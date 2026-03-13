@@ -628,27 +628,36 @@ New agent picks up exactly where the previous left off.
 ### agents.json
 Defines your agents:
 ```json
-[
-  {
-    "name": "hashiko",
-    "engine": "gemini-cli",
-    "model": "gemini-3-flash",
+{
+  "global": {
     "authorized_id": 123456789,
-    "system_prompt_file": "agent_seeds/hashiko.md",
-    "workspaces": ["default"],
-    "telegram_enabled": true,
-    "whatsapp_enabled": false
-  }
-]
+    "whatsapp": {
+      "enabled": false,
+      "allowed_numbers": [],
+      "default_agent": "hashiko"
+    }
+  },
+  "agents": [
+    {
+      "name": "hashiko",
+      "display_name": "Hashiko",
+      "engine": "gemini-cli",
+      "model": "gemini-3-flash",
+      "system_md": "workspaces/hashiko/agent.md",
+      "workspace_dir": "workspaces/hashiko",
+      "is_active": true
+    }
+  ]
+}
 ```
 
 ### secrets.json
 Stores API keys and tokens:
 ```json
 {
-  "telegram_bot_token": "your_bot_token",
-  "openrouter_api_key": "sk-or-v1-...",
-  "hashiko": "WORKBENCH_ONLY_NO_TOKEN"
+  "hashiko": "your_telegram_bot_token",
+  "openrouter-api_key": "sk-or-v1-...",
+  "authorized_telegram_id": 123456789
 }
 ```
 

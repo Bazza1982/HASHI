@@ -50,6 +50,18 @@
     "cli.js",
     "onboard-cli.js",
     "postinstall.js",
+    "main.py",
+    "__main__.py",
+    "requirements.txt",
+    "adapters/",
+    "orchestrator/",
+    "onboarding/",
+    "transports/",
+    "skills/",
+    "agent_seeds/",
+    "docs/initial.md",
+    "docs/AGENT_FYI.md",
+    "examples/",
     "README.md",
     "LICENSE"
   ]

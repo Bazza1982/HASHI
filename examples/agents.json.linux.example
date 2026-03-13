@@ -15,6 +15,9 @@
       "type": "flex",
       "display_name": "Sakura",
       "workspace_dir": "~/projects/hashi/workspaces/sakura",
+      "system_md": "~/projects/hashi/workspaces/sakura/agent.md",
+      "allowed_backends": ["claude-cli", "gemini-cli", "codex-cli", "openrouter"],
+      "active_backend": "claude-cli",
       "is_active": true
     }
   ]

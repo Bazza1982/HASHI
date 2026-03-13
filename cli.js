@@ -1,20 +1,20 @@
 #!/usr/bin/env node
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
 const HASHI_ROOT = __dirname;
 const MAIN_PY = path.join(HASHI_ROOT, 'main.py');
 
-// Check if Python is available
+// Check if Python is available (synchronous)
 function checkPython() {
   const pythonCommands = ['python3', 'python'];
   for (const cmd of pythonCommands) {
     try {
-      const result = spawn(cmd, ['--version'], { stdio: 'pipe' });
-      result.on('exit', (code) => {
-        if (code === 0) return cmd;
-      });
+      const result = spawnSync(cmd, ['--version'], { stdio: 'pipe' });
+      if (result.status === 0) {
+        return cmd;
+      }
     } catch (e) {
       continue;
     }
