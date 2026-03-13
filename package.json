@@ -1,0 +1,56 @@
+{
+  "name": "hashi-bridge",
+  "version": "1.0.0",
+  "description": "HASHI — Universal AI Agent Orchestration Platform. Privacy-first, multi-backend, multi-agent system with no OAuth token storage.",
+  "keywords": [
+    "ai",
+    "agent",
+    "orchestration",
+    "claude",
+    "gemini",
+    "codex",
+    "telegram",
+    "whatsapp",
+    "multi-agent",
+    "chatbot",
+    "automation"
+  ],
+  "homepage": "https://github.com/Bazza1982/hashi#readme",
+  "bugs": {
+    "url": "https://github.com/Bazza1982/hashi/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Bazza1982/hashi.git"
+  },
+  "license": "MIT",
+  "author": {
+    "name": "HASHI Team",
+    "email": "barrytianli@gmail.com"
+  },
+  "main": "cli.js",
+  "bin": {
+    "hashi": "./cli.js",
+    "hashi-onboard": "./onboard-cli.js"
+  },
+  "scripts": {
+    "postinstall": "node postinstall.js"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "preferGlobal": true,
+  "files": [
+    "cli.js",
+    "onboard-cli.js",
+    "postinstall.js",
+    "README.md",
+    "LICENSE"
+  ]
+}

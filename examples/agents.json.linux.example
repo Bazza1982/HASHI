@@ -1,0 +1,21 @@
+{
+  "global": {
+    "project_root": "~/projects",
+    "gemini_cmd": "gemini",
+    "claude_cmd": "claude",
+    "codex_cmd": "codex",
+    "workbench_port": 18800,
+    "api_gateway_port": 18801,
+    "tts_provider": "piper",
+    "authorized_id": 123456789
+  },
+  "agents": [
+    {
+      "name": "sakura",
+      "type": "flex",
+      "display_name": "Sakura",
+      "workspace_dir": "~/projects/hashi/workspaces/sakura",
+      "is_active": true
+    }
+  ]
+}

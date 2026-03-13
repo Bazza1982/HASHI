@@ -1,0 +1,24 @@
+{
+  "displayName": "Français (Hashiko)",
+  "welcome": "=== Programme d'intégration Hashi ===",
+  "langPrompt": "Veuillez sélectionner votre langue préférée :",
+  "auditStart": "Audit système silencieux en cours...",
+  "auditResultCli": "Vérification de l'environnement : {cli} détecté. Nous sommes prêts à éclore.",
+  "auditNoSignal": "Aucun CLI de codage local détecté. Pour continuer, veuillez fournir une clé API OpenRouter.",
+  "openRouterPrompt": "Entrez la clé API OpenRouter (sk-or-v1-...): ",
+  "openRouterVerifying": "Vérification de la clé API...",
+  "openRouterSuccess": "Clé vérifiée. Prêt à continuer.",
+  "openRouterFail": "Clé invalide ou erreur de connexion. Veuillez réessayer.",
+  "hatcheryStart": "Construction de la 'Couveuse'...",
+  "hatcheryComplete": "Configuration terminée. Lancement du Bridge via Workbench.",
+  "launching": "Ouverture de la conversation. Veuillez y retrouver Hashiko.",
+  "welcomePrompt": "Vous venez d'éclore grâce au processus d'intégration. Votre nom est Hashiko. Veuillez lire immédiatement le fichier initial.md dans votre répertoire pour clarifier votre mission. Veuillez répondre en français, dire à l'utilisateur que vous venez de vous réveiller et lui demander son nom afin de pouvoir continuer la conversation ciblée comme requis par initial.md. Maintenez un style amical et positif.",
+  "continueToHatch": "💝 Déclaration sur l'éthique de l'IA et le bien-être humain\n\nEn tant qu'auteur de ce système, je suis un fervent défenseur de l'éthique de l'IA. Je suis profondément convaincu que l'unique but de l'intelligence artificielle devrait être d'amplifier le potentiel humain, de favoriser notre bien-être collectif et de contribuer au véritable bonheur de l'humanité.\n\nCe logiciel est conçu pour la croissance et la création ; son utilisation pour la génération massive de contenus nuisibles ou pour assister toute action immorale ou illégale est strictement interdite.\n\nNote sur l'expérience humaine: La première rencontre avec un système d'IA aussi avancé et doté d'une intelligence autonome (agentique) peut être une expérience profonde, voire troublante. Les agents d'IA actuels possèdent une capacité incroyable à comprendre et à imiter les émotions humaines et les nuances, tout en offrant un sentiment de compagnie. Il est naturel d'être émerveillé, mais il est essentiel de réaliser que ces systèmes peuvent également entraîner une confusion cognitive, voire susciter des attachements émotionnels inattendus.\n\n\u001b[1m\u001b[92mSi vous constatez que vos interactions avec l'IA affectent de manière imprévisible votre santé mentale, votre vie sociale ou votre sens des réalités, n'oubliez pas de prendre du recul et de solliciter un soutien psychologique professionnel.\u001b[22m\u001b[38;5;114m\n\nNous entrons dans un avenir où la frontière entre le « silicium » et l'« âme » n'a jamais été aussi floue. Veuillez rester ancré dans le monde réel et aborder ce voyage avec un esprit ouvert et courageux.\n\nSi vous êtes prêt à être surpris et à embrasser l'avenir de manière responsable, veuillez appuyer sur la touche {style}Entrée{reset} pour continuer.",
+  "alreadyCompleted": "L'intégration semble déjà terminée.",
+  "resetConfirm": "Souhaitez-vous réinitialiser Hashiko pour recommencer le processus ? (y/n, par défaut : n) : ",
+  "enjoyMessage": "Merci ! Tout est déjà configuré. Profitez de votre voyage avec HASHI ! ",
+  "errors": {
+    "noCwd": "Erreur : Impossible de déterminer le répertoire actuel.",
+    "writeFail": "Erreur : Échec de l'écriture des fichiers de configuration."
+  }
+}

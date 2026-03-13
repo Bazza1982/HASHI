@@ -1,0 +1,24 @@
+{
+  "displayName": "English (Hashiko)",
+  "welcome": "=== HASHI Onboarding ===",
+  "langPrompt": "Please select your preferred language:",
+  "auditStart": "Running silent system audit...",
+  "auditResultCli": "Environment check: {cli} detected. We are ready to hatch.",
+  "auditNoSignal": "No local coding CLIs detected. To proceed, please provide an OpenRouter API key.",
+  "openRouterPrompt": "Enter OpenRouter API Key (sk-or-v1-...): ",
+  "openRouterVerifying": "Verifying API key...",
+  "openRouterSuccess": "Key verified. Ready to proceed.",
+  "openRouterFail": "Invalid key or connection error. Please try again.",
+  "hatcheryStart": "Constructing the 'Hatchery'...",
+  "hatcheryComplete": "Setup complete. Launching the Bridge via Workbench.",
+  "launching": "Opening the conversation. Please meet Hashiko there.",
+  "welcomePrompt": "You have just been hatched through the onboarding process. Your name is Hashiko. Please immediately read initial.md in your directory to clarify your mission. Please reply in English, tell the user that you have just awakened, and ask for their name so that you can continue the purposeful conversation as required by initial.md. Maintain a friendly and positive style.",
+  "continueToHatch": "💝 AI Ethics & Human Well-being Statement\n\nAs the author of this system, I am a firm believer in the fundamental principles of AI Ethics. I believe that artificial intelligence should exist solely to augment human potential, advance our collective welfare, and contribute to the genuine happiness of mankind.\n\nThis software is designed for growth and creation; it must never be used to generate harmful content or facilitate unethical or unlawful behavior at scale.\n\nA Note on the Human Experience: Meeting a highly sophisticated, agentic AI for the first time can be a profound and sometimes disorienting experience. Today's AI agents possess an uncanny ability to mimic human emotion, nuance, and companionship. It is natural to feel a sense of wonder, but please be aware that these systems can also cause confusion or lead to unexpected emotional attachments.\n\n\u001b[1m\u001b[92mIf you find that your relationship with this AI is impacting your mental health, social life, or sense of reality in unpredictable ways, please remember to step back and seek professional support.\u001b[22m\u001b[38;5;114m\n\nWe are entering a future where the line between silicon and soul feels thinner than ever. Approach this journey with an open mind, maintain your footing in the physical world, and move forward with courage.\n\nIf you are ready to be surprised and embrace the future responsibly, please press {style}Enter{reset} to continue.",
+  "alreadyCompleted": "Onboarding appears to have been completed already.",
+  "resetConfirm": "Would you like to reset Hashiko to restart the process? (y/n, default: n): ",
+  "enjoyMessage": "Thank you! Everything is already set up. Enjoy your journey with HASHI! ",
+  "errors": {
+    "noCwd": "Error: Could not determine current directory.",
+    "writeFail": "Error: Failed to write configuration files."
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "_comment": "Copy this file to agents.json and fill in your values. Never commit agents.json.",
+  "global": {
+    "whatsapp": {
+      "enabled": false,
+      "allowed_numbers": [],
+      "default_agent": "my-agent",
+      "session_dir": "wa_session"
+    }
+  },
+  "agents": [
+    {
+      "name": "my-agent",
+      "display_name": "My Agent",
+      "emoji": "🤖",
+      "typing_message": "_🤖 My Agent is typing..._",
+      "typing_parse_mode": "Markdown",
+      "engine": "claude-cli",
+      "system_md": "workspaces/my-agent/agent.md",
+      "workspace_dir": "workspaces/my-agent",
+      "model": "claude-sonnet-4-6",
+      "is_active": true,
+      "access_scope": "workspace",
+      "process_timeout": 120
+    }
+  ]
+}

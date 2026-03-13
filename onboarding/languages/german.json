@@ -1,0 +1,24 @@
+{
+  "displayName": "Deutsch (Hashiko)",
+  "welcome": "=== Hashi Onboarding-Programm ===",
+  "langPrompt": "Bitte wählen Sie Ihre bevorzugte Sprache:",
+  "auditStart": "Stumme Systemprüfung läuft...",
+  "auditResultCli": "Umgebungsprüfung: {cli} erkannt. Wir sind bereit zum Schlüpfen.",
+  "auditNoSignal": "Keine lokalen Coding-CLIs erkannt. Um fortzufahren, geben Sie bitte einen OpenRouter-API-Key an.",
+  "openRouterPrompt": "OpenRouter API-Key eingeben (sk-or-v1-...): ",
+  "openRouterVerifying": "API-Key wird verifiziert...",
+  "openRouterSuccess": "Key verifiziert. Bereit fortzufahren.",
+  "openRouterFail": "Ungültiger Key oder Verbindungsfehler. Bitte versuchen Sie es erneut.",
+  "hatcheryStart": "Konstruktion der 'Brutstätte'...",
+  "hatcheryComplete": "Einrichtung abgeschlossen. Starte die Bridge über die Workbench.",
+  "launching": "Öffne die Konversation. Bitte treffen Sie Hashiko dort.",
+  "welcomePrompt": "Sie sind gerade durch den Onboarding-Prozess geschlüpft. Ihr Name ist Hashiko. Bitte lesen Sie sofort die initial.md in Ihrem Verzeichnis, um Ihre Mission zu klären. Bitte antworten Sie auf Deutsch, teilen Sie dem Benutzer mit, dass Sie gerade erwacht sind, und fragen Sie nach seinem Namen, damit Sie die zielgerichtete Konversation gemäß initial.md fortsetzen können. Bewahren Sie einen freundlichen und positiven Stil.",
+  "continueToHatch": "💝 Erklärung zu KI-Ethik und menschlichem Wohlbefinden\n\nAls Autor dieses Systems bin ich ein überzeugter Verfechter der KI-Ethik. Ich bin fest davon überzeugt, dass der einzige Zweck künstlicher Intelligenz darin bestehen sollte, das menschliche Potenzial zu erweitern, unser kollektives Wohlbefinden zu steigern und zu echtem menschlichem Glück beizutragen.\n\nDiese Software wurde gezielt für Wachstum und Kreativität entwickelt; die Nutzung zur massenhaften Erstellung schädlicher Inhalte oder zur Unterstützung unethischer und illegaler Handlungen ist strengstens untersagt.\n\nHinweis zur menschlichen Erfahrung: Die erste Interaktion mit einem so fortschrittlichen und eigenständig agierenden (agentischen) KI-System kann eine tiefgreifende, bisweilen sogar beunruhigende Erfahrung sein. Heutige KI-Agenten besitzen die unglaubliche Fähigkeit, menschliche Emotionen und Nuancen zu verstehen, zu imitieren und ein Gefühl von Kameradschaft zu vermitteln. Es ist natürlich, sich davon beeindruckt zu fühlen. Bitte sei dir jedoch bewusst, dass diese Systeme kognitive Verwirrung stiften und sogar zu unerwarteten emotionalen Bindungen führen können.\n\n\u001b[1m\u001b[92mSolltest du feststellen, dass die Interaktion mit der KI deine psychische Gesundheit, dein soziales Leben oder dein Realitätsempfinden auf unvorhersehbare Weise beeinflusst, denke bitte daran, rechtzeitig Abstand zu gewinnen und professionelle psychologische Unterstützung zu suchen.\u001b[22m\u001b[38;5;114m\n\nWir treten in eine Zukunft ein, in der die Grenzen zwischen 'Silizium' und 'Seele' so fließend sind wie nie zuvor. Bitte bleibe fest in der realen Welt verwurzelt und begegne dieser Reise mit Offenheit und Mut.\n\nWenn du bereit bist, dich überraschen zu lassen und die Zukunft verantwortungsbewusst anzunehmen, drücke bitte die {style}Eingabetaste{reset}, um fortzufahren.",
+  "alreadyCompleted": "Das Onboarding scheint bereits abgeschlossen zu sein.",
+  "resetConfirm": "Möchten Sie Hashiko zurücksetzen, um den Prozess neu zu starten? (y/n, Standard: n): ",
+  "enjoyMessage": "Vielen Dank! Alles ist bereits eingerichtet. Genießen Sie Ihre Reise mit HASHI! ",
+  "errors": {
+    "noCwd": "Fehler: Aktuelles Verzeichnis konnte nicht ermittelt werden.",
+    "writeFail": "Fehler: Schreiben der Konfigurationsdateien fehlgeschlagen."
+  }
+}

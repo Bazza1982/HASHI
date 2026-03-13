@@ -1,0 +1,264 @@
+{
+  "agents": [
+    {
+      "name": "sakura",
+      "display_name": "春野サクラ (Sakura)",
+      "emoji": "🌸",
+      "type": "flex",
+      "engine": "gemini-cli",
+      "workspace_dir": "workspaces/sakura",
+      "system_md": "workspaces/sakura/AGENT.md",
+      "model": "gemini-2.5-flash",
+      "is_active": false,
+      "allowed_backends": [
+        {
+          "engine": "gemini-cli",
+          "model": "gemini-2.5-flash"
+        },
+        {
+          "engine": "claude-cli",
+          "model": "claude-sonnet-4-6"
+        },
+        {
+          "engine": "openrouter-api",
+          "model": "anthropic/claude-sonnet-4.6"
+        }
+      ],
+      "active_backend": "gemini-cli"
+    },
+    {
+      "name": "pikachu",
+      "display_name": "ピカチュウ (Pikachu)",
+      "emoji": "🌸",
+      "type": "flex",
+      "engine": "gemini-cli",
+      "workspace_dir": "workspaces/pikachu",
+      "system_md": "workspaces/pikachu/AGENT.md",
+      "model": "gemini-2.5-flash",
+      "is_active": false,
+      "allowed_backends": [
+        {
+          "engine": "gemini-cli",
+          "model": "gemini-2.5-flash"
+        },
+        {
+          "engine": "claude-cli",
+          "model": "claude-sonnet-4-6"
+        },
+        {
+          "engine": "openrouter-api",
+          "model": "anthropic/claude-sonnet-4.6"
+        }
+      ],
+      "active_backend": "gemini-cli"
+    },
+    {
+      "name": "xiao_yao",
+      "display_name": "李逍遥 (Li Xiaoyao)",
+      "emoji": "🌸",
+      "type": "flex",
+      "engine": "gemini-cli",
+      "workspace_dir": "workspaces/xiao_yao",
+      "system_md": "workspaces/xiao_yao/AGENT.md",
+      "model": "gemini-2.5-flash",
+      "is_active": false,
+      "allowed_backends": [
+        {
+          "engine": "gemini-cli",
+          "model": "gemini-2.5-flash"
+        },
+        {
+          "engine": "claude-cli",
+          "model": "claude-sonnet-4-6"
+        },
+        {
+          "engine": "openrouter-api",
+          "model": "anthropic/claude-sonnet-4.6"
+        }
+      ],
+      "active_backend": "gemini-cli"
+    },
+    {
+      "name": "levi",
+      "display_name": "リヴァイ (Levi)",
+      "emoji": "🌸",
+      "type": "flex",
+      "engine": "gemini-cli",
+      "workspace_dir": "workspaces/levi",
+      "system_md": "workspaces/levi/AGENT.md",
+      "model": "gemini-2.5-flash",
+      "is_active": false,
+      "allowed_backends": [
+        {
+          "engine": "gemini-cli",
+          "model": "gemini-2.5-flash"
+        },
+        {
+          "engine": "claude-cli",
+          "model": "claude-sonnet-4-6"
+        },
+        {
+          "engine": "openrouter-api",
+          "model": "anthropic/claude-sonnet-4.6"
+        }
+      ],
+      "active_backend": "gemini-cli"
+    },
+    {
+      "name": "jarvis",
+      "display_name": "JARVIS",
+      "emoji": "🌸",
+      "type": "flex",
+      "engine": "gemini-cli",
+      "workspace_dir": "workspaces/jarvis",
+      "system_md": "workspaces/jarvis/AGENT.md",
+      "model": "gemini-2.5-flash",
+      "is_active": false,
+      "allowed_backends": [
+        {
+          "engine": "gemini-cli",
+          "model": "gemini-2.5-flash"
+        },
+        {
+          "engine": "claude-cli",
+          "model": "claude-sonnet-4-6"
+        },
+        {
+          "engine": "openrouter-api",
+          "model": "anthropic/claude-sonnet-4.6"
+        }
+      ],
+      "active_backend": "gemini-cli"
+    },
+    {
+      "name": "samantha",
+      "display_name": "Samantha",
+      "emoji": "🌸",
+      "type": "flex",
+      "engine": "gemini-cli",
+      "workspace_dir": "workspaces/samantha",
+      "system_md": "workspaces/samantha/AGENT.md",
+      "model": "gemini-2.5-flash",
+      "is_active": false,
+      "allowed_backends": [
+        {
+          "engine": "gemini-cli",
+          "model": "gemini-2.5-flash"
+        },
+        {
+          "engine": "claude-cli",
+          "model": "claude-sonnet-4-6"
+        },
+        {
+          "engine": "openrouter-api",
+          "model": "anthropic/claude-sonnet-4.6"
+        }
+      ],
+      "active_backend": "gemini-cli"
+    },
+    {
+      "name": "baymax",
+      "display_name": "大白 (Baymax)",
+      "emoji": "🌸",
+      "type": "flex",
+      "engine": "gemini-cli",
+      "workspace_dir": "workspaces/baymax",
+      "system_md": "workspaces/baymax/AGENT.md",
+      "model": "gemini-2.5-flash",
+      "is_active": false,
+      "allowed_backends": [
+        {
+          "engine": "gemini-cli",
+          "model": "gemini-2.5-flash"
+        },
+        {
+          "engine": "claude-cli",
+          "model": "claude-sonnet-4-6"
+        },
+        {
+          "engine": "openrouter-api",
+          "model": "anthropic/claude-sonnet-4.6"
+        }
+      ],
+      "active_backend": "gemini-cli"
+    },
+    {
+      "name": "doraemon",
+      "display_name": "哆啦A梦 (Doraemon)",
+      "emoji": "🌸",
+      "type": "flex",
+      "engine": "gemini-cli",
+      "workspace_dir": "workspaces/doraemon",
+      "system_md": "workspaces/doraemon/AGENT.md",
+      "model": "gemini-2.5-flash",
+      "is_active": false,
+      "allowed_backends": [
+        {
+          "engine": "gemini-cli",
+          "model": "gemini-2.5-flash"
+        },
+        {
+          "engine": "claude-cli",
+          "model": "claude-sonnet-4-6"
+        },
+        {
+          "engine": "openrouter-api",
+          "model": "anthropic/claude-sonnet-4.6"
+        }
+      ],
+      "active_backend": "gemini-cli"
+    },
+    {
+      "name": "zelda",
+      "display_name": "塞尔达 (Zelda)",
+      "emoji": "🌸",
+      "type": "flex",
+      "engine": "gemini-cli",
+      "workspace_dir": "workspaces/zelda",
+      "system_md": "workspaces/zelda/AGENT.md",
+      "model": "gemini-2.5-flash",
+      "is_active": false,
+      "allowed_backends": [
+        {
+          "engine": "gemini-cli",
+          "model": "gemini-2.5-flash"
+        },
+        {
+          "engine": "claude-cli",
+          "model": "claude-sonnet-4-6"
+        },
+        {
+          "engine": "openrouter-api",
+          "model": "anthropic/claude-sonnet-4.6"
+        }
+      ],
+      "active_backend": "gemini-cli"
+    },
+    {
+      "name": "tom_nook",
+      "display_name": "狸克 (Tom Nook)",
+      "emoji": "🌸",
+      "type": "flex",
+      "engine": "gemini-cli",
+      "workspace_dir": "workspaces/tom_nook",
+      "system_md": "workspaces/tom_nook/AGENT.md",
+      "model": "gemini-2.5-flash",
+      "is_active": false,
+      "allowed_backends": [
+        {
+          "engine": "gemini-cli",
+          "model": "gemini-2.5-flash"
+        },
+        {
+          "engine": "claude-cli",
+          "model": "claude-sonnet-4-6"
+        },
+        {
+          "engine": "openrouter-api",
+          "model": "anthropic/claude-sonnet-4.6"
+        }
+      ],
+      "active_backend": "gemini-cli"
+    }
+  ]
+}

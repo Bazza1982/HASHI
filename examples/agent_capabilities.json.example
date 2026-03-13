@@ -1,0 +1,11 @@
+{
+  "_comment": "Copy this file to agent_capabilities.json and configure agent-to-agent permissions.",
+  "agents": {
+    "my-agent": {
+      "can_talk_to": [],
+      "can_receive_from": [],
+      "allowed_intents": ["ask", "notify"],
+      "granted_scopes": []
+    }
+  }
+}

@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=65.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hashi-bridge"
+version = "1.0.0"
+description = "HASHI — Universal AI Agent Orchestration Platform. Privacy-first, multi-backend, multi-agent system."
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "HASHI Team", email = "barrytianli@gmail.com"}
+]
+keywords = [
+    "ai", "agent", "orchestration", "claude", "gemini", "codex",
+    "telegram", "whatsapp", "multi-agent", "automation"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+requires-python = ">=3.10"
+dependencies = [
+    "python-telegram-bot>=20.0",
+    "httpx>=0.24.0",
+    "aiohttp>=3.8.0",
+    "pillow>=9.0.0",
+]
+
+[project.optional-dependencies]
+whatsapp = ["neonize>=1.0.0"]
+voice = ["edge-tts>=6.0.0"]
+
+[project.urls]
+Homepage = "https://github.com/Bazza1982/hashi"
+Repository = "https://github.com/Bazza1982/hashi"
+Issues = "https://github.com/Bazza1982/hashi/issues"

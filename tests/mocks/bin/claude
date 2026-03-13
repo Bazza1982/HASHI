@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Mock Claude Code CLI for testing
+
+PROMPT=""
+PRINT_MODE=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --version) echo "2.1.74 (Claude Code) [mock]"; exit 0 ;;
+        -p|--print) PRINT_MODE=true; PROMPT="$2"; shift 2 ;;
+        --model) shift 2 ;;
+        --allowedTools|--allowed-tools) shift 2 ;;
+        --max-turns) shift 2 ;;
+        --dangerously-skip-permissions) shift ;;
+        login) echo "Mock: Login successful (simulated)"; exit 0 ;;
+        config) echo "Mock: Config displayed"; exit 0 ;;
+        *) PROMPT="$PROMPT $1"; shift ;;
+    esac
+done
+
+sleep 0.2
+
+if [[ "$PROMPT" == *"error"* ]]; then
+    echo '{"error": "Simulated Claude error"}' >&2
+    exit 1
+fi
+
+if $PRINT_MODE; then
+    echo "Mock Claude response: I've processed your request about: ${PROMPT:0:80}..."
+else
+    echo "Claude Code (mock) ready. Your prompt: $PROMPT"
+fi

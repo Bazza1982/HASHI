@@ -1,0 +1,105 @@
+# Secrets and credentials
+secrets.json
+agents.json
+agent_capabilities.json
+tasks.json
+local_doc/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Runtime state
+*.lock
+*.pid
+.bridge_u_f.lock
+.bridge_u_f.pid
+.bridge_u_last_agents.txt
+.bridge_u_lang.txt
+scheduler_state.json
+.hashi_onboarding_complete
+
+# Logs and runtime output
+logs/
+restart_stdout.log
+restart_stderr.log
+*.log
+
+# Media files
+media/
+
+# WhatsApp session (neonize credentials — never commit)
+wa_session/
+
+# Workspace runtime data (agent state, transcripts, sqlite, sessions)
+workspaces/*/bridge_memory.sqlite
+workspaces/*/bridge_memory.sqlite-shm
+workspaces/*/bridge_memory.sqlite-wal
+workspaces/*/memory_index.sqlite
+workspaces/*/memory_index.sqlite-shm
+workspaces/*/memory_index.sqlite-wal
+workspaces/*/transcript.jsonl
+workspaces/*/recent_context.jsonl
+workspaces/*/codex_exec_events.jsonl
+workspaces/*/state.json
+workspaces/*/backend_state/
+workspaces/*/sessions/
+workspaces/*/*.png
+workspaces/*/*.jpg
+workspaces/*/conversation_log.jsonl
+workspaces/*/history.json
+workspaces/*/.codex_*.txt
+workspaces/*/.bridge_u_claude_system_prompt.txt
+workspaces/*/.runtime_session.json
+workspaces/*/.think
+workspaces/*/CTempsysinfo.txt
+workspaces/*/.verbose
+workspaces/*/handoff.md
+workspaces/*/voice_state.json
+workspaces/*/temp_audio.ogg
+workspaces/*/*_startup.log
+workspaces/*/*_task_prompt.txt
+workspaces/*/journals/
+workspaces/*/journal_*.md
+workspaces/*/*_Continuity_Journal.md
+workspaces/*/bridge-u-root/
+workspaces/*/skill_state.json
+
+# Workbench build artifacts
+workbench/node_modules/
+workbench/dist/
+workbench/api/node_modules/
+workbench/.env
+state/
+
+# Temp and stress test artifacts
+.tmp_*/
+phaseA_lily_report.json
+phaseA1_lily_report.json
+phaseA_lily_stress.py
+phaseA1_lily_stress.py
+stress_test.py
+
+# Node
+node_modules/
+
+# Local scratch, backups, and model assets
+*.bak_*
+voice_models/
+
+# Additional workspace runtime state
+workspaces/*/.env
+workspaces/*/memory/
+*.log
+
+# Windows Zone.Identifier metadata files
+*:Zone.Identifier
+
+# Personal setup notes
+Manual_Setup.md
+Manual_Setup.md.personal
+*.personal
+
+# Windows-only launchers (not needed for Linux)
+onboard.bat
