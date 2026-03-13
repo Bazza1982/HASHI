@@ -43,9 +43,34 @@ Since the script is already in `tests/`, this creates `tests/tests/...` paths.
 
 ---
 
+### 4. FTS5 Reserved Word Syntax Error
+**File:** `orchestrator/bridge_memory.py` (line 92-99)
+
+When user input contains FTS5 reserved words (`NOT`, `AND`, `OR`, `NEAR`), the memory search query fails with:
+```
+fts5: syntax error near "NOT"
+```
+
+**Root cause:** `_safe_query()` extracts words and joins with `" OR "`, but doesn't filter reserved words.
+
+**Example:**
+- Input: "DO NOT remind me"
+- Generated query: `"DO OR NOT OR remind OR me"` → FTS5 interprets `NOT` as operator → syntax error
+
+**Fix:**
+```python
+FTS5_RESERVED = {"AND", "OR", "NOT", "NEAR"}
+parts = [p for p in re.findall(r"[a-zA-Z0-9_]+", q) 
+         if len(p) > 1 and p.upper() not in FTS5_RESERVED]
+```
+
+**Impact:** Low — only affects memory recall when user input contains reserved words.
+
+---
+
 ## 🟠 Optional Fixes
 
-### 4. docs/README.md Stale File References
+### 5. docs/README.md Stale File References
 **File:** `docs/README.md`
 
 References to:
@@ -54,7 +79,7 @@ References to:
 
 ---
 
-### 5. PowerShell Scripts Hardcoded Paths
+### 6. PowerShell Scripts Hardcoded Paths
 **Files:**
 - `scripts/install_elevated_autostart.ps1`
 - `scripts/check_stress_test.ps1`
