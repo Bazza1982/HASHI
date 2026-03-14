@@ -6,6 +6,20 @@
 
 set -euo pipefail
 
+# ── macOS dependency guard ──────────────────────────────────────────────────
+if [[ "$(uname)" == "Darwin" ]]; then
+    MISSING=()
+    command -v python3  &>/dev/null || MISSING+=("python3 (brew install python@3.11)")
+    command -v node     &>/dev/null || MISSING+=("node    (brew install node)")
+    command -v ffmpeg   &>/dev/null || MISSING+=("ffmpeg  (brew install ffmpeg)")
+    if [[ ${#MISSING[@]} -gt 0 ]]; then
+        echo "❌  Missing dependencies on macOS:"
+        printf '   • %s\n' "${MISSING[@]}"
+        echo "   Install Homebrew first: https://brew.sh"
+        exit 1
+    fi
+fi
+
 # Colors
 C_RESET="\033[0m"
 C_ACCENT="\033[38;5;111m"

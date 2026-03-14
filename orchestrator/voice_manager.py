@@ -9,13 +9,21 @@ from orchestrator.tts_providers import build_provider, list_provider_names
 from orchestrator.voice_synthesizer import VoiceAsset
 
 
+def _default_tts_provider() -> str:
+    if sys.platform == "win32":
+        return "windows"
+    if sys.platform == "darwin":
+        return "macos"
+    return "edge"
+
+
 class VoiceManager:
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
     PIPER_MODEL_DIR = PROJECT_ROOT / "voice_models" / "piper"
     DEFAULT_STATE = {
         "enabled": False,
         "mode": "text_and_voice",
-        "provider": "windows",
+        "provider": _default_tts_provider(),
         "voice_name": None,
         "rate": 0,
         "max_chars": 1200,
@@ -108,6 +116,17 @@ class VoiceManager:
             "language": "English",
         },
     }
+
+    MACOS_VOICE_PRESETS = {
+        "maus_ava":      {"provider": "macos", "voice_name": "Ava",      "label": "Ava [macOS EN-US]",       "language": "en-US"},
+        "maus_samantha": {"provider": "macos", "voice_name": "Samantha", "label": "Samantha [macOS EN-US]",   "language": "en-US"},
+        "maus_alex":     {"provider": "macos", "voice_name": "Alex",     "label": "Alex [macOS EN-US male]",  "language": "en-US"},
+        "maus_daniel":   {"provider": "macos", "voice_name": "Daniel",   "label": "Daniel [macOS EN-GB]",     "language": "en-GB"},
+        "maus_moira":    {"provider": "macos", "voice_name": "Moira",    "label": "Moira [macOS EN-IE]",      "language": "en-IE"},
+    }
+
+    if sys.platform == "darwin":
+        VOICE_PRESETS.update(MACOS_VOICE_PRESETS)
 
     def __init__(self, workspace_dir: Path, media_dir: Path, ffmpeg_cmd: str = "ffmpeg"):
         self.workspace_dir = workspace_dir
