@@ -98,7 +98,7 @@ def _show_ascii_startup_banner(
     print("  Universal Flexible Safe AI Agents")
     print("  Powered by CLI backends")
     print()
-    print("  Developed by the HASHI Team")
+    print("  Designed by Barry Li")
     print("  AI tool usage")
     print("  (ASCII banner fallback: terminal is not Unicode-safe)")
     print()
@@ -421,8 +421,8 @@ def show_startup_banner(
         print(f"  {_c(75)}{_BOLD}Universal Flexible Safe AI Agents{_R}  {_c(244)}{_BLINK}Powered by CLI backends{_R}")
         print(f"  {_c(61)}ユニバーサル・フレキシブルな安全AIエージェント{_R}  {_c(250)}{_BLINK}CLIバックエンド駆動{_R}")
         print()
-        print(f"  {_c(240)}デベロップド・バイ・ハシ・チーム  エーアイ・ツール・シヨウ{_R}")
-        print(f"  {_c(238)}© 2026 HASHI Team  ·  {_c(245)}MIT License{_R}")
+        print(f"  {_c(240)}デザインド・バイ・バリー・リー  エーアイ・ツール・シヨウ{_R}")
+        print(f"  {_c(238)}© 2026 Barry Li  ·  {_c(245)}MIT License{_R}")
 
         if logo_only:
             print()
