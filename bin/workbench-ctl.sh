@@ -7,8 +7,8 @@ WORKBENCH_DIR="$SCRIPT_DIR/workbench"
 ECOSYSTEM="$WORKBENCH_DIR/ecosystem.config.cjs"
 ACTION="${1:-start}"
 
-SERVER_PORT=3001
-CLIENT_PORT=5173
+SERVER_PORT=${HASHI_SERVER_PORT:-3001}
+CLIENT_PORT=${HASHI_CLIENT_PORT:-5173}
 
 health(){ curl -sf --max-time 3 "$1" >/dev/null 2>&1; }
 

@@ -358,9 +358,15 @@ def run_onboarding():
         args = ["/usr/bin/bash", str(main_sh), "--workbench", "--resume-last", "--force"]
         _log(f"Launching bridge-u.sh via subprocess: {args}")
 
+        # Pass HASHI_BRIDGE_PORT through so the correct instance port is used
+        launch_env = os.environ.copy()
+        bridge_port = launch_env.get("HASHI_BRIDGE_PORT", "18800")
+        launch_env["HASHI_BRIDGE_PORT"] = bridge_port
+        _log(f"HASHI_BRIDGE_PORT={bridge_port}")
+
         # Use subprocess.run so we can capture the exit code for logging
         # stdout/stderr are inherited (user sees output on screen)
-        result = subprocess.run(args, cwd=str(project_root))
+        result = subprocess.run(args, cwd=str(project_root), env=launch_env)
         exit_code = result.returncode
         _log(f"bridge-u.sh exited with code: {exit_code}")
         if exit_code != 0:
