@@ -40,6 +40,9 @@ class FlexibleBackendManager:
         except Exception as e:
             self.logger.error(f"Failed to save state.json: {e}")
 
+    def persist_state(self, active_model: str | None = None):
+        self._save_state(active_model=active_model)
+
     async def initialize_active_backend(self, target_model: str | None = None) -> bool:
         engine = self.config.active_backend
         self.logger.info(f"Initializing active backend: {engine}")
