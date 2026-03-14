@@ -20,17 +20,27 @@ class FlexibleBackendManager:
                 state = json.loads(self.state_file.read_text(encoding="utf-8"))
                 if "active_backend" in state:
                     self.config.active_backend = state["active_backend"]
+                if "active_model" in state:
+                    self._active_model_override = state["active_model"]
+                else:
+                    self._active_model_override = None
             except Exception as e:
                 self.logger.error(f"Failed to load state.json: {e}")
+        else:
+            self._active_model_override = None
 
-    def _save_state(self):
+    def _save_state(self, active_model: str | None = None):
+        if active_model is not None:
+            self._active_model_override = active_model
         state = {"active_backend": self.config.active_backend}
+        if getattr(self, "_active_model_override", None):
+            state["active_model"] = self._active_model_override
         try:
             self.state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
         except Exception as e:
             self.logger.error(f"Failed to save state.json: {e}")
 
-    async def initialize_active_backend(self) -> bool:
+    async def initialize_active_backend(self, target_model: str | None = None) -> bool:
         engine = self.config.active_backend
         self.logger.info(f"Initializing active backend: {engine}")
         
@@ -55,7 +65,7 @@ class FlexibleBackendManager:
             engine=engine,
             workspace_dir=self.config.workspace_dir,
             system_md=self.config.system_md,
-            model=backend_cfg_raw.get("model", "default"),
+            model=target_model or getattr(self, "_active_model_override", None) or backend_cfg_raw.get("model", "default"),
             is_active=True,
             extra=extra,
             access_scope=backend_scope,
@@ -73,8 +83,8 @@ class FlexibleBackendManager:
             self.logger.error(f"Failed to initialize backend {engine}: {e}")
             return False
 
-    async def switch_backend(self, target_engine: str) -> bool:
-        self.logger.info(f"Switching backend to {target_engine}")
+    async def switch_backend(self, target_engine: str, target_model: str | None = None) -> bool:
+        self.logger.info(f"Switching backend to {target_engine}" + (f" model={target_model}" if target_model else ""))
         backend_cfg_raw = next((b for b in self.config.allowed_backends if b["engine"] == target_engine), None)
         if not backend_cfg_raw:
             self.logger.error(f"Target backend {target_engine} not allowed.")
@@ -88,10 +98,10 @@ class FlexibleBackendManager:
 
         # Update config and state
         self.config.active_backend = target_engine
-        self._save_state()
+        self._save_state(active_model=target_model)
 
         # Initialize target backend — rollback on failure
-        if not await self.initialize_active_backend():
+        if not await self.initialize_active_backend(target_model=target_model):
             self.logger.error(
                 f"Failed to initialize {target_engine}; rolling back to {previous_engine}"
             )
