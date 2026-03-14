@@ -103,3 +103,10 @@ Manual_Setup.md.personal
 
 # Windows-only launchers (not needed for Linux)
 onboard.bat
+
+# Ignore entire workspaces directory (agent state is local-only)
+workspaces/
+
+# Backup files
+*.bak
+*.bak_*
