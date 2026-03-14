@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hashi-bridge"
-version = "1.0.0"
+version = "1.0.1"
 description = "HASHI — Universal AI Agent Orchestration Platform. Privacy-first, multi-backend, multi-agent system."
 readme = "README.md"
 license = {text = "MIT"}

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.0.1] - 2026-03-15
+
+### 🔧 Fixed
+
+- **Author Attribution** — Restored correct author credit in startup banner
+  - Fixed: "© 2026 Barry Li" (was incorrectly showing "HASHI Team")
+  - Fixed: "Designed by Barry Li" in both English and Japanese (デザインド・バイ・バリー・リー)
+
+---
+
 ## [1.0.0] - 2026-03-15
 
 ### 🎉 Initial Release
