@@ -145,6 +145,14 @@ class BridgeMemoryStore:
             ).fetchall()
         return [dict(r) for r in reversed(rows)]
 
+    def get_last_user_turn_ts(self) -> str | None:
+        """Return the ISO timestamp of the most recent user turn, or None."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT ts FROM turns WHERE role = 'user' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        return row["ts"] if row else None
+
     def retrieve_memories(self, query: str, limit: int = 6) -> list[dict[str, Any]]:
         safe_query = self._safe_query(query)
         q_vec = self.encoder.encode(query or "")
@@ -244,6 +252,33 @@ class BridgeContextAssembler:
         kept_context = self._clip(context_part, context_budget, "[context trimmed for budget]")
         return f"{kept_context}{separator}{kept_request}"
 
+    def _build_time_fyi(self) -> str:
+        """Build a soft time-awareness note for the agent."""
+        now = datetime.now()
+        now_str = now.strftime("%I:%M %p").lstrip("0")
+        last_ts = self.memory_store.get_last_user_turn_ts()
+        if not last_ts:
+            return f"[FYI: You received this message at {now_str}.]"
+        try:
+            last_dt = datetime.fromisoformat(last_ts)
+            delta = now - last_dt
+            total_seconds = int(delta.total_seconds())
+            if total_seconds < 60:
+                gap = f"{total_seconds}s ago"
+            elif total_seconds < 3600:
+                gap = f"{total_seconds // 60}m ago"
+            elif total_seconds < 86400:
+                hours = total_seconds // 3600
+                mins = (total_seconds % 3600) // 60
+                gap = f"{hours}h {mins}m ago" if mins else f"{hours}h ago"
+            else:
+                days = total_seconds // 86400
+                gap = f"{days} day{'s' if days != 1 else ''} ago"
+            last_str = last_dt.strftime("%I:%M %p").lstrip("0")
+            return f"[FYI: You received this message at {now_str}. Last message from user was at {last_str} — {gap}.]"
+        except Exception:
+            return f"[FYI: You received this message at {now_str}.]"
+
     def build_prompt(self, user_prompt: str, engine: str) -> str:
         system_text = self._load_system_prompt()
         recent_turns = self.memory_store.get_recent_turns(limit=10)
@@ -279,11 +314,13 @@ class BridgeContextAssembler:
         if not context_parts:
             return user_prompt
 
+        time_fyi = self._build_time_fyi()
         final_prompt = (
             "Bridge-managed context follows. Use it as background memory. "
             "Respond only to NEW REQUEST unless explicitly asked to summarize memory.\n\n"
             + "\n\n".join(context_parts)
             + "\n\n--- NEW REQUEST ---\n"
+            + time_fyi + "\n\n"
             + user_prompt
         )
         return self._apply_budget(final_prompt, engine)
