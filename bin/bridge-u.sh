@@ -598,7 +598,7 @@ if ! _onboarding_complete; then
     echo -e "${C_WARN}Onboarding not complete. Starting onboarding...${C_RESET}"
     echo ''
     sleep 1
-    python3 onboarding/onboarding_main.py
+    HASHI_BRIDGE_PORT=$BRIDGE_PORT python3 onboarding/onboarding_main.py
     exit 0
 fi
 # ---------------------------------------------------------------------------
