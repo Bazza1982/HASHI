@@ -52,7 +52,10 @@ LAST_AGENTS=""
 # System info
 WHATSAPP_ENABLED="no"
 WHATSAPP_DEFAULT_AGENT=""
-WORKBENCH_PORT=""
+BRIDGE_PORT=${HASHI_BRIDGE_PORT:-18800}
+WORKBENCH_PORT=$BRIDGE_PORT
+CLIENT_PORT=$((5173 + BRIDGE_PORT - 18800))
+SERVER_PORT=$((3001 + BRIDGE_PORT - 18800))
 CLI_GEMINI="missing"
 CLI_CLAUDE="missing"
 CLI_CODEX="missing"
@@ -481,6 +484,7 @@ launch() {
     if [[ "$WORKBENCH_LAUNCH" == "1" ]]; then
         echo -e "${C_RAIL}│${C_RESET} ${C_LABEL}Workbench        ${C_RESET} ${C_OK}starting${C_RESET} (:${WORKBENCH_PORT})"
         if [[ -x "$SCRIPT_DIR/bin/workbench-ctl.sh" ]]; then
+            export HASHI_CLIENT_PORT=$CLIENT_PORT HASHI_SERVER_PORT=$SERVER_PORT HASHI_BRIDGE_API_PORT=$BRIDGE_PORT
             "$SCRIPT_DIR/bin/workbench-ctl.sh" start --open &
         else
             echo -e "${C_WARN}workbench-ctl.sh not found, skipping workbench${C_RESET}"
@@ -572,6 +576,33 @@ trap '_bridge_exit_trap' EXIT
 # Initial setup
 ensure_env
 echo "[$(date +%T)] ensure_env done" >> "$BRIDGE_LOG"
+
+# -- Onboarding gate --------------------------------------------------------
+_onboarding_complete() {
+    local agents_file="$BRIDGE_HOME/agents.json"
+    if [[ ! -f "$agents_file" ]]; then
+        return 1
+    fi
+    python3 -c "
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+    sys.exit(0 if any(a.get('name') == 'hashiko' for a in data.get('agents', [])) else 1)
+except Exception:
+    sys.exit(1)
+" "$agents_file"
+}
+
+if ! _onboarding_complete; then
+    echo ''
+    echo -e "${C_WARN}Onboarding not complete. Starting onboarding...${C_RESET}"
+    echo ''
+    sleep 1
+    python3 onboarding/onboarding_main.py
+    exit 0
+fi
+# ---------------------------------------------------------------------------
+
 check_system_info
 load_agents
 load_last_state

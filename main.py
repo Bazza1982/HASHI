@@ -1173,6 +1173,22 @@ if __name__ == "__main__":
     selected_agents = set(args.agents) if args.agents else None
     paths = build_bridge_paths(CODE_ROOT, bridge_home=args.bridge_home)
 
+    # Onboarding gate: if onboarding not complete, redirect to onboarding
+    _agents_path = paths.bridge_home / "agents.json"
+    _onboarding_done = False
+    try:
+        with open(_agents_path, encoding="utf-8") as _f:
+            _cfg = json.load(_f)
+            if any(a.get("name") == "hashiko" for a in _cfg.get("agents", [])):
+                _onboarding_done = True
+    except Exception:
+        pass
+    if not _onboarding_done:
+        print("\033[38;5;180mOnboarding required. Starting onboarding program...\033[0m")
+        import subprocess as _sp
+        _sp.run([sys.executable, str(CODE_ROOT / "onboarding" / "onboarding_main.py")])
+        sys.exit(0)
+
     orchestrator = UniversalOrchestrator(paths=paths, selected_agents=selected_agents, enable_api_gateway=args.api_gateway)
     lock = InstanceLock(paths.lock_path)
     try:

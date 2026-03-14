@@ -564,3 +564,81 @@ Scope: active stress-testing cycle on 2026-03-11 (3-hour protocol, stopped early
 3. Add retries with capped attempts for transient Telegram failures, but preserve raw first-failure evidence.
 4. Prioritize fix validation for `Chat not found` on automatic send branches before next long soak run.
 
+
+
+## Fresh-Clone Startup Issues — HASHI2 Debugging Session (2026-03-14)
+
+### Issue 1: Missing npm packages — react-markdown and remark-gfm
+
+**Symptom:**
+`[plugin:vite:import-analysis] Failed to resolve import "react-markdown" from "src/App.jsx"`
+
+**Classification:** Environment / dependency gap
+
+**Root cause:**
+`workbench/package.json` did not include `react-markdown` or `remark-gfm` as dependencies.
+These packages are imported in `App.jsx` but were never added to the manifest.
+A fresh `npm install` after cloning does not install undeclared packages, so Vite fails to resolve them at build time.
+
+**Fix applied (HASHI2):**
+```bash
+cd workbench && npm install react-markdown remark-gfm
+```
+Versions installed: `react-markdown@10.1.0`, `remark-gfm@4.0.1`
+`package.json` updated automatically by npm.
+
+**Action required before merging back to GitHub:**
+- Commit the updated `package.json` and `package-lock.json` from HASHI2 back to main.
+- Confirm the install works cleanly on a third fresh clone before releasing.
+
+**Requirements note:**
+No additional system packages needed — these are pure npm dependencies.
+
+### Issue 2: Missing npm packages — @dnd-kit/core, @dnd-kit/sortable, @dnd-kit/utilities
+
+**Symptom:**
+
+
+**Classification:** Environment / dependency gap
+
+**Root cause:**
+ did not include the  packages as dependencies.
+ imports from , , and  but none were declared.
+A fresh  after cloning does not install undeclared packages.
+
+**Fix applied (HASHI2):**
+```bash
+cd workbench && npm install @dnd-kit/core @dnd-kit/sortable @dnd-kit/utilities
+```
+Versions installed: , , 
+ updated automatically by npm.
+
+**Action required before merging back to GitHub:**
+- Commit the updated  and  from HASHI2 back to main.
+
+**Requirements note:**
+No additional system packages needed — pure npm dependencies.
+
+
+### Issue 2: Missing npm packages — @dnd-kit/core, @dnd-kit/sortable, @dnd-kit/utilities
+
+**Symptom:**
+Vite import-analysis error: Failed to resolve import @dnd-kit/core from src/App.jsx
+
+**Classification:** Environment / dependency gap
+
+**Root cause:**
+workbench/package.json did not include the @dnd-kit packages as dependencies.
+App.jsx imports from @dnd-kit/core, @dnd-kit/sortable, and @dnd-kit/utilities but none were declared.
+A fresh npm install after cloning does not install undeclared packages.
+
+**Fix applied (HASHI2):**
+cd workbench and run: npm install @dnd-kit/core @dnd-kit/sortable @dnd-kit/utilities
+Versions installed: @dnd-kit/core@6.3.1, @dnd-kit/sortable@10.0.0, @dnd-kit/utilities@3.2.2
+package.json updated automatically by npm.
+
+**Action required before merging back to GitHub:**
+- Commit the updated package.json and package-lock.json from HASHI2 back to main.
+
+**Requirements note:**
+No additional system packages needed. Pure npm dependencies.
