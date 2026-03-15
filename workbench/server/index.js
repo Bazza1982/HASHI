@@ -262,6 +262,21 @@ app.get('/api/system', async (_req, res) => {
   });
 });
 
+app.post('/api/agents/:agentId/command', async (req, res) => {
+  try {
+    const { agentId } = req.params;
+    const response = await fetch(`${BRIDGE_U_API}/api/agents/${encodeURIComponent(agentId)}/command`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body),
+    });
+    const body = await response.text();
+    return res.status(response.status).type(response.headers.get('content-type') || 'application/json').send(body);
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+
 app.post('/api/chat', upload.any(), async (req, res) => {
   try {
     const contentType = req.headers['content-type'] || '';
