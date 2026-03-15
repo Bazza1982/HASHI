@@ -107,6 +107,19 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - Voice is bridge-owned capability: models still return text, and bridge handles synthesis, OGG/Opus conversion, and transport delivery.
 - Voice providers are pluggable; built-ins include `edge`, `piper` ect.
 
+## WhatsApp Linking Procedure
+
+**Do NOT run `link_whatsapp.py` directly.** It starts an interactive pairing session that will hang indefinitely when run as a subprocess — the agent can't display the QR and will never exit.
+
+**Correct method:**
+1. Run `scripts/run_whatsapp_link.sh` in the background — this starts `link_whatsapp.py` with `--qr-image-file /tmp/wa_link_qr.png --completion-file /tmp/wa_link_result.json`
+2. Poll for `/tmp/wa_link_qr.png` to appear (within ~5 seconds)
+3. Send that PNG file to the user via Telegram (`send_photo`)
+4. Poll `/tmp/wa_link_result.json` — when `{"status": "linked"}` appears, notify the user that WhatsApp is connected
+5. If `{"status": "timeout"}` appears, tell the user to try again
+
+Session is saved in `wa_session/` — subsequent starts do not need a QR scan.
+
 ## Practical Expectations
 - Prefer bridge-owned evidence: code, logs, config, transcripts.
 - Use `README.md` when you need deeper detail, or the user has system related questions.

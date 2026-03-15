@@ -5,7 +5,7 @@ Note: HASHI is not designed to be installed as a traditional Python package.
 This setup.py is primarily for development and dependency management.
 
 Recommended installation:
-    git clone https://github.com/Bazza1982/hashi.git
+    git clone https://github.com/Bazza1982/HASHI.git
     cd hashi
     pip install -r requirements.txt
     python onboarding/onboarding_main.py
@@ -37,11 +37,11 @@ setup(
     long_description_content_type="text/markdown",
     author="HASHI Team",
     author_email="barrytianli@gmail.com",
-    url="https://github.com/Bazza1982/hashi",
+    url="https://github.com/Bazza1982/HASHI",
     project_urls={
-        "Documentation": "https://github.com/Bazza1982/hashi#readme",
-        "Source": "https://github.com/Bazza1982/hashi",
-        "Issues": "https://github.com/Bazza1982/hashi/issues",
+        "Documentation": "https://github.com/Bazza1982/HASHI#readme",
+        "Source": "https://github.com/Bazza1982/HASHI",
+        "Issues": "https://github.com/Bazza1982/HASHI/issues",
     },
     license="MIT",
     keywords=[

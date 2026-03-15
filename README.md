@@ -78,7 +78,7 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
 
 ```bash
 # Clone the repository
-git clone https://github.com/Bazza1982/hashi.git
+git clone https://github.com/Bazza1982/HASHI.git
 cd hashi
 
 # Install Python dependencies
@@ -273,10 +273,24 @@ HASHI supports multiple communication channels through a **transport layer**:
 - **Multi-Agent Support** - Route messages to different agents using `/agent <name>` prefix
 
 **Setup:**
-1. Run `python scripts/link_whatsapp.py` to generate QR code
-2. Scan QR code with WhatsApp mobile app
-3. Session saved in `.wwebjs_auth/`
-4. Configure routing in agent's `whatsapp_routing` settings
+
+> ⚠️ **Important:** Do NOT run `link_whatsapp.py` directly in a terminal and wait for it — it opens an interactive pairing session that never exits on its own when run that way. Use the relay method below.
+
+**Recommended method (agent-relay via Telegram):**
+1. Ask your HASHI agent (e.g. Hashiko) to set up WhatsApp. She will handle it.
+2. The agent runs `scripts/run_whatsapp_link.sh` in the background, which starts `link_whatsapp.py` with `--qr-image-file /tmp/wa_link_qr.png --completion-file /tmp/wa_link_result.json`.
+3. When the QR PNG appears, the agent automatically sends it to you as a Telegram image.
+4. Scan the QR code from Telegram using your WhatsApp mobile app.
+5. The agent polls `/tmp/wa_link_result.json` and confirms when linking is complete.
+6. Session saved in `wa_session/` — subsequent starts do not require a new QR scan.
+
+**Manual method (if running without an agent):**
+1. Open a terminal and run: `bash scripts/run_whatsapp_link.sh`
+2. Wait a few seconds, then open `/tmp/wa_link_qr.png` in an image viewer.
+3. Scan the QR code with WhatsApp mobile app.
+4. Check `/tmp/wa_link_result.json` for `{"status": "linked"}` to confirm success.
+
+5. Configure routing in agent's `whatsapp_routing` settings.
 
 **WhatsApp Commands:**
 - `/agent hashiko` - Switch to "hashiko" agent
@@ -780,9 +794,10 @@ export BRIDGE_DEBUG=1
 - Verify bot token with [@BotFather](https://t.me/botfather)
 - Check `authorized_id` matches your Telegram user ID
 
-**WhatsApp QR code not showing**
-- Run `python scripts/link_whatsapp.py` separately
-- Check firewall allows localhost connections
+**WhatsApp QR code not showing / process exits immediately**
+- Do NOT run `link_whatsapp.py` directly — it opens an interactive session that hangs or exits without showing the QR
+- Use `bash scripts/run_whatsapp_link.sh` instead, then open `/tmp/wa_link_qr.png`
+- Or ask your HASHI agent to set up WhatsApp — it will send the QR image to you via Telegram
 
 ---
 
@@ -851,8 +866,8 @@ You are free to use, modify, and distribute this software. See `LICENSE` file fo
 
 ## Support & Community
 
-- **GitHub Issues:** [Report bugs and request features](https://github.com/Bazza1982/hashi/issues)
-- **Discussions:** [Ask questions and share tips](https://github.com/Bazza1982/hashi/discussions)
+- **GitHub Issues:** [Report bugs and request features](https://github.com/Bazza1982/HASHI/issues)
+- **Discussions:** [Ask questions and share tips](https://github.com/Bazza1982/HASHI/discussions)
 - **Author:** HASHI Team
 
 ---

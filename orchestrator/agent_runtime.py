@@ -16,7 +16,7 @@ from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandle
 
 from adapters.base import BaseBackend
 from orchestrator.agent_fyi import build_agent_fyi_primer
-from orchestrator.bridge_memory import BridgeMemoryStore, BridgeContextAssembler
+from orchestrator.bridge_memory import BridgeMemoryStore, BridgeContextAssembler, SysPromptManager
 from orchestrator.handoff_builder import HandoffBuilder
 from orchestrator.media_utils import is_image_file, normalize_image_file
 from orchestrator.skill_manager import SkillDefinition, SkillManager
@@ -290,10 +290,12 @@ class BridgeAgentRuntime:
         self.voice_manager = VoiceManager(self.config.workspace_dir, self.media_dir, ffmpeg_cmd="ffmpeg")
         self.memory_store = BridgeMemoryStore(self.config.workspace_dir)
         self.handoff_builder = HandoffBuilder(self.config.workspace_dir, transcript_filename="conversation_log.jsonl")
+        self.sys_prompt_manager = SysPromptManager(self.config.workspace_dir)
         self.context_assembler = BridgeContextAssembler(
             self.memory_store,
             self.config.system_md,
             active_skill_provider=self._get_active_skill_sections,
+            sys_prompt_manager=self.sys_prompt_manager,
         )
 
     def get_typing_placeholder(self) -> tuple[str, str | None]:
@@ -2266,6 +2268,51 @@ class BridgeAgentRuntime:
             "AGENT FYI refresh",
         )
 
+    async def cmd_sys(self, update, context):
+        if update.effective_user.id != self.global_config.authorized_id:
+            return
+        args = [a.strip() for a in (context.args or []) if a.strip()]
+        mgr = self.sys_prompt_manager
+
+        if not args:
+            await update.message.reply_text(mgr.display_all(), parse_mode="Markdown")
+            return
+
+        slot = args[0]
+        if slot not in mgr.SLOTS:
+            await update.message.reply_text(f"Invalid slot '{slot}'. Use 1–10.")
+            return
+
+        if len(args) == 1:
+            await update.message.reply_text(mgr.display_slot(slot))
+            return
+
+        sub = args[1].lower()
+
+        if sub == "on":
+            await update.message.reply_text(mgr.activate(slot))
+        elif sub == "off":
+            await update.message.reply_text(mgr.deactivate(slot))
+        elif sub == "delete":
+            await update.message.reply_text(mgr.delete(slot))
+        elif sub == "save":
+            text = " ".join(args[2:])
+            if not text:
+                await update.message.reply_text("Usage: /sys <slot> save <message>")
+                return
+            await update.message.reply_text(mgr.save(slot, text))
+        elif sub == "replace":
+            text = " ".join(args[2:])
+            if not text:
+                await update.message.reply_text("Usage: /sys <slot> replace <message>")
+                return
+            await update.message.reply_text(mgr.replace(slot, text))
+        else:
+            await update.message.reply_text(
+                "Usage:\n/sys — show all slots\n/sys <n> — show slot\n"
+                "/sys <n> on|off|delete\n/sys <n> save <msg>\n/sys <n> replace <msg>"
+            )
+
     async def cmd_voice(self, update, context):
         if update.effective_user.id != self.global_config.authorized_id:
             return
@@ -2995,6 +3042,7 @@ class BridgeAgentRuntime:
         self.app.add_handler(CommandHandler("help", self.cmd_help))
         self.app.add_handler(CommandHandler("start", self.cmd_start))
         self.app.add_handler(CommandHandler("status", self.cmd_status))
+        self.app.add_handler(CommandHandler("sys", self.cmd_sys))
         self.app.add_handler(CommandHandler("voice", self.cmd_voice))
         self.app.add_handler(CommandHandler("active", self.cmd_active))
         self.app.add_handler(CommandHandler("handoff", self.cmd_handoff))

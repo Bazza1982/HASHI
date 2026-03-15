@@ -157,8 +157,32 @@ Special thanks to [OpenClaw] by Peter Steinberg for inspiration and foundational
 
 ---
 
-## [Unreleased]
+## [Unreleased] — v1.1-upgrades branch
 
-_Future releases will be documented here._
+### ✨ Added
+
+- **Time-Awareness (FYI Injection)** — `orchestrator/bridge_memory.py`
+  - Added `get_last_user_turn_ts()` — retrieves timestamp of the user's last message from the `turns` table
+  - Added `_build_time_fyi()` — computes current time + elapsed gap since last user message
+  - Injected as a soft one-line note into every prompt just before the user message:
+    ```
+    [FYI: You received this message at 12:07 AM. Last message from user was at 11:52 PM — 15m ago.]
+    ```
+  - Gap formatting: seconds / minutes / hours / days — human-readable
+  - Agents now feel the natural rhythm of conversation without being told explicitly
+
+### 🔧 Fixed
+
+- **Backend switching silent failure** — `adapters/flexible_backend_manager.py`
+  - Fixed: `/backend` → Gemini switch silently stayed on Claude due to unsupported parameter
+  - Added missing parameter support so switching actually completes
+
+- **Model change not persisting** — `adapters/flexible_backend_manager.py`
+  - Fixed: `AttributeError` on `persist_state()` — method was named `_save_state` (private)
+  - Added public `persist_state()` delegate so model selection survives restarts
+
+---
+
+## [1.0.1] - 2026-03-15
 
 

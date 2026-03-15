@@ -112,7 +112,7 @@ class OpenRouterAdapter(BaseBackend):
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
-            "HTTP-Referer": "https://github.com/Bazza1982/hashi",
+            "HTTP-Referer": "https://github.com/Bazza1982/HASHI",
             "X-Title": "Bridge-U Orchestrator",
         }
 

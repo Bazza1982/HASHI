@@ -145,6 +145,14 @@ class BridgeMemoryStore:
             ).fetchall()
         return [dict(r) for r in reversed(rows)]
 
+    def get_last_user_turn_ts(self) -> str | None:
+        """Return the ISO timestamp of the most recent user turn, or None."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT ts FROM turns WHERE role = 'user' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        return row["ts"] if row else None
+
     def retrieve_memories(self, query: str, limit: int = 6) -> list[dict[str, Any]]:
         safe_query = self._safe_query(query)
         q_vec = self.encoder.encode(query or "")
@@ -198,6 +206,84 @@ class BridgeMemoryStore:
         return {"turns": int(turns), "memories": int(memories)}
 
 
+class SysPromptManager:
+    """Manages up to 10 additional system prompt slots per workspace."""
+
+    SLOTS = [str(i) for i in range(1, 11)]
+
+    def __init__(self, workspace_dir: Path):
+        self.state_path = workspace_dir / "sys_prompts.json"
+        self._data: dict = self._load()
+
+    def _load(self) -> dict:
+        if self.state_path.exists():
+            try:
+                return json.loads(self.state_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        return {slot: {"text": "", "active": False} for slot in self.SLOTS}
+
+    def _save(self):
+        # Ensure all 10 slots exist
+        for slot in self.SLOTS:
+            self._data.setdefault(slot, {"text": "", "active": False})
+        self.state_path.write_text(json.dumps(self._data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    def _slot(self, n: str) -> dict:
+        self._data.setdefault(n, {"text": "", "active": False})
+        return self._data[n]
+
+    def display_all(self) -> str:
+        lines = ["*System Prompt Slots:*"]
+        for slot in self.SLOTS:
+            s = self._slot(slot)
+            status = "ON" if s["active"] else "off"
+            preview = (s["text"][:60] + "…") if len(s["text"]) > 60 else s["text"]
+            lines.append(f"[{slot}] {status} | {preview or '(empty)'}")
+        return "\n".join(lines)
+
+    def display_slot(self, n: str) -> str:
+        s = self._slot(n)
+        status = "ON" if s["active"] else "off"
+        text = s["text"] or "(empty)"
+        return f"Slot {n} [{status}]:\n{text}"
+
+    def activate(self, n: str) -> str:
+        if not self._slot(n)["text"]:
+            return f"Slot {n} is empty — save a message first."
+        self._data[n]["active"] = True
+        self._save()
+        return f"Slot {n} activated."
+
+    def deactivate(self, n: str) -> str:
+        self._data[n]["active"] = False
+        self._save()
+        return f"Slot {n} deactivated."
+
+    def save(self, n: str, text: str) -> str:
+        self._data[n] = {"text": text, "active": False}
+        self._save()
+        return f"Slot {n} saved (inactive). Use /sys {n} on to activate."
+
+    def replace(self, n: str, text: str) -> str:
+        was_active = self._slot(n).get("active", False)
+        self._data[n] = {"text": text, "active": was_active}
+        self._save()
+        return f"Slot {n} updated."
+
+    def delete(self, n: str) -> str:
+        self._data[n] = {"text": "", "active": False}
+        self._save()
+        return f"Slot {n} cleared."
+
+    def get_active_texts(self) -> list[str]:
+        return [
+            self._data[slot]["text"]
+            for slot in self.SLOTS
+            if self._data.get(slot, {}).get("active") and self._data[slot].get("text")
+        ]
+
+
 class BridgeContextAssembler:
     PROMPT_BUDGETS = {
         "codex-cli": 24000,
@@ -206,10 +292,11 @@ class BridgeContextAssembler:
         "openrouter-api": 35000,
     }
 
-    def __init__(self, memory_store: BridgeMemoryStore, system_md: Path | None, active_skill_provider=None):
+    def __init__(self, memory_store: BridgeMemoryStore, system_md: Path | None, active_skill_provider=None, sys_prompt_manager=None):
         self.memory_store = memory_store
         self.system_md = system_md
         self.active_skill_provider = active_skill_provider
+        self.sys_prompt_manager = sys_prompt_manager
 
     def _load_system_prompt(self) -> str:
         if not self.system_md:
@@ -244,6 +331,33 @@ class BridgeContextAssembler:
         kept_context = self._clip(context_part, context_budget, "[context trimmed for budget]")
         return f"{kept_context}{separator}{kept_request}"
 
+    def _build_time_fyi(self) -> str:
+        """Build a soft time-awareness note for the agent."""
+        now = datetime.now()
+        now_str = now.strftime("%I:%M %p").lstrip("0")
+        last_ts = self.memory_store.get_last_user_turn_ts()
+        if not last_ts:
+            return f"[FYI: You received this message at {now_str}.]"
+        try:
+            last_dt = datetime.fromisoformat(last_ts)
+            delta = now - last_dt
+            total_seconds = int(delta.total_seconds())
+            if total_seconds < 60:
+                gap = f"{total_seconds}s ago"
+            elif total_seconds < 3600:
+                gap = f"{total_seconds // 60}m ago"
+            elif total_seconds < 86400:
+                hours = total_seconds // 3600
+                mins = (total_seconds % 3600) // 60
+                gap = f"{hours}h {mins}m ago" if mins else f"{hours}h ago"
+            else:
+                days = total_seconds // 86400
+                gap = f"{days} day{'s' if days != 1 else ''} ago"
+            last_str = last_dt.strftime("%I:%M %p").lstrip("0")
+            return f"[FYI: You received this message at {now_str}. Last message from user was at {last_str} — {gap}.]"
+        except Exception:
+            return f"[FYI: You received this message at {now_str}.]"
+
     def build_prompt(self, user_prompt: str, engine: str) -> str:
         system_text = self._load_system_prompt()
         recent_turns = self.memory_store.get_recent_turns(limit=10)
@@ -256,6 +370,13 @@ class BridgeContextAssembler:
                 active_skills = []
 
         context_parts = []
+        if self.sys_prompt_manager:
+            active_sys = self.sys_prompt_manager.get_active_texts()
+            if active_sys:
+                context_parts.append("--- ADDITIONAL SYSTEM CONTEXT ---")
+                for txt in active_sys:
+                    context_parts.append(txt)
+
         if system_text:
             context_parts.append("--- SYSTEM IDENTITY ---")
             context_parts.append(system_text)
@@ -279,11 +400,13 @@ class BridgeContextAssembler:
         if not context_parts:
             return user_prompt
 
+        time_fyi = self._build_time_fyi()
         final_prompt = (
             "Bridge-managed context follows. Use it as background memory. "
             "Respond only to NEW REQUEST unless explicitly asked to summarize memory.\n\n"
             + "\n\n".join(context_parts)
             + "\n\n--- NEW REQUEST ---\n"
+            + time_fyi + "\n\n"
             + user_prompt
         )
         return self._apply_budget(final_prompt, engine)

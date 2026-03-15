@@ -20,7 +20,7 @@ def load_whatsapp_config(config_path: Path) -> dict:
     return (raw.get("global", {}).get("whatsapp") or {}).copy()
 
 
-async def run_link(session_dir: str | None, timeout_minutes: float, bridge_home: str | None):
+async def run_link(session_dir: str | None, timeout_minutes: float, bridge_home: str | None, qr_image_file: str | None, completion_file: str | None):
     from neonize.aioze.client import NewAClient
     from neonize.aioze.events import ConnectedEv, DisconnectedEv, PairStatusEv
 
@@ -46,6 +46,11 @@ async def run_link(session_dir: str | None, timeout_minutes: float, bridge_home:
         print("")
         segno.make_qr(data_qr).terminal(compact=True)
         print("")
+        if qr_image_file:
+            qr_path = Path(qr_image_file)
+            qr_path.parent.mkdir(parents=True, exist_ok=True)
+            segno.make_qr(data_qr).save(str(qr_path), scale=5)
+            print(f"QR image saved to: {qr_path}")
 
     client.qr(on_qr)
 
@@ -53,6 +58,8 @@ async def run_link(session_dir: str | None, timeout_minutes: float, bridge_home:
     async def _on_connected(_, __):
         print("WhatsApp linked and connected.")
         linked.set()
+        if completion_file:
+            Path(completion_file).write_text(json.dumps({"status": "linked"}))
 
     @client.event(PairStatusEv)
     async def _on_pair_status(_, ev):
@@ -74,6 +81,8 @@ async def run_link(session_dir: str | None, timeout_minutes: float, bridge_home:
             print("Timed out before QR was shown.")
         else:
             print("Timed out waiting for WhatsApp link confirmation.")
+        if completion_file:
+            Path(completion_file).write_text(json.dumps({"status": "timeout"}))
         raise SystemExit(1)
     finally:
         connect_task.cancel()
@@ -102,10 +111,18 @@ def main():
         default=5.0,
         help="How long to wait for linking before exiting. Default: 5 minutes.",
     )
+    parser.add_argument(
+        "--qr-image-file",
+        help="Path to save QR code as PNG image when it arrives.",
+    )
+    parser.add_argument(
+        "--completion-file",
+        help="Path to write JSON result file when linking completes or times out.",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.WARNING)
-    asyncio.run(run_link(args.session_dir, args.timeout_minutes, args.bridge_home))
+    asyncio.run(run_link(args.session_dir, args.timeout_minutes, args.bridge_home, args.qr_image_file, args.completion_file))
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ HASHI is designed to run as a **local application**, not as a Python package ins
 ### Step 1: Clone the Repository
 
 ```bash
-git clone https://github.com/Bazza1982/hashi.git
+git clone https://github.com/Bazza1982/HASHI.git
 cd hashi
 ```
 
@@ -60,7 +60,7 @@ python main.py
 
 ## Alternative: Download Release
 
-1. Download the latest release from [GitHub Releases](https://github.com/Bazza1982/hashi/releases)
+1. Download the latest release from [GitHub Releases](https://github.com/Bazza1982/HASHI/releases)
 2. Extract the archive
 3. Follow Steps 2-4 above
 
@@ -170,9 +170,9 @@ After installation:
 1. Run `hashi-onboard` or `python onboarding/onboarding_main.py`
 2. Follow the guided setup
 3. Read the [README](README.md) for usage instructions
-4. Join the community: [GitHub Discussions](https://github.com/Bazza1982/hashi/discussions)
+4. Join the community: [GitHub Discussions](https://github.com/Bazza1982/HASHI/discussions)
 
 ---
 
 **Need Help?**  
-Open an issue: [GitHub Issues](https://github.com/Bazza1982/hashi/issues)
+Open an issue: [GitHub Issues](https://github.com/Bazza1982/HASHI/issues)

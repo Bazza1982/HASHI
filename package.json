@@ -15,13 +15,13 @@
     "chatbot",
     "automation"
   ],
-  "homepage": "https://github.com/Bazza1982/hashi#readme",
+  "homepage": "https://github.com/Bazza1982/HASHI#readme",
   "bugs": {
-    "url": "https://github.com/Bazza1982/hashi/issues"
+    "url": "https://github.com/Bazza1982/HASHI/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Bazza1982/hashi.git"
+    "url": "git+https://github.com/Bazza1982/HASHI.git"
   },
   "license": "MIT",
   "author": {
