@@ -44,48 +44,101 @@ let gpuCache = { data: null, time: 0 };
 
 function getGpuInfo() {
   const now = Date.now();
-  if (gpuCache.data && now - gpuCache.time < 2000) return gpuCache.data;
+  if (gpuCache.data && now - gpuCache.time < 5000) return gpuCache.data;
+
+  let result = { available: false, name: null, vendor: null, status: 'Unavailable',
+                 npu: { available: false, name: null, status: 'Unavailable' } };
 
   try {
-    const output = execSync(
-      `powershell -NoProfile -Command "$gpu = Get-CimInstance Win32_VideoController | Select-Object -First 1 Name,AdapterCompatibility,Status; ` +
-      `$npu = Get-PnpDevice | Where-Object { $_.Class -eq 'ComputeAccelerator' } | Select-Object -First 1 FriendlyName,Class,Status; ` +
-      `[pscustomobject]@{ gpu = $gpu; npu = $npu } | ConvertTo-Json -Depth 4 -Compress"`,
-      { encoding: 'utf8', timeout: 5000, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] },
-    ).trim();
-    if (output) {
-      const parsed = JSON.parse(output);
-      gpuCache.data = {
-        available: Boolean(parsed.gpu?.Name),
-        name: parsed.gpu?.Name || null,
-        vendor: parsed.gpu?.AdapterCompatibility || null,
-        status: parsed.gpu?.Status || 'Unknown',
+    const platform = process.platform;
+
+    if (platform === 'win32') {
+      const output = execSync(
+        `powershell -NoProfile -Command "$gpu = Get-CimInstance Win32_VideoController | Select-Object -First 1 Name,AdapterCompatibility,Status; ` +
+        `$npu = Get-PnpDevice | Where-Object { $_.Class -eq 'ComputeAccelerator' } | Select-Object -First 1 FriendlyName,Class,Status; ` +
+        `[pscustomobject]@{ gpu = $gpu; npu = $npu } | ConvertTo-Json -Depth 4 -Compress"`,
+        { encoding: 'utf8', timeout: 5000, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] },
+      ).trim();
+      if (output) {
+        const parsed = JSON.parse(output);
+        result = {
+          available: Boolean(parsed.gpu?.Name),
+          name: parsed.gpu?.Name || null,
+          vendor: parsed.gpu?.AdapterCompatibility || null,
+          status: parsed.gpu?.Status || 'Unknown',
+          npu: {
+            available: Boolean(parsed.npu?.FriendlyName),
+            name: parsed.npu?.FriendlyName || null,
+            status: parsed.npu?.Status || 'Unknown',
+          },
+        };
+      }
+    } else if (platform === 'darwin') {
+      const raw = execSync(
+        `system_profiler SPDisplaysDataType 2>/dev/null`,
+        { encoding: 'utf8', timeout: 8000, stdio: ['ignore','pipe','pipe'] }
+      ).trim();
+
+      const chipsetMatch = raw.match(/Chipset Model:\s*(.+)/);
+      const name = chipsetMatch ? chipsetMatch[1].trim() : null;
+
+      result = {
+        available: !!name,
+        name: name || 'Apple Integrated GPU',
+        vendor: name?.includes('Apple') ? 'Apple' : detectVendor(name || ''),
+        status: name ? 'OK' : 'Integrated',
         npu: {
-          available: Boolean(parsed.npu?.FriendlyName),
-          name: parsed.npu?.FriendlyName || null,
-          status: parsed.npu?.Status || 'Unknown',
+          available: isAppleSilicon(),
+          name: isAppleSilicon() ? 'Apple Neural Engine' : null,
+          status: isAppleSilicon() ? 'Available' : 'Unavailable',
         },
       };
-      gpuCache.time = now;
-      return gpuCache.data;
+
+    } else {
+      const name = linuxGpuName();
+      result = {
+        available: !!name,
+        name: name || 'Unknown',
+        vendor: detectVendor(name || ''),
+        status: name ? 'OK' : 'Unavailable',
+        npu: { available: false, name: null, status: 'Unavailable' },
+      };
     }
-  } catch {
-    // No GPU telemetry available.
+  } catch (_) {
+    // swallow
   }
 
-  gpuCache.data = {
-    available: false,
-    name: null,
-    vendor: null,
-    status: 'Unavailable',
-    npu: {
-      available: false,
-      name: null,
-      status: 'Unavailable',
-    },
-  };
+  gpuCache.data = result;
   gpuCache.time = now;
-  return gpuCache.data;
+  return result;
+}
+
+function isAppleSilicon() {
+  try {
+    const chip = execSync('sysctl -n machdep.cpu.brand_string 2>/dev/null', { encoding: 'utf8', timeout: 2000 }).trim();
+    return chip.includes('Apple');
+  } catch { return false; }
+}
+
+function linuxGpuName() {
+  try {
+    const raw = execSync('nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null', { encoding: 'utf8', timeout: 3000 }).trim();
+    if (raw) return raw.split('\n')[0];
+  } catch {}
+  try {
+    const raw = execSync('lspci 2>/dev/null | grep -i vga', { encoding: 'utf8', timeout: 3000 }).trim();
+    if (raw) return raw.split(':').pop()?.trim() || null;
+  } catch {}
+  return null;
+}
+
+function detectVendor(name) {
+  const n = name.toLowerCase();
+  if (n.includes('nvidia'))  return 'NVIDIA';
+  if (n.includes('amd') || n.includes('radeon')) return 'AMD';
+  if (n.includes('intel'))   return 'Intel';
+  if (n.includes('apple'))   return 'Apple';
+  return 'Unknown';
 }
 
 function parseMessageRecord(line) {

@@ -33,8 +33,11 @@ case "$ACTION" in
           echo "Services ready. Allowing terminal animation and LLM hatching to complete (15s)..."
           sleep 15
           echo "Opening browser..."
-          # Use powershell.exe to reliably open the URL in Windows browser
-          powershell.exe -NoProfile -Command "Start-Process http://localhost:$CLIENT_PORT/" 2>/dev/null || true
+          case "$(uname)" in
+            Darwin)  open "http://localhost:$CLIENT_PORT" ;;
+            Linux)   xdg-open "http://localhost:$CLIENT_PORT" ;;
+            *)       powershell.exe -NoProfile -Command "Start-Process http://localhost:$CLIENT_PORT/" 2>/dev/null || true ;;
+          esac
         fi
         npx pm2 list
         exit 0
