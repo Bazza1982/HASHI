@@ -17,6 +17,7 @@ This directory contains **developer documentation**, operational notes, and a sm
 ### Install / Ops
 - [INSTALL.md](INSTALL.md) — Unified install guide (Windows/macOS/Linux)
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — Single-source troubleshooting + checklist
+- [WINDOWS_OFFLINE_INSTALLER_PACKAGING_PLAN.md](WINDOWS_OFFLINE_INSTALLER_PACKAGING_PLAN.md) — Windows offline installer & packaging plan (v2)
 - [KNOWN_ISSUES.md](KNOWN_ISSUES.md) — Short list of known issues (keep minimal)
 
 ### Roadmap
