@@ -355,7 +355,7 @@ def run_onboarding():
             except Exception:
                 pass
 
-        args = ["/usr/bin/bash", str(main_sh), "--workbench", "--resume-last", "--force"]
+        args = ["/bin/bash", str(main_sh), "--workbench", "--resume-last", "--force"]
         _log(f"Launching bridge-u.sh via subprocess: {args}")
 
         # Pass HASHI_BRIDGE_PORT through so the correct instance port is used

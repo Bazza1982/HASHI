@@ -1373,7 +1373,7 @@ export default function App() {
       throw new Error(err);
     }
 
-    const cmdResult = payload?.result || {};
+    const cmdResult = payload?.result ?? payload ?? {};
     await loadAgents(false);
     const rendered = appendCommandMessages(
       agentId,
