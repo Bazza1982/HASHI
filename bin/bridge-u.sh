@@ -533,10 +533,13 @@ launch() {
     echo ""
     
     # ── Wakeup prompt injector ──────────────────────────────────────────────
-    # If onboarding wrote a WAKEUP.prompt, send it to Hashiko as soon as
-    # the orchestrator API is up — so the response is ready when the
-    # browser window opens.
-    local wakeup_file="$BRIDGE_HOME/workspaces/onboarding_agent/WAKEUP.prompt"
+    # If Hashiko or the legacy onboarding flow wrote a WAKEUP.prompt, send it
+    # as soon as the orchestrator API is up so the first response is ready
+    # when the browser window opens.
+    local wakeup_file="$BRIDGE_HOME/workspaces/hashiko/WAKEUP.prompt"
+    if [[ ! -f "$wakeup_file" ]]; then
+        wakeup_file="$BRIDGE_HOME/workspaces/onboarding_agent/WAKEUP.prompt"
+    fi
     if [[ -f "$wakeup_file" ]]; then
         local hashi_api="http://localhost:${WORKBENCH_PORT:-18800}"
         (

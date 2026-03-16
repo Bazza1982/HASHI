@@ -202,8 +202,13 @@ def run_onboarding():
 
     # Phase 1.5: Completion Detection
     _log("Phase 1.5: Completion detection")
-    agents_path = project_root / "agents.json"
-    secrets_path = project_root / "secrets.json"
+    # IMPORTANT: main.py expects agents.json/secrets.json under bridge_home.
+    # Respect BRIDGE_HOME env (used by Windows batch launchers) and default to project_root.
+    bridge_home = Path(os.environ.get("BRIDGE_HOME") or str(project_root)).resolve()
+    bridge_home.mkdir(parents=True, exist_ok=True)
+    agents_path = bridge_home / "agents.json"
+    secrets_path = bridge_home / "secrets.json"
+    _log(f"bridge_home resolved: {bridge_home}")
     is_completed = False
     if agents_path.exists():
         try:
@@ -355,8 +360,16 @@ def run_onboarding():
             except Exception:
                 pass
 
-        args = ["/bin/bash", str(main_sh), "--workbench", "--resume-last", "--force"]
-        _log(f"Launching bridge-u.sh via subprocess: {args}")
+        # Launch bridge using the most native mechanism for the current OS.
+        # - Windows: use bridge-u.bat (no bash expected)
+        # - POSIX:   use bridge-u.sh via bash
+        if os.name == "nt":
+            main_bat = project_root / "bin" / "bridge-u.bat"
+            args = ["cmd", "/d", "/c", "call", str(main_bat), "--workbench", "--resume-last", "--force"]
+            _log(f"Launching bridge-u.bat via subprocess: {args}")
+        else:
+            args = ["bash", str(main_sh), "--workbench", "--resume-last", "--force"]
+            _log(f"Launching bridge-u.sh via subprocess: {args}")
 
         # Pass HASHI_BRIDGE_PORT through so the correct instance port is used
         launch_env = os.environ.copy()

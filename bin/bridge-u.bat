@@ -4,10 +4,17 @@ setlocal EnableDelayedExpansion
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
 title Bridge-U-F Launcher
-set "BRIDGE_CODE_ROOT=%~dp0"
-if "!BRIDGE_CODE_ROOT:~-1!"=="\" set "BRIDGE_CODE_ROOT=!BRIDGE_CODE_ROOT:~0,-1!"
-cd /d "%BRIDGE_CODE_ROOT%"
-if not defined BRIDGE_HOME set "BRIDGE_HOME=%BRIDGE_CODE_ROOT%"
+
+rem This script lives under <repo>\bin\. We want BRIDGE_CODE_ROOT to be the repo root,
+rem not the bin folder, otherwise agents.json will be looked up in the wrong place.
+set "SCRIPT_DIR=%~dp0"
+if "!SCRIPT_DIR:~-1!"=="\" set "SCRIPT_DIR=!SCRIPT_DIR:~0,-1!"
+
+set "BRIDGE_CODE_ROOT=!SCRIPT_DIR!\.."
+for %%I in ("!BRIDGE_CODE_ROOT!") do set "BRIDGE_CODE_ROOT=%%~fI"
+cd /d "!BRIDGE_CODE_ROOT!"
+
+if not defined BRIDGE_HOME set "BRIDGE_HOME=!BRIDGE_CODE_ROOT!"
 if "!BRIDGE_HOME:~-1!"=="\" set "BRIDGE_HOME=!BRIDGE_HOME:~0,-1!"
 
 set "STATE_FILE=%BRIDGE_HOME%\.bridge_u_last_agents.txt"
@@ -19,6 +26,7 @@ set "AUTO_STOP_WORKBENCH=0"
 set "AUTO_RESUME_LAST=0"
 set "NO_PAUSE=0"
 set "DRY_RUN=0"
+set "WAKEUP_FILE="
 
 call :parse_args %*
 
@@ -142,6 +150,8 @@ echo !C_RAIL!│!C_RESET!
 if exist "%AGENTS_FILE%" del "%AGENTS_FILE%" >nul 2>&1
 set "GW_ARG="
 if "!API_GATEWAY_LAUNCH!"=="1" set "GW_ARG=--api-gateway"
+call :resolve_wakeup_file
+if defined WAKEUP_FILE call :start_wakeup_injector
 python main.py --bridge-home "%BRIDGE_HOME%" %PY_ARGS% !GW_ARG!
 if "!AUTO_STOP_WORKBENCH!"=="1" (
     echo.
@@ -150,6 +160,39 @@ if "!AUTO_STOP_WORKBENCH!"=="1" (
 )
 if "!NO_PAUSE!"=="1" exit /b 0
 pause
+exit /b 0
+
+:resolve_wakeup_file
+set "WAKEUP_FILE="
+if exist "%BRIDGE_HOME%\workspaces\hashiko\WAKEUP.prompt" (
+    set "WAKEUP_FILE=%BRIDGE_HOME%\workspaces\hashiko\WAKEUP.prompt"
+    exit /b 0
+)
+if exist "%BRIDGE_HOME%\workspaces\onboarding_agent\WAKEUP.prompt" (
+    set "WAKEUP_FILE=%BRIDGE_HOME%\workspaces\onboarding_agent\WAKEUP.prompt"
+)
+exit /b 0
+
+:start_wakeup_injector
+set "WAKEUP_PORT=%WORKBENCH_PORT%"
+if not defined WAKEUP_PORT set "WAKEUP_PORT=18800"
+start "" /MIN powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$wakeupFile = '%WAKEUP_FILE%'; " ^
+  "$health = 'http://localhost:%WAKEUP_PORT%/api/health'; " ^
+  "$chat = 'http://localhost:%WAKEUP_PORT%/api/chat'; " ^
+  "for ($i = 0; $i -lt 40; $i++) { " ^
+  "  Start-Sleep -Seconds 1; " ^
+  "  try { " ^
+  "    Invoke-RestMethod -Uri $health -Method Get -TimeoutSec 2 | Out-Null; " ^
+  "    Start-Sleep -Seconds 1; " ^
+  "    if (-not (Test-Path $wakeupFile)) { break }; " ^
+  "    $prompt = Get-Content $wakeupFile -Raw; " ^
+  "    $body = @{ agent = 'hashiko'; text = $prompt } | ConvertTo-Json -Compress; " ^
+  "    Invoke-RestMethod -Uri $chat -Method Post -ContentType 'application/json' -Body $body | Out-Null; " ^
+  "    Remove-Item $wakeupFile -Force; " ^
+  "    break; " ^
+  "  } catch { } " ^
+  "}"
 exit /b 0
 
 :quit
@@ -328,8 +371,8 @@ exit /b 0
 rem Check for an already-running bridge-u-f orchestrator.
 rem Uses .bridge_u_f.pid (always readable) — the .lock file is unreadable while held.
 set "EXISTING_PID="
-if exist "%~dp0.bridge_u_f.pid" (
-    for /f "usebackq delims=" %%P in ("%~dp0.bridge_u_f.pid") do set "EXISTING_PID=%%P"
+if exist "%BRIDGE_HOME%\.bridge_u_f.pid" (
+    for /f "usebackq delims=" %%P in ("%BRIDGE_HOME%\.bridge_u_f.pid") do set "EXISTING_PID=%%P"
 )
 if not defined EXISTING_PID exit /b 0
 rem Verify the PID is still alive and is actually bridge-u-f
@@ -340,7 +383,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "if($cmd -and $cmd -like '*main.py*'){ exit 0 } else { exit 1 }"
 if errorlevel 1 (
     rem PID file is stale — process is gone or not bridge-u-f
-    del /f /q "%~dp0.bridge_u_f.pid" >nul 2>&1
+    del /f /q "%BRIDGE_HOME%\.bridge_u_f.pid" >nul 2>&1
     exit /b 0
 )
 echo.
