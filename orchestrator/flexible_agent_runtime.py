@@ -17,7 +17,7 @@ from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandle
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
 from orchestrator.agent_runtime import QueuedRequest, _safe_excerpt, _md_to_html, _print_user_message, _print_final_response, _print_thinking
 from orchestrator.agent_fyi import build_agent_fyi_primer
-from orchestrator.bridge_memory import BridgeMemoryStore, BridgeContextAssembler
+from orchestrator.bridge_memory import BridgeMemoryStore, BridgeContextAssembler, SysPromptManager
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
 from orchestrator.flexible_backend_registry import (
     CLAUDE_MODEL_ALIASES,
@@ -98,6 +98,7 @@ class FlexibleAgentRuntime:
         self._openrouter_think_chunk: str = ""
         self._last_openrouter_think_snippet: str | None = None
         self.memory_dir = self.workspace_dir / "memory"
+        self.sys_prompt_manager = SysPromptManager(self.workspace_dir)
         self.backend_state_dir = self.workspace_dir / "backend_state"
         self.transcript_log_path = self.workspace_dir / "transcript.jsonl"
         self.recent_context_path = self.workspace_dir / "recent_context.jsonl"
@@ -793,6 +794,8 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CommandHandler("help", self.cmd_help))
         self.app.add_handler(CommandHandler("start", self.cmd_start))
         self.app.add_handler(CommandHandler("status", self.cmd_status))
+        self.app.add_handler(CommandHandler("sys", self.cmd_sys))
+        self.app.add_handler(CommandHandler("credit", self.cmd_credit))
         self.app.add_handler(CommandHandler("voice", self.cmd_voice))
         self.app.add_handler(CommandHandler("active", self.cmd_active))
         self.app.add_handler(CommandHandler("fyi", self.cmd_fyi))
@@ -1067,6 +1070,76 @@ class FlexibleAgentRuntime:
             "AGENT FYI refresh",
         )
 
+
+    async def cmd_sys(self, update, context):
+        if update.effective_user.id != self.global_config.authorized_id:
+            return
+        args = [a.strip() for a in (context.args or []) if a.strip()]
+        mgr = self.sys_prompt_manager
+
+        if not args:
+            await update.message.reply_text(mgr.display_all(), parse_mode="Markdown")
+            return
+
+        slot = args[0]
+        if slot not in mgr.SLOTS:
+            await update.message.reply_text(f"Invalid slot '{slot}'. Use 1-10.")
+            return
+
+        if len(args) == 1:
+            await update.message.reply_text(mgr.display_slot(slot))
+            return
+
+        sub = args[1].lower()
+
+        if sub == "on":
+            await update.message.reply_text(mgr.activate(slot))
+        elif sub == "off":
+            await update.message.reply_text(mgr.deactivate(slot))
+        elif sub == "delete":
+            await update.message.reply_text(mgr.delete(slot))
+        elif sub == "save":
+            text = " ".join(args[2:])
+            if not text:
+                await update.message.reply_text("Usage: /sys <slot> save <message>")
+                return
+            await update.message.reply_text(mgr.save(slot, text))
+        elif sub == "replace":
+            text = " ".join(args[2:])
+            if not text:
+                await update.message.reply_text("Usage: /sys <slot> replace <message>")
+                return
+            await update.message.reply_text(mgr.replace(slot, text))
+        else:
+            await update.message.reply_text(
+                "Usage:\n/sys - show all slots\n/sys <n> - show slot\n"
+                "/sys <n> on|off|delete\n/sys <n> save <msg>\n/sys <n> replace <msg>"
+            )
+
+    async def cmd_credit(self, update, context):
+        if update.effective_user.id != self.global_config.authorized_id:
+            return
+        backend = self.backend_manager.current_backend
+        if not backend or not hasattr(backend, "get_key_info"):
+            await update.message.reply_text("Credit info is only available for OpenRouter backends.")
+            return
+        key_info = await backend.get_key_info()
+        if not key_info:
+            await update.message.reply_text("Failed to fetch credit info.")
+            return
+        data = key_info.get("data", {})
+        label = data.get("label", "unknown")
+        usage = data.get("usage", "unknown")
+        limit = data.get("limit", "unknown")
+        limit_remaining = data.get("limit_remaining", "unknown")
+        is_free_tier = data.get("is_free_tier", False)
+        await update.message.reply_text(
+            f"OpenRouter key: {label}\n"
+            f"Usage: {usage}\n"
+            f"Limit: {limit}\n"
+            f"Remaining: {limit_remaining}\n"
+            f"Free tier: {is_free_tier}"
+        )
     async def cmd_voice(self, update: Update, context: Any):
         if update.effective_user.id != self.global_config.authorized_id:
             return
@@ -1841,18 +1914,22 @@ class FlexibleAgentRuntime:
             return
         if not self.backend_manager.current_backend:
             return
+        # /new semantics (author intent): start stateless and ONLY rely on the agent's own agent.md
+        # - No Bridge FYI injection
+        # - No README/doc auto-reading claims
+        # - No continuity restore
         self._pending_auto_recall_context = None
-        self._arm_session_primer(
-            "This is a fresh bridge-managed session start. Review AGENT FYI so you know the local environment and available bridge functions."
-        )
 
         if getattr(self.backend_manager.current_backend.capabilities, "supports_sessions", False):
             await self.backend_manager.current_backend.handle_new_session()
-            await self.enqueue_startup_bootstrap(update.effective_chat.id)
-            await self._reply_text(update, "Starting a fresh session with current active backend...")
+            await self._reply_text(update, "Starting a fresh session...")
         else:
-            await self._reply_text(update, "Starting a fresh stateless session with bridge FYI...")
-        prompt = "SYSTEM: This is a fresh session. Acknowledge readiness."
+            await self._reply_text(update, "Starting a fresh stateless session...")
+
+        prompt = (
+            "SYSTEM: Fresh session started. Do not reference any previous chat. "
+            "Follow ONLY your agent.md instructions. Ask the user what they want to do next."
+        )
         await self.enqueue_request(update.effective_chat.id, prompt, "system", "New session")
 
     async def cmd_clear(self, update: Update, context: Any):
@@ -2904,6 +2981,8 @@ class FlexibleAgentRuntime:
             BotCommand("wa_on", "Start WhatsApp transport"),
             BotCommand("wa_off", "Stop WhatsApp transport"),
             BotCommand("wa_send", "Send a WhatsApp message"),
+            BotCommand("sys", "Manage system prompt slots"),
+            BotCommand("credit", "Check API credit/usage"),
         ]
 
     async def shutdown(self):

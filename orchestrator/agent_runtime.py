@@ -2630,18 +2630,22 @@ class BridgeAgentRuntime:
     async def cmd_new(self, update, context):
         if update.effective_user.id != self.global_config.authorized_id:
             return
+        # /new semantics (author intent): start stateless and ONLY rely on the agent's own agent.md
+        # - No Bridge FYI injection
+        # - No README/doc auto-reading claims
+        # - No continuity restore
         self._pending_auto_recall_context = None
-        self._arm_session_primer(
-            "This is a fresh bridge-managed session start. Review AGENT FYI so you know the local environment and available bridge functions."
-        )
 
         if self.backend.capabilities.supports_sessions:
             await self.backend.handle_new_session()
-            await self.enqueue_startup_bootstrap(update.effective_chat.id)
             await update.message.reply_text("Starting a fresh session...")
         else:
-            await update.message.reply_text("Starting a fresh stateless session with bridge FYI...")
-        prompt = "SYSTEM: This is a fresh session. Please greet the user warmly."
+            await update.message.reply_text("Starting a fresh stateless session...")
+
+        prompt = (
+            "SYSTEM: Fresh session started. Do not reference any previous chat. "
+            "Follow ONLY your agent.md instructions. Ask the user what they want to do next."
+        )
         await self.enqueue_request(update.effective_chat.id, prompt, "system", "New session")
 
     async def cmd_status(self, update, context):
