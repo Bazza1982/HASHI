@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:client\"",
-    "dev:client": "vite",
+    "dev:client": "vite --host 127.0.0.1", 
     "dev:server": "node --env-file=.env --watch server/index.js",
     "build": "vite build",
     "preview": "vite preview"
