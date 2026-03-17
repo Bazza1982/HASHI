@@ -4,6 +4,7 @@ import time
 import asyncio
 import inspect
 import logging
+import shutil
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
@@ -821,6 +822,7 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CallbackQueryHandler(self.callback_start_agent, pattern=r"^startagent:"))
         self.app.add_handler(CallbackQueryHandler(self.callback_skill, pattern=r"^(skill|skilljob):"))
         self.app.add_handler(CommandHandler("new", self.cmd_new))
+        self.app.add_handler(CommandHandler("wipe", self.cmd_wipe))
         self.app.add_handler(CommandHandler("clear", self.cmd_clear))
         self.app.add_handler(CommandHandler("stop", self.cmd_stop))
         self.app.add_handler(CommandHandler("terminate", self.cmd_terminate))
@@ -1942,6 +1944,88 @@ class FlexibleAgentRuntime:
             "Follow ONLY your agent.md instructions. Ask the user what they want to do next."
         )
         await self.enqueue_request(update.effective_chat.id, prompt, "system", "New session")
+
+    async def cmd_wipe(self, update: Update, context: Any):
+        """Dangerous: wipe the agent's persisted workspace state.
+
+        Goal: after /wipe, the only thing remaining in the workspace should be instructions
+        from agent.md (and optionally AGENT.md).
+
+        Usage:
+          /wipe            -> shows warning
+          /wipe CONFIRM    -> executes wipe
+        """
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        if self._backend_busy():
+            await self._reply_text(update, "Wipe is blocked while a request is running or queued. Use /stop first.")
+            return
+
+        args = [a.strip() for a in (context.args or []) if a.strip()]
+        if not args or args[0].upper() != "CONFIRM":
+            await self._reply_text(
+                update,
+                "⚠️ /wipe will permanently delete this agent's persisted workspace state (memory, transcript, handoff, backend_state, etc.).\n"
+                "Only agent instructions (agent.md / AGENT.md) will remain.\n\n"
+                "To proceed: /wipe CONFIRM",
+            )
+            return
+
+        keep_names = {"agent.md", "AGENT.md"}
+        removed_files = 0
+        removed_dirs = 0
+
+        # Stop any backend process just in case.
+        if self.backend_manager.current_backend:
+            with suppress(Exception):
+                await self.backend_manager.current_backend.shutdown()
+
+        # Wipe workspace contents (keep agent instructions only)
+        for child in list(self.workspace_dir.iterdir()):
+            if child.name in keep_names:
+                continue
+            try:
+                if child.is_dir():
+                    shutil.rmtree(child)
+                    removed_dirs += 1
+                else:
+                    child.unlink(missing_ok=True)
+                    removed_files += 1
+            except Exception:
+                # continue best-effort
+                pass
+
+        # Re-create essential dirs
+        self.workspace_dir.mkdir(parents=True, exist_ok=True)
+        self.memory_dir = self.workspace_dir / "memory"
+        self.backend_state_dir = self.workspace_dir / "backend_state"
+        self.memory_dir.mkdir(parents=True, exist_ok=True)
+        self.backend_state_dir.mkdir(parents=True, exist_ok=True)
+
+        # Re-init memory/handoff subsystems (fresh)
+        self.memory_index = MemoryIndex(self.workspace_dir / "memory_index.sqlite")
+        self.handoff_builder = HandoffBuilder(self.workspace_dir)
+        self.memory_store = BridgeMemoryStore(self.workspace_dir)
+        self.context_assembler = BridgeContextAssembler(
+            self.memory_store,
+            self.config.system_md,
+            active_skill_provider=self._get_active_skill_sections,
+        )
+
+        # Reset any pending continuity
+        self._pending_auto_recall_context = None
+        self._pending_session_primer = None
+
+        # Start a fresh backend session if supported
+        if self.backend_manager.current_backend and getattr(self.backend_manager.current_backend.capabilities, "supports_sessions", False):
+            with suppress(Exception):
+                await self.backend_manager.current_backend.handle_new_session()
+
+        await self._reply_text(
+            update,
+            f"✅ Wiped workspace for {self.name}. Removed {removed_dirs} dirs and {removed_files} files.\n"
+            "Only agent.md instructions remain. Start fresh with /new.",
+        )
 
     async def cmd_clear(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
