@@ -160,6 +160,41 @@ def _print_final_response(agent_name: str, text: str):
             print(safe, end="", flush=True)
 
 
+def resolve_authorized_telegram_ids(extra: dict | None, global_authorized_id: int) -> tuple[int, ...]:
+    """Resolve a stable allowlist of Telegram user IDs.
+
+    - If agent config `extra.authorized_telegram_ids` exists, parse it.
+    - Otherwise fall back to the global authorized_id.
+
+    This is used by FlexRuntime to prevent accidental spam/routing mistakes.
+    """
+    candidates: list[int] = []
+    raw = (extra or {}).get("authorized_telegram_ids")
+    if raw is not None:
+        if isinstance(raw, (list, tuple)):
+            candidates.extend(raw)
+        else:
+            candidates.append(raw)
+
+    ids: list[int] = []
+    for item in candidates:
+        if item is None:
+            continue
+        try:
+            value = int(item)
+        except (TypeError, ValueError):
+            continue
+        if value <= 0:
+            continue
+        if value not in ids:
+            ids.append(value)
+
+    if not ids and global_authorized_id:
+        ids.append(global_authorized_id)
+
+    return tuple(ids)
+
+
 def _build_jobs_text(agent_name: str, skill_manager) -> str:
     """Build a formatted jobs listing for a single agent."""
     import json as _json
