@@ -7,7 +7,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# workbench_ctl.ps1 lives under <repo>\bin\. Resolve the actual repo root.
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$RepoRoot = (Resolve-Path (Join-Path $RepoRoot "..")).Path
 $WorkbenchDir = Join-Path $RepoRoot "workbench"
 $StateDir = Join-Path $RepoRoot "state\workbench"
 $LogDir = Join-Path $StateDir "logs"

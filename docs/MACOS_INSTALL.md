@@ -1,3 +1,13 @@
+# HASHI on macOS — Installation Guide (Deprecated)
+
+This document has been consolidated.
+
+➡️ Please use: `docs/INSTALL.md` (macOS section)
+
+---
+
+## Legacy content
+
 # HASHI on macOS — Installation Guide
 
 ## Minimum Requirements
