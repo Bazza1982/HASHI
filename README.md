@@ -1,5 +1,8 @@
 # HASHI
 
+> **Status (v1.1):** main branch is now at **v1.1**. v1.1 debugging is completed. 
+> **Roadmap to v2:** see [`docs/ROADMAP.md`](docs/ROADMAP.md).
+
 ## About
 
 **HASHI** is a privacy-first, compliant alternative to OpenClaw designed for a more secure agentic experience. It prioritizes your security by never requiring or storing your Claude, Codex, or Gemini OAuth authentication tokens, ensuring your setup remains fully compliant with current Terms of Service.
