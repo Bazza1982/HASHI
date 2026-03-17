@@ -15,7 +15,7 @@ from telegram.error import TimedOut as TelegramTimedOut
 from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
-from orchestrator.agent_runtime import QueuedRequest, _safe_excerpt, _md_to_html, _print_user_message, _print_final_response, _print_thinking
+from orchestrator.agent_runtime import QueuedRequest, _safe_excerpt, _md_to_html, _print_user_message, _print_final_response, _print_thinking, resolve_authorized_telegram_ids
 from orchestrator.agent_fyi import build_agent_fyi_primer
 from orchestrator.bridge_memory import BridgeMemoryStore, BridgeContextAssembler, SysPromptManager
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
@@ -106,6 +106,7 @@ class FlexibleAgentRuntime:
         self.state_path = self.workspace_dir / "state.json"
         self.runtime_session_path = self.workspace_dir / ".runtime_session.json"
         self.voice_manager = VoiceManager(self.workspace_dir, self.media_dir, ffmpeg_cmd="ffmpeg")
+        self._authorized_telegram_ids = resolve_authorized_telegram_ids(self.config.extra, self.global_config.authorized_id)
 
         # Initialize directories
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
@@ -124,6 +125,16 @@ class FlexibleAgentRuntime:
 
         # Initialize FlexibleBackendManager
         self.backend_manager = FlexibleBackendManager(config, global_config, secrets)
+
+    def _primary_chat_id(self) -> int:
+        if self._authorized_telegram_ids:
+            return self._authorized_telegram_ids[0]
+        return self.global_config.authorized_id
+
+    def _is_authorized_user(self, user_id: int | None) -> bool:
+        if user_id is None:
+            return False
+        return user_id in self._authorized_telegram_ids
 
     def _setup_logging(self):
         formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
@@ -662,7 +673,7 @@ class FlexibleAgentRuntime:
             ok, text = await self.skill_manager.run_action_skill(skill, self.workspace_dir, args=args)
             if ok and text:
                 await self.send_long_message(
-                    chat_id=self.global_config.authorized_id,
+                    chat_id=self._primary_chat_id(),
                     text=text,
                     request_id=f"skill-{task_id}",
                     purpose="scheduler-skill",
@@ -684,7 +695,7 @@ class FlexibleAgentRuntime:
                     self.error_logger.error(f"Failed to switch backend for scheduled skill {skill.id}.")
                     return
         await self.enqueue_request(
-            chat_id=self.global_config.authorized_id,
+            chat_id=self._primary_chat_id(),
             prompt=prompt,
             source="scheduler-skill",
             summary=f"Skill Task [{task_id}]",
@@ -759,7 +770,7 @@ class FlexibleAgentRuntime:
     async def enqueue_api_text(self, text: str, source: str = "api", deliver_to_telegram: bool = True):
         _print_user_message(self.name, text)
         return await self.enqueue_request(
-            self.global_config.authorized_id,
+            self._primary_chat_id(),
             text,
             source,
             _safe_excerpt(text),
@@ -782,7 +793,7 @@ class FlexibleAgentRuntime:
         prompt, summary = self._build_media_prompt(media_kind, filename, caption=caption, emoji=emoji)
         rendered_prompt = prompt.replace("{local_path}", str(local_path))
         return await self.enqueue_request(
-            self.global_config.authorized_id,
+            self._primary_chat_id(),
             rendered_prompt,
             source,
             summary,
@@ -859,7 +870,7 @@ class FlexibleAgentRuntime:
             )
 
     async def cmd_help(self, update: Update, context: Any):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
         lines = [
             f"Flexible Agent {self.name} Commands",
@@ -920,7 +931,7 @@ class FlexibleAgentRuntime:
         return InlineKeyboardMarkup(rows)
 
     async def cmd_start(self, update: Update, context: Any):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
         orchestrator = getattr(self, "orchestrator", None)
         if orchestrator is None:
@@ -934,7 +945,7 @@ class FlexibleAgentRuntime:
 
     async def callback_start_agent(self, update: Update, context: Any):
         query = update.callback_query
-        if query.from_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(query.from_user.id):
             return
         orchestrator = getattr(self, "orchestrator", None)
         if orchestrator is None:
@@ -947,7 +958,7 @@ class FlexibleAgentRuntime:
 
     async def callback_voice(self, update: Update, context: Any):
         query = update.callback_query
-        if query.from_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(query.from_user.id):
             return
         parts = (query.data or "").split(":", 2)
         action = parts[1] if len(parts) > 1 else "refresh"
@@ -969,7 +980,7 @@ class FlexibleAgentRuntime:
         await query.answer()
 
     async def cmd_terminate(self, update: Update, context: Any):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
         orchestrator = getattr(self, "orchestrator", None)
         if orchestrator is None:
@@ -979,7 +990,7 @@ class FlexibleAgentRuntime:
         asyncio.create_task(orchestrator.stop_agent(self.name))
 
     async def cmd_reboot(self, update: Update, context: Any):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
         orchestrator = getattr(self, "orchestrator", None)
         if orchestrator is None:
@@ -1020,7 +1031,7 @@ class FlexibleAgentRuntime:
         orchestrator.request_restart(mode=mode, agent_name=self.name, agent_number=int(arg) if arg.isdigit() else None)
 
     async def cmd_wa_on(self, update: Update, context: Any):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
         orchestrator = getattr(self, "orchestrator", None)
         if orchestrator is None:
@@ -1030,7 +1041,7 @@ class FlexibleAgentRuntime:
         await self._reply_text(update, message)
 
     async def cmd_wa_off(self, update: Update, context: Any):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
         orchestrator = getattr(self, "orchestrator", None)
         if orchestrator is None:
@@ -1040,7 +1051,7 @@ class FlexibleAgentRuntime:
         await self._reply_text(update, message)
 
     async def cmd_wa_send(self, update: Update, context: Any):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
         orchestrator = getattr(self, "orchestrator", None)
         if orchestrator is None:
@@ -1059,7 +1070,7 @@ class FlexibleAgentRuntime:
         await self._reply_text(update, message)
 
     async def cmd_fyi(self, update: Update, context: Any):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
         prompt = self._build_fyi_request_prompt(" ".join(context.args or []))
         await self._reply_text(update, "Refreshing AGENT FYI...")
@@ -1072,7 +1083,7 @@ class FlexibleAgentRuntime:
 
 
     async def cmd_sys(self, update, context):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
         args = [a.strip() for a in (context.args or []) if a.strip()]
         mgr = self.sys_prompt_manager
@@ -1117,7 +1128,7 @@ class FlexibleAgentRuntime:
             )
 
     async def cmd_credit(self, update, context):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
         backend = self.backend_manager.current_backend
         if not backend or not hasattr(backend, "get_key_info"):
@@ -1141,7 +1152,7 @@ class FlexibleAgentRuntime:
             f"Free tier: {is_free_tier}"
         )
     async def cmd_voice(self, update: Update, context: Any):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
         args = [a.strip() for a in (context.args or []) if a.strip()]
         if not args or args[0].lower() == "status":
@@ -1246,12 +1257,12 @@ class FlexibleAgentRuntime:
         )
 
     async def cmd_debug(self, update: Update, context: Any):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
         await self._invoke_prompt_skill_from_command(update, "debug", list(context.args or []))
 
     async def cmd_skill(self, update: Update, context: Any):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
         if not self.skill_manager:
             await self._reply_text(update, "Skill system is not configured.")
@@ -1350,7 +1361,7 @@ class FlexibleAgentRuntime:
 
     async def callback_skill(self, update: Update, context: Any):
         query = update.callback_query
-        if query.from_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(query.from_user.id):
             return
         data = query.data or ""
         if data == "skill:noop:none":
@@ -1413,7 +1424,7 @@ class FlexibleAgentRuntime:
         action = job.get("action", "enqueue_prompt")
         if action == "export_transcript":
             await self.send_long_message(
-                chat_id=self.global_config.authorized_id,
+                chat_id=self._primary_chat_id(),
                 text="Transcript export is only implemented for fixed agents.",
                 request_id=f"job-{job.get('id')}",
                 purpose="skill-job-run",
@@ -1429,7 +1440,7 @@ class FlexibleAgentRuntime:
         prompt = job.get("prompt", "")
         if not prompt.strip():
             await self.send_long_message(
-                chat_id=self.global_config.authorized_id,
+                chat_id=self._primary_chat_id(),
                 text=f"Job {job.get('id')} has no prompt.",
                 request_id=f"job-{job.get('id')}",
                 purpose="skill-job-run",
@@ -1437,20 +1448,20 @@ class FlexibleAgentRuntime:
             return
         summary_prefix = "Heartbeat Task" if "interval_seconds" in job else "Cron Task"
         await self.enqueue_request(
-            chat_id=self.global_config.authorized_id,
+            chat_id=self._primary_chat_id(),
             prompt=prompt,
             source="scheduler",
             summary=f"{summary_prefix} [{job.get('id')}]",
         )
 
     async def cmd_status(self, update: Update, context: Any):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
         detailed = bool(context.args and context.args[0].strip().lower() in {"full", "all", "more"})
         await self._reply_text(update, self._build_status_text(detailed=detailed))
 
     async def cmd_verbose(self, update: Update, context: Any):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
         args = [a.strip().lower() for a in (context.args or []) if a.strip()]
         if args and args[0] in {"on", "true", "1"}:
@@ -1474,7 +1485,7 @@ class FlexibleAgentRuntime:
 
 
     async def cmd_think(self, update: Update, context: Any):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
         args = [a.strip().lower() for a in (context.args or []) if a.strip()]
         if args and args[0] in {"on", "true", "1"}:
@@ -1496,7 +1507,7 @@ class FlexibleAgentRuntime:
         )
 
     async def cmd_jobs(self, update: Update, context: Any):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
         from orchestrator.agent_runtime import _build_jobs_text
         await self._reply_text(
@@ -1506,7 +1517,7 @@ class FlexibleAgentRuntime:
         )
 
     async def cmd_logo(self, update: Update, context: Any):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
         import asyncio
         from orchestrator.agent_runtime import _show_logo_animation
@@ -1515,7 +1526,7 @@ class FlexibleAgentRuntime:
         await self._reply_text(update, "Logo displayed in console.")
 
     async def cmd_backend(self, update: Update, context: Any):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
 
         args = context.args
@@ -1542,7 +1553,7 @@ class FlexibleAgentRuntime:
         )
 
     async def cmd_handoff(self, update: Update, context: Any):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
         if self._backend_busy():
             await self._reply_text(update, "Handoff is blocked while a request is running or queued.")
@@ -1578,7 +1589,7 @@ class FlexibleAgentRuntime:
         )
 
     async def cmd_active(self, update: Update, context: Any):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
         if not self.skill_manager:
             await self._reply_text(update, "Active mode is unavailable because the skill manager is not configured.")
@@ -1782,7 +1793,7 @@ class FlexibleAgentRuntime:
         return True, message
 
     async def cmd_model(self, update: Update, context: Any):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
         if not self.backend_manager.current_backend:
             return
@@ -1815,7 +1826,7 @@ class FlexibleAgentRuntime:
         )
 
     async def cmd_effort(self, update: Update, context: Any):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
         if not self.backend_manager.current_backend:
             return
@@ -1846,7 +1857,7 @@ class FlexibleAgentRuntime:
 
     async def callback_model(self, update: Update, context: Any):
         query = update.callback_query
-        if query.from_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(query.from_user.id):
             return
         data = query.data
         try:
@@ -1910,7 +1921,7 @@ class FlexibleAgentRuntime:
         await query.answer()
 
     async def cmd_new(self, update: Update, context: Any):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
         if not self.backend_manager.current_backend:
             return
@@ -1933,7 +1944,7 @@ class FlexibleAgentRuntime:
         await self.enqueue_request(update.effective_chat.id, prompt, "system", "New session")
 
     async def cmd_clear(self, update: Update, context: Any):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
 
         cleared = 0
@@ -1951,7 +1962,7 @@ class FlexibleAgentRuntime:
         await self._reply_text(update, f"Cleared {cleared} media files and reset session state for current backend.")
 
     async def cmd_stop(self, update: Update, context: Any):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
 
         self.logger.warning(
@@ -1976,7 +1987,7 @@ class FlexibleAgentRuntime:
         )
 
     async def cmd_retry(self, update: Update, context: Any):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
         args = [a.strip().lower() for a in (context.args or []) if a.strip()]
         mode = args[0] if args else "response"
@@ -2007,7 +2018,7 @@ class FlexibleAgentRuntime:
         await self._reply_text(update, "Usage: /retry [response|prompt]")
 
     async def handle_message(self, update: Update, context: Any):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
         text = update.message.text
         _print_user_message(self.name, text)
@@ -2042,7 +2053,7 @@ class FlexibleAgentRuntime:
                 pass
 
     async def handle_document(self, update: Update, context: Any):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
         doc = update.message.document
         original_name = doc.file_name or f"file_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -2059,7 +2070,7 @@ class FlexibleAgentRuntime:
         await self._handle_media_message(update, "Document", original_name, doc.file_id, prompt, original_name)
 
     async def handle_photo(self, update: Update, context: Any):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
         photo = update.message.photo[-1]
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -2071,7 +2082,7 @@ class FlexibleAgentRuntime:
         await self._handle_media_message(update, "Photo", f"photo_{ts}.jpg", photo.file_id, prompt, caption or f"photo_{ts}.jpg")
 
     async def handle_voice(self, update: Update, context: Any):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
         voice = update.message.voice
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -2079,7 +2090,7 @@ class FlexibleAgentRuntime:
         await self._handle_voice_or_audio(update, "Voice", filename, voice.file_id)
 
     async def handle_audio(self, update: Update, context: Any):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
         audio = update.message.audio
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -2125,7 +2136,7 @@ class FlexibleAgentRuntime:
                 pass
 
     async def handle_video(self, update: Update, context: Any):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
         video = update.message.video
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -2138,7 +2149,7 @@ class FlexibleAgentRuntime:
         await self._handle_media_message(update, "Video", original_name, video.file_id, prompt, original_name)
 
     async def handle_sticker(self, update: Update, context: Any):
-        if update.effective_user.id != self.global_config.authorized_id:
+        if not self._is_authorized_user(update.effective_user.id):
             return
         sticker = update.message.sticker
         emoji = sticker.emoji or ""
@@ -2152,6 +2163,16 @@ class FlexibleAgentRuntime:
         request_id: Optional[str] = None,
         purpose: str = "response",
     ):
+        """Send a message to Telegram with safe chunking.
+
+        IMPORTANT: For backend errors, we must avoid spamming the user.
+        - Errors can be extremely long (e.g., CLI streaming logs).
+        - HTML chunking can break tags and trigger Telegram parse failures.
+
+        Policy:
+        - purpose=="error": send a single **plain-text** summary (truncated)
+          + pointer to the local errors log.
+        """
         # Guard: skip Telegram send if not connected
         if not self.telegram_connected:
             self.logger.info(
@@ -2161,9 +2182,44 @@ class FlexibleAgentRuntime:
             return 0.0, 0
 
         send_started = datetime.now()
-        html = _md_to_html(text)
         tg_max_len = 4096
         chunk_count = 0
+
+        # --- Error: never spam. Send one short, plain-text message only. ---
+        if purpose == "error":
+            errors_path = str(getattr(self, "session_dir", self.workspace_dir) / "errors.log")
+            header = f"❌ Backend error ({self.config.active_backend})"
+            if request_id:
+                header += f" | {request_id}"
+
+            # Keep a readable excerpt (head + tail) and stay under Telegram limits.
+            max_excerpt = 2400
+            s = (text or "").strip()
+            if len(s) > max_excerpt:
+                head = s[:1200]
+                tail = s[-800:]
+                excerpt = head + "\n... (truncated) ...\n" + tail
+            else:
+                excerpt = s
+
+            msg = (
+                f"{header}\n\n"
+                f"{excerpt}\n\n"
+                f"Full log (local): {errors_path}\n"
+                f"Tip: use /verbose off to reduce progress message noise."
+            )
+            if len(msg) > tg_max_len:
+                msg = msg[: tg_max_len - 20] + "\n... (truncated)"
+
+            await self.app.bot.send_message(chat_id=chat_id, text=msg)
+            self.telegram_logger.info(
+                f"Sent Telegram message for request_id={request_id or '<none>'} "
+                f"(purpose=error, chunks=1, text_len={len(msg)})"
+            )
+            return (datetime.now() - send_started).total_seconds(), 1
+
+        # --- Normal responses: markdown→HTML + chunking ---
+        html = _md_to_html(text)
 
         async def _send_chunk(chunk_raw: str, chunk_html: str, chunk_index: int):
             try:
