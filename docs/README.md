@@ -2,6 +2,10 @@
 
 This directory contains technical documentation, architecture plans, and development notes for HASHI.
 
+> **Status:** v1.1 debugging is now considered **completed**. The author has a clear roadmap to v2.
+> 
+> **v2 roadmap:** see [ROADMAP.md](ROADMAP.md) (in this folder).
+
 ---
 
 ## 📚 Documentation Index
@@ -30,6 +34,12 @@ This directory contains technical documentation, architecture plans, and develop
 | [2026-03-11_delivery_routing_fix_plan.md](2026-03-11_delivery_routing_fix_plan.md) | Message delivery routing fixes |
 | [PLAN-telegram-optional-boot.md](PLAN-telegram-optional-boot.md) | Telegram optional boot implementation |
 | [BRIDGE_AGENT_HANDOFF_2026-03-10.md](BRIDGE_AGENT_HANDOFF_2026-03-10.md) | Agent handoff protocol design |
+
+### Roadmap
+
+| Document | Description |
+|----------|-------------|
+| [ROADMAP.md](ROADMAP.md) | High-level roadmap: v1.1 status + v2 upgrade outcomes |
 
 ### Debugging & Tools
 

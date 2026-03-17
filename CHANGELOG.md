@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.1.0] - 2026-03-18
+
+### ✨ Highlights
+- **/new is now truly bare** (stateless): no Bridge FYI injection and no automatic doc/README reading.
+- A **clear v2 roadmap** has been documented under `docs/ROADMAP.md`.
+
+### 🔧 Fixed
+- `/new` semantics: fresh session starts without Bridge primer injection; agents follow only their workspace `agent.md`.
+
+### 🗺️ Roadmap
+- v2 upgrade outcomes are tracked in: `docs/ROADMAP.md`
+
+---
+
 ## [1.0.1] - 2026-03-15
 
 ### 🔧 Fixed

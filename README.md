@@ -70,6 +70,12 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
 
 ---
 
+## Project Status
+
+- v1.1 debugging is now considered **completed**.
+- The author has a clear roadmap to v2 in `docs/`.
+  - See: [`docs/ROADMAP.md`](docs/ROADMAP.md)
+
 ## Installation
 
 **See [INSTALL.md](INSTALL.md) for detailed installation instructions.**
