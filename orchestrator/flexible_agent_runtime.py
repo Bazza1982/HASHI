@@ -809,6 +809,7 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CommandHandler("sys", self.cmd_sys))
         self.app.add_handler(CommandHandler("credit", self.cmd_credit))
         self.app.add_handler(CommandHandler("voice", self.cmd_voice))
+        self.app.add_handler(CommandHandler("whisper", self.cmd_whisper))
         self.app.add_handler(CommandHandler("active", self.cmd_active))
         self.app.add_handler(CommandHandler("fyi", self.cmd_fyi))
         self.app.add_handler(CommandHandler("debug", self.cmd_debug))
@@ -1215,6 +1216,53 @@ class FlexibleAgentRuntime:
             await self._reply_text(update, self.voice_manager.set_enabled(False))
             return
         await self._reply_text(update, "Usage: /voice [status|on|off|voices|use <alias>|providers|provider <name>|name <voice>|rate <n>]")
+
+    async def cmd_whisper(self, update: Update, context: Any):
+        """Set the local voice transcription model size.
+
+        Usage:
+          /whisper                -> show current
+          /whisper small          -> faster, less accurate
+          /whisper medium         -> balanced
+          /whisper large          -> best accuracy (largest download/slowest)
+
+        Notes:
+        - This controls **local** transcription of Telegram voice/audio messages.
+        - Changes take effect on next transcription; the model will be (re)loaded lazily.
+        """
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+
+        from orchestrator.voice_transcriber import get_transcriber
+
+        args = [a.strip().lower() for a in (context.args or []) if a.strip()]
+        transcriber = get_transcriber()
+
+        if not args:
+            await self._reply_text(update, f"Current Whisper model size: {transcriber.model_size}")
+            return
+
+        value = args[0]
+        mapping = {
+            "small": "small",
+            "medium": "medium",
+            # In Whisper naming, the common best-performing option is large-v3.
+            "large": "large-v3",
+            "large-v3": "large-v3",
+        }
+        if value not in mapping:
+            await self._reply_text(update, "Usage: /whisper [small|medium|large]")
+            return
+
+        new_size = mapping[value]
+        # Reset model so it reloads with the new size on next use.
+        transcriber.model_size = new_size
+        transcriber._model = None
+
+        await self._reply_text(
+            update,
+            f"✅ Whisper model set to: {new_size}. It will load on the next voice message.",
+        )
 
     async def _invoke_prompt_skill_from_command(self, update: Update, skill_id: str, args: list[str]):
         if not self.skill_manager:
@@ -3100,6 +3148,7 @@ class FlexibleAgentRuntime:
             BotCommand("start", "Start another stopped agent"),
             BotCommand("status", "View agent status"),
             BotCommand("voice", "Toggle native voice replies"),
+            BotCommand("whisper", "Set Whisper model size [small|medium|large]"),
             BotCommand("active", "Toggle proactive heartbeat"),
             BotCommand("fyi", "Refresh bridge environment awareness"),
             BotCommand("debug", "Run in strict debug mode"),
