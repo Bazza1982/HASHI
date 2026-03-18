@@ -56,7 +56,7 @@ def main():
         backend = a.get('active_backend') or a.get('engine') or 'unknown'
         
         # Check token
-        token_key = a.get('telegram_token_key', f'{name}_telegram_token')
+        token_key = a.get('telegram_token_key', name)
         has_token = token_key in secrets and secrets[token_key]
         token_status = 'ok' if has_token else 'missing'
         

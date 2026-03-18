@@ -404,7 +404,11 @@ class APIGatewayServer:
                 "X-Accel-Buffering": "no",
             },
         )
-        await resp.prepare(request)
+        try:
+            await resp.prepare(request)
+        except Exception as e:
+            logger.debug(f"Stream prepare failed for {request_id} (client disconnected?): {e}")
+            return resp
 
         completion_id = f"chatcmpl-{uuid.uuid4().hex}"
         collected_text: list[str] = []
@@ -437,8 +441,11 @@ class APIGatewayServer:
             )
         except Exception as e:
             logger.error(f"Streaming backend error for {request_id}: {e}")
-            await resp.write(b"data: [DONE]\n\n")
-            await resp.write_eof()
+            try:
+                await resp.write(b"data: [DONE]\n\n")
+                await resp.write_eof()
+            except Exception:
+                pass
             return resp
 
         elapsed = time.time() - t_start
@@ -459,7 +466,10 @@ class APIGatewayServer:
                     }
                 ],
             }
-            await resp.write(f"data: {json.dumps(chunk)}\n\n".encode())
+            try:
+                await resp.write(f"data: {json.dumps(chunk)}\n\n".encode())
+            except Exception:
+                pass
 
         final_text = full_text or "".join(collected_text)
         _print_api_out(model, elapsed, len(final_text), stream=True)
@@ -476,7 +486,10 @@ class APIGatewayServer:
             "model": model,
             "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
         }
-        await resp.write(f"data: {json.dumps(final_chunk)}\n\n".encode())
-        await resp.write(b"data: [DONE]\n\n")
-        await resp.write_eof()
+        try:
+            await resp.write(f"data: {json.dumps(final_chunk)}\n\n".encode())
+            await resp.write(b"data: [DONE]\n\n")
+            await resp.write_eof()
+        except Exception:
+            pass
         return resp

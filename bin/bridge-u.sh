@@ -498,7 +498,7 @@ launch() {
     if [[ "$WORKBENCH_LAUNCH" == "1" ]]; then
         echo -e "${C_RAIL}│${C_RESET} ${C_LABEL}Workbench        ${C_RESET} ${C_OK}starting${C_RESET} (:${WORKBENCH_PORT})"
         if [[ -x "$SCRIPT_DIR/bin/workbench-ctl.sh" ]]; then
-            export HASHI_CLIENT_PORT=$CLIENT_PORT HASHI_SERVER_PORT=$SERVER_PORT HASHI_BRIDGE_API_PORT=$BRIDGE_PORT
+            export HASHI_CLIENT_PORT=$CLIENT_PORT HASHI_SERVER_PORT=$SERVER_PORT HASHI_BRIDGE_API_PORT=$WORKBENCH_PORT
             "$SCRIPT_DIR/bin/workbench-ctl.sh" start --open &
         else
             echo -e "${C_WARN}workbench-ctl.sh not found, skipping workbench${C_RESET}"

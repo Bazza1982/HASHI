@@ -1,13 +1,19 @@
 $ErrorActionPreference = "Stop"
 
-$taskName = "Bridge-U-F Autostart"
+$taskName = "HASHI2 Autostart (WSL)"
 $taskPath = "\"
-$startupBat = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup\bridge-u-f-autostart.bat"
-$bridgeBat = "C:\Users\thene\projects\bridge-u-f\bridge-u.bat"
-$arguments = '/c ""C:\Users\thene\projects\bridge-u-f\bridge-u.bat" --resume-last --workbench --no-pause"'
+$startupBat = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup\hashi2-autostart.bat"
+
+# Execute wsl.exe to run the HASHI2 Linux instance directly
+$wslDistro = "Ubuntu-22.04"
+$wslProjectDir = "/home/lily/projects/hashi2"
+$bashScript = "./bin/bridge-u.sh"
+
+# Note: Using --api-gateway instead of --workbench as requested. --force avoids the prompt on reboot.
+$arguments = "-d $wslDistro --cd $wslProjectDir -e bash $bashScript --resume-last --api-gateway --force"
 
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
-$action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument $arguments
+$action = New-ScheduledTaskAction -Execute "wsl.exe" -Argument $arguments
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 0)
 

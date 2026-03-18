@@ -110,3 +110,6 @@ workspaces/
 # Backup files
 *.bak
 *.bak_*
+
+# Windows interop guide (machine-specific)
+workspaces/WINDOWS.MD
