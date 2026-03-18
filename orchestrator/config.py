@@ -174,11 +174,12 @@ class ConfigManager:
                     )
                     access_scope = "workspace"
 
+                extra = a_raw.pop("extra", None) or a_raw or None
                 cfg = FlexibleAgentConfig(
                     name=name, workspace_dir=workspace_dir, system_md=system_md,
                     telegram_token_key=telegram_token_key, allowed_backends=allowed_backends,
                     active_backend=active_backend, is_active=is_active, type=agent_type,
-                    access_scope=access_scope, extra=a_raw, project_root=code_root
+                    access_scope=access_scope, extra=extra, project_root=code_root
                 )
                 agents.append(cfg)
             else:

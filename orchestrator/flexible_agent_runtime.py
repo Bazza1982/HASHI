@@ -2216,6 +2216,7 @@ class FlexibleAgentRuntime:
 
     async def handle_message(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
+            self.logger.warning(f"Ignored message from unauthorized user ID: {update.effective_user.id}")
             return
         text = update.message.text
         _print_user_message(self.name, text)
