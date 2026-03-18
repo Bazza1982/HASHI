@@ -526,7 +526,7 @@ class UniversalOrchestrator:
         from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime as _FlexRT
         from adapters.registry import get_backend_class as _get_backend
 
-        if agent_cfg.type == "flex":
+        if agent_cfg.type in {"flex", "limited"}:
             token = secrets.get(agent_cfg.telegram_token_key)
             if not token:
                 raise RuntimeError(
