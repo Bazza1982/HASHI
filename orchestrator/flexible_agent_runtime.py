@@ -109,6 +109,14 @@ class FlexibleAgentRuntime:
         self.voice_manager = VoiceManager(self.workspace_dir, self.media_dir, ffmpeg_cmd="ffmpeg")
         self._authorized_telegram_ids = resolve_authorized_telegram_ids(self.config.extra, self.global_config.authorized_id)
 
+        # Command policy
+        # - default: allow all commands
+        # - limited: disable execution/admin commands by default
+        self._command_policy_mode = "allow_all"
+        self._disabled_commands: set[str] = set()
+        self._enabled_commands: set[str] = set()
+        self._init_command_policy()
+
         # Initialize directories
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
         self.memory_dir.mkdir(parents=True, exist_ok=True)
@@ -136,6 +144,74 @@ class FlexibleAgentRuntime:
         if user_id is None:
             return False
         return user_id in self._authorized_telegram_ids
+
+    def _init_command_policy(self):
+        extra = self.config.extra or {}
+
+        # Defaults for limited conversational agents
+        if getattr(self.config, "type", "flex") == "limited":
+            self._command_policy_mode = "denylist"
+            self._disabled_commands.update(
+                {
+                    # high-risk / admin / execution commands
+                    "credit",
+                    "retry",
+                    "sys",
+                    "skill",
+                    "backend",
+                    "handoff",
+                    "fyi",
+                    "debug",
+                    "start",
+                    "stop",
+                    "terminate",
+                    "reboot",
+                    "wa_on",
+                    "wa_off",
+                    "wa_send",
+                }
+            )
+            # explicitly allowed convenience commands for conversational agents
+            self._enabled_commands.update({"jobs", "verbose", "think", "voice", "whisper"})
+
+        # Optional overrides (per-agent): extra.limited_policy
+        policy = extra.get("limited_policy") if isinstance(extra, dict) else None
+        if isinstance(policy, dict):
+            mode = (policy.get("mode") or "denylist").lower()
+            if mode in {"denylist", "allowlist"}:
+                self._command_policy_mode = mode
+            for name in policy.get("disabled_commands", []) or []:
+                if isinstance(name, str) and name.strip():
+                    self._disabled_commands.add(name.strip().lstrip("/").lower())
+            for name in policy.get("enabled_commands", []) or []:
+                if isinstance(name, str) and name.strip():
+                    self._enabled_commands.add(name.strip().lstrip("/").lower())
+
+        # help/status/new/wipe/clear/model/effort should always be available
+        self._enabled_commands.update({"help", "status", "new", "wipe", "clear", "model", "effort", "jobs", "verbose", "think", "voice", "whisper"})
+
+    def _is_command_allowed(self, cmd: str) -> bool:
+        cmd = (cmd or "").lstrip("/").lower()
+        if not cmd:
+            return True
+        if cmd in self._disabled_commands:
+            return False
+        if self._command_policy_mode == "allow_all":
+            return True
+        if self._command_policy_mode == "allowlist":
+            return cmd in self._enabled_commands
+        # denylist
+        return True
+
+    def _wrap_cmd(self, cmd: str, handler):
+        async def _wrapped(update: Update, context: Any):
+            if not self._is_authorized_user(update.effective_user.id):
+                return
+            if not self._is_command_allowed(cmd):
+                await self._reply_text(update, f"/{cmd} is disabled for this agent.")
+                return
+            return await handler(update, context)
+        return _wrapped
 
     def _setup_logging(self):
         formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
@@ -803,39 +879,39 @@ class FlexibleAgentRuntime:
 
     def bind_handlers(self):
         self.app.add_error_handler(self.handle_telegram_error)
-        self.app.add_handler(CommandHandler("help", self.cmd_help))
-        self.app.add_handler(CommandHandler("start", self.cmd_start))
-        self.app.add_handler(CommandHandler("status", self.cmd_status))
-        self.app.add_handler(CommandHandler("sys", self.cmd_sys))
-        self.app.add_handler(CommandHandler("credit", self.cmd_credit))
-        self.app.add_handler(CommandHandler("voice", self.cmd_voice))
-        self.app.add_handler(CommandHandler("whisper", self.cmd_whisper))
-        self.app.add_handler(CommandHandler("active", self.cmd_active))
-        self.app.add_handler(CommandHandler("fyi", self.cmd_fyi))
-        self.app.add_handler(CommandHandler("debug", self.cmd_debug))
-        self.app.add_handler(CommandHandler("skill", self.cmd_skill))
-        self.app.add_handler(CommandHandler("backend", self.cmd_backend))
-        self.app.add_handler(CommandHandler("handoff", self.cmd_handoff))
-        self.app.add_handler(CommandHandler("model", self.cmd_model))
-        self.app.add_handler(CommandHandler("effort", self.cmd_effort))
+        self.app.add_handler(CommandHandler("help", self._wrap_cmd("help", self.cmd_help)))
+        self.app.add_handler(CommandHandler("start", self._wrap_cmd("start", self.cmd_start)))
+        self.app.add_handler(CommandHandler("status", self._wrap_cmd("status", self.cmd_status)))
+        self.app.add_handler(CommandHandler("sys", self._wrap_cmd("sys", self.cmd_sys)))
+        self.app.add_handler(CommandHandler("credit", self._wrap_cmd("credit", self.cmd_credit)))
+        self.app.add_handler(CommandHandler("voice", self._wrap_cmd("voice", self.cmd_voice)))
+        self.app.add_handler(CommandHandler("whisper", self._wrap_cmd("whisper", self.cmd_whisper)))
+        self.app.add_handler(CommandHandler("active", self._wrap_cmd("active", self.cmd_active)))
+        self.app.add_handler(CommandHandler("fyi", self._wrap_cmd("fyi", self.cmd_fyi)))
+        self.app.add_handler(CommandHandler("debug", self._wrap_cmd("debug", self.cmd_debug)))
+        self.app.add_handler(CommandHandler("skill", self._wrap_cmd("skill", self.cmd_skill)))
+        self.app.add_handler(CommandHandler("backend", self._wrap_cmd("backend", self.cmd_backend)))
+        self.app.add_handler(CommandHandler("handoff", self._wrap_cmd("handoff", self.cmd_handoff)))
+        self.app.add_handler(CommandHandler("model", self._wrap_cmd("model", self.cmd_model)))
+        self.app.add_handler(CommandHandler("effort", self._wrap_cmd("effort", self.cmd_effort)))
         self.app.add_handler(CallbackQueryHandler(self.callback_model, pattern=r"^(model|backend|bmodel|effort|backend_menu)"))
         self.app.add_handler(CallbackQueryHandler(self.callback_voice, pattern=r"^voice:"))
         self.app.add_handler(CallbackQueryHandler(self.callback_start_agent, pattern=r"^startagent:"))
         self.app.add_handler(CallbackQueryHandler(self.callback_skill, pattern=r"^(skill|skilljob):"))
-        self.app.add_handler(CommandHandler("new", self.cmd_new))
-        self.app.add_handler(CommandHandler("wipe", self.cmd_wipe))
-        self.app.add_handler(CommandHandler("clear", self.cmd_clear))
-        self.app.add_handler(CommandHandler("stop", self.cmd_stop))
-        self.app.add_handler(CommandHandler("terminate", self.cmd_terminate))
-        self.app.add_handler(CommandHandler("reboot", self.cmd_reboot))
-        self.app.add_handler(CommandHandler("retry", self.cmd_retry))
-        self.app.add_handler(CommandHandler("verbose", self.cmd_verbose))
-        self.app.add_handler(CommandHandler("think", self.cmd_think))
-        self.app.add_handler(CommandHandler("jobs", self.cmd_jobs))
-        self.app.add_handler(CommandHandler("logo", self.cmd_logo))
-        self.app.add_handler(CommandHandler("wa_on", self.cmd_wa_on))
-        self.app.add_handler(CommandHandler("wa_off", self.cmd_wa_off))
-        self.app.add_handler(CommandHandler("wa_send", self.cmd_wa_send))
+        self.app.add_handler(CommandHandler("new", self._wrap_cmd("new", self.cmd_new)))
+        self.app.add_handler(CommandHandler("wipe", self._wrap_cmd("wipe", self.cmd_wipe)))
+        self.app.add_handler(CommandHandler("clear", self._wrap_cmd("clear", self.cmd_clear)))
+        self.app.add_handler(CommandHandler("stop", self._wrap_cmd("stop", self.cmd_stop)))
+        self.app.add_handler(CommandHandler("terminate", self._wrap_cmd("terminate", self.cmd_terminate)))
+        self.app.add_handler(CommandHandler("reboot", self._wrap_cmd("reboot", self.cmd_reboot)))
+        self.app.add_handler(CommandHandler("retry", self._wrap_cmd("retry", self.cmd_retry)))
+        self.app.add_handler(CommandHandler("verbose", self._wrap_cmd("verbose", self.cmd_verbose)))
+        self.app.add_handler(CommandHandler("think", self._wrap_cmd("think", self.cmd_think)))
+        self.app.add_handler(CommandHandler("jobs", self._wrap_cmd("jobs", self.cmd_jobs)))
+        self.app.add_handler(CommandHandler("logo", self._wrap_cmd("logo", self.cmd_logo)))
+        self.app.add_handler(CommandHandler("wa_on", self._wrap_cmd("wa_on", self.cmd_wa_on)))
+        self.app.add_handler(CommandHandler("wa_off", self._wrap_cmd("wa_off", self.cmd_wa_off)))
+        self.app.add_handler(CommandHandler("wa_send", self._wrap_cmd("wa_send", self.cmd_wa_send)))
         self.app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), self.handle_message))
         self.app.add_handler(MessageHandler(filters.PHOTO, self.handle_photo))
         self.app.add_handler(MessageHandler(filters.VOICE, self.handle_voice))
@@ -875,31 +951,20 @@ class FlexibleAgentRuntime:
     async def cmd_help(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
-        lines = [
-            f"Flexible Agent {self.name} Commands",
-            "",
-            "/help - Show this menu",
-            "/start - Start another stopped agent",
-            "/status [full] - View agent status",
-            "/voice [status|voices|use|on|off] - Native voice replies",
-            "/active [on|off] [minutes] - Proactive follow-up heartbeat",
-            "/fyi [prompt] - Refresh bridge environment awareness",
-            "/backend - Show backend buttons; + means switch with context",
-            "/handoff - Start fresh session with recent chat continuity",
-            "/model - View or change model for current backend",
-            "/effort - View or change effort for Claude/Codex",
-            "/new - Start a fresh session",
-            "/clear - Clear media and session state",
-            "/stop - Stop execution",
-            "/terminate - Shut down this agent",
-            "/retry [response|prompt] - Resend last response (default) or rerun last prompt",
-            "/debug <prompt> - Run the task in strict debug mode",
-            "/skill - Browse and run skills",
-            "/verbose [on|off] - Toggle verbose long-task status display",
-            "/wa_on - Start WhatsApp transport and show QR in console if needed",
-            "/wa_off - Stop WhatsApp transport",
-            "/wa_send <number> <message> - Send a WhatsApp message through bridge-u-f",
-        ]
+        # Build help dynamically from the bot command list, filtered by command policy.
+        cmds = self.get_bot_commands()
+        enabled = [c for c in cmds if self._is_command_allowed(c.command)]
+        disabled = sorted({c.command for c in cmds if not self._is_command_allowed(c.command)})
+
+        lines = [f"Agent {self.name} ({getattr(self.config, 'type', 'flex')}) Commands", ""]
+        for c in enabled:
+            lines.append(f"/{c.command} - {c.description}")
+
+        if disabled:
+            lines.append("")
+            lines.append("Disabled for this agent:")
+            lines.append("  " + ", ".join(f"/{c}" for c in disabled))
+
         await self._reply_text(update, "\n".join(lines))
 
     def _startable_agent_keyboard(self) -> InlineKeyboardMarkup | None:

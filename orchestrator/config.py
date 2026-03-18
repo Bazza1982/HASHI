@@ -150,7 +150,7 @@ class ConfigManager:
             a_raw = dict(agent_raw)
             agent_type = a_raw.pop("type", "fixed")
 
-            if agent_type == "flex":
+            if agent_type in {"flex", "limited"}:
                 name = a_raw.pop("name")
                 workspace_dir = resolve_path_value(
                     a_raw.pop("workspace_dir"),
@@ -177,7 +177,7 @@ class ConfigManager:
                 cfg = FlexibleAgentConfig(
                     name=name, workspace_dir=workspace_dir, system_md=system_md,
                     telegram_token_key=telegram_token_key, allowed_backends=allowed_backends,
-                    active_backend=active_backend, is_active=is_active, type="flex",
+                    active_backend=active_backend, is_active=is_active, type=agent_type,
                     access_scope=access_scope, extra=a_raw, project_root=code_root
                 )
                 agents.append(cfg)
