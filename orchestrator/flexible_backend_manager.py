@@ -3,6 +3,7 @@ import logging
 from pathlib import Path
 from typing import Optional, Any
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig, AgentConfig
+from orchestrator.flexible_backend_registry import get_secret_lookup_order
 
 class FlexibleBackendManager:
     def __init__(self, config: FlexibleAgentConfig, global_config: GlobalConfig, secrets: dict):
@@ -46,6 +47,14 @@ class FlexibleBackendManager:
     def persist_state(self, active_model: str | None = None):
         self._save_state(active_model=active_model)
 
+    def _resolve_api_key(self, engine: str) -> Optional[Any]:
+        for secret_key in get_secret_lookup_order(engine, self.config.name):
+            api_key = self.secrets.get(secret_key)
+            if api_key:
+                self.logger.info(f"Resolved API key for {engine} via '{secret_key}'")
+                return api_key
+        return None
+
     async def initialize_active_backend(self, target_model: str | None = None) -> bool:
         engine = self.config.active_backend
         self.logger.info(f"Initializing active backend: {engine}")
@@ -81,7 +90,7 @@ class FlexibleBackendManager:
         try:
             from adapters.registry import get_backend_class
             BackendClass = get_backend_class(engine)
-            api_key = self.secrets.get(f"{engine}_key", None)
+            api_key = self._resolve_api_key(engine)
             
             self.current_backend = BackendClass(adapter_cfg, self.global_config, api_key)
             return await self.current_backend.initialize()

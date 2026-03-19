@@ -679,7 +679,7 @@ Stores API keys and tokens:
 ```json
 {
   "hashiko": "your_telegram_bot_token",
-  "openrouter-api_key": "sk-or-v1-...",
+  "openrouter_key": "sk-or-v1-...",
   "authorized_telegram_id": 123456789
 }
 ```
@@ -883,4 +883,3 @@ You are free to use, modify, and distribute this software. See `LICENSE` file fo
 
 **Built with Vision. Written by AI. Directed by Human.**
 *HASHI - The Bridge to the Future of AI Collaboration.*
-

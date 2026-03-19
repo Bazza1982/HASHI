@@ -56,7 +56,7 @@ MEMORY_FILE = "MEMORY.md"
 
 # API credential mappings: OpenClaw provider -> bridge-u-f secrets key
 CREDENTIAL_MAP = {
-    "openrouter": "openrouter-api_key",
+    "openrouter": "openrouter_key",
 }
 
 
@@ -708,6 +708,9 @@ def main():
         except Exception as e:
             print(f"WARNING: Failed to read {cron_jobs_path}: {e}")
             oc_jobs = []
+
+        new_heartbeats = []
+        new_crons = []
 
         if oc_jobs:
             agent_name_map = {a["id"]: a.get("name", a["id"]) for a in oc_agents}
