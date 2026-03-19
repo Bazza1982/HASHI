@@ -15,6 +15,8 @@ class FlexibleBackendManager:
         self._load_state()
 
     def _load_state(self):
+        self._active_model_override = None
+        self.agent_mode = "flex"  # default mode
         if self.state_file.exists():
             try:
                 state = json.loads(self.state_file.read_text(encoding="utf-8"))
@@ -22,17 +24,18 @@ class FlexibleBackendManager:
                     self.config.active_backend = state["active_backend"]
                 if "active_model" in state:
                     self._active_model_override = state["active_model"]
-                else:
-                    self._active_model_override = None
+                if "agent_mode" in state:
+                    self.agent_mode = state["agent_mode"]
             except Exception as e:
                 self.logger.error(f"Failed to load state.json: {e}")
-        else:
-            self._active_model_override = None
 
     def _save_state(self, active_model: str | None = None):
         if active_model is not None:
             self._active_model_override = active_model
-        state = {"active_backend": self.config.active_backend}
+        state = {
+            "active_backend": self.config.active_backend,
+            "agent_mode": self.agent_mode,
+        }
         if getattr(self, "_active_model_override", None):
             state["active_model"] = self._active_model_override
         try:

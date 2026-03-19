@@ -358,10 +358,17 @@ class BridgeContextAssembler:
         except Exception:
             return f"[FYI: You received this message at {now_str}.]"
 
-    def build_prompt(self, user_prompt: str, engine: str) -> str:
-        system_text = self._load_system_prompt()
-        recent_turns = self.memory_store.get_recent_turns(limit=10)
-        memories = self.memory_store.retrieve_memories(user_prompt, limit=6)
+    def build_prompt(self, user_prompt: str, engine: str, incremental: bool = False) -> str:
+        """Build the prompt to send to the backend.
+
+        Args:
+            incremental: When True (fixed/session mode), skip system identity,
+                recent turns, and memories — the CLI session already has them.
+                Only include /sys slots, active skills, and the user prompt.
+        """
+        system_text = "" if incremental else self._load_system_prompt()
+        recent_turns = [] if incremental else self.memory_store.get_recent_turns(limit=10)
+        memories = [] if incremental else self.memory_store.retrieve_memories(user_prompt, limit=6)
         active_skills = []
         if callable(self.active_skill_provider):
             try:

@@ -1179,7 +1179,7 @@ if __name__ == "__main__":
     try:
         with open(_agents_path, encoding="utf-8") as _f:
             _cfg = json.load(_f)
-            if any(a.get("name") == "hashiko" for a in _cfg.get("agents", [])):
+            if _cfg.get("agents"):
                 _onboarding_done = True
     except Exception:
         pass

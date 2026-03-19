@@ -190,8 +190,8 @@ class FlexibleAgentRuntime:
                 if isinstance(name, str) and name.strip():
                     self._enabled_commands.add(name.strip().lstrip("/").lower())
 
-        # help/status/new/wipe/clear/model/effort should always be available
-        self._enabled_commands.update({"help", "status", "new", "wipe", "clear", "model", "effort", "jobs", "verbose", "think", "voice", "whisper"})
+        # help/status/new/wipe/clear/model/effort/mode should always be available
+        self._enabled_commands.update({"help", "status", "new", "wipe", "clear", "model", "effort", "mode", "jobs", "verbose", "think", "voice", "whisper"})
 
     def _is_command_allowed(self, cmd: str) -> bool:
         cmd = (cmd or "").lstrip("/").lower()
@@ -237,7 +237,14 @@ class FlexibleAgentRuntime:
 
     async def initialize(self) -> bool:
         self.logger.info(f"Initializing flex agent '{self.name}'...")
-        return await self.backend_manager.initialize_active_backend()
+        result = await self.backend_manager.initialize_active_backend()
+        # Apply session mode if agent is in fixed mode
+        if result and self.backend_manager.agent_mode == "fixed":
+            backend = self.backend_manager.current_backend
+            if hasattr(backend, "set_session_mode"):
+                backend.set_session_mode(True)
+                self.logger.info(f"Fixed mode active — session persistence enabled on {self.config.active_backend}")
+        return result
 
     def _format_retry_summary(self, summary: str) -> str:
         if not summary:
@@ -844,9 +851,14 @@ class FlexibleAgentRuntime:
         tg_status = "✓" if self.telegram_connected else "✗"
         wa_status = "✓" if self._get_whatsapp_connected() else "✗"
         channel_line = f"Telegram {tg_status} • WhatsApp {wa_status} • Workbench ✓"
+        mode_str = getattr(self.backend_manager, "agent_mode", "flex")
+        session_id_short = "none"
+        if mode_str == "fixed" and getattr(self.backend_manager, "current_backend", None):
+            sid = getattr(self.backend_manager.current_backend, "_session_id", None) or "none"
+            session_id_short = sid[:8] + "…" if sid != "none" and len(sid) > 8 else sid
         lines = [
             f"🧠 {self.name}",
-            f"🔀 Backend: {self.config.active_backend} • {self.get_current_model()}",
+            f"🔀 Backend: {self.config.active_backend} • {self.get_current_model()} • mode: {mode_str} • sid: {session_id_short}",
             f"📶 Channels: {channel_line}",
             f"📡 Runtime: {'busy' if self.is_generating else 'idle'} • queue {self.queue.qsize()} • process {self._process_info()}",
             f"🧾 Current: {current_line}",
@@ -858,6 +870,11 @@ class FlexibleAgentRuntime:
         if detailed:
             allowed = ", ".join(b["engine"] for b in self.config.allowed_backends)
             current_effort = self._get_current_effort() or "n/a"
+            
+            session_id = "none"
+            if mode_str == "fixed" and getattr(self.backend_manager, "current_backend", None):
+                session_id = getattr(self.backend_manager.current_backend, "_session_id", "none") or "none"
+                
             lines.extend([
                 "",
                 f"📁 Workspace: {self.workspace_dir}",
@@ -865,6 +882,7 @@ class FlexibleAgentRuntime:
                 f"🚀 Started: {self.session_started_at.isoformat(timespec='seconds')}",
                 f"🧩 Allowed Backends: {allowed}",
                 f"🎛️ Effort: {current_effort}",
+                f"⚙️ Mode: {mode_str} • Session ID: {session_id}",
                 f"🔁 Retry Cache: prompt {'yes' if self.last_prompt else 'no'} • response {'yes' if self.last_response else 'no'}",
                 f"🧷 Primers: FYI {'armed' if self._pending_session_primer else 'clear'} • auto-recall {'armed' if self._pending_auto_recall_context else 'clear'}",
                 f"📚 Bridge Memory: {self.memory_store.get_stats()['turns']} turns • {self.memory_store.get_stats()['memories']} memories",
@@ -1080,6 +1098,7 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CallbackQueryHandler(self.callback_voice, pattern=r"^voice:"))
         self.app.add_handler(CallbackQueryHandler(self.callback_start_agent, pattern=r"^startagent:"))
         self.app.add_handler(CallbackQueryHandler(self.callback_skill, pattern=r"^(skill|skilljob):"))
+        self.app.add_handler(CommandHandler("mode", self._wrap_cmd("mode", self.cmd_mode)))
         self.app.add_handler(CommandHandler("new", self._wrap_cmd("new", self.cmd_new)))
         self.app.add_handler(CommandHandler("wipe", self._wrap_cmd("wipe", self.cmd_wipe)))
         self.app.add_handler(CommandHandler("clear", self._wrap_cmd("clear", self.cmd_clear)))
@@ -1827,6 +1846,13 @@ class FlexibleAgentRuntime:
     async def cmd_backend(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
+        if self.backend_manager.agent_mode == "fixed":
+            await self._reply_text(
+                update,
+                "Backend switching is disabled in **fixed** mode.\nUse `/mode flex` to re-enable.",
+                parse_mode="Markdown",
+            )
+            return
 
         args = context.args
         allowed_engines = [b["engine"] for b in self.config.allowed_backends]
@@ -2330,6 +2356,59 @@ class FlexibleAgentRuntime:
             return
         await query.answer()
 
+    async def cmd_mode(self, update: Update, context: Any):
+        """Switch between fixed (continuous CLI session) and flex (multi-backend) modes.
+
+        Usage: /mode [fixed|flex]
+        """
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        args = (context.args[0].lower() if context.args else "").strip()
+        current = self.backend_manager.agent_mode
+
+        if not args or args not in ("fixed", "flex"):
+            await self._reply_text(
+                update,
+                f"Current mode: **{current}**\n\n"
+                f"• `/mode fixed` — continuous CLI session, incremental prompts\n"
+                f"• `/mode flex` — multi-backend switching, full context injection",
+                parse_mode="Markdown",
+            )
+            return
+
+        if args == current:
+            await self._reply_text(update, f"Already in **{current}** mode.", parse_mode="Markdown")
+            return
+
+        self.backend_manager.agent_mode = args
+        self.backend_manager._save_state()
+
+        backend = self.backend_manager.current_backend
+        if args == "fixed":
+            # Enable session persistence on compatible backends
+            if hasattr(backend, "set_session_mode"):
+                backend.set_session_mode(True)
+            await self._reply_text(
+                update,
+                "Switched to **fixed** mode.\n"
+                "• CLI session will persist across messages\n"
+                "• Bridge sends incremental prompts (no history re-injection)\n"
+                "• `/backend` is disabled; use `/mode flex` to re-enable\n"
+                "• `/new` will terminate the current session and start fresh",
+                parse_mode="Markdown",
+            )
+        else:
+            # Disable session persistence
+            if hasattr(backend, "set_session_mode"):
+                backend.set_session_mode(False)
+            await self._reply_text(
+                update,
+                "Switched to **flex** mode.\n"
+                "• Full context injection per request\n"
+                "• `/backend` switching re-enabled",
+                parse_mode="Markdown",
+            )
+
     async def cmd_new(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
@@ -2341,8 +2420,21 @@ class FlexibleAgentRuntime:
         # - No continuity restore
         self._pending_auto_recall_context = None
 
-        if getattr(self.backend_manager.current_backend.capabilities, "supports_sessions", False):
-            await self.backend_manager.current_backend.handle_new_session()
+        backend = self.backend_manager.current_backend
+
+        # In fixed mode: terminate CLI session and clear session_id for a truly fresh start
+        if self.backend_manager.agent_mode == "fixed":
+            if hasattr(backend, "handle_new_session"):
+                await backend.handle_new_session()
+            # Kill the running process if any
+            if hasattr(backend, "current_proc") and backend.current_proc:
+                await backend.force_kill_process_tree(
+                    backend.current_proc, logger=self.logger, reason="cmd_new_fixed_mode"
+                )
+                backend.current_proc = None
+            await self._reply_text(update, "Fixed mode: session terminated. Starting fresh...")
+        elif getattr(backend.capabilities, "supports_sessions", False):
+            await backend.handle_new_session()
             await self._reply_text(update, "Starting a fresh session...")
         else:
             await self._reply_text(update, "Starting a fresh stateless session...")
@@ -3224,7 +3316,15 @@ class FlexibleAgentRuntime:
                 self.is_generating = True
 
                 effective_prompt = self._consume_session_primer(item)
-                final_prompt = self.context_assembler.build_prompt(effective_prompt, self.config.active_backend)
+                # In fixed mode with an active session, use incremental prompts
+                _incremental = (
+                    self.backend_manager.agent_mode == "fixed"
+                    and hasattr(self.backend_manager.current_backend, "_session_id")
+                    and self.backend_manager.current_backend._session_id is not None
+                )
+                final_prompt = self.context_assembler.build_prompt(
+                    effective_prompt, self.config.active_backend, incremental=_incremental
+                )
                 
                 stop_typing = None
                 typing_task = None
@@ -3519,6 +3619,7 @@ class FlexibleAgentRuntime:
             BotCommand("handoff", "Fresh session with recent continuity"),
             BotCommand("park", "List or save parked topics"),
             BotCommand("load", "Restore a parked topic"),
+            BotCommand("mode", "Switch fixed/flex mode"),
             BotCommand("model", "View or change model"),
             BotCommand("effort", "View or change effort"),
             BotCommand("new", "Start a fresh session"),

@@ -175,6 +175,15 @@ Special thanks to [OpenClaw] by Peter Steinberg for inspiration and foundational
 
 ### ✨ Added
 
+- **Agent Modes: Flex and Fixed** — `orchestrator/flexible_agent_runtime.py`, `adapters/claude_cli.py`
+  - Added `/mode [flex|fixed]` command to toggle between stateless context injection (flex) and continuous CLI session persistence (fixed).
+  - In **Fixed Mode**, the bridge delegates context management to the native CLI backend (e.g., Claude CLI's `--resume`), reducing token overhead by passing only incremental prompts without re-injecting full system/memory context.
+  - Added mode enforcement: Backend switching is disabled while in fixed mode to prevent context fragmentation.
+
+- **Status Dashboard Upgrade** — `orchestrator/flexible_agent_runtime.py`
+  - `/status` now displays the current mode (flex/fixed) and shortened session ID.
+  - `/status full` now includes a dedicated monitoring row for `Mode` and full `Session ID`.
+
 - **Time-Awareness (FYI Injection)** — `orchestrator/bridge_memory.py`
   - Added `get_last_user_turn_ts()` — retrieves timestamp of the user's last message from the `turns` table
   - Added `_build_time_fyi()` — computes current time + elapsed gap since last user message
@@ -185,7 +194,27 @@ Special thanks to [OpenClaw] by Peter Steinberg for inspiration and foundational
   - Gap formatting: seconds / minutes / hours / days — human-readable
   - Agents now feel the natural rhythm of conversation without being told explicitly
 
+- **Delete Job Button** — `workbench/backend/api.py`, `skill_manager.py:303`
+  - Implemented `delete_job()` method in SkillManager for job deletion
+  - Added `/jobs` UI delete button with confirmation
+  - Jobs can now be removed directly from Workbench
+
+- **Jobs UI Global Redesign** — `workbench/frontend/Jobs.jsx`
+  - Changed all button labels to English for global accessibility: `Run`, `ON`, `OFF`, `Delete`
+  - Implemented responsive two-column grid layout for better scaling with multiple jobs
+  - Optimized button spacing and text overflow handling
+
+
 ### 🔧 Fixed
+
+- **Onboarding Agent Check** — `bin/bridge-u.sh`, `main.py`
+  - Onboarding is now considered complete if *any* agent is configured, rather than strictly requiring `hashiko`.
+
+- **System Prompt Slots Not Injecting** — `adapters/flexible_agent_runtime.py:131, 2425`
+  - Fixed: `BridgeContextAssembler` was created without `sys_prompt_manager=` parameter
+  - Result: Active slot texts from `/sys 1 on` were saved but never injected into the model's context
+  - Solution: Added `sys_prompt_manager=self.sys_prompt_manager` to both instantiation points
+  - Verification: System prompt slots now properly appear in the final assembled context
 
 - **Backend switching silent failure** — `adapters/flexible_backend_manager.py`
   - Fixed: `/backend` → Gemini switch silently stayed on Claude due to unsupported parameter

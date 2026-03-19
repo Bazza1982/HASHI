@@ -604,7 +604,10 @@ _onboarding_complete() {
 import json, sys
 try:
     data = json.load(open(sys.argv[1]))
-    sys.exit(0 if any(a.get('name') == 'hashiko' for a in data.get('agents', [])) else 1)
+    agents = data.get('agents', [])
+    # Consider onboarding complete once the install has at least one configured
+    # agent; HASHI1 intentionally runs a single custom agent without hashiko.
+    sys.exit(0 if agents else 1)
 except Exception:
     sys.exit(1)
 " "$agents_file"

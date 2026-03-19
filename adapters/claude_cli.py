@@ -21,7 +21,7 @@ class ClaudeCLIAdapter(BaseBackend):
 
     def _define_capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
-            supports_sessions=False,
+            supports_sessions=True,
             supports_files=True,
             supports_tool_use=True,
             supports_thinking_stream=True,
@@ -36,6 +36,9 @@ class ClaudeCLIAdapter(BaseBackend):
         self.system_prompt_source = None
         self.effort = (self.config.extra or {}).get("effort", "low")
         self.access_root = str(self.config.resolve_access_root())
+        # Session persistence for fixed mode
+        self._session_id: str | None = None
+        self._session_mode: bool = (self.config.extra or {}).get("session_mode", False)
 
     def _resolve_system_prompt_source(self) -> Path | None:
         candidates = []
@@ -74,8 +77,16 @@ class ClaudeCLIAdapter(BaseBackend):
             return False
 
     async def handle_new_session(self) -> bool:
-        self.logger.info("Claude backend is stateless. /new acknowledged.")
+        old_sid = self._session_id
+        self._session_id = None
+        self.logger.info(f"Claude session reset (previous session_id={old_sid}).")
         return True
+
+    def set_session_mode(self, enabled: bool):
+        """Enable/disable session persistence (fixed mode)."""
+        self._session_mode = enabled
+        self._session_id = None  # always clear on mode switch to avoid resuming a stale/non-persistent session
+        self.logger.info(f"Session mode set to {'ON' if enabled else 'OFF'}")
 
     def should_bootstrap_on_startup(self) -> bool:
         return False
@@ -114,8 +125,20 @@ class ClaudeCLIAdapter(BaseBackend):
 
         etype = obj.get("type", "")
 
+        # --- System event: capture session_id for resume ---
+        if etype == "system":
+            sid = obj.get("session_id")
+            if sid:
+                self._session_id = sid
+                self.logger.info(f"Captured session_id: {sid}")
+            return None
+
         # --- Result event: contains the final assembled text ---
         if etype == "result":
+            # Also check for session_id in result
+            sid = obj.get("session_id")
+            if sid:
+                self._session_id = sid
             return obj.get("result", "")
 
         # --- Stream event: wrapped Claude API streaming events ---
@@ -237,8 +260,12 @@ class ClaudeCLIAdapter(BaseBackend):
             "--dangerously-skip-permissions",
             "--add-dir",
             self.access_root,
-            "--no-session-persistence",
         ]
+        # Session persistence: use --resume when in session mode with an active session
+        if self._session_mode and self._session_id:
+            cmd.extend(["--resume", self._session_id])
+        elif not self._session_mode:
+            cmd.append("--no-session-persistence")
         # stream-json needs --verbose and --include-partial-messages for
         # intermediate events (tool calls, text deltas, thinking).
         if use_streaming:
