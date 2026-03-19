@@ -120,6 +120,10 @@ class HandoffBuilder:
 
         return "\n".join(lines).strip(), exchange_count, total_words
 
+    def get_recent_rounds(self, max_rounds: int = 10) -> List[List[Dict[str, Any]]]:
+        rounds = self._load_rounds()
+        return rounds[-max_rounds:] if max_rounds > 0 else rounds
+
     def build_session_restore_prompt(self, max_rounds: int = 10, max_words: int = 6000) -> tuple[str, int, int]:
         context_block, exchange_count, total_words = self.build_recent_context_block(
             max_rounds=max_rounds,
