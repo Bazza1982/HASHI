@@ -196,13 +196,110 @@ def resolve_authorized_telegram_ids(extra: dict | None, global_authorized_id: in
     return tuple(ids)
 
 
+def _build_jobs_with_buttons(agent_name: str, skill_manager):
+    """Build combined jobs message text and inline keyboard with run/toggle buttons.
+
+    Returns (text: str, markup: InlineKeyboardMarkup | None).
+    """
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    import json as _json
+
+    if skill_manager is None or not hasattr(skill_manager, "tasks_path"):
+        return "No task scheduler configured.", None
+    try:
+        if not skill_manager.tasks_path.exists():
+            data = {"heartbeats": [], "crons": []}
+        else:
+            data = _json.loads(skill_manager.tasks_path.read_text(encoding="utf-8"))
+    except Exception:
+        return "Could not read tasks.json.", None
+
+    lines = [f"<b>📋 Jobs — {agent_name}</b>"]
+    buttons: list = []
+    found = False
+
+    def _job_buttons(kind: str, job: dict) -> list[list]:
+        """Build label + action button rows for a single job."""
+        enabled = job.get("enabled", False)
+        toggle_mode = "off" if enabled else "on"
+        toggle_label = "OFF" if enabled else "ON"
+        icon = "⏱" if kind == "heartbeat" else "📅"
+        short_id = job["id"][:20]
+        jid = job["id"]
+        return [
+            [InlineKeyboardButton(f"{icon} {short_id}", callback_data="noop")],
+            [
+                InlineKeyboardButton("Run", callback_data=f"skilljob:{kind}:run:{jid}:now"),
+                InlineKeyboardButton(toggle_label, callback_data=f"skilljob:{kind}:toggle:{jid}:{toggle_mode}"),
+                InlineKeyboardButton("Delete", callback_data=f"skilljob:{kind}:delete:{jid}:confirm"),
+            ],
+        ]
+
+    # Collect all jobs into a flat list of (kind, job) for two-column layout
+    all_jobs: list[tuple[str, dict]] = []
+
+    hbs = [h for h in data.get("heartbeats", []) if h.get("agent") == agent_name]
+    crons = [c for c in data.get("crons", []) if c.get("agent") == agent_name]
+
+    for h in hbs:
+        enabled = h.get("enabled", False)
+        interval = h.get("interval_seconds", 0)
+        if interval >= 3600:
+            interval_s = f"every {interval // 3600}h"
+        elif interval >= 60:
+            interval_s = f"every {interval // 60}m"
+        else:
+            interval_s = f"every {interval}s"
+        status = "✅" if enabled else "❌"
+        lines.append(f"\n{status} ⏱ <code>{h['id']}</code> — {interval_s}")
+        note = h.get("note", "")
+        if note and note != h["id"]:
+            lines.append(f"   {note}")
+        all_jobs.append(("heartbeat", h))
+
+    for c in crons:
+        enabled = c.get("enabled", False)
+        time_s = c.get("time", "??:??")
+        status = "✅" if enabled else "❌"
+        lines.append(f"\n{status} 📅 <code>{c['id']}</code> — daily {time_s}")
+        note = c.get("note", "")
+        if note and note != c["id"]:
+            lines.append(f"   {note}")
+        all_jobs.append(("cron", c))
+
+    # Build two-column button layout
+    for i in range(0, len(all_jobs), 2):
+        left_kind, left_job = all_jobs[i]
+        left_rows = _job_buttons(left_kind, left_job)
+        if i + 1 < len(all_jobs):
+            right_kind, right_job = all_jobs[i + 1]
+            right_rows = _job_buttons(right_kind, right_job)
+            # Merge label rows side by side, action rows side by side
+            for lr, rr in zip(left_rows, right_rows):
+                buttons.append(lr + rr)
+        else:
+            # Odd job — single column
+            buttons.extend(left_rows)
+
+    found = len(all_jobs) > 0
+
+    if not found:
+        lines.append("\nNo jobs configured for this agent.")
+
+    markup = InlineKeyboardMarkup(buttons) if buttons else None
+    return "\n".join(lines), markup
+
+
 def _build_jobs_text(agent_name: str, skill_manager) -> str:
     """Build a formatted jobs listing for a single agent."""
     import json as _json
     if skill_manager is None or not hasattr(skill_manager, "tasks_path"):
         return "No task scheduler configured."
     try:
-        data = _json.loads(skill_manager.tasks_path.read_text(encoding="utf-8"))
+        if not skill_manager.tasks_path.exists():
+            data = {"heartbeats": [], "crons": []}
+        else:
+            data = _json.loads(skill_manager.tasks_path.read_text(encoding="utf-8"))
     except Exception:
         return "Could not read tasks.json."
 
@@ -991,8 +1088,8 @@ class BridgeAgentRuntime:
         if skill.type == "toggle":
             buttons.append(
                 [
-                    InlineKeyboardButton("Turn On", callback_data=f"skill:toggle:{skill.id}:on"),
-                    InlineKeyboardButton("Turn Off", callback_data=f"skill:toggle:{skill.id}:off"),
+                    InlineKeyboardButton("ON", callback_data=f"skill:toggle:{skill.id}:on"),
+                    InlineKeyboardButton("OFF", callback_data=f"skill:toggle:{skill.id}:off"),
                 ]
             )
         elif skill.type == "action" and skill.id not in {"cron", "heartbeat"}:
@@ -1004,23 +1101,11 @@ class BridgeAgentRuntime:
         return InlineKeyboardMarkup(buttons) if buttons else None
 
     async def _render_skill_jobs(self, update_or_query, kind: str):
-        text = self.skill_manager.describe_jobs(kind, agent_name=self.name)
-        jobs = self.skill_manager.list_jobs(kind, agent_name=self.name)
-        buttons = []
-        for job in jobs:
-            mode = "off" if job.get("enabled", False) else "on"
-            label = f"{job['id']} {'OFF' if job.get('enabled', False) else 'ON'}"
-            buttons.append(
-                [
-                    InlineKeyboardButton(label, callback_data=f"skilljob:{kind}:toggle:{job['id']}:{mode}"),
-                    InlineKeyboardButton("Run", callback_data=f"skilljob:{kind}:run:{job['id']}:now"),
-                ]
-            )
-        markup = InlineKeyboardMarkup(buttons) if buttons else None
+        text, markup = _build_jobs_with_buttons(self.name, self.skill_manager)
         if hasattr(update_or_query, "edit_message_text"):
-            await update_or_query.edit_message_text(text, reply_markup=markup)
+            await update_or_query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
         else:
-            await update_or_query.message.reply_text(text, reply_markup=markup)
+            await update_or_query.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
 
     async def invoke_scheduler_skill(self, skill_id: str, args: str, task_id: str):
         if not self.skill_manager:
@@ -2856,6 +2941,11 @@ class BridgeAgentRuntime:
                 await query.answer(message, show_alert=not ok)
                 await self._render_skill_jobs(query, kind)
                 return
+            if action == "delete":
+                ok, message = self.skill_manager.delete_job(kind, task_id)
+                await query.answer(message, show_alert=not ok)
+                await self._render_skill_jobs(query, kind)
+                return
             if action == "run":
                 job = self.skill_manager.get_job(kind, task_id)
                 if not job:
@@ -3283,10 +3373,8 @@ class BridgeAgentRuntime:
     async def cmd_jobs(self, update, context):
         if update.effective_user.id != self.global_config.authorized_id:
             return
-        await update.message.reply_text(
-            _build_jobs_text(self.name, self.skill_manager),
-            parse_mode="HTML",
-        )
+        text, markup = _build_jobs_with_buttons(self.name, self.skill_manager)
+        await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
 
     async def cmd_logo(self, update, context):
         if update.effective_user.id != self.global_config.authorized_id:

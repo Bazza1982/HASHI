@@ -132,6 +132,7 @@ class FlexibleAgentRuntime:
             self.memory_store,
             self.config.system_md,
             active_skill_provider=self._get_active_skill_sections,
+            sys_prompt_manager=self.sys_prompt_manager,
         )
 
         # Initialize FlexibleBackendManager
@@ -894,8 +895,8 @@ class FlexibleAgentRuntime:
         if skill.type == "toggle":
             buttons.append(
                 [
-                    InlineKeyboardButton("Turn On", callback_data=f"skill:toggle:{skill.id}:on"),
-                    InlineKeyboardButton("Turn Off", callback_data=f"skill:toggle:{skill.id}:off"),
+                    InlineKeyboardButton("ON", callback_data=f"skill:toggle:{skill.id}:on"),
+                    InlineKeyboardButton("OFF", callback_data=f"skill:toggle:{skill.id}:off"),
                 ]
             )
         elif skill.type == "action" and skill.id not in {"cron", "heartbeat"}:
@@ -907,23 +908,12 @@ class FlexibleAgentRuntime:
         return InlineKeyboardMarkup(buttons) if buttons else None
 
     async def _render_skill_jobs(self, update_or_query, kind: str):
-        text = self.skill_manager.describe_jobs(kind, agent_name=self.name)
-        jobs = self.skill_manager.list_jobs(kind, agent_name=self.name)
-        buttons = []
-        for job in jobs:
-            mode = "off" if job.get("enabled", False) else "on"
-            label = f"{job['id']} {'OFF' if job.get('enabled', False) else 'ON'}"
-            buttons.append(
-                [
-                    InlineKeyboardButton(label, callback_data=f"skilljob:{kind}:toggle:{job['id']}:{mode}"),
-                    InlineKeyboardButton("Run", callback_data=f"skilljob:{kind}:run:{job['id']}:now"),
-                ]
-            )
-        markup = InlineKeyboardMarkup(buttons) if buttons else None
+        from orchestrator.agent_runtime import _build_jobs_with_buttons
+        text, markup = _build_jobs_with_buttons(self.name, self.skill_manager)
         if hasattr(update_or_query, "edit_message_text"):
-            await update_or_query.edit_message_text(text, reply_markup=markup)
+            await update_or_query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
         else:
-            await self._reply_text(update_or_query, text, reply_markup=markup)
+            await self._reply_text(update_or_query, text, parse_mode="HTML", reply_markup=markup)
 
     async def invoke_scheduler_skill(self, skill_id: str, args: str, task_id: str):
         if not self.skill_manager:
@@ -1681,6 +1671,11 @@ class FlexibleAgentRuntime:
                 await query.answer(message, show_alert=not ok)
                 await self._render_skill_jobs(query, kind)
                 return
+            if action == "delete":
+                ok, message = self.skill_manager.delete_job(kind, task_id)
+                await query.answer(message, show_alert=not ok)
+                await self._render_skill_jobs(query, kind)
+                return
             if action == "run":
                 job = self.skill_manager.get_job(kind, task_id)
                 if not job:
@@ -1816,12 +1811,9 @@ class FlexibleAgentRuntime:
     async def cmd_jobs(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
-        from orchestrator.agent_runtime import _build_jobs_text
-        await self._reply_text(
-            update,
-            _build_jobs_text(self.name, self.skill_manager),
-            parse_mode="HTML",
-        )
+        from orchestrator.agent_runtime import _build_jobs_with_buttons
+        text, markup = _build_jobs_with_buttons(self.name, self.skill_manager)
+        await self._reply_text(update, text, parse_mode="HTML", reply_markup=markup)
 
     async def cmd_logo(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -2426,6 +2418,7 @@ class FlexibleAgentRuntime:
             self.memory_store,
             self.config.system_md,
             active_skill_provider=self._get_active_skill_sections,
+            sys_prompt_manager=self.sys_prompt_manager,
         )
 
         # Reset any pending continuity

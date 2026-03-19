@@ -300,6 +300,17 @@ class SkillManager:
             return True, f"{task_id} is now {'ON' if enabled else 'OFF'}."
         return False, f"Unknown {kind} task: {task_id}"
 
+    def delete_job(self, kind: str, task_id: str) -> tuple[bool, str]:
+        tasks = self._load_tasks()
+        key = "crons" if kind == "cron" else "heartbeats"
+        jobs = tasks.get(key, [])
+        for i, job in enumerate(jobs):
+            if job.get("id") == task_id:
+                jobs.pop(i)
+                self._save_tasks(tasks)
+                return True, f"Deleted {task_id}."
+        return False, f"Unknown {kind} task: {task_id}"
+
     def get_active_heartbeat_job_id(self, agent_name: str) -> str:
         return f"{agent_name}-active-heartbeat"
 
