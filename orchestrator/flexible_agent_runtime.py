@@ -31,6 +31,7 @@ from orchestrator.flexible_backend_registry import (
 from orchestrator.memory_index import MemoryIndex
 from orchestrator.handoff_builder import HandoffBuilder
 from orchestrator.media_utils import is_image_file, normalize_image_file
+from orchestrator.parked_topics import ParkedTopicStore
 from orchestrator.skill_manager import SkillDefinition, SkillManager
 from orchestrator.voice_manager import VoiceManager
 
@@ -125,6 +126,7 @@ class FlexibleAgentRuntime:
         # Initialize Memory and Handoff Subsystems
         self.memory_index = MemoryIndex(self.workspace_dir / "memory_index.sqlite")
         self.handoff_builder = HandoffBuilder(self.workspace_dir)
+        self.parked_topics = ParkedTopicStore(self.workspace_dir)
         self.memory_store = BridgeMemoryStore(self.workspace_dir)
         self.context_assembler = BridgeContextAssembler(
             self.memory_store,
@@ -542,6 +544,194 @@ class FlexibleAgentRuntime:
             return item.prompt
         return "\n\n".join(sections + [item.prompt])
 
+    def _extract_json_object(self, text: str) -> dict | None:
+        raw = (text or "").strip()
+        if not raw:
+            return None
+        candidates = [raw]
+        match = re.search(r"\{[\s\S]*\}", raw)
+        if match:
+            candidates.insert(0, match.group(0))
+        for candidate in candidates:
+            try:
+                parsed = json.loads(candidate)
+            except Exception:
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+        return None
+
+    def _fallback_park_summary(
+        self,
+        context_block: str,
+        last_user_text: str,
+        last_assistant_text: str,
+        title_override: str | None = None,
+    ) -> dict[str, str]:
+        title = (title_override or _safe_excerpt(last_user_text or "Parked topic", 48)).strip() or "Parked topic"
+        short = _safe_excerpt(last_user_text or last_assistant_text or title, 140)
+        long_summary = _safe_excerpt(context_block or short, 1600)
+        return {
+            "title": title,
+            "summary_short": short,
+            "summary_long": long_summary,
+        }
+
+    def _build_park_summary_prompt(
+        self,
+        context_block: str,
+        last_user_text: str,
+        last_assistant_text: str,
+        title_override: str | None = None,
+    ) -> str:
+        override_line = (
+            f'User preferred title: "{title_override.strip()}"\n'
+            if title_override and title_override.strip()
+            else ""
+        )
+        return (
+            "SYSTEM: You are preparing a parked conversation record for later resume.\n"
+            "Return JSON only with keys: title, summary_short, summary_long.\n"
+            "Rules:\n"
+            "- title: 3-8 words, concrete, no numbering\n"
+            "- summary_short: one sentence, under 140 chars\n"
+            "- summary_long: one detailed paragraph covering goal, decisions, unresolved work, and next step\n"
+            "- Do not include markdown fences or extra commentary\n\n"
+            f"{override_line}"
+            "--- CURRENT TOPIC CONTEXT ---\n"
+            f"{context_block}\n\n"
+            "--- LAST USER MESSAGE ---\n"
+            f"{last_user_text or '(none)'}\n\n"
+            "--- LAST ASSISTANT MESSAGE ---\n"
+            f"{last_assistant_text or '(none)'}\n\n"
+            "--- OUTPUT FORMAT ---\n"
+            '{"title":"...","summary_short":"...","summary_long":"..."}'
+        )
+
+    async def _summarize_current_topic_for_parking(self, title_override: str | None = None) -> dict[str, Any] | None:
+        context_block, exchange_count, _ = self.handoff_builder.build_recent_context_block(
+            max_rounds=12,
+            max_words=4500,
+        )
+        if exchange_count <= 0 or not context_block:
+            return None
+
+        recent_rounds = self.handoff_builder.get_recent_rounds(max_rounds=3)
+        last_user_text = ""
+        last_assistant_text = ""
+        last_exchange_text = ""
+        if recent_rounds:
+            last_round = recent_rounds[-1]
+            lines = []
+            for entry in last_round:
+                role = str(entry.get("role", "")).upper()
+                text = (entry.get("text") or "").strip()
+                if not text:
+                    continue
+                lines.append(f"{role}: {text}")
+                if entry.get("role") == "user":
+                    last_user_text = text
+                elif entry.get("role") == "assistant":
+                    last_assistant_text = text
+            last_exchange_text = "\n".join(lines).strip()
+
+        fallback = self._fallback_park_summary(
+            context_block,
+            last_user_text,
+            last_assistant_text,
+            title_override=title_override,
+        )
+        response = await self.backend_manager.generate_response(
+            self._build_park_summary_prompt(
+                context_block,
+                last_user_text,
+                last_assistant_text,
+                title_override=title_override,
+            ),
+            request_id=f"park-{int(time.time())}",
+            silent=True,
+        )
+        parsed = self._extract_json_object(response.text) if response and response.is_success else None
+        if not parsed:
+            parsed = fallback
+
+        title = (title_override or parsed.get("title") or fallback["title"]).strip()
+        summary_short = (parsed.get("summary_short") or fallback["summary_short"]).strip()
+        summary_long = (parsed.get("summary_long") or fallback["summary_long"]).strip()
+        return {
+            "title": title or fallback["title"],
+            "summary_short": summary_short or fallback["summary_short"],
+            "summary_long": summary_long or fallback["summary_long"],
+            "recent_context": context_block,
+            "last_user_text": last_user_text,
+            "last_assistant_text": last_assistant_text,
+            "last_exchange_text": last_exchange_text,
+        }
+
+    def _format_parked_topics_text(self) -> str:
+        topics = self.parked_topics.list_topics()
+        if not topics:
+            return (
+                "Parked topics: none.\n\n"
+                "Usage:\n"
+                "/park - list parked topics\n"
+                "/park chat [optional title] - park the current topic\n"
+                "/park delete <slot> - delete a parked topic\n"
+                "/load <slot> - restore a parked topic"
+            )
+        lines = ["Parked topics", ""]
+        for topic in topics:
+            slot_id = int(topic.get("slot_id", 0))
+            title = topic.get("title") or f"Topic {slot_id}"
+            short = topic.get("summary_short") or "(no short summary)"
+            followup = topic.get("followup") or {}
+            status = followup.get("status") or "scheduled"
+            attempts = int(followup.get("attempts", 0))
+            next_at = followup.get("next_at")
+            suffix = f" | next {next_at}" if next_at else ""
+            lines.append(f"[{slot_id}] {title}")
+            lines.append(f"  {short}")
+            lines.append(f"  reminders: {status} ({attempts}/3){suffix}")
+        lines.extend(["", "Use /load <slot> to restore or /park delete <slot> to remove one."])
+        return "\n".join(lines)
+
+    def is_idle_for_proactive_message(self, min_idle_seconds: int = 900) -> bool:
+        if self._backend_busy():
+            return False
+        last_user_ts = self.memory_store.get_last_user_turn_ts()
+        if not last_user_ts:
+            return True
+        try:
+            idle_for = (datetime.now() - datetime.fromisoformat(last_user_ts)).total_seconds()
+        except Exception:
+            return False
+        return idle_for >= min_idle_seconds
+
+    async def process_parked_topic_followups(self, now_dt: datetime | None = None):
+        now_dt = now_dt or datetime.now()
+        if not self.telegram_connected or not self.is_idle_for_proactive_message():
+            return
+        for topic in self.parked_topics.due_topics(now_dt):
+            slot_id = int(topic.get("slot_id", 0))
+            followup = topic.get("followup") or {}
+            attempt = int(followup.get("attempts", 0)) + 1
+            title = topic.get("title") or f"Topic {slot_id}"
+            summary_short = topic.get("summary_short") or ""
+            reminder_text = (
+                f"Parked topic reminder [{slot_id}] {title}\n\n"
+                f"{summary_short}\n\n"
+                f"Do you still want to continue this topic?\n"
+                f"Use /load {slot_id} to resume or /park delete {slot_id} to remove it.\n"
+                f"Reminder {attempt}/3."
+            )
+            await self.send_long_message(
+                chat_id=self._primary_chat_id(),
+                text=reminder_text,
+                request_id=f"park-reminder-{slot_id}-{attempt}",
+                purpose="park-reminder",
+            )
+            self.parked_topics.record_followup_sent(slot_id, sent_at=now_dt)
+
     def _skills_by_type(self) -> dict[str, list[SkillDefinition]]:
         if not self.skill_manager:
             return {"action": [], "toggle": [], "prompt": []}
@@ -892,6 +1082,8 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CommandHandler("skill", self._wrap_cmd("skill", self.cmd_skill)))
         self.app.add_handler(CommandHandler("backend", self._wrap_cmd("backend", self.cmd_backend)))
         self.app.add_handler(CommandHandler("handoff", self._wrap_cmd("handoff", self.cmd_handoff)))
+        self.app.add_handler(CommandHandler("park", self._wrap_cmd("park", self.cmd_park)))
+        self.app.add_handler(CommandHandler("load", self._wrap_cmd("load", self.cmd_load)))
         self.app.add_handler(CommandHandler("model", self._wrap_cmd("model", self.cmd_model)))
         self.app.add_handler(CommandHandler("effort", self._wrap_cmd("effort", self.cmd_effort)))
         self.app.add_handler(CallbackQueryHandler(self.callback_model, pattern=r"^(model|backend|bmodel|effort|backend_menu)"))
@@ -1701,6 +1893,117 @@ class FlexibleAgentRuntime:
             prompt,
             "handoff",
             f"Handoff restore [{exchange_count} exchanges]",
+        )
+
+    async def cmd_park(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        args = [a.strip() for a in (context.args or []) if a.strip()]
+        if not args:
+            await self._reply_text(update, self._format_parked_topics_text())
+            return
+
+        action = args[0].lower()
+        if action == "delete":
+            if len(args) < 2 or not args[1].isdigit():
+                await self._reply_text(update, "Usage: /park delete <slot>")
+                return
+            slot_id = int(args[1])
+            removed = self.parked_topics.delete_topic(slot_id)
+            if not removed:
+                await self._reply_text(update, f"Parked topic [{slot_id}] was not found.")
+                return
+            await self._reply_text(update, f"Deleted parked topic [{slot_id}] {removed.get('title') or ''}".strip())
+            return
+
+        if action != "chat":
+            await self._reply_text(
+                update,
+                "Usage:\n"
+                "/park - list parked topics\n"
+                "/park chat [optional title] - park the current topic\n"
+                "/park delete <slot> - delete a parked topic",
+            )
+            return
+
+        if self._backend_busy():
+            await self._reply_text(update, "Parking is blocked while a request is running or queued.")
+            return
+
+        title_override = " ".join(args[1:]).strip() or None
+        await self._reply_text(update, "Parking the current topic and writing a resume summary...")
+        summary = await self._summarize_current_topic_for_parking(title_override=title_override)
+        if not summary:
+            await self._reply_text(update, "No recent bridge transcript was available to park.")
+            return
+
+        topic = self.parked_topics.create_topic(
+            title=summary["title"],
+            summary_short=summary["summary_short"],
+            summary_long=summary["summary_long"],
+            recent_context=summary["recent_context"],
+            last_user_text=summary["last_user_text"],
+            last_assistant_text=summary["last_assistant_text"],
+            last_exchange_text=summary["last_exchange_text"],
+            source_session=self.session_id_dt,
+            title_user_override=title_override,
+        )
+        slot_id = int(topic["slot_id"])
+        await self._reply_text(
+            update,
+            f"Parked as [{slot_id}] {topic['title']}\n"
+            f"{topic['summary_short']}\n\n"
+            f"Follow-up reminders are scheduled for this parked topic (up to 3 attempts).\n"
+            f"Use /load {slot_id} to resume or /park delete {slot_id} to remove it.",
+        )
+
+    async def cmd_load(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        args = [a.strip() for a in (context.args or []) if a.strip()]
+        if len(args) != 1 or not args[0].isdigit():
+            await self._reply_text(update, "Usage: /load <slot>")
+            return
+        if self._backend_busy():
+            await self._reply_text(update, "Load is blocked while a request is running or queued.")
+            return
+
+        slot_id = int(args[0])
+        topic = self.parked_topics.get_topic(slot_id)
+        if not topic:
+            await self._reply_text(update, f"Parked topic [{slot_id}] was not found.")
+            return
+
+        self.parked_topics.mark_loaded(slot_id)
+        title = topic.get("title") or f"Topic {slot_id}"
+        summary_short = topic.get("summary_short") or ""
+        summary_long = topic.get("summary_long") or ""
+        recent_context = topic.get("recent_context") or ""
+        last_exchange = topic.get("last_exchange_text") or ""
+        self._pending_auto_recall_context = (
+            "Restore the parked topic below as active continuity context. "
+            "Use it as current working context for this session.\n\n"
+            f"--- PARKED TOPIC [{slot_id}] ---\n"
+            f"Title: {title}\n"
+            f"Short Summary: {summary_short}\n\n"
+            f"Long Summary:\n{summary_long}\n\n"
+            f"Last Exchange:\n{last_exchange or '(none)'}\n\n"
+            f"{recent_context}"
+        )
+        self._arm_session_primer(
+            f"Loading parked topic [{slot_id}] {title}. Resume it as the active working context."
+        )
+        await self._reply_text(update, f"Loading parked topic [{slot_id}] {title} and restoring continuity...")
+        await self.enqueue_request(
+            update.effective_chat.id,
+            (
+                "SYSTEM: Resume the parked topic that was just restored into context. "
+                "Continue naturally from the most relevant unfinished point. "
+                "Do not explain the restore process at length.\n\n"
+                "Resume the topic now."
+            ),
+            "park-load",
+            f"Parked topic load [{slot_id}]",
         )
 
     async def cmd_active(self, update: Update, context: Any):
@@ -3221,6 +3524,8 @@ class FlexibleAgentRuntime:
             BotCommand("skill", "Browse and run skills"),
             BotCommand("backend", "Show backend buttons (+ means context)"),
             BotCommand("handoff", "Fresh session with recent continuity"),
+            BotCommand("park", "List or save parked topics"),
+            BotCommand("load", "Restore a parked topic"),
             BotCommand("model", "View or change model"),
             BotCommand("effort", "View or change effort"),
             BotCommand("new", "Start a fresh session"),
