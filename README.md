@@ -1,7 +1,7 @@
 # HASHI
 
-> **Status (v1.1):** main branch is now at **v1.1**. v1.1 debugging is completed. 
-> **Roadmap to v2:** see [`docs/ROADMAP.md`](docs/ROADMAP.md).
+> **Status (v1.2-alpha):** All v2 roadmap targets completed. Tool execution layer live.
+> **Changelog:** see [`CHANGELOG.md`](CHANGELOG.md) · **Roadmap:** see [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## About
 
@@ -69,15 +69,17 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
 1. **No Token Storage** - Uses CLI backends (gemini, claude, codex) with local authentication, not stored tokens
 2. **Multi-Agent, Single Interface** - Chat with multiple specialized agents through one WhatsApp or Telegram account
 3. **Context Recovery** - `/handoff` command instantly restores project context after compression
-4. **Vibe-Coded** - Every line written by AI, reviewed by AI, directed by human vision
+4. **Tool Execution Layer** - OpenRouter agents can take real local actions: run bash commands, read/write files, search the web, call external APIs, and more
+5. **Flex/Fixed Mode Switching** - Agents can switch between CLI backends and OpenRouter mid-conversation via `/backend`
+6. **TUI Interface** - `tui.py` provides a split-panel terminal UI for log monitoring and agent chat without a browser
+7. **Vibe-Coded** - Every line written by AI, reviewed by AI, directed by human vision
 
 ---
 
 ## Project Status
 
-- v1.1 debugging is now considered **completed**.
-- The author has a clear roadmap to v2 in `docs/`.
-  - See: [`docs/ROADMAP.md`](docs/ROADMAP.md)
+- **v1.2-alpha** — All v2 roadmap outcomes delivered. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for full status.
+- v1.1 debugging completed. v2 fully delivered as of 2026-03-20.
 
 ## Installation
 
@@ -543,6 +545,38 @@ OpenRouter adapter uses HTTP API:
 - Requires `openrouter_api_key` in `secrets.json`
 - Supports multiple models via `model` parameter
 - Stateless (HASHI manages conversation history)
+- **Tool execution layer** — enable in `agents.json` with a `tools` key:
+
+```json
+{
+  "engine": "openrouter-api",
+  "model": "anthropic/claude-sonnet-4.6",
+  "tools": {
+    "allowed": ["bash", "file_read", "file_write", "file_list", "apply_patch",
+                "web_search", "web_fetch", "http_request",
+                "process_list", "process_kill", "telegram_send"],
+    "max_loops": 15
+  }
+}
+```
+
+**Available tools:**
+
+| Tool | Description |
+|------|-------------|
+| `bash` | Run shell commands (sandboxed to workspace, timeout + blocklist controls) |
+| `file_read` | Read files with offset/limit pagination |
+| `file_write` | Write/create files (size-capped, parent dirs auto-created) |
+| `file_list` | List directories with optional glob filter and recursive mode |
+| `apply_patch` | Apply unified diff patches to files (dry-run validated before apply) |
+| `process_list` | List running processes filtered by name (requires `psutil`) |
+| `process_kill` | Send SIGTERM or SIGKILL to a process by PID |
+| `telegram_send` | Send Telegram messages by chat_id or HASHI agent_id |
+| `http_request` | Arbitrary HTTP requests (GET/POST/PUT/DELETE/PATCH) for external APIs |
+| `web_search` | Brave Search API (requires `brave_api_key` in `secrets.json`) |
+| `web_fetch` | Fetch any URL and return content as Markdown |
+
+No `tools` key in config = fully backward compatible, tools disabled.
 
 ---
 
@@ -810,9 +844,27 @@ export BRIDGE_DEBUG=1
 
 ---
 
+### TUI Interface
+
+`tui.py` provides a terminal-first interface built with [Textual](https://github.com/Textualize/textual):
+
+```bash
+python tui.py
+```
+
+**Panels:**
+- **Log panel** (upper ~80%) — real-time stdout/stderr from the bridge process, auto-scroll
+- **Chat input bar** (lower ~20%) — send messages to any active agent via HTTP API Gateway
+- **Status bar** — current agent, backend, bridge uptime, gateway reachability
+- **Agent selector** — hotkey to switch which agent receives your chat input
+
+`main.py` remains unchanged. Graceful degradation: if API Gateway is unavailable, chat is disabled and logs still stream.
+
+---
+
 ## ⚠️ Important Warnings
 
-### This is Version 1.0
+### This is Version 1.2-alpha
 
 HASHI version 1.0 is a **working prototype** built entirely through AI-assisted development ("Vibe-Coding"). While functional and field-tested by the author, it is **not production-ready**.
 
@@ -845,7 +897,7 @@ If you encounter bugs or unexpected behavior, please report them on the GitHub I
 
 This marks the first public release of HASHI - a milestone in demonstrating what's possible when human vision directs AI execution.
 
-**What's Included in v1.0:**
+**What's Included (v1.2-alpha):**
 - ✅ Multi-language onboarding (9 languages)
 - ✅ Support for 4 backends (Gemini CLI, Claude CLI, Codex CLI, OpenRouter)
 - ✅ Telegram + WhatsApp + Workbench transports
@@ -854,6 +906,12 @@ This marks the first public release of HASHI - a milestone in demonstrating what
 - ✅ Memory system (vector-based retrieval)
 - ✅ Handoff context recovery
 - ✅ Multi-agent workspace management
+- ✅ **Flex/fixed backend switching** — `/backend` switches CLI ↔ OpenRouter mid-conversation
+- ✅ **TUI interface** — `tui.py` split-panel terminal UI (log stream + chat input)
+- ✅ **Tool execution layer** — 11 built-in tools for OpenRouter agents (bash, file ops, web, APIs)
+- ✅ **/dream skill** — nightly AI memory consolidation with undo snapshot
+- ✅ **Process-tree stop** — `/stop` kills entire subprocess tree, no zombie processes
+- ✅ **/retry persistence** — resends last prompt or reruns last response
 
 **Coming in Future Versions:**
 - Enhanced security (API Gateway authentication)
