@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.2.0-alpha] - 2026-03-20
+
+### ✨ Added
+
+- **`/dream` skill — nightly AI memory consolidation** (`skills/dream/`): agents can now "dream" at 01:30 daily, using an LLM to reflect on the day's transcript, extract important memories into `bridge_memory.sqlite`, and optionally update `AGENT.md` with behavioral insights. Includes snapshot-based `/skill dream undo` (no LLM required) for morning rollback, a persistent `dream_log.md`, and on/off toggle via `tasks.json` cron with `action: "skill:dream"`.
+
+### 🔧 Fixed
+
+- **Force-stop now kills entire process tree** — `/stop` previously only killed the main PID; child processes (e.g. Node.js workers spawned by Gemini CLI) stayed alive and held stdout/stderr pipes open, permanently blocking the queue processor.
+  - `adapters/base.py`: `force_kill_process_tree` now uses `os.killpg()` on Linux to kill the whole process group.
+  - `adapters/gemini_cli.py`: subprocess launched with `start_new_session=True`; active read tasks tracked in `self._active_read_tasks` and cancelled on `shutdown()`.
+  - `adapters/claude_cli.py`: same read-task cancellation fix applied.
+  - `adapters/codex_cli.py`: same `start_new_session=True` + read-task cancellation fix applied.
+
+---
+
 ## [1.1.0] - 2026-03-18
 
 ### ✨ Highlights

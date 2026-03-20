@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import os
 import time
 import asyncio
 import logging
@@ -32,6 +33,7 @@ class ClaudeCLIAdapter(BaseBackend):
         super().__init__(agent_config, global_config, api_key)
         self.logger = logging.getLogger(f"Backend.Claude.{self.config.name}")
         self.current_proc = None
+        self._active_read_tasks: list[asyncio.Task] = []
         self.cmd_base = self.global_config.claude_cmd
         self.system_prompt_source = None
         self.effort = (self.config.extra or {}).get("effort", "low")
@@ -279,6 +281,9 @@ class ClaudeCLIAdapter(BaseBackend):
                 f"(stateless=True, retry={is_retry}, stdin={stdin_data is not None}, "
                 f"streaming={use_streaming}, prompt_len={len(prompt)}, cwd={self.config.workspace_dir})"
             )
+            _extra_kwargs = {}
+            if os.name != "nt":
+                _extra_kwargs["start_new_session"] = True
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
@@ -286,6 +291,7 @@ class ClaudeCLIAdapter(BaseBackend):
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(self.config.workspace_dir),
                 limit=1024 * 1024,  # 1 MB readline buffer (default 64 KB too small for large JSON events)
+                **_extra_kwargs,
             )
             self.current_proc = proc  # keep ref for shutdown/kill
             self.logger.info(
@@ -363,6 +369,7 @@ class ClaudeCLIAdapter(BaseBackend):
             self.logger.info(f"[stream-json] stdout EOF after {line_count} lines")
 
         stdout_task = asyncio.create_task(_read_stdout())
+        self._active_read_tasks = [stdout_task, stderr_task]
 
         hard_deadline = started + self.HARD_TIMEOUT_SEC
         while proc.returncode is None:
@@ -397,6 +404,7 @@ class ClaudeCLIAdapter(BaseBackend):
             )
             self.current_proc = None
             await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+            self._active_read_tasks = []
             return BackendResponse(
                 text="",
                 duration_ms=duration_ms,
@@ -408,8 +416,8 @@ class ClaudeCLIAdapter(BaseBackend):
                 is_success=False,
             )
 
-        await stdout_task
-        await stderr_task
+        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+        self._active_read_tasks = []
         await proc.wait()
         returncode = proc.returncode
         self.current_proc = None
@@ -598,3 +606,7 @@ class ClaudeCLIAdapter(BaseBackend):
                 reason="backend_shutdown",
             )
             self.current_proc = None
+        for task in self._active_read_tasks:
+            if not task.done():
+                task.cancel()
+        self._active_read_tasks = []

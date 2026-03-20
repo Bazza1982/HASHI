@@ -32,6 +32,7 @@ class CodexCLIAdapter(BaseBackend):
         super().__init__(agent_config, global_config, api_key)
         self.logger = logging.getLogger(f"Backend.Codex.{self.config.name}")
         self.current_proc = None
+        self._active_read_tasks: list[asyncio.Task] = []
         self.effort = ((self.config.extra or {}).get("effort") or "medium").lower()
         self.cmd_base = self.global_config.codex_cmd
         if os.name == "nt" and Path(self.cmd_base).suffix.lower() not in {".cmd", ".exe", ".bat", ".ps1"}:
@@ -230,6 +231,9 @@ class CodexCLIAdapter(BaseBackend):
                 f"(stateless=True, retry={is_retry}, stdin={stdin_data is not None}, "
                 f"prompt_len={len(built_prompt)}, cwd={self.config.workspace_dir})"
             )
+            _extra_kwargs = {}
+            if os.name != "nt":
+                _extra_kwargs["start_new_session"] = True
             self.current_proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
@@ -237,6 +241,7 @@ class CodexCLIAdapter(BaseBackend):
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(self.config.workspace_dir),
                 limit=16 * 1024 * 1024,  # 16 MB readline buffer — Codex embeds full command output in single JSON lines
+                **_extra_kwargs,
             )
             # Capture local ref to avoid race with shutdown() nulling self.current_proc
             proc = self.current_proc
@@ -285,6 +290,7 @@ class CodexCLIAdapter(BaseBackend):
                     stderr_chunks.append(chunk)
 
             stderr_task = asyncio.create_task(_read_stderr())
+            self._active_read_tasks = [stdout_task, stderr_task]
             if stdin_data is not None and proc.stdin is not None:
                 proc.stdin.write(stdin_data)
                 await proc.stdin.drain()
@@ -319,6 +325,7 @@ class CodexCLIAdapter(BaseBackend):
                 )
                 self.current_proc = None
                 await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+                self._active_read_tasks = []
                 return BackendResponse(
                     text="",
                     duration_ms=duration_ms,
@@ -330,8 +337,8 @@ class CodexCLIAdapter(BaseBackend):
                     is_success=False,
                 )
 
-            await stdout_task
-            await stderr_task
+            await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+            self._active_read_tasks = []
             stderr_data = b"".join(stderr_chunks)
             await proc.wait()
             returncode = proc.returncode
@@ -403,3 +410,7 @@ class CodexCLIAdapter(BaseBackend):
                 reason="backend_shutdown",
             )
             self.current_proc = None
+        for task in self._active_read_tasks:
+            if not task.done():
+                task.cancel()
+        self._active_read_tasks = []

@@ -87,6 +87,38 @@ def load_json_relaxed(path: Path) -> dict:
     return json.loads("\n".join(lines))
 
 
+def load_openclaw_config(source: Path) -> tuple[dict, Path]:
+    """Load the primary OpenClaw config, falling back to valid backups if needed."""
+    candidates = [source / "openclaw.json"] + sorted(source.glob("openclaw.json.bak*"))
+    errors: list[str] = []
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        try:
+            return load_json_relaxed(candidate), candidate
+        except Exception as exc:
+            errors.append(f"{candidate.name}: {exc}")
+
+    joined = "; ".join(errors) if errors else "no config files found"
+    raise RuntimeError(f"Failed to load any OpenClaw config from {source}: {joined}")
+
+
+def load_json_with_backups(path: Path) -> tuple[dict, Path]:
+    """Load a JSON file, falling back to sibling .bak files when necessary."""
+    candidates = [path] + sorted(path.parent.glob(f"{path.name}.bak*"))
+    errors: list[str] = []
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        try:
+            return json.loads(candidate.read_text(encoding="utf-8-sig")), candidate
+        except Exception as exc:
+            errors.append(f"{candidate.name}: {exc}")
+
+    joined = "; ".join(errors) if errors else "no config files found"
+    raise RuntimeError(f"Failed to load any JSON config for {path}: {joined}")
+
+
 def discover_agents(oc: dict) -> list[dict]:
     """Extract agent list from openclaw.json."""
     return oc.get("agents", {}).get("list", [])
@@ -128,7 +160,7 @@ def merge_identity_docs(agent_dir: Path) -> str | None:
 
 
 def copy_memories(agent_dir: Path, target_workspace: Path, apply: bool) -> list[str]:
-    """Copy MEMORY.md and ALL memory/*.md files (journals + state) into target workspace."""
+    """Copy MEMORY.md and the full memory/ tree into the target workspace."""
     actions = []
 
     # MEMORY.md -> workspace root
@@ -139,18 +171,20 @@ def copy_memories(agent_dir: Path, target_workspace: Path, apply: bool) -> list[
         if apply:
             shutil.copy2(str(mem_file), str(dest))
 
-    # memory/* -> memory/ (preserve all state files, not just journals)
+    # memory/** -> memory/ (preserve journals, nested folders, and state files)
     mem_dir = agent_dir / "memory"
     if mem_dir.is_dir():
         target_mem_dir = target_workspace / "memory"
-        all_files = sorted(mem_dir.glob("*"))
-        files = [f for f in all_files if f.is_file()]
+        files = [f for f in sorted(mem_dir.rglob("*")) if f.is_file()]
         if files:
             actions.append(f"  Copy {len(files)} memory files -> {target_mem_dir}/")
             if apply:
                 target_mem_dir.mkdir(parents=True, exist_ok=True)
                 for f in files:
-                    shutil.copy2(str(f), str(target_mem_dir / f.name))
+                    rel = f.relative_to(mem_dir)
+                    dest = target_mem_dir / rel
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(str(f), str(dest))
     return actions
 
 
@@ -494,7 +528,7 @@ def main():
         sys.exit(1)
 
     # --- Load configs ---
-    oc = load_json_relaxed(oc_json_path)
+    oc, oc_loaded_from = load_openclaw_config(source)
     with open(agents_json_path, "r", encoding="utf-8-sig") as f:
         bridge_cfg = json.load(f)
     with open(secrets_json_path, "r", encoding="utf-8-sig") as f:
@@ -521,6 +555,7 @@ def main():
         print("=== APPLYING CHANGES ===\n")
 
     print(f"Source: {source}")
+    print(f"OpenClaw config: {oc_loaded_from}")
     print(f"Target: {target}")
     print(f"OpenClaw agents found: {[a['id'] for a in oc_agents]}")
     print(f"Telegram bindings: {bindings}")
@@ -703,11 +738,12 @@ def main():
     cron_jobs_path = source / "cron" / "jobs.json"
     if cron_jobs_path.is_file():
         try:
-            cron_data = json.loads(cron_jobs_path.read_text(encoding="utf-8-sig"))
+            cron_data, cron_loaded_from = load_json_with_backups(cron_jobs_path)
             oc_jobs = cron_data.get("jobs", [])
         except Exception as e:
             print(f"WARNING: Failed to read {cron_jobs_path}: {e}")
             oc_jobs = []
+            cron_loaded_from = None
 
         new_heartbeats = []
         new_crons = []
@@ -719,6 +755,8 @@ def main():
             )
 
             print(f"--- Scheduled Tasks ({len(oc_jobs)} OpenClaw jobs) ---")
+            if cron_loaded_from and cron_loaded_from != cron_jobs_path:
+                print(f"  Using backup cron source: {cron_loaded_from}")
 
             # Filter out tasks whose IDs already exist
             new_heartbeats = [h for h in new_heartbeats if h["id"] not in existing_task_ids]

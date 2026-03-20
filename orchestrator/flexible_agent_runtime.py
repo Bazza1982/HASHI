@@ -1101,6 +1101,7 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CommandHandler("mode", self._wrap_cmd("mode", self.cmd_mode)))
         self.app.add_handler(CommandHandler("new", self._wrap_cmd("new", self.cmd_new)))
         self.app.add_handler(CommandHandler("wipe", self._wrap_cmd("wipe", self.cmd_wipe)))
+        self.app.add_handler(CommandHandler("reset", self._wrap_cmd("reset", self.cmd_reset)))
         self.app.add_handler(CommandHandler("clear", self._wrap_cmd("clear", self.cmd_clear)))
         self.app.add_handler(CommandHandler("stop", self._wrap_cmd("stop", self.cmd_stop)))
         self.app.add_handler(CommandHandler("terminate", self._wrap_cmd("terminate", self.cmd_terminate)))
@@ -2528,6 +2529,89 @@ class FlexibleAgentRuntime:
             "Only agent.md instructions remain. Start fresh with /new.",
         )
 
+    async def cmd_reset(self, update: Update, context: Any):
+        """Soft reset: wipe workspace state but preserve agent identity and /sys prompts.
+
+        Goal: after /reset, agent.md, AGENT.md, and sys_prompts.json are kept intact —
+        personality and /sys slots survive. Everything else (memory, transcripts,
+        handoff, backend_state, etc.) is cleared.
+
+        Usage:
+          /reset           -> shows warning
+          /reset CONFIRM   -> executes reset
+        """
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        if self._backend_busy():
+            await self._reply_text(update, "Reset is blocked while a request is running or queued. Use /stop first.")
+            return
+
+        args = [a.strip() for a in (context.args or []) if a.strip()]
+        if not args or args[0].upper() != "CONFIRM":
+            await self._reply_text(
+                update,
+                "⚠️ /reset will clear this agent's memory, transcripts, and session state.\n"
+                "agent.md and /sys prompt slots will be preserved — the agent's identity stays intact.\n\n"
+                "To proceed: /reset CONFIRM",
+            )
+            return
+
+        keep_names = {"agent.md", "AGENT.md", "sys_prompts.json"}
+        removed_files = 0
+        removed_dirs = 0
+
+        # Stop any backend process just in case.
+        if self.backend_manager.current_backend:
+            with suppress(Exception):
+                await self.backend_manager.current_backend.shutdown()
+
+        # Wipe workspace contents (keep identity + sys prompts)
+        for child in list(self.workspace_dir.iterdir()):
+            if child.name in keep_names:
+                continue
+            try:
+                if child.is_dir():
+                    shutil.rmtree(child)
+                    removed_dirs += 1
+                else:
+                    child.unlink(missing_ok=True)
+                    removed_files += 1
+            except Exception:
+                pass
+
+        # Re-create essential dirs
+        self.workspace_dir.mkdir(parents=True, exist_ok=True)
+        self.memory_dir = self.workspace_dir / "memory"
+        self.backend_state_dir = self.workspace_dir / "backend_state"
+        self.memory_dir.mkdir(parents=True, exist_ok=True)
+        self.backend_state_dir.mkdir(parents=True, exist_ok=True)
+
+        # Re-init memory/handoff subsystems (fresh), reuse existing sys_prompt_manager
+        self.memory_index = MemoryIndex(self.workspace_dir / "memory_index.sqlite")
+        self.handoff_builder = HandoffBuilder(self.workspace_dir)
+        self.memory_store = BridgeMemoryStore(self.workspace_dir)
+        self.context_assembler = BridgeContextAssembler(
+            self.memory_store,
+            self.config.system_md,
+            active_skill_provider=self._get_active_skill_sections,
+            sys_prompt_manager=self.sys_prompt_manager,
+        )
+
+        # Reset any pending continuity
+        self._pending_auto_recall_context = None
+        self._pending_session_primer = None
+
+        # Start a fresh backend session if supported
+        if self.backend_manager.current_backend and getattr(self.backend_manager.current_backend.capabilities, "supports_sessions", False):
+            with suppress(Exception):
+                await self.backend_manager.current_backend.handle_new_session()
+
+        await self._reply_text(
+            update,
+            f"✅ Reset workspace for {self.name}. Removed {removed_dirs} dirs and {removed_files} files.\n"
+            "Agent identity and /sys slots are intact. Start fresh with /new.",
+        )
+
     async def cmd_clear(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
@@ -2571,14 +2655,56 @@ class FlexibleAgentRuntime:
             f"Stopped execution. Cleared {dropped} queued messages and killed active backend process tree.",
         )
 
+    def _load_last_text_from_transcript(self, role: str) -> str | None:
+        """Read the last message of the given role from transcript.jsonl."""
+        try:
+            if not self.transcript_log_path.exists():
+                return None
+            last_text = None
+            with open(self.transcript_log_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        if entry.get("role") == role and entry.get("text"):
+                            last_text = entry["text"]
+                    except Exception:
+                        pass
+            return last_text
+        except Exception:
+            return None
+
     async def cmd_retry(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
         args = [a.strip().lower() for a in (context.args or []) if a.strip()]
         mode = args[0] if args else "response"
+        chat_id = update.effective_chat.id
         if mode in {"response", "resp"}:
             if not self.last_response:
-                await self._reply_text(update, "No previous response to resend.")
+                # Try to restore last response from transcript (survives reboot)
+                transcript_text = self._load_last_text_from_transcript("assistant")
+                if transcript_text:
+                    await self._reply_text(update, "Restoring last response from transcript...")
+                    await self.send_long_message(
+                        chat_id=chat_id,
+                        text=transcript_text,
+                        purpose="retry-response",
+                    )
+                    return
+                # Fallback: re-run the last prompt
+                if self.last_prompt:
+                    await self._reply_text(update, "No cached response — retrying last prompt...")
+                    await self.enqueue_request(
+                        self.last_prompt.chat_id,
+                        self.last_prompt.prompt,
+                        "retry",
+                        "Retry request",
+                    )
+                else:
+                    await self._reply_text(update, "Nothing to retry — no previous response or prompt.")
                 return
             await self._reply_text(update, "Resending last response...")
             await self.send_long_message(
@@ -2590,7 +2716,13 @@ class FlexibleAgentRuntime:
             return
         if mode in {"prompt", "req", "request"}:
             if not self.last_prompt:
-                await self._reply_text(update, "No previous prompt to rerun.")
+                # Try to restore last user prompt from transcript
+                transcript_text = self._load_last_text_from_transcript("user")
+                if transcript_text:
+                    await self._reply_text(update, "Restoring last prompt from transcript...")
+                    await self.enqueue_request(chat_id, transcript_text, "retry", "Retry request")
+                else:
+                    await self._reply_text(update, "No previous prompt to rerun.")
                 return
             await self._reply_text(update, "Retrying last prompt...")
             await self.enqueue_request(

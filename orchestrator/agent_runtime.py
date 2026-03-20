@@ -3278,14 +3278,56 @@ class BridgeAgentRuntime:
         else:
             await update.message.reply_text(f"Stopped task. Cleared {dropped} queued messages and killed active backend process tree.")
 
+    def _load_last_text_from_transcript(self, role: str) -> str | None:
+        """Read the last message of the given role from conversation_log.jsonl."""
+        try:
+            if not self.transcript_log_path.exists():
+                return None
+            last_text = None
+            with open(self.transcript_log_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        if entry.get("role") == role and entry.get("text"):
+                            last_text = entry["text"]
+                    except Exception:
+                        pass
+            return last_text
+        except Exception:
+            return None
+
     async def cmd_retry(self, update, context):
         if update.effective_user.id != self.global_config.authorized_id:
             return
         args = [a.strip().lower() for a in (context.args or []) if a.strip()]
         mode = args[0] if args else "response"
+        chat_id = update.effective_chat.id
         if mode in {"response", "resp"}:
             if not self.last_response:
-                await update.message.reply_text("No previous response to resend.")
+                # Try to restore last response from transcript (survives reboot)
+                transcript_text = self._load_last_text_from_transcript("assistant")
+                if transcript_text:
+                    await update.message.reply_text("Restoring last response from transcript...")
+                    await self.send_long_message(
+                        chat_id=chat_id,
+                        text=transcript_text,
+                        purpose="retry-response",
+                    )
+                    return
+                # Fallback: re-run last prompt
+                if self.last_prompt:
+                    await update.message.reply_text("No cached response — retrying last prompt...")
+                    await self.enqueue_request(
+                        self.last_prompt.chat_id,
+                        self.last_prompt.prompt,
+                        "retry",
+                        "Retry request",
+                    )
+                else:
+                    await update.message.reply_text("Nothing to retry — no previous response or prompt.")
                 return
             await update.message.reply_text("Resending last response...")
             await self.send_long_message(
@@ -3297,7 +3339,13 @@ class BridgeAgentRuntime:
             return
         if mode in {"prompt", "req", "request"}:
             if not self.last_prompt:
-                await update.message.reply_text("No previous prompt to rerun.")
+                # Try to restore last user prompt from transcript
+                transcript_text = self._load_last_text_from_transcript("user")
+                if transcript_text:
+                    await update.message.reply_text("Restoring last prompt from transcript...")
+                    await self.enqueue_request(chat_id, transcript_text, "retry", "Retry request")
+                else:
+                    await update.message.reply_text("No previous prompt to rerun.")
                 return
             await update.message.reply_text("Retrying last prompt...")
             await self.enqueue_request(
