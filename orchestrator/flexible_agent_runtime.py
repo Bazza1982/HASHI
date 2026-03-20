@@ -1098,6 +1098,7 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CallbackQueryHandler(self.callback_voice, pattern=r"^voice:"))
         self.app.add_handler(CallbackQueryHandler(self.callback_start_agent, pattern=r"^startagent:"))
         self.app.add_handler(CallbackQueryHandler(self.callback_skill, pattern=r"^(skill|skilljob):"))
+        self.app.add_handler(CallbackQueryHandler(self.callback_toggle, pattern=r"^tgl:"))
         self.app.add_handler(CommandHandler("mode", self._wrap_cmd("mode", self.cmd_mode)))
         self.app.add_handler(CommandHandler("new", self._wrap_cmd("new", self.cmd_new)))
         self.app.add_handler(CommandHandler("wipe", self._wrap_cmd("wipe", self.cmd_wipe)))
@@ -1176,9 +1177,9 @@ class FlexibleAgentRuntime:
         names = orchestrator.get_startable_agent_names(exclude_name=self.name)
         if not names:
             return None
-        return InlineKeyboardMarkup(
-            [[InlineKeyboardButton(name, callback_data=f"startagent:{name}")] for name in names]
-        )
+        rows = [[InlineKeyboardButton(name, callback_data=f"startagent:{name}")] for name in names]
+        rows.append([InlineKeyboardButton("ALL", callback_data="startagent:__all__")])
+        return InlineKeyboardMarkup(rows)
 
     def _voice_keyboard(self) -> InlineKeyboardMarkup:
         rows = [
@@ -1207,6 +1208,18 @@ class FlexibleAgentRuntime:
         if orchestrator is None:
             await self._reply_text(update, "Dynamic lifecycle control is unavailable.")
             return
+        arg = " ".join(context.args).strip().lower() if context.args else ""
+        if arg == "all":
+            names = orchestrator.get_startable_agent_names(exclude_name=self.name)
+            if not names:
+                await self._reply_text(update, "All agents are running.")
+                return
+            lines = []
+            for name in names:
+                ok, msg = await orchestrator.start_agent(name)
+                lines.append(msg)
+            await self._reply_text(update, "\n".join(lines))
+            return
         keyboard = self._startable_agent_keyboard()
         if keyboard is None:
             await self._reply_text(update, "All agents are running.")
@@ -1222,6 +1235,16 @@ class FlexibleAgentRuntime:
             await query.answer("Lifecycle control unavailable", show_alert=True)
             return
         _, agent_name = (query.data or "").split(":", 1)
+        if agent_name == "__all__":
+            await query.answer("Starting all agents...")
+            names = orchestrator.get_startable_agent_names(exclude_name=self.name)
+            lines = []
+            for name in names:
+                ok, msg = await orchestrator.start_agent(name)
+                lines.append(msg)
+            result_text = "\n".join(lines) if lines else "All agents are already running."
+            await query.edit_message_text(result_text)
+            return
         await query.answer(f"Starting {agent_name}...")
         ok, message = await orchestrator.start_agent(agent_name)
         await query.edit_message_text(message, reply_markup=self._startable_agent_keyboard())
@@ -1249,6 +1272,175 @@ class FlexibleAgentRuntime:
         await query.edit_message_text(text, reply_markup=self._voice_keyboard())
         await query.answer()
 
+    # ── toggle callback ──────────────────────────────────────────────────────────
+    # Handles: tgl:verbose:on/off, tgl:think:on/off, tgl:mode:fixed/flex,
+    #          tgl:retry:response/prompt, tgl:whisper:small/medium/large,
+    #          tgl:active:on/off/<minutes>, tgl:reboot:min/max/same/<name>
+    async def callback_toggle(self, update: Update, context: Any):
+        query = update.callback_query
+        if not self._is_authorized_user(query.from_user.id):
+            await query.answer()
+            return
+        parts = (query.data or "").split(":", 2)
+        if len(parts) < 3:
+            await query.answer()
+            return
+        _, target, value = parts[0], parts[1], parts[2]
+
+        if target == "verbose":
+            self._verbose = value == "on"
+            _f = self.workspace_dir / ".verbose"
+            if self._verbose:
+                _f.touch()
+            else:
+                _f.unlink(missing_ok=True)
+            state = "ON 🔍" if self._verbose else "OFF"
+            markup = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ ON" if self._verbose else "ON", callback_data="tgl:verbose:on"),
+                InlineKeyboardButton("✅ OFF" if not self._verbose else "OFF", callback_data="tgl:verbose:off"),
+            ]])
+            await query.edit_message_text(f"Verbose mode: {state}", reply_markup=markup)
+            await query.answer(f"Verbose {state}")
+
+        elif target == "think":
+            self._think = value == "on"
+            _f = self.workspace_dir / ".think"
+            if self._think:
+                _f.touch()
+            else:
+                _f.unlink(missing_ok=True)
+            state = "ON 💭" if self._think else "OFF"
+            markup = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ ON" if self._think else "ON", callback_data="tgl:think:on"),
+                InlineKeyboardButton("✅ OFF" if not self._think else "OFF", callback_data="tgl:think:off"),
+            ]])
+            await query.edit_message_text(f"Thinking display: {state}", reply_markup=markup)
+            await query.answer(f"Think {state}")
+
+        elif target == "mode":
+            current = self.backend_manager.agent_mode
+            if value == current:
+                await query.answer(f"Already in {current} mode.")
+                return
+            self.backend_manager.agent_mode = value
+            self.backend_manager._save_state()
+            backend = self.backend_manager.current_backend
+            if value == "fixed":
+                if hasattr(backend, "set_session_mode"):
+                    backend.set_session_mode(True)
+                detail = "CLI session persists · /backend disabled"
+            else:
+                if hasattr(backend, "set_session_mode"):
+                    backend.set_session_mode(False)
+                detail = "Full context injection · /backend enabled"
+            markup = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Fixed" if value == "fixed" else "Fixed", callback_data="tgl:mode:fixed"),
+                InlineKeyboardButton("✅ Flex" if value == "flex" else "Flex", callback_data="tgl:mode:flex"),
+            ]])
+            await query.edit_message_text(f"Mode: <b>{value}</b>\n{detail}", parse_mode="HTML", reply_markup=markup)
+            await query.answer(f"Switched to {value}")
+
+        elif target == "retry":
+            chat_id = query.message.chat_id
+            await query.answer(f"Retrying {value}...")
+            if value == "response":
+                if self.last_response:
+                    await self.send_long_message(chat_id=self.last_response["chat_id"], text=self.last_response["text"],
+                                                  request_id=self.last_response.get("request_id"), purpose="retry-response")
+                else:
+                    transcript_text = self._load_last_text_from_transcript("assistant")
+                    if transcript_text:
+                        await self.send_long_message(chat_id=chat_id, text=transcript_text, purpose="retry-response")
+                    elif self.last_prompt:
+                        await self.enqueue_request(self.last_prompt.chat_id, self.last_prompt.prompt, "retry", "Retry request")
+                    else:
+                        await query.answer("Nothing to retry.", show_alert=True)
+            else:  # prompt
+                if self.last_prompt:
+                    await self.enqueue_request(self.last_prompt.chat_id, self.last_prompt.prompt, "retry", "Retry request")
+                else:
+                    transcript_text = self._load_last_text_from_transcript("user")
+                    if transcript_text:
+                        await self.enqueue_request(chat_id, transcript_text, "retry", "Retry request")
+                    else:
+                        await query.answer("No previous prompt.", show_alert=True)
+
+        elif target == "whisper":
+            from orchestrator.voice_transcriber import get_transcriber
+            mapping = {"small": "small", "medium": "medium", "large": "large-v3"}
+            new_size = mapping.get(value)
+            if not new_size:
+                await query.answer("Unknown size.", show_alert=True)
+                return
+            transcriber = get_transcriber()
+            transcriber.model_size = new_size
+            transcriber._model = None
+            markup = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ small" if value == "small" else "small", callback_data="tgl:whisper:small"),
+                InlineKeyboardButton("✅ medium" if value == "medium" else "medium", callback_data="tgl:whisper:medium"),
+                InlineKeyboardButton("✅ large" if value == "large" else "large", callback_data="tgl:whisper:large"),
+            ]])
+            await query.edit_message_text(f"Whisper model: <b>{new_size}</b>", parse_mode="HTML", reply_markup=markup)
+            await query.answer(f"Set to {new_size}")
+
+        elif target == "active":
+            if not self.skill_manager:
+                await query.answer("Skill manager not available.", show_alert=True)
+                return
+            if value == "off":
+                _, msg = self.skill_manager.set_active_heartbeat(self.name, enabled=False)
+            elif value == "on":
+                _, msg = self.skill_manager.set_active_heartbeat(self.name, enabled=True,
+                                                                  minutes=self.skill_manager.ACTIVE_HEARTBEAT_DEFAULT_MINUTES)
+            else:
+                try:
+                    mins = int(value)
+                    _, msg = self.skill_manager.set_active_heartbeat(self.name, enabled=True, minutes=mins)
+                except ValueError:
+                    await query.answer("Invalid value.", show_alert=True)
+                    return
+            status = self.skill_manager.describe_active_heartbeat(self.name)
+            markup = self._active_keyboard()
+            await query.edit_message_text(f"{status}\n\n{msg}", reply_markup=markup)
+            await query.answer()
+
+        elif target == "reboot":
+            orchestrator = getattr(self, "orchestrator", None)
+            if orchestrator is None:
+                await query.answer("Hot restart unavailable.", show_alert=True)
+                return
+            if value == "min":
+                mode, label = "min", f"Restarting only <b>{self.name}</b>..."
+            elif value == "max":
+                mode, label = "max", "Restarting all active agents..."
+            elif value.isdigit():
+                all_names = orchestrator.configured_agent_names()
+                num = int(value)
+                mode, label = "number", f"Restarting agent #{num} (<b>{all_names[num - 1]}</b>)..."
+            else:
+                mode, label = "same", "Restarting all running agents..."
+            await query.edit_message_text(label, parse_mode="HTML")
+            await query.answer()
+            orchestrator.request_restart(mode=mode, agent_name=self.name,
+                                          agent_number=int(value) if value.isdigit() else None)
+        else:
+            await query.answer()
+
+    def _active_keyboard(self) -> InlineKeyboardMarkup:
+        default_min = getattr(self.skill_manager, "ACTIVE_HEARTBEAT_DEFAULT_MINUTES", 10) if self.skill_manager else 10
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("ON", callback_data="tgl:active:on"),
+                InlineKeyboardButton("OFF", callback_data="tgl:active:off"),
+            ],
+            [
+                InlineKeyboardButton("10m", callback_data="tgl:active:10"),
+                InlineKeyboardButton("30m", callback_data="tgl:active:30"),
+                InlineKeyboardButton("60m", callback_data="tgl:active:60"),
+            ],
+        ])
+
+    # ── lifecycle commands ───────────────────────────────────────────────────────
     async def cmd_terminate(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
@@ -1267,22 +1459,24 @@ class FlexibleAgentRuntime:
             await self._reply_text(update, "Hot restart is unavailable.")
             return
         arg = " ".join(context.args).strip().lower() if context.args else ""
-        if arg == "help":
+        if not arg or arg == "help":
             all_names = orchestrator.configured_agent_names()
-            lines = [
-                "<b>/reboot</b> — restart all running agents (same selection)",
-                "<b>/reboot min</b> — restart only this bot",
-                "<b>/reboot max</b> — restart all active agents",
-                "<b>/reboot [number]</b> — restart a specific agent by number",
-                "<b>/reboot help</b> — show this help",
-                "",
-                "<b>Agents:</b>",
-            ]
+            lines = ["<b>Reboot</b> — select target:"]
             for i, name in enumerate(all_names, 1):
                 running = name in {rt.name for rt in orchestrator.runtimes}
                 marker = "●" if running else "○"
                 lines.append(f"  {i}. {marker} {name}")
-            await self._reply_text(update, "\n".join(lines), parse_mode="HTML")
+            rows = [
+                [
+                    InlineKeyboardButton("This bot", callback_data="tgl:reboot:min"),
+                    InlineKeyboardButton("All active", callback_data="tgl:reboot:max"),
+                    InlineKeyboardButton("Running only", callback_data="tgl:reboot:same"),
+                ]
+            ]
+            for i, name in enumerate(all_names, 1):
+                rows.append([InlineKeyboardButton(f"#{i} {name}", callback_data=f"tgl:reboot:{i}")])
+            markup = InlineKeyboardMarkup(rows)
+            await self._reply_text(update, "\n".join(lines), parse_mode="HTML", reply_markup=markup)
             return
         if arg == "min":
             mode, label = "min", f"Restarting only <b>{self.name}</b>..."
@@ -1362,6 +1556,16 @@ class FlexibleAgentRuntime:
             await update.message.reply_text(mgr.display_all(), parse_mode="Markdown")
             return
 
+        # /sys output <n> — return raw content of slot, no state change
+        if args[0].lower() == "output":
+            slot = args[1] if len(args) > 1 else ""
+            if slot not in mgr.SLOTS:
+                await update.message.reply_text("Usage: /sys output <1-10>")
+                return
+            text = mgr._slot(slot).get("text", "")
+            await update.message.reply_text(text if text else "(empty)", parse_mode=None)
+            return
+
         slot = args[0]
         if slot not in mgr.SLOTS:
             await update.message.reply_text(f"Invalid slot '{slot}'. Use 1-10.")
@@ -1394,7 +1598,8 @@ class FlexibleAgentRuntime:
         else:
             await update.message.reply_text(
                 "Usage:\n/sys - show all slots\n/sys <n> - show slot\n"
-                "/sys <n> on|off|delete\n/sys <n> save <msg>\n/sys <n> replace <msg>"
+                "/sys <n> on|off|delete\n/sys <n> save <msg>\n/sys <n> replace <msg>\n"
+                "/sys output <n> - return raw content of slot"
             )
 
     async def cmd_credit(self, update, context):
@@ -1506,7 +1711,13 @@ class FlexibleAgentRuntime:
         transcriber = get_transcriber()
 
         if not args:
-            await self._reply_text(update, f"Current Whisper model size: {transcriber.model_size}")
+            cur = transcriber.model_size
+            markup = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ small" if cur == "small" else "small", callback_data="tgl:whisper:small"),
+                InlineKeyboardButton("✅ medium" if cur == "medium" else "medium", callback_data="tgl:whisper:medium"),
+                InlineKeyboardButton("✅ large" if cur.startswith("large") else "large", callback_data="tgl:whisper:large"),
+            ]])
+            await self._reply_text(update, f"Whisper model: <b>{cur}</b>", parse_mode="HTML", reply_markup=markup)
             return
 
         value = args[0]
@@ -1799,10 +2010,15 @@ class FlexibleAgentRuntime:
         else:
             _verbose_file.unlink(missing_ok=True)
         state = "ON 🔍" if self._verbose else "OFF"
+        markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ ON" if self._verbose else "ON", callback_data="tgl:verbose:on"),
+            InlineKeyboardButton("✅ OFF" if not self._verbose else "OFF", callback_data="tgl:verbose:off"),
+        ]])
         await self._reply_text(
             update,
             f"Verbose mode: {state}\n"
-            f"{'Long-task placeholders will show engine, elapsed, idle time and output events.' if self._verbose else 'Placeholders will show concise status only.'}"
+            f"{'Long-task placeholders will show engine, elapsed, idle time and output events.' if self._verbose else 'Placeholders will show concise status only.'}",
+            reply_markup=markup,
         )
 
 
@@ -1822,10 +2038,15 @@ class FlexibleAgentRuntime:
         else:
             _think_file.unlink(missing_ok=True)
         state = "ON 💭" if self._think else "OFF"
+        markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ ON" if self._think else "ON", callback_data="tgl:think:on"),
+            InlineKeyboardButton("✅ OFF" if not self._think else "OFF", callback_data="tgl:think:off"),
+        ]])
         await self._reply_text(
             update,
             f"Thinking display: {state}\n"
-            f"{'Thinking traces will be sent as permanent italic messages every ~60s during generation.' if self._think else 'Thinking traces will not be displayed.'}"
+            f"{'Thinking traces will be sent as permanent italic messages every ~60s during generation.' if self._think else 'Thinking traces will not be displayed.'}",
+            reply_markup=markup,
         )
 
     async def cmd_jobs(self, update: Update, context: Any):
@@ -2034,7 +2255,9 @@ class FlexibleAgentRuntime:
 
         args = [a.strip().lower() for a in (context.args or []) if a.strip()]
         if not args:
-            await self._reply_text(update, self.skill_manager.describe_active_heartbeat(self.name))
+            status = self.skill_manager.describe_active_heartbeat(self.name)
+            markup = self._active_keyboard()
+            await self._reply_text(update, status, reply_markup=markup)
             return
 
         mode = args[0]
@@ -2368,12 +2591,17 @@ class FlexibleAgentRuntime:
         current = self.backend_manager.agent_mode
 
         if not args or args not in ("fixed", "flex"):
+            markup = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Fixed" if current == "fixed" else "Fixed", callback_data="tgl:mode:fixed"),
+                InlineKeyboardButton("✅ Flex" if current == "flex" else "Flex", callback_data="tgl:mode:flex"),
+            ]])
             await self._reply_text(
                 update,
-                f"Current mode: **{current}**\n\n"
-                f"• `/mode fixed` — continuous CLI session, incremental prompts\n"
-                f"• `/mode flex` — multi-backend switching, full context injection",
-                parse_mode="Markdown",
+                f"Current mode: <b>{current}</b>\n\n"
+                f"• <b>fixed</b> — continuous CLI session, incremental prompts\n"
+                f"• <b>flex</b> — multi-backend switching, full context injection",
+                parse_mode="HTML",
+                reply_markup=markup,
             )
             return
 
@@ -2732,7 +2960,11 @@ class FlexibleAgentRuntime:
                 "Retry request",
             )
             return
-        await self._reply_text(update, "Usage: /retry [response|prompt]")
+        markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton("重发回复", callback_data="tgl:retry:response"),
+            InlineKeyboardButton("重跑 Prompt", callback_data="tgl:retry:prompt"),
+        ]])
+        await self._reply_text(update, "Retry — choose action:", reply_markup=markup)
 
     async def handle_message(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):

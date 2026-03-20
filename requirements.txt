@@ -12,3 +12,9 @@ pillow>=9.0.0
 # Optional: Voice/TTS
 # edge-tts>=6.0.0
 # piper-tts>=1.0.0
+
+# Optional: semantic vector memory
+# sqlite-vec>=0.1.6
+# onnxruntime>=1.18.0
+# transformers>=4.44.0
+# tokenizers>=0.19.0
