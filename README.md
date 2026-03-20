@@ -270,7 +270,7 @@ HASHI supports multiple communication channels through a **transport layer**:
 #### Telegram
 - Default transport, enabled by default
 - Requires `telegram_bot_token` in `secrets.json`
-- Commands: `/start`, `/stop`, `/restart`, `/handoff`, `/skill`, etc.
+- Commands: `/new`, `/stop`, `/reboot`, `/handoff`, `/skill`, etc.
 - Supports inline keyboards, file uploads, voice messages
 
 **Setup:**
@@ -323,33 +323,62 @@ HASHI agents respond to both natural language and structured commands:
 
 | Command | Description |
 |---------|-------------|
-| `/start` | Restart conversation, clear context |
-| `/stop` | Pause agent, stop processing new messages |
-| `/restart` | Hot restart agent runtime |
-| `/status` | Show agent status, backend info, memory usage |
-| `/handoff` | Generate context restoration prompt for new session |
-| `/export` | Export daily transcript as markdown |
-| `/skill` | Access skills system (see Skills section) |
+| `/new` | Start a fresh session (clears continuity) |
+| `/stop` | Cancel current processing |
+| `/reboot [min\|max\|#]` | Hot restart agents — shows button menu when called without args |
+| `/status [full]` | Show agent status, backend info |
+| `/handoff` | Restore continuity from recent transcript |
+| `/skill` | Browse and run skills (inline keyboard) |
 | `/help` | Show available commands |
 
-#### Memory Commands
+#### Session & Mode Commands
 
 | Command | Description |
 |---------|-------------|
-| `/remember <text>` | Store long-term memory |
-| `/recall <query>` | Search memory by semantic similarity |
-| `/forget <id>` | Delete specific memory |
-| `/memories` | List all stored memories |
+| `/mode [fixed\|flex]` | Switch between fixed CLI session and flex multi-backend mode (button menu) |
+| `/backend [engine]` | Switch backend — shows inline button picker (flex mode only) |
+| `/model` | View/change active model (inline keyboard) |
+| `/effort` | View/change effort level — Claude/Codex only (inline keyboard) |
+| `/fyi [prompt]` | Refresh bridge environment awareness |
+| `/retry` | Resend last response or re-run last prompt (button menu) |
+| `/park [chat\|delete <n>]` | Save or list parked topics |
+| `/load <n>` | Restore a parked topic |
+| `/sys <n> [on\|off\|save\|output]` | Manage system prompt slots; `/sys output <n>` returns raw text |
+| `/clear` | Clear media directory and reset session state |
+
+#### Toggles & Settings
+
+| Command | Description |
+|---------|-------------|
+| `/verbose [on\|off]` | Toggle detailed long-task status (button menu) |
+| `/think [on\|off]` | Toggle thinking trace display (button menu) |
+| `/active [on\|off\|minutes]` | Toggle proactive heartbeat (button menu) |
+| `/whisper [small\|medium\|large]` | Set local voice transcription model (button menu) |
+| `/voice [on\|off\|menu\|use <alias>]` | Control bridge voice replies (inline keyboard) |
+| `/credit` | Show API credit/usage (OpenRouter only) |
+
+#### Lifecycle Commands
+
+| Command | Description |
+|---------|-------------|
+| `/start [all\|<name>]` | Start a stopped agent — button menu or `all` to start all |
+| `/terminate` | Shut down this agent gracefully |
+
+#### WhatsApp Commands
+
+| Command | Description |
+|---------|-------------|
+| `/wa_on` | Start WhatsApp transport |
+| `/wa_off` | Stop WhatsApp transport |
+| `/wa_send <+number> <msg>` | Send a WhatsApp message |
 
 #### Job Commands
 
 | Command | Description |
 |---------|-------------|
-| `/heartbeat` | Manage heartbeat tasks (periodic checks) |
-| `/cron` | Manage cron jobs (scheduled tasks) |
-| `/job add` | Add new scheduled job |
-| `/job list` | List all jobs |
-| `/job delete <id>` | Delete job |
+| `/jobs` | Show cron and heartbeat jobs with action buttons |
+| `/skill cron` | Full cron job management |
+| `/skill heartbeat` | Full heartbeat job management |
 
 ---
 
@@ -481,10 +510,9 @@ Jobs can invoke skills instead of prompts:
 
 Via Telegram:
 ```
-/heartbeat                  → List heartbeat tasks
-/cron                       → List cron jobs
-/job add                    → Add new job (guided)
-/job delete <id>            → Delete job
+/jobs                       → Show all jobs with action buttons
+/skill cron                 → Cron job management (list, enable/disable, run now)
+/skill heartbeat            → Heartbeat job management (list, enable/disable, run now)
 ```
 
 Via `tasks.json`:
@@ -542,7 +570,7 @@ CLI backends spawn subprocess and communicate via stdin/stdout:
 
 #### OpenRouter Backend
 OpenRouter adapter uses HTTP API:
-- Requires `openrouter_api_key` in `secrets.json`
+- Requires `openrouter_key` (or `<agent_name>_openrouter_key`) in `secrets.json`
 - Supports multiple models via `model` parameter
 - Stateless (HASHI manages conversation history)
 - **Tool execution layer** — enable in `agents.json` with a `tools` key:
@@ -595,35 +623,20 @@ HASHI includes a **vector-based memory system** for long-term context retrieval:
 
 #### How It Works
 
-1. **User stores memory:**
-   ```
-   /remember The user prefers formal academic writing style
-   ```
+1. **Bridge stores memory automatically** — relevant turns are embedded and saved to `bridge_memory.sqlite` in the agent's workspace.
 
 2. **Memory is vectorized:**
-   - Text embedded using sentence-transformers (local)
-   - Vector + text stored in `_memory.json`
-   - Index updated in `_memory_index.json`
+   - Text embedded using BGE-M3 (local ONNX) when available, falling back to hash-based similarity.
+   - Vector + text stored in `bridge_memory.sqlite` (`memory_vec` / `turns_vec` tables).
 
 3. **Context assembly retrieves relevant memories:**
-   - Current user message is vectorized
-   - Top-K similar memories retrieved via cosine similarity
-   - Injected into prompt under `--- RELEVANT LONG-TERM MEMORY ---`
+   - Current user message is vectorized at request time.
+   - Top-K similar memories retrieved via cosine similarity (`sqlite-vec`).
+   - Injected into prompt under `--- RELEVANT LONG-TERM MEMORY ---`.
 
-4. **User recalls memory:**
-   ```
-   /recall writing preferences
-   ```
-   Returns ranked list of relevant memories.
+4. **Memory skill** (`/skill recall`) — toggle bridge auto-recall: if ON, recent continuity is restored once after an unexpected restart (not after `/new`).
 
-#### Memory Commands
-
-```
-/remember <text>               → Store long-term memory
-/recall <query>                → Search memories
-/forget <id>                   → Delete memory by ID
-/memories                      → List all memories
-```
+> Memory is bridge-managed. There are no `/remember` / `/recall` / `/forget` slash commands — memory is automatic.
 
 #### Memory in Prompts
 

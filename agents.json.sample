@@ -1,0 +1,328 @@
+{
+  "global": {
+    "authorized_id": 0,
+    "workbench_port": 18802
+  },
+  "agents": [
+    {
+      "name": "hashiko",
+      "display_name": "Hashiko",
+      "emoji": "🐣",
+      "type": "flex",
+      "engine": "claude-cli",
+      "system_md": "workspaces/hashiko/agent.md",
+      "workspace_dir": "workspaces/hashiko",
+      "is_active": true,
+      "model": "claude-sonnet-4-6",
+      "allowed_backends": [
+        {
+          "engine": "gemini-cli",
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "engine": "claude-cli",
+          "model": "claude-sonnet-4-6"
+        },
+        {
+          "engine": "codex-cli",
+          "model": "gpt-5.4"
+        },
+        {
+          "engine": "openrouter-api",
+          "model": "anthropic/claude_sonnet-4.6"
+        }
+      ],
+      "active_backend": "claude-cli"
+    },
+    {
+      "name": "samantha",
+      "display_name": "Samantha",
+      "emoji": "🧡",
+      "type": "flex",
+      "engine": "claude-cli",
+      "system_md": "workspaces/samantha/agent.md",
+      "workspace_dir": "workspaces/samantha",
+      "is_active": true,
+      "model": "claude-sonnet-4-6",
+      "allowed_backends": [
+        {
+          "engine": "gemini-cli",
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "engine": "claude-cli",
+          "model": "claude-sonnet-4-6"
+        },
+        {
+          "engine": "codex-cli",
+          "model": "gpt-5.4"
+        },
+        {
+          "engine": "openrouter-api",
+          "model": "anthropic/claude_sonnet-4.6"
+        }
+      ],
+      "active_backend": "claude-cli"
+    },
+    {
+      "name": "baymax",
+      "display_name": "大白 Baymax",
+      "emoji": "🤖",
+      "type": "flex",
+      "engine": "claude-cli",
+      "system_md": "workspaces/baymax/agent.md",
+      "workspace_dir": "workspaces/baymax",
+      "is_active": false,
+      "model": "claude-sonnet-4-6",
+      "allowed_backends": [
+        {
+          "engine": "gemini-cli",
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "engine": "claude-cli",
+          "model": "claude-sonnet-4-6"
+        },
+        {
+          "engine": "codex-cli",
+          "model": "gpt-5.4"
+        },
+        {
+          "engine": "openrouter-api",
+          "model": "anthropic/claude_sonnet-4.6"
+        }
+      ],
+      "active_backend": "claude-cli"
+    },
+    {
+      "name": "yoda",
+      "display_name": "Master Yoda",
+      "emoji": "🧘‍♂️",
+      "type": "flex",
+      "engine": "claude-cli",
+      "system_md": "workspaces/yoda/agent.md",
+      "workspace_dir": "workspaces/yoda",
+      "is_active": false,
+      "model": "claude-sonnet-4-6",
+      "allowed_backends": [
+        {
+          "engine": "gemini-cli",
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "engine": "claude-cli",
+          "model": "claude-sonnet-4-6"
+        },
+        {
+          "engine": "codex-cli",
+          "model": "gpt-5.4"
+        },
+        {
+          "engine": "openrouter-api",
+          "model": "anthropic/claude_sonnet-4.6"
+        }
+      ],
+      "active_backend": "claude-cli"
+    },
+    {
+      "name": "doraemon",
+      "display_name": "ドラえもん Doraemon",
+      "emoji": "🐱",
+      "type": "flex",
+      "engine": "claude-cli",
+      "system_md": "workspaces/doraemon/agent.md",
+      "workspace_dir": "workspaces/doraemon",
+      "is_active": false,
+      "model": "claude-sonnet-4-6",
+      "allowed_backends": [
+        {
+          "engine": "gemini-cli",
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "engine": "claude-cli",
+          "model": "claude-sonnet-4-6"
+        },
+        {
+          "engine": "codex-cli",
+          "model": "gpt-5.4"
+        },
+        {
+          "engine": "openrouter-api",
+          "model": "anthropic/claude_sonnet-4.6"
+        }
+      ],
+      "active_backend": "claude-cli"
+    },
+    {
+      "name": "zelda",
+      "display_name": "ゼルダ姫 Princess Zelda",
+      "emoji": "🌸",
+      "type": "flex",
+      "engine": "claude-cli",
+      "system_md": "workspaces/zelda/agent.md",
+      "workspace_dir": "workspaces/zelda",
+      "is_active": false,
+      "model": "claude-sonnet-4-6",
+      "allowed_backends": [
+        {
+          "engine": "gemini-cli",
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "engine": "claude-cli",
+          "model": "claude-sonnet-4-6"
+        },
+        {
+          "engine": "codex-cli",
+          "model": "gpt-5.4"
+        },
+        {
+          "engine": "openrouter-api",
+          "model": "anthropic/claude_sonnet-4.6"
+        }
+      ],
+      "active_backend": "claude-cli"
+    },
+    {
+      "name": "xiao_yao",
+      "display_name": "李逍遥 Li Xiaoyao",
+      "emoji": "🗡️",
+      "type": "flex",
+      "engine": "claude-cli",
+      "system_md": "workspaces/xiao_yao/agent.md",
+      "workspace_dir": "workspaces/xiao_yao",
+      "is_active": false,
+      "model": "claude-sonnet-4-6",
+      "allowed_backends": [
+        {
+          "engine": "gemini-cli",
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "engine": "claude-cli",
+          "model": "claude-sonnet-4-6"
+        },
+        {
+          "engine": "codex-cli",
+          "model": "gpt-5.4"
+        },
+        {
+          "engine": "openrouter-api",
+          "model": "anthropic/claude_sonnet-4.6"
+        }
+      ],
+      "extra": {
+        "authorized_telegram_ids": [
+          7430217666,
+          8299708872
+        ]
+      },
+      "active_backend": "claude-cli"
+    },
+    {
+      "name": "temp",
+      "display_name": "临时女优",
+      "emoji": "🧡",
+      "type": "flex",
+      "engine": "claude-cli",
+      "system_md": "workspaces/temp/agent.md",
+      "workspace_dir": "workspaces/temp",
+      "is_active": false,
+      "model": "claude-sonnet-4-6",
+      "allowed_backends": [
+        {
+          "engine": "gemini-cli",
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "engine": "claude-cli",
+          "model": "claude-sonnet-4-6"
+        },
+        {
+          "engine": "codex-cli",
+          "model": "gpt-5.4"
+        },
+        {
+          "engine": "openrouter-api",
+          "model": "anthropic/claude_sonnet-4.6"
+        }
+      ],
+      "active_backend": "claude-cli"
+    },
+    {
+      "name": "kasumi",
+      "display_name": "小霞",
+      "emoji": "🌸",
+      "type": "flex",
+      "engine": "openrouter-api",
+      "system_md": "workspaces/kasumi/agent.md",
+      "workspace_dir": "workspaces/kasumi",
+      "telegram_token_key": "kasumi",
+      "is_active": true,
+      "model": "moonshotai/kimi-k2",
+      "allowed_backends": [
+        {
+          "engine": "gemini-cli",
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "engine": "claude-cli",
+          "model": "claude-sonnet-4-6"
+        },
+        {
+          "engine": "codex-cli",
+          "model": "gpt-5.4"
+        },
+        {
+          "engine": "openrouter-api",
+          "model": "moonshotai/kimi-k2",
+          "tools": {
+            "allowed": ["bash", "file_read", "file_write", "web_search", "web_fetch"],
+            "max_loops": 15
+          }
+        }
+      ],
+      "active_backend": "openrouter-api"
+    },
+    {
+      "name": "xiao_tian",
+      "display_name": "小天",
+      "emoji": "💬",
+      "type": "limited",
+      "engine": "openrouter-api",
+      "system_md": "workspaces/xiao_tian/agent.md",
+      "workspace_dir": "workspaces/xiao_tian",
+      "telegram_token_key": "xiao_tian",
+      "is_active": true,
+      "model": "openrouter/auto",
+      "allowed_backends": [
+        {
+          "engine": "openrouter-api",
+          "model": "openrouter/auto"
+        }
+      ],
+      "active_backend": "openrouter-api",
+      "extra": {
+        "authorized_telegram_ids": [
+          8299708872,
+          7430217666
+        ],
+        "limited_policy": {
+          "mode": "denylist",
+          "disabled_commands": [
+            "credit",
+            "retry"
+          ],
+          "enabled_commands": [
+            "jobs",
+            "verbose",
+            "think",
+            "voice",
+            "whisper"
+          ]
+        }
+      }
+    }
+  ]
+}

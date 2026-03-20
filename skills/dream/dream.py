@@ -31,6 +31,10 @@ from pathlib import Path
 PROJECT_ROOT = Path(os.environ.get("BRIDGE_PROJECT_ROOT", Path(__file__).parent.parent.parent))
 WORKSPACE_DIR = Path(os.environ.get("BRIDGE_WORKSPACE_DIR", PROJECT_ROOT / "workspaces" / "lily"))
 AGENT_NAME = WORKSPACE_DIR.name
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from orchestrator.bridge_memory import BridgeMemoryStore
 
 TASKS_PATH = PROJECT_ROOT / "tasks.json"
 SECRETS_PATH = PROJECT_ROOT / "secrets.json"
@@ -47,6 +51,7 @@ MAX_NEW_MEMORIES = 5
 MIN_IMPORTANCE = 0.7
 MAX_AGENT_MD_SECTIONS = 3
 SNAPSHOT_RETENTION_DAYS = 7
+_MEMORY_STORE: BridgeMemoryStore | None = None
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
@@ -134,57 +139,43 @@ def _call_openrouter(api_key: str, messages: list[dict], model: str = "anthropic
         raise RuntimeError(f"OpenRouter HTTP {e.code}: {body[:300]}") from e
 
 
-def _hash_embed(text: str, dim: int = 256) -> list[float]:
-    """Simple deterministic embedding matching bridge_memory LocalEmbeddingEncoder."""
-    import re
-    tokens = re.findall(r"[a-zA-Z0-9_]+", text.lower())
-    vec = [0.0] * dim
-    for tok in tokens:
-        h = hash(tok) & 0x7FFFFFFF
-        vec[h % dim] += 1.0
-    norm = sum(x * x for x in vec) ** 0.5
-    if norm > 0:
-        vec = [x / norm for x in vec]
-    return vec
+def _memory_store() -> BridgeMemoryStore:
+    global _MEMORY_STORE
+    if _MEMORY_STORE is None:
+        _MEMORY_STORE = BridgeMemoryStore(WORKSPACE_DIR)
+    return _MEMORY_STORE
 
 
-def _write_memory(content: str, memory_type: str, source: str, importance: float):
-    """Write a single memory entry to bridge_memory.sqlite."""
-    if not MEMORY_DB_PATH.exists():
-        return
-    emb = json.dumps(_hash_embed(content))
-    ts = _now_iso()
-    with sqlite3.connect(str(MEMORY_DB_PATH)) as conn:
-        cur = conn.execute(
-            "INSERT INTO memories (ts, memory_type, source, content, importance, embedding) VALUES (?, ?, ?, ?, ?, ?)",
-            (ts, memory_type, source, content, importance, emb),
-        )
-        memory_id = cur.lastrowid
-        conn.execute(
-            "INSERT INTO memory_fts (content, memory_id, source) VALUES (?, ?, ?)",
-            (content, memory_id, source),
-        )
-        conn.commit()
+def _write_memory(content: str, memory_type: str, source: str, importance: float) -> int | None:
+    """Write a single memory entry through the canonical bridge store."""
+    return _memory_store().record_memory(
+        memory_type=memory_type,
+        source=source,
+        content=content,
+        importance=importance,
+    )
 
 
 def _delete_memories_by_ids(ids: list[int]):
     if not ids or not MEMORY_DB_PATH.exists():
         return
     with sqlite3.connect(str(MEMORY_DB_PATH)) as conn:
+        try:
+            import sqlite_vec
+
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+        except Exception:
+            pass
         placeholders = ",".join("?" * len(ids))
+        try:
+            conn.execute(f"DELETE FROM memory_vec WHERE memory_id IN ({placeholders})", ids)
+        except Exception:
+            pass
         conn.execute(f"DELETE FROM memory_fts WHERE memory_id IN ({placeholders})", ids)
         conn.execute(f"DELETE FROM memories WHERE id IN ({placeholders})", ids)
         conn.commit()
-
-
-def _get_recent_memory_ids(limit: int) -> list[int]:
-    if not MEMORY_DB_PATH.exists():
-        return []
-    with sqlite3.connect(str(MEMORY_DB_PATH)) as conn:
-        rows = conn.execute(
-            "SELECT id FROM memories ORDER BY id DESC LIMIT ?", (limit,)
-        ).fetchall()
-    return [r[0] for r in rows]
 
 
 # ─── snapshot ─────────────────────────────────────────────────────────────────
@@ -402,16 +393,14 @@ RULES (follow strictly):
 
     # Write memories
     for mem in valid_memories:
-        _write_memory(
+        memory_id = _write_memory(
             content=mem["content"],
             memory_type=mem.get("memory_type", "episodic"),
             source=mem.get("source", f"dream:{_today_str()}"),
             importance=float(mem.get("importance", 0.8)),
         )
-
-    # Get IDs of newly added memories (the last N by id)
-    if valid_memories:
-        added_memory_ids = _get_recent_memory_ids(len(valid_memories))
+        if memory_id is not None:
+            added_memory_ids.append(memory_id)
 
     # Apply agent.md updates
     agent_md_updated = False
