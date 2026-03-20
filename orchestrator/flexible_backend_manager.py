@@ -91,12 +91,51 @@ class FlexibleBackendManager:
             from adapters.registry import get_backend_class
             BackendClass = get_backend_class(engine)
             api_key = self._resolve_api_key(engine)
-            
+
             self.current_backend = BackendClass(adapter_cfg, self.global_config, api_key)
+
+            # V2.2: inject ToolRegistry for OpenRouter if tools are configured
+            if engine == "openrouter-api":
+                tools_cfg = backend_cfg_raw.get("tools")
+                if tools_cfg:
+                    self._attach_tool_registry(tools_cfg, adapter_cfg)
+
             return await self.current_backend.initialize()
         except Exception as e:
             self.logger.error(f"Failed to initialize backend {engine}: {e}")
             return False
+
+    def _attach_tool_registry(self, tools_cfg: dict, adapter_cfg) -> None:
+        """Create and attach a ToolRegistry to the current OpenRouter backend."""
+        try:
+            from tools.registry import ToolRegistry
+
+            allowed = tools_cfg.get("allowed", [])
+            if not allowed:
+                return
+
+            access_root = adapter_cfg.resolve_access_root()
+            workspace_dir = adapter_cfg.workspace_dir
+            max_loops = int(tools_cfg.get("max_loops", 25))
+
+            # Per-tool options (e.g. bash.timeout_max, file_write.max_file_size_kb)
+            tool_options = {k: v for k, v in tools_cfg.items()
+                            if k not in ("allowed", "max_loops")}
+
+            registry = ToolRegistry(
+                allowed_tools=allowed,
+                access_root=access_root,
+                workspace_dir=workspace_dir,
+                secrets=self.secrets,
+                tool_options=tool_options,
+                max_loops=max_loops,
+            )
+            self.current_backend.tool_registry = registry
+            self.logger.info(
+                f"ToolRegistry attached: allowed={allowed}, max_loops={max_loops}"
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to attach ToolRegistry: {e}")
 
     async def switch_backend(self, target_engine: str, target_model: str | None = None) -> bool:
         self.logger.info(f"Switching backend to {target_engine}" + (f" model={target_model}" if target_model else ""))

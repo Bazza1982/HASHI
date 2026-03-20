@@ -27,6 +27,8 @@ class BackendResponse:
     duration_ms: float
     error: Optional[str] = None
     is_success: bool = True
+    tool_calls: Optional[list] = None   # Raw tool_calls list from API (V2.2+)
+    stop_reason: Optional[str] = None   # e.g. "stop", "tool_calls", "length"
 
 
 class BaseBackend(ABC):

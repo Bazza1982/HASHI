@@ -11,6 +11,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### ✨ Added
 
+- **V2.2 Tool Execution Layer — OpenRouter/API agents now have local action capabilities**
+  - New `tools/` package: `schemas.py` (JSON Schema definitions), `builtins.py` (executors), `registry.py` (`ToolRegistry` dispatcher), `__init__.py`.
+  - **11 built-in tools** available to OpenRouter-backed agents:
+    - `bash` — run shell commands (sandboxed to workspace, timeout + blocked-pattern controls)
+    - `file_read` — read files with offset/limit pagination
+    - `file_write` — write/create files (size-capped, parent dirs auto-created)
+    - `file_list` — list directories with glob filter and recursive option
+    - `apply_patch` — apply unified diff patches to files (dry-run validated before apply)
+    - `process_list` — list running processes filtered by name (requires `psutil`)
+    - `process_kill` — send SIGTERM/SIGKILL to a process by PID
+    - `telegram_send` — send Telegram messages by chat_id or HASHI agent_id
+    - `http_request` — arbitrary HTTP requests (GET/POST/PUT/DELETE/PATCH) for external API calls
+    - `web_search` — Brave Search API integration (requires `brave_api_key` in `secrets.json`)
+    - `web_fetch` — fetch any URL and return content as Markdown
+  - `adapters/openrouter_api.py`: full tool loop — model proposes tool calls → bridge executes → results returned → model continues, up to `max_loops` iterations. Tool call streaming accumulated correctly across chunks.
+  - `adapters/base.py`: `BackendResponse` gains `tool_calls` and `stop_reason` fields.
+  - `orchestrator/flexible_backend_manager.py`: auto-attaches `ToolRegistry` when backend config contains a `tools` key.
+  - Tool enablement is per-agent in `agents.json` via `tools.allowed` list and `tools.max_loops`. No `tools` key = fully backward compatible.
+
+---
+
+## [1.2.0-alpha] - 2026-03-20
+
+### ✨ Added
+
 - **`/dream` skill — nightly AI memory consolidation** (`skills/dream/`): agents can now "dream" at 01:30 daily, using an LLM to reflect on the day's transcript, extract important memories into `bridge_memory.sqlite`, and optionally update `AGENT.md` with behavioral insights. Includes snapshot-based `/skill dream undo` (no LLM required) for morning rollback, a persistent `dream_log.md`, and on/off toggle via `tasks.json` cron with `action: "skill:dream"`.
 
 ### 🔧 Fixed
