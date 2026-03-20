@@ -30,15 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `orchestrator/flexible_backend_manager.py`: auto-attaches `ToolRegistry` when backend config contains a `tools` key.
   - Tool enablement is per-agent in `agents.json` via `tools.allowed` list and `tools.max_loops`. No `tools` key = fully backward compatible.
 
----
-
-## [1.2.0-alpha] - 2026-03-20
-
-### ✨ Added
+- **`/retry` persistence across reboot** — `/retry` now reads `transcript.jsonl` to recover the last assistant response or user prompt when in-memory state is lost after a reboot, ensuring retry always works regardless of restart history.
 
 - **`/dream` skill — nightly AI memory consolidation** (`skills/dream/`): agents can now "dream" at 01:30 daily, using an LLM to reflect on the day's transcript, extract important memories into `bridge_memory.sqlite`, and optionally update `AGENT.md` with behavioral insights. Includes snapshot-based `/skill dream undo` (no LLM required) for morning rollback, a persistent `dream_log.md`, and on/off toggle via `tasks.json` cron with `action: "skill:dream"`.
 
 ### 🔧 Fixed
+
+- **Fixed mode safety guard for stateless backends** — `/mode fixed` on a backend without session support (e.g. `gemini-cli`) previously caused context loss because bridge sent incremental prompts to a stateless process. Two fixes applied:
+  - `flexible_agent_runtime.py`: `_incremental` flag now checks `backend.capabilities.supports_sessions`; stateless backends always receive full context regardless of mode setting.
+  - `cmd_mode`: switching to fixed mode on a stateless backend now shows a clear warning instead of silently degrading.
 
 - **Force-stop now kills entire process tree** — `/stop` previously only killed the main PID; child processes (e.g. Node.js workers spawned by Gemini CLI) stayed alive and held stdout/stderr pipes open, permanently blocking the queue processor.
   - `adapters/base.py`: `force_kill_process_tree` now uses `os.killpg()` on Linux to kill the whole process group.

@@ -2387,17 +2387,25 @@ class FlexibleAgentRuntime:
         backend = self.backend_manager.current_backend
         if args == "fixed":
             # Enable session persistence on compatible backends
+            _supports_sessions = getattr(getattr(backend, "capabilities", None), "supports_sessions", False)
             if hasattr(backend, "set_session_mode"):
                 backend.set_session_mode(True)
-            await self._reply_text(
-                update,
-                "Switched to **fixed** mode.\n"
-                "• CLI session will persist across messages\n"
-                "• Bridge sends incremental prompts (no history re-injection)\n"
-                "• `/backend` is disabled; use `/mode flex` to re-enable\n"
-                "• `/new` will terminate the current session and start fresh",
-                parse_mode="Markdown",
-            )
+            if _supports_sessions:
+                fixed_note = (
+                    "Switched to **fixed** mode.\n"
+                    "• CLI session will persist across messages\n"
+                    "• Bridge sends incremental prompts (no history re-injection)\n"
+                    "• `/backend` is disabled; use `/mode flex` to re-enable\n"
+                    "• `/new` will terminate the current session and start fresh"
+                )
+            else:
+                fixed_note = (
+                    "Switched to **fixed** mode.\n"
+                    "• ⚠️ Current backend (`{}`) does not support sessions — full context will still be injected per message\n"
+                    "• Fixed mode on this backend only disables `/backend` switching\n"
+                    "• Use `/mode flex` to re-enable backend switching"
+                ).format(self.config.active_backend)
+            await self._reply_text(update, fixed_note, parse_mode="Markdown")
         else:
             # Disable session persistence
             if hasattr(backend, "set_session_mode"):
@@ -3448,11 +3456,16 @@ class FlexibleAgentRuntime:
                 self.is_generating = True
 
                 effective_prompt = self._consume_session_primer(item)
-                # In fixed mode with an active session, use incremental prompts
+                # In fixed mode with an active session, use incremental prompts.
+                # Only applies to backends that actually support sessions (e.g. claude-cli).
+                # Stateless backends (e.g. gemini-cli) always get full context regardless of mode.
+                _backend = self.backend_manager.current_backend
+                _supports_sessions = getattr(getattr(_backend, "capabilities", None), "supports_sessions", False)
                 _incremental = (
                     self.backend_manager.agent_mode == "fixed"
-                    and hasattr(self.backend_manager.current_backend, "_session_id")
-                    and self.backend_manager.current_backend._session_id is not None
+                    and _supports_sessions
+                    and hasattr(_backend, "_session_id")
+                    and _backend._session_id is not None
                 )
                 final_prompt = self.context_assembler.build_prompt(
                     effective_prompt, self.config.active_backend, incremental=_incremental
