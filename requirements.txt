@@ -9,6 +9,9 @@ pillow>=9.0.0
 # Optional: WhatsApp support
 # neonize>=1.0.0
 
+# Optional: Browser automation (headless + CDP attach)
+# playwright>=1.40.0  # run: playwright install chromium
+
 # Optional: Voice/TTS
 # edge-tts>=6.0.0
 # piper-tts>=1.0.0

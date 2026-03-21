@@ -293,6 +293,154 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    # ------------------------------------------------------------------ browser
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_screenshot",
+            "description": (
+                "Launch a browser (or attach to the user's running Chrome via CDP), "
+                "navigate to a URL, and return a base64-encoded PNG screenshot. "
+                "Works with local pages (localhost) and any public URL. "
+                "Set cdp_url='http://localhost:9222' to reuse the user's existing "
+                "logged-in browser session with all cookies intact."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to navigate to."},
+                    "cdp_url": {
+                        "type": "string",
+                        "description": "Chrome DevTools Protocol endpoint, e.g. 'http://localhost:9222'. "
+                                       "Omit to launch a standalone headless browser.",
+                    },
+                    "headed": {
+                        "type": "boolean",
+                        "description": "Launch a visible browser window (standalone mode only). Default false.",
+                    },
+                    "full_page": {
+                        "type": "boolean",
+                        "description": "Capture full scrollable page. Default false.",
+                    },
+                    "wait_ms": {
+                        "type": "integer",
+                        "description": "Extra wait in milliseconds after page load. Default 1500.",
+                    },
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_get_text",
+            "description": (
+                "Navigate to a URL, execute all JavaScript, and return the visible "
+                "text content of the page. More powerful than web_fetch for JS-heavy "
+                "apps (SPAs, dashboards, login-gated pages). "
+                "Set cdp_url to reuse the user's logged-in browser."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to navigate to."},
+                    "cdp_url": {"type": "string", "description": "CDP endpoint for attaching to existing browser."},
+                    "headed": {"type": "boolean", "description": "Visible browser (standalone only). Default false."},
+                    "wait_ms": {"type": "integer", "description": "Extra wait in ms after load. Default 1500."},
+                    "max_length": {"type": "integer", "description": "Max characters to return. Default 15000."},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_get_html",
+            "description": (
+                "Navigate to a URL and return the fully-rendered HTML (post JS execution). "
+                "Useful for inspecting DOM structure of dynamic pages."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to navigate to."},
+                    "cdp_url": {"type": "string", "description": "CDP endpoint for attaching to existing browser."},
+                    "headed": {"type": "boolean", "description": "Visible browser (standalone only). Default false."},
+                    "wait_ms": {"type": "integer", "description": "Extra wait in ms after load. Default 1500."},
+                    "max_length": {"type": "integer", "description": "Max characters to return. Default 20000."},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_click",
+            "description": (
+                "Navigate to a URL and click an element identified by a CSS selector. "
+                "Useful for button clicks, navigation, toggling UI elements."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to navigate to first."},
+                    "selector": {"type": "string", "description": "CSS selector of the element to click."},
+                    "cdp_url": {"type": "string", "description": "CDP endpoint to reuse existing browser."},
+                    "headed": {"type": "boolean", "description": "Visible browser (standalone only). Default false."},
+                },
+                "required": ["url", "selector"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_fill",
+            "description": (
+                "Navigate to a URL, fill a form field (CSS selector) with text, "
+                "and optionally press Enter to submit. Useful for search boxes, login forms, etc."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to navigate to."},
+                    "selector": {"type": "string", "description": "CSS selector of the input field."},
+                    "text": {"type": "string", "description": "Text to type into the field."},
+                    "submit": {"type": "boolean", "description": "Press Enter after filling. Default false."},
+                    "cdp_url": {"type": "string", "description": "CDP endpoint to reuse existing browser."},
+                    "headed": {"type": "boolean", "description": "Visible browser (standalone only). Default false."},
+                },
+                "required": ["url", "selector", "text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_evaluate",
+            "description": (
+                "Navigate to a URL and execute custom JavaScript, returning the result. "
+                "Use for extracting specific data, checking state, or interacting with the page programmatically."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to navigate to."},
+                    "script": {
+                        "type": "string",
+                        "description": "JS expression/function to evaluate. E.g. '() => document.title'",
+                    },
+                    "cdp_url": {"type": "string", "description": "CDP endpoint to reuse existing browser."},
+                    "headed": {"type": "boolean", "description": "Visible browser (standalone only). Default false."},
+                    "wait_ms": {"type": "integer", "description": "Extra wait in ms after load. Default 1000."},
+                },
+                "required": ["url", "script"],
+            },
+        },
+    },
 ]
 
 # Map tool name -> schema for quick lookup

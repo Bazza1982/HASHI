@@ -178,4 +178,30 @@ class ToolRegistry:
         if tool_name == "web_fetch":
             return await execute_web_fetch(arguments)
 
+        if tool_name in (
+            "browser_screenshot",
+            "browser_get_text",
+            "browser_get_html",
+            "browser_click",
+            "browser_fill",
+            "browser_evaluate",
+        ):
+            from tools.browser import (
+                execute_browser_screenshot,
+                execute_browser_get_text,
+                execute_browser_get_html,
+                execute_browser_click,
+                execute_browser_fill,
+                execute_browser_evaluate,
+            )
+            _browser_dispatch = {
+                "browser_screenshot": execute_browser_screenshot,
+                "browser_get_text": execute_browser_get_text,
+                "browser_get_html": execute_browser_get_html,
+                "browser_click": execute_browser_click,
+                "browser_fill": execute_browser_fill,
+                "browser_evaluate": execute_browser_evaluate,
+            }
+            return await _browser_dispatch[tool_name](arguments)
+
         return f"Error: no executor for tool '{tool_name}'"
