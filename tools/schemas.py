@@ -297,6 +297,194 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "browser_session",
+            "description": (
+                "Execute a multi-step browser workflow on a single page without reloading between steps. "
+                "This is the most powerful browser tool — use it for complex tasks like: login flows, "
+                "form wizards, navigating SPAs, scraping paginated content, or any sequence of "
+                "interactions. Supports: goto, click, fill, submit, key, scroll, scroll_to, hover, "
+                "select, wait_for, screenshot, get_text, evaluate, wait, back, forward, reload. "
+                "Set cdp_url to reuse the user's logged-in browser."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "Initial URL to navigate to before steps."},
+                    "steps": {
+                        "type": "array",
+                        "description": (
+                            "List of action steps. Each step is an object with 'action' key. Examples:\n"
+                            '{"action":"click","selector":"#btn"}\n'
+                            '{"action":"fill","selector":"#q","text":"hello"}\n'
+                            '{"action":"scroll","y":500}\n'
+                            '{"action":"wait_for","selector":".result","timeout_ms":5000}\n'
+                            '{"action":"screenshot"}\n'
+                            '{"action":"get_text"}\n'
+                            '{"action":"wait","ms":1000}'
+                        ),
+                        "items": {"type": "object"},
+                    },
+                    "cdp_url": {"type": "string", "description": "CDP endpoint to reuse existing browser."},
+                    "headed": {"type": "boolean", "description": "Visible browser (standalone only). Default false."},
+                },
+                "required": ["steps"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_scroll",
+            "description": "Scroll a page by pixel offset or scroll a specific element into view.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to navigate to."},
+                    "x": {"type": "integer", "description": "Horizontal scroll pixels. Default 0."},
+                    "y": {"type": "integer", "description": "Vertical scroll pixels. Default 500."},
+                    "selector": {"type": "string", "description": "If set, scroll this element into view instead of using x/y."},
+                    "cdp_url": {"type": "string", "description": "CDP endpoint."},
+                    "headed": {"type": "boolean", "description": "Visible browser. Default false."},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_hover",
+            "description": "Hover the mouse over a CSS-selected element (reveals tooltips, dropdowns, etc).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to navigate to."},
+                    "selector": {"type": "string", "description": "CSS selector of element to hover."},
+                    "cdp_url": {"type": "string", "description": "CDP endpoint."},
+                    "headed": {"type": "boolean", "description": "Visible browser. Default false."},
+                },
+                "required": ["url", "selector"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_key",
+            "description": (
+                "Press keyboard key(s) on a page. Examples: 'Enter', 'Tab', 'Escape', "
+                "'ArrowDown', 'Control+a', 'Control+c', 'Shift+Tab'. "
+                "Optionally focus a selector first."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to navigate to."},
+                    "key": {"type": "string", "description": "Key or key combination to press."},
+                    "selector": {"type": "string", "description": "Optional CSS selector to focus before pressing key."},
+                    "cdp_url": {"type": "string", "description": "CDP endpoint."},
+                    "headed": {"type": "boolean", "description": "Visible browser. Default false."},
+                },
+                "required": ["url", "key"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_select",
+            "description": "Select an option from a <select> dropdown by value, visible label, or index.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to navigate to."},
+                    "selector": {"type": "string", "description": "CSS selector of the <select> element."},
+                    "value": {"type": "string", "description": "Option value attribute to select."},
+                    "label": {"type": "string", "description": "Visible option text to select."},
+                    "index": {"type": "integer", "description": "Zero-based option index to select."},
+                    "cdp_url": {"type": "string", "description": "CDP endpoint."},
+                    "headed": {"type": "boolean", "description": "Visible browser. Default false."},
+                },
+                "required": ["url", "selector"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_wait_for",
+            "description": "Navigate to a URL and wait until a CSS selector appears in the DOM. Returns the element's text.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to navigate to."},
+                    "selector": {"type": "string", "description": "CSS selector to wait for."},
+                    "timeout_ms": {"type": "integer", "description": "Max wait in milliseconds. Default 10000."},
+                    "cdp_url": {"type": "string", "description": "CDP endpoint."},
+                    "headed": {"type": "boolean", "description": "Visible browser. Default false."},
+                },
+                "required": ["url", "selector"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_get_attribute",
+            "description": "Get the value of an HTML attribute (e.g. href, src, value, data-*) from a CSS-selected element.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to navigate to."},
+                    "selector": {"type": "string", "description": "CSS selector of the element."},
+                    "attribute": {"type": "string", "description": "Attribute name to retrieve, e.g. 'href', 'src', 'value'."},
+                    "cdp_url": {"type": "string", "description": "CDP endpoint."},
+                    "headed": {"type": "boolean", "description": "Visible browser. Default false."},
+                },
+                "required": ["url", "selector", "attribute"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_drag",
+            "description": "Drag and drop an element from a source CSS selector to a target CSS selector.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to navigate to."},
+                    "source": {"type": "string", "description": "CSS selector of the element to drag."},
+                    "target": {"type": "string", "description": "CSS selector of the drop target."},
+                    "cdp_url": {"type": "string", "description": "CDP endpoint."},
+                    "headed": {"type": "boolean", "description": "Visible browser. Default false."},
+                },
+                "required": ["url", "source", "target"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_upload",
+            "description": "Upload a local file to a file input element on a page.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to navigate to."},
+                    "selector": {"type": "string", "description": "CSS selector of the file input element."},
+                    "file_path": {"type": "string", "description": "Absolute path to the local file to upload."},
+                    "cdp_url": {"type": "string", "description": "CDP endpoint."},
+                    "headed": {"type": "boolean", "description": "Visible browser. Default false."},
+                },
+                "required": ["url", "selector", "file_path"],
+            },
+        },
+    },
+    # ------------------------------------------------------------------ browser (original 6)
+    {
+        "type": "function",
+        "function": {
             "name": "browser_screenshot",
             "description": (
                 "Launch a browser (or attach to the user's running Chrome via CDP), "
