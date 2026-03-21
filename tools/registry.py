@@ -178,14 +178,7 @@ class ToolRegistry:
         if tool_name == "web_fetch":
             return await execute_web_fetch(arguments)
 
-        if tool_name in (
-            "browser_screenshot",
-            "browser_get_text",
-            "browser_get_html",
-            "browser_click",
-            "browser_fill",
-            "browser_evaluate",
-        ):
+        if tool_name.startswith("browser_"):
             from tools.browser import (
                 execute_browser_screenshot,
                 execute_browser_get_text,
@@ -193,15 +186,35 @@ class ToolRegistry:
                 execute_browser_click,
                 execute_browser_fill,
                 execute_browser_evaluate,
+                execute_browser_scroll,
+                execute_browser_hover,
+                execute_browser_key,
+                execute_browser_select,
+                execute_browser_wait_for,
+                execute_browser_get_attribute,
+                execute_browser_drag,
+                execute_browser_upload,
+                execute_browser_session,
             )
             _browser_dispatch = {
-                "browser_screenshot": execute_browser_screenshot,
-                "browser_get_text": execute_browser_get_text,
-                "browser_get_html": execute_browser_get_html,
-                "browser_click": execute_browser_click,
-                "browser_fill": execute_browser_fill,
-                "browser_evaluate": execute_browser_evaluate,
+                "browser_screenshot":    execute_browser_screenshot,
+                "browser_get_text":      execute_browser_get_text,
+                "browser_get_html":      execute_browser_get_html,
+                "browser_click":         execute_browser_click,
+                "browser_fill":          execute_browser_fill,
+                "browser_evaluate":      execute_browser_evaluate,
+                "browser_scroll":        execute_browser_scroll,
+                "browser_hover":         execute_browser_hover,
+                "browser_key":           execute_browser_key,
+                "browser_select":        execute_browser_select,
+                "browser_wait_for":      execute_browser_wait_for,
+                "browser_get_attribute": execute_browser_get_attribute,
+                "browser_drag":          execute_browser_drag,
+                "browser_upload":        execute_browser_upload,
+                "browser_session":       execute_browser_session,
             }
-            return await _browser_dispatch[tool_name](arguments)
+            if tool_name in _browser_dispatch:
+                return await _browser_dispatch[tool_name](arguments)
+            return f"Error: unknown browser tool '{tool_name}'"
 
         return f"Error: no executor for tool '{tool_name}'"
