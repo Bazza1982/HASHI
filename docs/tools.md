@@ -62,6 +62,66 @@ Two operating modes:
 - `recall` — toggle for one-shot automatic session restore after unexpected restart (not after `/new`).
 - Delegation skills: `/skill codex <task>`, `/skill claude <task>`, `/skill gemini <task>` for cross-backend delegation.
 
+## Browser Tool
+
+All agents can control a real web browser through Playwright, regardless of their backend type.
+
+### Actions
+
+| Action | Description |
+|--------|-------------|
+| `screenshot` | Navigate to URL, return PNG screenshot (base64 or saved file) |
+| `get_text` | Render page with JS, return visible text content |
+| `get_html` | Return fully-rendered HTML after JS execution |
+| `click` | Click an element by CSS selector |
+| `fill` | Fill a form field; optionally press Enter to submit |
+| `evaluate` | Run custom JavaScript and return the result |
+
+### Two Modes
+
+**Standalone mode** (default) — launches a clean headless Chromium. No login state.
+
+**CDP mode** — attaches to the user's already-running Chrome, inheriting all cookies and login sessions:
+```bash
+# Start Chrome once with debugging port (login state persists in --user-data-dir)
+google-chrome --remote-debugging-port=9222 --user-data-dir=~/.chrome-hashi
+```
+
+### Usage by Backend Type
+
+**CLI backends (Claude CLI, Gemini CLI, Codex CLI)** — call via `bash` tool:
+```bash
+python tools/browser_cli.py screenshot --url https://example.com --out /tmp/shot.png
+python tools/browser_cli.py get_text   --url http://localhost:3000 --cdp-url http://localhost:9222
+python tools/browser_cli.py fill       --url https://site.com --selector "#q" --text "hello" --submit
+python tools/browser_cli.py evaluate   --url https://site.com --script "() => document.title"
+```
+
+**OpenRouter API backend** — native tool schema via `ToolRegistry`. Enable in `agents.json`:
+```json
+{
+  "engine": "openrouter-api",
+  "tools": {
+    "allowed": ["browser_screenshot", "browser_get_text", "browser_get_html",
+                "browser_click", "browser_fill", "browser_evaluate"],
+    "max_loops": 10
+  }
+}
+```
+
+### Prerequisites
+
+```bash
+pip install playwright
+playwright install chromium
+```
+
+Playwright is listed as an optional dependency in `requirements.txt`.
+
+### Cross-Platform
+
+Chrome/Chromium auto-detected on Linux, macOS, and Windows (including WSL). Falls back to Playwright's bundled Chromium if system Chrome is not found.
+
 ## Bridge Memory System
 - `orchestrator/bridge_memory.py` — SQLite with WAL mode, local hashed embeddings (256-dim), FTS5 full-text search.
 - `BridgeContextAssembler` builds the final prompt sent to backends: system identity + skill sections + top-6 long-term memory + last-10 conversation turns.

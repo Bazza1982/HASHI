@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.2.0-beta] - 2026-03-21
+
+### ✨ Added
+
+- **Browser Tool — all agents can now control a real web browser** (`tools/browser.py`, `tools/browser_cli.py`)
+  - **6 browser actions** available to every agent regardless of backend:
+    - `browser_screenshot` — navigate to any URL and capture a PNG screenshot (base64)
+    - `browser_get_text` — render page with full JS execution and extract visible text (handles SPAs, dashboards)
+    - `browser_get_html` — return fully-rendered post-JS HTML for DOM inspection
+    - `browser_click` — click any element by CSS selector
+    - `browser_fill` — fill form fields by CSS selector, with optional Enter-to-submit
+    - `browser_evaluate` — run arbitrary JavaScript and return the result
+  - **Two browser modes:**
+    - *Standalone mode* (default) — launches a clean headless Chromium via Playwright
+    - *CDP mode* — attaches to the user's already-running Chrome (`--cdp-url http://localhost:9222`), reusing all existing cookies, sessions, and login state
+  - **Universal access via CLI wrapper** (`tools/browser_cli.py`):
+    - Claude CLI, Gemini CLI, and Codex CLI agents invoke the browser through their `bash` tool
+    - `python tools/browser_cli.py screenshot --url <url> [--cdp-url ...] [--out file.png]`
+    - All 6 actions supported; `--out` saves screenshots as PNG files
+  - **OpenRouter API agents** use the native tool schema (`browser_screenshot` etc.) via `ToolRegistry` — add to `agents.json` `tools.allowed` list
+  - **Cross-platform**: auto-detects Chrome/Chromium on Linux, macOS, and Windows/WSL
+  - Playwright listed in `requirements.txt` (optional dependency); run `playwright install chromium` once
+
+---
+
 ## [1.2.0-alpha] - 2026-03-20
 
 ### ✨ Added
