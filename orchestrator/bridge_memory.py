@@ -87,7 +87,11 @@ class BgeM3Encoder:
             self._error = f"dependencies unavailable: {exc}"
             return
 
-        model_path = self._model_dir / "model.onnx"
+        # Support both flat layout (model.onnx) and onnx/ subdirectory layout
+        if (self._model_dir / "onnx" / "model.onnx").exists():
+            model_path = self._model_dir / "onnx" / "model.onnx"
+        else:
+            model_path = self._model_dir / "model.onnx"
         if not model_path.exists():
             self._error = f"missing model: {model_path}"
             return
