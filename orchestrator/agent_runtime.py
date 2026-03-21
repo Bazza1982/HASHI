@@ -214,35 +214,13 @@ def _build_jobs_with_buttons(agent_name: str, skill_manager):
     except Exception:
         return "Could not read tasks.json.", None
 
-    lines = [f"<b>📋 Jobs — {agent_name}</b>"]
+    lines = [f"<b>📋 Jobs — all agents</b>"]
     buttons: list = []
-    found = False
 
-    def _job_buttons(kind: str, job: dict) -> list[list]:
-        """Build label + action button rows for a single job."""
-        enabled = job.get("enabled", False)
-        toggle_mode = "off" if enabled else "on"
-        toggle_label = "OFF" if enabled else "ON"
-        icon = "⏱" if kind == "heartbeat" else "📅"
-        short_id = job["id"][:20]
-        jid = job["id"]
-        return [
-            [InlineKeyboardButton(f"{icon} {short_id}", callback_data="noop")],
-            [
-                InlineKeyboardButton("Run", callback_data=f"skilljob:{kind}:run:{jid}:now"),
-                InlineKeyboardButton(toggle_label, callback_data=f"skilljob:{kind}:toggle:{jid}:{toggle_mode}"),
-                InlineKeyboardButton("Delete", callback_data=f"skilljob:{kind}:delete:{jid}:confirm"),
-            ],
-        ]
-
-    # Collect all jobs into a flat list of (kind, job) for two-column layout
+    # Show all jobs across all agents, single-column layout
     all_jobs: list[tuple[str, dict]] = []
 
-    hbs = [h for h in data.get("heartbeats", []) if h.get("agent") == agent_name]
-    crons = [c for c in data.get("crons", []) if c.get("agent") == agent_name]
-
-    for h in hbs:
-        enabled = h.get("enabled", False)
+    for h in data.get("heartbeats", []):
         interval = h.get("interval_seconds", 0)
         if interval >= 3600:
             interval_s = f"every {interval // 3600}h"
@@ -250,41 +228,42 @@ def _build_jobs_with_buttons(agent_name: str, skill_manager):
             interval_s = f"every {interval // 60}m"
         else:
             interval_s = f"every {interval}s"
-        status = "✅" if enabled else "❌"
-        lines.append(f"\n{status} ⏱ <code>{h['id']}</code> — {interval_s}")
+        status = "✅" if h.get("enabled", False) else "❌"
+        owner = h.get("agent", "?")
+        lines.append(f"\n{status} ⏱ <code>{h['id']}</code> — {interval_s} [{owner}]")
         note = h.get("note", "")
         if note and note != h["id"]:
             lines.append(f"   {note}")
         all_jobs.append(("heartbeat", h))
 
-    for c in crons:
+    for c in data.get("crons", []):
         enabled = c.get("enabled", False)
         time_s = c.get("time", "??:??")
         status = "✅" if enabled else "❌"
-        lines.append(f"\n{status} 📅 <code>{c['id']}</code> — daily {time_s}")
+        owner = c.get("agent", "?")
+        lines.append(f"\n{status} 📅 <code>{c['id']}</code> — daily {time_s} [{owner}]")
         note = c.get("note", "")
         if note and note != c["id"]:
             lines.append(f"   {note}")
         all_jobs.append(("cron", c))
 
-    # Build two-column button layout
-    for i in range(0, len(all_jobs), 2):
-        left_kind, left_job = all_jobs[i]
-        left_rows = _job_buttons(left_kind, left_job)
-        if i + 1 < len(all_jobs):
-            right_kind, right_job = all_jobs[i + 1]
-            right_rows = _job_buttons(right_kind, right_job)
-            # Merge label rows side by side, action rows side by side
-            for lr, rr in zip(left_rows, right_rows):
-                buttons.append(lr + rr)
-        else:
-            # Odd job — single column
-            buttons.extend(left_rows)
+    # Single-column layout: label row + action row per job
+    for kind, job in all_jobs:
+        jid = job["id"]
+        enabled = job.get("enabled", False)
+        toggle_mode = "off" if enabled else "on"
+        toggle_label = "OFF" if enabled else "ON"
+        icon = "⏱" if kind == "heartbeat" else "📅"
+        short_id = jid[:22]
+        buttons.append([InlineKeyboardButton(f"{icon} {short_id}", callback_data="noop")])
+        buttons.append([
+            InlineKeyboardButton("▶ Run", callback_data=f"skilljob:{kind}:run:{jid}:now"),
+            InlineKeyboardButton(toggle_label, callback_data=f"skilljob:{kind}:toggle:{jid}:{toggle_mode}"),
+            InlineKeyboardButton("🗑 Del", callback_data=f"skilljob:{kind}:delete:{jid}:confirm"),
+        ])
 
-    found = len(all_jobs) > 0
-
-    if not found:
-        lines.append("\nNo jobs configured for this agent.")
+    if not all_jobs:
+        lines.append("\nNo jobs configured.")
 
     markup = InlineKeyboardMarkup(buttons) if buttons else None
     return "\n".join(lines), markup
