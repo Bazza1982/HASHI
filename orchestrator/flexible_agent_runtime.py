@@ -1113,6 +1113,8 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CommandHandler("think", self._wrap_cmd("think", self.cmd_think)))
         self.app.add_handler(CommandHandler("jobs", self._wrap_cmd("jobs", self.cmd_jobs)))
         self.app.add_handler(CommandHandler("logo", self._wrap_cmd("logo", self.cmd_logo)))
+        self.app.add_handler(CommandHandler("move", self._wrap_cmd("move", self.cmd_move)))
+        self.app.add_handler(CallbackQueryHandler(self.callback_move, pattern=r"^move:"))
         self.app.add_handler(CommandHandler("wa_on", self._wrap_cmd("wa_on", self.cmd_wa_on)))
         self.app.add_handler(CommandHandler("wa_off", self._wrap_cmd("wa_off", self.cmd_wa_off)))
         self.app.add_handler(CommandHandler("wa_send", self._wrap_cmd("wa_send", self.cmd_wa_send)))
@@ -1494,6 +1496,231 @@ class FlexibleAgentRuntime:
             mode, label = "same", "Restarting all running agents..."
         await self._reply_text(update, label, parse_mode="HTML")
         orchestrator.request_restart(mode=mode, agent_name=self.name, agent_number=int(arg) if arg.isdigit() else None)
+
+    # ── /move command ────────────────────────────────────────────────────────
+    def _load_instances(self) -> dict:
+        """Load instances.json from the project root or ~/.hashi/instances.json."""
+        candidates = [
+            Path(__file__).parent.parent / "instances.json",
+            Path.home() / ".hashi" / "instances.json",
+        ]
+        for p in candidates:
+            if p.exists():
+                import json as _json
+                with open(p) as f:
+                    data = _json.load(f)
+                return data.get("instances", {})
+        return {}
+
+    async def cmd_move(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+
+        instances = self._load_instances()
+        if not instances:
+            await self._reply_text(update, "⚠️ No instances.json found. Create one at the project root.")
+            return
+
+        args = context.args or []
+
+        # /move list
+        if args and args[0].lower() == "list":
+            lines = ["<b>Known HASHI Instances:</b>"]
+            for name, inst in instances.items():
+                root = inst.get("root") or "(auto)"
+                lines.append(f"  • <code>{name}</code> — {inst.get('display_name', '')}  <i>{root}</i>")
+            await self._reply_text(update, "\n".join(lines), parse_mode="HTML")
+            return
+
+        # /move <agent> <target> [--keep-source] [--sync] [--dry-run]
+        if len(args) >= 2:
+            agent_id = args[0]
+            target = args[1]
+            keep = "--keep-source" in args
+            sync = "--sync" in args
+            dry = "--dry-run" in args
+            await self._do_move(update, agent_id, target, instances, keep_source=keep, sync=sync, dry_run=dry)
+            return
+
+        # /move <agent> — show target picker
+        if len(args) == 1:
+            agent_id = args[0]
+            await self._move_show_target_picker(update, agent_id, instances)
+            return
+
+        # /move — show agent picker first, then target
+        await self._move_show_agent_picker(update, instances)
+
+    async def _move_show_agent_picker(self, update: Update, instances: dict):
+        """Step 1: pick which agent to move (from current instance)."""
+        import json as _json
+        root = Path(__file__).parent.parent
+        try:
+            with open(root / "agents.json") as f:
+                data = _json.load(f)
+            agents = data if isinstance(data, list) else data.get("agents", [])
+            agent_names = [ag.get("name") or ag.get("id", "?") for ag in agents if ag.get("name")]
+        except Exception:
+            agent_names = []
+
+        if not agent_names:
+            await self._reply_text(update, "No agents found in this instance.")
+            return
+
+        rows = [[InlineKeyboardButton(f"🤖 {name}", callback_data=f"move:agent:{name}")]
+                for name in agent_names]
+        markup = InlineKeyboardMarkup(rows)
+        await self._reply_text(update, "<b>Move Agent</b> — select agent to move:", parse_mode="HTML", reply_markup=markup)
+
+    async def _move_show_target_picker(self, update: Update, agent_id: str, instances: dict):
+        """Step 2: pick target instance."""
+        rows = []
+        for name, inst in instances.items():
+            label = inst.get("display_name", name)
+            rows.append([InlineKeyboardButton(f"📦 {label}", callback_data=f"move:target:{agent_id}:{name}")])
+        markup = InlineKeyboardMarkup(rows)
+        await self._reply_text(
+            update,
+            f"<b>Move <code>{agent_id}</code></b> — select target instance:",
+            parse_mode="HTML",
+            reply_markup=markup,
+        )
+
+    async def _move_show_options(self, update, agent_id: str, target: str):
+        """Step 3: show move options (keep source / sync / encrypt)."""
+        markup = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🔒 Move + Encrypt", callback_data=f"move:exec:{agent_id}:{target}:enc"),
+                InlineKeyboardButton("📋 Move Plain", callback_data=f"move:exec:{agent_id}:{target}:plain"),
+            ],
+            [
+                InlineKeyboardButton("📂 Copy (keep source)", callback_data=f"move:exec:{agent_id}:{target}:keep"),
+                InlineKeyboardButton("🔄 Sync memories", callback_data=f"move:exec:{agent_id}:{target}:sync"),
+            ],
+            [InlineKeyboardButton("❌ Cancel", callback_data="move:cancel")],
+        ])
+        await update.callback_query.edit_message_text(
+            f"<b>Move <code>{agent_id}</code> → {target}</b>\n\nChoose move mode:",
+            parse_mode="HTML",
+            reply_markup=markup,
+        )
+
+    async def _do_move(self, update, agent_id: str, target: str, instances: dict,
+                       keep_source: bool = False, sync: bool = False, dry_run: bool = False):
+        """Execute the actual migration."""
+        import asyncio as _asyncio
+        import subprocess as _subprocess
+
+        await self._reply_text(update, f"⏳ Moving <code>{agent_id}</code> → <b>{target}</b>…", parse_mode="HTML")
+
+        script = Path(__file__).parent.parent / "scripts" / "move_agent.py"
+        if not script.exists():
+            await self._reply_text(update, "Error: move_agent.py not found.")
+            return
+
+        cmd = [
+            "python", str(script),
+            agent_id, target,
+            "--source-instance", "hashi2",
+        ]
+        if keep_source:
+            cmd.append("--keep-source")
+        if sync:
+            cmd.append("--sync")
+        if dry_run:
+            cmd.append("--dry-run")
+
+        try:
+            result = await _asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: _subprocess.run(cmd, capture_output=True, text=True,
+                                        cwd=str(Path(__file__).parent.parent))
+            )
+            output = (result.stdout + result.stderr).strip()
+            # Trim for Telegram
+            if len(output) > 3000:
+                output = output[:3000] + "\n…[truncated]"
+            status = "✅" if result.returncode == 0 else "❌"
+            await self._reply_text(
+                update,
+                f"{status} <b>Migration result:</b>\n<pre>{output}</pre>",
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            await self._reply_text(update, f"Error running migration: {e}")
+
+    async def callback_move(self, update: Update, context: Any):
+        """Handle move: callback queries (multi-step picker)."""
+        query = update.callback_query
+        if not self._is_authorized_user(query.from_user.id):
+            await query.answer()
+            return
+        await query.answer()
+
+        data = query.data or ""
+        parts = data.split(":", 3)
+
+        if len(parts) < 2:
+            return
+
+        action = parts[1] if len(parts) > 1 else ""
+
+        if action == "cancel":
+            await query.edit_message_text("Move cancelled.")
+            return
+
+        if action == "agent" and len(parts) >= 3:
+            agent_id = parts[2]
+            instances = self._load_instances()
+            rows = []
+            for name, inst in instances.items():
+                label = inst.get("display_name", name)
+                rows.append([InlineKeyboardButton(f"📦 {label}", callback_data=f"move:target:{agent_id}:{name}")])
+            rows.append([InlineKeyboardButton("❌ Cancel", callback_data="move:cancel")])
+            markup = InlineKeyboardMarkup(rows)
+            await query.edit_message_text(
+                f"<b>Move <code>{agent_id}</code></b> — select target:",
+                parse_mode="HTML",
+                reply_markup=markup,
+            )
+            return
+
+        if action == "target" and len(parts) >= 4:
+            agent_id = parts[2]
+            target = parts[3]
+            markup = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("📋 Move (plain)", callback_data=f"move:exec:{agent_id}:{target}:plain"),
+                    InlineKeyboardButton("📂 Copy (keep source)", callback_data=f"move:exec:{agent_id}:{target}:keep"),
+                ],
+                [
+                    InlineKeyboardButton("🔄 Sync memories back", callback_data=f"move:exec:{agent_id}:{target}:sync"),
+                    InlineKeyboardButton("🔍 Dry run preview", callback_data=f"move:exec:{agent_id}:{target}:dry"),
+                ],
+                [InlineKeyboardButton("❌ Cancel", callback_data="move:cancel")],
+            ])
+            await query.edit_message_text(
+                f"<b>Move <code>{agent_id}</code> → {target}</b>\n\nChoose mode:",
+                parse_mode="HTML",
+                reply_markup=markup,
+            )
+            return
+
+        if action == "exec" and len(parts) >= 4:
+            # parts: move:exec:<agent>:<target>:<mode>
+            sub = parts[3].split(":", 1)
+            agent_id = sub[0]
+            rest = sub[1] if len(sub) > 1 else "plain"
+            target_mode = rest.split(":", 1)
+            target = target_mode[0]
+            mode = target_mode[1] if len(target_mode) > 1 else "plain"
+
+            keep = mode == "keep"
+            sync = mode == "sync"
+            dry = mode == "dry"
+            instances = self._load_instances()
+            await self._do_move(update, agent_id, target, instances,
+                                keep_source=keep, sync=sync, dry_run=dry)
 
     async def cmd_wa_on(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
