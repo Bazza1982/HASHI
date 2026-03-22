@@ -325,7 +325,7 @@ class HASHITuiApp(App):
         Binding("ctrl+q", "quit_app", "Quit", show=True),
     ]
 
-    def __init__(self):
+    def __init__(self, workbench_url: str = "http://localhost:8769"):
         super().__init__()
         self.bridge_home = self._find_bridge_home()
         self.bridge_proc: asyncio.subprocess.Process | None = None
@@ -334,7 +334,7 @@ class HASHITuiApp(App):
         self.current_agent_display: str = ""
         self.current_backend: str = ""
         self._agent_mode: str = ""
-        self.api = TuiApiClient()
+        self.api = TuiApiClient(base_url=workbench_url)
         self.gateway_ok = False
         self._log_paused = False
         self._onboarding: OnboardingPhase | None = None

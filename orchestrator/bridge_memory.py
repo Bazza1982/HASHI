@@ -475,6 +475,20 @@ class BridgeMemoryStore:
             memories = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
         return {"turns": int(turns), "memories": int(memories)}
 
+    def clear_all(self) -> dict[str, int]:
+        """Wipe all stored turns and memories. Keeps the database file and schema intact."""
+        with self._connect() as conn:
+            deleted_turns = conn.execute("DELETE FROM turns").rowcount
+            deleted_memories = conn.execute("DELETE FROM memories").rowcount
+            conn.execute("DELETE FROM memory_fts")
+            try:
+                conn.execute("DELETE FROM memory_vec")
+                conn.execute("DELETE FROM turns_vec")
+            except Exception:
+                pass
+            conn.commit()
+        return {"deleted_turns": int(deleted_turns), "deleted_memories": int(deleted_memories)}
+
     def get_vector_status(self) -> dict[str, Any]:
         status: dict[str, Any] = {
             "db_path": str(self.db_path),
@@ -626,6 +640,7 @@ class BridgeContextAssembler:
         self.system_md = system_md
         self.active_skill_provider = active_skill_provider
         self.sys_prompt_manager = sys_prompt_manager
+        self.memory_injection_enabled: bool = True
 
     def _load_system_prompt(self) -> str:
         if not self.system_md:
@@ -696,8 +711,9 @@ class BridgeContextAssembler:
                 Only include /sys slots, active skills, and the user prompt.
         """
         system_text = "" if incremental else self._load_system_prompt()
-        recent_turns = [] if incremental else self.memory_store.get_recent_turns(limit=10)
-        memories = [] if incremental else self.memory_store.retrieve_memories(user_prompt, limit=6)
+        inject = self.memory_injection_enabled and not incremental
+        recent_turns = self.memory_store.get_recent_turns(limit=10) if inject else []
+        memories = self.memory_store.retrieve_memories(user_prompt, limit=6) if inject else []
         active_skills = []
         if callable(self.active_skill_provider):
             try:

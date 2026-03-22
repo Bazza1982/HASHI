@@ -18,6 +18,7 @@ TUI-only commands:
 """
 import sys
 import os
+import json
 
 # Ensure the project root is on sys.path so `tui.*` and `orchestrator.*` imports work
 _project_root = os.path.dirname(os.path.abspath(__file__))
@@ -27,8 +28,20 @@ if _project_root not in sys.path:
 from tui.app import HASHITuiApp
 
 
+def _get_workbench_url() -> str:
+    """Read workbench_port from agents.json so TUI always connects to THIS instance."""
+    try:
+        config_path = os.path.join(_project_root, "agents.json")
+        with open(config_path) as f:
+            config = json.load(f)
+        port = config.get("global", {}).get("workbench_port", 8769)
+        return f"http://localhost:{port}"
+    except Exception:
+        return "http://localhost:8769"
+
+
 def main():
-    app = HASHITuiApp()
+    app = HASHITuiApp(workbench_url=_get_workbench_url())
     app.run()
 
 

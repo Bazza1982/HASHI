@@ -191,7 +191,7 @@ class FlexibleAgentRuntime:
                     self._enabled_commands.add(name.strip().lstrip("/").lower())
 
         # help/status/new/wipe/clear/model/effort/mode should always be available
-        self._enabled_commands.update({"help", "status", "new", "wipe", "clear", "model", "effort", "mode", "jobs", "verbose", "think", "voice", "whisper"})
+        self._enabled_commands.update({"help", "status", "new", "wipe", "reset", "clear", "memory", "model", "effort", "mode", "jobs", "verbose", "think", "voice", "whisper"})
 
     def _is_command_allowed(self, cmd: str) -> bool:
         cmd = (cmd or "").lstrip("/").lower()
@@ -1101,6 +1101,7 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CallbackQueryHandler(self.callback_toggle, pattern=r"^tgl:"))
         self.app.add_handler(CommandHandler("mode", self._wrap_cmd("mode", self.cmd_mode)))
         self.app.add_handler(CommandHandler("new", self._wrap_cmd("new", self.cmd_new)))
+        self.app.add_handler(CommandHandler("memory", self._wrap_cmd("memory", self.cmd_memory)))
         self.app.add_handler(CommandHandler("wipe", self._wrap_cmd("wipe", self.cmd_wipe)))
         self.app.add_handler(CommandHandler("reset", self._wrap_cmd("reset", self.cmd_reset)))
         self.app.add_handler(CommandHandler("clear", self._wrap_cmd("clear", self.cmd_clear)))
@@ -2674,6 +2675,67 @@ class FlexibleAgentRuntime:
         )
         await self.enqueue_request(update.effective_chat.id, prompt, "system", "New session")
 
+    async def cmd_memory(self, update: Update, context: Any):
+        """Control long-term memory injection into the agent's context.
+
+        Usage:
+          /memory          -> show current status
+          /memory on       -> enable memory injection (default)
+          /memory pause    -> disable injection without deleting any data
+          /memory wipe     -> permanently delete all stored memories and turns
+        """
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        args = " ".join(context.args).strip().lower() if context.args else ""
+        assembler = getattr(self, "context_assembler", None)
+
+        if args in ("", "status"):
+            if assembler:
+                state = "ON ✅" if assembler.memory_injection_enabled else "PAUSED ⏸️"
+            else:
+                state = "unknown (assembler not ready)"
+            stats = self.memory_store.get_stats() if hasattr(self, "memory_store") else {}
+            turns = stats.get("turns", "?")
+            memories = stats.get("memories", "?")
+            await self._reply_text(update,
+                f"Memory injection: {state}\n"
+                f"Stored: {turns} turns, {memories} memories\n\n"
+                f"Commands: /memory on | pause | wipe"
+            )
+
+        elif args == "on":
+            if assembler:
+                assembler.memory_injection_enabled = True
+            await self._reply_text(update,
+                "✅ Memory injection ON. Long-term memories will be included in context."
+            )
+
+        elif args == "pause":
+            if assembler:
+                assembler.memory_injection_enabled = False
+            await self._reply_text(update,
+                "⏸️ Memory injection PAUSED. Memories are preserved but not injected into context.\n"
+                "Use /memory on to resume."
+            )
+
+        elif args == "wipe":
+            if hasattr(self, "memory_store"):
+                result = self.memory_store.clear_all()
+                turns = result.get("deleted_turns", 0)
+                mems = result.get("deleted_memories", 0)
+                state = "ON ✅" if (assembler and assembler.memory_injection_enabled) else "PAUSED ⏸️"
+                await self._reply_text(update,
+                    f"🗑️ Memory wiped: {turns} turns and {mems} memories deleted.\n"
+                    f"Database structure preserved. Injection is still {state}."
+                )
+            else:
+                await self._reply_text(update, "❌ Memory store not available.")
+
+        else:
+            await self._reply_text(update,
+                "Usage: /memory [on | pause | wipe | status]"
+            )
+
     async def cmd_wipe(self, update: Update, context: Any):
         """Dangerous: wipe the agent's persisted workspace state.
 
@@ -3871,7 +3933,35 @@ class FlexibleAgentRuntime:
                         pass
 
                 # 3. Update transcript and refresh context
-                if response.is_success and response.text:
+                if response.is_success and not response.text:
+                    # Backend succeeded but returned empty text (e.g. tool call returned
+                    # an error and the model gave up without producing a reply).
+                    # Surface a clear message rather than falling through to "Unknown error".
+                    err_msg = "I wasn't able to complete that — a tool I tried to use didn't return a result. Please check that all required API keys (e.g. brave_api_key for web search) are configured in secrets.json."
+                    self.logger.warning(
+                        f"Backend {self.config.active_backend} returned success with empty text for "
+                        f"{item.request_id} — treating as recoverable tool failure"
+                    )
+                    self._mark_error(err_msg)
+                    if not item.silent:
+                        await self.send_long_message(
+                            chat_id=item.chat_id,
+                            text=err_msg,
+                            request_id=item.request_id,
+                            purpose="error",
+                        )
+                    await self._notify_request_listeners(
+                        item.request_id,
+                        {
+                            "request_id": item.request_id,
+                            "success": False,
+                            "text": None,
+                            "error": err_msg,
+                            "source": item.source,
+                            "summary": item.summary,
+                        },
+                    )
+                elif response.is_success and response.text:
                     self._mark_success()
                     await self._notify_request_listeners(
                         item.request_id,
