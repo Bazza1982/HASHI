@@ -2803,7 +2803,7 @@ class FlexibleAgentRuntime:
                         reply_markup=self._effort_keyboard(requested),
                     )
         except Exception as e:
-            logger.error(f"callback_model error: {e}", exc_info=True)
+            self.error_logger.error(f"callback_model error: {e}", exc_info=True)
             await query.answer(f"Error: {e}", show_alert=True)
             return
         await query.answer()

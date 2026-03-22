@@ -71,6 +71,26 @@ class GeminiCLIAdapter(BaseBackend):
         self.logger.info("Initializing Gemini CLI backend (stateless mode)...")
         self.config.workspace_dir.mkdir(parents=True, exist_ok=True)
         self.system_md_path = self._resolve_system_md_path()
+
+        # Verify the Gemini CLI is actually accessible (like claude_cli does)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self.cmd_base,
+                "--version",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                err = stderr.decode(errors="replace").strip()
+                self.logger.error(f"Gemini CLI version check failed: {err}")
+                return False
+            version = stdout.decode(errors="replace").strip()
+            self.logger.info(f"Gemini CLI version: {version}")
+        except Exception as e:
+            self.logger.error(f"Gemini CLI not accessible: {e}")
+            return False
+
         return True
 
     async def handle_new_session(self) -> bool:
