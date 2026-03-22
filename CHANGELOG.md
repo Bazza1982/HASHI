@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.2.0-beta] - 2026-03-22
+
+### ✨ Added
+
+- **Pack & Go — USB zero-install deployment for Windows and macOS**
+  - `windows/prepare_usb.bat` — one-click USB builder for Windows: downloads Python 3.13 embeddable, installs all dependencies, copies project files. Run once on any Windows machine with internet; resulting USB runs on any Windows PC with no Python installation required.
+  - `mac/prepare_usb.sh` — equivalent builder for macOS: downloads `python-build-standalone` (auto-detects arm64/x86_64), installs all dependencies, sets permissions.
+  - `windows/fix_usb_path.bat` — one-click repair tool for existing USB drives (patches Python `._pth` to include project root).
+  - `mac/start_tui.command`, `mac/start_main.command`, `mac/start_workbench.command` — double-clickable Finder launchers for macOS, no terminal required.
+  - `windows/start_tui.bat`, `windows/start_main.bat`, `windows/start_workbench.bat` — Windows launchers with auto-embedded-Python detection, fallback to `.venv` for dev machines.
+
+- **`/memory` command — surgical long-term memory control**
+  - `/memory` or `/memory status` — show injection state and stored counts (turns + memories).
+  - `/memory pause` — stop injecting long-term memories into context without deleting any data; resume instantly with `/memory on`.
+  - `/memory wipe` — permanently delete all stored turns and memories while preserving the database structure (surgical alternative to `/wipe` which nukes the entire workspace).
+  - Implemented via `BridgeContextAssembler.memory_injection_enabled` flag and new `BridgeMemoryStore.clear_all()` method.
+
+### 🐛 Fixed
+
+- **Agent starts in LOCAL MODE when Telegram token is missing** — previously a missing/empty bot token caused a hard crash at startup. Now the agent starts cleanly in Workbench + TUI only mode, allowing onboarding to guide the user through token setup without re-launching.
+- **`web_search` returning "Unknown error"** — when a tool call succeeds but the model returns empty text (e.g. `brave_api_key` missing), the runtime now surfaces a clear diagnostic message instead of a generic "Unknown error".
+- **TUI connecting to wrong HASHI instance** — TUI now reads `workbench_port` from `agents.json` instead of using a hardcoded port (18800), preventing cross-instance contamination when multiple HASHI instances run on the same machine.
+- **`rich` and `textual` missing from requirements** — added to `requirements.txt`; TUI now installs cleanly from a fresh checkout.
+- **Python embedded runtime cannot find project modules** — fixed `._pth` file to include `..` (project root), resolving `ModuleNotFoundError: No module named 'orchestrator'` on USB deployments.
+
+---
+
 ## [1.2.0-beta] - 2026-03-21
 
 ### ✨ Added

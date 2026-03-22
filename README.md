@@ -1,6 +1,6 @@
 # HASHI
 
-> **Status (v1.2-alpha):** All v2 roadmap targets completed. Tool execution layer live.
+> **Status (v1.2-beta):** Pack & Go USB deployment for Windows + macOS. `/memory` command. Agent LOCAL MODE when no Telegram token.
 > **Changelog:** see [`CHANGELOG.md`](CHANGELOG.md) · **Roadmap:** see [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## About
@@ -72,25 +72,52 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
 4. **Tool Execution Layer** - OpenRouter agents can take real local actions: run bash commands, read/write files, search the web, call external APIs, and more
 5. **Flex/Fixed Mode Switching** - Agents can switch between CLI backends and OpenRouter mid-conversation via `/backend`
 6. **TUI Interface** - `tui.py` provides a split-panel terminal UI for log monitoring and agent chat without a browser
-7. **Vibe-Coded** - Every line written by AI, reviewed by AI, directed by human vision
+7. **Pack & Go** - Build a self-contained USB for Windows or macOS; recipients just plug in and double-click, no setup required
+8. **Vibe-Coded** - Every line written by AI, reviewed by AI, directed by human vision
 
 ---
 
 ## Project Status
 
-- **v1.2-alpha** — All v2 roadmap outcomes delivered. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for full status.
-- v1.1 debugging completed. v2 fully delivered as of 2026-03-20.
+- **v1.2-beta** — Pack & Go USB deployment (Windows + macOS), `/memory` command, agent LOCAL MODE, web search fixes. See [`CHANGELOG.md`](CHANGELOG.md).
+- **v1.2-alpha** — All v2 roadmap outcomes delivered. Tool execution layer, browser automation, vector memory.
 
 ## Installation
 
 **See [INSTALL.md](INSTALL.md) for detailed installation instructions.**
 
-### Quick Start (Recommended)
+### 🚀 Pack & Go — USB Zero-Install (Recommended for sharing)
+
+Run HASHI on any Windows or macOS machine straight from a USB drive — no Python installation, no `pip install`, nothing to set up on the target machine.
+
+**Windows:**
+```
+# On your machine (with internet):
+windows\prepare_usb.bat        # builds D:\HASHI9 with embedded Python + all deps
+
+# On any Windows PC:
+HASHI9\windows\start_tui.bat  # double-click to launch
+```
+
+**macOS:**
+```bash
+# On your Mac (with internet):
+bash mac/prepare_usb.sh        # builds USB with portable Python + all deps
+
+# On any Mac:
+# Double-click HASHI9/mac/start_tui.command in Finder
+```
+
+> **Note (macOS):** First run may trigger Gatekeeper. Right-click the `.command` file → Open → Open anyway.
+
+---
+
+### Quick Start (Developer / Standard Install)
 
 ```bash
 # Clone the repository
 git clone https://github.com/Bazza1982/HASHI.git
-cd hashi
+cd HASHI
 
 # Install Python dependencies
 pip install -r requirements.txt
@@ -99,7 +126,7 @@ pip install -r requirements.txt
 python onboarding/onboarding_main.py
 
 # Start HASHI
-./bin/bridge-u.sh         # Linux (macOS untested)
+./bin/bridge-u.sh         # macOS / Linux
 # or
 bin\bridge-u.bat          # Windows
 # or
@@ -107,7 +134,7 @@ python main.py            # Any platform
 ```
 
 ### Prerequisites
-- Python 3.10+
+- Python 3.10+ (not required for Pack & Go USB deployments)
 - At least one AI backend:
   - [Gemini CLI] (`gemini`)
   - [Claude Code] (`claude`)
