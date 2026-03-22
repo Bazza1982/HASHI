@@ -5,12 +5,15 @@ setlocal
 :: ============================================================
 :: HASHI9 - Start TUI
 :: Auto-starts main bridge in a new window if not already running.
-:: Uses .venv Python to satisfy textual and other dependencies.
+:: USB mode: uses embedded Python from \python\ if present.
+:: Fallback: uses .venv Python for local dev installs.
 :: Logs written to: windows\logs\tui_<timestamp>.log
 :: ============================================================
 
 set ROOT=%~dp0..
-set VENV_PYTHON=%ROOT%\.venv\Scripts\python.exe
+:: USB mode: prefer embedded Python, fall back to venv
+set PYTHON_EXE=%ROOT%\python\python.exe
+if not exist "%PYTHON_EXE%" set PYTHON_EXE=%ROOT%\.venv\Scripts\python.exe
 set PID_FILE=%ROOT%\.bridge_u_f.pid
 set LOG_DIR=%~dp0logs
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
@@ -22,14 +25,16 @@ set LOG_FILE=%LOG_DIR%\tui_%D%_%T%.log
 echo ==================================================== >> "%LOG_FILE%"
 echo HASHI9 TUI >> "%LOG_FILE%"
 echo Started: %DATE% %TIME% >> "%LOG_FILE%"
-echo Venv Python: %VENV_PYTHON% >> "%LOG_FILE%"
+echo Python: %PYTHON_EXE% >> "%LOG_FILE%"
 echo ==================================================== >> "%LOG_FILE%"
 
-:: Check if venv exists
-if not exist "%VENV_PYTHON%" (
-    echo ERROR: .venv not found at %VENV_PYTHON% >> "%LOG_FILE%"
+:: Check Python exists
+if not exist "%PYTHON_EXE%" (
+    echo ERROR: Python not found. >> "%LOG_FILE%"
     echo.
-    echo ERROR: .venv not found. Run start_main.bat first to create it.
+    echo ERROR: Python not found at %PYTHON_EXE%
+    echo        On USB: run prepare_usb.bat to set up embedded Python.
+    echo        On dev machine: run start_main.bat first to create .venv.
     pause
     exit /b 1
 )
@@ -52,21 +57,13 @@ if "%BRIDGE_RUNNING%"=="0" (
     timeout /t 15 /nobreak >nul
 )
 
-:: Install / update TUI dependencies
-echo Checking TUI dependencies...
-echo Checking TUI dependencies... >> "%LOG_FILE%"
-"%ROOT%\.venv\Scripts\pip.exe" install rich textual --quiet >> "%LOG_FILE%" 2>&1
-if errorlevel 1 (
-    echo WARNING: pip install had issues - check log for details
-    echo WARNING: pip install had issues >> "%LOG_FILE%"
-)
-
 echo Starting HASHI9 TUI...
 echo Log file: %LOG_FILE%
 echo.
 
 cd /d "%ROOT%"
-"%VENV_PYTHON%" tui.py 2>> "%LOG_FILE%"
+set PYTHONPATH=%ROOT%
+"%PYTHON_EXE%" tui.py 2>> "%LOG_FILE%"
 set EXIT_CODE=%ERRORLEVEL%
 
 echo. >> "%LOG_FILE%"

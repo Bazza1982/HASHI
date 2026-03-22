@@ -536,15 +536,17 @@ class UniversalOrchestrator:
         if agent_cfg.type in {"flex", "limited"}:
             token = secrets.get(agent_cfg.telegram_token_key)
             if not token:
-                raise RuntimeError(
+                main_logger.warning(
                     f"No Telegram token found for flex agent '{agent_cfg.name}' (key: {agent_cfg.telegram_token_key})."
                 )
+                token = "WORKBENCH_ONLY_NO_TOKEN"
             runtime = _FlexRT(agent_cfg, global_cfg, token, secrets, self.skill_manager)
         else:
             token = secrets.get(agent_cfg.name)
             api_key = secrets.get(f"{agent_cfg.engine}_key", None)
             if not token:
-                raise RuntimeError(f"No Telegram token found for agent '{agent_cfg.name}'.")
+                main_logger.warning(f"No Telegram token found for agent '{agent_cfg.name}'.")
+                token = "WORKBENCH_ONLY_NO_TOKEN"
             backend = _get_backend(agent_cfg.engine)(agent_cfg, global_cfg, api_key)
             runtime = _BridgeRT(agent_cfg.name, backend, token, self.skill_manager)
         runtime.orchestrator = self
