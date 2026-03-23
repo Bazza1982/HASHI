@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -100,6 +101,12 @@ def resolve_command_value(
     if looks_like_path:
         resolved = resolve_path_value(raw, config_dir=config_dir, bridge_home=bridge_home)
         return str(resolved) if resolved is not None else ""
+    # On Windows, asyncio.create_subprocess_exec won't find .cmd/.ps1 wrappers.
+    # Use shutil.which() to resolve bare command names to their full path.
+    if os.name == "nt":
+        full = shutil.which(raw)
+        if full:
+            return full
     return raw
 
 

@@ -148,6 +148,13 @@ class TaskScheduler:
                         self.state["crons"][task_id] = today_date
                         state_changed = True
 
+                # Process parked-topic follow-ups without creating ad hoc task rows.
+                for rt in runtime_map.values():
+                    handler = getattr(rt, "process_parked_topic_followups", None)
+                    if handler is None:
+                        continue
+                    await handler(now_dt)
+
                 if state_changed:
                     self._save_state()
 

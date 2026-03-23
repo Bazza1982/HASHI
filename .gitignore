@@ -113,3 +113,9 @@ workspaces/
 
 # Windows interop guide (machine-specific)
 workspaces/WINDOWS.MD
+
+# Local instance registry (contains machine-specific paths)
+instances.json
+
+# AIPM payload files (project data, not part of HASHI)
+*_payload.json

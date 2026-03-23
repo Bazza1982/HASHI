@@ -14,6 +14,14 @@ set "BRIDGE_CODE_ROOT=!SCRIPT_DIR!\.."
 for %%I in ("!BRIDGE_CODE_ROOT!") do set "BRIDGE_CODE_ROOT=%%~fI"
 cd /d "!BRIDGE_CODE_ROOT!"
 
+:: USB mode: use embedded Python if present (no system Python or venv required)
+set "PYTHON_EXE=python"
+set "USING_EMBEDDED=0"
+if exist "!BRIDGE_CODE_ROOT!\python\python.exe" (
+    set "PYTHON_EXE=!BRIDGE_CODE_ROOT!\python\python.exe"
+    set "USING_EMBEDDED=1"
+)
+
 if not defined BRIDGE_HOME set "BRIDGE_HOME=!BRIDGE_CODE_ROOT!"
 if "!BRIDGE_HOME:~-1!"=="\" set "BRIDGE_HOME=!BRIDGE_HOME:~0,-1!"
 
@@ -150,9 +158,11 @@ echo !C_RAIL!│!C_RESET!
 if exist "%AGENTS_FILE%" del "%AGENTS_FILE%" >nul 2>&1
 set "GW_ARG="
 if "!API_GATEWAY_LAUNCH!"=="1" set "GW_ARG=--api-gateway"
+:: Ensure project root is on sys.path (required for embedded Python which doesn't add cwd)
+set "PYTHONPATH=!BRIDGE_CODE_ROOT!"
 call :resolve_wakeup_file
 if defined WAKEUP_FILE call :start_wakeup_injector
-python main.py --bridge-home "%BRIDGE_HOME%" %PY_ARGS% !GW_ARG!
+"!PYTHON_EXE!" main.py --bridge-home "%BRIDGE_HOME%" %PY_ARGS% !GW_ARG!
 if "!AUTO_STOP_WORKBENCH!"=="1" (
     echo.
     echo !C_MUTED!Stopping workbench services started by this launcher...!C_RESET!
@@ -269,6 +279,16 @@ echo !C_RAIL!│!C_RESET!
 exit /b 0
 
 :ensure_env
+if "!USING_EMBEDDED!"=="1" (
+    :: USB mode — embedded Python has all packages pre-installed, skip venv entirely
+    "!PYTHON_EXE!" -c "import telegram, httpx, aiohttp, PIL" >nul 2>&1
+    if errorlevel 1 (
+        echo !C_WARN!Embedded Python is missing required packages.!C_RESET!
+        echo !C_MUTED!Run prepare_usb.bat again to reinstall dependencies.!C_RESET!
+        exit /b 1
+    )
+    exit /b 0
+)
 if not exist .venv (
     echo !C_MUTED!Creating virtual environment...!C_RESET!
     python -m venv .venv || exit /b 1

@@ -97,9 +97,10 @@ def supported_commands(runtime) -> list[str]:
         "wa_on",
         "wa_off",
         "wa_send",
+        "memory",
     ]
     if hasattr(runtime, "cmd_backend"):
-        names.extend(["backend", "memory"])
+        names.extend(["backend"])
     supported = []
     for name in names:
         if hasattr(runtime, f"cmd_{name}"):

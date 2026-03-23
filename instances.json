@@ -1,0 +1,42 @@
+{
+  "_comment": "HASHI instance registry. Edit this file to add/update instances.",
+  "_version": "1.0",
+  "_default_export_dir": "~/.hashi/exports",
+
+  "instances": {
+    "hashi1": {
+      "display_name": "HASHI1 (WSL)",
+      "platform": "wsl",
+      "distro": "Ubuntu-22.04",
+      "root": "/home/lily/projects/hashi",
+      "python": "/home/lily/projects/hashi/.venv/bin/python",
+      "wsl_root_from_windows": "\\\\wsl$\\Ubuntu-22.04\\home\\lily\\projects\\hashi",
+      "active": true
+    },
+    "hashi2": {
+      "display_name": "HASHI2 (WSL)",
+      "platform": "wsl",
+      "distro": "Ubuntu-22.04",
+      "root": "/home/lily/projects/hashi2",
+      "python": "/home/lily/projects/hashi2/.venv/bin/python",
+      "wsl_root_from_windows": "\\\\wsl$\\Ubuntu-22.04\\home\\lily\\projects\\hashi2",
+      "active": true
+    },
+    "hashi9": {
+      "display_name": "HASHI9 (Windows)",
+      "platform": "windows",
+      "root": "C:\\Users\\thene\\projects\\HASHI",
+      "python": "C:\\Users\\thene\\projects\\HASHI\\.venv\\Scripts\\python.exe",
+      "wsl_root": "/mnt/c/Users/thene/projects/HASHI",
+      "active": true
+    },
+    "usb": {
+      "display_name": "USB / Portable",
+      "platform": "portable",
+      "root": null,
+      "auto_detect": true,
+      "active": true,
+      "_note": "Set root to your USB path, e.g. /mnt/usb or D:\\. Leave null for auto-detect."
+    }
+  }
+}

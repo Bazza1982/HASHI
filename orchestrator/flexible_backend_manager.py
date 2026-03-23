@@ -3,6 +3,7 @@ import logging
 from pathlib import Path
 from typing import Optional, Any
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig, AgentConfig
+from orchestrator.flexible_backend_registry import get_secret_lookup_order
 
 class FlexibleBackendManager:
     def __init__(self, config: FlexibleAgentConfig, global_config: GlobalConfig, secrets: dict):
@@ -15,6 +16,8 @@ class FlexibleBackendManager:
         self._load_state()
 
     def _load_state(self):
+        self._active_model_override = None
+        self.agent_mode = "flex"  # default mode
         if self.state_file.exists():
             try:
                 state = json.loads(self.state_file.read_text(encoding="utf-8"))
@@ -22,17 +25,18 @@ class FlexibleBackendManager:
                     self.config.active_backend = state["active_backend"]
                 if "active_model" in state:
                     self._active_model_override = state["active_model"]
-                else:
-                    self._active_model_override = None
+                if "agent_mode" in state:
+                    self.agent_mode = state["agent_mode"]
             except Exception as e:
                 self.logger.error(f"Failed to load state.json: {e}")
-        else:
-            self._active_model_override = None
 
     def _save_state(self, active_model: str | None = None):
         if active_model is not None:
             self._active_model_override = active_model
-        state = {"active_backend": self.config.active_backend}
+        state = {
+            "active_backend": self.config.active_backend,
+            "agent_mode": self.agent_mode,
+        }
         if getattr(self, "_active_model_override", None):
             state["active_model"] = self._active_model_override
         try:
@@ -42,6 +46,14 @@ class FlexibleBackendManager:
 
     def persist_state(self, active_model: str | None = None):
         self._save_state(active_model=active_model)
+
+    def _resolve_api_key(self, engine: str) -> Optional[Any]:
+        for secret_key in get_secret_lookup_order(engine, self.config.name):
+            api_key = self.secrets.get(secret_key)
+            if api_key:
+                self.logger.info(f"Resolved API key for {engine} via '{secret_key}'")
+                return api_key
+        return None
 
     async def initialize_active_backend(self, target_model: str | None = None) -> bool:
         engine = self.config.active_backend
@@ -78,13 +90,52 @@ class FlexibleBackendManager:
         try:
             from adapters.registry import get_backend_class
             BackendClass = get_backend_class(engine)
-            api_key = self.secrets.get(f"{engine}_key", None)
-            
+            api_key = self._resolve_api_key(engine)
+
             self.current_backend = BackendClass(adapter_cfg, self.global_config, api_key)
+
+            # V2.2: inject ToolRegistry for OpenRouter if tools are configured
+            if engine == "openrouter-api":
+                tools_cfg = backend_cfg_raw.get("tools")
+                if tools_cfg:
+                    self._attach_tool_registry(tools_cfg, adapter_cfg)
+
             return await self.current_backend.initialize()
         except Exception as e:
             self.logger.error(f"Failed to initialize backend {engine}: {e}")
             return False
+
+    def _attach_tool_registry(self, tools_cfg: dict, adapter_cfg) -> None:
+        """Create and attach a ToolRegistry to the current OpenRouter backend."""
+        try:
+            from tools.registry import ToolRegistry
+
+            allowed = tools_cfg.get("allowed", [])
+            if not allowed:
+                return
+
+            access_root = adapter_cfg.resolve_access_root()
+            workspace_dir = adapter_cfg.workspace_dir
+            max_loops = int(tools_cfg.get("max_loops", 25))
+
+            # Per-tool options (e.g. bash.timeout_max, file_write.max_file_size_kb)
+            tool_options = {k: v for k, v in tools_cfg.items()
+                            if k not in ("allowed", "max_loops")}
+
+            registry = ToolRegistry(
+                allowed_tools=allowed,
+                access_root=access_root,
+                workspace_dir=workspace_dir,
+                secrets=self.secrets,
+                tool_options=tool_options,
+                max_loops=max_loops,
+            )
+            self.current_backend.tool_registry = registry
+            self.logger.info(
+                f"ToolRegistry attached: allowed={allowed}, max_loops={max_loops}"
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to attach ToolRegistry: {e}")
 
     async def switch_backend(self, target_engine: str, target_model: str | None = None) -> bool:
         self.logger.info(f"Switching backend to {target_engine}" + (f" model={target_model}" if target_model else ""))

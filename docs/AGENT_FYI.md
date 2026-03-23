@@ -99,6 +99,36 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - Built-in skill views can inspect and toggle cron/heartbeat jobs.
 - `/active on` creates or enables a managed heartbeat job for this agent.
 
+## Browser Tool
+
+Agents can control a real web browser (headless or headed) using Playwright.
+
+**Two modes:**
+- *Standalone* — launches a clean headless Chromium (no login state)
+- *CDP mode* — attaches to the user's running Chrome, reusing all cookies and login sessions
+
+**For CLI-backend agents (Claude CLI, Gemini CLI, Codex CLI)** — use `bash` to call the wrapper:
+```bash
+python tools/browser_cli.py screenshot --url <url> [--out /tmp/shot.png]
+python tools/browser_cli.py get_text   --url <url> [--cdp-url http://localhost:9222]
+python tools/browser_cli.py get_html   --url <url>
+python tools/browser_cli.py click      --url <url> --selector <css>
+python tools/browser_cli.py fill       --url <url> --selector <css> --text <text> [--submit]
+python tools/browser_cli.py evaluate   --url <url> --script "() => document.title"
+```
+
+**For OpenRouter API agents** — add to `agents.json` `tools.allowed`:
+```json
+"allowed": ["browser_screenshot", "browser_get_text", "browser_get_html",
+            "browser_click", "browser_fill", "browser_evaluate"]
+```
+
+**CDP mode (reuse user's logged-in browser):**
+1. Start Chrome once: `google-chrome --remote-debugging-port=9222 --user-data-dir=~/.chrome-hashi`
+2. Pass `--cdp-url http://localhost:9222` to any browser command
+
+**Prerequisites:** `playwright install chromium` (one-time setup).
+
 ## Media
 - Agents can receive text plus Telegram media.
 - Voice/audio is transcribed locally before being sent to the backend.

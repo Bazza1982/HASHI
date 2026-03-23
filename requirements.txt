@@ -6,9 +6,22 @@ httpx>=0.24.0
 aiohttp>=3.8.0
 pillow>=9.0.0
 
+# TUI
+rich>=13.0.0
+textual>=0.50.0
+
 # Optional: WhatsApp support
 # neonize>=1.0.0
+
+# Optional: Browser automation (headless + CDP attach)
+# playwright>=1.40.0  # run: playwright install chromium
 
 # Optional: Voice/TTS
 # edge-tts>=6.0.0
 # piper-tts>=1.0.0
+
+# Optional: semantic vector memory
+# sqlite-vec>=0.1.6
+# onnxruntime>=1.18.0
+# transformers>=4.44.0
+# tokenizers>=0.19.0

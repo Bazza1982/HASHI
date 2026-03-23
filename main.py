@@ -19,6 +19,7 @@ from orchestrator.scheduler import TaskScheduler
 from orchestrator.skill_manager import SkillManager
 from orchestrator.workbench_api import WorkbenchApiServer
 from orchestrator.api_gateway import APIGatewayServer
+from orchestrator.flexible_backend_registry import get_secret_lookup_order
 from orchestrator.pathing import BridgePaths, build_bridge_paths
 from adapters.registry import get_backend_class
 
@@ -435,6 +436,13 @@ class UniversalOrchestrator:
             if name not in running and name not in starting and name != exclude_name
         ]
 
+    def _has_openrouter_api_key(self, agent_configs, secrets) -> bool:
+        for cfg in agent_configs:
+            for secret_key in get_secret_lookup_order("openrouter-api", getattr(cfg, "name", "")):
+                if secrets.get(secret_key):
+                    return True
+        return False
+
     def _check_backend_availability(self, global_cfg, agent_configs, secrets) -> dict[str, tuple[bool, str]]:
         """
         Check which backend engines are available. Returns {engine: (available, reason)}.
@@ -465,8 +473,7 @@ class UniversalOrchestrator:
                 else:
                     result[engine] = (False, f"'{cmd}' not found on PATH")
             elif engine == "openrouter-api":
-                key = secrets.get("openrouter-api_key") or secrets.get("openrouter_key")
-                if key:
+                if self._has_openrouter_api_key(agent_configs, secrets):
                     result[engine] = (True, "API key present")
                 else:
                     result[engine] = (False, "no API key in secrets.json")
@@ -529,15 +536,17 @@ class UniversalOrchestrator:
         if agent_cfg.type in {"flex", "limited"}:
             token = secrets.get(agent_cfg.telegram_token_key)
             if not token:
-                raise RuntimeError(
+                main_logger.warning(
                     f"No Telegram token found for flex agent '{agent_cfg.name}' (key: {agent_cfg.telegram_token_key})."
                 )
+                token = "WORKBENCH_ONLY_NO_TOKEN"
             runtime = _FlexRT(agent_cfg, global_cfg, token, secrets, self.skill_manager)
         else:
             token = secrets.get(agent_cfg.name)
             api_key = secrets.get(f"{agent_cfg.engine}_key", None)
             if not token:
-                raise RuntimeError(f"No Telegram token found for agent '{agent_cfg.name}'.")
+                main_logger.warning(f"No Telegram token found for agent '{agent_cfg.name}'.")
+                token = "WORKBENCH_ONLY_NO_TOKEN"
             backend = _get_backend(agent_cfg.engine)(agent_cfg, global_cfg, api_key)
             runtime = _BridgeRT(agent_cfg.name, backend, token, self.skill_manager)
         runtime.orchestrator = self
@@ -1179,7 +1188,7 @@ if __name__ == "__main__":
     try:
         with open(_agents_path, encoding="utf-8") as _f:
             _cfg = json.load(_f)
-            if any(a.get("name") == "hashiko" for a in _cfg.get("agents", [])):
+            if _cfg.get("agents"):
                 _onboarding_done = True
     except Exception:
         pass

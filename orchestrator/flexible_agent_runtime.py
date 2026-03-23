@@ -31,6 +31,7 @@ from orchestrator.flexible_backend_registry import (
 from orchestrator.memory_index import MemoryIndex
 from orchestrator.handoff_builder import HandoffBuilder
 from orchestrator.media_utils import is_image_file, normalize_image_file
+from orchestrator.parked_topics import ParkedTopicStore
 from orchestrator.skill_manager import SkillDefinition, SkillManager
 from orchestrator.voice_manager import VoiceManager
 
@@ -125,11 +126,13 @@ class FlexibleAgentRuntime:
         # Initialize Memory and Handoff Subsystems
         self.memory_index = MemoryIndex(self.workspace_dir / "memory_index.sqlite")
         self.handoff_builder = HandoffBuilder(self.workspace_dir)
+        self.parked_topics = ParkedTopicStore(self.workspace_dir)
         self.memory_store = BridgeMemoryStore(self.workspace_dir)
         self.context_assembler = BridgeContextAssembler(
             self.memory_store,
             self.config.system_md,
             active_skill_provider=self._get_active_skill_sections,
+            sys_prompt_manager=self.sys_prompt_manager,
         )
 
         # Initialize FlexibleBackendManager
@@ -187,8 +190,8 @@ class FlexibleAgentRuntime:
                 if isinstance(name, str) and name.strip():
                     self._enabled_commands.add(name.strip().lstrip("/").lower())
 
-        # help/status/new/wipe/clear/model/effort should always be available
-        self._enabled_commands.update({"help", "status", "new", "wipe", "clear", "model", "effort", "jobs", "verbose", "think", "voice", "whisper"})
+        # help/status/new/wipe/clear/model/effort/mode should always be available
+        self._enabled_commands.update({"help", "status", "new", "wipe", "reset", "clear", "memory", "model", "effort", "mode", "jobs", "verbose", "think", "voice", "whisper"})
 
     def _is_command_allowed(self, cmd: str) -> bool:
         cmd = (cmd or "").lstrip("/").lower()
@@ -234,7 +237,14 @@ class FlexibleAgentRuntime:
 
     async def initialize(self) -> bool:
         self.logger.info(f"Initializing flex agent '{self.name}'...")
-        return await self.backend_manager.initialize_active_backend()
+        result = await self.backend_manager.initialize_active_backend()
+        # Apply session mode if agent is in fixed mode
+        if result and self.backend_manager.agent_mode == "fixed":
+            backend = self.backend_manager.current_backend
+            if hasattr(backend, "set_session_mode"):
+                backend.set_session_mode(True)
+                self.logger.info(f"Fixed mode active — session persistence enabled on {self.config.active_backend}")
+        return result
 
     def _format_retry_summary(self, summary: str) -> str:
         if not summary:
@@ -542,6 +552,194 @@ class FlexibleAgentRuntime:
             return item.prompt
         return "\n\n".join(sections + [item.prompt])
 
+    def _extract_json_object(self, text: str) -> dict | None:
+        raw = (text or "").strip()
+        if not raw:
+            return None
+        candidates = [raw]
+        match = re.search(r"\{[\s\S]*\}", raw)
+        if match:
+            candidates.insert(0, match.group(0))
+        for candidate in candidates:
+            try:
+                parsed = json.loads(candidate)
+            except Exception:
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+        return None
+
+    def _fallback_park_summary(
+        self,
+        context_block: str,
+        last_user_text: str,
+        last_assistant_text: str,
+        title_override: str | None = None,
+    ) -> dict[str, str]:
+        title = (title_override or _safe_excerpt(last_user_text or "Parked topic", 48)).strip() or "Parked topic"
+        short = _safe_excerpt(last_user_text or last_assistant_text or title, 140)
+        long_summary = _safe_excerpt(context_block or short, 1600)
+        return {
+            "title": title,
+            "summary_short": short,
+            "summary_long": long_summary,
+        }
+
+    def _build_park_summary_prompt(
+        self,
+        context_block: str,
+        last_user_text: str,
+        last_assistant_text: str,
+        title_override: str | None = None,
+    ) -> str:
+        override_line = (
+            f'User preferred title: "{title_override.strip()}"\n'
+            if title_override and title_override.strip()
+            else ""
+        )
+        return (
+            "SYSTEM: You are preparing a parked conversation record for later resume.\n"
+            "Return JSON only with keys: title, summary_short, summary_long.\n"
+            "Rules:\n"
+            "- title: 3-8 words, concrete, no numbering\n"
+            "- summary_short: one sentence, under 140 chars\n"
+            "- summary_long: one detailed paragraph covering goal, decisions, unresolved work, and next step\n"
+            "- Do not include markdown fences or extra commentary\n\n"
+            f"{override_line}"
+            "--- CURRENT TOPIC CONTEXT ---\n"
+            f"{context_block}\n\n"
+            "--- LAST USER MESSAGE ---\n"
+            f"{last_user_text or '(none)'}\n\n"
+            "--- LAST ASSISTANT MESSAGE ---\n"
+            f"{last_assistant_text or '(none)'}\n\n"
+            "--- OUTPUT FORMAT ---\n"
+            '{"title":"...","summary_short":"...","summary_long":"..."}'
+        )
+
+    async def _summarize_current_topic_for_parking(self, title_override: str | None = None) -> dict[str, Any] | None:
+        context_block, exchange_count, _ = self.handoff_builder.build_recent_context_block(
+            max_rounds=12,
+            max_words=4500,
+        )
+        if exchange_count <= 0 or not context_block:
+            return None
+
+        recent_rounds = self.handoff_builder.get_recent_rounds(max_rounds=3)
+        last_user_text = ""
+        last_assistant_text = ""
+        last_exchange_text = ""
+        if recent_rounds:
+            last_round = recent_rounds[-1]
+            lines = []
+            for entry in last_round:
+                role = str(entry.get("role", "")).upper()
+                text = (entry.get("text") or "").strip()
+                if not text:
+                    continue
+                lines.append(f"{role}: {text}")
+                if entry.get("role") == "user":
+                    last_user_text = text
+                elif entry.get("role") == "assistant":
+                    last_assistant_text = text
+            last_exchange_text = "\n".join(lines).strip()
+
+        fallback = self._fallback_park_summary(
+            context_block,
+            last_user_text,
+            last_assistant_text,
+            title_override=title_override,
+        )
+        response = await self.backend_manager.generate_response(
+            self._build_park_summary_prompt(
+                context_block,
+                last_user_text,
+                last_assistant_text,
+                title_override=title_override,
+            ),
+            request_id=f"park-{int(time.time())}",
+            silent=True,
+        )
+        parsed = self._extract_json_object(response.text) if response and response.is_success else None
+        if not parsed:
+            parsed = fallback
+
+        title = (title_override or parsed.get("title") or fallback["title"]).strip()
+        summary_short = (parsed.get("summary_short") or fallback["summary_short"]).strip()
+        summary_long = (parsed.get("summary_long") or fallback["summary_long"]).strip()
+        return {
+            "title": title or fallback["title"],
+            "summary_short": summary_short or fallback["summary_short"],
+            "summary_long": summary_long or fallback["summary_long"],
+            "recent_context": context_block,
+            "last_user_text": last_user_text,
+            "last_assistant_text": last_assistant_text,
+            "last_exchange_text": last_exchange_text,
+        }
+
+    def _format_parked_topics_text(self) -> str:
+        topics = self.parked_topics.list_topics()
+        if not topics:
+            return (
+                "Parked topics: none.\n\n"
+                "Usage:\n"
+                "/park - list parked topics\n"
+                "/park chat [optional title] - park the current topic\n"
+                "/park delete <slot> - delete a parked topic\n"
+                "/load <slot> - restore a parked topic"
+            )
+        lines = ["Parked topics", ""]
+        for topic in topics:
+            slot_id = int(topic.get("slot_id", 0))
+            title = topic.get("title") or f"Topic {slot_id}"
+            short = topic.get("summary_short") or "(no short summary)"
+            followup = topic.get("followup") or {}
+            status = followup.get("status") or "scheduled"
+            attempts = int(followup.get("attempts", 0))
+            next_at = followup.get("next_at")
+            suffix = f" | next {next_at}" if next_at else ""
+            lines.append(f"[{slot_id}] {title}")
+            lines.append(f"  {short}")
+            lines.append(f"  reminders: {status} ({attempts}/3){suffix}")
+        lines.extend(["", "Use /load <slot> to restore or /park delete <slot> to remove one."])
+        return "\n".join(lines)
+
+    def is_idle_for_proactive_message(self, min_idle_seconds: int = 900) -> bool:
+        if self._backend_busy():
+            return False
+        last_user_ts = self.memory_store.get_last_user_turn_ts()
+        if not last_user_ts:
+            return True
+        try:
+            idle_for = (datetime.now() - datetime.fromisoformat(last_user_ts)).total_seconds()
+        except Exception:
+            return False
+        return idle_for >= min_idle_seconds
+
+    async def process_parked_topic_followups(self, now_dt: datetime | None = None):
+        now_dt = now_dt or datetime.now()
+        if not self.telegram_connected or not self.is_idle_for_proactive_message():
+            return
+        for topic in self.parked_topics.due_topics(now_dt):
+            slot_id = int(topic.get("slot_id", 0))
+            followup = topic.get("followup") or {}
+            attempt = int(followup.get("attempts", 0)) + 1
+            title = topic.get("title") or f"Topic {slot_id}"
+            summary_short = topic.get("summary_short") or ""
+            reminder_text = (
+                f"Parked topic reminder [{slot_id}] {title}\n\n"
+                f"{summary_short}\n\n"
+                f"Do you still want to continue this topic?\n"
+                f"Use /load {slot_id} to resume or /park delete {slot_id} to remove it.\n"
+                f"Reminder {attempt}/3."
+            )
+            await self.send_long_message(
+                chat_id=self._primary_chat_id(),
+                text=reminder_text,
+                request_id=f"park-reminder-{slot_id}-{attempt}",
+                purpose="park-reminder",
+            )
+            self.parked_topics.record_followup_sent(slot_id, sent_at=now_dt)
+
     def _skills_by_type(self) -> dict[str, list[SkillDefinition]]:
         if not self.skill_manager:
             return {"action": [], "toggle": [], "prompt": []}
@@ -653,9 +851,14 @@ class FlexibleAgentRuntime:
         tg_status = "✓" if self.telegram_connected else "✗"
         wa_status = "✓" if self._get_whatsapp_connected() else "✗"
         channel_line = f"Telegram {tg_status} • WhatsApp {wa_status} • Workbench ✓"
+        mode_str = getattr(self.backend_manager, "agent_mode", "flex")
+        session_id_short = "none"
+        if mode_str == "fixed" and getattr(self.backend_manager, "current_backend", None):
+            sid = getattr(self.backend_manager.current_backend, "_session_id", None) or "none"
+            session_id_short = sid[:8] + "…" if sid != "none" and len(sid) > 8 else sid
         lines = [
             f"🧠 {self.name}",
-            f"🔀 Backend: {self.config.active_backend} • {self.get_current_model()}",
+            f"🔀 Backend: {self.config.active_backend} • {self.get_current_model()} • mode: {mode_str} • sid: {session_id_short}",
             f"📶 Channels: {channel_line}",
             f"📡 Runtime: {'busy' if self.is_generating else 'idle'} • queue {self.queue.qsize()} • process {self._process_info()}",
             f"🧾 Current: {current_line}",
@@ -667,6 +870,11 @@ class FlexibleAgentRuntime:
         if detailed:
             allowed = ", ".join(b["engine"] for b in self.config.allowed_backends)
             current_effort = self._get_current_effort() or "n/a"
+            
+            session_id = "none"
+            if mode_str == "fixed" and getattr(self.backend_manager, "current_backend", None):
+                session_id = getattr(self.backend_manager.current_backend, "_session_id", "none") or "none"
+                
             lines.extend([
                 "",
                 f"📁 Workspace: {self.workspace_dir}",
@@ -674,6 +882,7 @@ class FlexibleAgentRuntime:
                 f"🚀 Started: {self.session_started_at.isoformat(timespec='seconds')}",
                 f"🧩 Allowed Backends: {allowed}",
                 f"🎛️ Effort: {current_effort}",
+                f"⚙️ Mode: {mode_str} • Session ID: {session_id}",
                 f"🔁 Retry Cache: prompt {'yes' if self.last_prompt else 'no'} • response {'yes' if self.last_response else 'no'}",
                 f"🧷 Primers: FYI {'armed' if self._pending_session_primer else 'clear'} • auto-recall {'armed' if self._pending_auto_recall_context else 'clear'}",
                 f"📚 Bridge Memory: {self.memory_store.get_stats()['turns']} turns • {self.memory_store.get_stats()['memories']} memories",
@@ -704,8 +913,8 @@ class FlexibleAgentRuntime:
         if skill.type == "toggle":
             buttons.append(
                 [
-                    InlineKeyboardButton("Turn On", callback_data=f"skill:toggle:{skill.id}:on"),
-                    InlineKeyboardButton("Turn Off", callback_data=f"skill:toggle:{skill.id}:off"),
+                    InlineKeyboardButton("ON", callback_data=f"skill:toggle:{skill.id}:on"),
+                    InlineKeyboardButton("OFF", callback_data=f"skill:toggle:{skill.id}:off"),
                 ]
             )
         elif skill.type == "action" and skill.id not in {"cron", "heartbeat"}:
@@ -717,23 +926,12 @@ class FlexibleAgentRuntime:
         return InlineKeyboardMarkup(buttons) if buttons else None
 
     async def _render_skill_jobs(self, update_or_query, kind: str):
-        text = self.skill_manager.describe_jobs(kind, agent_name=self.name)
-        jobs = self.skill_manager.list_jobs(kind, agent_name=self.name)
-        buttons = []
-        for job in jobs:
-            mode = "off" if job.get("enabled", False) else "on"
-            label = f"{job['id']} {'OFF' if job.get('enabled', False) else 'ON'}"
-            buttons.append(
-                [
-                    InlineKeyboardButton(label, callback_data=f"skilljob:{kind}:toggle:{job['id']}:{mode}"),
-                    InlineKeyboardButton("Run", callback_data=f"skilljob:{kind}:run:{job['id']}:now"),
-                ]
-            )
-        markup = InlineKeyboardMarkup(buttons) if buttons else None
+        from orchestrator.agent_runtime import _build_jobs_with_buttons
+        text, markup = _build_jobs_with_buttons(self.name, self.skill_manager)
         if hasattr(update_or_query, "edit_message_text"):
-            await update_or_query.edit_message_text(text, reply_markup=markup)
+            await update_or_query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
         else:
-            await self._reply_text(update_or_query, text, reply_markup=markup)
+            await self._reply_text(update_or_query, text, parse_mode="HTML", reply_markup=markup)
 
     async def invoke_scheduler_skill(self, skill_id: str, args: str, task_id: str):
         if not self.skill_manager:
@@ -892,14 +1090,20 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CommandHandler("skill", self._wrap_cmd("skill", self.cmd_skill)))
         self.app.add_handler(CommandHandler("backend", self._wrap_cmd("backend", self.cmd_backend)))
         self.app.add_handler(CommandHandler("handoff", self._wrap_cmd("handoff", self.cmd_handoff)))
+        self.app.add_handler(CommandHandler("park", self._wrap_cmd("park", self.cmd_park)))
+        self.app.add_handler(CommandHandler("load", self._wrap_cmd("load", self.cmd_load)))
         self.app.add_handler(CommandHandler("model", self._wrap_cmd("model", self.cmd_model)))
         self.app.add_handler(CommandHandler("effort", self._wrap_cmd("effort", self.cmd_effort)))
         self.app.add_handler(CallbackQueryHandler(self.callback_model, pattern=r"^(model|backend|bmodel|effort|backend_menu)"))
         self.app.add_handler(CallbackQueryHandler(self.callback_voice, pattern=r"^voice:"))
         self.app.add_handler(CallbackQueryHandler(self.callback_start_agent, pattern=r"^startagent:"))
         self.app.add_handler(CallbackQueryHandler(self.callback_skill, pattern=r"^(skill|skilljob):"))
+        self.app.add_handler(CallbackQueryHandler(self.callback_toggle, pattern=r"^tgl:"))
+        self.app.add_handler(CommandHandler("mode", self._wrap_cmd("mode", self.cmd_mode)))
         self.app.add_handler(CommandHandler("new", self._wrap_cmd("new", self.cmd_new)))
+        self.app.add_handler(CommandHandler("memory", self._wrap_cmd("memory", self.cmd_memory)))
         self.app.add_handler(CommandHandler("wipe", self._wrap_cmd("wipe", self.cmd_wipe)))
+        self.app.add_handler(CommandHandler("reset", self._wrap_cmd("reset", self.cmd_reset)))
         self.app.add_handler(CommandHandler("clear", self._wrap_cmd("clear", self.cmd_clear)))
         self.app.add_handler(CommandHandler("stop", self._wrap_cmd("stop", self.cmd_stop)))
         self.app.add_handler(CommandHandler("terminate", self._wrap_cmd("terminate", self.cmd_terminate)))
@@ -909,6 +1113,8 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CommandHandler("think", self._wrap_cmd("think", self.cmd_think)))
         self.app.add_handler(CommandHandler("jobs", self._wrap_cmd("jobs", self.cmd_jobs)))
         self.app.add_handler(CommandHandler("logo", self._wrap_cmd("logo", self.cmd_logo)))
+        self.app.add_handler(CommandHandler("move", self._wrap_cmd("move", self.cmd_move)))
+        self.app.add_handler(CallbackQueryHandler(self.callback_move, pattern=r"^move:"))
         self.app.add_handler(CommandHandler("wa_on", self._wrap_cmd("wa_on", self.cmd_wa_on)))
         self.app.add_handler(CommandHandler("wa_off", self._wrap_cmd("wa_off", self.cmd_wa_off)))
         self.app.add_handler(CommandHandler("wa_send", self._wrap_cmd("wa_send", self.cmd_wa_send)))
@@ -974,9 +1180,9 @@ class FlexibleAgentRuntime:
         names = orchestrator.get_startable_agent_names(exclude_name=self.name)
         if not names:
             return None
-        return InlineKeyboardMarkup(
-            [[InlineKeyboardButton(name, callback_data=f"startagent:{name}")] for name in names]
-        )
+        rows = [[InlineKeyboardButton(name, callback_data=f"startagent:{name}")] for name in names]
+        rows.append([InlineKeyboardButton("ALL", callback_data="startagent:__all__")])
+        return InlineKeyboardMarkup(rows)
 
     def _voice_keyboard(self) -> InlineKeyboardMarkup:
         rows = [
@@ -1005,6 +1211,18 @@ class FlexibleAgentRuntime:
         if orchestrator is None:
             await self._reply_text(update, "Dynamic lifecycle control is unavailable.")
             return
+        arg = " ".join(context.args).strip().lower() if context.args else ""
+        if arg == "all":
+            names = orchestrator.get_startable_agent_names(exclude_name=self.name)
+            if not names:
+                await self._reply_text(update, "All agents are running.")
+                return
+            lines = []
+            for name in names:
+                ok, msg = await orchestrator.start_agent(name)
+                lines.append(msg)
+            await self._reply_text(update, "\n".join(lines))
+            return
         keyboard = self._startable_agent_keyboard()
         if keyboard is None:
             await self._reply_text(update, "All agents are running.")
@@ -1020,6 +1238,16 @@ class FlexibleAgentRuntime:
             await query.answer("Lifecycle control unavailable", show_alert=True)
             return
         _, agent_name = (query.data or "").split(":", 1)
+        if agent_name == "__all__":
+            await query.answer("Starting all agents...")
+            names = orchestrator.get_startable_agent_names(exclude_name=self.name)
+            lines = []
+            for name in names:
+                ok, msg = await orchestrator.start_agent(name)
+                lines.append(msg)
+            result_text = "\n".join(lines) if lines else "All agents are already running."
+            await query.edit_message_text(result_text)
+            return
         await query.answer(f"Starting {agent_name}...")
         ok, message = await orchestrator.start_agent(agent_name)
         await query.edit_message_text(message, reply_markup=self._startable_agent_keyboard())
@@ -1047,6 +1275,175 @@ class FlexibleAgentRuntime:
         await query.edit_message_text(text, reply_markup=self._voice_keyboard())
         await query.answer()
 
+    # ── toggle callback ──────────────────────────────────────────────────────────
+    # Handles: tgl:verbose:on/off, tgl:think:on/off, tgl:mode:fixed/flex,
+    #          tgl:retry:response/prompt, tgl:whisper:small/medium/large,
+    #          tgl:active:on/off/<minutes>, tgl:reboot:min/max/same/<name>
+    async def callback_toggle(self, update: Update, context: Any):
+        query = update.callback_query
+        if not self._is_authorized_user(query.from_user.id):
+            await query.answer()
+            return
+        parts = (query.data or "").split(":", 2)
+        if len(parts) < 3:
+            await query.answer()
+            return
+        _, target, value = parts[0], parts[1], parts[2]
+
+        if target == "verbose":
+            self._verbose = value == "on"
+            _f = self.workspace_dir / ".verbose"
+            if self._verbose:
+                _f.touch()
+            else:
+                _f.unlink(missing_ok=True)
+            state = "ON 🔍" if self._verbose else "OFF"
+            markup = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ ON" if self._verbose else "ON", callback_data="tgl:verbose:on"),
+                InlineKeyboardButton("✅ OFF" if not self._verbose else "OFF", callback_data="tgl:verbose:off"),
+            ]])
+            await query.edit_message_text(f"Verbose mode: {state}", reply_markup=markup)
+            await query.answer(f"Verbose {state}")
+
+        elif target == "think":
+            self._think = value == "on"
+            _f = self.workspace_dir / ".think"
+            if self._think:
+                _f.touch()
+            else:
+                _f.unlink(missing_ok=True)
+            state = "ON 💭" if self._think else "OFF"
+            markup = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ ON" if self._think else "ON", callback_data="tgl:think:on"),
+                InlineKeyboardButton("✅ OFF" if not self._think else "OFF", callback_data="tgl:think:off"),
+            ]])
+            await query.edit_message_text(f"Thinking display: {state}", reply_markup=markup)
+            await query.answer(f"Think {state}")
+
+        elif target == "mode":
+            current = self.backend_manager.agent_mode
+            if value == current:
+                await query.answer(f"Already in {current} mode.")
+                return
+            self.backend_manager.agent_mode = value
+            self.backend_manager._save_state()
+            backend = self.backend_manager.current_backend
+            if value == "fixed":
+                if hasattr(backend, "set_session_mode"):
+                    backend.set_session_mode(True)
+                detail = "CLI session persists · /backend disabled"
+            else:
+                if hasattr(backend, "set_session_mode"):
+                    backend.set_session_mode(False)
+                detail = "Full context injection · /backend enabled"
+            markup = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Fixed" if value == "fixed" else "Fixed", callback_data="tgl:mode:fixed"),
+                InlineKeyboardButton("✅ Flex" if value == "flex" else "Flex", callback_data="tgl:mode:flex"),
+            ]])
+            await query.edit_message_text(f"Mode: <b>{value}</b>\n{detail}", parse_mode="HTML", reply_markup=markup)
+            await query.answer(f"Switched to {value}")
+
+        elif target == "retry":
+            chat_id = query.message.chat_id
+            await query.answer(f"Retrying {value}...")
+            if value == "response":
+                if self.last_response:
+                    await self.send_long_message(chat_id=self.last_response["chat_id"], text=self.last_response["text"],
+                                                  request_id=self.last_response.get("request_id"), purpose="retry-response")
+                else:
+                    transcript_text = self._load_last_text_from_transcript("assistant")
+                    if transcript_text:
+                        await self.send_long_message(chat_id=chat_id, text=transcript_text, purpose="retry-response")
+                    elif self.last_prompt:
+                        await self.enqueue_request(self.last_prompt.chat_id, self.last_prompt.prompt, "retry", "Retry request")
+                    else:
+                        await query.answer("Nothing to retry.", show_alert=True)
+            else:  # prompt
+                if self.last_prompt:
+                    await self.enqueue_request(self.last_prompt.chat_id, self.last_prompt.prompt, "retry", "Retry request")
+                else:
+                    transcript_text = self._load_last_text_from_transcript("user")
+                    if transcript_text:
+                        await self.enqueue_request(chat_id, transcript_text, "retry", "Retry request")
+                    else:
+                        await query.answer("No previous prompt.", show_alert=True)
+
+        elif target == "whisper":
+            from orchestrator.voice_transcriber import get_transcriber
+            mapping = {"small": "small", "medium": "medium", "large": "large-v3"}
+            new_size = mapping.get(value)
+            if not new_size:
+                await query.answer("Unknown size.", show_alert=True)
+                return
+            transcriber = get_transcriber()
+            transcriber.model_size = new_size
+            transcriber._model = None
+            markup = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ small" if value == "small" else "small", callback_data="tgl:whisper:small"),
+                InlineKeyboardButton("✅ medium" if value == "medium" else "medium", callback_data="tgl:whisper:medium"),
+                InlineKeyboardButton("✅ large" if value == "large" else "large", callback_data="tgl:whisper:large"),
+            ]])
+            await query.edit_message_text(f"Whisper model: <b>{new_size}</b>", parse_mode="HTML", reply_markup=markup)
+            await query.answer(f"Set to {new_size}")
+
+        elif target == "active":
+            if not self.skill_manager:
+                await query.answer("Skill manager not available.", show_alert=True)
+                return
+            if value == "off":
+                _, msg = self.skill_manager.set_active_heartbeat(self.name, enabled=False)
+            elif value == "on":
+                _, msg = self.skill_manager.set_active_heartbeat(self.name, enabled=True,
+                                                                  minutes=self.skill_manager.ACTIVE_HEARTBEAT_DEFAULT_MINUTES)
+            else:
+                try:
+                    mins = int(value)
+                    _, msg = self.skill_manager.set_active_heartbeat(self.name, enabled=True, minutes=mins)
+                except ValueError:
+                    await query.answer("Invalid value.", show_alert=True)
+                    return
+            status = self.skill_manager.describe_active_heartbeat(self.name)
+            markup = self._active_keyboard()
+            await query.edit_message_text(f"{status}\n\n{msg}", reply_markup=markup)
+            await query.answer()
+
+        elif target == "reboot":
+            orchestrator = getattr(self, "orchestrator", None)
+            if orchestrator is None:
+                await query.answer("Hot restart unavailable.", show_alert=True)
+                return
+            if value == "min":
+                mode, label = "min", f"Restarting only <b>{self.name}</b>..."
+            elif value == "max":
+                mode, label = "max", "Restarting all active agents..."
+            elif value.isdigit():
+                all_names = orchestrator.configured_agent_names()
+                num = int(value)
+                mode, label = "number", f"Restarting agent #{num} (<b>{all_names[num - 1]}</b>)..."
+            else:
+                mode, label = "same", "Restarting all running agents..."
+            await query.edit_message_text(label, parse_mode="HTML")
+            await query.answer()
+            orchestrator.request_restart(mode=mode, agent_name=self.name,
+                                          agent_number=int(value) if value.isdigit() else None)
+        else:
+            await query.answer()
+
+    def _active_keyboard(self) -> InlineKeyboardMarkup:
+        default_min = getattr(self.skill_manager, "ACTIVE_HEARTBEAT_DEFAULT_MINUTES", 10) if self.skill_manager else 10
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("ON", callback_data="tgl:active:on"),
+                InlineKeyboardButton("OFF", callback_data="tgl:active:off"),
+            ],
+            [
+                InlineKeyboardButton("10m", callback_data="tgl:active:10"),
+                InlineKeyboardButton("30m", callback_data="tgl:active:30"),
+                InlineKeyboardButton("60m", callback_data="tgl:active:60"),
+            ],
+        ])
+
+    # ── lifecycle commands ───────────────────────────────────────────────────────
     async def cmd_terminate(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
@@ -1065,22 +1462,24 @@ class FlexibleAgentRuntime:
             await self._reply_text(update, "Hot restart is unavailable.")
             return
         arg = " ".join(context.args).strip().lower() if context.args else ""
-        if arg == "help":
+        if not arg or arg == "help":
             all_names = orchestrator.configured_agent_names()
-            lines = [
-                "<b>/reboot</b> — restart all running agents (same selection)",
-                "<b>/reboot min</b> — restart only this bot",
-                "<b>/reboot max</b> — restart all active agents",
-                "<b>/reboot [number]</b> — restart a specific agent by number",
-                "<b>/reboot help</b> — show this help",
-                "",
-                "<b>Agents:</b>",
-            ]
+            lines = ["<b>Reboot</b> — select target:"]
             for i, name in enumerate(all_names, 1):
                 running = name in {rt.name for rt in orchestrator.runtimes}
                 marker = "●" if running else "○"
                 lines.append(f"  {i}. {marker} {name}")
-            await self._reply_text(update, "\n".join(lines), parse_mode="HTML")
+            rows = [
+                [
+                    InlineKeyboardButton("This bot", callback_data="tgl:reboot:min"),
+                    InlineKeyboardButton("All active", callback_data="tgl:reboot:max"),
+                    InlineKeyboardButton("Running only", callback_data="tgl:reboot:same"),
+                ]
+            ]
+            for i, name in enumerate(all_names, 1):
+                rows.append([InlineKeyboardButton(f"#{i} {name}", callback_data=f"tgl:reboot:{i}")])
+            markup = InlineKeyboardMarkup(rows)
+            await self._reply_text(update, "\n".join(lines), parse_mode="HTML", reply_markup=markup)
             return
         if arg == "min":
             mode, label = "min", f"Restarting only <b>{self.name}</b>..."
@@ -1097,6 +1496,231 @@ class FlexibleAgentRuntime:
             mode, label = "same", "Restarting all running agents..."
         await self._reply_text(update, label, parse_mode="HTML")
         orchestrator.request_restart(mode=mode, agent_name=self.name, agent_number=int(arg) if arg.isdigit() else None)
+
+    # ── /move command ────────────────────────────────────────────────────────
+    def _load_instances(self) -> dict:
+        """Load instances.json from the project root or ~/.hashi/instances.json."""
+        candidates = [
+            Path(__file__).parent.parent / "instances.json",
+            Path.home() / ".hashi" / "instances.json",
+        ]
+        for p in candidates:
+            if p.exists():
+                import json as _json
+                with open(p) as f:
+                    data = _json.load(f)
+                return data.get("instances", {})
+        return {}
+
+    async def cmd_move(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+
+        instances = self._load_instances()
+        if not instances:
+            await self._reply_text(update, "⚠️ No instances.json found. Create one at the project root.")
+            return
+
+        args = context.args or []
+
+        # /move list
+        if args and args[0].lower() == "list":
+            lines = ["<b>Known HASHI Instances:</b>"]
+            for name, inst in instances.items():
+                root = inst.get("root") or "(auto)"
+                lines.append(f"  • <code>{name}</code> — {inst.get('display_name', '')}  <i>{root}</i>")
+            await self._reply_text(update, "\n".join(lines), parse_mode="HTML")
+            return
+
+        # /move <agent> <target> [--keep-source] [--sync] [--dry-run]
+        if len(args) >= 2:
+            agent_id = args[0]
+            target = args[1]
+            keep = "--keep-source" in args
+            sync = "--sync" in args
+            dry = "--dry-run" in args
+            await self._do_move(update, agent_id, target, instances, keep_source=keep, sync=sync, dry_run=dry)
+            return
+
+        # /move <agent> — show target picker
+        if len(args) == 1:
+            agent_id = args[0]
+            await self._move_show_target_picker(update, agent_id, instances)
+            return
+
+        # /move — show agent picker first, then target
+        await self._move_show_agent_picker(update, instances)
+
+    async def _move_show_agent_picker(self, update: Update, instances: dict):
+        """Step 1: pick which agent to move (from current instance)."""
+        import json as _json
+        root = Path(__file__).parent.parent
+        try:
+            with open(root / "agents.json") as f:
+                data = _json.load(f)
+            agents = data if isinstance(data, list) else data.get("agents", [])
+            agent_names = [ag.get("name") or ag.get("id", "?") for ag in agents if ag.get("name")]
+        except Exception:
+            agent_names = []
+
+        if not agent_names:
+            await self._reply_text(update, "No agents found in this instance.")
+            return
+
+        rows = [[InlineKeyboardButton(f"🤖 {name}", callback_data=f"move:agent:{name}")]
+                for name in agent_names]
+        markup = InlineKeyboardMarkup(rows)
+        await self._reply_text(update, "<b>Move Agent</b> — select agent to move:", parse_mode="HTML", reply_markup=markup)
+
+    async def _move_show_target_picker(self, update: Update, agent_id: str, instances: dict):
+        """Step 2: pick target instance."""
+        rows = []
+        for name, inst in instances.items():
+            label = inst.get("display_name", name)
+            rows.append([InlineKeyboardButton(f"📦 {label}", callback_data=f"move:target:{agent_id}:{name}")])
+        markup = InlineKeyboardMarkup(rows)
+        await self._reply_text(
+            update,
+            f"<b>Move <code>{agent_id}</code></b> — select target instance:",
+            parse_mode="HTML",
+            reply_markup=markup,
+        )
+
+    async def _move_show_options(self, update, agent_id: str, target: str):
+        """Step 3: show move options (keep source / sync / encrypt)."""
+        markup = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🔒 Move + Encrypt", callback_data=f"move:exec:{agent_id}:{target}:enc"),
+                InlineKeyboardButton("📋 Move Plain", callback_data=f"move:exec:{agent_id}:{target}:plain"),
+            ],
+            [
+                InlineKeyboardButton("📂 Copy (keep source)", callback_data=f"move:exec:{agent_id}:{target}:keep"),
+                InlineKeyboardButton("🔄 Sync memories", callback_data=f"move:exec:{agent_id}:{target}:sync"),
+            ],
+            [InlineKeyboardButton("❌ Cancel", callback_data="move:cancel")],
+        ])
+        await update.callback_query.edit_message_text(
+            f"<b>Move <code>{agent_id}</code> → {target}</b>\n\nChoose move mode:",
+            parse_mode="HTML",
+            reply_markup=markup,
+        )
+
+    async def _do_move(self, update, agent_id: str, target: str, instances: dict,
+                       keep_source: bool = False, sync: bool = False, dry_run: bool = False):
+        """Execute the actual migration."""
+        import asyncio as _asyncio
+        import subprocess as _subprocess
+
+        await self._reply_text(update, f"⏳ Moving <code>{agent_id}</code> → <b>{target}</b>…", parse_mode="HTML")
+
+        script = Path(__file__).parent.parent / "scripts" / "move_agent.py"
+        if not script.exists():
+            await self._reply_text(update, "Error: move_agent.py not found.")
+            return
+
+        cmd = [
+            "python", str(script),
+            agent_id, target,
+            "--source-instance", "hashi2",
+        ]
+        if keep_source:
+            cmd.append("--keep-source")
+        if sync:
+            cmd.append("--sync")
+        if dry_run:
+            cmd.append("--dry-run")
+
+        try:
+            result = await _asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: _subprocess.run(cmd, capture_output=True, text=True,
+                                        cwd=str(Path(__file__).parent.parent))
+            )
+            output = (result.stdout + result.stderr).strip()
+            # Trim for Telegram
+            if len(output) > 3000:
+                output = output[:3000] + "\n…[truncated]"
+            status = "✅" if result.returncode == 0 else "❌"
+            await self._reply_text(
+                update,
+                f"{status} <b>Migration result:</b>\n<pre>{output}</pre>",
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            await self._reply_text(update, f"Error running migration: {e}")
+
+    async def callback_move(self, update: Update, context: Any):
+        """Handle move: callback queries (multi-step picker)."""
+        query = update.callback_query
+        if not self._is_authorized_user(query.from_user.id):
+            await query.answer()
+            return
+        await query.answer()
+
+        data = query.data or ""
+        parts = data.split(":", 3)
+
+        if len(parts) < 2:
+            return
+
+        action = parts[1] if len(parts) > 1 else ""
+
+        if action == "cancel":
+            await query.edit_message_text("Move cancelled.")
+            return
+
+        if action == "agent" and len(parts) >= 3:
+            agent_id = parts[2]
+            instances = self._load_instances()
+            rows = []
+            for name, inst in instances.items():
+                label = inst.get("display_name", name)
+                rows.append([InlineKeyboardButton(f"📦 {label}", callback_data=f"move:target:{agent_id}:{name}")])
+            rows.append([InlineKeyboardButton("❌ Cancel", callback_data="move:cancel")])
+            markup = InlineKeyboardMarkup(rows)
+            await query.edit_message_text(
+                f"<b>Move <code>{agent_id}</code></b> — select target:",
+                parse_mode="HTML",
+                reply_markup=markup,
+            )
+            return
+
+        if action == "target" and len(parts) >= 4:
+            agent_id = parts[2]
+            target = parts[3]
+            markup = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("📋 Move (plain)", callback_data=f"move:exec:{agent_id}:{target}:plain"),
+                    InlineKeyboardButton("📂 Copy (keep source)", callback_data=f"move:exec:{agent_id}:{target}:keep"),
+                ],
+                [
+                    InlineKeyboardButton("🔄 Sync memories back", callback_data=f"move:exec:{agent_id}:{target}:sync"),
+                    InlineKeyboardButton("🔍 Dry run preview", callback_data=f"move:exec:{agent_id}:{target}:dry"),
+                ],
+                [InlineKeyboardButton("❌ Cancel", callback_data="move:cancel")],
+            ])
+            await query.edit_message_text(
+                f"<b>Move <code>{agent_id}</code> → {target}</b>\n\nChoose mode:",
+                parse_mode="HTML",
+                reply_markup=markup,
+            )
+            return
+
+        if action == "exec" and len(parts) >= 4:
+            # parts: move:exec:<agent>:<target>:<mode>
+            sub = parts[3].split(":", 1)
+            agent_id = sub[0]
+            rest = sub[1] if len(sub) > 1 else "plain"
+            target_mode = rest.split(":", 1)
+            target = target_mode[0]
+            mode = target_mode[1] if len(target_mode) > 1 else "plain"
+
+            keep = mode == "keep"
+            sync = mode == "sync"
+            dry = mode == "dry"
+            instances = self._load_instances()
+            await self._do_move(update, agent_id, target, instances,
+                                keep_source=keep, sync=sync, dry_run=dry)
 
     async def cmd_wa_on(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -1160,6 +1784,16 @@ class FlexibleAgentRuntime:
             await update.message.reply_text(mgr.display_all(), parse_mode="Markdown")
             return
 
+        # /sys output <n> — return raw content of slot, no state change
+        if args[0].lower() == "output":
+            slot = args[1] if len(args) > 1 else ""
+            if slot not in mgr.SLOTS:
+                await update.message.reply_text("Usage: /sys output <1-10>")
+                return
+            text = mgr._slot(slot).get("text", "")
+            await update.message.reply_text(text if text else "(empty)", parse_mode=None)
+            return
+
         slot = args[0]
         if slot not in mgr.SLOTS:
             await update.message.reply_text(f"Invalid slot '{slot}'. Use 1-10.")
@@ -1192,7 +1826,8 @@ class FlexibleAgentRuntime:
         else:
             await update.message.reply_text(
                 "Usage:\n/sys - show all slots\n/sys <n> - show slot\n"
-                "/sys <n> on|off|delete\n/sys <n> save <msg>\n/sys <n> replace <msg>"
+                "/sys <n> on|off|delete\n/sys <n> save <msg>\n/sys <n> replace <msg>\n"
+                "/sys output <n> - return raw content of slot"
             )
 
     async def cmd_credit(self, update, context):
@@ -1304,7 +1939,13 @@ class FlexibleAgentRuntime:
         transcriber = get_transcriber()
 
         if not args:
-            await self._reply_text(update, f"Current Whisper model size: {transcriber.model_size}")
+            cur = transcriber.model_size
+            markup = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ small" if cur == "small" else "small", callback_data="tgl:whisper:small"),
+                InlineKeyboardButton("✅ medium" if cur == "medium" else "medium", callback_data="tgl:whisper:medium"),
+                InlineKeyboardButton("✅ large" if cur.startswith("large") else "large", callback_data="tgl:whisper:large"),
+            ]])
+            await self._reply_text(update, f"Whisper model: <b>{cur}</b>", parse_mode="HTML", reply_markup=markup)
             return
 
         value = args[0]
@@ -1489,6 +2130,11 @@ class FlexibleAgentRuntime:
                 await query.answer(message, show_alert=not ok)
                 await self._render_skill_jobs(query, kind)
                 return
+            if action == "delete":
+                ok, message = self.skill_manager.delete_job(kind, task_id)
+                await query.answer(message, show_alert=not ok)
+                await self._render_skill_jobs(query, kind)
+                return
             if action == "run":
                 job = self.skill_manager.get_job(kind, task_id)
                 if not job:
@@ -1592,10 +2238,15 @@ class FlexibleAgentRuntime:
         else:
             _verbose_file.unlink(missing_ok=True)
         state = "ON 🔍" if self._verbose else "OFF"
+        markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ ON" if self._verbose else "ON", callback_data="tgl:verbose:on"),
+            InlineKeyboardButton("✅ OFF" if not self._verbose else "OFF", callback_data="tgl:verbose:off"),
+        ]])
         await self._reply_text(
             update,
             f"Verbose mode: {state}\n"
-            f"{'Long-task placeholders will show engine, elapsed, idle time and output events.' if self._verbose else 'Placeholders will show concise status only.'}"
+            f"{'Long-task placeholders will show engine, elapsed, idle time and output events.' if self._verbose else 'Placeholders will show concise status only.'}",
+            reply_markup=markup,
         )
 
 
@@ -1615,21 +2266,23 @@ class FlexibleAgentRuntime:
         else:
             _think_file.unlink(missing_ok=True)
         state = "ON 💭" if self._think else "OFF"
+        markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ ON" if self._think else "ON", callback_data="tgl:think:on"),
+            InlineKeyboardButton("✅ OFF" if not self._think else "OFF", callback_data="tgl:think:off"),
+        ]])
         await self._reply_text(
             update,
             f"Thinking display: {state}\n"
-            f"{'Thinking traces will be sent as permanent italic messages every ~60s during generation.' if self._think else 'Thinking traces will not be displayed.'}"
+            f"{'Thinking traces will be sent as permanent italic messages every ~60s during generation.' if self._think else 'Thinking traces will not be displayed.'}",
+            reply_markup=markup,
         )
 
     async def cmd_jobs(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
-        from orchestrator.agent_runtime import _build_jobs_text
-        await self._reply_text(
-            update,
-            _build_jobs_text(self.name, self.skill_manager),
-            parse_mode="HTML",
-        )
+        from orchestrator.agent_runtime import _build_jobs_with_buttons
+        text, markup = _build_jobs_with_buttons(self.name, self.skill_manager)
+        await self._reply_text(update, text, parse_mode="HTML", reply_markup=markup)
 
     async def cmd_logo(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -1642,6 +2295,13 @@ class FlexibleAgentRuntime:
 
     async def cmd_backend(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
+            return
+        if self.backend_manager.agent_mode == "fixed":
+            await self._reply_text(
+                update,
+                "Backend switching is disabled in **fixed** mode.\nUse `/mode flex` to re-enable.",
+                parse_mode="Markdown",
+            )
             return
 
         args = context.args
@@ -1703,6 +2363,117 @@ class FlexibleAgentRuntime:
             f"Handoff restore [{exchange_count} exchanges]",
         )
 
+    async def cmd_park(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        args = [a.strip() for a in (context.args or []) if a.strip()]
+        if not args:
+            await self._reply_text(update, self._format_parked_topics_text())
+            return
+
+        action = args[0].lower()
+        if action == "delete":
+            if len(args) < 2 or not args[1].isdigit():
+                await self._reply_text(update, "Usage: /park delete <slot>")
+                return
+            slot_id = int(args[1])
+            removed = self.parked_topics.delete_topic(slot_id)
+            if not removed:
+                await self._reply_text(update, f"Parked topic [{slot_id}] was not found.")
+                return
+            await self._reply_text(update, f"Deleted parked topic [{slot_id}] {removed.get('title') or ''}".strip())
+            return
+
+        if action != "chat":
+            await self._reply_text(
+                update,
+                "Usage:\n"
+                "/park - list parked topics\n"
+                "/park chat [optional title] - park the current topic\n"
+                "/park delete <slot> - delete a parked topic",
+            )
+            return
+
+        if self._backend_busy():
+            await self._reply_text(update, "Parking is blocked while a request is running or queued.")
+            return
+
+        title_override = " ".join(args[1:]).strip() or None
+        await self._reply_text(update, "Parking the current topic and writing a resume summary...")
+        summary = await self._summarize_current_topic_for_parking(title_override=title_override)
+        if not summary:
+            await self._reply_text(update, "No recent bridge transcript was available to park.")
+            return
+
+        topic = self.parked_topics.create_topic(
+            title=summary["title"],
+            summary_short=summary["summary_short"],
+            summary_long=summary["summary_long"],
+            recent_context=summary["recent_context"],
+            last_user_text=summary["last_user_text"],
+            last_assistant_text=summary["last_assistant_text"],
+            last_exchange_text=summary["last_exchange_text"],
+            source_session=self.session_id_dt,
+            title_user_override=title_override,
+        )
+        slot_id = int(topic["slot_id"])
+        await self._reply_text(
+            update,
+            f"Parked as [{slot_id}] {topic['title']}\n"
+            f"{topic['summary_short']}\n\n"
+            f"Follow-up reminders are scheduled for this parked topic (up to 3 attempts).\n"
+            f"Use /load {slot_id} to resume or /park delete {slot_id} to remove it.",
+        )
+
+    async def cmd_load(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        args = [a.strip() for a in (context.args or []) if a.strip()]
+        if len(args) != 1 or not args[0].isdigit():
+            await self._reply_text(update, "Usage: /load <slot>")
+            return
+        if self._backend_busy():
+            await self._reply_text(update, "Load is blocked while a request is running or queued.")
+            return
+
+        slot_id = int(args[0])
+        topic = self.parked_topics.get_topic(slot_id)
+        if not topic:
+            await self._reply_text(update, f"Parked topic [{slot_id}] was not found.")
+            return
+
+        self.parked_topics.mark_loaded(slot_id)
+        title = topic.get("title") or f"Topic {slot_id}"
+        summary_short = topic.get("summary_short") or ""
+        summary_long = topic.get("summary_long") or ""
+        recent_context = topic.get("recent_context") or ""
+        last_exchange = topic.get("last_exchange_text") or ""
+        self._pending_auto_recall_context = (
+            "Restore the parked topic below as active continuity context. "
+            "Use it as current working context for this session.\n\n"
+            f"--- PARKED TOPIC [{slot_id}] ---\n"
+            f"Title: {title}\n"
+            f"Short Summary: {summary_short}\n\n"
+            f"Long Summary:\n{summary_long}\n\n"
+            f"Last Exchange:\n{last_exchange or '(none)'}\n\n"
+            f"{recent_context}"
+        )
+        self._arm_session_primer(
+            f"Loading parked topic [{slot_id}] {title}. Resume it as the active working context."
+        )
+        await self._reply_text(update, f"Loading parked topic [{slot_id}] {title} and restoring continuity...")
+        await self.enqueue_request(
+            update.effective_chat.id,
+            (
+                "SYSTEM: Resume the parked topic that was just restored into context. "
+                "Continue naturally from the most relevant unfinished point. "
+                "Do not explain the restore process at length.\n\n"
+                "Resume the topic now."
+            ),
+            "park-load",
+            f"Parked topic load [{slot_id}]",
+        )
+
     async def cmd_active(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
@@ -1712,7 +2483,9 @@ class FlexibleAgentRuntime:
 
         args = [a.strip().lower() for a in (context.args or []) if a.strip()]
         if not args:
-            await self._reply_text(update, self.skill_manager.describe_active_heartbeat(self.name))
+            status = self.skill_manager.describe_active_heartbeat(self.name)
+            markup = self._active_keyboard()
+            await self._reply_text(update, status, reply_markup=markup)
             return
 
         mode = args[0]
@@ -2030,10 +2803,68 @@ class FlexibleAgentRuntime:
                         reply_markup=self._effort_keyboard(requested),
                     )
         except Exception as e:
-            logger.error(f"callback_model error: {e}", exc_info=True)
+            self.error_logger.error(f"callback_model error: {e}", exc_info=True)
             await query.answer(f"Error: {e}", show_alert=True)
             return
         await query.answer()
+
+    async def cmd_mode(self, update: Update, context: Any):
+        """Switch between fixed (continuous CLI session) and flex (multi-backend) modes.
+
+        Usage: /mode [fixed|flex]
+        """
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        args = (context.args[0].lower() if context.args else "").strip()
+        current = self.backend_manager.agent_mode
+
+        if not args or args not in ("fixed", "flex"):
+            markup = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Fixed" if current == "fixed" else "Fixed", callback_data="tgl:mode:fixed"),
+                InlineKeyboardButton("✅ Flex" if current == "flex" else "Flex", callback_data="tgl:mode:flex"),
+            ]])
+            await self._reply_text(
+                update,
+                f"Current mode: <b>{current}</b>\n\n"
+                f"• <b>fixed</b> — continuous CLI session, incremental prompts\n"
+                f"• <b>flex</b> — multi-backend switching, full context injection",
+                parse_mode="HTML",
+                reply_markup=markup,
+            )
+            return
+
+        if args == current:
+            await self._reply_text(update, f"Already in **{current}** mode.", parse_mode="Markdown")
+            return
+
+        self.backend_manager.agent_mode = args
+        self.backend_manager._save_state()
+
+        backend = self.backend_manager.current_backend
+        if args == "fixed":
+            # Enable session persistence on compatible backends
+            if hasattr(backend, "set_session_mode"):
+                backend.set_session_mode(True)
+            await self._reply_text(
+                update,
+                "Switched to **fixed** mode.\n"
+                "• CLI session will persist across messages\n"
+                "• Bridge sends incremental prompts (no history re-injection)\n"
+                "• `/backend` is disabled; use `/mode flex` to re-enable\n"
+                "• `/new` will terminate the current session and start fresh",
+                parse_mode="Markdown",
+            )
+        else:
+            # Disable session persistence
+            if hasattr(backend, "set_session_mode"):
+                backend.set_session_mode(False)
+            await self._reply_text(
+                update,
+                "Switched to **flex** mode.\n"
+                "• Full context injection per request\n"
+                "• `/backend` switching re-enabled",
+                parse_mode="Markdown",
+            )
 
     async def cmd_new(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -2046,8 +2877,21 @@ class FlexibleAgentRuntime:
         # - No continuity restore
         self._pending_auto_recall_context = None
 
-        if getattr(self.backend_manager.current_backend.capabilities, "supports_sessions", False):
-            await self.backend_manager.current_backend.handle_new_session()
+        backend = self.backend_manager.current_backend
+
+        # In fixed mode: terminate CLI session and clear session_id for a truly fresh start
+        if self.backend_manager.agent_mode == "fixed":
+            if hasattr(backend, "handle_new_session"):
+                await backend.handle_new_session()
+            # Kill the running process if any
+            if hasattr(backend, "current_proc") and backend.current_proc:
+                await backend.force_kill_process_tree(
+                    backend.current_proc, logger=self.logger, reason="cmd_new_fixed_mode"
+                )
+                backend.current_proc = None
+            await self._reply_text(update, "Fixed mode: session terminated. Starting fresh...")
+        elif getattr(backend.capabilities, "supports_sessions", False):
+            await backend.handle_new_session()
             await self._reply_text(update, "Starting a fresh session...")
         else:
             await self._reply_text(update, "Starting a fresh stateless session...")
@@ -2057,6 +2901,67 @@ class FlexibleAgentRuntime:
             "Follow ONLY your agent.md instructions. Ask the user what they want to do next."
         )
         await self.enqueue_request(update.effective_chat.id, prompt, "system", "New session")
+
+    async def cmd_memory(self, update: Update, context: Any):
+        """Control long-term memory injection into the agent's context.
+
+        Usage:
+          /memory          -> show current status
+          /memory on       -> enable memory injection (default)
+          /memory pause    -> disable injection without deleting any data
+          /memory wipe     -> permanently delete all stored memories and turns
+        """
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        args = " ".join(context.args).strip().lower() if context.args else ""
+        assembler = getattr(self, "context_assembler", None)
+
+        if args in ("", "status"):
+            if assembler:
+                state = "ON ✅" if assembler.memory_injection_enabled else "PAUSED ⏸️"
+            else:
+                state = "unknown (assembler not ready)"
+            stats = self.memory_store.get_stats() if hasattr(self, "memory_store") else {}
+            turns = stats.get("turns", "?")
+            memories = stats.get("memories", "?")
+            await self._reply_text(update,
+                f"Memory injection: {state}\n"
+                f"Stored: {turns} turns, {memories} memories\n\n"
+                f"Commands: /memory on | pause | wipe"
+            )
+
+        elif args == "on":
+            if assembler:
+                assembler.memory_injection_enabled = True
+            await self._reply_text(update,
+                "✅ Memory injection ON. Long-term memories will be included in context."
+            )
+
+        elif args == "pause":
+            if assembler:
+                assembler.memory_injection_enabled = False
+            await self._reply_text(update,
+                "⏸️ Memory injection PAUSED. Memories are preserved but not injected into context.\n"
+                "Use /memory on to resume."
+            )
+
+        elif args == "wipe":
+            if hasattr(self, "memory_store"):
+                result = self.memory_store.clear_all()
+                turns = result.get("deleted_turns", 0)
+                mems = result.get("deleted_memories", 0)
+                state = "ON ✅" if (assembler and assembler.memory_injection_enabled) else "PAUSED ⏸️"
+                await self._reply_text(update,
+                    f"🗑️ Memory wiped: {turns} turns and {mems} memories deleted.\n"
+                    f"Database structure preserved. Injection is still {state}."
+                )
+            else:
+                await self._reply_text(update, "❌ Memory store not available.")
+
+        else:
+            await self._reply_text(update,
+                "Usage: /memory [on | pause | wipe | status]"
+            )
 
     async def cmd_wipe(self, update: Update, context: Any):
         """Dangerous: wipe the agent's persisted workspace state.
@@ -2123,6 +3028,7 @@ class FlexibleAgentRuntime:
             self.memory_store,
             self.config.system_md,
             active_skill_provider=self._get_active_skill_sections,
+            sys_prompt_manager=self.sys_prompt_manager,
         )
 
         # Reset any pending continuity
@@ -2138,6 +3044,89 @@ class FlexibleAgentRuntime:
             update,
             f"✅ Wiped workspace for {self.name}. Removed {removed_dirs} dirs and {removed_files} files.\n"
             "Only agent.md instructions remain. Start fresh with /new.",
+        )
+
+    async def cmd_reset(self, update: Update, context: Any):
+        """Soft reset: wipe workspace state but preserve agent identity and /sys prompts.
+
+        Goal: after /reset, agent.md, AGENT.md, and sys_prompts.json are kept intact —
+        personality and /sys slots survive. Everything else (memory, transcripts,
+        handoff, backend_state, etc.) is cleared.
+
+        Usage:
+          /reset           -> shows warning
+          /reset CONFIRM   -> executes reset
+        """
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        if self._backend_busy():
+            await self._reply_text(update, "Reset is blocked while a request is running or queued. Use /stop first.")
+            return
+
+        args = [a.strip() for a in (context.args or []) if a.strip()]
+        if not args or args[0].upper() != "CONFIRM":
+            await self._reply_text(
+                update,
+                "⚠️ /reset will clear this agent's memory, transcripts, and session state.\n"
+                "agent.md and /sys prompt slots will be preserved — the agent's identity stays intact.\n\n"
+                "To proceed: /reset CONFIRM",
+            )
+            return
+
+        keep_names = {"agent.md", "AGENT.md", "sys_prompts.json"}
+        removed_files = 0
+        removed_dirs = 0
+
+        # Stop any backend process just in case.
+        if self.backend_manager.current_backend:
+            with suppress(Exception):
+                await self.backend_manager.current_backend.shutdown()
+
+        # Wipe workspace contents (keep identity + sys prompts)
+        for child in list(self.workspace_dir.iterdir()):
+            if child.name in keep_names:
+                continue
+            try:
+                if child.is_dir():
+                    shutil.rmtree(child)
+                    removed_dirs += 1
+                else:
+                    child.unlink(missing_ok=True)
+                    removed_files += 1
+            except Exception:
+                pass
+
+        # Re-create essential dirs
+        self.workspace_dir.mkdir(parents=True, exist_ok=True)
+        self.memory_dir = self.workspace_dir / "memory"
+        self.backend_state_dir = self.workspace_dir / "backend_state"
+        self.memory_dir.mkdir(parents=True, exist_ok=True)
+        self.backend_state_dir.mkdir(parents=True, exist_ok=True)
+
+        # Re-init memory/handoff subsystems (fresh), reuse existing sys_prompt_manager
+        self.memory_index = MemoryIndex(self.workspace_dir / "memory_index.sqlite")
+        self.handoff_builder = HandoffBuilder(self.workspace_dir)
+        self.memory_store = BridgeMemoryStore(self.workspace_dir)
+        self.context_assembler = BridgeContextAssembler(
+            self.memory_store,
+            self.config.system_md,
+            active_skill_provider=self._get_active_skill_sections,
+            sys_prompt_manager=self.sys_prompt_manager,
+        )
+
+        # Reset any pending continuity
+        self._pending_auto_recall_context = None
+        self._pending_session_primer = None
+
+        # Start a fresh backend session if supported
+        if self.backend_manager.current_backend and getattr(self.backend_manager.current_backend.capabilities, "supports_sessions", False):
+            with suppress(Exception):
+                await self.backend_manager.current_backend.handle_new_session()
+
+        await self._reply_text(
+            update,
+            f"✅ Reset workspace for {self.name}. Removed {removed_dirs} dirs and {removed_files} files.\n"
+            "Agent identity and /sys slots are intact. Start fresh with /new.",
         )
 
     async def cmd_clear(self, update: Update, context: Any):
@@ -2183,14 +3172,56 @@ class FlexibleAgentRuntime:
             f"Stopped execution. Cleared {dropped} queued messages and killed active backend process tree.",
         )
 
+    def _load_last_text_from_transcript(self, role: str) -> str | None:
+        """Read the last message of the given role from transcript.jsonl."""
+        try:
+            if not self.transcript_log_path.exists():
+                return None
+            last_text = None
+            with open(self.transcript_log_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        if entry.get("role") == role and entry.get("text"):
+                            last_text = entry["text"]
+                    except Exception:
+                        pass
+            return last_text
+        except Exception:
+            return None
+
     async def cmd_retry(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
         args = [a.strip().lower() for a in (context.args or []) if a.strip()]
         mode = args[0] if args else "response"
+        chat_id = update.effective_chat.id
         if mode in {"response", "resp"}:
             if not self.last_response:
-                await self._reply_text(update, "No previous response to resend.")
+                # Try to restore last response from transcript (survives reboot)
+                transcript_text = self._load_last_text_from_transcript("assistant")
+                if transcript_text:
+                    await self._reply_text(update, "Restoring last response from transcript...")
+                    await self.send_long_message(
+                        chat_id=chat_id,
+                        text=transcript_text,
+                        purpose="retry-response",
+                    )
+                    return
+                # Fallback: re-run the last prompt
+                if self.last_prompt:
+                    await self._reply_text(update, "No cached response — retrying last prompt...")
+                    await self.enqueue_request(
+                        self.last_prompt.chat_id,
+                        self.last_prompt.prompt,
+                        "retry",
+                        "Retry request",
+                    )
+                else:
+                    await self._reply_text(update, "Nothing to retry — no previous response or prompt.")
                 return
             await self._reply_text(update, "Resending last response...")
             await self.send_long_message(
@@ -2202,7 +3233,13 @@ class FlexibleAgentRuntime:
             return
         if mode in {"prompt", "req", "request"}:
             if not self.last_prompt:
-                await self._reply_text(update, "No previous prompt to rerun.")
+                # Try to restore last user prompt from transcript
+                transcript_text = self._load_last_text_from_transcript("user")
+                if transcript_text:
+                    await self._reply_text(update, "Restoring last prompt from transcript...")
+                    await self.enqueue_request(chat_id, transcript_text, "retry", "Retry request")
+                else:
+                    await self._reply_text(update, "No previous prompt to rerun.")
                 return
             await self._reply_text(update, "Retrying last prompt...")
             await self.enqueue_request(
@@ -2212,7 +3249,11 @@ class FlexibleAgentRuntime:
                 "Retry request",
             )
             return
-        await self._reply_text(update, "Usage: /retry [response|prompt]")
+        markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton("重发回复", callback_data="tgl:retry:response"),
+            InlineKeyboardButton("重跑 Prompt", callback_data="tgl:retry:prompt"),
+        ]])
+        await self._reply_text(update, "Retry — choose action:", reply_markup=markup)
 
     async def handle_message(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -2928,7 +3969,15 @@ class FlexibleAgentRuntime:
                 self.is_generating = True
 
                 effective_prompt = self._consume_session_primer(item)
-                final_prompt = self.context_assembler.build_prompt(effective_prompt, self.config.active_backend)
+                # In fixed mode with an active session, use incremental prompts
+                _incremental = (
+                    self.backend_manager.agent_mode == "fixed"
+                    and hasattr(self.backend_manager.current_backend, "_session_id")
+                    and self.backend_manager.current_backend._session_id is not None
+                )
+                final_prompt = self.context_assembler.build_prompt(
+                    effective_prompt, self.config.active_backend, incremental=_incremental
+                )
                 
                 stop_typing = None
                 typing_task = None
@@ -3111,7 +4160,35 @@ class FlexibleAgentRuntime:
                         pass
 
                 # 3. Update transcript and refresh context
-                if response.is_success and response.text:
+                if response.is_success and not response.text:
+                    # Backend succeeded but returned empty text (e.g. tool call returned
+                    # an error and the model gave up without producing a reply).
+                    # Surface a clear message rather than falling through to "Unknown error".
+                    err_msg = "I wasn't able to complete that — a tool I tried to use didn't return a result. Please check that all required API keys (e.g. brave_api_key for web search) are configured in secrets.json."
+                    self.logger.warning(
+                        f"Backend {self.config.active_backend} returned success with empty text for "
+                        f"{item.request_id} — treating as recoverable tool failure"
+                    )
+                    self._mark_error(err_msg)
+                    if not item.silent:
+                        await self.send_long_message(
+                            chat_id=item.chat_id,
+                            text=err_msg,
+                            request_id=item.request_id,
+                            purpose="error",
+                        )
+                    await self._notify_request_listeners(
+                        item.request_id,
+                        {
+                            "request_id": item.request_id,
+                            "success": False,
+                            "text": None,
+                            "error": err_msg,
+                            "source": item.source,
+                            "summary": item.summary,
+                        },
+                    )
+                elif response.is_success and response.text:
                     self._mark_success()
                     await self._notify_request_listeners(
                         item.request_id,
@@ -3221,6 +4298,9 @@ class FlexibleAgentRuntime:
             BotCommand("skill", "Browse and run skills"),
             BotCommand("backend", "Show backend buttons (+ means context)"),
             BotCommand("handoff", "Fresh session with recent continuity"),
+            BotCommand("park", "List or save parked topics"),
+            BotCommand("load", "Restore a parked topic"),
+            BotCommand("mode", "Switch fixed/flex mode"),
             BotCommand("model", "View or change model"),
             BotCommand("effort", "View or change effort"),
             BotCommand("new", "Start a fresh session"),

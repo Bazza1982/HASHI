@@ -1,8 +1,10 @@
 from __future__ import annotations
 import json
 import math
+import os
 import re
 import sqlite3
+import struct
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -34,17 +36,201 @@ class LocalEmbeddingEncoder:
         return sum(x * y for x, y in zip(a, b))
 
 
+class BgeM3Encoder:
+    """BGE-M3 ONNX encoder with safe fallback to the legacy hash encoder."""
+
+    DIM = 1024
+    DEFAULT_MODEL_DIR = Path(os.environ.get("HASHI_BGE_M3_MODEL_DIR") or Path.home() / "hashi_models/bge-m3-int8")
+    DEFAULT_TOKENIZER_ID = "BAAI/bge-m3"
+
+    def __init__(self, model_dir: str | Path | None = None, tokenizer_dir: str | Path | None = None):
+        self._fallback = LocalEmbeddingEncoder()
+        self._ready = False
+        self._error: str | None = None
+        self._np = None
+        self._session = None
+        self._tokenizer = None
+        self._input_names: set[str] = set()
+        self._model_dir = Path(
+            model_dir
+            or self.DEFAULT_MODEL_DIR
+        )
+        self._tokenizer_dir = Path(
+            tokenizer_dir
+            or os.environ.get("HASHI_BGE_M3_TOKENIZER_DIR")
+            or self._model_dir
+        )
+        self._init()
+
+    @property
+    def dim(self) -> int:
+        return self.DIM if self._ready else self._fallback.dim
+
+    @property
+    def ready(self) -> bool:
+        return self._ready
+
+    @property
+    def error(self) -> str | None:
+        return self._error
+
+    @property
+    def vector_dim(self) -> int | None:
+        return self.DIM if self._ready else None
+
+    def _init(self):
+        try:
+            import numpy as np
+            import onnxruntime as ort
+            from transformers import AutoTokenizer
+        except Exception as exc:
+            self._error = f"dependencies unavailable: {exc}"
+            return
+
+        # Support both flat layout (model.onnx) and onnx/ subdirectory layout
+        if (self._model_dir / "onnx" / "model.onnx").exists():
+            model_path = self._model_dir / "onnx" / "model.onnx"
+        else:
+            model_path = self._model_dir / "model.onnx"
+        if not model_path.exists():
+            self._error = f"missing model: {model_path}"
+            return
+
+        tokenizer_candidates: list[str] = []
+        if self._tokenizer_dir.exists():
+            tokenizer_candidates.append(str(self._tokenizer_dir))
+        if self._model_dir != self._tokenizer_dir and self._model_dir.exists():
+            tokenizer_candidates.append(str(self._model_dir))
+        tokenizer_candidates.append(self.DEFAULT_TOKENIZER_ID)
+
+        tokenizer = None
+        tokenizer_errors: list[str] = []
+        for candidate in tokenizer_candidates:
+            try:
+                tokenizer = AutoTokenizer.from_pretrained(candidate, trust_remote_code=True)
+                break
+            except Exception as exc:
+                tokenizer_errors.append(f"{candidate}: {exc}")
+        if tokenizer is None:
+            self._error = "tokenizer load failed: " + " | ".join(tokenizer_errors[:3])
+            return
+
+        try:
+            session = ort.InferenceSession(
+                str(model_path),
+                providers=["CPUExecutionProvider"],
+            )
+        except Exception as exc:
+            self._error = f"onnx session init failed: {exc}"
+            return
+
+        self._np = np
+        self._tokenizer = tokenizer
+        self._session = session
+        self._input_names = {node.name for node in session.get_inputs()}
+        self._ready = True
+
+    def encode(self, text: str) -> list[float]:
+        if not self._ready:
+            return self._fallback.encode(text)
+
+        np = self._np
+        inputs = self._tokenizer(
+            [text or ""],
+            padding=True,
+            truncation=True,
+            max_length=512,
+            return_tensors="np",
+        )
+        ort_inputs: dict[str, Any] = {}
+        for key, value in inputs.items():
+            if key in self._input_names:
+                ort_inputs[key] = value.astype(np.int64)
+        outputs = self._session.run(None, ort_inputs)
+        token_embeddings = outputs[0][0]
+        mask = inputs["attention_mask"][0].astype(np.float32)
+        mask_sum = float(mask.sum())
+        if mask_sum <= 0.0:
+            return [0.0] * self.DIM
+        masked = token_embeddings * mask[:, None]
+        vec = masked.sum(axis=0) / mask_sum
+        norm = float(np.linalg.norm(vec))
+        if norm > 0.0:
+            vec = vec / norm
+        return vec.astype(np.float32).tolist()
+
+    @staticmethod
+    def cosine(a: list[float], b: list[float]) -> float:
+        if not a or not b or len(a) != len(b):
+            return 0.0
+        return sum(x * y for x, y in zip(a, b))
+
+
 class BridgeMemoryStore:
     def __init__(self, workspace_dir: Path):
         self.workspace_dir = workspace_dir
         self.db_path = workspace_dir / "bridge_memory.sqlite"
-        self.encoder = LocalEmbeddingEncoder()
+        self.legacy_encoder = LocalEmbeddingEncoder()
+        self.encoder = BgeM3Encoder()
+        self._sqlite_vec_supported: bool | None = None
+        self._vec_enabled = False
+        self._vec_dim: int | None = None
+        self._vec_reason: str | None = None
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        self._ensure_sqlite_vec(conn)
         return conn
+
+    def _ensure_sqlite_vec(self, conn: sqlite3.Connection) -> bool:
+        if self._sqlite_vec_supported is False:
+            return False
+        try:
+            import sqlite_vec
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+            self._sqlite_vec_supported = True
+            return True
+        except Exception as exc:
+            self._sqlite_vec_supported = False
+            self._vec_reason = f"sqlite-vec unavailable: {exc}"
+            return False
+
+    def _vec_table_exists(self, conn: sqlite3.Connection, name: str) -> bool:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (name,),
+        ).fetchone()
+        return bool(row and row["sql"])
+
+    def _vec_table_dim(self, conn: sqlite3.Connection, name: str) -> int | None:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (name,),
+        ).fetchone()
+        if not row or not row["sql"]:
+            return None
+        match = re.search(r"embedding\s+float\[(\d+)\]", row["sql"], re.IGNORECASE)
+        if not match:
+            return None
+        return int(match.group(1))
+
+    def _vector_blob(self, embedding: list[float]) -> bytes:
+        return struct.pack(f"{len(embedding)}f", *embedding)
+
+    def _upsert_vec(self, conn: sqlite3.Connection, table: str, key_col: str, row_id: int, embedding: list[float]):
+        if not self._vec_enabled or not embedding or self._vec_dim != len(embedding):
+            return
+        try:
+            conn.execute(
+                f"INSERT OR REPLACE INTO {table}({key_col}, embedding) VALUES (?, ?)",
+                (row_id, self._vector_blob(embedding)),
+            )
+        except Exception:
+            pass
 
     def _init_db(self):
         with self._connect() as conn:
@@ -84,6 +270,47 @@ class BridgeMemoryStore:
                 )
                 """
             )
+            desired_vec_dim = self.encoder.vector_dim
+            if desired_vec_dim and self._sqlite_vec_supported:
+                existing_dims = {
+                    dim
+                    for dim in (
+                        self._vec_table_dim(conn, "memory_vec"),
+                        self._vec_table_dim(conn, "turns_vec"),
+                    )
+                    if dim is not None
+                }
+                if not existing_dims:
+                    conn.execute(
+                        f"""
+                        CREATE VIRTUAL TABLE IF NOT EXISTS memory_vec USING vec0(
+                            memory_id INTEGER PRIMARY KEY,
+                            embedding FLOAT[{desired_vec_dim}] distance_metric=cosine
+                        )
+                        """
+                    )
+                    conn.execute(
+                        f"""
+                        CREATE VIRTUAL TABLE IF NOT EXISTS turns_vec USING vec0(
+                            turn_id INTEGER PRIMARY KEY,
+                            embedding FLOAT[{desired_vec_dim}] distance_metric=cosine
+                        )
+                        """
+                    )
+                    self._vec_enabled = True
+                    self._vec_dim = desired_vec_dim
+                elif existing_dims == {desired_vec_dim}:
+                    self._vec_enabled = self._vec_table_exists(conn, "memory_vec") and self._vec_table_exists(conn, "turns_vec")
+                    self._vec_dim = desired_vec_dim if self._vec_enabled else None
+                else:
+                    self._vec_reason = (
+                        f"existing sqlite-vec tables use dim {sorted(existing_dims)}, "
+                        f"current encoder uses {desired_vec_dim}"
+                    )
+            elif desired_vec_dim:
+                self._vec_reason = self._vec_reason or "sqlite-vec unavailable"
+            else:
+                self._vec_reason = self.encoder.error or "BGE-M3 unavailable; using legacy hash retrieval"
             conn.commit()
 
     def _now(self) -> str:
@@ -102,13 +329,40 @@ class BridgeMemoryStore:
         clean = (text or "").strip()
         if not clean:
             return
-        emb = json.dumps(self.encoder.encode(clean))
+        embedding = self.encoder.encode(clean)
+        emb = json.dumps(embedding)
         with self._connect() as conn:
-            conn.execute(
+            cur = conn.execute(
                 "INSERT INTO turns (ts, role, source, text, embedding) VALUES (?, ?, ?, ?, ?)",
                 (self._now(), role, source, clean, emb),
             )
+            if cur.lastrowid is not None:
+                self._upsert_vec(conn, "turns_vec", "turn_id", int(cur.lastrowid), embedding)
             conn.commit()
+
+    def record_memory(self, memory_type: str, source: str, content: str, importance: float = 1.0) -> int | None:
+        clean = (content or "").strip()
+        if not clean:
+            return None
+        embedding = self.encoder.encode(clean)
+        emb = json.dumps(embedding)
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO memories (ts, memory_type, source, content, importance, embedding)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (self._now(), memory_type, source, clean, float(importance), emb),
+            )
+            memory_id = int(cur.lastrowid) if cur.lastrowid is not None else None
+            if memory_id is not None:
+                conn.execute(
+                    "INSERT INTO memory_fts (content, memory_id, source) VALUES (?, ?, ?)",
+                    (clean, memory_id, source),
+                )
+                self._upsert_vec(conn, "memory_vec", "memory_id", memory_id, embedding)
+            conn.commit()
+        return memory_id
 
     def record_exchange(self, user_text: str, assistant_text: str, source: str):
         user_clean = (user_text or "").strip()
@@ -116,21 +370,7 @@ class BridgeMemoryStore:
         if not user_clean or not assistant_clean:
             return
         episode = f"User: {user_clean}\nAssistant: {assistant_clean}"
-        emb = json.dumps(self.encoder.encode(episode))
-        with self._connect() as conn:
-            cur = conn.execute(
-                """
-                INSERT INTO memories (ts, memory_type, source, content, importance, embedding)
-                VALUES (?, 'episodic', ?, ?, ?, ?)
-                """,
-                (self._now(), source, episode, 1.0, emb),
-            )
-            memory_id = cur.lastrowid
-            conn.execute(
-                "INSERT INTO memory_fts (content, memory_id, source) VALUES (?, ?, ?)",
-                (episode, memory_id, source),
-            )
-            conn.commit()
+        self.record_memory("episodic", source, episode, importance=1.0)
 
     def get_recent_turns(self, limit: int = 10) -> list[dict[str, Any]]:
         with self._connect() as conn:
@@ -156,9 +396,29 @@ class BridgeMemoryStore:
     def retrieve_memories(self, query: str, limit: int = 6) -> list[dict[str, Any]]:
         safe_query = self._safe_query(query)
         q_vec = self.encoder.encode(query or "")
+        legacy_q_vec = self.legacy_encoder.encode(query or "")
         candidates: dict[int, dict[str, Any]] = {}
 
         with self._connect() as conn:
+            if self._vec_enabled and query.strip():
+                try:
+                    rows = conn.execute(
+                        """
+                        SELECT m.id, m.ts, m.memory_type, m.source, m.content, m.importance,
+                               m.embedding, v.distance
+                        FROM memory_vec v
+                        JOIN memories m ON m.id = v.memory_id
+                        WHERE v.embedding MATCH ?
+                          AND k = ?
+                        ORDER BY distance
+                        LIMIT ?
+                        """,
+                        (self._vector_blob(q_vec), max(limit * 6, 24), max(limit * 6, 24)),
+                    ).fetchall()
+                    for row in rows:
+                        candidates[row["id"]] = dict(row)
+                except Exception:
+                    pass
             if safe_query:
                 rows = conn.execute(
                     """
@@ -186,11 +446,21 @@ class BridgeMemoryStore:
 
         scored: list[tuple[float, dict[str, Any]]] = []
         for row in candidates.values():
-            try:
-                emb = json.loads(row["embedding"])
-            except Exception:
-                emb = []
-            sim = self.encoder.cosine(q_vec, emb)
+            sim = 0.0
+            if row.get("distance") is not None:
+                try:
+                    sim = max(0.0, 1.0 - float(row["distance"]))
+                except Exception:
+                    sim = 0.0
+            elif row.get("embedding"):
+                try:
+                    emb = json.loads(row["embedding"])
+                except Exception:
+                    emb = []
+                if len(emb) == len(q_vec):
+                    sim = self.encoder.cosine(q_vec, emb)
+                elif len(emb) == len(legacy_q_vec):
+                    sim = self.legacy_encoder.cosine(legacy_q_vec, emb)
             recency_boost = 0.05 if row["memory_type"] == "episodic" else 0.1
             score = sim + float(row.get("importance", 1.0)) * recency_boost
             row["score"] = score
@@ -204,6 +474,79 @@ class BridgeMemoryStore:
             turns = conn.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
             memories = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
         return {"turns": int(turns), "memories": int(memories)}
+
+    def clear_all(self) -> dict[str, int]:
+        """Wipe all stored turns and memories. Keeps the database file and schema intact."""
+        with self._connect() as conn:
+            deleted_turns = conn.execute("DELETE FROM turns").rowcount
+            deleted_memories = conn.execute("DELETE FROM memories").rowcount
+            conn.execute("DELETE FROM memory_fts")
+            try:
+                conn.execute("DELETE FROM memory_vec")
+                conn.execute("DELETE FROM turns_vec")
+            except Exception:
+                pass
+            conn.commit()
+        return {"deleted_turns": int(deleted_turns), "deleted_memories": int(deleted_memories)}
+
+    def get_vector_status(self) -> dict[str, Any]:
+        status: dict[str, Any] = {
+            "db_path": str(self.db_path),
+            "encoder_ready": bool(self.encoder.ready),
+            "encoder_dim": self.encoder.vector_dim,
+            "encoder_error": self.encoder.error,
+            "sqlite_vec_supported": bool(self._sqlite_vec_supported),
+            "vec_enabled": bool(self._vec_enabled),
+            "vec_dim": self._vec_dim,
+            "vec_reason": self._vec_reason,
+            "tables": {},
+            "counts": {
+                "memories": 0,
+                "memory_vec": 0,
+                "turns": 0,
+                "turns_vec": 0,
+            },
+            "coverage": {
+                "memories": 0.0,
+                "turns": 0.0,
+            },
+            "overall_status": "fallback_active",
+        }
+        with self._connect() as conn:
+            for table_name in ("memory_vec", "turns_vec"):
+                exists = self._vec_table_exists(conn, table_name)
+                status["tables"][table_name] = {
+                    "exists": exists,
+                    "dim": self._vec_table_dim(conn, table_name) if exists else None,
+                }
+
+            status["counts"]["memories"] = int(conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0])
+            status["counts"]["turns"] = int(conn.execute("SELECT COUNT(*) FROM turns").fetchone()[0])
+
+            if status["tables"]["memory_vec"]["exists"]:
+                status["counts"]["memory_vec"] = int(conn.execute("SELECT COUNT(*) FROM memory_vec").fetchone()[0])
+            if status["tables"]["turns_vec"]["exists"]:
+                status["counts"]["turns_vec"] = int(conn.execute("SELECT COUNT(*) FROM turns_vec").fetchone()[0])
+
+        memories_total = status["counts"]["memories"]
+        turns_total = status["counts"]["turns"]
+        status["coverage"]["memories"] = (
+            status["counts"]["memory_vec"] / memories_total if memories_total else 1.0
+        )
+        status["coverage"]["turns"] = (
+            status["counts"]["turns_vec"] / turns_total if turns_total else 1.0
+        )
+
+        if status["vec_enabled"]:
+            fully_backfilled = (
+                status["coverage"]["memories"] >= 0.999
+                and status["coverage"]["turns"] >= 0.999
+            )
+            status["overall_status"] = "fully_upgraded" if fully_backfilled else "partially_upgraded"
+        elif status["encoder_ready"] and status["sqlite_vec_supported"]:
+            status["overall_status"] = "upgrade_available_not_enabled"
+
+        return status
 
 
 class SysPromptManager:
@@ -297,6 +640,7 @@ class BridgeContextAssembler:
         self.system_md = system_md
         self.active_skill_provider = active_skill_provider
         self.sys_prompt_manager = sys_prompt_manager
+        self.memory_injection_enabled: bool = True
 
     def _load_system_prompt(self) -> str:
         if not self.system_md:
@@ -358,10 +702,18 @@ class BridgeContextAssembler:
         except Exception:
             return f"[FYI: You received this message at {now_str}.]"
 
-    def build_prompt(self, user_prompt: str, engine: str) -> str:
-        system_text = self._load_system_prompt()
-        recent_turns = self.memory_store.get_recent_turns(limit=10)
-        memories = self.memory_store.retrieve_memories(user_prompt, limit=6)
+    def build_prompt(self, user_prompt: str, engine: str, incremental: bool = False) -> str:
+        """Build the prompt to send to the backend.
+
+        Args:
+            incremental: When True (fixed/session mode), skip system identity,
+                recent turns, and memories — the CLI session already has them.
+                Only include /sys slots, active skills, and the user prompt.
+        """
+        system_text = "" if incremental else self._load_system_prompt()
+        inject = self.memory_injection_enabled and not incremental
+        recent_turns = self.memory_store.get_recent_turns(limit=10) if inject else []
+        memories = self.memory_store.retrieve_memories(user_prompt, limit=6) if inject else []
         active_skills = []
         if callable(self.active_skill_provider):
             try:

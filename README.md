@@ -1,7 +1,7 @@
 # HASHI
 
-> **Status (v1.1):** main branch is now at **v1.1**. v1.1 debugging is completed. 
-> **Roadmap to v2:** see [`docs/ROADMAP.md`](docs/ROADMAP.md).
+> **Status (v2.0.0):** All v2 roadmap delivered. Tool execution layer, browser automation, Pack & Go USB deployment, TUI, vector memory, and more.
+> **Changelog:** see [`CHANGELOG.md`](CHANGELOG.md) · **Roadmap:** see [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## About
 
@@ -69,26 +69,54 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
 1. **No Token Storage** - Uses CLI backends (gemini, claude, codex) with local authentication, not stored tokens
 2. **Multi-Agent, Single Interface** - Chat with multiple specialized agents through one WhatsApp or Telegram account
 3. **Context Recovery** - `/handoff` command instantly restores project context after compression
-4. **Vibe-Coded** - Every line written by AI, reviewed by AI, directed by human vision
+4. **Tool Execution Layer** - OpenRouter agents can take real local actions: run bash commands, read/write files, search the web, call external APIs, and more
+5. **Flex/Fixed Mode Switching** - Agents can switch between CLI backends and OpenRouter mid-conversation via `/backend`
+6. **TUI Interface** - `tui.py` provides a split-panel terminal UI for log monitoring and agent chat without a browser
+7. **Pack & Go** - Build a self-contained USB for Windows or macOS; recipients just plug in and double-click, no setup required
+8. **Vibe-Coded** - Every line written by AI, reviewed by AI, directed by human vision
 
 ---
 
 ## Project Status
 
-- v1.1 debugging is now considered **completed**.
-- The author has a clear roadmap to v2 in `docs/`.
-  - See: [`docs/ROADMAP.md`](docs/ROADMAP.md)
+- **v2.0.0** — All v2 roadmap outcomes delivered. Tool execution layer (11 tools), browser automation (Playwright), Pack & Go USB deployment (Windows + macOS), TUI, vector memory, `/dream` skill, `/memory` command. See [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Installation
 
 **See [INSTALL.md](INSTALL.md) for detailed installation instructions.**
 
-### Quick Start (Recommended)
+### 🚀 Pack & Go — USB Zero-Install (Recommended for sharing)
+
+Run HASHI on any Windows or macOS machine straight from a USB drive — no Python installation, no `pip install`, nothing to set up on the target machine.
+
+**Windows:**
+```
+# On your machine (with internet):
+windows\prepare_usb.bat        # builds D:\HASHI9 with embedded Python + all deps
+
+# On any Windows PC:
+HASHI9\windows\start_tui.bat  # double-click to launch
+```
+
+**macOS:**
+```bash
+# On your Mac (with internet):
+bash mac/prepare_usb.sh        # builds USB with portable Python + all deps
+
+# On any Mac:
+# Double-click HASHI9/mac/start_tui.command in Finder
+```
+
+> **Note (macOS):** First run may trigger Gatekeeper. Right-click the `.command` file → Open → Open anyway.
+
+---
+
+### Quick Start (Developer / Standard Install)
 
 ```bash
 # Clone the repository
 git clone https://github.com/Bazza1982/HASHI.git
-cd hashi
+cd HASHI
 
 # Install Python dependencies
 pip install -r requirements.txt
@@ -97,7 +125,7 @@ pip install -r requirements.txt
 python onboarding/onboarding_main.py
 
 # Start HASHI
-./bin/bridge-u.sh         # Linux (macOS untested)
+./bin/bridge-u.sh         # macOS / Linux
 # or
 bin\bridge-u.bat          # Windows
 # or
@@ -105,7 +133,7 @@ python main.py            # Any platform
 ```
 
 ### Prerequisites
-- Python 3.10+
+- Python 3.10+ (not required for Pack & Go USB deployments)
 - At least one AI backend:
   - [Gemini CLI] (`gemini`)
   - [Claude Code] (`claude`)
@@ -268,7 +296,7 @@ HASHI supports multiple communication channels through a **transport layer**:
 #### Telegram
 - Default transport, enabled by default
 - Requires `telegram_bot_token` in `secrets.json`
-- Commands: `/start`, `/stop`, `/restart`, `/handoff`, `/skill`, etc.
+- Commands: `/new`, `/stop`, `/reboot`, `/handoff`, `/skill`, etc.
 - Supports inline keyboards, file uploads, voice messages
 
 **Setup:**
@@ -321,33 +349,62 @@ HASHI agents respond to both natural language and structured commands:
 
 | Command | Description |
 |---------|-------------|
-| `/start` | Restart conversation, clear context |
-| `/stop` | Pause agent, stop processing new messages |
-| `/restart` | Hot restart agent runtime |
-| `/status` | Show agent status, backend info, memory usage |
-| `/handoff` | Generate context restoration prompt for new session |
-| `/export` | Export daily transcript as markdown |
-| `/skill` | Access skills system (see Skills section) |
+| `/new` | Start a fresh session (clears continuity) |
+| `/stop` | Cancel current processing |
+| `/reboot [min\|max\|#]` | Hot restart agents — shows button menu when called without args |
+| `/status [full]` | Show agent status, backend info |
+| `/handoff` | Restore continuity from recent transcript |
+| `/skill` | Browse and run skills (inline keyboard) |
 | `/help` | Show available commands |
 
-#### Memory Commands
+#### Session & Mode Commands
 
 | Command | Description |
 |---------|-------------|
-| `/remember <text>` | Store long-term memory |
-| `/recall <query>` | Search memory by semantic similarity |
-| `/forget <id>` | Delete specific memory |
-| `/memories` | List all stored memories |
+| `/mode [fixed\|flex]` | Switch between fixed CLI session and flex multi-backend mode (button menu) |
+| `/backend [engine]` | Switch backend — shows inline button picker (flex mode only) |
+| `/model` | View/change active model (inline keyboard) |
+| `/effort` | View/change effort level — Claude/Codex only (inline keyboard) |
+| `/fyi [prompt]` | Refresh bridge environment awareness |
+| `/retry` | Resend last response or re-run last prompt (button menu) |
+| `/park [chat\|delete <n>]` | Save or list parked topics |
+| `/load <n>` | Restore a parked topic |
+| `/sys <n> [on\|off\|save\|output]` | Manage system prompt slots; `/sys output <n>` returns raw text |
+| `/clear` | Clear media directory and reset session state |
+
+#### Toggles & Settings
+
+| Command | Description |
+|---------|-------------|
+| `/verbose [on\|off]` | Toggle detailed long-task status (button menu) |
+| `/think [on\|off]` | Toggle thinking trace display (button menu) |
+| `/active [on\|off\|minutes]` | Toggle proactive heartbeat (button menu) |
+| `/whisper [small\|medium\|large]` | Set local voice transcription model (button menu) |
+| `/voice [on\|off\|menu\|use <alias>]` | Control bridge voice replies (inline keyboard) |
+| `/credit` | Show API credit/usage (OpenRouter only) |
+
+#### Lifecycle Commands
+
+| Command | Description |
+|---------|-------------|
+| `/start [all\|<name>]` | Start a stopped agent — button menu or `all` to start all |
+| `/terminate` | Shut down this agent gracefully |
+
+#### WhatsApp Commands
+
+| Command | Description |
+|---------|-------------|
+| `/wa_on` | Start WhatsApp transport |
+| `/wa_off` | Stop WhatsApp transport |
+| `/wa_send <+number> <msg>` | Send a WhatsApp message |
 
 #### Job Commands
 
 | Command | Description |
 |---------|-------------|
-| `/heartbeat` | Manage heartbeat tasks (periodic checks) |
-| `/cron` | Manage cron jobs (scheduled tasks) |
-| `/job add` | Add new scheduled job |
-| `/job list` | List all jobs |
-| `/job delete <id>` | Delete job |
+| `/jobs` | Show cron and heartbeat jobs with action buttons |
+| `/skill cron` | Full cron job management |
+| `/skill heartbeat` | Full heartbeat job management |
 
 ---
 
@@ -479,10 +536,9 @@ Jobs can invoke skills instead of prompts:
 
 Via Telegram:
 ```
-/heartbeat                  → List heartbeat tasks
-/cron                       → List cron jobs
-/job add                    → Add new job (guided)
-/job delete <id>            → Delete job
+/jobs                       → Show all jobs with action buttons
+/skill cron                 → Cron job management (list, enable/disable, run now)
+/skill heartbeat            → Heartbeat job management (list, enable/disable, run now)
 ```
 
 Via `tasks.json`:
@@ -540,9 +596,41 @@ CLI backends spawn subprocess and communicate via stdin/stdout:
 
 #### OpenRouter Backend
 OpenRouter adapter uses HTTP API:
-- Requires `openrouter_api_key` in `secrets.json`
+- Requires `openrouter_key` (or `<agent_name>_openrouter_key`) in `secrets.json`
 - Supports multiple models via `model` parameter
 - Stateless (HASHI manages conversation history)
+- **Tool execution layer** — enable in `agents.json` with a `tools` key:
+
+```json
+{
+  "engine": "openrouter-api",
+  "model": "anthropic/claude-sonnet-4.6",
+  "tools": {
+    "allowed": ["bash", "file_read", "file_write", "file_list", "apply_patch",
+                "web_search", "web_fetch", "http_request",
+                "process_list", "process_kill", "telegram_send"],
+    "max_loops": 15
+  }
+}
+```
+
+**Available tools:**
+
+| Tool | Description |
+|------|-------------|
+| `bash` | Run shell commands (sandboxed to workspace, timeout + blocklist controls) |
+| `file_read` | Read files with offset/limit pagination |
+| `file_write` | Write/create files (size-capped, parent dirs auto-created) |
+| `file_list` | List directories with optional glob filter and recursive mode |
+| `apply_patch` | Apply unified diff patches to files (dry-run validated before apply) |
+| `process_list` | List running processes filtered by name (requires `psutil`) |
+| `process_kill` | Send SIGTERM or SIGKILL to a process by PID |
+| `telegram_send` | Send Telegram messages by chat_id or HASHI agent_id |
+| `http_request` | Arbitrary HTTP requests (GET/POST/PUT/DELETE/PATCH) for external APIs |
+| `web_search` | Brave Search API (requires `brave_api_key` in `secrets.json`) |
+| `web_fetch` | Fetch any URL and return content as Markdown |
+
+No `tools` key in config = fully backward compatible, tools disabled.
 
 ---
 
@@ -561,35 +649,20 @@ HASHI includes a **vector-based memory system** for long-term context retrieval:
 
 #### How It Works
 
-1. **User stores memory:**
-   ```
-   /remember The user prefers formal academic writing style
-   ```
+1. **Bridge stores memory automatically** — relevant turns are embedded and saved to `bridge_memory.sqlite` in the agent's workspace.
 
 2. **Memory is vectorized:**
-   - Text embedded using sentence-transformers (local)
-   - Vector + text stored in `_memory.json`
-   - Index updated in `_memory_index.json`
+   - Text embedded using BGE-M3 (local ONNX) when available, falling back to hash-based similarity.
+   - Vector + text stored in `bridge_memory.sqlite` (`memory_vec` / `turns_vec` tables).
 
 3. **Context assembly retrieves relevant memories:**
-   - Current user message is vectorized
-   - Top-K similar memories retrieved via cosine similarity
-   - Injected into prompt under `--- RELEVANT LONG-TERM MEMORY ---`
+   - Current user message is vectorized at request time.
+   - Top-K similar memories retrieved via cosine similarity (`sqlite-vec`).
+   - Injected into prompt under `--- RELEVANT LONG-TERM MEMORY ---`.
 
-4. **User recalls memory:**
-   ```
-   /recall writing preferences
-   ```
-   Returns ranked list of relevant memories.
+4. **Memory skill** (`/skill recall`) — toggle bridge auto-recall: if ON, recent continuity is restored once after an unexpected restart (not after `/new`).
 
-#### Memory Commands
-
-```
-/remember <text>               → Store long-term memory
-/recall <query>                → Search memories
-/forget <id>                   → Delete memory by ID
-/memories                      → List all memories
-```
+> Memory is bridge-managed. There are no `/remember` / `/recall` / `/forget` slash commands — memory is automatic.
 
 #### Memory in Prompts
 
@@ -679,7 +752,7 @@ Stores API keys and tokens:
 ```json
 {
   "hashiko": "your_telegram_bot_token",
-  "openrouter-api_key": "sk-or-v1-...",
+  "openrouter_key": "sk-or-v1-...",
   "authorized_telegram_id": 123456789
 }
 ```
@@ -810,11 +883,29 @@ export BRIDGE_DEBUG=1
 
 ---
 
+### TUI Interface
+
+`tui.py` provides a terminal-first interface built with [Textual](https://github.com/Textualize/textual):
+
+```bash
+python tui.py
+```
+
+**Panels:**
+- **Log panel** (upper ~80%) — real-time stdout/stderr from the bridge process, auto-scroll
+- **Chat input bar** (lower ~20%) — send messages to any active agent via HTTP API Gateway
+- **Status bar** — current agent, backend, bridge uptime, gateway reachability
+- **Agent selector** — hotkey to switch which agent receives your chat input
+
+`main.py` remains unchanged. Graceful degradation: if API Gateway is unavailable, chat is disabled and logs still stream.
+
+---
+
 ## ⚠️ Important Warnings
 
-### This is Version 1.0
+### This is Version 2.0.0
 
-HASHI version 1.0 is a **working prototype** built entirely through AI-assisted development ("Vibe-Coding"). While functional and field-tested by the author, it is **not production-ready**.
+HASHI v2.0 is a **working prototype** built entirely through AI-assisted development ("Vibe-Coding"). While functional and field-tested by the author, it is **not production-ready**.
 
 **Known Limitations:**
 - **Bugs** - Expect edge cases and unexpected behavior
@@ -841,11 +932,11 @@ If you encounter bugs or unexpected behavior, please report them on the GitHub I
 
 ## Version 1.0 Release
 
-**Release Date:** March 15, 2026
+**Release Date:** March 23, 2026
 
-This marks the first public release of HASHI - a milestone in demonstrating what's possible when human vision directs AI execution.
+This marks the v2.0.0 release of HASHI — a major milestone delivering the complete v2 roadmap.
 
-**What's Included in v1.0:**
+**What's Included (v2.0.0):**
 - ✅ Multi-language onboarding (9 languages)
 - ✅ Support for 4 backends (Gemini CLI, Claude CLI, Codex CLI, OpenRouter)
 - ✅ Telegram + WhatsApp + Workbench transports
@@ -854,6 +945,12 @@ This marks the first public release of HASHI - a milestone in demonstrating what
 - ✅ Memory system (vector-based retrieval)
 - ✅ Handoff context recovery
 - ✅ Multi-agent workspace management
+- ✅ **Flex/fixed backend switching** — `/backend` switches CLI ↔ OpenRouter mid-conversation
+- ✅ **TUI interface** — `tui.py` split-panel terminal UI (log stream + chat input)
+- ✅ **Tool execution layer** — 11 built-in tools for OpenRouter agents (bash, file ops, web, APIs)
+- ✅ **/dream skill** — nightly AI memory consolidation with undo snapshot
+- ✅ **Process-tree stop** — `/stop` kills entire subprocess tree, no zombie processes
+- ✅ **/retry persistence** — resends last prompt or reruns last response
 
 **Coming in Future Versions:**
 - Enhanced security (API Gateway authentication)
@@ -883,4 +980,3 @@ You are free to use, modify, and distribute this software. See `LICENSE` file fo
 
 **Built with Vision. Written by AI. Directed by Human.**
 *HASHI - The Bridge to the Future of AI Collaboration.*
-

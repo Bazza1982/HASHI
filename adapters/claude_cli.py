@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import os
 import time
 import asyncio
 import logging
@@ -21,7 +22,7 @@ class ClaudeCLIAdapter(BaseBackend):
 
     def _define_capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
-            supports_sessions=False,
+            supports_sessions=True,
             supports_files=True,
             supports_tool_use=True,
             supports_thinking_stream=True,
@@ -32,10 +33,14 @@ class ClaudeCLIAdapter(BaseBackend):
         super().__init__(agent_config, global_config, api_key)
         self.logger = logging.getLogger(f"Backend.Claude.{self.config.name}")
         self.current_proc = None
+        self._active_read_tasks: list[asyncio.Task] = []
         self.cmd_base = self.global_config.claude_cmd
         self.system_prompt_source = None
         self.effort = (self.config.extra or {}).get("effort", "low")
         self.access_root = str(self.config.resolve_access_root())
+        # Session persistence for fixed mode
+        self._session_id: str | None = None
+        self._session_mode: bool = (self.config.extra or {}).get("session_mode", False)
 
     def _resolve_system_prompt_source(self) -> Path | None:
         candidates = []
@@ -74,8 +79,16 @@ class ClaudeCLIAdapter(BaseBackend):
             return False
 
     async def handle_new_session(self) -> bool:
-        self.logger.info("Claude backend is stateless. /new acknowledged.")
+        old_sid = self._session_id
+        self._session_id = None
+        self.logger.info(f"Claude session reset (previous session_id={old_sid}).")
         return True
+
+    def set_session_mode(self, enabled: bool):
+        """Enable/disable session persistence (fixed mode)."""
+        self._session_mode = enabled
+        self._session_id = None  # always clear on mode switch to avoid resuming a stale/non-persistent session
+        self.logger.info(f"Session mode set to {'ON' if enabled else 'OFF'}")
 
     def should_bootstrap_on_startup(self) -> bool:
         return False
@@ -114,8 +127,20 @@ class ClaudeCLIAdapter(BaseBackend):
 
         etype = obj.get("type", "")
 
+        # --- System event: capture session_id for resume ---
+        if etype == "system":
+            sid = obj.get("session_id")
+            if sid:
+                self._session_id = sid
+                self.logger.info(f"Captured session_id: {sid}")
+            return None
+
         # --- Result event: contains the final assembled text ---
         if etype == "result":
+            # Also check for session_id in result
+            sid = obj.get("session_id")
+            if sid:
+                self._session_id = sid
             return obj.get("result", "")
 
         # --- Stream event: wrapped Claude API streaming events ---
@@ -237,8 +262,12 @@ class ClaudeCLIAdapter(BaseBackend):
             "--dangerously-skip-permissions",
             "--add-dir",
             self.access_root,
-            "--no-session-persistence",
         ]
+        # Session persistence: use --resume when in session mode with an active session
+        if self._session_mode and self._session_id:
+            cmd.extend(["--resume", self._session_id])
+        elif not self._session_mode:
+            cmd.append("--no-session-persistence")
         # stream-json needs --verbose and --include-partial-messages for
         # intermediate events (tool calls, text deltas, thinking).
         if use_streaming:
@@ -252,6 +281,9 @@ class ClaudeCLIAdapter(BaseBackend):
                 f"(stateless=True, retry={is_retry}, stdin={stdin_data is not None}, "
                 f"streaming={use_streaming}, prompt_len={len(prompt)}, cwd={self.config.workspace_dir})"
             )
+            _extra_kwargs = {}
+            if os.name != "nt":
+                _extra_kwargs["start_new_session"] = True
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
@@ -259,6 +291,7 @@ class ClaudeCLIAdapter(BaseBackend):
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(self.config.workspace_dir),
                 limit=1024 * 1024,  # 1 MB readline buffer (default 64 KB too small for large JSON events)
+                **_extra_kwargs,
             )
             self.current_proc = proc  # keep ref for shutdown/kill
             self.logger.info(
@@ -336,6 +369,7 @@ class ClaudeCLIAdapter(BaseBackend):
             self.logger.info(f"[stream-json] stdout EOF after {line_count} lines")
 
         stdout_task = asyncio.create_task(_read_stdout())
+        self._active_read_tasks = [stdout_task, stderr_task]
 
         hard_deadline = started + self.HARD_TIMEOUT_SEC
         while proc.returncode is None:
@@ -370,6 +404,7 @@ class ClaudeCLIAdapter(BaseBackend):
             )
             self.current_proc = None
             await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+            self._active_read_tasks = []
             return BackendResponse(
                 text="",
                 duration_ms=duration_ms,
@@ -381,8 +416,8 @@ class ClaudeCLIAdapter(BaseBackend):
                 is_success=False,
             )
 
-        await stdout_task
-        await stderr_task
+        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+        self._active_read_tasks = []
         await proc.wait()
         returncode = proc.returncode
         self.current_proc = None
@@ -571,3 +606,7 @@ class ClaudeCLIAdapter(BaseBackend):
                 reason="backend_shutdown",
             )
             self.current_proc = None
+        for task in self._active_read_tasks:
+            if not task.done():
+                task.cancel()
+        self._active_read_tasks = []

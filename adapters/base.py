@@ -1,6 +1,7 @@
 from __future__ import annotations
 import sys
 import os
+import signal
 import time
 import asyncio
 import subprocess
@@ -26,6 +27,8 @@ class BackendResponse:
     duration_ms: float
     error: Optional[str] = None
     is_success: bool = True
+    tool_calls: Optional[list] = None   # Raw tool_calls list from API (V2.2+)
+    stop_reason: Optional[str] = None   # e.g. "stop", "tool_calls", "length"
 
 
 class BaseBackend(ABC):
@@ -147,9 +150,18 @@ class BaseBackend(ABC):
                         f"(rc={completed.returncode}, stdout={stdout_preview}, stderr={stderr_preview})"
                     )
             else:
-                proc.kill()
-                if logger:
-                    logger.warning(f"Forced kill for pid={pid} reason={reason!r}")
+                # On Linux/Mac: kill the entire process group to catch child processes
+                # that may be holding stdout/stderr pipes open.
+                try:
+                    pgid = os.getpgid(pid)
+                    os.killpg(pgid, signal.SIGKILL)
+                    if logger:
+                        logger.warning(f"Forced killpg(pgid={pgid}) for pid={pid} reason={reason!r}")
+                except (ProcessLookupError, PermissionError):
+                    # Fallback if process group kill fails
+                    proc.kill()
+                    if logger:
+                        logger.warning(f"Forced kill (pgid failed) for pid={pid} reason={reason!r}")
         except Exception as exc:
             if logger:
                 logger.warning(f"Failed to terminate pid={pid} reason={reason!r}: {exc}")

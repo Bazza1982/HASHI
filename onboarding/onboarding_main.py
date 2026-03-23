@@ -315,7 +315,7 @@ def run_onboarding():
     if 'hashiko' not in secrets:
         secrets['hashiko'] = "WORKBENCH_ONLY_NO_TOKEN"
     if or_key:
-        secrets['openrouter-api_key'] = or_key
+        secrets['openrouter_key'] = or_key
     with open(secrets_path, 'w', encoding='utf-8') as f:
         json.dump(secrets, f, indent=2, ensure_ascii=False)
 

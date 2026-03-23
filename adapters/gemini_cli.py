@@ -1,6 +1,8 @@
 from __future__ import annotations
 import re
 import json
+import os
+import signal
 import time
 import asyncio
 import logging
@@ -43,6 +45,7 @@ class GeminiCLIAdapter(BaseBackend):
         super().__init__(agent_config, global_config, api_key)
         self.logger = logging.getLogger(f"Backend.Gemini.{self.config.name}")
         self.current_proc = None
+        self._active_read_tasks: list[asyncio.Task] = []
         self.cmd_base = self.global_config.gemini_cmd
         self.system_md_path = None
         self.access_root = str(self.config.resolve_access_root())
@@ -68,6 +71,26 @@ class GeminiCLIAdapter(BaseBackend):
         self.logger.info("Initializing Gemini CLI backend (stateless mode)...")
         self.config.workspace_dir.mkdir(parents=True, exist_ok=True)
         self.system_md_path = self._resolve_system_md_path()
+
+        # Verify the Gemini CLI is actually accessible (like claude_cli does)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self.cmd_base,
+                "--version",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                err = stderr.decode(errors="replace").strip()
+                self.logger.error(f"Gemini CLI version check failed: {err}")
+                return False
+            version = stdout.decode(errors="replace").strip()
+            self.logger.info(f"Gemini CLI version: {version}")
+        except Exception as e:
+            self.logger.error(f"Gemini CLI not accessible: {e}")
+            return False
+
         return True
 
     async def handle_new_session(self) -> bool:
@@ -261,6 +284,12 @@ class GeminiCLIAdapter(BaseBackend):
                 f"streaming={use_streaming}, "
                 f"prompt_len={len(prompt)}, cwd={self.config.workspace_dir}, system_md={self.system_md_path})"
             )
+            _extra_kwargs = {}
+            if os.name != "nt":
+                # Put the subprocess in its own process group so force_kill_process_tree
+                # can kill all child processes (Node workers, tool subprocesses, etc.)
+                # via os.killpg, preventing orphaned pipe holders after /stop.
+                _extra_kwargs["start_new_session"] = True
             self.current_proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=asyncio.subprocess.PIPE,
@@ -268,6 +297,7 @@ class GeminiCLIAdapter(BaseBackend):
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(self.config.workspace_dir),
                 limit=1024 * 1024,  # 1 MB readline buffer (default 64 KB too small for large output lines)
+                **_extra_kwargs,
             )
             self.logger.info(
                 f"Gemini subprocess started for {request_id} "
@@ -353,6 +383,10 @@ class GeminiCLIAdapter(BaseBackend):
 
         stdout_task = asyncio.create_task(_read_stdout())
 
+        # Track active read tasks so shutdown() can cancel them if the process is killed
+        # but orphaned child processes keep the pipes open.
+        self._active_read_tasks = [stdout_task, stderr_task]
+
         hard_deadline = started + self.HARD_TIMEOUT_SEC
         while proc.returncode is None:
             remaining_hard = hard_deadline - time.perf_counter()
@@ -386,6 +420,7 @@ class GeminiCLIAdapter(BaseBackend):
             )
             self.current_proc = None
             await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+            self._active_read_tasks = []
             return BackendResponse(
                 text="",
                 duration_ms=duration_ms,
@@ -397,8 +432,9 @@ class GeminiCLIAdapter(BaseBackend):
                 is_success=False,
             )
 
-        await stdout_task
-        await stderr_task
+        # Use return_exceptions=True so that cancellations from shutdown() don't propagate
+        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+        self._active_read_tasks = []
         await proc.wait()
         returncode = proc.returncode
         self.current_proc = None
@@ -530,3 +566,10 @@ class GeminiCLIAdapter(BaseBackend):
                 reason="backend_shutdown",
             )
             self.current_proc = None
+        # Cancel any in-flight stdout/stderr read tasks. After the process is killed,
+        # orphaned child processes may still hold the pipes open, blocking readline()
+        # indefinitely. Cancelling the tasks unblocks generate_response immediately.
+        for task in self._active_read_tasks:
+            if not task.done():
+                task.cancel()
+        self._active_read_tasks = []
