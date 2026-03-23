@@ -15,6 +15,9 @@ class LocalEmbeddingEncoder:
 
     def __init__(self, dim: int = 256):
         self.dim = dim
+        self.vector_dim = dim
+        self.ready = True
+        self.error = None
 
     def encode(self, text: str) -> list[float]:
         vec = [0.0] * self.dim
