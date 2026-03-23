@@ -1284,9 +1284,9 @@ class FlexibleAgentRuntime:
 
             btn_row = []
             if is_active:
-                btn_row.append(InlineKeyboardButton("❌ Deactivate", callback_data=f"agents:deactivate:{name}"))
+                btn_row.append(InlineKeyboardButton(f"❌ {name}", callback_data=f"agents:deactivate:{name}"))
             else:
-                btn_row.append(InlineKeyboardButton("✅ Activate", callback_data=f"agents:activate:{name}"))
+                btn_row.append(InlineKeyboardButton(f"✅ {name}", callback_data=f"agents:activate:{name}"))
 
             if name in starting_names:
                 btn_row.append(InlineKeyboardButton("⏳", callback_data="agents:noop"))
