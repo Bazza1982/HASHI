@@ -1,6 +1,6 @@
 # HASHI
 
-> **Status (v1.2-beta):** Pack & Go USB deployment for Windows + macOS. `/memory` command. Agent LOCAL MODE when no Telegram token.
+> **Status (v2.0.0):** All v2 roadmap delivered. Tool execution layer, browser automation, Pack & Go USB deployment, TUI, vector memory, and more.
 > **Changelog:** see [`CHANGELOG.md`](CHANGELOG.md) · **Roadmap:** see [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## About
@@ -79,8 +79,7 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
 
 ## Project Status
 
-- **v1.2-beta** — Pack & Go USB deployment (Windows + macOS), `/memory` command, agent LOCAL MODE, web search fixes. See [`CHANGELOG.md`](CHANGELOG.md).
-- **v1.2-alpha** — All v2 roadmap outcomes delivered. Tool execution layer, browser automation, vector memory.
+- **v2.0.0** — All v2 roadmap outcomes delivered. Tool execution layer (11 tools), browser automation (Playwright), Pack & Go USB deployment (Windows + macOS), TUI, vector memory, `/dream` skill, `/memory` command. See [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Installation
 
@@ -904,9 +903,9 @@ python tui.py
 
 ## ⚠️ Important Warnings
 
-### This is Version 1.2-alpha
+### This is Version 2.0.0
 
-HASHI version 1.0 is a **working prototype** built entirely through AI-assisted development ("Vibe-Coding"). While functional and field-tested by the author, it is **not production-ready**.
+HASHI v2.0 is a **working prototype** built entirely through AI-assisted development ("Vibe-Coding"). While functional and field-tested by the author, it is **not production-ready**.
 
 **Known Limitations:**
 - **Bugs** - Expect edge cases and unexpected behavior
@@ -933,11 +932,11 @@ If you encounter bugs or unexpected behavior, please report them on the GitHub I
 
 ## Version 1.0 Release
 
-**Release Date:** March 15, 2026
+**Release Date:** March 23, 2026
 
-This marks the first public release of HASHI - a milestone in demonstrating what's possible when human vision directs AI execution.
+This marks the v2.0.0 release of HASHI — a major milestone delivering the complete v2 roadmap.
 
-**What's Included (v1.2-alpha):**
+**What's Included (v2.0.0):**
 - ✅ Multi-language onboarding (9 languages)
 - ✅ Support for 4 backends (Gemini CLI, Claude CLI, Codex CLI, OpenRouter)
 - ✅ Telegram + WhatsApp + Workbench transports

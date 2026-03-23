@@ -1,6 +1,6 @@
 {
   "name": "hashi-bridge",
-  "version": "1.0.1",
+  "version": "2.0.0",
   "description": "HASHI — Universal AI Agent Orchestration Platform. Privacy-first, multi-backend, multi-agent system with no OAuth token storage.",
   "keywords": [
     "ai",
