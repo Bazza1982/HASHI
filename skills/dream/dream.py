@@ -51,6 +51,9 @@ MAX_NEW_MEMORIES = 5
 MIN_IMPORTANCE = 0.7
 MAX_AGENT_MD_SECTIONS = 3
 SNAPSHOT_RETENTION_DAYS = 7
+MEMORY_FORGET_THRESHOLD = 200   # start forgetting when agent exceeds this many memories
+MEMORY_FORGET_TARGET = 160      # trim down to this count when threshold exceeded
+MAX_FORGET_PER_DREAM = 20       # safety cap — never delete more than this in one run
 _MEMORY_STORE: BridgeMemoryStore | None = None
 
 
@@ -154,6 +157,98 @@ def _write_memory(content: str, memory_type: str, source: str, importance: float
         content=content,
         importance=importance,
     )
+
+
+def _count_memories() -> int:
+    if not MEMORY_DB_PATH.exists():
+        return 0
+    try:
+        with sqlite3.connect(str(MEMORY_DB_PATH)) as conn:
+            row = conn.execute("SELECT COUNT(*) FROM memories").fetchone()
+            return row[0] if row else 0
+    except Exception:
+        return 0
+
+
+def _fetch_low_importance_memories(limit: int) -> list[dict]:
+    """Fetch memories sorted by importance ASC, last_accessed ASC for forgetting candidates."""
+    if not MEMORY_DB_PATH.exists():
+        return []
+    try:
+        with sqlite3.connect(str(MEMORY_DB_PATH)) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """SELECT id, content, memory_type, importance, created_at, last_accessed
+                   FROM memories
+                   ORDER BY importance ASC, last_accessed ASC
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def _forget_memories(api_key: str, current_count: int) -> tuple[int, list[str]]:
+    """Ask LLM which memories to forget, delete them, return (count_deleted, summaries)."""
+    candidates = _fetch_low_importance_memories(limit=min(60, current_count))
+    if not candidates:
+        return 0, []
+
+    candidate_text = "\n".join(
+        f"[ID:{m['id']} importance:{m['importance']:.2f} accessed:{m.get('last_accessed','?')[:10]}] {m['content'][:200]}"
+        for m in candidates
+    )
+    n_to_forget = min(MAX_FORGET_PER_DREAM, current_count - MEMORY_FORGET_TARGET)
+
+    forget_prompt = f"""You are managing long-term memory for an AI assistant. The memory store has {current_count} entries, which exceeds the healthy threshold of {MEMORY_FORGET_THRESHOLD}.
+
+Your task: select up to {n_to_forget} memories to FORGET — permanently delete.
+
+Choose memories that are:
+- Low importance (score < 0.75)
+- Old and not recently accessed
+- Redundant, superseded, or too trivial to matter in future conversations
+
+Do NOT forget:
+- Memories about user preferences, identity, or long-term goals
+- Memories with importance >= 0.8
+- Memories accessed recently
+
+CANDIDATE MEMORIES (lowest importance first):
+{candidate_text}
+
+Respond ONLY with valid JSON:
+{{
+  "forget_ids": [list of integer IDs to delete],
+  "reason": "One-line explanation of selection criteria"
+}}
+
+If nothing should be forgotten, return {{"forget_ids": [], "reason": "..."}}
+"""
+
+    try:
+        response = _call_openrouter(api_key, [{"role": "user", "content": forget_prompt}])
+        clean = response.strip()
+        if clean.startswith("```"):
+            clean = "\n".join(clean.split("\n")[1:])
+            if clean.endswith("```"):
+                clean = clean[:-3]
+        result = json.loads(clean.strip())
+        forget_ids = [int(i) for i in result.get("forget_ids", [])][:n_to_forget]
+        reason = result.get("reason", "")
+    except Exception:
+        return 0, []
+
+    if not forget_ids:
+        return 0, []
+
+    # build summaries before deletion
+    id_to_content = {m["id"]: m["content"][:80] for m in candidates}
+    summaries = [id_to_content.get(i, f"ID:{i}") for i in forget_ids if i in id_to_content]
+
+    _delete_memories_by_ids(forget_ids)
+    return len(forget_ids), summaries
 
 
 def _delete_memories_by_ids(ids: list[int]):
@@ -276,13 +371,20 @@ def cmd_status() -> str:
         snap_line = "No dream snapshots found"
 
     log_exists = "✅" if DREAM_LOG_PATH.exists() else "—"
+    mem_count = _count_memories()
+    mem_status = f"{mem_count} memories"
+    if mem_count > MEMORY_FORGET_THRESHOLD:
+        mem_status += f" ⚠️ (>{MEMORY_FORGET_THRESHOLD} — forgetting will run next dream)"
 
     lines = [
         f"🌙 Dream Status — {AGENT_NAME}",
         "",
         f"Schedule: {status_line}",
         f"Snapshot: {snap_line}",
+        f"Memory store: {mem_status}",
         f"Dream log: {log_exists}",
+        "",
+        f"Forget threshold: {MEMORY_FORGET_THRESHOLD} | Target: {MEMORY_FORGET_TARGET} | Max per run: {MAX_FORGET_PER_DREAM}",
         "",
         "Commands: on | off | now | undo | status",
     ]
@@ -386,6 +488,13 @@ RULES (follow strictly):
         if isinstance(m, dict) and float(m.get("importance", 0)) >= MIN_IMPORTANCE
     ][:MAX_NEW_MEMORIES]
 
+    # ── Forgetting phase (before adding new memories) ──────────────────────────
+    current_memory_count = _count_memories()
+    forgotten_count = 0
+    forgotten_summaries: list[str] = []
+    if current_memory_count > MEMORY_FORGET_THRESHOLD:
+        forgotten_count, forgotten_summaries = _forget_memories(api_key, current_memory_count)
+
     # Save snapshot BEFORE applying changes
     agent_md_before = agent_md_content if agent_md_updates else None
     # We'll fill added_memory_ids after writing
@@ -449,6 +558,14 @@ RULES (follow strictly):
         reflection_summary,
         "",
     ]
+    if forgotten_count > 0:
+        lines.append(f"🗑️ Forgot {forgotten_count} old memories (store was {current_memory_count}, trimming to ~{MEMORY_FORGET_TARGET}):")
+        for s in forgotten_summaries[:5]:
+            lines.append(f"  • {s}")
+        if len(forgotten_summaries) > 5:
+            lines.append(f"  • ...and {len(forgotten_summaries) - 5} more")
+        lines.append("")
+
     if valid_memories:
         lines.append(f"🧠 {len(valid_memories)} new memories saved:")
         for m in valid_memories:

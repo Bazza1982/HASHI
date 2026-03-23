@@ -1097,6 +1097,8 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CallbackQueryHandler(self.callback_model, pattern=r"^(model|backend|bmodel|effort|backend_menu)"))
         self.app.add_handler(CallbackQueryHandler(self.callback_voice, pattern=r"^voice:"))
         self.app.add_handler(CallbackQueryHandler(self.callback_start_agent, pattern=r"^startagent:"))
+        self.app.add_handler(CommandHandler("agents", self._wrap_cmd("agents", self.cmd_agents)))
+        self.app.add_handler(CallbackQueryHandler(self.callback_agents, pattern=r"^agents:"))
         self.app.add_handler(CallbackQueryHandler(self.callback_skill, pattern=r"^(skill|skilljob):"))
         self.app.add_handler(CallbackQueryHandler(self.callback_toggle, pattern=r"^tgl:"))
         self.app.add_handler(CommandHandler("mode", self._wrap_cmd("mode", self.cmd_mode)))
@@ -1251,6 +1253,156 @@ class FlexibleAgentRuntime:
         await query.answer(f"Starting {agent_name}...")
         ok, message = await orchestrator.start_agent(agent_name)
         await query.edit_message_text(message, reply_markup=self._startable_agent_keyboard())
+
+    # ── /agents ────────────────────────────────────────────────────────────────
+
+    def _build_agents_view(self, orchestrator) -> tuple[str, "InlineKeyboardMarkup"]:
+        import re as _re
+        all_agents = orchestrator.get_all_agents_raw()
+        running_names = set(orchestrator._runtime_map().keys())
+        starting_names = set(orchestrator._startup_tasks.keys())
+
+        lines = ["<b>📋 HASHI Agents</b>"]
+        rows = []
+
+        for agent in all_agents:
+            name = agent.get("name", "?")
+            display = agent.get("display_name", name)
+            emoji = agent.get("emoji", "🤖")
+            is_active = agent.get("is_active", True)
+
+            if name in starting_names:
+                status_icon, status_text = "⏳", "starting"
+            elif name in running_names:
+                status_icon, status_text = "🟢", "running"
+            elif is_active:
+                status_icon, status_text = "⚪", "stopped"
+            else:
+                status_icon, status_text = "🔴", "inactive"
+
+            lines.append(f"{status_icon} <b>{name}</b> — {display} [{status_text}]")
+
+            btn_row = []
+            if is_active:
+                btn_row.append(InlineKeyboardButton("❌ Deactivate", callback_data=f"agents:deactivate:{name}"))
+            else:
+                btn_row.append(InlineKeyboardButton("✅ Activate", callback_data=f"agents:activate:{name}"))
+
+            if name in starting_names:
+                btn_row.append(InlineKeyboardButton("⏳", callback_data="agents:noop"))
+            elif name in running_names:
+                btn_row.append(InlineKeyboardButton("⏹ Stop", callback_data=f"agents:stop:{name}"))
+            elif is_active:
+                btn_row.append(InlineKeyboardButton("▶ Start", callback_data=f"agents:start:{name}"))
+
+            btn_row.append(InlineKeyboardButton("🗑", callback_data=f"agents:delete:{name}"))
+            rows.append(btn_row)
+
+        rows.append([InlineKeyboardButton("🔄 Refresh", callback_data="agents:refresh")])
+        return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+    async def cmd_agents(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        args = context.args or []
+        if args and args[0] == "add":
+            await self._cmd_agents_add(update, context)
+            return
+        orchestrator = getattr(self, "orchestrator", None)
+        if orchestrator is None:
+            await self._reply_text(update, "Agent management unavailable.")
+            return
+        text, markup = self._build_agents_view(orchestrator)
+        await self._reply_text(update, text, reply_markup=markup, parse_mode="HTML")
+
+    async def _cmd_agents_add(self, update: Update, context: Any):
+        import re as _re
+        orchestrator = getattr(self, "orchestrator", None)
+        if orchestrator is None:
+            await self._reply_text(update, "Agent management unavailable.")
+            return
+        args = context.args or []
+        # args: ["add", "<id>", "<display_name_parts...>", "[token]"]
+        if len(args) < 3:
+            await self._reply_text(update, "Usage: /agents add <id> <display_name> [telegram_token]")
+            return
+        new_id = args[1]
+        if not _re.match(r'^[a-zA-Z0-9_]+$', new_id):
+            await self._reply_text(update, "Agent ID must be alphanumeric with underscores only.")
+            return
+        # If last arg looks like a Telegram token (digits:letters) treat as token
+        if len(args) >= 4 and _re.match(r'^\d+:[A-Za-z0-9_-]+$', args[-1]):
+            token = args[-1]
+            display_name = " ".join(args[2:-1])
+        else:
+            token = None
+            display_name = " ".join(args[2:])
+        if not display_name:
+            display_name = new_id
+        ok, msg = orchestrator.add_agent_to_config(new_id, display_name, token)
+        await self._reply_text(update, msg)
+
+    async def callback_agents(self, update: Update, context: Any):
+        query = update.callback_query
+        if not self._is_authorized_user(query.from_user.id):
+            return
+        orchestrator = getattr(self, "orchestrator", None)
+        if orchestrator is None:
+            await query.answer("Agent management unavailable.", show_alert=True)
+            return
+        data = query.data or ""
+        parts = data.split(":", 2)
+        action = parts[1] if len(parts) > 1 else ""
+        name = parts[2] if len(parts) > 2 else ""
+
+        if action in ("refresh", "noop"):
+            await query.answer()
+            text, markup = self._build_agents_view(orchestrator)
+            await query.edit_message_text(text, reply_markup=markup, parse_mode="HTML")
+            return
+
+        if action == "activate":
+            await query.answer(f"Activating {name}…")
+            orchestrator.set_agent_active(name, True)
+        elif action == "deactivate":
+            if name in orchestrator._runtime_map():
+                await query.answer(f"Stop {name} first.", show_alert=True)
+                return
+            await query.answer(f"Deactivating {name}…")
+            orchestrator.set_agent_active(name, False)
+        elif action == "start":
+            await query.answer(f"Starting {name}…")
+            ok, msg = await orchestrator.start_agent(name)
+            if not ok:
+                await query.answer(msg, show_alert=True)
+                return
+        elif action == "stop":
+            await query.answer(f"Stopping {name}…")
+            ok, msg = await orchestrator.stop_agent(name)
+            if not ok:
+                await query.answer(msg, show_alert=True)
+                return
+        elif action == "delete":
+            await query.answer()
+            confirm_markup = InlineKeyboardMarkup([[
+                InlineKeyboardButton(f"⚠️ Confirm delete {name}", callback_data=f"agents:confirmdelete:{name}"),
+                InlineKeyboardButton("Cancel", callback_data="agents:refresh"),
+            ]])
+            await query.edit_message_text(
+                f"⚠️ <b>Delete '{name}'?</b>\n\nRemoves from config only — workspace files are kept.",
+                reply_markup=confirm_markup,
+                parse_mode="HTML",
+            )
+            return
+        elif action == "confirmdelete":
+            if name in orchestrator._runtime_map():
+                await query.answer(f"Stop {name} first.", show_alert=True)
+                return
+            await query.answer(f"Deleted {name}.")
+            orchestrator.delete_agent_from_config(name)
+
+        text, markup = self._build_agents_view(orchestrator)
+        await query.edit_message_text(text, reply_markup=markup, parse_mode="HTML")
 
     async def callback_voice(self, update: Update, context: Any):
         query = update.callback_query
@@ -1611,11 +1763,14 @@ class FlexibleAgentRuntime:
         import asyncio as _asyncio
         import subprocess as _subprocess
 
-        await self._reply_text(update, f"⏳ Moving <code>{agent_id}</code> → <b>{target}</b>…", parse_mode="HTML")
+        # Called from callback query — update.message is None, use chat_id + _send_text
+        chat_id = update.effective_chat.id
+
+        await self._send_text(chat_id, f"⏳ Moving <code>{agent_id}</code> → <b>{target}</b>…", parse_mode="HTML")
 
         script = Path(__file__).parent.parent / "scripts" / "move_agent.py"
         if not script.exists():
-            await self._reply_text(update, "Error: move_agent.py not found.")
+            await self._send_text(chat_id, "Error: move_agent.py not found.")
             return
 
         cmd = [
@@ -1641,13 +1796,13 @@ class FlexibleAgentRuntime:
             if len(output) > 3000:
                 output = output[:3000] + "\n…[truncated]"
             status = "✅" if result.returncode == 0 else "❌"
-            await self._reply_text(
-                update,
+            await self._send_text(
+                chat_id,
                 f"{status} <b>Migration result:</b>\n<pre>{output}</pre>",
                 parse_mode="HTML",
             )
         except Exception as e:
-            await self._reply_text(update, f"Error running migration: {e}")
+            await self._send_text(chat_id, f"Error running migration: {e}")
 
     async def callback_move(self, update: Update, context: Any):
         """Handle move: callback queries (multi-step picker)."""
@@ -2902,14 +3057,29 @@ class FlexibleAgentRuntime:
         )
         await self.enqueue_request(update.effective_chat.id, prompt, "system", "New session")
 
+    def _get_skill_state(self) -> dict:
+        path = self.workspace_dir / "skill_state.json"
+        try:
+            return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        except Exception:
+            return {}
+
+    def _set_skill_state(self, key: str, value):
+        path = self.workspace_dir / "skill_state.json"
+        state = self._get_skill_state()
+        state[key] = value
+        path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+
     async def cmd_memory(self, update: Update, context: Any):
-        """Control long-term memory injection into the agent's context.
+        """Control long-term memory injection and BGE sync for this agent.
 
         Usage:
-          /memory          -> show current status
-          /memory on       -> enable memory injection (default)
-          /memory pause    -> disable injection without deleting any data
-          /memory wipe     -> permanently delete all stored memories and turns
+          /memory              -> show current status
+          /memory on           -> enable memory injection (default)
+          /memory pause        -> disable injection without deleting any data
+          /memory wipe         -> permanently delete all stored memories and turns
+          /memory sync on      -> opt this agent into nightly BGE consolidation
+          /memory sync off     -> opt this agent out of BGE consolidation (default)
         """
         if not self._is_authorized_user(update.effective_user.id):
             return
@@ -2924,10 +3094,13 @@ class FlexibleAgentRuntime:
             stats = self.memory_store.get_stats() if hasattr(self, "memory_store") else {}
             turns = stats.get("turns", "?")
             memories = stats.get("memories", "?")
+            sync_on = self._get_skill_state().get("memory_sync", False)
+            sync_state = "ON 🔄" if sync_on else "OFF ⬜"
             await self._reply_text(update,
                 f"Memory injection: {state}\n"
-                f"Stored: {turns} turns, {memories} memories\n\n"
-                f"Commands: /memory on | pause | wipe"
+                f"Stored: {turns} turns, {memories} memories\n"
+                f"BGE sync: {sync_state}\n\n"
+                f"Commands: /memory on | pause | wipe | sync on | sync off"
             )
 
         elif args == "on":
@@ -2958,9 +3131,27 @@ class FlexibleAgentRuntime:
             else:
                 await self._reply_text(update, "❌ Memory store not available.")
 
+        elif args == "sync on":
+            self._set_skill_state("memory_sync", True)
+            agent = self.workspace_dir.name
+            await self._reply_text(update,
+                f"🔄 Memory sync ON for {agent}.\n"
+                f"This agent's important memories will be queued for nightly BGE consolidation.\n"
+                f"Use /memory sync off to opt out."
+            )
+
+        elif args == "sync off":
+            self._set_skill_state("memory_sync", False)
+            agent = self.workspace_dir.name
+            await self._reply_text(update,
+                f"⬜ Memory sync OFF for {agent}.\n"
+                f"This agent will not participate in BGE consolidation.\n"
+                f"Local memories are unaffected. Use /memory sync on to re-enable."
+            )
+
         else:
             await self._reply_text(update,
-                "Usage: /memory [on | pause | wipe | status]"
+                "Usage: /memory [on | pause | wipe | sync on | sync off | status]"
             )
 
     async def cmd_wipe(self, update: Update, context: Any):
@@ -4289,6 +4480,7 @@ class FlexibleAgentRuntime:
         return [
             BotCommand("help", "Show help menu"),
             BotCommand("start", "Start another stopped agent"),
+            BotCommand("agents", "List all agents with controls; add <id> <name> [token]"),
             BotCommand("status", "View agent status"),
             BotCommand("voice", "Toggle native voice replies"),
             BotCommand("whisper", "Set Whisper model size [small|medium|large]"),
