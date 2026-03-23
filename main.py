@@ -424,6 +424,10 @@ class UniversalOrchestrator:
         self.secrets = secrets
         return global_cfg, agent_configs, secrets
 
+    def get_all_agents_raw(self) -> list[dict]:
+        raw = json.loads(self.paths.config_path.read_text(encoding="utf-8-sig"))
+        return raw.get("agents", [])
+
     def configured_agent_names(self) -> list[str]:
         raw = json.loads(self.paths.config_path.read_text(encoding="utf-8-sig"))
         return [agent["name"] for agent in raw.get("agents", []) if agent.get("is_active", True)]
