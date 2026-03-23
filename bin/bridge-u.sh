@@ -375,10 +375,15 @@ ensure_env() {
     
     source .venv/bin/activate
     
-    # Check dependencies
+    # Check core dependencies
     if ! python3 -c "import telegram, httpx, aiohttp, PIL" 2>/dev/null; then
         echo -e "${C_WARN}Installing Python dependencies...${C_RESET}"
         pip install --quiet python-telegram-bot httpx aiohttp pillow
+    fi
+    # Check BGE-M3 dependencies (for semantic memory retrieval)
+    if ! python3 -c "import onnxruntime, transformers" 2>/dev/null; then
+        echo -e "${C_WARN}Installing BGE-M3 dependencies (onnxruntime, transformers)...${C_RESET}"
+        pip install --quiet "onnxruntime>=1.18.0" transformers sentencepiece
     fi
 }
 
