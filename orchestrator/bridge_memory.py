@@ -171,7 +171,7 @@ class BridgeMemoryStore:
         self.workspace_dir = workspace_dir
         self.db_path = workspace_dir / "bridge_memory.sqlite"
         self.legacy_encoder = LocalEmbeddingEncoder()
-        self.encoder = BgeM3Encoder()
+        self.encoder = LocalEmbeddingEncoder()  # BGE disabled by default; enable via /memory sync
         self._sqlite_vec_supported: bool | None = None
         self._vec_enabled = False
         self._vec_dim: int | None = None
