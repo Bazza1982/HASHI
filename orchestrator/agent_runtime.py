@@ -2526,6 +2526,75 @@ class BridgeAgentRuntime:
             f"Handoff restore [{exchange_count} exchanges]",
         )
 
+    async def cmd_ticket(self, update, context):
+        """Submit an IT support ticket to Arale. Usage: /ticket <description>"""
+        if update.effective_user.id != self.global_config.authorized_id:
+            return
+        from orchestrator.ticket_manager import (
+            create_ticket, detect_instance, format_ticket_notification,
+            list_tickets, _resolve_tickets_dir,
+        )
+
+        args_text = " ".join(context.args).strip() if context.args else ""
+
+        # /ticket with no args → list open tickets
+        if not args_text:
+            tickets_dir = _resolve_tickets_dir(self.global_config.project_root)
+            open_tickets = list_tickets(tickets_dir, "open")
+            ip_tickets = list_tickets(tickets_dir, "in_progress")
+            lines = []
+            if open_tickets:
+                lines.append("Open tickets:")
+                for t in open_tickets:
+                    lines.append(f"  [{t['ticket_id']}] {t['source_agent']} — {t['summary'][:60]}")
+            if ip_tickets:
+                lines.append("In progress:")
+                for t in ip_tickets:
+                    lines.append(f"  [{t['ticket_id']}] {t['source_agent']} — {t['summary'][:60]}")
+            if not lines:
+                lines.append("No open tickets.")
+            await update.message.reply_text("\n".join(lines))
+            return
+
+        # Create the ticket
+        instance = detect_instance(self.global_config.project_root)
+        ticket = create_ticket(
+            project_root=self.global_config.project_root,
+            source_agent=self.name,
+            source_instance=instance,
+            workspace_dir=self.config.workspace_dir,
+            summary=args_text,
+        )
+
+        await update.message.reply_text(
+            f"🎫 Ticket {ticket['ticket_id']} created.\n"
+            f"Arale has been notified and will investigate.",
+        )
+
+        # Notify Arale via bridge
+        notification = format_ticket_notification(ticket)
+        orchestrator = getattr(self, "orchestrator", None)
+        notified = False
+
+        if orchestrator is not None:
+            for rt in getattr(orchestrator, "runtimes", []):
+                if getattr(rt, "name", "") == "arale" and hasattr(rt, "enqueue_api_text"):
+                    try:
+                        await rt.enqueue_api_text(
+                            f"[TICKET RECEIVED]\n{notification}\n\n"
+                            f"Ticket file: {self.global_config.project_root / 'tickets' / 'open' / (ticket['ticket_id'] + '.json')}\n"
+                            f"Please investigate and resolve per IT support protocol.",
+                            source=f"ticket:{ticket['ticket_id']}",
+                            deliver_to_telegram=True,
+                        )
+                        notified = True
+                    except Exception as e:
+                        logging.warning(f"Failed to notify arale via bridge: {e}")
+                    break
+
+        if not notified:
+            logging.info(f"Ticket {ticket['ticket_id']} saved to file; Arale will pick up on next scan.")
+
     async def cmd_park(self, update, context):
         if update.effective_user.id != self.global_config.authorized_id:
             return
@@ -3485,6 +3554,7 @@ class BridgeAgentRuntime:
             BotCommand("voice", "Toggle native voice replies"),
             BotCommand("active", "Toggle proactive heartbeat"),
             BotCommand("handoff", "Fresh continuity restore"),
+            BotCommand("ticket", "Submit IT support ticket to Arale"),
             BotCommand("park", "List or save parked topics"),
             BotCommand("load", "Restore a parked topic"),
             BotCommand("fyi", "Refresh bridge environment awareness"),
@@ -3520,6 +3590,7 @@ class BridgeAgentRuntime:
         self.app.add_handler(CommandHandler("voice", self.cmd_voice))
         self.app.add_handler(CommandHandler("active", self.cmd_active))
         self.app.add_handler(CommandHandler("handoff", self.cmd_handoff))
+        self.app.add_handler(CommandHandler("ticket", self.cmd_ticket))
         self.app.add_handler(CommandHandler("park", self.cmd_park))
         self.app.add_handler(CommandHandler("load", self.cmd_load))
         self.app.add_handler(CommandHandler("fyi", self.cmd_fyi))

@@ -527,9 +527,15 @@ class BridgeMemoryStore:
             status["counts"]["turns"] = int(conn.execute("SELECT COUNT(*) FROM turns").fetchone()[0])
 
             if status["tables"]["memory_vec"]["exists"]:
-                status["counts"]["memory_vec"] = int(conn.execute("SELECT COUNT(*) FROM memory_vec").fetchone()[0])
+                try:
+                    status["counts"]["memory_vec"] = int(conn.execute("SELECT COUNT(*) FROM memory_vec").fetchone()[0])
+                except Exception:
+                    status["counts"]["memory_vec"] = 0
             if status["tables"]["turns_vec"]["exists"]:
-                status["counts"]["turns_vec"] = int(conn.execute("SELECT COUNT(*) FROM turns_vec").fetchone()[0])
+                try:
+                    status["counts"]["turns_vec"] = int(conn.execute("SELECT COUNT(*) FROM turns_vec").fetchone()[0])
+                except Exception:
+                    status["counts"]["turns_vec"] = 0
 
         memories_total = status["counts"]["memories"]
         turns_total = status["counts"]["turns"]

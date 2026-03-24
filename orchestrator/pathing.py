@@ -79,7 +79,7 @@ def resolve_path_value(
     if normalized.startswith(HOME_PREFIX):
         suffix = normalized[len(HOME_PREFIX):]
         return (bridge_home / Path(suffix)).resolve()
-    candidate = Path(raw)
+    candidate = Path(normalized)
     if candidate.is_absolute():
         return candidate.resolve()
     return (config_dir / candidate).resolve()

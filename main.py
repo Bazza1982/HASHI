@@ -428,6 +428,53 @@ class UniversalOrchestrator:
         raw = json.loads(self.paths.config_path.read_text(encoding="utf-8-sig"))
         return raw.get("agents", [])
 
+    def set_agent_active(self, agent_name: str, active: bool) -> bool:
+        """Toggle is_active for an agent. Returns True if found and updated."""
+        raw = self._load_raw_config()
+        for ag in raw.get("agents", []):
+            if ag.get("name") == agent_name:
+                ag["is_active"] = active
+                self._write_raw_config(raw)
+                return True
+        return False
+
+    def delete_agent_from_config(self, agent_name: str) -> bool:
+        """Remove an agent entry from config. Returns True if found and removed."""
+        raw = self._load_raw_config()
+        agents = raw.get("agents", [])
+        orig_len = len(agents)
+        raw["agents"] = [ag for ag in agents if ag.get("name") != agent_name]
+        if len(raw["agents"]) < orig_len:
+            self._write_raw_config(raw)
+            return True
+        return False
+
+    def add_agent_to_config(self, agent_name: str, agent_cfg: dict | None = None) -> bool:
+        """Add a new flex agent to config, create workspace dir + AGENT.md scaffold.
+        Returns True on success, False if agent already exists."""
+        raw = self._load_raw_config()
+        existing_names = {ag.get("name") for ag in raw.get("agents", [])}
+        if agent_name in existing_names:
+            return False
+
+        ws_dir = self.paths.workspaces_root / agent_name
+        ws_dir.mkdir(parents=True, exist_ok=True)
+
+        agent_md = ws_dir / "AGENT.md"
+        if not agent_md.exists():
+            agent_md.write_text(f"# {agent_name}\n\nNew HASHI agent.\n", encoding="utf-8")
+
+        new_entry = agent_cfg or {}
+        new_entry.setdefault("name", agent_name)
+        new_entry.setdefault("workspace_dir", f"workspaces/{agent_name}")
+        new_entry.setdefault("system_md", f"workspaces/{agent_name}/AGENT.md")
+        new_entry.setdefault("is_active", True)
+        new_entry.setdefault("type", "flex")
+
+        raw.setdefault("agents", []).append(new_entry)
+        self._write_raw_config(raw)
+        return True
+
     def configured_agent_names(self) -> list[str]:
         raw = json.loads(self.paths.config_path.read_text(encoding="utf-8-sig"))
         return [agent["name"] for agent in raw.get("agents", []) if agent.get("is_active", True)]

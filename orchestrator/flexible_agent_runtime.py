@@ -1090,6 +1090,7 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CommandHandler("skill", self._wrap_cmd("skill", self.cmd_skill)))
         self.app.add_handler(CommandHandler("backend", self._wrap_cmd("backend", self.cmd_backend)))
         self.app.add_handler(CommandHandler("handoff", self._wrap_cmd("handoff", self.cmd_handoff)))
+        self.app.add_handler(CommandHandler("ticket", self._wrap_cmd("ticket", self.cmd_ticket)))
         self.app.add_handler(CommandHandler("park", self._wrap_cmd("park", self.cmd_park)))
         self.app.add_handler(CommandHandler("load", self._wrap_cmd("load", self.cmd_load)))
         self.app.add_handler(CommandHandler("model", self._wrap_cmd("model", self.cmd_model)))
@@ -2517,6 +2518,79 @@ class FlexibleAgentRuntime:
             "handoff",
             f"Handoff restore [{exchange_count} exchanges]",
         )
+
+    async def cmd_ticket(self, update: Update, context: Any):
+        """Submit an IT support ticket to Arale. Usage: /ticket <description>"""
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        from orchestrator.ticket_manager import (
+            create_ticket, detect_instance, format_ticket_notification,
+            list_tickets, _resolve_tickets_dir,
+        )
+
+        args_text = " ".join(context.args).strip() if context.args else ""
+
+        # /ticket with no args → list open tickets
+        if not args_text:
+            tickets_dir = _resolve_tickets_dir(self.global_config.project_root)
+            open_tickets = list_tickets(tickets_dir, "open")
+            ip_tickets = list_tickets(tickets_dir, "in_progress")
+            lines = []
+            if open_tickets:
+                lines.append("Open tickets:")
+                for t in open_tickets:
+                    lines.append(f"  [{t['ticket_id']}] {t['source_agent']} — {t['summary'][:60]}")
+            if ip_tickets:
+                lines.append("In progress:")
+                for t in ip_tickets:
+                    lines.append(f"  [{t['ticket_id']}] {t['source_agent']} — {t['summary'][:60]}")
+            if not lines:
+                lines.append("No open tickets.")
+            await self._reply_text(update, "\n".join(lines))
+            return
+
+        # Create the ticket (program-driven, no LLM needed)
+        instance = detect_instance(self.global_config.project_root)
+        ticket = create_ticket(
+            project_root=self.global_config.project_root,
+            source_agent=self.name,
+            source_instance=instance,
+            workspace_dir=self.workspace_dir,
+            summary=args_text,
+        )
+
+        # Confirm to the submitting agent
+        await self._reply_text(
+            update,
+            f"🎫 Ticket {ticket['ticket_id']} created.\n"
+            f"Arale has been notified and will investigate.",
+        )
+
+        # Notify Arale via bridge if available, otherwise file-based fallback
+        notification = format_ticket_notification(ticket)
+        orchestrator = getattr(self, "orchestrator", None)
+        notified = False
+
+        if orchestrator is not None:
+            # Try to deliver via bridge to arale's runtime
+            for rt in getattr(orchestrator, "runtimes", []):
+                if getattr(rt, "name", "") == "arale" and hasattr(rt, "enqueue_api_text"):
+                    try:
+                        await rt.enqueue_api_text(
+                            f"[TICKET RECEIVED]\n{notification}\n\n"
+                            f"Ticket file: {self.global_config.project_root / 'tickets' / 'open' / (ticket['ticket_id'] + '.json')}\n"
+                            f"Please investigate and resolve per IT support protocol.",
+                            source=f"ticket:{ticket['ticket_id']}",
+                            deliver_to_telegram=True,
+                        )
+                        notified = True
+                    except Exception as e:
+                        logger.warning(f"Failed to notify arale via bridge: {e}")
+                    break
+
+        if not notified:
+            # Fallback: ticket is in tickets/open/ — Arale's daily scan will pick it up
+            logger.info(f"Ticket {ticket['ticket_id']} saved to file; Arale will pick up on next scan.")
 
     async def cmd_park(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -4490,6 +4564,7 @@ class FlexibleAgentRuntime:
             BotCommand("skill", "Browse and run skills"),
             BotCommand("backend", "Show backend buttons (+ means context)"),
             BotCommand("handoff", "Fresh session with recent continuity"),
+            BotCommand("ticket", "Submit IT support ticket to Arale"),
             BotCommand("park", "List or save parked topics"),
             BotCommand("load", "Restore a parked topic"),
             BotCommand("mode", "Switch fixed/flex mode"),
