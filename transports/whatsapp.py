@@ -174,6 +174,15 @@ class WhatsAppTransport:
             chat_key = self._jid_str(chat_jid)
             self._jid_cache[chat_key] = chat_jid
 
+            # Block group chats unless explicitly whitelisted in allowed_chat_ids.
+            # Group JIDs end with @g.us; individual DMs end with @s.whatsapp.net.
+            is_group = chat_key.endswith("@g.us")
+            if is_group and chat_key not in self._allowed_chat_ids:
+                logger.info(
+                    "Ignored WhatsApp group message (not in allowed_chat_ids). chat=%s", chat_key
+                )
+                return
+
             # Whitelist check
             sender_candidates = self._phone_candidates(sender_jid)
             chat_candidates = self._phone_candidates(chat_jid)
