@@ -10,7 +10,7 @@ setlocal enabledelayedexpansion
 :: ============================================================
 
 set TARGET=D:\HASHI9
-set SOURCE=%~dp0.
+set SOURCE=%~dp0..
 set PYTHON_VERSION=3.13.3
 set PYTHON_ZIP=python-%PYTHON_VERSION%-embed-amd64.zip
 set PYTHON_URL=https://www.python.org/ftp/python/%PYTHON_VERSION%/%PYTHON_ZIP%
@@ -66,9 +66,9 @@ if exist "%PYTHON_DIR%\python.exe" (
     goto :install_pip
 )
 
-if not exist "%TARGET%\tmp" mkdir "%TARGET%\tmp"
+if not exist "%TARGET%	mp" mkdir "%TARGET%	mp"
 powershell -NoProfile -Command ^
-    "Invoke-WebRequest -Uri '%PYTHON_URL%' -OutFile '%TARGET%\tmp\%PYTHON_ZIP%' -UseBasicParsing"
+    "Invoke-WebRequest -Uri '%PYTHON_URL%' -OutFile '%TARGET%	mp\%PYTHON_ZIP%' -UseBasicParsing"
 if errorlevel 1 (
     echo ERROR: Failed to download Python. Check internet connection.
     pause
@@ -78,8 +78,8 @@ if errorlevel 1 (
 echo    Extracting...
 if not exist "%PYTHON_DIR%" mkdir "%PYTHON_DIR%"
 powershell -NoProfile -Command ^
-    "Expand-Archive -Path '%TARGET%\tmp\%PYTHON_ZIP%' -DestinationPath '%PYTHON_DIR%' -Force"
-rmdir /s /q "%TARGET%\tmp"
+    "Expand-Archive -Path '%TARGET%	mp\%PYTHON_ZIP%' -DestinationPath '%PYTHON_DIR%' -Force"
+rmdir /s /q "%TARGET%	mp"
 echo    Done.
 
 :install_pip
@@ -140,18 +140,28 @@ if errorlevel 1 (
 echo    Done.
 
 echo.
-echo [5/5] Finalising...
+echo [5/5] Finalising - stripping runtime data...
 
-:: Clear any runtime data that may have copied over
+:: System logs
 if exist "%TARGET%\logs" rmdir /s /q "%TARGET%\logs"
-if exist "%TARGET%\workspaces\hashiko\bridge_memory.sqlite" del /f "%TARGET%\workspaces\hashiko\bridge_memory.sqlite"
-if exist "%TARGET%\workspaces\hashiko\transcript.jsonl" del /f "%TARGET%\workspaces\hashiko\transcript.jsonl"
-if exist "%TARGET%\workspaces\hashiko\recent_context.jsonl" del /f "%TARGET%\workspaces\hashiko\recent_context.jsonl"
-if exist "%TARGET%\workspaces\onboarding_agent\conversation_log.jsonl" ^
-    type nul > "%TARGET%\workspaces\onboarding_agent\conversation_log.jsonl"
-
-:: Create logs dir so HASHI starts cleanly
 mkdir "%TARGET%\logs" >nul 2>&1
+
+:: WhatsApp session (contains linked account - do not ship)
+if exist "%TARGET%\wa_session" rmdir /s /q "%TARGET%\wa_session"
+mkdir "%TARGET%\wa_session" >nul 2>&1
+
+:: Workspace runtime files - keep only AGENT.md per workspace
+for /D %%W in ("%TARGET%\workspaces\*") do (
+    if exist "%%W	ranscript.jsonl"         del /f /q "%%W	ranscript.jsonl"
+    if exist "%%W\conversation_log.jsonl"   del /f /q "%%W\conversation_log.jsonl"
+    if exist "%%Wecent_context.jsonl"     del /f /q "%%Wecent_context.jsonl"
+    if exist "%%W\handoff.md"               del /f /q "%%W\handoff.md"
+    if exist "%%Wridge_memory.sqlite"     del /f /q "%%Wridge_memory.sqlite"
+    if exist "%%Wridge_memory.sqlite-wal" del /f /q "%%Wridge_memory.sqlite-wal"
+    if exist "%%Wridge_memory.sqlite-shm" del /f /q "%%Wridge_memory.sqlite-shm"
+    if exist "%%W\state.json"               del /f /q "%%W\state.json"
+    if exist "%%W\logs"                     rmdir /s /q "%%W\logs"
+)
 
 echo    Done.
 
