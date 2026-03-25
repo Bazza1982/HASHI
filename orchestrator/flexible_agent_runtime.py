@@ -1115,6 +1115,8 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CommandHandler("verbose", self._wrap_cmd("verbose", self.cmd_verbose)))
         self.app.add_handler(CommandHandler("think", self._wrap_cmd("think", self.cmd_think)))
         self.app.add_handler(CommandHandler("jobs", self._wrap_cmd("jobs", self.cmd_jobs)))
+        self.app.add_handler(CommandHandler("timeout", self._wrap_cmd("timeout", self.cmd_timeout)))
+        self.app.add_handler(CommandHandler("hchat", self._wrap_cmd("hchat", self.cmd_hchat)))
         self.app.add_handler(CommandHandler("logo", self._wrap_cmd("logo", self.cmd_logo)))
         self.app.add_handler(CommandHandler("move", self._wrap_cmd("move", self.cmd_move)))
         self.app.add_handler(CallbackQueryHandler(self.callback_move, pattern=r"^move:"))
@@ -2171,6 +2173,16 @@ class FlexibleAgentRuntime:
     async def cmd_debug(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
+        args = [a.strip().lower() for a in (context.args or []) if a.strip()]
+        if args and args[0] in {"on", "off"}:
+            enabled = args[0] == "on"
+            if self.skill_manager:
+                _, msg = self.skill_manager.set_toggle_state(self.workspace_dir, "debug", enabled=enabled)
+                state_str = "ON 🔴" if enabled else "OFF"
+                await self._reply_text(update, f"🐛 Debug mode: {state_str}\n{msg}")
+            else:
+                await self._reply_text(update, "Skill manager not available.")
+            return
         await self._invoke_prompt_skill_from_command(update, "debug", list(context.args or []))
 
     async def cmd_skill(self, update: Update, context: Any):
@@ -2437,8 +2449,131 @@ class FlexibleAgentRuntime:
         if not self._is_authorized_user(update.effective_user.id):
             return
         from orchestrator.agent_runtime import _build_jobs_with_buttons
-        text, markup = _build_jobs_with_buttons(self.name, self.skill_manager)
+        arg = (context.args[0].strip().lower() if context.args else "")
+        if arg == "all":
+            filter_agent = None
+        elif arg:
+            filter_agent = arg
+        else:
+            filter_agent = self.name
+        text, markup = _build_jobs_with_buttons(self.name, self.skill_manager, filter_agent=filter_agent)
         await self._reply_text(update, text, parse_mode="HTML", reply_markup=markup)
+
+    async def cmd_timeout(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        args = [a.strip() for a in (context.args or []) if a.strip()]
+        backend = getattr(self, "backend", None) or (
+            self.backend_manager.current_backend if hasattr(self, "backend_manager") else None
+        )
+        extra = {}
+        if backend and hasattr(backend, "config") and backend.config.extra:
+            extra = backend.config.extra
+
+        # Defaults (in seconds) from the backend class
+        default_idle = getattr(type(backend), "DEFAULT_IDLE_TIMEOUT_SEC", 300) if backend else 300
+        default_hard = getattr(type(backend), "DEFAULT_HARD_TIMEOUT_SEC", 1800) if backend else 1800
+
+        if not args:
+            # Show current values
+            idle_s = extra.get("idle_timeout_sec") or extra.get("process_timeout") or default_idle
+            hard_s = extra.get("hard_timeout_sec") or default_hard
+            idle_min = int(idle_s) // 60
+            hard_min = int(hard_s) // 60
+            def_idle_min = default_idle // 60
+            def_hard_min = default_hard // 60
+            text = (
+                f"<b>⏱ Timeout — {self.name}</b>\n\n"
+                f"  Idle:  <b>{idle_min} min</b>  (default: {def_idle_min} min)\n"
+                f"  Hard:  <b>{hard_min} min</b>  (default: {def_hard_min} min)\n\n"
+                f"Usage:\n"
+                f"  <code>/timeout 30</code>        — set idle to 30 min\n"
+                f"  <code>/timeout 30 120</code>    — idle=30 min, hard=120 min\n"
+                f"  <code>/timeout reset</code>     — restore defaults"
+            )
+            await self._reply_text(update, text, parse_mode="HTML")
+            return
+
+        if args[0].lower() == "reset":
+            if backend and hasattr(backend, "config") and backend.config.extra:
+                backend.config.extra.pop("idle_timeout_sec", None)
+                backend.config.extra.pop("hard_timeout_sec", None)
+                backend.config.extra.pop("process_timeout", None)
+            def_idle_min = default_idle // 60
+            def_hard_min = default_hard // 60
+            await self._reply_text(
+                update,
+                f"⏱ Timeout reset to defaults: idle={def_idle_min} min, hard={def_hard_min} min",
+            )
+            return
+
+        try:
+            idle_min = int(args[0])
+            if idle_min <= 0:
+                raise ValueError
+        except ValueError:
+            await self._reply_text(update, "Usage: /timeout [minutes] [hard_minutes] | reset")
+            return
+
+        hard_min = None
+        if len(args) >= 2:
+            try:
+                hard_min = int(args[1])
+                if hard_min <= 0:
+                    raise ValueError
+            except ValueError:
+                await self._reply_text(update, "Usage: /timeout [minutes] [hard_minutes] | reset")
+                return
+
+        if backend and hasattr(backend, "config"):
+            if backend.config.extra is None:
+                backend.config.extra = {}
+            backend.config.extra["idle_timeout_sec"] = idle_min * 60
+            backend.config.extra.pop("process_timeout", None)  # avoid legacy conflict
+            if hard_min is not None:
+                backend.config.extra["hard_timeout_sec"] = hard_min * 60
+
+        hard_str = f", hard={hard_min} min" if hard_min is not None else ""
+        await self._reply_text(update, f"⏱ Timeout updated: idle={idle_min} min{hard_str}")
+
+    async def cmd_hchat(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        args = [a.strip() for a in (context.args or []) if a.strip()]
+        if len(args) < 2:
+            await self._reply_text(
+                update,
+                "<b>💬 Hchat — Ask this agent to compose &amp; send a message to another agent</b>\n\n"
+                "Usage: <code>/hchat &lt;agent&gt; &lt;intent&gt;</code>\n\n"
+                "Example: <code>/hchat lily give her an update on what we've been doing</code>\n"
+                "Example: <code>/hchat arale 告诉她新功能已完成</code>\n\n"
+                "<i>Note: YOU compose the message based on context — intent is what to communicate, not the literal text.</i>",
+                parse_mode="HTML",
+            )
+            return
+        target_name = args[0].lower()
+        intent = " ".join(args[1:])
+
+        # Build a self-prompt: instruct this agent's LLM to compose and send the message
+        self_prompt = (
+            f"[HCHAT TASK] The user wants you to send a Hchat message to agent \"{target_name}\".\n\n"
+            f"Intent: {intent}\n\n"
+            f"Instructions:\n"
+            f"1. Think about what from our current conversation context is relevant to this intent.\n"
+            f"2. Compose a complete, meaningful message FROM you ({self.name}) TO {target_name}. "
+            f"Write it as yourself — introduce yourself if appropriate, include relevant context, be concise.\n"
+            f"3. Send the message by running this bash command:\n"
+            f"   python tools/hchat_send.py --to {target_name} --from {self.name} --text \"<your composed message>\"\n"
+            f"4. Report back to the user: what you sent and a brief summary of why.\n\n"
+            f"Do NOT relay the user's words literally. Compose the message yourself."
+        )
+
+        await self._reply_text(update, f"💬 Composing Hchat message to <b>{target_name}</b>...", parse_mode="HTML")
+        await self.enqueue_api_text(
+            self_prompt,
+            source="bridge:hchat",
+            deliver_to_telegram=True,
+        )
 
     async def cmd_logo(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -3105,6 +3240,10 @@ class FlexibleAgentRuntime:
         # - No README/doc auto-reading claims
         # - No continuity restore
         self._pending_auto_recall_context = None
+
+        # Clear recent_turns so polluted history from a previous mode doesn't bleed into the new session
+        if hasattr(self.context_assembler, "memory_store") and hasattr(self.context_assembler.memory_store, "clear_turns"):
+            self.context_assembler.memory_store.clear_turns()
 
         backend = self.backend_manager.current_backend
 
@@ -4579,6 +4718,8 @@ class FlexibleAgentRuntime:
             BotCommand("verbose", "Toggle verbose long-task status [on|off]"),
             BotCommand("think", "Toggle thinking trace display [on|off]"),
             BotCommand("jobs", "Show cron and heartbeat jobs"),
+            BotCommand("timeout", "View or set request timeout [minutes]"),
+            BotCommand("hchat", "Send a message to another agent [agent] [message]"),
             BotCommand("logo", "Play startup animation"),
             BotCommand("wa_on", "Start WhatsApp transport"),
             BotCommand("wa_off", "Stop WhatsApp transport"),

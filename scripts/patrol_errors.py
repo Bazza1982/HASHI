@@ -9,6 +9,7 @@ filters non-critical noise (Telegram connectivity), and reports meaningful issue
 import os
 import sys
 import re
+import json
 from pathlib import Path
 from datetime import datetime, timedelta
 
@@ -18,6 +19,14 @@ INSTANCES = {
     "HASHI2": Path("/home/lily/projects/hashi2/logs"),
     "HASHI9": Path("/mnt/c/Users/thene/projects/HASHI/logs"),
 }
+
+# ── OpenClaw definition ──────────────────────────────────────────────────────
+OPENCLAW_ROOT = Path("/mnt/c/Users/thene/.openclaw")
+
+# ── OpenClaw noise (cron errors to ignore) ──────────────────────────────────
+OPENCLAW_NOISE_ERRORS = [
+    "cron announce delivery failed",  # Telegram delivery flap — normal noise
+]
 
 # ── Noise filters (non-critical, skip or downgrade) ─────────────────────────
 NOISE_PATTERNS = [
@@ -129,20 +138,110 @@ def scan_instance(name: str, logs_root: Path) -> dict:
             elif "ERROR" in line or "Exception" in line or "Traceback" in line:
                 warn_lines.append(line.strip())
 
+        # Discard warn_lines that are only bare "Traceback" headers with no real message
+        real_warn_lines = [
+            ln for ln in warn_lines
+            if not ln.strip().startswith("Traceback (most recent call last):")
+        ]
+
         if crit_lines:
             result["critical"].append({
                 "agent": agent,
                 "log_path": str(log),
                 "lines": crit_lines[:10],
             })
-        elif warn_lines:
+        elif real_warn_lines:
             result["warnings"].append({
                 "agent": agent,
                 "log_path": str(log),
-                "lines": warn_lines[:5],
+                "lines": real_warn_lines[:5],
             })
         else:
             result["clean"].append(agent)
+
+    return result
+
+
+def scan_openclaw(root: Path) -> dict:
+    """Scan OpenClaw cron run logs for recent errors."""
+    result = {
+        "instance": "OpenClaw",
+        "accessible": False,
+        "agents_scanned": 0,
+        "critical": [],
+        "warnings": [],
+        "clean": [],
+        "error": None,
+    }
+
+    runs_dir = root / "cron" / "runs"
+    jobs_file = root / "cron" / "jobs.json"
+
+    if not runs_dir.exists():
+        result["error"] = f"runs dir not found: {runs_dir}"
+        return result
+
+    result["accessible"] = True
+    cutoff_ms = (datetime.now() - timedelta(hours=SCAN_WINDOW_HOURS)).timestamp() * 1000
+
+    # Build job id→name map
+    job_names: dict[str, str] = {}
+    try:
+        data = json.loads(jobs_file.read_text(encoding="utf-8"))
+        for j in data.get("jobs", []):
+            if j.get("id"):
+                job_names[j["id"]] = j.get("name", j["id"])
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    error_by_job: dict[str, list[str]] = {}
+
+    try:
+        run_files = list(runs_dir.glob("*.jsonl"))
+    except OSError as e:
+        result["error"] = str(e)
+        return result
+
+    result["agents_scanned"] = len(run_files)
+
+    for run_file in run_files:
+        try:
+            lines = run_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            if entry.get("ts", 0) < cutoff_ms:
+                continue
+            if entry.get("status") != "error":
+                continue
+
+            err_msg = entry.get("error", "unknown error")
+            # Skip known noise
+            if any(noise in err_msg for noise in OPENCLAW_NOISE_ERRORS):
+                continue
+
+            job_id = entry.get("jobId", run_file.stem)
+            job_label = job_names.get(job_id, job_id[:8])
+            ts = datetime.fromtimestamp(entry["ts"] / 1000).strftime("%H:%M")
+            error_by_job.setdefault(job_label, []).append(f"[{ts}] {err_msg}")
+
+    for job_label, errs in error_by_job.items():
+        result["warnings"].append({
+            "agent": job_label,
+            "log_path": str(runs_dir),
+            "lines": errs[:5],
+        })
+
+    if not error_by_job:
+        result["clean"].append("all cron jobs")
 
     return result
 
@@ -194,6 +293,7 @@ def main():
     findings = []
     for name, root in INSTANCES.items():
         findings.append(scan_instance(name, root))
+    findings.append(scan_openclaw(OPENCLAW_ROOT))
 
     report = format_report(findings)
     print(report)

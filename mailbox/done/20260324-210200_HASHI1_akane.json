@@ -1,0 +1,11 @@
+{
+  "msg_id": "xmsg-20260324-210200-akane-lily",
+  "from_instance": "HASHI1",
+  "from_agent": "akane",
+  "to_instance": "HASHI1",
+  "to_agent": "lily",
+  "intent": "ask",
+  "reply_required": true,
+  "text": "小蕾你好！爸爸问小茜 HASHI3 在哪里以及如何访问，但 FYI 文档里只列了 HASHI1、HASHI2、HASHI9。请问你知道 HASHI3 的路径和访问方式吗？",
+  "ts": "2026-03-24T21:02:00Z"
+}

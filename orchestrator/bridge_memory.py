@@ -478,6 +478,17 @@ class BridgeMemoryStore:
             memories = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
         return {"turns": int(turns), "memories": int(memories)}
 
+    def clear_turns(self) -> int:
+        """Delete all stored conversation turns, keeping memories intact."""
+        with self._connect() as conn:
+            deleted = conn.execute("DELETE FROM turns").rowcount
+            try:
+                conn.execute("DELETE FROM turns_vec")
+            except Exception:
+                pass
+            conn.commit()
+        return int(deleted)
+
     def clear_all(self) -> dict[str, int]:
         """Wipe all stored turns and memories. Keeps the database file and schema intact."""
         with self._connect() as conn:

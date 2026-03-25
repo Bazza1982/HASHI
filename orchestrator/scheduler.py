@@ -12,7 +12,7 @@ try:
     HAS_CRONITER = True
 except ImportError:
     HAS_CRONITER = False
-    scheduler_logger.warning("croniter not installed — advanced cron expressions disabled, falling back to HH:MM matching")
+    print("[Scheduler] croniter not installed — using HH:MM fallback (this is fine)")
 
 
 def _time_to_cron(hm: str) -> str:

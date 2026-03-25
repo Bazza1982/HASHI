@@ -26,3 +26,6 @@ textual>=0.50.0
 # onnxruntime>=1.18.0
 # transformers>=4.44.0
 # tokenizers>=0.19.0
+
+# Optional: voice transcription
+# faster-whisper>=1.0.0

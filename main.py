@@ -254,6 +254,7 @@ class UniversalOrchestrator:
         self.workbench_api = None
         self.api_gateway = None
         self.scheduler = None
+        self.agent_directory = None
         self.scheduler_task = None
         self.whatsapp = None
         self._lifecycle_lock = asyncio.Lock()
@@ -1109,6 +1110,11 @@ class UniversalOrchestrator:
             return
 
         main_logger.info("Universal Orchestrator is online. Awaiting messages.")
+
+        # Build agent directory so /hchat and other agent-to-agent commands can resolve runtimes
+        from orchestrator.agent_directory import AgentDirectory as _AgentDirectory
+        capabilities_path = self.paths.bridge_home / "agent_capabilities.json"
+        self.agent_directory = _AgentDirectory(self.paths.config_path, capabilities_path, self.runtimes)
 
         try:
             self.workbench_api = WorkbenchApiServer(

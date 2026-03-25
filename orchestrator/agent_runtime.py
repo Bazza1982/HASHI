@@ -196,9 +196,10 @@ def resolve_authorized_telegram_ids(extra: dict | None, global_authorized_id: in
     return tuple(ids)
 
 
-def _build_jobs_with_buttons(agent_name: str, skill_manager):
+def _build_jobs_with_buttons(agent_name: str, skill_manager, filter_agent: str | None = None):
     """Build combined jobs message text and inline keyboard with run/toggle buttons.
 
+    filter_agent: if set, only show jobs whose 'agent' field matches. None means show all.
     Returns (text: str, markup: InlineKeyboardMarkup | None).
     """
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -214,13 +215,19 @@ def _build_jobs_with_buttons(agent_name: str, skill_manager):
     except Exception:
         return "Could not read tasks.json.", None
 
-    lines = [f"<b>📋 Jobs — all agents</b>"]
+    if filter_agent:
+        title = f"<b>📋 Jobs — {filter_agent}</b>"
+    else:
+        title = "<b>📋 Jobs — all agents</b>"
+    lines = [title]
     buttons: list = []
 
-    # Show all jobs across all agents, single-column layout
+    # Show jobs, optionally filtered by agent
     all_jobs: list[tuple[str, dict]] = []
 
     for h in data.get("heartbeats", []):
+        if filter_agent and h.get("agent") != filter_agent:
+            continue
         interval = h.get("interval_seconds", 0)
         if interval >= 3600:
             interval_s = f"every {interval // 3600}h"
@@ -237,11 +244,38 @@ def _build_jobs_with_buttons(agent_name: str, skill_manager):
         all_jobs.append(("heartbeat", h))
 
     for c in data.get("crons", []):
+        if filter_agent and c.get("agent") != filter_agent:
+            continue
         enabled = c.get("enabled", False)
-        time_s = c.get("time", "??:??")
+        schedule = c.get("schedule", "")
+        # Parse cron expression into human-readable label
+        parts = schedule.split() if schedule else []
+        if len(parts) == 5:
+            minute, hour, dom, month, dow = parts
+            if dom == "*" and month == "*":
+                if dow == "*":
+                    # Standard daily/hourly cron
+                    if hour.startswith("*/"):
+                        interval_h = hour[2:]
+                        time_s = f"every {interval_h}h"
+                    elif minute.startswith("*/"):
+                        interval_m = minute[2:]
+                        time_s = f"every {interval_m}m"
+                    else:
+                        try:
+                            time_s = f"{int(hour):02d}:{int(minute):02d}"
+                        except ValueError:
+                            time_s = schedule
+                else:
+                    time_s = schedule
+            else:
+                time_s = schedule
+        else:
+            time_s = schedule or "??:??"
+        freq_label = "every " if "every" in time_s else "daily "
         status = "✅" if enabled else "❌"
         owner = c.get("agent", "?")
-        lines.append(f"\n{status} 📅 <code>{c['id']}</code> — daily {time_s} [{owner}]")
+        lines.append(f"\n{status} 📅 <code>{c['id']}</code> — {freq_label}{time_s} [{owner}]")
         note = c.get("note", "")
         if note and note != c["id"]:
             lines.append(f"   {note}")
@@ -252,7 +286,7 @@ def _build_jobs_with_buttons(agent_name: str, skill_manager):
         jid = job["id"]
         enabled = job.get("enabled", False)
         toggle_mode = "off" if enabled else "on"
-        toggle_label = "OFF" if enabled else "ON"
+        toggle_label = "ON" if enabled else "OFF"
         icon = "⏱" if kind == "heartbeat" else "📅"
         short_id = jid[:22]
         buttons.append([InlineKeyboardButton(f"{icon} {short_id}", callback_data="noop")])
@@ -1041,6 +1075,7 @@ class BridgeAgentRuntime:
                 f"🔍 Verbose: {'ON' if self._verbose else 'OFF'}",
                 f"💭 Think: {'ON' if self._think else 'OFF'}",
             ])
+            lines.append(f"🏠 HASHI Instance: {self.global_config.project_root}")
             if self.config.engine == "openrouter-api":
                 lines.append("☁️ Session Mode: stateless bridge-managed API")
             else:
@@ -2888,6 +2923,16 @@ class BridgeAgentRuntime:
     async def cmd_debug(self, update, context):
         if update.effective_user.id != self.global_config.authorized_id:
             return
+        args = [a.strip().lower() for a in (context.args or []) if a.strip()]
+        if args and args[0] in {"on", "off"}:
+            enabled = args[0] == "on"
+            if self.skill_manager:
+                _, msg = self.skill_manager.set_toggle_state(self.workspace_dir, "debug", enabled=enabled)
+                state_str = "ON 🔴" if enabled else "OFF"
+                await update.message.reply_text(f"🐛 Debug mode: {state_str}\n{msg}")
+            else:
+                await update.message.reply_text("Skill manager not available.")
+            return
         await self._invoke_prompt_skill_from_command(update, "debug", list(context.args or []))
 
     async def cmd_skill(self, update, context):
@@ -3469,8 +3514,124 @@ class BridgeAgentRuntime:
     async def cmd_jobs(self, update, context):
         if update.effective_user.id != self.global_config.authorized_id:
             return
-        text, markup = _build_jobs_with_buttons(self.name, self.skill_manager)
+        arg = (context.args[0].strip().lower() if context.args else "")
+        if arg == "all":
+            filter_agent = None
+        elif arg:
+            filter_agent = arg
+        else:
+            filter_agent = self.name
+        text, markup = _build_jobs_with_buttons(self.name, self.skill_manager, filter_agent=filter_agent)
         await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+
+    async def cmd_timeout(self, update, context):
+        if update.effective_user.id != self.global_config.authorized_id:
+            return
+        args = [a.strip() for a in (context.args or []) if a.strip()]
+        backend = getattr(self, "backend", None)
+        extra = {}
+        if backend and hasattr(backend, "config") and backend.config.extra:
+            extra = backend.config.extra
+
+        default_idle = getattr(type(backend), "DEFAULT_IDLE_TIMEOUT_SEC", 300) if backend else 300
+        default_hard = getattr(type(backend), "DEFAULT_HARD_TIMEOUT_SEC", 1800) if backend else 1800
+
+        if not args:
+            idle_s = extra.get("idle_timeout_sec") or extra.get("process_timeout") or default_idle
+            hard_s = extra.get("hard_timeout_sec") or default_hard
+            idle_min = int(idle_s) // 60
+            hard_min = int(hard_s) // 60
+            def_idle_min = default_idle // 60
+            def_hard_min = default_hard // 60
+            text = (
+                f"<b>⏱ Timeout — {self.name}</b>\n\n"
+                f"  Idle:  <b>{idle_min} min</b>  (default: {def_idle_min} min)\n"
+                f"  Hard:  <b>{hard_min} min</b>  (default: {def_hard_min} min)\n\n"
+                f"Usage:\n"
+                f"  <code>/timeout 30</code>        — set idle to 30 min\n"
+                f"  <code>/timeout 30 120</code>    — idle=30 min, hard=120 min\n"
+                f"  <code>/timeout reset</code>     — restore defaults"
+            )
+            await update.message.reply_text(text, parse_mode="HTML")
+            return
+
+        if args[0].lower() == "reset":
+            if backend and hasattr(backend, "config") and backend.config.extra:
+                backend.config.extra.pop("idle_timeout_sec", None)
+                backend.config.extra.pop("hard_timeout_sec", None)
+                backend.config.extra.pop("process_timeout", None)
+            def_idle_min = default_idle // 60
+            def_hard_min = default_hard // 60
+            await update.message.reply_text(
+                f"⏱ Timeout reset to defaults: idle={def_idle_min} min, hard={def_hard_min} min"
+            )
+            return
+
+        try:
+            idle_min = int(args[0])
+            if idle_min <= 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Usage: /timeout [minutes] [hard_minutes] | reset")
+            return
+
+        hard_min = None
+        if len(args) >= 2:
+            try:
+                hard_min = int(args[1])
+                if hard_min <= 0:
+                    raise ValueError
+            except ValueError:
+                await update.message.reply_text("Usage: /timeout [minutes] [hard_minutes] | reset")
+                return
+
+        if backend and hasattr(backend, "config"):
+            if backend.config.extra is None:
+                backend.config.extra = {}
+            backend.config.extra["idle_timeout_sec"] = idle_min * 60
+            backend.config.extra.pop("process_timeout", None)
+            if hard_min is not None:
+                backend.config.extra["hard_timeout_sec"] = hard_min * 60
+
+        hard_str = f", hard={hard_min} min" if hard_min is not None else ""
+        await update.message.reply_text(f"⏱ Timeout updated: idle={idle_min} min{hard_str}")
+
+    async def cmd_hchat(self, update, context):
+        if update.effective_user.id != self.global_config.authorized_id:
+            return
+        args = [a.strip() for a in (context.args or []) if a.strip()]
+        if len(args) < 2:
+            await update.message.reply_text(
+                "💬 Hchat — Ask this agent to compose & send a message to another agent\n\n"
+                "Usage: /hchat <agent> <intent>\n\n"
+                "Example: /hchat lily give her an update on what we've been doing\n"
+                "Example: /hchat arale 告诉她新的 debug toggle 功能已完成\n\n"
+                "Note: YOU compose the message based on context — intent is what to communicate, not the literal text."
+            )
+            return
+        target_name = args[0].lower()
+        intent = " ".join(args[1:])
+
+        # Build a self-prompt: instruct this agent's LLM to compose and send the message
+        self_prompt = (
+            f"[HCHAT TASK] The user wants you to send a Hchat message to agent \"{target_name}\".\n\n"
+            f"Intent: {intent}\n\n"
+            f"Instructions:\n"
+            f"1. Think about what from our current conversation context is relevant to this intent.\n"
+            f"2. Compose a complete, meaningful message FROM you ({self.name}) TO {target_name}. "
+            f"Write it as yourself — introduce yourself if appropriate, include relevant context, be concise.\n"
+            f"3. Send the message by running this bash command:\n"
+            f"   python tools/hchat_send.py --to {target_name} --from {self.name} --text \"<your composed message>\"\n"
+            f"4. Report back to the user: what you sent and a brief summary of why.\n\n"
+            f"Do NOT relay the user's words literally. Compose the message yourself."
+        )
+
+        await update.message.reply_text(f"💬 Composing Hchat message to {target_name}...")
+        await self.enqueue_api_text(
+            self_prompt,
+            source="bridge:hchat",
+            deliver_to_telegram=True,
+        )
 
     async def cmd_logo(self, update, context):
         if update.effective_user.id != self.global_config.authorized_id:
@@ -3570,6 +3731,8 @@ class BridgeAgentRuntime:
             BotCommand("think", "Toggle thinking trace display [on|off]"),
             BotCommand("verbose", "Toggle verbose long-task status [on|off]"),
             BotCommand("jobs", "Show cron and heartbeat jobs"),
+            BotCommand("timeout", "View or set request timeout [minutes]"),
+            BotCommand("hchat", "Send a message to another agent [agent] [message]"),
             BotCommand("logo", "Play startup animation"),
             BotCommand("wa_on", "Start WhatsApp transport"),
             BotCommand("wa_off", "Stop WhatsApp transport"),
@@ -3612,6 +3775,8 @@ class BridgeAgentRuntime:
         self.app.add_handler(CommandHandler("credit", self.cmd_credit))
         self.app.add_handler(CommandHandler("effort", self.cmd_effort))
         self.app.add_handler(CommandHandler("jobs", self.cmd_jobs))
+        self.app.add_handler(CommandHandler("timeout", self.cmd_timeout))
+        self.app.add_handler(CommandHandler("hchat", self.cmd_hchat))
         self.app.add_handler(CommandHandler("logo", self.cmd_logo))
         self.app.add_handler(CommandHandler("wa_on", self.cmd_wa_on))
         self.app.add_handler(CommandHandler("wa_off", self.cmd_wa_off))

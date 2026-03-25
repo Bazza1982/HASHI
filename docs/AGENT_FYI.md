@@ -267,3 +267,48 @@ Agents check their instance's `mailbox/incoming/` on demand (when told to check,
 - Filenames include timestamp + source instance + agent — guaranteed unique
 - Write via temp file + rename for atomicity (prevents reading half-written files)
 - Each instance only processes its own `incoming/` — no cross-reading of processing state
+
+## Hchat — Real-Time Direct Agent Messaging
+
+**Hchat** is the official name for real-time direct messaging between agents across HASHI instances via HTTP API. Use this name to avoid confusion with the file-based mailbox system.
+
+Beyond file-based mailbox, agents can communicate **in real-time** via HTTP API between WSL instances and Windows (HASHI9).
+
+### Prerequisites — WSL Mirrored Networking
+
+For `127.0.0.1` to be shared between WSL and Windows, `.wslconfig` must have `networkingMode=mirrored`.
+
+**File:** `C:\Users\<user>\.wslconfig`
+```ini
+[wsl2]
+networkingMode=mirrored
+```
+
+After editing, restart WSL: shut down via `wsl --shutdown` in PowerShell, then relaunch.
+
+**Status:** ✅ Confirmed working as of 2026-03-24. WSL and Windows now share `127.0.0.1`.
+
+### HASHI9 API Endpoints (from WSL, after mirrored networking)
+
+| Port | Purpose | Example |
+|------|---------|---------|
+| `8769` | Workbench API — chat with agents | `POST http://127.0.0.1:8769/api/chat` |
+| `18801` | API Gateway — OpenAI-compatible interface | `POST http://127.0.0.1:18801/v1/chat/completions` |
+
+### Sending a Real-Time Message to HASHI9
+
+```bash
+curl -s -X POST http://127.0.0.1:8769/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{"agent": "hashiko", "text": "你好！"}'
+```
+
+### Communication Protocol Summary
+
+| Method | Speed | Use Case |
+|--------|-------|---------|
+| **File Mailbox** | Async (manual check) | Reliable delivery, agent offline OK |
+| **Real-Time API** | Synchronous | Live queries, immediate responses |
+
+Use **file mailbox** when the target instance may be offline or the message can wait.
+Use **real-time API** when you need an immediate response and know the target is running.
