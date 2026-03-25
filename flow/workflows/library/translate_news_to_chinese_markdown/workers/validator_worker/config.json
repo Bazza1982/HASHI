@@ -1,0 +1,82 @@
+{
+  "worker_id": "validator_worker",
+  "workflow_id": "translate_news_to_chinese_markdown",
+  "model": "claude-sonnet-4-6",
+  "execution": {
+    "temperature": 0.0,
+    "max_tokens": 5000,
+    "timeout_seconds": 45,
+    "retry_policy": {
+      "max_attempts": 3,
+      "backoff_strategy": "exponential",
+      "initial_delay_ms": 1000,
+      "max_delay_ms": 30000
+    }
+  },
+  "input": {
+    "schema_type": "object",
+    "properties": {
+      "markdown_files": {
+        "type": "array",
+        "description": "Markdown files to validate"
+      },
+      "quality_threshold": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 100,
+        "description": "Minimum acceptable quality score"
+      }
+    },
+    "required": ["markdown_files", "quality_threshold"]
+  },
+  "output": {
+    "schema_type": "object",
+    "properties": {
+      "validation_result": {
+        "type": "object",
+        "description": "Validation results and details"
+      },
+      "final_output": {
+        "type": "array",
+        "description": "Final validated output files"
+      },
+      "quality_score": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 100,
+        "description": "Overall quality score"
+      }
+    }
+  },
+  "capabilities": [
+    "content_validation",
+    "format_verification",
+    "quality_assessment"
+  ],
+  "validation_rules": {
+    "check_translation_completeness": true,
+    "check_terminology_consistency": true,
+    "check_markdown_syntax": true,
+    "check_metadata_completeness": true,
+    "check_encoding": true
+  },
+  "quality_scoring": {
+    "translation_quality_weight": 0.6,
+    "format_compliance_weight": 0.25,
+    "completeness_weight": 0.15,
+    "default_threshold": 90
+  },
+  "error_handler": {
+    "on_failure": "debug_01",
+    "max_attempts": 3,
+    "fallback_action": "pass_to_debug"
+  },
+  "logging": {
+    "level": "INFO",
+    "log_inputs": true,
+    "log_outputs": true,
+    "log_performance_metrics": true,
+    "log_validation_details": true,
+    "log_quality_breakdown": true
+  }
+}

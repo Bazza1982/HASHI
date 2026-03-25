@@ -1,0 +1,21 @@
+{
+  "worker_id": "terminology_01",
+  "name": "Terminology Specialist",
+  "model": "claude-opus-4-6",
+  "role": "构建术语库、验证术语一致性",
+  "timeout_minutes": 8,
+  "critical": true,
+  "retry_policy": {
+    "max_attempts": 3,
+    "backoff_strategy": "exponential"
+  },
+  "output_format": "json",
+  "dependencies": ["metadata_01"],
+  "inputs": ["initial_terminology"],
+  "outputs": ["terminology_table", "translation_guidelines"],
+  "quality_requirements": {
+    "min_accuracy": 0.98,
+    "min_completeness": 0.95,
+    "ambiguities_must_be_resolved": true
+  }
+}

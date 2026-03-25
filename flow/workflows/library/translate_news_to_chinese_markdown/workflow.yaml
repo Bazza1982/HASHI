@@ -1,0 +1,150 @@
+version: '1.0'
+description: 'Translate English news articles to Chinese Markdown'
+metadata:
+  author: designer_agent
+  created_at: '2026-03-26T08:12:11Z'
+  max_interventions: 0
+
+workers:
+  parse_worker:
+    id: parse_worker
+    type: agent
+    model: claude-haiku-4-5
+    description: Extract and parse English news articles
+    capabilities:
+      - article_extraction
+      - metadata_parsing
+      - content_normalization
+    retry_policy:
+      max_attempts: 3
+      backoff_strategy: exponential
+
+  translate_worker:
+    id: translate_worker
+    type: agent
+    model: claude-opus-4-6
+    description: Translate content to high-quality Chinese
+    capabilities:
+      - english_to_chinese_translation
+      - terminology_preservation
+      - tone_adaptation
+    retry_policy:
+      max_attempts: 3
+      backoff_strategy: exponential
+
+  format_worker:
+    id: format_worker
+    type: agent
+    model: claude-sonnet-4-6
+    description: Convert translated content to Markdown format
+    capabilities:
+      - markdown_generation
+      - structure_preservation
+      - metadata_embedding
+    retry_policy:
+      max_attempts: 3
+      backoff_strategy: exponential
+
+  validator_worker:
+    id: validator_worker
+    type: agent
+    model: claude-sonnet-4-6
+    description: Validate translation quality and Markdown format
+    capabilities:
+      - content_validation
+      - format_verification
+      - quality_assessment
+    retry_policy:
+      max_attempts: 3
+      backoff_strategy: exponential
+
+  debug_agent:
+    id: debug_01
+    type: debug
+    model: claude-opus-4-6
+    description: Autonomous error diagnosis and recovery
+    capabilities:
+      - error_analysis
+      - alternative_approach
+      - automatic_remediation
+
+steps:
+  step_1_parse:
+    id: parse_articles
+    worker: parse_worker
+    task: Extract and normalize article content from input
+    depends_on: []
+    input_schema:
+      articles: array
+      format: string
+    output_schema:
+      parsed_content: array
+      metadata: object
+    error_handler:
+      on_failure: debug_01
+      max_attempts: 3
+
+  step_2_translate:
+    id: translate_content
+    worker: translate_worker
+    task: Translate extracted content to Chinese with quality preservation
+    depends_on:
+      - parse_articles
+    input_schema:
+      parsed_content: array
+      source_language: string
+      target_language: string
+    output_schema:
+      translated_content: array
+      translation_quality_score: number
+    parallel_by_item: true
+    parallel_limit: 5
+    error_handler:
+      on_failure: debug_01
+      max_attempts: 3
+
+  step_3_format:
+    id: format_markdown
+    worker: format_worker
+    task: Convert translated content to Markdown with proper structure
+    depends_on:
+      - translate_content
+    input_schema:
+      translated_content: array
+      metadata: object
+      output_format: string
+    output_schema:
+      markdown_files: array
+      format_validation: object
+    error_handler:
+      on_failure: debug_01
+      max_attempts: 3
+
+  step_4_validate:
+    id: validate_output
+    worker: validator_worker
+    task: Validate translation quality and Markdown format compliance
+    depends_on:
+      - format_markdown
+    input_schema:
+      markdown_files: array
+      quality_threshold: number
+    output_schema:
+      validation_result: object
+      final_output: array
+      quality_score: number
+    error_handler:
+      on_failure: debug_01
+      max_attempts: 3
+
+error_handling:
+  debug_agent: debug_01
+  strategy: autonomous_recovery
+  max_total_attempts: 3
+  fallback: generate_partial_output
+
+output:
+  format: markdown_files
+  location: ./output/
+  naming_pattern: '{article_id}_cn.md'
+  metadata_preservation: true

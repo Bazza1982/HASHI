@@ -1,0 +1,16 @@
+{
+  "task_analysis": {
+    "path": "flow/runs/run-meta-workflow-creation-20260326-080613/artifacts/task_analysis/task_analysis.json",
+    "original_path": "/home/lily/projects/hashi/flow/runs/run-meta-workflow-creation-20260326-080613/workers/analyst_01/task_analysis.json",
+    "step_id": null,
+    "size_bytes": 8608,
+    "registered_at": "2026-03-25T21:06:53.993277+00:00"
+  },
+  "design_package": {
+    "path": "flow/runs/run-meta-workflow-creation-20260326-080613/artifacts/design_package/design_package.json",
+    "original_path": "/home/lily/projects/hashi/flow/runs/run-meta-workflow-creation-20260326-080613/workers/designer_01/design_package.json",
+    "step_id": null,
+    "size_bytes": 8230,
+    "registered_at": "2026-03-25T21:07:41.507434+00:00"
+  }
+}

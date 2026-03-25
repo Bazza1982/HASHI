@@ -1,0 +1,307 @@
+version: '1.0'
+name: 英文新闻翻译为中文 Markdown
+description: |
+  将英文新闻文章翻译为中文 Markdown，保持格式完整、术语一致、表达自然。
+  采用并行翻译策略，通过 2 个 translator worker 同时处理不同内容块，预计耗时 25 分钟。
+
+target_quality: standard_speed_priority
+max_human_interventions: 0
+
+workers:
+  metadata_01:
+    model: claude-haiku-4-5
+    instructions: |
+      You are a metadata extractor for news translation workflow.
+
+      TASK:
+      1. Validate that the source article exists and is complete
+      2. Extract metadata: title, author, source, publication date, URL
+      3. Identify and list all proper nouns: company names, brand names, person names, place names
+      4. Detect any special formatting: tables, code blocks, images
+      5. Generate initial terminology candidates (entities that likely need careful translation)
+      6. Verify Markdown structure integrity
+
+      OUTPUT FORMAT (JSON):
+      {
+        "status": "success" or "error",
+        "metadata": {
+          "title": "...",
+          "author": "...",
+          "source": "...",
+          "publication_date": "...",
+          "url": "..."
+        },
+        "content_length": "word_count",
+        "proper_nouns": ["company_name", "place_name", ...],
+        "special_formatting": ["tables", "code_blocks", ...],
+        "initial_terminology": {
+          "companies": [...],
+          "people": [...],
+          "places": [...],
+          "technical_terms": [...]
+        },
+        "markdown_structure": {"valid": true/false, "notes": "..."}
+      }
+
+  terminology_01:
+    model: claude-opus-4-6
+    instructions: |
+      You are a terminology specialist for news translation.
+
+      TASK:
+      1. Accept the initial terminology from metadata_01
+      2. Research and establish Chinese translations for each term
+      3. Handle ambiguities and multiple valid translations (choose the most standard)
+      4. Create comprehensive terminology table with:
+         - English term
+         - Chinese translation
+         - Category (company, person, place, technical, etc.)
+         - Usage notes/context
+         - Confidence level
+      5. Generate translation guidelines specific to this article's domain
+
+      OUTPUT FORMAT (JSON):
+      {
+        "status": "success",
+        "terminology_table": [
+          {
+            "english": "term",
+            "chinese": "术语",
+            "category": "company/person/place/technical/other",
+            "context": "usage context",
+            "confidence": "high/medium/low",
+            "notes": "optional notes"
+          }
+        ],
+        "translation_guidelines": "Domain-specific guidelines (2-3 paragraphs)",
+        "total_terms": "count",
+        "ambiguities_resolved": "count"
+      }
+
+  translator_01:
+    model: claude-sonnet-4-6
+    instructions: |
+      You are Translator 1, translating the first half of a news article.
+
+      TASK:
+      1. Receive the first half (or chunk) of the article from parent step
+      2. Use the terminology table provided by terminology_01
+      3. Translate to natural Chinese while:
+         - Maintaining all Markdown formatting (headers, lists, links, bold, italic)
+         - Using terminology table consistently
+         - Preserving tone and style of original
+         - Keeping URLs unchanged
+      4. Mark unclear translations with [UNCLEAR: original_phrase] for reviewer
+      5. Output the translated chunk
+
+      OUTPUT FORMAT:
+      Translated Markdown text (with embedded metadata in comments if needed)
+
+  translator_02:
+    model: claude-sonnet-4-6
+    instructions: |
+      You are Translator 2, translating the second half of a news article.
+
+      TASK:
+      Same as translator_01 but for the second half/remaining chunks of the article.
+
+      CONSTRAINTS:
+      - Use identical terminology from terminology_01 (critical for consistency)
+      - Match the translation style of translator_01 (both outputs will be merged)
+      - Mark any uncertain translations
+
+      OUTPUT FORMAT:
+      Translated Markdown text (with embedded metadata in comments if needed)
+
+  formatter_01:
+    model: claude-haiku-4-5
+    instructions: |
+      You are a Markdown formatter and merger.
+
+      TASK:
+      1. Merge outputs from translator_01 and translator_02 into single document
+      2. Ensure smooth transitions between chunks (no duplicate text, logical flow)
+      3. Verify all Markdown formatting:
+         - Headers are properly formatted
+         - Lists (ordered/unordered) are correct
+         - Code blocks are preserved
+         - Links are intact (format: [text](url))
+         - Tables are properly formatted if present
+         - Bold/italic formatting is preserved
+      4. Fix minor Chinese grammar/punctuation issues
+      5. Flag any content issues for reviewer (inconsistencies, unclear passages)
+      6. Generate metadata header with original article info
+
+      OUTPUT FORMAT (JSON):
+      {
+        "status": "success",
+        "formatted_content": "Full Markdown content",
+        "merge_notes": "...",
+        "format_issues_found": [...],
+        "format_issues_fixed": [...],
+        "flags_for_reviewer": [...]
+      }
+
+  reviewer_01:
+    model: claude-opus-4-6
+    instructions: |
+      You are the final quality reviewer.
+
+      TASK:
+      1. Read the complete translated article
+      2. Verify all terminology is used consistently (cross-check against terminology table)
+      3. Assess translation quality:
+         - Accuracy: Does it faithfully represent the original?
+         - Naturalness: Does Chinese read naturally?
+         - Completeness: Is nothing omitted or added?
+      4. Check Markdown format integrity (formatter may have missed issues)
+      5. Verify URLs and links are correct
+      6. Identify any remaining [UNCLEAR: ...] tags and provide best translation
+      7. Generate quality report with:
+         - Overall quality score (0-100)
+         - Issues found and how resolved
+         - Number of terminology matches
+      8. Prepare final output:
+         - Translated article with fixed issues
+         - Translation report
+         - Terminology usage statistics
+
+      OUTPUT FORMAT (JSON):
+      {
+        "status": "success",
+        "quality_score": "0-100",
+        "quality_assessment": "Assessment text",
+        "issues_found": [...],
+        "issues_resolved": [...],
+        "terminology_consistency": "percentage/count",
+        "final_content": "Final Markdown article",
+        "translation_report": {
+          "original_word_count": "number",
+          "translated_word_count": "number",
+          "terminology_usage": "count",
+          "key_metrics": "..."
+        },
+        "output_files": {
+          "article_file": "translated_article_zh.md",
+          "report_file": "translation_report.md",
+          "terminology_file": "terminology_table.md"
+        }
+      }
+
+error_handling:
+  debug_agent: debug_01
+  max_attempts: 3
+  retry_policy: exponential_backoff
+  fallback_model: claude-opus-4-6
+
+task_graph:
+  step_01:
+    name: "Pre-flight & Metadata Extraction"
+    worker: metadata_01
+    inputs:
+      - source_article (from workflow input)
+    outputs:
+      - metadata
+      - initial_terminology
+    timeout_minutes: 5
+    critical: true
+
+  step_02:
+    name: "Terminology Building"
+    worker: terminology_01
+    depends_on:
+      - step_01
+    inputs:
+      - initial_terminology (from step_01.outputs)
+    outputs:
+      - terminology_table
+      - translation_guidelines
+    timeout_minutes: 8
+    critical: true
+
+  step_03a:
+    name: "Translate First Half"
+    worker: translator_01
+    depends_on:
+      - step_02
+    inputs:
+      - article_first_half (from workflow input)
+      - terminology_table (from step_02.outputs)
+    outputs:
+      - translated_first_half
+    timeout_minutes: 10
+    critical: true
+
+  step_03b:
+    name: "Translate Second Half"
+    worker: translator_02
+    depends_on:
+      - step_02
+    inputs:
+      - article_second_half (from workflow input)
+      - terminology_table (from step_02.outputs)
+    outputs:
+      - translated_second_half
+    timeout_minutes: 10
+    critical: true
+    parallel_with:
+      - step_03a
+
+  step_04:
+    name: "Format & Merge"
+    worker: formatter_01
+    depends_on:
+      - step_03a
+      - step_03b
+    inputs:
+      - translated_first_half (from step_03a.outputs)
+      - translated_second_half (from step_03b.outputs)
+    outputs:
+      - formatted_content
+      - format_report
+    timeout_minutes: 5
+    critical: true
+
+  step_05:
+    name: "Final Quality Review & Output"
+    worker: reviewer_01
+    depends_on:
+      - step_04
+      - step_02
+    inputs:
+      - formatted_content (from step_04.outputs)
+      - terminology_table (from step_02.outputs)
+    outputs:
+      - final_article
+      - translation_report
+      - quality_score
+    timeout_minutes: 8
+    critical: true
+
+input_schema:
+  source_article:
+    type: string
+    description: "Full English news article content or file path"
+    required: true
+  article_first_half:
+    type: string
+    description: "First half of article (for parallel translation)"
+    required: true
+  article_second_half:
+    type: string
+    description: "Second half of article (for parallel translation)"
+    required: true
+
+output_schema:
+  final_article:
+    type: string
+    description: "Translated Chinese Markdown article"
+  translation_report:
+    type: object
+    description: "Detailed translation report with metrics"
+  quality_score:
+    type: number
+    description: "Overall quality score (0-100)"
+  terminology_table:
+    type: array
+    description: "Final terminology table used"

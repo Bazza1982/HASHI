@@ -1,0 +1,36 @@
+{
+  "run_id": "run-meta-workflow-creation-20260326-080613",
+  "workflow_status": "failed",
+  "steps": {
+    "analyze_requirements": {
+      "status": "completed",
+      "updated_at": "2026-03-25T21:06:53.993471+00:00",
+      "started_at": "2026-03-25T21:06:13.763152+00:00",
+      "ended_at": "2026-03-25T21:06:53.993478+00:00"
+    },
+    "design_workflow": {
+      "status": "completed",
+      "updated_at": "2026-03-25T21:07:41.507564+00:00",
+      "started_at": "2026-03-25T21:06:53.993765+00:00",
+      "ended_at": "2026-03-25T21:07:41.507569+00:00"
+    },
+    "create_workflow_files": {
+      "status": "completed",
+      "updated_at": "2026-03-25T21:09:01.050889+00:00",
+      "started_at": "2026-03-25T21:07:41.508080+00:00",
+      "ended_at": "2026-03-25T21:09:01.050894+00:00"
+    },
+    "validate_workflow": {
+      "status": "failed",
+      "updated_at": "2026-03-25T21:09:57.969377+00:00",
+      "started_at": "2026-03-25T21:09:01.051157+00:00",
+      "ended_at": "2026-03-25T21:09:57.969380+00:00"
+    }
+  },
+  "human_interventions": [],
+  "error_count": 0,
+  "created_at": "2026-03-25T21:06:13.759888+00:00",
+  "updated_at": "2026-03-25T21:11:24.671371+00:00",
+  "started_at": "2026-03-25T21:06:13.760495+00:00",
+  "ended_at": "2026-03-25T21:11:24.671380+00:00"
+}

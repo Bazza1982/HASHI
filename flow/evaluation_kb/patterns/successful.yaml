@@ -1,0 +1,65 @@
+# 成功执行模式库
+# 由 Evaluator Agent 维护
+# 每条 pattern 代表一个可复用的最佳实践
+
+version: "1.0"
+last_updated: "2026-03-26T00:00:00Z"
+total_patterns: 3
+
+patterns:
+
+  - id: pat-001
+    name: "先分析后执行"
+    category: workflow_design
+    confidence: 0.9
+    observed_count: 1
+    description: |
+      在执行实际工作前，先用 analyst_01 完整分析任务需求。
+      分析步骤的输出（task_analysis.json）显著提升了后续步骤的质量，
+      减少了 debug agent 介入次数。
+    applies_to:
+      - translation workflows
+      - research workflows
+      - any multi-step content creation
+    evidence:
+      - workflow: meta-workflow-creation
+        result: "分析步骤使设计步骤的一次性成功率提升"
+    recommended_practice: |
+      第一个步骤始终是 analyst_01 的分析步骤，
+      timeout 设为 120s，输出 task_analysis.json。
+
+  - id: pat-002
+    name: "模型分级使用"
+    category: cost_optimization
+    confidence: 0.85
+    observed_count: 1
+    description: |
+      分析/验证类任务用 sonnet，创意/设计类任务用 opus。
+      按任务复杂度和创造性要求选择合适模型，
+      既保证质量又控制成本。
+    model_recommendations:
+      analysis: claude-sonnet-4-6
+      validation: claude-sonnet-4-6
+      design: claude-opus-4-6
+      translation: claude-opus-4-6
+      debug: claude-sonnet-4-6
+    evidence:
+      - workflow: meta-workflow-creation
+        result: "设计步骤用 opus 质量更高，验证步骤 sonnet 足够"
+
+  - id: pat-003
+    name: "pre-flight 一次性收集"
+    category: human_interaction
+    confidence: 0.95
+    observed_count: 1
+    description: |
+      所有需要人工输入的信息在工作流开始前统一收集（pre-flight），
+      而不是在执行过程中多次打扰用户。
+      显著降低了人工介入次数，提升了工作流的自治度。
+    best_practice: |
+      pre_flight 设计原则：
+      1. 必填项：任务描述
+      2. 可选项：质量要求、最大介入次数、输入文件
+      3. 自动扫描：source_files 可通过 analyst_agent 自动发现
+    evidence:
+      - pattern: "用户只需在开始时回答一次问题，工作流完全自动运行"

@@ -1,0 +1,22 @@
+{
+  "worker_id": "reviewer_01",
+  "name": "Quality Reviewer",
+  "model": "claude-opus-4-6",
+  "role": "全文审核、生成最终输出",
+  "timeout_minutes": 8,
+  "critical": true,
+  "retry_policy": {
+    "max_attempts": 3,
+    "backoff_strategy": "exponential"
+  },
+  "output_format": "json",
+  "dependencies": ["formatter_01", "terminology_01"],
+  "inputs": ["formatted_content", "terminology_table"],
+  "outputs": ["final_article", "translation_report", "quality_score"],
+  "quality_requirements": {
+    "min_quality_score": 80,
+    "min_terminology_consistency": 0.95,
+    "all_unclear_tags_resolved": true,
+    "production_ready": true
+  }
+}

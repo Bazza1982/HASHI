@@ -1,0 +1,25 @@
+{
+  "msg_type": "task_assign",
+  "task_id": "step-create_workflow_files-run-meta-workflow-creation-20260326-075403",
+  "workflow_id": "meta-workflow-creation",
+  "run_id": "run-meta-workflow-creation-20260326-075403",
+  "from": "orchestrator",
+  "to": "designer_01",
+  "payload": {
+    "step_id": "create_workflow_files",
+    "prompt": "根据 design_package.json 的内容，实际创建以下文件：\n\n1. 新工作流的 workflow.yaml（保存到 flow/workflows/library/）\n2. 所有 worker 的目录和 AGENT.md\n3. 各 worker 的初始 config.json\n4. 工作空间目录结构\n\n完成后输出 creation_report.json，列出所有创建的文件。\n",
+    "input_artifacts": {
+      "design_package": "flow/runs/run-meta-workflow-creation-20260326-075403/artifacts/design_package/design_package.json"
+    },
+    "output_spec": [
+      {
+        "key": "creation_report",
+        "path": "creation_report.json",
+        "type": "json"
+      }
+    ],
+    "params": {}
+  },
+  "timeout_seconds": 120,
+  "ts": "2026-03-25T20:55:54.649592+00:00"
+}

@@ -1,0 +1,85 @@
+{
+  "worker_id": "format_worker",
+  "workflow_id": "translate_news_to_chinese_markdown",
+  "model": "claude-sonnet-4-6",
+  "execution": {
+    "temperature": 0.2,
+    "max_tokens": 6000,
+    "timeout_seconds": 45,
+    "retry_policy": {
+      "max_attempts": 3,
+      "backoff_strategy": "exponential",
+      "initial_delay_ms": 1000,
+      "max_delay_ms": 30000
+    }
+  },
+  "input": {
+    "schema_type": "object",
+    "properties": {
+      "translated_content": {
+        "type": "array",
+        "description": "Translated Chinese content"
+      },
+      "metadata": {
+        "type": "object",
+        "description": "Article metadata for embedding"
+      },
+      "output_format": {
+        "type": "string",
+        "enum": ["markdown"],
+        "description": "Output format specification"
+      }
+    },
+    "required": ["translated_content", "metadata", "output_format"]
+  },
+  "output": {
+    "schema_type": "object",
+    "properties": {
+      "markdown_files": {
+        "type": "array",
+        "description": "Generated Markdown files"
+      },
+      "format_validation": {
+        "type": "object",
+        "description": "Format validation report"
+      }
+    }
+  },
+  "capabilities": [
+    "markdown_generation",
+    "structure_preservation",
+    "metadata_embedding"
+  ],
+  "markdown_config": {
+    "include_frontmatter": true,
+    "frontmatter_format": "yaml",
+    "use_setext_headers": false,
+    "list_style": "unordered",
+    "code_fence_style": "backticks",
+    "preserve_emphasis": true
+  },
+  "metadata_fields": [
+    "title",
+    "author",
+    "date",
+    "source",
+    "translated_date",
+    "language"
+  ],
+  "output_naming": {
+    "pattern": "{article_id}_cn.md",
+    "preserve_original_names": false
+  },
+  "error_handler": {
+    "on_failure": "debug_01",
+    "max_attempts": 3,
+    "fallback_action": "pass_to_debug"
+  },
+  "logging": {
+    "level": "INFO",
+    "log_inputs": true,
+    "log_outputs": true,
+    "log_performance_metrics": true,
+    "log_validation_details": true
+  }
+}

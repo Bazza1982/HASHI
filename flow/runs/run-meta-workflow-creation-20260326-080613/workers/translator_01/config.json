@@ -1,0 +1,66 @@
+{
+  "worker_id": "translator_01",
+  "role": "translator",
+  "model": "claude-opus-4-6",
+  "description": "输入验证、文本预处理、核心翻译、Markdown格式化",
+  "version": "1.0",
+  "created_at": "2026-03-26T08:30:00Z",
+  "enabled": true,
+  "max_attempts": 2,
+  "timeout_seconds": 600,
+  "retry_policy": {
+    "max_retries": 1,
+    "backoff_multiplier": 1.5,
+    "max_delay_seconds": 30,
+    "retry_on": ["timeout", "rate_limit", "transient_error"]
+  },
+  "translation_config": {
+    "translation_style": "natural_flow",
+    "markdown_dialect": "github_flavored",
+    "terminology_management": true,
+    "preserve_structure": true,
+    "handle_special_content": {
+      "urls": "keep_original",
+      "code_blocks": "preserve",
+      "quotes": "preserve",
+      "lists": "convert_to_markdown"
+    }
+  },
+  "input_validation_rules": {
+    "min_length_chars": 100,
+    "max_length_chars": 100000,
+    "required_format": "text_or_file",
+    "encoding_required": "utf-8",
+    "content_type": "news_article"
+  },
+  "preprocessing_config": {
+    "extract_terminology": true,
+    "identify_structure": true,
+    "normalize_whitespace": true,
+    "handle_line_breaks": "preserve"
+  },
+  "markdown_formatting_config": {
+    "include_metadata": true,
+    "auto_heading_hierarchy": true,
+    "add_table_of_contents": false,
+    "preserve_formatting": true
+  },
+  "logging": {
+    "level": "info",
+    "log_to_file": true,
+    "include_timestamps": true
+  },
+  "required_capabilities": [
+    "english_language_understanding",
+    "chinese_language_generation",
+    "text_structure_analysis",
+    "markdown_formatting",
+    "terminology_management"
+  ],
+  "tasks_assigned": [
+    "input_validation",
+    "text_preprocessing",
+    "core_translation",
+    "markdown_formatting"
+  ]
+}

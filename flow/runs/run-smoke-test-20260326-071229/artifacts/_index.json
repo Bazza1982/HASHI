@@ -1,0 +1,16 @@
+{
+  "quote": {
+    "path": "flow/runs/run-smoke-test-20260326-071229/artifacts/quote/output.txt",
+    "original_path": "/home/lily/projects/hashi/flow/runs/run-smoke-test-20260326-071229/workers/writer_01/output.txt",
+    "step_id": null,
+    "size_bytes": 48,
+    "registered_at": "2026-03-25T20:12:46.353096+00:00"
+  },
+  "review": {
+    "path": "flow/runs/run-smoke-test-20260326-071229/artifacts/review/review.txt",
+    "original_path": "/home/lily/projects/hashi/flow/runs/run-smoke-test-20260326-071229/workers/checker_01/review.txt",
+    "step_id": null,
+    "size_bytes": 360,
+    "registered_at": "2026-03-25T20:12:58.772448+00:00"
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "worker_id": "translator_01",
+  "name": "Translator 1",
+  "model": "claude-sonnet-4-6",
+  "role": "并行翻译内容块（第一部分）",
+  "timeout_minutes": 10,
+  "critical": true,
+  "retry_policy": {
+    "max_attempts": 3,
+    "backoff_strategy": "exponential"
+  },
+  "output_format": "markdown",
+  "dependencies": ["terminology_01"],
+  "inputs": ["article_first_half", "terminology_table"],
+  "outputs": ["translated_first_half"],
+  "parallel_with": ["translator_02"],
+  "quality_requirements": {
+    "min_accuracy": 0.95,
+    "min_fluency": 0.90,
+    "terminology_consistency": 1.0,
+    "markdown_preservation": 1.0
+  }
+}

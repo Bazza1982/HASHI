@@ -1,0 +1,335 @@
+# HASHI Flow — 书籍翻译工作流
+# 将英文书籍翻译为中文，含术语表、章节拆分、质量审核
+# 版本: 1.0.0
+# 基于《新华人》翻译项目经验设计
+
+workflow:
+  id: book-translation
+  name: "书籍翻译工作流"
+  version: "1.0.0"
+  description: |
+    将英文书籍翻译为中文。
+    自动处理：专有名词统一、章节并行翻译、质量审核、PDF 打包。
+  tags: [translation, document, book]
+
+meta:
+  created_by: akane
+  created_at: "2026-03-26T00:00:00Z"
+  improvement_count: 0
+  source_prompt: "将英文书籍翻译为高质量中文，供家人阅读"
+
+# =============================================================================
+# Pre-flight：翻译前信息收集
+# =============================================================================
+
+pre_flight:
+  analyst_agent: analyst_01
+  auto_scan: true  # 自动扫描源文件，提取专有名词
+
+  collect_from_human:
+    - key: source_path
+      question: "源文件路径是什么？（PDF 或 DOCX）"
+      required: true
+      type: text
+
+    - key: output_path
+      question: "翻译结果保存到哪里？"
+      required: true
+      type: text
+
+    - key: target_language
+      question: "目标语言？"
+      required: false
+      type: choice
+      choices: ["简体中文", "繁体中文", "日语"]
+      default: "简体中文"
+
+    - key: quality_mode
+      question: "翻译质量要求？"
+      required: false
+      type: choice
+      choices: ["标准（速度优先）", "高质量（质量优先）"]
+      default: "高质量（质量优先）"
+
+    - key: proper_nouns
+      question: "有需要固定的专有名词翻译吗？（如人名、地名，格式：原文:译文，多个用逗号分隔）"
+      required: false
+      type: text
+
+# =============================================================================
+# Agent 定义
+# =============================================================================
+
+agents:
+  orchestrator:
+    id: akane
+
+  workers:
+    - id: analyst_01
+      role: "文本分析师"
+      agent_md: "flow/agents/analyst/AGENT.md"
+      workspace: "flow/runs/{run_id}/workers/analyst_01"
+      backend: claude-cli
+      model: claude-sonnet-4-6
+      controllable_by: [orchestrator, human]
+
+    - id: translator_01
+      role: "主翻译员（前半部分）"
+      agent_md: "flow/agents/analyst/AGENT.md"  # 使用 analyst 作为基础，任务 prompt 给翻译指令
+      workspace: "flow/runs/{run_id}/workers/translator_01"
+      backend: claude-cli
+      model: claude-opus-4-6  # 翻译用 opus 保证质量
+      controllable_by: [orchestrator]
+
+    - id: translator_02
+      role: "主翻译员（后半部分）"
+      agent_md: "flow/agents/analyst/AGENT.md"
+      workspace: "flow/runs/{run_id}/workers/translator_02"
+      backend: claude-cli
+      model: claude-opus-4-6
+      controllable_by: [orchestrator]
+
+    - id: reviewer_01
+      role: "翻译审校员"
+      agent_md: "flow/agents/analyst/AGENT.md"
+      workspace: "flow/runs/{run_id}/workers/reviewer_01"
+      backend: claude-cli
+      model: claude-sonnet-4-6
+      controllable_by: [orchestrator, human]
+
+    - id: packager_01
+      role: "PDF 打包员"
+      agent_md: "flow/agents/analyst/AGENT.md"
+      workspace: "flow/runs/{run_id}/workers/packager_01"
+      backend: claude-cli
+      model: claude-sonnet-4-6
+      controllable_by: [orchestrator]
+
+    - id: debug_01
+      role: "调试代理"
+      agent_md: "flow/agents/debug/AGENT.md"
+      workspace: "flow/runs/{run_id}/workers/debug_01"
+      backend: claude-cli
+      model: claude-sonnet-4-6
+      controllable_by: [orchestrator]
+
+# =============================================================================
+# 执行步骤
+# =============================================================================
+
+steps:
+  # 步骤 1：分析文档，提取结构和专有名词
+  - id: analyze_document
+    name: "分析源文件"
+    agent: analyst_01
+    depends: []
+    input:
+      params:
+        source_path: "{pre_flight.source_path}"
+        proper_nouns_hint: "{pre_flight.proper_nouns}"
+    prompt: |
+      分析以下书籍文件，输出 document_analysis.json：
+
+      源文件路径：{pre_flight.source_path}
+      用户指定专有名词：{pre_flight.proper_nouns}
+
+      请输出：
+      1. 书籍基本信息（标题、作者、章节数、总字数估计）
+      2. 章节列表（id, 标题, 字数估计）
+      3. 专有名词表（原文 → 建议译文）：包括人名、地名、机构名、术语
+      4. 建议分段方式（前半 / 后半的分割点，用于并行翻译）
+      5. 翻译难点说明
+
+      严格输出 JSON 格式到 document_analysis.json。
+    output:
+      artifacts:
+        - key: document_analysis
+          path: document_analysis.json
+          type: json
+    timeout_seconds: 180
+
+  # 步骤 2a：翻译前半部分（与 2b 并行）
+  - id: translate_first_half
+    name: "翻译前半部分"
+    agent: translator_01
+    strategy: parallel
+    depends: [analyze_document]
+    input:
+      from_artifacts: [document_analysis]
+      params:
+        source_path: "{pre_flight.source_path}"
+        target_language: "{pre_flight.target_language}"
+        quality_mode: "{pre_flight.quality_mode}"
+    prompt: |
+      你是专业的中文翻译员。请翻译书籍的前半部分。
+
+      源文件：{pre_flight.source_path}
+      目标语言：{pre_flight.target_language}
+      质量模式：{pre_flight.quality_mode}
+      专有名词表：[见 document_analysis.json 的 proper_nouns 字段]
+
+      翻译要求：
+      1. 使用 document_analysis.json 中的专有名词表，保持译名一致
+      2. 保留原文章节结构（标题层级）
+      3. 文学性翻译，避免机器感
+      4. 括号内保留原文关键词（如有必要）
+
+      输出：translation_first_half.md（Markdown 格式）
+    output:
+      artifacts:
+        - key: translation_first_half
+          path: translation_first_half.md
+          type: markdown
+    timeout_seconds: 900
+
+  # 步骤 2b：翻译后半部分（与 2a 并行）
+  - id: translate_second_half
+    name: "翻译后半部分"
+    agent: translator_02
+    strategy: parallel
+    depends: [analyze_document]
+    input:
+      from_artifacts: [document_analysis]
+      params:
+        source_path: "{pre_flight.source_path}"
+        target_language: "{pre_flight.target_language}"
+        quality_mode: "{pre_flight.quality_mode}"
+    prompt: |
+      你是专业的中文翻译员。请翻译书籍的后半部分。
+
+      源文件：{pre_flight.source_path}
+      目标语言：{pre_flight.target_language}
+      质量模式：{pre_flight.quality_mode}
+      专有名词表：[见 document_analysis.json 的 proper_nouns 字段]
+
+      翻译要求同前半部分，注意与前半部分保持风格一致。
+
+      输出：translation_second_half.md（Markdown 格式）
+    output:
+      artifacts:
+        - key: translation_second_half
+          path: translation_second_half.md
+          type: markdown
+    timeout_seconds: 900
+
+  # 步骤 3：合并并审校
+  - id: review_and_merge
+    name: "审校并合并"
+    agent: reviewer_01
+    depends: [translate_first_half, translate_second_half]
+    input:
+      from_artifacts: [document_analysis, translation_first_half, translation_second_half]
+    prompt: |
+      审校并合并两个翻译文件：
+
+      1. 合并 translation_first_half.md 和 translation_second_half.md 为完整的 complete_translation.md
+      2. 检查并修正：
+         - 专有名词一致性（对照 document_analysis.json 的专有名词表）
+         - 前后半部分的风格一致性
+         - 明显的翻译错误或遗漏
+         - 章节标题格式统一
+      3. 输出审校报告 review_report.json：
+         - 修改了哪些内容
+         - 发现的问题
+         - 翻译质量评分 (A/B/C)
+
+      输出：complete_translation.md + review_report.json
+    output:
+      artifacts:
+        - key: complete_translation
+          path: complete_translation.md
+          type: markdown
+        - key: review_report
+          path: review_report.json
+          type: json
+    quality_gate:
+      type: auto
+      criteria:
+        - "review_report.quality_score in ['A', 'B']"
+    timeout_seconds: 300
+
+  # 步骤 4：打包 PDF
+  - id: package_pdf
+    name: "生成 PDF"
+    agent: packager_01
+    depends: [review_and_merge]
+    input:
+      from_artifacts: [complete_translation, document_analysis]
+      params:
+        output_path: "{pre_flight.output_path}"
+    prompt: |
+      将翻译结果打包为 PDF 文件：
+
+      输入文件：complete_translation.md
+      输出路径：{pre_flight.output_path}
+      书籍信息：[见 document_analysis.json]
+
+      使用 Python weasyprint 生成 PDF：
+      1. 使用书籍标题和作者信息生成封面页
+      2. 生成目录页（从章节标题提取）
+      3. 正文排版：
+         - 字体：Noto Serif CJK SC（中文衬线体）
+         - 字号：12pt 正文，16pt 标题
+         - 页边距：上下 2.5cm，左右 3cm
+         - 页码：底部居中
+      4. 将 PDF 复制到 {pre_flight.output_path}
+
+      输出：pdf_path（最终 PDF 文件的绝对路径）
+    output:
+      artifacts:
+        - key: final_pdf
+          path: "{pre_flight.output_path}"
+          type: binary
+    timeout_seconds: 180
+
+# =============================================================================
+# 错误处理
+# =============================================================================
+
+error_handling:
+  debug_agent: debug_01
+  max_attempts: 3
+  retry_strategy:
+    attempt_1: "检查错误日志，调整 prompt 重试"
+    attempt_2: "切换到 claude-opus-4-6 重试"
+    attempt_3: "简化输出要求重试"
+  on_max_exceeded:
+    action: notify_orchestrator
+    message: "书籍翻译失败（已尝试3次），步骤：{failed_step_id}，错误：{error}"
+
+# =============================================================================
+# 成功标准
+# =============================================================================
+
+success_criteria:
+  - "步骤 package_pdf 状态为 completed"
+  - "final_pdf 文件存在"
+  - "review_report.quality_score in ['A', 'B']"
+
+# =============================================================================
+# 输出
+# =============================================================================
+
+output:
+  type: message
+  notify_orchestrator: true
+  message_template: |
+    ✅ 书籍翻译完成！
+
+    📚 书籍：{document_analysis.title}
+    🌏 目标语言：{pre_flight.target_language}
+    📁 PDF 位置：{pre_flight.output_path}
+    ⭐ 翻译质量：{review_report.quality_score}
+    ⏱️ 总耗时：{total_duration}
+
+# =============================================================================
+# 评估配置
+# =============================================================================
+
+evaluation:
+  enabled: true
+  metrics:
+    - translation_quality_score
+    - total_duration
+    - proper_noun_consistency_rate
+  improvement_threshold: 3

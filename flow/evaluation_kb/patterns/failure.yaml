@@ -1,0 +1,55 @@
+# 失败模式库（反模式）
+# 记录已知会导致失败的设计和使用方式，供 Evaluator 检测和预防
+
+version: "1.0"
+last_updated: "2026-03-26T00:00:00Z"
+total_patterns: 3
+
+patterns:
+
+  - id: fail-001
+    name: "过长单步 prompt"
+    category: prompt_design
+    severity: high
+    observed_count: 0  # 理论模式，尚未观测到
+    description: |
+      单个步骤的 prompt 包含太多要求（>10项），
+      导致 worker agent 遗漏部分输出或输出格式混乱。
+    symptoms:
+      - artifacts_produced 字段缺少预期的 key
+      - JSON 输出不完整或格式错误
+      - worker 输出 "partial" 状态
+    prevention: |
+      将复杂步骤拆分为多个步骤，每个步骤只做一件事。
+      目标：每个步骤的 prompt ≤ 200 字，输出 ≤ 3 个 artifact。
+    debug_strategy: "attempt_2: 拆分步骤，每步只做一件事"
+
+  - id: fail-002
+    name: "依赖未定义的 artifact"
+    category: dag_design
+    severity: critical
+    observed_count: 0
+    description: |
+      步骤的 from_artifacts 引用了一个在前置步骤中不存在的 artifact key，
+      导致工件解析失败，worker 收到空的 input_artifacts。
+    symptoms:
+      - worker 报告找不到输入文件
+      - artifact_store.get() 返回 None
+    prevention: |
+      每个步骤的 from_artifacts 中的 key 必须在其 depends 中某个步骤的
+      output.artifacts.key 中声明。
+      validator_01 负责检查此项。
+
+  - id: fail-003
+    name: "无限等待无响应 worker"
+    category: runtime
+    severity: high
+    observed_count: 0
+    description: |
+      worker 子进程卡住（如等待用户输入）导致整个工作流挂起。
+    symptoms:
+      - 步骤长时间停留在 running 状态
+      - 没有新的 evaluation_events.jsonl 条目
+    prevention: |
+      每个步骤必须配置 timeout_seconds（推荐：分析120s，设计300s，验证60s）。
+      WorkerDispatcher 使用 subprocess.TimeoutExpired 强制终止超时进程。

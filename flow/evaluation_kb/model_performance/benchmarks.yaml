@@ -1,0 +1,70 @@
+# Model 性能基准库
+# 记录不同 model 在不同任务类型的表现
+# 由 Evaluator Agent 在每次运行后更新
+
+version: "1.0"
+last_updated: "2026-03-26T00:00:00Z"
+note: "初始数据基于设计原则，运行数据将逐步积累"
+
+models:
+
+  claude-opus-4-6:
+    strengths:
+      - "复杂创意任务（工作流设计、架构设计）"
+      - "长文本生成（书籍翻译、报告写作）"
+      - "多约束推理（需要同时满足多个条件）"
+    weaknesses:
+      - "简单重复任务（过度思考，速度慢）"
+      - "纯格式转换（不需要创意的场景）"
+    avg_duration_by_task:
+      analysis: null    # 待实测
+      design: null
+      translation: null
+      validation: null
+    recommended_for:
+      - workflow_design
+      - translation (quality mode)
+      - creative_writing
+      - complex_analysis
+
+  claude-sonnet-4-6:
+    strengths:
+      - "快速分析和总结"
+      - "结构化数据提取"
+      - "验证和审查任务"
+      - "调试和错误诊断"
+    weaknesses:
+      - "需要高创意的设计任务（质量略低于 opus）"
+    avg_duration_by_task:
+      analysis: null    # 待实测
+      design: null
+      translation: null
+      validation: null
+    recommended_for:
+      - analysis
+      - validation
+      - debug
+      - quick_translation
+
+  claude-haiku-4-5-20251001:
+    strengths:
+      - "极快速的简单任务"
+      - "批量处理"
+    weaknesses:
+      - "复杂推理能力有限"
+      - "长文本质量较低"
+    recommended_for:
+      - simple_extraction
+      - format_conversion
+      - batch_processing
+
+# 任务类型 → 推荐 model 映射（快速查找）
+task_model_matrix:
+  analysis:      claude-sonnet-4-6
+  design:        claude-opus-4-6
+  translation:   claude-opus-4-6   # 高质量模式
+  validation:    claude-sonnet-4-6
+  debug:         claude-sonnet-4-6
+  writing:       claude-opus-4-6
+  extraction:    claude-sonnet-4-6
+  formatting:    claude-haiku-4-5-20251001

@@ -1,0 +1,59 @@
+{
+  "worker_id": "parse_worker",
+  "workflow_id": "translate_news_to_chinese_markdown",
+  "model": "claude-haiku-4-5",
+  "execution": {
+    "temperature": 0.0,
+    "max_tokens": 4000,
+    "timeout_seconds": 30,
+    "retry_policy": {
+      "max_attempts": 3,
+      "backoff_strategy": "exponential",
+      "initial_delay_ms": 1000,
+      "max_delay_ms": 30000
+    }
+  },
+  "input": {
+    "schema_type": "object",
+    "properties": {
+      "articles": {
+        "type": "array",
+        "description": "List of articles to parse"
+      },
+      "format": {
+        "type": "string",
+        "description": "Input format (html, plaintext, markdown, pdf)"
+      }
+    },
+    "required": ["articles", "format"]
+  },
+  "output": {
+    "schema_type": "object",
+    "properties": {
+      "parsed_content": {
+        "type": "array",
+        "description": "Extracted and normalized article content"
+      },
+      "metadata": {
+        "type": "object",
+        "description": "Extracted metadata from articles"
+      }
+    }
+  },
+  "capabilities": [
+    "article_extraction",
+    "metadata_parsing",
+    "content_normalization"
+  ],
+  "error_handler": {
+    "on_failure": "debug_01",
+    "max_attempts": 3,
+    "fallback_action": "pass_to_debug"
+  },
+  "logging": {
+    "level": "INFO",
+    "log_inputs": true,
+    "log_outputs": true,
+    "log_performance_metrics": true
+  }
+}

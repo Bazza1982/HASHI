@@ -1,0 +1,24 @@
+# 待处理的改进建议
+# 由 Evaluator Agent 生成，等待 Orchestrator 审核
+
+version: "1.0"
+last_updated: "2026-03-26T00:00:00Z"
+
+improvements: []
+
+# 示例格式：
+# - id: imp-001
+#   class: B          # A=立即实施, B=下次运行前, C=长期优化
+#   target: "meta-workflow-creation"    # 目标工作流或组件
+#   title: "减少 design_workflow 步骤的 prompt 长度"
+#   problem: "设计步骤 prompt 包含15项要求，worker 经常遗漏部分输出"
+#   proposed_change: |
+#     将 design_workflow 步骤拆分为两步：
+#     1. design_workflow_structure（DAG + agent 列表）
+#     2. design_workflow_prompts（每个步骤的 prompt 内容）
+#   expected_benefit: "成功率从 70% 提升至 95%"
+#   evidence:
+#     - run_id: run-meta-workflow-creation-xxx
+#       issue: "design_package.json 缺少 worker AGENT.md 内容"
+#   created_at: "2026-03-26T10:00:00Z"
+#   created_by: evaluator

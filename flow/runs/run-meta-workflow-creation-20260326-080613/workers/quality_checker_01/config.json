@@ -1,0 +1,110 @@
+{
+  "worker_id": "quality_checker_01",
+  "role": "quality_reviewer",
+  "model": "claude-sonnet-4-6",
+  "description": "质量检查、输出验证、文件导出",
+  "version": "1.0",
+  "created_at": "2026-03-26T08:30:00Z",
+  "enabled": true,
+  "max_attempts": 2,
+  "timeout_seconds": 300,
+  "retry_policy": {
+    "max_retries": 1,
+    "backoff_multiplier": 1.5,
+    "max_delay_seconds": 30,
+    "retry_on": ["timeout", "rate_limit", "transient_error"]
+  },
+  "quality_config": {
+    "quality_threshold": 0.85,
+    "auto_fix_minor_issues": true,
+    "compare_with_original": true,
+    "quality_metrics": [
+      "accuracy",
+      "fluency",
+      "format_correctness",
+      "completeness"
+    ]
+  },
+  "assessment_rules": {
+    "accuracy_check": {
+      "enabled": true,
+      "weight": 0.4,
+      "criteria": [
+        "no_information_loss",
+        "no_distortion",
+        "terminology_consistency"
+      ]
+    },
+    "fluency_check": {
+      "enabled": true,
+      "weight": 0.3,
+      "criteria": [
+        "natural_chinese_expression",
+        "grammar_correctness",
+        "punctuation_correctness"
+      ]
+    },
+    "format_check": {
+      "enabled": true,
+      "weight": 0.2,
+      "criteria": [
+        "valid_markdown",
+        "proper_heading_hierarchy",
+        "consistent_formatting"
+      ]
+    },
+    "completeness_check": {
+      "enabled": true,
+      "weight": 0.1,
+      "criteria": [
+        "all_sections_translated",
+        "no_missing_content",
+        "metadata_present"
+      ]
+    }
+  },
+  "proofreading_rules": {
+    "check_grammar": true,
+    "check_punctuation": true,
+    "check_consistency": true,
+    "fix_minor_issues": true,
+    "preserve_formatting_intent": true
+  },
+  "file_validation_rules": {
+    "encoding_required": "utf-8",
+    "line_endings": "unix",
+    "max_file_size_mb": 10,
+    "validate_markdown_syntax": true,
+    "check_readability": true
+  },
+  "output_export_config": {
+    "output_format": "markdown",
+    "encoding": "utf-8",
+    "include_bom": false,
+    "file_naming_pattern": "${article_id}-translated.md",
+    "add_translation_metadata": true,
+    "metadata_fields": [
+      "original_title",
+      "translated_title",
+      "translation_date",
+      "quality_score"
+    ]
+  },
+  "logging": {
+    "level": "info",
+    "log_to_file": true,
+    "include_timestamps": true,
+    "log_quality_metrics": true
+  },
+  "required_capabilities": [
+    "quality_assessment",
+    "chinese_proofreading",
+    "file_validation",
+    "utf8_encoding_verification",
+    "markdown_validation"
+  ],
+  "tasks_assigned": [
+    "quality_assessment",
+    "output_export"
+  ]
+}

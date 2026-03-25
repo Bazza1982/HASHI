@@ -1,0 +1,186 @@
+# HASHI Flow — Worker Agent 配置标准
+# 版本: 1.0
+# 每个 local-only worker 的 config.json 必须符合此格式
+
+# =============================================================================
+# Worker Agent 目录结构
+# =============================================================================
+#
+# flow/runs/{run_id}/workers/{agent_id}/
+# ├── AGENT.md          角色定义（从模板复制+定制）
+# ├── config.json       运行时配置（此 schema 定义）
+# ├── state.json        当前任务状态
+# ├── inbox/            接收的 HChat 任务消息
+# ├── outbox/           发出的 HChat 结果消息
+# └── logs/
+#     └── {session}.log 完整执行日志
+
+# =============================================================================
+# config.json Schema
+# =============================================================================
+
+# {
+#   "agent_id": "translator_01",        唯一标识
+#   "role": "中文翻译员",                角色描述
+#   "workflow_id": "book-translation",  所属工作流
+#   "run_id": "run-20260326-001",       所属运行实例
+#
+#   "backend": {
+#     "active": "claude-cli",           当前激活的后端
+#     "model": "claude-opus-4-6",       当前使用的 model
+#     "available": [                    可用后端列表
+#       {
+#         "name": "claude-cli",
+#         "models": ["claude-opus-4-6", "claude-sonnet-4-6"]
+#       },
+#       {
+#         "name": "openrouter-api",
+#         "models": ["anthropic/claude-opus-4-6", "google/gemini-pro"]
+#       }
+#     ],
+#     "controllable_by": ["orchestrator", "human"]
+#   },
+#
+#   "capabilities": [                   agent 具备的能力
+#     "file_read", "file_write",
+#     "bash", "browser"
+#   ],
+#
+#   "communication": {
+#     "hchat_endpoint": "http://localhost:5000",
+#     "inbox_path": "inbox/",
+#     "outbox_path": "outbox/",
+#     "poll_interval_seconds": 5
+#   },
+#
+#   "limits": {
+#     "timeout_seconds": 600,           单次任务超时
+#     "max_tokens": 100000,             最大 token 消耗
+#     "max_file_size_mb": 50            最大处理文件大小
+#   },
+#
+#   "created_at": "2026-03-26T06:00:00Z",
+#   "created_by": "workflow_design_agent"
+# }
+
+# =============================================================================
+# state.json Schema
+# =============================================================================
+
+# {
+#   "agent_id": "translator_01",
+#   "status": "idle",                   idle | busy | error | completed
+#   "current_task": null,               当前任务 id，空则 idle
+#   "current_step": null,               当前执行的步骤 id
+#
+#   "task_history": [                   历史任务记录
+#     {
+#       "task_id": "step-translate-ch1",
+#       "status": "completed",
+#       "started_at": "...",
+#       "completed_at": "...",
+#       "duration_seconds": 42
+#     }
+#   ],
+#
+#   "error_count": 0,                   当前任务累计错误次数
+#   "last_error": null,                 最后一次错误详情
+#
+#   "updated_at": "2026-03-26T06:10:00Z"
+# }
+
+# =============================================================================
+# AGENT.md 模板结构
+# =============================================================================
+#
+# 每个 worker 的 AGENT.md 包含以下部分：
+#
+# ## Identity
+# - Agent ID, Role, Workflow context
+#
+# ## Responsibilities
+# - 精确描述这个 agent 负责做什么（不多不少）
+#
+# ## Input Contract
+# - 接收什么格式的任务消息
+# - 可以访问哪些 artifacts
+#
+# ## Output Contract
+# - 产出什么文件/数据
+# - 消息格式（成功/失败）
+#
+# ## Quality Standards
+# - 这个 agent 的工作质量标准
+#
+# ## Constraints
+# - 不能做什么（防止越权）
+# - 如果不确定，停止并上报
+#
+# ## Communication Protocol
+# - 如何通过 HChat 接收任务
+# - 如何报告完成/失败
+
+# =============================================================================
+# HChat 任务消息格式（Agent 间通信标准）
+# =============================================================================
+
+# 任务分配消息（Orchestrator → Worker）：
+# {
+#   "msg_type": "task_assign",
+#   "task_id": "step-translate-ch1",
+#   "workflow_id": "book-translation-v1",
+#   "run_id": "run-20260326-001",
+#   "from": "orchestrator",
+#   "to": "translator_01",
+#   "priority": "normal",              normal | high | urgent
+#   "payload": {
+#     "step_id": "translate_ch1",
+#     "prompt": "翻译第1章...",
+#     "input_artifacts": {
+#       "source_text": "runs/run-001/artifacts/ch1_source.txt"
+#     },
+#     "output_spec": {
+#       "chapter_1": "runs/run-001/artifacts/chapters/ch1.md"
+#     },
+#     "params": {
+#       "proper_nouns": {"Barry Li": "李天", "Yanjiang Li": "李延江"}
+#     }
+#   },
+#   "timeout_seconds": 600,
+#   "ts": "2026-03-26T06:00:00Z"
+# }
+
+# 任务完成消息（Worker → Orchestrator）：
+# {
+#   "msg_type": "task_result",
+#   "task_id": "step-translate-ch1",
+#   "from": "translator_01",
+#   "to": "orchestrator",
+#   "status": "completed",             completed | failed | partial
+#   "payload": {
+#     "artifacts_produced": {
+#       "chapter_1": "runs/run-001/artifacts/chapters/ch1.md"
+#     },
+#     "summary": "第1章翻译完成，共3200字",
+#     "quality_notes": "发现2处术语不确定，已标注"
+#   },
+#   "duration_seconds": 38,
+#   "ts": "2026-03-26T06:00:38Z"
+# }
+
+# 任务失败消息：
+# {
+#   "msg_type": "task_result",
+#   "task_id": "step-translate-ch1",
+#   "from": "translator_01",
+#   "to": "orchestrator",
+#   "status": "failed",
+#   "payload": {
+#     "error_type": "timeout",         timeout | model_error | file_error | logic_error
+#     "error_message": "...",
+#     "partial_artifacts": {},
+#     "debug_info": "...",
+#     "suggested_fix": "建议切换到更长上下文的 model"
+#   },
+#   "ts": "2026-03-26T06:10:00Z"
+# }

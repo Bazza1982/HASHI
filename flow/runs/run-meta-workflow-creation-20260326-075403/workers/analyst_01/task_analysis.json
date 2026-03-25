@@ -1,0 +1,309 @@
+{
+  "task_id": "step-analyze_requirements-run-meta-workflow-creation-20260326-075403",
+  "workflow_id": "meta-workflow-creation",
+  "analysis_timestamp": "2026-03-26T07:54:00Z",
+  "task_type": "translation",
+  "task_description": "将英文新闻文章翻译为中文 Markdown",
+  "quality_requirement": "标准（速度优先）",
+  "recommended_steps": [
+    {
+      "step_no": 1,
+      "title": "Pre-flight 验证与元数据提取",
+      "description": "确认源文件、提取文章元数据（标题、作者、来源、发布日期）、检测专有名词和技术术语",
+      "recommended_model": "claude-haiku-4",
+      "estimated_duration_minutes": 3,
+      "critical": true,
+      "blockers": "缺少源文件"
+    },
+    {
+      "step_no": 2,
+      "title": "术语库构建",
+      "description": "识别文章中的关键术语、品牌名、机构名、人名，建立中英对照术语表",
+      "recommended_model": "claude-opus-4-6",
+      "estimated_duration_minutes": 5,
+      "critical": true,
+      "notes": "关键步骤，决定翻译质量"
+    },
+    {
+      "step_no": 3,
+      "title": "内容分块",
+      "description": "按照段落/句子对文章进行分块，为并行翻译做准备",
+      "recommended_model": "claude-haiku-4",
+      "estimated_duration_minutes": 2,
+      "critical": false
+    },
+    {
+      "step_no": 4,
+      "title": "内容翻译（并行处理）",
+      "description": "多个 translator agent 并行翻译各个块，保持风格一致和术语统一",
+      "recommended_model": "claude-sonnet-4-6",
+      "estimated_duration_minutes": 8,
+      "critical": true,
+      "parallelizable": true,
+      "notes": "可用 2-3 个 worker 并行，根据文章长度调整"
+    },
+    {
+      "step_no": 5,
+      "title": "Markdown 格式化",
+      "description": "调整翻译后的中文文本，确保 Markdown 格式正确（标题、列表、代码块、链接等）",
+      "recommended_model": "claude-haiku-4",
+      "estimated_duration_minutes": 3,
+      "critical": true
+    },
+    {
+      "step_no": 6,
+      "title": "一致性检查与术语验证",
+      "description": "检查术语库中的术语是否在全文中一致使用，修复任何不一致的翻译",
+      "recommended_model": "claude-opus-4-6",
+      "estimated_duration_minutes": 4,
+      "critical": true,
+      "notes": "质量关键步骤"
+    },
+    {
+      "step_no": 7,
+      "title": "质量评估",
+      "description": "进行最终审核，检查流畅性、准确性、格式合规性，确保满足「标准（速度优先）」要求",
+      "recommended_model": "claude-opus-4-6",
+      "estimated_duration_minutes": 3,
+      "critical": true
+    },
+    {
+      "step_no": 8,
+      "title": "输出生成",
+      "description": "生成最终的中文 Markdown 文件，附带翻译报告和术语表",
+      "recommended_model": "claude-haiku-4",
+      "estimated_duration_minutes": 2,
+      "critical": false
+    }
+  ],
+  "step_count": 8,
+  "recommended_agents": [
+    {
+      "agent_name": "metadata_extractor",
+      "role": "Pre-flight 检验和元数据提取",
+      "responsibilities": [
+        "验证源文件完整性",
+        "提取文章元数据（标题、日期、作者等）",
+        "生成初始专有名词列表"
+      ],
+      "model": "claude-haiku-4",
+      "required": true
+    },
+    {
+      "agent_name": "terminology_specialist",
+      "role": "术语库管理和一致性检查",
+      "responsibilities": [
+        "构建中英术语对照表",
+        "验证全文术语一致性",
+        "处理歧义和多义词"
+      ],
+      "model": "claude-opus-4-6",
+      "required": true
+    },
+    {
+      "agent_name": "translator",
+      "role": "内容翻译（可并行多个实例）",
+      "responsibilities": [
+        "翻译分配的内容块",
+        "遵守术语表",
+        "保持中文自然流畅"
+      ],
+      "model": "claude-sonnet-4-6",
+      "required": true,
+      "parallelizable": true,
+      "recommended_instances": 2
+    },
+    {
+      "agent_name": "markdown_formatter",
+      "role": "格式化和结构调整",
+      "responsibilities": [
+        "修复 Markdown 格式",
+        "调整排版和缩进",
+        "验证链接和媒体引用"
+      ],
+      "model": "claude-haiku-4",
+      "required": true
+    },
+    {
+      "agent_name": "quality_reviewer",
+      "role": "最终审核和质量控制",
+      "responsibilities": [
+        "全文审核",
+        "流畅性评估",
+        "准确性验证",
+        "生成质量报告"
+      ],
+      "model": "claude-opus-4-6",
+      "required": true
+    }
+  ],
+  "agent_count": 5,
+  "time_estimation": {
+    "total_minutes": 30,
+    "total_minutes_with_buffer": 45,
+    "breakdown_by_step": {
+      "pre_flight": 3,
+      "preparation": 7,
+      "translation_core": 8,
+      "formatting_and_validation": 7,
+      "quality_assurance": 3,
+      "output": 2
+    },
+    "parallelization_benefit": "可通过并行翻译节省 40-50% 的时间（如有多个 translator），预计总耗时可降至 20-25 分钟"
+  },
+  "risk_assessment": {
+    "overall_risk_level": "medium",
+    "risks": [
+      {
+        "id": "R1",
+        "category": "input_validation",
+        "description": "未提供源文件",
+        "severity": "critical",
+        "impact": "无法启动翻译工作流",
+        "mitigation": "需要从用户确认源文件路径或内容"
+      },
+      {
+        "id": "R2",
+        "category": "terminology",
+        "description": "英文新闻中可能包含大量专有名词、品牌名、地名等，翻译标准不一致的风险",
+        "severity": "high",
+        "impact": "翻译质量受影响，文档显得不专业",
+        "mitigation": "建立综合术语表，确保全文一致性检查"
+      },
+      {
+        "id": "R3",
+        "category": "domain_knowledge",
+        "description": "新闻文章可能涉及特定行业背景（金融、科技、政治等），译者需要相关知识背景",
+        "severity": "medium",
+        "impact": "可能误解原意或产生不自然的表达",
+        "mitigation": "在 pre-flight 确认文章主题和行业背景，必要时指定 domain-aware agent"
+      },
+      {
+        "id": "R4",
+        "category": "format_preservation",
+        "description": "Markdown 格式可能复杂（嵌套列表、代码块、表格等），翻译过程可能破坏格式",
+        "severity": "medium",
+        "impact": "输出文件格式错误或混乱",
+        "mitigation": "在步骤 5 和 7 中明确进行格式验证"
+      },
+      {
+        "id": "R5",
+        "category": "quality_vs_speed",
+        "description": "「速度优先」与「高质量翻译」存在本质矛盾，可能需要权衡",
+        "severity": "medium",
+        "impact": "翻译质量可能达不到预期",
+        "mitigation": "需要在 pre-flight 与用户确认能接受的质量底线"
+      }
+    ]
+  },
+  "preflight_questions_for_user": [
+    {
+      "key": "source_file_confirmation",
+      "question": "【关键】请提供英文新闻文章的源文件路径或上传文件内容。当前任务参数中未指定源文件。",
+      "required": true,
+      "type": "file_or_path",
+      "impact": "blocking"
+    },
+    {
+      "key": "article_topic_and_domain",
+      "question": "请说明文章的主要话题和行业背景（例如：科技新闻、金融投资、政治新闻、医疗健康等），这将帮助我们选择合适的译者。",
+      "required": true,
+      "type": "text",
+      "impact": "high"
+    },
+    {
+      "key": "specialized_terminology",
+      "question": "文章中是否包含特定的专有术语、品牌名或机构名？请列举需要特别关注的中英术语对照。",
+      "required": false,
+      "type": "list",
+      "impact": "medium"
+    },
+    {
+      "key": "quality_acceptance_criteria",
+      "question": "「标准（速度优先）」的具体含义是什么？能否接受以下标准之一：(A) 保证 95% 准确性，容许少量表达不自然；(B) 保证 85% 准确性，强调速度；(C) 其他？",
+      "required": true,
+      "type": "single_choice",
+      "options": [
+        "Option A: 95% 准确性，允许少量表达不自然",
+        "Option B: 85% 准确性，优先速度",
+        "Option C: 其他标准（请在备注中说明）"
+      ],
+      "impact": "high"
+    },
+    {
+      "key": "target_audience",
+      "question": "翻译的目标读者是谁？（例如：技术人员、普通大众、学术人士等），这将影响术语和表达的选择。",
+      "required": false,
+      "type": "text",
+      "impact": "medium"
+    },
+    {
+      "key": "timeline_constraint",
+      "question": "是否有硬性的完成期限？当前估计耗时 30-45 分钟，如果需要更快完成，我们可以增加并行 worker 数量，但可能影响质量。",
+      "required": false,
+      "type": "text",
+      "impact": "medium"
+    }
+  ],
+  "preflight_question_count": 6,
+  "execution_strategy": {
+    "approach": "hybrid_serial_parallel",
+    "parallelization_points": [
+      {
+        "step": 4,
+        "description": "内容翻译",
+        "suggested_parallelism": "2-3 workers",
+        "expected_speedup": "1.8-2.2x"
+      }
+    ],
+    "quality_gates": [
+      {
+        "before_step": 4,
+        "gate": "术语库完成审核"
+      },
+      {
+        "before_step": 7,
+        "gate": "所有分块翻译完成并合并"
+      },
+      {
+        "after_step": 8,
+        "gate": "最终输出质量检查"
+      }
+    ]
+  },
+  "recommended_models_by_complexity": {
+    "haiku_tasks": [
+      "step 1: Pre-flight 验证",
+      "step 3: 内容分块",
+      "step 5: Markdown 格式化",
+      "step 8: 输出生成"
+    ],
+    "sonnet_tasks": [
+      "step 4: 核心翻译工作"
+    ],
+    "opus_tasks": [
+      "step 2: 术语库构建",
+      "step 6: 一致性检查",
+      "step 7: 质量评估"
+    ]
+  },
+  "success_criteria": [
+    "所有 pre-flight 问题已由用户确认",
+    "源文件已验证完整",
+    "术语表已 100% 建立并审核",
+    "翻译后的中文文章流畅易读",
+    "Markdown 格式完全保留",
+    "术语在全文一致",
+    "满足用户定义的质量标准"
+  ],
+  "analysis_summary": {
+    "task_complexity": "medium",
+    "estimated_effort": "30-45 分钟（基线）/ 20-25 分钟（优化并行）",
+    "key_dependencies": [
+      "源文件的完整性和可访问性",
+      "文章主题和专有术语的清晰定义",
+      "用户的质量与速度平衡偏好"
+    ],
+    "recommendation": "在启动翻译工作流前，必须收集所有 pre-flight 问题的答案。特别是源文件的确认和质量标准的明确定义对项目成功至关重要。建议采用分布式翻译（2-3 个 translator agents 并行工作）以充分利用速度优先的要求，同时不牺牲质量。"
+  }
+}

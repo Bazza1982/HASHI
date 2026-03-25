@@ -1,0 +1,285 @@
+# HASHI Flow — Meta-Workflow
+# "工作流创建工作流"
+# 这是整个系统最核心的工作流：用来动态创建任何新的工作流
+# 版本: 1.0.0
+
+workflow:
+  id: meta-workflow-creation
+  name: "工作流创建工作流"
+  version: "1.0.0"
+  description: |
+    接收用户的自然语言需求，自动设计并创建完整的工作流配置。
+    这是 HASHI Flow 的元工作流，用于 bootstrap 任何其他工作流。
+  tags: [meta, system, workflow-creation]
+
+meta:
+  created_by: human
+  created_at: "2026-03-26T06:00:00Z"
+  improvement_count: 0
+  source_prompt: "系统核心工作流，手动创建"
+
+# =============================================================================
+# Pre-flight：在设计工作流之前，收集必要信息
+# =============================================================================
+
+pre_flight:
+  analyst_agent: analyst_01
+  auto_scan: false  # 元工作流不扫描文件，直接问用户
+
+  collect_from_human:
+    - key: task_description
+      question: "请详细描述你想要完成的任务是什么？"
+      required: true
+      type: text
+
+    - key: quality_requirement
+      question: "质量要求如何？"
+      required: false
+      type: choice
+      choices: ["标准（速度优先）", "高质量（质量优先）", "极致质量（不计时间）"]
+
+    - key: max_interventions
+      question: "你希望在过程中被打扰几次？（0=完全自动，1=只在开始前，2+=允许中途问我）"
+      required: false
+      type: choice
+      choices: ["0", "1", "2", "3+"]
+
+    - key: source_files
+      question: "有需要处理的输入文件吗？如有，请提供路径。"
+      required: false
+      type: text
+
+# =============================================================================
+# Agent 定义
+# =============================================================================
+
+agents:
+  orchestrator:
+    id: akane  # 使用小茜作为 Orchestrator
+
+  workers:
+    - id: analyst_01
+      role: "需求分析师"
+      agent_md: "flow/agents/analyst/AGENT.md"
+      workspace: "flow/runs/{run_id}/workers/analyst_01"
+      backend: claude-cli
+      model: claude-sonnet-4-6  # 分析任务用 sonnet 即可
+      controllable_by: [orchestrator, human]
+
+    - id: designer_01
+      role: "工作流设计师"
+      agent_md: "flow/agents/designer/AGENT.md"
+      workspace: "flow/runs/{run_id}/workers/designer_01"
+      backend: claude-cli
+      model: claude-opus-4-6  # 设计任务需要最高质量
+      controllable_by: [orchestrator, human]
+
+    - id: validator_01
+      role: "工作流验证员"
+      agent_md: "flow/agents/validator/AGENT.md"
+      workspace: "flow/runs/{run_id}/workers/validator_01"
+      backend: claude-cli
+      model: claude-sonnet-4-6
+      controllable_by: [orchestrator, human]
+
+    - id: debug_01
+      role: "调试代理"
+      agent_md: "flow/agents/debug/AGENT.md"
+      workspace: "flow/runs/{run_id}/workers/debug_01"
+      backend: claude-cli
+      model: claude-sonnet-4-6
+      controllable_by: [orchestrator]
+
+# =============================================================================
+# 执行步骤
+# =============================================================================
+
+steps:
+  # 步骤 1：分析需求
+  - id: analyze_requirements
+    name: "分析任务需求"
+    agent: analyst_01
+    depends: []
+    input:
+      params:
+        task_description: "{pre_flight.task_description}"
+        quality_requirement: "{pre_flight.quality_requirement}"
+        source_files: "{pre_flight.source_files}"
+    prompt: |
+      分析以下任务需求，输出 task_analysis.json：
+
+      任务描述：{pre_flight.task_description}
+      质量要求：{pre_flight.quality_requirement}
+      输入文件：{pre_flight.source_files}
+
+      请输出：
+      1. 任务类型（translation/research/writing/analysis/other）
+      2. 建议的步骤分解（5-10步）
+      3. 建议的 agent 角色（2-5个）
+      4. 每个步骤推荐的 model
+      5. 估计的总耗时
+      6. 可能的风险点
+      7. pre-flight 需要向用户确认的额外问题（如果有）
+
+      严格输出 JSON 格式。
+    output:
+      artifacts:
+        - key: task_analysis
+          path: task_analysis.json
+          type: json
+    timeout_seconds: 120
+
+  # 步骤 2：设计工作流
+  - id: design_workflow
+    name: "设计工作流 YAML"
+    agent: designer_01
+    depends: [analyze_requirements]
+    input:
+      from_artifacts: [task_analysis]
+      params:
+        task_description: "{pre_flight.task_description}"
+        max_interventions: "{pre_flight.max_interventions}"
+        knowledge_base_path: "flow/evaluation_kb/"
+    prompt: |
+      基于以下分析结果，设计完整的工作流配置：
+
+      任务需求：{pre_flight.task_description}
+      任务分析：[见 task_analysis.json]
+      最大人工介入次数：{pre_flight.max_interventions}
+
+      请生成 design_package.json，内容包含：
+      1. `workflow_yaml`：完整的 workflow YAML 字符串
+      2. `workers`：worker 列表，每个包含 id、agent_md_content（100字以内）、model
+      3. `dag_diagram`：ASCII 格式的 DAG（单行）
+      4. `summary`：步骤数、worker 数、预计耗时（分钟）
+
+      设计原则：
+      - 步骤控制在 3-6 个（简洁为主）
+      - 最小化人工介入（目标：{pre_flight.max_interventions} 次）
+      - 错误处理：debug_agent: debug_01, max_attempts: 3
+
+      最后输出结果 JSON：
+      ```json
+      {"status": "completed", "artifacts_produced": {"design_package": "design_package.json"}, "summary": "设计完成"}
+      ```
+    output:
+      artifacts:
+        - key: design_package
+          path: design_package.json
+          type: json
+    timeout_seconds: 600
+
+  # 步骤 3：创建工作流文件
+  - id: create_workflow_files
+    name: "创建工作流文件"
+    agent: designer_01
+    depends: [design_workflow]
+    input:
+      from_artifacts: [design_package]
+    prompt: |
+      根据 design_package.json 的内容，实际创建以下文件：
+
+      1. 新工作流的 workflow.yaml（保存到 flow/workflows/library/）
+      2. 所有 worker 的目录和 AGENT.md
+      3. 各 worker 的初始 config.json
+      4. 工作空间目录结构
+
+      完成后输出 creation_report.json，列出所有创建的文件。
+    output:
+      artifacts:
+        - key: creation_report
+          path: creation_report.json
+          type: json
+    timeout_seconds: 300
+
+  # 步骤 4：验证工作流
+  - id: validate_workflow
+    name: "验证工作流可执行性"
+    agent: validator_01
+    depends: [create_workflow_files]
+    input:
+      from_artifacts: [design_package, creation_report]
+    prompt: |
+      验证生成的工作流配置：
+
+      检查项目：
+      1. workflow.yaml 语法正确，符合 schema
+      2. 所有步骤的依赖关系无循环
+      3. 所有引用的 agent_id 都有对应的 worker 定义
+      4. 所有 AGENT.md 都存在且内容完整
+      5. pre_flight 覆盖了所有可能的人工输入点
+      6. 成功标准可被验证
+
+      输出 validation_report.json：
+      {
+        "valid": true/false,
+        "issues": [...],
+        "warnings": [...],
+        "recommendation": "可以执行" / "建议修改后执行"
+      }
+    output:
+      artifacts:
+        - key: validation_report
+          path: validation_report.json
+          type: json
+    quality_gate:
+      type: auto
+      criteria:
+        - "validation_report.valid == true"
+    timeout_seconds: 180
+
+# =============================================================================
+# 错误处理
+# =============================================================================
+
+error_handling:
+  debug_agent: debug_01
+  max_attempts: 3
+  retry_strategy:
+    attempt_1: "检查错误日志，调整 prompt 重试"
+    attempt_2: "切换到更强的 model (opus) 重试"
+    attempt_3: "简化设计要求，减少步骤数量重试"
+  on_max_exceeded:
+    action: notify_orchestrator
+    message: "工作流设计失败（已尝试3次），步骤：{failed_step_id}，错误：{error}"
+
+# =============================================================================
+# 成功标准
+# =============================================================================
+
+success_criteria:
+  - "步骤 validate_workflow 状态为 completed"
+  - "validation_report.valid == true"
+  - "工作流 YAML 文件已创建"
+  - "所有 worker AGENT.md 已创建"
+
+# =============================================================================
+# 输出
+# =============================================================================
+
+output:
+  type: message
+  notify_orchestrator: true
+  message_template: |
+    ✅ 工作流创建完成！
+
+    📋 工作流 ID：{new_workflow.id}
+    📁 文件位置：{new_workflow.yaml_path}
+    🤖 Agent 数量：{new_workflow.agent_count}
+    📊 步骤数量：{new_workflow.step_count}
+    ⏱️ 预计耗时：{new_workflow.estimated_duration}
+    👤 人工介入：{new_workflow.human_interventions} 次
+
+    是否现在执行新工作流？
+
+# =============================================================================
+# Evaluator 配置
+# =============================================================================
+
+evaluation:
+  enabled: true
+  metrics:
+    - human_interventions
+    - total_duration
+    - design_quality_score  # 由 Evaluator 根据后续工作流执行效果反向评分
+  improvement_threshold: 5  # 每5次运行后尝试改进
