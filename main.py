@@ -713,6 +713,7 @@ class UniversalOrchestrator:
                 await rt.app.updater.start_polling(
                     drop_pending_updates=True,
                     error_callback=error_callback,
+                    timeout=30,
                 )
                 rt.telegram_connected = True
                 try:
