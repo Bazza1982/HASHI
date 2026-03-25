@@ -4,6 +4,7 @@ patrol_errors.py — Arale's 3-hour error log patrol across all HASHI instances.
 
 Scans the latest session error logs for all agents in HASHI1, HASHI2, HASHI9,
 filters non-critical noise (Telegram connectivity), and reports meaningful issues.
+OpenClaw has been decommissioned and is no longer included in patrol.
 """
 
 import os
@@ -19,14 +20,6 @@ INSTANCES = {
     "HASHI2": Path("/home/lily/projects/hashi2/logs"),
     "HASHI9": Path("/mnt/c/Users/thene/projects/HASHI/logs"),
 }
-
-# ── OpenClaw definition ──────────────────────────────────────────────────────
-OPENCLAW_ROOT = Path("/mnt/c/Users/thene/.openclaw")
-
-# ── OpenClaw noise (cron errors to ignore) ──────────────────────────────────
-OPENCLAW_NOISE_ERRORS = [
-    "cron announce delivery failed",  # Telegram delivery flap — normal noise
-]
 
 # ── Noise filters (non-critical, skip or downgrade) ─────────────────────────
 NOISE_PATTERNS = [
@@ -162,90 +155,6 @@ def scan_instance(name: str, logs_root: Path) -> dict:
     return result
 
 
-def scan_openclaw(root: Path) -> dict:
-    """Scan OpenClaw cron run logs for recent errors."""
-    result = {
-        "instance": "OpenClaw",
-        "accessible": False,
-        "agents_scanned": 0,
-        "critical": [],
-        "warnings": [],
-        "clean": [],
-        "error": None,
-    }
-
-    runs_dir = root / "cron" / "runs"
-    jobs_file = root / "cron" / "jobs.json"
-
-    if not runs_dir.exists():
-        result["error"] = f"runs dir not found: {runs_dir}"
-        return result
-
-    result["accessible"] = True
-    cutoff_ms = (datetime.now() - timedelta(hours=SCAN_WINDOW_HOURS)).timestamp() * 1000
-
-    # Build job id→name map
-    job_names: dict[str, str] = {}
-    try:
-        data = json.loads(jobs_file.read_text(encoding="utf-8"))
-        for j in data.get("jobs", []):
-            if j.get("id"):
-                job_names[j["id"]] = j.get("name", j["id"])
-    except (OSError, json.JSONDecodeError):
-        pass
-
-    error_by_job: dict[str, list[str]] = {}
-
-    try:
-        run_files = list(runs_dir.glob("*.jsonl"))
-    except OSError as e:
-        result["error"] = str(e)
-        return result
-
-    result["agents_scanned"] = len(run_files)
-
-    for run_file in run_files:
-        try:
-            lines = run_file.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
-            continue
-
-        for line in lines:
-            if not line.strip():
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-            if entry.get("ts", 0) < cutoff_ms:
-                continue
-            if entry.get("status") != "error":
-                continue
-
-            err_msg = entry.get("error", "unknown error")
-            # Skip known noise
-            if any(noise in err_msg for noise in OPENCLAW_NOISE_ERRORS):
-                continue
-
-            job_id = entry.get("jobId", run_file.stem)
-            job_label = job_names.get(job_id, job_id[:8])
-            ts = datetime.fromtimestamp(entry["ts"] / 1000).strftime("%H:%M")
-            error_by_job.setdefault(job_label, []).append(f"[{ts}] {err_msg}")
-
-    for job_label, errs in error_by_job.items():
-        result["warnings"].append({
-            "agent": job_label,
-            "log_path": str(runs_dir),
-            "lines": errs[:5],
-        })
-
-    if not error_by_job:
-        result["clean"].append("all cron jobs")
-
-    return result
-
-
 def format_report(findings: list[dict]) -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     lines = [f"🤖 阿拉蕾巡逻报告 — {now}\n"]
@@ -293,8 +202,6 @@ def main():
     findings = []
     for name, root in INSTANCES.items():
         findings.append(scan_instance(name, root))
-    findings.append(scan_openclaw(OPENCLAW_ROOT))
-
     report = format_report(findings)
     print(report)
     return report

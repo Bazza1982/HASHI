@@ -73,9 +73,13 @@ class ColorFormatter(logging.Formatter):
     }
 
     def format(self, record):
-        color = self.COLORS.get(record.levelno, C_RESET)
+        msg = record.getMessage()
+        if "Telegram polling error" in msg and "NetworkError" in msg:
+            color = C_MUTED
+        else:
+            color = self.COLORS.get(record.levelno, C_RESET)
         ts = self.formatTime(record, "%H:%M:%S")
-        return f"{color}{ts} [{record.name}] {record.getMessage()}{C_RESET}"
+        return f"{color}{ts} [{record.name}] {msg}{C_RESET}"
 
 
 _configure_console_encoding()

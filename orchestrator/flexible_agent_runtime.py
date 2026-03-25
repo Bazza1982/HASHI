@@ -927,7 +927,7 @@ class FlexibleAgentRuntime:
 
     async def _render_skill_jobs(self, update_or_query, kind: str):
         from orchestrator.agent_runtime import _build_jobs_with_buttons
-        text, markup = _build_jobs_with_buttons(self.name, self.skill_manager)
+        text, markup = _build_jobs_with_buttons(self.name, self.skill_manager, filter_agent=self.name)
         if hasattr(update_or_query, "edit_message_text"):
             await update_or_query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
         else:
