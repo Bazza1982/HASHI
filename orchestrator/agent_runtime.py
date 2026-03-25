@@ -1225,6 +1225,30 @@ class BridgeAgentRuntime:
             deliver_to_telegram=deliver_to_telegram,
         )
 
+    async def _hchat_route_reply(self, item: QueuedRequest, response_text: str):
+        """If this request was an hchat message, route the reply back to the sender."""
+        import re
+        match = re.match(r"^\[hchat from (\w+)\]", item.prompt)
+        if not match:
+            return
+        sender_name = match.group(1).lower()
+        orchestrator = getattr(self, "orchestrator", None)
+        if orchestrator is None:
+            return
+        for rt in getattr(orchestrator, "runtimes", []):
+            if getattr(rt, "name", "") == sender_name and hasattr(rt, "enqueue_api_text"):
+                try:
+                    await rt.enqueue_api_text(
+                        f"[hchat reply from {self.name}] {response_text}",
+                        source=f"hchat-reply:{self.name}",
+                        deliver_to_telegram=True,
+                    )
+                    self.logger.info(f"Hchat reply routed back to {sender_name}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to route hchat reply to {sender_name}: {e}")
+                return
+        self.logger.warning(f"Hchat reply: sender '{sender_name}' runtime not found")
+
     async def enqueue_api_media(
         self,
         local_path: Path,
@@ -2136,6 +2160,8 @@ class BridgeAgentRuntime:
                         f"chunks={chunk_count})"
                     )
                     self._log_maintenance(item, "send_success", text_len=len(response.text or ""))
+                    # Route hchat reply back to sender if applicable
+                    await self._hchat_route_reply(item, response.text)
                 else:
                     err_msg = response.error or "Unknown error"
                     self._mark_error(err_msg)
@@ -3603,30 +3629,74 @@ class BridgeAgentRuntime:
         if len(args) < 2:
             await update.message.reply_text(
                 "💬 Hchat — Ask this agent to compose & send a message to another agent\n\n"
-                "Usage: /hchat <agent> <intent>\n\n"
+                "Usage: /hchat <agent> <intent>\n"
+                "       /hchat all <intent>  — broadcast to all active agents (excludes temp)\n\n"
                 "Example: /hchat lily give her an update on what we've been doing\n"
-                "Example: /hchat arale 告诉她新的 debug toggle 功能已完成\n\n"
+                "Example: /hchat arale 告诉她新的 debug toggle 功能已完成\n"
+                "Example: /hchat all 告诉大家新功能上线了\n\n"
                 "Note: YOU compose the message based on context — intent is what to communicate, not the literal text."
             )
             return
         target_name = args[0].lower()
         intent = " ".join(args[1:])
 
-        # Build a self-prompt: instruct this agent's LLM to compose and send the message
-        self_prompt = (
-            f"[HCHAT TASK] The user wants you to send a Hchat message to agent \"{target_name}\".\n\n"
-            f"Intent: {intent}\n\n"
-            f"Instructions:\n"
-            f"1. Think about what from our current conversation context is relevant to this intent.\n"
-            f"2. Compose a complete, meaningful message FROM you ({self.name}) TO {target_name}. "
-            f"Write it as yourself — introduce yourself if appropriate, include relevant context, be concise.\n"
-            f"3. Send the message by running this bash command:\n"
-            f"   python tools/hchat_send.py --to {target_name} --from {self.name} --text \"<your composed message>\"\n"
-            f"4. Report back to the user: what you sent and a brief summary of why.\n\n"
-            f"Do NOT relay the user's words literally. Compose the message yourself."
-        )
+        # Handle "all" target — broadcast to every active agent except temp and self
+        if target_name == "all":
+            import json as _json
+            try:
+                _cfg = _json.loads(self.global_config.config_path.read_text(encoding="utf-8-sig"))
+                all_agents = [
+                    a["name"] for a in _cfg.get("agents", [])
+                    if a.get("is_active", True)
+                    and a["name"].lower() != "temp"
+                    and a["name"].lower() != self.name.lower()
+                ]
+            except Exception:
+                all_agents = []
+            if not all_agents:
+                await update.message.reply_text("❌ No agents found to broadcast to.")
+                return
+            agent_list = ", ".join(all_agents)
+            send_cmds = "\n".join(
+                f'   python tools/hchat_send.py --to {a} --from {self.name} --text "<your composed message>"'
+                for a in all_agents
+            )
+            self_prompt = (
+                f"[HCHAT BROADCAST] The user wants you to send a Hchat message to ALL active agents.\n\n"
+                f"Target agents: {agent_list}\n"
+                f"EXCLUDED: temp (always excluded from broadcasts), {self.name} (yourself)\n\n"
+                f"Intent: {intent}\n\n"
+                f"Instructions:\n"
+                f"1. Think about what from our current conversation context is relevant to this intent.\n"
+                f"2. Compose a complete, meaningful message FROM you ({self.name}). "
+                f"Write it as yourself — the same message goes to all agents. Be concise.\n"
+                f"3. Send the message to EACH agent by running these bash commands:\n"
+                f"{send_cmds}\n"
+                f"4. Report back to the user: what you sent, to whom, and how many succeeded.\n\n"
+                f"Do NOT relay the user's words literally. Compose the message yourself.\n\n"
+                f"IMPORTANT: When you later receive messages starting with '[hchat reply from ...]', "
+                f"just report the reply content to the user. Do NOT send another hchat message back."
+            )
+            await update.message.reply_text(f"📢 Broadcasting Hchat to {len(all_agents)} agents...")
+        else:
+            # Single agent target
+            self_prompt = (
+                f"[HCHAT TASK] The user wants you to send a Hchat message to agent \"{target_name}\".\n\n"
+                f"Intent: {intent}\n\n"
+                f"Instructions:\n"
+                f"1. Think about what from our current conversation context is relevant to this intent.\n"
+                f"2. Compose a complete, meaningful message FROM you ({self.name}) TO {target_name}. "
+                f"Write it as yourself — introduce yourself if appropriate, include relevant context, be concise.\n"
+                f"3. Send the message by running this bash command:\n"
+                f"   python tools/hchat_send.py --to {target_name} --from {self.name} --text \"<your composed message>\"\n"
+                f"4. Report back to the user: what you sent and a brief summary of why.\n\n"
+                f"Do NOT relay the user's words literally. Compose the message yourself.\n\n"
+                f"IMPORTANT: When you later receive a message starting with '[hchat reply from ...]', "
+                f"just report the reply content to the user. Do NOT send another hchat message back — "
+                f"the conversation ends there."
+            )
+            await update.message.reply_text(f"💬 Composing Hchat message to {target_name}...")
 
-        await update.message.reply_text(f"💬 Composing Hchat message to {target_name}...")
         await self.enqueue_api_text(
             self_prompt,
             source="bridge:hchat",
