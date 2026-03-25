@@ -7,6 +7,9 @@ def get_backend_class(engine_name: str):
     elif engine_name == "openrouter-api":
         from adapters.openrouter_api import OpenRouterAdapter
         return OpenRouterAdapter
+    elif engine_name == "deepseek-api":
+        from adapters.deepseek_api import DeepSeekAdapter
+        return DeepSeekAdapter
     elif engine_name == "claude-cli":
         from adapters.claude_cli import ClaudeCLIAdapter
         return ClaudeCLIAdapter

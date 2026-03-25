@@ -42,6 +42,20 @@ BACKEND_REGISTRY: dict[str, dict] = {
         "default_effort": "medium",
         "secret_keys": ["codex-cli_key"],
     },
+    "deepseek-api": {
+        "label": "deepseek",
+        "models": [
+            "deepseek-reasoner",
+            "deepseek-chat",
+        ],
+        "default_model": "deepseek-reasoner",
+        "efforts": [],
+        "default_effort": None,
+        "secret_keys": [
+            "deepseek-api_key",
+            "deepseek_api_key",
+        ],
+    },
     "openrouter-api": {
         "label": "openrouter",
         "models": [
