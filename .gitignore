@@ -136,3 +136,8 @@ flow/evaluation_kb/workflow_scores/
 # Gitwatch sentinel runtime state
 scripts/.gitwatch_state.json
 scripts/gitwatch_report.md
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
