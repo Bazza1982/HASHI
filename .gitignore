@@ -132,3 +132,7 @@ flow/_trigger_logs/
 flow/_trigger_registry.jsonl
 flow/evaluation_kb/improvements/
 flow/evaluation_kb/workflow_scores/
+
+# Gitwatch sentinel runtime state
+scripts/.gitwatch_state.json
+scripts/gitwatch_report.md
