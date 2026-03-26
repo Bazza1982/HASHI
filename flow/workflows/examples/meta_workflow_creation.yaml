@@ -1,22 +1,45 @@
 # HASHI Flow — Meta-Workflow
 # "工作流创建工作流"
 # 这是整个系统最核心的工作流：用来动态创建任何新的工作流
-# 版本: 1.0.0
+# 版本: 1.4.0
 
 workflow:
   id: meta-workflow-creation
   name: "工作流创建工作流"
-  version: "1.0.0"
+  version: "1.4.0"
   description: |
     接收用户的自然语言需求，自动设计并创建完整的工作流配置。
     这是 HASHI Flow 的元工作流，用于 bootstrap 任何其他工作流。
+    v1.3：pre-flight 后完全自动，异步改进确认，candidate 发布机制
   tags: [meta, system, workflow-creation]
 
 meta:
   created_by: human
   created_at: "2026-03-26T06:00:00Z"
+  previous_version: "1.2.0"
   improvement_count: 0
   source_prompt: "系统核心工作流，手动创建"
+  # trace_id 和 parent_run_id 由 flow_runner 在运行时自动生成并写入 events
+
+changelog:
+  - version: "1.0.0"
+    date: "2026-03-26"
+    changes: "初始版本：analyze → design → create_files → validate"
+  - version: "1.2.0"
+    date: "2026-03-26"
+    changes: "新增 evaluate/apply_improvement/human_approval/publish 步骤"
+  - version: "1.3.0"
+    date: "2026-03-26"
+    changes: |
+      修复 13 个审查问题：
+      - 删除 human_approval 阻塞步骤，改为异步 HChat 通知
+      - 删除 quality_requirement 冗余问题
+      - Orchestrator 改为 flow-runner（akane 是 Human Interface Agent）
+      - 所有 prompt 改为质量优先（默认 Opus，简单任务降级 Sonnet）
+      - publish 改为 candidate 机制（不直接覆盖自身）
+      - 删除 self_improvement_score（Evaluator 不给自己打分）
+      - success_criteria 改用 evaluation_kb 历史查询
+      - Designer/Validator 参照实际 schema 文件
 
 # =============================================================================
 # Pre-flight：在设计工作流之前，收集必要信息
@@ -32,22 +55,15 @@ pre_flight:
       required: true
       type: text
 
-    - key: quality_requirement
-      question: "质量要求如何？"
-      required: false
-      type: choice
-      choices: ["标准（速度优先）", "高质量（质量优先）", "极致质量（不计时间）"]
-
-    - key: max_interventions
-      question: "你希望在过程中被打扰几次？（0=完全自动，1=只在开始前，2+=允许中途问我）"
-      required: false
-      type: choice
-      choices: ["0", "1", "2", "3+"]
-
     - key: source_files
       question: "有需要处理的输入文件吗？如有，请提供路径。"
       required: false
       type: text
+
+  # 以下为系统默认值，不向用户提问
+  defaults:
+    quality_requirement: "高质量（质量优先）"
+    max_interventions: 0  # pre-flight 后完全自动
 
 # =============================================================================
 # Agent 定义
@@ -55,7 +71,8 @@ pre_flight:
 
 agents:
   orchestrator:
-    id: akane  # 使用小茜作为 Orchestrator
+    id: flow-runner  # flow_runner 引擎本身作为 orchestrator
+    human_interface: akane  # akane 负责用户沟通
 
   workers:
     - id: analyst_01
@@ -63,7 +80,7 @@ agents:
       agent_md: "flow/agents/analyst/AGENT.md"
       workspace: "flow/runs/{run_id}/workers/analyst_01"
       backend: claude-cli
-      model: claude-sonnet-4-6  # 分析任务用 sonnet 即可
+      model: claude-opus-4-6  # 需求分析需要深度理解
       controllable_by: [orchestrator, human]
 
     - id: designer_01
@@ -79,7 +96,15 @@ agents:
       agent_md: "flow/agents/validator/AGENT.md"
       workspace: "flow/runs/{run_id}/workers/validator_01"
       backend: claude-cli
-      model: claude-sonnet-4-6
+      model: claude-sonnet-4-6  # 格式检查 Sonnet 足够
+      controllable_by: [orchestrator, human]
+
+    - id: evaluator_01
+      role: "评估与改进引擎"
+      agent_md: "flow/agents/evaluator/AGENT.md"
+      workspace: "flow/runs/{run_id}/workers/evaluator_01"
+      backend: claude-cli
+      model: claude-opus-4-6  # 评估需要高质量判断
       controllable_by: [orchestrator, human]
 
     - id: debug_01
@@ -87,49 +112,51 @@ agents:
       agent_md: "flow/agents/debug/AGENT.md"
       workspace: "flow/runs/{run_id}/workers/debug_01"
       backend: claude-cli
-      model: claude-sonnet-4-6
+      model: claude-sonnet-4-6  # 调试用 Sonnet 足够
       controllable_by: [orchestrator]
 
 # =============================================================================
-# 执行步骤
+# 执行步骤（pre-flight 后完全自动，无人工阻塞点）
 # =============================================================================
 
 steps:
-  # 步骤 1：分析需求
+  # 步骤 1：分析需求（完成后可能暂停等待 human 确认关键领域问题）
   - id: analyze_requirements
     name: "分析任务需求"
     agent: analyst_01
     depends: []
+    wait_for_human: true  # 如果有需确认问题，自动暂停等待 human 回答
     input:
       params:
         task_description: "{pre_flight.task_description}"
-        quality_requirement: "{pre_flight.quality_requirement}"
         source_files: "{pre_flight.source_files}"
     prompt: |
       分析以下任务需求，输出 task_analysis.json：
 
       任务描述：{pre_flight.task_description}
-      质量要求：{pre_flight.quality_requirement}
       输入文件：{pre_flight.source_files}
 
       请输出：
       1. 任务类型（translation/research/writing/analysis/other）
-      2. 建议的步骤分解（5-10步）
+      2. 建议的步骤分解（3-6步，简洁为主）
       3. 建议的 agent 角色（2-5个）
-      4. 每个步骤推荐的 model
-      5. 估计的总耗时
+      4. 每个步骤推荐的 model（默认 Opus 确保质量，仅明确简单的格式化/校对任务用 Sonnet）
+      5. 估计的总耗时和成本区间（美元）
       6. 可能的风险点
-      7. pre-flight 需要向用户确认的额外问题（如果有）
+      7. clarification_questions：需要向用户确认的领域知识问题列表（仅限系统无法自主推断的）
+         ⚠️ 这个字段非常重要：任何影响设计方向的未知信息都必须列为问题。
+         例如：适用的法规/准则、目标国家/地区、专有名词译法、目标受众、输出格式偏好等。
+         如果任务描述已经足够清晰无需确认，输出空列表 []。
 
-      严格输出 JSON 格式。
+      严格输出 JSON 格式，clarification_questions 必须是字符串列表。
     output:
       artifacts:
         - key: task_analysis
           path: task_analysis.json
           type: json
-    timeout_seconds: 120
+    timeout_seconds: 180
 
-  # 步骤 2：设计工作流
+  # 步骤 2：设计工作流（参照知识库 + schema）
   - id: design_workflow
     name: "设计工作流 YAML"
     agent: designer_01
@@ -138,24 +165,33 @@ steps:
       from_artifacts: [task_analysis]
       params:
         task_description: "{pre_flight.task_description}"
-        max_interventions: "{pre_flight.max_interventions}"
         knowledge_base_path: "flow/evaluation_kb/"
+        workflow_schema_path: "flow/workflows/schema/workflow_schema.yaml"
     prompt: |
       基于以下分析结果，设计完整的工作流配置：
 
       任务需求：{pre_flight.task_description}
       任务分析：[见 task_analysis.json]
-      最大人工介入次数：{pre_flight.max_interventions}
+
+      ⚠️ 设计前必读：
+      - 参阅 flow/workflows/schema/workflow_schema.yaml，确保 YAML 严格符合 schema
+      - 参阅 flow/evaluation_kb/patterns/common_failures.yaml，避免历史已知失败模式
+      - 参阅 flow/evaluation_kb/patterns/model_performance.yaml，选择合适 model
+      - 参阅 flow/evaluation_kb/improvements/applied.yaml，采纳已验证的改进做法
+      - 检查 flow/evaluation_kb/improvements/pending.yaml，如有用户已批准的改进，纳入设计
 
       请生成 design_package.json，内容包含：
-      1. `workflow_yaml`：完整的 workflow YAML 字符串
-      2. `workers`：worker 列表，每个包含 id、agent_md_content（100字以内）、model
-      3. `dag_diagram`：ASCII 格式的 DAG（单行）
-      4. `summary`：步骤数、worker 数、预计耗时（分钟）
+      1. `workflow_yaml`：完整的 workflow YAML 字符串（严格符合 schema）
+      2. `design_rationale`：设计决策记录（每个关键选择的原因，可审计）
+      3. `workers`：worker 列表，每个包含 id、agent_md_content（100字以内）、model
+      4. `dag_diagram`：ASCII 格式的 DAG
+      5. `summary`：步骤数、worker 数、预计耗时（分钟）、预计成本（美元）
+      6. `kb_references`：本设计参考了哪些知识库条目（traceability）
 
       设计原则：
+      - 质量优先：默认使用 Opus，仅简单的格式化/校对任务降级到 Sonnet
       - 步骤控制在 3-6 个（简洁为主）
-      - 最小化人工介入（目标：{pre_flight.max_interventions} 次）
+      - pre-flight 后完全自动（max_interventions = 0）
       - 错误处理：debug_agent: debug_01, max_attempts: 3
 
       最后输出结果 JSON：
@@ -184,7 +220,7 @@ steps:
       3. 各 worker 的初始 config.json
       4. 工作空间目录结构
 
-      完成后输出 creation_report.json，列出所有创建的文件。
+      完成后输出 creation_report.json，列出所有创建的文件及其 checksum。
     output:
       artifacts:
         - key: creation_report
@@ -192,29 +228,39 @@ steps:
           type: json
     timeout_seconds: 300
 
-  # 步骤 4：验证工作流
+  # 步骤 4：双层验证
   - id: validate_workflow
     name: "验证工作流可执行性"
     agent: validator_01
     depends: [create_workflow_files]
     input:
       from_artifacts: [design_package, creation_report]
+      params:
+        schema_path: "flow/workflows/schema/workflow_schema.yaml"
     prompt: |
-      验证生成的工作流配置：
+      对生成的工作流进行双层验证：
 
-      检查项目：
-      1. workflow.yaml 语法正确，符合 schema
-      2. 所有步骤的依赖关系无循环
+      **第一层（格式验证）**：
+      1. workflow.yaml 语法正确，严格符合 flow/workflows/schema/workflow_schema.yaml
+      2. 所有步骤的依赖关系无循环（用拓扑排序验证）
       3. 所有引用的 agent_id 都有对应的 worker 定义
       4. 所有 AGENT.md 都存在且内容完整
-      5. pre_flight 覆盖了所有可能的人工输入点
-      6. 成功标准可被验证
+      5. 所有 timeout 值合理（步骤类型 × 内容规模 × model 速度）
+
+      **第二层（设计合理性验证）**：
+      6. pre_flight 只问系统无法自主推断的问题（无冗余提问）
+      7. 步骤划分符合单一职责原则
+      8. model 选择与任务复杂度匹配
+      9. success_criteria 可被客观验证
+      10. 预估成本在合理范围内
 
       输出 validation_report.json：
       {
         "valid": true/false,
-        "issues": [...],
+        "layer1_issues": [...],
+        "layer2_issues": [...],
         "warnings": [...],
+        "design_quality_score": 0-10,
         "recommendation": "可以执行" / "建议修改后执行"
       }
     output:
@@ -228,6 +274,149 @@ steps:
         - "validation_report.valid == true"
     timeout_seconds: 180
 
+  # 步骤 5：评估 + 生成改进建议
+  - id: evaluate_and_improve
+    name: "评估设计质量并生成改进建议"
+    agent: evaluator_01
+    depends: [validate_workflow]
+    input:
+      from_artifacts: [task_analysis, design_package, validation_report]
+      params:
+        kb_path: "flow/evaluation_kb/"
+    prompt: |
+      综合评估本次工作流设计的质量，并生成可落地的改进建议。
+
+      读取以下 artifacts：
+      - task_analysis.json（需求分析结果）
+      - design_package.json（设计决策及 rationale）
+      - validation_report.json（双层验证结果）
+
+      同时参阅：
+      - flow/evaluation_kb/workflow_scores/scores.jsonl（历史评分）
+      - flow/evaluation_kb/improvements/pending.yaml（上次建议的采纳情况）
+      - flow/evaluation_kb/improvements/applied.yaml（已验证的改进）
+
+      计算 improvement_adoption_rate：上次 pending.yaml 中有多少条已被 designer 采纳
+      （对比 pending.yaml 和 design_package.kb_references）
+
+      输出 evaluation_report.json：
+      {
+        "workflow_id": "...",
+        "run_id": "...",
+        "timestamp": "...",
+        "metrics": {
+          "design_quality_score": 0-10,
+          "validation_score": 0-10,
+          "estimated_cost_usd": ...,
+          "improvement_adoption_rate": 0.0-1.0
+        },
+        "patterns_detected": [...],
+        "improvements": [
+          {
+            "id": "imp-{run_id}-001",
+            "class": "A/B/C",
+            "target": "...",
+            "description": "...",
+            "evidence": "...",
+            "confidence": 0.0-1.0,
+            "expected_benefit": "..."
+          }
+        ],
+        "knowledge_updates": [...]
+      }
+
+      改进分级标准：
+      - A 类（自动应用）：低风险，仅修改 prompt 文字或 timeout 值
+      - B 类（需用户批准）：修改步骤结构或 agent 角色
+      - C 类（需用户批准）：修改核心设计逻辑或引入新 agent
+    output:
+      artifacts:
+        - key: evaluation_report
+          path: evaluation_report.json
+          type: json
+    timeout_seconds: 300
+
+  # 步骤 6：生成 vNext candidate（自动应用 A 类，B/C 类记录 pending）
+  - id: apply_improvement
+    name: "生成 vNext candidate 工作流"
+    agent: evaluator_01
+    depends: [evaluate_and_improve]
+    input:
+      from_artifacts: [design_package, evaluation_report]
+      params:
+        kb_improvements_path: "flow/evaluation_kb/improvements/"
+        version_history_dir: "flow/evaluation_kb/workflow_versions/"
+    prompt: |
+      基于 evaluation_report.json 中的改进建议，生成下一版本的 candidate 工作流。
+
+      步骤：
+      1. 读取 design_package.json 中的 workflow_yaml（当前版本）
+      2. 自动应用所有 class=A 的改进建议（低风险，无需确认）
+      3. 确定新版本号（semantic versioning）：
+         - 只有 A 类改进 → patch（x.y.z → x.y.z+1）
+         - 有 B/C 类建议（记录但不应用） → 版本号不变，仅标注 pending
+      4. 生成 unified diff（当前版本 vs vNext）
+      5. 将 A 类改进记录写入 flow/evaluation_kb/improvements/applied.yaml
+      6. 将 B/C 类改进写入 flow/evaluation_kb/improvements/pending.yaml（异步等待批准）
+      7. 备份当前版本到 flow/evaluation_kb/workflow_versions/{workflow_id}/v{current}.yaml
+
+      输出 improvement_package.json：
+      {
+        "current_version": "...",
+        "next_version": "...",
+        "a_class_applied": [...],
+        "bc_class_pending": [...],
+        "changes_summary": [...],
+        "diff": "..."
+      }
+
+      将 vNext YAML 写入 candidate 文件（不覆盖原文件）：
+      flow/workflows/library/{workflow_id}_candidate.yaml
+
+      如果没有任何 A 类改进，仍然输出 improvement_package.json 记录评估结果，
+      但不生成 candidate 文件。
+    output:
+      artifacts:
+        - key: improvement_package
+          path: improvement_package.json
+          type: json
+        - key: candidate_workflow
+          path: "output/{workflow_id}_candidate.yaml"
+          type: file
+    timeout_seconds: 300
+
+  # 步骤 7：异步通知（非阻塞，自动完成）
+  - id: notify_completion
+    name: "通知用户并记录 pending 改进"
+    agent: evaluator_01
+    depends: [apply_improvement]
+    input:
+      from_artifacts: [improvement_package, evaluation_report]
+    prompt: |
+      工作流创建完毕，通过 HChat 向 akane 发送完成通知（非阻塞，不等待回复）。
+
+      通知内容应包含：
+      1. 新工作流的基本信息（ID、步骤数、预计耗时/成本）
+      2. 设计质量评分
+      3. 已自动应用的 A 类改进（如有）
+      4. 待批准的 B/C 类改进数量（如有，提示用户查看 pending.yaml）
+      5. candidate 文件位置（如有）
+
+      输出 notification_report.json：
+      {
+        "notified": true,
+        "notification_text": "...",
+        "pending_improvements_count": 0
+      }
+
+      注意：这是纯通知步骤，不等待回复，不阻塞工作流。
+    output:
+      artifacts:
+        - key: notification_report
+          path: notification_report.json
+          type: json
+    timeout_seconds: 120
+
 # =============================================================================
 # 错误处理
 # =============================================================================
@@ -240,7 +429,8 @@ error_handling:
     attempt_2: "切换到更强的 model (opus) 重试"
     attempt_3: "简化设计要求，减少步骤数量重试"
   on_max_exceeded:
-    action: notify_orchestrator
+    action: notify_human_interface
+    target: akane
     message: "工作流设计失败（已尝试3次），步骤：{failed_step_id}，错误：{error}"
 
 # =============================================================================
@@ -250,8 +440,11 @@ error_handling:
 success_criteria:
   - "步骤 validate_workflow 状态为 completed"
   - "validation_report.valid == true"
+  - "validation_report.design_quality_score >= 6"
   - "工作流 YAML 文件已创建"
   - "所有 worker AGENT.md 已创建"
+  - "evaluation_report 已生成"
+  - "improvement_package 已生成（至少记录了本次评估结果）"
 
 # =============================================================================
 # 输出
@@ -259,7 +452,7 @@ success_criteria:
 
 output:
   type: message
-  notify_orchestrator: true
+  notify_agent: akane  # 通知 Human Interface Agent
   message_template: |
     ✅ 工作流创建完成！
 
@@ -267,19 +460,58 @@ output:
     📁 文件位置：{new_workflow.yaml_path}
     🤖 Agent 数量：{new_workflow.agent_count}
     📊 步骤数量：{new_workflow.step_count}
-    ⏱️ 预计耗时：{new_workflow.estimated_duration}
-    👤 人工介入：{new_workflow.human_interventions} 次
+    📈 设计质量评分：{evaluation_report.metrics.design_quality_score}/10
+    💰 预计成本：${evaluation_report.metrics.estimated_cost_usd}
 
-    是否现在执行新工作流？
+    🔄 Candidate：{improvement_package.candidate_path or "无改进需要"}
+    📝 待审改进：{improvement_package.bc_class_pending_count or 0} 条
 
 # =============================================================================
-# Evaluator 配置
+# Evaluator 配置（持续改进闭环）
 # =============================================================================
 
 evaluation:
   enabled: true
   metrics:
-    - human_interventions
     - total_duration
-    - design_quality_score  # 由 Evaluator 根据后续工作流执行效果反向评分
-  improvement_threshold: 5  # 每5次运行后尝试改进
+    - design_quality_score       # Validator 双层验证评分
+    - model_cost_estimate        # 所有 worker 的 API 成本估算
+    - error_retries              # 触发 debug_agent 的次数
+    - improvement_adoption_rate  # 上次 Evaluator 建议有多少被 Designer 采纳
+  improvement_threshold: 2       # 每2次运行就触发改进尝试
+  auto_apply: true               # A 类改进自动应用到 candidate
+
+# =============================================================================
+# Candidate 发布机制（由 flow_runner 在下次启动时自动处理）
+# =============================================================================
+#
+# flow_runner 启动时检查：
+# 1. 是否存在 {workflow_id}_candidate.yaml？
+# 2. 如果存在，加载 candidate 而非原文件
+# 3. 如果 candidate run 成功 → 自动晋升为正式版本
+# 4. 如果 candidate run 失败 → 删除 candidate，回退到上一版
+# 5. 晋升/回退均记录到 evaluation_kb/workflow_versions/
+
+# =============================================================================
+# 实时通知与控制机制 (v1.4.0)
+# =============================================================================
+#
+# 【事件驱动通知】
+# flow_runner 在每个步骤的开始/完成/失败/跳过时，自动通过 HChat 通知
+# human_interface agent（即 akane）。不再依赖轮询式 watchdog。
+# 步骤可通过 notify: false 关闭通知（减少噪音）。
+#
+# 【暂停控制】
+# 外部可随时创建 flow/runs/{run_id}/_pause 文件来暂停工作流。
+# 当前步骤会执行完毕，下一步开始前进入等待。
+# 删除 _pause 文件即可恢复。文件内容作为暂停原因记录。
+#
+# 【紧急停止】
+# 创建 flow/runs/{run_id}/_stop 文件立即终止工作流。
+# 当前步骤执行完毕后不再继续。文件内容作为停止原因记录。
+# 启动时 HChat 通知中会包含信号文件的完整路径。
+#
+# 使用方式（human 通过 akane 操作）：
+#   暂停: touch flow/runs/{run_id}/_pause
+#   恢复: rm flow/runs/{run_id}/_pause
+#   停止: echo "原因" > flow/runs/{run_id}/_stop

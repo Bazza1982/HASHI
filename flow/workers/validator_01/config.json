@@ -1,0 +1,74 @@
+{
+  "worker_id": "validator_01",
+  "role": "Response Validator",
+  "version": "1.0.0",
+  "backend": {
+    "system": "claude-cli",
+    "model": "claude-sonnet-4-6",
+    "api_timeout_seconds": 90,
+    "temperature": 0.3,
+    "max_tokens": 2000
+  },
+  "execution": {
+    "timeout_seconds": 90,
+    "strategy": "sequential",
+    "depends_on": ["step_02_infer_context", "step_04_collect_responses"],
+    "retry_on_failure": true,
+    "max_retries": 3,
+    "notification_enabled": false
+  },
+  "output": {
+    "artifacts": [
+      {
+        "key": "pre_flight_data",
+        "path": "pre_flight_data.json",
+        "type": "json",
+        "required": true
+      }
+    ]
+  },
+  "validation": {
+    "check_required_fields": true,
+    "validate_format": true,
+    "validate_value_ranges": true,
+    "detect_conflicts": true,
+    "merge_inferred_with_user": true,
+    "normalize_values": true,
+    "track_data_sources": true
+  },
+  "conflict_resolution": {
+    "strategy": "user_provided_wins",
+    "flag_conflicts_as_warning": true,
+    "allow_proceed_with_warnings": true,
+    "strict_mode": false
+  },
+  "data_quality": {
+    "quality_level_enum": ["fast", "balanced", "high"],
+    "complexity_score_range": [0, 10],
+    "confidence_score_range": [0.0, 1.0],
+    "domain_enum": ["business", "legal", "technical", "creative", "data", "other"]
+  },
+  "error_handling": {
+    "on_failure": "escalate_to_debug",
+    "debug_agent": "debug_01",
+    "recovery_strategy": "loosen_validation"
+  },
+  "environment": {
+    "WORKER_TYPE": "validator",
+    "VALIDATION": "enabled",
+    "DATA_MERGING": "enabled",
+    "CONFLICT_DETECTION": "enabled"
+  },
+  "quality_gates": {
+    "validate_output_schema": true,
+    "validate_status_values": true,
+    "validate_data_sources_exist": true,
+    "validate_ready_for_workflow_flag": true,
+    "require_all_metadata": false
+  },
+  "metadata": {
+    "created_date": "2026-03-27T07:44:38Z",
+    "created_by": "designer_01",
+    "workflow_id": "pre-flight-intelligent-questioner"
+  }
+}

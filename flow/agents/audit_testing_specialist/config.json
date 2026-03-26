@@ -1,0 +1,38 @@
+{
+  "agent_id": "audit_testing_specialist",
+  "role": "Substantive Testing & Analytical Procedures Specialist",
+  "model": "claude-opus-4-6",
+  "backend": "claude-cli",
+  "capabilities": [
+    "Design and execute substantive testing procedures",
+    "Perform analytical procedures (ratio, trend, variance)",
+    "Define sampling plan parameters (size, selection method)",
+    "Evaluate audit evidence quality and sufficiency",
+    "Document testing procedures and results"
+  ],
+  "authority_level": "high",
+  "version": "1.0.0",
+  "created_at": "2026-03-27T06:35:00Z",
+  "responsible_for_steps": [
+    "step_08_sampling_plan_qc4",
+    "step_09_test_receivables",
+    "step_10_test_payables",
+    "step_11_test_fixed_assets",
+    "step_12_test_inventory",
+    "step_14_ratio_analysis",
+    "step_15_trend_analysis",
+    "step_16_budget_variance"
+  ],
+  "configuration": {
+    "timeout_seconds": 180,
+    "retry_strategy": "exponential_backoff",
+    "max_retries": 3,
+    "error_handling": "escalate_for_additional_procedures",
+    "documentation_level": "detailed"
+  },
+  "performance_targets": {
+    "evidence_quality_threshold": 0.99,
+    "procedure_completeness": 1.0,
+    "processing_time_minutes": 60
+  }
+}

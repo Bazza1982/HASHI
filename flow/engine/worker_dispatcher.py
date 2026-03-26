@@ -213,11 +213,16 @@ class WorkerDispatcher:
             if parsed:
                 parsed["ts"] = utc_now()
                 parsed["raw_output_preview"] = stdout[:500]
-                # 展开 artifacts 相对路径为绝对路径
-                parsed["artifacts_produced"] = {
-                    k: str(worker_dir / v) if not Path(v).is_absolute() else v
-                    for k, v in parsed.get("artifacts_produced", {}).items()
-                }
+                # 展开 artifacts 相对路径为绝对路径（支持单文件和文件列表）
+                resolved = {}
+                for k, v in parsed.get("artifacts_produced", {}).items():
+                    if isinstance(v, list):
+                        resolved[k] = [str(worker_dir / f) if not Path(f).is_absolute() else f for f in v]
+                    elif isinstance(v, str):
+                        resolved[k] = str(worker_dir / v) if not Path(v).is_absolute() else v
+                    else:
+                        resolved[k] = v
+                parsed["artifacts_produced"] = resolved
                 return parsed
             else:
                 # 没有找到结构化 JSON — 视为完成但无工件
@@ -230,7 +235,17 @@ class WorkerDispatcher:
                     "ts": utc_now(),
                 }
 
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as e:
+            # 超时时也保存已有输出到日志
+            try:
+                partial_stdout = (e.stdout or "") if hasattr(e, "stdout") else ""
+                partial_stderr = (e.stderr or "") if hasattr(e, "stderr") else ""
+                with open(log_file, "w", encoding="utf-8") as f:
+                    f.write(f"=== TIMEOUT after {timeout_seconds}s ===\n\n"
+                            f"=== STDOUT (partial) ===\n{partial_stdout}\n\n"
+                            f"=== STDERR (partial) ===\n{partial_stderr}\n")
+            except Exception:
+                pass
             return {
                 "status": "failed",
                 "error_type": "timeout",

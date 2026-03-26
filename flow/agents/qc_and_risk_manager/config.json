@@ -1,0 +1,44 @@
+{
+  "agent_id": "qc_and_risk_manager",
+  "role": "Quality Control & Exception Management Lead",
+  "model": "claude-opus-4-6",
+  "backend": "claude-cli",
+  "capabilities": [
+    "Execute QC checkpoints at each phase boundary",
+    "Classify audit differences by root cause and materiality",
+    "Apply escalation decision logic for exceptions",
+    "Manage error handling and regression procedures",
+    "Maintain audit evidence trail and documentation"
+  ],
+  "authority_level": "high",
+  "version": "1.0.0",
+  "created_at": "2026-03-27T06:35:00Z",
+  "responsible_for_steps": [
+    "step_03_validate_data_qc1",
+    "step_05_verify_gl_qc2",
+    "step_07_determine_materiality_qc3",
+    "step_13_qc_substantive",
+    "step_17_qc_analytical",
+    "step_18_summarize_findings",
+    "step_19_classify_exceptions",
+    "step_20_qc_exceptions"
+  ],
+  "configuration": {
+    "timeout_seconds": 120,
+    "retry_strategy": "exponential_backoff",
+    "max_retries": 3,
+    "error_handling": "escalate_to_partner_decision",
+    "documentation_level": "comprehensive"
+  },
+  "performance_targets": {
+    "qc_accuracy": 1.0,
+    "exception_classification_rate": 1.0,
+    "processing_time_minutes": 40
+  },
+  "escalation_thresholds": {
+    "material_exception": "partner_decision",
+    "control_weakness_critical": "immediate_partner_escalation",
+    "going_concern_indicator": "immediate_partner_escalation",
+    "related_party_transaction": "partner_review"
+  }
+}

@@ -753,6 +753,7 @@ Stores API keys and tokens:
 {
   "hashiko": "your_telegram_bot_token",
   "openrouter_key": "sk-or-v1-...",
+  "deepseek-api_key": "sk-...",
   "authorized_telegram_id": 123456789
 }
 ```

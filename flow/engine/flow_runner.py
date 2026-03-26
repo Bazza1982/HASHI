@@ -4,6 +4,7 @@ HASHI Flow — Flow Runner
 """
 
 import json
+import uuid
 import yaml
 import time
 import logging
@@ -49,6 +50,7 @@ class FlowRunner:
     def __init__(self, workflow_path: str, run_id: Optional[str] = None):
         self.workflow_path = Path(workflow_path)
         self.run_id = run_id or self._generate_run_id()
+        self.trace_id = str(uuid.uuid4())
         self.workflow = self._load_workflow()
         self.state = TaskState(self.run_id)
         self.artifacts = ArtifactStore(self.run_id)
@@ -56,7 +58,16 @@ class FlowRunner:
         self._paused = False
         self._aborted = False
         self._pre_flight_data: dict = {}
+        self._step_results: dict = {}  # step_id → result dict (for skip_if evaluation)
         self.dispatcher = WorkerDispatcher(self.run_id)
+        # 信号文件路径（外部进程可通过创建这些文件来控制工作流）
+        self._run_dir = Path(f"flow/runs/{self.run_id}")
+        self._pause_signal = self._run_dir / "_pause"
+        self._stop_signal = self._run_dir / "_stop"
+        # human_interface agent（事件驱动通知的接收方）
+        self._human_interface = (
+            self.workflow.get("agents", {}).get("orchestrator", {}).get("human_interface")
+        )
 
     # =========================================================================
     # 公开接口
@@ -72,6 +83,9 @@ class FlowRunner:
         self.logger.info(f"[FlowRunner] 启动工作流: {self.workflow['workflow']['id']}, run_id={self.run_id}")
         self.state.set_workflow_status(WorkflowStatus.RUNNING)
 
+        total_steps = len(self.workflow.get("steps", []))
+        self._notify_human(f"🚀 工作流启动 | {total_steps} 个步骤 | run={self.run_id}\n暂停: touch {self._pause_signal}\n停止: touch {self._stop_signal}")
+
         try:
             self._emit_event("workflow_started", {"workflow_id": self.workflow["workflow"]["id"]})
             result = self._execute_dag()
@@ -79,45 +93,313 @@ class FlowRunner:
                 self.state.set_workflow_status(WorkflowStatus.COMPLETED)
                 self.logger.info(f"[FlowRunner] 工作流完成 ✅")
                 self._emit_event("workflow_completed", result)
+                self._notify_human(f"🎉 工作流完成 ✅ | 全部 {total_steps} 步成功")
             else:
                 self.state.set_workflow_status(WorkflowStatus.FAILED)
                 self.logger.error(f"[FlowRunner] 工作流失败 ❌: {result.get('error')}")
                 self._emit_event("workflow_failed", result)
+                error_type = result.get("error_type", "unknown")
+                self._notify_human(
+                    f"❌ 工作流失败 [{error_type}]\n"
+                    f"错误: {result.get('error', '未知错误')}\n"
+                    f"已完成: {result.get('completed_steps', [])}\n"
+                    f"失败: {result.get('failed_steps', [])}"
+                )
 
             # 自动触发 Evaluator
             self._run_evaluator()
+
+            # Candidate 晋升/回退
+            self._handle_candidate_result(result["success"])
+
             return result
 
         except Exception as e:
             self.logger.exception(f"[FlowRunner] 未预期错误")
             self.state.set_workflow_status(WorkflowStatus.FAILED)
+            # Orchestrator 自身故障 → 必须主动通知 human-facing agent
+            import traceback
+            tb = traceback.format_exc()
+            self._notify_human(
+                f"🚨🚨 ORCHESTRATOR 故障 🚨🚨\n"
+                f"flow_runner 自身发生未预期异常，工作流已终止。\n\n"
+                f"错误: {str(e)}\n"
+                f"Traceback:\n{tb[-500:]}\n\n"
+                f"Run: {self.run_id}\n"
+                f"已完成步骤: {list(self.state.get_full_status().get('steps', {}).keys())}\n"
+                f"⚠️ 这是基础设施级故障，需要人工检查代码。"
+            )
             return {"success": False, "error": str(e), "run_id": self.run_id}
 
-    def pause(self):
-        """暂停工作流（当前步骤完成后生效）"""
-        self._paused = True
-        self.state.set_workflow_status(WorkflowStatus.PAUSED)
-        self.logger.info("[FlowRunner] 工作流暂停请求已接收")
+    def pause(self, reason: str = ""):
+        """暂停工作流（当前步骤完成后生效）— 写信号文件，_check_signals 会读取"""
+        self._pause_signal.parent.mkdir(parents=True, exist_ok=True)
+        self._pause_signal.write_text(reason, encoding="utf-8")
+        self.logger.info(f"[FlowRunner] 暂停信号已写入: {self._pause_signal}")
 
     def resume(self):
-        """恢复暂停的工作流"""
-        self._paused = False
-        self.state.set_workflow_status(WorkflowStatus.RUNNING)
-        self.logger.info("[FlowRunner] 工作流已恢复")
+        """恢复暂停的工作流 — 删除信号文件，_check_signals 循环会自动检测"""
+        if self._pause_signal.exists():
+            self._pause_signal.unlink()
+        self.logger.info("[FlowRunner] 暂停信号已移除")
 
-    def abort(self):
-        """终止工作流"""
-        self._aborted = True
-        self.state.set_workflow_status(WorkflowStatus.ABORTED)
-        self.logger.info("[FlowRunner] 工作流已终止")
+    def abort(self, reason: str = ""):
+        """紧急停止工作流 — 写信号文件，_check_signals 会立即终止"""
+        self._stop_signal.parent.mkdir(parents=True, exist_ok=True)
+        self._stop_signal.write_text(reason, encoding="utf-8")
+        self.logger.info(f"[FlowRunner] 停止信号已写入: {self._stop_signal}")
 
     def get_status(self) -> dict:
         """获取当前工作流状态"""
         return self.state.get_full_status()
 
     # =========================================================================
+    # 信号控制（外部可通过文件系统触发暂停/停止）
+    # =========================================================================
+
+    def _check_signals(self) -> str:
+        """
+        检查外部信号文件，返回当前信号状态。
+        - _stop 文件存在 → 立即终止（硬停）
+        - _pause 文件存在 → 暂停，等待文件被删除后恢复
+        返回: "ok" | "stopped"
+        """
+        # 紧急停止：最高优先级
+        if self._stop_signal.exists():
+            self._aborted = True
+            self.state.set_workflow_status(WorkflowStatus.ABORTED)
+            reason = ""
+            try:
+                reason = self._stop_signal.read_text(encoding="utf-8").strip()
+            except Exception:
+                pass
+            self.logger.error(f"[Signal] 🛑 收到紧急停止信号" + (f": {reason}" if reason else ""))
+            self._notify_human(f"🛑 工作流已紧急停止。" + (f"\n原因: {reason}" if reason else ""))
+            return "stopped"
+
+        # 暂停：等待信号文件被删除
+        if self._pause_signal.exists():
+            self._paused = True
+            self.state.set_workflow_status(WorkflowStatus.PAUSED)
+            reason = ""
+            try:
+                reason = self._pause_signal.read_text(encoding="utf-8").strip()
+            except Exception:
+                pass
+            self.logger.info(f"[Signal] ⏸️ 收到暂停信号" + (f": {reason}" if reason else ""))
+            self._notify_human(f"⏸️ 工作流已暂停，等待恢复。删除 _pause 文件或调用 resume() 恢复。" + (f"\n原因: {reason}" if reason else ""))
+
+            while self._pause_signal.exists() and not self._stop_signal.exists():
+                time.sleep(2)
+
+            # 暂停期间可能收到停止信号
+            if self._stop_signal.exists():
+                return self._check_signals()
+
+            self._paused = False
+            self.state.set_workflow_status(WorkflowStatus.RUNNING)
+            self.logger.info("[Signal] ▶️ 暂停已解除，继续执行")
+            self._notify_human("▶️ 工作流已恢复，继续执行。")
+
+        return "ok"
+
+    def _notify_human(self, text: str):
+        """向 human_interface agent 发送实时通知"""
+        if not self._human_interface:
+            return
+        wf_id = self.workflow.get("workflow", {}).get("id", "?")
+        full_msg = f"[{wf_id}] {text}"
+        self._notify_via_hchat(self._human_interface, full_msg)
+
+    def _notify_step_event(self, step: dict, event: str, detail: str = "",
+                           result: dict = None):
+        """步骤事件通知 — 除非步骤声明 notify: false，否则通知 human_interface（含内容摘要）"""
+        if step.get("notify") is False:
+            return
+        msg = f"{event} | {step['id']}"
+        if detail:
+            msg += f" — {detail}"
+        # 步骤完成时附加 worker 产出摘要
+        if result and result.get("success") and result.get("result"):
+            summary = result["result"].get("summary", "")
+            if summary:
+                msg += f"\n📋 摘要: {str(summary)[:300]}"
+            artifacts = result["result"].get("artifacts_produced", {})
+            if artifacts:
+                artifact_names = [Path(v).name if isinstance(v, str) else f"{len(v)} files"
+                                  for v in artifacts.values()]
+                msg += f"\n📦 产出: {', '.join(artifact_names)}"
+        self._notify_human(msg)
+
+    def _handle_wait_for_human(self, step: dict, result: dict):
+        """
+        wait_for_human 机制：步骤完成后，读取产出中的 clarification_questions，
+        通过 HChat 发给 human_interface，然后自动暂停等待回复。
+        human 回答后写入 _human_response.json 并删除 _pause 文件恢复。
+        恢复后将回答合并到 _pre_flight_data 中供后续步骤使用。
+        """
+        if not step.get("wait_for_human"):
+            return
+
+        # 从步骤产出中提取需要确认的问题
+        questions = self._extract_questions(step, result)
+        if not questions:
+            self.logger.info(f"[WaitForHuman] {step['id']} 无需确认问题，继续执行")
+            return
+
+        # 写查询文件
+        query_file = self._run_dir / "_human_query.json"
+        response_file = self._run_dir / "_human_response.json"
+        query_data = {
+            "from_step": step["id"],
+            "questions": questions,
+            "response_file": str(response_file),
+            "instruction": "请回答以上问题，将答案写入 _human_response.json 后删除 _pause 文件恢复工作流。"
+        }
+        query_file.write_text(json.dumps(query_data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        # 通知 human_interface
+        q_text = "\n".join(f"  {i+1}. {q}" for i, q in enumerate(questions))
+        self._notify_human(
+            f"❓ 步骤 {step['id']} 需要确认以下问题：\n{q_text}\n\n"
+            f"请回答后写入 {response_file} 并删除 _pause 文件恢复。"
+        )
+
+        # 自动暂停
+        self._pause_signal.write_text(f"等待 human 回答来自 {step['id']} 的问题", encoding="utf-8")
+        self.logger.info(f"[WaitForHuman] 已暂停，等待 human 回答 {len(questions)} 个问题")
+
+        # _check_signals 会在下次循环中捕获暂停并等待
+        # 暂停解除后读取回答
+        # 注意：实际等待发生在 _execute_dag 的 _check_signals 调用中
+        # 这里我们设置一个标记，让 _check_signals 解除后读取 response
+        self._pending_human_response = response_file
+
+    def _extract_questions(self, step: dict, result: dict) -> list:
+        """从步骤产出的 artifact 中提取 clarification_questions"""
+        if not result.get("success") or not result.get("result"):
+            return []
+
+        artifacts = result["result"].get("artifacts_produced", {})
+        for key, path in artifacts.items():
+            try:
+                full_path = Path(f"flow/runs/{self.run_id}/workers/{step['agent']}") / path
+                if not full_path.exists():
+                    full_path = Path(f"flow/runs/{self.run_id}/workers") / path
+                if not full_path.exists():
+                    full_path = Path(path)
+                if full_path.exists() and full_path.suffix == ".json":
+                    data = json.loads(full_path.read_text(encoding="utf-8"))
+                    # 查找 clarification_questions 或 questions_for_human 字段
+                    questions = (
+                        data.get("clarification_questions")
+                        or data.get("questions_for_human")
+                        or data.get("questions")
+                        or []
+                    )
+                    if isinstance(questions, list) and questions:
+                        return questions
+            except Exception:
+                continue
+        return []
+
+    def _read_human_response(self):
+        """读取 human 的回答并合并到 pre_flight_data"""
+        response_file = getattr(self, "_pending_human_response", None)
+        if not response_file:
+            return
+        response_file = Path(response_file)
+        if response_file.exists():
+            try:
+                response = json.loads(response_file.read_text(encoding="utf-8"))
+                if isinstance(response, dict):
+                    self._pre_flight_data.update(response)
+                    self.logger.info(f"[WaitForHuman] 已读取 human 回答: {list(response.keys())}")
+                    self._notify_human(f"📝 已收到回答，合并 {len(response)} 个字段到上下文，继续执行。")
+            except Exception as e:
+                self.logger.warning(f"[WaitForHuman] 读取回答失败: {e}")
+        else:
+            self.logger.warning(f"[WaitForHuman] 回答文件不存在: {response_file}，以空回答继续")
+        self._pending_human_response = None
+
+    # =========================================================================
     # 内部执行逻辑
     # =========================================================================
+
+    def _should_skip(self, step: dict) -> bool:
+        """评估 skip_if 条件，决定是否跳过步骤"""
+        skip_if = step.get("skip_if")
+        if not skip_if:
+            return False
+
+        # 构建评估上下文：所有已产生的 artifact 数据 + pre_flight 数据
+        context = {"pre_flight": self._pre_flight_data}
+        for step_id, result in self._step_results.items():
+            if result.get("success") and result.get("result"):
+                # 尝试读取该步骤的 artifact 内容
+                artifacts = result["result"].get("artifacts_produced", {})
+                for key, path in artifacts.items():
+                    try:
+                        full_path = Path(f"flow/runs/{self.run_id}/workers") / path
+                        if not full_path.exists():
+                            full_path = Path(path)
+                        if full_path.exists() and full_path.suffix == ".json":
+                            context[key] = json.loads(full_path.read_text(encoding="utf-8"))
+                    except Exception:
+                        pass
+
+        # 简单条件评估（支持常见模式）
+        try:
+            condition = skip_if.strip()
+            # "X is empty" → 检查字段为空列表/None/空字符串
+            if " is empty" in condition:
+                parts = condition.split(" is empty")[0].strip()
+                # "improvement_package.pending_for_human is empty"
+                obj_parts = parts.split(".")
+                val = context
+                for p in obj_parts:
+                    if isinstance(val, dict):
+                        val = val.get(p)
+                    else:
+                        val = None
+                        break
+                field_empty = val is None or val == [] or val == "" or val == {}
+
+                # 处理 "X is empty and Y == 'Z'" 复合条件
+                if " and " in condition:
+                    rest = condition.split(" and ", 1)[1].strip()
+                    if "==" in rest:
+                        lhs, rhs = rest.split("==", 1)
+                        lhs_parts = lhs.strip().split(".")
+                        lhs_val = context
+                        for p in lhs_parts:
+                            if isinstance(lhs_val, dict):
+                                lhs_val = lhs_val.get(p)
+                            else:
+                                lhs_val = None
+                                break
+                        rhs_val = rhs.strip().strip("'\"")
+                        return field_empty and str(lhs_val) == rhs_val
+                return field_empty
+
+            # "X == 'value'" → 简单相等比较
+            if "==" in condition:
+                lhs, rhs = condition.split("==", 1)
+                lhs_parts = lhs.strip().split(".")
+                val = context
+                for p in lhs_parts:
+                    if isinstance(val, dict):
+                        val = val.get(p)
+                    else:
+                        val = None
+                        break
+                rhs_val = rhs.strip().strip("'\"")
+                return str(val) == rhs_val
+
+        except Exception as e:
+            self.logger.warning(f"[SkipIf] 条件评估失败: {skip_if} → {e}，不跳过")
+
+        return False
 
     def _execute_dag(self) -> dict:
         """解析 DAG，按依赖顺序执行所有步骤"""
@@ -130,13 +412,21 @@ class FlowRunner:
         for step in steps:
             self.state.set_step_status(step["id"], StepStatus.PENDING)
 
+        self.logger.info(f"[FlowRunner] trace_id={self.trace_id}")
+
+        self._pending_human_response = None  # 初始化
+
         while True:
+            # 检查外部信号（停止/暂停）
+            if self._check_signals() == "stopped":
+                return {"success": False, "error": "工作流已被紧急停止", "run_id": self.run_id}
+
+            # 暂停解除后，检查是否有待读取的 human 回答
+            if self._pending_human_response:
+                self._read_human_response()
+
             if self._aborted:
                 return {"success": False, "error": "工作流已被终止", "run_id": self.run_id}
-
-            # 等待暂停解除
-            while self._paused and not self._aborted:
-                time.sleep(2)
 
             # 找出所有可执行的步骤（依赖已完成且自身未执行）
             ready = []
@@ -171,22 +461,75 @@ class FlowRunner:
             # 先处理顺序步骤（第一个）
             if sequential_steps:
                 step = sequential_steps[0]
+                # 检查 skip_if 条件
+                if self._should_skip(step):
+                    self.logger.info(f"[Step] 跳过: {step['id']} (skip_if 条件满足)")
+                    self.state.set_step_status(step["id"], StepStatus.SKIPPED)
+                    self._step_results[step["id"]] = {"success": True, "skipped": True}
+                    completed.add(step["id"])
+                    self._notify_step_event(step, "⏭️ 跳过", "skip_if 条件满足")
+                    continue
+
+                # 步骤间缓冲：给 human 时间查看通知并发出暂停/停止指令
+                inter_step_wait = self.workflow.get("inter_step_wait_seconds", 30)
+                if completed and inter_step_wait > 0:
+                    self.logger.info(f"[FlowRunner] 步骤间等待 {inter_step_wait}s（可在此期间暂停/停止）")
+                    for _ in range(inter_step_wait):
+                        if self._check_signals() == "stopped":
+                            return {"success": False, "error": "工作流已被紧急停止", "run_id": self.run_id}
+                        time.sleep(1)
+
+                # 步骤执行前最终检查信号
+                if self._check_signals() == "stopped":
+                    return {"success": False, "error": "工作流已被紧急停止", "run_id": self.run_id}
+
+                self._notify_step_event(step, "🔄 开始", step.get("name", ""))
                 result = self._execute_step(step)
+                self._step_results[step["id"]] = result
                 if result["success"]:
                     completed.add(step["id"])
+                    done = len(completed)
+                    total = len(steps)
+                    self._notify_step_event(step, f"✅ 完成 ({done}/{total})", step.get("name", ""), result=result)
+                    # wait_for_human: 步骤完成后可能需要人工确认
+                    self._handle_wait_for_human(step, result)
                 else:
                     failed.add(step["id"])
-                    # 触发 debug agent
+                    error_type = result.get("error_type", "unknown")
+                    error_msg = str(result.get("error", ""))[:200]
+                    self._notify_step_event(step, "❌ 失败", f"[{error_type}] {error_msg}")
+
+                    # 基础设施故障（非任务级别）→ debug agent 无法修复，直接通知 human
+                    if error_type in ("unexpected", "cli_error", "cli_not_found", "timeout", "exception"):
+                        self._notify_human(
+                            f"🚨 基础设施故障 | {step['id']}\n"
+                            f"类型: {error_type}\n"
+                            f"错误: {error_msg}\n"
+                            f"⚠️ 这不是任务错误，debug agent 无法修复。需要人工介入。"
+                        )
+                        self._escalate_to_orchestrator(step, result)
+                        return {
+                            "success": False,
+                            "error": f"步骤 {step['id']} 基础设施故障 [{error_type}]: {error_msg}",
+                            "error_type": error_type,
+                            "run_id": self.run_id
+                        }
+
+                    # 任务级别失败 → 触发 debug agent
                     recovered = self._handle_failure(step, result)
                     if recovered:
                         failed.discard(step["id"])
+                        self._notify_step_event(step, "🔧 Debug 恢复成功", "重新执行中...")
                         # 重新执行
                         result = self._execute_step(step)
+                        self._step_results[step["id"]] = result
                         if result["success"]:
                             completed.add(step["id"])
+                            done = len(completed)
+                            self._notify_step_event(step, f"✅ 重试成功 ({done}/{total})", step.get("name", ""))
                         else:
                             failed.add(step["id"])
-                            # 上报 Orchestrator
+                            self._notify_step_event(step, "❌ 重试仍失败", str(result.get("error", ""))[:200])
                             self._escalate_to_orchestrator(step, result)
                             return {
                                 "success": False,
@@ -203,12 +546,18 @@ class FlowRunner:
 
             # 并行执行
             elif parallel_steps:
+                step_names = ", ".join(s["id"] for s in parallel_steps)
+                self._notify_human(f"🔄 并行执行 {len(parallel_steps)} 个步骤: {step_names}")
                 results = self._execute_parallel(parallel_steps)
                 for step, result in zip(parallel_steps, results):
                     if result["success"]:
                         completed.add(step["id"])
+                        done = len(completed)
+                        total = len(steps)
+                        self._notify_step_event(step, f"✅ 完成 ({done}/{total})", step.get("name", ""), result=result)
                     else:
                         failed.add(step["id"])
+                        self._notify_step_event(step, "❌ 失败", str(result.get("error", ""))[:200])
 
     def _execute_step(self, step: dict) -> dict:
         """执行单个步骤"""
@@ -245,21 +594,31 @@ class FlowRunner:
                 return {"success": True, "step_id": step_id, "result": result}
 
             else:
+                # dispatcher 返回 error_message，统一提取错误信息
+                error_msg = (result.get("error_message")
+                             or result.get("error")
+                             or "未知错误（worker 未返回错误信息）")
+                error_type = result.get("error_type", "unknown")
                 self.state.set_step_status(step_id, StepStatus.FAILED)
                 self._emit_event("step_failed", {
                     "step_id": step_id,
                     "agent_id": agent_id,
-                    "error": result.get("error"),
+                    "error": error_msg,
+                    "error_type": error_type,
                     "duration_seconds": duration
                 })
-                self.logger.error(f"[Step] 失败: {step_id} - {result.get('error')}")
-                return {"success": False, "step_id": step_id, "error": result.get("error"), "result": result}
+                self.logger.error(f"[Step] 失败: {step_id} [{error_type}] - {error_msg}")
+                return {
+                    "success": False, "step_id": step_id,
+                    "error": error_msg, "error_type": error_type,
+                    "result": result
+                }
 
         except Exception as e:
             duration = time.time() - start_time
             self.state.set_step_status(step_id, StepStatus.FAILED)
             self.logger.exception(f"[Step] 异常: {step_id}")
-            return {"success": False, "step_id": step_id, "error": str(e)}
+            return {"success": False, "step_id": step_id, "error": str(e), "error_type": "exception"}
 
     def _execute_parallel(self, steps: list) -> list:
         """并行执行多个步骤"""
@@ -267,7 +626,11 @@ class FlowRunner:
         threads = []
 
         def run_step(i, step):
-            results[i] = self._execute_step(step)
+            try:
+                results[i] = self._execute_step(step)
+            except Exception as e:
+                self.logger.exception(f"[Parallel] 线程异常: {step['id']}")
+                results[i] = {"success": False, "step_id": step["id"], "error": str(e)}
 
         for i, step in enumerate(steps):
             t = threading.Thread(target=run_step, args=(i, step))
@@ -276,6 +639,12 @@ class FlowRunner:
 
         for t in threads:
             t.join()
+
+        # 兜底：确保没有 None 结果
+        for i, step in enumerate(steps):
+            if results[i] is None:
+                self.logger.error(f"[Parallel] 步骤 {step['id']} 线程无返回值，标记为失败")
+                results[i] = {"success": False, "step_id": step["id"], "error": "线程无返回值"}
 
         return results
 
@@ -328,6 +697,37 @@ class FlowRunner:
             )
         except Exception as e:
             self.logger.warning(f"[Evaluator] 评估失败（非致命）: {e}")
+
+    def _handle_candidate_result(self, success: bool):
+        """Candidate 晋升/回退：成功则替换原文件，失败则删除 candidate"""
+        if not self._using_candidate or not self._candidate_path:
+            return
+
+        if success:
+            # 晋升：candidate → 正式版本
+            import shutil
+            backup_dir = Path("flow/evaluation_kb/workflow_versions")
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            wf_id = self.workflow.get("workflow", {}).get("id", "unknown")
+            version = self.workflow.get("workflow", {}).get("version", "unknown")
+            backup_path = backup_dir / wf_id / f"v{version}_promoted.yaml"
+            backup_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(self._candidate_path, backup_path)
+            shutil.copy2(self._candidate_path, self.workflow_path)
+            self._candidate_path.unlink()
+            self.logger.info(f"[Candidate] 晋升成功: {self._candidate_path.name} → {self.workflow_path.name}")
+            self._notify_via_hchat(
+                self.workflow.get("agents", {}).get("orchestrator", {}).get("human_interface", "akane"),
+                f"✅ Candidate 工作流晋升成功 (v{version})，已替换为正式版本。"
+            )
+        else:
+            # 回退：删除 candidate
+            self._candidate_path.unlink()
+            self.logger.warning(f"[Candidate] 运行失败，已删除 candidate: {self._candidate_path.name}")
+            self._notify_via_hchat(
+                self.workflow.get("agents", {}).get("orchestrator", {}).get("human_interface", "akane"),
+                f"❌ Candidate 工作流运行失败，已自动回退到上一版本。"
+            )
 
     def _escalate_to_orchestrator(self, step: dict, failure_result: dict):
         """向 Orchestrator 上报无法恢复的失败"""
@@ -457,6 +857,7 @@ class FlowRunner:
             "event_type": event_type,
             "workflow_id": self.workflow["workflow"]["id"],
             "run_id": self.run_id,
+            "trace_id": self.trace_id,
             "ts": utc_now(),
             "data": data
         }
@@ -470,6 +871,18 @@ class FlowRunner:
     # =========================================================================
 
     def _load_workflow(self) -> dict:
+        # Candidate 机制：如果存在 candidate 文件，优先加载
+        candidate_path = self.workflow_path.with_name(
+            self.workflow_path.stem + "_candidate" + self.workflow_path.suffix
+        )
+        if candidate_path.exists():
+            self.logger.info(f"[FlowRunner] 发现 candidate 文件: {candidate_path}，优先加载")
+            self._using_candidate = True
+            self._candidate_path = candidate_path
+            with open(candidate_path) as f:
+                return yaml.safe_load(f)
+        self._using_candidate = False
+        self._candidate_path = None
         with open(self.workflow_path) as f:
             return yaml.safe_load(f)
 

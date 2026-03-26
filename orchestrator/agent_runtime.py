@@ -2264,13 +2264,24 @@ class BridgeAgentRuntime:
         )
 
     def handle_polling_error(self, error):
-        from telegram.error import Conflict
+        import time
+        from telegram.error import Conflict, NetworkError, TimedOut
         err_text = str(error) or "<no error message>"
+        now = time.monotonic()
+        if isinstance(error, (NetworkError, TimedOut)) and not isinstance(error, Conflict):
+            self._last_network_error_ts = now
         if isinstance(error, Conflict):
-            self.error_logger.error(
-                f"Telegram polling conflict for '{self.name}': another process is using this bot token. "
-                f"Check for duplicate bridge/bridge-g-m instances running. ({err_text})"
-            )
+            last_net_err = getattr(self, "_last_network_error_ts", 0)
+            if now - last_net_err < 120:
+                self.telegram_logger.warning(
+                    f"Telegram polling self-conflict for '{self.name}': network recovered and new poll "
+                    f"displaced the stale one. This is harmless and auto-recovers. ({err_text})"
+                )
+            else:
+                self.error_logger.error(
+                    f"Telegram polling conflict for '{self.name}': another process is using this bot token. "
+                    f"Check for duplicate bridge/bridge-g-m instances running. ({err_text})"
+                )
             return
         self.telegram_logger.warning(
             f"Polling error while fetching updates: {type(error).__name__}: {err_text}"

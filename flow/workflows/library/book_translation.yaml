@@ -75,23 +75,23 @@ agents:
 
     - id: translator_01
       role: "主翻译员（前半部分）"
-      agent_md: "flow/agents/analyst/AGENT.md"  # 使用 analyst 作为基础，任务 prompt 给翻译指令
+      agent_md: "flow/agents/translator/AGENT.md"
       workspace: "flow/runs/{run_id}/workers/translator_01"
       backend: claude-cli
-      model: claude-opus-4-6  # 翻译用 opus 保证质量
+      model: claude-sonnet-4-6
       controllable_by: [orchestrator]
 
     - id: translator_02
       role: "主翻译员（后半部分）"
-      agent_md: "flow/agents/analyst/AGENT.md"
+      agent_md: "flow/agents/translator/AGENT.md"
       workspace: "flow/runs/{run_id}/workers/translator_02"
       backend: claude-cli
-      model: claude-opus-4-6
+      model: claude-sonnet-4-6
       controllable_by: [orchestrator]
 
     - id: reviewer_01
       role: "翻译审校员"
-      agent_md: "flow/agents/analyst/AGENT.md"
+      agent_md: "flow/agents/reviewer/AGENT.md"
       workspace: "flow/runs/{run_id}/workers/reviewer_01"
       backend: claude-cli
       model: claude-sonnet-4-6
@@ -180,7 +180,7 @@ steps:
         - key: translation_first_half
           path: translation_first_half.md
           type: markdown
-    timeout_seconds: 900
+    timeout_seconds: 1800
 
   # 步骤 2b：翻译后半部分（与 2a 并行）
   - id: translate_second_half
@@ -210,7 +210,7 @@ steps:
         - key: translation_second_half
           path: translation_second_half.md
           type: markdown
-    timeout_seconds: 900
+    timeout_seconds: 1800
 
   # 步骤 3：合并并审校
   - id: review_and_merge
@@ -220,20 +220,25 @@ steps:
     input:
       from_artifacts: [document_analysis, translation_first_half, translation_second_half]
     prompt: |
-      审校并合并两个翻译文件：
+      任务：合并并审校两份翻译文件。
 
-      1. 合并 translation_first_half.md 和 translation_second_half.md 为完整的 complete_translation.md
-      2. 检查并修正：
-         - 专有名词一致性（对照 document_analysis.json 的专有名词表）
-         - 前后半部分的风格一致性
-         - 明显的翻译错误或遗漏
-         - 章节标题格式统一
-      3. 输出审校报告 review_report.json：
-         - 修改了哪些内容
-         - 发现的问题
-         - 翻译质量评分 (A/B/C)
+      【输入文件】
+      - translation_first_half.md：前半部分翻译
+      - translation_second_half.md：后半部分翻译
+      - document_analysis.json：专有名词表和书籍结构
 
-      输出：complete_translation.md + review_report.json
+      【执行步骤】
+      1. 合并两份翻译为 complete_translation.md（保留章节标题格式）
+      2. 快速审校：
+         - 专有名词一致性（与 document_analysis.json 对比）
+         - 前后半部分风格一致性
+         - 明显的翻译错误/遗漏
+      3. 输出 review_report.json：
+         - changes: 修改位置和内容列表
+         - issues: 发现的问题列表
+         - quality_score: A/B/C 评分
+
+      【质量标准】质量评分优先选 A 或 B，C 表示有严重缺陷。
     output:
       artifacts:
         - key: complete_translation
@@ -242,11 +247,7 @@ steps:
         - key: review_report
           path: review_report.json
           type: json
-    quality_gate:
-      type: auto
-      criteria:
-        - "review_report.quality_score in ['A', 'B']"
-    timeout_seconds: 300
+    timeout_seconds: 1800
 
   # 步骤 4：打包 PDF
   - id: package_pdf

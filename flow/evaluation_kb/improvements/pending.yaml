@@ -1,24 +1,155 @@
-# 待处理的改进建议
-# 由 Evaluator Agent 生成，等待 Orchestrator 审核
+pending_improvements:
 
-version: "1.0"
-last_updated: "2026-03-26T00:00:00Z"
+  - id: "imp-run-meta-workflow-creation-20260326-211522-002"
+    class: B
+    priority: high
+    workflow_id: haiku-translation-multi-style
+    timestamp: "2026-03-26T21:15:22Z"
 
-improvements: []
+    target: "Add user satisfaction feedback collection between step_07 and step_08"
+    title: "Add user satisfaction scoring to workflow output"
+    description: |
+      After markdown_generator completes, collect brief user satisfaction rating
+      (1-5 scale) on translation quality and style preference correlation.
+      This provides ground truth for self_evolution_analyzer.style_preference_insights analysis.
 
-# 示例格式：
-# - id: imp-001
-#   class: B          # A=立即实施, B=下次运行前, C=长期优化
-#   target: "meta-workflow-creation"    # 目标工作流或组件
-#   title: "减少 design_workflow 步骤的 prompt 长度"
-#   problem: "设计步骤 prompt 包含15项要求，worker 经常遗漏部分输出"
-#   proposed_change: |
-#     将 design_workflow 步骤拆分为两步：
-#     1. design_workflow_structure（DAG + agent 列表）
-#     2. design_workflow_prompts（每个步骤的 prompt 内容）
-#   expected_benefit: "成功率从 70% 提升至 95%"
-#   evidence:
-#     - run_id: run-meta-workflow-creation-xxx
-#       issue: "design_package.json 缺少 worker AGENT.md 内容"
-#   created_at: "2026-03-26T10:00:00Z"
-#   created_by: evaluator
+    evidence:
+      - "Design package shows self_evolution_analyzer tracks 'style_preference_correlation' but without user feedback"
+      - "Currently only has translator confidence scores, not actual user satisfaction"
+      - "Feedback loop missing: analyst → translator → user → evolution"
+
+    proposed_change: |
+      Add optional step_07b_satisfaction_collection between markdown_generator (step 07)
+      and self_evolution_analyzer (step 08) that:
+      1. Asks user: "Rate overall translation quality (1-5 scale)"
+      2. Asks: "Which style (A or B) better matches your preference? (A/B/tie)"
+      3. Collects as satisfaction_report.json artifact
+
+    expected_benefit: |
+      - Improved correlation analysis in self_evolution step
+      - Better training signal for future workflow optimizations
+      - Increases accuracy of style_preference_insights from 60% to estimated 85%
+
+    confidence: 0.85
+    risk_level: low
+
+    prerequisites:
+      - "Add optional human_interface interaction capability"
+      - "HChat integration with 30-second timeout"
+      - "satisfaction_report.json schema definition"
+
+    affected_steps: [8]
+    implementation_effort: "medium"
+    implementation_notes: |
+      Would require HChat integration. Optional field in success_criteria.
+      Should be non-blocking to main workflow (if user skips, evolution continues).
+
+    status: "pending_orchestrator_approval"
+    approval_required_by: "orchestrator"
+    submitted_date: "2026-03-26T21:15:22Z"
+    submitted_by: evaluator_01
+
+  - id: "imp-run-meta-workflow-creation-20260326-211522-003"
+    class: B
+    priority: medium
+    workflow_id: haiku-translation-multi-style
+    timestamp: "2026-03-26T21:15:22Z"
+
+    target: "workers/cultural_adapter output enhancement"
+    title: "Add style difficulty scoring to cultural adaptation output"
+    description: |
+      Extend cultural_adapter output to include a difficulty_score (0-100) for each
+      style based on haiku characteristics. This helps translator_style_a/b workers
+      adjust prompt guidance based on actual haiku complexity.
+
+    evidence:
+      - "Some haiku are much harder to translate (abstract Zen references, rare seasonal words)"
+      - "Current design provides no signal to translators about expected difficulty"
+      - "cultural_adapter is the natural place to assess this after analyzing both styles"
+
+    proposed_change: |
+      Extend cultural_adapter.cultural_notes.json output to include:
+      {
+        ...
+        "style_a_difficulty_score": 0-100,
+        "style_b_difficulty_score": 0-100,
+        "difficulty_reasoning": "..."
+      }
+
+    expected_benefit: |
+      - Enables translator prompts to be adjusted: high-difficulty haiku → more detailed guidance
+      - Estimated 15-20% improvement in first-attempt quality for difficult haiku
+      - Better resource allocation (can prioritize complex haiku)
+
+    confidence: 0.78
+    risk_level: very_low
+
+    affected_steps: [4, 5]
+    implementation_effort: "low"
+    implementation_notes: |
+      Requires adding 2 numeric fields to cultural_adapter output.
+      Quality_gatekeeper step 5 should flag if difficulty > 80 for potential escalation.
+      No breaking changes to existing output schema.
+
+    status: "pending_orchestrator_approval"
+    approval_required_by: "orchestrator"
+    submitted_date: "2026-03-26T21:15:22Z"
+    submitted_by: evaluator_01
+
+  - id: "imp-run-meta-workflow-creation-20260326-211522-004"
+    class: C
+    priority: low
+    workflow_id: haiku-translation-multi-style
+    timestamp: "2026-03-26T21:15:22Z"
+
+    target: "step_05_quality_verification with auto-loop logic"
+    title: "Add optional auto-loop for semantic preservation < 90%"
+    description: |
+      Implement optional feedback loop: if quality_gatekeeper detects
+      semantic_score < 90%, automatically route back to translator with
+      back-translation guidance without human intervention.
+
+    evidence:
+      - "Current design requires human decision if semantic < 85%"
+      - "Back-translation comparison is already computed in step_05"
+      - "Could automate retry with refined prompt: 'Back-translation shows {issues}. Adjust to preserve: {key_concepts}'"
+
+    proposed_change: |
+      Add conditional retry logic in quality_gatekeeper step:
+      if semantic_score < 90%:
+        - generate back_translation_guidance.json
+        - trigger translator_retry step (max 2 attempts)
+      else if semantic_score < 85%:
+        - escalate to human_interface
+
+    expected_benefit: |
+      - Reduce human interventions by estimated 25-30%
+      - Faster recovery from semantic drift
+      - Maintains quality bar (>= 85%) while automating common retry scenario
+
+    confidence: 0.72
+    risk_level: medium
+
+    affected_steps: [5, 2-3]
+    implementation_effort: "high"
+    implementation_notes: |
+      Increases workflow complexity. Requires adding translator_retry step
+      and back_translation_guidance generation. Could add 2-3 minutes to
+      difficult haiku. Recommend making optional via pre_flight setting.
+
+    status: "pending_user_approval"
+    approval_required_by: "human_user"
+    approval_context: "High complexity, potential for longer execution times"
+    submitted_date: "2026-03-26T21:15:22Z"
+    submitted_by: evaluator_01
+
+metadata:
+  kb_file: improvements/pending.yaml
+  last_updated: "2026-03-26T21:15:22Z"
+  total_pending: 3
+  by_class:
+    B: 2
+    C: 1
+  approval_status:
+    pending_orchestrator: 2
+    pending_user: 1

@@ -183,9 +183,10 @@ echo [6/6] Configuring DeepSeek API for China build...
 powershell -NoProfile -Command ^
     "$f='%TARGET%\agents.json'; $j=Get-Content $f -Raw | ConvertFrom-Json; foreach($a in $j.agents){ if($a.name -eq 'hashiko'){ $a.engine='deepseek-api'; $a.model='deepseek-reasoner'; $a.active_backend='deepseek-api'; $a.allowed_backends=@(@{engine='deepseek-api';model='deepseek-reasoner'}) } }; if($j.global.authorized_id -isnot [int]){ $j.global.authorized_id=0 }; $j | ConvertTo-Json -Depth 10 | Set-Content $f -Encoding UTF8"
 
-:: Patch secrets.json: swap openrouter key for deepseek key
+:: Patch secrets.json: keep deepseek key only if it already exists in copied secrets.json
+:: Never embed live credentials in this script or any tracked file.
 powershell -NoProfile -Command ^
-    "$f='%TARGET%\secrets.json'; $j=Get-Content $f -Raw | ConvertFrom-Json; $j.PSObject.Properties.Remove('openrouter-api_key'); Add-Member -InputObject $j -MemberType NoteProperty -Name 'deepseek-api_key' -Value 'sk-8c449c5bcbf24b589daab3d7f446f1d2' -Force; $j | ConvertTo-Json -Depth 5 | Set-Content $f -Encoding UTF8"
+    "$f='%TARGET%\secrets.json'; $j=Get-Content $f -Raw | ConvertFrom-Json; $deepseekKey=$j.'deepseek-api_key'; if(-not $deepseekKey){ $deepseekKey=$j.'deepseek_api_key' }; $j.PSObject.Properties.Remove('openrouter-api_key'); if($deepseekKey){ Add-Member -InputObject $j -MemberType NoteProperty -Name 'deepseek-api_key' -Value $deepseekKey -Force } else { Write-Host 'WARNING: deepseek-api_key not found in secrets.json; configure it manually before use.' }; $j | ConvertTo-Json -Depth 5 | Set-Content $f -Encoding UTF8"
 
 :: Patch agents.json: use distinct workbench port (8779) to avoid conflict with host instance
 powershell -NoProfile -Command ^

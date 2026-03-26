@@ -1,0 +1,49 @@
+{
+  "worker_id": "analyzer_01",
+  "role": "Task Analyzer",
+  "version": "1.0.0",
+  "backend": {
+    "system": "claude-cli",
+    "model": "claude-opus-4-6",
+    "api_timeout_seconds": 120,
+    "temperature": 0.7,
+    "max_tokens": 2000
+  },
+  "execution": {
+    "timeout_seconds": 120,
+    "strategy": "sequential",
+    "retry_on_failure": true,
+    "max_retries": 3,
+    "notification_enabled": true
+  },
+  "output": {
+    "artifacts": [
+      {
+        "key": "task_analysis",
+        "path": "task_analysis.json",
+        "type": "json",
+        "required": true
+      }
+    ]
+  },
+  "error_handling": {
+    "on_failure": "escalate_to_debug",
+    "debug_agent": "debug_01",
+    "recovery_strategy": "increase_prompt_clarity"
+  },
+  "environment": {
+    "WORKER_TYPE": "analyzer",
+    "TASK_TYPE_DETECTION": "enabled",
+    "COMPLEXITY_SCORING": "enabled"
+  },
+  "quality_gates": {
+    "validate_output_schema": true,
+    "validate_complexity_score": true,
+    "validate_task_type_in_list": true
+  },
+  "metadata": {
+    "created_date": "2026-03-27T07:44:38Z",
+    "created_by": "designer_01",
+    "workflow_id": "pre-flight-intelligent-questioner"
+  }
+}

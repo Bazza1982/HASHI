@@ -126,6 +126,10 @@ const BACKEND_CATALOG = {
     models: ['gpt-5.4', 'gpt-5.3-codex', 'gpt-5.2-codex', 'gpt-5.2', 'gpt-5.1-codex-max', 'gpt-5.1-codex-mini'],
     efforts: ['low', 'medium', 'high', 'extra_high'],
   },
+  'deepseek-api': {
+    models: ['deepseek-reasoner', 'deepseek-chat'],
+    efforts: [],
+  },
   'openrouter-api': {
     models: ['deepseek/deepseek-v3.2-exp', 'moonshotai/kimi-k2.5', 'google/gemini-3.1-flash-lite-preview', 'anthropic/claude-sonnet-4.6', 'anthropic/claude-opus-4.6', 'anthropic/claude-opus-4.5'],
     efforts: [],
@@ -796,14 +800,22 @@ function AgentPanel({ agent, session, state, onSend, onSaveIdentity, onRunComman
     setSelectedBackend(value);
     const preferred = (agent.allowedBackends || []).find((b) => b.engine === value)?.model;
     const firstCatalogModel = (BACKEND_CATALOG[value]?.models || [])[0];
-    if (preferred || firstCatalogModel) setSelectedModel(preferred || firstCatalogModel);
+    const nextModel = preferred || firstCatalogModel || '';
+    if (nextModel) setSelectedModel(nextModel);
     if (!supportsBackend || !value || value === (session?.engine || agent.activeBackend || agent.engine)) return;
-    await runCommand(`/backend ${value}`);
+    if (nextModel) {
+      await runCommand(`/backend ${value} ${nextModel}`);
+    }
   };
 
   const onModelChange = async (value) => {
     setSelectedModel(value);
     if (!supportsModel || !value || value === (session?.model || agent.model)) return;
+    const currentEngine = session?.engine || agent.activeBackend || agent.engine;
+    if (supportsBackend && selectedBackend && selectedBackend !== currentEngine) {
+      await runCommand(`/backend ${selectedBackend} ${value}`);
+      return;
+    }
     await runCommand(`/model ${value}`);
   };
 
@@ -1045,8 +1057,10 @@ export default function App() {
     setAgents((incomingAgents || []).map((agent) => ({
       ...agent,
       displayName: agent.display_name || agent.displayName || agent.name,
+      activeBackend: agent.activeBackend || agent.active_backend || agent.engine || '',
+      allowedBackends: agent.allowedBackends || agent.allowed_backends || [],
       emoji: agent.emoji || '🤖',
-      isActive: agent.isActive !== false,
+      isActive: agent.isActive ?? agent.is_active ?? true,
     })));
   };
 

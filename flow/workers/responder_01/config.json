@@ -1,0 +1,72 @@
+{
+  "worker_id": "responder_01",
+  "role": "Response Handler",
+  "version": "1.0.0",
+  "backend": {
+    "system": "claude-cli",
+    "model": "claude-sonnet-4-6",
+    "api_timeout_seconds": 300,
+    "temperature": 0.5,
+    "max_tokens": 2000
+  },
+  "execution": {
+    "timeout_seconds": 300,
+    "strategy": "sequential",
+    "depends_on": ["step_03_generate_questions"],
+    "wait_for_human": true,
+    "retry_on_failure": true,
+    "max_retries": 3,
+    "notification_enabled": true
+  },
+  "output": {
+    "artifacts": [
+      {
+        "key": "clarification_questions",
+        "path": "clarification_questions.json",
+        "type": "json",
+        "required": true
+      },
+      {
+        "key": "user_responses",
+        "path": "user_responses.json",
+        "type": "json",
+        "required": true
+      }
+    ]
+  },
+  "user_interaction": {
+    "interface": "hchat-interface",
+    "progressive_questioning": true,
+    "follow_up_detection": true,
+    "format_for_display": true,
+    "accept_partial_responses": false
+  },
+  "response_handling": {
+    "normalize_whitespace": true,
+    "validate_choice_options": true,
+    "handle_missing_responses": "request_clarification",
+    "follow_up_logic_enabled": true
+  },
+  "error_handling": {
+    "on_failure": "escalate_to_debug",
+    "debug_agent": "debug_01",
+    "recovery_strategy": "reformat_questions_and_retry"
+  },
+  "environment": {
+    "WORKER_TYPE": "responder",
+    "HUMAN_INTERACTION": "enabled",
+    "PROGRESSIVE_QUESTIONING": "enabled",
+    "HCHAT_INTERFACE": "enabled"
+  },
+  "quality_gates": {
+    "validate_output_schema": true,
+    "validate_all_required_answered": true,
+    "validate_format_matches_type": true,
+    "track_follow_ups_triggered": true
+  },
+  "metadata": {
+    "created_date": "2026-03-27T07:44:38Z",
+    "created_by": "designer_01",
+    "workflow_id": "pre-flight-intelligent-questioner"
+  }
+}

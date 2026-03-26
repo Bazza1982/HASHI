@@ -1,8 +1,10 @@
 from __future__ import annotations
+import json
 import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable, Optional
 
 
 HOME_PREFIX = "@home/"
@@ -40,12 +42,55 @@ def resolve_bridge_home(code_root: Path, override: str | Path | None = None) -> 
     return Path(expand_path_string(raw)).resolve()
 
 
-def resolve_home_file(bridge_home: Path, code_root: Path, filename: str) -> Path:
+def resolve_home_file(
+    bridge_home: Path,
+    code_root: Path,
+    filename: str,
+    validator: Optional[Callable[[Path], bool]] = None,
+) -> Path:
     home_path = bridge_home / filename
     legacy_path = code_root / filename
-    if home_path.exists() or bridge_home == code_root or not legacy_path.exists():
+    if home_path.exists():
+        if validator is None or validator(home_path):
+            return home_path
+        # File exists but content is invalid — fall through to legacy
+    if bridge_home == code_root or not legacy_path.exists():
         return home_path
     return legacy_path
+
+
+# ── Validators for resolve_home_file ──────────────────────────────
+
+PLACEHOLDER_TOKENS = frozenset({"WORKBENCH_ONLY_NO_TOKEN", ""})
+
+
+def _secrets_validator(path: Path) -> bool:
+    """Return True if secrets.json contains at least one real token."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    if not isinstance(data, dict) or not data:
+        return False
+    # Check that at least one agent-level token is real
+    skip_keys = {"authorized_telegram_id", "openrouter_key"}
+    for key, value in data.items():
+        if key in skip_keys:
+            continue
+        if isinstance(value, str) and value.strip() not in PLACEHOLDER_TOKENS:
+            return True
+    return False
+
+
+def _json_validator(path: Path) -> bool:
+    """Return True if the file is valid, non-empty JSON."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    if isinstance(data, dict):
+        return bool(data)
+    return data is not None
 
 
 def build_bridge_paths(code_root: Path, bridge_home: str | Path | None = None) -> BridgePaths:
@@ -54,8 +99,8 @@ def build_bridge_paths(code_root: Path, bridge_home: str | Path | None = None) -
     return BridgePaths(
         code_root=resolved_code_root,
         bridge_home=resolved_home,
-        config_path=resolve_home_file(resolved_home, resolved_code_root, "agents.json"),
-        secrets_path=resolve_home_file(resolved_home, resolved_code_root, "secrets.json"),
+        config_path=resolve_home_file(resolved_home, resolved_code_root, "agents.json", validator=_json_validator),
+        secrets_path=resolve_home_file(resolved_home, resolved_code_root, "secrets.json", validator=_secrets_validator),
         tasks_path=resolve_home_file(resolved_home, resolved_code_root, "tasks.json"),
         state_path=resolved_home / "scheduler_state.json",
         lock_path=resolved_home / ".bridge_u_f.lock",

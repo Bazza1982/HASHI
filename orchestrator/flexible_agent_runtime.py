@@ -435,7 +435,9 @@ class FlexibleAgentRuntime:
             "display_name": self.get_display_name(),
             "emoji": self.get_agent_emoji(),
             "engine": self.config.active_backend,
+            "active_backend": self.config.active_backend,
             "model": self.get_current_model(),
+            "allowed_backends": [dict(backend) for backend in self.config.allowed_backends],
             "workspace_dir": str(self.workspace_dir),
             "transcript_path": str(self.transcript_log_path),
             "online": bool(self.backend_ready),
@@ -1141,6 +1143,8 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CommandHandler("jobs", self._wrap_cmd("jobs", self.cmd_jobs)))
         self.app.add_handler(CommandHandler("timeout", self._wrap_cmd("timeout", self.cmd_timeout)))
         self.app.add_handler(CommandHandler("hchat", self._wrap_cmd("hchat", self.cmd_hchat)))
+        self.app.add_handler(CommandHandler("group", self._wrap_cmd("group", self.cmd_group)))
+        self.app.add_handler(CallbackQueryHandler(self.callback_group, pattern=r"^group:"))
         self.app.add_handler(CommandHandler("logo", self._wrap_cmd("logo", self.cmd_logo)))
         self.app.add_handler(CommandHandler("move", self._wrap_cmd("move", self.cmd_move)))
         self.app.add_handler(CallbackQueryHandler(self.callback_move, pattern=r"^move:"))
@@ -1168,13 +1172,24 @@ class FlexibleAgentRuntime:
         )
 
     def handle_polling_error(self, error):
-        from telegram.error import Conflict
+        import time
+        from telegram.error import Conflict, NetworkError, TimedOut
         err_text = str(error) or "<no error message>"
+        now = time.monotonic()
+        if isinstance(error, (NetworkError, TimedOut)) and not isinstance(error, Conflict):
+            self._last_network_error_ts = now
         if isinstance(error, Conflict):
-            self.error_logger.error(
-                f"Telegram polling conflict for '{self.name}': another process is using this bot token. "
-                f"Check for duplicate bridge/bridge-g-m instances running. ({err_text})"
-            )
+            last_net_err = getattr(self, "_last_network_error_ts", 0)
+            if now - last_net_err < 120:
+                self.telegram_logger.warning(
+                    f"Telegram polling self-conflict for '{self.name}': network recovered and new poll "
+                    f"displaced the stale one. This is harmless and auto-recovers. ({err_text})"
+                )
+            else:
+                self.error_logger.error(
+                    f"Telegram polling conflict for '{self.name}': another process is using this bot token. "
+                    f"Check for duplicate bridge/bridge-g-m instances running. ({err_text})"
+                )
             return
         self.telegram_logger.warning(f"Polling error while fetching updates: {type(error).__name__}: {err_text}")
         if getattr(error, "__traceback__", None):
@@ -2569,10 +2584,12 @@ class FlexibleAgentRuntime:
                 update,
                 "<b>💬 Hchat — Ask this agent to compose &amp; send a message to another agent</b>\n\n"
                 "Usage: <code>/hchat &lt;agent&gt; &lt;intent&gt;</code>\n"
-                "       <code>/hchat all &lt;intent&gt;</code> — broadcast to all active agents (excludes temp)\n\n"
+                "       <code>/hchat all &lt;intent&gt;</code> — broadcast to all active agents (excludes temp)\n"
+                "       <code>/hchat @&lt;group&gt; &lt;intent&gt;</code> — broadcast to a group (use /group to manage)\n\n"
                 "Example: <code>/hchat lily give her an update on what we've been doing</code>\n"
                 "Example: <code>/hchat arale 告诉她新功能已完成</code>\n"
-                "Example: <code>/hchat all 告诉大家新功能上线了</code>\n\n"
+                "Example: <code>/hchat all 告诉大家新功能上线了</code>\n"
+                "Example: <code>/hchat @staff 告诉核心团队系统已重启</code>\n\n"
                 "<i>Note: YOU compose the message based on context — intent is what to communicate, not the literal text.</i>",
                 parse_mode="HTML",
             )
@@ -2580,29 +2597,47 @@ class FlexibleAgentRuntime:
         target_name = args[0].lower()
         intent = " ".join(args[1:])
 
-        # Handle "all" target — broadcast to every active agent except temp and self
+        # Resolve "all" or "@group_name" to a list of agent names
+        broadcast_targets: list[str] | None = None
+        broadcast_label: str = ""
+
         if target_name == "all":
             import json as _json
             try:
                 _cfg = _json.loads(self.global_config.config_path.read_text(encoding="utf-8-sig"))
-                all_agents = [
+                broadcast_targets = [
                     a["name"] for a in _cfg.get("agents", [])
                     if a.get("is_active", True)
                     and a["name"].lower() != "temp"
                     and a["name"].lower() != self.name.lower()
                 ]
             except Exception:
-                all_agents = []
-            if not all_agents:
-                await self._reply_text(update, "❌ No agents found to broadcast to.")
+                broadcast_targets = []
+            broadcast_label = "ALL active agents"
+
+        elif target_name.startswith("@"):
+            group_name = target_name[1:]
+            directory = getattr(self, "agent_directory", None) or getattr(getattr(self, "orchestrator", None), "agent_directory", None)
+            if directory is None:
+                await self._reply_text(update, "❌ Agent directory unavailable for group resolution.")
                 return
-            agent_list = ", ".join(all_agents)
+            if not directory.group_exists(group_name):
+                await self._reply_text(update, f"❌ Group '{group_name}' not found. Use /group to list groups.")
+                return
+            broadcast_targets = directory.resolve_group(group_name, exclude_self=self.name)
+            broadcast_label = f"group @{group_name}"
+
+        if broadcast_targets is not None:
+            if not broadcast_targets:
+                await self._reply_text(update, f"❌ No agents found in {broadcast_label}.")
+                return
+            agent_list = ", ".join(broadcast_targets)
             send_cmds = "\n".join(
                 f'   python tools/hchat_send.py --to {a} --from {self.name} --text "<your composed message>"'
-                for a in all_agents
+                for a in broadcast_targets
             )
             self_prompt = (
-                f"[HCHAT BROADCAST] The user wants you to send a Hchat message to ALL active agents.\n\n"
+                f"[HCHAT BROADCAST] The user wants you to send a Hchat message to {broadcast_label}.\n\n"
                 f"Target agents: {agent_list}\n"
                 f"EXCLUDED: temp (always excluded from broadcasts), {self.name} (yourself)\n\n"
                 f"Intent: {intent}\n\n"
@@ -2617,7 +2652,7 @@ class FlexibleAgentRuntime:
                 f"IMPORTANT: When you later receive messages starting with '[hchat reply from ...]', "
                 f"just report the reply content to the user. Do NOT send another hchat message back."
             )
-            await self._reply_text(update, f"📢 Broadcasting Hchat to <b>{len(all_agents)}</b> agents...", parse_mode="HTML")
+            await self._reply_text(update, f"📢 Broadcasting Hchat to <b>{len(broadcast_targets)}</b> agents ({broadcast_label})...", parse_mode="HTML")
         else:
             # Single agent target
             self_prompt = (
@@ -2642,6 +2677,315 @@ class FlexibleAgentRuntime:
             source="bridge:hchat",
             deliver_to_telegram=True,
         )
+
+    # ── /group ────────────────────────────────────────────────────────────────
+
+    def _group_detail_view(self, directory, group_name: str) -> tuple[str, "InlineKeyboardMarkup"]:
+        """Build the group detail message + inline keyboard."""
+        groups = directory.list_groups()
+        grp = groups.get(group_name, {})
+        desc = grp.get("description", "")
+        members = grp.get("members", [])
+        is_dynamic = members == "@active"
+
+        if is_dynamic:
+            resolved = directory.resolve_group(group_name)
+            member_display = "🔄 <i>Dynamic — all active agents</i>\n  " + ", ".join(resolved) if resolved else "🔄 <i>Dynamic — (none running)</i>"
+        else:
+            if members:
+                rows_meta = []
+                for m in members:
+                    row = directory.get_agent_row(m)
+                    emoji = row.get("emoji", "🤖") if row else "🤖"
+                    display = row.get("display_name", m) if row else m
+                    rows_meta.append(f"{emoji} {display}")
+                member_display = "  " + "  ·  ".join(rows_meta)
+            else:
+                member_display = "  <i>(empty)</i>"
+
+        text = (
+            f"<b>📦 Group: {group_name}</b>\n"
+            f"{desc}\n\n"
+            f"Members ({len(directory.resolve_group(group_name))}):\n"
+            f"{member_display}\n"
+        )
+
+        if is_dynamic:
+            rows = [[InlineKeyboardButton("✕ Close", callback_data=f"group:back")]]
+        else:
+            rows = [
+                [
+                    InlineKeyboardButton("＋ Add", callback_data=f"group:add:{group_name}"),
+                    InlineKeyboardButton("－ Remove", callback_data=f"group:remove:{group_name}"),
+                    InlineKeyboardButton("✏️ Rename", callback_data=f"group:rename:{group_name}"),
+                ],
+                [
+                    InlineKeyboardButton("🗑 Delete", callback_data=f"group:delete:{group_name}"),
+                    InlineKeyboardButton("« Back", callback_data="group:back"),
+                ],
+                [
+                    InlineKeyboardButton("▶ Start All", callback_data=f"group:start:{group_name}"),
+                    InlineKeyboardButton("⏹ Stop All", callback_data=f"group:stop:{group_name}"),
+                    InlineKeyboardButton("🔄 Reboot All", callback_data=f"group:reboot:{group_name}"),
+                ],
+                [InlineKeyboardButton("💬 Broadcast", callback_data=f"group:broadcast:{group_name}")],
+            ]
+        return text, InlineKeyboardMarkup(rows)
+
+    def _group_list_view(self, directory) -> tuple[str, "InlineKeyboardMarkup"]:
+        """Build the group overview message + inline keyboard."""
+        groups = directory.list_groups()
+        if groups:
+            lines = ["<b>📦 Agent Groups</b>\n"]
+            for name, grp in groups.items():
+                members = grp.get("members", [])
+                is_dynamic = members == "@active"
+                count = len(directory.resolve_group(name)) if is_dynamic else len(members)
+                desc = grp.get("description", "")
+                tag = " 🔄" if is_dynamic else ""
+                lines.append(f"• <b>{name}</b>{tag}  ({count} agents) — {desc}")
+        else:
+            lines = ["<b>📦 Agent Groups</b>\n", "<i>No groups defined yet.</i>"]
+
+        rows = [[InlineKeyboardButton(f"📦 {name}", callback_data=f"group:view:{name}")] for name in groups]
+        rows.append([InlineKeyboardButton("＋ New Group", callback_data="group:new")])
+        return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+    async def cmd_group(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        directory = getattr(self, "agent_directory", None)
+        if directory is None:
+            await self._reply_text(update, "❌ Agent directory unavailable.")
+            return
+
+        args = [a.strip() for a in (context.args or []) if a.strip()]
+
+        # /group new <name>
+        if args and args[0].lower() == "new":
+            if len(args) < 2:
+                await self._reply_text(update, "Usage: <code>/group new &lt;name&gt;</code>", parse_mode="HTML")
+                return
+            name = args[1].lower()
+            desc = " ".join(args[2:]) if len(args) > 2 else ""
+            ok, msg = directory.create_group(name, desc)
+            if ok:
+                text, markup = self._group_detail_view(directory, name)
+                await self._reply_text(update, f"✅ {msg}\n\n" + text, parse_mode="HTML", reply_markup=markup)
+            else:
+                await self._reply_text(update, f"❌ {msg}")
+            return
+
+        # /group del <name>
+        if args and args[0].lower() == "del":
+            if len(args) < 2:
+                await self._reply_text(update, "Usage: <code>/group del &lt;name&gt;</code>", parse_mode="HTML")
+                return
+            name = args[1].lower()
+            rows = [[
+                InlineKeyboardButton("✅ Confirm Delete", callback_data=f"group:delete_confirm:{name}"),
+                InlineKeyboardButton("✕ Cancel", callback_data="group:back"),
+            ]]
+            await self._reply_text(
+                update,
+                f"⚠️ Delete group <b>{name}</b>?\nThis will NOT affect the agents themselves.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+            return
+
+        # /group <name>  — view detail
+        if args:
+            name = args[0].lower()
+            if not directory.group_exists(name):
+                await self._reply_text(update, f"❌ Group '{name}' not found.")
+                return
+            text, markup = self._group_detail_view(directory, name)
+            await self._reply_text(update, text, parse_mode="HTML", reply_markup=markup)
+            return
+
+        # /group  — overview
+        text, markup = self._group_list_view(directory)
+        await self._reply_text(update, text, parse_mode="HTML", reply_markup=markup)
+
+    async def callback_group(self, update: Update, context: Any):
+        query = update.callback_query
+        if not self._is_authorized_user(query.from_user.id):
+            return
+        directory = getattr(self, "agent_directory", None)
+        if directory is None:
+            await query.answer("Agent directory unavailable", show_alert=True)
+            return
+
+        data = query.data or ""
+        # data format: group:<action>[:<group_name>[:<agent_name>]]
+        parts = data.split(":", 3)
+        action = parts[1] if len(parts) > 1 else ""
+        group_name = parts[2] if len(parts) > 2 else ""
+        extra = parts[3] if len(parts) > 3 else ""
+
+        await query.answer()
+
+        # ── back → group list ──
+        if action == "back":
+            text, markup = self._group_list_view(directory)
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+            return
+
+        # ── view group detail ──
+        if action == "view":
+            text, markup = self._group_detail_view(directory, group_name)
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+            return
+
+        # ── new group (prompt) ──
+        if action == "new":
+            await query.edit_message_text(
+                "To create a new group, send:\n<code>/group new &lt;name&gt; [description]</code>",
+                parse_mode="HTML",
+            )
+            return
+
+        # ── delete (confirm prompt) ──
+        if action == "delete":
+            rows = [[
+                InlineKeyboardButton("✅ Confirm Delete", callback_data=f"group:delete_confirm:{group_name}"),
+                InlineKeyboardButton("✕ Cancel", callback_data=f"group:view:{group_name}"),
+            ]]
+            await query.edit_message_text(
+                f"⚠️ Delete group <b>{group_name}</b>?\nThis will NOT affect the agents themselves.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+            return
+
+        # ── delete confirmed ──
+        if action == "delete_confirm":
+            ok, msg = directory.delete_group(group_name)
+            if ok:
+                text, markup = self._group_list_view(directory)
+                await query.edit_message_text(f"🗑 {msg}\n\n" + text, parse_mode="HTML", reply_markup=markup)
+            else:
+                await query.edit_message_text(f"❌ {msg}")
+            return
+
+        # ── add members ──
+        if action == "add":
+            groups = directory.list_groups()
+            current = groups.get(group_name, {}).get("members", [])
+            all_agents = list(directory._agent_rows.keys())
+            available = [n for n in all_agents if n not in current]
+            if not available:
+                await query.edit_message_text(f"All active agents are already in <b>{group_name}</b>.", parse_mode="HTML")
+                return
+            rows = []
+            for agent in available:
+                row = directory.get_agent_row(agent)
+                emoji = row.get("emoji", "🤖") if row else "🤖"
+                rows.append([InlineKeyboardButton(f"{emoji} {agent}", callback_data=f"group:add_confirm:{group_name}:{agent}")])
+            rows.append([InlineKeyboardButton("✕ Cancel", callback_data=f"group:view:{group_name}")])
+            await query.edit_message_text(
+                f"➕ Add to <b>{group_name}</b>\nSelect agents to add:",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+            return
+
+        # ── add confirmed ──
+        if action == "add_confirm":
+            agent_name = extra
+            ok, msg = directory.group_add_member(group_name, agent_name)
+            text, markup = self._group_detail_view(directory, group_name)
+            prefix = "✅ " if ok else "❌ "
+            await query.edit_message_text(prefix + msg + "\n\n" + text, parse_mode="HTML", reply_markup=markup)
+            return
+
+        # ── remove members ──
+        if action == "remove":
+            groups = directory.list_groups()
+            current = groups.get(group_name, {}).get("members", [])
+            if not current:
+                await query.edit_message_text(f"Group <b>{group_name}</b> is empty.", parse_mode="HTML")
+                return
+            rows = []
+            for agent in current:
+                row = directory.get_agent_row(agent)
+                emoji = row.get("emoji", "🤖") if row else "🤖"
+                rows.append([InlineKeyboardButton(f"{emoji} {agent}", callback_data=f"group:remove_confirm:{group_name}:{agent}")])
+            rows.append([InlineKeyboardButton("✕ Cancel", callback_data=f"group:view:{group_name}")])
+            await query.edit_message_text(
+                f"➖ Remove from <b>{group_name}</b>\nSelect agents to remove:",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+            return
+
+        # ── remove confirmed ──
+        if action == "remove_confirm":
+            agent_name = extra
+            ok, msg = directory.group_remove_member(group_name, agent_name)
+            text, markup = self._group_detail_view(directory, group_name)
+            prefix = "✅ " if ok else "❌ "
+            await query.edit_message_text(prefix + msg + "\n\n" + text, parse_mode="HTML", reply_markup=markup)
+            return
+
+        # ── rename (prompt) ──
+        if action == "rename":
+            await query.edit_message_text(
+                f"To rename group <b>{group_name}</b>, send:\n<code>/group rename {group_name} &lt;new_name&gt;</code>",
+                parse_mode="HTML",
+            )
+            return
+
+        # ── start/stop/reboot all in group ──
+        if action in ("start", "stop", "reboot"):
+            orchestrator = getattr(self, "orchestrator", None)
+            members = directory.resolve_group(group_name, exclude_self=self.name)
+            if not members:
+                await query.edit_message_text(f"Group <b>{group_name}</b> has no members to act on.", parse_mode="HTML")
+                return
+
+            lines = [f"<b>{'▶ Starting' if action == 'start' else '⏹ Stopping' if action == 'stop' else '🔄 Rebooting'} group {group_name}</b> ({len(members)} agents)\n"]
+
+            if action == "reboot" and orchestrator:
+                for name in members:
+                    all_names = orchestrator.configured_agent_names()
+                    if name in all_names:
+                        num = all_names.index(name) + 1
+                        orchestrator.request_restart(mode="number", agent_name=self.name, agent_number=num)
+                        lines.append(f"  🔄 {name} — reboot queued")
+                    else:
+                        lines.append(f"  ⚠️ {name} — not found")
+            elif action == "start" and orchestrator:
+                for name in members:
+                    ok, msg = await orchestrator.start_agent(name)
+                    lines.append(f"  {'✅' if ok else '❌'} {name} — {msg}")
+            elif action == "stop" and orchestrator:
+                for name in members:
+                    runtime = directory.get_runtime(name)
+                    if runtime and hasattr(runtime, "backend_manager") and runtime.backend_manager.current_backend:
+                        await runtime.backend_manager.current_backend.shutdown()
+                        lines.append(f"  ⏹ {name} — stopped")
+                    else:
+                        lines.append(f"  ⚠️ {name} — not running or unavailable")
+            else:
+                lines.append("⚠️ Orchestrator unavailable.")
+
+            await query.edit_message_text("\n".join(lines), parse_mode="HTML")
+            return
+
+        # ── broadcast message ──
+        if action == "broadcast":
+            members = directory.resolve_group(group_name, exclude_self=self.name)
+            if not members:
+                await query.edit_message_text(f"Group <b>{group_name}</b> has no members to broadcast to.", parse_mode="HTML")
+                return
+            await query.edit_message_text(
+                f"📢 Broadcast to group <b>{group_name}</b> ({len(members)} agents)\n\n"
+                f"Use: <code>/hchat @{group_name} &lt;your intent&gt;</code>",
+                parse_mode="HTML",
+            )
+            return
 
     async def cmd_logo(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -2672,12 +3016,39 @@ class FlexibleAgentRuntime:
 
         target_engine = args[0].lower()
         with_context = False
-        if len(args) > 1:
-            flag = args[1].strip().lower()
-            with_context = flag in {"+", "context", "handoff", "with-context"}
+        requested_model = None
+        for raw_arg in args[1:]:
+            raw_value = raw_arg.strip()
+            if not raw_value:
+                continue
+            flag = raw_value.lower()
+            if flag in {"+", "context", "handoff", "with-context"}:
+                with_context = True
+            else:
+                requested_model = raw_value
 
         if target_engine not in allowed_engines:
             await self._reply_text(update, f"Backend not allowed: {target_engine}")
+            return
+
+        if requested_model:
+            if target_engine == "claude-cli":
+                requested_model = CLAUDE_MODEL_ALIASES.get(requested_model.lower(), requested_model)
+            available = self._get_available_models_for(target_engine)
+            if available and requested_model not in available:
+                await self._reply_text(
+                    update,
+                    f"Unknown model for {target_engine}: {requested_model}\nUse /backend {target_engine} to see available options.",
+                )
+                return
+
+            success, message = await self._switch_backend_mode(
+                update.effective_chat.id,
+                target_engine,
+                target_model=requested_model,
+                with_context=with_context,
+            )
+            await self._reply_text(update, message)
             return
 
         await self._reply_text(
@@ -3944,7 +4315,20 @@ class FlexibleAgentRuntime:
                     f"Send failed for request_id={request_id or '<none>'} "
                     f"(purpose={purpose}, chunk={chunk_index}, mode=html): {e}. Fallback to raw text."
                 )
-                await self.app.bot.send_message(chat_id=chat_id, text=chunk_raw)
+                # Split into multiple messages instead of truncating
+                if len(chunk_raw) <= tg_max_len:
+                    await self.app.bot.send_message(chat_id=chat_id, text=chunk_raw)
+                else:
+                    remain = chunk_raw
+                    while remain:
+                        if len(remain) <= tg_max_len:
+                            await self.app.bot.send_message(chat_id=chat_id, text=remain)
+                            break
+                        split_at = remain.rfind("\n", 0, tg_max_len)
+                        if split_at == -1:
+                            split_at = tg_max_len
+                        await self.app.bot.send_message(chat_id=chat_id, text=remain[:split_at])
+                        remain = remain[split_at:].lstrip("\n")
 
         if len(html) <= tg_max_len:
             chunk_count = 1

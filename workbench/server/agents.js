@@ -63,6 +63,14 @@ function transcriptPathForAgent(agent) {
   return path.join(BRIDGE_U_ROOT, agent.workspace_dir, transcriptName);
 }
 
+function activeBackendForAgent(agent) {
+  return agent.active_backend || agent.engine || 'unknown';
+}
+
+function allowedBackendsForAgent(agent) {
+  return (agent.allowed_backends || []).map((backend) => ({ ...backend }));
+}
+
 export function getAgents() {
   const data = loadConfig();
   return (data.agents || [])
@@ -73,8 +81,10 @@ export function getAgents() {
       displayName: agent.display_name || agent.name,
       emoji: agent.emoji || '🤖',
       engine: agent.engine || agent.active_backend || 'unknown',
+      activeBackend: activeBackendForAgent(agent),
       model: modelForAgent(agent),
       type: agent.type || 'fixed',
+      allowedBackends: allowedBackendsForAgent(agent),
       workspaceDir: path.join(BRIDGE_U_ROOT, agent.workspace_dir),
       transcriptPath: transcriptPathForAgent(agent),
     }));
@@ -107,8 +117,10 @@ export function updateAgentMetadata(agentId, updates = {}) {
     displayName: agent.display_name || agent.name,
     emoji: agent.emoji || '🤖',
     engine: agent.engine || agent.active_backend || 'unknown',
+    activeBackend: activeBackendForAgent(agent),
     model: modelForAgent(agent),
     type: agent.type || 'fixed',
+    allowedBackends: allowedBackendsForAgent(agent),
     workspaceDir: path.join(BRIDGE_U_ROOT, agent.workspace_dir),
     transcriptPath: transcriptPathForAgent(agent),
   };

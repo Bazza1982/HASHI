@@ -1,0 +1,74 @@
+{
+  "worker_id": "question_gen_01",
+  "role": "Question Generator",
+  "version": "1.0.0",
+  "backend": {
+    "system": "claude-cli",
+    "model": "claude-opus-4-6",
+    "api_timeout_seconds": 120,
+    "temperature": 0.7,
+    "max_tokens": 2500
+  },
+  "execution": {
+    "timeout_seconds": 120,
+    "strategy": "sequential",
+    "depends_on": ["step_01_analyze_task", "step_02_infer_context"],
+    "retry_on_failure": true,
+    "max_retries": 3,
+    "notification_enabled": true
+  },
+  "output": {
+    "artifacts": [
+      {
+        "key": "questions",
+        "path": "questions.json",
+        "type": "json",
+        "required": true
+      }
+    ]
+  },
+  "question_generation": {
+    "max_initial_questions": 5,
+    "max_optional_questions": 10,
+    "complexity_aware_count": true,
+    "task_type_specific_templates": true,
+    "exclude_high_confidence_fields": true
+  },
+  "question_types_supported": [
+    "text",
+    "choice",
+    "list",
+    "boolean"
+  ],
+  "task_type_templates": {
+    "translation": ["target_language", "style_preference", "formality"],
+    "research": ["research_scope", "output_format", "required_depth"],
+    "audit": ["audit_standard", "entity_type", "risk_tolerance"],
+    "analysis": ["analysis_framework", "stakeholder_type", "detail_level"],
+    "writing": ["audience", "tone", "length"],
+    "code_generation": ["language", "framework", "performance_requirements"]
+  },
+  "error_handling": {
+    "on_failure": "escalate_to_debug",
+    "debug_agent": "debug_01",
+    "recovery_strategy": "ensure_question_count_limit"
+  },
+  "environment": {
+    "WORKER_TYPE": "question_generator",
+    "QUESTION_GENERATION": "enabled",
+    "PROGRESSIVE_QUESTIONING": "enabled"
+  },
+  "quality_gates": {
+    "validate_output_schema": true,
+    "validate_initial_question_count": true,
+    "validate_max_initial_5": true,
+    "validate_question_types": true,
+    "validate_follow_up_logic": true,
+    "exclude_high_confidence": true
+  },
+  "metadata": {
+    "created_date": "2026-03-27T07:44:38Z",
+    "created_by": "designer_01",
+    "workflow_id": "pre-flight-intelligent-questioner"
+  }
+}

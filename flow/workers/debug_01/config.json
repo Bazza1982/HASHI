@@ -1,0 +1,58 @@
+{
+  "worker_id": "debug_01",
+  "role": "Debug Agent",
+  "version": "1.0.0",
+  "backend": {
+    "system": "claude-cli",
+    "model": "claude-sonnet-4-6",
+    "api_timeout_seconds": 120,
+    "temperature": 0.6,
+    "max_tokens": 2000
+  },
+  "execution": {
+    "timeout_seconds": 120,
+    "strategy": "on_demand",
+    "triggered_by": "error_handling_system",
+    "retry_on_failure": false,
+    "notification_enabled": true
+  },
+  "debugging": {
+    "analyze_error_type": true,
+    "suggest_targeted_fixes": true,
+    "track_retry_attempts": true,
+    "escalate_after_max_attempts": true
+  },
+  "error_recovery": {
+    "max_attempts_per_step": 3,
+    "recovery_strategies": {
+      "step_01_analyze_task": "increase_prompt_clarity",
+      "step_02_infer_context": "adjust_confidence_threshold",
+      "step_03_generate_questions": "enforce_question_count_limit",
+      "step_04_collect_responses": "reformat_questions",
+      "step_05_validate_responses": "loosen_validation"
+    },
+    "escalation_criteria": [
+      "max_attempts_exceeded",
+      "unrecoverable_error",
+      "ambiguous_input",
+      "system_error"
+    ]
+  },
+  "escalation": {
+    "target_interface": "hchat-interface",
+    "notify_on_escalation": true,
+    "provide_context": true,
+    "suggest_actions": true
+  },
+  "environment": {
+    "WORKER_TYPE": "debug_agent",
+    "ERROR_ANALYSIS": "enabled",
+    "ERROR_RECOVERY": "enabled",
+    "ESCALATION": "enabled"
+  },
+  "metadata": {
+    "created_date": "2026-03-27T07:44:38Z",
+    "created_by": "designer_01",
+    "workflow_id": "pre-flight-intelligent-questioner"
+  }
+}

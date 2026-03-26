@@ -48,7 +48,7 @@ CRITICAL_PATTERNS = [
     re.compile(r"IndexError.*memory", re.IGNORECASE),
 ]
 
-SCAN_WINDOW_HOURS = 4  # look back a bit more than the 3h interval
+SCAN_WINDOW_HOURS = 3  # only report errors from the last 3 hours
 
 
 def is_noise(line: str) -> bool:
@@ -124,6 +124,10 @@ def scan_instance(name: str, logs_root: Path) -> dict:
         warn_lines = []
 
         for line in lines:
+            # Skip lines older than the scan window
+            ts = parse_timestamp(line)
+            if ts is not None and ts < cutoff:
+                continue
             if is_noise(line):
                 continue
             if is_critical(line):
@@ -155,6 +159,32 @@ def scan_instance(name: str, logs_root: Path) -> dict:
     return result
 
 
+def parse_timestamp(line: str) -> datetime | None:
+    """Parse timestamp from log line, return datetime or None."""
+    m = re.match(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", line)
+    if m:
+        try:
+            return datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            pass
+    return None
+
+
+def extract_timestamp(line: str) -> str:
+    """Extract timestamp from log line like '2026-03-25 20:57:55,975 | ERROR | ...'"""
+    m = re.match(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", line)
+    return m.group(1) if m else "??:??"
+
+
+def extract_message(line: str) -> str:
+    """Extract the meaningful error message after the logger name."""
+    # Format: "2026-03-25 20:57:55,975 | ERROR | FlexRuntime.akane.errors | actual message"
+    parts = line.split(" | ", 3)
+    if len(parts) >= 4:
+        return parts[3].strip()[:150]
+    return line.strip()[:150]
+
+
 def format_report(findings: list[dict]) -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     lines = [f"🤖 阿拉蕾巡逻报告 — {now}\n"]
@@ -174,14 +204,18 @@ def format_report(findings: list[dict]) -> str:
             lines.append(f"  ⚠️ 读取错误: {f['error']}")
 
         for item in f["critical"]:
-            lines.append(f"  🔴 **{item['agent']}** — [{item['log_path']}]")
+            lines.append(f"  🔴 **{item['agent']}**")
             for ln in item["lines"]:
-                lines.append(f"      `{ln[:120]}`")
+                ts = extract_timestamp(ln)
+                msg = extract_message(ln)
+                lines.append(f"      [{ts}] {msg}")
 
         for item in f["warnings"]:
-            lines.append(f"  🟡 **{item['agent']}** — [{item['log_path']}]")
+            lines.append(f"  🟡 **{item['agent']}**")
             for ln in item["lines"]:
-                lines.append(f"      `{ln[:120]}`")
+                ts = extract_timestamp(ln)
+                msg = extract_message(ln)
+                lines.append(f"      [{ts}] {msg}")
 
         if f["clean"]:
             lines.append(f"  ✅ 无问题: {', '.join(f['clean'])}")
