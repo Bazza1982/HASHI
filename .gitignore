@@ -122,3 +122,13 @@ instances.json
 
 # Cross-instance mailbox (internal comms, never commit)
 mailbox/
+
+# Flow — runtime output and private project content
+flow/runs/
+flow/workflows/library/
+flow/agents/translator/
+flow/agents/reviewer/
+flow/_trigger_logs/
+flow/_trigger_registry.jsonl
+flow/evaluation_kb/improvements/
+flow/evaluation_kb/workflow_scores/
