@@ -119,3 +119,6 @@ instances.json
 
 # AIPM payload files (project data, not part of HASHI)
 *_payload.json
+
+# Cross-instance mailbox (internal comms, never commit)
+mailbox/
