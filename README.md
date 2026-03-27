@@ -1,7 +1,7 @@
 # HASHI
 
-> **Status (v2.0.0):** All v2 roadmap delivered. Tool execution layer, browser automation, Pack & Go USB deployment, TUI, vector memory, and more.
-> **Changelog:** see [`CHANGELOG.md`](CHANGELOG.md) · **Roadmap:** see [`docs/ROADMAP.md`](docs/ROADMAP.md).
+> **Status (v2.1.0):** Nagare Flow System released — multi-agent workflow orchestration with cross-vendor evaluation, self-improving knowledge base, and autonomous task execution. All v2 roadmap delivered.
+> **Changelog:** see [`CHANGELOG.md`](CHANGELOG.md) · **Roadmap:** see [`docs/ROADMAP.md`](docs/ROADMAP.md) · **Nagare Docs:** see [`docs/NAGARE_FLOW_SYSTEM.md`](docs/NAGARE_FLOW_SYSTEM.md).
 
 ## About
 
@@ -61,6 +61,7 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
 - **Onboarding** - Multi-language guided setup to create your first agent
 - **Workbench** - Local web UI (React + Vite) for multi-agent conversations
 - **Orchestrator** - Central runtime managing agents, memory, skills, and scheduling
+- **Nagare Flow System** - Multi-agent workflow orchestration engine (v2.1)
 - **Transports** - Connect via Telegram, WhatsApp, or Workbench
 - **Skills** - Modular capabilities (prompts, toggles, actions) that extend agents
 - **Jobs** - Automated scheduling (heartbeats + cron) for periodic agent tasks
@@ -68,18 +69,20 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
 **What makes HASHI different:**
 1. **No Token Storage** - Uses CLI backends (gemini, claude, codex) with local authentication, not stored tokens
 2. **Multi-Agent, Single Interface** - Chat with multiple specialized agents through one WhatsApp or Telegram account
-3. **Context Recovery** - `/handoff` command instantly restores project context after compression
-4. **Tool Execution Layer** - OpenRouter agents can take real local actions: run bash commands, read/write files, search the web, call external APIs, and more
-5. **Flex/Fixed Mode Switching** - Agents can switch between CLI backends and OpenRouter mid-conversation via `/backend`
-6. **TUI Interface** - `tui.py` provides a split-panel terminal UI for log monitoring and agent chat without a browser
-7. **Pack & Go** - Build a self-contained USB for Windows or macOS; recipients just plug in and double-click, no setup required
-8. **Vibe-Coded** - Every line written by AI, reviewed by AI, directed by human vision
+3. **Nagare Flow System** - Describe a task in natural language; Nagare designs, executes, and improves a multi-agent workflow automatically — with cross-vendor evaluation, self-improving knowledge base, and autonomous error recovery
+4. **Context Recovery** - `/handoff` command instantly restores project context after compression
+5. **Tool Execution Layer** - OpenRouter agents can take real local actions: run bash commands, read/write files, search the web, call external APIs, and more
+6. **Flex/Fixed Mode Switching** - Agents can switch between CLI backends and OpenRouter mid-conversation via `/backend`
+7. **TUI Interface** - `tui.py` provides a split-panel terminal UI for log monitoring and agent chat without a browser
+8. **Pack & Go** - Build a self-contained USB for Windows or macOS; recipients just plug in and double-click, no setup required
+9. **Vibe-Coded** - Every line written by AI, reviewed by AI, directed by human vision
 
 ---
 
 ## Project Status
 
-- **v2.0.0** — All v2 roadmap outcomes delivered. Tool execution layer (11 tools), browser automation (Playwright), Pack & Go USB deployment (Windows + macOS), TUI, vector memory, `/dream` skill, `/memory` command. See [`CHANGELOG.md`](CHANGELOG.md).
+- **v2.1.0** — **Nagare Flow System** — multi-agent workflow orchestration with cross-vendor evaluation, self-improving knowledge base, DAG execution, and autonomous error recovery. See [`docs/NAGARE_FLOW_SYSTEM.md`](docs/NAGARE_FLOW_SYSTEM.md).
+- **v2.0.0** — Tool execution layer (11 tools), browser automation (Playwright), Pack & Go USB deployment (Windows + macOS), TUI, vector memory, `/dream` skill, `/memory` command. See [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Installation
 
@@ -177,6 +180,14 @@ HASHI uses a **Universal Orchestrator** pattern where a single Python process ma
 │  │   Skill    │  │  Scheduler │  │   Memory System    │   │
 │  │  Manager   │  │ (Jobs/Cron)│  │ (Vector + Recall)  │   │
 │  └────────────┘  └────────────┘  └────────────────────┘   │
+│                                                              │
+│  ┌───────────────────────────────────────────────────────┐ │
+│  │           Nagare Flow System (v2.1)                   │ │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────────────┐   │ │
+│  │  │FlowRunner│→ │ Workers  │→ │ Evaluation KB    │   │ │
+│  │  │(DAG Orch)│  │(Multi-AI)│  │(Self-Improving)  │   │ │
+│  │  └──────────┘  └──────────┘  └──────────────────┘   │ │
+│  └───────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -223,6 +234,12 @@ hashi/
 ├── workbench/                 # Local web UI
 │   ├── server/                # Node.js API server
 │   └── src/                   # React frontend
+├── flow/                      # Nagare Flow System (v2.1)
+│   ├── engine/                # FlowRunner, WorkerDispatcher, TaskState
+│   ├── workflows/             # Workflow YAML definitions
+│   ├── runs/                  # Workflow run directories (state, artifacts)
+│   ├── evaluation_kb/         # Self-improving knowledge base
+│   └── flow_trigger.py        # CLI launcher for workflows
 ├── memory/                    # Agent memory files
 ├── state/                     # Runtime state
 ├── logs/                      # Log files
@@ -686,6 +703,50 @@ Every agent request includes:
 
 ---
 
+### Nagare Flow System (v2.1)
+
+**Nagare (流れ)** is HASHI's multi-agent workflow orchestration engine — the system's most significant capability upgrade. It enables complex, multi-step tasks to be designed, executed, and improved autonomously.
+
+**The Core Problem Nagare Solves:**
+Every AI model operates in a single reasoning session. It cannot run parallel sub-tasks, critique its own output from a fresh perspective, or learn from previous runs. For tasks requiring more than 2-3 coherent reasoning steps, quality collapses. Nagare solves this at the architecture level.
+
+**Key Capabilities:**
+
+| Capability | How It Works |
+|-----------|-------------|
+| **Meta-Workflow** | Describe a task in natural language → Nagare designs a complete multi-agent workflow automatically |
+| **Cross-Vendor Evaluation** | Claude writes → GPT reviews. No model evaluates its own output — architecturally enforced |
+| **Pre-Flight System** | All human decisions collected once upfront; workflow runs uninterrupted with no mid-task blocking |
+| **DAG Orchestration** | Steps execute in dependency order with parallel execution where possible |
+| **Debug Agent** | Auto-recovers from failures (3 attempts), only escalates to human when truly stuck |
+| **Evaluation KB** | Every run feeds lessons back — the 201st workflow is genuinely better than the 1st |
+| **Self-Improving** | A/B/C graded improvements: low-risk auto-applied, high-risk queued for approval |
+| **Crash Recovery** | Atomic `state.json` writes — survives crashes, resumes at exact failure point |
+
+**The 12-Step Meta-Workflow Pipeline:**
+```
+Pre-flight → Analyze Requirements → Generate Questions → Integrate Responses → Validate
+         → Design Workflow → Devil's Advocate Critique → Create Files
+         → Validate → Independent Cross-Vendor Review
+         → Evaluate & Improve → Apply Improvements → Notify
+```
+
+**Quick Start:**
+```bash
+# Create a new workflow from natural language
+python flow/flow_trigger.py start meta '{"task_description": "Describe your task here"}'
+
+# Check status
+python flow/flow_trigger.py status <run_id>
+
+# List all runs
+python flow/flow_trigger.py list
+```
+
+> Full technical reference: [`docs/NAGARE_FLOW_SYSTEM.md`](docs/NAGARE_FLOW_SYSTEM.md)
+
+---
+
 ### Handoff System
 
 The `/handoff` command generates a **context restoration prompt** for recovering work after conversation compression or session loss:
@@ -904,9 +965,9 @@ python tui.py
 
 ## ⚠️ Important Warnings
 
-### This is Version 2.0.0
+### This is Version 2.1.0
 
-HASHI v2.0 is a **working prototype** built entirely through AI-assisted development ("Vibe-Coding"). While functional and field-tested by the author, it is **not production-ready**.
+HASHI v2.1 is a **working prototype** built entirely through AI-assisted development ("Vibe-Coding"). While functional and field-tested by the author, it is **not production-ready**.
 
 **Known Limitations:**
 - **Bugs** - Expect edge cases and unexpected behavior
@@ -931,13 +992,21 @@ If you encounter bugs or unexpected behavior, please report them on the GitHub I
 
 ---
 
-## Version 1.0 Release
+## Release History
 
-**Release Date:** March 23, 2026
+### v2.1.0 — Nagare Flow System (March 2026)
 
-This marks the v2.0.0 release of HASHI — a major milestone delivering the complete v2 roadmap.
+- ✅ **Nagare Flow System** — multi-agent workflow orchestration engine
+- ✅ **Meta-Workflow** — natural language → complete workflow design, automatically
+- ✅ **Cross-vendor evaluation** — Claude writes, GPT reviews (architecturally enforced)
+- ✅ **Pre-flight system** — smart question filtering, max 5 questions, auto-timeout
+- ✅ **DAG orchestration** — topological step ordering with parallel execution
+- ✅ **Debug agent** — auto-recovery with 3 retries before human escalation
+- ✅ **Evaluation Knowledge Base** — self-improving with A/B/C graded improvements
+- ✅ **Crash recovery** — atomic state persistence, resume at exact failure point
 
-**What's Included (v2.0.0):**
+### v2.0.0 — Tool Execution & Platform (March 2026)
+
 - ✅ Multi-language onboarding (9 languages)
 - ✅ Support for 4 backends (Gemini CLI, Claude CLI, Codex CLI, OpenRouter)
 - ✅ Telegram + WhatsApp + Workbench transports
@@ -955,11 +1024,8 @@ This marks the v2.0.0 release of HASHI — a major milestone delivering the comp
 
 **Coming in Future Versions:**
 - Enhanced security (API Gateway authentication)
-- Mobile app (iOS/Android)
-- Cloud deployment options
 - Expanded skill library
 - Performance optimizations
-- Voice-first interfaces
 
 ---
 
