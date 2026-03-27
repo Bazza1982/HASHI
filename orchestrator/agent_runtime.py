@@ -373,12 +373,13 @@ class BridgeAgentRuntime:
     CODEX_CHUNK_LIMIT_ERROR = "Separator is not found, and chunk exceed the limit"
     CODEX_SCHEDULER_RETRY_DELAY_S = 120
 
-    def __init__(self, name: str, backend: BaseBackend, telegram_token: str, skill_manager: SkillManager | None = None):
+    def __init__(self, name: str, backend: BaseBackend, telegram_token: str, skill_manager: SkillManager | None = None, secrets: dict | None = None):
         self.name = name
         self.backend = backend
         self.config = backend.config
         self.global_config = backend.global_config
         self.token = telegram_token
+        self.secrets = secrets or {}
 
         self.session_started_at = datetime.now()
         self.session_id_dt = self.session_started_at.strftime("%Y-%m-%d_%H%M%S")
@@ -433,7 +434,7 @@ class BridgeAgentRuntime:
         self._pending_session_primer: str | None = None
         self._pending_auto_recall_context: str | None = None
         self.runtime_session_path = self.config.workspace_dir / ".runtime_session.json"
-        self.voice_manager = VoiceManager(self.config.workspace_dir, self.media_dir, ffmpeg_cmd="ffmpeg")
+        self.voice_manager = VoiceManager(self.config.workspace_dir, self.media_dir, ffmpeg_cmd="ffmpeg", secrets=self.secrets)
         self.memory_store = BridgeMemoryStore(self.config.workspace_dir)
         self.handoff_builder = HandoffBuilder(self.config.workspace_dir, transcript_filename="conversation_log.jsonl")
         self.parked_topics = ParkedTopicStore(self.config.workspace_dir)
@@ -2960,7 +2961,8 @@ class BridgeAgentRuntime:
     async def cmd_debug(self, update, context):
         if update.effective_user.id != self.global_config.authorized_id:
             return
-        args = [a.strip().lower() for a in (context.args or []) if a.strip()]
+        raw_args = list(context.args or [])
+        args = [a.strip().lower() for a in raw_args if a.strip()]
         if args and args[0] in {"on", "off"}:
             enabled = args[0] == "on"
             if self.skill_manager:
@@ -2970,7 +2972,25 @@ class BridgeAgentRuntime:
             else:
                 await update.message.reply_text("Skill manager not available.")
             return
-        await self._invoke_prompt_skill_from_command(update, "debug", list(context.args or []))
+        if not self.skill_manager:
+            await update.message.reply_text("Skill system is not configured.")
+            return
+        skill = self.skill_manager.get_skill("debug")
+        if skill is None:
+            await update.message.reply_text("Unknown skill: debug")
+            return
+        prompt_text = " ".join(raw_args).strip()
+        if not prompt_text:
+            await update.message.reply_text("Usage: /debug <prompt> or /debug on|off")
+            return
+        prompt = self.skill_manager.build_prompt_for_skill(skill, prompt_text)
+        await update.message.reply_text(f"Running skill {skill.id}...")
+        await self.enqueue_request(
+            update.effective_chat.id,
+            prompt,
+            f"skill:{skill.id}",
+            f"Skill {skill.id}",
+        )
 
     async def cmd_skill(self, update, context):
         if update.effective_user.id != self.global_config.authorized_id:

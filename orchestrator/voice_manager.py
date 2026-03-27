@@ -115,6 +115,35 @@ class VoiceManager:
             "label": "Zira [Win-US]",
             "language": "English",
         },
+        # Kokoro local TTS presets — runs on CPU, no API key needed
+        "ko_bella": {
+            "provider": "kokoro",
+            "voice_name": "af_bella",
+            "label": "Bella [Kokoro EN]",
+            "language": "English",
+            "provider_options": {"lang_code": "a"},
+        },
+        "ko_heart": {
+            "provider": "kokoro",
+            "voice_name": "af_heart",
+            "label": "Heart [Kokoro EN]",
+            "language": "English",
+            "provider_options": {"lang_code": "a"},
+        },
+        "ko_xiaoxiao": {
+            "provider": "kokoro",
+            "voice_name": "zf_xiaoxiao",
+            "label": "Xiaoxiao [Kokoro ZH]",
+            "language": "Chinese",
+            "provider_options": {"lang_code": "z"},
+        },
+        "ko_xiaobei": {
+            "provider": "kokoro",
+            "voice_name": "zf_xiaobei",
+            "label": "Xiaobei [Kokoro ZH]",
+            "language": "Chinese",
+            "provider_options": {"lang_code": "z"},
+        },
     }
 
     MACOS_VOICE_PRESETS = {
@@ -128,12 +157,13 @@ class VoiceManager:
     if sys.platform == "darwin":
         VOICE_PRESETS.update(MACOS_VOICE_PRESETS)
 
-    def __init__(self, workspace_dir: Path, media_dir: Path, ffmpeg_cmd: str = "ffmpeg"):
+    def __init__(self, workspace_dir: Path, media_dir: Path, ffmpeg_cmd: str = "ffmpeg", secrets: dict | None = None):
         self.workspace_dir = workspace_dir
         self.media_dir = media_dir
         self.state_path = workspace_dir / "voice_state.json"
         self.output_dir = media_dir / "voice"
         self.ffmpeg_cmd = ffmpeg_cmd
+        self._secrets = secrets or {}
 
     def _default_piper_exe(self) -> str:
         piper_exe = Path(sys.executable).with_name("piper.exe")
@@ -305,7 +335,7 @@ class VoiceManager:
             f"- edge: Microsoft Edge online neural voices [{self._provider_status('edge')}]\n"
             f"- piper: local Piper CLI/model [{self._provider_status('piper')}]\n"
             f"- kokoro: Kokoro Python package [{self._provider_status('kokoro')}]\n"
-            f"- coqui: Coqui TTS Python package [{self._provider_status('coqui')}]"
+            f"- coqui: Coqui TTS Python package [{self._provider_status('coqui')}]\n"
         )
 
     def apply_voice_preset(self, alias: str) -> str:
@@ -334,7 +364,8 @@ class VoiceManager:
         for attempt in range(max_retries + 1):
             try:
                 stem = f"{agent_name}_{request_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{attempt}"
-                provider = build_provider(state.get("provider", "windows"), ffmpeg_cmd=self.ffmpeg_cmd)
+                provider_name = state.get("provider", "windows")
+                provider = build_provider(provider_name, ffmpeg_cmd=self.ffmpeg_cmd)
                 return await provider.synthesize(
                     text=text,
                     output_dir=self.output_dir,

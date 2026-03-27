@@ -1,16 +1,16 @@
 # HASHI Flow — Meta-Workflow
 # "工作流创建工作流"
 # 这是整个系统最核心的工作流：用来动态创建任何新的工作流
-# 版本: 1.4.0
+# 版本: 1.6.0
 
 workflow:
   id: meta-workflow-creation
   name: "工作流创建工作流"
-  version: "1.5.0"
+  version: "1.6.0"
   description: |
     接收用户的自然语言需求，自动设计并创建完整的工作流配置。
     这是 HASHI Flow 的元工作流，用于 bootstrap 任何其他工作流。
-    v1.5：多厂商独立评估 + critic（devil's advocate）设计批判
+    v1.6：集成 smart-preflight-module（智能预检 + 问题质量过滤 + 超时自动默认值）
   tags: [meta, system, workflow-creation]
 
 meta:
@@ -57,6 +57,16 @@ changelog:
       - 新增 critic_01（codex-cli / GPT-5.4）Devil's Advocate 角色
       - 新增 critique_design 步骤（design → critic → create_files）
       - critic 权重机制：意见仅供参考，orchestrator 有最终决策权
+  - version: "1.6.0"
+    date: "2026-03-27"
+    changes: |
+      集成 smart-preflight-module：
+      - 以 smart-preflight 4步骤流水线替换单步 analyze_requirements
+      - 新增 questioner_01（Opus）+ integrator_01（Sonnet）workers
+      - 三维问题质量评分（necessity×0.5 + impact×0.3 + clarity×0.2），阈值0.6过滤，最多5个问题
+      - wait_for_human_timeout_seconds: 300（依赖 NAGARE-TIMEOUT-001）
+      - smart defaults 自动填充：超时后继续执行而非卡死
+      - preflight_context.json 通过 from_artifacts 传递给后续设计步骤
 
 # =============================================================================
 # Pre-flight：在设计工作流之前，收集必要信息
@@ -140,6 +150,22 @@ agents:
       model: gpt-5.4  # 外部视角：专门挑战设计假设和盲点
       controllable_by: [orchestrator, human]
 
+    - id: questioner_01
+      role: "问题生成与过滤专家（smart-preflight）"
+      agent_md: "flow/workflows/library/smart-preflight-module/workers/questioner_01/AGENT.md"
+      workspace: "flow/runs/{run_id}/workers/questioner_01"
+      backend: claude-cli
+      model: claude-opus-4-6  # 问题质量评分需要高判断力
+      controllable_by: [orchestrator, human]
+
+    - id: integrator_01
+      role: "响应集成与默认值解析（smart-preflight）"
+      agent_md: "flow/workflows/library/smart-preflight-module/workers/integrator_01/AGENT.md"
+      workspace: "flow/runs/{run_id}/workers/integrator_01"
+      backend: claude-cli
+      model: claude-sonnet-4-6  # 合并回答 Sonnet 足够
+      controllable_by: [orchestrator, human]
+
     - id: debug_01
       role: "调试代理"
       agent_md: "flow/agents/debug/AGENT.md"
@@ -153,35 +179,54 @@ agents:
 # =============================================================================
 
 steps:
-  # 步骤 1：分析需求（完成后可能暂停等待 human 确认关键领域问题）
+  # ─── Smart Preflight（步骤 1-4）：集成 smart-preflight-module 流水线 ──────────
+  # 替代旧版单步 analyze_requirements + wait_for_human
+  # 亮点：三维问题质量评分（necessity×0.5 + impact×0.3 + clarity×0.2），
+  # 阈值0.6过滤，最多5个问题；超时300秒自动使用 smart defaults 继续
+
+  # 步骤 1：深度分析任务需求与信息缺口
   - id: analyze_requirements
-    name: "分析任务需求"
+    name: "深度分析任务需求与信息缺口"
     agent: analyst_01
     depends: []
-    wait_for_human: true  # 如果有需确认问题，自动暂停等待 human 回答
     input:
       params:
         task_description: "{pre_flight.task_description}"
         source_files: "{pre_flight.source_files}"
     prompt: |
-      分析以下任务需求，输出 task_analysis.json：
+      深度分析以下任务需求，识别信息缺口，输出 task_analysis.json。
 
       任务描述：{pre_flight.task_description}
       输入文件：{pre_flight.source_files}
 
-      请输出：
-      1. 任务类型（translation/research/writing/analysis/other）
-      2. 建议的步骤分解（3-6步，简洁为主）
-      3. 建议的 agent 角色（2-5个）
-      4. 每个步骤推荐的 model（默认 Opus 确保质量，仅明确简单的格式化/校对任务用 Sonnet）
-      5. 估计的总耗时和成本区间（美元）
-      6. 可能的风险点
-      7. clarification_questions：需要向用户确认的领域知识问题列表（仅限系统无法自主推断的）
-         ⚠️ 这个字段非常重要：任何影响设计方向的未知信息都必须列为问题。
-         例如：适用的法规/准则、目标国家/地区、专有名词译法、目标受众、输出格式偏好等。
-         如果任务描述已经足够清晰无需确认，输出空列表 []。
-
-      严格输出 JSON 格式，clarification_questions 必须是字符串列表。
+      请输出（严格 JSON）：
+      {
+        "task_type": "translation/research/writing/analysis/other",
+        "task_summary": "一句话总结任务",
+        "complexity": "low/medium/high",
+        "suggested_steps": [...],        // 3-6步
+        "suggested_agents": [...],       // 2-5个 agent 角色
+        "model_recommendations": {...},  // step_id → model
+        "estimated_duration_minutes": 0,
+        "estimated_cost_usd_range": [0, 0],
+        "risk_points": [...],
+        "information_gaps": [            // 系统无法自主推断的信息缺口（供 questioner 使用）
+          {
+            "key": "snake_case_key",
+            "description": "缺少什么信息",
+            "impact_if_unknown": "不知道这个信息会导致什么问题",
+            "parameter_layer": "design_time OR runtime OR implementation_detail",
+            "can_assume": true/false,    // 是否可以合理假设
+            "suggested_default": "建议的默认值（如果 can_assume=true）"
+          }
+        ]
+        // parameter_layer 字段是必填的，定义如下：
+        // - design_time: 影响工作流架构/步骤数量/agent选择的参数，设计时必须确认，必须问设计者（即当前用户）
+        // - runtime: 工作流运行时由该工作流自身的 pre-flight 向终端用户收集的输入，
+        //            设计时只需确保 workflow 的 pre-flight 包含收集机制，不需要知道具体值
+        //            例如：用户要写哪段落、提供什么源材料 —— 这些是 runtime，设计时绝对不问
+        // - implementation_detail: 技术参数，有合理默认值，设计者无需关心
+      }
     output:
       artifacts:
         - key: task_analysis
@@ -189,13 +234,143 @@ steps:
           type: json
     timeout_seconds: 360
 
-  # 步骤 2：设计工作流（参照知识库 + schema）
+  # 步骤 2：动态生成问题并质量过滤（smart-preflight 核心）
+  - id: generate_preflight_questions
+    name: "智能问题生成与质量过滤"
+    agent: questioner_01
+    depends: [analyze_requirements]
+    wait_for_human: true                    # 过滤后有问题则暂停等待 human 回答
+    wait_for_human_timeout_seconds: 300     # NAGARE-TIMEOUT-001: 300s 后自动使用 smart defaults
+    input:
+      from_artifacts: [task_analysis]
+      params:
+        task_description: "{pre_flight.task_description}"
+    prompt: |
+      读取 task_analysis.json 中的 information_gaps，对每个缺口进行三维质量评分。
+
+      ⚠️ 重要：你的受众是工作流设计者（当前用户），不是工作流的最终用户。
+      - parameter_layer == "runtime" 的缺口：直接跳过，加入 auto_resolved（value="runtime_parameter"）
+        因为这些是被设计的工作流在运行时向终端用户收集的，设计时不需要问
+      - parameter_layer == "implementation_detail" 的缺口：直接使用 suggested_default，加入 auto_resolved
+      - 只有 parameter_layer == "design_time" 的缺口才进入评分流程
+
+      质量评分公式（仅对 design_time 缺口）：score = necessity×0.5 + impact×0.3 + clarity×0.2
+      - necessity (0-1)：问这个问题是否必要
+      - impact (0-1)：答案对设计质量的影响程度
+      - clarity (0-1)：问题表达是否清晰
+
+      过滤规则（仅对通过 parameter_layer 过滤的缺口）：
+      - score < 0.6 → 删除（低价值问题）
+      - can_assume=true + score < 0.75 → 直接使用 suggested_default，不提问
+      - 最终问题数 ≤ 5（若超过则取 score 最高的5个）
+
+      输出 question_set.json（同时也是 clarification_questions 格式，供 wait_for_human 机制读取）：
+      {
+        "clarification_questions": ["最终问题文本列表"],
+        "questions_detail": [
+          {
+            "key": "snake_case_key",
+            "question": "问题文本",
+            "score": 0.0,
+            "default": "smart default 值"
+          }
+        ],
+        "auto_resolved": [               // 已自动解析（不需要问 human）的字段
+          {"key": "...", "value": "runtime_parameter", "reason": "parameter_layer=runtime，运行时由 workflow 自身收集，设计时跳过"},
+          {"key": "...", "value": "...", "reason": "can_assume=true + score<0.75"}
+        ]
+      }
+
+      同时将 smart defaults 写入 _human_defaults.json（供超时恢复使用，仅含 can_assume=true 的字段）：
+      {
+        "key1": "default_value1",
+        "key2": "default_value2"
+      }
+    output:
+      artifacts:
+        - key: question_set
+          path: question_set.json
+          type: json
+    timeout_seconds: 300
+
+  # 步骤 3：集成 human 响应与 smart defaults
+  - id: integrate_preflight_responses
+    name: "集成人类响应与智能默认值"
+    agent: integrator_01
+    depends: [generate_preflight_questions]
+    input:
+      from_artifacts: [task_analysis, question_set]
+      params:
+        task_description: "{pre_flight.task_description}"
+    prompt: |
+      读取以下内容，生成完整的 preflight_context.json：
+
+      1. task_analysis.json — 任务分析结果
+      2. question_set.json — 已过滤的问题集 + auto_resolved 字段
+      3. _human_response.json（如存在）— human 的回答
+         - 若含 _timeout_assumed=true，表示已超时，使用 defaults
+
+      合并规则：
+      - human 明确回答 → 使用 human 回答
+      - human 未回答 + 存在 default → 使用 default，标记 assumed=true
+      - human 未回答 + 无 default + can_assume=false → 标记为 blocking_issue
+      - auto_resolved 字段直接采纳
+
+      输出 preflight_context.json：
+      {
+        "resolved": {
+          "key1": {"value": "...", "source": "human/default/auto", "assumed": false}
+        },
+        "blocking_issues": [],           // 必须为空才能继续
+        "assumption_count": 0,
+        "human_input_ratio": 0.0,        // human 实际回答的比例
+        "ready_for_workflow": true
+      }
+    output:
+      artifacts:
+        - key: preflight_context
+          path: preflight_context.json
+          type: json
+    timeout_seconds: 300
+
+  # 步骤 4：验证 preflight 上下文完整性
+  - id: validate_preflight
+    name: "验证预检上下文完整性"
+    agent: analyst_01
+    depends: [integrate_preflight_responses]
+    input:
+      from_artifacts: [preflight_context]
+    prompt: |
+      读取 preflight_context.json，验证：
+      1. ready_for_workflow == true
+      2. blocking_issues 为空列表
+      3. resolved 中所有必要字段存在
+
+      如果验证通过，直接输出：
+      {"status": "completed", "valid": true, "summary": "预检通过，ready_for_workflow=true"}
+
+      如果验证失败，输出：
+      {"status": "failed", "valid": false, "blocking_issues": [...], "summary": "预检失败原因"}
+    output:
+      artifacts:
+        - key: preflight_validation
+          path: preflight_validation.json
+          type: json
+    quality_gate:
+      type: auto
+      criteria:
+        - "preflight_validation.valid == true"
+    timeout_seconds: 180
+
+  # ─── 工作流设计阶段（步骤 5-8）────────────────────────────────────────────────
+
+  # 步骤 5：设计工作流（参照知识库 + schema）
   - id: design_workflow
     name: "设计工作流 YAML"
     agent: designer_01
-    depends: [analyze_requirements]
+    depends: [validate_preflight]
     input:
-      from_artifacts: [task_analysis]
+      from_artifacts: [task_analysis, preflight_context]
       params:
         task_description: "{pre_flight.task_description}"
         knowledge_base_path: "flow/evaluation_kb/"
@@ -386,13 +561,50 @@ steps:
         - "validation_report.valid == true"
     timeout_seconds: 360
 
-  # 步骤 5：评估 + 生成改进建议
+  # 步骤 5：独立代码审查（GPT 独立审查 validator 的结论）
+  - id: independent_review
+    name: "独立审查验证结果"
+    agent: reviewer_01
+    depends: [validate_workflow]
+    input:
+      from_artifacts: [design_package, creation_report, validation_report]
+    prompt: |
+      你是一个独立审查员（与 designer 和 validator 完全隔离）。
+      阅读以下 artifacts：
+      - design_package.json（设计决策）
+      - creation_report.json（创建结果）
+      - validation_report.json（验证结论）
+
+      重点审查：
+      1. validator 的结论是否可信？有无遗漏的重大问题？
+      2. designer 对 critic 高危问题的处理是否合理？被拒绝的建议是否有充分理由？
+      3. 从"独立第三方"视角看，这个工作流有无明显盲点或风险？
+
+      输出 review_report.json：
+      {
+        "reviewer_agrees_with_validation": true/false,
+        "disagreements": [...],
+        "additional_issues": [...],
+        "overall_verdict": "approve" / "flag_for_attention" / "reject",
+        "verdict_reasoning": "..."
+      }
+
+      如果你同意 validator 的结论且没有额外问题，直接输出 overall_verdict=approve。
+      不要重复 validator 已经发现的问题，只报告新发现。
+    output:
+      artifacts:
+        - key: review_report
+          path: review_report.json
+          type: json
+    timeout_seconds: 360
+
+  # 步骤 6：评估 + 生成改进建议
   - id: evaluate_and_improve
     name: "评估设计质量并生成改进建议"
     agent: evaluator_01
-    depends: [validate_workflow]
+    depends: [independent_review]
     input:
-      from_artifacts: [task_analysis, design_package, validation_report]
+      from_artifacts: [task_analysis, design_package, validation_report, review_report]
       params:
         kb_path: "flow/evaluation_kb/"
     prompt: |
@@ -410,6 +622,9 @@ steps:
 
       计算 improvement_adoption_rate：上次 pending.yaml 中有多少条已被 designer 采纳
       （对比 pending.yaml 和 design_package.kb_references）
+      注意：applied.yaml 中 status 为 completed_noop_already_satisfied 的条目
+      不计入 adoption_rate 分子，因为它们不代表 designer 主动采纳，而是原本已满足。
+      adoption_rate = (真正修改了 YAML 的 A 类条目数) / (上次 pending 总数)
 
       输出 evaluation_report.json：
       {
@@ -553,6 +768,7 @@ success_criteria:
   - "步骤 validate_workflow 状态为 completed"
   - "validation_report.valid == true"
   - "validation_report.design_quality_score >= 6"
+  - "review_report.overall_verdict != 'reject'"
   - "工作流 YAML 文件已创建"
   - "所有 worker AGENT.md 已创建"
   - "evaluation_report 已生成"

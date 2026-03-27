@@ -2,3 +2,21 @@
 version: "1.0"
 last_updated: "2026-03-26T00:00:00Z"
 improvements: []
+
+  - id: imp-run-meta-workflow-creation-20260327-132844-001
+    class: A
+    workflow_id: smart-preflight-module
+    target: "smart-preflight-module.workflow.version"
+    description: "Changed version from '1.0.0-candidate' to '1.0.0'; candidate status expressed via tags field"
+    applied_at: "2026-03-27T16:38:00+11:00"
+    applied_by: orchestrator_akane
+    result: "Resolved schema blocking error, workflow now valid"
+
+  - id: imp-run-meta-workflow-creation-20260327-132844-002
+    class: A
+    workflow_id: smart-preflight-module
+    target: "smart-preflight-module.evaluation.metrics"
+    description: "Deferred custom metrics question_filter_ratio and auto_resolve_ratio to supplementary report pending schema extension"
+    applied_at: "2026-03-27T16:38:00+11:00"
+    applied_by: orchestrator_akane
+    result: "Noted as tech debt; no immediate file change needed as metrics are advisory only"

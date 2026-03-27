@@ -1,0 +1,24 @@
+{
+  "agent_id": "style_adapter_01",
+  "role": "Journal style adaptation, regional English, de-formulaic prose pass",
+  "workflow_id": "academic-writing-paragraph",
+  "run_id": "{run_id}",
+  "backend": {
+    "active": "claude-cli",
+    "model": "claude-opus-4-6",
+    "available": ["claude-cli"],
+    "controllable_by": ["orchestrator", "human"]
+  },
+  "capabilities": ["file_read", "file_write", "bash"],
+  "communication": {
+    "hchat_endpoint": "http://localhost:5000",
+    "inbox_path": "inbox/",
+    "outbox_path": "outbox/",
+    "poll_interval_seconds": 5
+  },
+  "limits": {
+    "timeout_seconds": 600,
+    "max_tokens": 100000,
+    "max_file_size_mb": 50
+  }
+}

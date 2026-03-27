@@ -605,7 +605,7 @@ class UniversalOrchestrator:
                 main_logger.warning(f"No Telegram token found for agent '{agent_cfg.name}'.")
                 token = "WORKBENCH_ONLY_NO_TOKEN"
             backend = _get_backend(agent_cfg.engine)(agent_cfg, global_cfg, api_key)
-            runtime = _BridgeRT(agent_cfg.name, backend, token, self.skill_manager)
+            runtime = _BridgeRT(agent_cfg.name, backend, token, self.skill_manager, secrets=secrets)
         runtime.orchestrator = self
         runtime.bind_handlers()
         return runtime

@@ -59,6 +59,9 @@ class FlowRunner:
         self._aborted = False
         self._pre_flight_data: dict = {}
         self._step_results: dict = {}  # step_id → result dict (for skip_if evaluation)
+        self._human_wait_deadline: Optional[float] = None   # NAGARE-TIMEOUT-001
+        self._human_wait_defaults: dict = {}                # NAGARE-TIMEOUT-001: fallback defaults
+        self._timeout_assumptions: list = []                # NAGARE-TIMEOUT-001: log of auto-assumed values
         self.dispatcher = WorkerDispatcher(self.run_id)
         # 信号文件路径（外部进程可通过创建这些文件来控制工作流）
         self._run_dir = Path(f"flow/runs/{self.run_id}")
@@ -190,6 +193,10 @@ class FlowRunner:
             self._notify_human(f"⏸️ 工作流已暂停，等待恢复。删除 _pause 文件或调用 resume() 恢复。" + (f"\n原因: {reason}" if reason else ""))
 
             while self._pause_signal.exists() and not self._stop_signal.exists():
+                # NAGARE-TIMEOUT-001: 检查 wait_for_human 超时
+                if self._human_wait_deadline is not None and time.time() > self._human_wait_deadline:
+                    self._handle_human_timeout()
+                    break
                 time.sleep(2)
 
             # 暂停期间可能收到停止信号
@@ -265,9 +272,29 @@ class FlowRunner:
             f"请回答后写入 {response_file} 并删除 _pause 文件恢复。"
         )
 
+        # 解析超时配置（NAGARE-TIMEOUT-001）
+        # 优先级：step.wait_for_human_timeout > workflow.pre_flight.human_response_timeout_seconds > 默认 300s
+        timeout_secs = (
+            step.get("wait_for_human_timeout_seconds")
+            or self.workflow.get("pre_flight", {}).get("human_response_timeout_seconds")
+            or 300
+        )
+        self._human_wait_deadline = time.time() + timeout_secs
+        # 尝试读取 worker 提供的 smart defaults（文件名约定：_human_defaults.json）
+        defaults_file = self._run_dir / "_human_defaults.json"
+        if defaults_file.exists():
+            try:
+                self._human_wait_defaults = json.loads(defaults_file.read_text(encoding="utf-8"))
+            except Exception:
+                self._human_wait_defaults = {}
+        else:
+            self._human_wait_defaults = {}
+
         # 自动暂停
         self._pause_signal.write_text(f"等待 human 回答来自 {step['id']} 的问题", encoding="utf-8")
-        self.logger.info(f"[WaitForHuman] 已暂停，等待 human 回答 {len(questions)} 个问题")
+        self.logger.info(
+            f"[WaitForHuman] 已暂停，等待 human 回答 {len(questions)} 个问题（超时 {timeout_secs}s）"
+        )
 
         # _check_signals 会在下次循环中捕获暂停并等待
         # 暂停解除后读取回答
@@ -321,6 +348,84 @@ class FlowRunner:
         else:
             self.logger.warning(f"[WaitForHuman] 回答文件不存在: {response_file}，以空回答继续")
         self._pending_human_response = None
+        self._human_wait_deadline = None   # NAGARE-TIMEOUT-001: 清空超时状态
+        self._human_wait_defaults = {}
+
+    def _handle_human_timeout(self):
+        """
+        NAGARE-TIMEOUT-001: wait_for_human 超时处理。
+
+        关键设计原则：pre-flight 是工作流的前置控制门。
+        - 有 blocking 必填问题（can_assume=false）未回答 → 不能继续，重新通知并继续等待
+        - 全部是可选/有默认值的问题 → 超时后用 smart defaults 继续
+        """
+        step_id = "unknown"
+        blocking_questions = []
+        try:
+            query_file = self._run_dir / "_human_query.json"
+            if query_file.exists():
+                qdata = json.loads(query_file.read_text(encoding="utf-8"))
+                step_id = qdata.get("from_step", "unknown")
+                # 检查是否有 blocking 问题（can_assume=false 且无默认值）
+                for q in qdata.get("questions", []):
+                    if not q.get("can_assume", True) and q.get("default") is None:
+                        blocking_questions.append(q.get("key", q.get("question", "unknown")))
+        except Exception:
+            pass
+
+        defaults = self._human_wait_defaults or {}
+
+        # 如果有 blocking 必填问题，不能跳过——重新通知并继续等待
+        if blocking_questions:
+            # 延长等待时间（再等 300s），重新发通知
+            self._human_wait_deadline = time.time() + 300
+            self.logger.warning(
+                f"[WaitForHuman] ⏱️ 超时但有 blocking 必填问题，不能继续。"
+                f"重新通知并继续等待（step={step_id}, blocking={blocking_questions}）"
+            )
+            self._notify_human(
+                f"⚠️ 步骤 {step_id} 等待超时，但以下必填问题未回答，工作流无法继续：\n"
+                f"{chr(10).join(f'  - {q}' for q in blocking_questions)}\n\n"
+                f"请回答后写入 {self._run_dir}/_human_response.json 并删除 _pause 文件恢复。\n"
+                f"（将在 5 分钟后再次提醒）"
+            )
+            return  # 不清除 pause，继续等待
+
+        # 没有 blocking 问题，用 smart defaults 继续
+        assumption_entry = {
+            "step_id": step_id,
+            "assumed_at": utc_now(),
+            "reason": "wait_for_human timeout — no blocking questions, using smart defaults",
+            "defaults_applied": defaults,
+        }
+        self._timeout_assumptions.append(assumption_entry)
+
+        # 写入 response 文件（defaults 作为回答）
+        response_file = self._run_dir / "_human_response.json"
+        response_data = dict(defaults)
+        response_data["_timeout_assumed"] = True
+        response_data["_assumed_at"] = assumption_entry["assumed_at"]
+        response_file.write_text(json.dumps(response_data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        # 写入假设日志文件
+        assumptions_file = self._run_dir / "_timeout_assumptions.json"
+        assumptions_file.write_text(
+            json.dumps(self._timeout_assumptions, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+        self.logger.warning(
+            f"[WaitForHuman] ⏱️ 超时，自动使用 {len(defaults)} 个默认值继续（step={step_id}）"
+        )
+        self._notify_human(
+            f"⏱️ 步骤 {step_id} 等待超时，已自动使用默认值继续。\n"
+            f"假设字段数: {len(defaults)}，详见 _timeout_assumptions.json"
+        )
+
+        # 清除暂停信号，让工作流继续
+        self._human_wait_deadline = None
+        self._human_wait_defaults = {}
+        if self._pause_signal.exists():
+            self._pause_signal.unlink()
 
     # =========================================================================
     # 内部执行逻辑
@@ -415,6 +520,8 @@ class FlowRunner:
         self.logger.info(f"[FlowRunner] trace_id={self.trace_id}")
 
         self._pending_human_response = None  # 初始化
+        self._human_wait_deadline = None     # NAGARE-TIMEOUT-001
+        self._human_wait_defaults = {}       # NAGARE-TIMEOUT-001
 
         while True:
             # 检查外部信号（停止/暂停）
@@ -583,6 +690,10 @@ class FlowRunner:
                 for artifact_key, artifact_path in result.get("artifacts_produced", {}).items():
                     self.artifacts.register(artifact_key, artifact_path)
 
+                # post-step handler: apply_improvement 由 runner 执行文件写入
+                if step_id == "apply_improvement":
+                    self._post_apply_improvement(result)
+
                 self.state.set_step_status(step_id, StepStatus.COMPLETED)
                 self._emit_event("step_completed", {
                     "step_id": step_id,
@@ -619,6 +730,44 @@ class FlowRunner:
             self.state.set_step_status(step_id, StepStatus.FAILED)
             self.logger.exception(f"[Step] 异常: {step_id}")
             return {"success": False, "step_id": step_id, "error": str(e), "error_type": "exception"}
+
+    def _post_apply_improvement(self, result: dict) -> None:
+        """
+        apply_improvement 步骤的 post-step handler。
+        Worker 只负责生成 staged_flow/ 目录下的文件，
+        runner 拥有完整文件系统权限，负责将 staged 文件写入正式路径。
+        """
+        flow_root = Path(__file__).parent.parent  # flow/
+        repo_root = flow_root.parent              # hashi/
+
+        # 找到 evaluator worker 目录（staged_flow 由 evaluator 产出）
+        run_dir = Path(f"flow/runs/{self.run_id}")
+        if not run_dir.is_absolute():
+            run_dir = repo_root / run_dir
+
+        # 搜索 staged_flow 目录
+        staged_roots = list(run_dir.rglob("staged_flow/flow"))
+        if not staged_roots:
+            self.logger.warning("[PostApplyImprovement] 未找到 staged_flow/flow 目录，跳过写入")
+            return
+
+        staged_flow = staged_roots[0]
+        target_flow = repo_root / "flow"
+
+        import shutil
+        copied = []
+        for src in staged_flow.rglob("*"):
+            if src.is_file():
+                relative = src.relative_to(staged_flow)
+                dst = target_flow / relative
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+                copied.append(str(relative))
+
+        if copied:
+            self.logger.info(f"[PostApplyImprovement] 写入 {len(copied)} 个文件到 flow/: {copied[:5]}{'...' if len(copied) > 5 else ''}")
+        else:
+            self.logger.warning("[PostApplyImprovement] staged_flow/flow 目录为空，无文件写入")
 
     def _execute_parallel(self, steps: list) -> list:
         """并行执行多个步骤"""

@@ -30,6 +30,8 @@ NOISE_PATTERNS = [
     re.compile(r"RetryAfter", re.IGNORECASE),
     re.compile(r"TimedOut", re.IGNORECASE),
     re.compile(r"httpx.*ConnectError", re.IGNORECASE),
+    # Manual-stop / Codex event-stream residue
+    re.compile(r'Flex Backend error.*\{"type":"thread\.started"', re.IGNORECASE),
     # Normal shutdown noise
     re.compile(r"KeyboardInterrupt"),
     re.compile(r"SystemExit"),
@@ -37,7 +39,6 @@ NOISE_PATTERNS = [
 
 # ── Critical patterns (always flag) ─────────────────────────────────────────
 CRITICAL_PATTERNS = [
-    re.compile(r"bridge", re.IGNORECASE),
     re.compile(r"BridgeError", re.IGNORECASE),
     re.compile(r"MemoryError"),
     re.compile(r"OSError.*No such file"),
@@ -124,6 +125,14 @@ def scan_instance(name: str, logs_root: Path) -> dict:
         warn_lines = []
 
         for line in lines:
+            stripped = line.strip()
+
+            # Codex/agent event-stream JSON can be embedded inside a single backend
+            # error block after the first timestamped line. These payload lines are
+            # not independent runtime errors and create noisy false positives.
+            if stripped.startswith("{") and '"type":"' in stripped:
+                continue
+
             # Skip lines older than the scan window
             ts = parse_timestamp(line)
             if ts is not None and ts < cutoff:

@@ -267,9 +267,11 @@ def send_hchat(to_agent: str, from_agent: str, text: str,
             print(f"⚠️ Remote API failed, falling back to mailbox...", file=sys.stderr)
         return _send_via_mailbox(instance_id, from_agent, to_agent, text)
 
-    # === Local agent: send via local API ===
+    # === Local agent: send via local API, fall through on failure ===
     if _is_local_agent(cfg, to_agent):
-        return _send_via_api("127.0.0.1", port, to_agent, from_agent, text)
+        if _send_via_api("127.0.0.1", port, to_agent, from_agent, text):
+            return True
+        print(f"⚠️ Local API failed for {to_agent}, trying remote...", file=sys.stderr)
 
     # === Remote agent: discover instance and send via remote API ===
     remote = _find_remote_instance(to_agent, instance_id)
