@@ -1,0 +1,119 @@
+{
+  "worker_id": "translator_01",
+  "workflow_id": "news_translation_to_markdown",
+  "role": "translator",
+  "model": "claude-sonnet-4-6",
+  "entrypoint": "translate_to_markdown",
+  "execution_config": {
+    "timeout_seconds": 1200,
+    "max_retries": 3,
+    "retry_delay_seconds": 5,
+    "parallel": false
+  },
+  "task_config": {
+    "task_name": "translate_to_markdown",
+    "description": "Translate English to Chinese with Markdown formatting, maintain news style",
+    "steps": [
+      {
+        "step": 1,
+        "name": "parse_content_structure",
+        "description": "Understand article sections and hierarchies"
+      },
+      {
+        "step": 2,
+        "name": "paragraph_translation",
+        "description": "Translate each paragraph to natural Chinese"
+      },
+      {
+        "step": 3,
+        "name": "apply_markdown_formatting",
+        "description": "Apply proper Markdown syntax (headings, lists, quotes)"
+      },
+      {
+        "step": 4,
+        "name": "verify_terminology",
+        "description": "Ensure all entities use terminology_table translations"
+      },
+      {
+        "step": 5,
+        "name": "preserve_references",
+        "description": "Keep all links, citations, and references intact"
+      },
+      {
+        "step": 6,
+        "name": "generate_output",
+        "description": "Output translated_draft.md with metadata"
+      }
+    ]
+  },
+  "input_schema": {
+    "source_content": {
+      "type": "string",
+      "description": "Raw English article text",
+      "required": true
+    },
+    "file_analysis": {
+      "type": "object",
+      "description": "Analysis output from analyst_01",
+      "required": true
+    },
+    "terminology_table": {
+      "type": "object",
+      "description": "Entity translation mapping from analyst_01",
+      "required": true
+    }
+  },
+  "output_schema": {
+    "translated_draft": {
+      "type": "object",
+      "description": "Translated content and metadata"
+    },
+    "translation_metadata": {
+      "type": "object",
+      "description": "Translation statistics and compliance info"
+    }
+  },
+  "translation_settings": {
+    "target_language": "zh",
+    "writing_style": "news_article",
+    "tone": "journalistic",
+    "formality_level": "formal",
+    "punctuation_style": "chinese_standard",
+    "terminology_strictness": 0.95
+  },
+  "markdown_settings": {
+    "heading_style": "atx",
+    "list_style": "dash",
+    "preserve_links": true,
+    "preserve_images": true,
+    "preserve_code_blocks": true,
+    "quote_style": "standard"
+  },
+  "quality_settings": {
+    "readability_check": true,
+    "consistency_check": true,
+    "style_preservation_target": 0.95,
+    "terminology_conformance_target": 0.98
+  },
+  "error_handling": {
+    "on_terminology_mismatch": "mark_and_continue",
+    "on_format_error": "auto_fix_and_retry",
+    "on_timeout": "escalate_to_debug"
+  },
+  "optimization": {
+    "goal": "speed",
+    "quality_tier": "standard",
+    "skip_minor_details": false
+  },
+  "output_format": {
+    "translated_draft": "Markdown",
+    "encoding": "utf-8"
+  },
+  "dependencies": [
+    "analyst_01"
+  ],
+  "provides": [
+    "translated_draft",
+    "translation_metadata"
+  ]
+}

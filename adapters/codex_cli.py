@@ -9,8 +9,8 @@ from pathlib import Path
 from adapters.base import BaseBackend, BackendCapabilities, BackendResponse
 from adapters.stream_events import (
     StreamCallback, StreamEvent,
-    KIND_THINKING, KIND_TOOL_START, KIND_TOOL_END,
-    KIND_FILE_EDIT, KIND_SHELL_EXEC, KIND_PROGRESS, KIND_TEXT_DELTA,
+    KIND_THINKING, KIND_TOOL_END,
+    KIND_FILE_EDIT, KIND_SHELL_EXEC, KIND_PROGRESS,
 )
 
 
@@ -24,7 +24,7 @@ class CodexCLIAdapter(BaseBackend):
             supports_sessions=False,
             supports_files=True,
             supports_tool_use=True,
-            supports_thinking_stream=False,
+            supports_thinking_stream=True,
             supports_headless_mode=True,
         )
 
@@ -150,41 +150,109 @@ class CodexCLIAdapter(BaseBackend):
         self.logger.warning("Codex prompt exceeded safe size; keeping tail only before CLI execution.")
         return prompt[-self.MAX_PROMPT_CHARS:]
 
-    def _parse_codex_event(self, raw_line: str, on_stream_event: StreamCallback) -> None:
-        """Parse a single Codex JSONL line and emit a StreamEvent if applicable."""
-        if on_stream_event is None:
+    def _emit_stream_event(self, event: StreamEvent | None, on_stream_event: StreamCallback) -> None:
+        if event is None or on_stream_event is None:
             return
+        asyncio.create_task(on_stream_event(event))
+
+    def _summarize_command(self, item: dict) -> str:
+        raw_cmd = item.get("command")
+        if isinstance(raw_cmd, list):
+            cmd = " ".join(str(part) for part in raw_cmd if part)
+        else:
+            cmd = str(raw_cmd or "").strip()
+        cmd = " ".join(cmd.split())
+        if not cmd:
+            return "Running command"
+        return f"Running: {cmd[:100]}"
+
+    def _summarize_file_change(self, item: dict) -> tuple[str, str]:
+        changes = item.get("changes")
+        if isinstance(changes, list) and changes:
+            paths = []
+            for change in changes:
+                if not isinstance(change, dict):
+                    continue
+                path = str(change.get("path") or "").strip()
+                if path:
+                    paths.append(path)
+            if paths:
+                if len(paths) == 1:
+                    return (f"Edited: {paths[0]}", paths[0])
+                preview = ", ".join(paths[:2])
+                if len(paths) > 2:
+                    preview += ", ..."
+                return (f"Edited {len(paths)} files: {preview}", paths[0])
+        path = str(item.get("file_path") or "").strip() or "unknown"
+        return (f"Edited: {path}", path)
+
+    def _flush_pending_agent_message(
+        self,
+        pending_agent_message: dict | None,
+        on_stream_event: StreamCallback,
+    ) -> None:
+        if on_stream_event is None or not pending_agent_message:
+            return
+        text = " ".join(str(pending_agent_message.get("text") or "").split())
+        if not text:
+            return
+        self._emit_stream_event(
+            StreamEvent(kind=KIND_THINKING, summary=text[:160]),
+            on_stream_event,
+        )
+
+    def _parse_codex_event(
+        self,
+        raw_line: str,
+        on_stream_event: StreamCallback,
+        pending_agent_message: dict | None = None,
+    ) -> dict | None:
+        """Parse a single Codex JSONL line and emit stream events when possible."""
+        if on_stream_event is None:
+            return pending_agent_message
         try:
             event = json.loads(raw_line)
         except json.JSONDecodeError:
-            return
+            return pending_agent_message
 
         etype = event.get("type", "")
         item = event.get("item") or {}
         item_type = item.get("type", "")
 
+        if etype == "turn.completed":
+            return None
+
+        if pending_agent_message and not (etype == "item.completed" and item_type == "agent_message"):
+            # Codex uses `agent_message` for intermediate progress updates as well as
+            # the final answer. Hold the latest one until another event arrives; if
+            # something follows, it was an interim status update and can be exposed
+            # as a thinking trace without duplicating the final response.
+            self._flush_pending_agent_message(pending_agent_message, on_stream_event)
+            pending_agent_message = None
+
         se: StreamEvent | None = None
 
         if etype == "turn.started":
-            se = StreamEvent(kind=KIND_THINKING, summary="Thinking...")
+            se = StreamEvent(kind=KIND_PROGRESS, summary="Codex started reasoning")
         elif etype == "item.started" and item_type == "command_execution":
-            cmd = (item.get("command") or [""])[0] if isinstance(item.get("command"), list) else str(item.get("command", ""))
-            se = StreamEvent(kind=KIND_SHELL_EXEC, summary=f"Running: {cmd[:80]}", tool_name="Bash")
+            se = StreamEvent(
+                kind=KIND_SHELL_EXEC,
+                summary=self._summarize_command(item),
+                tool_name="Bash",
+            )
         elif etype == "item.completed" and item_type == "command_execution":
             exit_code = item.get("exit_code", "?")
             se = StreamEvent(kind=KIND_TOOL_END, summary=f"Command exited ({exit_code})", tool_name="Bash")
         elif etype == "item.completed" and item_type == "file_change":
-            path = item.get("file_path", "unknown")
-            se = StreamEvent(kind=KIND_FILE_EDIT, summary=f"Edited: {path}", file_path=path)
+            summary, path = self._summarize_file_change(item)
+            se = StreamEvent(kind=KIND_FILE_EDIT, summary=summary, file_path=path)
         elif etype == "item.started" and item_type == "todo_list":
             se = StreamEvent(kind=KIND_PROGRESS, summary="Updated task list")
         elif etype == "item.completed" and item_type == "agent_message":
-            text = (item.get("text") or "")[:120]
-            se = StreamEvent(kind=KIND_TEXT_DELTA, summary=text)
+            pending_agent_message = {"text": item.get("text") or ""}
 
-        if se is not None:
-            import asyncio
-            asyncio.create_task(on_stream_event(se))
+        self._emit_stream_event(se, on_stream_event)
+        return pending_agent_message
 
     async def generate_response(
         self, prompt: str, request_id: str, is_retry: bool = False, silent: bool = False,
@@ -254,8 +322,10 @@ class CodexCLIAdapter(BaseBackend):
             stdout_lines = []
             stderr_chunks: list[bytes] = []
             timeout_kind: str | None = None
+            pending_agent_message: dict | None = None
 
             async def _read_stdout():
+                nonlocal pending_agent_message
                 nonlocal timeout_kind
                 while True:
                     try:
@@ -277,7 +347,11 @@ class CodexCLIAdapter(BaseBackend):
                     self._touch_activity()
                     decoded = line.decode(errors="replace")
                     stdout_lines.append(decoded)
-                    self._parse_codex_event(decoded, on_stream_event)
+                    pending_agent_message = self._parse_codex_event(
+                        decoded,
+                        on_stream_event,
+                        pending_agent_message=pending_agent_message,
+                    )
 
             stdout_task = asyncio.create_task(_read_stdout())
 

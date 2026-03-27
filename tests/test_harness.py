@@ -9,14 +9,19 @@ import asyncio
 import sys
 from pathlib import Path
 
+import pytest
+
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tests.mocks.mock_adapters import MockBackend, MockScenario, SimpleTestConfig, SimpleGlobalConfig
 
+pytestmark = pytest.mark.anyio
+
 
 class TestHarness:
     """Orchestrates testing with mocked externals."""
+    __test__ = False
     
     def __init__(self):
         self.test_dir = Path("/tmp/hashi_test")

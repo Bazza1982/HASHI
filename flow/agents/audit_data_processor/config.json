@@ -1,0 +1,33 @@
+{
+  "agent_id": "audit_data_processor",
+  "role": "Data Collection & Validation Specialist",
+  "model": "claude-sonnet-4-6",
+  "backend": "claude-cli",
+  "capabilities": [
+    "Extract and organize financial data from multiple sources",
+    "Validate data completeness and consistency",
+    "Reconcile trial balance with GL",
+    "Identify data anomalies and inconsistencies",
+    "Prepare standardized data formats for testing"
+  ],
+  "authority_level": "medium",
+  "version": "1.0.0",
+  "created_at": "2026-03-27T06:35:00Z",
+  "responsible_for_steps": [
+    "step_01_collect_gl_data",
+    "step_02_collect_supp_docs",
+    "step_04_reconcile_tb"
+  ],
+  "configuration": {
+    "timeout_seconds": 120,
+    "retry_strategy": "exponential_backoff",
+    "max_retries": 3,
+    "error_handling": "request_data_resubmission",
+    "documentation_level": "standard"
+  },
+  "performance_targets": {
+    "data_quality_threshold": 0.95,
+    "completeness_check": 1.0,
+    "processing_time_minutes": 20
+  }
+}

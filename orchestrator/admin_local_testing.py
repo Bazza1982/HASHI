@@ -98,6 +98,9 @@ def supported_commands(runtime) -> list[str]:
         "wa_off",
         "wa_send",
         "memory",
+        "transfer",
+        "fork",
+        "cos",
     ]
     if hasattr(runtime, "cmd_backend"):
         names.extend(["backend"])

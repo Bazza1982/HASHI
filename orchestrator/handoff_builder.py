@@ -80,6 +80,15 @@ class HandoffBuilder:
     def _word_count(text: str) -> int:
         return len((text or "").split())
 
+    def _read_optional_text(self, path: Path) -> str:
+        if not path.exists():
+            return ""
+        try:
+            return path.read_text(encoding="utf-8").strip()
+        except Exception as e:
+            logger.error(f"Failed to read handoff context from {path}: {e}")
+            return ""
+
     def build_recent_context_block(self, max_rounds: int = 10, max_words: int = 6000) -> tuple[str, int, int]:
         rounds = self._load_rounds()
         selected = rounds[-max_rounds:] if max_rounds > 0 else rounds
@@ -123,6 +132,92 @@ class HandoffBuilder:
     def get_recent_rounds(self, max_rounds: int = 10) -> List[List[Dict[str, Any]]]:
         rounds = self._load_rounds()
         return rounds[-max_rounds:] if max_rounds > 0 else rounds
+
+    def build_transfer_package(
+        self,
+        *,
+        transfer_id: str,
+        source_agent: str,
+        source_instance: str,
+        target_agent: str,
+        target_instance: str,
+        created_at: str,
+        max_rounds: int = 30,
+        max_words: int = 18000,
+    ) -> dict[str, Any]:
+        context_block, exchange_count, word_count = self.build_recent_context_block(
+            max_rounds=max_rounds,
+            max_words=max_words,
+        )
+        recent_rounds = self.get_recent_rounds(max_rounds=max_rounds)
+        last_user_text = ""
+        last_assistant_text = ""
+        rendered_rounds: list[dict[str, Any]] = []
+
+        for round_index, round_entries in enumerate(recent_rounds, start=1):
+            rendered_entries = []
+            for entry in round_entries:
+                role = str(entry.get("role") or "")
+                text = (entry.get("text") or "").strip()
+                source = str(entry.get("source") or "")
+                if not text:
+                    continue
+                rendered_entries.append(
+                    {
+                        "role": role,
+                        "source": source,
+                        "text": text,
+                    }
+                )
+                if role == "user":
+                    last_user_text = text
+                elif role == "assistant":
+                    last_assistant_text = text
+            if rendered_entries:
+                rendered_rounds.append({"index": round_index, "entries": rendered_entries})
+
+        handoff_summary = self._read_optional_text(self.handoff_path)
+        if not handoff_summary:
+            self.build_handoff()
+            handoff_summary = self._read_optional_text(self.handoff_path)
+
+        memory_files = {}
+        for name in ("project.md", "decisions.md", "tasks.md"):
+            text = self._read_optional_text(self.memory_dir / name)
+            if text:
+                memory_files[name] = text
+
+        task_state = {
+            "latest_user_request": last_user_text,
+            "latest_source_reply": last_assistant_text,
+            "recent_exchange_count": exchange_count,
+            "handoff_available": bool(handoff_summary),
+            "memory_files_available": sorted(memory_files.keys()),
+        }
+
+        return {
+            "transfer_id": transfer_id,
+            "source_agent": source_agent,
+            "source_instance": source_instance,
+            "target_agent": target_agent,
+            "target_instance": target_instance,
+            "created_at": created_at,
+            "exchange_count": exchange_count,
+            "word_count": word_count,
+            "recent_context_block": context_block,
+            "recent_rounds": rendered_rounds,
+            "last_user_message": last_user_text,
+            "last_assistant_message": last_assistant_text,
+            "transfer_guidance": {
+                "prioritize_recent_turns": True,
+                "recent_turn_weighting": "Prefer the newest exchanges for current intent, task state, and next actions.",
+                "older_turn_weighting": "Treat older exchanges as background only; they may contain stale topics or superseded assumptions.",
+                "conflict_rule": "If older context conflicts with newer instructions or task state, follow the newer context.",
+            },
+            "task_state": task_state,
+            "handoff_summary": handoff_summary,
+            "memory_files": memory_files,
+        }
 
     def build_session_restore_prompt(self, max_rounds: int = 10, max_words: int = 6000) -> tuple[str, int, int]:
         context_block, exchange_count, total_words = self.build_recent_context_block(

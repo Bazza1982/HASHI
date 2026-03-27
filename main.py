@@ -27,6 +27,7 @@ from adapters.registry import get_backend_class
 CODE_ROOT = Path(__file__).resolve().parent
 
 main_logger = logging.getLogger("BridgeU.Orchestrator")
+bridge_logger = logging.getLogger("BridgeU.Bridge")  # file-only orchestrator log
 
 C_RESET = "\033[0m"
 C_MUTED = "\033[38;5;242m"
@@ -73,9 +74,13 @@ class ColorFormatter(logging.Formatter):
     }
 
     def format(self, record):
-        color = self.COLORS.get(record.levelno, C_RESET)
+        msg = record.getMessage()
+        if "Telegram polling error" in msg and "NetworkError" in msg:
+            color = C_MUTED
+        else:
+            color = self.COLORS.get(record.levelno, C_RESET)
         ts = self.formatTime(record, "%H:%M:%S")
-        return f"{color}{ts} [{record.name}] {record.getMessage()}{C_RESET}"
+        return f"{color}{ts} [{record.name}] {msg}{C_RESET}"
 
 
 _configure_console_encoding()
@@ -254,6 +259,7 @@ class UniversalOrchestrator:
         self.workbench_api = None
         self.api_gateway = None
         self.scheduler = None
+        self.agent_directory = None
         self.scheduler_task = None
         self.whatsapp = None
         self._lifecycle_lock = asyncio.Lock()
@@ -424,6 +430,57 @@ class UniversalOrchestrator:
         self.secrets = secrets
         return global_cfg, agent_configs, secrets
 
+    def get_all_agents_raw(self) -> list[dict]:
+        raw = json.loads(self.paths.config_path.read_text(encoding="utf-8-sig"))
+        return raw.get("agents", [])
+
+    def set_agent_active(self, agent_name: str, active: bool) -> bool:
+        """Toggle is_active for an agent. Returns True if found and updated."""
+        raw = self._load_raw_config()
+        for ag in raw.get("agents", []):
+            if ag.get("name") == agent_name:
+                ag["is_active"] = active
+                self._write_raw_config(raw)
+                return True
+        return False
+
+    def delete_agent_from_config(self, agent_name: str) -> bool:
+        """Remove an agent entry from config. Returns True if found and removed."""
+        raw = self._load_raw_config()
+        agents = raw.get("agents", [])
+        orig_len = len(agents)
+        raw["agents"] = [ag for ag in agents if ag.get("name") != agent_name]
+        if len(raw["agents"]) < orig_len:
+            self._write_raw_config(raw)
+            return True
+        return False
+
+    def add_agent_to_config(self, agent_name: str, agent_cfg: dict | None = None) -> bool:
+        """Add a new flex agent to config, create workspace dir + AGENT.md scaffold.
+        Returns True on success, False if agent already exists."""
+        raw = self._load_raw_config()
+        existing_names = {ag.get("name") for ag in raw.get("agents", [])}
+        if agent_name in existing_names:
+            return False
+
+        ws_dir = self.paths.workspaces_root / agent_name
+        ws_dir.mkdir(parents=True, exist_ok=True)
+
+        agent_md = ws_dir / "AGENT.md"
+        if not agent_md.exists():
+            agent_md.write_text(f"# {agent_name}\n\nNew HASHI agent.\n", encoding="utf-8")
+
+        new_entry = agent_cfg or {}
+        new_entry.setdefault("name", agent_name)
+        new_entry.setdefault("workspace_dir", f"workspaces/{agent_name}")
+        new_entry.setdefault("system_md", f"workspaces/{agent_name}/AGENT.md")
+        new_entry.setdefault("is_active", True)
+        new_entry.setdefault("type", "flex")
+
+        raw.setdefault("agents", []).append(new_entry)
+        self._write_raw_config(raw)
+        return True
+
     def configured_agent_names(self) -> list[str]:
         raw = json.loads(self.paths.config_path.read_text(encoding="utf-8-sig"))
         return [agent["name"] for agent in raw.get("agents", []) if agent.get("is_active", True)]
@@ -548,7 +605,7 @@ class UniversalOrchestrator:
                 main_logger.warning(f"No Telegram token found for agent '{agent_cfg.name}'.")
                 token = "WORKBENCH_ONLY_NO_TOKEN"
             backend = _get_backend(agent_cfg.engine)(agent_cfg, global_cfg, api_key)
-            runtime = _BridgeRT(agent_cfg.name, backend, token, self.skill_manager)
+            runtime = _BridgeRT(agent_cfg.name, backend, token, self.skill_manager, secrets=secrets)
         runtime.orchestrator = self
         runtime.bind_handlers()
         return runtime
@@ -563,22 +620,26 @@ class UniversalOrchestrator:
             with suppress(Exception):
                 await rt.shutdown()
 
-    async def telegram_preflight(self, token: str, agent_name: str) -> bool:
+    async def telegram_preflight(self, token: str, agent_name: str, attempt: int = 0, max_attempts: int = 0) -> bool:
         url = f"https://api.telegram.org/bot{token}/getMe"
+        attempt_tag = f" (attempt {attempt}/{max_attempts})" if attempt else ""
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.get(url)
                 resp.raise_for_status()
                 data = resp.json()
                 if not data.get("ok"):
-                    main_logger.error(f"Telegram preflight failed for '{agent_name}': API returned not ok.")
+                    msg = f"Telegram preflight failed for '{agent_name}'{attempt_tag}: API returned not ok."
+                    main_logger.error(msg)
+                    bridge_logger.error(msg)
                     return False
+                bridge_logger.info(f"Telegram preflight OK for '{agent_name}'{attempt_tag}")
                 return True
         except Exception as e:
             err_text = str(e) or "<no error message>"
-            main_logger.warning(
-                f"Telegram preflight failed for '{agent_name}': {type(e).__name__}: {err_text}"
-            )
+            msg = f"Telegram preflight failed for '{agent_name}'{attempt_tag}: {type(e).__name__}: {err_text}"
+            main_logger.warning(msg)
+            bridge_logger.warning(msg)
             return False
 
     async def _start_runtime(self, rt) -> tuple[bool, str]:
@@ -587,6 +648,7 @@ class UniversalOrchestrator:
         Telegram connection failure results in LOCAL MODE (Workbench + WhatsApp only).
         """
         # Stage 1: Backend initialization (required)
+        bridge_logger.info(f"{rt.name}: starting backend initialization")
         for attempt in range(1, 4):
             try:
                 main_logger.info(f"Initializing backend for '{rt.name}' (attempt {attempt}/3)...")
@@ -594,15 +656,19 @@ class UniversalOrchestrator:
                     backend_ok = await rt.backend.initialize()
                     if not backend_ok:
                         await rt.backend.shutdown()
+                        bridge_logger.error(f"{rt.name}: backend.initialize() returned False")
                         return False, f"Backend for '{rt.name}' failed to initialize."
                 else:
                     backend_ok = await rt.initialize()
                     if not backend_ok:
                         await rt.shutdown()
+                        bridge_logger.error(f"{rt.name}: flex initialize() returned False")
                         return False, f"Flex initialization for '{rt.name}' failed."
                 rt.backend_ready = True
+                bridge_logger.info(f"{rt.name}: backend ready (attempt {attempt}/3)")
                 break
             except Exception as e:
+                bridge_logger.warning(f"{rt.name}: backend init attempt {attempt}/3 failed: {type(e).__name__}: {e}")
                 if attempt < 3:
                     main_logger.warning(
                         f"Backend init for '{rt.name}' attempt {attempt} failed: {e}. Retrying in 5s..."
@@ -614,9 +680,11 @@ class UniversalOrchestrator:
                     rt.error_logger.exception(f"Backend startup error for '{rt.name}' after 3 attempts: {e}")
                 else:
                     main_logger.error(f"Backend startup error for '{rt.name}' after 3 attempts: {e}")
+                bridge_logger.error(f"{rt.name}: backend init FAILED after 3 attempts")
                 return False, f"Failed to start '{rt.name}': {e}"
 
         # Stage 2: Telegram connection (optional — local mode if fails)
+        bridge_logger.info(f"{rt.name}: starting Telegram connection")
         telegram_ok = await self._try_telegram_connect(rt)
 
         # Stage 3: Finalize startup
@@ -625,9 +693,11 @@ class UniversalOrchestrator:
             rt.prepare_post_start_state()
 
         if telegram_ok:
+            bridge_logger.info(f"{rt.name}: ONLINE (backend + Telegram)")
             main_logger.info(f"Bot '{rt.name}' is online.")
             return True, f"Started agent '{rt.name}'."
         else:
+            bridge_logger.warning(f"{rt.name}: LOCAL MODE (backend ok, Telegram failed)")
             main_logger.info(f"Bot '{rt.name}' started in LOCAL MODE (Telegram unavailable).")
             return True, f"Started '{rt.name}' in LOCAL MODE (Workbench + WhatsApp only)."
 
@@ -636,20 +706,22 @@ class UniversalOrchestrator:
         Attempt to connect Telegram. Returns True on success, False on failure.
         Does NOT block agent startup — local mode will be used if this fails.
         """
+        last_failure_reason = ""
         for attempt in range(1, 4):
-            preflight_ok = await self.telegram_preflight(rt.token, rt.name)
+            preflight_ok = await self.telegram_preflight(rt.token, rt.name, attempt=attempt, max_attempts=3)
             if not preflight_ok:
+                last_failure_reason = f"preflight {attempt}/3 failed"
                 if attempt < 3:
-                    main_logger.warning(
-                        f"Telegram preflight failed for '{rt.name}' (attempt {attempt}/3). Retrying in 5s..."
-                    )
+                    bridge_logger.info(f"{rt.name}: {last_failure_reason}, retrying in 5s...")
                     await asyncio.sleep(5)
                     continue
                 # All attempts failed — continue in local mode
-                main_logger.warning(
+                msg = (
                     f"⚠️ Telegram unavailable for '{rt.name}'. "
                     f"Agent will run in LOCAL MODE (Workbench + WhatsApp only)."
                 )
+                main_logger.warning(msg)
+                bridge_logger.warning(f"{rt.name}: all 3 preflight attempts failed → LOCAL MODE")
                 rt.telegram_connected = False
                 return False
 
@@ -661,6 +733,7 @@ class UniversalOrchestrator:
                 await rt.app.updater.start_polling(
                     drop_pending_updates=True,
                     error_callback=error_callback,
+                    timeout=30,
                 )
                 rt.telegram_connected = True
                 try:
@@ -670,6 +743,8 @@ class UniversalOrchestrator:
                         rt.logger.warning(f"Could not register command menu: {e}")
                 return True
             except Exception as e:
+                last_failure_reason = f"connect attempt {attempt}/3: {type(e).__name__}: {e}"
+                bridge_logger.warning(f"{rt.name}: {last_failure_reason}")
                 if attempt < 3:
                     main_logger.warning(
                         f"Telegram connect for '{rt.name}' attempt {attempt} failed: {e}. Retrying in 5s..."
@@ -683,6 +758,7 @@ class UniversalOrchestrator:
                     f"⚠️ Telegram connection failed for '{rt.name}' after 3 attempts: {e}. "
                     f"Agent will run in LOCAL MODE."
                 )
+                bridge_logger.warning(f"{rt.name}: all 3 connect attempts failed → LOCAL MODE")
                 rt.telegram_connected = False
                 return False
 
@@ -850,6 +926,7 @@ class UniversalOrchestrator:
 
         # Set up boot_state for the banner animation
         boot_state = {name: "pending" for name in targets}
+        boot_reason = {}
 
         main_logger.info(f"Hot restart: stopping {len(targets)} agent(s): {targets}")
         for name in targets:
@@ -883,12 +960,17 @@ class UniversalOrchestrator:
             try:
                 ok, msg = await self.start_agent(name)
                 if ok:
-                    boot_state[name] = "local" if "LOCAL MODE" in msg.upper() else "online"
+                    new_state = "local" if "LOCAL MODE" in msg.upper() else "online"
+                    boot_state[name] = new_state
+                    if new_state == "local":
+                        boot_reason[name] = "Telegram unavailable"
                 else:
                     boot_state[name] = "failed"
+                    boot_reason[name] = msg
                     main_logger.error(f"Hot restart: {msg}")
             except Exception as e:
                 boot_state[name] = "failed"
+                boot_reason[name] = f"{type(e).__name__}: {e}"
                 main_logger.error(f"Hot restart: failed to start '{name}': {e}")
 
         def _run_banner():
@@ -898,7 +980,8 @@ class UniversalOrchestrator:
                 workbench_port=workbench_port,
                 wa_enabled=wa_enabled,
                 api_gateway_enabled=api_gw,
-                inactive_agents=inactive_agent_names
+                inactive_agents=inactive_agent_names,
+                boot_reason=boot_reason,
             )
 
         _mute = _AnimMute()
@@ -926,6 +1009,20 @@ class UniversalOrchestrator:
             main_logger.critical(f"Failed to load configuration: {e}")
             return
 
+        # ── Set up bridge.log (orchestrator-level, file-only) ───────────
+        _bridge_log_path = global_cfg.base_logs_dir / "bridge.log"
+        global_cfg.base_logs_dir.mkdir(parents=True, exist_ok=True)
+        _bl_handler = logging.FileHandler(_bridge_log_path, encoding="utf-8")
+        _bl_handler.setFormatter(logging.Formatter(
+            "%(asctime)s [%(name)s] %(levelname)s  %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        ))
+        bridge_logger.handlers.clear()
+        bridge_logger.setLevel(logging.DEBUG)
+        bridge_logger.propagate = False
+        bridge_logger.addHandler(_bl_handler)
+        bridge_logger.info("=== Bridge starting ===")
+
         # Filter to selected agents
         selected_configs = [
             cfg for cfg in agent_configs
@@ -952,6 +1049,10 @@ class UniversalOrchestrator:
         engine_status = self._check_backend_availability(global_cfg, selected_configs, secrets)
         startable_configs, skipped = self._partition_agents_by_availability(selected_configs, engine_status)
         initial_agent_names = [cfg.name for cfg in startable_configs]
+        bridge_logger.info(f"Agents to start: {initial_agent_names}")
+        if skipped:
+            for name, reason in skipped:
+                bridge_logger.warning(f"Skipping agent '{name}': {reason}")
 
         try:
             _, wa_cfg = self._load_whatsapp_cfg()
@@ -974,23 +1075,33 @@ class UniversalOrchestrator:
         # boot_state is a plain dict written by agent tasks (CPython GIL makes
         # simple key writes safe from a thread) and read by the banner thread.
         boot_state    = {name: "pending" for name in initial_agent_names}
+        boot_reason   = {}  # last failure reason per agent, shown in banner
         startup_limit = max(1, min(INITIAL_AGENT_STARTUP_CONCURRENCY, len(initial_agent_names) or 1))
         startup_sem   = asyncio.Semaphore(startup_limit)
 
         async def _start_initial_agent(agent_name: str):
             async with startup_sem:
                 boot_state[agent_name] = "connecting"
+                bridge_logger.info(f"{agent_name}: pending → connecting")
                 try:
                     ok, msg = await self.start_agent(agent_name)
                 except Exception as e:
                     main_logger.exception(f"Unexpected startup error for '{agent_name}': {e}")
                     boot_state[agent_name] = "failed"
+                    boot_reason[agent_name] = f"{type(e).__name__}: {e}"
+                    bridge_logger.error(f"{agent_name}: connecting → failed (exception: {e})")
                     return agent_name, (False, str(e))
                 if ok:
                     # Distinguish online (Telegram connected) from local (Telegram unavailable)
-                    boot_state[agent_name] = "local" if "LOCAL MODE" in msg.upper() else "online"
+                    new_state = "local" if "LOCAL MODE" in msg.upper() else "online"
+                    boot_state[agent_name] = new_state
+                    if new_state == "local":
+                        boot_reason[agent_name] = "Telegram unavailable"
+                    bridge_logger.info(f"{agent_name}: connecting → {new_state}")
                 else:
                     boot_state[agent_name] = "failed"
+                    boot_reason[agent_name] = msg
+                    bridge_logger.error(f"{agent_name}: connecting → failed ({msg})")
                 return agent_name, (ok, msg)
 
         # Create all tasks first — they are queued and begin running as soon as
@@ -1016,7 +1127,8 @@ class UniversalOrchestrator:
                 wa_enabled=bool(wa_cfg.get("enabled")),
                 api_gateway_enabled=self.enable_api_gateway,
                 skipped_agents=skipped,
-                inactive_agents=inactive_agent_names
+                inactive_agents=inactive_agent_names,
+                boot_reason=boot_reason,
             )
 
         try:
@@ -1058,6 +1170,11 @@ class UniversalOrchestrator:
             return
 
         main_logger.info("Universal Orchestrator is online. Awaiting messages.")
+
+        # Build agent directory so /hchat and other agent-to-agent commands can resolve runtimes
+        from orchestrator.agent_directory import AgentDirectory as _AgentDirectory
+        capabilities_path = self.paths.bridge_home / "agent_capabilities.json"
+        self.agent_directory = _AgentDirectory(self.paths.config_path, capabilities_path, self.runtimes)
 
         try:
             self.workbench_api = WorkbenchApiServer(

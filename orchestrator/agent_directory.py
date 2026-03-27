@@ -23,6 +23,7 @@ class AgentDirectory:
             for row in raw_cfg.get("agents", [])
             if row.get("is_active", True)
         }
+        self._groups: dict[str, dict] = raw_cfg.get("groups", {})
 
         # Handle missing capabilities file gracefully
         if self.capabilities_path.exists():
@@ -109,6 +110,95 @@ class AgentDirectory:
                 "model": metadata.get("model", "unknown"),
             },
         }
+
+    # ── Group management ──────────────────────────────────────────────────────
+
+    def list_groups(self) -> dict[str, dict]:
+        """Return all group definitions."""
+        return dict(self._groups)
+
+    def resolve_group(self, name: str, exclude_self: str | None = None) -> list[str]:
+        """Resolve a group name to a list of agent names.
+
+        Supports the magic keyword '@active' as members value — dynamically
+        returns all currently running agents minus any exclude_from_broadcast entries.
+        Returns [] if group not found.
+        """
+        group = self._groups.get(name)
+        if group is None:
+            return []
+        members = group.get("members", [])
+        excludes = {e.lower() for e in group.get("exclude_from_broadcast", [])}
+        if exclude_self:
+            excludes.add(exclude_self.lower())
+
+        if members == "@active":
+            # Dynamic: all currently running agents
+            active = list(self.runtime_map().keys())
+            return [n for n in active if n.lower() not in excludes]
+        else:
+            return [n for n in members if n.lower() not in excludes]
+
+    def group_exists(self, name: str) -> bool:
+        return name in self._groups
+
+    def _save_groups(self) -> None:
+        """Persist groups back to agents.json."""
+        raw_cfg = json.loads(self.config_path.read_text(encoding="utf-8-sig"))
+        raw_cfg["groups"] = self._groups
+        self.config_path.write_text(
+            json.dumps(raw_cfg, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def create_group(self, name: str, description: str = "") -> tuple[bool, str]:
+        if name in self._groups:
+            return False, f"Group '{name}' already exists."
+        self._groups[name] = {"description": description, "members": [], "exclude_from_broadcast": []}
+        self._save_groups()
+        return True, f"Group '{name}' created."
+
+    def delete_group(self, name: str) -> tuple[bool, str]:
+        if name not in self._groups:
+            return False, f"Group '{name}' not found."
+        del self._groups[name]
+        self._save_groups()
+        return True, f"Group '{name}' deleted."
+
+    def group_add_member(self, group_name: str, agent_name: str) -> tuple[bool, str]:
+        if group_name not in self._groups:
+            return False, f"Group '{group_name}' not found."
+        grp = self._groups[group_name]
+        if grp.get("members") == "@active":
+            return False, "Cannot manually edit a dynamic group (@active)."
+        members: list = grp.setdefault("members", [])
+        if agent_name in members:
+            return False, f"'{agent_name}' is already in group '{group_name}'."
+        members.append(agent_name)
+        self._save_groups()
+        return True, f"Added '{agent_name}' to group '{group_name}'."
+
+    def group_remove_member(self, group_name: str, agent_name: str) -> tuple[bool, str]:
+        if group_name not in self._groups:
+            return False, f"Group '{group_name}' not found."
+        grp = self._groups[group_name]
+        if grp.get("members") == "@active":
+            return False, "Cannot manually edit a dynamic group (@active)."
+        members: list = grp.get("members", [])
+        if agent_name not in members:
+            return False, f"'{agent_name}' is not in group '{group_name}'."
+        members.remove(agent_name)
+        self._save_groups()
+        return True, f"Removed '{agent_name}' from group '{group_name}'."
+
+    def group_rename(self, old_name: str, new_name: str) -> tuple[bool, str]:
+        if old_name not in self._groups:
+            return False, f"Group '{old_name}' not found."
+        if new_name in self._groups:
+            return False, f"Group '{new_name}' already exists."
+        self._groups[new_name] = self._groups.pop(old_name)
+        self._save_groups()
+        return True, f"Group renamed '{old_name}' → '{new_name}'."
 
     def check_permission(self, message: dict[str, Any]) -> tuple[bool, str]:
         from_agent = message["from_agent"]

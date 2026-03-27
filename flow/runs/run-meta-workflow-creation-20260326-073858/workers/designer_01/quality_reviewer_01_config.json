@@ -1,0 +1,82 @@
+{
+  "agent_id": "quality_reviewer_01",
+  "role": "质量审核员",
+  "workflow_id": "news-article-translation-v1",
+  "workflow_version": "1.0.0",
+  "run_id": "run-meta-workflow-creation-20260326-073858",
+
+  "backend": {
+    "active": "claude-cli",
+    "model": "claude-opus-4-6",
+    "available": [
+      {
+        "name": "claude-cli",
+        "models": [
+          "claude-haiku-4-5",
+          "claude-sonnet-4-6",
+          "claude-opus-4-6"
+        ]
+      }
+    ],
+    "controllable_by": [
+      "orchestrator",
+      "human"
+    ]
+  },
+
+  "capabilities": [
+    "file_read",
+    "file_write",
+    "comparative_analysis",
+    "quality_assessment",
+    "text_refinement",
+    "markdown_validation"
+  ],
+
+  "communication": {
+    "hchat_endpoint": "http://localhost:5000",
+    "inbox_path": "flow/runs/run-meta-workflow-creation-20260326-073858/workers/quality_reviewer_01/inbox/",
+    "outbox_path": "flow/runs/run-meta-workflow-creation-20260326-073858/workers/quality_reviewer_01/outbox/",
+    "poll_interval_seconds": 5
+  },
+
+  "limits": {
+    "timeout_seconds": 300,
+    "max_tokens": 100000,
+    "max_file_size_mb": 50
+  },
+
+  "steps_handled": [
+    "step_05_quality_review",
+    "step_07_final_review"
+  ],
+
+  "responsibility_scope": {
+    "can_read_files": true,
+    "can_modify_files": false,
+    "can_create_files": true,
+    "can_access_artifacts": true,
+    "can_modify_artifacts": false,
+    "can_execute_shell": false
+  },
+
+  "quality_thresholds": {
+    "minimum_completion_percent": 100,
+    "minimum_quality_score": 85,
+    "error_retry_max_attempts": 3,
+    "timeout_retry_allowed": true
+  },
+
+  "review_criteria": {
+    "accuracy_weight": 0.4,
+    "fluency_weight": 0.35,
+    "consistency_weight": 0.25,
+    "minimum_passing_score": 85
+  },
+
+  "created_at": "2026-03-26T07:45:00Z",
+  "created_by": "workflow_design_agent",
+    "last_modified_at": "2026-03-26T07:45:00Z",
+
+  "notes": "Quality reviewer uses opus model for highest quality review of translations. Performs Step 05 quality review and Step 07 final review. Responsible for critical quality gates."
+}

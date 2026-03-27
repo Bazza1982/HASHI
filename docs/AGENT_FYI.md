@@ -150,7 +150,165 @@ python tools/browser_cli.py evaluate   --url <url> --script "() => document.titl
 
 Session is saved in `wa_session/` — subsequent starts do not need a QR scan.
 
+## 记忆查询与上报（通过小蕾 / lily）
+
+小蕾（lily，HASHI1）是系统唯一的记忆守护者，管理所有 agent 的长期巩固记忆。
+
+### 查询记忆
+
+如果你需要查询系统知识、项目信息、或自己的历史记忆，向小蕾发送请求。
+
+**方法：**
+- **同实例（HASHI1）：** 直接发消息给 lily
+- **跨实例（HASHI2/HASHI9等）：** 通过 Cross-Instance Mailbox 发消息到 HASHI1 的 lily，或使用 `/ask lily 你的问题`
+
+**查询权限：**
+- system 域（系统知识）：所有 agent 可查询
+- project 域（项目信息）：相关 agent 可查询
+- personal / identity 域：只能查询自己的，不能查看其他 agent 的
+
+### 上报信息
+
+如果你在工作中发现重要的系统变更或项目进展，主动报告给小蕾存档。
+
+**可上报：** 系统变更（配置、端口、新 agent 等）、项目进展（阶段完成、问题、决策等）
+**不可上报：** 其他 agent 的 personal / identity 信息
+
+小蕾收到后会核实并存储。如与现有记录冲突，她会暂缓存储并请求爸爸批准。
+
+**禁止：** 不要直接读取其他 agent 的 workspace 或数据库文件。
+
 ## Practical Expectations
 - Prefer bridge-owned evidence: code, logs, config, transcripts.
 - Use `README.md` when you need deeper detail, or the user has system related questions.
 - Do not assume CLI internal session memory is available or reliable.
+
+## IT Support - /ticket
+
+Arale serves as the system's IT Support agent. When you encounter a technical issue (backend crash, timeout, config error, etc.), use `/ticket` to submit a support request.
+
+**Usage:** `/ticket <problem description>`
+
+**What happens automatically (program-driven, no LLM required):**
+1. Orchestrator collects diagnostic info: last error log, backend status, recent context, git status, system resources
+2. A ticket JSON is written to `tickets/open/`
+3. Arale is notified via bridge message (file fallback if bridge is down)
+
+**Auto-trigger (no user action needed):**
+- Backend process crash → ticket created automatically
+- 3 consecutive request timeouts → ticket created automatically
+
+**Arale's response protocol:**
+- Confidence ≥90%: fixes directly (restart process, modify config — no business code changes, no PC restart)
+- Confidence <90%: provides recommendation for admin approval
+
+**You do NOT need to:**
+- Collect logs yourself — the system does it
+- Tag priority — auto-assessed
+- Follow up — Arale will investigate and respond
+
+**Ticket statuses:** `open` → `in_progress` → `resolved`
+
+## Cross-Instance Mailbox — Inter-Instance Agent Messaging
+
+HASHI instances can send messages to agents on other instances via a shared file-based mailbox. No API or network protocol is needed — all instances share filesystem access.
+
+### Instance Paths
+
+| Instance | Mailbox Path (from WSL) |
+|----------|------------------------|
+| HASHI1 | `/home/lily/projects/hashi/mailbox/incoming/` |
+| HASHI2 | `/home/lily/projects/hashi2/mailbox/incoming/` |
+| HASHI9 | `/mnt/c/Users/thene/projects/HASHI/mailbox/incoming/` |
+
+From Windows, use the equivalent UNC/native paths:
+- HASHI1: `\\wsl.localhost\Ubuntu-22.04\home\lily\projects\hashi\mailbox\incoming\`
+- HASHI2: `\\wsl.localhost\Ubuntu-22.04\home\lily\projects\hashi2\mailbox\incoming\`
+- HASHI9: `C:\Users\thene\projects\HASHI\mailbox\incoming\`
+
+### Sending a Message
+
+Write a JSON file to the **target instance's** `mailbox/incoming/` directory.
+
+**Filename format:** `{timestamp}_{from_instance}_{from_agent}.json`
+Example: `20260324-053200_HASHI1_hashiko.json`
+
+**Message format:**
+```json
+{
+  "msg_id": "xmsg-20260324-053200-hashiko-akane",
+  "from_instance": "HASHI1",
+  "from_agent": "hashiko",
+  "to_instance": "HASHI9",
+  "to_agent": "hashiko",
+  "intent": "ask",
+  "reply_required": true,
+  "text": "Your message here",
+  "ts": "2026-03-24T05:32:00Z"
+}
+```
+
+**Fields:**
+- `intent`: `ask` | `inform` | `reply` | `task`
+- `reply_required`: if `true`, recipient should reply to sender's mailbox
+- For replies, include `reply_to` with the original `msg_id`
+
+### Receiving Messages
+
+Agents check their instance's `mailbox/incoming/` on demand (when told to check, or during `/fyi`). This is manual — no background polling.
+
+**Processing flow:**
+1. Read files in `mailbox/incoming/`
+2. Move processed messages to `mailbox/done/`
+3. If reply needed, write reply JSON to the sender's `mailbox/incoming/`
+
+### Conflict Prevention
+
+- Filenames include timestamp + source instance + agent — guaranteed unique
+- Write via temp file + rename for atomicity (prevents reading half-written files)
+- Each instance only processes its own `incoming/` — no cross-reading of processing state
+
+## Hchat — Real-Time Direct Agent Messaging
+
+**Hchat** is the official name for real-time direct messaging between agents across HASHI instances via HTTP API. Use this name to avoid confusion with the file-based mailbox system.
+
+Beyond file-based mailbox, agents can communicate **in real-time** via HTTP API between WSL instances and Windows (HASHI9).
+
+### Prerequisites — WSL Mirrored Networking
+
+For `127.0.0.1` to be shared between WSL and Windows, `.wslconfig` must have `networkingMode=mirrored`.
+
+**File:** `C:\Users\<user>\.wslconfig`
+```ini
+[wsl2]
+networkingMode=mirrored
+```
+
+After editing, restart WSL: shut down via `wsl --shutdown` in PowerShell, then relaunch.
+
+**Status:** ✅ Confirmed working as of 2026-03-24. WSL and Windows now share `127.0.0.1`.
+
+### HASHI9 API Endpoints (from WSL, after mirrored networking)
+
+| Port | Purpose | Example |
+|------|---------|---------|
+| `8769` | Workbench API — chat with agents | `POST http://127.0.0.1:8769/api/chat` |
+| `18801` | API Gateway — OpenAI-compatible interface | `POST http://127.0.0.1:18801/v1/chat/completions` |
+
+### Sending a Real-Time Message to HASHI9
+
+```bash
+curl -s -X POST http://127.0.0.1:8769/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{"agent": "hashiko", "text": "你好！"}'
+```
+
+### Communication Protocol Summary
+
+| Method | Speed | Use Case |
+|--------|-------|---------|
+| **File Mailbox** | Async (manual check) | Reliable delivery, agent offline OK |
+| **Real-Time API** | Synchronous | Live queries, immediate responses |
+
+Use **file mailbox** when the target instance may be offline or the message can wait.
+Use **real-time API** when you need an immediate response and know the target is running.

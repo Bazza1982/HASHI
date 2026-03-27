@@ -1,7 +1,7 @@
 ---
 id: debug
 name: Debug
-type: prompt
+type: toggle
 description: Run a task in strict debugging and verification mode
 ---
 

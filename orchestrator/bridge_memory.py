@@ -15,6 +15,9 @@ class LocalEmbeddingEncoder:
 
     def __init__(self, dim: int = 256):
         self.dim = dim
+        self.vector_dim = dim
+        self.ready = True
+        self.error = None
 
     def encode(self, text: str) -> list[float]:
         vec = [0.0] * self.dim
@@ -171,7 +174,7 @@ class BridgeMemoryStore:
         self.workspace_dir = workspace_dir
         self.db_path = workspace_dir / "bridge_memory.sqlite"
         self.legacy_encoder = LocalEmbeddingEncoder()
-        self.encoder = BgeM3Encoder()
+        self.encoder = LocalEmbeddingEncoder()  # BGE disabled by default; enable via /memory sync
         self._sqlite_vec_supported: bool | None = None
         self._vec_enabled = False
         self._vec_dim: int | None = None
@@ -320,10 +323,15 @@ class BridgeMemoryStore:
         q = (query or "").replace('"', '""').strip()
         if not q:
             return ""
-        parts = [p for p in re.findall(r"[a-zA-Z0-9_]+", q) if len(p) > 1]
+        reserved = {"AND", "OR", "NOT", "NEAR"}
+        parts = [
+            p
+            for p in re.findall(r"[a-zA-Z0-9_]+", q)
+            if len(p) > 1 and p.upper() not in reserved
+        ]
         if not parts:
             return ""
-        return " OR ".join(parts[:16])
+        return " OR ".join(f'"{p}"' for p in parts[:16])
 
     def record_turn(self, role: str, source: str, text: str):
         clean = (text or "").strip()
@@ -420,18 +428,21 @@ class BridgeMemoryStore:
                 except Exception:
                     pass
             if safe_query:
-                rows = conn.execute(
-                    """
-                    SELECT m.id, m.ts, m.memory_type, m.source, m.content, m.importance, m.embedding
-                    FROM memory_fts f
-                    JOIN memories m ON m.id = f.memory_id
-                    WHERE memory_fts MATCH ?
-                    LIMIT 40
-                    """,
-                    (safe_query,),
-                ).fetchall()
-                for row in rows:
-                    candidates[row["id"]] = dict(row)
+                try:
+                    rows = conn.execute(
+                        """
+                        SELECT m.id, m.ts, m.memory_type, m.source, m.content, m.importance, m.embedding
+                        FROM memory_fts f
+                        JOIN memories m ON m.id = f.memory_id
+                        WHERE memory_fts MATCH ?
+                        LIMIT 40
+                        """,
+                        (safe_query,),
+                    ).fetchall()
+                    for row in rows:
+                        candidates[row["id"]] = dict(row)
+                except sqlite3.OperationalError:
+                    pass
 
             recent_rows = conn.execute(
                 """
@@ -474,6 +485,17 @@ class BridgeMemoryStore:
             turns = conn.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
             memories = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
         return {"turns": int(turns), "memories": int(memories)}
+
+    def clear_turns(self) -> int:
+        """Delete all stored conversation turns, keeping memories intact."""
+        with self._connect() as conn:
+            deleted = conn.execute("DELETE FROM turns").rowcount
+            try:
+                conn.execute("DELETE FROM turns_vec")
+            except Exception:
+                pass
+            conn.commit()
+        return int(deleted)
 
     def clear_all(self) -> dict[str, int]:
         """Wipe all stored turns and memories. Keeps the database file and schema intact."""
@@ -524,9 +546,15 @@ class BridgeMemoryStore:
             status["counts"]["turns"] = int(conn.execute("SELECT COUNT(*) FROM turns").fetchone()[0])
 
             if status["tables"]["memory_vec"]["exists"]:
-                status["counts"]["memory_vec"] = int(conn.execute("SELECT COUNT(*) FROM memory_vec").fetchone()[0])
+                try:
+                    status["counts"]["memory_vec"] = int(conn.execute("SELECT COUNT(*) FROM memory_vec").fetchone()[0])
+                except Exception:
+                    status["counts"]["memory_vec"] = 0
             if status["tables"]["turns_vec"]["exists"]:
-                status["counts"]["turns_vec"] = int(conn.execute("SELECT COUNT(*) FROM turns_vec").fetchone()[0])
+                try:
+                    status["counts"]["turns_vec"] = int(conn.execute("SELECT COUNT(*) FROM turns_vec").fetchone()[0])
+                except Exception:
+                    status["counts"]["turns_vec"] = 0
 
         memories_total = status["counts"]["memories"]
         turns_total = status["counts"]["turns"]

@@ -1,0 +1,255 @@
+# HASHI Flow — 工作流 YAML Schema 标准
+# 版本: 1.0
+# 所有工作流定义文件必须符合此格式
+
+# =============================================================================
+# 顶层结构
+# =============================================================================
+
+workflow:
+  id: string                  # 唯一标识符，如 "book-translation-v1"
+  name: string                # 人类可读名称，如 "书籍翻译工作流"
+  version: string             # 语义版本，如 "1.0.0"
+  description: string         # 工作流用途说明
+  tags: [string]              # 分类标签，如 ["translation", "document"]
+
+meta:
+  created_by: string          # 创建者，如 "workflow_design_agent" 或 "human"
+  created_at: datetime        # ISO 8601 时间戳
+  last_improved_at: datetime  # 最后一次被 Evaluator 改进的时间
+  improvement_count: int      # 改进次数（Evaluator 追踪）
+  source_prompt: string       # 原始用户 prompt（动态生成时记录）
+
+# =============================================================================
+# 前置确认（Pre-flight）
+# 所有需要人工输入的内容在此定义，工作流运行前一次性收集
+# =============================================================================
+
+pre_flight:
+  analyst_agent: string       # 负责分析的 analyst agent id
+  auto_scan: bool             # 是否让 analyst 自动扫描输入文件寻找潜在问题
+
+  collect_from_human:         # 需要人工确认的问题列表
+    - key: string             # 参数名，后续步骤可用 {key} 引用
+      question: string        # 问向用户的问题
+      required: bool          # 是否必填
+      type: string            # text | list | confirm | choice
+      choices: [string]       # 当 type=choice 时的选项
+
+  # 示例：
+  # collect_from_human:
+  #   - key: author_name_zh
+  #     question: "作者中文名是？"
+  #     required: true
+  #     type: text
+  #   - key: character_names
+  #     question: "请确认以下人名翻译：\n{auto_scanned_names}"
+  #     required: true
+  #     type: list
+
+# =============================================================================
+# Agent 定义
+# =============================================================================
+
+agents:
+  orchestrator:
+    id: string                # 如 "akane"（已存在的 Telegram-enabled agent）
+
+  workers:                    # 工作流专用 local-only workers
+    - id: string              # 唯一标识符，如 "translator_01"
+      role: string            # 角色描述，如 "中文翻译员"
+      agent_md: string        # AGENT.md 路径，如 "flow/agents/translator/AGENT.md"
+      workspace: string       # 工作目录，如 "flow/runs/{run_id}/workers/translator_01"
+      backend: string         # claude-cli | gemini-cli | openrouter-api | codex-cli
+      model: string           # 具体 model，如 "claude-opus-4-6"
+      controllable_by:        # 谁可以修改 backend/model
+        - orchestrator
+        - human
+
+# =============================================================================
+# 步骤定义（DAG）
+# =============================================================================
+
+steps:
+  - id: string                # 步骤唯一标识
+    name: string              # 人类可读名称
+    agent: string             # 使用哪个 worker（引用 agents.workers[].id）
+
+    depends: [string]         # 依赖的步骤 id 列表（[] 表示无依赖）
+
+    input:                    # 输入定义
+      files: [string]         # 输入文件路径列表
+      from_artifacts: [string] # 引用之前步骤的输出工件 key
+      params: {}              # 额外参数，可引用 pre_flight 变量 {key}
+
+    prompt: string            # 给 agent 的指令 prompt
+
+    output:                   # 输出定义
+      artifacts:              # 产出的工件
+        - key: string         # 工件 key（供后续步骤引用）
+          path: string        # 相对于 run workspace 的路径
+          type: string        # file | json | directory
+
+    strategy: string          # 执行策略（可选）
+                              # sequential（默认）| parallel | parallel_by_item
+    parallel_items: string    # 当 strategy=parallel_by_item 时，指定迭代对象
+
+    quality_gate:             # 质量检查（可选）
+      type: string            # auto | human | auto_then_human
+      criteria: [string]      # 自动检查标准列表
+      human_prompt: string    # 当 type=human 时，发给用户的确认消息
+
+    timeout_seconds: int      # 步骤超时（默认 600）
+
+# =============================================================================
+# 错误处理
+# =============================================================================
+
+error_handling:
+  debug_agent: string         # debug agent id
+  max_attempts: int           # 最大重试次数（默认 3，可调）
+
+  retry_strategy:             # 每次重试的策略
+    attempt_1: string         # 如 "分析错误日志，调整 prompt 重试"
+    attempt_2: string         # 如 "切换到备用 model 重试"
+    attempt_3: string         # 如 "将步骤拆分为更小任务重试"
+
+  on_max_exceeded:            # 超过最大次数后的处理
+    action: string            # notify_orchestrator | abort | skip_step
+    message: string           # 通知消息模板
+
+# =============================================================================
+# 成功标准
+# =============================================================================
+
+success_criteria:
+  - string                    # 每条是一个可验证的标准
+  # 示例：
+  # - "所有步骤状态为 completed"
+  # - "output.pdf 文件存在且大小 > 100KB"
+  # - "quality_gate 全部通过"
+
+# =============================================================================
+# 输出定义
+# =============================================================================
+
+output:
+  type: string                # file | directory | message
+  source_artifact: string     # 引用哪个 artifact key 作为最终输出
+  destination: string         # 输出路径（支持变量替换）
+  notify_orchestrator: bool   # 完成后是否通知 Orchestrator（默认 true）
+
+# =============================================================================
+# Evaluator 配置（可选，不配置则使用全局默认）
+# =============================================================================
+
+evaluation:
+  enabled: bool               # 是否启用评估（默认 true）
+  metrics:                    # 关注的指标
+    - human_interventions     # 人工介入次数（越少越好）
+    - total_duration          # 总耗时
+    - error_retries           # 错误重试次数
+    - quality_score           # 质量分（0-10）
+  improvement_threshold: int  # 超过多少次运行后尝试改进（默认 3）
+
+# =============================================================================
+# 完整示例（书籍翻译）
+# =============================================================================
+
+# workflow:
+#   id: book-translation-v1
+#   name: "书籍翻译"
+#   version: "1.0.0"
+#   description: "将英文书籍翻译成高质量中文版，包含质量审核和PDF输出"
+#   tags: [translation, document, long-form]
+#
+# pre_flight:
+#   analyst_agent: analyst_01
+#   auto_scan: true
+#   collect_from_human:
+#     - key: proper_nouns
+#       question: "以下专有名词请确认中文译名（自动扫描结果）：\n{scanned_names}"
+#       required: true
+#       type: list
+#     - key: style_preference
+#       question: "翻译风格偏好？"
+#       required: false
+#       type: choice
+#       choices: ["正式学术", "通俗易懂", "保持原文节奏"]
+#
+# agents:
+#   orchestrator:
+#     id: akane
+#   workers:
+#     - id: translator_01
+#       role: "中文翻译员"
+#       agent_md: "flow/agents/translator/AGENT.md"
+#       backend: claude-cli
+#       model: claude-opus-4-6
+#     - id: reviewer_01
+#       role: "中文校对员"
+#       agent_md: "flow/agents/reviewer/AGENT.md"
+#       backend: claude-cli
+#       model: claude-sonnet-4-6
+#
+# steps:
+#   - id: scan
+#     name: "扫描文档结构"
+#     agent: translator_01
+#     depends: []
+#     input:
+#       files: ["{source_file}"]
+#     prompt: "扫描文档，输出章节结构 JSON"
+#     output:
+#       artifacts:
+#         - key: structure
+#           path: structure.json
+#           type: json
+#
+#   - id: translate
+#     name: "翻译各章节"
+#     agent: translator_01
+#     depends: [scan]
+#     strategy: parallel_by_item
+#     parallel_items: "{artifacts.structure.chapters}"
+#     prompt: "翻译第 {item.index} 章，人名规范：{pre_flight.proper_nouns}"
+#     output:
+#       artifacts:
+#         - key: chapter_{item.index}
+#           path: chapters/ch{item.index}.md
+#           type: file
+#
+#   - id: review
+#     name: "统一校对"
+#     agent: reviewer_01
+#     depends: [translate]
+#     prompt: "对所有章节进行一致性校对"
+#     quality_gate:
+#       type: auto
+#       criteria:
+#         - "所有人名使用确认的译名"
+#         - "术语全书一致"
+#
+#   - id: compile
+#     name: "生成 PDF"
+#     agent: translator_01
+#     depends: [review]
+#     prompt: "将所有章节编译为最终 PDF，包含封面和目录"
+#     output:
+#       artifacts:
+#         - key: final_pdf
+#           path: final/output.pdf
+#           type: file
+#
+# error_handling:
+#   debug_agent: debug_01
+#   max_attempts: 3
+#
+# success_criteria:
+#   - "步骤 compile 状态为 completed"
+#   - "final_pdf 文件存在"
+#
+# output:
+#   type: file
+#   source_artifact: final_pdf
+#   destination: "{output_dir}/{title}_中文版.pdf"

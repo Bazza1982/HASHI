@@ -1,0 +1,83 @@
+{
+  "agent_id": "format_specialist_01",
+  "role": "格式专家",
+  "workflow_id": "news-article-translation-v1",
+  "workflow_version": "1.0.0",
+  "run_id": "run-meta-workflow-creation-20260326-073858",
+
+  "backend": {
+    "active": "claude-cli",
+    "model": "claude-haiku-4-5",
+    "available": [
+      {
+        "name": "claude-cli",
+        "models": [
+          "claude-haiku-4-5",
+          "claude-sonnet-4-6",
+          "claude-opus-4-6"
+        ]
+      }
+    ],
+    "controllable_by": [
+      "orchestrator",
+      "human"
+    ]
+  },
+
+  "capabilities": [
+    "file_read",
+    "file_write",
+    "markdown_formatting",
+    "file_validation",
+    "encoding_handling",
+    "checksum_generation"
+  ],
+
+  "communication": {
+    "hchat_endpoint": "http://localhost:5000",
+    "inbox_path": "flow/runs/run-meta-workflow-creation-20260326-073858/workers/format_specialist_01/inbox/",
+    "outbox_path": "flow/runs/run-meta-workflow-creation-20260326-073858/workers/format_specialist_01/outbox/",
+    "poll_interval_seconds": 5
+  },
+
+  "limits": {
+    "timeout_seconds": 120,
+    "max_tokens": 50000,
+    "max_file_size_mb": 50
+  },
+
+  "steps_handled": [
+    "step_06_markdown_formatting",
+    "step_08_output_generation"
+  ],
+
+  "responsibility_scope": {
+    "can_read_files": true,
+    "can_modify_files": false,
+    "can_create_files": true,
+    "can_access_artifacts": true,
+    "can_modify_artifacts": false,
+    "can_execute_shell": false
+  },
+
+  "quality_thresholds": {
+    "minimum_completion_percent": 100,
+    "markdown_validation_required": true,
+    "encoding_validation_required": true,
+    "error_retry_max_attempts": 3,
+    "timeout_retry_allowed": true
+  },
+
+  "formatting_standards": {
+    "output_format": "markdown",
+    "required_encoding": "UTF-8",
+    "include_front_matter": true,
+    "validate_markdown": true
+  },
+
+  "created_at": "2026-03-26T07:45:00Z",
+  "created_by": "workflow_design_agent",
+  "last_modified_at": "2026-03-26T07:45:00Z",
+
+  "notes": "Format specialist handles Markdown formatting and output generation. Uses haiku model for efficient file formatting tasks. Responsible for file validation and integrity checks."
+}

@@ -134,7 +134,9 @@ def _show_ascii_startup_banner(
             elif state == "failed":
                 print(f"  xx  {name} failed")
             elif state == "connecting":
-                print(f"  ..  {name} still connecting")
+                reason = (boot_reason or {}).get(name, "")
+                suffix = f" ({reason})" if reason else ""
+                print(f"  ..  {name} still connecting{suffix}")
             else:
                 print(f"  --  {name} pending")
         
@@ -223,6 +225,7 @@ def show_startup_banner(
     skipped_agents: list | None = None,
     logo_only: bool = False,
     inactive_agents: list | None = None,
+    boot_reason: dict | None = None,
 ) -> None:
     """
     HASHI startup animation.
@@ -482,7 +485,9 @@ def show_startup_banner(
                 elif s == "failed":
                     print(f"  {_c(203)}✗{_R}  {_c(240)}{n}  failed{_R}")
                 else:
-                    print(f"  {_c(75)}⠙{_R}  {_c(244)}{n}  still connecting…{_R}")
+                    reason = (boot_reason or {}).get(n, "")
+                    suffix = f" ({reason})" if reason else ""
+                    print(f"  {_c(75)}⠙{_R}  {_c(244)}{n}  still connecting…{suffix}{_R}")
                 sys.stdout.flush()
                 time.sleep(0.05)
             

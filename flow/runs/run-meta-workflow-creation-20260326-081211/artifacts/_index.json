@@ -1,0 +1,16 @@
+{
+  "design_package": {
+    "path": "flow/runs/run-meta-workflow-creation-20260326-081211/artifacts/design_package/design_package.json",
+    "original_path": "/home/lily/projects/hashi/flow/runs/run-meta-workflow-creation-20260326-081211/workers/designer_01/design_package.json",
+    "step_id": null,
+    "size_bytes": 6972,
+    "registered_at": "2026-03-25T21:13:35.638379+00:00"
+  },
+  "validation_report": {
+    "path": "flow/runs/run-meta-workflow-creation-20260326-081211/artifacts/validation_report/validation_report.json",
+    "original_path": "/home/lily/projects/hashi/flow/runs/run-meta-workflow-creation-20260326-081211/workers/validator_01/validation_report.json",
+    "step_id": null,
+    "size_bytes": 9388,
+    "registered_at": "2026-03-25T21:17:20.881675+00:00"
+  }
+}

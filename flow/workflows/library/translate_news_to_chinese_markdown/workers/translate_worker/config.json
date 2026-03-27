@@ -1,0 +1,81 @@
+{
+  "worker_id": "translate_worker",
+  "workflow_id": "translate_news_to_chinese_markdown",
+  "model": "claude-opus-4-6",
+  "execution": {
+    "temperature": 0.3,
+    "max_tokens": 8000,
+    "timeout_seconds": 60,
+    "retry_policy": {
+      "max_attempts": 3,
+      "backoff_strategy": "exponential",
+      "initial_delay_ms": 1000,
+      "max_delay_ms": 30000
+    }
+  },
+  "parallelization": {
+    "enabled": true,
+    "parallel_by_item": true,
+    "parallel_limit": 5,
+    "strategy": "map_reduce"
+  },
+  "input": {
+    "schema_type": "object",
+    "properties": {
+      "parsed_content": {
+        "type": "array",
+        "description": "Parsed article content to translate"
+      },
+      "source_language": {
+        "type": "string",
+        "enum": ["en", "english"],
+        "description": "Source language"
+      },
+      "target_language": {
+        "type": "string",
+        "enum": ["zh", "zh-CN", "chinese"],
+        "description": "Target language (Simplified Chinese)"
+      }
+    },
+    "required": ["parsed_content", "source_language", "target_language"]
+  },
+  "output": {
+    "schema_type": "object",
+    "properties": {
+      "translated_content": {
+        "type": "array",
+        "description": "Translated content in Chinese"
+      },
+      "translation_quality_score": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 100,
+        "description": "Quality score for translation"
+      }
+    }
+  },
+  "capabilities": [
+    "english_to_chinese_translation",
+    "terminology_preservation",
+    "tone_adaptation"
+  ],
+  "translation_rules": {
+    "preserve_proper_nouns": true,
+    "preserve_brand_names": true,
+    "use_standard_terminology": true,
+    "maintain_journalistic_tone": true
+  },
+  "quality_threshold": 85,
+  "error_handler": {
+    "on_failure": "debug_01",
+    "max_attempts": 3,
+    "fallback_action": "pass_to_debug"
+  },
+  "logging": {
+    "level": "INFO",
+    "log_inputs": true,
+    "log_outputs": true,
+    "log_performance_metrics": true,
+    "log_quality_scores": true
+  }
+}

@@ -1,16 +1,19 @@
 from __future__ import annotations
 import re
+import sys
 import time
 import asyncio
 import inspect
 import logging
 import shutil
+from uuid import uuid4
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Any
 import json
 
+import aiohttp
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update, constants
 from telegram.error import TimedOut as TelegramTimedOut
 from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler, MessageHandler, filters
@@ -82,6 +85,8 @@ class FlexibleAgentRuntime:
         self._background_tasks: set[asyncio.Task] = set()
         self._request_listeners: dict[str, list] = {}
         self._pending_request_results: dict[str, dict] = {}
+        self._transfer_state: dict | None = None
+        self._suppressed_transfer_results: list[dict[str, Any]] = []
         self.skill_manager = skill_manager
         self.agent_fyi_path = self.global_config.project_root / "docs" / "AGENT_FYI.md"
         self._pending_session_primer: str | None = None
@@ -91,11 +96,10 @@ class FlexibleAgentRuntime:
 
         # Workspace structure
         self.workspace_dir = config.workspace_dir
-        # Load persisted verbose preference (.verbose file presence = ON, absence = OFF)
-        _verbose_file = self.workspace_dir / ".verbose"
-        self._verbose: bool = _verbose_file.exists()
-        _think_file = self.workspace_dir / ".think"
-        self._think: bool = _think_file.exists()
+        # Load persisted verbose preference (.verbose_off file presence = OFF, absence = ON)
+        self._verbose: bool = not (self.workspace_dir / ".verbose_off").exists()
+        # Load persisted think preference (.think_off file presence = OFF, absence = ON)
+        self._think: bool = not (self.workspace_dir / ".think_off").exists()
         self._think_buffer: list[str] = []
         self._openrouter_think_chunk: str = ""
         self._last_openrouter_think_snippet: str | None = None
@@ -107,7 +111,9 @@ class FlexibleAgentRuntime:
         self.handoff_path = self.workspace_dir / "handoff.md"
         self.state_path = self.workspace_dir / "state.json"
         self.runtime_session_path = self.workspace_dir / ".runtime_session.json"
-        self.voice_manager = VoiceManager(self.workspace_dir, self.media_dir, ffmpeg_cmd="ffmpeg")
+        self.transfer_state_path = self.workspace_dir / "active_transfer.json"
+        self._cos_enabled: bool = (self.workspace_dir / ".cos_on").exists()
+        self.voice_manager = VoiceManager(self.workspace_dir, self.media_dir, ffmpeg_cmd="ffmpeg", secrets=self.secrets)
         self._authorized_telegram_ids = resolve_authorized_telegram_ids(self.config.extra, self.global_config.authorized_id)
 
         # Command policy
@@ -122,6 +128,11 @@ class FlexibleAgentRuntime:
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
         self.memory_dir.mkdir(parents=True, exist_ok=True)
         self.backend_state_dir.mkdir(parents=True, exist_ok=True)
+        if self.transfer_state_path.exists():
+            try:
+                self._transfer_state = json.loads(self.transfer_state_path.read_text(encoding="utf-8"))
+            except Exception:
+                self._transfer_state = None
 
         # Initialize Memory and Handoff Subsystems
         self.memory_index = MemoryIndex(self.workspace_dir / "memory_index.sqlite")
@@ -191,7 +202,7 @@ class FlexibleAgentRuntime:
                     self._enabled_commands.add(name.strip().lstrip("/").lower())
 
         # help/status/new/wipe/clear/model/effort/mode should always be available
-        self._enabled_commands.update({"help", "status", "new", "wipe", "reset", "clear", "memory", "model", "effort", "mode", "jobs", "verbose", "think", "voice", "whisper"})
+        self._enabled_commands.update({"help", "status", "new", "wipe", "reset", "clear", "memory", "model", "effort", "mode", "jobs", "verbose", "think", "voice", "whisper", "transfer", "fork", "cos"})
 
     def _is_command_allowed(self, cmd: str) -> bool:
         cmd = (cmd or "").lstrip("/").lower()
@@ -435,7 +446,9 @@ class FlexibleAgentRuntime:
             "display_name": self.get_display_name(),
             "emoji": self.get_agent_emoji(),
             "engine": self.config.active_backend,
+            "active_backend": self.config.active_backend,
             "model": self.get_current_model(),
+            "allowed_backends": [dict(backend) for backend in self.config.allowed_backends],
             "workspace_dir": str(self.workspace_dir),
             "transcript_path": str(self.transcript_log_path),
             "online": bool(self.backend_ready),
@@ -487,6 +500,113 @@ class FlexibleAgentRuntime:
             encoding="utf-8",
         )
 
+    def _detect_instance_name(self) -> str:
+        from orchestrator.ticket_manager import detect_instance
+
+        return detect_instance(self.global_config.project_root)
+
+    def _normalize_instance_name(self, value: str | None) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return self._detect_instance_name()
+        match = re.search(r"(\d+)$", raw, flags=re.IGNORECASE)
+        if match:
+            return f"HASHI{match.group(1)}"
+        if raw.lower() == "usb":
+            return "USB"
+        return raw.upper()
+
+    def _parse_request_seq(self, request_id: str | None) -> int | None:
+        match = re.match(r"^req-(\d+)$", str(request_id or "").strip())
+        if not match:
+            return None
+        return int(match.group(1))
+
+    def _persist_transfer_state(self) -> None:
+        if self._transfer_state is None:
+            self.transfer_state_path.unlink(missing_ok=True)
+            return
+        self.transfer_state_path.write_text(
+            json.dumps(self._transfer_state, indent=2, ensure_ascii=True) + "\n",
+            encoding="utf-8",
+        )
+
+    def _clear_transfer_state(self) -> None:
+        self._transfer_state = None
+        self._suppressed_transfer_results.clear()
+        self._persist_transfer_state()
+
+    def has_active_transfer(self) -> bool:
+        return bool(self._transfer_state and self._transfer_state.get("status") in {"pending", "accepted"})
+
+    def _transfer_redirect_text(self) -> str:
+        state = self._transfer_state or {}
+        target_agent = state.get("target_agent") or "target"
+        target_instance = state.get("target_instance") or "unknown"
+        transfer_id = state.get("transfer_id") or "unknown"
+        return (
+            f"This session has been transferred to {target_agent}@{target_instance}.\n"
+            f"Continue there. Transfer ID: {transfer_id}"
+        )
+
+    def _should_redirect_after_transfer(self) -> bool:
+        return bool(self._transfer_state and self._transfer_state.get("status") == "accepted")
+
+    def _should_buffer_during_transfer(self, request_id: str | None) -> bool:
+        if not self._transfer_state:
+            return False
+        status = self._transfer_state.get("status")
+        if status not in {"pending", "accepted"}:
+            return False
+        cutoff_seq = self._transfer_state.get("cutoff_seq")
+        req_seq = self._parse_request_seq(request_id)
+        return cutoff_seq is not None and req_seq is not None and req_seq <= cutoff_seq
+
+    def _record_suppressed_transfer_result(
+        self,
+        item: QueuedRequest,
+        *,
+        success: bool,
+        text: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        self._suppressed_transfer_results.append(
+            {
+                "request_id": item.request_id,
+                "chat_id": item.chat_id,
+                "success": success,
+                "text": text,
+                "error": error,
+                "summary": item.summary,
+                "source": item.source,
+            }
+        )
+
+    async def _flush_suppressed_transfer_results(self) -> None:
+        buffered = list(self._suppressed_transfer_results)
+        self._suppressed_transfer_results.clear()
+        for entry in buffered:
+            text = entry.get("text") if entry.get("success") else f"Flex Backend Error ({self.config.active_backend}): {entry.get('error')}"
+            if not text:
+                continue
+            await self.send_long_message(
+                chat_id=entry["chat_id"],
+                text=text,
+                request_id=entry.get("request_id"),
+                purpose="transfer-release",
+            )
+
+    def _strip_transfer_accept_prefix(self, item: QueuedRequest, text: str) -> str:
+        if not item.source.startswith("bridge-transfer:"):
+            return text
+        prefix = f"TRANSFER_ACCEPTED {item.source.split(':', 1)[1]}"
+        if not text.startswith(prefix):
+            return text
+        stripped = text[len(prefix):].lstrip()
+        if stripped.startswith("\n"):
+            stripped = stripped.lstrip()
+        return stripped
+
     def _mark_runtime_started(self):
         state = self._load_runtime_session_state()
         state["last_started_at"] = datetime.now().isoformat()
@@ -537,7 +657,7 @@ class FlexibleAgentRuntime:
         return f"{primer}\n\n--- NEW REQUEST ---\n{request}"
 
     def _consume_session_primer(self, item: QueuedRequest) -> str:
-        if item.source.startswith("scheduler") or item.source.startswith("bridge:"):
+        if item.source.startswith("scheduler") or item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:"):
             return item.prompt
         if item.silent:
             return item.prompt
@@ -891,6 +1011,12 @@ class FlexibleAgentRuntime:
                 f"💭 Think: {'ON' if self._think else 'OFF'}",
                 f"🕓 Last Switch: {self._format_age(self.last_backend_switch_at)}",
             ])
+            try:
+                from tools.token_tracker import get_summary, format_status_line
+                _usage_summary = get_summary(self.workspace_dir, session_id=self.session_id_dt)
+                lines.append(f"💰 Tokens: {format_status_line(_usage_summary)}")
+            except Exception:
+                pass
         else:
             lines.append("")
             lines.append("Use /status full for more detail.")
@@ -927,7 +1053,7 @@ class FlexibleAgentRuntime:
 
     async def _render_skill_jobs(self, update_or_query, kind: str):
         from orchestrator.agent_runtime import _build_jobs_with_buttons
-        text, markup = _build_jobs_with_buttons(self.name, self.skill_manager)
+        text, markup = _build_jobs_with_buttons(self.name, self.skill_manager, filter_agent=self.name)
         if hasattr(update_or_query, "edit_message_text"):
             await update_or_query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
         else:
@@ -1043,6 +1169,15 @@ class FlexibleAgentRuntime:
         return f'User sent a file "{filename}" (saved at {{local_path}}). Read it if possible and respond.', filename
 
     async def enqueue_api_text(self, text: str, source: str = "api", deliver_to_telegram: bool = True):
+        if self._should_redirect_after_transfer() and not source.startswith("bridge-transfer:"):
+            if deliver_to_telegram:
+                await self.send_long_message(
+                    self._primary_chat_id(),
+                    self._transfer_redirect_text(),
+                    request_id=f"transfer-redirect-{uuid4().hex[:8]}",
+                    purpose="transfer-redirect",
+                )
+            return None
         _print_user_message(self.name, text)
         return await self.enqueue_request(
             self._primary_chat_id(),
@@ -1051,6 +1186,30 @@ class FlexibleAgentRuntime:
             _safe_excerpt(text),
             deliver_to_telegram=deliver_to_telegram,
         )
+
+    async def _hchat_route_reply(self, item, response_text: str):
+        """If this request was an hchat message, route the reply back to the sender."""
+        import re
+        match = re.match(r"^\[hchat from (\w+)\]", item.prompt)
+        if not match:
+            return
+        sender_name = match.group(1).lower()
+        orchestrator = getattr(self, "orchestrator", None)
+        if orchestrator is None:
+            return
+        for rt in getattr(orchestrator, "runtimes", []):
+            if getattr(rt, "name", "") == sender_name and hasattr(rt, "enqueue_api_text"):
+                try:
+                    await rt.enqueue_api_text(
+                        f"[hchat reply from {self.name}] {response_text}",
+                        source=f"hchat-reply:{self.name}",
+                        deliver_to_telegram=True,
+                    )
+                    self.logger.info(f"Hchat reply routed back to {sender_name}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to route hchat reply to {sender_name}: {e}")
+                return
+        self.logger.warning(f"Hchat reply: sender '{sender_name}' runtime not found")
 
     async def enqueue_api_media(
         self,
@@ -1062,6 +1221,15 @@ class FlexibleAgentRuntime:
         source: str = "api",
         deliver_to_telegram: bool = True,
     ):
+        if self._should_redirect_after_transfer():
+            if deliver_to_telegram:
+                await self.send_long_message(
+                    self._primary_chat_id(),
+                    self._transfer_redirect_text(),
+                    request_id=f"transfer-redirect-{uuid4().hex[:8]}",
+                    purpose="transfer-redirect",
+                )
+            return None
         if media_kind.lower() in {"photo", "document"} and is_image_file(filename):
             local_path, filename = normalize_image_file(local_path, filename)
             media_kind = "photo"
@@ -1090,8 +1258,12 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CommandHandler("skill", self._wrap_cmd("skill", self.cmd_skill)))
         self.app.add_handler(CommandHandler("backend", self._wrap_cmd("backend", self.cmd_backend)))
         self.app.add_handler(CommandHandler("handoff", self._wrap_cmd("handoff", self.cmd_handoff)))
+        self.app.add_handler(CommandHandler("ticket", self._wrap_cmd("ticket", self.cmd_ticket)))
         self.app.add_handler(CommandHandler("park", self._wrap_cmd("park", self.cmd_park)))
         self.app.add_handler(CommandHandler("load", self._wrap_cmd("load", self.cmd_load)))
+        self.app.add_handler(CommandHandler("transfer", self._wrap_cmd("transfer", self.cmd_transfer)))
+        self.app.add_handler(CommandHandler("fork", self._wrap_cmd("fork", self.cmd_fork)))
+        self.app.add_handler(CommandHandler("cos", self._wrap_cmd("cos", self.cmd_cos)))
         self.app.add_handler(CommandHandler("model", self._wrap_cmd("model", self.cmd_model)))
         self.app.add_handler(CommandHandler("effort", self._wrap_cmd("effort", self.cmd_effort)))
         self.app.add_handler(CallbackQueryHandler(self.callback_model, pattern=r"^(model|backend|bmodel|effort|backend_menu)"))
@@ -1114,6 +1286,11 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CommandHandler("verbose", self._wrap_cmd("verbose", self.cmd_verbose)))
         self.app.add_handler(CommandHandler("think", self._wrap_cmd("think", self.cmd_think)))
         self.app.add_handler(CommandHandler("jobs", self._wrap_cmd("jobs", self.cmd_jobs)))
+        self.app.add_handler(CommandHandler("timeout", self._wrap_cmd("timeout", self.cmd_timeout)))
+        self.app.add_handler(CommandHandler("hchat", self._wrap_cmd("hchat", self.cmd_hchat)))
+        self.app.add_handler(CommandHandler("group", self._wrap_cmd("group", self.cmd_group)))
+        self.app.add_handler(CallbackQueryHandler(self.callback_group, pattern=r"^group:"))
+        self.app.add_handler(CommandHandler("usage", self._wrap_cmd("usage", self.cmd_usage)))
         self.app.add_handler(CommandHandler("logo", self._wrap_cmd("logo", self.cmd_logo)))
         self.app.add_handler(CommandHandler("move", self._wrap_cmd("move", self.cmd_move)))
         self.app.add_handler(CallbackQueryHandler(self.callback_move, pattern=r"^move:"))
@@ -1141,13 +1318,24 @@ class FlexibleAgentRuntime:
         )
 
     def handle_polling_error(self, error):
-        from telegram.error import Conflict
+        import time
+        from telegram.error import Conflict, NetworkError, TimedOut
         err_text = str(error) or "<no error message>"
+        now = time.monotonic()
+        if isinstance(error, (NetworkError, TimedOut)) and not isinstance(error, Conflict):
+            self._last_network_error_ts = now
         if isinstance(error, Conflict):
-            self.error_logger.error(
-                f"Telegram polling conflict for '{self.name}': another process is using this bot token. "
-                f"Check for duplicate bridge/bridge-g-m instances running. ({err_text})"
-            )
+            last_net_err = getattr(self, "_last_network_error_ts", 0)
+            if now - last_net_err < 120:
+                self.telegram_logger.warning(
+                    f"Telegram polling self-conflict for '{self.name}': network recovered and new poll "
+                    f"displaced the stale one. This is harmless and auto-recovers. ({err_text})"
+                )
+            else:
+                self.error_logger.error(
+                    f"Telegram polling conflict for '{self.name}': another process is using this bot token. "
+                    f"Check for duplicate bridge/bridge-g-m instances running. ({err_text})"
+                )
             return
         self.telegram_logger.warning(f"Polling error while fetching updates: {type(error).__name__}: {err_text}")
         if getattr(error, "__traceback__", None):
@@ -1444,11 +1632,11 @@ class FlexibleAgentRuntime:
 
         if target == "verbose":
             self._verbose = value == "on"
-            _f = self.workspace_dir / ".verbose"
+            _f = self.workspace_dir / ".verbose_off"
             if self._verbose:
-                _f.touch()
-            else:
                 _f.unlink(missing_ok=True)
+            else:
+                _f.touch()
             state = "ON 🔍" if self._verbose else "OFF"
             markup = InlineKeyboardMarkup([[
                 InlineKeyboardButton("✅ ON" if self._verbose else "ON", callback_data="tgl:verbose:on"),
@@ -1459,11 +1647,11 @@ class FlexibleAgentRuntime:
 
         elif target == "think":
             self._think = value == "on"
-            _f = self.workspace_dir / ".think"
+            _f = self.workspace_dir / ".think_off"
             if self._think:
-                _f.touch()
-            else:
                 _f.unlink(missing_ok=True)
+            else:
+                _f.touch()
             state = "ON 💭" if self._think else "OFF"
             markup = InlineKeyboardMarkup([[
                 InlineKeyboardButton("✅ ON" if self._think else "ON", callback_data="tgl:think:on"),
@@ -1877,6 +2065,242 @@ class FlexibleAgentRuntime:
             await self._do_move(update, agent_id, target, instances,
                                 keep_source=keep, sync=sync, dry_run=dry)
 
+    def _resolve_bridge_handoff_endpoint(self, target_instance: str, mode: str) -> tuple[str, str]:
+        action = "fork" if str(mode or "").strip().lower() == "fork" else "transfer"
+        normalized_target = self._normalize_instance_name(target_instance)
+        current_instance = self._normalize_instance_name(self._detect_instance_name())
+        if normalized_target == current_instance:
+            return current_instance, f"http://127.0.0.1:{self.global_config.workbench_port}/api/bridge/{action}"
+
+        instances = self._load_instances()
+        for name, inst in instances.items():
+            if self._normalize_instance_name(name) != normalized_target:
+                continue
+            host = str(inst.get("api_host") or "127.0.0.1").strip() or "127.0.0.1"
+            port = inst.get("workbench_port")
+            if not port:
+                raise ValueError(f"instance {normalized_target} has no workbench_port configured")
+            return normalized_target, f"http://{host}:{int(port)}/api/bridge/{action}"
+        raise ValueError(f"unknown instance: {target_instance}")
+
+    def _build_handoff_payload(self, target_agent: str, target_instance: str, mode: str) -> dict[str, Any]:
+        action = "fork" if str(mode or "").strip().lower() == "fork" else "transfer"
+        transfer_id = f"{'frk' if action == 'fork' else 'trf'}-{uuid4().hex}"
+        source_instance = self._normalize_instance_name(self._detect_instance_name())
+        package = self.handoff_builder.build_transfer_package(
+            transfer_id=transfer_id,
+            source_agent=self.name,
+            source_instance=source_instance,
+            target_agent=target_agent,
+            target_instance=target_instance,
+            created_at=datetime.now().isoformat(),
+            max_rounds=30,
+            max_words=18000,
+        )
+        package["mode"] = action
+        package["source_runtime"] = self.get_runtime_metadata()
+        package["source_workspace_dir"] = str(self.workspace_dir)
+        package["source_transcript_path"] = str(self.transcript_log_path)
+        return package
+
+    async def _cmd_bridge_handoff(self, update: Update, context: Any, *, mode: str) -> None:
+        action = "fork" if str(mode or "").strip().lower() == "fork" else "transfer"
+        label = "Fork" if action == "fork" else "Transfer"
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        args = [a.strip() for a in (context.args or []) if a.strip()]
+        if len(args) not in {1, 2}:
+            await self._reply_text(update, f"Usage: /{action} <target_agent> [HASHI instance]")
+            return
+        if action == "transfer" and self.has_active_transfer():
+            await self._reply_text(update, f"Transfer already active.\n{self._transfer_redirect_text()}")
+            return
+
+        target_agent = args[0]
+        target_instance = self._normalize_instance_name(args[1] if len(args) > 1 else self._detect_instance_name())
+        current_instance = self._normalize_instance_name(self._detect_instance_name())
+        if target_agent == self.name and target_instance == current_instance:
+            await self._reply_text(update, f"Cannot {action} to the same agent on the same instance.")
+            return
+
+        package = self._build_handoff_payload(target_agent, target_instance, action)
+        if int(package.get("exchange_count") or 0) <= 0:
+            await self._reply_text(update, f"No recent bridge transcript was available to {action}.")
+            return
+
+        if action == "transfer":
+            self._transfer_state = {
+                "transfer_id": package["transfer_id"],
+                "status": "pending",
+                "source_agent": self.name,
+                "source_instance": current_instance,
+                "target_agent": target_agent,
+                "target_instance": target_instance,
+                "cutoff_seq": self.request_seq,
+                "initiated_at": package["created_at"],
+            }
+            self._persist_transfer_state()
+        await self._reply_text(
+            update,
+            f"Preparing {action} to {target_agent}@{target_instance}.\n{label} ID: {package['transfer_id']}",
+        )
+
+        try:
+            _, endpoint = self._resolve_bridge_handoff_endpoint(target_instance, action)
+            timeout = aiohttp.ClientTimeout(total=100)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(endpoint, json=package) as response:
+                    body = await response.json()
+                    if response.status >= 400 or not body.get("ok"):
+                        raise RuntimeError(str(body.get("error") or f"HTTP {response.status}"))
+        except Exception as e:
+            self.logger.warning(f"{label} failed for {package['transfer_id']}: {e}")
+            if action == "transfer":
+                self._transfer_state["status"] = "failed"
+                self._transfer_state["error"] = str(e)
+                self._persist_transfer_state()
+                await self._flush_suppressed_transfer_results()
+                self._clear_transfer_state()
+                await self._send_text(
+                    update.effective_chat.id,
+                    f"Transfer failed: {e}\nSession remains here.",
+                )
+                return
+            await self._send_text(
+                update.effective_chat.id,
+                f"Fork failed: {e}",
+            )
+            return
+
+        final_status = str(body.get("status") or "accepted")
+        if action == "transfer":
+            self._transfer_state["status"] = "accepted"
+            self._transfer_state["target_status"] = final_status
+            self._persist_transfer_state()
+            self._suppressed_transfer_results.clear()
+            if final_status == "accepted_but_chat_offline":
+                target_status = body.get("target_chat_status") or "offline"
+                message = (
+                    f"Transfer accepted by {target_agent}@{target_instance}, but the target chat is {target_status}.\n"
+                    f"Continue there once it reconnects. Transfer ID: {package['transfer_id']}"
+                )
+            else:
+                message = (
+                    f"Transfer accepted by {target_agent}@{target_instance}.\n"
+                    f"Continue there. Transfer ID: {package['transfer_id']}"
+                )
+            await self._send_text(
+                update.effective_chat.id,
+                message,
+            )
+            return
+
+        if final_status == "accepted_but_chat_offline":
+            target_status = body.get("target_chat_status") or "offline"
+            message = (
+                f"Fork accepted by {target_agent}@{target_instance}, but the target chat is {target_status}.\n"
+                f"Both sessions remain usable. Fork ID: {package['transfer_id']}"
+            )
+        else:
+            message = (
+                f"Fork accepted by {target_agent}@{target_instance}.\n"
+                f"Both sessions can continue from the same context. Fork ID: {package['transfer_id']}"
+            )
+        await self._send_text(
+            update.effective_chat.id,
+            message,
+        )
+
+    async def cmd_transfer(self, update: Update, context: Any):
+        await self._cmd_bridge_handoff(update, context, mode="transfer")
+
+    async def cmd_fork(self, update: Update, context: Any):
+        await self._cmd_bridge_handoff(update, context, mode="fork")
+
+    async def cmd_cos(self, update: Update, context: Any):
+        """Chief of Staff: route human-in-the-loop decisions to Lily for precedent-based answers."""
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        if self.name == "lily":
+            await self._reply_text(update, "Lily cannot use /cos — that would go in circles 🌸")
+            return
+        args = [a.strip().lower() for a in (context.args or []) if a.strip()]
+        if not args:
+            status = "ON ✅" if self._cos_enabled else "OFF"
+            await self._reply_text(update, f"Chief of Staff routing: {status}\nUse /cos on or /cos off to toggle.")
+            return
+        if args[0] == "on":
+            self._cos_enabled = True
+            (self.workspace_dir / ".cos_on").touch()
+            await self._reply_text(update, "Chief of Staff routing enabled ✅\nHuman-in-the-loop decisions will be routed to Lily first.")
+        elif args[0] == "off":
+            self._cos_enabled = False
+            (self.workspace_dir / ".cos_on").unlink(missing_ok=True)
+            await self._reply_text(update, "Chief of Staff routing disabled.\nDecisions will go directly to the user.")
+        else:
+            await self._reply_text(update, "Usage: /cos [on|off]")
+
+    async def cos_query(self, question: str, *, timeout_s: float = 30.0) -> dict[str, Any]:
+        """Send a decision query to Lily (Chief of Staff) via hchat and wait for response.
+
+        Returns: {"answered": True/False, "response": str or None, "reason": str}
+        """
+        if not self._cos_enabled:
+            return {"answered": False, "response": None, "reason": "cos_disabled"}
+        if self.name == "lily":
+            return {"answered": False, "response": None, "reason": "self_referential"}
+
+        orchestrator = getattr(self, "orchestrator", None)
+        if orchestrator is None:
+            return {"answered": False, "response": None, "reason": "no_orchestrator"}
+
+        lily_runtime = None
+        for rt in getattr(orchestrator, "runtimes", []):
+            if getattr(rt, "name", "") == "lily" and hasattr(rt, "enqueue_api_text"):
+                lily_runtime = rt
+                break
+        if lily_runtime is None or not getattr(lily_runtime, "startup_success", False):
+            return {"answered": False, "response": None, "reason": "lily_offline"}
+
+        cos_id = f"cos-{uuid4().hex[:12]}"
+        cos_prompt = (
+            f"[cos query from {self.name}] (ID: {cos_id})\n"
+            f"An agent needs a decision. Search your memory for precedent.\n"
+            f"If you find clear precedent, reply with: COS_APPROVED: <your recommendation>\n"
+            f"If no clear precedent exists, reply with: COS_DECLINED: <reason>\n\n"
+            f"Question: {question}"
+        )
+
+        loop = asyncio.get_running_loop()
+        response_future = loop.create_future()
+        original_hchat_route = lily_runtime._hchat_route_reply
+
+        async def _cos_intercept(item, response_text: str):
+            if not response_future.done() and cos_id in getattr(item, "prompt", ""):
+                response_future.set_result(response_text)
+            await original_hchat_route(item, response_text)
+
+        lily_runtime._hchat_route_reply = _cos_intercept
+        try:
+            request_id = await lily_runtime.enqueue_api_text(
+                cos_prompt,
+                source=f"cos-query:{self.name}",
+                deliver_to_telegram=True,
+            )
+            if request_id is None:
+                return {"answered": False, "response": None, "reason": "enqueue_failed"}
+
+            try:
+                response_text = await asyncio.wait_for(response_future, timeout=timeout_s)
+            except asyncio.TimeoutError:
+                return {"answered": False, "response": None, "reason": "timeout"}
+
+            if response_text.strip().startswith("COS_DECLINED"):
+                return {"answered": False, "response": response_text, "reason": "declined"}
+            return {"answered": True, "response": response_text, "reason": "approved", "cos_id": cos_id}
+        finally:
+            lily_runtime._hchat_route_reply = original_hchat_route
+
     async def cmd_wa_on(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
@@ -2170,7 +2594,36 @@ class FlexibleAgentRuntime:
     async def cmd_debug(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
-        await self._invoke_prompt_skill_from_command(update, "debug", list(context.args or []))
+        raw_args = list(context.args or [])
+        args = [a.strip().lower() for a in raw_args if a.strip()]
+        if args and args[0] in {"on", "off"}:
+            enabled = args[0] == "on"
+            if self.skill_manager:
+                _, msg = self.skill_manager.set_toggle_state(self.workspace_dir, "debug", enabled=enabled)
+                state_str = "ON 🔴" if enabled else "OFF"
+                await self._reply_text(update, f"🐛 Debug mode: {state_str}\n{msg}")
+            else:
+                await self._reply_text(update, "Skill manager not available.")
+            return
+        if not self.skill_manager:
+            await self._reply_text(update, "Skill system is not configured.")
+            return
+        skill = self.skill_manager.get_skill("debug")
+        if skill is None:
+            await self._reply_text(update, "Unknown skill: debug")
+            return
+        prompt_text = " ".join(raw_args).strip()
+        if not prompt_text:
+            await self._reply_text(update, "Usage: /debug <prompt> or /debug on|off")
+            return
+        prompt = self.skill_manager.build_prompt_for_skill(skill, prompt_text)
+        await self._reply_text(update, f"Running skill {skill.id}...")
+        await self.enqueue_request(
+            update.effective_chat.id,
+            prompt,
+            f"skill:{skill.id}",
+            f"Skill {skill.id}",
+        )
 
     async def cmd_skill(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -2387,11 +2840,11 @@ class FlexibleAgentRuntime:
         else:
             self._verbose = not self._verbose
         # Persist so it survives restarts
-        _verbose_file = self.workspace_dir / ".verbose"
+        _verbose_file = self.workspace_dir / ".verbose_off"
         if self._verbose:
-            _verbose_file.touch()
-        else:
             _verbose_file.unlink(missing_ok=True)
+        else:
+            _verbose_file.touch()
         state = "ON 🔍" if self._verbose else "OFF"
         markup = InlineKeyboardMarkup([[
             InlineKeyboardButton("✅ ON" if self._verbose else "ON", callback_data="tgl:verbose:on"),
@@ -2415,11 +2868,11 @@ class FlexibleAgentRuntime:
             self._think = False
         else:
             self._think = not self._think
-        _think_file = self.workspace_dir / ".think"
+        _think_file = self.workspace_dir / ".think_off"
         if self._think:
-            _think_file.touch()
-        else:
             _think_file.unlink(missing_ok=True)
+        else:
+            _think_file.touch()
         state = "ON 💭" if self._think else "OFF"
         markup = InlineKeyboardMarkup([[
             InlineKeyboardButton("✅ ON" if self._think else "ON", callback_data="tgl:think:on"),
@@ -2436,8 +2889,548 @@ class FlexibleAgentRuntime:
         if not self._is_authorized_user(update.effective_user.id):
             return
         from orchestrator.agent_runtime import _build_jobs_with_buttons
-        text, markup = _build_jobs_with_buttons(self.name, self.skill_manager)
+        arg = (context.args[0].strip().lower() if context.args else "")
+        if arg == "all":
+            filter_agent = None
+        elif arg:
+            filter_agent = arg
+        else:
+            filter_agent = self.name
+        text, markup = _build_jobs_with_buttons(self.name, self.skill_manager, filter_agent=filter_agent)
         await self._reply_text(update, text, parse_mode="HTML", reply_markup=markup)
+
+    async def cmd_timeout(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        args = [a.strip() for a in (context.args or []) if a.strip()]
+        backend = getattr(self, "backend", None) or (
+            self.backend_manager.current_backend if hasattr(self, "backend_manager") else None
+        )
+        extra = {}
+        if backend and hasattr(backend, "config") and backend.config.extra:
+            extra = backend.config.extra
+
+        # Defaults (in seconds) from the backend class
+        default_idle = getattr(type(backend), "DEFAULT_IDLE_TIMEOUT_SEC", 300) if backend else 300
+        default_hard = getattr(type(backend), "DEFAULT_HARD_TIMEOUT_SEC", 1800) if backend else 1800
+
+        if not args:
+            # Show current values
+            idle_s = extra.get("idle_timeout_sec") or extra.get("process_timeout") or default_idle
+            hard_s = extra.get("hard_timeout_sec") or default_hard
+            idle_min = int(idle_s) // 60
+            hard_min = int(hard_s) // 60
+            def_idle_min = default_idle // 60
+            def_hard_min = default_hard // 60
+            text = (
+                f"<b>⏱ Timeout — {self.name}</b>\n\n"
+                f"  Idle:  <b>{idle_min} min</b>  (default: {def_idle_min} min)\n"
+                f"  Hard:  <b>{hard_min} min</b>  (default: {def_hard_min} min)\n\n"
+                f"Usage:\n"
+                f"  <code>/timeout 30</code>        — set idle to 30 min\n"
+                f"  <code>/timeout 30 120</code>    — idle=30 min, hard=120 min\n"
+                f"  <code>/timeout reset</code>     — restore defaults"
+            )
+            await self._reply_text(update, text, parse_mode="HTML")
+            return
+
+        if args[0].lower() == "reset":
+            if backend and hasattr(backend, "config") and backend.config.extra:
+                backend.config.extra.pop("idle_timeout_sec", None)
+                backend.config.extra.pop("hard_timeout_sec", None)
+                backend.config.extra.pop("process_timeout", None)
+            def_idle_min = default_idle // 60
+            def_hard_min = default_hard // 60
+            await self._reply_text(
+                update,
+                f"⏱ Timeout reset to defaults: idle={def_idle_min} min, hard={def_hard_min} min",
+            )
+            return
+
+        try:
+            idle_min = int(args[0])
+            if idle_min <= 0:
+                raise ValueError
+        except ValueError:
+            await self._reply_text(update, "Usage: /timeout [minutes] [hard_minutes] | reset")
+            return
+
+        hard_min = None
+        if len(args) >= 2:
+            try:
+                hard_min = int(args[1])
+                if hard_min <= 0:
+                    raise ValueError
+            except ValueError:
+                await self._reply_text(update, "Usage: /timeout [minutes] [hard_minutes] | reset")
+                return
+
+        if backend and hasattr(backend, "config"):
+            if backend.config.extra is None:
+                backend.config.extra = {}
+            backend.config.extra["idle_timeout_sec"] = idle_min * 60
+            backend.config.extra.pop("process_timeout", None)  # avoid legacy conflict
+            if hard_min is not None:
+                backend.config.extra["hard_timeout_sec"] = hard_min * 60
+
+        hard_str = f", hard={hard_min} min" if hard_min is not None else ""
+        await self._reply_text(update, f"⏱ Timeout updated: idle={idle_min} min{hard_str}")
+
+    async def cmd_hchat(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        args = [a.strip() for a in (context.args or []) if a.strip()]
+        if len(args) < 2:
+            await self._reply_text(
+                update,
+                "<b>💬 Hchat — Ask this agent to compose &amp; send a message to another agent</b>\n\n"
+                "Usage: <code>/hchat &lt;agent&gt; &lt;intent&gt;</code>\n"
+                "       <code>/hchat all &lt;intent&gt;</code> — broadcast to all active agents (excludes temp)\n"
+                "       <code>/hchat @&lt;group&gt; &lt;intent&gt;</code> — broadcast to a group (use /group to manage)\n\n"
+                "Example: <code>/hchat lily give her an update on what we've been doing</code>\n"
+                "Example: <code>/hchat arale 告诉她新功能已完成</code>\n"
+                "Example: <code>/hchat all 告诉大家新功能上线了</code>\n"
+                "Example: <code>/hchat @staff 告诉核心团队系统已重启</code>\n\n"
+                "<i>Note: YOU compose the message based on context — intent is what to communicate, not the literal text.</i>",
+                parse_mode="HTML",
+            )
+            return
+        target_name = args[0].lower()
+        intent = " ".join(args[1:])
+
+        # Resolve "all" or "@group_name" to a list of agent names
+        broadcast_targets: list[str] | None = None
+        broadcast_label: str = ""
+
+        if target_name == "all":
+            import json as _json
+            try:
+                _cfg = _json.loads(self.global_config.config_path.read_text(encoding="utf-8-sig"))
+                broadcast_targets = [
+                    a["name"] for a in _cfg.get("agents", [])
+                    if a.get("is_active", True)
+                    and a["name"].lower() != "temp"
+                    and a["name"].lower() != self.name.lower()
+                ]
+            except Exception:
+                broadcast_targets = []
+            broadcast_label = "ALL active agents"
+
+        elif target_name.startswith("@"):
+            group_name = target_name[1:]
+            directory = getattr(self, "agent_directory", None) or getattr(getattr(self, "orchestrator", None), "agent_directory", None)
+            if directory is None:
+                await self._reply_text(update, "❌ Agent directory unavailable for group resolution.")
+                return
+            if not directory.group_exists(group_name):
+                await self._reply_text(update, f"❌ Group '{group_name}' not found. Use /group to list groups.")
+                return
+            broadcast_targets = directory.resolve_group(group_name, exclude_self=self.name)
+            broadcast_label = f"group @{group_name}"
+
+        if broadcast_targets is not None:
+            if not broadcast_targets:
+                await self._reply_text(update, f"❌ No agents found in {broadcast_label}.")
+                return
+            agent_list = ", ".join(broadcast_targets)
+            send_cmds = "\n".join(
+                f'   {sys.executable} {Path(__file__).resolve().parent.parent / "tools" / "hchat_send.py"} --to {a} --from {self.name} --text "<your composed message>"'
+                for a in broadcast_targets
+            )
+            self_prompt = (
+                f"[HCHAT BROADCAST] The user wants you to send a Hchat message to {broadcast_label}.\n\n"
+                f"Target agents: {agent_list}\n"
+                f"EXCLUDED: temp (always excluded from broadcasts), {self.name} (yourself)\n\n"
+                f"Intent: {intent}\n\n"
+                f"Instructions:\n"
+                f"1. Think about what from our current conversation context is relevant to this intent.\n"
+                f"2. Compose a complete, meaningful message FROM you ({self.name}). "
+                f"Write it as yourself — the same message goes to all agents. Be concise.\n"
+                f"3. Send the message to EACH agent by running these bash commands:\n"
+                f"{send_cmds}\n"
+                f"4. Report back to the user: what you sent, to whom, and how many succeeded.\n\n"
+                f"Do NOT relay the user's words literally. Compose the message yourself.\n\n"
+                f"IMPORTANT: When you later receive messages starting with '[hchat reply from ...]', "
+                f"just report the reply content to the user. Do NOT send another hchat message back."
+            )
+            await self._reply_text(update, f"📢 Broadcasting Hchat to <b>{len(broadcast_targets)}</b> agents ({broadcast_label})...", parse_mode="HTML")
+        else:
+            # Single agent target
+            self_prompt = (
+                f"[HCHAT TASK] The user wants you to send a Hchat message to agent \"{target_name}\".\n\n"
+                f"Intent: {intent}\n\n"
+                f"Instructions:\n"
+                f"1. Think about what from our current conversation context is relevant to this intent.\n"
+                f"2. Compose a complete, meaningful message FROM you ({self.name}) TO {target_name}. "
+                f"Write it as yourself — introduce yourself if appropriate, include relevant context, be concise.\n"
+                f"3. Send the message by running this bash command:\n"
+                f"   {sys.executable} {Path(__file__).resolve().parent.parent / 'tools' / 'hchat_send.py'} --to {target_name} --from {self.name} --text \"<your composed message>\"\n"
+                f"4. Report back to the user: what you sent and a brief summary of why.\n\n"
+                f"Do NOT relay the user's words literally. Compose the message yourself.\n\n"
+                f"IMPORTANT: When you later receive a message starting with '[hchat reply from ...]', "
+                f"just report the reply content to the user. Do NOT send another hchat message back — "
+                f"the conversation ends there."
+            )
+            await self._reply_text(update, f"💬 Composing Hchat message to <b>{target_name}</b>...", parse_mode="HTML")
+
+        await self.enqueue_api_text(
+            self_prompt,
+            source="bridge:hchat",
+            deliver_to_telegram=True,
+        )
+
+    # ── /group ────────────────────────────────────────────────────────────────
+
+    def _group_detail_view(self, directory, group_name: str) -> tuple[str, "InlineKeyboardMarkup"]:
+        """Build the group detail message + inline keyboard."""
+        groups = directory.list_groups()
+        grp = groups.get(group_name, {})
+        desc = grp.get("description", "")
+        members = grp.get("members", [])
+        is_dynamic = members == "@active"
+
+        if is_dynamic:
+            resolved = directory.resolve_group(group_name)
+            member_display = "🔄 <i>Dynamic — all active agents</i>\n  " + ", ".join(resolved) if resolved else "🔄 <i>Dynamic — (none running)</i>"
+        else:
+            if members:
+                rows_meta = []
+                for m in members:
+                    row = directory.get_agent_row(m)
+                    emoji = row.get("emoji", "🤖") if row else "🤖"
+                    display = row.get("display_name", m) if row else m
+                    rows_meta.append(f"{emoji} {display}")
+                member_display = "  " + "  ·  ".join(rows_meta)
+            else:
+                member_display = "  <i>(empty)</i>"
+
+        text = (
+            f"<b>📦 Group: {group_name}</b>\n"
+            f"{desc}\n\n"
+            f"Members ({len(directory.resolve_group(group_name))}):\n"
+            f"{member_display}\n"
+        )
+
+        if is_dynamic:
+            rows = [[InlineKeyboardButton("✕ Close", callback_data=f"group:back")]]
+        else:
+            rows = [
+                [
+                    InlineKeyboardButton("＋ Add", callback_data=f"group:add:{group_name}"),
+                    InlineKeyboardButton("－ Remove", callback_data=f"group:remove:{group_name}"),
+                    InlineKeyboardButton("✏️ Rename", callback_data=f"group:rename:{group_name}"),
+                ],
+                [
+                    InlineKeyboardButton("🗑 Delete", callback_data=f"group:delete:{group_name}"),
+                    InlineKeyboardButton("« Back", callback_data="group:back"),
+                ],
+                [
+                    InlineKeyboardButton("▶ Start All", callback_data=f"group:start:{group_name}"),
+                    InlineKeyboardButton("⏹ Stop All", callback_data=f"group:stop:{group_name}"),
+                    InlineKeyboardButton("🔄 Reboot All", callback_data=f"group:reboot:{group_name}"),
+                ],
+                [InlineKeyboardButton("💬 Broadcast", callback_data=f"group:broadcast:{group_name}")],
+            ]
+        return text, InlineKeyboardMarkup(rows)
+
+    def _group_list_view(self, directory) -> tuple[str, "InlineKeyboardMarkup"]:
+        """Build the group overview message + inline keyboard."""
+        groups = directory.list_groups()
+        if groups:
+            lines = ["<b>📦 Agent Groups</b>\n"]
+            for name, grp in groups.items():
+                members = grp.get("members", [])
+                is_dynamic = members == "@active"
+                count = len(directory.resolve_group(name)) if is_dynamic else len(members)
+                desc = grp.get("description", "")
+                tag = " 🔄" if is_dynamic else ""
+                lines.append(f"• <b>{name}</b>{tag}  ({count} agents) — {desc}")
+        else:
+            lines = ["<b>📦 Agent Groups</b>\n", "<i>No groups defined yet.</i>"]
+
+        rows = [[InlineKeyboardButton(f"📦 {name}", callback_data=f"group:view:{name}")] for name in groups]
+        rows.append([InlineKeyboardButton("＋ New Group", callback_data="group:new")])
+        return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+    async def cmd_group(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        directory = getattr(self, "agent_directory", None)
+        if directory is None:
+            await self._reply_text(update, "❌ Agent directory unavailable.")
+            return
+
+        args = [a.strip() for a in (context.args or []) if a.strip()]
+
+        # /group new <name>
+        if args and args[0].lower() == "new":
+            if len(args) < 2:
+                await self._reply_text(update, "Usage: <code>/group new &lt;name&gt;</code>", parse_mode="HTML")
+                return
+            name = args[1].lower()
+            desc = " ".join(args[2:]) if len(args) > 2 else ""
+            ok, msg = directory.create_group(name, desc)
+            if ok:
+                text, markup = self._group_detail_view(directory, name)
+                await self._reply_text(update, f"✅ {msg}\n\n" + text, parse_mode="HTML", reply_markup=markup)
+            else:
+                await self._reply_text(update, f"❌ {msg}")
+            return
+
+        # /group del <name>
+        if args and args[0].lower() == "del":
+            if len(args) < 2:
+                await self._reply_text(update, "Usage: <code>/group del &lt;name&gt;</code>", parse_mode="HTML")
+                return
+            name = args[1].lower()
+            rows = [[
+                InlineKeyboardButton("✅ Confirm Delete", callback_data=f"group:delete_confirm:{name}"),
+                InlineKeyboardButton("✕ Cancel", callback_data="group:back"),
+            ]]
+            await self._reply_text(
+                update,
+                f"⚠️ Delete group <b>{name}</b>?\nThis will NOT affect the agents themselves.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+            return
+
+        # /group <name>  — view detail
+        if args:
+            name = args[0].lower()
+            if not directory.group_exists(name):
+                await self._reply_text(update, f"❌ Group '{name}' not found.")
+                return
+            text, markup = self._group_detail_view(directory, name)
+            await self._reply_text(update, text, parse_mode="HTML", reply_markup=markup)
+            return
+
+        # /group  — overview
+        text, markup = self._group_list_view(directory)
+        await self._reply_text(update, text, parse_mode="HTML", reply_markup=markup)
+
+    async def callback_group(self, update: Update, context: Any):
+        query = update.callback_query
+        if not self._is_authorized_user(query.from_user.id):
+            return
+        directory = getattr(self, "agent_directory", None)
+        if directory is None:
+            await query.answer("Agent directory unavailable", show_alert=True)
+            return
+
+        data = query.data or ""
+        # data format: group:<action>[:<group_name>[:<agent_name>]]
+        parts = data.split(":", 3)
+        action = parts[1] if len(parts) > 1 else ""
+        group_name = parts[2] if len(parts) > 2 else ""
+        extra = parts[3] if len(parts) > 3 else ""
+
+        await query.answer()
+
+        # ── back → group list ──
+        if action == "back":
+            text, markup = self._group_list_view(directory)
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+            return
+
+        # ── view group detail ──
+        if action == "view":
+            text, markup = self._group_detail_view(directory, group_name)
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+            return
+
+        # ── new group (prompt) ──
+        if action == "new":
+            await query.edit_message_text(
+                "To create a new group, send:\n<code>/group new &lt;name&gt; [description]</code>",
+                parse_mode="HTML",
+            )
+            return
+
+        # ── delete (confirm prompt) ──
+        if action == "delete":
+            rows = [[
+                InlineKeyboardButton("✅ Confirm Delete", callback_data=f"group:delete_confirm:{group_name}"),
+                InlineKeyboardButton("✕ Cancel", callback_data=f"group:view:{group_name}"),
+            ]]
+            await query.edit_message_text(
+                f"⚠️ Delete group <b>{group_name}</b>?\nThis will NOT affect the agents themselves.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+            return
+
+        # ── delete confirmed ──
+        if action == "delete_confirm":
+            ok, msg = directory.delete_group(group_name)
+            if ok:
+                text, markup = self._group_list_view(directory)
+                await query.edit_message_text(f"🗑 {msg}\n\n" + text, parse_mode="HTML", reply_markup=markup)
+            else:
+                await query.edit_message_text(f"❌ {msg}")
+            return
+
+        # ── add members ──
+        if action == "add":
+            groups = directory.list_groups()
+            current = groups.get(group_name, {}).get("members", [])
+            all_agents = list(directory._agent_rows.keys())
+            available = [n for n in all_agents if n not in current]
+            if not available:
+                await query.edit_message_text(f"All active agents are already in <b>{group_name}</b>.", parse_mode="HTML")
+                return
+            rows = []
+            for agent in available:
+                row = directory.get_agent_row(agent)
+                emoji = row.get("emoji", "🤖") if row else "🤖"
+                rows.append([InlineKeyboardButton(f"{emoji} {agent}", callback_data=f"group:add_confirm:{group_name}:{agent}")])
+            rows.append([InlineKeyboardButton("✕ Cancel", callback_data=f"group:view:{group_name}")])
+            await query.edit_message_text(
+                f"➕ Add to <b>{group_name}</b>\nSelect agents to add:",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+            return
+
+        # ── add confirmed ──
+        if action == "add_confirm":
+            agent_name = extra
+            ok, msg = directory.group_add_member(group_name, agent_name)
+            text, markup = self._group_detail_view(directory, group_name)
+            prefix = "✅ " if ok else "❌ "
+            await query.edit_message_text(prefix + msg + "\n\n" + text, parse_mode="HTML", reply_markup=markup)
+            return
+
+        # ── remove members ──
+        if action == "remove":
+            groups = directory.list_groups()
+            current = groups.get(group_name, {}).get("members", [])
+            if not current:
+                await query.edit_message_text(f"Group <b>{group_name}</b> is empty.", parse_mode="HTML")
+                return
+            rows = []
+            for agent in current:
+                row = directory.get_agent_row(agent)
+                emoji = row.get("emoji", "🤖") if row else "🤖"
+                rows.append([InlineKeyboardButton(f"{emoji} {agent}", callback_data=f"group:remove_confirm:{group_name}:{agent}")])
+            rows.append([InlineKeyboardButton("✕ Cancel", callback_data=f"group:view:{group_name}")])
+            await query.edit_message_text(
+                f"➖ Remove from <b>{group_name}</b>\nSelect agents to remove:",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+            return
+
+        # ── remove confirmed ──
+        if action == "remove_confirm":
+            agent_name = extra
+            ok, msg = directory.group_remove_member(group_name, agent_name)
+            text, markup = self._group_detail_view(directory, group_name)
+            prefix = "✅ " if ok else "❌ "
+            await query.edit_message_text(prefix + msg + "\n\n" + text, parse_mode="HTML", reply_markup=markup)
+            return
+
+        # ── rename (prompt) ──
+        if action == "rename":
+            await query.edit_message_text(
+                f"To rename group <b>{group_name}</b>, send:\n<code>/group rename {group_name} &lt;new_name&gt;</code>",
+                parse_mode="HTML",
+            )
+            return
+
+        # ── start/stop/reboot all in group ──
+        if action in ("start", "stop", "reboot"):
+            orchestrator = getattr(self, "orchestrator", None)
+            members = directory.resolve_group(group_name, exclude_self=self.name)
+            if not members:
+                await query.edit_message_text(f"Group <b>{group_name}</b> has no members to act on.", parse_mode="HTML")
+                return
+
+            lines = [f"<b>{'▶ Starting' if action == 'start' else '⏹ Stopping' if action == 'stop' else '🔄 Rebooting'} group {group_name}</b> ({len(members)} agents)\n"]
+
+            if action == "reboot" and orchestrator:
+                for name in members:
+                    all_names = orchestrator.configured_agent_names()
+                    if name in all_names:
+                        num = all_names.index(name) + 1
+                        orchestrator.request_restart(mode="number", agent_name=self.name, agent_number=num)
+                        lines.append(f"  🔄 {name} — reboot queued")
+                    else:
+                        lines.append(f"  ⚠️ {name} — not found")
+            elif action == "start" and orchestrator:
+                for name in members:
+                    ok, msg = await orchestrator.start_agent(name)
+                    lines.append(f"  {'✅' if ok else '❌'} {name} — {msg}")
+            elif action == "stop" and orchestrator:
+                for name in members:
+                    runtime = directory.get_runtime(name)
+                    if runtime and hasattr(runtime, "backend_manager") and runtime.backend_manager.current_backend:
+                        await runtime.backend_manager.current_backend.shutdown()
+                        lines.append(f"  ⏹ {name} — stopped")
+                    else:
+                        lines.append(f"  ⚠️ {name} — not running or unavailable")
+            else:
+                lines.append("⚠️ Orchestrator unavailable.")
+
+            await query.edit_message_text("\n".join(lines), parse_mode="HTML")
+            return
+
+        # ── broadcast message ──
+        if action == "broadcast":
+            members = directory.resolve_group(group_name, exclude_self=self.name)
+            if not members:
+                await query.edit_message_text(f"Group <b>{group_name}</b> has no members to broadcast to.", parse_mode="HTML")
+                return
+            await query.edit_message_text(
+                f"📢 Broadcast to group <b>{group_name}</b> ({len(members)} agents)\n\n"
+                f"Use: <code>/hchat @{group_name} &lt;your intent&gt;</code>",
+                parse_mode="HTML",
+            )
+            return
+
+    # ── /usage ────────────────────────────────────────────────────────────────
+
+    async def cmd_usage(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        try:
+            from tools.token_tracker import get_summary, format_summary_text
+        except ImportError:
+            await self._reply_text(update, "❌ token_tracker not available.")
+            return
+
+        args = [a.strip().lower() for a in (context.args or []) if a.strip()]
+        show_all = args and args[0] == "all"
+
+        if show_all:
+            # Collect usage from all agents via orchestrator
+            orchestrator = getattr(self, "orchestrator", None)
+            if orchestrator is None:
+                await self._reply_text(update, "❌ Orchestrator unavailable for all-agents view.")
+                return
+            lines = ["<b>📊 Token Usage — All Agents</b>\n"]
+            total_cost = 0.0
+            for runtime in orchestrator.runtimes:
+                s = get_summary(runtime.workspace_dir, session_id=runtime.session_id_dt)
+                all_t = s.get("all_time", {})
+                if all_t.get("requests", 0) == 0:
+                    continue
+                tokens = all_t["input"] + all_t["output"]
+                cost = all_t["cost_usd"]
+                total_cost += cost
+                sess = s.get("session", {}) or {}
+                sess_tokens = sess.get("input", 0) + sess.get("output", 0)
+                sess_cost = sess.get("cost_usd", 0.0)
+                lines.append(
+                    f"<b>{runtime.name}</b>  {tokens//1000}K tokens  ${cost:.4f}"
+                    + (f"  (session {sess_tokens//1000}K ${sess_cost:.4f})" if sess.get("requests") else "")
+                )
+            lines.append(f"\n<b>Total: ${total_cost:.4f}</b>")
+            await self._reply_text(update, "\n".join(lines), parse_mode="HTML")
+        else:
+            summary = get_summary(self.workspace_dir, session_id=self.session_id_dt)
+            text = format_summary_text(summary, agent_name=self.name)
+            await self._reply_text(update, text, parse_mode="HTML")
 
     async def cmd_logo(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -2468,12 +3461,39 @@ class FlexibleAgentRuntime:
 
         target_engine = args[0].lower()
         with_context = False
-        if len(args) > 1:
-            flag = args[1].strip().lower()
-            with_context = flag in {"+", "context", "handoff", "with-context"}
+        requested_model = None
+        for raw_arg in args[1:]:
+            raw_value = raw_arg.strip()
+            if not raw_value:
+                continue
+            flag = raw_value.lower()
+            if flag in {"+", "context", "handoff", "with-context"}:
+                with_context = True
+            else:
+                requested_model = raw_value
 
         if target_engine not in allowed_engines:
             await self._reply_text(update, f"Backend not allowed: {target_engine}")
+            return
+
+        if requested_model:
+            if target_engine == "claude-cli":
+                requested_model = CLAUDE_MODEL_ALIASES.get(requested_model.lower(), requested_model)
+            available = self._get_available_models_for(target_engine)
+            if available and requested_model not in available:
+                await self._reply_text(
+                    update,
+                    f"Unknown model for {target_engine}: {requested_model}\nUse /backend {target_engine} to see available options.",
+                )
+                return
+
+            success, message = await self._switch_backend_mode(
+                update.effective_chat.id,
+                target_engine,
+                target_model=requested_model,
+                with_context=with_context,
+            )
+            await self._reply_text(update, message)
             return
 
         await self._reply_text(
@@ -2517,6 +3537,79 @@ class FlexibleAgentRuntime:
             "handoff",
             f"Handoff restore [{exchange_count} exchanges]",
         )
+
+    async def cmd_ticket(self, update: Update, context: Any):
+        """Submit an IT support ticket to Arale. Usage: /ticket <description>"""
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        from orchestrator.ticket_manager import (
+            create_ticket, detect_instance, format_ticket_notification,
+            list_tickets, _resolve_tickets_dir,
+        )
+
+        args_text = " ".join(context.args).strip() if context.args else ""
+
+        # /ticket with no args → list open tickets
+        if not args_text:
+            tickets_dir = _resolve_tickets_dir(self.global_config.project_root)
+            open_tickets = list_tickets(tickets_dir, "open")
+            ip_tickets = list_tickets(tickets_dir, "in_progress")
+            lines = []
+            if open_tickets:
+                lines.append("Open tickets:")
+                for t in open_tickets:
+                    lines.append(f"  [{t['ticket_id']}] {t['source_agent']} — {t['summary'][:60]}")
+            if ip_tickets:
+                lines.append("In progress:")
+                for t in ip_tickets:
+                    lines.append(f"  [{t['ticket_id']}] {t['source_agent']} — {t['summary'][:60]}")
+            if not lines:
+                lines.append("No open tickets.")
+            await self._reply_text(update, "\n".join(lines))
+            return
+
+        # Create the ticket (program-driven, no LLM needed)
+        instance = detect_instance(self.global_config.project_root)
+        ticket = create_ticket(
+            project_root=self.global_config.project_root,
+            source_agent=self.name,
+            source_instance=instance,
+            workspace_dir=self.workspace_dir,
+            summary=args_text,
+        )
+
+        # Confirm to the submitting agent
+        await self._reply_text(
+            update,
+            f"🎫 Ticket {ticket['ticket_id']} created.\n"
+            f"Arale has been notified and will investigate.",
+        )
+
+        # Notify Arale via bridge if available, otherwise file-based fallback
+        notification = format_ticket_notification(ticket)
+        orchestrator = getattr(self, "orchestrator", None)
+        notified = False
+
+        if orchestrator is not None:
+            # Try to deliver via bridge to arale's runtime
+            for rt in getattr(orchestrator, "runtimes", []):
+                if getattr(rt, "name", "") == "arale" and hasattr(rt, "enqueue_api_text"):
+                    try:
+                        await rt.enqueue_api_text(
+                            f"[TICKET RECEIVED]\n{notification}\n\n"
+                            f"Ticket file: {self.global_config.project_root / 'tickets' / 'open' / (ticket['ticket_id'] + '.json')}\n"
+                            f"Please investigate and resolve per IT support protocol.",
+                            source=f"ticket:{ticket['ticket_id']}",
+                            deliver_to_telegram=True,
+                        )
+                        notified = True
+                    except Exception as e:
+                        logger.warning(f"Failed to notify arale via bridge: {e}")
+                    break
+
+        if not notified:
+            # Fallback: ticket is in tickets/open/ — Arale's daily scan will pick it up
+            logger.info(f"Ticket {ticket['ticket_id']} saved to file; Arale will pick up on next scan.")
 
     async def cmd_park(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -3026,11 +4119,16 @@ class FlexibleAgentRuntime:
             return
         if not self.backend_manager.current_backend:
             return
+        self._clear_transfer_state()
         # /new semantics (author intent): start stateless and ONLY rely on the agent's own agent.md
         # - No Bridge FYI injection
         # - No README/doc auto-reading claims
         # - No continuity restore
         self._pending_auto_recall_context = None
+
+        # Clear recent_turns so polluted history from a previous mode doesn't bleed into the new session
+        if hasattr(self.context_assembler, "memory_store") and hasattr(self.context_assembler.memory_store, "clear_turns"):
+            self.context_assembler.memory_store.clear_turns()
 
         backend = self.backend_manager.current_backend
 
@@ -3225,6 +4323,7 @@ class FlexibleAgentRuntime:
         # Reset any pending continuity
         self._pending_auto_recall_context = None
         self._pending_session_primer = None
+        self._clear_transfer_state()
 
         # Start a fresh backend session if supported
         if self.backend_manager.current_backend and getattr(self.backend_manager.current_backend.capabilities, "supports_sessions", False):
@@ -3308,6 +4407,7 @@ class FlexibleAgentRuntime:
         # Reset any pending continuity
         self._pending_auto_recall_context = None
         self._pending_session_primer = None
+        self._clear_transfer_state()
 
         # Start a fresh backend session if supported
         if self.backend_manager.current_backend and getattr(self.backend_manager.current_backend.capabilities, "supports_sessions", False):
@@ -3450,6 +4550,9 @@ class FlexibleAgentRuntime:
         if not self._is_authorized_user(update.effective_user.id):
             self.logger.warning(f"Ignored message from unauthorized user ID: {update.effective_user.id}")
             return
+        if self._should_redirect_after_transfer():
+            await self._reply_text(update, self._transfer_redirect_text())
+            return
         text = update.message.text
         _print_user_message(self.name, text)
         await self.enqueue_request(update.effective_chat.id, text, "text", _safe_excerpt(text))
@@ -3466,6 +4569,9 @@ class FlexibleAgentRuntime:
         return local_path
 
     async def _handle_media_message(self, update, media_kind: str, filename: str, file_id: str, prompt: str, summary: str):
+        if self._should_redirect_after_transfer():
+            await self._reply_text(update, self._transfer_redirect_text())
+            return
         backend = getattr(self.backend_manager, "current_backend", None)
         if backend and not backend.capabilities.supports_files:
             await self._reply_text(update, f"Current backend does not support {media_kind.lower()} attachments yet.")
@@ -3530,6 +4636,9 @@ class FlexibleAgentRuntime:
 
     async def _handle_voice_or_audio(self, update: Update, media_kind: str, filename: str, file_id: str, caption: str = ""):
         """Download voice/audio, transcribe locally, and dispatch as text."""
+        if self._should_redirect_after_transfer():
+            await self._reply_text(update, self._transfer_redirect_text())
+            return
         from orchestrator.voice_transcriber import get_transcriber
         _print_user_message(self.name, f"Transcribing {filename}...", media_tag=media_kind)
         try:
@@ -3580,6 +4689,9 @@ class FlexibleAgentRuntime:
 
     async def handle_sticker(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
+            return
+        if self._should_redirect_after_transfer():
+            await self._reply_text(update, self._transfer_redirect_text())
             return
         sticker = update.message.sticker
         emoji = sticker.emoji or ""
@@ -3663,7 +4775,20 @@ class FlexibleAgentRuntime:
                     f"Send failed for request_id={request_id or '<none>'} "
                     f"(purpose={purpose}, chunk={chunk_index}, mode=html): {e}. Fallback to raw text."
                 )
-                await self.app.bot.send_message(chat_id=chat_id, text=chunk_raw)
+                # Split into multiple messages instead of truncating
+                if len(chunk_raw) <= tg_max_len:
+                    await self.app.bot.send_message(chat_id=chat_id, text=chunk_raw)
+                else:
+                    remain = chunk_raw
+                    while remain:
+                        if len(remain) <= tg_max_len:
+                            await self.app.bot.send_message(chat_id=chat_id, text=remain)
+                            break
+                        split_at = remain.rfind("\n", 0, tg_max_len)
+                        if split_at == -1:
+                            split_at = tg_max_len
+                        await self.app.bot.send_message(chat_id=chat_id, text=remain[:split_at])
+                        remain = remain[split_at:].lstrip("\n")
 
         if len(html) <= tg_max_len:
             chunk_count = 1
@@ -4079,31 +5204,47 @@ class FlexibleAgentRuntime:
             response = task.result()
 
             if response.is_success and response.text:
+                display_text = self._strip_transfer_accept_prefix(item, response.text)
                 self._mark_success()
+                if self._should_buffer_during_transfer(item.request_id):
+                    self._record_suppressed_transfer_result(item, success=True, text=display_text or response.text)
+                    return
                 self.last_response = {
                     "chat_id": item.chat_id,
-                    "text": response.text,
+                    "text": display_text or response.text,
                     "request_id": item.request_id,
                 }
+                try:
+                    from tools.token_tracker import estimate_tokens, record_usage
+                    record_usage(
+                        self.workspace_dir,
+                        model=self.get_current_model(),
+                        backend=self.config.active_backend,
+                        input_tokens=estimate_tokens(item.prompt),
+                        output_tokens=estimate_tokens(display_text or response.text),
+                        session_id=self.session_id_dt,
+                    )
+                except Exception:
+                    pass
                 memory_user_text = item.prompt
                 if item.source.lower() in {"document", "photo", "voice", "audio", "video", "sticker"}:
                     memory_user_text = f"[{item.source}] {item.summary}"
                 if item.source not in {"startup", "system"}:
                     self.memory_store.record_turn("user", item.source, memory_user_text)
-                    self.memory_store.record_turn("assistant", self.config.active_backend, response.text)
-                    self.memory_store.record_exchange(memory_user_text, response.text, item.source)
+                    self.memory_store.record_turn("assistant", self.config.active_backend, display_text or response.text)
+                    self.memory_store.record_exchange(memory_user_text, display_text or response.text, item.source)
                 self.handoff_builder.append_transcript("user", item.prompt, item.source)
-                self.handoff_builder.append_transcript("assistant", response.text)
+                self.handoff_builder.append_transcript("assistant", display_text or response.text)
                 self.handoff_builder.refresh_recent_context()
-                _print_final_response(self.name, response.text)
+                _print_final_response(self.name, display_text or response.text)
                 total_s = (datetime.now() - datetime.fromisoformat(item.created_at)).total_seconds()
                 send_elapsed_s, chunk_count = await self.send_long_message(
                     chat_id=item.chat_id,
-                    text=response.text,
+                    text=display_text or response.text,
                     request_id=item.request_id,
                     purpose="bg-response",
                 )
-                await self._send_voice_reply(item.chat_id, response.text, item.request_id)
+                await self._send_voice_reply(item.chat_id, display_text or response.text, item.request_id)
                 self.logger.info(
                     f"Background task {item.request_id} delivered "
                     f"(total_s={total_s:.2f}, chunks={chunk_count}, send_s={send_elapsed_s:.2f})"
@@ -4111,6 +5252,9 @@ class FlexibleAgentRuntime:
             else:
                 err_msg = response.error or "Unknown error"
                 self._mark_error(err_msg)
+                if self._should_buffer_during_transfer(item.request_id):
+                    self._record_suppressed_transfer_result(item, success=False, error=err_msg)
+                    return
                 self.error_logger.error(f"Background task {item.request_id} failed: {err_msg}")
                 clipped = err_msg if len(err_msg) <= 3000 else err_msg[:2800].rstrip() + "\n\n[truncated]"
                 await self.send_long_message(
@@ -4134,7 +5278,7 @@ class FlexibleAgentRuntime:
                 item = await self.queue.get()
                 if not item.silent:
                     self.last_prompt = item
-                is_bridge_request = item.source.startswith("bridge:")
+                is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
                 queued_at = datetime.fromisoformat(item.created_at)
                 queue_wait_s = (datetime.now() - queued_at).total_seconds()
                 self.logger.info(
@@ -4361,13 +5505,16 @@ class FlexibleAgentRuntime:
                         f"{item.request_id} — treating as recoverable tool failure"
                     )
                     self._mark_error(err_msg)
+                    if self._should_buffer_during_transfer(item.request_id):
+                        self._record_suppressed_transfer_result(item, success=False, error=err_msg)
                     if not item.silent:
-                        await self.send_long_message(
-                            chat_id=item.chat_id,
-                            text=err_msg,
-                            request_id=item.request_id,
-                            purpose="error",
-                        )
+                        if not self._should_buffer_during_transfer(item.request_id):
+                            await self.send_long_message(
+                                chat_id=item.chat_id,
+                                text=err_msg,
+                                request_id=item.request_id,
+                                purpose="error",
+                            )
                     await self._notify_request_listeners(
                         item.request_id,
                         {
@@ -4380,6 +5527,7 @@ class FlexibleAgentRuntime:
                         },
                     )
                 elif response.is_success and response.text:
+                    display_text = self._strip_transfer_accept_prefix(item, response.text)
                     self._mark_success()
                     await self._notify_request_listeners(
                         item.request_id,
@@ -4392,10 +5540,25 @@ class FlexibleAgentRuntime:
                             "summary": item.summary,
                         },
                     )
+                    try:
+                        from tools.token_tracker import estimate_tokens, record_usage
+                        record_usage(
+                            self.workspace_dir,
+                            model=self.get_current_model(),
+                            backend=self.config.active_backend,
+                            input_tokens=estimate_tokens(item.prompt),
+                            output_tokens=estimate_tokens(display_text or response.text),
+                            session_id=self.session_id_dt,
+                        )
+                    except Exception:
+                        pass
                     if not item.silent:
+                        if self._should_buffer_during_transfer(item.request_id):
+                            self._record_suppressed_transfer_result(item, success=True, text=display_text or response.text)
+                            continue
                         self.last_response = {
                             "chat_id": item.chat_id,
-                            "text": response.text,
+                            "text": display_text or response.text,
                             "request_id": item.request_id,
                         }
                         memory_user_text = item.prompt
@@ -4403,22 +5566,22 @@ class FlexibleAgentRuntime:
                             memory_user_text = f"[{item.source}] {item.summary}"
                         if item.source not in {"startup", "system"} and not is_bridge_request:
                             self.memory_store.record_turn("user", item.source, memory_user_text)
-                            self.memory_store.record_turn("assistant", self.config.active_backend, response.text)
-                            self.memory_store.record_exchange(memory_user_text, response.text, item.source)
+                            self.memory_store.record_turn("assistant", self.config.active_backend, display_text or response.text)
+                            self.memory_store.record_exchange(memory_user_text, display_text or response.text, item.source)
                         if not is_bridge_request:
                             self.handoff_builder.append_transcript("user", item.prompt, item.source)
-                            self.handoff_builder.append_transcript("assistant", response.text)
+                            self.handoff_builder.append_transcript("assistant", display_text or response.text)
                             self.handoff_builder.refresh_recent_context()
                         if not item.deliver_to_telegram:
                             continue
-                        _print_final_response(self.name, response.text)
+                        _print_final_response(self.name, display_text or response.text)
                         send_elapsed_s, chunk_count = await self.send_long_message(
                             chat_id=item.chat_id,
-                            text=response.text,
+                            text=display_text or response.text,
                             request_id=item.request_id,
                             purpose="response",
                         )
-                        await self._send_voice_reply(item.chat_id, response.text, item.request_id)
+                        await self._send_voice_reply(item.chat_id, display_text or response.text, item.request_id)
                         total_elapsed_s = (datetime.now() - queued_at).total_seconds()
                         self.logger.info(
                             f"Completed {item.request_id} delivery via {self.config.active_backend} "
@@ -4426,10 +5589,14 @@ class FlexibleAgentRuntime:
                             f"telegram_send_s={send_elapsed_s:.2f}, total_s={total_elapsed_s:.2f}, "
                             f"chunks={chunk_count})"
                         )
-                        self._log_maintenance(item, "send_success", text_len=len(response.text or ""))
+                        self._log_maintenance(item, "send_success", text_len=len(display_text or response.text or ""))
+                        # Route hchat reply back to sender if applicable
+                        await self._hchat_route_reply(item, display_text or response.text)
                 else:
                     err_msg = response.error or "Unknown error"
                     self._mark_error(err_msg)
+                    if self._should_buffer_during_transfer(item.request_id):
+                        self._record_suppressed_transfer_result(item, success=False, error=err_msg)
                     await self._notify_request_listeners(
                         item.request_id,
                         {
@@ -4449,6 +5616,8 @@ class FlexibleAgentRuntime:
                         if self._should_retry_codex_scheduler_failure(item, err_msg):
                             self._schedule_codex_scheduler_retry(item)
                         if not item.deliver_to_telegram:
+                            continue
+                        if self._should_buffer_during_transfer(item.request_id):
                             continue
                         send_elapsed_s, chunk_count = await self.send_long_message(
                             chat_id=item.chat_id,
@@ -4490,8 +5659,12 @@ class FlexibleAgentRuntime:
             BotCommand("skill", "Browse and run skills"),
             BotCommand("backend", "Show backend buttons (+ means context)"),
             BotCommand("handoff", "Fresh session with recent continuity"),
+            BotCommand("ticket", "Submit IT support ticket to Arale"),
             BotCommand("park", "List or save parked topics"),
             BotCommand("load", "Restore a parked topic"),
+            BotCommand("transfer", "Transfer this session to another agent"),
+            BotCommand("fork", "Fork this session to another agent"),
+            BotCommand("cos", "Chief of Staff decision routing (on/off)"),
             BotCommand("mode", "Switch fixed/flex mode"),
             BotCommand("model", "View or change model"),
             BotCommand("effort", "View or change effort"),
@@ -4504,6 +5677,8 @@ class FlexibleAgentRuntime:
             BotCommand("verbose", "Toggle verbose long-task status [on|off]"),
             BotCommand("think", "Toggle thinking trace display [on|off]"),
             BotCommand("jobs", "Show cron and heartbeat jobs"),
+            BotCommand("timeout", "View or set request timeout [minutes]"),
+            BotCommand("hchat", "Send a message to another agent [agent] [message]"),
             BotCommand("logo", "Play startup animation"),
             BotCommand("wa_on", "Start WhatsApp transport"),
             BotCommand("wa_off", "Stop WhatsApp transport"),

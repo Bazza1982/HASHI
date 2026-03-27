@@ -1,0 +1,20 @@
+{
+  "worker_id": "metadata_01",
+  "name": "Metadata Extractor",
+  "model": "claude-haiku-4-5",
+  "role": "验证源文件、提取元数据、识别专有名词",
+  "timeout_minutes": 5,
+  "critical": true,
+  "retry_policy": {
+    "max_attempts": 3,
+    "backoff_strategy": "exponential"
+  },
+  "output_format": "json",
+  "dependencies": [],
+  "inputs": ["source_article"],
+  "outputs": ["metadata", "initial_terminology"],
+  "quality_requirements": {
+    "min_accuracy": 0.95,
+    "min_completeness": 0.90
+  }
+}

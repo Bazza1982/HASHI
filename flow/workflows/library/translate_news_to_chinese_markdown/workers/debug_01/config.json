@@ -1,0 +1,113 @@
+{
+  "worker_id": "debug_01",
+  "workflow_id": "translate_news_to_chinese_markdown",
+  "model": "claude-opus-4-6",
+  "type": "debug_agent",
+  "execution": {
+    "temperature": 0.5,
+    "max_tokens": 10000,
+    "timeout_seconds": 120,
+    "retry_policy": {
+      "max_attempts": 3,
+      "backoff_strategy": "exponential",
+      "initial_delay_ms": 2000,
+      "max_delay_ms": 60000
+    }
+  },
+  "activation": {
+    "trigger_on_failure": true,
+    "target_workers": [
+      "parse_worker",
+      "translate_worker",
+      "format_worker",
+      "validator_worker"
+    ]
+  },
+  "input": {
+    "schema_type": "object",
+    "properties": {
+      "failed_step": {
+        "type": "string",
+        "description": "ID of failed step"
+      },
+      "error_message": {
+        "type": "string",
+        "description": "Error message from failed worker"
+      },
+      "input_data": {
+        "type": "object",
+        "description": "Input data that caused failure"
+      },
+      "attempt_history": {
+        "type": "array",
+        "description": "History of previous recovery attempts"
+      }
+    },
+    "required": ["failed_step", "error_message"]
+  },
+  "output": {
+    "schema_type": "object",
+    "properties": {
+      "diagnosis": {
+        "type": "object",
+        "description": "Root cause analysis"
+      },
+      "recovery_strategy": {
+        "type": "string",
+        "description": "Recommended recovery action"
+      },
+      "remediation_applied": {
+        "type": "boolean",
+        "description": "Whether remediation was successfully applied"
+      },
+      "status": {
+        "type": "string",
+        "enum": ["recovered", "fallback_mode", "escalated"]
+      }
+    }
+  },
+  "capabilities": [
+    "error_analysis",
+    "alternative_approach",
+    "automatic_remediation"
+  ],
+  "error_analysis_rules": {
+    "classify_error_type": true,
+    "identify_root_cause": true,
+    "review_previous_attempts": true,
+    "suggest_mitigation": true
+  },
+  "recovery_strategies": {
+    "transient_errors": {
+      "timeout": "exponential_backoff_retry",
+      "rate_limit": "exponential_backoff_retry",
+      "api_error": "exponential_backoff_retry"
+    },
+    "input_errors": {
+      "invalid_input": "preprocess_input",
+      "encoding_error": "normalize_encoding",
+      "format_error": "convert_format"
+    },
+    "systematic_errors": {
+      "model_limitation": "fallback_mode",
+      "resource_exhaustion": "chunk_input",
+      "unsupported_input": "fallback_mode"
+    }
+  },
+  "fallback_behavior": {
+    "enabled": true,
+    "output_partial_results": true,
+    "generate_quality_notes": true,
+    "document_failures": true,
+    "max_retries_before_fallback": 3
+  },
+  "logging": {
+    "level": "DEBUG",
+    "log_inputs": true,
+    "log_outputs": true,
+    "log_performance_metrics": true,
+    "log_analysis_details": true,
+    "log_recovery_attempts": true,
+    "log_root_cause": true
+  }
+}

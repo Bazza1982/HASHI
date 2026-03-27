@@ -1,0 +1,58 @@
+{
+  "worker_id": "inferencer_01",
+  "role": "Context Inferencer",
+  "version": "1.0.0",
+  "backend": {
+    "system": "claude-cli",
+    "model": "claude-opus-4-6",
+    "api_timeout_seconds": 90,
+    "temperature": 0.6,
+    "max_tokens": 2000
+  },
+  "execution": {
+    "timeout_seconds": 90,
+    "strategy": "sequential",
+    "depends_on": ["step_01_analyze_task"],
+    "retry_on_failure": true,
+    "max_retries": 3,
+    "notification_enabled": true
+  },
+  "output": {
+    "artifacts": [
+      {
+        "key": "context_inference",
+        "path": "context_inference.json",
+        "type": "json",
+        "required": true
+      }
+    ]
+  },
+  "inference": {
+    "confidence_threshold": 0.5,
+    "high_confidence_minimum": 0.8,
+    "low_confidence_maximum": 0.5,
+    "extract_implicit_information": true,
+    "field_extraction_enabled": true
+  },
+  "error_handling": {
+    "on_failure": "escalate_to_debug",
+    "debug_agent": "debug_01",
+    "recovery_strategy": "adjust_confidence_threshold"
+  },
+  "environment": {
+    "WORKER_TYPE": "inferencer",
+    "CONTEXT_EXTRACTION": "enabled",
+    "CONFIDENCE_SCORING": "enabled"
+  },
+  "quality_gates": {
+    "validate_output_schema": true,
+    "validate_confidence_scores": true,
+    "validate_field_sources": true,
+    "separate_high_low_confidence": true
+  },
+  "metadata": {
+    "created_date": "2026-03-27T07:44:38Z",
+    "created_by": "designer_01",
+    "workflow_id": "pre-flight-intelligent-questioner"
+  }
+}

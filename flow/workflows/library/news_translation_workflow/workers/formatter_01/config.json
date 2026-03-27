@@ -1,0 +1,22 @@
+{
+  "worker_id": "formatter_01",
+  "name": "Markdown Formatter",
+  "model": "claude-haiku-4-5",
+  "role": "合并翻译、修复格式、验证链接",
+  "timeout_minutes": 5,
+  "critical": true,
+  "retry_policy": {
+    "max_attempts": 3,
+    "backoff_strategy": "exponential"
+  },
+  "output_format": "json",
+  "dependencies": ["translator_01", "translator_02"],
+  "inputs": ["translated_first_half", "translated_second_half"],
+  "outputs": ["formatted_content", "format_report"],
+  "quality_requirements": {
+    "merge_completeness": 1.0,
+    "markdown_validation": 1.0,
+    "format_preservation": 0.99,
+    "no_content_duplication": true
+  }
+}

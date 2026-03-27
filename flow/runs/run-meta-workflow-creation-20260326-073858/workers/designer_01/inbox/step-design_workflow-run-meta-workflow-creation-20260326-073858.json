@@ -1,0 +1,29 @@
+{
+  "msg_type": "task_assign",
+  "task_id": "step-design_workflow-run-meta-workflow-creation-20260326-073858",
+  "workflow_id": "meta-workflow-creation",
+  "run_id": "run-meta-workflow-creation-20260326-073858",
+  "from": "orchestrator",
+  "to": "designer_01",
+  "payload": {
+    "step_id": "design_workflow",
+    "prompt": "基于以下分析结果，设计完整的工作流配置：\n\n任务需求：{pre_flight.task_description}\n任务分析：[见 task_analysis.json]\n最大人工介入次数：{pre_flight.max_interventions}\n\n请生成：\n1. 完整的 workflow.yaml（符合 flow/schema/workflow.schema.yaml）\n2. 每个 worker 的 AGENT.md 内容\n3. 所有 worker 的 config.json\n4. 工作目录结构说明\n5. ASCII 格式的 DAG 图\n\n输出为 design_package.json，包含所有文件内容。\n\n设计原则：\n- 最小化人工介入（目标：{pre_flight.max_interventions} 次）\n- 为每个步骤选择最合适的 model\n- 错误处理使用 debug_agent: debug_01, max_attempts: 3\n- 包含 Evaluator 配置\n",
+    "input_artifacts": {
+      "task_analysis": "flow/runs/run-meta-workflow-creation-20260326-073858/artifacts/task_analysis/task_analysis.json"
+    },
+    "output_spec": [
+      {
+        "key": "design_package",
+        "path": "design_package.json",
+        "type": "json"
+      }
+    ],
+    "params": {
+      "task_description": "将一篇英文新闻文章翻译为中文，保存为 Markdown 文件",
+      "max_interventions": "0",
+      "knowledge_base_path": "flow/evaluation_kb/"
+    }
+  },
+  "timeout_seconds": 300,
+  "ts": "2026-03-25T20:39:58.429504+00:00"
+}

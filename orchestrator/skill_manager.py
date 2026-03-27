@@ -281,7 +281,7 @@ class SkillManager:
         lines.append("")
         for job in jobs:
             enabled = "ON" if job.get("enabled", False) else "OFF"
-            schedule = job.get("time") if kind == "cron" else f"{job.get('interval_seconds', 0)}s"
+            schedule = (job.get("schedule") or job.get("time", "?")) if kind == "cron" else f"{job.get('interval_seconds', 0)}s"
             action = job.get("action", "enqueue_prompt")
             note = job.get("note") or ""
             lines.append(f"- {job.get('id')} [{enabled}] {schedule} -> {action}")

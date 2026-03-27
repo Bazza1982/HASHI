@@ -38,7 +38,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$SCRIPT_DIR"
 
 export BRIDGE_CODE_ROOT="$SCRIPT_DIR"
-export BRIDGE_HOME="${BRIDGE_HOME:-$SCRIPT_DIR}"
+# Always bind this launcher to its own repo. Inheriting BRIDGE_HOME from
+# another HASHI shell can silently start the wrong instance.
+export BRIDGE_HOME="$SCRIPT_DIR"
 export PYTHONUTF8=1
 export PYTHONIOENCODING=utf-8
 
@@ -374,6 +376,11 @@ ensure_env() {
     fi
     
     source .venv/bin/activate
+
+    # Prefer Linux user-installed CLIs over Windows PATH entries exposed by WSL.
+    if [[ -d "$HOME/.local/bin" ]]; then
+        export PATH="$HOME/.local/bin:$PATH"
+    fi
     
     # Check dependencies
     if ! python3 -c "import telegram, httpx, aiohttp, PIL" 2>/dev/null; then
@@ -483,11 +490,10 @@ launch() {
     local start_label="$1"
     local py_args="$2"
 
-    # In force mode, skip preflight (caller already cleaned up stale processes)
-    if [[ "$FORCE_LAUNCH" != "1" ]]; then
-        if ! preflight_check; then
-            exit 1
-        fi
+    # Always run preflight. In force mode, preflight will stop the old instance
+    # automatically instead of prompting.
+    if ! preflight_check; then
+        exit 1
     fi
     
     clear

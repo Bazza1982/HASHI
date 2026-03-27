@@ -34,6 +34,15 @@ sleep 0.3
 echo '{"type":"turn.started","item":{"type":"thinking"}}'
 sleep 0.1
 
+echo '{"type":"item.completed","item":{"type":"agent_message","text":"Inspecting the workspace and planning the next step."}}'
+sleep 0.1
+
+echo '{"type":"item.started","item":{"type":"command_execution","command":["rg","--files"],"aggregated_output":"","exit_code":null,"status":"in_progress"}}'
+sleep 0.1
+
+echo '{"type":"item.completed","item":{"type":"command_execution","command":["rg","--files"],"aggregated_output":"README.md","exit_code":0,"status":"completed"}}'
+sleep 0.1
+
 RESPONSE="Mock Codex processed: ${PROMPT:0:100}..."
 
 if [[ "$PROMPT" == *"error"* ]]; then
@@ -42,6 +51,7 @@ if [[ "$PROMPT" == *"error"* ]]; then
 fi
 
 echo '{"type":"item.completed","item":{"type":"agent_message","text":"'"$RESPONSE"'"}}'
+echo '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}'
 
 # Write to output file if specified
 if [[ -n "$OUTPUT_FILE" ]]; then

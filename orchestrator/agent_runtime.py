@@ -196,9 +196,10 @@ def resolve_authorized_telegram_ids(extra: dict | None, global_authorized_id: in
     return tuple(ids)
 
 
-def _build_jobs_with_buttons(agent_name: str, skill_manager):
+def _build_jobs_with_buttons(agent_name: str, skill_manager, filter_agent: str | None = None):
     """Build combined jobs message text and inline keyboard with run/toggle buttons.
 
+    filter_agent: if set, only show jobs whose 'agent' field matches. None means show all.
     Returns (text: str, markup: InlineKeyboardMarkup | None).
     """
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -214,13 +215,19 @@ def _build_jobs_with_buttons(agent_name: str, skill_manager):
     except Exception:
         return "Could not read tasks.json.", None
 
-    lines = [f"<b>📋 Jobs — all agents</b>"]
+    if filter_agent:
+        title = f"<b>📋 Jobs — {filter_agent}</b>"
+    else:
+        title = "<b>📋 Jobs — all agents</b>"
+    lines = [title]
     buttons: list = []
 
-    # Show all jobs across all agents, single-column layout
+    # Show jobs, optionally filtered by agent
     all_jobs: list[tuple[str, dict]] = []
 
     for h in data.get("heartbeats", []):
+        if filter_agent and h.get("agent") != filter_agent:
+            continue
         interval = h.get("interval_seconds", 0)
         if interval >= 3600:
             interval_s = f"every {interval // 3600}h"
@@ -237,11 +244,38 @@ def _build_jobs_with_buttons(agent_name: str, skill_manager):
         all_jobs.append(("heartbeat", h))
 
     for c in data.get("crons", []):
+        if filter_agent and c.get("agent") != filter_agent:
+            continue
         enabled = c.get("enabled", False)
-        time_s = c.get("time", "??:??")
+        schedule = c.get("schedule", "")
+        # Parse cron expression into human-readable label
+        parts = schedule.split() if schedule else []
+        if len(parts) == 5:
+            minute, hour, dom, month, dow = parts
+            if dom == "*" and month == "*":
+                if dow == "*":
+                    # Standard daily/hourly cron
+                    if hour.startswith("*/"):
+                        interval_h = hour[2:]
+                        time_s = f"every {interval_h}h"
+                    elif minute.startswith("*/"):
+                        interval_m = minute[2:]
+                        time_s = f"every {interval_m}m"
+                    else:
+                        try:
+                            time_s = f"{int(hour):02d}:{int(minute):02d}"
+                        except ValueError:
+                            time_s = schedule
+                else:
+                    time_s = schedule
+            else:
+                time_s = schedule
+        else:
+            time_s = schedule or "??:??"
+        freq_label = "every " if "every" in time_s else "daily "
         status = "✅" if enabled else "❌"
         owner = c.get("agent", "?")
-        lines.append(f"\n{status} 📅 <code>{c['id']}</code> — daily {time_s} [{owner}]")
+        lines.append(f"\n{status} 📅 <code>{c['id']}</code> — {freq_label}{time_s} [{owner}]")
         note = c.get("note", "")
         if note and note != c["id"]:
             lines.append(f"   {note}")
@@ -252,7 +286,7 @@ def _build_jobs_with_buttons(agent_name: str, skill_manager):
         jid = job["id"]
         enabled = job.get("enabled", False)
         toggle_mode = "off" if enabled else "on"
-        toggle_label = "OFF" if enabled else "ON"
+        toggle_label = "ON" if enabled else "OFF"
         icon = "⏱" if kind == "heartbeat" else "📅"
         short_id = jid[:22]
         buttons.append([InlineKeyboardButton(f"{icon} {short_id}", callback_data="noop")])
@@ -339,12 +373,13 @@ class BridgeAgentRuntime:
     CODEX_CHUNK_LIMIT_ERROR = "Separator is not found, and chunk exceed the limit"
     CODEX_SCHEDULER_RETRY_DELAY_S = 120
 
-    def __init__(self, name: str, backend: BaseBackend, telegram_token: str, skill_manager: SkillManager | None = None):
+    def __init__(self, name: str, backend: BaseBackend, telegram_token: str, skill_manager: SkillManager | None = None, secrets: dict | None = None):
         self.name = name
         self.backend = backend
         self.config = backend.config
         self.global_config = backend.global_config
         self.token = telegram_token
+        self.secrets = secrets or {}
 
         self.session_started_at = datetime.now()
         self.session_id_dt = self.session_started_at.strftime("%Y-%m-%d_%H%M%S")
@@ -399,7 +434,7 @@ class BridgeAgentRuntime:
         self._pending_session_primer: str | None = None
         self._pending_auto_recall_context: str | None = None
         self.runtime_session_path = self.config.workspace_dir / ".runtime_session.json"
-        self.voice_manager = VoiceManager(self.config.workspace_dir, self.media_dir, ffmpeg_cmd="ffmpeg")
+        self.voice_manager = VoiceManager(self.config.workspace_dir, self.media_dir, ffmpeg_cmd="ffmpeg", secrets=self.secrets)
         self.memory_store = BridgeMemoryStore(self.config.workspace_dir)
         self.handoff_builder = HandoffBuilder(self.config.workspace_dir, transcript_filename="conversation_log.jsonl")
         self.parked_topics = ParkedTopicStore(self.config.workspace_dir)
@@ -1041,6 +1076,7 @@ class BridgeAgentRuntime:
                 f"🔍 Verbose: {'ON' if self._verbose else 'OFF'}",
                 f"💭 Think: {'ON' if self._think else 'OFF'}",
             ])
+            lines.append(f"🏠 HASHI Instance: {self.global_config.project_root}")
             if self.config.engine == "openrouter-api":
                 lines.append("☁️ Session Mode: stateless bridge-managed API")
             else:
@@ -1080,7 +1116,7 @@ class BridgeAgentRuntime:
         return InlineKeyboardMarkup(buttons) if buttons else None
 
     async def _render_skill_jobs(self, update_or_query, kind: str):
-        text, markup = _build_jobs_with_buttons(self.name, self.skill_manager)
+        text, markup = _build_jobs_with_buttons(self.name, self.skill_manager, filter_agent=self.name)
         if hasattr(update_or_query, "edit_message_text"):
             await update_or_query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
         else:
@@ -1189,6 +1225,30 @@ class BridgeAgentRuntime:
             _safe_excerpt(text),
             deliver_to_telegram=deliver_to_telegram,
         )
+
+    async def _hchat_route_reply(self, item: QueuedRequest, response_text: str):
+        """If this request was an hchat message, route the reply back to the sender."""
+        import re
+        match = re.match(r"^\[hchat from (\w+)\]", item.prompt)
+        if not match:
+            return
+        sender_name = match.group(1).lower()
+        orchestrator = getattr(self, "orchestrator", None)
+        if orchestrator is None:
+            return
+        for rt in getattr(orchestrator, "runtimes", []):
+            if getattr(rt, "name", "") == sender_name and hasattr(rt, "enqueue_api_text"):
+                try:
+                    await rt.enqueue_api_text(
+                        f"[hchat reply from {self.name}] {response_text}",
+                        source=f"hchat-reply:{self.name}",
+                        deliver_to_telegram=True,
+                    )
+                    self.logger.info(f"Hchat reply routed back to {sender_name}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to route hchat reply to {sender_name}: {e}")
+                return
+        self.logger.warning(f"Hchat reply: sender '{sender_name}' runtime not found")
 
     async def enqueue_api_media(
         self,
@@ -2101,6 +2161,8 @@ class BridgeAgentRuntime:
                         f"chunks={chunk_count})"
                     )
                     self._log_maintenance(item, "send_success", text_len=len(response.text or ""))
+                    # Route hchat reply back to sender if applicable
+                    await self._hchat_route_reply(item, response.text)
                 else:
                     err_msg = response.error or "Unknown error"
                     self._mark_error(err_msg)
@@ -2203,13 +2265,24 @@ class BridgeAgentRuntime:
         )
 
     def handle_polling_error(self, error):
-        from telegram.error import Conflict
+        import time
+        from telegram.error import Conflict, NetworkError, TimedOut
         err_text = str(error) or "<no error message>"
+        now = time.monotonic()
+        if isinstance(error, (NetworkError, TimedOut)) and not isinstance(error, Conflict):
+            self._last_network_error_ts = now
         if isinstance(error, Conflict):
-            self.error_logger.error(
-                f"Telegram polling conflict for '{self.name}': another process is using this bot token. "
-                f"Check for duplicate bridge/bridge-g-m instances running. ({err_text})"
-            )
+            last_net_err = getattr(self, "_last_network_error_ts", 0)
+            if now - last_net_err < 120:
+                self.telegram_logger.warning(
+                    f"Telegram polling self-conflict for '{self.name}': network recovered and new poll "
+                    f"displaced the stale one. This is harmless and auto-recovers. ({err_text})"
+                )
+            else:
+                self.error_logger.error(
+                    f"Telegram polling conflict for '{self.name}': another process is using this bot token. "
+                    f"Check for duplicate bridge/bridge-g-m instances running. ({err_text})"
+                )
             return
         self.telegram_logger.warning(
             f"Polling error while fetching updates: {type(error).__name__}: {err_text}"
@@ -2526,6 +2599,75 @@ class BridgeAgentRuntime:
             f"Handoff restore [{exchange_count} exchanges]",
         )
 
+    async def cmd_ticket(self, update, context):
+        """Submit an IT support ticket to Arale. Usage: /ticket <description>"""
+        if update.effective_user.id != self.global_config.authorized_id:
+            return
+        from orchestrator.ticket_manager import (
+            create_ticket, detect_instance, format_ticket_notification,
+            list_tickets, _resolve_tickets_dir,
+        )
+
+        args_text = " ".join(context.args).strip() if context.args else ""
+
+        # /ticket with no args → list open tickets
+        if not args_text:
+            tickets_dir = _resolve_tickets_dir(self.global_config.project_root)
+            open_tickets = list_tickets(tickets_dir, "open")
+            ip_tickets = list_tickets(tickets_dir, "in_progress")
+            lines = []
+            if open_tickets:
+                lines.append("Open tickets:")
+                for t in open_tickets:
+                    lines.append(f"  [{t['ticket_id']}] {t['source_agent']} — {t['summary'][:60]}")
+            if ip_tickets:
+                lines.append("In progress:")
+                for t in ip_tickets:
+                    lines.append(f"  [{t['ticket_id']}] {t['source_agent']} — {t['summary'][:60]}")
+            if not lines:
+                lines.append("No open tickets.")
+            await update.message.reply_text("\n".join(lines))
+            return
+
+        # Create the ticket
+        instance = detect_instance(self.global_config.project_root)
+        ticket = create_ticket(
+            project_root=self.global_config.project_root,
+            source_agent=self.name,
+            source_instance=instance,
+            workspace_dir=self.config.workspace_dir,
+            summary=args_text,
+        )
+
+        await update.message.reply_text(
+            f"🎫 Ticket {ticket['ticket_id']} created.\n"
+            f"Arale has been notified and will investigate.",
+        )
+
+        # Notify Arale via bridge
+        notification = format_ticket_notification(ticket)
+        orchestrator = getattr(self, "orchestrator", None)
+        notified = False
+
+        if orchestrator is not None:
+            for rt in getattr(orchestrator, "runtimes", []):
+                if getattr(rt, "name", "") == "arale" and hasattr(rt, "enqueue_api_text"):
+                    try:
+                        await rt.enqueue_api_text(
+                            f"[TICKET RECEIVED]\n{notification}\n\n"
+                            f"Ticket file: {self.global_config.project_root / 'tickets' / 'open' / (ticket['ticket_id'] + '.json')}\n"
+                            f"Please investigate and resolve per IT support protocol.",
+                            source=f"ticket:{ticket['ticket_id']}",
+                            deliver_to_telegram=True,
+                        )
+                        notified = True
+                    except Exception as e:
+                        logging.warning(f"Failed to notify arale via bridge: {e}")
+                    break
+
+        if not notified:
+            logging.info(f"Ticket {ticket['ticket_id']} saved to file; Arale will pick up on next scan.")
+
     async def cmd_park(self, update, context):
         if update.effective_user.id != self.global_config.authorized_id:
             return
@@ -2819,7 +2961,36 @@ class BridgeAgentRuntime:
     async def cmd_debug(self, update, context):
         if update.effective_user.id != self.global_config.authorized_id:
             return
-        await self._invoke_prompt_skill_from_command(update, "debug", list(context.args or []))
+        raw_args = list(context.args or [])
+        args = [a.strip().lower() for a in raw_args if a.strip()]
+        if args and args[0] in {"on", "off"}:
+            enabled = args[0] == "on"
+            if self.skill_manager:
+                _, msg = self.skill_manager.set_toggle_state(self.workspace_dir, "debug", enabled=enabled)
+                state_str = "ON 🔴" if enabled else "OFF"
+                await update.message.reply_text(f"🐛 Debug mode: {state_str}\n{msg}")
+            else:
+                await update.message.reply_text("Skill manager not available.")
+            return
+        if not self.skill_manager:
+            await update.message.reply_text("Skill system is not configured.")
+            return
+        skill = self.skill_manager.get_skill("debug")
+        if skill is None:
+            await update.message.reply_text("Unknown skill: debug")
+            return
+        prompt_text = " ".join(raw_args).strip()
+        if not prompt_text:
+            await update.message.reply_text("Usage: /debug <prompt> or /debug on|off")
+            return
+        prompt = self.skill_manager.build_prompt_for_skill(skill, prompt_text)
+        await update.message.reply_text(f"Running skill {skill.id}...")
+        await self.enqueue_request(
+            update.effective_chat.id,
+            prompt,
+            f"skill:{skill.id}",
+            f"Skill {skill.id}",
+        )
 
     async def cmd_skill(self, update, context):
         if update.effective_user.id != self.global_config.authorized_id:
@@ -3400,8 +3571,168 @@ class BridgeAgentRuntime:
     async def cmd_jobs(self, update, context):
         if update.effective_user.id != self.global_config.authorized_id:
             return
-        text, markup = _build_jobs_with_buttons(self.name, self.skill_manager)
+        arg = (context.args[0].strip().lower() if context.args else "")
+        if arg == "all":
+            filter_agent = None
+        elif arg:
+            filter_agent = arg
+        else:
+            filter_agent = self.name
+        text, markup = _build_jobs_with_buttons(self.name, self.skill_manager, filter_agent=filter_agent)
         await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+
+    async def cmd_timeout(self, update, context):
+        if update.effective_user.id != self.global_config.authorized_id:
+            return
+        args = [a.strip() for a in (context.args or []) if a.strip()]
+        backend = getattr(self, "backend", None)
+        extra = {}
+        if backend and hasattr(backend, "config") and backend.config.extra:
+            extra = backend.config.extra
+
+        default_idle = getattr(type(backend), "DEFAULT_IDLE_TIMEOUT_SEC", 300) if backend else 300
+        default_hard = getattr(type(backend), "DEFAULT_HARD_TIMEOUT_SEC", 1800) if backend else 1800
+
+        if not args:
+            idle_s = extra.get("idle_timeout_sec") or extra.get("process_timeout") or default_idle
+            hard_s = extra.get("hard_timeout_sec") or default_hard
+            idle_min = int(idle_s) // 60
+            hard_min = int(hard_s) // 60
+            def_idle_min = default_idle // 60
+            def_hard_min = default_hard // 60
+            text = (
+                f"<b>⏱ Timeout — {self.name}</b>\n\n"
+                f"  Idle:  <b>{idle_min} min</b>  (default: {def_idle_min} min)\n"
+                f"  Hard:  <b>{hard_min} min</b>  (default: {def_hard_min} min)\n\n"
+                f"Usage:\n"
+                f"  <code>/timeout 30</code>        — set idle to 30 min\n"
+                f"  <code>/timeout 30 120</code>    — idle=30 min, hard=120 min\n"
+                f"  <code>/timeout reset</code>     — restore defaults"
+            )
+            await update.message.reply_text(text, parse_mode="HTML")
+            return
+
+        if args[0].lower() == "reset":
+            if backend and hasattr(backend, "config") and backend.config.extra:
+                backend.config.extra.pop("idle_timeout_sec", None)
+                backend.config.extra.pop("hard_timeout_sec", None)
+                backend.config.extra.pop("process_timeout", None)
+            def_idle_min = default_idle // 60
+            def_hard_min = default_hard // 60
+            await update.message.reply_text(
+                f"⏱ Timeout reset to defaults: idle={def_idle_min} min, hard={def_hard_min} min"
+            )
+            return
+
+        try:
+            idle_min = int(args[0])
+            if idle_min <= 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Usage: /timeout [minutes] [hard_minutes] | reset")
+            return
+
+        hard_min = None
+        if len(args) >= 2:
+            try:
+                hard_min = int(args[1])
+                if hard_min <= 0:
+                    raise ValueError
+            except ValueError:
+                await update.message.reply_text("Usage: /timeout [minutes] [hard_minutes] | reset")
+                return
+
+        if backend and hasattr(backend, "config"):
+            if backend.config.extra is None:
+                backend.config.extra = {}
+            backend.config.extra["idle_timeout_sec"] = idle_min * 60
+            backend.config.extra.pop("process_timeout", None)
+            if hard_min is not None:
+                backend.config.extra["hard_timeout_sec"] = hard_min * 60
+
+        hard_str = f", hard={hard_min} min" if hard_min is not None else ""
+        await update.message.reply_text(f"⏱ Timeout updated: idle={idle_min} min{hard_str}")
+
+    async def cmd_hchat(self, update, context):
+        if update.effective_user.id != self.global_config.authorized_id:
+            return
+        args = [a.strip() for a in (context.args or []) if a.strip()]
+        if len(args) < 2:
+            await update.message.reply_text(
+                "💬 Hchat — Ask this agent to compose & send a message to another agent\n\n"
+                "Usage: /hchat <agent> <intent>\n"
+                "       /hchat all <intent>  — broadcast to all active agents (excludes temp)\n\n"
+                "Example: /hchat lily give her an update on what we've been doing\n"
+                "Example: /hchat arale 告诉她新的 debug toggle 功能已完成\n"
+                "Example: /hchat all 告诉大家新功能上线了\n\n"
+                "Note: YOU compose the message based on context — intent is what to communicate, not the literal text."
+            )
+            return
+        target_name = args[0].lower()
+        intent = " ".join(args[1:])
+
+        # Handle "all" target — broadcast to every active agent except temp and self
+        if target_name == "all":
+            import json as _json
+            try:
+                _cfg = _json.loads(self.global_config.config_path.read_text(encoding="utf-8-sig"))
+                all_agents = [
+                    a["name"] for a in _cfg.get("agents", [])
+                    if a.get("is_active", True)
+                    and a["name"].lower() != "temp"
+                    and a["name"].lower() != self.name.lower()
+                ]
+            except Exception:
+                all_agents = []
+            if not all_agents:
+                await update.message.reply_text("❌ No agents found to broadcast to.")
+                return
+            agent_list = ", ".join(all_agents)
+            send_cmds = "\n".join(
+                f'   python tools/hchat_send.py --to {a} --from {self.name} --text "<your composed message>"'
+                for a in all_agents
+            )
+            self_prompt = (
+                f"[HCHAT BROADCAST] The user wants you to send a Hchat message to ALL active agents.\n\n"
+                f"Target agents: {agent_list}\n"
+                f"EXCLUDED: temp (always excluded from broadcasts), {self.name} (yourself)\n\n"
+                f"Intent: {intent}\n\n"
+                f"Instructions:\n"
+                f"1. Think about what from our current conversation context is relevant to this intent.\n"
+                f"2. Compose a complete, meaningful message FROM you ({self.name}). "
+                f"Write it as yourself — the same message goes to all agents. Be concise.\n"
+                f"3. Send the message to EACH agent by running these bash commands:\n"
+                f"{send_cmds}\n"
+                f"4. Report back to the user: what you sent, to whom, and how many succeeded.\n\n"
+                f"Do NOT relay the user's words literally. Compose the message yourself.\n\n"
+                f"IMPORTANT: When you later receive messages starting with '[hchat reply from ...]', "
+                f"just report the reply content to the user. Do NOT send another hchat message back."
+            )
+            await update.message.reply_text(f"📢 Broadcasting Hchat to {len(all_agents)} agents...")
+        else:
+            # Single agent target
+            self_prompt = (
+                f"[HCHAT TASK] The user wants you to send a Hchat message to agent \"{target_name}\".\n\n"
+                f"Intent: {intent}\n\n"
+                f"Instructions:\n"
+                f"1. Think about what from our current conversation context is relevant to this intent.\n"
+                f"2. Compose a complete, meaningful message FROM you ({self.name}) TO {target_name}. "
+                f"Write it as yourself — introduce yourself if appropriate, include relevant context, be concise.\n"
+                f"3. Send the message by running this bash command:\n"
+                f"   python tools/hchat_send.py --to {target_name} --from {self.name} --text \"<your composed message>\"\n"
+                f"4. Report back to the user: what you sent and a brief summary of why.\n\n"
+                f"Do NOT relay the user's words literally. Compose the message yourself.\n\n"
+                f"IMPORTANT: When you later receive a message starting with '[hchat reply from ...]', "
+                f"just report the reply content to the user. Do NOT send another hchat message back — "
+                f"the conversation ends there."
+            )
+            await update.message.reply_text(f"💬 Composing Hchat message to {target_name}...")
+
+        await self.enqueue_api_text(
+            self_prompt,
+            source="bridge:hchat",
+            deliver_to_telegram=True,
+        )
 
     async def cmd_logo(self, update, context):
         if update.effective_user.id != self.global_config.authorized_id:
@@ -3485,6 +3816,7 @@ class BridgeAgentRuntime:
             BotCommand("voice", "Toggle native voice replies"),
             BotCommand("active", "Toggle proactive heartbeat"),
             BotCommand("handoff", "Fresh continuity restore"),
+            BotCommand("ticket", "Submit IT support ticket to Arale"),
             BotCommand("park", "List or save parked topics"),
             BotCommand("load", "Restore a parked topic"),
             BotCommand("fyi", "Refresh bridge environment awareness"),
@@ -3500,6 +3832,8 @@ class BridgeAgentRuntime:
             BotCommand("think", "Toggle thinking trace display [on|off]"),
             BotCommand("verbose", "Toggle verbose long-task status [on|off]"),
             BotCommand("jobs", "Show cron and heartbeat jobs"),
+            BotCommand("timeout", "View or set request timeout [minutes]"),
+            BotCommand("hchat", "Send a message to another agent [agent] [message]"),
             BotCommand("logo", "Play startup animation"),
             BotCommand("wa_on", "Start WhatsApp transport"),
             BotCommand("wa_off", "Stop WhatsApp transport"),
@@ -3520,6 +3854,7 @@ class BridgeAgentRuntime:
         self.app.add_handler(CommandHandler("voice", self.cmd_voice))
         self.app.add_handler(CommandHandler("active", self.cmd_active))
         self.app.add_handler(CommandHandler("handoff", self.cmd_handoff))
+        self.app.add_handler(CommandHandler("ticket", self.cmd_ticket))
         self.app.add_handler(CommandHandler("park", self.cmd_park))
         self.app.add_handler(CommandHandler("load", self.cmd_load))
         self.app.add_handler(CommandHandler("fyi", self.cmd_fyi))
@@ -3541,6 +3876,8 @@ class BridgeAgentRuntime:
         self.app.add_handler(CommandHandler("credit", self.cmd_credit))
         self.app.add_handler(CommandHandler("effort", self.cmd_effort))
         self.app.add_handler(CommandHandler("jobs", self.cmd_jobs))
+        self.app.add_handler(CommandHandler("timeout", self.cmd_timeout))
+        self.app.add_handler(CommandHandler("hchat", self.cmd_hchat))
         self.app.add_handler(CommandHandler("logo", self.cmd_logo))
         self.app.add_handler(CommandHandler("wa_on", self.cmd_wa_on))
         self.app.add_handler(CommandHandler("wa_off", self.cmd_wa_off))

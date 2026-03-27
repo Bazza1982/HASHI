@@ -11,6 +11,7 @@ from aiohttp import web
 from orchestrator.admin_local_testing import execute_local_command, supported_commands
 from orchestrator.conversation_router import ConversationRouter
 from orchestrator.pathing import resolve_path_value
+from orchestrator.transfer_store import TransferStore
 
 
 def _read_jsonl_recent(file_path: Path, limit: int = 50) -> dict:
@@ -61,6 +62,9 @@ def _read_jsonl_increment(file_path: Path, offset: int = 0) -> dict:
 
 
 class WorkbenchApiServer:
+    TRANSFER_ACCEPT_PREFIX = "TRANSFER_ACCEPTED "
+    FORK_ACCEPT_PREFIX = "FORK_ACCEPTED "
+
     def __init__(self, config_path: Path, global_config, runtimes: list | None = None, secrets: dict | None = None, orchestrator=None):
         self.config_path = config_path
         self.global_config = global_config
@@ -73,6 +77,7 @@ class WorkbenchApiServer:
             store_path=self.config_path.parent / "state" / "bridge_conversations.sqlite",
             runtimes=self._runtime_list(),
         )
+        self.transfer_store = TransferStore(self.config_path.parent / "state" / "bridge_transfers.sqlite")
         self.app = web.Application(client_max_size=64 * 1024 * 1024)
         self.app.router.add_get("/api/agents", self.handle_agents)
         self.app.router.add_get("/api/transcript/{name}", self.handle_transcript_recent)
@@ -80,6 +85,10 @@ class WorkbenchApiServer:
         self.app.router.add_post("/api/chat", self.handle_chat)
         self.app.router.add_post("/api/bridge/message", self.handle_bridge_message)
         self.app.router.add_post("/api/bridge/reply", self.handle_bridge_reply)
+        self.app.router.add_post("/api/bridge/transfer", self.handle_bridge_transfer)
+        self.app.router.add_post("/api/bridge/fork", self.handle_bridge_fork)
+        self.app.router.add_post("/api/bridge/cos", self.handle_bridge_cos)
+        self.app.router.add_get("/api/bridge/transfer/{transfer_id}", self.handle_bridge_transfer_get)
         self.app.router.add_post("/api/bridge/spawn", self.handle_bridge_spawn)
         self.app.router.add_get("/api/bridge/message/{message_id}", self.handle_bridge_message_get)
         self.app.router.add_get("/api/bridge/thread/{thread_id}", self.handle_bridge_thread)
@@ -214,7 +223,9 @@ class WorkbenchApiServer:
                 "display_name": agent_row.get("display_name", agent_row["name"]),
                 "emoji": agent_row.get("emoji", "🤖"),
                 "engine": engine,
+                "active_backend": agent_row.get("active_backend", engine),
                 "model": model,
+                "allowed_backends": [dict(backend) for backend in agent_row.get("allowed_backends", [])],
                 "workspace_dir": str(workspace_dir),
                 "transcript_path": str(transcript_path),
                 "online": False,
@@ -386,6 +397,311 @@ class WorkbenchApiServer:
             return web.json_response({"ok": False, "error": str(e)}, status=403)
         except ValueError as e:
             return web.json_response({"ok": False, "error": str(e)}, status=400)
+
+    def _validate_transfer_payload(self, payload: dict) -> dict:
+        required = [
+            "transfer_id",
+            "source_agent",
+            "source_instance",
+            "target_agent",
+            "target_instance",
+            "created_at",
+            "recent_context_block",
+            "last_user_message",
+            "last_assistant_message",
+        ]
+        missing = [key for key in required if not str(payload.get(key) or "").strip()]
+        if missing:
+            raise ValueError(f"missing transfer fields: {', '.join(missing)}")
+        mode = str(payload.get("mode") or "transfer").strip().lower()
+        if mode not in {"transfer", "fork"}:
+            raise ValueError("mode must be transfer or fork")
+        return {
+            "transfer_id": str(payload["transfer_id"]).strip(),
+            "mode": mode,
+            "source_agent": str(payload["source_agent"]).strip(),
+            "source_instance": str(payload["source_instance"]).strip(),
+            "target_agent": str(payload["target_agent"]).strip(),
+            "target_instance": str(payload["target_instance"]).strip(),
+            "created_at": str(payload["created_at"]).strip(),
+            "exchange_count": int(payload.get("exchange_count") or 0),
+            "word_count": int(payload.get("word_count") or 0),
+            "recent_context_block": str(payload["recent_context_block"]).strip(),
+            "recent_rounds": payload.get("recent_rounds") if isinstance(payload.get("recent_rounds"), list) else [],
+            "last_user_message": str(payload["last_user_message"]).strip(),
+            "last_assistant_message": str(payload["last_assistant_message"]).strip(),
+            "source_runtime": payload.get("source_runtime") if isinstance(payload.get("source_runtime"), dict) else {},
+            "source_workspace_dir": str(payload.get("source_workspace_dir") or "").strip(),
+            "source_transcript_path": str(payload.get("source_transcript_path") or "").strip(),
+            "transfer_guidance": payload.get("transfer_guidance") if isinstance(payload.get("transfer_guidance"), dict) else {},
+            "task_state": payload.get("task_state") if isinstance(payload.get("task_state"), dict) else {},
+            "handoff_summary": str(payload.get("handoff_summary") or "").strip(),
+            "memory_files": payload.get("memory_files") if isinstance(payload.get("memory_files"), dict) else {},
+        }
+
+    def _accept_prefix_for_mode(self, mode: str) -> str:
+        return self.FORK_ACCEPT_PREFIX if mode == "fork" else self.TRANSFER_ACCEPT_PREFIX
+
+    def _build_transfer_prompt(self, package: dict) -> str:
+        mode = str(package.get("mode") or "transfer").strip().lower()
+        action_label = "fork" if mode == "fork" else "transfer"
+        intro = (
+            "SYSTEM: This is a bridge-managed fork.\n"
+            "You are receiving a parallel context branch. The source session remains active.\n"
+            if mode == "fork"
+            else "SYSTEM: This is a bridge-managed transfer.\n"
+        )
+        guidance = package.get("transfer_guidance") or {}
+        task_state = package.get("task_state") or {}
+        memory_files = package.get("memory_files") or {}
+        memory_sections = []
+        for name in ("project.md", "decisions.md", "tasks.md"):
+            text = str(memory_files.get(name) or "").strip()
+            if text:
+                memory_sections.append(f"[{name}]\n{text}")
+        memory_block = "\n\n".join(memory_sections).strip()
+        handoff_summary = str(package.get("handoff_summary") or "").strip()
+        return (
+            intro
+            +
+            f"You are NOT {package['source_agent']}. Do not imitate that agent's identity, persona, or relationship style.\n"
+            "Keep your own identity, permissions, and system instructions.\n\n"
+            f"Continue the {action_label}ed work using the operational context below.\n\n"
+            "--- TRANSFER METADATA ---\n"
+            f"Mode: {mode}\n"
+            f"Transfer ID: {package['transfer_id']}\n"
+            f"From: {package['source_agent']}@{package['source_instance']}\n"
+            f"To: {package['target_agent']}@{package['target_instance']}\n"
+            f"Created at: {package['created_at']}\n"
+            f"Recent exchanges captured: {package['exchange_count']}\n"
+            f"Recent words captured: {package['word_count']}\n\n"
+            "--- CONTEXT WEIGHTING RULES ---\n"
+            f"- {guidance.get('recent_turn_weighting') or 'Prefer the newest exchanges for current intent, task state, and next actions.'}\n"
+            f"- {guidance.get('older_turn_weighting') or 'Treat older exchanges as background only.'}\n"
+            f"- {guidance.get('conflict_rule') or 'If there is any conflict, prefer the newer context.'}\n\n"
+            "--- STRUCTURED TASK STATE ---\n"
+            f"Latest user request: {task_state.get('latest_user_request') or package['last_user_message']}\n"
+            f"Latest source reply: {task_state.get('latest_source_reply') or package['last_assistant_message']}\n"
+            f"Recent exchange count retained: {task_state.get('recent_exchange_count') or package['exchange_count']}\n"
+            f"Memory files available: {', '.join(task_state.get('memory_files_available') or []) or 'none'}\n\n"
+            "--- HANDOFF SUMMARY ---\n"
+            f"{handoff_summary or 'No handoff summary was available.'}\n\n"
+            "--- MEMORY FILE CONTEXT ---\n"
+            f"{memory_block or 'No project/decision/task memory files were available.'}\n\n"
+            "--- CONTINUITY CONTEXT ---\n"
+            "Last user message:\n"
+            f"{package['last_user_message']}\n\n"
+            "Last assistant message from source:\n"
+            f"{package['last_assistant_message']}\n\n"
+            f"{package['recent_context_block']}\n\n"
+            "--- REQUIRED FIRST RESPONSE ---\n"
+            f"Start your first reply with: {self._accept_prefix_for_mode(mode)}{package['transfer_id']}\n"
+            "Then, in your own voice:\n"
+            "1. State what task is currently in progress.\n"
+            "2. Continue directly from the next unfinished step.\n"
+            "3. Do not ask the user to restate context unless a critical field is missing."
+        )
+
+    async def _notify_transfer_chat(self, runtime, text: str, *, purpose: str) -> dict[str, Any]:
+        if not getattr(runtime, "telegram_connected", False):
+            runtime.logger.warning(
+                "Transfer system notification not delivered because Telegram is disconnected.",
+                extra={"purpose": purpose},
+            )
+            return {"delivered": False, "reason": "telegram_disconnected", "chunks": 0}
+        try:
+            _, chunk_count = await runtime.send_long_message(
+                chat_id=runtime._primary_chat_id(),
+                text=text,
+                request_id=f"transfer-{uuid4().hex[:8]}",
+                purpose=purpose,
+            )
+            return {
+                "delivered": chunk_count > 0,
+                "reason": "sent" if chunk_count > 0 else "telegram_send_skipped",
+                "chunks": chunk_count,
+            }
+        except Exception:
+            runtime.logger.warning("Failed to deliver transfer system notification.", exc_info=True)
+            return {"delivered": False, "reason": "send_exception", "chunks": 0}
+
+    def _classify_transfer_ack(self, transfer_id: str, result: dict[str, Any], *, mode: str = "transfer") -> dict[str, Any]:
+        if not result.get("success"):
+            return {"ok": False, "error": result.get("error") or "transfer bootstrap failed"}
+        raw_text = str(result.get("text") or "").strip()
+        if not raw_text:
+            return {"ok": False, "error": "target completed transfer bootstrap without a visible reply"}
+        expected = f"{self._accept_prefix_for_mode(mode)}{transfer_id}"
+        if raw_text.startswith(expected):
+            return {"ok": True, "raw_text": raw_text, "ack_mode": "explicit"}
+        return {"ok": True, "raw_text": raw_text, "ack_mode": "implicit"}
+
+    def _finalize_transfer_status(self, *notifications: dict[str, Any]) -> tuple[str, str]:
+        if any(not note.get("delivered") for note in notifications):
+            return "accepted_but_chat_offline", "offline"
+        return "accepted", "online"
+
+    async def handle_bridge_transfer(self, request):
+        return await self._handle_bridge_handoff(request, mode="transfer")
+
+    async def handle_bridge_fork(self, request):
+        return await self._handle_bridge_handoff(request, mode="fork")
+
+    async def _handle_bridge_handoff(self, request, *, mode: str):
+        payload = await request.json()
+        payload["mode"] = mode
+        try:
+            package = self._validate_transfer_payload(payload)
+        except ValueError as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
+
+        from orchestrator.ticket_manager import detect_instance
+
+        current_instance = detect_instance(self.global_config.project_root)
+        if str(package["target_instance"]).upper() != str(current_instance).upper():
+            return web.json_response(
+                {"ok": False, "error": f"target instance mismatch: this endpoint is {current_instance}"},
+                status=409,
+            )
+        runtime = self._runtime_map().get(package["target_agent"])
+        if runtime is None:
+            return web.json_response({"ok": False, "error": "target agent not found"}, status=404)
+        if package["source_agent"] == package["target_agent"] and package["source_instance"] == package["target_instance"]:
+            return web.json_response({"ok": False, "error": f"cannot {mode} to the same agent"}, status=400)
+        if not getattr(runtime, "startup_success", False):
+            return web.json_response({"ok": False, "error": "target runtime is offline"}, status=409)
+        if mode == "transfer" and getattr(runtime, "has_active_transfer", None) and runtime.has_active_transfer():
+            return web.json_response({"ok": False, "error": "target already has an active transfer"}, status=409)
+
+        transfer_id = package["transfer_id"]
+        self.transfer_store.create_transfer(package, status="received")
+        self.transfer_store.append_event(transfer_id, "received", {"target_agent": package["target_agent"]})
+        incoming_notice = await self._notify_transfer_chat(
+            runtime,
+            (
+                f"Incoming {'fork' if mode == 'fork' else 'transfer'} received from "
+                f"{package['source_agent']}@{package['source_instance']}.\n"
+                f"{'Fork' if mode == 'fork' else 'Transfer'} ID: {transfer_id}"
+            ),
+            purpose=f"{mode}-incoming",
+        )
+        self.transfer_store.append_event(transfer_id, "incoming_notice", incoming_notice)
+        bridge_prompt = self._build_transfer_prompt(package)
+        request_id = await runtime.enqueue_api_text(
+            bridge_prompt,
+            source=f"bridge-{mode}:{transfer_id}",
+            deliver_to_telegram=True,
+        )
+        if request_id is None:
+            self.transfer_store.update_transfer(
+                transfer_id,
+                status="failed",
+                error_code="enqueue_failed",
+                error_text=f"failed to enqueue {mode} request on target",
+            )
+            self.transfer_store.append_event(transfer_id, "failed", {"reason": "enqueue_failed"})
+            await self._notify_transfer_chat(
+                runtime,
+                (
+                    f"{'Fork' if mode == 'fork' else 'Transfer'} failed before enqueue.\n"
+                    f"{'Fork' if mode == 'fork' else 'Transfer'} ID: {transfer_id}"
+                ),
+                purpose=f"{mode}-failed",
+            )
+            return web.json_response({"ok": False, "error": f"failed to enqueue {mode} request on target"}, status=409)
+
+        self.transfer_store.update_transfer(transfer_id, status="queued_on_target", request_id=request_id)
+        self.transfer_store.append_event(transfer_id, "queued_on_target", {"request_id": request_id})
+        loop = asyncio.get_running_loop()
+        ack_future = loop.create_future()
+
+        async def _listener(result: dict) -> None:
+            if ack_future.done():
+                return
+            ack_future.set_result(self._classify_transfer_ack(transfer_id, result, mode=mode))
+
+        runtime.register_request_listener(request_id, _listener)
+        timeout_s = max(10.0, min(float(payload.get("timeout_s") or 90.0), 180.0))
+        try:
+            ack_result = await asyncio.wait_for(ack_future, timeout=timeout_s)
+        except asyncio.TimeoutError:
+            ack_result = {"ok": False, "error": f"target did not acknowledge {mode} within {int(timeout_s)}s"}
+
+        if not ack_result.get("ok"):
+            error_text = str(ack_result.get("error") or f"{mode} failed")
+            self.transfer_store.update_transfer(
+                transfer_id,
+                status="failed",
+                error_code="target_ack_failed",
+                error_text=error_text,
+            )
+            self.transfer_store.append_event(transfer_id, "failed", {"reason": error_text})
+            await self._notify_transfer_chat(
+                runtime,
+                (
+                    f"{'Fork' if mode == 'fork' else 'Transfer'} failed.\n"
+                    f"{'Fork' if mode == 'fork' else 'Transfer'} ID: {transfer_id}\n"
+                    f"Reason: {error_text}"
+                ),
+                purpose=f"{mode}-failed",
+            )
+            return web.json_response({"ok": False, "error": error_text, "transfer_id": transfer_id}, status=409)
+
+        ack_text = str(ack_result.get("raw_text") or "")
+        ack_mode = str(ack_result.get("ack_mode") or "explicit")
+        accepted_notice = await self._notify_transfer_chat(
+            runtime,
+            (
+                f"{'Fork' if mode == 'fork' else 'Transfer'} accepted from "
+                f"{package['source_agent']}@{package['source_instance']}.\n"
+                f"{'Fork' if mode == 'fork' else 'Transfer'} ID: {transfer_id}"
+            ),
+            purpose=f"{mode}-accepted",
+        )
+        self.transfer_store.append_event(transfer_id, "accepted_notice", accepted_notice)
+        final_status, target_chat_status = self._finalize_transfer_status(incoming_notice, accepted_notice)
+        self.transfer_store.update_transfer(transfer_id, status=final_status, ack_text=ack_text)
+        self.transfer_store.append_event(
+            transfer_id,
+            "accepted",
+            {
+                "request_id": request_id,
+                "ack_mode": ack_mode,
+                "target_chat_status": target_chat_status,
+            },
+        )
+        return web.json_response(
+            {
+                "ok": True,
+                "transfer_id": transfer_id,
+                "request_id": request_id,
+                "status": final_status,
+                "ack_mode": ack_mode,
+                "target_chat_status": target_chat_status,
+            }
+        )
+
+    async def handle_bridge_cos(self, request):
+        """Handle cross-instance Chief of Staff query. Routes to Lily for precedent-based decision support."""
+        payload = await request.json()
+        question = str(payload.get("question") or "").strip()
+        from_agent = str(payload.get("from_agent") or "").strip()
+        if not question or not from_agent:
+            return web.json_response({"ok": False, "error": "question and from_agent required"}, status=400)
+
+        lily_runtime = self._runtime_map().get("lily")
+        if lily_runtime is None or not getattr(lily_runtime, "startup_success", False):
+            return web.json_response({"ok": False, "error": "lily is offline", "reason": "lily_offline"}, status=503)
+
+        cos_result = await lily_runtime.cos_query(question, timeout_s=float(payload.get("timeout_s") or 30.0))
+        return web.json_response({"ok": cos_result.get("answered", False), **cos_result})
+
+    async def handle_bridge_transfer_get(self, request):
+        transfer_id = request.match_info["transfer_id"]
+        record = self.transfer_store.get_transfer(transfer_id)
+        if record is None:
+            return web.json_response({"ok": False, "error": "transfer not found"}, status=404)
+        return web.json_response({"ok": True, "transfer": record})
 
     async def handle_bridge_spawn(self, request):
         return web.json_response(

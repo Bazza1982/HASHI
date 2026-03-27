@@ -1,0 +1,258 @@
+pending_improvements:
+
+  - id: "imp-run-meta-workflow-creation-20260326-211522-002"
+    class: B
+    priority: high
+    workflow_id: haiku-translation-multi-style
+    timestamp: "2026-03-26T21:15:22Z"
+
+    target: "Add user satisfaction feedback collection between step_07 and step_08"
+    title: "Add user satisfaction scoring to workflow output"
+    description: |
+      After markdown_generator completes, collect brief user satisfaction rating
+      (1-5 scale) on translation quality and style preference correlation.
+      This provides ground truth for self_evolution_analyzer.style_preference_insights analysis.
+
+    evidence:
+      - "Design package shows self_evolution_analyzer tracks 'style_preference_correlation' but without user feedback"
+      - "Currently only has translator confidence scores, not actual user satisfaction"
+      - "Feedback loop missing: analyst → translator → user → evolution"
+
+    proposed_change: |
+      Add optional step_07b_satisfaction_collection between markdown_generator (step 07)
+      and self_evolution_analyzer (step 08) that:
+      1. Asks user: "Rate overall translation quality (1-5 scale)"
+      2. Asks: "Which style (A or B) better matches your preference? (A/B/tie)"
+      3. Collects as satisfaction_report.json artifact
+
+    expected_benefit: |
+      - Improved correlation analysis in self_evolution step
+      - Better training signal for future workflow optimizations
+      - Increases accuracy of style_preference_insights from 60% to estimated 85%
+
+    confidence: 0.85
+    risk_level: low
+
+    prerequisites:
+      - "Add optional human_interface interaction capability"
+      - "HChat integration with 30-second timeout"
+      - "satisfaction_report.json schema definition"
+
+    affected_steps: [8]
+    implementation_effort: "medium"
+    implementation_notes: |
+      Would require HChat integration. Optional field in success_criteria.
+      Should be non-blocking to main workflow (if user skips, evolution continues).
+
+    status: "pending_orchestrator_approval"
+    approval_required_by: "orchestrator"
+    submitted_date: "2026-03-26T21:15:22Z"
+    submitted_by: evaluator_01
+
+  - id: "imp-run-meta-workflow-creation-20260326-211522-003"
+    class: B
+    priority: medium
+    workflow_id: haiku-translation-multi-style
+    timestamp: "2026-03-26T21:15:22Z"
+
+    target: "workers/cultural_adapter output enhancement"
+    title: "Add style difficulty scoring to cultural adaptation output"
+    description: |
+      Extend cultural_adapter output to include a difficulty_score (0-100) for each
+      style based on haiku characteristics. This helps translator_style_a/b workers
+      adjust prompt guidance based on actual haiku complexity.
+
+    evidence:
+      - "Some haiku are much harder to translate (abstract Zen references, rare seasonal words)"
+      - "Current design provides no signal to translators about expected difficulty"
+      - "cultural_adapter is the natural place to assess this after analyzing both styles"
+
+    proposed_change: |
+      Extend cultural_adapter.cultural_notes.json output to include:
+      {
+        ...
+        "style_a_difficulty_score": 0-100,
+        "style_b_difficulty_score": 0-100,
+        "difficulty_reasoning": "..."
+      }
+
+    expected_benefit: |
+      - Enables translator prompts to be adjusted: high-difficulty haiku → more detailed guidance
+      - Estimated 15-20% improvement in first-attempt quality for difficult haiku
+      - Better resource allocation (can prioritize complex haiku)
+
+    confidence: 0.78
+    risk_level: very_low
+
+    affected_steps: [4, 5]
+    implementation_effort: "low"
+    implementation_notes: |
+      Requires adding 2 numeric fields to cultural_adapter output.
+      Quality_gatekeeper step 5 should flag if difficulty > 80 for potential escalation.
+      No breaking changes to existing output schema.
+
+    status: "pending_orchestrator_approval"
+    approval_required_by: "orchestrator"
+    submitted_date: "2026-03-26T21:15:22Z"
+    submitted_by: evaluator_01
+
+  - id: "imp-run-meta-workflow-creation-20260326-211522-004"
+    class: C
+    priority: low
+    workflow_id: haiku-translation-multi-style
+    timestamp: "2026-03-26T21:15:22Z"
+
+    target: "step_05_quality_verification with auto-loop logic"
+    title: "Add optional auto-loop for semantic preservation < 90%"
+    description: |
+      Implement optional feedback loop: if quality_gatekeeper detects
+      semantic_score < 90%, automatically route back to translator with
+      back-translation guidance without human intervention.
+
+    evidence:
+      - "Current design requires human decision if semantic < 85%"
+      - "Back-translation comparison is already computed in step_05"
+      - "Could automate retry with refined prompt: 'Back-translation shows {issues}. Adjust to preserve: {key_concepts}'"
+
+    proposed_change: |
+      Add conditional retry logic in quality_gatekeeper step:
+      if semantic_score < 90%:
+        - generate back_translation_guidance.json
+        - trigger translator_retry step (max 2 attempts)
+      else if semantic_score < 85%:
+        - escalate to human_interface
+
+    expected_benefit: |
+      - Reduce human interventions by estimated 25-30%
+      - Faster recovery from semantic drift
+      - Maintains quality bar (>= 85%) while automating common retry scenario
+
+    confidence: 0.72
+    risk_level: medium
+
+    affected_steps: [5, 2-3]
+    implementation_effort: "high"
+    implementation_notes: |
+      Increases workflow complexity. Requires adding translator_retry step
+      and back_translation_guidance generation. Could add 2-3 minutes to
+      difficult haiku. Recommend making optional via pre_flight setting.
+
+    status: "pending_user_approval"
+    approval_required_by: "human_user"
+    approval_context: "High complexity, potential for longer execution times"
+    submitted_date: "2026-03-26T21:15:22Z"
+    submitted_by: evaluator_01
+
+  - id: "imp-run-meta-workflow-creation-20260327-132844-003"
+    class: B
+    priority: high
+    workflow_id: smart-preflight
+    timestamp: "2026-03-27T16:37:19+11:00"
+
+    target: "smart-preflight-module.success_criteria"
+    title: "新增顶层 success_criteria"
+    description: |
+      新增顶层 success_criteria，显式约束 ready_for_workflow=true、
+      high_risk_assumptions=0，以及 assumed_count 的上限。
+
+    evidence:
+      - "validation_report.layer2_issues.missing_workflow_success_criteria 明确指出当前成功定义仅停留在 step_04 quality_gate，缺少工作流级成功标准。"
+
+    expected_benefit: |
+      让整体成功判定可观测、可回归测试，并减少 runner 或 reviewer 的主观解释空间。
+
+    confidence: 0.90
+    risk_level: low
+
+    status: "pending_orchestrator_approval"
+    approval_required_by: "orchestrator"
+    submitted_date: "2026-03-27T16:37:19+11:00"
+    submitted_by: evaluator_01
+
+  - id: "imp-run-meta-workflow-creation-20260327-132844-004"
+    class: C
+    priority: high
+    workflow_id: smart-preflight
+    timestamp: "2026-03-27T16:37:19+11:00"
+
+    target: "flow_runner wait_for_human timeout recovery"
+    title: "在 flow_runner 中实现 wait_for_human 的超时恢复与默认值回退"
+    description: |
+      在 flow_runner 中实现 wait_for_human 的超时恢复与默认值回退，
+      并把 timeout 结果显式写回后续步骤可消费的上下文。
+
+    evidence:
+      - "validation_report 记录 NAGARE-TIMEOUT-001；当前设计把超时 fallback 作为核心能力，但运行时会无限等待。"
+
+    expected_benefit: |
+      让 smart preflight 真正支持无人值守运行，消除批量执行卡死风险。
+
+    confidence: 0.92
+    risk_level: medium
+
+    status: "pending_user_approval"
+    approval_required_by: "human_user"
+    approval_context: "需要修改 flow_runner 核心逻辑，影响所有使用 wait_for_human 的工作流"
+    submitted_date: "2026-03-27T16:37:19+11:00"
+    submitted_by: evaluator_01
+
+  - id: "imp-run-meta-workflow-creation-20260327-174105-002"
+    class: B
+    priority: high
+    workflow_id: academic-writing-paragraph
+    timestamp: "2026-03-27T18:12:59+11:00"
+
+    target: "workflow.steps.final_review.quality_gate"
+    title: "为 final_review 增加 orchestrator 层 quality_gate，例如要求 passed == true 且 quality_score >= 0.7，否则自动阻断输出并走 retry/notify 流程。"
+    description: |
+      为 final_review 增加 orchestrator 层 quality_gate，例如要求 passed == true 且 quality_score >= 0.7，否则自动阻断输出并走 retry/notify 流程。
+
+    evidence:
+      - "validation_report 将 quality_gate 缺失列为 advisory warning；当前设计仅靠 reviewer JSON 字段表达质量结果，缺少系统级执行约束。"
+
+    expected_benefit: |
+      把质量判断从“报告信息”升级为“可执行控制”，降低低质量结果穿透到最终输出的概率。
+
+    confidence: 0.93
+    risk_level: low
+
+    status: "pending_orchestrator_approval"
+    approval_required_by: "orchestrator"
+    submitted_date: "2026-03-27T18:12:59+11:00"
+    submitted_by: evaluator_01
+
+  - id: "imp-run-meta-workflow-creation-20260327-174105-003"
+    class: B
+    priority: high
+    workflow_id: academic-writing-paragraph
+    timestamp: "2026-03-27T18:12:59+11:00"
+
+    target: "agents.workers[*].agent_md path strategy"
+    title: "将 agent_md 从 `flow/runs/{run_id}/workers/...` 迁移到稳定的库级路径，例如 `flow/agents/academic-writing-paragraph/<agent_id>/AGENT.md`，由 run 仅引用而不复制。"
+    description: |
+      将 agent_md 从 `flow/runs/{run_id}/workers/...` 迁移到稳定的库级路径，例如 `flow/agents/academic-writing-paragraph/<agent_id>/AGENT.md`，由 run 仅引用而不复制。
+
+    evidence:
+      - "validation_report 的 agent_md_portability warning 指出当前做法依赖每次实例化复制文件，版本升级无法自动传播。"
+
+    expected_benefit: |
+      提升版本控制、一致性和后续维护效率，减少 run-specific 漂移。
+
+    confidence: 0.9
+    risk_level: low
+
+    status: "pending_orchestrator_approval"
+    approval_required_by: "orchestrator"
+    submitted_date: "2026-03-27T18:12:59+11:00"
+    submitted_by: evaluator_01
+
+metadata:
+  kb_file: improvements/pending.yaml
+  last_updated: "2026-03-27T18:12:59+11:00"
+  total_pending: 7
+  by_class:
+    B: 5
+    C: 2
+  approval_status:
+    pending_orchestrator: 5
+    pending_user: 2

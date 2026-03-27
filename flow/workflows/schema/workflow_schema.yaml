@@ -1,0 +1,300 @@
+# HASHI Flow — Workflow YAML Schema
+# 所有工作流 YAML 必须符合此 schema
+# 版本: 1.0.0
+
+schema_version: "1.0.0"
+
+# =============================================================================
+# 顶层结构
+# =============================================================================
+
+required_sections:
+  - workflow      # 工作流元信息
+  - agents        # agent 定义
+  - steps         # 执行步骤
+
+optional_sections:
+  - meta          # 创建信息、版本历史
+  - changelog     # 版本变更记录
+  - pre_flight    # 预检配置
+  - error_handling
+  - success_criteria
+  - output
+  - evaluation
+
+# =============================================================================
+# workflow 区块
+# =============================================================================
+
+workflow:
+  required_fields:
+    id:
+      type: string
+      pattern: "^[a-z][a-z0-9-]+$"  # 小写字母+数字+短横线
+      description: "工作流唯一标识符"
+    name:
+      type: string
+      description: "工作流人类可读名称"
+    version:
+      type: string
+      pattern: "^\\d+\\.\\d+\\.\\d+$"  # semantic versioning
+      description: "语义版本号"
+  optional_fields:
+    description:
+      type: text
+    tags:
+      type: list[string]
+
+# =============================================================================
+# agents 区块
+# =============================================================================
+
+agents:
+  orchestrator:
+    required_fields:
+      id:
+        type: string
+        description: "orchestrator agent ID（flow-runner 或具体 agent ID）"
+    optional_fields:
+      human_interface:
+        type: string
+        description: "Human Interface Agent ID（负责与用户沟通）"
+
+  workers:
+    type: list
+    item_schema:
+      required_fields:
+        id:
+          type: string
+          description: "worker 唯一 ID"
+        role:
+          type: string
+          description: "worker 角色描述"
+        agent_md:
+          type: path
+          must_exist: true
+          description: "AGENT.md 文件路径（相对于 hashi root）"
+        backend:
+          type: enum
+          values: [claude-cli, gemini-cli, openrouter-api, codex-cli]
+        model:
+          type: enum
+          values:
+            - claude-opus-4-6
+            - claude-sonnet-4-6
+            - claude-haiku-4-5-20251001
+            - gemini-3.1-pro-preview
+            - gemini-2.5-flash
+            - gpt-5.4
+            - deepseek/deepseek-v3.2-exp
+      optional_fields:
+        workspace:
+          type: path_template
+          description: "worker 工作空间路径模板"
+        controllable_by:
+          type: list[string]
+          default: [orchestrator]
+
+# =============================================================================
+# steps 区块
+# =============================================================================
+
+steps:
+  type: list
+  min_items: 1
+  max_items: 12  # 超过 12 步应该拆分为子工作流
+  item_schema:
+    required_fields:
+      id:
+        type: string
+        pattern: "^[a-z][a-z0-9_]+$"  # 小写字母+数字+下划线
+        description: "步骤唯一 ID"
+      name:
+        type: string
+        description: "步骤人类可读名称"
+      agent:
+        type: string
+        must_reference: "agents.workers[].id"
+        description: "执行此步骤的 worker ID"
+      prompt:
+        type: text
+        description: "发送给 worker 的完整 prompt"
+    optional_fields:
+      depends:
+        type: list[string]
+        default: []
+        description: "依赖的步骤 ID 列表（DAG 依赖）"
+        constraint: "不允许循环依赖"
+      strategy:
+        type: enum
+        values: [sequential, parallel]
+        default: sequential
+      input:
+        type: object
+        fields:
+          from_artifacts:
+            type: list[string]
+            description: "依赖的 artifact key 列表"
+          params:
+            type: map[string, string]
+            description: "参数映射，支持 {pre_flight.xxx} 变量替换"
+      output:
+        type: object
+        fields:
+          artifacts:
+            type: list
+            item_schema:
+              key:
+                type: string
+                description: "artifact 唯一 key（全局可引用）"
+              path:
+                type: string
+                description: "输出文件路径（相对于 worker workspace）"
+              type:
+                type: enum
+                values: [json, file, directory]
+      timeout_seconds:
+        type: integer
+        default: 600
+        min: 60
+        max: 3600
+        description: "步骤超时时间（秒）"
+      notify:
+        type: boolean
+        default: true
+        description: "是否通知 human_interface agent。默认 true（每步完成都通知），设为 false 可关闭该步骤的通知"
+      wait_for_human:
+        type: boolean
+        default: false
+        description: |
+          步骤完成后是否等待 human 确认。当为 true 时：
+          1. 步骤完成后，flow_runner 从产出 artifact 中提取 clarification_questions 字段
+          2. 如果有问题，通过 HChat 发给 human_interface，自动暂停工作流
+          3. human 回答写入 {run_dir}/_human_response.json，删除 _pause 恢复
+          4. 回答合并到 pre_flight_data，供后续步骤使用
+          5. 如果无需确认问题（clarification_questions 为空），不暂停直接继续
+      skip_if:
+        type: string
+        description: "跳过条件表达式，为 true 时跳过此步骤"
+      quality_gate:
+        type: object
+        fields:
+          type:
+            type: enum
+            values: [auto, manual]
+          criteria:
+            type: list[string]
+
+# =============================================================================
+# pre_flight 区块
+# =============================================================================
+
+pre_flight:
+  optional_fields:
+    analyst_agent:
+      type: string
+      description: "负责 pre-flight 分析的 agent ID"
+    auto_scan:
+      type: boolean
+      default: true
+      description: "是否自动扫描输入文件"
+    collect_from_human:
+      type: list
+      item_schema:
+        key:
+          type: string
+          description: "参数 key（用于 {pre_flight.xxx} 引用）"
+        question:
+          type: string
+          description: "向用户展示的问题文本"
+        required:
+          type: boolean
+          default: false
+        type:
+          type: enum
+          values: [text, choice, list, boolean]
+        choices:
+          type: list[string]
+          description: "仅 type=choice 时使用"
+    defaults:
+      type: map[string, any]
+      description: "系统默认值，不向用户提问"
+
+# =============================================================================
+# error_handling 区块
+# =============================================================================
+
+error_handling:
+  optional_fields:
+    debug_agent:
+      type: string
+      must_reference: "agents.workers[].id"
+    max_attempts:
+      type: integer
+      default: 3
+      min: 1
+      max: 5
+    retry_strategy:
+      type: map[string, string]
+    on_max_exceeded:
+      type: object
+      fields:
+        action:
+          type: enum
+          values: [notify_human_interface, abort, skip]
+        target:
+          type: string
+          description: "通知目标 agent ID"
+        message:
+          type: string
+          description: "支持 {failed_step_id} 和 {error} 变量"
+
+# =============================================================================
+# evaluation 区块
+# =============================================================================
+
+evaluation:
+  optional_fields:
+    enabled:
+      type: boolean
+      default: true
+    metrics:
+      type: list[string]
+      allowed_values:
+        - total_duration
+        - design_quality_score
+        - model_cost_estimate
+        - error_retries
+        - improvement_adoption_rate
+        - human_interventions
+    improvement_threshold:
+      type: integer
+      default: 5
+      description: "每 N 次运行触发一次改进尝试"
+    auto_apply:
+      type: boolean
+      default: false
+      description: "是否自动应用 A 类改进"
+
+# =============================================================================
+# 验证规则
+# =============================================================================
+
+validation_rules:
+  - name: "no_circular_dependencies"
+    description: "步骤依赖关系不允许循环（DAG 拓扑排序验证）"
+
+  - name: "all_agents_defined"
+    description: "steps[].agent 必须在 agents.workers[] 中有对应定义"
+
+  - name: "all_artifact_refs_valid"
+    description: "from_artifacts 中引用的 key 必须在前置步骤的 output.artifacts 中定义"
+
+  - name: "agent_md_exists"
+    description: "agents.workers[].agent_md 指向的文件必须存在"
+
+  - name: "no_redundant_preflight"
+    description: "pre_flight.collect_from_human 不应包含系统能自主推断的问题"
+
+  - name: "timeout_reasonable"
+    description: "timeout_seconds 应在 60-3600 之间，且与任务规模匹配"

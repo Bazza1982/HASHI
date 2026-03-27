@@ -1,0 +1,228 @@
+{
+  "workflow_id": "meta-workflow-creation",
+  "run_id": "run-meta-workflow-creation-20260326-080613",
+  "analysis_timestamp": "2026-03-26T08:06:13Z",
+  "task_type": "translation",
+  "task_description": "将英文新闻文章翻译为中文 Markdown",
+  "quality_requirement": "标准（速度优先）",
+  "input_validation": {
+    "source_files_provided": false,
+    "validation_status": "INCOMPLETE",
+    "critical_missing": [
+      "source_files - 未提供具体的输入文件路径或内容"
+    ]
+  },
+  "task_decomposition": [
+    {
+      "step": 1,
+      "name": "输入文件验证与加载",
+      "description": "读取并验证英文新闻文章的格式、编码、文件大小",
+      "suggested_agent": "data-validator",
+      "suggested_model": "claude-haiku",
+      "estimated_duration_seconds": 30
+    },
+    {
+      "step": 2,
+      "name": "文本预处理",
+      "description": "识别新闻结构（标题、摘要、正文、链接等），提取 Markdown 标记点",
+      "suggested_agent": "text-analyzer",
+      "suggested_model": "claude-haiku",
+      "estimated_duration_seconds": 60
+    },
+    {
+      "step": 3,
+      "name": "术语/专有名词识别",
+      "description": "识别人名、地名、组织、技术术语，建立术语表",
+      "suggested_agent": "terminology-extractor",
+      "suggested_model": "claude-sonnet",
+      "estimated_duration_seconds": 90
+    },
+    {
+      "step": 4,
+      "name": "核心翻译",
+      "description": "翻译正文内容，保留原有的逻辑结构和信息完整性",
+      "suggested_agent": "translator",
+      "suggested_model": "claude-opus",
+      "estimated_duration_seconds": 300
+    },
+    {
+      "step": 5,
+      "name": "Markdown 格式化",
+      "description": "应用正确的 Markdown 语法（标题层级、粗体、链接、代码块等）",
+      "suggested_agent": "formatter",
+      "suggested_model": "claude-haiku",
+      "estimated_duration_seconds": 60
+    },
+    {
+      "step": 6,
+      "name": "术语一致性检查",
+      "description": "确保相同概念在全文中使用一致的中文表达",
+      "suggested_agent": "terminology-validator",
+      "suggested_model": "claude-sonnet",
+      "estimated_duration_seconds": 120
+    },
+    {
+      "step": 7,
+      "name": "质量审阅",
+      "description": "检查流畅度、准确性、格式完整性，纠正翻译错误",
+      "suggested_agent": "quality-reviewer",
+      "suggested_model": "claude-sonnet",
+      "estimated_duration_seconds": 180
+    },
+    {
+      "step": 8,
+      "name": "最终输出验证",
+      "description": "确保输出文件格式正确、编码正确、Markdown 有效",
+      "suggested_agent": "output-validator",
+      "suggested_model": "claude-haiku",
+      "estimated_duration_seconds": 30
+    }
+  ],
+  "recommended_agent_roles": [
+    {
+      "role": "translator",
+      "responsibility": "执行英→中翻译，处理语境和习惯用语",
+      "required": true,
+      "suggested_model": "claude-opus"
+    },
+    {
+      "role": "terminology-manager",
+      "responsibility": "管理术语表，确保专有名词和技术术语的一致性",
+      "required": false,
+      "suggested_model": "claude-sonnet"
+    },
+    {
+      "role": "formatter",
+      "responsibility": "处理 Markdown 格式、版面和结构",
+      "required": true,
+      "suggested_model": "claude-haiku"
+    },
+    {
+      "role": "quality-reviewer",
+      "responsibility": "最终质量审阅，确保满足用户需求",
+      "required": true,
+      "suggested_model": "claude-sonnet"
+    },
+    {
+      "role": "data-validator",
+      "responsibility": "输入/输出验证，文件格式检查",
+      "required": false,
+      "suggested_model": "claude-haiku"
+    }
+  ],
+  "time_estimation": {
+    "per_article_estimate_seconds": 870,
+    "per_article_estimate_minutes": 14.5,
+    "overhead_seconds": 120,
+    "total_estimated_seconds": 990,
+    "total_estimated_minutes": 16.5,
+    "note": "基于单篇新闻文章（约 500-1500 词），速度优先模式。实际时间取决于文章长度、复杂度、图表数量"
+  },
+  "risk_assessment": {
+    "complexity_level": "medium",
+    "critical_risks": [
+      {
+        "risk": "输入文件未知",
+        "severity": "CRITICAL",
+        "impact": "无法开始任何实际工作",
+        "mitigation": "需要用户提供具体的文件路径或文件内容"
+      },
+      {
+        "risk": "新闻来源未知",
+        "severity": "HIGH",
+        "impact": "无法判断专有名词、背景知识需求、翻译风格预期",
+        "mitigation": "需要获取文章的来源、发布日期、主题领域"
+      },
+      {
+        "risk": "Markdown 目标格式不明确",
+        "severity": "MEDIUM",
+        "impact": "可能无法满足特定的格式需求（如目录生成、脚注处理等）",
+        "mitigation": "需要确认输出的 Markdown 规范（GFM / CommonMark / 其他）"
+      }
+    ],
+    "medium_risks": [
+      {
+        "risk": "专有名词翻译风格",
+        "severity": "MEDIUM",
+        "impact": "人名、品牌名称的音译/意译选择会影响可读性",
+        "mitigation": "建立术语指南，或提供参考翻译"
+      },
+      {
+        "risk": "速度优先可能降低质量",
+        "severity": "MEDIUM",
+        "impact": "快速翻译可能引入拗口的表述",
+        "mitigation": "在第7步（质量审阅）中加强检查"
+      }
+    ],
+    "low_risks": [
+      {
+        "risk": "编码问题",
+        "severity": "LOW",
+        "impact": "UTF-8 编码错误导致乱码",
+        "mitigation": "输入输出都使用 UTF-8"
+      }
+    ]
+  },
+  "pre_flight_questions_for_human": [
+    {
+      "key": "source_file_path",
+      "question": "请提供英文新闻文章的文件路径或直接粘贴内容",
+      "required": true,
+      "type": "file_path_or_text",
+      "priority": "CRITICAL"
+    },
+    {
+      "key": "article_metadata",
+      "question": "请提供以下信息（帮助建立术语表）：\n- 新闻来源（如：BBC、Reuters、NYTimes）\n- 主题领域（如：技术、医学、金融、时政）\n- 发布日期\n- 是否包含特定领域术语（科学名词、法律术语等）",
+      "required": false,
+      "type": "text",
+      "priority": "HIGH"
+    },
+    {
+      "key": "markdown_style",
+      "question": "输出 Markdown 的具体需求：\n- 是否需要目录（Table of Contents）\n- 是否需要保留超链接\n- 是否需要处理引用块、代码块等特殊格式\n- 目标平台（如：GitHub、Notion、知乎等，会影响 Markdown 方言）",
+      "required": false,
+      "type": "multiple_choice_or_text",
+      "priority": "MEDIUM"
+    },
+    {
+      "key": "terminology_preferences",
+      "question": "对于常见词汇的翻译风格，有特定偏好吗？\n- 例：\"AI\" 译为 \"人工智能\" 还是 \"AI\"（保留英文）\n- 人名是否音译或保留英文\n- 是否有公司/品牌的官方中文名称应当使用",
+      "required": false,
+      "type": "text",
+      "priority": "MEDIUM"
+    },
+    {
+      "key": "quality_acceptance_criteria",
+      "question": "\"速度优先\" 的具体含义——可以接受的最小完成度是什么？\n- 完全准确的逐句翻译（耗时长）\n- 意思传达准确即可（允许措辞调整，更快）\n- 或其他标准？",
+      "required": false,
+      "type": "text",
+      "priority": "MEDIUM"
+    }
+  ],
+  "recommended_execution_strategy": {
+    "parallelization_strategy": "sequential_with_validators",
+    "rationale": "翻译任务通常不易并行化，但可在第3步（术语识别）完成后并行执行第6步的验证",
+    "suggested_worker_count": 2,
+    "worker_allocation": {
+      "worker_1": "translator + formatter（步骤 1-5）",
+      "worker_2": "quality_reviewer + validator（步骤 6-8）"
+    },
+    "checkpoint_strategy": "在第3步、第5步、第7步设置检查点，允许中途调整术语表"
+  },
+  "model_selection_rationale": {
+    "claude_haiku": "用于数据验证、格式化、简单的语言任务（预处理、后处理）",
+    "claude_sonnet": "用于术语管理、质量审阅、需要上下文理解的任务",
+    "claude_opus": "用于核心翻译，处理复杂的语义转换和文化差异"
+  },
+  "summary": {
+    "task_readiness": "BLOCKED - 关键信息缺失",
+    "blockers": [
+      "未提供源文件"
+    ],
+    "can_proceed_after": [
+      "获取英文新闻文章内容或路径",
+      "（可选）确认 Markdown 输出规范和术语风格"
+    ]
+  }
+}

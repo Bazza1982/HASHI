@@ -119,3 +119,26 @@ instances.json
 
 # AIPM payload files (project data, not part of HASHI)
 *_payload.json
+
+# Cross-instance mailbox (internal comms, never commit)
+mailbox/
+
+# Flow — runtime output and private project content
+flow/runs/
+flow/workflows/library/
+flow/agents/translator/
+flow/agents/reviewer/
+flow/_trigger_logs/
+flow/_trigger_registry.jsonl
+flow/evaluation_kb/improvements/
+flow/evaluation_kb/workflow_scores/
+flow/evaluation_kb/workflow_versions/
+
+# Gitwatch sentinel runtime state
+scripts/.gitwatch_state.json
+scripts/gitwatch_report.md
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec

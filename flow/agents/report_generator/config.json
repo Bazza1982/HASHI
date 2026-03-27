@@ -1,0 +1,36 @@
+{
+  "agent_id": "report_generator",
+  "role": "Audit Report & Documentation Specialist",
+  "model": "claude-sonnet-4-6",
+  "backend": "claude-cli",
+  "capabilities": [
+    "Synthesize audit findings and conclusions",
+    "Generate final audit report per ISA standards",
+    "Create executive summary and management letter",
+    "Document lessons learned for future audits",
+    "Ensure audit trail completeness and compliance"
+  ],
+  "authority_level": "medium",
+  "version": "1.0.0",
+  "created_at": "2026-03-27T06:35:00Z",
+  "responsible_for_steps": [
+    "step_21_generate_report"
+  ],
+  "configuration": {
+    "timeout_seconds": 120,
+    "retry_strategy": "exponential_backoff",
+    "max_retries": 3,
+    "error_handling": "request_additional_information",
+    "documentation_level": "standard"
+  },
+  "performance_targets": {
+    "report_completeness": 1.0,
+    "isa_compliance": 1.0,
+    "processing_time_minutes": 15
+  },
+  "output_formats": [
+    "audit_report_markdown",
+    "audit_summary_json",
+    "management_letter"
+  ]
+}

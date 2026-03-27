@@ -133,7 +133,11 @@ def instance_root(inst: dict) -> Path:
                 return Path(wsl_root)
         return Path(root)
     elif platform == "wsl":
-        # If running in Windows (unlikely for this script), use wsl_root_from_windows
+        # If running from Windows, use the UNC path to access WSL filesystem
+        if not _is_wsl():
+            wsl_root = inst.get("wsl_root_from_windows")
+            if wsl_root:
+                return Path(wsl_root)
         return Path(root)
     elif platform == "portable":
         return Path(root)

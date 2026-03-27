@@ -10,7 +10,7 @@ setlocal enabledelayedexpansion
 :: ============================================================
 
 set TARGET=D:\HASHI9
-set SOURCE=%~dp0.
+set SOURCE=%~dp0..
 set PYTHON_VERSION=3.13.3
 set PYTHON_ZIP=python-%PYTHON_VERSION%-embed-amd64.zip
 set PYTHON_URL=https://www.python.org/ftp/python/%PYTHON_VERSION%/%PYTHON_ZIP%
@@ -44,15 +44,25 @@ if /i not "%CONFIRM%"=="YES" (
 
 echo.
 echo [1/5] Copying project files...
+
+:: Clear previous HASHI9 folder (except python\ to avoid re-download)
+if exist "%TARGET%\python" (
+    echo    Keeping existing Python installation...
+) else (
+    if exist "%TARGET%" rmdir /s /q "%TARGET%"
+)
 if not exist "%TARGET%" mkdir "%TARGET%"
 
 :: Copy project files, excluding runtime/dev artifacts
-robocopy "%SOURCE%" "%TARGET%" /E /XD .git .venv __pycache__ build dist logs ^
+:: /R:0 /W:0 = no retries on locked files (avoids hanging on open SQLite DBs)
+:: errorlevel 16 = fatal; errorlevel 8 = some files skipped (acceptable)
+robocopy "%SOURCE%" "%TARGET%" /E /R:0 /W:0 ^
+    /XD .git .venv __pycache__ build dist logs wa_session ^
     windows-packaging-smoke-home node_modules .idea .vscode ^
     /XF *.pyc *.pyo *.spec hashi-zero.exe ^
     /NP /NFL /NDL /NJH /NJS >nul 2>&1
 
-if errorlevel 8 (
+if errorlevel 16 (
     echo ERROR: File copy failed. Check that D: is writable.
     pause
     exit /b 1
@@ -140,18 +150,51 @@ if errorlevel 1 (
 echo    Done.
 
 echo.
-echo [5/5] Finalising...
+echo [5/5] Finalising - stripping runtime data...
 
-:: Clear any runtime data that may have copied over
+:: System logs
 if exist "%TARGET%\logs" rmdir /s /q "%TARGET%\logs"
-if exist "%TARGET%\workspaces\hashiko\bridge_memory.sqlite" del /f "%TARGET%\workspaces\hashiko\bridge_memory.sqlite"
-if exist "%TARGET%\workspaces\hashiko\transcript.jsonl" del /f "%TARGET%\workspaces\hashiko\transcript.jsonl"
-if exist "%TARGET%\workspaces\hashiko\recent_context.jsonl" del /f "%TARGET%\workspaces\hashiko\recent_context.jsonl"
-if exist "%TARGET%\workspaces\onboarding_agent\conversation_log.jsonl" ^
-    type nul > "%TARGET%\workspaces\onboarding_agent\conversation_log.jsonl"
-
-:: Create logs dir so HASHI starts cleanly
 mkdir "%TARGET%\logs" >nul 2>&1
+
+:: WhatsApp session (contains linked account - do not ship)
+if exist "%TARGET%\wa_session" rmdir /s /q "%TARGET%\wa_session"
+mkdir "%TARGET%\wa_session" >nul 2>&1
+
+:: Workspace runtime files - keep only AGENT.md per workspace
+for /D %%W in ("%TARGET%\workspaces\*") do (
+    if exist "%%W\transcript.jsonl"         del /f /q "%%W\transcript.jsonl"
+    if exist "%%W\conversation_log.jsonl"   del /f /q "%%W\conversation_log.jsonl"
+    if exist "%%W\recent_context.jsonl"     del /f /q "%%W\recent_context.jsonl"
+    if exist "%%W\handoff.md"               del /f /q "%%W\handoff.md"
+    if exist "%%W\bridge_memory.sqlite"     del /f /q "%%W\bridge_memory.sqlite"
+    if exist "%%W\bridge_memory.sqlite-wal" del /f /q "%%W\bridge_memory.sqlite-wal"
+    if exist "%%W\bridge_memory.sqlite-shm" del /f /q "%%W\bridge_memory.sqlite-shm"
+    if exist "%%W\state.json"               del /f /q "%%W\state.json"
+    if exist "%%W\logs"                     rmdir /s /q "%%W\logs"
+)
+
+echo    Done.
+
+echo.
+echo [6/6] Configuring DeepSeek API for China build...
+
+:: Patch agents.json: set hashiko to use deepseek-api / deepseek-reasoner
+:: Also fix authorized_id: must be integer 0 (not string placeholder) for config to load
+powershell -NoProfile -Command ^
+    "$f='%TARGET%\agents.json'; $j=Get-Content $f -Raw | ConvertFrom-Json; foreach($a in $j.agents){ if($a.name -eq 'hashiko'){ $a.engine='deepseek-api'; $a.model='deepseek-reasoner'; $a.active_backend='deepseek-api'; $a.allowed_backends=@(@{engine='deepseek-api';model='deepseek-reasoner'}) } }; if($j.global.authorized_id -isnot [int]){ $j.global.authorized_id=0 }; $j | ConvertTo-Json -Depth 10 | Set-Content $f -Encoding UTF8"
+
+:: Patch secrets.json: keep deepseek key only if it already exists in copied secrets.json
+:: Never embed live credentials in this script or any tracked file.
+powershell -NoProfile -Command ^
+    "$f='%TARGET%\secrets.json'; $j=Get-Content $f -Raw | ConvertFrom-Json; $deepseekKey=$j.'deepseek-api_key'; if(-not $deepseekKey){ $deepseekKey=$j.'deepseek_api_key' }; $j.PSObject.Properties.Remove('openrouter-api_key'); if($deepseekKey){ Add-Member -InputObject $j -MemberType NoteProperty -Name 'deepseek-api_key' -Value $deepseekKey -Force } else { Write-Host 'WARNING: deepseek-api_key not found in secrets.json; configure it manually before use.' }; $j | ConvertTo-Json -Depth 5 | Set-Content $f -Encoding UTF8"
+
+:: Patch agents.json: use distinct workbench port (8779) to avoid conflict with host instance
+powershell -NoProfile -Command ^
+    "$f='%TARGET%\agents.json'; $j=Get-Content $f -Raw | ConvertFrom-Json; $j.global.workbench_port=8779; $j | ConvertTo-Json -Depth 10 | Set-Content $f -Encoding UTF8"
+
+:: Fix bridge-u.bat: force BRIDGE_HOME to USB root (ignore inherited env from host HASHI9)
+powershell -NoProfile -Command ^
+    "$f='%TARGET%\bin\bridge-u.bat'; (Get-Content $f) -replace 'if not defined BRIDGE_HOME set \"BRIDGE_HOME=!BRIDGE_CODE_ROOT!\"',':: USB: always force BRIDGE_HOME to this USB root`r`nset \"BRIDGE_HOME=!BRIDGE_CODE_ROOT!\"' | Set-Content $f -Encoding UTF8"
 
 echo    Done.
 

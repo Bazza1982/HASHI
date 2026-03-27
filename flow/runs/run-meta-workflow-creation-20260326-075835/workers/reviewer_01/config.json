@@ -1,0 +1,120 @@
+{
+  "worker_id": "reviewer_01",
+  "workflow_id": "news_translation_to_markdown",
+  "role": "reviewer",
+  "model": "claude-sonnet-4-6",
+  "entrypoint": "verify_and_finalize",
+  "execution_config": {
+    "timeout_seconds": 600,
+    "max_retries": 3,
+    "retry_delay_seconds": 5,
+    "parallel": false
+  },
+  "task_config": {
+    "task_name": "verify_and_finalize",
+    "description": "Verify terminology consistency, validate Markdown format, finalize output",
+    "steps": [
+      {
+        "step": 1,
+        "name": "consistency_check",
+        "description": "Compare all entities against terminology_table"
+      },
+      {
+        "step": 2,
+        "name": "format_validation",
+        "description": "Validate Markdown syntax and structure"
+      },
+      {
+        "step": 3,
+        "name": "quality_assessment",
+        "description": "Assess translation accuracy and readability"
+      },
+      {
+        "step": 4,
+        "name": "generate_metadata",
+        "description": "Add translation metadata header"
+      },
+      {
+        "step": 5,
+        "name": "generate_report",
+        "description": "Create comprehensive quality report"
+      },
+      {
+        "step": 6,
+        "name": "finalize_output",
+        "description": "Output final_article_zh.md"
+      }
+    ]
+  },
+  "input_schema": {
+    "translated_draft": {
+      "type": "string|object",
+      "description": "Translated draft from translator_01",
+      "required": true
+    },
+    "terminology_table": {
+      "type": "object",
+      "description": "Entity translation mapping from analyst_01",
+      "required": true
+    },
+    "original_file_path": {
+      "type": "string",
+      "description": "Path to original English article",
+      "required": false
+    }
+  },
+  "output_schema": {
+    "final_output": {
+      "type": "object",
+      "description": "Publication-ready final article with metadata"
+    },
+    "quality_report": {
+      "type": "object",
+      "description": "Detailed quality assessment and findings"
+    }
+  },
+  "verification_settings": {
+    "consistency_threshold": 0.95,
+    "auto_fix_minor_issues": true,
+    "auto_fix_confidence_threshold": 0.90,
+    "report_all_issues": true
+  },
+  "quality_checks": {
+    "consistency_check": true,
+    "format_validation": true,
+    "translation_accuracy": true,
+    "readability_check": true,
+    "metadata_generation": true
+  },
+  "metadata_settings": {
+    "include_translation_date": true,
+    "include_source_reference": true,
+    "include_version_number": true,
+    "include_consistency_score": true,
+    "metadata_format": "yaml_frontmatter"
+  },
+  "error_handling": {
+    "on_consistency_fail": "report_and_auto_fix_if_confident",
+    "on_format_error": "fix_and_report",
+    "on_timeout": "escalate_to_debug",
+    "high_failure_mode": "escalate_to_human_if_available"
+  },
+  "automation_mode": {
+    "human_intervention_available": false,
+    "auto_resolve_mismatches": true,
+    "confidence_threshold": 0.90
+  },
+  "output_format": {
+    "final_output": "Markdown with YAML frontmatter",
+    "quality_report": "JSON",
+    "encoding": "utf-8"
+  },
+  "dependencies": [
+    "analyst_01",
+    "translator_01"
+  ],
+  "provides": [
+    "final_output",
+    "quality_report"
+  ]
+}
