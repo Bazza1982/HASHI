@@ -10,10 +10,14 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tests.mocks.mock_adapters import MockBackend, MockScenario, SimpleTestConfig, SimpleGlobalConfig
 from tests.mocks.test_logger import TestLogger, get_logger, set_logger
+
+pytestmark = pytest.mark.anyio
 
 
 class LoggingMockBackend(MockBackend):

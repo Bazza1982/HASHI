@@ -27,6 +27,8 @@ class LogLevel(Enum):
 @dataclass
 class TestLogEntry:
     """A single log entry with full context."""
+    __test__ = False
+
     timestamp: str
     level: str
     category: str
@@ -51,6 +53,8 @@ class TestLogEntry:
 @dataclass  
 class TestRunSummary:
     """Summary of a test run."""
+    __test__ = False
+
     run_id: str
     start_time: str
     end_time: Optional[str] = None
@@ -88,6 +92,8 @@ class TestLogger:
         logger.export_report()
     """
     
+    __test__ = False
+
     def __init__(
         self,
         log_dir: str | Path = "/tmp/hashi_test_logs",

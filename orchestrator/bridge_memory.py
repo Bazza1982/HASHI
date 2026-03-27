@@ -323,10 +323,15 @@ class BridgeMemoryStore:
         q = (query or "").replace('"', '""').strip()
         if not q:
             return ""
-        parts = [p for p in re.findall(r"[a-zA-Z0-9_]+", q) if len(p) > 1]
+        reserved = {"AND", "OR", "NOT", "NEAR"}
+        parts = [
+            p
+            for p in re.findall(r"[a-zA-Z0-9_]+", q)
+            if len(p) > 1 and p.upper() not in reserved
+        ]
         if not parts:
             return ""
-        return " OR ".join(parts[:16])
+        return " OR ".join(f'"{p}"' for p in parts[:16])
 
     def record_turn(self, role: str, source: str, text: str):
         clean = (text or "").strip()
@@ -423,18 +428,21 @@ class BridgeMemoryStore:
                 except Exception:
                     pass
             if safe_query:
-                rows = conn.execute(
-                    """
-                    SELECT m.id, m.ts, m.memory_type, m.source, m.content, m.importance, m.embedding
-                    FROM memory_fts f
-                    JOIN memories m ON m.id = f.memory_id
-                    WHERE memory_fts MATCH ?
-                    LIMIT 40
-                    """,
-                    (safe_query,),
-                ).fetchall()
-                for row in rows:
-                    candidates[row["id"]] = dict(row)
+                try:
+                    rows = conn.execute(
+                        """
+                        SELECT m.id, m.ts, m.memory_type, m.source, m.content, m.importance, m.embedding
+                        FROM memory_fts f
+                        JOIN memories m ON m.id = f.memory_id
+                        WHERE memory_fts MATCH ?
+                        LIMIT 40
+                        """,
+                        (safe_query,),
+                    ).fetchall()
+                    for row in rows:
+                        candidates[row["id"]] = dict(row)
+                except sqlite3.OperationalError:
+                    pass
 
             recent_rows = conn.execute(
                 """

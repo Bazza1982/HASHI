@@ -33,6 +33,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+test = ["pytest>=9.0.0,<10.0.0"]
 whatsapp = ["neonize>=1.0.0"]
 voice = ["edge-tts>=6.0.0"]
 vector = [

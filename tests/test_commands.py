@@ -12,10 +12,14 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, List, Dict
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tests.mocks.mock_adapters import MockBackend, MockScenario, SimpleTestConfig, SimpleGlobalConfig
 from tests.mocks.test_logger import TestLogger
+
+pytestmark = pytest.mark.anyio
 
 
 # === Mock Runtime for Command Testing ===

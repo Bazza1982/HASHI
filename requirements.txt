@@ -10,6 +10,7 @@ croniter>=1.3.0
 # TUI
 rich>=13.0.0
 textual>=0.50.0
+pytest>=9.0.0,<10.0.0
 
 # Optional: WhatsApp support
 # neonize>=1.0.0
