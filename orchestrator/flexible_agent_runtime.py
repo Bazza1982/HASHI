@@ -893,6 +893,12 @@ class FlexibleAgentRuntime:
                 f"💭 Think: {'ON' if self._think else 'OFF'}",
                 f"🕓 Last Switch: {self._format_age(self.last_backend_switch_at)}",
             ])
+            try:
+                from tools.token_tracker import get_summary, format_status_line
+                _usage_summary = get_summary(self.workspace_dir, session_id=self.session_id_dt)
+                lines.append(f"💰 Tokens: {format_status_line(_usage_summary)}")
+            except Exception:
+                pass
         else:
             lines.append("")
             lines.append("Use /status full for more detail.")
@@ -1145,6 +1151,7 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CommandHandler("hchat", self._wrap_cmd("hchat", self.cmd_hchat)))
         self.app.add_handler(CommandHandler("group", self._wrap_cmd("group", self.cmd_group)))
         self.app.add_handler(CallbackQueryHandler(self.callback_group, pattern=r"^group:"))
+        self.app.add_handler(CommandHandler("usage", self._wrap_cmd("usage", self.cmd_usage)))
         self.app.add_handler(CommandHandler("logo", self._wrap_cmd("logo", self.cmd_logo)))
         self.app.add_handler(CommandHandler("move", self._wrap_cmd("move", self.cmd_move)))
         self.app.add_handler(CallbackQueryHandler(self.callback_move, pattern=r"^move:"))
@@ -2987,6 +2994,50 @@ class FlexibleAgentRuntime:
             )
             return
 
+    # ── /usage ────────────────────────────────────────────────────────────────
+
+    async def cmd_usage(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        try:
+            from tools.token_tracker import get_summary, format_summary_text
+        except ImportError:
+            await self._reply_text(update, "❌ token_tracker not available.")
+            return
+
+        args = [a.strip().lower() for a in (context.args or []) if a.strip()]
+        show_all = args and args[0] == "all"
+
+        if show_all:
+            # Collect usage from all agents via orchestrator
+            orchestrator = getattr(self, "orchestrator", None)
+            if orchestrator is None:
+                await self._reply_text(update, "❌ Orchestrator unavailable for all-agents view.")
+                return
+            lines = ["<b>📊 Token Usage — All Agents</b>\n"]
+            total_cost = 0.0
+            for runtime in orchestrator.runtimes:
+                s = get_summary(runtime.workspace_dir, session_id=runtime.session_id_dt)
+                all_t = s.get("all_time", {})
+                if all_t.get("requests", 0) == 0:
+                    continue
+                tokens = all_t["input"] + all_t["output"]
+                cost = all_t["cost_usd"]
+                total_cost += cost
+                sess = s.get("session", {}) or {}
+                sess_tokens = sess.get("input", 0) + sess.get("output", 0)
+                sess_cost = sess.get("cost_usd", 0.0)
+                lines.append(
+                    f"<b>{runtime.name}</b>  {tokens//1000}K tokens  ${cost:.4f}"
+                    + (f"  (session {sess_tokens//1000}K ${sess_cost:.4f})" if sess.get("requests") else "")
+                )
+            lines.append(f"\n<b>Total: ${total_cost:.4f}</b>")
+            await self._reply_text(update, "\n".join(lines), parse_mode="HTML")
+        else:
+            summary = get_summary(self.workspace_dir, session_id=self.session_id_dt)
+            text = format_summary_text(summary, agent_name=self.name)
+            await self._reply_text(update, text, parse_mode="HTML")
+
     async def cmd_logo(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
@@ -4750,6 +4801,18 @@ class FlexibleAgentRuntime:
                     "text": response.text,
                     "request_id": item.request_id,
                 }
+                try:
+                    from tools.token_tracker import estimate_tokens, record_usage
+                    record_usage(
+                        self.workspace_dir,
+                        model=self.get_current_model(),
+                        backend=self.config.active_backend,
+                        input_tokens=estimate_tokens(item.prompt),
+                        output_tokens=estimate_tokens(response.text),
+                        session_id=self.session_id_dt,
+                    )
+                except Exception:
+                    pass
                 memory_user_text = item.prompt
                 if item.source.lower() in {"document", "photo", "voice", "audio", "video", "sticker"}:
                     memory_user_text = f"[{item.source}] {item.summary}"
@@ -5057,6 +5120,18 @@ class FlexibleAgentRuntime:
                             "summary": item.summary,
                         },
                     )
+                    try:
+                        from tools.token_tracker import estimate_tokens, record_usage
+                        record_usage(
+                            self.workspace_dir,
+                            model=self.get_current_model(),
+                            backend=self.config.active_backend,
+                            input_tokens=estimate_tokens(item.prompt),
+                            output_tokens=estimate_tokens(response.text),
+                            session_id=self.session_id_dt,
+                        )
+                    except Exception:
+                        pass
                     if not item.silent:
                         self.last_response = {
                             "chat_id": item.chat_id,

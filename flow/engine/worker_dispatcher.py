@@ -38,7 +38,8 @@ class WorkerDispatcher:
         self.logger = logging.getLogger(f"flow.dispatcher.{run_id}")
 
     def dispatch(self, agent_id: str, task_message: dict, agent_md_path: str,
-                 timeout_seconds: int = 600) -> dict:
+                 timeout_seconds: int = 600, backend: str = "claude-cli",
+                 model: str = "") -> dict:
         """
         调度任务给指定 worker。
 
@@ -47,6 +48,8 @@ class WorkerDispatcher:
             task_message: 符合 agent.schema.yaml 的任务消息
             agent_md_path: worker AGENT.md 文件路径（相对于 hashi root）
             timeout_seconds: 最大等待秒数
+            backend: 后端类型 ("claude-cli" 或 "codex-cli")
+            model: 模型标识符（如 "claude-opus-4-6", "gpt-5.4"）
 
         Returns:
             {"status": "completed"|"failed", "artifacts_produced": {}, "summary": "", ...}
@@ -73,14 +76,16 @@ class WorkerDispatcher:
         # 构建发给 worker 的完整 prompt
         user_prompt = self._build_worker_prompt(task_message, worker_dir)
 
-        # 运行 claude CLI
-        result = self._run_claude(
+        # 运行 CLI（根据 backend 选择 claude 或 codex）
+        result = self._run_cli(
             agent_id=agent_id,
             task_id=task_id,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             worker_dir=worker_dir,
             timeout_seconds=timeout_seconds,
+            backend=backend,
+            model=model,
         )
 
         # 写入 outbox 结果文件
@@ -163,18 +168,31 @@ class WorkerDispatcher:
 
         return "\n".join(lines)
 
-    def _run_claude(self, agent_id: str, task_id: str, system_prompt: str,
-                    user_prompt: str, worker_dir: Path, timeout_seconds: int) -> dict:
-        """调用 claude CLI 执行任务，解析结果"""
+    def _run_cli(self, agent_id: str, task_id: str, system_prompt: str,
+                 user_prompt: str, worker_dir: Path, timeout_seconds: int,
+                 backend: str = "claude-cli", model: str = "") -> dict:
+        """调用 CLI 执行任务，根据 backend 选择 claude 或 codex，解析结果"""
         log_dir = worker_dir / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file = log_dir / f"{task_id}.log"
 
-        # 构建命令（--dangerously-skip-permissions 允许 worker 在沙盒 runs/ 目录内自由写文件）
-        cmd = ["claude", "--print", "--dangerously-skip-permissions",
-               "--system-prompt", system_prompt, user_prompt]
+        # 根据 backend 构建命令
+        if backend == "codex-cli":
+            # Codex CLI（OpenAI）— 使用 exec 子命令非交互运行
+            cmd = ["codex", "exec",
+                   "--model", model or "o4-mini",
+                   "--full-auto"]
+            # codex exec 用 prompt 作为最后一个参数，合并 system + user prompt
+            full_prompt = f"SYSTEM INSTRUCTIONS:\n{system_prompt}\n\nTASK:\n{user_prompt}"
+            cmd.append(full_prompt)
+        else:
+            # Claude CLI（默认）
+            cmd = ["claude", "--print", "--dangerously-skip-permissions"]
+            if model:
+                cmd.extend(["--model", model])
+            cmd.extend(["--system-prompt", system_prompt, user_prompt])
 
-        self.logger.info(f"[Claude] 启动 worker {agent_id}, task={task_id}")
+        self.logger.info(f"[{backend}] 启动 worker {agent_id}, task={task_id}, model={model}")
 
         # 移除嵌套会话检测变量（允许在 Claude Code 会话内启动子进程）
         child_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}

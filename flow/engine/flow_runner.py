@@ -768,12 +768,16 @@ class FlowRunner:
 
         agent_md_path = worker_def.get("agent_md", f"flow/agents/{agent_id}/AGENT.md")
         timeout = message.get("timeout_seconds", 600)
+        backend = worker_def.get("backend", "claude-cli")
+        model = worker_def.get("model", "")
 
         result = self.dispatcher.dispatch(
             agent_id=agent_id,
             task_message=message,
             agent_md_path=agent_md_path,
             timeout_seconds=timeout,
+            backend=backend,
+            model=model,
         )
         return result
 

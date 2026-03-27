@@ -6,17 +6,17 @@
 workflow:
   id: meta-workflow-creation
   name: "工作流创建工作流"
-  version: "1.4.0"
+  version: "1.5.0"
   description: |
     接收用户的自然语言需求，自动设计并创建完整的工作流配置。
     这是 HASHI Flow 的元工作流，用于 bootstrap 任何其他工作流。
-    v1.3：pre-flight 后完全自动，异步改进确认，candidate 发布机制
+    v1.5：多厂商独立评估 + critic（devil's advocate）设计批判
   tags: [meta, system, workflow-creation]
 
 meta:
   created_by: human
   created_at: "2026-03-26T06:00:00Z"
-  previous_version: "1.2.0"
+  previous_version: "1.4.0"
   improvement_count: 0
   source_prompt: "系统核心工作流，手动创建"
   # trace_id 和 parent_run_id 由 flow_runner 在运行时自动生成并写入 events
@@ -40,6 +40,23 @@ changelog:
       - 删除 self_improvement_score（Evaluator 不给自己打分）
       - success_criteria 改用 evaluation_kb 历史查询
       - Designer/Validator 参照实际 schema 文件
+  - version: "1.4.0"
+    date: "2026-03-27"
+    changes: |
+      事件驱动 + 人工控制：
+      - HChat 实时通知（替代轮询 watchdog）
+      - 信号文件暂停/停止机制
+      - wait_for_human 机制（analyst 可暂停问人）
+      - 30 秒步间缓冲
+  - version: "1.5.0"
+    date: "2026-03-27"
+    changes: |
+      多厂商独立评估 + 设计批判：
+      - evaluator_01 改用 codex-cli / GPT-5.4（消除 Claude 自评偏差）
+      - 新增 reviewer_01（codex-cli / GPT-5.4）独立审查员
+      - 新增 critic_01（codex-cli / GPT-5.4）Devil's Advocate 角色
+      - 新增 critique_design 步骤（design → critic → create_files）
+      - critic 权重机制：意见仅供参考，orchestrator 有最终决策权
 
 # =============================================================================
 # Pre-flight：在设计工作流之前，收集必要信息
@@ -103,8 +120,24 @@ agents:
       role: "评估与改进引擎"
       agent_md: "flow/agents/evaluator/AGENT.md"
       workspace: "flow/runs/{run_id}/workers/evaluator_01"
-      backend: claude-cli
-      model: claude-opus-4-6  # 评估需要高质量判断
+      backend: codex-cli
+      model: gpt-5.4  # 独立评估：使用不同厂商模型消除自评偏差
+      controllable_by: [orchestrator, human]
+
+    - id: reviewer_01
+      role: "独立审查员"
+      agent_md: "flow/agents/reviewer/AGENT.md"
+      workspace: "flow/runs/{run_id}/workers/reviewer_01"
+      backend: codex-cli
+      model: gpt-5.4  # 独立审查：使用不同厂商模型确保评估独立性
+      controllable_by: [orchestrator, human]
+
+    - id: critic_01
+      role: "魔鬼代言人（Devil's Advocate）"
+      agent_md: "flow/agents/critic/AGENT.md"
+      workspace: "flow/runs/{run_id}/workers/critic_01"
+      backend: codex-cli
+      model: gpt-5.4  # 外部视角：专门挑战设计假设和盲点
       controllable_by: [orchestrator, human]
 
     - id: debug_01
@@ -154,7 +187,7 @@ steps:
         - key: task_analysis
           path: task_analysis.json
           type: json
-    timeout_seconds: 180
+    timeout_seconds: 360
 
   # 步骤 2：设计工作流（参照知识库 + schema）
   - id: design_workflow
@@ -205,13 +238,72 @@ steps:
           type: json
     timeout_seconds: 600
 
-  # 步骤 3：创建工作流文件
+  # 步骤 2.5：设计批判（Devil's Advocate）
+  # ⚠️ 权重机制：critic 的意见是参考性质，不是指令。
+  # orchestrator 有最终决策权——评估 critic 意见是否合理后选择性采纳。
+  # 即使 critic 全盘否定设计，orchestrator 也可以记录意见但继续推进。
+  # 目标：引入外部视角，而非造成工作流阻塞或设计大幅逆转。
+  - id: critique_design
+    name: "设计批判（Devil's Advocate）"
+    agent: critic_01
+    depends: [design_workflow]
+    input:
+      from_artifacts: [task_analysis, design_package]
+      params:
+        task_description: "{pre_flight.task_description}"
+    prompt: |
+      你是 Devil's Advocate（魔鬼代言人）。你的职责是从对立面审视设计，挑出潜在的问题。
+
+      读取以下 artifacts：
+      - task_analysis.json（需求分析结果）
+      - design_package.json（设计方案及其 rationale）
+
+      请从以下五个维度进行批判，输出 critique_report.json：
+
+      1. **盲点**：设计是否遗漏了任务需求中的重要场景或边缘情况？
+      2. **风险**：设计中哪些决策可能在执行时导致失败？（例如：model 选择不当、timeout 太短、步骤依赖缺失）
+      3. **过度复杂**：是否有不必要的步骤、agent、或配置？能否简化？
+      4. **不必要假设**：设计是否做了任务描述中未提及的假设？这些假设是否安全？
+      5. **替代方案**：是否有更简单、更可靠的设计方式被忽略？
+
+      输出格式：
+      ```json
+      {
+        "status": "completed",
+        "critique": {
+          "blind_spots": [{"issue": "...", "severity": "high/medium/low", "suggestion": "..."}],
+          "risks": [{"issue": "...", "severity": "high/medium/low", "mitigation": "..."}],
+          "over_engineering": [{"issue": "...", "suggestion": "..."}],
+          "unwarranted_assumptions": [{"assumption": "...", "risk_if_wrong": "..."}],
+          "alternative_approaches": [{"approach": "...", "pros": "...", "cons": "..."}]
+        },
+        "overall_assessment": "设计整体是否合理的一句话总结",
+        "critical_issues_count": 0,
+        "recommendation": "proceed / revise_minor / revise_major",
+        "summary": "批判总结",
+        "artifacts_produced": {"critique_report": "critique_report.json"}
+      }
+      ```
+
+      ⚠️ 重要原则：
+      - 你的意见是**参考性质**，供 orchestrator 决策使用，不是强制要求
+      - 请保持建设性批判——指出问题的同时提供具体改进建议
+      - severity 要诚实标注，不要为了显示价值而夸大问题
+      - 如果设计确实优秀，也可以给出 "proceed" 建议，不必强行找问题
+    output:
+      artifacts:
+        - key: critique_report
+          path: critique_report.json
+          type: json
+    timeout_seconds: 600
+
+  # 步骤 3：创建工作流文件（参考 critic 意见但 orchestrator 决定是否采纳）
   - id: create_workflow_files
     name: "创建工作流文件"
     agent: designer_01
-    depends: [design_workflow]
+    depends: [critique_design]
     input:
-      from_artifacts: [design_package]
+      from_artifacts: [design_package, critique_report]
     prompt: |
       根据 design_package.json 的内容，实际创建以下文件：
 
@@ -220,13 +312,33 @@ steps:
       3. 各 worker 的初始 config.json
       4. 工作空间目录结构
 
-      完成后输出 creation_report.json，列出所有创建的文件及其 checksum。
+      ⚠️ 在创建文件之前，必须先逐条处理 critique_report.json（Devil's Advocate 的批判意见）。
+
+      【强制要求】对 critique_report 中所有 severity=high 的 blind_spots 和 risks，
+      你必须逐条给出明确回应，格式如下：
+      - "同意" + 采纳措施（说明如何在文件中修正）
+      - "拒绝" + 理由（说明为什么 critic 的意见不适用）
+      - "延期" + 理由（说明为什么现在不处理，记录为 pending）
+
+      对 severity=medium/low 的意见可以批量处理，但也需要简要说明处理决策。
+      你有最终决策权，但必须留下可审计的决策记录。
+
+      在 creation_report.json 中包含 "critic_responses" 字段，结构如下：
+      {
+        "critic_responses": [
+          {"issue": "原始问题", "severity": "high", "decision": "同意/拒绝/延期", "rationale": "理由", "action_taken": "具体措施"}
+        ],
+        "files_created": [...],
+        "checksums": {...}
+      }
+
+      完成后输出 creation_report.json。
     output:
       artifacts:
         - key: creation_report
           path: creation_report.json
           type: json
-    timeout_seconds: 300
+    timeout_seconds: 600
 
   # 步骤 4：双层验证
   - id: validate_workflow
@@ -272,7 +384,7 @@ steps:
       type: auto
       criteria:
         - "validation_report.valid == true"
-    timeout_seconds: 180
+    timeout_seconds: 360
 
   # 步骤 5：评估 + 生成改进建议
   - id: evaluate_and_improve
@@ -334,7 +446,7 @@ steps:
         - key: evaluation_report
           path: evaluation_report.json
           type: json
-    timeout_seconds: 300
+    timeout_seconds: 600
 
   # 步骤 6：生成 vNext candidate（自动应用 A 类，B/C 类记录 pending）
   - id: apply_improvement
@@ -383,7 +495,7 @@ steps:
         - key: candidate_workflow
           path: "output/{workflow_id}_candidate.yaml"
           type: file
-    timeout_seconds: 300
+    timeout_seconds: 600
 
   # 步骤 7：异步通知（非阻塞，自动完成）
   - id: notify_completion
@@ -415,7 +527,7 @@ steps:
         - key: notification_report
           path: notification_report.json
           type: json
-    timeout_seconds: 120
+    timeout_seconds: 600
 
 # =============================================================================
 # 错误处理

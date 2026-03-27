@@ -227,7 +227,7 @@ def format_report(findings: list[dict]) -> str:
     elif any_critical:
         lines.append("🔴 发现严重问题，请爸爸注意！阿拉蕾会继续跟进。")
     else:
-        lines.append("🟡 有警告项，建议爸爸确认后处理。")
+        lines.append("🟢 无严重问题！当前仅有可恢复警告，系统整体健康，建议继续观察。")
 
     return "\n".join(lines)
 
