@@ -1,0 +1,5 @@
+name: "Workflow Work"
+description: "Build and improve the Nagare/Shimanto workflow system itself. Uses the workflow system to build the workflow system — self-referential by design."
+status: active
+created: "2026-03-28"
+parent_minato: ai-consulting

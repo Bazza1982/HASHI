@@ -16,10 +16,41 @@ from datetime import datetime, timedelta
 
 # ── Instance definitions ────────────────────────────────────────────────────
 INSTANCES = {
-    "HASHI1": Path("/home/lily/projects/hashi/logs"),
-    "HASHI2": Path("/home/lily/projects/hashi2/logs"),
-    "HASHI9": Path("/mnt/c/Users/thene/projects/HASHI/logs"),
+    "HASHI1": {
+        "logs": Path("/home/lily/projects/hashi/logs"),
+        "config": Path("/home/lily/projects/hashi/agents.json"),
+    },
+    "HASHI2": {
+        "logs": Path("/home/lily/projects/hashi2/logs"),
+        "config": Path("/home/lily/projects/hashi2/agents.json"),
+    },
+    "HASHI9": {
+        "logs": Path("/mnt/c/Users/thene/projects/HASHI/logs"),
+        "config": Path("/mnt/c/Users/thene/projects/HASHI/agents.json"),
+    },
 }
+
+# System-level log dirs to always scan (not tied to any agent)
+SYSTEM_LOGS = [
+    "bridge",
+    "orchestrator",
+    "workbench",
+]
+
+
+def _load_active_agents(config_path: Path) -> set[str] | None:
+    """Load active agent names from agents.json. Returns None if file unreadable."""
+    if not config_path.exists():
+        return None
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8-sig"))
+        return {
+            a["name"].lower()
+            for a in data.get("agents", [])
+            if a.get("is_active", True)
+        }
+    except Exception:
+        return None
 
 # ── Noise filters (non-critical, skip or downgrade) ─────────────────────────
 NOISE_PATTERNS = [
@@ -77,8 +108,10 @@ def get_latest_log(agent_log_dir: Path) -> Path | None:
     return None
 
 
-def scan_instance(name: str, logs_root: Path) -> dict:
+def scan_instance(name: str, inst: dict) -> dict:
     """Scan one instance, return structured findings."""
+    logs_root = inst["logs"]
+    config_path = inst["config"]
     result = {
         "instance": name,
         "accessible": False,
@@ -95,6 +128,7 @@ def scan_instance(name: str, logs_root: Path) -> dict:
 
     result["accessible"] = True
     cutoff = datetime.now() - timedelta(hours=SCAN_WINDOW_HOURS)
+    active_agents = _load_active_agents(config_path)
 
     try:
         agent_dirs = [d for d in logs_root.iterdir() if d.is_dir()]
@@ -104,6 +138,10 @@ def scan_instance(name: str, logs_root: Path) -> dict:
 
     for agent_dir in sorted(agent_dirs):
         agent = agent_dir.name
+        # Always scan system-level logs; skip inactive agents
+        if agent.lower() not in SYSTEM_LOGS:
+            if active_agents is not None and agent.lower() not in active_agents:
+                continue
         log = get_latest_log(agent_dir)
         if log is None:
             continue
@@ -243,8 +281,8 @@ def format_report(findings: list[dict]) -> str:
 
 def main():
     findings = []
-    for name, root in INSTANCES.items():
-        findings.append(scan_instance(name, root))
+    for name, inst in INSTANCES.items():
+        findings.append(scan_instance(name, inst))
     report = format_report(findings)
     print(report)
     return report

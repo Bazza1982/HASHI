@@ -104,6 +104,23 @@ class WorkbenchApiServer:
         self.runner = None
         self.site = None
 
+    def _learn_reply_route(self, text: str, reply_route: dict) -> None:
+        """Auto-learn sender's routing info from reply_route metadata in hchat messages."""
+        try:
+            from tools.hchat_send import parse_return_address, update_contact
+            info = parse_return_address(text)
+            if not info:
+                return
+            inst = reply_route.get("instance_id", info.get("instance_id", ""))
+            host = reply_route.get("host", "")
+            port = reply_route.get("port", 0)
+            wb_port = reply_route.get("wb_port", port)
+            ttl = reply_route.get("ttl", 3600)
+            if inst and host and port:
+                update_contact(info["agent"], inst, host, port, wb_port=wb_port, ttl=ttl)
+        except Exception:
+            pass  # non-critical — don't break message delivery
+
     def _runtime_list(self) -> list:
         if self.orchestrator is not None:
             return list(getattr(self.orchestrator, "runtimes", []))
@@ -370,6 +387,11 @@ class WorkbenchApiServer:
             return web.json_response({"ok": False, "error": "agent not found"}, status=404)
         if not text:
             return web.json_response({"ok": False, "error": "text is required"}, status=400)
+
+        # Auto-learn reply route from hchat messages (updates contacts.json)
+        reply_route = payload.get("reply_route")
+        if reply_route and isinstance(reply_route, dict):
+            self._learn_reply_route(text, reply_route)
 
         request_id = await runtime.enqueue_api_text(text)
         return web.json_response({"ok": True, "request_id": request_id})

@@ -355,77 +355,37 @@ class FlowRunner:
         """
         NAGARE-TIMEOUT-001: wait_for_human 超时处理。
 
-        关键设计原则：pre-flight 是工作流的前置控制门。
-        - 有 blocking 必填问题（can_assume=false）未回答 → 不能继续，重新通知并继续等待
-        - 全部是可选/有默认值的问题 → 超时后用 smart defaults 继续
+        关键设计原则：pre-flight 是工作流的前置控制门，必须等待所有问题被人工回答。
+        超时只是一个提醒机制，不允许自动用默认值继续——无论问题是否有默认值。
+        工作流在收到人工回答前始终保持暂停状态。
         """
         step_id = "unknown"
-        blocking_questions = []
+        questions = []
         try:
             query_file = self._run_dir / "_human_query.json"
             if query_file.exists():
                 qdata = json.loads(query_file.read_text(encoding="utf-8"))
                 step_id = qdata.get("from_step", "unknown")
-                # 检查是否有 blocking 问题（can_assume=false 且无默认值）
-                for q in qdata.get("questions", []):
-                    if not q.get("can_assume", True) and q.get("default") is None:
-                        blocking_questions.append(q.get("key", q.get("question", "unknown")))
+                questions = qdata.get("questions", [])
         except Exception:
             pass
 
-        defaults = self._human_wait_defaults or {}
-
-        # 如果有 blocking 必填问题，不能跳过——重新通知并继续等待
-        if blocking_questions:
-            # 延长等待时间（再等 300s），重新发通知
-            self._human_wait_deadline = time.time() + 300
-            self.logger.warning(
-                f"[WaitForHuman] ⏱️ 超时但有 blocking 必填问题，不能继续。"
-                f"重新通知并继续等待（step={step_id}, blocking={blocking_questions}）"
-            )
-            self._notify_human(
-                f"⚠️ 步骤 {step_id} 等待超时，但以下必填问题未回答，工作流无法继续：\n"
-                f"{chr(10).join(f'  - {q}' for q in blocking_questions)}\n\n"
-                f"请回答后写入 {self._run_dir}/_human_response.json 并删除 _pause 文件恢复。\n"
-                f"（将在 5 分钟后再次提醒）"
-            )
-            return  # 不清除 pause，继续等待
-
-        # 没有 blocking 问题，用 smart defaults 继续
-        assumption_entry = {
-            "step_id": step_id,
-            "assumed_at": utc_now(),
-            "reason": "wait_for_human timeout — no blocking questions, using smart defaults",
-            "defaults_applied": defaults,
-        }
-        self._timeout_assumptions.append(assumption_entry)
-
-        # 写入 response 文件（defaults 作为回答）
-        response_file = self._run_dir / "_human_response.json"
-        response_data = dict(defaults)
-        response_data["_timeout_assumed"] = True
-        response_data["_assumed_at"] = assumption_entry["assumed_at"]
-        response_file.write_text(json.dumps(response_data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-        # 写入假设日志文件
-        assumptions_file = self._run_dir / "_timeout_assumptions.json"
-        assumptions_file.write_text(
-            json.dumps(self._timeout_assumptions, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-
+        # 延长等待时间（再等 300s），重新提醒并继续等待
+        self._human_wait_deadline = time.time() + 300
         self.logger.warning(
-            f"[WaitForHuman] ⏱️ 超时，自动使用 {len(defaults)} 个默认值继续（step={step_id}）"
+            f"[WaitForHuman] ⏱️ 超时提醒，继续等待人工回答（step={step_id}）"
         )
+        q_text = "\n".join(
+            f"  {i+1}. {q.get('question', q.get('key', 'unknown'))}"
+            for i, q in enumerate(questions)
+        ) if questions else "  （详见 _human_query.json）"
         self._notify_human(
-            f"⏱️ 步骤 {step_id} 等待超时，已自动使用默认值继续。\n"
-            f"假设字段数: {len(defaults)}，详见 _timeout_assumptions.json"
+            f"⏱️ 步骤 {step_id} 等待超时提醒——工作流仍在暂停，等待您回答以下问题：\n"
+            f"{q_text}\n\n"
+            f"请回答后写入 {self._run_dir}/_human_response.json 并删除 _pause 文件恢复。\n"
+            f"（将在 5 分钟后再次提醒）"
         )
-
-        # 清除暂停信号，让工作流继续
-        self._human_wait_deadline = None
-        self._human_wait_defaults = {}
-        if self._pause_signal.exists():
-            self._pause_signal.unlink()
+        # 不清除 pause，不写入任何默认值，继续等待
 
     # =========================================================================
     # 内部执行逻辑

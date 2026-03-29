@@ -1,11 +1,11 @@
 {
-  "agent_id": "material_processor_01",
-  "role": "Material ingestion, classification, relevance ranking, and selection",
+  "agent_id": "editor_01",
+  "role": "Language Editor & Final Polish",
   "workflow_id": "academic-writing-paragraph",
   "run_id": "{run_id}",
   "backend": {
     "active": "claude-cli",
-    "model": "claude-opus-4-6",
+    "model": "claude-sonnet-4-6",
     "available": ["claude-cli"],
     "controllable_by": ["orchestrator", "human"]
   },

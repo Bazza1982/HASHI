@@ -1,11 +1,11 @@
 {
   "agent_id": "reviewer_01",
-  "role": "Final review: grounding verification, logical flow, style compliance",
+  "role": "Academic Reviewer & Quality Gatekeeper",
   "workflow_id": "academic-writing-paragraph",
   "run_id": "{run_id}",
   "backend": {
     "active": "claude-cli",
-    "model": "claude-sonnet-4-6",
+    "model": "claude-opus-4-6",
     "available": ["claude-cli"],
     "controllable_by": ["orchestrator", "human"]
   },

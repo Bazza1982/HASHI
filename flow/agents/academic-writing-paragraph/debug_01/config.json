@@ -1,13 +1,13 @@
 {
   "agent_id": "debug_01",
-  "role": "Error diagnosis and retry guidance",
+  "role": "Debug Agent",
   "workflow_id": "academic-writing-paragraph",
   "run_id": "{run_id}",
   "backend": {
     "active": "claude-cli",
     "model": "claude-sonnet-4-6",
     "available": ["claude-cli"],
-    "controllable_by": ["orchestrator", "human"]
+    "controllable_by": ["orchestrator"]
   },
   "capabilities": ["file_read", "file_write", "bash"],
   "communication": {
