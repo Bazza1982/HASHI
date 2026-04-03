@@ -1,0 +1,56 @@
+# Phase 0 fixture: explicit round-trip preservation coverage.
+# If a future editor/export path cannot preserve these shapes, it must warn.
+
+workflow:
+  id: unknown-fields-smoke
+  name: "Unknown Fields Smoke"
+  version: "1.0.0"
+  description: "Small workflow with editor metadata and unsupported fields."
+  tags: [test, preservation]
+
+meta:
+  created_by: human
+  created_at: "2026-04-03T00:00:00Z"
+  source_prompt: "Phase 0 preservation fixture"
+
+pre_flight:
+  collect_from_human: []
+
+x-team-note:
+  owner: "nagare-core"
+  ticket: "PHASE0-RT-001"
+
+agents:
+  orchestrator:
+    id: akane
+  workers:
+    - id: writer_01
+      role: "Writer"
+      agent_md: "flow/agents/analyst/AGENT.md"
+      backend: claude-cli
+      model: claude-sonnet-4-6
+      x-worker-extension:
+        ui_color: "amber"
+
+steps:
+  - id: draft
+    name: "Draft"
+    agent: writer_01
+    depends: []
+    prompt: |
+      Write one sentence to output.txt.
+    timeout_seconds: 120
+    x-step-note:
+      visible_in_forms: false
+      reason: "Used to confirm unknown nested fields survive export."
+
+success_criteria:
+  - "draft completes"
+
+x-nagare-viz:
+  version: 1
+  nodes:
+    draft:
+      position:
+        x: 120
+        y: 80

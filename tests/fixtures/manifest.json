@@ -1,0 +1,75 @@
+{
+  "version": 1,
+  "fixtures": [
+    {
+      "id": "smoke_test",
+      "path": "tests/fixtures/smoke_test.yaml",
+      "category": "minimal_happy_path",
+      "source": "flow/workflows/examples/smoke_test.yaml",
+      "preservation_focus": [
+        "basic_dag",
+        "artifact_references",
+        "simple_prompts"
+      ]
+    },
+    {
+      "id": "book_translation",
+      "path": "tests/fixtures/book_translation.yaml",
+      "category": "parallel_branching",
+      "source": "flow/workflows/library/book_translation.yaml",
+      "preservation_focus": [
+        "parallel_steps",
+        "defaults",
+        "fan_in_dependencies",
+        "pre_flight_choices"
+      ]
+    },
+    {
+      "id": "academic_writing_paragraph",
+      "path": "tests/fixtures/academic_writing_paragraph.yaml",
+      "category": "nested_config",
+      "source": "flow/workflows/library/academic-writing-paragraph/workflow.yaml",
+      "preservation_focus": [
+        "scope_notice",
+        "defaults",
+        "rich_prompt_blocks",
+        "quality_threshold_text"
+      ]
+    },
+    {
+      "id": "meta_workflow_creation",
+      "path": "tests/fixtures/meta_workflow_creation.yaml",
+      "category": "hitl_wait_flow",
+      "source": "flow/workflows/examples/meta_workflow_creation.yaml",
+      "preservation_focus": [
+        "wait_for_human",
+        "timeout_recovery",
+        "evaluator_semantics",
+        "large_real_workflow"
+      ]
+    },
+    {
+      "id": "legacy_english_news_to_chinese_markdown",
+      "path": "tests/fixtures/legacy_english_news_to_chinese_markdown.yaml",
+      "category": "legacy_hand_edited",
+      "source": "flow/workflows/library/english_news_to_chinese_markdown.yaml",
+      "preservation_focus": [
+        "legacy_dialect",
+        "noncanonical_keys",
+        "migration_risk"
+      ]
+    },
+    {
+      "id": "unknown_fields_workflow",
+      "path": "tests/fixtures/unknown_fields_workflow.yaml",
+      "category": "unknown_fields",
+      "source": "tests/fixtures/unknown_fields_workflow.yaml",
+      "preservation_focus": [
+        "comments",
+        "unknown_top_level_fields",
+        "unknown_step_fields",
+        "editor_extension_block"
+      ]
+    }
+  ]
+}

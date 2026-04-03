@@ -18,6 +18,13 @@ This directory contains developer documentation and operational notes for HASHI.
 
 ### Nagare Flow System (v2.1)
 - [NAGARE_FLOW_SYSTEM.md](NAGARE_FLOW_SYSTEM.md) — Complete technical reference for the multi-agent workflow orchestration engine
+- [MIGRATION_FROM_HASHI.md](MIGRATION_FROM_HASHI.md) — Current extraction boundary and host responsibilities
+- [HANDLER_GUIDE.md](HANDLER_GUIDE.md) — Step handler protocol and implementation guidance
+- [ADAPTER_GUIDE.md](ADAPTER_GUIDE.md) — Host integration guidance for downstream adapters
+- [LOGGING.md](LOGGING.md) — Stable event and snapshot contract
+- [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md) — Release-readiness gate for package and editor
+- [KNOWN_LIMITATIONS_NAGARE.md](KNOWN_LIMITATIONS_NAGARE.md) — Current standalone limitations
+- [RELEASE_NOTES_NAGARE_v0.1.0.md](RELEASE_NOTES_NAGARE_v0.1.0.md) — Initial extracted-package release notes
 
 ### Installation
 - [INSTALL.md](INSTALL.md) — Standard installation guide

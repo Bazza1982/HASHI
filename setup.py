@@ -67,7 +67,6 @@ setup(
         "whatsapp": ["neonize>=1.0.0"],
         "voice": ["edge-tts>=6.0.0"],
     },
-    # Don't install as a package - this is an application
-    packages=[],
+    packages=find_packages(include=["flow*", "nagare*"]),
     include_package_data=False,
 )

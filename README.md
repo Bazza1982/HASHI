@@ -1,6 +1,6 @@
 # HASHI
 
-> **Status (v2.1.0):** Nagare Flow System released — multi-agent workflow orchestration with cross-vendor evaluation, self-improving knowledge base, and autonomous task execution. All v2 roadmap delivered.
+> **Status (v3.0-alpha):** Habit-based self-improvement system — agents learn from user feedback signals (`/good`, `/bad`) and nightly dream reflection. All v2 roadmap delivered; v3 in active development.
 > **Changelog:** see [`CHANGELOG.md`](CHANGELOG.md) · **Roadmap:** see [`docs/ROADMAP.md`](docs/ROADMAP.md) · **Nagare Docs:** see [`docs/NAGARE_FLOW_SYSTEM.md`](docs/NAGARE_FLOW_SYSTEM.md).
 
 ## About
@@ -84,9 +84,84 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
 - **v2.1.0** — **Nagare Flow System** — multi-agent workflow orchestration with cross-vendor evaluation, self-improving knowledge base, DAG execution, and autonomous error recovery. See [`docs/NAGARE_FLOW_SYSTEM.md`](docs/NAGARE_FLOW_SYSTEM.md).
 - **v2.0.0** — Tool execution layer (11 tools), browser automation (Playwright), Pack & Go USB deployment (Windows + macOS), TUI, vector memory, `/dream` skill, `/memory` command. See [`CHANGELOG.md`](CHANGELOG.md).
 
+## Habit-Based Self-Improvement
+
+HASHI agents learn from real usage over time. The habit system has two layers: user feedback signals that seed new habits, and nightly dream reflection that consolidates and evolves them.
+
+### User Feedback Signals
+
+The simplest way to shape agent behavior — give direct feedback while working:
+
+```
+/good                          — agent did something right
+/good always verify before asserting facts
+/bad                           — agent did something wrong
+/bad skipped verification, stated file existed without checking
+```
+
+Each signal captures the full conversation context (including thinking tokens) and stores it for nightly processing. No immediate action; agents absorb feedback during dream.
+
+### Dream — Nightly Reflection
+
+Each night, agents run `/skill dream` to consolidate memory and process habit signals:
+- Pending `/good` and `/bad` signals are analyzed (up to 3 per dream, paced to avoid overload)
+- New habit candidates are extracted from the conversation context and user comment
+- Similar habits are reinforced rather than duplicated
+- Habits accumulate evidence over time before being promoted to active
+
+### Habit Governance (Lily-mediated)
+
+Lily reviews habits across all agents and governs cross-agent reuse:
+- `/skill habits report` — regenerate Lily's evaluation report
+- `/skill habits dashboard` — advanced evaluation dashboard
+- `/skill habits list pending` — inspect pending copy recommendations
+- `/skill habits approve <ids>` / `/skill habits apply` — approve and apply cross-agent copies
+- `/skill habits shared list` — inspect active shared patterns and protocols
+- `/skill habits shared promote <source_agent> <habit_id> [pattern|protocol] [target_class]` — promote to shared registry
+- `/skill habits shared retire <shared_pattern_id>` — retire a shared pattern
+
+### Storage
+
+All habit data is local-only and gitignored:
+- Per-agent habits: `workspaces/<agent>/habits.sqlite`
+- Shared evaluation: `workspaces/lily/habit_evaluation.sqlite` (includes user signals)
+- Reports: `workspaces/lily/habit_reports/`
+
 ## Installation
 
 **See [INSTALL.md](INSTALL.md) for detailed installation instructions.**
+
+### Nagare Core And Editor
+
+The extracted Nagare workflow engine now ships inside this repo as the `nagare` Python package, with the visual editor under [`nagare-viz/`](nagare-viz).
+
+Core install and smoke check:
+
+```bash
+pip install .
+python -m nagare.cli --help
+pytest tests/contract/test_nagare_core_contract.py \
+  tests/contract/test_logging_contract.py \
+  tests/contract/test_round_trip_contract.py \
+  tests/contract/test_nagare_api_contract.py \
+  tests/contract/test_hashi_adapter_contract.py -q
+```
+
+Editor install and smoke check:
+
+```bash
+cd nagare-viz
+npm install
+npm test
+npm run build
+```
+
+Phase 8 docs:
+- [`docs/MIGRATION_FROM_HASHI.md`](docs/MIGRATION_FROM_HASHI.md)
+- [`docs/HANDLER_GUIDE.md`](docs/HANDLER_GUIDE.md)
+- [`docs/ADAPTER_GUIDE.md`](docs/ADAPTER_GUIDE.md)
+- [`docs/NAGARE_RELEASE_CHECKLIST.md`](docs/NAGARE_RELEASE_CHECKLIST.md)
+- [`docs/NAGARE_KNOWN_LIMITATIONS.md`](docs/NAGARE_KNOWN_LIMITATIONS.md)
 
 ### 🚀 Pack & Go — USB Zero-Install (Recommended for sharing)
 
@@ -422,6 +497,7 @@ HASHI agents respond to both natural language and structured commands:
 | `/jobs` | Show cron and heartbeat jobs with action buttons |
 | `/skill cron` | Full cron job management |
 | `/skill heartbeat` | Full heartbeat job management |
+| `/skill habits` | Lily habit recommendation review and approval surface |
 
 ---
 
@@ -556,6 +632,7 @@ Via Telegram:
 /jobs                       → Show all jobs with action buttons
 /skill cron                 → Cron job management (list, enable/disable, run now)
 /skill heartbeat            → Heartbeat job management (list, enable/disable, run now)
+/skill habits               → Habit recommendation report/list/approve/apply
 ```
 
 Via `tasks.json`:
