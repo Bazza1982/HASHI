@@ -7,6 +7,7 @@ import json
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 
 def utc_now():
@@ -53,7 +54,7 @@ class ArtifactStore:
         }
         self._write_index(index)
 
-    def get(self, key: str) -> Path:
+    def get(self, key: str) -> Optional[Path]:
         """获取工件路径"""
         index = self._read_index()
         if key not in index:
@@ -82,5 +83,8 @@ class ArtifactStore:
             return json.load(f)
 
     def _write_index(self, index: dict):
-        with open(self.index_path, "w") as f:
+        # Atomic write: write to temp file then rename to prevent partial reads on crash
+        tmp = self.index_path.with_suffix(".tmp")
+        with open(tmp, "w") as f:
             json.dump(index, f, ensure_ascii=False, indent=2)
+        tmp.replace(self.index_path)

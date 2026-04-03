@@ -5,8 +5,11 @@ HASHI Flow — Flow Runner
 
 import json
 import logging
+import re
+import shutil
 import threading
 import time
+import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -89,6 +92,9 @@ class FlowRunner:
             message="Loading workflow definition",
             data={"workflow_path": str(self.workflow_path)},
         )
+        # Bug 1 fix: initialize before _load_workflow() in case it raises
+        self._using_candidate: bool = False
+        self._candidate_path: Optional[Path] = None
         self.workflow = self._load_workflow()
         workflow_meta = self.workflow.get("workflow", {})
         self.event_logger.workflow_id = workflow_meta.get("id")
@@ -206,7 +212,6 @@ class FlowRunner:
                 error_message=str(e),
             )
             # Orchestrator 自身故障 → 必须主动通知 human-facing agent
-            import traceback
             tb = traceback.format_exc()
             self._notify_human(
                 f"🚨🚨 ORCHESTRATOR 故障 🚨🚨\n"
@@ -708,6 +713,7 @@ class FlowRunner:
                 self._notify_human(f"🔄 并行执行 {len(parallel_steps)} 个步骤: {step_names}")
                 results = self._execute_parallel(parallel_steps)
                 for step, result in zip(parallel_steps, results):
+                    self._step_results[step["id"]] = result
                     if result["success"]:
                         completed.add(step["id"])
                         done = len(completed)
@@ -715,7 +721,23 @@ class FlowRunner:
                         self._notify_step_event(step, f"✅ 完成 ({done}/{total})", step.get("name", ""), result=result)
                     else:
                         failed.add(step["id"])
-                        self._notify_step_event(step, "❌ 失败", str(result.get("error", ""))[:200])
+                        error_msg = str(result.get("error", ""))[:200]
+                        self._notify_step_event(step, "❌ 失败", error_msg)
+
+                # If any parallel step failed, escalate and return
+                if failed.intersection(s["id"] for s in parallel_steps):
+                    first_failed = next(
+                        (s for s in parallel_steps if s["id"] in failed), parallel_steps[0]
+                    )
+                    first_result = self._step_results[first_failed["id"]]
+                    self._escalate_to_orchestrator(first_failed, first_result)
+                    failed_ids = [s["id"] for s in parallel_steps if s["id"] in failed]
+                    return {
+                        "success": False,
+                        "error": f"并行步骤失败: {failed_ids}",
+                        "run_id": self.run_id,
+                        "failed_steps": list(failed),
+                    }
 
     def _execute_step(self, step: dict) -> dict:
         """执行单个步骤"""
@@ -745,10 +767,6 @@ class FlowRunner:
                 # 注册工件
                 for artifact_key, artifact_path in result.get("artifacts_produced", {}).items():
                     self.artifacts.register(artifact_key, artifact_path)
-
-                # post-step handler: apply_improvement 由 runner 执行文件写入
-                if step_id == "apply_improvement":
-                    self._post_apply_improvement(result)
 
                 self.state.set_step_status(
                     step_id,
@@ -809,39 +827,6 @@ class FlowRunner:
             )
             self.logger.exception(f"[Step] 异常: {step_id}")
             return {"success": False, "step_id": step_id, "error": str(e), "error_type": "exception"}
-
-    def _post_apply_improvement(self, result: dict) -> None:
-        """
-        apply_improvement 步骤的 post-step handler。
-        Worker 只负责生成 staged_flow/ 目录下的文件，
-        runner 拥有完整文件系统权限，负责将 staged 文件写入正式路径。
-        """
-        # 找到 evaluator worker 目录（staged_flow 由 evaluator 产出）
-        run_dir = self._run_dir
-
-        # 搜索 staged_flow 目录
-        staged_roots = list(run_dir.rglob("staged_flow/flow"))
-        if not staged_roots:
-            self.logger.warning("[PostApplyImprovement] 未找到 staged_flow/flow 目录，跳过写入")
-            return
-
-        staged_flow = staged_roots[0]
-        target_flow = self.repo_root / "flow"
-
-        import shutil
-        copied = []
-        for src in staged_flow.rglob("*"):
-            if src.is_file():
-                relative = src.relative_to(staged_flow)
-                dst = target_flow / relative
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, dst)
-                copied.append(str(relative))
-
-        if copied:
-            self.logger.info(f"[PostApplyImprovement] 写入 {len(copied)} 个文件到 flow/: {copied[:5]}{'...' if len(copied) > 5 else ''}")
-        else:
-            self.logger.warning("[PostApplyImprovement] staged_flow/flow 目录为空，无文件写入")
 
     def _execute_parallel(self, steps: list) -> list:
         """并行执行多个步骤"""
@@ -938,7 +923,6 @@ class FlowRunner:
 
         if success:
             # 晋升：candidate → 正式版本
-            import shutil
             backup_dir = self.repo_root / "flow" / "evaluation_kb" / "workflow_versions"
             backup_dir.mkdir(parents=True, exist_ok=True)
             wf_id = self.workflow.get("workflow", {}).get("id", "unknown")
@@ -1078,7 +1062,6 @@ class FlowRunner:
         """替换字符串中的变量占位符"""
         if not isinstance(value, str):
             return value
-        import re
         def replacer(match):
             var_path = match.group(1)
             parts = var_path.split(".", 1)

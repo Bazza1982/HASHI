@@ -5,6 +5,7 @@ Nagare subprocess-backed step handler.
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -354,7 +355,6 @@ class SubprocessStepHandler:
 
     def _extract_json_result(self, text: str) -> Optional[dict]:
         """从输出文本中提取最后一个 ```json ... ``` 块并解析"""
-        import re
         blocks = re.findall(r"```json\s*([\s\S]*?)```", text)
         if not blocks:
             # 尝试提取最后一行的裸 JSON
