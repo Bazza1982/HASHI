@@ -435,13 +435,13 @@ test('docs tools and resources/read expose filesystem-backed reference docs', as
     assert.equal(doc.response.status, 200);
     assert.equal(doc.body.result.doc, 'MINATO_MCP_SERVER_PLAN');
     assert.match(doc.body.result.content, /Minato MCP Server Plan/);
-    assert.match(doc.body.result.content, /Tier 7/);
+    assert.match(doc.body.result.content, /Tier 8/);
 
     const readme = await callTool(baseUrl, 'docs_read', { doc: 'MINATO_README' });
     assert.equal(readme.response.status, 200);
     assert.equal(readme.body.result.doc, 'MINATO_README');
     assert.match(readme.body.result.content, /Minato MCP/);
-    assert.match(readme.body.result.content, /Implemented through Tier 7/);
+    assert.match(readme.body.result.content, /Implemented through Tier 8/);
 
     const resourceListResponse = await fetch(`${baseUrl}/resources/list`);
     assert.equal(resourceListResponse.status, 200);
@@ -524,14 +524,62 @@ test('resources/read exposes today log resources and recent chat resources', asy
   });
 });
 
-test('prompts/list exposes Minato prompt templates', async () => {
+test('prompt endpoints expose read and render surfaces for Minato prompts', async () => {
   const { router } = makeRouter();
   await withServer(router, async (baseUrl) => {
-    const response = await fetch(`${baseUrl}/prompts/list`);
-    assert.equal(response.status, 200);
-    const body = await response.json();
-    assert.ok(body.prompts.some((prompt) => prompt.name === 'minato_start_session'));
-    assert.ok(body.prompts.some((prompt) => prompt.name === 'minato_log_decision'));
+    const listResponse = await fetch(`${baseUrl}/prompts/list`);
+    assert.equal(listResponse.status, 200);
+    const listBody = await listResponse.json();
+    assert.ok(listBody.prompts.some((prompt) => prompt.name === 'minato_start_session'));
+    assert.ok(listBody.prompts.some((prompt) => prompt.name === 'minato_operator_handoff'));
+    assert.ok(!Object.hasOwn(listBody.prompts[0], 'template'));
+
+    const readResponse = await fetch(`${baseUrl}/prompts/read`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'minato_operator_handoff' }),
+    });
+    assert.equal(readResponse.status, 200);
+    const readBody = await readResponse.json();
+    assert.equal(readBody.name, 'minato_operator_handoff');
+    assert.match(readBody.template, /Current state: \{current_state\}/);
+    assert.ok(Array.isArray(readBody.operator_guide));
+    assert.ok(readBody.operator_guide.length >= 2);
+
+    const renderResponse = await fetch(`${baseUrl}/prompts/render`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'minato_operator_handoff',
+        arguments: {
+          project: 'Alpha',
+          current_state: 'Draft complete and ready for review',
+          open_questions: 'Need Barry approval on scope',
+          next_actions: 'Send to kasumi for review and then log decision',
+        },
+      }),
+    });
+    assert.equal(renderResponse.status, 200);
+    const renderBody = await renderResponse.json();
+    assert.equal(renderBody.name, 'minato_operator_handoff');
+    assert.match(renderBody.rendered, /Project: Alpha/);
+    assert.match(renderBody.rendered, /Draft complete and ready for review/);
+
+    const resourceListResponse = await fetch(`${baseUrl}/resources/list`);
+    assert.equal(resourceListResponse.status, 200);
+    const resourceList = await resourceListResponse.json();
+    assert.ok(resourceList.resources.some((item) => item.uri === 'minato://prompts/list'));
+    assert.ok(resourceList.resources.some((item) => item.uri === 'minato://prompt/minato_operator_handoff'));
+
+    const promptResourceResponse = await fetch(`${baseUrl}/resources/read`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ uri: 'minato://prompt/minato_operator_handoff' }),
+    });
+    assert.equal(promptResourceResponse.status, 200);
+    const promptResource = await promptResourceResponse.json();
+    assert.equal(promptResource.mime_type, 'application/json');
+    assert.equal(promptResource.data.name, 'minato_operator_handoff');
   });
 });
 

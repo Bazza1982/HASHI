@@ -32,7 +32,7 @@ Current coverage includes:
 - Nagare workflow inspection and manual step status updates
 - artefact registration, read, linking, and KASUMI delegation
 - project log and agent chat access
-- docs, resources, and prompt catalog endpoints
+- docs, resources, prompt catalog, and prompt read/render endpoints
 
 See:
 

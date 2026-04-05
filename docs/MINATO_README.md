@@ -315,7 +315,7 @@ The Minato MCP (Model Context Protocol) server is now live as the programmable p
 - Nagare tools: `nagare_list_workflows`, `nagare_get_workflow_dag`, `nagare_get_run_status`, `nagare_update_step_status`
 - Artefact tools: `artefacts_list`, `artefacts_create`, `artefacts_read`, `artefacts_link`, `artefacts_kasumi_call`
 - Log/chat/doc tools: `log_query`, `log_append`, `log_project_chat`, `chat_send`, `chat_get_history`, `chat_poll`, `docs_list`, `docs_read`
-- Read-only surfaces: `resources/list`, `resources/read`, `prompts/list`
+- Read-only surfaces: `resources/list`, `resources/read`, `prompts/list`, `prompts/read`, `prompts/render`
 
 **Tier rollout completed:**
 
@@ -326,6 +326,7 @@ The Minato MCP (Model Context Protocol) server is now live as the programmable p
 5. Tier 5: automatic project action logging for mutating MCP calls
 6. Tier 6: delegated KASUMI tool execution via registered artefacts
 7. Tier 7: documentation and README sync for the shipped server surface
+8. Tier 8: prompt read/render endpoints, prompt resources, and stronger operator handoff guides
 
 **Current boundary:**
 
@@ -425,7 +426,7 @@ The following features are planned or partially implemented. Items marked 🚧 d
 | Footer projects bar (active project switcher in UI) | 🚧 WIP | UI component not built; data model exists |
 | Shimanto phase selector in UI | 🚧 WIP | Phases are parsed/logged but no UI to set them |
 | Nagare-Viz visual workflow editor | 🚧 WIP | No implementation; planned as Workbench component |
-| Minato MCP Server | ✅ | Implemented through Tier 7 with tools, resources, prompts, docs, artefacts, and KASUMI delegation hooks |
+| Minato MCP Server | ✅ | Implemented through Tier 8 with tools, resources, prompt read/render, docs, artefacts, and KASUMI delegation hooks |
 | KASUMI MCP Server | 🚧 WIP | Architecture plan exists; external service still owns the downstream Nexcel/Wordo tool surface |
 | KASUMI Nexcel artefact type | 🚧 WIP | Planned; no implementation |
 | KASUMI Wordo artefact type | 🚧 WIP | Planned; no implementation |

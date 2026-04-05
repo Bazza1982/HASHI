@@ -2,7 +2,7 @@
 
 ## 1. Document Status
 
-- Status: Implemented through Tier 7; this document now serves as a living architecture and rollout ledger
+- Status: Implemented through Tier 8; this document now serves as a living architecture and rollout ledger
 - Scope: Minato project-management MCP layer over the HASHI agent bridge
 - Intended audience: system architect, API implementers, AI agents operating within Minato
 - Last updated: 2026-04-05
@@ -119,6 +119,8 @@ AI Agent / HASHI Runtime
   - `POST /api/minato/mcp/v1/resources/read`
   - `GET  /api/minato/mcp/v1/resources/list`
   - `GET  /api/minato/mcp/v1/prompts/list`
+  - `POST /api/minato/mcp/v1/prompts/read`
+  - `POST /api/minato/mcp/v1/prompts/render`
 
 ---
 
@@ -855,6 +857,8 @@ Resources are read-only views that agents can inspect without triggering mutatio
 | `minato://chat/{agent_id}/recent` | Recent transcript messages for an agent | Built |
 | `minato://docs/list` | Available system reference documents | Built |
 | `minato://docs/{doc_name}` | Full content of a named system doc | Built |
+| `minato://prompts/list` | Prompt catalog summary for Minato operators and agents | Built |
+| `minato://prompt/{prompt_name}` | Full prompt definition with template and operator guide | Built |
 
 ---
 
@@ -862,7 +866,7 @@ Resources are read-only views that agents can inspect without triggering mutatio
 
 ### Rollout status today
 
-The Minato MCP server has now been implemented through Tier 7:
+The Minato MCP server has now been implemented through Tier 8:
 
 - Tier 1: JSON-RPC skeleton, audit envelope, tool registry
 - Tier 2: project session context, Shimanto tools, Nagare read tools, docs/resources/chat wrappers
@@ -871,6 +875,7 @@ The Minato MCP server has now been implemented through Tier 7:
 - Tier 5: automatic project action logging for mutating MCP actions
 - Tier 6: delegated KASUMI tool execution through registered artefacts
 - Tier 7: documentation and README surface brought back into sync with the shipped server
+- Tier 8: prompt read/render endpoints, prompt resources, and stronger operator handoff guides
 
 The following REST endpoints still matter because Minato wraps or extends them:
 
@@ -895,7 +900,6 @@ Supporting infrastructure that exists:
 
 The foundation server is in place. The next useful tiers are now about depth, not existence:
 
-- Tier 8: richer prompt surface, including prompt read/render endpoints and stronger agent operator guides
 - Tier 9: more complete KASUMI round-trip syncing so delegated mutations can update artefact metadata and richer project log payloads
 - Tier 10: optional UI/operator integration in the workbench so active project and phase state can be driven visually rather than only through MCP and raw context headers
 

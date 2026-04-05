@@ -827,8 +827,16 @@ function buildPromptCatalog() {
   return [
     {
       name: 'minato_start_session',
+      title: 'Start a Minato session',
       description: 'Start a Minato work session with explicit project context and catch-up checks.',
-      arguments: ['project'],
+      arguments: [
+        { name: 'project', required: true, description: 'Display name or slug for the active project.' },
+      ],
+      operator_guide: [
+        'Use this before doing any real work in a project.',
+        'Switch project context first, then inspect state and recent log entries.',
+        'Do not assume prior session state survives across callers.',
+      ],
       template: [
         '1. Call `project_switch` for project "{project}".',
         '2. Call `project_get_state` and `log_query` to catch up on current phase, workflow, and recent activity.',
@@ -837,8 +845,18 @@ function buildPromptCatalog() {
     },
     {
       name: 'minato_log_decision',
+      title: 'Record a project decision',
       description: 'Record a project decision in a durable, agent-readable way.',
-      arguments: ['project', 'summary', 'details'],
+      arguments: [
+        { name: 'project', required: true, description: 'Project name or slug to attach the decision to.' },
+        { name: 'summary', required: true, description: 'Short decision summary for the log index.' },
+        { name: 'details', required: true, description: 'Longer explanation for why the decision was made.' },
+      ],
+      operator_guide: [
+        'Use `type: "decision"` so future agents can find this reliably.',
+        'Keep the summary short and put nuance into details.',
+        'Include the concrete reason, approver, or constraint when known.',
+      ],
       template: [
         'Use `log_append` with:',
         '- `type: "decision"`',
@@ -849,8 +867,17 @@ function buildPromptCatalog() {
     },
     {
       name: 'minato_delegate_review',
+      title: 'Delegate a review to another agent',
       description: 'Send a review request to another agent with Minato context attached.',
-      arguments: ['agent_id', 'text'],
+      arguments: [
+        { name: 'agent_id', required: true, description: 'Target agent identifier.' },
+        { name: 'text', required: true, description: 'Concrete review request to send.' },
+      ],
+      operator_guide: [
+        'Use this when another agent needs project context to review or continue work.',
+        'Prefer `inject_context: true` so the receiving agent sees project, phase, and workflow state.',
+        'Poll until a reply arrives before assuming the delegation finished.',
+      ],
       template: [
         '1. Make sure the active project is set with `project_switch`.',
         '2. Call `chat_send` with `inject_context: true`.',
@@ -859,15 +886,123 @@ function buildPromptCatalog() {
     },
     {
       name: 'minato_review_workflow_run',
+      title: 'Review a Nagare workflow run',
       description: 'Inspect a Nagare workflow and its latest run before intervening.',
-      arguments: ['workflow_id'],
+      arguments: [
+        { name: 'workflow_id', required: true, description: 'Workflow id to inspect.' },
+      ],
+      operator_guide: [
+        'Read both the DAG definition and the latest run state before changing workflow status.',
+        'If a human override is needed, document it with both `nagare_update_step_status` and a log entry.',
+        'Avoid duplicate interventions when the workflow is already completed.',
+      ],
       template: [
         '1. Call `nagare_get_workflow_dag` for "{workflow_id}".',
         '2. Call `nagare_get_run_status` for "{workflow_id}".',
         '3. If a human gate is needed, update the step with `nagare_update_step_status` and log the decision.',
       ].join('\n'),
     },
+    {
+      name: 'minato_operator_handoff',
+      title: 'Hand off work to the next operator or agent',
+      description: 'Create a crisp Minato-aware handoff that preserves project context, open questions, and next actions.',
+      arguments: [
+        { name: 'project', required: true, description: 'Project name or slug.' },
+        { name: 'current_state', required: true, description: 'Short summary of where the work stands now.' },
+        { name: 'open_questions', required: false, description: 'Unresolved risks, questions, or blockers.' },
+        { name: 'next_actions', required: true, description: 'Concrete next actions for the receiver.' },
+      ],
+      operator_guide: [
+        'Use this when switching humans, switching agents, or ending a session mid-task.',
+        'State what is done, what is uncertain, and exactly what should happen next.',
+        'After sending the handoff, log the key decision or state change if it affects the project record.',
+      ],
+      template: [
+        'Project: {project}',
+        'Current state: {current_state}',
+        'Open questions: {open_questions}',
+        'Next actions: {next_actions}',
+        '',
+        'Then:',
+        '1. If needed, call `chat_send` with `inject_context: true` to pass the handoff to another agent.',
+        '2. Call `log_append` if the handoff includes a durable project decision or milestone.',
+      ].join('\n'),
+    },
   ];
+}
+
+function getPromptDefinition(promptName) {
+  const requested = requireString(promptName, 'name').toLowerCase();
+  const prompt = buildPromptCatalog().find((item) => item.name.toLowerCase() === requested);
+  if (!prompt) {
+    throw createRpcError('NOT_FOUND', {
+      field: 'name',
+      reason: `Unknown prompt '${promptName}'`,
+    });
+  }
+  return prompt;
+}
+
+function renderPromptTemplate(template, values) {
+  return String(template).replace(/\{([^}]+)\}/g, (_match, key) => {
+    const raw = values[key];
+    if (raw === undefined || raw === null || raw === '') {
+      return `(missing:${key})`;
+    }
+    if (Array.isArray(raw)) {
+      return raw.map((item) => String(item)).join(', ');
+    }
+    if (isPlainObject(raw)) {
+      return JSON.stringify(raw);
+    }
+    return String(raw);
+  });
+}
+
+function readPrompt(promptName) {
+  const prompt = getPromptDefinition(promptName);
+  return {
+    name: prompt.name,
+    title: prompt.title || prompt.name,
+    description: prompt.description,
+    arguments: deepClone(prompt.arguments || []),
+    operator_guide: [...(prompt.operator_guide || [])],
+    template: prompt.template,
+  };
+}
+
+function renderPrompt(promptName, args = {}) {
+  const prompt = getPromptDefinition(promptName);
+  const values = expectObject(args, 'arguments');
+  const missing = (prompt.arguments || [])
+    .filter((item) => item.required)
+    .map((item) => item.name)
+    .filter((name) => values[name] === undefined || values[name] === null || values[name] === '');
+
+  if (missing.length) {
+    throw createRpcError('INVALID_PARAMS', {
+      field: 'arguments',
+      reason: `Missing required prompt arguments: ${missing.join(', ')}`,
+    });
+  }
+
+  return {
+    name: prompt.name,
+    title: prompt.title || prompt.name,
+    description: prompt.description,
+    arguments: deepClone(prompt.arguments || []),
+    operator_guide: [...(prompt.operator_guide || [])],
+    rendered: renderPromptTemplate(prompt.template, values),
+  };
+}
+
+function readPromptSummary(prompt) {
+  return {
+    name: prompt.name,
+    title: prompt.title || prompt.name,
+    description: prompt.description,
+    arguments: deepClone(prompt.arguments || []),
+  };
 }
 
 function readDoc(docName) {
@@ -978,6 +1113,10 @@ async function buildResourceList(deps) {
     uri: `minato://docs/${item.name}`,
     name: `Doc: ${item.name}`,
   }));
+  const promptResources = buildPromptCatalog().map((item) => ({
+    uri: `minato://prompt/${item.name}`,
+    name: `Prompt: ${item.name}`,
+  }));
   const chatResources = (((await listAgentsFn?.()) || []).map((item) => ({
     uri: `minato://chat/${encodeURIComponent(item.id)}/recent`,
     name: `Recent chat: ${item.id}`,
@@ -987,6 +1126,7 @@ async function buildResourceList(deps) {
     { uri: 'minato://project/list', name: 'Project list' },
     { uri: 'minato://nagare/workflows', name: 'Nagare workflow definitions' },
     { uri: 'minato://docs/list', name: 'Minato docs list' },
+    { uri: 'minato://prompts/list', name: 'Minato prompt catalog' },
     ...projects,
     ...logResources,
     ...shimantoResources,
@@ -995,6 +1135,7 @@ async function buildResourceList(deps) {
     ...artefactResources,
     ...chatResources,
     ...docResources,
+    ...promptResources,
   ];
 }
 
@@ -1754,6 +1895,9 @@ function createResourceReader(deps) {
     if (value === 'minato://docs/list') {
       return { uri: value, mime_type: 'application/json', data: { docs: listDocs() } };
     }
+    if (value === 'minato://prompts/list') {
+      return { uri: value, mime_type: 'application/json', data: { prompts: buildPromptCatalog().map(readPromptSummary) } };
+    }
 
     const projectStateMatch = value.match(/^minato:\/\/project\/([^/]+)\/state$/);
     if (projectStateMatch) {
@@ -1861,6 +2005,15 @@ function createResourceReader(deps) {
       };
     }
 
+    const promptMatch = value.match(/^minato:\/\/prompt\/([^/]+)$/);
+    if (promptMatch) {
+      return {
+        uri: value,
+        mime_type: 'application/json',
+        data: readPrompt(decodeURIComponent(promptMatch[1])),
+      };
+    }
+
     throw createRpcError('NOT_FOUND', {
       field: 'uri',
       reason: `Unknown resource '${value}'`,
@@ -1921,7 +2074,33 @@ export function createMinatoMcpRouter(deps) {
   });
 
   router.get('/prompts/list', (_req, res) => {
-    res.json({ prompts: buildPromptCatalog() });
+    res.json({ prompts: buildPromptCatalog().map(readPromptSummary) });
+  });
+
+  router.post('/prompts/read', (req, res) => {
+    const id = req.body?.id ?? null;
+    try {
+      const body = expectObject(req.body || {}, 'body');
+      return res.json(readPrompt(body.name || body.prompt));
+    } catch (error) {
+      const normalized = normalizeUpstreamError(error);
+      const payload = err(id, normalized.rpcMessage || 'INTERNAL_ERROR', normalized.rpcData || null);
+      const status = payload.error.code === ERROR_CODES.NOT_FOUND ? 404 : 400;
+      return res.status(status).json(payload);
+    }
+  });
+
+  router.post('/prompts/render', (req, res) => {
+    const id = req.body?.id ?? null;
+    try {
+      const body = expectObject(req.body || {}, 'body');
+      return res.json(renderPrompt(body.name || body.prompt, body.arguments || body.args || {}));
+    } catch (error) {
+      const normalized = normalizeUpstreamError(error);
+      const payload = err(id, normalized.rpcMessage || 'INTERNAL_ERROR', normalized.rpcData || null);
+      const status = payload.error.code === ERROR_CODES.NOT_FOUND ? 404 : 400;
+      return res.status(status).json(payload);
+    }
   });
 
   router.post('/tools/call', async (req, res) => {
