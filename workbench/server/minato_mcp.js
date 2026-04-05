@@ -1002,6 +1002,35 @@ function getActiveProject(args, context, field = 'project') {
   });
 }
 
+function buildProjectActionLogPayload(tool, args, context, result, deps) {
+  if (typeof tool.autoLog !== 'function') return null;
+
+  const payload = tool.autoLog({ args, context, result, deps });
+  if (!payload) return null;
+
+  const project = optionalString(payload.project, 'project')
+    || optionalString(args?.project, 'project')
+    || context.session?.active_project
+    || optionalString(result?.project, 'project');
+  if (!project) return null;
+
+  let state = null;
+  try {
+    state = aggregateProjectState(project, deps.projectList);
+  } catch {}
+
+  return {
+    type: 'action',
+    project,
+    agent: 'minato_mcp',
+    shimanto_phases: payload.shimanto_phases || state?.shimanto_phases || context.session?.shimanto_phases || undefined,
+    nagare_workflows: payload.nagare_workflows || state?.nagare_workflows || context.session?.nagare_workflows || undefined,
+    summary: payload.summary,
+    details: payload.details,
+    excerpt: payload.excerpt,
+  };
+}
+
 function createToolRegistry(deps) {
   return [
     {
@@ -1254,6 +1283,16 @@ function createToolRegistry(deps) {
           workflow_status: runState.status,
         };
       },
+      autoLog: ({ args, context }) => ({
+        project: context.session?.active_project,
+        summary: `Nagare step '${args.step_id}' updated to '${args.status}'`,
+        details: [
+          `Run ID: ${args.run_id}`,
+          `Step ID: ${args.step_id}`,
+          `Status: ${args.status}`,
+          ...(optionalString(args.note, 'note') ? [`Note: ${optionalString(args.note, 'note')}`] : []),
+        ],
+      }),
     },
     {
       name: 'artefacts_list',
@@ -1303,6 +1342,24 @@ function createToolRegistry(deps) {
           ok: true,
           artefact_id: record.artefact_id,
           artefact: record,
+        };
+      },
+      autoLog: ({ result }) => {
+        const artefact = result?.artefact;
+        if (!artefact) return null;
+        return {
+          project: artefact.project,
+          summary: `Registered artefact '${artefact.name}'`,
+          details: [
+            `Artefact ID: ${artefact.artefact_id}`,
+            `Type: ${artefact.type}`,
+            ...(artefact.path ? [`Path: ${artefact.path}`] : []),
+            ...(artefact.kasumi_module ? [`KASUMI module: ${artefact.kasumi_module}`] : []),
+            ...(artefact.kasumi_id ? [`KASUMI ID: ${artefact.kasumi_id}`] : []),
+            ...(artefact.nagare_step ? [`Nagare step: ${artefact.nagare_step}`] : []),
+            ...(artefact.shimanto_phase ? [`Shimanto phase: ${artefact.shimanto_phase}`] : []),
+            ...(artefact.note ? [`Note: ${artefact.note}`] : []),
+          ],
         };
       },
     },
@@ -1367,6 +1424,20 @@ function createToolRegistry(deps) {
           shimanto_phase: current.shimanto_phase || shimantoPhase || null,
         }));
         return { ok: true, artefact: updated };
+      },
+      autoLog: ({ args, result, context }) => {
+        const artefact = result?.artefact;
+        if (!artefact) return null;
+        return {
+          project: artefact.project || context.session?.active_project,
+          summary: `Linked artefact '${artefact.name}' to additional Minato context`,
+          details: [
+            `Artefact ID: ${artefact.artefact_id}`,
+            ...(optionalString(args.project, 'project') ? [`Project link: ${optionalString(args.project, 'project')}`] : []),
+            ...(optionalString(args.nagare_step, 'nagare_step') ? [`Nagare step link: ${optionalString(args.nagare_step, 'nagare_step')}`] : []),
+            ...(optionalString(args.shimanto_phase, 'shimanto_phase') ? [`Shimanto phase link: ${optionalString(args.shimanto_phase, 'shimanto_phase')}`] : []),
+          ],
+        };
       },
     },
     {
@@ -1805,6 +1876,10 @@ export function createMinatoMcpRouter(deps) {
       const session = deepClone(sessionStore.get(sessionId));
       const context = { req, sessionId, session, sessionStore };
       const result = await tool.handler(args, context);
+      const actionLog = buildProjectActionLogPayload(tool, args, context, result, deps);
+      if (actionLog) {
+        await deps.logAppend(actionLog);
+      }
 
       auditWriter({
         ts: new Date().toISOString(),

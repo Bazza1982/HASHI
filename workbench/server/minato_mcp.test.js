@@ -567,6 +567,81 @@ test('artefacts_read delegates KASUMI artefacts when a kasumi reader is configur
   });
 });
 
+test('Tier 5 auto-logs project actions for artefact and Nagare mutations', async () => {
+  const project = 'Tier5 Action Log Project';
+  const capturedLogs = [];
+  const runId = 'run-meta-workflow-creation-20260326-075403';
+  const runPath = path.join(WORKBENCH_DIR, '..', 'flow', 'runs', runId, 'state.json');
+  const backup = fs.readFileSync(runPath, 'utf8');
+
+  try {
+    await withArtefactStore(async () => {
+      await withProjectLog(project, [
+        {
+          ts: `${TODAY}T13:00:00Z`,
+          project,
+          shimanto_phases: ['delivery'],
+          nagare_workflows: ['meta-workflow-creation'],
+          scope: 'Tier 5 rollout',
+        },
+      ], async ({ slug }) => {
+        await withTempFile('tier5.md', 'Tier 5 artefact body\n', async (filePath) => {
+          const { router } = makeRouter({
+            projectList: () => ({ projects: [{ slug, name: project }] }),
+            logAppend: async (payload) => {
+              capturedLogs.push(payload);
+              return { ok: true };
+            },
+          });
+
+          await withServer(router, async (baseUrl) => {
+            const headers = { 'x-minato-session': 'sess-tier5' };
+            await callTool(baseUrl, 'project_switch', { project }, headers);
+
+            const created = await callTool(baseUrl, 'artefacts_create', {
+              name: 'Tier 5 Draft',
+              type: 'file',
+              path: filePath,
+              nagare_step: 'draft',
+              shimanto_phase: 'delivery',
+            }, headers);
+            assert.equal(created.response.status, 200);
+
+            const linked = await callTool(baseUrl, 'artefacts_link', {
+              artefact_id: 'art_001',
+              nagare_step: 'review',
+            }, headers);
+            assert.equal(linked.response.status, 200);
+
+            const updated = await callTool(baseUrl, 'nagare_update_step_status', {
+              run_id: runId,
+              step_id: 'create_workflow_files',
+              status: 'completed',
+              note: 'Tier 5 approval',
+            }, headers);
+            assert.equal(updated.response.status, 200);
+          });
+        });
+      });
+    });
+  } finally {
+    fs.writeFileSync(runPath, backup, 'utf8');
+  }
+
+  assert.equal(capturedLogs.length, 3);
+  assert.deepEqual(
+    capturedLogs.map((entry) => entry.type),
+    ['action', 'action', 'action'],
+  );
+  assert.ok(capturedLogs.every((entry) => entry.project === project));
+  assert.ok(capturedLogs.every((entry) => entry.agent === 'minato_mcp'));
+  assert.ok(capturedLogs.every((entry) => entry.shimanto_phases?.includes('delivery')));
+  assert.ok(capturedLogs.every((entry) => entry.nagare_workflows?.includes('meta-workflow-creation')));
+  assert.match(capturedLogs[0].summary, /Registered artefact 'Tier 5 Draft'/);
+  assert.match(capturedLogs[1].summary, /Linked artefact 'Tier 5 Draft'/);
+  assert.match(capturedLogs[2].summary, /Nagare step 'create_workflow_files' updated to 'completed'/);
+});
+
 test('invalid envelope returns INVALID_REQUEST', async () => {
   const { router } = makeRouter();
   await withServer(router, async (baseUrl) => {
