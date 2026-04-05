@@ -14,6 +14,7 @@ const FLOW_WORKFLOWS_DIR = path.join(FLOW_DIR, 'workflows');
 const FLOW_RUNS_DIR = path.join(FLOW_DIR, 'runs');
 const AUDIT_DIR = path.join(WORKBENCH_DIR, 'data');
 const AUDIT_FILE = path.join(AUDIT_DIR, 'minato_mcp_audit.jsonl');
+const ARTEFACTS_FILE = path.join(AUDIT_DIR, 'minato_artefacts.json');
 
 const ERROR_CODES = {
   INVALID_REQUEST: -32600,
@@ -222,6 +223,10 @@ function deepClone(value) {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 }
 
+function nowIso() {
+  return new Date().toISOString();
+}
+
 function collectFiles(dir, predicate) {
   if (!fs.existsSync(dir)) return [];
   const results = [];
@@ -234,6 +239,261 @@ function collectFiles(dir, predicate) {
     }
   }
   return results.sort();
+}
+
+function ensureArtefactStore() {
+  fs.mkdirSync(AUDIT_DIR, { recursive: true });
+  if (!fs.existsSync(ARTEFACTS_FILE)) {
+    fs.writeFileSync(ARTEFACTS_FILE, JSON.stringify({ last_id: 0, artefacts: [] }, null, 2) + '\n', 'utf8');
+  }
+}
+
+function readArtefactStore() {
+  ensureArtefactStore();
+  try {
+    const parsed = JSON.parse(fs.readFileSync(ARTEFACTS_FILE, 'utf8'));
+    return {
+      last_id: Number(parsed?.last_id) || 0,
+      artefacts: Array.isArray(parsed?.artefacts) ? parsed.artefacts : [],
+    };
+  } catch {
+    return { last_id: 0, artefacts: [] };
+  }
+}
+
+function writeArtefactStore(store) {
+  ensureArtefactStore();
+  fs.writeFileSync(ARTEFACTS_FILE, JSON.stringify(store, null, 2) + '\n', 'utf8');
+}
+
+function nextArtefactId(lastId) {
+  return `art_${String(lastId + 1).padStart(3, '0')}`;
+}
+
+function normalizeArtefactRecord(record) {
+  return {
+    artefact_id: record.artefact_id,
+    name: record.name,
+    type: record.type,
+    project: record.project,
+    linked_projects: uniqStrings(record.linked_projects || [record.project].filter(Boolean)),
+    path: record.path || null,
+    kasumi_id: record.kasumi_id || null,
+    kasumi_module: record.kasumi_module || null,
+    nagare_step: record.nagare_step || null,
+    linked_nagare_steps: uniqStrings(record.linked_nagare_steps || [record.nagare_step].filter(Boolean)),
+    shimanto_phase: record.shimanto_phase || null,
+    linked_shimanto_phases: uniqStrings(record.linked_shimanto_phases || [record.shimanto_phase].filter(Boolean)),
+    note: record.note || '',
+    linked_at: record.linked_at || record.created_at || null,
+    created_at: record.created_at || record.linked_at || null,
+    updated_at: record.updated_at || record.created_at || null,
+  };
+}
+
+function listArtefactsForProject(projectName, { type = 'any' } = {}) {
+  const project = requireString(projectName, 'project');
+  const normalizedType = optionalString(type, 'type') || 'any';
+  if (!['any', 'file', 'kasumi'].includes(normalizedType)) {
+    throw createRpcError('INVALID_PARAMS', {
+      field: 'type',
+      reason: 'type must be one of any, file, kasumi',
+    });
+  }
+
+  const store = readArtefactStore();
+  const artefacts = store.artefacts
+    .map(normalizeArtefactRecord)
+    .filter((item) => item.linked_projects.includes(project))
+    .filter((item) => normalizedType === 'any' || item.type === normalizedType)
+    .sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
+
+  return { project, artefacts };
+}
+
+function createArtefactRecord(payload) {
+  const type = requireString(payload.type, 'type');
+  if (!['file', 'kasumi'].includes(type)) {
+    throw createRpcError('INVALID_PARAMS', {
+      field: 'type',
+      reason: 'type must be file or kasumi',
+    });
+  }
+
+  const project = requireString(payload.project, 'project');
+  const name = requireString(payload.name, 'name');
+  const nagareStep = optionalString(payload.nagare_step, 'nagare_step');
+  const shimantoPhase = optionalString(payload.shimanto_phase, 'shimanto_phase');
+  const note = optionalString(payload.note, 'note') || '';
+
+  const record = {
+    name,
+    type,
+    project,
+    linked_projects: [project],
+    nagare_step: nagareStep || null,
+    linked_nagare_steps: nagareStep ? [nagareStep] : [],
+    shimanto_phase: shimantoPhase || null,
+    linked_shimanto_phases: shimantoPhase ? [shimantoPhase] : [],
+    note,
+    linked_at: nowIso(),
+    created_at: nowIso(),
+    updated_at: nowIso(),
+  };
+
+  if (type === 'file') {
+    const filePath = requireString(payload.path, 'path');
+    record.path = path.resolve(filePath);
+  } else {
+    record.kasumi_id = requireString(payload.kasumi_id, 'kasumi_id');
+    const kasumiModule = requireString(payload.kasumi_module, 'kasumi_module');
+    if (!['nexcel', 'wordo'].includes(kasumiModule)) {
+      throw createRpcError('INVALID_PARAMS', {
+        field: 'kasumi_module',
+        reason: 'kasumi_module must be nexcel or wordo',
+      });
+    }
+    record.kasumi_module = kasumiModule;
+  }
+
+  const store = readArtefactStore();
+  const artefactId = nextArtefactId(store.last_id);
+  const finalRecord = normalizeArtefactRecord({
+    ...record,
+    artefact_id: artefactId,
+  });
+  store.last_id += 1;
+  store.artefacts.push(finalRecord);
+  writeArtefactStore(store);
+  return finalRecord;
+}
+
+function getArtefactRecord(artefactId) {
+  const requested = requireString(artefactId, 'artefact_id');
+  const store = readArtefactStore();
+  const match = store.artefacts.find((item) => item.artefact_id === requested);
+  if (!match) {
+    throw createRpcError('NOT_FOUND', {
+      field: 'artefact_id',
+      reason: `Unknown artefact '${artefactId}'`,
+    });
+  }
+  return normalizeArtefactRecord(match);
+}
+
+function updateArtefactRecord(artefactId, updater) {
+  const requested = requireString(artefactId, 'artefact_id');
+  const store = readArtefactStore();
+  const index = store.artefacts.findIndex((item) => item.artefact_id === requested);
+  if (index === -1) {
+    throw createRpcError('NOT_FOUND', {
+      field: 'artefact_id',
+      reason: `Unknown artefact '${artefactId}'`,
+    });
+  }
+  const current = normalizeArtefactRecord(store.artefacts[index]);
+  const updated = normalizeArtefactRecord({
+    ...current,
+    ...updater(current),
+    updated_at: nowIso(),
+  });
+  store.artefacts[index] = updated;
+  writeArtefactStore(store);
+  return updated;
+}
+
+function readFilesystemArtefact(record) {
+  const resolvedPath = requireString(record.path, 'path');
+  if (!fs.existsSync(resolvedPath)) {
+    throw createRpcError('NOT_FOUND', {
+      field: 'path',
+      reason: `Artefact file does not exist: ${resolvedPath}`,
+    });
+  }
+
+  const stat = fs.statSync(resolvedPath);
+  if (!stat.isFile()) {
+    throw createRpcError('CONFLICT', {
+      field: 'path',
+      reason: `Artefact path is not a file: ${resolvedPath}`,
+    });
+  }
+
+  const ext = path.extname(resolvedPath).toLowerCase();
+  const isTextLike = ['.txt', '.md', '.json', '.jsonl', '.yaml', '.yml', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.py', '.html', '.css', '.csv'].includes(ext);
+  const content = isTextLike ? fs.readFileSync(resolvedPath, 'utf8') : null;
+
+  return {
+    artefact_id: record.artefact_id,
+    name: record.name,
+    type: record.type,
+    path: resolvedPath,
+    size_bytes: stat.size,
+    mime_type: isTextLike ? 'text/plain' : 'application/octet-stream',
+    content,
+  };
+}
+
+function updateRunStateStep({ runId, stepId, status, note }) {
+  const allowed = ['completed', 'failed', 'pending', 'skipped'];
+  if (!allowed.includes(status)) {
+    throw createRpcError('INVALID_PARAMS', {
+      field: 'status',
+      reason: `status must be one of ${allowed.join(', ')}`,
+    });
+  }
+
+  const runStateRecord = resolveRunState({ runId, workflowId: 'run' });
+  const state = deepClone(runStateRecord.state);
+  if (!isPlainObject(state.steps?.[stepId])) {
+    throw createRpcError('NOT_FOUND', {
+      field: 'step_id',
+      reason: `Unknown step '${stepId}' in run '${runId}'`,
+    });
+  }
+
+  const ts = nowIso();
+  const step = state.steps[stepId];
+  step.status = status;
+  step.updated_at = ts;
+  if ((status === 'completed' || status === 'failed' || status === 'skipped') && !step.ended_at) {
+    step.ended_at = ts;
+  }
+  if (status === 'pending') {
+    delete step.ended_at;
+  }
+  if (note) {
+    step.note = note;
+  }
+
+  state.updated_at = ts;
+  state.human_interventions = Array.isArray(state.human_interventions) ? state.human_interventions : [];
+  state.human_interventions.push({
+    ts,
+    step_id: stepId,
+    status,
+    note: note || '',
+    source: 'minato_mcp',
+  });
+
+  const stepStatuses = Object.values(state.steps || {}).map((item) => item.status);
+  if (stepStatuses.length && stepStatuses.every((item) => item === 'completed' || item === 'skipped')) {
+    state.workflow_status = 'completed';
+    state.ended_at = ts;
+  } else if (stepStatuses.some((item) => item === 'failed')) {
+    state.workflow_status = 'failed';
+    state.ended_at = ts;
+  } else if (stepStatuses.some((item) => item === 'pending')) {
+    state.workflow_status = 'running';
+    delete state.ended_at;
+  }
+
+  fs.writeFileSync(runStateRecord.path, JSON.stringify(state, null, 2) + '\n', 'utf8');
+  const workflowId = String(state.run_id || '').replace(/^run-/, '').replace(/-\d{8}-\d{6}$/, '') || 'unknown';
+  return normalizeRunState(workflowId, {
+    ...runStateRecord,
+    state,
+  });
 }
 
 function stripQuotes(value) {
@@ -543,6 +803,10 @@ function buildResourceList(projectListFn) {
     uri: `minato://nagare/run/${item.state.run_id}/state`,
     name: `Nagare run state: ${item.state.run_id}`,
   }));
+  const artefactResources = ((projectListFn?.() || defaultListProjects()).projects || []).map((item) => ({
+    uri: `minato://artefacts/${item.slug}`,
+    name: `Artefacts: ${item.name}`,
+  }));
   const docResources = listDocs().map((item) => ({
     uri: `minato://docs/${item.name}`,
     name: `Doc: ${item.name}`,
@@ -556,6 +820,7 @@ function buildResourceList(projectListFn) {
     ...shimantoResources,
     ...workflowResources,
     ...runResources,
+    ...artefactResources,
     ...docResources,
   ];
 }
@@ -811,6 +1076,154 @@ function createToolRegistry(deps) {
           runId: optionalString(args.run_id, 'run_id'),
         });
         return normalizeRunState(workflowId, runState);
+      },
+    },
+    {
+      name: 'nagare_update_step_status',
+      description: 'Update a Nagare run step status for human-in-the-loop intervention.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          run_id: { type: 'string' },
+          step_id: { type: 'string' },
+          status: { type: 'string' },
+          note: { type: 'string' },
+        },
+        required: ['run_id', 'step_id', 'status'],
+        additionalProperties: false,
+      },
+      handler: async (rawArgs) => {
+        const args = expectObject(rawArgs);
+        const runId = requireString(args.run_id, 'run_id');
+        const stepId = requireString(args.step_id, 'step_id');
+        const status = requireString(args.status, 'status');
+        const note = optionalString(args.note, 'note');
+        const runState = updateRunStateStep({ runId, stepId, status, note });
+        return {
+          ok: true,
+          run_id: runId,
+          step_id: stepId,
+          status,
+          note: note || '',
+          workflow_status: runState.status,
+        };
+      },
+    },
+    {
+      name: 'artefacts_list',
+      description: 'List artefacts linked to a Minato project.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          project: { type: 'string' },
+          type: { type: 'string' },
+        },
+        additionalProperties: false,
+      },
+      handler: async (rawArgs, context) => {
+        const args = expectObject(rawArgs);
+        const project = getActiveProject(args, context);
+        return listArtefactsForProject(project, {
+          type: optionalString(args.type, 'type') || 'any',
+        });
+      },
+    },
+    {
+      name: 'artefacts_create',
+      description: 'Create a new Minato artefact record.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          project: { type: 'string' },
+          name: { type: 'string' },
+          type: { type: 'string' },
+          path: { type: 'string' },
+          kasumi_id: { type: 'string' },
+          kasumi_module: { type: 'string' },
+          nagare_step: { type: 'string' },
+          shimanto_phase: { type: 'string' },
+          note: { type: 'string' },
+        },
+        required: ['name', 'type'],
+        additionalProperties: false,
+      },
+      handler: async (rawArgs, context) => {
+        const args = expectObject(rawArgs);
+        const record = createArtefactRecord({
+          ...args,
+          project: getActiveProject(args, context),
+        });
+        return {
+          ok: true,
+          artefact_id: record.artefact_id,
+          artefact: record,
+        };
+      },
+    },
+    {
+      name: 'artefacts_read',
+      description: 'Read a Minato artefact by id.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          artefact_id: { type: 'string' },
+        },
+        required: ['artefact_id'],
+        additionalProperties: false,
+      },
+      handler: async (rawArgs) => {
+        const args = expectObject(rawArgs);
+        const record = getArtefactRecord(args.artefact_id);
+        if (record.type === 'kasumi') {
+          throw createRpcError('UPSTREAM_ERROR', {
+            field: 'artefact_id',
+            reason: 'KASUMI artefact delegation is not implemented yet',
+            artefact_id: record.artefact_id,
+            kasumi_id: record.kasumi_id,
+            kasumi_module: record.kasumi_module,
+          });
+        }
+        return {
+          ...record,
+          ...readFilesystemArtefact(record),
+        };
+      },
+    },
+    {
+      name: 'artefacts_link',
+      description: 'Link an existing artefact to additional Minato project metadata.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          artefact_id: { type: 'string' },
+          project: { type: 'string' },
+          nagare_step: { type: 'string' },
+          shimanto_phase: { type: 'string' },
+        },
+        required: ['artefact_id'],
+        additionalProperties: false,
+      },
+      handler: async (rawArgs, context) => {
+        const args = expectObject(rawArgs);
+        const project = optionalString(args.project, 'project') || context.session?.active_project;
+        const nagareStep = optionalString(args.nagare_step, 'nagare_step');
+        const shimantoPhase = optionalString(args.shimanto_phase, 'shimanto_phase');
+        if (!project && !nagareStep && !shimantoPhase) {
+          throw createRpcError('INVALID_PARAMS', {
+            field: 'artefact_id',
+            reason: 'at least one of project, nagare_step, or shimanto_phase is required',
+          });
+        }
+
+        const updated = updateArtefactRecord(args.artefact_id, (current) => ({
+          linked_projects: uniqStrings([...current.linked_projects, ...(project ? [project] : [])]),
+          project: current.project || project || null,
+          linked_nagare_steps: uniqStrings([...current.linked_nagare_steps, ...(nagareStep ? [nagareStep] : [])]),
+          nagare_step: current.nagare_step || nagareStep || null,
+          linked_shimanto_phases: uniqStrings([...current.linked_shimanto_phases, ...(shimantoPhase ? [shimantoPhase] : [])]),
+          shimanto_phase: current.shimanto_phase || shimantoPhase || null,
+        }));
+        return { ok: true, artefact: updated };
       },
     },
     {
@@ -1104,6 +1517,16 @@ function createResourceReader(deps) {
         uri: value,
         mime_type: 'application/json',
         data: normalizeRunState(workflowId || 'unknown', runState),
+      };
+    }
+
+    const artefactMatch = value.match(/^minato:\/\/artefacts\/([^/]+)$/);
+    if (artefactMatch) {
+      const project = resolveProjectRecord(decodeURIComponent(artefactMatch[1]), deps.projectList).name;
+      return {
+        uri: value,
+        mime_type: 'application/json',
+        data: listArtefactsForProject(project),
       };
     }
 
