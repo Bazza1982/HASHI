@@ -420,7 +420,7 @@ preflight_check() {
             for pid in $(pgrep -f "python.*main.py" 2>/dev/null || true); do
                 local cmdline
                 cmdline=$(ps -p "$pid" -o args= 2>/dev/null || true)
-                if [[ "$cmdline" =~ "$SCRIPT_DIR" ]]; then
+                if [[ "$cmdline" =~ "$SCRIPT_DIR/" ]]; then
                     existing_pid="$pid"
                     break
                 fi

@@ -23,7 +23,7 @@ import sqlite3
 import sys
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # ─── paths ───────────────────────────────────────────────────────────────────
@@ -35,9 +35,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from orchestrator.bridge_memory import BridgeMemoryStore
+from orchestrator.habits import HabitStore
 
 TASKS_PATH = PROJECT_ROOT / "tasks.json"
 SECRETS_PATH = PROJECT_ROOT / "secrets.json"
+AGENTS_PATH = PROJECT_ROOT / "agents.json"
 TRANSCRIPT_PATH = WORKSPACE_DIR / "transcript.jsonl"
 AGENT_MD_PATH = WORKSPACE_DIR / "AGENT.md"
 DREAM_DIR = WORKSPACE_DIR / "dream_snapshots"
@@ -55,6 +57,7 @@ MEMORY_FORGET_THRESHOLD = 200   # start forgetting when agent exceeds this many 
 MEMORY_FORGET_TARGET = 160      # trim down to this count when threshold exceeded
 MAX_FORGET_PER_DREAM = 20       # safety cap — never delete more than this in one run
 _MEMORY_STORE: BridgeMemoryStore | None = None
+_HABIT_STORE: HabitStore | None = None
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
@@ -80,6 +83,13 @@ def _read_tasks() -> dict:
         return {"version": 1, "heartbeats": [], "crons": []}
 
 
+def _read_agents() -> dict:
+    try:
+        return json.loads(AGENTS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {"agents": []}
+
+
 def _write_tasks(tasks: dict):
     TASKS_PATH.write_text(json.dumps(tasks, indent=2, ensure_ascii=False))
 
@@ -92,12 +102,21 @@ def _today_str() -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
 
-def _load_today_transcript() -> list[dict]:
-    """Load today's user+assistant turns from transcript.jsonl."""
+def _load_transcript_for_date(target_date: str) -> list[dict]:
+    """Load user+assistant turns from transcript.jsonl for a specific local date.
+
+    For entries WITH a 'ts' field: included only if the local date matches target_date.
+    For legacy entries WITHOUT 'ts': included only if they appear between or after
+    entries that match target_date (i.e. once we've seen at least one matching entry).
+
+    If NO entries have a 'ts' at all (fully legacy transcript), falls back to returning
+    the last 60 entries — the old behavior — so dream still works for agents that
+    predate the ts addition.
+    """
     if not TRANSCRIPT_PATH.exists():
         return []
-    today = _today_str()
-    turns = []
+    all_entries: list[dict] = []
+    any_has_ts = False
     try:
         for line in TRANSCRIPT_PATH.read_text(encoding="utf-8").splitlines():
             line = line.strip()
@@ -107,10 +126,66 @@ def _load_today_transcript() -> list[dict]:
                 entry = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if entry.get("role") in ("user", "assistant"):
-                turns.append(entry)
+            if entry.get("role") not in ("user", "assistant"):
+                continue
+            if entry.get("ts"):
+                any_has_ts = True
+            all_entries.append(entry)
     except Exception:
-        pass
+        return []
+
+    # Fully legacy transcript (no ts fields at all) — return tail entries
+    if not any_has_ts:
+        return all_entries[-60:]
+
+    # Resolve local dates for all entries (None for undated)
+    resolved: list[tuple[dict, str | None]] = []
+    for entry in all_entries:
+        ts = entry.get("ts", "")
+        local_date = None
+        if ts:
+            try:
+                utc_dt = datetime.fromisoformat(ts)
+                local_date = utc_dt.astimezone().strftime("%Y-%m-%d")
+            except (ValueError, OSError):
+                pass
+        resolved.append((entry, local_date))
+
+    # Find the last dated entry's local_date — if it's the day BEFORE target_date,
+    # then undated entries trailing after it are likely today's activity (partial-legacy).
+    last_dated_date = None
+    last_dated_idx = -1
+    for i in range(len(resolved) - 1, -1, -1):
+        if resolved[i][1] is not None:
+            last_dated_date = resolved[i][1]
+            last_dated_idx = i
+            break
+
+    # Collect entries matching target_date
+    turns: list[dict] = []
+    seen_target = False
+    for entry, local_date in resolved:
+        if local_date == target_date:
+            seen_target = True
+            turns.append(entry)
+        elif local_date is not None:
+            # Different date — if we were collecting, stop (passed the window)
+            if seen_target:
+                break
+        elif seen_target:
+            # Undated entry interleaved with matching block — include
+            turns.append(entry)
+
+    # Partial-legacy fix: if no dated entries matched target_date, but there are
+    # undated entries trailing AFTER the last dated block (which is from an earlier
+    # date), those undated entries are the most recent activity — include them.
+    if not turns and last_dated_date is not None and last_dated_date < target_date:
+        for entry, local_date in resolved[last_dated_idx + 1:]:
+            if local_date is None:
+                turns.append(entry)
+            else:
+                break  # hit another dated block
+
     return turns
 
 
@@ -147,6 +222,28 @@ def _memory_store() -> BridgeMemoryStore:
     if _MEMORY_STORE is None:
         _MEMORY_STORE = BridgeMemoryStore(WORKSPACE_DIR)
     return _MEMORY_STORE
+
+
+def _resolve_agent_class() -> str:
+    agents = _read_agents().get("agents", [])
+    for entry in agents:
+        if str(entry.get("name") or entry.get("id") or "").strip().lower() != AGENT_NAME.lower():
+            continue
+        extra = entry.get("extra") or {}
+        return str(entry.get("agent_class") or extra.get("agent_class") or "general").strip().lower()
+    return "general"
+
+
+def _habit_store() -> HabitStore:
+    global _HABIT_STORE
+    if _HABIT_STORE is None:
+        _HABIT_STORE = HabitStore(
+            workspace_dir=WORKSPACE_DIR,
+            project_root=PROJECT_ROOT,
+            agent_id=AGENT_NAME,
+            agent_class=_resolve_agent_class(),
+        )
+    return _HABIT_STORE
 
 
 def _write_memory(content: str, memory_type: str, source: str, importance: float) -> int | None:
@@ -275,16 +372,16 @@ def _delete_memories_by_ids(ids: list[int]):
 
 # ─── snapshot ─────────────────────────────────────────────────────────────────
 
-def _save_snapshot(added_memory_ids: list[int], agent_md_before: str | None) -> Path:
+def _save_snapshot(added_memory_ids: list[int], agent_md_before: str | None, dream_date: str | None = None) -> Path:
     DREAM_DIR.mkdir(exist_ok=True)
-    today = _today_str()
+    date_label = dream_date or _today_str()
     snapshot = {
-        "date": today,
+        "date": date_label,
         "ts": _now_iso(),
         "agent_md_before": agent_md_before,
         "added_memory_ids": added_memory_ids,
     }
-    path = DREAM_DIR / f"dream_{today}.json"
+    path = DREAM_DIR / f"dream_{date_label}.json"
     path.write_text(json.dumps(snapshot, indent=2, ensure_ascii=False))
     # purge old snapshots
     cutoff = datetime.now().timestamp() - SNAPSHOT_RETENTION_DAYS * 86400
@@ -398,10 +495,23 @@ def cmd_now(is_scheduled: bool = False) -> str:
     if not api_key:
         return "❌ Dream: No OpenRouter API key found. Cannot run reflection."
 
-    turns = _load_today_transcript()
+    # Scheduled runs (cron at 01:30) reflect on yesterday; manual runs reflect on today.
+    # If today has no turns, also try yesterday as fallback (for manual runs shortly after midnight).
+    today = _today_str()
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    if is_scheduled:
+        dream_date = yesterday
+        turns = _load_transcript_for_date(yesterday)
+    else:
+        turns = _load_transcript_for_date(today)
+        dream_date = today
+        if len(turns) < 4:
+            # Fallback: try yesterday (user might run /dream now shortly after midnight)
+            turns = _load_transcript_for_date(yesterday)
+            dream_date = yesterday
     if len(turns) < 4:
         return (
-            "🌙 Dream skipped — not enough conversation today to reflect on "
+            f"🌙 Dream skipped — not enough conversation on {dream_date} to reflect on "
             f"(found {len(turns)} turns, need at least 4)."
         )
 
@@ -418,11 +528,11 @@ def cmd_now(is_scheduled: bool = False) -> str:
     # Build dream prompt
     dream_prompt = f"""You are performing a nightly memory consolidation for an AI assistant agent named {AGENT_NAME}.
 
-Review today's conversation transcript and decide what is truly worth remembering long-term to serve the user better.
+Review the conversation transcript from {dream_date} and decide what is truly worth remembering long-term to serve the user better.
 
 Think like a human brain during sleep: extract the essence, compress the important, discard the noise.
 
-TODAY'S TRANSCRIPT:
+TRANSCRIPT FROM {dream_date}:
 ---
 {transcript_text}
 ---
@@ -439,7 +549,7 @@ Respond ONLY with valid JSON in this exact format:
       "content": "Concise memory text — should be self-contained and useful in future conversations",
       "memory_type": "episodic",
       "importance": 0.8,
-      "source": "dream:{_today_str()}"
+      "source": "dream:{dream_date}"
     }}
   ],
   "agent_md_updates": [
@@ -449,7 +559,7 @@ Respond ONLY with valid JSON in this exact format:
       "new_content": "The exact new content for this section"
     }}
   ],
-  "reflection_summary": "2-4 sentence summary of what was learned today and why it matters for future interactions. Write in first person as the agent."
+  "reflection_summary": "2-4 sentence summary of what was learned on {dream_date} and why it matters for future interactions. Write in first person as the agent."
 }}
 
 RULES (follow strictly):
@@ -457,7 +567,7 @@ RULES (follow strictly):
 2. agent_md_updates: max {MAX_AGENT_MD_SECTIONS} sections, only for genuinely significant insights
 3. Do NOT invent facts — only extract from the actual transcript
 4. Do NOT update agent.md for trivial things; only for meaningful behavioral insights
-5. If nothing significant happened today, return empty arrays and say so in reflection_summary
+5. If nothing significant happened, return empty arrays and say so in reflection_summary
 6. new_memories array may be empty, agent_md_updates array may be empty
 """
 
@@ -505,7 +615,7 @@ RULES (follow strictly):
         memory_id = _write_memory(
             content=mem["content"],
             memory_type=mem.get("memory_type", "episodic"),
-            source=mem.get("source", f"dream:{_today_str()}"),
+            source=mem.get("source", f"dream:{dream_date}"),
             importance=float(mem.get("importance", 0.8)),
         )
         if memory_id is not None:
@@ -545,14 +655,37 @@ RULES (follow strictly):
             agent_md_updated = True
 
     # Save snapshot for undo
-    _save_snapshot(added_memory_ids, agent_md_before)
+    _save_snapshot(added_memory_ids, agent_md_before, dream_date=dream_date)
 
     # Append to dream log
-    _append_dream_log(_today_str(), reflection_summary, len(valid_memories), agent_md_updated)
+    _append_dream_log(dream_date, reflection_summary, len(valid_memories), agent_md_updated)
+    habit_review = _habit_store().nightly_review()
+    habit_review_text = _habit_store().format_nightly_review(habit_review)
+    _append_dream_log(dream_date, f"[habit-review] {habit_review.summary}", 0, False)
+
+    # Process user /good and /bad signals (max 3 per dream to avoid overwhelm)
+    signal_log_lines = _habit_store().process_user_signals(
+        api_key=api_key,
+        call_llm_fn=_call_openrouter,
+        max_signals=3,
+        max_habits_per_signal=2,
+        max_context_words=6000,
+    )
+    if signal_log_lines:
+        for sline in signal_log_lines:
+            _append_dream_log(dream_date, sline, 0, False)
+
+    recommendation_report = HabitStore.generate_recommendation_report(
+        project_root=PROJECT_ROOT,
+        generated_by=AGENT_NAME,
+        lookback_days=7,
+    )
+    recommendation_report_summary = HabitStore.summarize_recommendation_report(recommendation_report)
+    _append_dream_log(dream_date, f"[habit-report] {recommendation_report_summary}", 0, False)
 
     # Build output message
     lines = [
-        f"🌙 Dream complete — {_today_str()}",
+        f"🌙 Dream complete — {dream_date}",
         "",
         f"💭 Reflection:",
         reflection_summary,
@@ -581,6 +714,16 @@ RULES (follow strictly):
         lines.append(f"📝 Agent.md updated: {', '.join(updated_names)}")
         lines.append("")
 
+    lines.append(habit_review_text)
+    lines.append("")
+    if signal_log_lines:
+        lines.append(f"💬 User signals processed: {len(signal_log_lines)}")
+        for sline in signal_log_lines:
+            lines.append(f"  • {sline}")
+        lines.append("")
+    lines.append(f"🧾 {recommendation_report_summary}")
+    lines.append(f"📍 Report: {recommendation_report.markdown_path}")
+    lines.append("")
     lines.append("Use '/skill dream undo' to revert if needed.")
 
     return "\n".join(lines)

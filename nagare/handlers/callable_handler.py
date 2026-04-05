@@ -14,9 +14,12 @@ import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from nagare.logging.events import RunEventLogger
+
+if TYPE_CHECKING:
+    from nagare.engine.callable_setup_manager import CallableSetupManager
 
 
 logger = logging.getLogger(__name__)
@@ -56,11 +59,13 @@ class CallableStepHandler:
         *,
         event_logger: RunEventLogger | None = None,
         runs_root: str | Path = "flow/runs",
+        setup_manager: CallableSetupManager | None = None,
     ) -> None:
         self.run_id = run_id
         self._event_logger = event_logger
         self.runs_root = Path(runs_root)
         self._registry: dict[str, StepCallable] = {}
+        self._setup_manager = setup_manager
 
     def register(self, agent_id: str, fn: StepCallable) -> None:
         """Register a Python callable for a given agent_id."""
@@ -86,8 +91,14 @@ class CallableStepHandler:
         """Execute a registered callable. Conforms to StepHandler protocol."""
         del agent_md_path, timeout_seconds, backend, model  # unused
 
-        fn = self._registry.get(agent_id)
-        if fn is None:
+        step_id = task_message.get("payload", {}).get("step_id", "unknown")
+
+        # Auto-setup loop: if callable is missing and setup_manager is wired,
+        # ask AI to implement it (up to MAX_RETRIES times) before giving up.
+        if agent_id not in self._registry and self._setup_manager is not None:
+            return self._execute_with_auto_setup(agent_id, step_id, task_message)
+
+        if agent_id not in self._registry:
             available = list(self._registry.keys())
             error_msg = (
                 f"No callable registered for agent_id='{agent_id}'. "
@@ -97,13 +108,108 @@ class CallableStepHandler:
             self._emit("callable_not_found", agent_id=agent_id, error=error_msg)
             return {"status": "failed", "error": error_msg}
 
-        step_id = task_message.get("payload", {}).get("step_id", "unknown")
+        return self._invoke(agent_id, step_id, task_message)
+
+    def _execute_with_auto_setup(
+        self,
+        agent_id: str,
+        step_id: str,
+        task_message: dict,
+    ) -> dict:
+        """
+        Retry loop that asks the AI to implement the callable, waits for code
+        delivery, and re-executes. Escalates to human after MAX_RETRIES.
+        """
+        from nagare.engine.callable_setup_manager import MAX_RETRIES
+
+        self._emit("callable_not_found", agent_id=agent_id, step_id=step_id)
+        mgr = self._setup_manager  # guaranteed non-None by caller
+
+        for attempt in range(1, MAX_RETRIES + 1):
+            logger.info(
+                "Callable auto-setup attempt %d/%d for agent_id='%s'",
+                attempt,
+                MAX_RETRIES,
+                agent_id,
+            )
+            self._emit(
+                "callable_setup_attempt",
+                agent_id=agent_id,
+                step_id=step_id,
+                attempt=attempt,
+                max_retries=MAX_RETRIES,
+            )
+
+            event = mgr.request_setup(agent_id, task_message, attempt=attempt)
+            delivered = mgr.wait_for_setup(agent_id, event)
+
+            if not delivered:
+                self._emit(
+                    "callable_setup_timeout",
+                    agent_id=agent_id,
+                    step_id=step_id,
+                    attempt=attempt,
+                )
+                mgr.increment_retry(agent_id)
+                continue
+
+            fn = mgr.pop_pending_callable(agent_id)
+            if fn is None:
+                # Shouldn't happen — event fired but no fn stored
+                mgr.increment_retry(agent_id)
+                continue
+
+            # Register (force, bypassing duplicate guard) and try executing
+            self._registry[agent_id] = fn
+            logger.info("Callable '%s' registered from auto-setup, executing…", agent_id)
+
+            result = self._invoke(agent_id, step_id, task_message)
+            if result.get("status") != "failed":
+                self._emit(
+                    "callable_setup_success",
+                    agent_id=agent_id,
+                    step_id=step_id,
+                    attempt=attempt,
+                )
+                return result
+
+            # Callable ran but returned failed — remove so next attempt re-delivers
+            del self._registry[agent_id]
+            mgr.increment_retry(agent_id)
+            self._emit(
+                "callable_setup_bad_result",
+                agent_id=agent_id,
+                step_id=step_id,
+                attempt=attempt,
+                error=result.get("error", ""),
+            )
+
+        # All retries exhausted
+        logger.error(
+            "Callable auto-setup exhausted %d attempts for agent_id='%s', escalating",
+            MAX_RETRIES,
+            agent_id,
+        )
+        mgr.escalate_to_human(agent_id, task_message)
         self._emit(
-            "callable_start",
+            "callable_setup_exhausted",
             agent_id=agent_id,
             step_id=step_id,
+            max_retries=MAX_RETRIES,
         )
+        return {
+            "status": "failed",
+            "error": (
+                f"Callable auto-setup failed after {MAX_RETRIES} attempts "
+                f"for agent_id='{agent_id}'. Human escalation sent."
+            ),
+        }
 
+    def _invoke(self, agent_id: str, step_id: str, task_message: dict) -> dict:
+        """Execute a callable that is already in self._registry."""
+        fn = self._registry[agent_id]
+
+        self._emit("callable_start", agent_id=agent_id, step_id=step_id)
         t0 = time.monotonic()
         try:
             result = fn(task_message)
@@ -137,9 +243,7 @@ class CallableStepHandler:
             elapsed = time.monotonic() - t0
             error_msg = f"{type(exc).__name__}: {exc}"
             tb = traceback.format_exc()
-            logger.error(
-                "Callable %s raised: %s\n%s", agent_id, error_msg, tb
-            )
+            logger.error("Callable %s raised: %s\n%s", agent_id, error_msg, tb)
             self._emit(
                 "callable_error",
                 agent_id=agent_id,
@@ -147,11 +251,7 @@ class CallableStepHandler:
                 error=error_msg,
                 elapsed_s=round(elapsed, 3),
             )
-            return {
-                "status": "failed",
-                "error": error_msg,
-                "traceback": tb,
-            }
+            return {"status": "failed", "error": error_msg, "traceback": tb}
 
     def _emit(self, event_type: str, **kwargs: Any) -> None:
         if self._event_logger is None:

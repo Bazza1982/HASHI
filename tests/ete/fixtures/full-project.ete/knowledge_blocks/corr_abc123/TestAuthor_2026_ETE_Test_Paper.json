@@ -1,0 +1,18 @@
+{
+  "title": "ETE Test Paper",
+  "authors": ["Test Author"],
+  "year": 2026,
+  "chunks": [
+    {
+      "id": 1,
+      "section": "Introduction",
+      "content": "This is a test knowledge block for ETE fixture validation.",
+      "metadata": {}
+    }
+  ],
+  "metadata": {
+    "source_pdf": "test_paper.pdf",
+    "injection_timestamp": "2026-04-03T12:00:00Z",
+    "workflow_used": "test_workflow"
+  }
+}

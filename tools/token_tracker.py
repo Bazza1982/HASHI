@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -96,6 +96,10 @@ def _usage_path(workspace_dir: Path) -> Path:
     return workspace_dir / "token_usage.jsonl"
 
 
+def _audit_path(workspace_dir: Path) -> Path:
+    return workspace_dir / "token_audit.jsonl"
+
+
 def record_usage(
     workspace_dir: Path,
     model: str,
@@ -123,6 +127,17 @@ def record_usage(
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
     except Exception:
         pass  # Never break the agent over tracking
+
+
+def record_audit_event(workspace_dir: Path, record: dict[str, Any]) -> None:
+    """Append a structured token-audit event to the agent workspace."""
+    payload = {"ts": datetime.now(timezone.utc).isoformat(), **record}
+    path = _audit_path(workspace_dir)
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 
 def _load_records(workspace_dir: Path) -> list[dict]:
@@ -252,3 +267,73 @@ def _fmt_tokens(n: int) -> str:
     if n >= 1_000:
         return f"{n/1_000:.1f}K"
     return str(n)
+
+
+# Public alias so cmd_token can import it
+fmt_tokens = _fmt_tokens
+
+
+def _week_start_utc() -> datetime:
+    """Most recent Sunday at 00:00 UTC."""
+    now = datetime.now(timezone.utc)
+    # weekday(): Mon=0 … Sun=6 → days since last Sunday
+    days_since_sunday = (now.weekday() + 1) % 7
+    return (now - timedelta(days=days_since_sunday)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+
+
+def _month_start_utc() -> datetime:
+    """1st of current month at 00:00 UTC."""
+    now = datetime.now(timezone.utc)
+    return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+def get_summary_extended(
+    workspace_dir: Path,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    """Return usage summary with all_time, session, weekly, monthly, by_model, since."""
+    records = _load_records(workspace_dir)
+
+    def empty() -> dict:
+        return {"input": 0, "output": 0, "thinking": 0, "cost_usd": 0.0, "requests": 0}
+
+    all_time = empty()
+    session  = empty()
+    weekly   = empty()
+    monthly  = empty()
+    by_model: dict[str, dict] = {}
+
+    week_start  = _week_start_utc()
+    month_start = _month_start_utc()
+
+    for r in records:
+        _add(all_time, r)
+        if session_id and r.get("session_id") == session_id:
+            _add(session, r)
+        try:
+            ts = datetime.fromisoformat(r.get("ts", ""))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            if ts >= week_start:
+                _add(weekly, r)
+            if ts >= month_start:
+                _add(monthly, r)
+        except Exception:
+            pass
+        model = r.get("model", "unknown")
+        if model not in by_model:
+            by_model[model] = empty()
+        _add(by_model[model], r)
+
+    earliest = records[0].get("ts", "")[:10] if records else None
+
+    return {
+        "all_time": all_time,
+        "session":  session if session_id else None,
+        "weekly":   weekly,
+        "monthly":  monthly,
+        "by_model": by_model,
+        "since":    earliest,
+    }

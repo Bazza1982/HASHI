@@ -24,7 +24,7 @@ BACKEND_REGISTRY: dict[str, dict] = {
         ],
         "default_model": "claude-sonnet-4-6",
         "efforts": ["low", "medium", "high"],
-        "default_effort": "low",
+        "default_effort": "medium",
         "secret_keys": ["claude-cli_key"],
     },
     "codex-cli": {

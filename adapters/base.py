@@ -22,6 +22,14 @@ class BackendCapabilities:
 
 
 @dataclass
+class TokenUsage:
+    """Real token usage from API response, or None for CLI backends."""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    thinking_tokens: int = 0
+
+
+@dataclass
 class BackendResponse:
     text: str
     duration_ms: float
@@ -29,6 +37,9 @@ class BackendResponse:
     is_success: bool = True
     tool_calls: Optional[list] = None   # Raw tool_calls list from API (V2.2+)
     stop_reason: Optional[str] = None   # e.g. "stop", "tool_calls", "length"
+    usage: Optional[TokenUsage] = None  # Real token usage from API (V3.0+)
+    tool_call_count: int = 0
+    tool_loop_count: int = 0
 
 
 class BaseBackend(ABC):

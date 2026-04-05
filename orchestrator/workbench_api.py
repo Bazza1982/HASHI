@@ -101,6 +101,7 @@ class WorkbenchApiServer:
         self.app.router.add_post("/api/admin/stop-agent", self.handle_admin_stop_agent)
         self.app.router.add_post("/api/admin/shutdown", self.handle_admin_shutdown)
         self.app.router.add_get("/api/health", self.handle_health)
+        self.app.router.add_post("/api/jobs/import", self.handle_jobs_import)
         self.runner = None
         self.site = None
 
@@ -874,6 +875,36 @@ class WorkbenchApiServer:
     async def handle_health(self, request):
         running_agents = [runtime.name for runtime in self._runtime_list() if runtime.startup_success]
         return web.json_response({"ok": True, "agents": running_agents})
+
+    async def handle_jobs_import(self, request):
+        """Import a job from a remote instance (cross-instance job transfer).
+
+        Payload: {"kind": "cron"|"heartbeat", "job": {...}, "from_instance": "HASHI1", "from_agent": "akane"}
+        The job is imported as disabled so the recipient can review before enabling.
+        """
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+
+        kind = payload.get("kind", "")
+        job = payload.get("job")
+        if kind not in ("cron", "heartbeat") or not isinstance(job, dict):
+            return web.json_response({"ok": False, "error": "kind and job are required"}, status=400)
+
+        # Find skill_manager from any running runtime
+        skill_manager = None
+        for runtime in self._runtime_list():
+            sm = getattr(runtime, "skill_manager", None)
+            if sm is not None:
+                skill_manager = sm
+                break
+        if skill_manager is None:
+            return web.json_response({"ok": False, "error": "skill_manager unavailable"}, status=503)
+
+        job["enabled"] = False  # always import as disabled
+        ok, message = skill_manager.import_job(kind, job)
+        return web.json_response({"ok": ok, "message": message, "job_id": job.get("id")})
 
     async def handle_admin_start_agent(self, request):
         if not self._check_admin_auth(request):

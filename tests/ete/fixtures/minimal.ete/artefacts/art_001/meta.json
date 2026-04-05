@@ -1,0 +1,14 @@
+{
+  "artefact_id": "art_001",
+  "title": "Test Document",
+  "mime_type": "text/plain",
+  "artefact_type": "file",
+  "content_hash": "sha256:b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
+  "size_bytes": 11,
+  "envelope_version": 0,
+  "correlation_id": "test:run_001:art_001",
+  "source": {"system": "hashi-test", "session_id": "test", "run_id": "run_001"},
+  "created_at": "2026-04-03T00:00:00Z",
+  "updated_at": "2026-04-03T00:00:00Z",
+  "extra": {}
+}

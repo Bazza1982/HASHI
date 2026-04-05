@@ -1,11 +1,12 @@
+import { CollapsiblePanel } from "./CollapsiblePanel";
+
 type UnsupportedFieldsPanelProps = {
   scopes: Array<{ scope: string; value: unknown }>;
 };
 
 export function UnsupportedFieldsPanel({ scopes }: UnsupportedFieldsPanelProps) {
   return (
-    <section className="panel">
-      <h2>Unsupported Fields</h2>
+    <CollapsiblePanel title="Unsupported Fields" badge={scopes.length} defaultCollapsed>
       {scopes.length === 0 ? (
         <p className="muted">No unsupported fields detected in the current workflow.</p>
       ) : (
@@ -18,6 +19,6 @@ export function UnsupportedFieldsPanel({ scopes }: UnsupportedFieldsPanelProps) 
           ))}
         </div>
       )}
-    </section>
+    </CollapsiblePanel>
   );
 }

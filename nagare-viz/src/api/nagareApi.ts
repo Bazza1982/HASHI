@@ -105,6 +105,32 @@ export async function fetchRunArtifacts(
   );
 }
 
+export type ApiSubmitRunResponse = {
+  request_id: string;
+  retrieved_at: string;
+  run_id: string;
+  workflow_path: string;
+  status: string;
+};
+
+export async function submitRun(
+  apiBaseUrl: string,
+  workflowPath: string,
+  preFlight?: Record<string, unknown>,
+): Promise<ApiSubmitRunResponse> {
+  const url = `${normalizeBaseUrl(apiBaseUrl)}/runs`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ workflow_path: workflowPath, pre_flight: preFlight ?? {} }),
+  });
+  if (!response.ok) {
+    const errorPayload = await tryParseError(response);
+    throw new Error(errorPayload?.message ?? errorPayload?.error ?? `Submit failed: ${response.status}`);
+  }
+  return (await response.json()) as ApiSubmitRunResponse;
+}
+
 async function requestJson<T>(url: string): Promise<T> {
   const response = await fetch(url, {
     headers: {

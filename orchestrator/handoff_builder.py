@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Any
 
@@ -37,7 +38,8 @@ class HandoffBuilder:
         entry = {
             "role": role,
             "text": text,
-            "source": source
+            "source": source,
+            "ts": datetime.now(timezone.utc).isoformat(),
         }
         try:
             with open(self.transcript_path, "a", encoding="utf-8") as f:

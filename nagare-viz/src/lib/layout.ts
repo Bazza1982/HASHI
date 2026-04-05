@@ -2,6 +2,11 @@ import type { DraftStep, WorkflowDraft } from "./yamlCodec";
 
 export type NodePosition = { x: number; y: number };
 
+/**
+ * Auto-layout: top-to-bottom DAG layout.
+ * Steps at the same dependency depth are placed in the same row.
+ * Rows flow top → bottom, columns spread left → right, centered.
+ */
 export function autoLayout(draft: WorkflowDraft): Record<string, { position: NodePosition }> {
   const levels = computeLevels(draft.steps);
   const grouped = new Map<number, DraftStep[]>();
@@ -15,18 +20,29 @@ export function autoLayout(draft: WorkflowDraft): Record<string, { position: Nod
 
   const metadata: Record<string, { position: NodePosition }> = {};
   const sortedLevels = [...grouped.keys()].sort((left, right) => left - right);
+
+  const NODE_WIDTH = 240;
+  const H_GAP = 40;
+  const V_GAP = 40;
+
   for (const level of sortedLevels) {
     const steps = grouped.get(level)!;
     steps.sort((left, right) => left.id.localeCompare(right.id));
+
+    // Center each row horizontally around x=0
+    const rowWidth = steps.length * NODE_WIDTH + (steps.length - 1) * H_GAP;
+    const startX = -rowWidth / 2;
+
     steps.forEach((step, index) => {
       metadata[step.id] = {
         position: {
-          x: 120 + level * 320,
-          y: 96 + index * 168,
+          x: Math.round(startX + index * (NODE_WIDTH + H_GAP)),
+          y: Math.round(level * (70 + V_GAP)),
         },
       };
     });
   }
+
   return metadata;
 }
 

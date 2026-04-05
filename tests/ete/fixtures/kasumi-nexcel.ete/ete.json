@@ -1,0 +1,6 @@
+{
+  "ete_version": "1.0.0",
+  "producer": {"system": "hashi-test", "version": "1.0.0"},
+  "produced_at": "2026-04-03T00:00:00Z",
+  "contents": ["artefacts"]
+}

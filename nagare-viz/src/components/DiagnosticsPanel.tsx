@@ -1,5 +1,6 @@
 import type { DiagnosticLog } from "../lib/logger";
 import type { ValidationIssue } from "../lib/workflowSafety";
+import { CollapsiblePanel } from "./CollapsiblePanel";
 
 type DiagnosticsPanelProps = {
   correlationId: string;
@@ -17,8 +18,7 @@ export function DiagnosticsPanel({
   logs,
 }: DiagnosticsPanelProps) {
   return (
-    <section className="panel">
-      <h2>Diagnostics</h2>
+    <CollapsiblePanel title="Diagnostics" defaultCollapsed>
       <div className="diagnostics-grid">
         <div className="diagnostic-meta">
           <strong>Correlation ID</strong>
@@ -74,7 +74,7 @@ export function DiagnosticsPanel({
           ))}
         </div>
       )}
-    </section>
+    </CollapsiblePanel>
   );
 }
 

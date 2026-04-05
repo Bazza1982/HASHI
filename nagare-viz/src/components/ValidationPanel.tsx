@@ -1,4 +1,5 @@
 import type { ValidationIssue } from "../lib/workflowSafety";
+import { CollapsiblePanel } from "./CollapsiblePanel";
 
 type ValidationPanelProps = {
   compatibilityClass: string;
@@ -11,15 +12,14 @@ export function ValidationPanel({ compatibilityClass, issues }: ValidationPanelP
   const informational = issues.filter((issue) => issue.severity === "info");
 
   return (
-    <section className="panel">
-      <h2>Validation</h2>
+    <CollapsiblePanel title="Validation" badge={`Class ${compatibilityClass}`} defaultCollapsed>
       <p className="muted">Compatibility class: {compatibilityClass}</p>
       <div className="validation-groups">
         <ValidationGroup emptyLabel="No blocking issues." issues={blocking} title="Blocking" />
         <ValidationGroup emptyLabel="No active warnings." issues={warnings} title="Warnings" />
         <ValidationGroup emptyLabel="No informational notes." issues={informational} title="Info" />
       </div>
-    </section>
+    </CollapsiblePanel>
   );
 }
 
