@@ -4,6 +4,12 @@ import os from 'node:os';
 import fs from 'node:fs';
 import { execSync } from 'node:child_process';
 import { getAgents, getAgentMap, updateAgentMetadata } from './agents.js';
+import { createMinatoMcpRouter } from './minato_mcp.js';
+import { parseMinatoContext, stripHeaders, appendEntry, appendLogEntry, readEntries, listProjects } from './project_log.js';
+
+// Per-agent active project context — updated when an outbound message carries MINATO CONTEXT.
+// Used to tag inbound replies with the same project metadata.
+const agentContextMap = {};
 
 const PORT = Number(process.env.PORT || 3001);
 const BRIDGE_U_API = process.env.BRIDGE_U_API || 'http://127.0.0.1:18800';
@@ -219,6 +225,104 @@ async function fetchBridgeHealth() {
   return response.json();
 }
 
+function captureOutboundProjectMessage(agentId, text) {
+  const ctx = parseMinatoContext(text);
+  const cleanText = stripHeaders(text);
+  if (!ctx) return { ctx: null, cleanText };
+
+  const sessionId = `sess_${Date.now().toString(36)}`;
+  agentContextMap[agentId] = { ...ctx, sessionId, pendingUserText: cleanText };
+  appendEntry({
+    ts: new Date().toISOString(),
+    session_id: sessionId,
+    direction: 'outbound',
+    agent: agentId,
+    user: 'user',
+    text: cleanText,
+    project: ctx.project,
+    shimanto_phases: ctx.shimanto_phases || [],
+    nagare_workflows: ctx.nagare_workflows || [],
+    scope: ctx.scope || '',
+  });
+
+  return { ctx, cleanText };
+}
+
+async function sendBridgeText(agentId, text) {
+  const response = await fetch(`${BRIDGE_U_API}/api/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agent: agentId, text }),
+  });
+  const body = await response.text();
+  return {
+    ok: response.ok,
+    status: response.status,
+    contentType: response.headers.get('content-type') || 'application/json',
+    body,
+  };
+}
+
+app.use('/api/minato/mcp/v1', createMinatoMcpRouter({
+  projectList: async () => ({ projects: listProjects() }),
+  logQuery: async ({ project, limit, since }) => {
+    const entries = readEntries(project, {
+      limit: Math.min(Number(limit || 200), 1000),
+      since: since || null,
+    });
+    return { entries, count: entries.length };
+  },
+  logAppend: async (payload) => {
+    appendLogEntry(payload);
+    return { ok: true };
+  },
+  logProjectChat: async ({ agent, project, limit }) => {
+    const response = await fetch(
+      `${BRIDGE_U_API}/api/project-chat/${encodeURIComponent(agent)}/${encodeURIComponent(project)}?limit=${Math.max(1, Math.min(Number(limit || 100), 500))}`,
+    );
+    if (!response.ok) {
+      const error = new Error(`Bridge project chat request failed with status ${response.status}`);
+      error.status = response.status;
+      error.error = await response.text();
+      throw error;
+    }
+    return response.json();
+  },
+  chatSend: async ({ agentId, text }) => {
+    captureOutboundProjectMessage(agentId, text);
+    const response = await sendBridgeText(agentId, text);
+    if (!response.ok) {
+      const error = new Error(`Bridge chat request failed with status ${response.status}`);
+      error.status = response.status;
+      error.error = response.body;
+      throw error;
+    }
+    try {
+      return JSON.parse(response.body);
+    } catch {
+      return { ok: true, raw: response.body };
+    }
+  },
+  chatGetHistory: async ({ agentId, limit }) => {
+    const agent = getAgentMap().get(agentId);
+    if (!agent) {
+      const error = new Error(`agent '${agentId}' not found`);
+      error.status = 404;
+      throw error;
+    }
+    return readTranscriptRecent(agent.transcriptPath, Math.max(1, Math.min(Number(limit || 50), 200)));
+  },
+  chatPoll: async ({ agentId, offset }) => {
+    const agent = getAgentMap().get(agentId);
+    if (!agent) {
+      const error = new Error(`agent '${agentId}' not found`);
+      error.status = 404;
+      throw error;
+    }
+    return readTranscriptIncrement(agent.transcriptPath, Math.max(0, Number(offset || 0)));
+  },
+}));
+
 app.get('/api/config', async (_req, res) => {
   try {
     const bridge = await fetchBridgeAgents();
@@ -253,10 +357,58 @@ app.get('/api/transcript/:agentId', (req, res) => {
 });
 
 app.get('/api/transcript/:agentId/poll', (req, res) => {
-  const agent = getAgentMap().get(req.params.agentId);
+  const agentId = req.params.agentId;
+  const agent = getAgentMap().get(agentId);
   if (!agent) return res.status(404).json({ error: 'agent not found' });
   const offset = Number(req.query.offset || 0);
-  return res.json(readTranscriptIncrement(agent.transcriptPath, offset));
+  const result = readTranscriptIncrement(agent.transcriptPath, offset);
+
+  // Project log: capture inbound assistant replies if this agent has an active context
+  const activeCtx = agentContextMap[agentId];
+  if (activeCtx && result.messages?.length) {
+    for (const msg of result.messages) {
+      if (msg.role === 'assistant' && msg.content) {
+        const replyText = stripHeaders(msg.content);
+        const ts = msg.timestamp || new Date().toISOString();
+
+        // JSONL machine-readable entry
+        appendEntry({
+          ts,
+          session_id: activeCtx.sessionId,
+          direction: 'inbound',
+          agent: agentId,
+          user: 'user',
+          text: replyText,
+          project: activeCtx.project,
+          shimanto_phases: activeCtx.shimanto_phases || [],
+          nagare_workflows: activeCtx.nagare_workflows || [],
+          scope: activeCtx.scope || '',
+        });
+
+        // Markdown human-readable log entry (pairs user question with agent reply)
+        appendLogEntry({
+          type: 'chat',
+          project: activeCtx.project,
+          agent: agentId,
+          user: 'user',
+          ts,
+          shimanto_phases: activeCtx.shimanto_phases || [],
+          nagare_workflows: activeCtx.nagare_workflows || [],
+          scope: activeCtx.scope || '',
+          summary: `Conversation with ${agentId}`,
+          excerpt: {
+            from: activeCtx.pendingUserText || '',
+            to: replyText,
+          },
+        });
+
+        // Clear pending user text after pairing (keep context for further replies)
+        activeCtx.pendingUserText = '';
+      }
+    }
+  }
+
+  return res.json(result);
 });
 
 app.post('/api/agents/:agentId/metadata', (req, res) => {
@@ -315,6 +467,55 @@ app.get('/api/system', async (_req, res) => {
   });
 });
 
+// ─────────────────────────────────────────────────────────
+// Project log endpoints (Minato-owned conversation history)
+// ─────────────────────────────────────────────────────────
+
+app.get('/api/project-log', (req, res) => {
+  const { project, limit, since } = req.query;
+  if (!project) return res.status(400).json({ error: 'project is required' });
+  const entries = readEntries(project, {
+    limit: Math.min(Number(limit || 200), 1000),
+    since: since || null,
+  });
+  return res.json({ entries, count: entries.length });
+});
+
+app.get('/api/project-log/list', (_req, res) => {
+  return res.json({ projects: listProjects() });
+});
+
+/**
+ * POST /api/project-log/entry
+ * Agents and humans can write structured activity entries to the project Markdown log.
+ *
+ * Body: {
+ *   type:             'chat' | 'action' | 'decision' | 'milestone' | 'note'
+ *   project:          string (display name)
+ *   agent:            string (optional)
+ *   user:             string (optional)
+ *   ts:               ISO string (optional)
+ *   shimanto_phases:  string[] (optional)
+ *   nagare_workflows: string[] (optional)
+ *   summary:          string
+ *   details:          string | string[] (optional)
+ *   excerpt:          { from?: string, to?: string } (optional, for 'chat' type)
+ * }
+ */
+app.post('/api/project-log/entry', (req, res) => {
+  try {
+    const body = req.body || {};
+    if (!body.project) return res.status(400).json({ error: 'project is required' });
+    if (!body.summary && !body.details && !body.excerpt) {
+      return res.status(400).json({ error: 'at least one of summary, details, or excerpt is required' });
+    }
+    appendLogEntry(body);
+    return res.json({ ok: true });
+  } catch (err) {
+    return res.status(500).json({ error: String(err.message || err) });
+  }
+});
+
 app.post('/api/agents/:agentId/command', async (req, res) => {
   try {
     const { agentId } = req.params;
@@ -367,13 +568,10 @@ app.post('/api/chat', upload.any(), async (req, res) => {
     const { agentId, text } = req.body || {};
     if (!agentId || !text) return res.status(400).json({ error: 'agentId and text are required' });
 
-    const response = await fetch(`${BRIDGE_U_API}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ agent: agentId, text }),
-    });
-    const body = await response.text();
-    return res.status(response.status).type(response.headers.get('content-type') || 'application/json').send(body);
+    captureOutboundProjectMessage(agentId, text);
+
+    const response = await sendBridgeText(agentId, text);
+    return res.status(response.status).type(response.contentType).send(response.body);
   } catch (error) {
     return res.status(500).json({ error: String(error.message || error) });
   }
