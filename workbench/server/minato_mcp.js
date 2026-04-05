@@ -453,6 +453,33 @@ function readKasumiArtefact(record, deps) {
   return deps.kasumiRead(record);
 }
 
+function callKasumiToolForArtefact(record, toolName, toolArgs, deps) {
+  if (typeof deps.kasumiCall !== 'function') {
+    throw createRpcError('UPSTREAM_ERROR', {
+      field: 'artefact_id',
+      reason: 'KASUMI tool delegation is not configured',
+      artefact_id: record.artefact_id,
+      kasumi_id: record.kasumi_id,
+      kasumi_module: record.kasumi_module,
+    });
+  }
+
+  const normalizedToolName = requireString(toolName, 'tool_name');
+  const allowedPrefixes = [`${record.kasumi_module}_`, 'system_'];
+  if (!allowedPrefixes.some((prefix) => normalizedToolName.startsWith(prefix))) {
+    throw createRpcError('INVALID_PARAMS', {
+      field: 'tool_name',
+      reason: `tool_name must start with ${allowedPrefixes.join(' or ')} for ${record.kasumi_module} artefacts`,
+    });
+  }
+
+  return deps.kasumiCall({
+    record,
+    toolName: normalizedToolName,
+    arguments: expectObject(toolArgs ?? {}, 'arguments'),
+  });
+}
+
 function updateRunStateStep({ runId, stepId, status, note }) {
   const allowed = ['completed', 'failed', 'pending', 'skipped'];
   if (!allowed.includes(status)) {
@@ -1439,6 +1466,54 @@ function createToolRegistry(deps) {
           ],
         };
       },
+    },
+    {
+      name: 'artefacts_kasumi_call',
+      description: 'Delegate a KASUMI MCP tool call for a registered KASUMI artefact and log the action in Minato.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          artefact_id: { type: 'string' },
+          tool_name: { type: 'string' },
+          arguments: { type: 'object' },
+          note: { type: 'string' },
+        },
+        required: ['artefact_id', 'tool_name'],
+        additionalProperties: false,
+      },
+      handler: async (rawArgs) => {
+        const args = expectObject(rawArgs);
+        const record = getArtefactRecord(args.artefact_id);
+        if (record.type !== 'kasumi') {
+          throw createRpcError('CONFLICT', {
+            field: 'artefact_id',
+            reason: `Artefact '${record.artefact_id}' is not a KASUMI artefact`,
+          });
+        }
+
+        const delegated = await callKasumiToolForArtefact(record, args.tool_name, args.arguments, deps);
+        return {
+          ok: true,
+          artefact_id: record.artefact_id,
+          artefact_name: record.name,
+          project: record.project,
+          kasumi_id: record.kasumi_id,
+          kasumi_module: record.kasumi_module,
+          tool_name: requireString(args.tool_name, 'tool_name'),
+          result: delegated,
+        };
+      },
+      autoLog: ({ args, result, context }) => ({
+        project: result?.project || context.session?.active_project,
+        summary: `Delegated KASUMI tool '${args.tool_name}' for artefact '${result?.artefact_name || args.artefact_id}'`,
+        details: [
+          `Artefact ID: ${result?.artefact_id || args.artefact_id}`,
+          ...(result?.kasumi_module ? [`KASUMI module: ${result.kasumi_module}`] : []),
+          ...(result?.kasumi_id ? [`KASUMI ID: ${result.kasumi_id}`] : []),
+          `Tool: ${args.tool_name}`,
+          ...(optionalString(args.note, 'note') ? [`Note: ${optionalString(args.note, 'note')}`] : []),
+        ],
+      }),
     },
     {
       name: 'log_query',

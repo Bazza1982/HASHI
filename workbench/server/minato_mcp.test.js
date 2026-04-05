@@ -162,6 +162,7 @@ test('tools/list exposes Tier 1 and Tier 2 tools', async () => {
         'artefacts_create',
         'artefacts_read',
         'artefacts_link',
+        'artefacts_kasumi_call',
         'log_query',
         'log_append',
         'log_project_chat',
@@ -562,6 +563,72 @@ test('artefacts_read delegates KASUMI artefacts when a kasumi reader is configur
         assert.equal(read.response.status, 200);
         assert.equal(read.body.result.kasumi_uri, 'kasumi://nexcel/wb_001');
         assert.equal(read.body.result.data.id, 'wb_001');
+      });
+    });
+  });
+});
+
+test('artefacts_kasumi_call delegates a KASUMI tool and auto-logs the project action', async () => {
+  const project = 'Tier6 Kasumi Tool Project';
+  const capturedLogs = [];
+
+  await withArtefactStore(async () => {
+    await withProjectLog(project, [
+      {
+        ts: `${TODAY}T15:00:00Z`,
+        project,
+        shimanto_phases: ['delivery'],
+        nagare_workflows: ['kasumi-sync'],
+        scope: 'Workbook enrichment',
+      },
+    ], async ({ slug }) => {
+      const { router } = makeRouter({
+        projectList: () => ({ projects: [{ slug, name: project }] }),
+        logAppend: async (payload) => {
+          capturedLogs.push(payload);
+          return { ok: true, entry: payload };
+        },
+        kasumiCall: async ({ record, toolName, arguments: toolArgs }) => ({
+          ok: true,
+          delegated_tool: toolName,
+          artefact: record.kasumi_id,
+          received: toolArgs,
+        }),
+      });
+
+      await withServer(router, async (baseUrl) => {
+        const headers = { 'x-minato-session': 'sess-tier6' };
+        await callTool(baseUrl, 'project_switch', { project }, headers);
+
+        const created = await callTool(baseUrl, 'artefacts_create', {
+          name: 'Workbook 6',
+          type: 'kasumi',
+          kasumi_id: 'wb_006',
+          kasumi_module: 'nexcel',
+          note: 'Tier 6 workbook',
+        }, headers);
+        assert.equal(created.response.status, 200);
+
+        capturedLogs.length = 0;
+
+        const delegated = await callTool(baseUrl, 'artefacts_kasumi_call', {
+          artefact_id: 'art_001',
+          tool_name: 'nexcel_new_sheet',
+          arguments: { workbookId: 'wb_006', name: 'Review Notes' },
+          note: 'Create a review sheet',
+        }, headers);
+        assert.equal(delegated.response.status, 200);
+        assert.equal(delegated.body.result.ok, true);
+        assert.equal(delegated.body.result.kasumi_id, 'wb_006');
+        assert.equal(delegated.body.result.tool_name, 'nexcel_new_sheet');
+        assert.equal(delegated.body.result.result.received.name, 'Review Notes');
+
+        assert.equal(capturedLogs.length, 1);
+        assert.equal(capturedLogs[0].type, 'action');
+        assert.equal(capturedLogs[0].project, project);
+        assert.ok(capturedLogs[0].shimanto_phases.includes('delivery'));
+        assert.ok(capturedLogs[0].nagare_workflows.includes('kasumi-sync'));
+        assert.match(capturedLogs[0].summary, /Delegated KASUMI tool 'nexcel_new_sheet'/);
       });
     });
   });

@@ -261,6 +261,53 @@ async function readKasumiArtefact(record) {
   throw lastError || new Error('KASUMI MCP resource read failed');
 }
 
+async function callKasumiTool({ record, toolName, arguments: toolArgs }) {
+  if (!KASUMI_MCP_API) {
+    const error = new Error('KASUMI_MCP_API is not configured');
+    error.status = 502;
+    throw error;
+  }
+
+  const response = await fetch(`${KASUMI_MCP_API.replace(/\/$/, '')}/tools/call`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: `minato-${Date.now().toString(36)}`,
+      method: 'tools/call',
+      params: {
+        name: toolName,
+        arguments: toolArgs || {},
+      },
+    }),
+  });
+
+  let payload = null;
+  let text = '';
+  try {
+    payload = await response.json();
+  } catch {
+    text = await response.text();
+  }
+
+  if (!response.ok || payload?.error) {
+    const error = new Error(
+      payload?.error?.data?.reason
+      || payload?.error?.message
+      || text
+      || `KASUMI MCP tool call failed with status ${response.status}`,
+    );
+    error.status = response.status;
+    error.error = payload?.error || text || null;
+    error.tool = toolName;
+    error.kasumi_id = record?.kasumi_id || null;
+    error.kasumi_module = record?.kasumi_module || null;
+    throw error;
+  }
+
+  return payload?.result ?? payload;
+}
+
 async function fetchBridgeAgents() {
   const response = await fetch(`${BRIDGE_U_API}/api/agents`);
   if (!response.ok) throw new Error(`bridge-u-f /api/agents failed: ${response.status}`);
@@ -371,6 +418,7 @@ app.use('/api/minato/mcp/v1', createMinatoMcpRouter({
     return readTranscriptIncrement(agent.transcriptPath, Math.max(0, Number(offset || 0)));
   },
   kasumiRead: readKasumiArtefact,
+  kasumiCall: callKasumiTool,
 }));
 
 app.get('/api/config', async (_req, res) => {
