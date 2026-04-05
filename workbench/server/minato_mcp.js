@@ -13,6 +13,7 @@ const FLOW_DIR = path.join(REPO_ROOT, 'flow');
 const FLOW_WORKFLOWS_DIR = path.join(FLOW_DIR, 'workflows');
 const FLOW_RUNS_DIR = path.join(FLOW_DIR, 'runs');
 const AUDIT_DIR = path.join(WORKBENCH_DIR, 'data');
+const PROJECTS_DIR = path.join(AUDIT_DIR, 'projects');
 const AUDIT_FILE = path.join(AUDIT_DIR, 'minato_mcp_audit.jsonl');
 const ARTEFACTS_FILE = path.join(AUDIT_DIR, 'minato_artefacts.json');
 
@@ -227,6 +228,10 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function todayDateStr() {
+  return new Date().toISOString().slice(0, 10);
+}
+
 function collectFiles(dir, predicate) {
   if (!fs.existsSync(dir)) return [];
   const results = [];
@@ -432,6 +437,20 @@ function readFilesystemArtefact(record) {
     mime_type: isTextLike ? 'text/plain' : 'application/octet-stream',
     content,
   };
+}
+
+function readKasumiArtefact(record, deps) {
+  if (typeof deps.kasumiRead !== 'function') {
+    throw createRpcError('UPSTREAM_ERROR', {
+      field: 'artefact_id',
+      reason: 'KASUMI artefact delegation is not configured',
+      artefact_id: record.artefact_id,
+      kasumi_id: record.kasumi_id,
+      kasumi_module: record.kasumi_module,
+    });
+  }
+
+  return deps.kasumiRead(record);
 }
 
 function updateRunStateStep({ runId, stepId, status, note }) {
@@ -717,6 +736,113 @@ function listDocs() {
   }));
 }
 
+function projectConversationPath(projectSlugValue, date = todayDateStr()) {
+  return path.join(PROJECTS_DIR, projectSlugValue, 'conversations', `${date}.jsonl`);
+}
+
+function projectMarkdownLogPath(projectSlugValue, date = todayDateStr()) {
+  return path.join(PROJECTS_DIR, projectSlugValue, 'log', `${date}.md`);
+}
+
+function readTodayConversationLog(projectName, projectListFn) {
+  const project = resolveProjectRecord(projectName, projectListFn);
+  const date = todayDateStr();
+  const filePath = projectConversationPath(project.slug, date);
+  if (!fs.existsSync(filePath)) {
+    return {
+      project: project.name,
+      slug: project.slug,
+      date,
+      path: filePath,
+      entries: [],
+      count: 0,
+    };
+  }
+
+  const entries = fs.readFileSync(filePath, 'utf8')
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+
+  return {
+    project: project.name,
+    slug: project.slug,
+    date,
+    path: filePath,
+    entries,
+    count: entries.length,
+  };
+}
+
+function readTodayMarkdownLog(projectName, projectListFn) {
+  const project = resolveProjectRecord(projectName, projectListFn);
+  const date = todayDateStr();
+  const filePath = projectMarkdownLogPath(project.slug, date);
+  const content = fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf8') : '';
+  return {
+    project: project.name,
+    slug: project.slug,
+    date,
+    path: filePath,
+    size_bytes: Buffer.byteLength(content, 'utf8'),
+    content,
+  };
+}
+
+function buildPromptCatalog() {
+  return [
+    {
+      name: 'minato_start_session',
+      description: 'Start a Minato work session with explicit project context and catch-up checks.',
+      arguments: ['project'],
+      template: [
+        '1. Call `project_switch` for project "{project}".',
+        '2. Call `project_get_state` and `log_query` to catch up on current phase, workflow, and recent activity.',
+        '3. Summarise what matters before taking action.',
+      ].join('\n'),
+    },
+    {
+      name: 'minato_log_decision',
+      description: 'Record a project decision in a durable, agent-readable way.',
+      arguments: ['project', 'summary', 'details'],
+      template: [
+        'Use `log_append` with:',
+        '- `type: "decision"`',
+        '- `project: "{project}"`',
+        '- `summary: "{summary}"`',
+        '- `details: "{details}"`',
+      ].join('\n'),
+    },
+    {
+      name: 'minato_delegate_review',
+      description: 'Send a review request to another agent with Minato context attached.',
+      arguments: ['agent_id', 'text'],
+      template: [
+        '1. Make sure the active project is set with `project_switch`.',
+        '2. Call `chat_send` with `inject_context: true`.',
+        '3. Poll with `chat_poll` until the review response arrives.',
+      ].join('\n'),
+    },
+    {
+      name: 'minato_review_workflow_run',
+      description: 'Inspect a Nagare workflow and its latest run before intervening.',
+      arguments: ['workflow_id'],
+      template: [
+        '1. Call `nagare_get_workflow_dag` for "{workflow_id}".',
+        '2. Call `nagare_get_run_status` for "{workflow_id}".',
+        '3. If a human gate is needed, update the step with `nagare_update_step_status` and log the decision.',
+      ].join('\n'),
+    },
+  ];
+}
+
 function readDoc(docName) {
   const requested = requireString(docName, 'doc').replace(/\.md$/i, '').toLowerCase();
   const docs = listDocs();
@@ -786,12 +912,26 @@ function aggregateProjectState(projectName, projectListFn) {
   };
 }
 
-function buildResourceList(projectListFn) {
-  const projects = ((projectListFn?.() || defaultListProjects()).projects || []).map((item) => ({
+async function buildResourceList(deps) {
+  const projectListFn = deps?.projectList;
+  const listAgentsFn = deps?.listAgents;
+  const projectListResult = projectListFn ? await projectListFn() : { projects: defaultListProjects() };
+  const projectList = (projectListResult?.projects || []);
+  const projects = projectList.map((item) => ({
     uri: `minato://project/${item.slug}/state`,
     name: `Project state: ${item.name}`,
   }));
-  const shimantoResources = ((projectListFn?.() || defaultListProjects()).projects || []).map((item) => ({
+  const logResources = projectList.flatMap((item) => ([
+    {
+      uri: `minato://log/${item.slug}/today`,
+      name: `Project log today: ${item.name}`,
+    },
+    {
+      uri: `minato://log/${item.slug}/markdown/today`,
+      name: `Project markdown log today: ${item.name}`,
+    },
+  ]));
+  const shimantoResources = projectList.map((item) => ({
     uri: `minato://shimanto/${item.slug}/phases`,
     name: `Shimanto phases: ${item.name}`,
   }));
@@ -803,7 +943,7 @@ function buildResourceList(projectListFn) {
     uri: `minato://nagare/run/${item.state.run_id}/state`,
     name: `Nagare run state: ${item.state.run_id}`,
   }));
-  const artefactResources = ((projectListFn?.() || defaultListProjects()).projects || []).map((item) => ({
+  const artefactResources = projectList.map((item) => ({
     uri: `minato://artefacts/${item.slug}`,
     name: `Artefacts: ${item.name}`,
   }));
@@ -811,16 +951,22 @@ function buildResourceList(projectListFn) {
     uri: `minato://docs/${item.name}`,
     name: `Doc: ${item.name}`,
   }));
+  const chatResources = (((await listAgentsFn?.()) || []).map((item) => ({
+    uri: `minato://chat/${encodeURIComponent(item.id)}/recent`,
+    name: `Recent chat: ${item.id}`,
+  })));
 
   return [
     { uri: 'minato://project/list', name: 'Project list' },
     { uri: 'minato://nagare/workflows', name: 'Nagare workflow definitions' },
     { uri: 'minato://docs/list', name: 'Minato docs list' },
     ...projects,
+    ...logResources,
     ...shimantoResources,
     ...workflowResources,
     ...runResources,
     ...artefactResources,
+    ...chatResources,
     ...docResources,
   ];
 }
@@ -1175,13 +1321,10 @@ function createToolRegistry(deps) {
         const args = expectObject(rawArgs);
         const record = getArtefactRecord(args.artefact_id);
         if (record.type === 'kasumi') {
-          throw createRpcError('UPSTREAM_ERROR', {
-            field: 'artefact_id',
-            reason: 'KASUMI artefact delegation is not implemented yet',
-            artefact_id: record.artefact_id,
-            kasumi_id: record.kasumi_id,
-            kasumi_module: record.kasumi_module,
-          });
+          return {
+            ...record,
+            ...(await readKasumiArtefact(record, deps)),
+          };
         }
         return {
           ...record,
@@ -1530,6 +1673,39 @@ function createResourceReader(deps) {
       };
     }
 
+    const logJsonMatch = value.match(/^minato:\/\/log\/([^/]+)\/today$/);
+    if (logJsonMatch) {
+      const project = resolveProjectRecord(decodeURIComponent(logJsonMatch[1]), deps.projectList).name;
+      return {
+        uri: value,
+        mime_type: 'application/json',
+        data: readTodayConversationLog(project, deps.projectList),
+      };
+    }
+
+    const logMarkdownMatch = value.match(/^minato:\/\/log\/([^/]+)\/markdown\/today$/);
+    if (logMarkdownMatch) {
+      const project = resolveProjectRecord(decodeURIComponent(logMarkdownMatch[1]), deps.projectList).name;
+      return {
+        uri: value,
+        mime_type: 'text/markdown',
+        data: readTodayMarkdownLog(project, deps.projectList),
+      };
+    }
+
+    const chatRecentMatch = value.match(/^minato:\/\/chat\/([^/]+)\/recent$/);
+    if (chatRecentMatch) {
+      const agentId = decodeURIComponent(chatRecentMatch[1]);
+      return {
+        uri: value,
+        mime_type: 'application/json',
+        data: {
+          agent_id: agentId,
+          ...(await deps.chatGetHistory({ agentId, limit: 50 })),
+        },
+      };
+    }
+
     const docMatch = value.match(/^minato:\/\/docs\/([^/]+)$/);
     if (docMatch) {
       return {
@@ -1580,8 +1756,8 @@ export function createMinatoMcpRouter(deps) {
     });
   });
 
-  router.get('/resources/list', (_req, res) => {
-    res.json({ resources: buildResourceList(deps.projectList) });
+  router.get('/resources/list', async (_req, res) => {
+    res.json({ resources: await buildResourceList(deps) });
   });
 
   router.post('/resources/read', async (req, res) => {
@@ -1599,7 +1775,7 @@ export function createMinatoMcpRouter(deps) {
   });
 
   router.get('/prompts/list', (_req, res) => {
-    res.json({ prompts: [] });
+    res.json({ prompts: buildPromptCatalog() });
   });
 
   router.post('/tools/call', async (req, res) => {

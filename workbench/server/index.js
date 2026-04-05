@@ -13,6 +13,7 @@ const agentContextMap = {};
 
 const PORT = Number(process.env.PORT || 3001);
 const BRIDGE_U_API = process.env.BRIDGE_U_API || 'http://127.0.0.1:18800';
+const KASUMI_MCP_API = process.env.KASUMI_MCP_API || '';
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 64 * 1024 * 1024 } });
 
 const app = express();
@@ -213,6 +214,53 @@ function getSessionInfo(agent) {
   };
 }
 
+function kasumiResourceCandidates(record) {
+  if (record.kasumi_module === 'wordo') {
+    return [
+      `kasumi://wordo/document/${encodeURIComponent(record.kasumi_id)}/raw`,
+      `kasumi://wordo/document/${encodeURIComponent(record.kasumi_id)}`,
+    ];
+  }
+
+  return [
+    `kasumi://nexcel/workbook/${encodeURIComponent(record.kasumi_id)}`,
+    `kasumi://nexcel/workbook/${encodeURIComponent(record.kasumi_id)}/tabs`,
+  ];
+}
+
+async function readKasumiArtefact(record) {
+  if (!KASUMI_MCP_API) {
+    const error = new Error('KASUMI_MCP_API is not configured');
+    error.status = 502;
+    throw error;
+  }
+
+  let lastError = null;
+  for (const uri of kasumiResourceCandidates(record)) {
+    const response = await fetch(`${KASUMI_MCP_API.replace(/\/$/, '')}/resources/read`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ uri }),
+    });
+
+    if (response.ok) {
+      const payload = await response.json();
+      return {
+        kasumi_uri: uri,
+        mime_type: payload.mime_type || 'application/json',
+        content: typeof payload.data === 'string' ? payload.data : null,
+        data: payload.data,
+      };
+    }
+
+    lastError = new Error(`KASUMI MCP resource read failed with status ${response.status}`);
+    lastError.status = response.status;
+    lastError.error = await response.text();
+  }
+
+  throw lastError || new Error('KASUMI MCP resource read failed');
+}
+
 async function fetchBridgeAgents() {
   const response = await fetch(`${BRIDGE_U_API}/api/agents`);
   if (!response.ok) throw new Error(`bridge-u-f /api/agents failed: ${response.status}`);
@@ -265,6 +313,7 @@ async function sendBridgeText(agentId, text) {
 
 app.use('/api/minato/mcp/v1', createMinatoMcpRouter({
   projectList: async () => ({ projects: listProjects() }),
+  listAgents: () => getAgents(),
   logQuery: async ({ project, limit, since }) => {
     const entries = readEntries(project, {
       limit: Math.min(Number(limit || 200), 1000),
@@ -321,6 +370,7 @@ app.use('/api/minato/mcp/v1', createMinatoMcpRouter({
     }
     return readTranscriptIncrement(agent.transcriptPath, Math.max(0, Number(offset || 0)));
   },
+  kasumiRead: readKasumiArtefact,
 }));
 
 app.get('/api/config', async (_req, res) => {

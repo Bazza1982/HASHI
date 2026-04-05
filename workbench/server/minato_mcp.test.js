@@ -12,6 +12,7 @@ const __dirname = path.dirname(__filename);
 const WORKBENCH_DIR = path.resolve(__dirname, '..');
 const PROJECT_DATA_DIR = path.join(WORKBENCH_DIR, 'data', 'projects');
 const ARTEFACTS_FILE = path.join(WORKBENCH_DIR, 'data', 'minato_artefacts.json');
+const TODAY = new Date().toISOString().slice(0, 10);
 
 async function withServer(router, fn) {
   const app = express();
@@ -38,6 +39,7 @@ function makeRouter(overrides = {}) {
 
   const router = createMinatoMcpRouter({
     projectList: async () => ({ projects: [{ slug: 'alpha', name: 'Alpha' }] }),
+    listAgents: () => [{ id: 'kasumi' }, { id: 'akane' }],
     logQuery: async ({ project, limit, since }) => ({ entries: [{ project, limit, since }], count: 1 }),
     logAppend: async (payload) => ({ ok: true, entry: payload }),
     logProjectChat: async ({ agent, project, limit }) => {
@@ -86,13 +88,27 @@ async function withProjectLog(projectName, entries, fn) {
   const dir = path.join(PROJECT_DATA_DIR, slug);
   const conversationsDir = path.join(dir, 'conversations');
   fs.mkdirSync(conversationsDir, { recursive: true });
-  const filePath = path.join(conversationsDir, '2026-04-05.jsonl');
+  const filePath = path.join(conversationsDir, `${TODAY}.jsonl`);
   fs.writeFileSync(filePath, `${entries.map((entry) => JSON.stringify(entry)).join('\n')}\n`, 'utf8');
 
   try {
     await fn({ slug, dir, filePath });
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function withMarkdownLog(projectName, content, fn) {
+  const slug = projectSlug(projectName);
+  const dir = path.join(PROJECT_DATA_DIR, slug, 'log');
+  fs.mkdirSync(dir, { recursive: true });
+  const filePath = path.join(dir, `${TODAY}.md`);
+  fs.writeFileSync(filePath, content, 'utf8');
+
+  try {
+    await fn({ slug, filePath });
+  } finally {
+    fs.rmSync(path.join(PROJECT_DATA_DIR, slug), { recursive: true, force: true });
   }
 }
 
@@ -432,6 +448,122 @@ test('docs tools and resources/read expose filesystem-backed reference docs', as
     const resourceBody = await resourceResponse.json();
     assert.equal(resourceBody.mime_type, 'text/markdown');
     assert.equal(resourceBody.data.doc, 'MINATO_MCP_SERVER_PLAN');
+  });
+});
+
+test('resources/read exposes today log resources and recent chat resources', async () => {
+  const project = 'Tier4 Resource Project';
+  await withProjectLog(project, [
+    {
+      ts: `${TODAY}T09:00:00Z`,
+      project,
+      shimanto_phases: ['planning'],
+      nagare_workflows: ['smoke-test'],
+      text: 'Morning update',
+    },
+  ], async ({ slug }) => {
+    await withMarkdownLog(project, '# Daily Log\n\nTier 4 markdown entry.\n', async () => {
+      const { router } = makeRouter({
+        projectList: async () => ({ projects: [{ slug, name: project }] }),
+        chatGetHistory: async ({ agentId, limit }) => ({
+          messages: [{ role: 'assistant', content: `recent ${agentId}` }],
+          offset: limit || 50,
+        }),
+      });
+
+      await withServer(router, async (baseUrl) => {
+        const resourceListResponse = await fetch(`${baseUrl}/resources/list`);
+        assert.equal(resourceListResponse.status, 200);
+        const resourceList = await resourceListResponse.json();
+        assert.ok(resourceList.resources.some((item) => item.uri === `minato://log/${slug}/today`));
+        assert.ok(resourceList.resources.some((item) => item.uri === `minato://log/${slug}/markdown/today`));
+        assert.ok(resourceList.resources.some((item) => item.uri === 'minato://chat/kasumi/recent'));
+
+        const jsonLogResponse = await fetch(`${baseUrl}/resources/read`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uri: `minato://log/${slug}/today` }),
+        });
+        assert.equal(jsonLogResponse.status, 200);
+        const jsonLog = await jsonLogResponse.json();
+        assert.equal(jsonLog.mime_type, 'application/json');
+        assert.equal(jsonLog.data.count, 1);
+        assert.equal(jsonLog.data.entries[0].text, 'Morning update');
+
+        const markdownLogResponse = await fetch(`${baseUrl}/resources/read`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uri: `minato://log/${slug}/markdown/today` }),
+        });
+        assert.equal(markdownLogResponse.status, 200);
+        const markdownLog = await markdownLogResponse.json();
+        assert.equal(markdownLog.mime_type, 'text/markdown');
+        assert.match(markdownLog.data.content, /Tier 4 markdown entry/);
+
+        const chatResourceResponse = await fetch(`${baseUrl}/resources/read`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uri: 'minato://chat/kasumi/recent' }),
+        });
+        assert.equal(chatResourceResponse.status, 200);
+        const chatResource = await chatResourceResponse.json();
+        assert.equal(chatResource.mime_type, 'application/json');
+        assert.equal(chatResource.data.agent_id, 'kasumi');
+        assert.equal(chatResource.data.messages[0].content, 'recent kasumi');
+      });
+    });
+  });
+});
+
+test('prompts/list exposes Minato prompt templates', async () => {
+  const { router } = makeRouter();
+  await withServer(router, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/prompts/list`);
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.ok(body.prompts.some((prompt) => prompt.name === 'minato_start_session'));
+    assert.ok(body.prompts.some((prompt) => prompt.name === 'minato_log_decision'));
+  });
+});
+
+test('artefacts_read delegates KASUMI artefacts when a kasumi reader is configured', async () => {
+  const project = 'Tier4 Kasumi Project';
+  await withArtefactStore(async () => {
+    await withProjectLog(project, [
+      {
+        ts: `${TODAY}T12:00:00Z`,
+        project,
+        shimanto_phases: ['planning'],
+        nagare_workflows: [],
+      },
+    ], async ({ slug }) => {
+      const { router } = makeRouter({
+        projectList: () => ({ projects: [{ slug, name: project }] }),
+        kasumiRead: async (record) => ({
+          kasumi_uri: `kasumi://${record.kasumi_module}/${record.kasumi_id}`,
+          mime_type: 'application/json',
+          data: { id: record.kasumi_id, module: record.kasumi_module },
+        }),
+      });
+
+      await withServer(router, async (baseUrl) => {
+        const headers = { 'x-minato-session': 'sess-kasumi' };
+        await callTool(baseUrl, 'project_switch', { project }, headers);
+
+        const created = await callTool(baseUrl, 'artefacts_create', {
+          name: 'Workbook 1',
+          type: 'kasumi',
+          kasumi_id: 'wb_001',
+          kasumi_module: 'nexcel',
+        }, headers);
+        assert.equal(created.response.status, 200);
+
+        const read = await callTool(baseUrl, 'artefacts_read', { artefact_id: 'art_001' }, headers);
+        assert.equal(read.response.status, 200);
+        assert.equal(read.body.result.kasumi_uri, 'kasumi://nexcel/wb_001');
+        assert.equal(read.body.result.data.id, 'wb_001');
+      });
+    });
   });
 });
 
