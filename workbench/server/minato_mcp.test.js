@@ -429,11 +429,19 @@ test('docs tools and resources/read expose filesystem-backed reference docs', as
     const docsList = await callTool(baseUrl, 'docs_list', {});
     assert.equal(docsList.response.status, 200);
     assert.ok(docsList.body.result.docs.some((doc) => doc.name === 'MINATO_MCP_SERVER_PLAN'));
+    assert.ok(docsList.body.result.docs.some((doc) => doc.name === 'MINATO_README'));
 
     const doc = await callTool(baseUrl, 'docs_read', { doc: 'MINATO_MCP_SERVER_PLAN' });
     assert.equal(doc.response.status, 200);
     assert.equal(doc.body.result.doc, 'MINATO_MCP_SERVER_PLAN');
     assert.match(doc.body.result.content, /Minato MCP Server Plan/);
+    assert.match(doc.body.result.content, /Tier 7/);
+
+    const readme = await callTool(baseUrl, 'docs_read', { doc: 'MINATO_README' });
+    assert.equal(readme.response.status, 200);
+    assert.equal(readme.body.result.doc, 'MINATO_README');
+    assert.match(readme.body.result.content, /Minato MCP/);
+    assert.match(readme.body.result.content, /Implemented through Tier 7/);
 
     const resourceListResponse = await fetch(`${baseUrl}/resources/list`);
     assert.equal(resourceListResponse.status, 200);

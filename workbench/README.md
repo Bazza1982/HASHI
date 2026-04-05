@@ -1,6 +1,6 @@
 # bridge-u-f Workbench
 
-This is the local Node/React workbench bundled inside `bridge-u-f`.
+This is the local Node/React workbench bundled inside `bridge-u-f`. It now hosts both the browser operator UI and the Minato MCP server surface used for project-aware agent operations.
 
 ## Purpose
 
@@ -12,12 +12,32 @@ It provides:
 - transcript polling for fixed and flex agents
 - local system status display
 - text and file/media send support through the bridge workbench API
+- the Minato MCP JSON-RPC surface at `/api/minato/mcp/v1`
 
 ## Runtime Shape
 
 - backend server: `workbench/server/index.js`
+- Minato MCP server: `workbench/server/minato_mcp.js`
 - frontend app: `workbench/src/App.jsx`
 - local bridge API target: `http://127.0.0.1:18800`
+
+## Minato MCP
+
+The workbench server mounts a Minato MCP surface for project-aware automation.
+
+Current coverage includes:
+
+- project context and session switching
+- Shimanto phase inspection and transitions
+- Nagare workflow inspection and manual step status updates
+- artefact registration, read, linking, and KASUMI delegation
+- project log and agent chat access
+- docs, resources, and prompt catalog endpoints
+
+See:
+
+- `docs/MINATO_README.md`
+- `docs/MINATO_MCP_SERVER_PLAN.md`
 
 ## Start / Stop
 
