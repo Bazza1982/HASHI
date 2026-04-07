@@ -18,6 +18,7 @@ This directory contains developer documentation and operational notes for HASHI.
 
 ### Nagare Flow System (v2.1)
 - [NAGARE_FLOW_SYSTEM.md](NAGARE_FLOW_SYSTEM.md) — Complete technical reference for the multi-agent workflow orchestration engine
+- [KASUMI_MCP_SERVER_PLAN.md](KASUMI_MCP_SERVER_PLAN.md) — Architecture and upgrade plan for a unified Kasumi MCP server spanning Nexcel, Wordo, and future modules
 
 ### Installation
 - [INSTALL.md](INSTALL.md) — Standard installation guide

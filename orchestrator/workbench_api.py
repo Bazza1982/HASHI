@@ -82,6 +82,7 @@ class WorkbenchApiServer:
         self.app.router.add_get("/api/agents", self.handle_agents)
         self.app.router.add_get("/api/transcript/{name}", self.handle_transcript_recent)
         self.app.router.add_get("/api/transcript/{name}/poll", self.handle_transcript_poll)
+        self.app.router.add_get("/api/project-chat/{name}/{project}", self.handle_project_chat_log)
         self.app.router.add_post("/api/chat", self.handle_chat)
         self.app.router.add_post("/api/bridge/message", self.handle_bridge_message)
         self.app.router.add_post("/api/bridge/reply", self.handle_bridge_reply)
@@ -101,6 +102,7 @@ class WorkbenchApiServer:
         self.app.router.add_post("/api/admin/stop-agent", self.handle_admin_stop_agent)
         self.app.router.add_post("/api/admin/shutdown", self.handle_admin_shutdown)
         self.app.router.add_get("/api/health", self.handle_health)
+        self.app.router.add_post("/api/jobs/import", self.handle_jobs_import)
         self.runner = None
         self.site = None
 
@@ -300,6 +302,31 @@ class WorkbenchApiServer:
             return web.json_response({"error": "agent not found"}, status=404)
         transcript_path = self._resolve_transcript_path(agent_row, runtime_map.get(name))
         return web.json_response(_read_jsonl_increment(transcript_path, offset=offset))
+
+    async def handle_project_chat_log(self, request):
+        name = request.match_info["name"]
+        project = request.match_info["project"]
+        limit = int(request.query.get("limit", 100))
+        agent_row = next((row for row in self._load_agent_rows() if row["name"] == name), None)
+        if agent_row is None:
+            return web.json_response({"error": "agent not found"}, status=404)
+        import re
+        slug = re.sub(r"['\"]", "", project.lower())
+        slug = re.sub(r"[^a-z0-9]+", "_", slug).strip("_") or "default"
+        workspace_dir = Path(agent_row.get("workspace_dir") or (self.global_config.project_root / "workspaces" / name))
+        chat_log = workspace_dir / "projects" / slug / "chat_log.jsonl"
+        if not chat_log.exists():
+            return web.json_response({"entries": [], "count": 0})
+        entries = []
+        with open(chat_log, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        entries.append(json.loads(line))
+                    except Exception:
+                        pass
+        return web.json_response({"entries": entries[-limit:], "count": len(entries)})
 
     def _classify_upload(self, filename: str, declared_media_type: str = "", content_type: str = "") -> str:
         if declared_media_type:
@@ -874,6 +901,36 @@ class WorkbenchApiServer:
     async def handle_health(self, request):
         running_agents = [runtime.name for runtime in self._runtime_list() if runtime.startup_success]
         return web.json_response({"ok": True, "agents": running_agents})
+
+    async def handle_jobs_import(self, request):
+        """Import a job from a remote instance (cross-instance job transfer).
+
+        Payload: {"kind": "cron"|"heartbeat", "job": {...}, "from_instance": "HASHI1", "from_agent": "akane"}
+        The job is imported as disabled so the recipient can review before enabling.
+        """
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+
+        kind = payload.get("kind", "")
+        job = payload.get("job")
+        if kind not in ("cron", "heartbeat") or not isinstance(job, dict):
+            return web.json_response({"ok": False, "error": "kind and job are required"}, status=400)
+
+        # Find skill_manager from any running runtime
+        skill_manager = None
+        for runtime in self._runtime_list():
+            sm = getattr(runtime, "skill_manager", None)
+            if sm is not None:
+                skill_manager = sm
+                break
+        if skill_manager is None:
+            return web.json_response({"ok": False, "error": "skill_manager unavailable"}, status=503)
+
+        job["enabled"] = False  # always import as disabled
+        ok, message = skill_manager.import_job(kind, job)
+        return web.json_response({"ok": ok, "message": message, "job_id": job.get("id")})
 
     async def handle_admin_start_agent(self, request):
         if not self._check_admin_auth(request):

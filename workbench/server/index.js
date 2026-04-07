@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import { execSync } from 'node:child_process';
 import { getAgents, getAgentMap, updateAgentMetadata } from './agents.js';
 import { createMinatoMcpRouter } from './minato_mcp.js';
-import { parseMinatoContext, stripHeaders, appendEntry, appendLogEntry, readEntries, listProjects } from './project_log.js';
+import { parseMinatoContext, stripHeaders, appendEntry, appendLogEntry, appendStructuredActivity, readEntries, listProjects } from './project_log.js';
 
 // Per-agent active project context — updated when an outbound message carries MINATO CONTEXT.
 // Used to tag inbound replies with the same project metadata.
@@ -359,7 +359,7 @@ async function sendBridgeText(agentId, text) {
 }
 
 app.use('/api/minato/mcp/v1', createMinatoMcpRouter({
-  projectList: async () => ({ projects: listProjects() }),
+  projectList: () => ({ projects: listProjects() }),
   listAgents: () => getAgents(),
   logQuery: async ({ project, limit, since }) => {
     const entries = readEntries(project, {
@@ -369,7 +369,7 @@ app.use('/api/minato/mcp/v1', createMinatoMcpRouter({
     return { entries, count: entries.length };
   },
   logAppend: async (payload) => {
-    appendLogEntry(payload);
+    appendStructuredActivity(payload);
     return { ok: true };
   },
   logProjectChat: async ({ agent, project, limit }) => {
@@ -607,7 +607,7 @@ app.post('/api/project-log/entry', (req, res) => {
     if (!body.summary && !body.details && !body.excerpt) {
       return res.status(400).json({ error: 'at least one of summary, details, or excerpt is required' });
     }
-    appendLogEntry(body);
+    appendStructuredActivity(body);
     return res.json({ ok: true });
   } catch (err) {
     return res.status(500).json({ error: String(err.message || err) });

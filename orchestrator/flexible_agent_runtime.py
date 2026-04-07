@@ -117,6 +117,8 @@ class FlexibleAgentRuntime:
         self.recent_context_path = self.workspace_dir / "recent_context.jsonl"
         self.handoff_path = self.workspace_dir / "handoff.md"
         self.state_path = self.workspace_dir / "state.json"
+        from orchestrator.project_chat_logger import ProjectChatLogger
+        self.project_chat_logger = ProjectChatLogger(self.workspace_dir)
         self.runtime_session_path = self.workspace_dir / ".runtime_session.json"
         self.transfer_state_path = self.workspace_dir / "active_transfer.json"
         self._cos_enabled: bool = (self.workspace_dir / ".cos_on").exists()
@@ -445,6 +447,22 @@ class FlexibleAgentRuntime:
             if backend.get("engine") == self.config.active_backend:
                 return backend.get("model", "unknown")
         return "unknown"
+
+    def _get_system_prompt_text(self) -> str:
+        """Return combined system prompt text for token estimation (CLI backends)."""
+        parts = []
+        try:
+            md_path = getattr(self.config, "system_md", None)
+            if md_path and Path(md_path).exists():
+                parts.append(Path(md_path).read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        try:
+            for text in self.sys_prompt_manager.get_active_texts():
+                parts.append(text)
+        except Exception:
+            pass
+        return "\n".join(parts)
 
     def get_runtime_metadata(self) -> dict:
         return {
@@ -1195,28 +1213,45 @@ class FlexibleAgentRuntime:
         )
 
     async def _hchat_route_reply(self, item, response_text: str):
-        """If this request was an hchat message, route the reply back to the sender."""
+        """If this request was an hchat message, route the reply back to the sender.
+
+        Supports both [hchat from name] and [hchat from name@INSTANCE] header formats.
+        Falls back to cross-instance delivery via send_hchat when the sender is not a
+        local runtime (e.g. when the message originates from Minato or another instance).
+        """
         import re
-        match = re.match(r"^\[hchat from (\w+)\]", item.prompt)
+        # Accept both [hchat from name] and [hchat from name@INSTANCE]
+        match = re.match(r"^\[hchat from (\w+)(?:@\w+)?\]", item.prompt)
         if not match:
             return
         sender_name = match.group(1).lower()
+        reply_text = response_text
+
         orchestrator = getattr(self, "orchestrator", None)
-        if orchestrator is None:
-            return
-        for rt in getattr(orchestrator, "runtimes", []):
-            if getattr(rt, "name", "") == sender_name and hasattr(rt, "enqueue_api_text"):
-                try:
-                    await rt.enqueue_api_text(
-                        f"[hchat reply from {self.name}] {response_text}",
-                        source=f"hchat-reply:{self.name}",
-                        deliver_to_telegram=True,
-                    )
-                    self.logger.info(f"Hchat reply routed back to {sender_name}")
-                except Exception as e:
-                    self.logger.warning(f"Failed to route hchat reply to {sender_name}: {e}")
-                return
-        self.logger.warning(f"Hchat reply: sender '{sender_name}' runtime not found")
+        if orchestrator:
+            for rt in getattr(orchestrator, "runtimes", []):
+                if getattr(rt, "name", "") == sender_name and hasattr(rt, "enqueue_api_text"):
+                    try:
+                        await rt.enqueue_api_text(
+                            reply_text,
+                            source=f"hchat-reply:{self.name}",
+                            deliver_to_telegram=True,
+                        )
+                        self.logger.info(f"Hchat reply routed back to local runtime '{sender_name}'")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to route hchat reply to {sender_name}: {e}")
+                    return
+
+        # Fallback: cross-instance delivery via send_hchat (e.g. reply back to Minato)
+        try:
+            from tools.hchat_send import send_hchat
+            import functools
+            loop = asyncio.get_event_loop()
+            ok = await loop.run_in_executor(None, functools.partial(send_hchat, sender_name, self.name, reply_text))
+            if ok:
+                self.logger.info(f"Hchat reply cross-instance delivered to '{sender_name}'")
+        except Exception as e:
+            self.logger.warning(f"Hchat reply: sender '{sender_name}' not found locally and cross-instance failed: {e}")
 
     async def enqueue_api_media(
         self,
@@ -2761,6 +2796,56 @@ class FlexibleAgentRuntime:
                 await query.answer("Running job now")
                 await self._run_job_now(job)
                 return
+            if action == "transfer":
+                # Show agent selector (same instance + remote instances)
+                markup = self._build_job_transfer_keyboard(kind, task_id)
+                job = self.skill_manager.get_job(kind, task_id)
+                job_label = (job.get("note") or task_id) if job else task_id
+                await query.edit_message_text(
+                    f"📤 <b>Transfer job</b>\n<code>{job_label[:60]}</code>\n\nSelect target agent:",
+                    parse_mode="HTML",
+                    reply_markup=markup,
+                )
+                await query.answer()
+                return
+            if action == "xfer_to":
+                # Same-instance transfer: value = target_agent_name
+                target_agent = value
+                job = self.skill_manager.get_job(kind, task_id)
+                if not job:
+                    await query.answer("Job not found", show_alert=True)
+                    return
+                ok, message, _ = self.skill_manager.transfer_job(kind, task_id, target_agent)
+                await query.answer(message, show_alert=not ok)
+                if ok:
+                    await query.edit_message_text(
+                        f"✅ Job transferred to <b>{target_agent}</b> (disabled — review before enabling).",
+                        parse_mode="HTML",
+                    )
+                return
+            if action == "xfer_remote":
+                # Cross-instance transfer: value = "{target_agent}:{instance_id}"
+                parts = value.split(":", 1)
+                if len(parts) != 2:
+                    await query.answer("Invalid target", show_alert=True)
+                    return
+                target_agent, instance_id = parts
+                job = self.skill_manager.get_job(kind, task_id)
+                if not job:
+                    await query.answer("Job not found", show_alert=True)
+                    return
+                await query.answer("Sending to remote instance…")
+                ok, msg = await self._transfer_job_remote(kind, job, target_agent, instance_id)
+                if ok:
+                    # Disable original
+                    self.skill_manager.set_job_enabled(kind, task_id, enabled=False)
+                    await query.edit_message_text(
+                        f"✅ Job transferred to <b>{target_agent}@{instance_id}</b> (original disabled).",
+                        parse_mode="HTML",
+                    )
+                else:
+                    await query.edit_message_text(f"❌ Transfer failed: {msg}")
+                return
         if data.startswith("skill:"):
             _, action, skill_id, *rest = data.split(":")
             skill = self.skill_manager.get_skill(skill_id)
@@ -2798,6 +2883,138 @@ class FlexibleAgentRuntime:
                 await query.answer()
                 return
         await query.answer()
+
+    def _build_job_transfer_keyboard(self, kind: str, task_id: str):
+        """Build inline keyboard for job transfer: same-instance agents + remote instances."""
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        buttons = []
+
+        # Same-instance active agents (excluding self)
+        orchestrator = getattr(self, "orchestrator", None)
+        local_agents = []
+        if orchestrator:
+            for rt in getattr(orchestrator, "runtimes", []):
+                name = getattr(rt, "name", "")
+                if name and name != self.name:
+                    local_agents.append(name)
+
+        if local_agents:
+            buttons.append([InlineKeyboardButton("── This instance ──", callback_data="noop")])
+            row = []
+            for agent in sorted(local_agents):
+                row.append(InlineKeyboardButton(agent, callback_data=f"skilljob:{kind}:xfer_to:{task_id}:{agent}"))
+                if len(row) == 3:
+                    buttons.append(row)
+                    row = []
+            if row:
+                buttons.append(row)
+
+        # Remote instances from instances.json
+        try:
+            import json as _j
+            from pathlib import Path as _P
+            instances_path = self.global_config.project_root / "instances.json"
+            if instances_path.exists():
+                data = _j.loads(instances_path.read_text(encoding="utf-8"))
+                local_id = self.global_config.project_root.name.upper()  # rough heuristic
+                for inst_id, inst_info in data.get("instances", {}).items():
+                    if not inst_info.get("active", False):
+                        continue
+                    # Skip self-instance
+                    display = inst_info.get("display_name", inst_id)
+                    platform = inst_info.get("platform", "")
+                    if platform == "portable":
+                        continue
+                    # Load agents from remote agents.json
+                    if platform == "windows":
+                        wsl_root = inst_info.get("wsl_root")
+                        agents_path = _P(wsl_root) / "agents.json" if wsl_root else None
+                    else:
+                        root = inst_info.get("root")
+                        agents_path = _P(root) / "agents.json" if root else None
+
+                    if not agents_path or not agents_path.exists():
+                        continue
+                    try:
+                        adata = _j.loads(agents_path.read_text(encoding="utf-8-sig"))
+                        remote_agents = [a["name"] for a in adata.get("agents", []) if a.get("is_active", True)]
+                    except Exception:
+                        continue
+
+                    if not remote_agents:
+                        continue
+
+                    buttons.append([InlineKeyboardButton(f"── {display} ──", callback_data="noop")])
+                    row = []
+                    for agent in sorted(remote_agents):
+                        cb = f"skilljob:{kind}:xfer_remote:{task_id}:{agent}:{inst_id}"
+                        row.append(InlineKeyboardButton(f"{agent}", callback_data=cb))
+                        if len(row) == 3:
+                            buttons.append(row)
+                            row = []
+                    if row:
+                        buttons.append(row)
+        except Exception:
+            pass
+
+        buttons.append([InlineKeyboardButton("✖ Cancel", callback_data="noop")])
+        return InlineKeyboardMarkup(buttons)
+
+    async def _transfer_job_remote(self, kind: str, job: dict, target_agent: str,
+                                   instance_id: str) -> tuple[bool, str]:
+        """POST job to remote instance /api/jobs/import via Workbench API."""
+        import json as _j
+        from urllib import request as _req
+        from urllib.error import URLError
+        from pathlib import Path as _P
+
+        try:
+            instances_path = self.global_config.project_root / "instances.json"
+            data = _j.loads(instances_path.read_text(encoding="utf-8"))
+            inst = data.get("instances", {}).get(instance_id, {})
+        except Exception as e:
+            return False, f"Could not read instances.json: {e}"
+
+        host = inst.get("lan_ip") or inst.get("api_host", "127.0.0.1")
+        wb_port = inst.get("workbench_port")
+        if not wb_port:
+            return False, f"No workbench_port for {instance_id}"
+
+        import copy
+        from uuid import uuid4
+        new_job = copy.deepcopy(job)
+        new_job["agent"] = target_agent
+        new_job["enabled"] = False
+        new_job["id"] = f"{target_agent}-{uuid4().hex[:8]}"
+        new_job["note"] = (job.get("note") or job["id"]) + f" [transferred from {self.name}@{self.global_config.project_root.name}]"
+
+        payload = _j.dumps({
+            "kind": kind,
+            "job": new_job,
+            "from_instance": str(self.global_config.project_root.name),
+            "from_agent": self.name,
+        }).encode("utf-8")
+
+        url = f"http://{host}:{wb_port}/api/jobs/import"
+        rq = _req.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with _req.urlopen(rq, timeout=10) as resp:
+                result = _j.loads(resp.read().decode("utf-8"))
+                if result.get("ok"):
+                    # hchat notification to target agent
+                    try:
+                        from tools.hchat_send import send_hchat
+                        send_hchat(
+                            target_agent, self.name,
+                            f"You have a new job transferred from {self.name}: [{new_job['id']}] {new_job.get('note', '')} — review with /jobs and enable when ready.",
+                            target_instance=instance_id,
+                        )
+                    except Exception:
+                        pass
+                    return True, result.get("message", "ok")
+                return False, result.get("message", "remote error")
+        except URLError as e:
+            return False, f"Connection failed ({host}:{wb_port}): {e}"
 
     async def _run_job_now(self, job: dict[str, Any]):
         action = job.get("action", "enqueue_prompt")
@@ -5387,14 +5604,28 @@ class FlexibleAgentRuntime:
                 }
                 try:
                     from tools.token_tracker import estimate_tokens, record_usage
-                    record_usage(
-                        self.workspace_dir,
-                        model=self.get_current_model(),
-                        backend=self.config.active_backend,
-                        input_tokens=estimate_tokens(item.prompt),
-                        output_tokens=estimate_tokens(display_text or response.text),
-                        session_id=self.session_id_dt,
-                    )
+                    if response.usage:
+                        # Real usage from API backend
+                        record_usage(
+                            self.workspace_dir,
+                            model=self.get_current_model(),
+                            backend=self.config.active_backend,
+                            input_tokens=response.usage.input_tokens,
+                            output_tokens=response.usage.output_tokens,
+                            thinking_tokens=response.usage.thinking_tokens,
+                            session_id=self.session_id_dt,
+                        )
+                    else:
+                        # CLI backend: estimate including system prompt context
+                        sys_prompt_tokens = estimate_tokens(self._get_system_prompt_text())
+                        record_usage(
+                            self.workspace_dir,
+                            model=self.get_current_model(),
+                            backend=self.config.active_backend,
+                            input_tokens=sys_prompt_tokens + estimate_tokens(item.prompt),
+                            output_tokens=estimate_tokens(display_text or response.text),
+                            session_id=self.session_id_dt,
+                        )
                 except Exception:
                     pass
                 memory_user_text = item.prompt
@@ -5407,6 +5638,7 @@ class FlexibleAgentRuntime:
                 self.handoff_builder.append_transcript("user", item.prompt, item.source)
                 self.handoff_builder.append_transcript("assistant", display_text or response.text)
                 self.handoff_builder.refresh_recent_context()
+                self.project_chat_logger.log_exchange(item.prompt, display_text or response.text, item.source)
                 _print_final_response(self.name, display_text or response.text)
                 total_s = (datetime.now() - datetime.fromisoformat(item.created_at)).total_seconds()
                 send_elapsed_s, chunk_count = await self.send_long_message(
@@ -5447,6 +5679,9 @@ class FlexibleAgentRuntime:
             item = None
             try:
                 item = await self.queue.get()
+                if not item.prompt or not item.prompt.strip():
+                    self.logger.debug(f"Skipping empty prompt in queue (source={item.source}, id={item.request_id})")
+                    continue
                 if not item.silent:
                     self.last_prompt = item
                 is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
@@ -5713,14 +5948,26 @@ class FlexibleAgentRuntime:
                     )
                     try:
                         from tools.token_tracker import estimate_tokens, record_usage
-                        record_usage(
-                            self.workspace_dir,
-                            model=self.get_current_model(),
-                            backend=self.config.active_backend,
-                            input_tokens=estimate_tokens(item.prompt),
-                            output_tokens=estimate_tokens(display_text or response.text),
-                            session_id=self.session_id_dt,
-                        )
+                        if response.usage:
+                            record_usage(
+                                self.workspace_dir,
+                                model=self.get_current_model(),
+                                backend=self.config.active_backend,
+                                input_tokens=response.usage.input_tokens,
+                                output_tokens=response.usage.output_tokens,
+                                thinking_tokens=response.usage.thinking_tokens,
+                                session_id=self.session_id_dt,
+                            )
+                        else:
+                            sys_prompt_tokens = estimate_tokens(self._get_system_prompt_text())
+                            record_usage(
+                                self.workspace_dir,
+                                model=self.get_current_model(),
+                                backend=self.config.active_backend,
+                                input_tokens=sys_prompt_tokens + estimate_tokens(item.prompt),
+                                output_tokens=estimate_tokens(display_text or response.text),
+                                session_id=self.session_id_dt,
+                            )
                     except Exception:
                         pass
                     if not item.silent:
@@ -5743,6 +5990,7 @@ class FlexibleAgentRuntime:
                             self.handoff_builder.append_transcript("user", item.prompt, item.source)
                             self.handoff_builder.append_transcript("assistant", display_text or response.text)
                             self.handoff_builder.refresh_recent_context()
+                            self.project_chat_logger.log_exchange(item.prompt, display_text or response.text, item.source)
                         if not item.deliver_to_telegram:
                             continue
                         # CoS intercept: if /cos on and response ends with ?, route to Lily first

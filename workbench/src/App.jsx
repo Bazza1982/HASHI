@@ -672,7 +672,7 @@ function AgentPanel({ agent, session, state, onSend, onSaveIdentity, onRunComman
 
   useEffect(() => {
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
-  }, [state.messages]);
+  }, [state.messages, state.isTyping]);
 
   useEffect(() => {
     attachmentsRef.current = attachments;
@@ -901,6 +901,12 @@ function AgentPanel({ agent, session, state, onSend, onSaveIdentity, onRunComman
             </div>
           </div>
         ))}
+        {state.isTyping && (
+          <div className="msg assistant typing-indicator">
+            <div className="msg-header"><b>{displayName}:</b></div>
+            <div className="msg-content"><span className="typing-dots"><span /><span /><span /></span></div>
+          </div>
+        )}
       </div>
 
       {!!attachments.length && (
@@ -1104,7 +1110,41 @@ export default function App() {
       for (const agent of incomingAgents) {
         const transcript = await fetch(`/api/transcript/${agent.id}?limit=60`).then((r) => r.json());
         pollOffsets.current[agent.id] = transcript.offset || 0;
-        newStateMap[agent.id] = { messages: normalizeMessages(transcript.messages) };
+        const transcriptMessages = normalizeMessages(transcript.messages);
+
+        // Project log: load recent project conversation history for this agent.
+        // Entries are stored by the workbench server independently of HASHI transcripts.
+        let projectMessages = [];
+        try {
+          const projectList = await fetch('/api/project-log/list').then((r) => r.json());
+          for (const proj of projectList.projects || []) {
+            const log = await fetch(`/api/project-log?project=${encodeURIComponent(proj.name)}&limit=100`).then((r) => r.json());
+            for (const entry of log.entries || []) {
+              if (entry.agent !== agent.id) continue;
+              projectMessages.push({
+                role: entry.direction === 'outbound' ? 'user' : 'assistant',
+                content: entry.text,
+                source: `project-log:${entry.project}`,
+                timestamp: entry.ts,
+                projectTags: {
+                  project: entry.project,
+                  shimanto_phases: entry.shimanto_phases,
+                  nagare_workflows: entry.nagare_workflows,
+                  scope: entry.scope,
+                },
+              });
+            }
+          }
+        } catch { /* project log unavailable, not fatal */ }
+
+        // Merge: project log messages as base (older), dedup with transcript by content+role
+        const seen = new Set(transcriptMessages.map((m) => `${m.role}:${m.content}`));
+        const uniqueProjectMessages = projectMessages.filter((m) => !seen.has(`${m.role}:${m.content}`));
+        const allMessages = [...uniqueProjectMessages, ...transcriptMessages]
+          .sort((a, b) => (a.timestamp || '') < (b.timestamp || '') ? -1 : 1)
+          .slice(-200);
+
+        newStateMap[agent.id] = { messages: allMessages };
       }
       setStateMap((prev) => ({ ...prev, ...newStateMap }));
     } finally {
@@ -1181,10 +1221,13 @@ export default function App() {
         pollOffsets.current[agent.id] = response.offset || offset;
         if (response.messages?.length) {
           const incomingMessages = normalizeMessages(response.messages);
+          const hasAssistant = incomingMessages.some((m) => m.role === 'assistant');
           setStateMap((prev) => ({
             ...prev,
             [agent.id]: {
+              ...prev[agent.id],
               messages: reconcileMessages(prev[agent.id]?.messages || [], incomingMessages).slice(-200),
+              ...(hasAssistant ? { isTyping: false } : {}),
             },
           }));
         }
@@ -1292,6 +1335,13 @@ export default function App() {
 
     if (files.length > 0) {
       appendSystemMessage(agent.id, `Media queued (${files.length} file${files.length > 1 ? 's' : ''}).`);
+    }
+
+    if (text) {
+      setStateMap((prev) => ({
+        ...prev,
+        [agent.id]: { ...prev[agent.id], isTyping: true },
+      }));
     }
   }
 

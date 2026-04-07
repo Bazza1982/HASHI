@@ -122,6 +122,7 @@ instances.json
 
 # Cross-instance mailbox (internal comms, never commit)
 mailbox/
+tickets/
 
 # Flow — runtime output and private project content
 flow/runs/
@@ -142,3 +143,6 @@ scripts/gitwatch_report.md
 build/
 dist/
 *.spec
+
+contacts.json
+docs/local_minato.md

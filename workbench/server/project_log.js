@@ -204,6 +204,26 @@ export function appendLogEntry(entry) {
   fs.appendFileSync(file, lines.join('\n') + '\n', 'utf8');
 }
 
+export function appendStructuredActivity(entry) {
+  const payload = {
+    ts: entry.ts || new Date().toISOString(),
+    session_id: entry.session_id || `sess_${Date.now().toString(36)}`,
+    type: entry.type || 'note',
+    project: entry.project,
+    agent: entry.agent,
+    user: entry.user || 'user',
+    shimanto_phases: entry.shimanto_phases || [],
+    nagare_workflows: entry.nagare_workflows || [],
+    scope: entry.scope || '',
+    summary: entry.summary || '',
+    details: entry.details || undefined,
+    excerpt: entry.excerpt || undefined,
+  };
+
+  appendLogEntry(payload);
+  appendEntry(payload);
+}
+
 export function appendEntry(entry) {
   const slug = projectSlug(entry.project);
   const dir = conversationsDir(slug);

@@ -293,6 +293,7 @@ def _build_jobs_with_buttons(agent_name: str, skill_manager, filter_agent: str |
         buttons.append([
             InlineKeyboardButton("▶ Run", callback_data=f"skilljob:{kind}:run:{jid}:now"),
             InlineKeyboardButton(toggle_label, callback_data=f"skilljob:{kind}:toggle:{jid}:{toggle_mode}"),
+            InlineKeyboardButton("📤 Transfer", callback_data=f"skilljob:{kind}:transfer:{jid}:select"),
             InlineKeyboardButton("🗑 Del", callback_data=f"skilljob:{kind}:delete:{jid}:confirm"),
         ])
 
@@ -1227,28 +1228,53 @@ class BridgeAgentRuntime:
         )
 
     async def _hchat_route_reply(self, item: QueuedRequest, response_text: str):
-        """If this request was an hchat message, route the reply back to the sender."""
+        """If this request was an hchat message, route the reply back to the sender.
+
+        Supports both [hchat from name] and [hchat from name@INSTANCE] header formats.
+        Falls back to cross-instance delivery via send_hchat when the sender is not a
+        local runtime (e.g. when the message originates from Minato or another instance).
+        """
         import re
-        match = re.match(r"^\[hchat from (\w+)\]", item.prompt)
+        # Accept both [hchat from name] and [hchat from name@INSTANCE]
+        match = re.match(r"^\[hchat from (\w+)(?:@\w+)?\]", item.prompt)
         if not match:
             return
         sender_name = match.group(1).lower()
+        reply_text = f"[hchat reply from {self.name}] {response_text}"
+
         orchestrator = getattr(self, "orchestrator", None)
         if orchestrator is None:
             return
+
+        # ── 1. Try local runtime first ────────────────────────────────────────
         for rt in getattr(orchestrator, "runtimes", []):
             if getattr(rt, "name", "") == sender_name and hasattr(rt, "enqueue_api_text"):
                 try:
                     await rt.enqueue_api_text(
-                        f"[hchat reply from {self.name}] {response_text}",
+                        reply_text,
                         source=f"hchat-reply:{self.name}",
                         deliver_to_telegram=True,
                     )
-                    self.logger.info(f"Hchat reply routed back to {sender_name}")
+                    self.logger.info(f"Hchat reply routed back to {sender_name} (local)")
                 except Exception as e:
                     self.logger.warning(f"Failed to route hchat reply to {sender_name}: {e}")
                 return
-        self.logger.warning(f"Hchat reply: sender '{sender_name}' runtime not found")
+
+        # ── 2. Fallback: cross-instance delivery via send_hchat (contacts.json) ──
+        try:
+            from tools.hchat_send import send_hchat
+            import asyncio
+            loop = asyncio.get_event_loop()
+            ok = await loop.run_in_executor(
+                None,
+                lambda: send_hchat(sender_name, self.name, reply_text),
+            )
+            if ok:
+                self.logger.info(f"Hchat reply delivered to {sender_name} via send_hchat (cross-instance)")
+            else:
+                self.logger.warning(f"Hchat reply: send_hchat failed for '{sender_name}'")
+        except Exception as e:
+            self.logger.warning(f"Hchat reply: cross-instance delivery failed for '{sender_name}': {e}")
 
     async def enqueue_api_media(
         self,
@@ -2644,7 +2670,7 @@ class BridgeAgentRuntime:
             f"Arale has been notified and will investigate.",
         )
 
-        # Notify Arale via bridge
+        # Notify Arale via bridge (local) or hchat (cross-instance)
         notification = format_ticket_notification(ticket)
         orchestrator = getattr(self, "orchestrator", None)
         notified = False
@@ -2666,7 +2692,25 @@ class BridgeAgentRuntime:
                     break
 
         if not notified:
-            logging.info(f"Ticket {ticket['ticket_id']} saved to file; Arale will pick up on next scan.")
+            # Arale not on this instance — deliver via hchat (real-time cross-instance)
+            try:
+                from tools.hchat_send import send_hchat
+                hchat_text = (
+                    f"[TICKET RECEIVED]\n{notification}\n\n"
+                    f"Ticket file: {self.global_config.project_root / 'tickets' / 'open' / (ticket['ticket_id'] + '.json')}\n"
+                    f"Please investigate and resolve per IT support protocol."
+                )
+                ok = send_hchat("arale", self.name, hchat_text)
+                if ok:
+                    notified = True
+                    logging.info(f"Ticket {ticket['ticket_id']} notified to arale via hchat.")
+                else:
+                    logging.warning(f"Ticket {ticket['ticket_id']} hchat delivery to arale failed.")
+            except Exception as e:
+                logging.warning(f"Failed to notify arale via hchat: {e}")
+
+        if not notified:
+            logging.warning(f"Ticket {ticket['ticket_id']} created but could not notify arale. She will pick it up on next patrol.")
 
     async def cmd_park(self, update, context):
         if update.effective_user.id != self.global_config.authorized_id:

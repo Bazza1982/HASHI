@@ -732,6 +732,7 @@ function normalizeRunState(workflowId, runStateRecord) {
   const state = runStateRecord.state || {};
   const steps = Object.entries(state.steps || {}).map(([id, step]) => ({
     id,
+    step_id: id,
     status: step.status || 'unknown',
     started_at: step.started_at || null,
     updated_at: step.updated_at || null,
