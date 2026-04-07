@@ -146,4 +146,6 @@ dist/
 *.spec
 *.egg-info/
 *.tsbuildinfo
+
+contacts.json
 docs/local_minato.md

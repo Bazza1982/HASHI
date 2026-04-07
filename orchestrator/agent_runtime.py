@@ -1313,28 +1313,53 @@ class BridgeAgentRuntime:
         )
 
     async def _hchat_route_reply(self, item: QueuedRequest, response_text: str):
-        """If this request was an hchat message, route the reply back to the sender."""
+        """If this request was an hchat message, route the reply back to the sender.
+
+        Supports both [hchat from name] and [hchat from name@INSTANCE] header formats.
+        Falls back to cross-instance delivery via send_hchat when the sender is not a
+        local runtime (e.g. when the message originates from Minato or another instance).
+        """
         import re
-        match = re.match(r"^\[hchat from (\w+)\]", item.prompt)
+        # Accept both [hchat from name] and [hchat from name@INSTANCE]
+        match = re.match(r"^\[hchat from (\w+)(?:@\w+)?\]", item.prompt)
         if not match:
             return
         sender_name = match.group(1).lower()
+        reply_text = f"[hchat reply from {self.name}] {response_text}"
+
         orchestrator = getattr(self, "orchestrator", None)
         if orchestrator is None:
             return
+
+        # ── 1. Try local runtime first ────────────────────────────────────────
         for rt in getattr(orchestrator, "runtimes", []):
             if getattr(rt, "name", "") == sender_name and hasattr(rt, "enqueue_api_text"):
                 try:
                     await rt.enqueue_api_text(
-                        f"[hchat reply from {self.name}] {response_text}",
+                        reply_text,
                         source=f"hchat-reply:{self.name}",
                         deliver_to_telegram=True,
                     )
-                    self.logger.info(f"Hchat reply routed back to {sender_name}")
+                    self.logger.info(f"Hchat reply routed back to {sender_name} (local)")
                 except Exception as e:
                     self.logger.warning(f"Failed to route hchat reply to {sender_name}: {e}")
                 return
-        self.logger.warning(f"Hchat reply: sender '{sender_name}' runtime not found")
+
+        # ── 2. Fallback: cross-instance delivery via send_hchat (contacts.json) ──
+        try:
+            from tools.hchat_send import send_hchat
+            import asyncio
+            loop = asyncio.get_event_loop()
+            ok = await loop.run_in_executor(
+                None,
+                lambda: send_hchat(sender_name, self.name, reply_text),
+            )
+            if ok:
+                self.logger.info(f"Hchat reply delivered to {sender_name} via send_hchat (cross-instance)")
+            else:
+                self.logger.warning(f"Hchat reply: send_hchat failed for '{sender_name}'")
+        except Exception as e:
+            self.logger.warning(f"Hchat reply: cross-instance delivery failed for '{sender_name}': {e}")
 
     async def enqueue_api_media(
         self,
