@@ -1195,28 +1195,61 @@ class FlexibleAgentRuntime:
         )
 
     async def _hchat_route_reply(self, item, response_text: str):
-        """If this request was an hchat message, route the reply back to the sender."""
-        import re
+        """Route hchat reply back to the sender.
+
+        Priority:
+        1. Local runtime (same orchestrator) — enqueue_api_text as before.
+        2. contacts.json entry (external caller such as Minato) — HTTP POST to their /api/chat.
+        """
         match = re.match(r"^\[hchat from (\w+)\]", item.prompt)
         if not match:
             return
         sender_name = match.group(1).lower()
+
+        # ── 1. Try local runtime first ────────────────────────────────────────
         orchestrator = getattr(self, "orchestrator", None)
-        if orchestrator is None:
-            return
-        for rt in getattr(orchestrator, "runtimes", []):
-            if getattr(rt, "name", "") == sender_name and hasattr(rt, "enqueue_api_text"):
-                try:
-                    await rt.enqueue_api_text(
-                        f"[hchat reply from {self.name}] {response_text}",
-                        source=f"hchat-reply:{self.name}",
-                        deliver_to_telegram=True,
-                    )
-                    self.logger.info(f"Hchat reply routed back to {sender_name}")
-                except Exception as e:
-                    self.logger.warning(f"Failed to route hchat reply to {sender_name}: {e}")
-                return
-        self.logger.warning(f"Hchat reply: sender '{sender_name}' runtime not found")
+        if orchestrator is not None:
+            for rt in getattr(orchestrator, "runtimes", []):
+                if getattr(rt, "name", "") == sender_name and hasattr(rt, "enqueue_api_text"):
+                    try:
+                        await rt.enqueue_api_text(
+                            f"[hchat reply from {self.name}] {response_text}",
+                            source=f"hchat-reply:{self.name}",
+                            deliver_to_telegram=True,
+                        )
+                        self.logger.info(f"Hchat reply routed to local runtime '{sender_name}'")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to route hchat reply to local runtime '{sender_name}': {e}")
+                    return
+
+        # ── 2. Fall back to contacts.json (external callers e.g. Minato) ──────
+        try:
+            from tools.hchat_send import _get_cached_route
+            contact = _get_cached_route(sender_name)
+            if contact:
+                host = contact.get("host") or "127.0.0.1"
+                # contacts store the listener address; treat 0.0.0.0 as localhost
+                if host in ("0.0.0.0", "::", ""):
+                    host = "127.0.0.1"
+                wb_port = contact.get("wb_port") or contact.get("port")
+                if wb_port:
+                    url = f"http://{host}:{wb_port}/api/chat"
+                    payload = {
+                        "agent": sender_name,
+                        "text": f"[hchat reply from {self.name}@HASHI1] {response_text}",
+                    }
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                            if resp.status < 300:
+                                self.logger.info(f"Hchat reply delivered to external '{sender_name}' via {url}")
+                            else:
+                                body = await resp.text()
+                                self.logger.warning(f"Hchat reply to '{sender_name}' got HTTP {resp.status}: {body[:200]}")
+                    return
+        except Exception as e:
+            self.logger.warning(f"Hchat reply: contacts fallback for '{sender_name}' failed: {e}")
+
+        self.logger.warning(f"Hchat reply: sender '{sender_name}' not found locally or in contacts")
 
     async def enqueue_api_media(
         self,

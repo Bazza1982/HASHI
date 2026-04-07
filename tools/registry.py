@@ -69,6 +69,7 @@ class ToolRegistry:
                 self.logger.warning(f"Unknown tool names in config (ignored): {unknown}")
 
         self.logger.info(f"ToolRegistry initialized. Allowed: {sorted(self._allowed)}")
+        self._obsidian = None  # lazy-initialized on first obsidian_* tool call
 
     def is_allowed(self, tool_name: str) -> bool:
         return tool_name in self._allowed
@@ -216,5 +217,14 @@ class ToolRegistry:
             if tool_name in _browser_dispatch:
                 return await _browser_dispatch[tool_name](arguments)
             return f"Error: unknown browser tool '{tool_name}'"
+
+        if tool_name.startswith("obsidian_"):
+            from tools.obsidian_mcp.client import ObsidianClient
+            if self._obsidian is None:
+                self._obsidian = ObsidianClient(
+                    base_url=self.secrets.get("obsidian_base_url", "http://127.0.0.1:27123"),
+                    api_key=self.secrets.get("obsidian_api_key", ""),
+                )
+            return await self._obsidian.dispatch(tool_name, arguments)
 
         return f"Error: no executor for tool '{tool_name}'"

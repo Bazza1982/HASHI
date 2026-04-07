@@ -105,7 +105,7 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [document, setDocument] = useState<WorkflowDocument>(() => bootstrapDocument());
   const [draft, setDraft] = useState<WorkflowDraft>(() => createDraftFromDocument(bootstrapDocument()));
-  const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
+  const [selectedStepIds, setSelectedStepIds] = useState<Set<string>>(new Set());
   const [rawMode, setRawMode] = useState(false);
   const [rawYaml, setRawYaml] = useState(DEFAULT_WORKFLOW);
   const [rawError, setRawError] = useState<string | null>(null);
@@ -128,10 +128,11 @@ export default function App() {
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
 
-  const selectedStep = useMemo(
-    () => draft.steps.find((step) => step.id === selectedStepId) ?? null,
-    [draft.steps, selectedStepId],
+  const selectedSteps = useMemo(
+    () => draft.steps.filter((step) => selectedStepIds.has(step.id)),
+    [draft.steps, selectedStepIds],
   );
+  const selectedStep = selectedSteps.length === 1 ? selectedSteps[0] : null;
 
   const workers = useMemo<WorkerInfo[]>(() => {
     const agents = isRecord(document.data.agents) ? document.data.agents : {};
@@ -160,7 +161,7 @@ export default function App() {
             label: step.name || step.id,
             agent: step.agent,
             dependsCount: step.depends.length,
-            selected: selectedStepId === step.id,
+            selected: selectedStepIds.has(step.id),
             runtimeStatus: runtimeStep ? normalizeRuntimeStatus(runtimeStep.status) : "idle",
             runtimeAttempt: runtimeStep?.attempt ?? 1,
             backend: workerForStep?.backend ?? "",
@@ -168,7 +169,7 @@ export default function App() {
           },
         };
       }),
-    [draft, runSnapshot, selectedStepId, workers],
+    [draft, runSnapshot, selectedStepIds, workers],
   );
 
   const edges = useMemo<Edge[]>(
@@ -343,7 +344,7 @@ export default function App() {
     setRawYaml(nextDocument.source);
     setRawError(null);
     setDirty(false);
-    setSelectedStepId(null);
+    setSelectedStepIds(new Set());
     setCorrelationId(makeCorrelationId());
     setRecoveryNotice(options?.notice ?? getImportRecoveryNotice(nextDocument));
     if (typeof options?.rawMode === "boolean") {
@@ -494,6 +495,69 @@ export default function App() {
     }));
     setDirty(true);
     setRecoveryNotice(null);
+  };
+
+  const handleSelectStep = (stepId: string, addToSelection: boolean) => {
+    if (addToSelection) {
+      setSelectedStepIds((prev) => {
+        const next = new Set(prev);
+        if (next.has(stepId)) {
+          next.delete(stepId);
+        } else {
+          next.add(stepId);
+        }
+        return next;
+      });
+    } else {
+      setSelectedStepIds(new Set([stepId]));
+    }
+  };
+
+  const handleClearSelection = () => setSelectedStepIds(new Set());
+
+  const handleBatchStepChange = (field: "agent" | "timeoutSeconds", value: string | number | null) => {
+    setDraft((current) => ({
+      ...current,
+      steps: current.steps.map((step) =>
+        selectedStepIds.has(step.id) ? { ...step, [field]: value } : step,
+      ),
+    }));
+    setDirty(true);
+    setRecoveryNotice(null);
+  };
+
+  const handleBatchPromptChange = (text: string, append: boolean) => {
+    setDraft((current) => ({
+      ...current,
+      steps: current.steps.map((step) => {
+        if (!selectedStepIds.has(step.id)) return step;
+        return { ...step, prompt: append ? step.prompt + "\n" + text : text };
+      }),
+    }));
+    setDirty(true);
+    setRecoveryNotice(null);
+  };
+
+  const handleBatchWorkerChange = (field: "backend" | "model", value: string) => {
+    const agentIds = new Set(selectedSteps.map((s) => s.agent).filter(Boolean));
+    setDocument((current) => {
+      const data = { ...current.data };
+      const agents = isRecord(data.agents) ? { ...data.agents } : {};
+      const workerList = Array.isArray(agents.workers) ? [...agents.workers] : [];
+      agents.workers = workerList.map((w) => {
+        if (!isRecord(w) || typeof w.id !== "string" || !agentIds.has(w.id)) return w;
+        const updatedWorker = { ...w, [field]: value };
+        if (field === "backend" && value === "callable") {
+          delete updatedWorker.model;
+        }
+        return updatedWorker;
+      });
+      data.agents = agents;
+      return { ...current, data };
+    });
+    setDirty(true);
+    setRecoveryNotice(null);
+    pushLog(createLog("info", "worker.batch_updated", `${field} → ${value} for ${agentIds.size} worker(s)`));
   };
 
   const handleWorkerChange = (workerId: string, field: "backend" | "model", value: string) => {
@@ -647,7 +711,8 @@ export default function App() {
               <WorkflowCanvas
                 nodes={nodes}
                 edges={edges}
-                onSelectStep={setSelectedStepId}
+                onSelectStep={handleSelectStep}
+                onClearSelection={handleClearSelection}
                 onNodeDragStop={handleNodeDragStop}
                 onAutoLayout={handleAutoLayout}
               />
@@ -666,11 +731,14 @@ export default function App() {
           {!rightCollapsed && (
             <aside className="workspace-side">
               <StepConfigPanel
-                step={selectedStep}
+                selectedSteps={selectedSteps}
                 availableStepIds={draft.steps.map((step) => step.id)}
                 workers={workers}
                 onChange={handleStepChange}
                 onWorkerChange={handleWorkerChange}
+                onBatchStepChange={handleBatchStepChange}
+                onBatchPromptChange={handleBatchPromptChange}
+                onBatchWorkerChange={handleBatchWorkerChange}
               />
               <ValidationPanel
                 compatibilityClass={document.compatibilityClass}
