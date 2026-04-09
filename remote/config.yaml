@@ -1,0 +1,33 @@
+# Hashi Remote Configuration
+# ═══════════════════════════════════════════════════════
+# Component of HASHI — Hashi Remote v1.0.0
+# Spiritual successor to Lily Remote by Barry & XiaoLei 🌸
+# ═══════════════════════════════════════════════════════
+
+server:
+  host: "0.0.0.0"
+  port: 8766                # Hashi Remote peer port (8766 to avoid clash with Lily Remote 8765)
+  use_tls: true
+
+security:
+  # LAN mode: skip token authentication for local network peers
+  # Set to false for internet-exposed deployments (e.g. Tailscale)
+  lan_mode: true
+
+  # Maximum auth level allowed for terminal commands
+  # L0=read-only, L1=read-files, L2=write, L3=restart (never L4=system)
+  max_terminal_level: "L2_WRITE"
+
+terminal:
+  enabled: true
+  timeout_seconds: 30
+
+discovery:
+  # Backend: "lan" (mDNS) or "tailscale" (future)
+  backend: "lan"
+  # mDNS service type — do not change unless you know what you're doing
+  service_type: "_hashi._tcp.local."
+
+logging:
+  level: INFO
+  audit_file: "~/.hashi-remote/audit.jsonl"

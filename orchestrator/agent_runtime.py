@@ -293,6 +293,7 @@ def _build_jobs_with_buttons(agent_name: str, skill_manager, filter_agent: str |
         buttons.append([
             InlineKeyboardButton("▶ Run", callback_data=f"skilljob:{kind}:run:{jid}:now"),
             InlineKeyboardButton(toggle_label, callback_data=f"skilljob:{kind}:toggle:{jid}:{toggle_mode}"),
+            InlineKeyboardButton("📤 Transfer", callback_data=f"skilljob:{kind}:transfer:{jid}:select"),
             InlineKeyboardButton("🗑 Del", callback_data=f"skilljob:{kind}:delete:{jid}:confirm"),
         ])
 
@@ -2644,7 +2645,7 @@ class BridgeAgentRuntime:
             f"Arale has been notified and will investigate.",
         )
 
-        # Notify Arale via bridge
+        # Notify Arale via bridge (local) or hchat (cross-instance)
         notification = format_ticket_notification(ticket)
         orchestrator = getattr(self, "orchestrator", None)
         notified = False
@@ -2666,7 +2667,25 @@ class BridgeAgentRuntime:
                     break
 
         if not notified:
-            logging.info(f"Ticket {ticket['ticket_id']} saved to file; Arale will pick up on next scan.")
+            # Arale not on this instance — deliver via hchat (real-time cross-instance)
+            try:
+                from tools.hchat_send import send_hchat
+                hchat_text = (
+                    f"[TICKET RECEIVED]\n{notification}\n\n"
+                    f"Ticket file: {self.global_config.project_root / 'tickets' / 'open' / (ticket['ticket_id'] + '.json')}\n"
+                    f"Please investigate and resolve per IT support protocol."
+                )
+                ok = send_hchat("arale", self.name, hchat_text)
+                if ok:
+                    notified = True
+                    logging.info(f"Ticket {ticket['ticket_id']} notified to arale via hchat.")
+                else:
+                    logging.warning(f"Ticket {ticket['ticket_id']} hchat delivery to arale failed.")
+            except Exception as e:
+                logging.warning(f"Failed to notify arale via hchat: {e}")
+
+        if not notified:
+            logging.warning(f"Ticket {ticket['ticket_id']} created but could not notify arale. She will pick it up on next patrol.")
 
     async def cmd_park(self, update, context):
         if update.effective_user.id != self.global_config.authorized_id:

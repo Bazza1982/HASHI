@@ -9,27 +9,104 @@ Sends a real-time message via the HASHI Workbench API (POST /api/chat).
 Supports cross-instance delivery: discovers remote instance ports from instances.json
 and routes messages to the correct Workbench API endpoint.
 
-Falls back to Cross-Instance Mailbox only if API delivery fails.
+Identity and routing are separated:
+  Message header: [hchat from rain@HASHI1] message text  (identity only, no IP/port)
+  Routing info:   reply_route in API payload metadata     (resolved by infrastructure)
+
+When the receiving Workbench sees reply_route in the payload, it auto-updates
+the local contacts.json cache so future replies route correctly.
+
+Cross-instance routing (priority order):
+  1. Local agent  → local Workbench API (127.0.0.1:<local_port>)
+  2. Contacts cache → previously learned route (with TTL expiry)
+  3. Hashi Remote → /hchat endpoint on remote instance (internet-safe, only exposes port 8766)
+  4. Direct Workbench → auto-discover via instances.json (LAN only)
 """
 
 import argparse
 import json
 import sys
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from urllib import request as urllib_request
 from urllib.error import URLError
 
 ROOT = Path(__file__).resolve().parent.parent
+CONTACTS_FILE = ROOT / "contacts.json"
+DEFAULT_TTL = 3600  # 1 hour — contacts expire and get re-discovered
 
-# Known instance mailbox paths (from WSL) — fallback only
-INSTANCE_MAILBOX = {
-    "HASHI1": Path("/home/lily/projects/hashi/mailbox/incoming/"),
-    "HASHI2": Path("/home/lily/projects/hashi2/mailbox/incoming/"),
-    "HASHI9": Path("/mnt/c/Users/thene/projects/HASHI/mailbox/incoming/"),
-}
 
+# ─────────────────────────────────────────────────────────
+# Contacts cache (learned routes with TTL)
+# ─────────────────────────────────────────────────────────
+
+def _load_contacts() -> dict:
+    """Load local contacts cache (agent → {instance_id, host, port, wb_port, updated, expires})."""
+    if CONTACTS_FILE.exists():
+        try:
+            return json.loads(CONTACTS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def _save_contacts(contacts: dict):
+    """Save contacts cache."""
+    CONTACTS_FILE.write_text(json.dumps(contacts, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def update_contact(agent_name: str, instance_id: str, host: str, port: int,
+                   wb_port: int | None = None, ttl: int = DEFAULT_TTL):
+    """Update a single agent's routing info in the local contacts cache."""
+    contacts = _load_contacts()
+    now = time.time()
+    contacts[agent_name.lower()] = {
+        "instance_id": instance_id,
+        "host": host,
+        "port": port,              # Hashi Remote port (8766) or workbench port
+        "wb_port": wb_port or port, # Workbench port for direct delivery
+        "updated": now,
+        "expires": now + ttl,
+    }
+    _save_contacts(contacts)
+
+
+def _get_cached_route(agent_name: str) -> dict | None:
+    """Get a non-expired cached route for an agent."""
+    contacts = _load_contacts()
+    cached = contacts.get(agent_name.lower())
+    if not cached:
+        return None
+    if cached.get("expires", 0) < time.time():
+        return None  # expired
+    return cached
+
+
+def parse_return_address(hchat_header: str) -> dict | None:
+    """Parse identity from hchat header.
+
+    Input:  '[hchat from rain@HASHI1] ...'
+    Returns: {'agent': 'rain', 'instance_id': 'HASHI1'}
+
+    Also supports legacy format with IP:port (ignored, only identity extracted):
+    Input:  '[hchat from rain@HASHI1:127.0.0.1:18800] ...'
+    Returns: {'agent': 'rain', 'instance_id': 'HASHI1'}
+    """
+    import re
+    # New format: agent@INSTANCE (no IP)
+    m = re.match(r'\[hchat from (\w+)@(\w+)\]', hchat_header)
+    if m:
+        return {"agent": m.group(1), "instance_id": m.group(2)}
+    # Legacy format: agent@INSTANCE:host:port
+    m = re.match(r'\[hchat from (\w+)@(\w+):', hchat_header)
+    if m:
+        return {"agent": m.group(1), "instance_id": m.group(2)}
+    return None
+
+
+# ─────────────────────────────────────────────────────────
+# Config loaders
+# ─────────────────────────────────────────────────────────
 
 def _load_config():
     config_path = ROOT / "agents.json"
@@ -70,16 +147,13 @@ def _is_local_agent(cfg: dict, agent_name: str) -> bool:
 
 def _load_remote_agents(instance_id: str, instance_info: dict) -> list[str]:
     """Load agent names from a remote instance's agents.json."""
-    # Determine the path to the remote instance's agents.json
     platform = instance_info.get("platform", "")
     if platform == "windows":
-        # Access Windows instance via WSL mount
         wsl_root = instance_info.get("wsl_root")
         if not wsl_root:
             return []
         agents_path = Path(wsl_root) / "agents.json"
     else:
-        # WSL instance — direct path
         root = instance_info.get("root")
         if not root:
             return []
@@ -103,8 +177,7 @@ def _find_remote_instance(target_agent: str, local_instance_id: str,
                           target_instance: str | None = None) -> dict | None:
     """Find which remote instance hosts the target agent.
 
-    If target_instance is specified, only check that instance.
-    Returns dict with 'instance_id', 'host', 'port' if found, else None.
+    Returns dict with 'instance_id', 'host', 'wb_port', 'remote_port' if found.
     """
     instances = _load_instances()
     candidates = []
@@ -117,57 +190,81 @@ def _find_remote_instance(target_agent: str, local_instance_id: str,
         if target_instance and inst_id.upper() != target_instance.upper():
             continue
 
-        port = inst_info.get("workbench_port")
-        if not port:
+        wb_port = inst_info.get("workbench_port")
+        if not wb_port:
             continue
 
-        # Check if this instance has the target agent
         agents = _load_remote_agents(inst_id, inst_info)
         if target_agent.lower() in agents:
+            # Prefer lan_ip (set by Hashi Remote mDNS discovery) over api_host
+            host = inst_info.get("lan_ip") or inst_info.get("api_host", "127.0.0.1")
             candidates.append({
                 "instance_id": inst_id.upper(),
-                "host": inst_info.get("api_host", "127.0.0.1"),
-                "port": port,
+                "host": host,
+                "wb_port": wb_port,
+                "remote_port": inst_info.get("remote_port", 8766),
             })
 
     if not candidates:
         return None
 
-    # If multiple instances have the same agent, try to verify which is alive
     if len(candidates) == 1:
         return candidates[0]
 
-    # Probe each candidate's API to find the live one
+    # Probe each candidate to find the live one
     for candidate in candidates:
         try:
-            url = f"http://{candidate['host']}:{candidate['port']}/api/chat"
-            # Quick probe — just check if the port responds
+            url = f"http://{candidate['host']}:{candidate['wb_port']}/api/chat"
             probe_req = urllib_request.Request(url, method="GET")
             urllib_request.urlopen(probe_req, timeout=3)
         except URLError:
             continue
         except Exception:
-            # Any response (even 405 Method Not Allowed) means the server is alive
             return candidate
 
-    # If no probe succeeded, return the last candidate (prefer higher instance numbers = HASHI9 > HASHI2)
     return candidates[-1]
 
 
-def _send_via_api(host: str, port: int, to_agent: str, from_agent: str, text: str,
-                  is_remote: bool = False) -> bool:
-    """Send via Workbench HTTP API (real-time)."""
+# ─────────────────────────────────────────────────────────
+# Delivery methods
+# ─────────────────────────────────────────────────────────
+
+def _build_reply_route(cfg: dict) -> dict:
+    """Build reply_route metadata for outgoing messages."""
+    instance_id = _get_instance_id(cfg)
+    host = cfg.get("global", {}).get("api_host", "127.0.0.1")
+    # Use lan_ip from our own instance in instances.json if available
+    instances = _load_instances()
+    our_inst = instances.get(instance_id.lower(), {})
+    if our_inst.get("lan_ip"):
+        host = our_inst["lan_ip"]
+    return {
+        "instance_id": instance_id,
+        "host": host,
+        "port": our_inst.get("remote_port", 8766),
+        "wb_port": _get_workbench_port(cfg),
+        "ttl": DEFAULT_TTL,
+    }
+
+
+def _send_via_workbench(host: str, port: int, to_agent: str, from_agent: str,
+                        text: str, instance_id: str,
+                        reply_route: dict | None = None,
+                        label: str = "local") -> bool:
+    """Send via Workbench HTTP API (POST /api/chat)."""
     url = f"http://{host}:{port}/api/chat"
-    full_text = f"[hchat from {from_agent}] {text}"
-    payload = json.dumps({"agent": to_agent.lower(), "text": full_text}).encode("utf-8")
+    full_text = f"[hchat from {from_agent}@{instance_id}] {text}"
+    payload = {"agent": to_agent.lower(), "text": full_text}
+    if reply_route:
+        payload["reply_route"] = reply_route
+    data = json.dumps(payload).encode("utf-8")
 
     req = urllib_request.Request(
-        url, data=payload,
+        url, data=data,
         headers={"Content-Type": "application/json"},
         method="POST",
     )
 
-    label = "remote" if is_remote else "local"
     try:
         with urllib_request.urlopen(req, timeout=10) as resp:
             result = json.loads(resp.read().decode("utf-8"))
@@ -183,43 +280,46 @@ def _send_via_api(host: str, port: int, to_agent: str, from_agent: str, text: st
         return False
 
 
-def _send_via_mailbox(from_instance: str, from_agent: str, to_agent: str, text: str) -> bool:
-    """Send via Cross-Instance Mailbox (async fallback)."""
-    now = datetime.now(timezone.utc)
-    ts_str = now.strftime("%Y%m%d-%H%M%S")
-    msg_id = f"hchat-{ts_str}-{from_agent}-{to_agent}"
-
-    message = {
-        "msg_id": msg_id,
+def _send_via_remote(host: str, port: int, to_agent: str, from_agent: str,
+                     text: str, from_instance: str,
+                     reply_route: dict | None = None) -> bool:
+    """Send via Hashi Remote /hchat endpoint (internet-safe)."""
+    url = f"http://{host}:{port}/hchat"
+    full_text = f"[hchat from {from_agent}@{from_instance}] {text}"
+    payload = {
         "from_instance": from_instance,
-        "from_agent": from_agent,
-        "to_agent": to_agent,
-        "intent": "ask",
-        "reply_required": True,
-        "text": f"[hchat from {from_agent}] {text}",
-        "ts": now.isoformat(),
+        "to_agent": to_agent.lower(),
+        "text": full_text,
+        "source_hchat_format": True,
     }
+    if reply_route:
+        payload["reply_route"] = reply_route
+    data = json.dumps(payload).encode("utf-8")
 
-    for instance_id, mailbox_path in INSTANCE_MAILBOX.items():
-        if instance_id == from_instance:
-            continue
-        if mailbox_path.exists():
-            try:
-                message["to_instance"] = instance_id
-                filename = f"{ts_str}_{from_instance}_{from_agent}.json"
-                target = mailbox_path / filename
-                tmp = target.with_suffix(".tmp")
-                tmp.write_text(json.dumps(message, ensure_ascii=False, indent=2), encoding="utf-8")
-                tmp.rename(target)
-                print(f"✅ Hchat queued (mailbox → {instance_id}): {from_agent} → {to_agent}")
+    req = urllib_request.Request(
+        url, data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib_request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+            if result.get("ok"):
+                print(f"✅ Hchat delivered (Remote, {host}:{port}): {from_agent} → {to_agent}")
                 print(f"   Message: {text[:80]}{'...' if len(text) > 80 else ''}")
                 return True
-            except Exception as e:
-                print(f"⚠️ Mailbox write to {instance_id} failed: {e}", file=sys.stderr)
+            else:
+                print(f"❌ Remote /hchat error: {result.get('error', 'unknown')}", file=sys.stderr)
+                return False
+    except URLError as e:
+        print(f"❌ Remote /hchat connection failed ({host}:{port}): {e}", file=sys.stderr)
+        return False
 
-    print(f"❌ No reachable mailbox found for {to_agent}", file=sys.stderr)
-    return False
 
+# ─────────────────────────────────────────────────────────
+# Group resolution
+# ─────────────────────────────────────────────────────────
 
 def _resolve_group_members(cfg: dict, group_name: str, exclude_self: str | None = None) -> list[str]:
     """Resolve a group name to a list of agent names."""
@@ -236,11 +336,16 @@ def _resolve_group_members(cfg: dict, group_name: str, exclude_self: str | None 
     return [n for n in members if n.lower() not in excludes]
 
 
+# ─────────────────────────────────────────────────────────
+# Main send logic
+# ─────────────────────────────────────────────────────────
+
 def send_hchat(to_agent: str, from_agent: str, text: str,
                target_instance: str | None = None) -> bool:
     cfg = _load_config()
     port = _get_workbench_port(cfg)
     instance_id = _get_instance_id(cfg)
+    reply_route = _build_reply_route(cfg)
 
     # Handle @group_name — expand to all members and send to each
     if to_agent.startswith("@"):
@@ -261,42 +366,74 @@ def send_hchat(to_agent: str, from_agent: str, text: str,
     if target_instance and target_instance.upper() != instance_id.upper():
         remote = _find_remote_instance(to_agent, instance_id, target_instance=target_instance)
         if remote:
-            print(f"ℹ️ {to_agent} → {remote['instance_id']} (port {remote['port']})", file=sys.stderr)
-            if _send_via_api(remote["host"], remote["port"], to_agent, from_agent, text, is_remote=True):
+            print(f"ℹ️ {to_agent} → {remote['instance_id']} (port {remote['wb_port']})", file=sys.stderr)
+            if _send_via_workbench(remote["host"], remote["wb_port"], to_agent, from_agent,
+                                   text, instance_id, reply_route, label="remote"):
                 return True
-            print(f"⚠️ Remote API failed, falling back to mailbox...", file=sys.stderr)
-        return _send_via_mailbox(instance_id, from_agent, to_agent, text)
+        print(f"❌ Failed to deliver to {to_agent}@{target_instance}. Target instance may be offline.", file=sys.stderr)
+        return False
 
-    # === Local agent: send via local API, fall through on failure ===
+    # === 1. Local agent: send via local Workbench API ===
     if _is_local_agent(cfg, to_agent):
-        if _send_via_api("127.0.0.1", port, to_agent, from_agent, text):
+        if _send_via_workbench("127.0.0.1", port, to_agent, from_agent,
+                               text, instance_id, reply_route):
             return True
         print(f"⚠️ Local API failed for {to_agent}, trying remote...", file=sys.stderr)
 
-    # === Remote agent: discover instance and send via remote API ===
+    # === 2. Contacts cache: check if we have a learned (non-expired) route ===
+    cached = _get_cached_route(to_agent)
+    if cached:
+        print(f"ℹ️ {to_agent} found in contacts → {cached['instance_id']} ({cached['host']})", file=sys.stderr)
+        # Try Remote /hchat first (internet-safe), then direct Workbench
+        if cached.get("port") and cached["port"] != cached.get("wb_port"):
+            if _send_via_remote(cached["host"], cached["port"], to_agent, from_agent,
+                                text, instance_id, reply_route):
+                return True
+        if cached.get("wb_port"):
+            if _send_via_workbench(cached["host"], cached["wb_port"], to_agent, from_agent,
+                                   text, instance_id, reply_route, label="cached"):
+                return True
+        print(f"⚠️ Contacts cache route failed, falling back to discovery...", file=sys.stderr)
+
+    # === 3. Instance discovery → try Remote /hchat then direct Workbench ===
     remote = _find_remote_instance(to_agent, instance_id)
     if remote:
-        print(f"ℹ️ {to_agent} found on {remote['instance_id']} (port {remote['port']})", file=sys.stderr)
-        if _send_via_api(remote["host"], remote["port"], to_agent, from_agent, text, is_remote=True):
+        print(f"ℹ️ {to_agent} found on {remote['instance_id']} ({remote['host']})", file=sys.stderr)
+        # Try Remote /hchat endpoint first (internet-safe)
+        if remote.get("remote_port"):
+            if _send_via_remote(remote["host"], remote["remote_port"], to_agent, from_agent,
+                                text, instance_id, reply_route):
+                return True
+        # Fall back to direct Workbench
+        if _send_via_workbench(remote["host"], remote["wb_port"], to_agent, from_agent,
+                               text, instance_id, reply_route, label="remote"):
             return True
-        print(f"⚠️ Remote API failed, falling back to mailbox...", file=sys.stderr)
+        print(f"❌ Remote delivery to {remote['instance_id']} failed.", file=sys.stderr)
+        return False
 
-    # === Fallback: try local API (might be a dynamic agent) ===
-    if not remote and _send_via_api("127.0.0.1", port, to_agent, from_agent, text):
+    # === 4. Fallback: try local API (might be a dynamic agent) ===
+    if _send_via_workbench("127.0.0.1", port, to_agent, from_agent,
+                           text, instance_id, reply_route):
         return True
 
-    # === Last resort: cross-instance mailbox ===
-    print(f"ℹ️ Falling back to cross-instance mailbox...", file=sys.stderr)
-    return _send_via_mailbox(instance_id, from_agent, to_agent, text)
+    print(f"❌ Could not deliver message to {to_agent}. Agent not found on any active instance.", file=sys.stderr)
+    return False
 
+
+# ─────────────────────────────────────────────────────────
+# CLI
+# ─────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description="Send a Hchat message to another agent")
-    parser.add_argument("--to", required=True, help="Target agent name or @group_name (e.g. lily or @staff)")
-    parser.add_argument("--from", dest="from_agent", required=True, help="Sender agent name (e.g. rain)")
-    parser.add_argument("--text", required=True, help="Message text to send")
+    parser.add_argument("--to", help="Target agent name or @group_name (e.g. lily or @staff)")
+    parser.add_argument("--from", dest="from_agent", help="Sender agent name (e.g. rain)")
+    parser.add_argument("--text", help="Message text to send")
     parser.add_argument("--instance", default=None, help="Target instance (e.g. HASHI9) — forces routing to specific instance")
     args = parser.parse_args()
+
+    if not args.to or not args.from_agent or not args.text:
+        parser.error("--to, --from, and --text are required for sending messages")
 
     success = send_hchat(args.to, args.from_agent, args.text, target_instance=args.instance)
     sys.exit(0 if success else 1)

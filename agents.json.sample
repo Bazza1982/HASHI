@@ -214,8 +214,8 @@
       ],
       "extra": {
         "authorized_telegram_ids": [
-          REDACTED_USER_ID,
-          REDACTED_USER_ID
+          "REDACTED_USER_ID",
+          "REDACTED_USER_ID"
         ]
       },
       "active_backend": "claude-cli"
@@ -305,8 +305,8 @@
       "active_backend": "openrouter-api",
       "extra": {
         "authorized_telegram_ids": [
-          REDACTED_USER_ID,
-          REDACTED_USER_ID
+          "REDACTED_USER_ID",
+          "REDACTED_USER_ID"
         ],
         "limited_policy": {
           "mode": "denylist",

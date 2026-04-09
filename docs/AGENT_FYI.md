@@ -292,13 +292,13 @@ After editing, restart WSL: shut down via `wsl --shutdown` in PowerShell, then r
 
 | Port | Purpose | Example |
 |------|---------|---------|
-| `8769` | Workbench API — chat with agents | `POST http://127.0.0.1:8769/api/chat` |
+| `18819` | Workbench API — chat with agents | `POST http://127.0.0.1:18819/api/chat` |
 | `18801` | API Gateway — OpenAI-compatible interface | `POST http://127.0.0.1:18801/v1/chat/completions` |
 
 ### Sending a Real-Time Message to HASHI9
 
 ```bash
-curl -s -X POST http://127.0.0.1:8769/api/chat \
+curl -s -X POST http://127.0.0.1:18819/api/chat \
   -H "Content-Type: application/json" \
   -d '{"agent": "hashiko", "text": "你好！"}'
 ```

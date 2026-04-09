@@ -34,10 +34,10 @@ def _get_workbench_url() -> str:
         config_path = os.path.join(_project_root, "agents.json")
         with open(config_path) as f:
             config = json.load(f)
-        port = config.get("global", {}).get("workbench_port", 8769)
+        port = config.get("global", {}).get("workbench_port", 18800)
         return f"http://localhost:{port}"
     except Exception:
-        return "http://localhost:8769"
+        return "http://localhost:18800"
 
 
 def main():

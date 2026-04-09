@@ -21,6 +21,7 @@ from tui.onboarding import (
     load_languages, lang_code_from_file, audit_environment,
     verify_openrouter, write_config,
 )
+from tui.light_onboarding import LightOnboardingPhase, is_onboarding_complete
 
 
 STARTUP_LOGO = [
@@ -325,7 +326,7 @@ class HASHITuiApp(App):
         Binding("ctrl+q", "quit_app", "Quit", show=True),
     ]
 
-    def __init__(self, workbench_url: str = "http://localhost:8769"):
+    def __init__(self, workbench_url: str = "http://localhost:18800", onboarding_mode: bool = False):
         super().__init__()
         self.bridge_home = self._find_bridge_home()
         self.bridge_proc: asyncio.subprocess.Process | None = None
@@ -338,6 +339,9 @@ class HASHITuiApp(App):
         self.gateway_ok = False
         self._log_paused = False
         self._onboarding: OnboardingPhase | None = None
+        self._light_onboarding: LightOnboardingPhase | None = None
+        self._inject_wakeup: str | None = None
+        self._onboarding_mode = onboarding_mode
         self._poll_task: asyncio.Task | None = None
         self._log_follow_task: asyncio.Task | None = None
         self._agents_cache: list[dict] = []
@@ -386,7 +390,9 @@ class HASHITuiApp(App):
             except Exception:
                 pass
 
-        if needs_onboarding:
+        if self._onboarding_mode and not is_onboarding_complete(self.bridge_home):
+            self._start_light_onboarding()
+        elif needs_onboarding:
             self._start_onboarding()
         else:
             self._start_bridge()
@@ -536,6 +542,54 @@ class HASHITuiApp(App):
             self.query_one("#chat-history", ChatHistory).border_title = "Chat"
             self._start_bridge()
 
+    # ── Light Onboarding (TUI_onboarding first-run flow) ─────────────────
+
+    def _start_light_onboarding(self):
+        self._light_onboarding = LightOnboardingPhase(self.bridge_home)
+        chat = self.query_one("#chat-history", ChatHistory)
+        chat.border_title = "Setup"
+        chat.write(self._light_onboarding.get_initial_prompt())
+        self.query_one("#chat-input", ChatInput).placeholder = "Enter your choice..."
+
+    async def _handle_light_onboarding_input(self, text: str):
+        chat = self.query_one("#chat-history", ChatHistory)
+        lo = self._light_onboarding
+
+        msg, needs_input = lo.handle_input(text)
+        if msg:
+            chat.write(msg)
+
+        if lo.phase == LightOnboardingPhase.PHASE_APICHECK:
+            self._run_light_api_check()
+            return
+
+        if lo.phase == LightOnboardingPhase.PHASE_DONE:
+            self._finalize_light_onboarding()
+
+    @work(thread=True)
+    def _run_light_api_check(self):
+        result, ok = self._light_onboarding.run_api_check()
+        self.call_from_thread(self._light_api_check_complete, result, ok)
+
+    def _light_api_check_complete(self, result: str, ok: bool):
+        chat = self.query_one("#chat-history", ChatHistory)
+        chat.write(result)
+        if self._light_onboarding.phase == LightOnboardingPhase.PHASE_APIKEY_INPUT:
+            pass  # wait for user input
+        elif self._light_onboarding.phase == LightOnboardingPhase.PHASE_DONE:
+            self._finalize_light_onboarding()
+
+    def _finalize_light_onboarding(self):
+        chat = self.query_one("#chat-history", ChatHistory)
+        lo = self._light_onboarding
+        lo.finalize()
+        self._inject_wakeup = lo.get_wakeup_prompt()
+        self._light_onboarding = None
+        chat.write("✅ Setup complete! Starting HASHI...\n")
+        self.query_one("#chat-input", ChatInput).placeholder = "Type message or /to <agent> ..."
+        self.query_one("#chat-history", ChatHistory).border_title = "Chat"
+        self._start_bridge()
+
     # ── Bridge subprocess ───────────────────────────────────────────────
 
     def _start_bridge(self):
@@ -682,6 +736,17 @@ class HASHITuiApp(App):
         # Load recent transcript
         self._load_initial_transcript()
 
+        # First-run wakeup: send once after initial agent selection
+        if self._inject_wakeup and self.current_agent:
+            wakeup = self._inject_wakeup
+            self._inject_wakeup = None
+            self._send_wakeup(wakeup, self.current_agent)
+
+    @work()
+    async def _send_wakeup(self, prompt: str, agent: str):
+        await asyncio.sleep(2.0)  # let bridge settle
+        await self.api.send_chat(agent, prompt)
+
     def _render_transcript_message(self, msg: dict):
         role = msg.get("role", "?")
         text = msg.get("text", "")
@@ -741,9 +806,15 @@ class HASHITuiApp(App):
 
     async def on_input_submitted(self, event: Input.Submitted):
         text = event.value.strip()
+        event.input.value = ""
+
+        # Light onboarding accepts empty Enter to advance
+        if self._light_onboarding:
+            await self._handle_light_onboarding_input(text)
+            return
+
         if not text:
             return
-        event.input.value = ""
         normalized = text
         if normalized.startswith("/ "):
             normalized = "/" + normalized[2:].lstrip()

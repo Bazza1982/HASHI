@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.0.0-alpha] - 2026-04-01
+
+### ✨ Added
+
+- **TUI Onboarding — first-run setup inside the terminal UI** (`tui_onboarding.py`, `windows/TUI_onboarding.bat`)
+  - New standalone entry point that replaces the old `onboarding/onboarding_main.py` flow for users with a pre-configured `agents.json`.
+  - Runs a guided first-run sequence directly inside the TUI window — no separate window or UI switch required.
+  - **First-run flow:**
+    1. Language selection (9 languages: English, Japanese, Simplified Chinese, Traditional Chinese, Korean, German, French, Russian, Arabic)
+    2. AI Ethics & Human Well-being disclaimer (Enter to confirm)
+    3. Mental health & AI relationship reminder (Enter to confirm)
+    4. API key connectivity check — auto-detects OpenRouter (`sk-or-v1-...`) or DeepSeek (`sk-...`) key in `secrets.json` with a live ping test; prompts user to paste a key if none found or ping fails
+    5. Generates `agents.json` from `agents.json.sample` (Hashiko only) if not present
+    6. Writes `workspaces/hashiko/tui_onboarding_complete` completion marker
+    7. Starts the HASHI bridge and transitions seamlessly into normal TUI chat
+    8. Injects a first-run wakeup prompt so Hashiko greets the user in their selected language, asks for their name, and guides Telegram setup — all within the same TUI session
+  - `tui/light_onboarding.py` — new module containing the `LightOnboardingPhase` state machine and helpers (language loading, disclaimer/wellbeing text extraction, API key detection and validation, `agents.json` bootstrapping, completion marker management)
+  - `tui/app.py` extended with `onboarding_mode` parameter; existing TUI behavior unchanged when launched via `start_tui.bat`
+  - USB packaging (`prepare_usb.bat`) picks up all new files automatically — no packaging changes needed
+
+---
+
 ## [2.0.0] - 2026-03-23
 
 ### ✨ Added

@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
 # HASHI9 - Start Bridge with Workbench (macOS)
-# Starts the bridge with Workbench API enabled on port 8769.
+# Starts the bridge with Workbench API enabled on the port from agents.json.
 # Double-click this file in Finder to launch.
 # Logs written to: mac/logs/workbench_<timestamp>.log
 # ============================================================
@@ -23,10 +23,15 @@ else
     exit 1
 fi
 
+WB_PORT="$("$PYTHON_EXE" -c 'import json, pathlib; p = pathlib.Path(r"'"$ROOT"'") / "agents.json"; data = json.loads(p.read_text(encoding="utf-8-sig")); print(data.get("global", {}).get("workbench_port", 18800))')"
+if [ -z "$WB_PORT" ]; then
+    WB_PORT="18800"
+fi
+
 {
     echo "===================================================="
     echo "HASHI9 Bridge + Workbench"
-    echo "Port:    8769"
+    echo "Port:    $WB_PORT"
     echo "Started: $(date)"
     echo "Python:  $PYTHON_EXE"
     echo "Root:    $ROOT"
@@ -34,7 +39,7 @@ fi
 } | tee -a "$LOG_FILE"
 
 echo ""
-echo "Workbench API: http://localhost:8769"
+echo "Workbench API: http://localhost:$WB_PORT"
 echo "Log: $LOG_FILE"
 echo ""
 

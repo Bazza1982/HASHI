@@ -87,6 +87,13 @@ class FlexibleAgentRuntime:
         self._pending_request_results: dict[str, dict] = {}
         self._transfer_state: dict | None = None
         self._suppressed_transfer_results: list[dict[str, Any]] = []
+        # /long ... /end buffering
+        self._long_buffer: list[str] = []
+        self._long_buffer_active: bool = False
+        self._long_buffer_chat_id: int | None = None
+        self._long_buffer_timeout_task: asyncio.Task | None = None
+        # Hashi Remote subprocess
+        self._remote_process: asyncio.subprocess.Process | None = None
         self.skill_manager = skill_manager
         self.agent_fyi_path = self.global_config.project_root / "docs" / "AGENT_FYI.md"
         self._pending_session_primer: str | None = None
@@ -115,6 +122,7 @@ class FlexibleAgentRuntime:
         self._cos_enabled: bool = (self.workspace_dir / ".cos_on").exists()
         self.voice_manager = VoiceManager(self.workspace_dir, self.media_dir, ffmpeg_cmd="ffmpeg", secrets=self.secrets)
         self._authorized_telegram_ids = resolve_authorized_telegram_ids(self.config.extra, self.global_config.authorized_id)
+        self._active_chat_ids: dict[int, int] = {}  # user_id -> chat_id, populated on first message
 
         # Command policy
         # - default: allow all commands
@@ -149,7 +157,25 @@ class FlexibleAgentRuntime:
         # Initialize FlexibleBackendManager
         self.backend_manager = FlexibleBackendManager(config, global_config, secrets)
 
+    def _record_active_chat(self, update) -> None:
+        """Track the chat_id for each authorized user who messages this bot."""
+        user = getattr(update, "effective_user", None)
+        chat = getattr(update, "effective_chat", None)
+        if user and chat and self._is_authorized_user(user.id):
+            self._active_chat_ids[user.id] = chat.id
+
     def _primary_chat_id(self) -> int:
+        """Return the best chat_id for proactive messages (forks, notifications).
+
+        Prefer a chat_id from an authorized user who has actually messaged
+        this bot (i.e. has an established conversation).  Fall back to the
+        first authorized ID only if no active chat has been recorded yet.
+        """
+        # Return the first active chat we find, in config order
+        for uid in self._authorized_telegram_ids:
+            if uid in self._active_chat_ids:
+                return self._active_chat_ids[uid]
+        # Fallback: original behaviour
         if self._authorized_telegram_ids:
             return self._authorized_telegram_ids[0]
         return self.global_config.authorized_id
@@ -202,7 +228,7 @@ class FlexibleAgentRuntime:
                     self._enabled_commands.add(name.strip().lstrip("/").lower())
 
         # help/status/new/wipe/clear/model/effort/mode should always be available
-        self._enabled_commands.update({"help", "status", "new", "wipe", "reset", "clear", "memory", "model", "effort", "mode", "jobs", "verbose", "think", "voice", "whisper", "transfer", "fork", "cos"})
+        self._enabled_commands.update({"help", "status", "new", "wipe", "reset", "clear", "memory", "model", "effort", "mode", "jobs", "verbose", "think", "voice", "whisper", "transfer", "fork", "cos", "long", "end"})
 
     def _is_command_allowed(self, cmd: str) -> bool:
         cmd = (cmd or "").lstrip("/").lower()
@@ -221,6 +247,7 @@ class FlexibleAgentRuntime:
         async def _wrapped(update: Update, context: Any):
             if not self._is_authorized_user(update.effective_user.id):
                 return
+            self._record_active_chat(update)
             if not self._is_command_allowed(cmd):
                 await self._reply_text(update, f"/{cmd} is disabled for this agent.")
                 return
@@ -1169,7 +1196,7 @@ class FlexibleAgentRuntime:
         return f'User sent a file "{filename}" (saved at {{local_path}}). Read it if possible and respond.', filename
 
     async def enqueue_api_text(self, text: str, source: str = "api", deliver_to_telegram: bool = True):
-        if self._should_redirect_after_transfer() and not source.startswith("bridge-transfer:"):
+        if self._should_redirect_after_transfer() and not source.startswith(("bridge-transfer:", "bridge-fork:")):
             if deliver_to_telegram:
                 await self.send_long_message(
                     self._primary_chat_id(),
@@ -1297,6 +1324,9 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CommandHandler("wa_on", self._wrap_cmd("wa_on", self.cmd_wa_on)))
         self.app.add_handler(CommandHandler("wa_off", self._wrap_cmd("wa_off", self.cmd_wa_off)))
         self.app.add_handler(CommandHandler("wa_send", self._wrap_cmd("wa_send", self.cmd_wa_send)))
+        self.app.add_handler(CommandHandler("long", self._wrap_cmd("long", self.cmd_long)))
+        self.app.add_handler(CommandHandler("end", self._wrap_cmd("end", self.cmd_end)))
+        self.app.add_handler(CommandHandler("remote", self._wrap_cmd("remote", self.cmd_remote)))
         self.app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), self.handle_message))
         self.app.add_handler(MessageHandler(filters.PHOTO, self.handle_photo))
         self.app.add_handler(MessageHandler(filters.VOICE, self.handle_voice))
@@ -2751,6 +2781,56 @@ class FlexibleAgentRuntime:
                 await query.answer("Running job now")
                 await self._run_job_now(job)
                 return
+            if action == "transfer":
+                # Show agent selector (same instance + remote instances)
+                markup = self._build_job_transfer_keyboard(kind, task_id)
+                job = self.skill_manager.get_job(kind, task_id)
+                job_label = (job.get("note") or task_id) if job else task_id
+                await query.edit_message_text(
+                    f"📤 <b>Transfer job</b>\n<code>{job_label[:60]}</code>\n\nSelect target agent:",
+                    parse_mode="HTML",
+                    reply_markup=markup,
+                )
+                await query.answer()
+                return
+            if action == "xfer_to":
+                # Same-instance transfer: value = target_agent_name
+                target_agent = value
+                job = self.skill_manager.get_job(kind, task_id)
+                if not job:
+                    await query.answer("Job not found", show_alert=True)
+                    return
+                ok, message, _ = self.skill_manager.transfer_job(kind, task_id, target_agent)
+                await query.answer(message, show_alert=not ok)
+                if ok:
+                    await query.edit_message_text(
+                        f"✅ Job transferred to <b>{target_agent}</b> (disabled — review before enabling).",
+                        parse_mode="HTML",
+                    )
+                return
+            if action == "xfer_remote":
+                # Cross-instance transfer: value = "{target_agent}:{instance_id}"
+                parts = value.split(":", 1)
+                if len(parts) != 2:
+                    await query.answer("Invalid target", show_alert=True)
+                    return
+                target_agent, instance_id = parts
+                job = self.skill_manager.get_job(kind, task_id)
+                if not job:
+                    await query.answer("Job not found", show_alert=True)
+                    return
+                await query.answer("Sending to remote instance…")
+                ok, msg = await self._transfer_job_remote(kind, job, target_agent, instance_id)
+                if ok:
+                    # Disable original
+                    self.skill_manager.set_job_enabled(kind, task_id, enabled=False)
+                    await query.edit_message_text(
+                        f"✅ Job transferred to <b>{target_agent}@{instance_id}</b> (original disabled).",
+                        parse_mode="HTML",
+                    )
+                else:
+                    await query.edit_message_text(f"❌ Transfer failed: {msg}")
+                return
         if data.startswith("skill:"):
             _, action, skill_id, *rest = data.split(":")
             skill = self.skill_manager.get_skill(skill_id)
@@ -2788,6 +2868,138 @@ class FlexibleAgentRuntime:
                 await query.answer()
                 return
         await query.answer()
+
+    def _build_job_transfer_keyboard(self, kind: str, task_id: str):
+        """Build inline keyboard for job transfer: same-instance agents + remote instances."""
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        buttons = []
+
+        # Same-instance active agents (excluding self)
+        orchestrator = getattr(self, "orchestrator", None)
+        local_agents = []
+        if orchestrator:
+            for rt in getattr(orchestrator, "runtimes", []):
+                name = getattr(rt, "name", "")
+                if name and name != self.name:
+                    local_agents.append(name)
+
+        if local_agents:
+            buttons.append([InlineKeyboardButton("── This instance ──", callback_data="noop")])
+            row = []
+            for agent in sorted(local_agents):
+                row.append(InlineKeyboardButton(agent, callback_data=f"skilljob:{kind}:xfer_to:{task_id}:{agent}"))
+                if len(row) == 3:
+                    buttons.append(row)
+                    row = []
+            if row:
+                buttons.append(row)
+
+        # Remote instances from instances.json
+        try:
+            import json as _j
+            from pathlib import Path as _P
+            instances_path = self.global_config.project_root / "instances.json"
+            if instances_path.exists():
+                data = _j.loads(instances_path.read_text(encoding="utf-8"))
+                local_id = self.global_config.project_root.name.upper()  # rough heuristic
+                for inst_id, inst_info in data.get("instances", {}).items():
+                    if not inst_info.get("active", False):
+                        continue
+                    # Skip self-instance
+                    display = inst_info.get("display_name", inst_id)
+                    platform = inst_info.get("platform", "")
+                    if platform == "portable":
+                        continue
+                    # Load agents from remote agents.json
+                    if platform == "windows":
+                        wsl_root = inst_info.get("wsl_root")
+                        agents_path = _P(wsl_root) / "agents.json" if wsl_root else None
+                    else:
+                        root = inst_info.get("root")
+                        agents_path = _P(root) / "agents.json" if root else None
+
+                    if not agents_path or not agents_path.exists():
+                        continue
+                    try:
+                        adata = _j.loads(agents_path.read_text(encoding="utf-8-sig"))
+                        remote_agents = [a["name"] for a in adata.get("agents", []) if a.get("is_active", True)]
+                    except Exception:
+                        continue
+
+                    if not remote_agents:
+                        continue
+
+                    buttons.append([InlineKeyboardButton(f"── {display} ──", callback_data="noop")])
+                    row = []
+                    for agent in sorted(remote_agents):
+                        cb = f"skilljob:{kind}:xfer_remote:{task_id}:{agent}:{inst_id}"
+                        row.append(InlineKeyboardButton(f"{agent}", callback_data=cb))
+                        if len(row) == 3:
+                            buttons.append(row)
+                            row = []
+                    if row:
+                        buttons.append(row)
+        except Exception:
+            pass
+
+        buttons.append([InlineKeyboardButton("✖ Cancel", callback_data="noop")])
+        return InlineKeyboardMarkup(buttons)
+
+    async def _transfer_job_remote(self, kind: str, job: dict, target_agent: str,
+                                   instance_id: str) -> tuple[bool, str]:
+        """POST job to remote instance /api/jobs/import via Workbench API."""
+        import json as _j
+        from urllib import request as _req
+        from urllib.error import URLError
+        from pathlib import Path as _P
+
+        try:
+            instances_path = self.global_config.project_root / "instances.json"
+            data = _j.loads(instances_path.read_text(encoding="utf-8"))
+            inst = data.get("instances", {}).get(instance_id, {})
+        except Exception as e:
+            return False, f"Could not read instances.json: {e}"
+
+        host = inst.get("lan_ip") or inst.get("api_host", "127.0.0.1")
+        wb_port = inst.get("workbench_port")
+        if not wb_port:
+            return False, f"No workbench_port for {instance_id}"
+
+        import copy
+        from uuid import uuid4
+        new_job = copy.deepcopy(job)
+        new_job["agent"] = target_agent
+        new_job["enabled"] = False
+        new_job["id"] = f"{target_agent}-{uuid4().hex[:8]}"
+        new_job["note"] = (job.get("note") or job["id"]) + f" [transferred from {self.name}@{self.global_config.project_root.name}]"
+
+        payload = _j.dumps({
+            "kind": kind,
+            "job": new_job,
+            "from_instance": str(self.global_config.project_root.name),
+            "from_agent": self.name,
+        }).encode("utf-8")
+
+        url = f"http://{host}:{wb_port}/api/jobs/import"
+        rq = _req.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with _req.urlopen(rq, timeout=10) as resp:
+                result = _j.loads(resp.read().decode("utf-8"))
+                if result.get("ok"):
+                    # hchat notification to target agent
+                    try:
+                        from tools.hchat_send import send_hchat
+                        send_hchat(
+                            target_agent, self.name,
+                            f"You have a new job transferred from {self.name}: [{new_job['id']}] {new_job.get('note', '')} — review with /jobs and enable when ready.",
+                            target_instance=instance_id,
+                        )
+                    except Exception:
+                        pass
+                    return True, result.get("message", "ok")
+                return False, result.get("message", "remote error")
+        except URLError as e:
+            return False, f"Connection failed ({host}:{wb_port}): {e}"
 
     async def _run_job_now(self, job: dict[str, Any]):
         action = job.get("action", "enqueue_prompt")
@@ -3585,13 +3797,13 @@ class FlexibleAgentRuntime:
             f"Arale has been notified and will investigate.",
         )
 
-        # Notify Arale via bridge if available, otherwise file-based fallback
+        # Notify Arale via bridge (local) or hchat (cross-instance)
         notification = format_ticket_notification(ticket)
         orchestrator = getattr(self, "orchestrator", None)
         notified = False
 
         if orchestrator is not None:
-            # Try to deliver via bridge to arale's runtime
+            # Try to deliver via bridge to arale's runtime (same instance)
             for rt in getattr(orchestrator, "runtimes", []):
                 if getattr(rt, "name", "") == "arale" and hasattr(rt, "enqueue_api_text"):
                     try:
@@ -3608,8 +3820,25 @@ class FlexibleAgentRuntime:
                     break
 
         if not notified:
-            # Fallback: ticket is in tickets/open/ — Arale's daily scan will pick it up
-            logger.info(f"Ticket {ticket['ticket_id']} saved to file; Arale will pick up on next scan.")
+            # Arale not on this instance — deliver via hchat (real-time cross-instance)
+            try:
+                from tools.hchat_send import send_hchat
+                hchat_text = (
+                    f"[TICKET RECEIVED]\n{notification}\n\n"
+                    f"Ticket file: {self.global_config.project_root / 'tickets' / 'open' / (ticket['ticket_id'] + '.json')}\n"
+                    f"Please investigate and resolve per IT support protocol."
+                )
+                ok = send_hchat("arale", self.name, hchat_text)
+                if ok:
+                    notified = True
+                    logger.info(f"Ticket {ticket['ticket_id']} notified to arale via hchat.")
+                else:
+                    logger.warning(f"Ticket {ticket['ticket_id']} hchat delivery to arale failed. Arale may be offline.")
+            except Exception as e:
+                logger.warning(f"Failed to notify arale via hchat: {e}")
+
+        if not notified:
+            logger.warning(f"Ticket {ticket['ticket_id']} created but could not notify arale. She will pick it up on next patrol.")
 
     async def cmd_park(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -4546,14 +4775,159 @@ class FlexibleAgentRuntime:
         ]])
         await self._reply_text(update, "Retry — choose action:", reply_markup=markup)
 
+    # ------------------------------------------------------------------
+    # /remote — one-click Hashi Remote start/stop
+    # ------------------------------------------------------------------
+
+    async def cmd_remote(self, update: Update, context: Any):
+        """Start/stop Hashi Remote. Usage: /remote [on|off|status]"""
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        arg = (context.args[0].lower() if context.args else "").strip()
+
+        # Status check
+        if arg == "status" or not arg:
+            alive = self._remote_process is not None and self._remote_process.returncode is None
+            if alive:
+                await self._reply_text(update, "🟢 Hashi Remote is running (PID %d)" % self._remote_process.pid)
+            else:
+                await self._reply_text(update, "⚪ Hashi Remote is not running. Use /remote on to start.")
+            return
+
+        if arg == "off":
+            if self._remote_process is None or self._remote_process.returncode is not None:
+                await self._reply_text(update, "⚪ Hashi Remote is not running.")
+                return
+            self._remote_process.terminate()
+            try:
+                await asyncio.wait_for(self._remote_process.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                self._remote_process.kill()
+            self._remote_process = None
+            await self._reply_text(update, "🔴 Hashi Remote stopped.")
+            return
+
+        if arg == "on":
+            alive = self._remote_process is not None and self._remote_process.returncode is None
+            if alive:
+                await self._reply_text(update, "🟢 Already running (PID %d)." % self._remote_process.pid)
+                return
+
+            root = self.global_config.project_root
+            venv_python = root / ".venv" / "bin" / "python3"
+            if not venv_python.exists():
+                venv_python = root / ".venv" / "Scripts" / "python.exe"  # Windows
+
+            self._remote_process = await asyncio.create_subprocess_exec(
+                str(venv_python), "-m", "remote", "--no-tls",
+                cwd=str(root),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await self._reply_text(
+                update,
+                "🟢 Hashi Remote started (PID %d)\n"
+                "   Port 8766 · mDNS discovery active\n"
+                "   Use /remote off to stop." % self._remote_process.pid,
+            )
+            return
+
+        await self._reply_text(update, "Usage: /remote [on|off|status]")
+
+    # ------------------------------------------------------------------
+    # /long ... /end buffering (collect split Telegram messages)
+    # ------------------------------------------------------------------
+
+    async def cmd_long(self, update: Update, context: Any):
+        """Start collecting multi-message input. Usage: /long [optional first line]"""
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        # If already buffering, treat as nested /long — just acknowledge
+        if self._long_buffer_active:
+            await self._reply_text(update, "⏳ Already in /long mode. Send /end to finish.")
+            return
+        self._long_buffer = []
+        self._long_buffer_active = True
+        self._long_buffer_chat_id = update.effective_chat.id
+        # If text was provided after /long, include it as the first chunk
+        args_text = " ".join(context.args).strip() if context.args else ""
+        if args_text:
+            self._long_buffer.append(args_text)
+        # Start safety timeout (5 minutes)
+        if self._long_buffer_timeout_task and not self._long_buffer_timeout_task.done():
+            self._long_buffer_timeout_task.cancel()
+        self._long_buffer_timeout_task = asyncio.create_task(self._long_buffer_timeout())
+        await self._reply_text(update, "📝 /long mode started. Paste your text, then send /end to submit.")
+
+    async def cmd_end(self, update: Update, context: Any):
+        """End /long buffering and submit collected text."""
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        if not self._long_buffer_active:
+            await self._reply_text(update, "No /long session active.")
+            return
+        # Cancel timeout
+        if self._long_buffer_timeout_task and not self._long_buffer_timeout_task.done():
+            self._long_buffer_timeout_task.cancel()
+            self._long_buffer_timeout_task = None
+        # Assemble and submit
+        combined = "\n".join(self._long_buffer).strip()
+        self._long_buffer = []
+        self._long_buffer_active = False
+        chat_id = self._long_buffer_chat_id or update.effective_chat.id
+        self._long_buffer_chat_id = None
+        if not combined:
+            await self._reply_text(update, "⚠️ /long buffer was empty, nothing to submit.")
+            return
+        chunk_count = len(combined.splitlines())
+        await self._reply_text(update, f"✅ Collected {chunk_count} lines. Submitting...")
+        _print_user_message(self.name, combined)
+        await self.enqueue_request(chat_id, combined, "text", _safe_excerpt(combined))
+
+    async def _long_buffer_timeout(self):
+        """Safety timeout: auto-submit after 5 minutes."""
+        try:
+            await asyncio.sleep(300)
+        except asyncio.CancelledError:
+            return
+        if not self._long_buffer_active:
+            return
+        combined = "\n".join(self._long_buffer).strip()
+        self._long_buffer = []
+        self._long_buffer_active = False
+        chat_id = self._long_buffer_chat_id
+        self._long_buffer_chat_id = None
+        self._long_buffer_timeout_task = None
+        if chat_id and combined:
+            await self.send_long_message(
+                chat_id,
+                f"⏰ /long auto-submitted after 5min timeout ({len(combined.splitlines())} lines).",
+                request_id=f"long-timeout-{uuid4().hex[:8]}",
+                purpose="long-timeout",
+            )
+            _print_user_message(self.name, combined)
+            await self.enqueue_request(chat_id, combined, "text", _safe_excerpt(combined))
+        elif chat_id:
+            await self.send_long_message(
+                chat_id,
+                "⏰ /long timed out with empty buffer. Cancelled.",
+                request_id=f"long-timeout-{uuid4().hex[:8]}",
+                purpose="long-timeout",
+            )
+
     async def handle_message(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             self.logger.warning(f"Ignored message from unauthorized user ID: {update.effective_user.id}")
             return
+        self._record_active_chat(update)
         if self._should_redirect_after_transfer():
             await self._reply_text(update, self._transfer_redirect_text())
             return
         text = update.message.text
+        # If in /long buffering mode, collect instead of processing
+        if self._long_buffer_active:
+            self._long_buffer.append(text)
+            return
         _print_user_message(self.name, text)
         await self.enqueue_request(update.effective_chat.id, text, "text", _safe_excerpt(text))
 
@@ -4569,6 +4943,7 @@ class FlexibleAgentRuntime:
         return local_path
 
     async def _handle_media_message(self, update, media_kind: str, filename: str, file_id: str, prompt: str, summary: str):
+        self._record_active_chat(update)
         if self._should_redirect_after_transfer():
             await self._reply_text(update, self._transfer_redirect_text())
             return
@@ -5276,6 +5651,9 @@ class FlexibleAgentRuntime:
             item = None
             try:
                 item = await self.queue.get()
+                if not item.prompt or not item.prompt.strip():
+                    self.logger.debug(f"Skipping empty prompt in queue (source={item.source}, id={item.request_id})")
+                    continue
                 if not item.silent:
                     self.last_prompt = item
                 is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
@@ -5574,14 +5952,31 @@ class FlexibleAgentRuntime:
                             self.handoff_builder.refresh_recent_context()
                         if not item.deliver_to_telegram:
                             continue
-                        _print_final_response(self.name, display_text or response.text)
+                        # CoS intercept: if /cos on and response ends with ?, route to Lily first
+                        _response_text = display_text or response.text
+                        _cos_handled = False
+                        if (
+                            self._cos_enabled
+                            and self.name != "lily"
+                            and not item.source.startswith("cos-query:")
+                            and _response_text
+                            and _response_text.rstrip().endswith(("?", "？"))
+                        ):
+                            cos_result = await self.cos_query(_response_text)
+                            if cos_result.get("answered") and cos_result.get("response"):
+                                # Lily answered — deliver Lily's response instead
+                                _response_text = cos_result["response"]
+                            else:
+                                # Declined/timeout: deliver original to user, skip hchat re-routing
+                                _cos_handled = True
+                        _print_final_response(self.name, _response_text)
                         send_elapsed_s, chunk_count = await self.send_long_message(
                             chat_id=item.chat_id,
-                            text=display_text or response.text,
+                            text=_response_text,
                             request_id=item.request_id,
                             purpose="response",
                         )
-                        await self._send_voice_reply(item.chat_id, display_text or response.text, item.request_id)
+                        await self._send_voice_reply(item.chat_id, _response_text, item.request_id)
                         total_elapsed_s = (datetime.now() - queued_at).total_seconds()
                         self.logger.info(
                             f"Completed {item.request_id} delivery via {self.config.active_backend} "
@@ -5589,9 +5984,10 @@ class FlexibleAgentRuntime:
                             f"telegram_send_s={send_elapsed_s:.2f}, total_s={total_elapsed_s:.2f}, "
                             f"chunks={chunk_count})"
                         )
-                        self._log_maintenance(item, "send_success", text_len=len(display_text or response.text or ""))
-                        # Route hchat reply back to sender if applicable
-                        await self._hchat_route_reply(item, display_text or response.text)
+                        self._log_maintenance(item, "send_success", text_len=len(_response_text or ""))
+                        # Route hchat reply back to sender if applicable (skip if CoS already delivered direct)
+                        if not _cos_handled:
+                            await self._hchat_route_reply(item, _response_text)
                 else:
                     err_msg = response.error or "Unknown error"
                     self._mark_error(err_msg)
@@ -5665,6 +6061,8 @@ class FlexibleAgentRuntime:
             BotCommand("transfer", "Transfer this session to another agent"),
             BotCommand("fork", "Fork this session to another agent"),
             BotCommand("cos", "Chief of Staff decision routing (on/off)"),
+            BotCommand("long", "Start multi-message input (end with /end)"),
+            BotCommand("end", "Submit collected /long input"),
             BotCommand("mode", "Switch fixed/flex mode"),
             BotCommand("model", "View or change model"),
             BotCommand("effort", "View or change effort"),
@@ -5680,6 +6078,7 @@ class FlexibleAgentRuntime:
             BotCommand("timeout", "View or set request timeout [minutes]"),
             BotCommand("hchat", "Send a message to another agent [agent] [message]"),
             BotCommand("logo", "Play startup animation"),
+            BotCommand("remote", "Start/stop Hashi Remote [on|off|status]"),
             BotCommand("wa_on", "Start WhatsApp transport"),
             BotCommand("wa_off", "Stop WhatsApp transport"),
             BotCommand("wa_send", "Send a WhatsApp message"),

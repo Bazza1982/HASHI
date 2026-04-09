@@ -1,6 +1,6 @@
 # HASHI
 
-> **Status (v2.1.0):** Nagare Flow System released — multi-agent workflow orchestration with cross-vendor evaluation, self-improving knowledge base, and autonomous task execution. All v2 roadmap delivered.
+> **Status (v3.0-alpha):** TUI Onboarding released — first-run setup now runs entirely inside the terminal UI, with language selection, disclaimer, API key check, and seamless handoff to Hashiko for Telegram and agent configuration.
 > **Changelog:** see [`CHANGELOG.md`](CHANGELOG.md) · **Roadmap:** see [`docs/ROADMAP.md`](docs/ROADMAP.md) · **Nagare Docs:** see [`docs/NAGARE_FLOW_SYSTEM.md`](docs/NAGARE_FLOW_SYSTEM.md).
 
 ## About
@@ -95,10 +95,13 @@ Run HASHI on any Windows or macOS machine straight from a USB drive — no Pytho
 **Windows:**
 ```
 # On your machine (with internet):
-windows\prepare_usb.bat        # builds D:\HASHI9 with embedded Python + all deps
+windows\prepare_usb.bat           # builds D:\HASHI9 with embedded Python + all deps
 
-# On any Windows PC:
-HASHI9\windows\start_tui.bat  # double-click to launch
+# First time on any Windows PC:
+HASHI9\windows\TUI_onboarding.bat # first-run setup + chat (language, API key, Telegram)
+
+# Subsequent launches:
+HASHI9\windows\start_tui.bat      # normal TUI chat
 ```
 
 **macOS:**
@@ -124,8 +127,8 @@ cd HASHI
 # Install Python dependencies
 pip install -r requirements.txt
 
-# Run onboarding (creates your first agent)
-python onboarding/onboarding_main.py
+# First run — TUI onboarding (language, API key, Telegram setup via Hashiko)
+python tui_onboarding.py
 
 # Start HASHI
 ./bin/bridge-u.sh         # macOS / Linux
@@ -250,27 +253,22 @@ hashi/
 
 ### Onboarding System
 
-The onboarding program (`onboarding/onboarding_main.py`) provides a guided, multi-language setup experience:
+First-run setup is handled by the **TUI Onboarding** program, which runs entirely inside the terminal UI — no separate window or web UI needed.
 
-**Features:**
-- **9 Languages** - English, Japanese, Simplified Chinese, Traditional Chinese, Korean, German, French, Russian, Arabic
-- **Environment Detection** - Automatically detects installed CLI backends (Gemini, Claude, Codex)
-- **Fallback to OpenRouter** - If no CLI is detected, prompts for OpenRouter API key
-- **Workbench Auto-Launch** - Optionally opens Workbench UI after setup
+**Entry points:**
+- Windows: `windows/TUI_onboarding.bat` (double-click)
+- Developer: `python tui_onboarding.py`
 
-**Onboarding Flow:**
-1. Language selection
-2. Environment audit (detect Gemini/Claude/Codex CLI)
-3. If no CLI found → prompt for OpenRouter API key
-4. Display AI Ethics & Human Well-being Statement
-5. Create first agent in `agents.json`
-6. Create `secrets.json` with API keys (if needed)
-7. Launch Workbench
+**First-run flow:**
+1. **Language selection** — 9 languages (English, Japanese, Simplified Chinese, Traditional Chinese, Korean, German, French, Russian, Arabic)
+2. **AI Ethics & Human Well-being disclaimer** — Enter to confirm
+3. **Mental health & AI relationship reminder** — Enter to confirm
+4. **API key check** — auto-detects OpenRouter or DeepSeek key in `secrets.json` with live ping; prompts for a key if none found or ping fails (key type auto-detected by prefix: `sk-or-v1-...` = OpenRouter, `sk-...` = DeepSeek)
+5. **Generates `agents.json`** from `agents.json.sample` (Hashiko only) if not present
+6. **Bridge starts** — TUI transitions seamlessly into normal chat
+7. **Hashiko greets the user** in their selected language, asks for their name, and guides Telegram setup — all within the same TUI session
 
-**Files Created:**
-- `agents.json` - First agent definition
-- `secrets.json` - API keys (OpenRouter, Telegram, etc.)
-- `.hashi_onboarding_complete` - Flag file to prevent re-onboarding
+**Completion marker:** `workspaces/hashiko/tui_onboarding_complete` — prevents re-running the onboarding flow on subsequent launches.
 
 ---
 

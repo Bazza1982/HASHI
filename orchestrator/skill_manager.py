@@ -311,6 +311,51 @@ class SkillManager:
                 return True, f"Deleted {task_id}."
         return False, f"Unknown {kind} task: {task_id}"
 
+    def transfer_job(self, kind: str, task_id: str, new_agent: str) -> tuple[bool, str, dict | None]:
+        """Disable original job and create a copy owned by new_agent.
+
+        Returns (ok, message, new_job_dict).
+        The new job is enabled=False so the recipient can review before enabling.
+        """
+        import copy
+        from uuid import uuid4
+
+        job = self.get_job(kind, task_id)
+        if not job:
+            return False, f"Job {task_id} not found.", None
+
+        # Disable original
+        ok, msg = self.set_job_enabled(kind, task_id, enabled=False)
+        if not ok:
+            return False, msg, None
+
+        # Create copy for new owner
+        new_job = copy.deepcopy(job)
+        new_job["id"] = f"{new_agent}-{uuid4().hex[:8]}"
+        new_job["agent"] = new_agent
+        new_job["enabled"] = False
+        new_job["note"] = (job.get("note") or job["id"]) + f" [transferred from {job.get('agent', '?')}]"
+
+        tasks = self._load_tasks()
+        key = "crons" if kind == "cron" else "heartbeats"
+        tasks.setdefault(key, []).append(new_job)
+        self._save_tasks(tasks)
+        return True, f"Transferred to {new_agent} (disabled, review before enabling).", new_job
+
+    def import_job(self, kind: str, job: dict) -> tuple[bool, str]:
+        """Import a job dict into local tasks.json (used for cross-instance transfer)."""
+        tasks = self._load_tasks()
+        key = "crons" if kind == "cron" else "heartbeats"
+        # Avoid duplicate IDs
+        existing_ids = {j.get("id") for j in tasks.get(key, [])}
+        if job.get("id") in existing_ids:
+            from uuid import uuid4
+            job = dict(job)
+            job["id"] = f"{job.get('agent', 'imported')}-{uuid4().hex[:8]}"
+        tasks.setdefault(key, []).append(job)
+        self._save_tasks(tasks)
+        return True, f"Imported job {job['id']} for {job.get('agent', '?')}."
+
     def get_active_heartbeat_job_id(self, agent_name: str) -> str:
         return f"{agent_name}-active-heartbeat"
 

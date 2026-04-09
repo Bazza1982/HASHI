@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 chcp 65001 >nul
 setlocal EnableDelayedExpansion
 set "PYTHONUTF8=1"
@@ -127,34 +127,34 @@ goto launch
 :launch
 cls
 call :print_banner "BRIDGE-U-F BOOT" "Multi-backend orchestrator launch"
-echo !C_RAIL!│!C_RESET! !C_LABEL!Agents           !C_RESET! !C_TEXT!!START_LABEL!!C_RESET!
+echo !C_RAIL!â”‚!C_RESET! !C_LABEL!Agents           !C_RESET! !C_TEXT!!START_LABEL!!C_RESET!
 if "!WORKBENCH_LAUNCH!"=="1" (
-    echo !C_RAIL!│!C_RESET! !C_LABEL!Workbench       !C_RESET! !C_OK!starting in background!C_RESET!
+    echo !C_RAIL!â”‚!C_RESET! !C_LABEL!Workbench       !C_RESET! !C_OK!starting in background!C_RESET!
     start /MIN "" powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0workbench_ctl.ps1" -Action start -OpenBrowser
     set "AUTO_STOP_WORKBENCH=1"
 ) else (
-    echo !C_RAIL!│!C_RESET! !C_LABEL!Workbench       !C_RESET! !C_MUTED!disabled!C_RESET!
+    echo !C_RAIL!â”‚!C_RESET! !C_LABEL!Workbench       !C_RESET! !C_MUTED!disabled!C_RESET!
 )
 if "!API_GATEWAY_LAUNCH!"=="1" (
-    echo !C_RAIL!│!C_RESET! !C_LABEL!API Gateway     !C_RESET! !C_OK!enabled ^(port 18801^)!C_RESET!
+    echo !C_RAIL!â”‚!C_RESET! !C_LABEL!API Gateway     !C_RESET! !C_OK!enabled ^(port 18801^)!C_RESET!
 ) else (
-    echo !C_RAIL!│!C_RESET! !C_LABEL!API Gateway     !C_RESET! !C_MUTED!disabled!C_RESET!
+    echo !C_RAIL!â”‚!C_RESET! !C_LABEL!API Gateway     !C_RESET! !C_MUTED!disabled!C_RESET!
 )
 if "!DRY_RUN!"=="1" (
-    echo !C_RAIL!│!C_RESET! !C_LABEL!Launch mode     !C_RESET! !C_WARN!dry run only!C_RESET!
-    echo !C_RAIL!│!C_RESET!
+    echo !C_RAIL!â”‚!C_RESET! !C_LABEL!Launch mode     !C_RESET! !C_WARN!dry run only!C_RESET!
+    echo !C_RAIL!â”‚!C_RESET!
     echo.
     exit /b 0
 )
 call :preflight_check
 if errorlevel 1 (
     echo.
-    echo !C_WARN!Launch aborted — bridge-u-f is already running.!C_RESET!
+    echo !C_WARN!Launch aborted â€” bridge-u-f is already running.!C_RESET!
     if "!NO_PAUSE!"=="0" pause
     exit /b 1
 )
-echo !C_RAIL!│!C_RESET! !C_LABEL!Bridge launch    !C_RESET! !C_OK!proceeding!C_RESET!
-echo !C_RAIL!│!C_RESET!
+echo !C_RAIL!â”‚!C_RESET! !C_LABEL!Bridge launch    !C_RESET! !C_OK!proceeding!C_RESET!
+echo !C_RAIL!â”‚!C_RESET!
 if exist "%AGENTS_FILE%" del "%AGENTS_FILE%" >nul 2>&1
 set "GW_ARG="
 if "!API_GATEWAY_LAUNCH!"=="1" set "GW_ARG=--api-gateway"
@@ -217,19 +217,19 @@ if "!WORKBENCH_LAUNCH!"=="1" set "WORKBENCH_LABEL=ON"
 set "API_GATEWAY_LABEL=OFF"
 if "!API_GATEWAY_LAUNCH!"=="1" set "API_GATEWAY_LABEL=ON"
 call :print_banner "BRIDGE-U-F LAUNCHER" "Universal bridge + optional workbench"
-echo !C_RAIL!│!C_RESET! !C_LABEL!Active agents    !C_RESET! !C_TEXT!!AGENT_COUNT!!C_RESET!
-echo !C_RAIL!│!C_RESET! !C_LABEL!Inactive agents  !C_RESET! !C_TEXT!!INACTIVE_COUNT!!C_RESET!
+echo !C_RAIL!â”‚!C_RESET! !C_LABEL!Active agents    !C_RESET! !C_TEXT!!AGENT_COUNT!!C_RESET!
+echo !C_RAIL!â”‚!C_RESET! !C_LABEL!Inactive agents  !C_RESET! !C_TEXT!!INACTIVE_COUNT!!C_RESET!
 if "!WORKBENCH_LABEL!"=="ON" (
-    echo !C_RAIL!│!C_RESET! !C_LABEL!Workbench       !C_RESET! !C_OK!ON!C_RESET!
+    echo !C_RAIL!â”‚!C_RESET! !C_LABEL!Workbench       !C_RESET! !C_OK!ON!C_RESET!
 ) else (
-    echo !C_RAIL!│!C_RESET! !C_LABEL!Workbench       !C_RESET! !C_MUTED!OFF!C_RESET!
+    echo !C_RAIL!â”‚!C_RESET! !C_LABEL!Workbench       !C_RESET! !C_MUTED!OFF!C_RESET!
 )
 if "!API_GATEWAY_LABEL!"=="ON" (
-    echo !C_RAIL!│!C_RESET! !C_LABEL!API Gateway     !C_RESET! !C_OK!ON!C_RESET!
+    echo !C_RAIL!â”‚!C_RESET! !C_LABEL!API Gateway     !C_RESET! !C_OK!ON!C_RESET!
 ) else (
-    echo !C_RAIL!│!C_RESET! !C_LABEL!API Gateway     !C_RESET! !C_MUTED!OFF!C_RESET!
+    echo !C_RAIL!â”‚!C_RESET! !C_LABEL!API Gateway     !C_RESET! !C_MUTED!OFF!C_RESET!
 )
-echo !C_RAIL!│!C_RESET!
+echo !C_RAIL!â”‚!C_RESET!
 echo.
 echo !C_ACCENT!Active Roster!C_RESET!
 for /l %%I in (1,1,!AGENT_COUNT!) do (
@@ -274,13 +274,13 @@ exit /b 0
 set "B_TITLE=%~1"
 set "B_SUB=%~2"
 echo.
-echo !C_RAIL!│!C_RESET! !C_TITLE!!B_TITLE!!C_RESET!  !C_MUTED!!B_SUB!!C_RESET!
-echo !C_RAIL!│!C_RESET!
+echo !C_RAIL!â”‚!C_RESET! !C_TITLE!!B_TITLE!!C_RESET!  !C_MUTED!!B_SUB!!C_RESET!
+echo !C_RAIL!â”‚!C_RESET!
 exit /b 0
 
 :ensure_env
 if "!USING_EMBEDDED!"=="1" (
-    :: USB mode — embedded Python has all packages pre-installed, skip venv entirely
+    :: USB mode â€” embedded Python has all packages pre-installed, skip venv entirely
     "!PYTHON_EXE!" -c "import telegram, httpx, aiohttp, PIL" >nul 2>&1
     if errorlevel 1 (
         echo !C_WARN!Embedded Python is missing required packages.!C_RESET!
@@ -389,7 +389,7 @@ exit /b 0
 
 :preflight_check
 rem Check for an already-running bridge-u-f orchestrator.
-rem Uses .bridge_u_f.pid (always readable) — the .lock file is unreadable while held.
+rem Uses .bridge_u_f.pid (always readable) â€” the .lock file is unreadable while held.
 set "EXISTING_PID="
 if exist "%BRIDGE_HOME%\.bridge_u_f.pid" (
     for /f "usebackq delims=" %%P in ("%BRIDGE_HOME%\.bridge_u_f.pid") do set "EXISTING_PID=%%P"
@@ -402,14 +402,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$cmd = [string]$p.CommandLine; " ^
   "if($cmd -and $cmd -like '*main.py*'){ exit 0 } else { exit 1 }"
 if errorlevel 1 (
-    rem PID file is stale — process is gone or not bridge-u-f
+    rem PID file is stale â€” process is gone or not bridge-u-f
     del /f /q "%BRIDGE_HOME%\.bridge_u_f.pid" >nul 2>&1
     exit /b 0
 )
 echo.
 echo   !C_WARN!Bridge-u-f is already running ^(PID !EXISTING_PID!^).!C_RESET!
 if "!AUTO_RESUME_LAST!"=="1" (
-    rem Called from restart script — don't prompt, just fail
+    rem Called from restart script â€” don't prompt, just fail
     exit /b 1
 )
 echo.

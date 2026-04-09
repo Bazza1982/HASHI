@@ -101,8 +101,26 @@ class WorkbenchApiServer:
         self.app.router.add_post("/api/admin/stop-agent", self.handle_admin_stop_agent)
         self.app.router.add_post("/api/admin/shutdown", self.handle_admin_shutdown)
         self.app.router.add_get("/api/health", self.handle_health)
+        self.app.router.add_post("/api/jobs/import", self.handle_jobs_import)
         self.runner = None
         self.site = None
+
+    def _learn_reply_route(self, text: str, reply_route: dict) -> None:
+        """Auto-learn sender's routing info from reply_route metadata in hchat messages."""
+        try:
+            from tools.hchat_send import parse_return_address, update_contact
+            info = parse_return_address(text)
+            if not info:
+                return
+            inst = reply_route.get("instance_id", info.get("instance_id", ""))
+            host = reply_route.get("host", "")
+            port = reply_route.get("port", 0)
+            wb_port = reply_route.get("wb_port", port)
+            ttl = reply_route.get("ttl", 3600)
+            if inst and host and port:
+                update_contact(info["agent"], inst, host, port, wb_port=wb_port, ttl=ttl)
+        except Exception:
+            pass  # non-critical — don't break message delivery
 
     def _runtime_list(self) -> list:
         if self.orchestrator is not None:
@@ -370,6 +388,11 @@ class WorkbenchApiServer:
             return web.json_response({"ok": False, "error": "agent not found"}, status=404)
         if not text:
             return web.json_response({"ok": False, "error": "text is required"}, status=400)
+
+        # Auto-learn reply route from hchat messages (updates contacts.json)
+        reply_route = payload.get("reply_route")
+        if reply_route and isinstance(reply_route, dict):
+            self._learn_reply_route(text, reply_route)
 
         request_id = await runtime.enqueue_api_text(text)
         return web.json_response({"ok": True, "request_id": request_id})
@@ -852,6 +875,36 @@ class WorkbenchApiServer:
     async def handle_health(self, request):
         running_agents = [runtime.name for runtime in self._runtime_list() if runtime.startup_success]
         return web.json_response({"ok": True, "agents": running_agents})
+
+    async def handle_jobs_import(self, request):
+        """Import a job from a remote instance (cross-instance job transfer).
+
+        Payload: {"kind": "cron"|"heartbeat", "job": {...}, "from_instance": "HASHI1", "from_agent": "akane"}
+        The job is imported as disabled so the recipient can review before enabling.
+        """
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+
+        kind = payload.get("kind", "")
+        job = payload.get("job")
+        if kind not in ("cron", "heartbeat") or not isinstance(job, dict):
+            return web.json_response({"ok": False, "error": "kind and job are required"}, status=400)
+
+        # Find skill_manager from any running runtime
+        skill_manager = None
+        for runtime in self._runtime_list():
+            sm = getattr(runtime, "skill_manager", None)
+            if sm is not None:
+                skill_manager = sm
+                break
+        if skill_manager is None:
+            return web.json_response({"ok": False, "error": "skill_manager unavailable"}, status=503)
+
+        job["enabled"] = False  # always import as disabled
+        ok, message = skill_manager.import_job(kind, job)
+        return web.json_response({"ok": ok, "message": message, "job_id": job.get("id")})
 
     async def handle_admin_start_agent(self, request):
         if not self._check_admin_auth(request):
