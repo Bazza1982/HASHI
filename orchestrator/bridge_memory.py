@@ -661,6 +661,7 @@ class BridgeContextAssembler:
         "gemini-cli": 24000,
         "claude-cli": 50000,
         "openrouter-api": 35000,
+        "ollama-api": 30000,
     }
 
     def __init__(self, memory_store: BridgeMemoryStore, system_md: Path | None, active_skill_provider=None, sys_prompt_manager=None):
@@ -738,10 +739,21 @@ class BridgeContextAssembler:
                 recent turns, and memories — the CLI session already has them.
                 Only include /sys slots, active skills, and the user prompt.
         """
+        # Per-engine memory injection limits — smaller models get less context
+        _memory_limits = {
+            "ollama-api":      {"recent_turns": 4, "memories": 2},
+            "deepseek-api":    {"recent_turns": 8, "memories": 4},
+            "openrouter-api":  {"recent_turns": 10, "memories": 6},
+            "claude-cli":      {"recent_turns": 10, "memories": 6},
+            "gemini-cli":      {"recent_turns": 8, "memories": 4},
+            "codex-cli":       {"recent_turns": 8, "memories": 4},
+        }
+        limits = _memory_limits.get(engine, {"recent_turns": 10, "memories": 6})
+
         system_text = "" if incremental else self._load_system_prompt()
         inject = self.memory_injection_enabled and not incremental
-        recent_turns = self.memory_store.get_recent_turns(limit=10) if inject else []
-        memories = self.memory_store.retrieve_memories(user_prompt, limit=6) if inject else []
+        recent_turns = self.memory_store.get_recent_turns(limit=limits["recent_turns"]) if inject else []
+        memories = self.memory_store.retrieve_memories(user_prompt, limit=limits["memories"]) if inject else []
         active_skills = []
         if callable(self.active_skill_provider):
             try:

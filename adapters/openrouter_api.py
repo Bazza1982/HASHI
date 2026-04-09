@@ -111,7 +111,12 @@ class OpenRouterAdapter(BaseBackend):
     # Payload builder
     # ------------------------------------------------------------------
 
-    def _build_payload(self, messages: list[dict], use_streaming: bool = False) -> dict:
+    # Default tiers for OpenRouter — None means send all allowed tools.
+    # Subclasses (e.g. OllamaAdapter) override with smaller defaults.
+    DEFAULT_TOOL_TIERS: list[str] | None = None
+
+    def _build_payload(self, messages: list[dict], use_streaming: bool = False,
+                       tool_tiers: list[str] | None = ...) -> dict:
         payload: dict = {
             "model": self.config.model,
             "messages": messages,
@@ -121,7 +126,8 @@ class OpenRouterAdapter(BaseBackend):
         if use_streaming:
             payload["stream"] = True
         if self.tool_registry:
-            tool_defs = self.tool_registry.get_tool_definitions()
+            tiers = self.DEFAULT_TOOL_TIERS if tool_tiers is ... else tool_tiers
+            tool_defs = self.tool_registry.get_tool_definitions(tiers=tiers)
             if tool_defs:
                 payload["tools"] = tool_defs
         return payload

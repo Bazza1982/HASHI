@@ -13,6 +13,33 @@ from typing import Optional
 
 from tools.schemas import TOOL_SCHEMA_MAP, ALL_TOOL_NAMES
 
+# Tool tiers — send only what's needed per turn to save context window.
+# Models can still *call* any allowed tool; tiers only control which
+# schemas are included in the API payload.
+TOOL_TIERS: dict[str, list[str]] = {
+    "core": ["bash", "file_read", "file_write", "file_list"],
+    "system": ["process_list", "process_kill", "apply_patch"],
+    "web": ["web_search", "web_fetch", "http_request"],
+    "communication": ["telegram_send"],
+    "browser": [
+        "browser_session", "browser_screenshot", "browser_get_text",
+        "browser_get_html", "browser_click", "browser_fill",
+        "browser_evaluate", "browser_scroll", "browser_hover",
+        "browser_key", "browser_select", "browser_wait_for",
+        "browser_get_attribute", "browser_drag", "browser_upload",
+    ],
+}
+
+def resolve_tiers(tier_names: list[str]) -> list[str]:
+    """Expand tier names into a flat list of tool names."""
+    tools = []
+    for t in tier_names:
+        if t in TOOL_TIERS:
+            tools.extend(TOOL_TIERS[t])
+        elif t in ALL_TOOL_NAMES:
+            tools.append(t)  # allow individual tool names too
+    return tools
+
 
 @dataclass
 class ToolResult:
@@ -73,8 +100,18 @@ class ToolRegistry:
     def is_allowed(self, tool_name: str) -> bool:
         return tool_name in self._allowed
 
-    def get_tool_definitions(self) -> list[dict]:
-        """Return OpenAI-format tool definitions filtered to allowed tools."""
+    def get_tool_definitions(self, tiers: list[str] | None = None) -> list[dict]:
+        """Return OpenAI-format tool definitions filtered to allowed tools.
+
+        If *tiers* is given, only include tools belonging to those tiers
+        (intersected with allowed). Pass None to include all allowed tools
+        (backwards-compatible default).
+        """
+        if tiers is not None:
+            tier_tools = set(resolve_tiers(tiers))
+            subset = self._allowed & tier_tools
+            return [TOOL_SCHEMA_MAP[name] for name in ALL_TOOL_NAMES
+                    if name in subset]
         return [TOOL_SCHEMA_MAP[name] for name in ALL_TOOL_NAMES if name in self._allowed]
 
     async def execute(self, tool_name: str, arguments: dict, tool_call_id: str = "") -> ToolResult:

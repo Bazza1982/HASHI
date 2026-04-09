@@ -56,6 +56,18 @@ BACKEND_REGISTRY: dict[str, dict] = {
             "deepseek_api_key",
         ],
     },
+    "ollama-api": {
+        "label": "ollama",
+        "models": [
+            "gemma4:26b",
+            "gemma4:31b",
+            "qwen3:32b",
+        ],
+        "default_model": "gemma4:26b",
+        "efforts": [],
+        "default_effort": None,
+        "secret_keys": [],
+    },
     "openrouter-api": {
         "label": "openrouter",
         "models": [

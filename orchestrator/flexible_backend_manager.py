@@ -95,7 +95,7 @@ class FlexibleBackendManager:
             self.current_backend = BackendClass(adapter_cfg, self.global_config, api_key)
 
             # V2.2: inject ToolRegistry for OpenRouter if tools are configured
-            if engine == "openrouter-api":
+            if engine in ("openrouter-api", "ollama-api"):
                 tools_cfg = backend_cfg_raw.get("tools")
                 if tools_cfg:
                     self._attach_tool_registry(tools_cfg, adapter_cfg)
