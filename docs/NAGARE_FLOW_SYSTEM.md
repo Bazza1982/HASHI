@@ -7,16 +7,17 @@
 ## Table of Contents
 
 1. [Why Nagare Exists — The Core Problem](#1-why-nagare-exists)
-2. [Architecture Overview](#2-architecture-overview)
-3. [Why Single-Prompt / Chain-of-Thought Cannot Compete](#3-why-single-prompt-cannot-compete)
-4. [System Components](#4-system-components)
-5. [Human-in-the-Loop: The Pre-Flight System](#5-human-in-the-loop-the-pre-flight-system)
-6. [Multi-Model Strategy](#6-multi-model-strategy)
-7. [How to Use: The Meta-Workflow](#7-how-to-use-the-meta-workflow)
-8. [Workflow YAML Schema](#8-workflow-yaml-schema)
-9. [Evaluation KB & Continuous Improvement](#9-evaluation-kb--continuous-improvement)
-10. [Operational Notes & Caveats](#10-operational-notes--caveats)
-11. [Quick Reference](#11-quick-reference)
+2. [The Three-Layer Architecture: Nagare · Shimanto · Minato](#2-the-three-layer-architecture)
+3. [Nagare Architecture Overview](#3-nagare-architecture-overview)
+4. [Why Single-Prompt / Chain-of-Thought Cannot Compete](#4-why-single-prompt-cannot-compete)
+5. [System Components](#5-system-components)
+6. [Human-in-the-Loop: The Pre-Flight System](#6-human-in-the-loop-the-pre-flight-system)
+7. [Multi-Model Strategy](#7-multi-model-strategy)
+8. [How to Use: The Meta-Workflow](#8-how-to-use-the-meta-workflow)
+9. [Workflow YAML Schema](#9-workflow-yaml-schema)
+10. [Evaluation KB & Continuous Improvement](#10-evaluation-kb--continuous-improvement)
+11. [Operational Notes & Caveats](#11-operational-notes--caveats)
+12. [Quick Reference](#12-quick-reference)
 
 ---
 
@@ -38,7 +39,101 @@ The result: for any task requiring more than 2-3 coherent reasoning steps, quali
 
 ---
 
-## 2. Architecture Overview
+## 2. The Three-Layer Architecture
+
+> *Nagare is water. Shimanto is the river. Minato is the harbour — the last human frontier before the open sea.*
+
+The HASHI system operates across three distinct layers. Each layer has a defined scope of responsibility and cannot substitute for the others.
+
+---
+
+### Layer 1 — Nagare (流れ / Flow)
+
+**Scope:** A single, bounded task of medium complexity — something a chain of AI agents can fully own and deliver.
+
+**Characteristics:**
+- Has a clear input, a clear output, and defined quality criteria
+- Internally coordinates multiple specialist agents
+- Runs without human intervention after pre-flight
+- Self-heals via Debug Agent (up to 3 attempts before escalation)
+
+**Examples:**
+- Write an academic paragraph
+- Translate a chapter
+- Produce an audit planning workpaper
+- Design a new workflow (meta-workflow)
+
+**Rule:** Every Nagare must belong to exactly one Shimanto.
+
+---
+
+### Layer 2 — Shimanto (四万十川 / River)
+
+**Scope:** A coherent piece of deliverable work that requires multiple Nagare to complete — a section, a chapter, a phase.
+
+**Characteristics:**
+- Does **no work itself** — gets work done through Nagare
+- Manages cross-Nagare context and continuity (e.g., paragraph 3 must know what paragraph 1 said)
+- Maintains mission alignment — prevents the drift and context pollution that LLMs suffer in long sessions
+- Sets the quality bar for the combined output of all its Nagare
+- Reports to Minato; escalates only when a decision exceeds its authority
+
+**Examples:**
+- Write a full chapter (calls: outline_paragraph × N → write_paragraph × N → compile_chapter)
+- Complete the planning section of an audit
+- Build a new Shimanto (meta-Shimanto)
+
+**Why this layer must exist:** Without Shimanto, long tasks are handed to a single LLM session — which inevitably drifts, loses context, and produces inconsistent output. Shimanto maintains the bigger picture so individual Nagare can stay focused.
+
+**Rule:** Every Shimanto must belong to exactly one Minato.
+
+---
+
+### Layer 3 — Minato (港 / Harbour)
+
+**Scope:** The human-owned command layer. Taste, judgement, and accountability live here and cannot be delegated to AI.
+
+**Characteristics:**
+- Sets the mission and strategic direction
+- Decides which Shimanto to invoke and in what order
+- Applies judgment that cannot be specified in advance: quality, tone, ethics, stakeholder fit
+- Holds final accountability for all outputs
+- Is the interface between the AI system and the real world
+
+**Examples:**
+- Write a complete research paper
+- Conduct a full financial audit
+- Build and deploy a new AI consulting product
+
+**Design philosophy:** Minato is not the ceiling of the system — it is the harbour from which ships depart to open water. The open sea (unlimited complexity, unlimited ambition) is reached through the harbour, not by bypassing it. AI cannot and should not replace the harbour master.
+
+---
+
+### Scope Boundaries — What Goes Where
+
+| Task | Layer |
+|------|-------|
+| Write one academic paragraph | **Nagare** |
+| Write one chapter of a paper | **Shimanto** |
+| Write and publish a complete paper | **Minato** |
+| Produce one audit workpaper | **Nagare** |
+| Complete the planning section of an audit | **Shimanto** |
+| Conduct a full financial audit | **Minato** |
+| Design a single new workflow | **Nagare** (meta-workflow) |
+| Build a complete workflow library for a domain | **Shimanto** |
+| Run an AI consulting engagement end-to-end | **Minato** |
+
+---
+
+### Why a Universal Nagare Doesn't Exist
+
+A common misconception: "Can't we build one super-flexible Nagare that any Shimanto can reuse?"
+
+No — and deliberately so. A Nagare optimised for maximum flexibility is, by definition, not optimised for any specific task. If a Nagare is truly general-purpose, a plain LLM prompt can already do it. The value of a Nagare comes precisely from its specificity: the right agents, the right prompts, the right quality gates for *that* task. Reuse across fundamentally different contexts means copying and re-specifying — which is cheap and correct, not a design flaw.
+
+---
+
+## 3. Nagare Architecture Overview
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -77,7 +172,7 @@ The result: for any task requiring more than 2-3 coherent reasoning steps, quali
 
 ---
 
-## 3. Why Single-Prompt Cannot Compete
+## 4. Why Single-Prompt Cannot Compete
 
 This is not marketing. These are concrete, architectural reasons:
 
@@ -113,7 +208,7 @@ The 201st workflow is genuinely better than the 1st because of what the previous
 
 ---
 
-## 4. System Components
+## 5. System Components
 
 ### 4.1 FlowRunner — The Orchestration Engine
 
@@ -205,7 +300,7 @@ python flow/flow_trigger.py status run-meta-2026-03-28-...
 
 ---
 
-## 5. Human-in-the-Loop: The Pre-Flight System
+## 6. Human-in-the-Loop: The Pre-Flight System
 
 ### 5.1 Core Philosophy
 
@@ -248,7 +343,7 @@ A separate pass checks that the collected answers are internally consistent and 
 
 ---
 
-## 6. Multi-Model Strategy
+## 7. Multi-Model Strategy
 
 ### 6.1 Why Multiple Models?
 
@@ -315,7 +410,7 @@ backend_extra:
 
 ---
 
-## 7. How to Use: The Meta-Workflow
+## 8. How to Use: The Meta-Workflow
 
 The meta-workflow is the system's most powerful capability: **describe a task in natural language, and Nagare designs and creates a complete, validated workflow for it**.
 
@@ -429,7 +524,7 @@ python flow/flow_trigger.py start your_new_workflow_name \
 
 ---
 
-## 8. Workflow YAML Schema
+## 9. Workflow YAML Schema
 
 A minimal valid workflow:
 
@@ -510,7 +605,7 @@ success_criteria:
 
 ---
 
-## 9. Evaluation KB & Continuous Improvement
+## 10. Evaluation KB & Continuous Improvement
 
 ### 9.1 Structure
 
@@ -572,7 +667,7 @@ If N+1 fails → revert, delete candidate
 
 ---
 
-## 10. Operational Notes & Caveats
+## 11. Operational Notes & Caveats
 
 ### ✅ Do
 
@@ -599,7 +694,7 @@ If N+1 fails → revert, delete candidate
 
 ---
 
-## 11. Quick Reference
+## 12. Quick Reference
 
 ### Start a workflow
 

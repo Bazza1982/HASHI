@@ -56,6 +56,12 @@ def cmd_run(args):
         print(f"   预填充答案: {args.prefill} ({len(prefill)} 项)")
 
     # Pre-flight 收集
+    runner.event_logger.emit(
+        "run.preflight.started",
+        component="cli",
+        message="Starting pre-flight collection",
+        data={"prefill_path": args.prefill, "silent": args.silent},
+    )
     collector = PreFlightCollector(
         workflow=wf,
         prefill=prefill,
@@ -80,9 +86,21 @@ def cmd_run(args):
             confirm = input("确认运行？[Y/n]: ").strip().lower()
             if confirm and confirm != "y":
                 print("已取消。")
+                runner.event_logger.emit(
+                    "run.cancelled",
+                    component="cli",
+                    message="Workflow run cancelled before confirmation",
+                    data={"reason": "user_declined_confirmation"},
+                )
                 sys.exit(0)
         except EOFError:
             pass  # 非交互环境，直接运行
+    runner.event_logger.emit(
+        "run.confirmed",
+        component="cli",
+        message="Workflow run confirmed by CLI",
+        data={"silent": args.silent, "yes": args.yes},
+    )
 
     # 执行工作流
     print(f"\n▶️  开始执行...\n")
@@ -125,6 +143,7 @@ def cmd_status(args):
 
     state = TaskState(run_id)
     status = state.get_full_status()
+    snapshot = state.get_runtime_snapshot()
 
     print(f"\n📊 Run 状态: {run_id}")
     print(f"   工作流: {status.get('workflow_id', '未知')}")
@@ -139,6 +158,8 @@ def cmd_status(args):
             s = step_info.get("status", "unknown")
             icon = {"completed": "✅", "failed": "❌", "running": "🔄", "pending": "⏳"}.get(s, "❓")
             print(f"   {icon} {step_id}: {s}")
+    if snapshot.get("current_steps"):
+        print(f"\n   当前运行步骤: {', '.join(snapshot['current_steps'])}")
 
     # 检查是否有评估报告
     scores_file = ROOT / "flow" / "evaluation_kb" / "workflow_scores" / "scores.jsonl"

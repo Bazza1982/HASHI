@@ -1,0 +1,12 @@
+{
+  "task_id": "task_002",
+  "project_id": "proj_test_001",
+  "name": "Implement codec",
+  "status": "in_progress",
+  "priority": "medium",
+  "assignee": "ying",
+  "created_at": "2026-04-02T00:00:00Z",
+  "completed_at": null,
+  "depends_on": ["task_001"],
+  "extra": {}
+}

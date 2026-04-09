@@ -1,0 +1,12 @@
+{
+  "project_id": "proj_test_001",
+  "name": "ETE Test Project",
+  "description": "A complete test project for ETE validation",
+  "status": "active",
+  "priority": "high",
+  "owner": "lily",
+  "created_at": "2026-04-01T00:00:00Z",
+  "updated_at": "2026-04-03T12:00:00Z",
+  "tags": ["test", "ete", "fixture"],
+  "extra": {"custom_field": "preserved"}
+}

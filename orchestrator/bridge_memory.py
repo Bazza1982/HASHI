@@ -1,4 +1,5 @@
 from __future__ import annotations
+import hashlib
 import json
 import math
 import os
@@ -8,6 +9,8 @@ import struct
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from tools.token_tracker import estimate_tokens as _estimate_tokens
 
 
 class LocalEmbeddingEncoder:
@@ -731,13 +734,37 @@ class BridgeContextAssembler:
         except Exception:
             return f"[FYI: You received this message at {now_str}.]"
 
-    def build_prompt(self, user_prompt: str, engine: str, incremental: bool = False) -> str:
+    def build_prompt(
+        self,
+        user_prompt: str,
+        engine: str,
+        incremental: bool = False,
+        extra_sections: list[tuple[str, str]] | None = None,
+    ) -> str:
+        return self.build_prompt_payload(
+            user_prompt,
+            engine,
+            incremental=incremental,
+            extra_sections=extra_sections,
+        )["final_prompt"]
+
+    def build_prompt_payload(
+        self,
+        user_prompt: str,
+        engine: str,
+        incremental: bool = False,
+        extra_sections: list[tuple[str, str]] | None = None,
+        inject_memory: bool = True,
+    ) -> dict[str, Any]:
         """Build the prompt to send to the backend.
 
         Args:
             incremental: When True (fixed/session mode), skip system identity,
                 recent turns, and memories — the CLI session already has them.
                 Only include /sys slots, active skills, and the user prompt.
+            inject_memory: When False, skip recent turns and memory retrieval
+                even if memory_injection_enabled is True. Used by /new to
+                ensure a clean slate.
         """
         # Per-engine memory injection limits — smaller models get less context
         _memory_limits = {
@@ -751,7 +778,7 @@ class BridgeContextAssembler:
         limits = _memory_limits.get(engine, {"recent_turns": 10, "memories": 6})
 
         system_text = "" if incremental else self._load_system_prompt()
-        inject = self.memory_injection_enabled and not incremental
+        inject = self.memory_injection_enabled and not incremental and inject_memory
         recent_turns = self.memory_store.get_recent_turns(limit=limits["recent_turns"]) if inject else []
         memories = self.memory_store.retrieve_memories(user_prompt, limit=limits["memories"]) if inject else []
         active_skills = []
@@ -761,44 +788,114 @@ class BridgeContextAssembler:
             except Exception:
                 active_skills = []
 
-        context_parts = []
+        section_blocks: list[dict[str, Any]] = []
+
+        def add_section(key: str, title: str, body_parts: list[str], item_count: int = 0) -> None:
+            parts = [part for part in body_parts if part]
+            if not parts:
+                return
+            block = f"--- {title} ---\n\n" + "\n\n".join(parts)
+            section_blocks.append(
+                {
+                    "key": key,
+                    "title": title,
+                    "text": block,
+                    "chars": len(block),
+                    "tokens_est": _estimate_tokens(block),
+                    "item_count": item_count,
+                }
+            )
+
         if self.sys_prompt_manager:
             active_sys = self.sys_prompt_manager.get_active_texts()
             if active_sys:
-                context_parts.append("--- ADDITIONAL SYSTEM CONTEXT ---")
-                for txt in active_sys:
-                    context_parts.append(txt)
+                add_section(
+                    "additional_system_context",
+                    "ADDITIONAL SYSTEM CONTEXT",
+                    list(active_sys),
+                    item_count=len(active_sys),
+                )
 
         if system_text:
-            context_parts.append("--- SYSTEM IDENTITY ---")
-            context_parts.append(system_text)
+            add_section("system_identity", "SYSTEM IDENTITY", [system_text], item_count=1)
 
         if active_skills:
-            context_parts.append("--- ACTIVE SKILLS ---")
+            skill_parts = []
             for skill_id, skill_name, skill_body in active_skills:
-                context_parts.append(f"## [{skill_id}] {skill_name}")
-                context_parts.append(skill_body)
+                skill_parts.append(f"## [{skill_id}] {skill_name}")
+                skill_parts.append(skill_body)
+            add_section("active_skills", "ACTIVE SKILLS", skill_parts, item_count=len(active_skills))
+
+        if extra_sections:
+            for title, body in extra_sections:
+                if not title or not body:
+                    continue
+                add_section(f"extra:{title.lower().replace(' ', '_')}", title, [body], item_count=1)
 
         if memories:
-            context_parts.append("--- RELEVANT LONG-TERM MEMORY ---")
+            memory_parts = []
             for m in memories:
-                context_parts.append(f"[{m['memory_type']}/{m['source']}] {m['content']}")
+                memory_parts.append(f"[{m['memory_type']}/{m['source']}] {m['content']}")
+            add_section(
+                "relevant_long_term_memory",
+                "RELEVANT LONG-TERM MEMORY",
+                memory_parts,
+                item_count=len(memories),
+            )
 
         if recent_turns:
-            context_parts.append("--- RECENT CONTEXT ---")
+            recent_parts = []
             for t in recent_turns:
-                context_parts.append(f"{t['role'].upper()}: {t['text']}")
+                recent_parts.append(f"{t['role'].upper()}: {t['text']}")
+            add_section("recent_context", "RECENT CONTEXT", recent_parts, item_count=len(recent_turns))
 
-        if not context_parts:
-            return user_prompt
+        if not section_blocks:
+            return {
+                "final_prompt": user_prompt,
+                "audit": {
+                    "incremental": incremental,
+                    "budget_limit_chars": self.PROMPT_BUDGETS.get(engine, 30000),
+                    "budget_applied": False,
+                    "context_chars_before_budget": 0,
+                    "final_prompt_chars_before_budget": len(user_prompt),
+                    "final_prompt_chars_after_budget": len(user_prompt),
+                    "time_fyi_chars": 0,
+                    "context_fingerprint": "",
+                    "sections": [],
+                },
+            }
 
         time_fyi = self._build_time_fyi()
-        final_prompt = (
+        context_text = "\n\n".join(section["text"] for section in section_blocks)
+        final_prompt_unbudgeted = (
             "Bridge-managed context follows. Use it as background memory. "
             "Respond only to NEW REQUEST unless explicitly asked to summarize memory.\n\n"
-            + "\n\n".join(context_parts)
+            + context_text
             + "\n\n--- NEW REQUEST ---\n"
             + time_fyi + "\n\n"
             + user_prompt
         )
-        return self._apply_budget(final_prompt, engine)
+        final_prompt = self._apply_budget(final_prompt_unbudgeted, engine)
+        return {
+            "final_prompt": final_prompt,
+            "audit": {
+                "incremental": incremental,
+                "budget_limit_chars": self.PROMPT_BUDGETS.get(engine, 30000),
+                "budget_applied": final_prompt != final_prompt_unbudgeted,
+                "context_chars_before_budget": len(context_text),
+                "final_prompt_chars_before_budget": len(final_prompt_unbudgeted),
+                "final_prompt_chars_after_budget": len(final_prompt),
+                "time_fyi_chars": len(time_fyi),
+                "context_fingerprint": hashlib.sha1(context_text.encode("utf-8")).hexdigest()[:16],
+                "sections": [
+                    {
+                        "key": section["key"],
+                        "title": section["title"],
+                        "chars": section["chars"],
+                        "tokens_est": section["tokens_est"],
+                        "item_count": section["item_count"],
+                    }
+                    for section in section_blocks
+                ],
+            },
+        }

@@ -3644,6 +3644,154 @@ class FlexibleAgentRuntime:
             text = format_summary_text(summary, agent_name=self.name)
             await self._reply_text(update, text, parse_mode="HTML")
 
+    async def cmd_token(self, update: Update, context: Any):
+        """System-wide token usage summary grouped by backend type."""
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        try:
+            from tools.token_tracker import get_summary_extended, fmt_tokens, _week_start_utc, _month_start_utc
+        except ImportError:
+            await self._reply_text(update, "❌ token_tracker not available.")
+            return
+
+        orchestrator = getattr(self, "orchestrator", None)
+        if orchestrator is None:
+            await self._reply_text(update, "❌ Orchestrator unavailable.")
+            return
+
+        # ── Collect data from all runtimes ────────────────────────────────────
+        groups: dict[str, dict[str, list]] = {}  # category -> backend -> [agent_entry]
+        totals = {k: {"input": 0, "output": 0, "thinking": 0, "cost_usd": 0.0, "requests": 0}
+                  for k in ("all_time", "session", "weekly", "monthly")}
+        total_agents = 0
+
+        for runtime in orchestrator.runtimes:
+            summary = get_summary_extended(runtime.workspace_dir, session_id=runtime.session_id_dt)
+            if summary["all_time"]["requests"] == 0:
+                continue
+            total_agents += 1
+
+            # Current backend
+            bm = getattr(runtime, "backend_manager", None)
+            backend = (getattr(bm, "active_backend", None)
+                       or getattr(getattr(runtime, "config", None), "active_backend", None)
+                       or "unknown")
+
+            # Current model
+            model = "unknown"
+            try:
+                model = runtime.get_current_model() or "unknown"
+            except Exception:
+                pass
+
+            # Categorise
+            if backend.endswith("-cli"):
+                cat = "🖥️ CLI Backends"
+            elif backend.endswith("-api"):
+                cat = "🌐 API Backends"
+            else:
+                cat = "❓ Other"
+
+            groups.setdefault(cat, {}).setdefault(backend, []).append(
+                {"name": runtime.name, "model": model, "summary": summary}
+            )
+
+            # Accumulate grand totals
+            for period in ("all_time", "session", "weekly", "monthly"):
+                src = summary.get(period) or {}
+                for k in ("input", "output", "thinking", "cost_usd", "requests"):
+                    totals[period][k] += src.get(k, 0)
+
+        if total_agents == 0:
+            await self._reply_text(update, "📊 No token usage recorded yet.")
+            return
+
+        # ── Build output ──────────────────────────────────────────────────────
+        lines = ["<b>📊 Token Summary — All Agents</b>"]
+
+        CAT_ORDER = ["🖥️ CLI Backends", "🌐 API Backends", "❓ Other"]
+        for cat in CAT_ORDER:
+            if cat not in groups:
+                continue
+            lines.append(f"\n<b>{cat}</b>")
+            for backend, agents in sorted(groups[cat].items()):
+                lines.append(f"  <b>{backend}</b>")
+                backend_at = {"input": 0, "output": 0, "thinking": 0, "cost_usd": 0.0, "requests": 0}
+                for agent in agents:
+                    at = agent["summary"]["all_time"]
+                    sess = agent["summary"].get("session") or {}
+                    think_part = f"  💭{fmt_tokens(at['thinking'])}" if at["thinking"] > 0 else ""
+                    sess_part  = (f"  <i>(sess ${sess['cost_usd']:.4f})</i>"
+                                  if sess.get("requests", 0) > 0 else "")
+                    lines.append(
+                        f"    {agent['name']:<10} <code>{agent['model']}</code>"
+                        f"  in:{fmt_tokens(at['input'])}"
+                        f"  out:{fmt_tokens(at['output'])}"
+                        f"{think_part}"
+                        f"  <b>${at['cost_usd']:.4f}</b>{sess_part}"
+                    )
+                    for k in ("input", "output", "thinking", "cost_usd", "requests"):
+                        backend_at[k] += at.get(k, 0)
+                if len(agents) > 1:
+                    lines.append(
+                        f"    {'─'*38}\n"
+                        f"    {'Subtotal':<10}  "
+                        f"in:{fmt_tokens(backend_at['input'])}"
+                        f"  out:{fmt_tokens(backend_at['output'])}"
+                        f"  <b>${backend_at['cost_usd']:.4f}</b>"
+                    )
+
+        # ── Grand totals ──────────────────────────────────────────────────────
+        lines.append(f"\n{'═'*44}")
+        at = totals["all_time"]
+        lines.append(
+            f"<b>All-time</b>  {total_agents} agents"
+            f"  in:{fmt_tokens(at['input'])}"
+            f"  out:{fmt_tokens(at['output'])}"
+            + (f"  💭{fmt_tokens(at['thinking'])}" if at["thinking"] > 0 else "")
+            + f"  <b>${at['cost_usd']:.4f}</b>"
+              f"  ({at['requests']} req)"
+        )
+
+        sess = totals["session"]
+        if sess["requests"] > 0:
+            lines.append(
+                f"<b>Session</b>    in:{fmt_tokens(sess['input'])}"
+                f"  out:{fmt_tokens(sess['output'])}"
+                + (f"  💭{fmt_tokens(sess['thinking'])}" if sess["thinking"] > 0 else "")
+                + f"  <b>${sess['cost_usd']:.4f}</b>"
+            )
+
+        weekly = totals["weekly"]
+        if weekly["requests"] > 0:
+            from datetime import timedelta as _td
+            now_utc = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
+            days_ago = (now_utc.weekday() + 1) % 7
+            week_label = (now_utc - _td(days=days_ago)).strftime("%m/%d")
+            lines.append(
+                f"<b>This week</b>  (since {week_label})"
+                f"  in:{fmt_tokens(weekly['input'])}"
+                f"  out:{fmt_tokens(weekly['output'])}"
+                + (f"  💭{fmt_tokens(weekly['thinking'])}" if weekly["thinking"] > 0 else "")
+                + f"  <b>${weekly['cost_usd']:.4f}</b>"
+            )
+
+        monthly = totals["monthly"]
+        if monthly["requests"] > 0:
+            from datetime import timezone as _tz
+            import datetime as _dt
+            now_m = _dt.datetime.now(_tz.utc)
+            month_label = now_m.strftime(f"%b 1–{now_m.day}")
+            lines.append(
+                f"<b>This month</b> ({month_label})"
+                f"  in:{fmt_tokens(monthly['input'])}"
+                f"  out:{fmt_tokens(monthly['output'])}"
+                + (f"  💭{fmt_tokens(monthly['thinking'])}" if monthly["thinking"] > 0 else "")
+                + f"  <b>${monthly['cost_usd']:.4f}</b>"
+            )
+
+        await self._reply_text(update, "\n".join(lines), parse_mode="HTML")
+
     async def cmd_logo(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return

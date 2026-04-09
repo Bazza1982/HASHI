@@ -1,0 +1,506 @@
+# HASHI Flow — Academic Paragraph Writing Workflow
+# Version: 1.0.0
+# Task: Design the perfect academic paragraph (150-300 words)
+# Critic revision: gate logic fixed, evidence-mode branching, score mapping clarified
+
+workflow:
+  id: academic-writing-paragraph
+  name: "Academic Paragraph Writing"
+  version: "1.0.0"
+  description: |
+    Generates a single polished academic paragraph (150-300 words) through a
+    structured pipeline: outline → draft → review → polish → final output.
+    Supports any discipline, citation style, and output language.
+    One-shot output with self-assessment; user may re-run for iteration.
+    Handles "no source materials" gracefully via argument-only mode.
+  tags: [writing, academic, paragraph]
+
+meta:
+  created_by: designer_01
+  created_at: "2026-03-28T13:16:36Z"
+  improvement_count: 0
+  source_prompt: "design the perfect academic paragraph writing workflow"
+
+changelog:
+  - version: "1.0.0"
+    date: "2026-03-28"
+    changes: "Initial version: outline → draft → review → polish → final_output. Critic fixes applied: non-blocking review gate, explicit score mapping, evidence-aware mode."
+
+# =============================================================================
+# Pre-flight: collect writing requirements from user at runtime
+# =============================================================================
+
+pre_flight:
+  analyst_agent: writer_01
+  auto_scan: false
+
+  collect_from_human:
+    - key: topic_and_argument
+      question: "What is the paragraph's topic and your main argument/thesis?"
+      required: true
+      type: text
+
+    - key: discipline
+      question: "What academic discipline? (e.g. computer science, economics, literature)"
+      required: false
+      type: text
+
+    - key: citation_style
+      question: "Citation format? (APA / MLA / Chicago / IEEE / none)"
+      required: false
+      type: choice
+      choices: [APA, MLA, Chicago, IEEE, none]
+
+    - key: output_language
+      question: "Output language? (English / Chinese / other)"
+      required: false
+      type: choice
+      choices: [English, Chinese, other]
+
+    - key: source_materials
+      question: "Any source materials, references, or evidence to incorporate? (paste text or file paths, or leave blank)"
+      required: false
+      type: text
+
+  scope_notice: |
+    This workflow produces a SINGLE academic paragraph (150-300 words).
+    For multi-paragraph or full-section writing, please use a different workflow
+    or run this workflow multiple times with different topic/argument inputs.
+
+  defaults:
+    quality_requirement: "high"
+    max_interventions: 0
+    paragraph_length: "150-300 words"
+    quality_threshold: "5-dimension scoring (logic/evidence/language/format/originality), 1-5 each, pass >= 20 total AND no dimension below 3"
+
+# =============================================================================
+# Agent Definitions
+# =============================================================================
+
+agents:
+  orchestrator:
+    id: flow-runner
+    human_interface: akane
+
+  workers:
+    - id: writer_01
+      role: "Academic Writer & Structure Architect"
+      agent_md: "flow/agents/academic-writing-paragraph/writer_01/AGENT.md"
+      workspace: "flow/runs/{run_id}/workers/writer_01"
+      backend: claude-cli
+      model: claude-opus-4-6
+      controllable_by: [orchestrator, human]
+
+    - id: reviewer_01
+      role: "Academic Reviewer & Quality Gatekeeper"
+      agent_md: "flow/agents/academic-writing-paragraph/reviewer_01/AGENT.md"
+      workspace: "flow/runs/{run_id}/workers/reviewer_01"
+      backend: claude-cli
+      model: claude-opus-4-6
+      controllable_by: [orchestrator, human]
+
+    - id: editor_01
+      role: "Language Editor & Final Polish"
+      agent_md: "flow/agents/academic-writing-paragraph/editor_01/AGENT.md"
+      workspace: "flow/runs/{run_id}/workers/editor_01"
+      backend: claude-cli
+      model: claude-sonnet-4-6
+      controllable_by: [orchestrator, human]
+
+    - id: debug_01
+      role: "Debug Agent"
+      agent_md: "flow/agents/academic-writing-paragraph/debug_01/AGENT.md"
+      workspace: "flow/runs/{run_id}/workers/debug_01"
+      backend: claude-cli
+      model: claude-sonnet-4-6
+      controllable_by: [orchestrator]
+
+# =============================================================================
+# Workflow Steps (fully automatic after pre-flight)
+# =============================================================================
+
+steps:
+  # Step 1: Design paragraph structure (skeleton)
+  - id: outline_structure
+    name: "Paragraph Structure Design"
+    agent: writer_01
+    depends: []
+    input:
+      params:
+        topic_and_argument: "{pre_flight.topic_and_argument}"
+        discipline: "{pre_flight.discipline}"
+        citation_style: "{pre_flight.citation_style}"
+        output_language: "{pre_flight.output_language}"
+        source_materials: "{pre_flight.source_materials}"
+    prompt: |
+      You are an academic writing structure architect. Design a paragraph skeleton
+      following academic writing conventions.
+
+      Topic & Argument: {pre_flight.topic_and_argument}
+      Discipline: {pre_flight.discipline}
+      Citation Style: {pre_flight.citation_style}
+      Output Language: {pre_flight.output_language}
+      Source Materials: {pre_flight.source_materials}
+      Target Length: {pre_flight.paragraph_length}
+
+      EVIDENCE MODE DETERMINATION:
+      - If source_materials are provided and non-empty → "evidence-backed" mode:
+        design structure with specific source references.
+      - If source_materials are empty/blank → "argument-only" mode:
+        design structure around logical reasoning and analysis without citation
+        requirements. Mark evidence_mode in output.
+
+      Design a paragraph skeleton with these components:
+      1. Topic sentence (claim/thesis)
+      2. Supporting evidence points (2-3) — from sources if available, from
+         logical reasoning if not
+      3. Analysis/reasoning for each evidence point
+      4. Transition/concluding sentence
+
+      Output paragraph_outline.json:
+      {
+        "evidence_mode": "evidence-backed | argument-only",
+        "topic_sentence_guidance": "...",
+        "evidence_points": [
+          {"point": "...", "source": "... or 'logical_reasoning'", "analysis_angle": "..."}
+        ],
+        "transition_strategy": "...",
+        "discipline_conventions": "key conventions for this discipline",
+        "citation_notes": "how citations should appear (or 'N/A for argument-only mode')",
+        "tone_register": "formal/semiformal, active/passive preferences",
+        "estimated_sentence_count": 0
+      }
+    output:
+      artifacts:
+        - key: paragraph_outline
+          path: paragraph_outline.json
+          type: json
+    timeout_seconds: 300
+
+  # Step 2: Write full draft based on skeleton
+  - id: draft_writing
+    name: "Draft Writing"
+    agent: writer_01
+    depends: [outline_structure]
+    input:
+      from_artifacts: [paragraph_outline]
+      params:
+        topic_and_argument: "{pre_flight.topic_and_argument}"
+        source_materials: "{pre_flight.source_materials}"
+        output_language: "{pre_flight.output_language}"
+    prompt: |
+      You are an expert academic writer. Based on the paragraph outline, write a
+      complete academic paragraph draft.
+
+      Read paragraph_outline.json for the structure plan.
+
+      Topic & Argument: {pre_flight.topic_and_argument}
+      Source Materials: {pre_flight.source_materials}
+      Output Language: {pre_flight.output_language}
+
+      IMPORTANT — check evidence_mode in paragraph_outline.json:
+      - If "evidence-backed": include citations in the specified format
+        (e.g. (Author, Year) for APA). Do NOT fabricate citations — use only
+        provided sources or mark as [CITATION NEEDED].
+      - If "argument-only": build the paragraph on logical reasoning and
+        analysis. No citations required. Do NOT invent fake references.
+
+      Writing requirements:
+      - Follow the outline structure precisely
+      - Use discipline-appropriate academic register
+      - Ensure logical flow between sentences
+      - Target 150-300 words
+
+      Output TWO files:
+      1. draft_paragraph.txt — the complete paragraph text
+      2. draft_metadata.json:
+         {
+           "evidence_mode": "evidence-backed | argument-only",
+           "word_count": 0,
+           "sentence_count": 0,
+           "citations_used": [],
+           "citation_needed_count": 0,
+           "confidence_notes": "any concerns about the draft"
+         }
+    output:
+      artifacts:
+        - key: draft_paragraph
+          path: draft_paragraph.txt
+          type: file
+        - key: draft_metadata
+          path: draft_metadata.json
+          type: json
+    timeout_seconds: 360
+
+  # Step 3: Academic quality review (NON-BLOCKING — always passes output forward)
+  - id: academic_review
+    name: "Academic Quality Review"
+    agent: reviewer_01
+    depends: [draft_writing]
+    input:
+      from_artifacts: [paragraph_outline, draft_paragraph, draft_metadata]
+      params:
+        discipline: "{pre_flight.discipline}"
+        citation_style: "{pre_flight.citation_style}"
+    prompt: |
+      You are a rigorous academic reviewer. Perform a comprehensive quality review
+      of the draft paragraph.
+
+      Read:
+      - paragraph_outline.json (intended structure, includes evidence_mode)
+      - draft_paragraph.txt (the draft)
+      - draft_metadata.json (draft stats, includes evidence_mode)
+
+      IMPORTANT: Adapt your review criteria to the evidence_mode:
+      - "evidence-backed": full citation and evidence scoring
+      - "argument-only": score evidence_quality based on logical reasoning
+        strength instead of source references. Do NOT penalize for missing
+        citations when no sources were provided.
+
+      Discipline/Language adaptation:
+      - Discipline: {pre_flight.discipline}
+      - Citation Style: {pre_flight.citation_style}
+      - Adjust expectations to discipline norms (e.g., humanities may value
+        nuanced argumentation; STEM may value precision and conciseness)
+
+      Review dimensions:
+      1. **Argument Logic** (1-5): Is the thesis clear? Does evidence support it?
+         Are there logical fallacies or gaps?
+      2. **Evidence Quality** (1-5): For evidence-backed: Are claims supported?
+         Are sources used appropriately? For argument-only: Is reasoning
+         rigorous and well-structured?
+      3. **Academic Language** (1-5): Is the register appropriate for the discipline?
+         Is terminology precise? Any colloquialisms?
+      4. **Format & Citations** (1-5): For evidence-backed: Does citation format
+         match the specified style? For argument-only: Is formatting clean and
+         consistent? (score 4-5 if no citations needed and format is clean)
+      5. **Originality & Insight** (1-5): Does the paragraph contribute a clear
+         analytical perspective, not just summarize?
+
+      For each issue found, provide a specific fix.
+
+      Output review_report.json:
+      {
+        "evidence_mode": "evidence-backed | argument-only",
+        "scores": {
+          "argument_logic": 0,
+          "evidence_quality": 0,
+          "academic_language": 0,
+          "format_citations": 0,
+          "originality_insight": 0,
+          "total": 0
+        },
+        "passed": true/false,
+        "issues": [
+          {"dimension": "...", "issue": "...", "location": "...", "fix": "..."}
+        ],
+        "revised_paragraph": "the paragraph with all fixes applied",
+        "revision_summary": "what was changed and why"
+      }
+
+      Pass criteria: total >= 20 out of 25 AND no single dimension below 3.
+      IMPORTANT: Even if passed==false, you MUST output revised_paragraph with
+      best-effort fixes applied. This step is NON-BLOCKING — output always
+      flows to the next step.
+    output:
+      artifacts:
+        - key: review_report
+          path: review_report.json
+          type: json
+    # NOTE: No quality_gate here — review is advisory, not blocking.
+    # Final gate is on step 5 (final_output) only.
+    timeout_seconds: 360
+
+  # Step 4: Language polish
+  - id: language_polish
+    name: "Language Polish & Refinement"
+    agent: editor_01
+    depends: [academic_review]
+    input:
+      from_artifacts: [review_report]
+      params:
+        output_language: "{pre_flight.output_language}"
+        discipline: "{pre_flight.discipline}"
+    prompt: |
+      You are a professional academic language editor. Polish the reviewed paragraph
+      for publication-ready quality.
+
+      Read review_report.json and work with the revised_paragraph field.
+
+      Discipline: {pre_flight.discipline}
+      Output Language: {pre_flight.output_language}
+
+      Adapt your editing to the output language:
+      - English: focus on article usage, tense consistency, hedging language
+      - Chinese: focus on 学术用语规范, 逻辑连接词, 句式多样性
+      - Other: apply general academic register norms
+
+      Polish checklist:
+      1. Sentence variety — mix simple, compound, and complex sentences
+      2. Grammar precision — subject-verb agreement, tense consistency, article usage
+      3. Academic register consistency — no informal language, appropriate hedging
+      4. Redundancy elimination — remove filler words, tighten prose
+      5. Cohesion devices — ensure smooth transitions between sentences
+      6. Word choice — replace vague terms with precise academic vocabulary
+      7. Paragraph flow — ensure the paragraph reads as a unified whole
+
+      Output TWO files:
+      1. polished_paragraph.txt — the final polished paragraph
+      2. polish_report.json:
+         {
+           "changes_made": [
+             {"type": "grammar/style/word_choice/cohesion/redundancy", "before": "...", "after": "...", "reason": "..."}
+           ],
+           "word_count": 0,
+           "readability_notes": "..."
+         }
+    output:
+      artifacts:
+        - key: polished_paragraph
+          path: polished_paragraph.txt
+          type: file
+        - key: polish_report
+          path: polish_report.json
+          type: json
+    timeout_seconds: 300
+
+  # Step 5: Final output with self-assessment
+  - id: final_output
+    name: "Final Output & Self-Assessment"
+    agent: reviewer_01
+    depends: [language_polish]
+    input:
+      from_artifacts: [polished_paragraph, review_report, polish_report]
+      params:
+        topic_and_argument: "{pre_flight.topic_and_argument}"
+        quality_threshold: "{pre_flight.quality_threshold}"
+    prompt: |
+      Produce the final deliverable: the polished academic paragraph with a
+      comprehensive quality self-assessment.
+
+      Read:
+      - polished_paragraph.txt (final text)
+      - review_report.json (review scores and evidence_mode)
+      - polish_report.json (editing changes)
+
+      Tasks:
+      1. Perform a final read-through of polished_paragraph.txt
+      2. Make any last micro-corrections (typos, punctuation only — no structural changes)
+      3. Re-score on all 5 dimensions after all edits
+      4. Compute quality_score = total / 25 (normalized 0.0 to 1.0)
+      5. Compile the final output package
+
+      SCORE MAPPING: quality_score is strictly total / 25.
+      Example: if total = 22, then quality_score = 0.88.
+
+      Output final_package.json:
+      {
+        "final_paragraph": "the complete final paragraph text",
+        "word_count": 0,
+        "evidence_mode": "evidence-backed | argument-only",
+        "quality_scores": {
+          "argument_logic": 0,
+          "evidence_quality": 0,
+          "academic_language": 0,
+          "format_citations": 0,
+          "originality_insight": 0,
+          "total": 0
+        },
+        "quality_passed": true/false,
+        "quality_score": 0.0,
+        "pass_criteria": "total >= 20 AND no dimension below 3",
+        "revision_history_summary": "brief summary of all changes from draft to final",
+        "improvement_suggestions": ["suggestions for further improvement if user re-runs"],
+        "citation_gaps": ["list any [CITATION NEEDED] markers remaining, if any"],
+        "metadata": {
+          "topic": "{pre_flight.topic_and_argument}",
+          "pipeline_steps_completed": 5,
+          "total_edits_applied": 0
+        }
+      }
+
+      Also write the final paragraph as a standalone file:
+      final_paragraph.txt
+    output:
+      artifacts:
+        - key: final_package
+          path: final_package.json
+          type: json
+        - key: final_paragraph
+          path: final_paragraph.txt
+          type: file
+    quality_gate:
+      type: auto
+      criteria:
+        - "final_package.quality_passed == true"
+        - "final_package.quality_score >= 0.7"
+    timeout_seconds: 300
+
+# =============================================================================
+# Error Handling
+# =============================================================================
+
+error_handling:
+  debug_agent: debug_01
+  max_attempts: 3
+  retry_strategy:
+    attempt_1: "Analyze error via debug_01. If prompt interpretation issue, clarify ambiguous instructions and retry. If artifact format issue, add explicit format examples."
+    attempt_2: "If step timed out, simplify prompt (remove optional requirements). If output was truncated, reduce target length to 120-200 words. If source_materials caused issues, switch to argument-only mode."
+    attempt_3: "Minimal viable attempt: reduce to core claim + 1 supporting point, relaxed quality threshold (total >= 16), notify user of degraded output."
+  on_max_exceeded:
+    action: notify_human_interface
+    target: akane
+    message: "Academic paragraph workflow failed after 3 attempts. Step: {failed_step_id}, Error: {error}"
+
+# =============================================================================
+# Success Criteria (tiered)
+# =============================================================================
+
+success_criteria:
+  full_success:
+    - "Step final_output status is completed"
+    - "final_package.quality_passed == true"
+    - "final_package.quality_score >= 0.8"
+    - "final_paragraph.txt exists and word_count within 120-350 range"
+    - "Zero [CITATION NEEDED] markers in final text"
+  acceptable:
+    - "Step final_output status is completed"
+    - "final_package.quality_score >= 0.7"
+    - "final_paragraph.txt exists and word_count within 100-400 range"
+  degraded:
+    - "Step final_output status is completed"
+    - "final_package.quality_score >= 0.6"
+    - "final_paragraph.txt exists"
+    - "User notified of quality gaps and citation gaps"
+
+# =============================================================================
+# Output
+# =============================================================================
+
+output:
+  type: file
+  source_artifact: final_paragraph
+  destination: "artifacts/output/final_paragraph.txt"
+  notify_agent: akane
+  message_template: |
+    Academic paragraph complete!
+    Evidence mode: {final_package.evidence_mode}
+    Quality score: {final_package.quality_scores.total}/25 ({final_package.quality_score})
+    Word count: {final_package.word_count}
+    Citation gaps: {final_package.citation_gaps}
+    Suggestions: {final_package.improvement_suggestions}
+
+# =============================================================================
+# Evaluation
+# =============================================================================
+
+evaluation:
+  enabled: true
+  metrics:
+    - total_duration
+    - design_quality_score
+    - model_cost_estimate
+    - error_retries
+    - human_interventions
+  improvement_threshold: 5
+  auto_apply: false

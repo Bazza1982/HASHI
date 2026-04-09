@@ -116,6 +116,7 @@ workspaces/WINDOWS.MD
 
 # Local instance registry (contains machine-specific paths)
 instances.json
+contacts.json
 
 # AIPM payload files (project data, not part of HASHI)
 *_payload.json
@@ -143,3 +144,6 @@ scripts/gitwatch_report.md
 build/
 dist/
 *.spec
+*.egg-info/
+*.tsbuildinfo
+docs/local_minato.md

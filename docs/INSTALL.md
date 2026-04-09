@@ -73,3 +73,37 @@ HASHI supports running multiple instances simultaneously.
 Example (conceptual):
 - HASHI2: `workbench_port=18802`
 - HASHI9: `workbench_port=18819`
+
+---
+
+## Nagare Core (Developer Install)
+
+Use this path when working on the extracted workflow engine directly.
+
+### Python package
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e .[test]
+```
+
+### Smoke verification
+
+```bash
+pytest -q tests/contract
+python -m nagare.cli run tests/fixtures/smoke_test.yaml --yes --silent --smoke-handler
+```
+
+The `--smoke-handler` flag is for packaging and CI validation. It avoids external model CLIs and writes deterministic artifacts locally.
+
+## nagare-viz
+
+```bash
+cd nagare-viz
+npm ci
+npm run build
+```
+
+The current release gate for `nagare-viz` is a clean production build.

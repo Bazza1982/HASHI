@@ -1,0 +1,8 @@
+workflow_id: test_workflow
+steps:
+  - step_id: step_1
+    agent: lily
+    handler: echo
+    config:
+      message: "Hello from ETE test workflow"
+    depends_on: []

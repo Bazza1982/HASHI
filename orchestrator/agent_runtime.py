@@ -5,6 +5,7 @@ import time
 import asyncio
 import inspect
 import logging
+import hashlib
 from contextlib import suppress
 from datetime import datetime, timedelta
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ from adapters.base import BaseBackend
 from orchestrator.agent_fyi import build_agent_fyi_primer
 from orchestrator.bridge_memory import BridgeMemoryStore, BridgeContextAssembler, SysPromptManager
 from orchestrator.handoff_builder import HandoffBuilder
+from orchestrator.habits import HabitStore
 from orchestrator.media_utils import is_image_file, normalize_image_file
 from orchestrator.parked_topics import ParkedTopicStore
 from orchestrator.skill_manager import SkillDefinition, SkillManager
@@ -74,6 +76,8 @@ class QueuedRequest:
     silent: bool = False
     is_retry: bool = False
     deliver_to_telegram: bool = True
+    active_habits: list[dict] | None = None
+    skip_memory_injection: bool = False
 
 
 def _safe_excerpt(text: str, limit: int = 160) -> str:
@@ -411,6 +415,7 @@ class BridgeAgentRuntime:
         self.last_prompt = None
         self.last_response: dict | None = None
         self.current_request_meta: dict | None = None
+        self._request_audit_meta: dict[str, dict] = {}
         self.last_activity_at = datetime.now()
         self.last_success_at: datetime | None = None
         self.last_error_at: datetime | None = None
@@ -446,6 +451,12 @@ class BridgeAgentRuntime:
             active_skill_provider=self._get_active_skill_sections,
             sys_prompt_manager=self.sys_prompt_manager,
         )
+        self.habit_store = HabitStore(
+            self.config.workspace_dir,
+            self.global_config.project_root,
+            self.name,
+            self._get_agent_class(),
+        )
 
     def get_typing_placeholder(self) -> tuple[str, str | None]:
         extra = self.config.extra or {}
@@ -454,6 +465,78 @@ class BridgeAgentRuntime:
         if text:
             return text, parse_mode
         return f"{self.name} is thinking...", None
+
+    def _get_agent_class(self) -> str:
+        extra = self.config.extra or {}
+        direct = getattr(self.config, "agent_class", None)
+        return (direct or extra.get("agent_class") or "general").strip().lower()
+
+    def _build_habit_sections(self, item: QueuedRequest, prompt: str) -> tuple[list[tuple[str, str]], list[str]]:
+        habits = self.habit_store.retrieve(prompt, source=item.source, summary=item.summary)
+        if not habits:
+            item.active_habits = []
+            return [], []
+        self.habit_store.mark_triggered(habits)
+        item.active_habits = self.habit_store.serialize_habits(habits)
+        habit_ids = [habit.habit_id for habit in habits]
+        section = self.habit_store.render_prompt_section(habits)
+        self.logger.info(
+            f"Habit retrieval for {item.request_id}: {len(habit_ids)} matched ({', '.join(habit_ids)})"
+        )
+        self._log_maintenance(item, "habit_retrieval", habit_ids=",".join(habit_ids), habit_count=len(habit_ids))
+        return ([section] if section else []), habit_ids
+
+    def _record_habit_outcome(
+        self,
+        item: QueuedRequest,
+        *,
+        success: bool,
+        response_text: str | None = None,
+        error_text: str | None = None,
+    ) -> None:
+        active_habits = item.active_habits or []
+        if not active_habits:
+            return
+        try:
+            self.habit_store.record_execution_outcome(
+                request_id=item.request_id,
+                prompt=item.prompt,
+                source=item.source,
+                summary=item.summary,
+                active_habits=active_habits,
+                response_text=response_text,
+                error_text=error_text,
+                success=success,
+            )
+        except Exception as exc:
+            self.error_logger.warning(
+                f"Failed to record habit outcome for {item.request_id}: {exc}"
+            )
+
+    def _capture_followup_habit_feedback(self, text: str) -> None:
+        last_response = self.last_response or {}
+        request_id = last_response.get("request_id")
+        responded_at = last_response.get("responded_at")
+        if not request_id:
+            return
+        try:
+            result = self.habit_store.apply_user_feedback(
+                request_id=request_id,
+                feedback_text=text,
+                responded_at=responded_at,
+            )
+        except Exception as exc:
+            self.error_logger.warning(
+                f"Failed to capture habit feedback for {request_id}: {exc}"
+            )
+            return
+        if not result:
+            return
+        self.maintenance_logger.info(
+            f"Habit follow-up feedback for {request_id}: "
+            f"sentiment={result.sentiment} updated_events={result.updated_events} "
+            f"habits={','.join(result.updated_habits)}"
+        )
 
     def _setup_logging(self):
         formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
@@ -487,6 +570,7 @@ class BridgeAgentRuntime:
         silent: bool = False,
         is_retry: bool = False,
         deliver_to_telegram: bool = True,
+        skip_memory_injection: bool = False,
     ):
         if not prompt or not prompt.strip():
             self.error_logger.error(
@@ -504,6 +588,7 @@ class BridgeAgentRuntime:
             silent=silent,
             is_retry=is_retry,
             deliver_to_telegram=deliver_to_telegram,
+            skip_memory_injection=skip_memory_injection,
         )
         await self.queue.put(item)
         self.message_logger.info(
@@ -1714,6 +1799,7 @@ class BridgeAgentRuntime:
         try:
             if task.cancelled():
                 self._mark_error(f"Background task cancelled: {item.summary}")
+                self._record_habit_outcome(item, success=False, error_text="background_task_cancelled")
                 self.logger.warning(f"Background task {item.request_id} was cancelled.")
                 await self.send_long_message(
                     item.chat_id,
@@ -1726,6 +1812,7 @@ class BridgeAgentRuntime:
             exc = task.exception()
             if exc:
                 self._mark_error(str(exc))
+                self._record_habit_outcome(item, success=False, error_text=str(exc))
                 self.error_logger.error(f"Background task {item.request_id} raised: {exc}")
                 await self.send_long_message(
                     item.chat_id,
@@ -1736,13 +1823,29 @@ class BridgeAgentRuntime:
                 return
 
             response = task.result()
+            audit_meta = self._request_audit_meta.pop(item.request_id, None)
 
             if response.is_success and response.text:
+                if audit_meta:
+                    self._record_request_usage_and_audit(
+                        item,
+                        response,
+                        effective_prompt=audit_meta["effective_prompt"],
+                        final_prompt=audit_meta["final_prompt"],
+                        prompt_audit=audit_meta["prompt_audit"],
+                        tool_audit=audit_meta["tool_audit"],
+                        queue_wait_s=audit_meta.get("queue_wait_s"),
+                        backend_elapsed_s=(datetime.now() - datetime.fromisoformat(item.created_at)).total_seconds(),
+                        detached=True,
+                        background_completion=True,
+                    )
                 self._mark_success()
+                self._record_habit_outcome(item, success=True, response_text=response.text)
                 self.last_response = {
                     "chat_id": item.chat_id,
                     "text": response.text,
                     "request_id": item.request_id,
+                    "responded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
                 }
                 memory_user_text = item.prompt
                 if item.source.lower() in {"document", "photo", "voice", "audio", "video", "sticker"}:
@@ -1766,8 +1869,22 @@ class BridgeAgentRuntime:
                     f"(total_s={total_s:.2f}, chunks={chunk_count}, send_s={send_elapsed_s:.2f})"
                 )
             else:
+                if audit_meta:
+                    self._record_request_usage_and_audit(
+                        item,
+                        response,
+                        effective_prompt=audit_meta["effective_prompt"],
+                        final_prompt=audit_meta["final_prompt"],
+                        prompt_audit=audit_meta["prompt_audit"],
+                        tool_audit=audit_meta["tool_audit"],
+                        queue_wait_s=audit_meta.get("queue_wait_s"),
+                        backend_elapsed_s=(datetime.now() - datetime.fromisoformat(item.created_at)).total_seconds(),
+                        detached=True,
+                        background_completion=True,
+                    )
                 err_msg = response.error or "Unknown error"
                 self._mark_error(err_msg)
+                self._record_habit_outcome(item, success=False, error_text=err_msg)
                 self.error_logger.error(f"Background task {item.request_id} failed: {err_msg}")
                 clipped = err_msg if len(err_msg) <= 3000 else err_msg[:2800].rstrip() + "\n\n[truncated]"
                 await self.send_long_message(
@@ -1887,6 +2004,154 @@ class BridgeAgentRuntime:
             parts.append(f"{key}={value!r}")
         self.maintenance_logger.info(" ".join(parts))
 
+    def _get_tool_audit(self) -> dict[str, int]:
+        registry = getattr(self.backend, "tool_registry", None)
+        if registry is None:
+            return {"catalog_count": 0, "schema_chars": 0, "schema_fingerprint": "", "max_loops": 0}
+        defs = []
+        schema_chars = 0
+        schema_fingerprint = ""
+        try:
+            defs = registry.get_tool_definitions()
+            schema_json = json.dumps(defs, ensure_ascii=False, sort_keys=True)
+            schema_chars = len(schema_json)
+            schema_fingerprint = hashlib.sha1(schema_json.encode("utf-8")).hexdigest()[:16]
+        except Exception:
+            pass
+        return {
+            "catalog_count": len(defs),
+            "schema_chars": schema_chars,
+            "schema_fingerprint": schema_fingerprint,
+            "max_loops": int(getattr(registry, "max_loops", 0) or 0),
+        }
+
+    def _build_audit_record(
+        self,
+        item: QueuedRequest,
+        response,
+        *,
+        effective_prompt: str,
+        final_prompt: str,
+        prompt_audit: dict,
+        tool_audit: dict[str, int],
+        queue_wait_s: float | None = None,
+        backend_elapsed_s: float | None = None,
+        detached: bool = False,
+        background_completion: bool = False,
+    ) -> dict:
+        from tools.token_tracker import estimate_tokens
+
+        def _ascii_token_est(char_count: int) -> int:
+            return max(1, int(char_count * 0.25)) if char_count else 0
+
+        input_tokens = response.usage.input_tokens if response.usage else estimate_tokens(final_prompt)
+        output_tokens = response.usage.output_tokens if response.usage else estimate_tokens(response.text or "")
+        thinking_tokens = response.usage.thinking_tokens if response.usage else 0
+        section_chars = {section["key"]: section["chars"] for section in prompt_audit.get("sections", [])}
+        section_tokens = {
+            section["key"]: section.get("tokens_est") or _ascii_token_est(section["chars"])
+            for section in prompt_audit.get("sections", [])
+        }
+        return {
+            "request_id": item.request_id,
+            "agent": self.name,
+            "runtime": "fixed",
+            "backend": self.config.engine,
+            "model": self.config.model,
+            "source": item.source,
+            "summary": item.summary,
+            "silent": item.silent,
+            "is_retry": item.is_retry,
+            "success": response.is_success,
+            "incremental_mode": False,
+            "detached": detached,
+            "background_completion": background_completion,
+            "token_source": "api" if response.usage else "estimated",
+            "raw_prompt_chars": len(item.prompt),
+            "effective_prompt_chars": len(effective_prompt),
+            "final_prompt_chars": len(final_prompt),
+            "response_chars": len(response.text or ""),
+            "error_chars": len(response.error or ""),
+            "queue_wait_s": round(queue_wait_s, 3) if queue_wait_s is not None else None,
+            "backend_elapsed_s": round(backend_elapsed_s, 3) if backend_elapsed_s is not None else None,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "thinking_tokens": thinking_tokens,
+            "tool_call_count": int(getattr(response, "tool_call_count", 0) or 0),
+            "tool_loop_count": int(getattr(response, "tool_loop_count", 0) or 0),
+            "tool_catalog_count": tool_audit["catalog_count"],
+            "tool_schema_chars": tool_audit["schema_chars"],
+            "tool_schema_tokens_est": _ascii_token_est(tool_audit["schema_chars"]),
+            "tool_schema_fingerprint": tool_audit.get("schema_fingerprint", ""),
+            "tool_max_loops": tool_audit["max_loops"],
+            "budget_applied": bool(prompt_audit.get("budget_applied")),
+            "budget_limit_chars": prompt_audit.get("budget_limit_chars"),
+            "context_chars_before_budget": prompt_audit.get("context_chars_before_budget", 0),
+            "time_fyi_chars": prompt_audit.get("time_fyi_chars", 0),
+            "context_expansion_ratio": round(len(final_prompt) / max(len(item.prompt), 1), 3),
+            "context_fingerprint": prompt_audit.get("context_fingerprint", ""),
+            "request_fingerprint": hashlib.sha1((item.prompt or "").encode("utf-8")).hexdigest()[:16],
+            "section_chars": section_chars,
+            "section_tokens_est": section_tokens,
+            "section_counts": {
+                section["key"]: section.get("item_count", 0)
+                for section in prompt_audit.get("sections", [])
+            },
+        }
+
+    def _record_request_usage_and_audit(
+        self,
+        item: QueuedRequest,
+        response,
+        *,
+        effective_prompt: str,
+        final_prompt: str,
+        prompt_audit: dict,
+        tool_audit: dict[str, int],
+        queue_wait_s: float | None = None,
+        backend_elapsed_s: float | None = None,
+        detached: bool = False,
+        background_completion: bool = False,
+    ) -> None:
+        try:
+            from tools.token_tracker import estimate_tokens, record_audit_event, record_usage
+
+            if response.usage:
+                input_tokens = response.usage.input_tokens
+                output_tokens = response.usage.output_tokens
+                thinking_tokens = response.usage.thinking_tokens
+            else:
+                input_tokens = estimate_tokens(final_prompt)
+                output_tokens = estimate_tokens(response.text or "")
+                thinking_tokens = 0
+
+            record_usage(
+                self.workspace_dir,
+                model=self.config.model,
+                backend=self.config.engine,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                thinking_tokens=thinking_tokens,
+                session_id=self.session_id_dt,
+            )
+            record_audit_event(
+                self.workspace_dir,
+                self._build_audit_record(
+                    item,
+                    response,
+                    effective_prompt=effective_prompt,
+                    final_prompt=final_prompt,
+                    prompt_audit=prompt_audit,
+                    tool_audit=tool_audit,
+                    queue_wait_s=queue_wait_s,
+                    backend_elapsed_s=backend_elapsed_s,
+                    detached=detached,
+                    background_completion=background_completion,
+                ),
+            )
+        except Exception:
+            pass
+
     async def process_queue(self):
         self.logger.info("Agent queue processor started.")
         while True:
@@ -1996,7 +2261,24 @@ class BridgeAgentRuntime:
 
                 backend_started = datetime.now()
                 effective_prompt = self._consume_session_primer(item)
-                final_prompt = self.context_assembler.build_prompt(effective_prompt, self.config.engine)
+                habit_sections, habit_ids = self._build_habit_sections(item, effective_prompt)
+                self.current_request_meta["habit_ids"] = habit_ids
+                prompt_payload = self.context_assembler.build_prompt_payload(
+                    effective_prompt,
+                    self.config.engine,
+                    extra_sections=habit_sections,
+                    inject_memory=not item.skip_memory_injection,
+                )
+                final_prompt = prompt_payload["final_prompt"]
+                prompt_audit = prompt_payload["audit"]
+                tool_audit = self._get_tool_audit()
+                self._request_audit_meta[item.request_id] = {
+                    "effective_prompt": effective_prompt,
+                    "final_prompt": final_prompt,
+                    "prompt_audit": prompt_audit,
+                    "tool_audit": tool_audit,
+                    "queue_wait_s": queue_wait_s,
+                }
                 if item.is_retry:
                     self.logger.warning(
                         f"Running retry for {self._extract_task_id(item.summary) or '<none>'} "
@@ -2116,7 +2398,19 @@ class BridgeAgentRuntime:
                         pass
 
                 if response.is_success and response.text:
+                    self._record_request_usage_and_audit(
+                        item,
+                        response,
+                        effective_prompt=effective_prompt,
+                        final_prompt=final_prompt,
+                        prompt_audit=prompt_audit,
+                        tool_audit=tool_audit,
+                        queue_wait_s=queue_wait_s,
+                        backend_elapsed_s=backend_elapsed,
+                    )
+                    self._request_audit_meta.pop(item.request_id, None)
                     self._mark_success()
+                    self._record_habit_outcome(item, success=True, response_text=response.text)
                     await self._notify_request_listeners(
                         item.request_id,
                         {
@@ -2134,6 +2428,7 @@ class BridgeAgentRuntime:
                         "chat_id": item.chat_id,
                         "text": response.text,
                         "request_id": item.request_id,
+                        "responded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
                     }
                     memory_user_text = item.prompt
                     if item.source.lower() in {"document", "photo", "voice", "audio", "video", "sticker"}:
@@ -2165,8 +2460,20 @@ class BridgeAgentRuntime:
                     # Route hchat reply back to sender if applicable
                     await self._hchat_route_reply(item, response.text)
                 else:
+                    self._record_request_usage_and_audit(
+                        item,
+                        response,
+                        effective_prompt=effective_prompt,
+                        final_prompt=final_prompt,
+                        prompt_audit=prompt_audit,
+                        tool_audit=tool_audit,
+                        queue_wait_s=queue_wait_s,
+                        backend_elapsed_s=backend_elapsed,
+                    )
+                    self._request_audit_meta.pop(item.request_id, None)
                     err_msg = response.error or "Unknown error"
                     self._mark_error(err_msg)
+                    self._record_habit_outcome(item, success=False, error_text=err_msg)
                     await self._notify_request_listeners(
                         item.request_id,
                         {
@@ -2207,6 +2514,8 @@ class BridgeAgentRuntime:
                 break
             except Exception as e:
                 self._mark_error(str(e))
+                if item is not None:
+                    self._record_habit_outcome(item, success=False, error_text=str(e))
                 self.error_logger.exception(f"Queue processing error for {getattr(item, 'request_id', '?')}: {e}")
             finally:
                 self.is_generating = False
@@ -2300,6 +2609,7 @@ class BridgeAgentRuntime:
             return
         text = update.message.text
         _print_user_message(self.name, text)
+        self._capture_followup_habit_feedback(text)
         self.append_conversation_entry("user", text, "text")
         await self.enqueue_request(update.effective_chat.id, text, "text", _safe_excerpt(text))
 
@@ -3258,7 +3568,10 @@ class BridgeAgentRuntime:
             "SYSTEM: Fresh session started. Do not reference any previous chat. "
             "Follow ONLY your agent.md instructions. Ask the user what they want to do next."
         )
-        await self.enqueue_request(update.effective_chat.id, prompt, "system", "New session")
+        await self.enqueue_request(
+            update.effective_chat.id, prompt, "system", "New session",
+            skip_memory_injection=True,
+        )
 
     async def cmd_status(self, update, context):
         if update.effective_user.id != self.global_config.authorized_id:

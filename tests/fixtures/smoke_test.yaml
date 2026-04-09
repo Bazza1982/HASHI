@@ -1,0 +1,78 @@
+# HASHI Flow — 冒烟测试工作流
+# 最简单的 2 步工作流，用于验证引擎是否正常工作
+# 不需要任何 pre-flight 问题
+
+workflow:
+  id: smoke-test
+  name: "冒烟测试"
+  version: "1.0.0"
+  description: "验证 FlowRunner + WorkerDispatcher + Evaluator 端到端流程"
+  tags: [test, smoke]
+
+meta:
+  created_by: akane
+  created_at: "2026-03-26T00:00:00Z"
+
+pre_flight:
+  collect_from_human: []
+
+agents:
+  orchestrator:
+    id: akane
+  workers:
+    - id: writer_01
+      role: "测试写手"
+      agent_md: "flow/agents/analyst/AGENT.md"
+      backend: claude-cli
+      model: claude-sonnet-4-6
+
+    - id: checker_01
+      role: "测试检查员"
+      agent_md: "flow/agents/analyst/AGENT.md"
+      backend: claude-cli
+      model: claude-sonnet-4-6
+
+steps:
+  - id: step_write
+    name: "写一句话"
+    agent: writer_01
+    depends: []
+    prompt: |
+      写一句关于 AI 协作的名言（中文，20字以内）。
+      将它保存到文件 output.txt。
+      然后输出结果 JSON：
+      ```json
+      {"status": "completed", "artifacts_produced": {"quote": "output.txt"}, "summary": "已写入名言"}
+      ```
+    output:
+      artifacts:
+        - key: quote
+          path: output.txt
+          type: text
+    timeout_seconds: 120
+
+  - id: step_check
+    name: "检查并评分"
+    agent: checker_01
+    depends: [step_write]
+    input:
+      from_artifacts: [quote]
+    prompt: |
+      读取 output.txt 的内容，对这句话打分（1-10分），写入 review.txt。
+      格式：「名言内容」- 评分：X/10 - 理由：...
+      然后输出结果 JSON：
+      ```json
+      {"status": "completed", "artifacts_produced": {"review": "review.txt"}, "summary": "评分完成"}
+      ```
+    output:
+      artifacts:
+        - key: review
+          path: review.txt
+          type: text
+    timeout_seconds: 120
+
+error_handling:
+  max_attempts: 2
+
+success_criteria:
+  - "step_check 状态为 completed"

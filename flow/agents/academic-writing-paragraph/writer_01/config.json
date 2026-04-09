@@ -1,6 +1,6 @@
 {
   "agent_id": "writer_01",
-  "role": "Structure planning, draft writing with per-sentence source grounding",
+  "role": "Academic Writer & Structure Architect",
   "workflow_id": "academic-writing-paragraph",
   "run_id": "{run_id}",
   "backend": {

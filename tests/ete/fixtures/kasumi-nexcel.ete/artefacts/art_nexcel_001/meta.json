@@ -1,0 +1,14 @@
+{
+  "artefact_id": "art_nexcel_001",
+  "title": "Budget Tracker",
+  "mime_type": "application/vnd.hashi.kasumi.nexcel+json",
+  "artefact_type": "nexcel",
+  "content_hash": "sha256:d235d979784bdd50cd05c4c367d8827cd350f909900629869b1930c38b235c22",
+  "size_bytes": 973,
+  "envelope_version": 1,
+  "correlation_id": "kasumi_test:run_001:art_nexcel_001",
+  "source": {"system": "hashi-test", "session_id": "kasumi_test", "run_id": "run_001"},
+  "created_at": "2026-04-03T00:00:00Z",
+  "updated_at": "2026-04-03T00:00:00Z",
+  "extra": {}
+}

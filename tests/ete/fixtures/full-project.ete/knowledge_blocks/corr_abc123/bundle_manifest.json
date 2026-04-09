@@ -1,0 +1,9 @@
+{
+  "correlation_id": "corr_abc123",
+  "source_path": "test_paper.pdf",
+  "standard_filename": "TestAuthor_2026_ETE_Test_Paper",
+  "status": "published",
+  "chunk_count": 1,
+  "created_at": "2026-04-03T12:00:00Z",
+  "updated_at": "2026-04-03T12:00:00Z"
+}

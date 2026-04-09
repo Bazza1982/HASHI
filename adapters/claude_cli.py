@@ -36,7 +36,7 @@ class ClaudeCLIAdapter(BaseBackend):
         self._active_read_tasks: list[asyncio.Task] = []
         self.cmd_base = self.global_config.claude_cmd
         self.system_prompt_source = None
-        self.effort = (self.config.extra or {}).get("effort", "low")
+        self.effort = (self.config.extra or {}).get("effort", "medium")
         self.access_root = str(self.config.resolve_access_root())
         # Session persistence for fixed mode
         self._session_id: str | None = None

@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hashi.dev/ete/v1/artefact-meta.schema.json",
+  "title": "ETE Artefact Metadata",
+  "description": "Schema for meta.json within each artefact directory. Describes the artefact payload including type, hash, source provenance, and timestamps.",
+  "type": "object",
+  "required": ["artefact_id", "title", "mime_type", "artefact_type", "size_bytes", "source", "created_at", "updated_at"],
+  "additionalProperties": true,
+  "properties": {
+    "artefact_id": {
+      "type": "string",
+      "description": "Unique identifier for this artefact."
+    },
+    "title": {
+      "type": "string",
+      "description": "Human-readable title of the artefact."
+    },
+    "mime_type": {
+      "type": "string",
+      "description": "MIME type of the payload (e.g. 'application/vnd.hashi.kasumi.nexcel+json')."
+    },
+    "artefact_type": {
+      "type": "string",
+      "description": "Short type label (e.g. 'nexcel', 'wordo', 'pdf')."
+    },
+    "content_hash": {
+      "type": ["string", "null"],
+      "description": "SHA-256 hash of the payload file, prefixed with 'sha256:'. Null if not computed.",
+      "pattern": "^sha256:[a-f0-9]{64}$",
+      "default": null
+    },
+    "size_bytes": {
+      "type": "integer",
+      "description": "Size of the payload file in bytes.",
+      "minimum": 0
+    },
+    "envelope_version": {
+      "type": "integer",
+      "description": "Version of the Kasumi envelope structure. 0 indicates legacy (no envelope).",
+      "default": 0
+    },
+    "correlation_id": {
+      "type": ["string", "null"],
+      "description": "Correlation identifier linking this artefact to a session/run context.",
+      "default": null
+    },
+    "source": {
+      "type": "object",
+      "description": "Provenance information about the system and context that produced this artefact.",
+      "required": ["system"],
+      "additionalProperties": true,
+      "properties": {
+        "system": {
+          "type": "string",
+          "description": "System that produced this artefact (e.g. 'minato', 'veritas')."
+        },
+        "session_id": {
+          "type": "string",
+          "description": "Session identifier within the producing system."
+        },
+        "run_id": {
+          "type": "string",
+          "description": "Run identifier within the session."
+        }
+      }
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp of when the artefact was created."
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp of when the artefact was last updated."
+    },
+    "extra": {
+      "type": "object",
+      "description": "System-specific metadata preserved but not interpreted by ETE.",
+      "additionalProperties": true,
+      "default": {}
+    }
+  }
+}

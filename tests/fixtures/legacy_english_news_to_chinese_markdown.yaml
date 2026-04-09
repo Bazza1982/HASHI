@@ -1,0 +1,123 @@
+workflow_id: english_news_to_chinese_markdown
+version: "1.0"
+description: "将英文新闻文章翻译为中文 Markdown，完全自动化流程"
+
+workers:
+  - id: translator_01
+    model: claude-opus-4-6
+    role: translator
+    description: "核心翻译、预处理、格式化模块"
+    max_attempts: 2
+    timeout_seconds: 600
+
+  - id: quality_checker_01
+    model: claude-sonnet-4-6
+    role: quality_reviewer
+    description: "质量检查与最终验证模块"
+    max_attempts: 2
+    timeout_seconds: 300
+
+tasks:
+  - id: input_validation
+    worker: translator_01
+    step: 1
+    name: "输入文件验证"
+    description: "验证英文新闻文章格式、编码、内容完整性"
+    input_binding:
+      source_article: "${workflow.input.source_article}"
+    output_binding:
+      validated_content: "output"
+    error_policy: "fail_fast"
+
+  - id: text_preprocessing
+    worker: translator_01
+    step: 2
+    name: "文本预处理与术语提取"
+    description: "识别新闻结构，提取术语表，准备翻译数据"
+    depends_on: [input_validation]
+    input_binding:
+      content: "${tasks.input_validation.output}"
+    output_binding:
+      preprocessed_data: "output"
+
+  - id: core_translation
+    worker: translator_01
+    step: 3
+    name: "核心翻译"
+    description: "执行英→中翻译，保留原有逻辑结构和信息完整性"
+    depends_on: [text_preprocessing]
+    input_binding:
+      preprocessed: "${tasks.text_preprocessing.output}"
+    output_binding:
+      translated_content: "output"
+    config:
+      translation_style: "natural_flow"
+      terminology_guide: "${tasks.text_preprocessing.output.terminology_table}"
+
+  - id: markdown_formatting
+    worker: translator_01
+    step: 4
+    name: "Markdown 格式化"
+    description: "应用 Markdown 语法（标题、链接、代码块等），确保格式完整"
+    depends_on: [core_translation]
+    input_binding:
+      translated: "${tasks.core_translation.output}"
+    output_binding:
+      formatted_output: "output"
+    config:
+      markdown_dialect: "github_flavored"
+      include_metadata: true
+
+  - id: quality_assessment
+    worker: quality_checker_01
+    step: 5
+    name: "质量检查与输出验证"
+    description: "检查流畅度、准确性、格式完整性；验证输出文件有效性"
+    depends_on: [markdown_formatting]
+    input_binding:
+      content: "${tasks.markdown_formatting.output}"
+      original_article: "${workflow.input.source_article}"
+    output_binding:
+      final_output: "output"
+    config:
+      quality_threshold: 0.85
+      auto_fix_minor_issues: true
+
+  - id: output_export
+    worker: quality_checker_01
+    step: 6
+    name: "输出导出"
+    description: "生成最终 Markdown 文件，保证编码正确（UTF-8）"
+    depends_on: [quality_assessment]
+    input_binding:
+      final_content: "${tasks.quality_assessment.output}"
+    output_binding:
+      exported_file: "output"
+    config:
+      output_format: "markdown"
+      encoding: "utf-8"
+      file_naming: "${workflow.input.article_id}-translated.md"
+
+error_handling:
+  default_strategy: "fail_fast"
+  retry_policy:
+    max_attempts: 2
+    backoff_multiplier: 1.5
+    max_delay_seconds: 30
+  debug_on_failure: true
+  debug_agent: null
+
+workflow_triggers:
+  - event: "manual_execution"
+    description: "用户手动触发，需提供 source_article 参数"
+
+workflow_outputs:
+  - id: markdown_file
+    source: "${tasks.output_export.output.exported_file}"
+    type: "file"
+    description: "最终的中文 Markdown 文件"
+
+  - id: translation_report
+    source: "${tasks.quality_assessment.output.quality_metrics}"
+    type: "json"
+    description: "翻译质量报告和统计信息"

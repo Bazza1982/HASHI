@@ -1,0 +1,93 @@
+name: nagare-smoke
+
+on:
+  push:
+    paths:
+      - "nagare/**"
+      - "flow/adapters/**"
+      - "flow/engine/**"
+      - "tests/contract/**"
+      - "tests/fixtures/**"
+      - "docs/HANDLER_GUIDE.md"
+      - "docs/ADAPTER_GUIDE.md"
+      - "docs/INSTALL.md"
+      - "docs/LOGGING.md"
+      - "pyproject.toml"
+      - "setup.py"
+      - ".github/workflows/nagare-smoke.yml"
+      - "nagare-viz/**"
+  pull_request:
+    paths:
+      - "nagare/**"
+      - "flow/adapters/**"
+      - "flow/engine/**"
+      - "tests/contract/**"
+      - "tests/fixtures/**"
+      - "docs/HANDLER_GUIDE.md"
+      - "docs/ADAPTER_GUIDE.md"
+      - "docs/INSTALL.md"
+      - "docs/LOGGING.md"
+      - "pyproject.toml"
+      - "setup.py"
+      - ".github/workflows/nagare-smoke.yml"
+      - "nagare-viz/**"
+
+jobs:
+  python-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build pytest
+
+      - name: Build package
+        run: python -m build
+
+      - name: Install built wheel
+        run: |
+          python -m venv .venv-smoke
+          . .venv-smoke/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install dist/*.whl
+
+      - name: CLI smoke run
+        run: |
+          . .venv-smoke/bin/activate
+          nagare run tests/fixtures/smoke_test.yaml --yes --silent --smoke-handler --output smoke-result.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          payload = json.loads(Path("smoke-result.json").read_text(encoding="utf-8"))
+          assert payload["success"] is True
+          assert set(payload["completed_steps"]) == {"step_write", "step_check"}
+          PY
+
+      - name: Contract tests
+        run: pytest -q tests/contract
+
+  viz-smoke:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: nagare-viz
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: nagare-viz/package-lock.json
+
+      - name: Install frontend deps
+        run: npm ci
+
+      - name: Build nagare-viz
+        run: npm run build

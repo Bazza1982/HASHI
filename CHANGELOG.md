@@ -7,9 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [3.0.0-alpha] - 2026-04-01
+## [3.0.0-alpha] - 2026-04-04
 
 ### ✨ Added
+
+#### Core Features
+- **Ollama Local LLM Support** — agents can now use locally-hosted LLMs via Ollama
+  - Per-engine memory injection tuning — smaller models get smaller context (`ollama-api`: 4 recent turns + 2 memories vs. `claude-cli`: 10 + 6)
+  - Intelligent context scaling based on model size and performance characteristics
 
 - **TUI Onboarding — first-run setup inside the terminal UI** (`tui_onboarding.py`, `windows/TUI_onboarding.bat`)
   - New standalone entry point that replaces the old `onboarding/onboarding_main.py` flow for users with a pre-configured `agents.json`.
@@ -27,7 +32,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `tui/app.py` extended with `onboarding_mode` parameter; existing TUI behavior unchanged when launched via `start_tui.bat`
   - USB packaging (`prepare_usb.bat`) picks up all new files automatically — no packaging changes needed
 
----
+#### Habit-Based Self-Improvement System
+- **Phase 5 habit evaluation dashboard** — richer evaluation summaries across agents, classes, and backends
+  - `orchestrator/habits.py` now computes Wilson-style evidence quality, aggregates task/class/backend dashboard buckets, tracks timestamp-source coverage, and exports dashboard artifacts.
+  - `scripts/habit_recommendations.py` adds a `dashboard` command and now prints dashboard artifact paths from `report`.
+  - `skills/habits/` now exposes `/skill habits dashboard` as a bridge-native read-only surface.
+  - `workspaces/lily/habit_reports/dashboard.md` and `workspaces/lily/habit_reports/dashboard.json` are exported on each report refresh.
+
+- **Phase 4 habit governance surfaces** — shared pattern / protocol registry added to the habit system
+  - `orchestrator/habits.py` now persists `shared_patterns` and `shared_pattern_changes`, supports promotion/retirement workflows, and exports a stable registry document.
+  - `scripts/habit_recommendations.py` adds `shared-list`, `shared-promote`, and `shared-retire` commands for CLI governance.
+  - `skills/habits/` now exposes bridge-native shared registry operations, with Lily-only enforcement for `shared promote` and `shared retire`.
+  - `workspaces/lily/habit_reports/shared_registry.md` is exported as the readable registry view for promoted shared patterns / protocols.
+
+#### Workflow & Tooling
+- **Minato MCP integration (8-tier architecture)**
+  - KASUMI tool delegation, artefact tools, project & Nagare tools, project action logging
+  - Workbench UI enhancements for workflow visualization and project logging
+
+- **Token audit system** — accurate token consumption tracking and cost analysis
+- **Dream system improvements** — mtime gate, habits instant-active processing
+- **Nagare-viz** — interactive workflow canvas and configuration panel
+- **Obsidian MCP** — knowledge vault integration
 
 ## [2.0.0] - 2026-03-23
 
@@ -111,6 +137,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### ✨ Added
 
 - **`/dream` skill — nightly AI memory consolidation** (`skills/dream/`): agents can now "dream" at 01:30 daily, using an LLM to reflect on the day's transcript, extract important memories into `bridge_memory.sqlite`, and optionally update `AGENT.md` with behavioral insights. Includes snapshot-based `/skill dream undo` (no LLM required) for morning rollback, a persistent `dream_log.md`, and on/off toggle via `tasks.json` cron with `action: "skill:dream"`.
+- **`/skill habits` — habit recommendation governance surface** (`skills/habits/`): bridge-native entry for regenerating Lily habit reports, listing copy recommendations, and Lily-only approve/reject/apply actions for cross-agent habit copying.
 
 ### 🔧 Fixed
 
@@ -286,7 +313,7 @@ Special thanks to [OpenClaw] by Peter Steinberg for inspiration and foundational
 
 ---
 
-## [Unreleased] — v1.1-upgrades branch
+## [v1.1-upgrades branch snapshot]
 
 ### ✨ Added
 
@@ -342,5 +369,3 @@ Special thanks to [OpenClaw] by Peter Steinberg for inspiration and foundational
 ---
 
 ## [1.0.1] - 2026-03-15
-
-

@@ -47,3 +47,6 @@ vector = [
 Homepage = "https://github.com/Bazza1982/hashi"
 Repository = "https://github.com/Bazza1982/hashi"
 Issues = "https://github.com/Bazza1982/hashi/issues"
+
+[project.scripts]
+nagare = "nagare.cli:main"

@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hashi.dev/ete/v1/ete-manifest.schema.json",
+  "title": "ETE Manifest",
+  "description": "Schema for ete.json, the required manifest file in every ETE bundle. Declares the bundle version, producer, and which content sections are present.",
+  "type": "object",
+  "required": ["ete_version", "producer", "produced_at", "contents"],
+  "additionalProperties": true,
+  "properties": {
+    "ete_version": {
+      "type": "string",
+      "description": "Semantic version of the ETE spec used to produce this bundle.",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "producer": {
+      "type": "object",
+      "description": "Identity of the system that produced this bundle.",
+      "required": ["system", "version"],
+      "additionalProperties": true,
+      "properties": {
+        "system": {
+          "type": "string",
+          "description": "Producing system identifier (e.g. 'veritas', 'minato')."
+        },
+        "version": {
+          "type": "string",
+          "description": "Version of the producing system."
+        }
+      }
+    },
+    "produced_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp of when the bundle was exported."
+    },
+    "contents": {
+      "type": "array",
+      "description": "Which top-level sections are present in this bundle.",
+      "items": {
+        "type": "string",
+        "enum": ["project", "tasks", "artefacts", "workflows", "knowledge_blocks"]
+      },
+      "uniqueItems": true
+    }
+  }
+}

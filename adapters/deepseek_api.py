@@ -28,6 +28,7 @@ class DeepSeekAdapter(OpenRouterAdapter):
         }
         if use_streaming:
             payload["stream"] = True
+            payload["stream_options"] = {"include_usage": True}
         if self.tool_registry:
             tiers = self.DEFAULT_TOOL_TIERS if tool_tiers is ... else tool_tiers
             tool_defs = self.tool_registry.get_tool_definitions(tiers=tiers)
@@ -61,12 +62,27 @@ class DeepSeekAdapter(OpenRouterAdapter):
                 await on_stream_event(StreamEvent(kind=KIND_THINKING, summary=reasoning[:400]))
 
         tool_calls = message.get("tool_calls") or None
-        return _APIResult(text=ai_text, tool_calls=tool_calls, finish_reason=finish_reason)
+
+        # Extract real token usage from DeepSeek API response
+        usage = data.get("usage") or {}
+        prompt_tokens = usage.get("prompt_tokens", 0)
+        completion_tokens = usage.get("completion_tokens", 0)
+        # DeepSeek reports thinking tokens in prompt_tokens_details or completion_tokens_details
+        thinking_tokens = 0
+        comp_details = usage.get("completion_tokens_details") or {}
+        thinking_tokens = comp_details.get("reasoning_tokens", 0)
+
+        return _APIResult(
+            text=ai_text, tool_calls=tool_calls, finish_reason=finish_reason,
+            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+            thinking_tokens=thinking_tokens,
+        )
 
     async def _stream_api_once(self, payload, headers, on_stream_event) -> _APIResult:
         text_chunks: list[str] = []
         tool_calls_acc: dict[int, dict] = {}
         finish_reason = "stop"
+        stream_usage: dict = {}
 
         async with self.client.stream("POST", _DEEPSEEK_URL, json=payload, headers=headers) as response:
             response.raise_for_status()
@@ -83,6 +99,9 @@ class DeepSeekAdapter(OpenRouterAdapter):
                     data = json.loads(data_str)
                 except json.JSONDecodeError:
                     continue
+
+                if data.get("usage"):
+                    stream_usage = data["usage"]
 
                 choices = data.get("choices", [])
                 if not choices:
@@ -127,7 +146,13 @@ class DeepSeekAdapter(OpenRouterAdapter):
 
         full_text = "".join(text_chunks)
         tool_calls = list(tool_calls_acc.values()) if tool_calls_acc else None
-        return _APIResult(text=full_text, tool_calls=tool_calls, finish_reason=finish_reason)
+        comp_details = stream_usage.get("completion_tokens_details") or {}
+        return _APIResult(
+            text=full_text, tool_calls=tool_calls, finish_reason=finish_reason,
+            prompt_tokens=stream_usage.get("prompt_tokens", 0),
+            completion_tokens=stream_usage.get("completion_tokens", 0),
+            thinking_tokens=comp_details.get("reasoning_tokens", 0),
+        )
 
     async def generate_response(self, prompt, request_id, is_retry=False, silent=False, on_stream_event=None):
         # Inject DeepSeek headers instead of OpenRouter's
@@ -145,6 +170,11 @@ class DeepSeekAdapter(OpenRouterAdapter):
         headers = self._deepseek_headers()
         last_text = ""
         result = None
+        total_prompt = 0
+        total_completion = 0
+        total_thinking = 0
+        total_tool_calls = 0
+        tool_loop_count = 0
 
         try:
             self._touch_activity()
@@ -155,10 +185,16 @@ class DeepSeekAdapter(OpenRouterAdapter):
                 else:
                     result = await self._call_api_once(payload, headers, on_stream_event)
 
+                total_prompt += result.prompt_tokens
+                total_completion += result.completion_tokens
+                total_thinking += result.thinking_tokens
+
                 last_text = result.text
                 if not result.tool_calls or not self.tool_registry:
                     break
 
+                tool_loop_count += 1
+                total_tool_calls += len(result.tool_calls)
                 assistant_msg: dict = {"role": "assistant"}
                 if result.text:
                     assistant_msg["content"] = result.text
@@ -169,13 +205,21 @@ class DeepSeekAdapter(OpenRouterAdapter):
                 if loop_idx == max_loops - 1:
                     self.logger.warning(f"Tool loop limit ({max_loops}) reached for {request_id}")
 
-            from adapters.base import BackendResponse
+            from adapters.base import BackendResponse, TokenUsage
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
+            usage = TokenUsage(
+                input_tokens=total_prompt,
+                output_tokens=total_completion,
+                thinking_tokens=total_thinking,
+            ) if (total_prompt or total_completion) else None
             return BackendResponse(
                 text=last_text,
                 duration_ms=duration_ms,
                 is_success=True,
                 stop_reason=result.finish_reason if result else "stop",
+                usage=usage,
+                tool_call_count=total_tool_calls,
+                tool_loop_count=tool_loop_count,
             )
 
         except Exception as e:

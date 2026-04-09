@@ -30,6 +30,9 @@ class _APIResult:
     text: str
     tool_calls: Optional[list]   # None = no tool calls, just text
     finish_reason: str
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    thinking_tokens: int = 0
 
 
 class OpenRouterAdapter(BaseBackend):
@@ -125,6 +128,7 @@ class OpenRouterAdapter(BaseBackend):
             payload["reasoning"] = {"enabled": True, "exclude": False}
         if use_streaming:
             payload["stream"] = True
+            payload["stream_options"] = {"include_usage": True}
         if self.tool_registry:
             tiers = self.DEFAULT_TOOL_TIERS if tool_tiers is ... else tool_tiers
             tool_defs = self.tool_registry.get_tool_definitions(tiers=tiers)
@@ -247,7 +251,18 @@ class OpenRouterAdapter(BaseBackend):
                     )
 
         tool_calls = message.get("tool_calls") or None
-        return _APIResult(text=ai_text, tool_calls=tool_calls, finish_reason=finish_reason)
+
+        # Extract real token usage from API response
+        usage = data.get("usage") or {}
+        prompt_tokens = usage.get("prompt_tokens", 0)
+        completion_tokens = usage.get("completion_tokens", 0)
+        thinking_tokens = usage.get("thinking_tokens", 0)
+
+        return _APIResult(
+            text=ai_text, tool_calls=tool_calls, finish_reason=finish_reason,
+            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+            thinking_tokens=thinking_tokens,
+        )
 
     # ------------------------------------------------------------------
     # Streaming single API call (accumulates tool_calls deltas)
@@ -263,6 +278,7 @@ class OpenRouterAdapter(BaseBackend):
         # tool_calls_acc: dict[int, dict] indexed by tool call index
         tool_calls_acc: dict[int, dict] = {}
         finish_reason = "stop"
+        stream_usage: dict = {}  # usage from final streaming chunk
 
         async with self.client.stream(
             "POST",
@@ -285,6 +301,10 @@ class OpenRouterAdapter(BaseBackend):
                     data = json.loads(data_str)
                 except json.JSONDecodeError:
                     continue
+
+                # Capture usage from streaming chunks (sent in final chunk)
+                if data.get("usage"):
+                    stream_usage = data["usage"]
 
                 choices = data.get("choices", [])
                 if not choices:
@@ -338,7 +358,12 @@ class OpenRouterAdapter(BaseBackend):
 
         full_text = "".join(text_chunks)
         tool_calls = list(tool_calls_acc.values()) if tool_calls_acc else None
-        return _APIResult(text=full_text, tool_calls=tool_calls, finish_reason=finish_reason)
+        return _APIResult(
+            text=full_text, tool_calls=tool_calls, finish_reason=finish_reason,
+            prompt_tokens=stream_usage.get("prompt_tokens", 0),
+            completion_tokens=stream_usage.get("completion_tokens", 0),
+            thinking_tokens=stream_usage.get("thinking_tokens", 0),
+        )
 
     # ------------------------------------------------------------------
     # Main generate_response with tool loop
@@ -370,6 +395,12 @@ class OpenRouterAdapter(BaseBackend):
         }
 
         last_text = ""
+        # Accumulate token usage across all tool loops
+        total_prompt = 0
+        total_completion = 0
+        total_thinking = 0
+        total_tool_calls = 0
+        tool_loop_count = 0
 
         try:
             self._touch_activity()
@@ -382,12 +413,19 @@ class OpenRouterAdapter(BaseBackend):
                 else:
                     result = await self._call_api_once(payload, headers, on_stream_event)
 
+                # Accumulate usage from each API call
+                total_prompt += result.prompt_tokens
+                total_completion += result.completion_tokens
+                total_thinking += result.thinking_tokens
+
                 last_text = result.text
 
                 # No tool calls — we're done
                 if not result.tool_calls or not self.tool_registry:
                     break
 
+                tool_loop_count += 1
+                total_tool_calls += len(result.tool_calls)
                 self.logger.debug(
                     f"Tool loop {loop_idx + 1}/{max_loops}: "
                     f"{len(result.tool_calls)} tool call(s)"
@@ -415,11 +453,20 @@ class OpenRouterAdapter(BaseBackend):
                         )
 
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
+            from adapters.base import TokenUsage
+            usage = TokenUsage(
+                input_tokens=total_prompt,
+                output_tokens=total_completion,
+                thinking_tokens=total_thinking,
+            ) if (total_prompt or total_completion) else None
             return BackendResponse(
                 text=last_text,
                 duration_ms=duration_ms,
                 is_success=True,
                 stop_reason=result.finish_reason if "result" in dir() else "stop",
+                usage=usage,
+                tool_call_count=total_tool_calls,
+                tool_loop_count=tool_loop_count,
             )
 
         except asyncio.CancelledError:
