@@ -25,6 +25,7 @@ This directory contains developer documentation and operational notes for HASHI.
 - [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md) — Release-readiness gate for package and editor
 - [KNOWN_LIMITATIONS_NAGARE.md](KNOWN_LIMITATIONS_NAGARE.md) — Current standalone limitations
 - [RELEASE_NOTES_NAGARE_v0.1.0.md](RELEASE_NOTES_NAGARE_v0.1.0.md) — Initial extracted-package release notes
+- [KASUMI_MCP_SERVER_PLAN.md](KASUMI_MCP_SERVER_PLAN.md) — Architecture and upgrade plan for a unified Kasumi MCP server spanning Nexcel, Wordo, and future modules
 
 ### Installation
 - [INSTALL.md](INSTALL.md) — Standard installation guide

@@ -8,6 +8,7 @@
     "dev:client": "vite --host 127.0.0.1", 
     "dev:server": "node --env-file=.env --watch server/index.js",
     "build": "vite build",
+    "test:server": "node --test server/*.test.js",
     "preview": "vite preview"
   },
   "dependencies": {

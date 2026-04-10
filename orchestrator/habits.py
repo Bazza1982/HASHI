@@ -1501,7 +1501,7 @@ class HabitStore:
                                 habit_id, agent_id, agent_class, status, habit_type,
                                 title, instruction, rationale, source, confidence,
                                 created_at, updated_at
-                            ) VALUES (?, ?, ?, 'candidate', ?, ?, ?, ?, 'user_signal', 0.5, ?, ?)
+                            ) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, 'user_signal', 0.8, ?, ?)
                             """,
                             (
                                 habit_id,

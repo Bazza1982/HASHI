@@ -631,6 +631,10 @@ TOOL_SCHEMAS = [
     },
 ]
 
+# ------------------------------------------------------------------ obsidian
+from tools.obsidian_mcp.schemas import OBSIDIAN_TOOL_SCHEMAS
+TOOL_SCHEMAS.extend(OBSIDIAN_TOOL_SCHEMAS)
+
 # Map tool name -> schema for quick lookup
 TOOL_SCHEMA_MAP = {s["function"]["name"]: s for s in TOOL_SCHEMAS}
 

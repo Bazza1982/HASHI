@@ -17,6 +17,7 @@ Environment (set by bridge skill runner):
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -372,7 +373,33 @@ def _delete_memories_by_ids(ids: list[int]):
 
 # ─── snapshot ─────────────────────────────────────────────────────────────────
 
-def _save_snapshot(added_memory_ids: list[int], agent_md_before: str | None, dream_date: str | None = None) -> Path:
+def _compute_turns_hash(turns: list[dict]) -> str:
+    """Compute a content hash of transcript turns to detect stale/unchanged content."""
+    content = "".join(f"{t.get('role','')}:{t.get('text','')}" for t in turns)
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+
+
+def _get_latest_snapshot_path() -> Path | None:
+    """Return the path to the most recent dream snapshot, or None."""
+    if not DREAM_DIR.exists():
+        return None
+    snapshots = sorted(DREAM_DIR.glob("dream_*.json"), reverse=True)
+    return snapshots[0] if snapshots else None
+
+
+def _get_last_dream_turns_hash() -> str | None:
+    """Read the turns_hash from the most recent dream snapshot."""
+    snap_path = _get_latest_snapshot_path()
+    if not snap_path:
+        return None
+    try:
+        snap = json.loads(snap_path.read_text(encoding="utf-8"))
+        return snap.get("turns_hash")
+    except Exception:
+        return None
+
+
+def _save_snapshot(added_memory_ids: list[int], agent_md_before: str | None, dream_date: str | None = None, turns_hash: str | None = None) -> Path:
     DREAM_DIR.mkdir(exist_ok=True)
     date_label = dream_date or _today_str()
     snapshot = {
@@ -380,6 +407,7 @@ def _save_snapshot(added_memory_ids: list[int], agent_md_before: str | None, dre
         "ts": _now_iso(),
         "agent_md_before": agent_md_before,
         "added_memory_ids": added_memory_ids,
+        "turns_hash": turns_hash,
     }
     path = DREAM_DIR / f"dream_{date_label}.json"
     path.write_text(json.dumps(snapshot, indent=2, ensure_ascii=False))
@@ -513,6 +541,26 @@ def cmd_now(is_scheduled: bool = False) -> str:
         return (
             f"🌙 Dream skipped — not enough conversation on {dream_date} to reflect on "
             f"(found {len(turns)} turns, need at least 4)."
+        )
+
+    # Stale content gate 1: skip if transcript file hasn't been modified since last dream snapshot
+    last_snapshot = _get_latest_snapshot_path()
+    if last_snapshot and TRANSCRIPT_PATH.exists():
+        transcript_mtime = TRANSCRIPT_PATH.stat().st_mtime
+        snapshot_mtime = last_snapshot.stat().st_mtime
+        if transcript_mtime < snapshot_mtime:
+            return (
+                f"🌙 Dream skipped — no new activity since last dream on {dream_date} "
+                f"(transcript not modified since last dream)."
+            )
+
+    # Stale content gate 2: skip if transcript content hash is identical to last dream
+    current_hash = _compute_turns_hash(turns)
+    last_hash = _get_last_dream_turns_hash()
+    if current_hash == last_hash:
+        return (
+            f"🌙 Dream skipped — no new activity since last dream on {dream_date} "
+            f"(transcript unchanged, hash={current_hash[:8]})."
         )
 
     # Build transcript excerpt (cap at ~6000 chars to stay within context)
@@ -655,7 +703,7 @@ RULES (follow strictly):
             agent_md_updated = True
 
     # Save snapshot for undo
-    _save_snapshot(added_memory_ids, agent_md_before, dream_date=dream_date)
+    _save_snapshot(added_memory_ids, agent_md_before, dream_date=dream_date, turns_hash=current_hash)
 
     # Append to dream log
     _append_dream_log(dream_date, reflection_summary, len(valid_memories), agent_md_updated)

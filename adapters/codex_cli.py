@@ -21,7 +21,7 @@ class CodexCLIAdapter(BaseBackend):
 
     def _define_capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
-            supports_sessions=False,
+            supports_sessions=True,
             supports_files=True,
             supports_tool_use=True,
             supports_thinking_stream=True,
@@ -39,6 +39,8 @@ class CodexCLIAdapter(BaseBackend):
             self.cmd_base = f"{self.cmd_base}.cmd"
         self.access_root = str(self.config.resolve_access_root())
         self.events_log_path = self.config.workspace_dir / "codex_exec_events.jsonl"
+        # Persistent session state
+        self._session_id: str | None = None
 
     def _should_use_stdin_transport(self, prompt: str) -> bool:
         if "\n" in prompt or "\r" in prompt:
@@ -75,7 +77,13 @@ class CodexCLIAdapter(BaseBackend):
             return False
 
     async def handle_new_session(self) -> bool:
-        self.logger.info("Codex backend is stateless. /new acknowledged.")
+        """Clear session ID so the next request starts a fresh codex session."""
+        old_id = self._session_id
+        self._session_id = None
+        if old_id:
+            self.logger.info(f"Codex session cleared (was {old_id[:8]}…). Next request starts fresh.")
+        else:
+            self.logger.info("Codex handle_new_session: no active session, nothing to clear.")
         return True
 
     def should_bootstrap_on_startup(self) -> bool:
@@ -254,6 +262,34 @@ class CodexCLIAdapter(BaseBackend):
         self._emit_stream_event(se, on_stream_event)
         return pending_agent_message
 
+    def _build_cmd(self, prompt_arg: str, output_path: Path) -> list[str]:
+        """Build the codex exec command. Uses 'resume' sub-command if a session exists.
+
+        Note: 'codex exec resume' supports fewer flags than 'codex exec' — notably
+        it does NOT support --add-dir (the session already has the access root from
+        the original exec call that created it).
+        """
+        base_flags = [
+            "--skip-git-repo-check",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--json",
+            "--output-last-message", str(output_path),
+        ]
+        if self.config.model and self.config.model != "default":
+            base_flags += ["--model", self.config.model]
+        if self.effort:
+            base_flags += ["-c", f'model_reasoning_effort="{self.effort}"']
+
+        if self._session_id:
+            # Resume existing session — access root already set in session, no --add-dir needed
+            cmd = [self.cmd_base, "exec", "resume", self._session_id] + base_flags
+        else:
+            # First turn: start a new persistent session (no --ephemeral), include --add-dir
+            cmd = [self.cmd_base, "exec", "--add-dir", self.access_root] + base_flags
+
+        cmd += ["--", prompt_arg]
+        return cmd
+
     async def generate_response(
         self, prompt: str, request_id: str, is_retry: bool = False, silent: bool = False,
         on_stream_event: StreamCallback = None,
@@ -273,30 +309,14 @@ class CodexCLIAdapter(BaseBackend):
                 f"Prompt for {request_id} requires stdin transport; sending full prompt via stdin."
             )
 
-        cmd = [
-            self.cmd_base,
-            "exec",
-            "--skip-git-repo-check",
-            "--dangerously-bypass-approvals-and-sandbox",
-            "--add-dir",
-            self.access_root,
-            "--ephemeral",
-            "--json",
-            "--output-last-message",
-            str(output_path),
-        ]
-
-        if self.config.model and self.config.model != "default":
-            cmd += ["--model", self.config.model]
-        if self.effort:
-            cmd += ["-c", f'model_reasoning_effort="{self.effort}"']
-
-        cmd += ["--", prompt_arg]
+        cmd = self._build_cmd(prompt_arg, output_path)
+        session_mode = "resume" if self._session_id else "new"
 
         try:
             self.logger.info(
                 f"Launching Codex request {request_id} "
-                f"(stateless=True, retry={is_retry}, stdin={stdin_data is not None}, "
+                f"(session={session_mode}, session_id={self._session_id or 'none'}, "
+                f"retry={is_retry}, stdin={stdin_data is not None}, "
                 f"prompt_len={len(built_prompt)}, cwd={self.config.workspace_dir})"
             )
             _extra_kwargs = {}
@@ -323,10 +343,12 @@ class CodexCLIAdapter(BaseBackend):
             stderr_chunks: list[bytes] = []
             timeout_kind: str | None = None
             pending_agent_message: dict | None = None
+            captured_thread_id: str | None = None
 
             async def _read_stdout():
                 nonlocal pending_agent_message
                 nonlocal timeout_kind
+                nonlocal captured_thread_id
                 while True:
                     try:
                         line = await proc.stdout.readline()
@@ -347,6 +369,14 @@ class CodexCLIAdapter(BaseBackend):
                     self._touch_activity()
                     decoded = line.decode(errors="replace")
                     stdout_lines.append(decoded)
+                    # Capture thread_id from the first thread.started event
+                    if captured_thread_id is None:
+                        try:
+                            event = json.loads(decoded)
+                            if event.get("type") == "thread.started" and event.get("thread_id"):
+                                captured_thread_id = event["thread_id"]
+                        except (json.JSONDecodeError, KeyError):
+                            pass
                     pending_agent_message = self._parse_codex_event(
                         decoded,
                         on_stream_event,
@@ -435,6 +465,14 @@ class CodexCLIAdapter(BaseBackend):
                 if not err_msg:
                     err_msg = "".join(stdout_lines).strip() or "Codex CLI exited with a non-zero status."
                 return BackendResponse(text="", duration_ms=duration_ms, error=err_msg, is_success=False)
+
+            # Persist the session ID from this turn so the next request can resume it
+            if captured_thread_id and captured_thread_id != self._session_id:
+                self.logger.info(
+                    f"Codex session established: {captured_thread_id} "
+                    f"(was: {self._session_id or 'none'})"
+                )
+                self._session_id = captured_thread_id
 
             response = ""
             if output_path.exists():

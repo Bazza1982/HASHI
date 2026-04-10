@@ -942,7 +942,13 @@ class UniversalOrchestrator:
         main_logger.info(f"Hot restart: starting agents: {targets}")
         try:
             _, agent_configs, _ = self._load_config_bundle()
-            inactive_agent_names = [cfg.name for cfg in agent_configs if cfg.name not in targets]
+            active_config_names = {cfg.name for cfg in agent_configs}
+            # Agents that were running but have since been deactivated — skip them
+            newly_inactive = [name for name in targets if name not in active_config_names]
+            targets = [name for name in targets if name in active_config_names]
+            for name in newly_inactive:
+                boot_state.pop(name, None)
+            inactive_agent_names = [cfg.name for cfg in agent_configs if cfg.name not in targets] + newly_inactive
         except Exception as e:
             main_logger.error(f"Hot restart: config reload failed: {e}")
             inactive_agent_names = []

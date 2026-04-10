@@ -117,6 +117,8 @@ class FlexibleAgentRuntime:
         self.recent_context_path = self.workspace_dir / "recent_context.jsonl"
         self.handoff_path = self.workspace_dir / "handoff.md"
         self.state_path = self.workspace_dir / "state.json"
+        from orchestrator.project_chat_logger import ProjectChatLogger
+        self.project_chat_logger = ProjectChatLogger(self.workspace_dir)
         self.runtime_session_path = self.workspace_dir / ".runtime_session.json"
         self.transfer_state_path = self.workspace_dir / "active_transfer.json"
         self._cos_enabled: bool = (self.workspace_dir / ".cos_on").exists()
@@ -465,6 +467,22 @@ class FlexibleAgentRuntime:
             if backend.get("engine") == self.config.active_backend:
                 return backend.get("model", "unknown")
         return "unknown"
+
+    def _get_system_prompt_text(self) -> str:
+        """Return combined system prompt text for token estimation (CLI backends)."""
+        parts = []
+        try:
+            md_path = getattr(self.config, "system_md", None)
+            if md_path and Path(md_path).exists():
+                parts.append(Path(md_path).read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        try:
+            for text in self.sys_prompt_manager.get_active_texts():
+                parts.append(text)
+        except Exception:
+            pass
+        return "\n".join(parts)
 
     def get_runtime_metadata(self) -> dict:
         return {
@@ -1215,28 +1233,76 @@ class FlexibleAgentRuntime:
         )
 
     async def _hchat_route_reply(self, item, response_text: str):
-        """If this request was an hchat message, route the reply back to the sender."""
-        import re
-        match = re.match(r"^\[hchat from (\w+)\]", item.prompt)
+        """Route hchat reply back to the sender.
+
+        Supports both [hchat from name] and [hchat from name@INSTANCE] header formats.
+        Priority:
+        1. Local runtime (same orchestrator) — enqueue_api_text.
+        2. contacts.json entry (external caller such as Minato) — HTTP POST.
+        3. Cross-instance delivery via send_hchat.
+        """
+        # Accept both [hchat from name] and [hchat from name@INSTANCE]
+        match = re.match(r"^\[hchat from (\w+)(?:@\w+)?\]", item.prompt)
         if not match:
             return
         sender_name = match.group(1).lower()
+        reply_text = response_text
+
+        # ── 1. Try local runtime first ────────────────────────────────────────
         orchestrator = getattr(self, "orchestrator", None)
-        if orchestrator is None:
-            return
-        for rt in getattr(orchestrator, "runtimes", []):
-            if getattr(rt, "name", "") == sender_name and hasattr(rt, "enqueue_api_text"):
-                try:
-                    await rt.enqueue_api_text(
-                        f"[hchat reply from {self.name}] {response_text}",
-                        source=f"hchat-reply:{self.name}",
-                        deliver_to_telegram=True,
-                    )
-                    self.logger.info(f"Hchat reply routed back to {sender_name}")
-                except Exception as e:
-                    self.logger.warning(f"Failed to route hchat reply to {sender_name}: {e}")
+        if orchestrator:
+            for rt in getattr(orchestrator, "runtimes", []):
+                if getattr(rt, "name", "") == sender_name and hasattr(rt, "enqueue_api_text"):
+                    try:
+                        await rt.enqueue_api_text(
+                            reply_text,
+                            source=f"hchat-reply:{self.name}",
+                            deliver_to_telegram=True,
+                        )
+                        self.logger.info(f"Hchat reply routed to local runtime '{sender_name}'")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to route hchat reply to '{sender_name}': {e}")
+                    return
+
+        # ── 2. Fall back to contacts.json (external callers e.g. Minato) ──────
+        try:
+            from tools.hchat_send import _get_cached_route
+            contact = _get_cached_route(sender_name)
+            if contact:
+                host = contact.get("host") or "127.0.0.1"
+                if host in ("0.0.0.0", "::", ""):
+                    host = "127.0.0.1"
+                wb_port = contact.get("wb_port") or contact.get("port")
+                if wb_port:
+                    url = f"http://{host}:{wb_port}/api/chat"
+                    payload = {
+                        "agent": sender_name,
+                        "text": f"[hchat reply from {self.name}] {reply_text}",
+                    }
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                            if resp.status < 300:
+                                self.logger.info(f"Hchat reply delivered to external '{sender_name}' via {url}")
+                            else:
+                                body = await resp.text()
+                                self.logger.warning(f"Hchat reply to '{sender_name}' got HTTP {resp.status}: {body[:200]}")
+                    return
+        except Exception as e:
+            self.logger.warning(f"Hchat reply: contacts fallback for '{sender_name}' failed: {e}")
+
+        # ── 3. Fall back to cross-instance delivery via send_hchat ────────────
+        try:
+            from tools.hchat_send import send_hchat
+            import functools
+            loop = asyncio.get_event_loop()
+            ok = await loop.run_in_executor(None, functools.partial(send_hchat, sender_name, self.name, reply_text))
+            if ok:
+                self.logger.info(f"Hchat reply cross-instance delivered to '{sender_name}'")
                 return
-        self.logger.warning(f"Hchat reply: sender '{sender_name}' runtime not found")
+        except Exception as e:
+            self.logger.warning(f"Hchat reply: cross-instance delivery to '{sender_name}' failed: {e}")
+
+        self.logger.warning(f"Hchat reply: sender '{sender_name}' not found locally, in contacts, or cross-instance")
 
     async def enqueue_api_media(
         self,
@@ -5739,14 +5805,28 @@ class FlexibleAgentRuntime:
                 }
                 try:
                     from tools.token_tracker import estimate_tokens, record_usage
-                    record_usage(
-                        self.workspace_dir,
-                        model=self.get_current_model(),
-                        backend=self.config.active_backend,
-                        input_tokens=estimate_tokens(item.prompt),
-                        output_tokens=estimate_tokens(display_text or response.text),
-                        session_id=self.session_id_dt,
-                    )
+                    if response.usage:
+                        # Real usage from API backend
+                        record_usage(
+                            self.workspace_dir,
+                            model=self.get_current_model(),
+                            backend=self.config.active_backend,
+                            input_tokens=response.usage.input_tokens,
+                            output_tokens=response.usage.output_tokens,
+                            thinking_tokens=response.usage.thinking_tokens,
+                            session_id=self.session_id_dt,
+                        )
+                    else:
+                        # CLI backend: estimate including system prompt context
+                        sys_prompt_tokens = estimate_tokens(self._get_system_prompt_text())
+                        record_usage(
+                            self.workspace_dir,
+                            model=self.get_current_model(),
+                            backend=self.config.active_backend,
+                            input_tokens=sys_prompt_tokens + estimate_tokens(item.prompt),
+                            output_tokens=estimate_tokens(display_text or response.text),
+                            session_id=self.session_id_dt,
+                        )
                 except Exception:
                     pass
                 memory_user_text = item.prompt
@@ -5759,6 +5839,7 @@ class FlexibleAgentRuntime:
                 self.handoff_builder.append_transcript("user", item.prompt, item.source)
                 self.handoff_builder.append_transcript("assistant", display_text or response.text)
                 self.handoff_builder.refresh_recent_context()
+                self.project_chat_logger.log_exchange(item.prompt, display_text or response.text, item.source)
                 _print_final_response(self.name, display_text or response.text)
                 total_s = (datetime.now() - datetime.fromisoformat(item.created_at)).total_seconds()
                 send_elapsed_s, chunk_count = await self.send_long_message(
@@ -6068,14 +6149,26 @@ class FlexibleAgentRuntime:
                     )
                     try:
                         from tools.token_tracker import estimate_tokens, record_usage
-                        record_usage(
-                            self.workspace_dir,
-                            model=self.get_current_model(),
-                            backend=self.config.active_backend,
-                            input_tokens=estimate_tokens(item.prompt),
-                            output_tokens=estimate_tokens(display_text or response.text),
-                            session_id=self.session_id_dt,
-                        )
+                        if response.usage:
+                            record_usage(
+                                self.workspace_dir,
+                                model=self.get_current_model(),
+                                backend=self.config.active_backend,
+                                input_tokens=response.usage.input_tokens,
+                                output_tokens=response.usage.output_tokens,
+                                thinking_tokens=response.usage.thinking_tokens,
+                                session_id=self.session_id_dt,
+                            )
+                        else:
+                            sys_prompt_tokens = estimate_tokens(self._get_system_prompt_text())
+                            record_usage(
+                                self.workspace_dir,
+                                model=self.get_current_model(),
+                                backend=self.config.active_backend,
+                                input_tokens=sys_prompt_tokens + estimate_tokens(item.prompt),
+                                output_tokens=estimate_tokens(display_text or response.text),
+                                session_id=self.session_id_dt,
+                            )
                     except Exception:
                         pass
                     if not item.silent:
@@ -6098,6 +6191,7 @@ class FlexibleAgentRuntime:
                             self.handoff_builder.append_transcript("user", item.prompt, item.source)
                             self.handoff_builder.append_transcript("assistant", display_text or response.text)
                             self.handoff_builder.refresh_recent_context()
+                            self.project_chat_logger.log_exchange(item.prompt, display_text or response.text, item.source)
                         if not item.deliver_to_telegram:
                             continue
                         # CoS intercept: if /cos on and response ends with ?, route to Lily first

@@ -34,6 +34,7 @@ class TaskState:
             "workflow_id": None,
             "workflow_version": None,
             "workflow_path": None,
+            "meta": {},                 # optional origin: task_id, phase_id, project_id
             "steps": {},
             "human_interventions": [],
             "error_count": 0,
@@ -53,6 +54,26 @@ class TaskState:
             state["workflow_id"] = workflow_id
             state["workflow_version"] = workflow_version
             state["workflow_path"] = workflow_path
+            state["updated_at"] = utc_now()
+            self._write(state)
+
+    def set_origin_meta(
+        self,
+        *,
+        task_id: str | None = None,
+        phase_id: str | None = None,
+        project_id: str | None = None,
+    ):
+        """Record the AIPM origin (task/phase/project) that triggered this run."""
+        with self._lock:
+            state = self._read()
+            meta = state.setdefault("meta", {})
+            if task_id is not None:
+                meta["task_id"] = task_id
+            if phase_id is not None:
+                meta["phase_id"] = phase_id
+            if project_id is not None:
+                meta["project_id"] = project_id
             state["updated_at"] = utc_now()
             self._write(state)
 

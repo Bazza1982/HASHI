@@ -1,0 +1,25 @@
+{"ts":"2026-04-05T11:48:58.122Z","tool":"project_list","ok":true,"session_id":"::ffff:127.0.0.1|node","arguments":{}}
+{"ts":"2026-04-05T11:48:58.125Z","tool":"project_get_state","ok":true,"session_id":"::ffff:127.0.0.1|node","arguments":{"project":"Minato MCP E2E Project"}}
+{"ts":"2026-04-05T11:48:58.130Z","tool":"project_switch","ok":true,"session_id":"sess-minato-mcp-e2e","arguments":{"project":"Minato MCP E2E Project"}}
+{"ts":"2026-04-05T11:48:58.136Z","tool":"shimanto_get_current_phase","ok":true,"session_id":"sess-minato-mcp-e2e","arguments":{}}
+{"ts":"2026-04-05T11:48:58.142Z","tool":"shimanto_list_phases","ok":true,"session_id":"sess-minato-mcp-e2e","arguments":{}}
+{"ts":"2026-04-05T11:48:58.154Z","tool":"shimanto_transition_phase","ok":true,"session_id":"sess-minato-mcp-e2e","arguments":{"to_phases":["execution"],"note":"E2E transition"}}
+{"ts":"2026-04-05T11:48:58.157Z","tool":"nagare_list_workflows","ok":true,"session_id":"sess-minato-mcp-e2e","arguments":{}}
+{"ts":"2026-04-05T11:48:58.161Z","tool":"nagare_get_workflow_dag","ok":true,"session_id":"::ffff:127.0.0.1|node","arguments":{"workflow_id":"smoke-test"}}
+{"ts":"2026-04-05T11:48:58.165Z","tool":"nagare_get_run_status","ok":true,"session_id":"::ffff:127.0.0.1|node","arguments":{"workflow_id":"smoke-test","run_id":"run-smoke-test-20260326-072341"}}
+{"ts":"2026-04-05T11:48:58.168Z","tool":"nagare_update_step_status","ok":true,"session_id":"sess-minato-mcp-e2e","arguments":{"run_id":"run-smoke-test-20260326-072341","step_id":"step_write","status":"completed","note":"E2E updated this step"}}
+{"ts":"2026-04-05T11:48:58.174Z","tool":"artefacts_create","ok":true,"session_id":"sess-minato-mcp-e2e","arguments":{"name":"Draft Report","type":"file","path":"/tmp/minato-mcp-project-6lDI4B/draft.md","nagare_step":"step_write","shimanto_phase":"execution"}}
+{"ts":"2026-04-05T11:48:58.178Z","tool":"artefacts_create","ok":true,"session_id":"sess-minato-mcp-e2e","arguments":{"name":"Workbook Mirror","type":"kasumi","kasumi_id":"wb_001","kasumi_module":"nexcel"}}
+{"ts":"2026-04-05T11:48:58.180Z","tool":"artefacts_list","ok":true,"session_id":"sess-minato-mcp-e2e","arguments":{}}
+{"ts":"2026-04-05T11:48:58.182Z","tool":"artefacts_read","ok":true,"session_id":"::ffff:127.0.0.1|node","arguments":{"artefact_id":"art_001"}}
+{"ts":"2026-04-05T11:48:58.192Z","tool":"artefacts_read","ok":true,"session_id":"::ffff:127.0.0.1|node","arguments":{"artefact_id":"art_002"}}
+{"ts":"2026-04-05T11:48:58.195Z","tool":"artefacts_link","ok":true,"session_id":"sess-minato-mcp-e2e","arguments":{"artefact_id":"art_001","shimanto_phase":"review"}}
+{"ts":"2026-04-05T11:48:58.202Z","tool":"artefacts_kasumi_call","ok":true,"session_id":"sess-minato-mcp-e2e","arguments":{"artefact_id":"art_002","tool_name":"nexcel_get_data","arguments":{"workbookId":"wb_001"}}}
+{"ts":"2026-04-05T11:48:58.204Z","tool":"log_append","ok":true,"session_id":"sess-minato-mcp-e2e","arguments":{"type":"decision","summary":"E2E log append","details":["validated from end-to-end test"]}}
+{"ts":"2026-04-05T11:48:58.207Z","tool":"log_query","ok":true,"session_id":"sess-minato-mcp-e2e","arguments":{"limit":20}}
+{"ts":"2026-04-05T11:48:58.215Z","tool":"log_project_chat","ok":true,"session_id":"sess-minato-mcp-e2e","arguments":{"agent":"mcp_echo","limit":5}}
+{"ts":"2026-04-05T11:48:58.221Z","tool":"chat_send","ok":true,"session_id":"sess-minato-mcp-e2e","arguments":{"agent_id":"mcp_echo","text":"Please review this output.","inject_context":true}}
+{"ts":"2026-04-05T11:48:58.224Z","tool":"chat_get_history","ok":true,"session_id":"::ffff:127.0.0.1|node","arguments":{"agent_id":"mcp_echo","limit":5}}
+{"ts":"2026-04-05T11:48:58.226Z","tool":"chat_poll","ok":true,"session_id":"::ffff:127.0.0.1|node","arguments":{"agent_id":"mcp_echo","offset":124}}
+{"ts":"2026-04-05T11:48:58.228Z","tool":"docs_list","ok":true,"session_id":"::ffff:127.0.0.1|node","arguments":{}}
+{"ts":"2026-04-05T11:48:58.231Z","tool":"docs_read","ok":true,"session_id":"::ffff:127.0.0.1|node","arguments":{"doc":"MINATO_README"}}

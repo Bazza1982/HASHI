@@ -18,7 +18,8 @@ const nodeTypes = { step: StepNode };
 type WorkflowCanvasProps = {
   nodes: Node[];
   edges: Edge[];
-  onSelectStep: (stepId: string | null) => void;
+  onSelectStep: (stepId: string, addToSelection: boolean) => void;
+  onClearSelection: () => void;
   onNodeDragStop: NodeMouseHandler<Node>;
   onAutoLayout?: () => void;
 };
@@ -27,6 +28,7 @@ function InnerCanvas({
   nodes,
   edges,
   onSelectStep,
+  onClearSelection,
   onNodeDragStop,
 }: WorkflowCanvasProps) {
   const { fitView } = useReactFlow();
@@ -56,8 +58,8 @@ function InnerCanvas({
         style: { stroke: "#0d6b5f", strokeWidth: 2.5 },
       }))}
       nodeTypes={nodeTypes}
-      onNodeClick={(_event, node) => onSelectStep(node.id)}
-      onPaneClick={() => onSelectStep(null)}
+      onNodeClick={(event, node) => onSelectStep(node.id, event.ctrlKey || event.metaKey)}
+      onPaneClick={() => onClearSelection()}
       onNodeDragStop={onNodeDragStop}
       onInit={handleInit}
       minZoom={0.15}
@@ -98,7 +100,7 @@ export function WorkflowCanvas(props: WorkflowCanvasProps) {
         </button>
       )}
       <div className="canvas-legend">
-        <strong>▼</strong> arrows = dependency flow (prerequisite → dependent)
+        <strong>▼</strong> arrows = dependency flow &nbsp;·&nbsp; <strong>Ctrl+Click</strong> to multi-select
       </div>
     </div>
   );

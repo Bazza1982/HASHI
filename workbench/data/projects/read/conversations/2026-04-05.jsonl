@@ -1,0 +1,4 @@
+{"ts": "2026-04-05T13:34:12.637613+00:00", "type": "chat", "project": "READ", "slug": "read", "agent": "minato_mcp", "summary": "\u2192 kasumi: [logging test] hello", "details": "[logging test] hello"}
+{"ts": "2026-04-05T13:34:20.942243+00:00", "type": "chat", "project": "READ", "slug": "read", "agent": "minato", "summary": "\u2192 kasumi: [logging test 2] from main endpoint", "details": "[logging test 2] from main endpoint"}
+{"ts": "2026-04-05T13:34:47.635751+00:00", "type": "chat", "project": "READ", "slug": "read", "agent": "kasumi@HASHI2", "summary": "\u2190 kasumi@HASHI2: received!", "details": "received!"}
+{"ts": "2026-04-05T13:35:45.319318+00:00", "type": "chat", "project": "READ", "slug": "read", "agent": "kasumi@HASHI2", "summary": "\u2190 kasumi@HASHI2: logging test reply\\!", "details": "logging test reply\\!"}
