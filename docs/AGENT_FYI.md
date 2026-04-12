@@ -129,6 +129,30 @@ python tools/browser_cli.py evaluate   --url <url> --script "() => document.titl
 
 **Prerequisites:** `playwright install chromium` (one-time setup).
 
+## Telegram File Sending
+
+Agents can send photos, documents, videos, and audio files to the user via Telegram.
+
+**For CLI-backend agents (Claude CLI, Gemini CLI, Codex CLI)** — use `bash` to call the wrapper:
+```bash
+python tools/telegram_send_file_cli.py --path /tmp/chart.png
+python tools/telegram_send_file_cli.py --path /tmp/chart.png --caption "Daily report" --agent <your_name>
+python tools/telegram_send_file_cli.py --path /tmp/doc.pdf --type document
+```
+
+Parameters:
+- `--path` (required): absolute path to the file
+- `--caption` (optional): message caption
+- `--type` (optional): `photo`, `document`, `video`, `audio` (default: auto-detect from extension)
+- `--agent` (optional): your agent name for token resolution
+
+Auto-detection: `.jpg/.png/.webp` → photo, `.mp4/.mov` → video, `.mp3/.ogg/.wav` → audio, everything else → document.
+
+**For OpenRouter/DeepSeek API agents** — `telegram_send_file` is auto-injected via global `default_tools` in `agents.json`. No per-agent config needed. Use it as a native tool call:
+```json
+{"tool": "telegram_send_file", "path": "/tmp/chart.png", "caption": "Daily report"}
+```
+
 ## Media
 - Agents can receive text plus Telegram media.
 - Voice/audio is transcribed locally before being sent to the backend.

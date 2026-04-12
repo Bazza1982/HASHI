@@ -429,6 +429,87 @@ async def execute_telegram_send(
         return f"Error sending Telegram message: {e}"
 
 
+async def execute_telegram_send_file(
+    args: dict,
+    secrets: dict,
+) -> str:
+    """Send a file (photo, document, video, or audio) to a Telegram chat."""
+    import mimetypes
+
+    path = args.get("path", "").strip()
+    if not path:
+        return "Error: path is required"
+
+    from pathlib import Path as _Path
+    file_path = _Path(path)
+    if not file_path.exists():
+        return f"Error: file not found: {path}"
+    if not file_path.is_file():
+        return f"Error: not a file: {path}"
+
+    caption = args.get("caption", "").strip() or None
+    chat_id = args.get("chat_id") or secrets.get("_authorized_telegram_id")
+    if not chat_id:
+        return "Error: chat_id not provided and authorized_telegram_id not available"
+
+    token = secrets.get("_agent_telegram_token") or secrets.get("telegram_bot_token")
+    if not token:
+        return "Error: no telegram token available"
+
+    # Determine send method
+    file_type = args.get("file_type", "auto").lower()
+    if file_type == "auto":
+        suffix = file_path.suffix.lower()
+        if suffix in (".jpg", ".jpeg", ".png", ".webp"):
+            file_type = "photo"
+        elif suffix in (".mp4", ".mov", ".avi", ".mkv"):
+            file_type = "video"
+        elif suffix in (".mp3", ".ogg", ".flac", ".wav", ".m4a"):
+            file_type = "audio"
+        else:
+            file_type = "document"
+
+    method_map = {
+        "photo": "sendPhoto",
+        "video": "sendVideo",
+        "audio": "sendAudio",
+        "document": "sendDocument",
+    }
+    field_map = {
+        "photo": "photo",
+        "video": "video",
+        "audio": "audio",
+        "document": "document",
+    }
+    api_method = method_map.get(file_type, "sendDocument")
+    field_name = field_map.get(file_type, "document")
+
+    try:
+        import httpx
+        mime_type, _ = mimetypes.guess_type(str(file_path))
+        mime_type = mime_type or "application/octet-stream"
+
+        data = {"chat_id": str(chat_id)}
+        if caption:
+            data["caption"] = caption
+
+        async with httpx.AsyncClient(timeout=60) as client:
+            with open(file_path, "rb") as f:
+                files = {field_name: (file_path.name, f, mime_type)}
+                resp = await client.post(
+                    f"https://api.telegram.org/bot{token}/{api_method}",
+                    data=data,
+                    files=files,
+                )
+            result = resp.json()
+            if result.get("ok"):
+                return f"OK: {file_type} sent to {chat_id} ({file_path.name})"
+            else:
+                return f"Error: Telegram API error: {result.get('description', 'unknown')}"
+    except Exception as e:
+        return f"Error sending Telegram file: {e}"
+
+
 async def execute_http_request(args: dict) -> str:
     url = str(args.get("url", "")).strip()
     if not url:

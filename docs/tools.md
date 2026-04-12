@@ -122,6 +122,54 @@ Playwright is listed as an optional dependency in `requirements.txt`.
 
 Chrome/Chromium auto-detected on Linux, macOS, and Windows (including WSL). Falls back to Playwright's bundled Chromium if system Chrome is not found.
 
+## Telegram File Sending
+
+Agents can send photos, documents, videos, and audio files directly to the user's Telegram chat.
+
+### CLI Script (all backends)
+
+```bash
+python tools/telegram_send_file_cli.py --path /tmp/chart.png --caption "Caption text" --agent <agent_name>
+python tools/telegram_send_file_cli.py --path /tmp/report.pdf --type document
+```
+
+Parameters:
+- `--path` (required): absolute path to the file
+- `--caption` (optional): message caption
+- `--type` (optional): `photo | document | video | audio` (default: auto-detect from extension)
+- `--agent` (optional): agent name for token resolution (defaults to first available)
+- `--chat-id` (optional): override target chat ID
+
+Auto-detection: `.jpg/.jpeg/.png/.webp` → photo, `.mp4/.mov/.avi/.mkv` → video, `.mp3/.ogg/.flac/.wav/.m4a` → audio, everything else → document.
+
+### Native Tool Call (OpenRouter/DeepSeek API backends)
+
+`telegram_send_file` is auto-injected for all agents via `global.default_tools` in `agents.json`. No per-agent configuration needed.
+
+```json
+{
+  "tool": "telegram_send_file",
+  "path": "/tmp/chart.png",
+  "caption": "Optional caption",
+  "file_type": "auto"
+}
+```
+
+### Global Default Tools
+
+Tools listed in `agents.json` → `global.default_tools.allowed` are automatically available to all agents when using OpenRouter or DeepSeek API backends. Per-backend `tools` config merges with (not replaces) the global defaults.
+
+```json
+{
+  "global": {
+    "default_tools": {
+      "allowed": ["telegram_send_file"],
+      "max_loops": 5
+    }
+  }
+}
+```
+
 ## Bridge Memory System
 - `orchestrator/bridge_memory.py` — SQLite with WAL mode, local hashed embeddings (256-dim), FTS5 full-text search.
 - `BridgeContextAssembler` builds the final prompt sent to backends: system identity + skill sections + top-6 long-term memory + last-10 conversation turns.

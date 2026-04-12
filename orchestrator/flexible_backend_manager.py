@@ -13,7 +13,19 @@ class FlexibleBackendManager:
         self.logger = logging.getLogger(f"BackendMgr.{config.name}")
         self.current_backend = None
         self.state_file = self.config.workspace_dir / "state.json"
+        self._agents_json_global = self._load_agents_json_global()
         self._load_state()
+
+    def _load_agents_json_global(self) -> dict:
+        """Load the 'global' section from agents.json for default_tools etc."""
+        try:
+            cfg_path = getattr(self.global_config, 'config_path', None)
+            if cfg_path and Path(cfg_path).exists():
+                raw = json.loads(Path(cfg_path).read_text(encoding="utf-8"))
+                return raw.get("global", {})
+        except Exception:
+            pass
+        return {}
 
     def _load_state(self):
         self._active_model_override = None
@@ -94,9 +106,9 @@ class FlexibleBackendManager:
 
             self.current_backend = BackendClass(adapter_cfg, self.global_config, api_key)
 
-            # V2.2: inject ToolRegistry for OpenRouter if tools are configured
-            if engine == "openrouter-api":
-                tools_cfg = backend_cfg_raw.get("tools")
+            # V2.2+: inject ToolRegistry for API backends that support tool calls
+            if engine in ("openrouter-api", "deepseek-api"):
+                tools_cfg = self._resolve_tools_config(backend_cfg_raw)
                 if tools_cfg:
                     self._attach_tool_registry(tools_cfg, adapter_cfg)
 
@@ -104,6 +116,33 @@ class FlexibleBackendManager:
         except Exception as e:
             self.logger.error(f"Failed to initialize backend {engine}: {e}")
             return False
+
+    def _resolve_tools_config(self, backend_cfg_raw: dict) -> dict | None:
+        """Merge global default_tools with per-backend tools config.
+
+        Priority: per-backend 'allowed' list extends (not replaces) global defaults.
+        Per-backend max_loops and tool_options override global ones.
+        """
+        global_raw = getattr(self, '_agents_json_global', None) or {}
+        global_tools = global_raw.get("default_tools", {})
+        backend_tools = backend_cfg_raw.get("tools", {})
+
+        if not global_tools and not backend_tools:
+            return None
+
+        # Merge allowed lists (union, global first)
+        global_allowed = set(global_tools.get("allowed", []))
+        backend_allowed = set(backend_tools.get("allowed", []))
+        merged_allowed = list(global_allowed | backend_allowed)
+
+        if not merged_allowed:
+            return None
+
+        # Backend-specific settings override global
+        merged = dict(global_tools)
+        merged.update(backend_tools)
+        merged["allowed"] = merged_allowed
+        return merged
 
     def _attach_tool_registry(self, tools_cfg: dict, adapter_cfg) -> None:
         """Create and attach a ToolRegistry to the current OpenRouter backend."""
@@ -122,11 +161,19 @@ class FlexibleBackendManager:
             tool_options = {k: v for k, v in tools_cfg.items()
                             if k not in ("allowed", "max_loops")}
 
+            # Inject agent token and authorized_id for telegram_send_file tool
+            enriched_secrets = dict(self.secrets)
+            agent_token = self.secrets.get(self.config.telegram_token_key)
+            if agent_token:
+                enriched_secrets["_agent_telegram_token"] = agent_token
+            if self.global_config and self.global_config.authorized_id:
+                enriched_secrets["_authorized_telegram_id"] = str(self.global_config.authorized_id)
+
             registry = ToolRegistry(
                 allowed_tools=allowed,
                 access_root=access_root,
                 workspace_dir=workspace_dir,
-                secrets=self.secrets,
+                secrets=enriched_secrets,
                 tool_options=tool_options,
                 max_loops=max_loops,
             )
