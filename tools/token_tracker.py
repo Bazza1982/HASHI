@@ -40,6 +40,12 @@ PRICING: dict[str, dict[str, float]] = {
     # OpenAI
     "gpt-4o":                   {"input": 2.50,  "output": 10.00},
     "gpt-4o-mini":              {"input": 0.15,  "output": 0.60},
+    "gpt-5.1-codex-mini":       {"input": 0.25,  "output": 2.00},
+    "gpt-5.1-codex-max":        {"input": 1.25,  "output": 10.00},
+    "gpt-5.2":                  {"input": 1.75,  "output": 14.00},
+    "gpt-5.2-codex":            {"input": 1.75,  "output": 14.00},
+    "gpt-5.3-codex":            {"input": 1.75,  "output": 14.00},
+    "gpt-5.4":                  {"input": 2.50,  "output": 15.00},
     # CLI fallback (treated as claude-sonnet-4-6 equivalent)
     "default":                  {"input": 3.00,  "output": 15.00},
 }

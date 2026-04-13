@@ -82,9 +82,36 @@ def _resolve_token(secrets: dict, agents_cfg: dict, agent_name: str | None) -> s
     sys.exit(1)
 
 
-def _resolve_chat_id(agents_cfg: dict, secrets: dict) -> str:
-    """Resolve authorized Telegram chat ID."""
-    # secrets.json first
+def _resolve_chat_id(agents_cfg: dict, secrets: dict, agent_name: str | None) -> str:
+    """Resolve target Telegram chat ID.
+
+    Resolution order:
+    1. agent-specific secrets key: ``<agent_name>_authorized_telegram_id``
+    2. agent-specific fields in ``agents.json``: ``telegram_chat_id`` / ``chat_id``
+    3. global secrets key: ``authorized_telegram_id``
+    4. global ``agents.json`` key: ``global.authorized_id``
+    """
+    agents = agents_cfg.get("agents", [])
+
+    if agent_name:
+        secret_key = f"{agent_name}_authorized_telegram_id"
+        auth_id = secrets.get(secret_key)
+        if auth_id and int(auth_id) != 0:
+            return str(auth_id)
+
+        for ag in agents:
+            if ag.get("name") == agent_name:
+                auth_id = ag.get("telegram_chat_id") or ag.get("chat_id")
+                if auth_id and int(auth_id) != 0:
+                    return str(auth_id)
+                print(
+                    f"Warning: agent '{agent_name}' has no dedicated Telegram chat configured; "
+                    "falling back to global authorized target",
+                    file=sys.stderr,
+                )
+                break
+
+    # secrets.json global
     auth_id = secrets.get("authorized_telegram_id")
     if auth_id and int(auth_id) != 0:
         return str(auth_id)
@@ -193,7 +220,7 @@ def main():
     secrets = _load_secrets()
     agents_cfg = _load_agents_json()
     token = _resolve_token(secrets, agents_cfg, args.agent)
-    chat_id = args.chat_id or _resolve_chat_id(agents_cfg, secrets)
+    chat_id = args.chat_id or _resolve_chat_id(agents_cfg, secrets, args.agent)
 
     success = send_file(file_path, args.caption, file_type, token, chat_id)
     sys.exit(0 if success else 1)

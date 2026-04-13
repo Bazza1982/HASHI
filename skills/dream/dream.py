@@ -50,7 +50,7 @@ MEMORY_DB_PATH = WORKSPACE_DIR / "bridge_memory.sqlite"
 CRON_JOB_ID = f"dream-{AGENT_NAME}-nightly"
 CRON_TIME = "01:30"
 
-MAX_NEW_MEMORIES = 5
+MAX_NEW_MEMORIES = 20          # soft safety cap, not a creative constraint
 MIN_IMPORTANCE = 0.7
 MAX_AGENT_MD_SECTIONS = 3
 SNAPSHOT_RETENTION_DAYS = 7
@@ -195,7 +195,7 @@ def _call_openrouter(api_key: str, messages: list[dict], model: str = "anthropic
     payload = json.dumps({
         "model": model,
         "messages": messages,
-        "max_tokens": 2000,
+        "max_tokens": 4096,
         "temperature": 0.3,
     }).encode("utf-8")
     req = urllib.request.Request(
@@ -210,7 +210,7 @@ def _call_openrouter(api_key: str, messages: list[dict], model: str = "anthropic
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=90) as resp:
+        with urllib.request.urlopen(req, timeout=180) as resp:
             result = json.loads(resp.read().decode("utf-8"))
             return result["choices"][0]["message"]["content"]
     except urllib.error.HTTPError as e:
@@ -563,13 +563,13 @@ def cmd_now(is_scheduled: bool = False) -> str:
             f"(transcript unchanged, hash={current_hash[:8]})."
         )
 
-    # Build transcript excerpt (cap at ~6000 chars to stay within context)
+    # Build transcript excerpt (cap at ~12000 chars to give LLM enough context)
     transcript_text = ""
-    for t in turns[-60:]:
+    for t in turns[-80:]:
         role = "User" if t["role"] == "user" else "Assistant"
-        transcript_text += f"{role}: {t['text'][:800]}\n\n"
-    if len(transcript_text) > 6000:
-        transcript_text = transcript_text[-6000:]
+        transcript_text += f"{role}: {t['text'][:1000]}\n\n"
+    if len(transcript_text) > 12000:
+        transcript_text = transcript_text[-12000:]
 
     agent_md_content = AGENT_MD_PATH.read_text(encoding="utf-8") if AGENT_MD_PATH.exists() else ""
 
@@ -594,7 +594,7 @@ Respond ONLY with valid JSON in this exact format:
 {{
   "new_memories": [
     {{
-      "content": "Concise memory text — should be self-contained and useful in future conversations",
+      "content": "Memory text — detail level should match importance",
       "memory_type": "episodic",
       "importance": 0.8,
       "source": "dream:{dream_date}"
@@ -611,12 +611,20 @@ Respond ONLY with valid JSON in this exact format:
 }}
 
 RULES (follow strictly):
-1. new_memories: max {MAX_NEW_MEMORIES} entries, only if importance >= {MIN_IMPORTANCE}
-2. agent_md_updates: max {MAX_AGENT_MD_SECTIONS} sections, only for genuinely significant insights
-3. Do NOT invent facts — only extract from the actual transcript
-4. Do NOT update agent.md for trivial things; only for meaningful behavioral insights
-5. If nothing significant happened, return empty arrays and say so in reflection_summary
-6. new_memories array may be empty, agent_md_updates array may be empty
+1. There is NO fixed quota on memories. Output as many as genuinely warranted — 0 if nothing significant, 15 if it was a rich day. Let the conversation guide you.
+2. IMPORTANCE SCORING — the strongest signal is how much time/turns the user spent on a topic:
+   - Long back-and-forth debugging, deep discussion, multi-step work → 0.9-1.0
+   - Medium conversation, decisions made, clear outcomes → 0.8-0.9
+   - Brief mention, minor preference, small fact → 0.7-0.8
+   - Trivial chit-chat, greetings, noise → skip entirely (below {MIN_IMPORTANCE})
+3. DETAIL MATCHES IMPORTANCE — importance controls how much you write:
+   - 0.9-1.0: Full context — what happened, why, what was decided, key details, consequences. 2-5 sentences.
+   - 0.8-0.9: Clear summary with key decision or outcome. 1-2 sentences.
+   - 0.7-0.8: One-liner fact or preference.
+4. agent_md_updates: max {MAX_AGENT_MD_SECTIONS} sections, only for genuinely significant insights
+5. Do NOT invent facts — only extract from the actual transcript
+6. Do NOT update agent.md for trivial things; only for meaningful behavioral insights
+7. If nothing significant happened, return empty arrays and say so in reflection_summary
 """
 
     try:
@@ -632,7 +640,33 @@ RULES (follow strictly):
             clean = "\n".join(clean.split("\n")[1:])
             if clean.endswith("```"):
                 clean = clean[:-3]
-        dream_result = json.loads(clean.strip())
+        clean = clean.strip()
+        # Fix truncated JSON: if response was cut off, try to salvage what we have
+        dream_result = None
+        try:
+            dream_result = json.loads(clean)
+        except json.JSONDecodeError:
+            # Try to find the last complete JSON object
+            import re
+            # Extract each complete memory object and build a partial result
+            mem_pattern = re.compile(r'\{[^{}]*"content"\s*:\s*"[^"]*"[^{}]*\}')
+            memories = []
+            for m in mem_pattern.finditer(clean):
+                try:
+                    memories.append(json.loads(m.group()))
+                except json.JSONDecodeError:
+                    continue
+            # Extract reflection_summary if present
+            summary_match = re.search(r'"reflection_summary"\s*:\s*"([^"]*)"', clean)
+            summary = summary_match.group(1) if summary_match else "Partial dream — response was truncated."
+            if memories:
+                dream_result = {
+                    "new_memories": memories,
+                    "agent_md_updates": [],
+                    "reflection_summary": summary,
+                }
+        if dream_result is None:
+            raise json.JSONDecodeError("Could not parse or salvage JSON", clean, 0)
     except json.JSONDecodeError as e:
         return f"❌ Dream: Failed to parse LLM response as JSON — {e}\n\nRaw response:\n{response[:500]}"
 
@@ -640,11 +674,15 @@ RULES (follow strictly):
     agent_md_updates: list[dict] = dream_result.get("agent_md_updates", [])
     reflection_summary: str = dream_result.get("reflection_summary", "No summary provided.")
 
-    # Filter memories by importance threshold and cap count
+    # Filter memories by importance threshold (safety cap at MAX_NEW_MEMORIES)
     valid_memories = [
         m for m in new_memories
         if isinstance(m, dict) and float(m.get("importance", 0)) >= MIN_IMPORTANCE
-    ][:MAX_NEW_MEMORIES]
+    ]
+    if len(valid_memories) > MAX_NEW_MEMORIES:
+        # Sort by importance desc, keep the top ones
+        valid_memories.sort(key=lambda m: float(m.get("importance", 0)), reverse=True)
+        valid_memories = valid_memories[:MAX_NEW_MEMORIES]
 
     # ── Forgetting phase (before adding new memories) ──────────────────────────
     current_memory_count = _count_memories()
@@ -750,8 +788,11 @@ RULES (follow strictly):
     if valid_memories:
         lines.append(f"🧠 {len(valid_memories)} new memories saved:")
         for m in valid_memories:
-            importance_bar = "█" * round(float(m.get("importance", 0.8)) * 5)
-            lines.append(f"  [{importance_bar}] {m['content'][:120]}")
+            imp = float(m.get("importance", 0.8))
+            importance_bar = "█" * round(imp * 5)
+            # Show more text for high-importance memories
+            preview_len = 200 if imp >= 0.9 else 120
+            lines.append(f"  [{importance_bar}] {m['content'][:preview_len]}")
         lines.append("")
     else:
         lines.append("🧠 No new memories — nothing significant enough today.")

@@ -93,18 +93,18 @@ HASHI agents learn from real usage over time. The habit system has two layers: u
 The simplest way to shape agent behavior — give direct feedback while working:
 
 ```
-/good                          — agent did something right
-/good always verify before asserting facts
-/bad                           — agent did something wrong
-/bad skipped verification, stated file existed without checking
+/skill good                    — agent did something right
+/skill good always verify before asserting facts
+/skill bad                     — agent did something wrong
+/skill bad skipped verification, stated file existed without checking
 ```
 
-Each signal captures the full conversation context (including thinking tokens) and stores it for nightly processing. No immediate action; agents absorb feedback during dream.
+Each signal captures the full conversation context (including thinking tokens). If an OpenRouter key is available, the signal is processed into habits immediately; otherwise it is stored for the next dream run.
 
 ### Dream — Nightly Reflection
 
 Each night, agents run `/skill dream` to consolidate memory and process habit signals:
-- Pending `/good` and `/bad` signals are analyzed (up to 3 per dream, paced to avoid overload)
+- Pending `/skill good` and `/skill bad` signals are analyzed (up to 3 per dream, paced to avoid overload)
 - New habit candidates are extracted from the conversation context and user comment
 - Similar habits are reinforced rather than duplicated
 - Habits accumulate evidence over time before being promoted to active

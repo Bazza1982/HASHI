@@ -54,15 +54,20 @@ def _should_fire(schedule: str, last_run_ts: float, now_dt: datetime) -> bool:
                 target_hm = f"{hour:02d}:{minute:02d}"
                 if current_hm != target_hm:
                     return False
-                # Ensure not already fired today
-                last_dt = datetime.fromtimestamp(last_run_ts) if last_run_ts else datetime.min
+                # Ensure not already fired today.
+                # If never run (last_run_ts=0), use today's date so it does NOT
+                # fire immediately — it waits for the next scheduled occurrence.
+                last_dt = datetime.fromtimestamp(last_run_ts) if last_run_ts else now_dt
                 return last_dt.date() < now_dt.date()
             except (ValueError, TypeError):
                 return False
         return False
 
     try:
-        last_dt = datetime.fromtimestamp(last_run_ts) if last_run_ts else datetime(2000, 1, 1)
+        # If last_run_ts is 0 (never run), use now_dt as the base so the next
+        # scheduled time is calculated forward from *now*, not from year 2000.
+        # This prevents new cron jobs from firing immediately on first scheduler tick.
+        last_dt = datetime.fromtimestamp(last_run_ts) if last_run_ts else now_dt
         cron = croniter(schedule, last_dt)
         next_fire = cron.get_next(datetime)
         return next_fire <= now_dt

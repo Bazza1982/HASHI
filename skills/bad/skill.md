@@ -6,7 +6,7 @@ description: Record a negative signal — agent did something wrong. Processed i
 run: bad.py
 ---
 
-Record a /bad signal with optional comment. Context is captured automatically from the current transcript (including thinking tokens) and processed into habit candidates during the next dream.
+Record a negative signal with optional comment via `/skill bad`. Context is captured automatically from the current transcript (including thinking tokens). If an OpenRouter key is available, the signal is processed into habit candidates immediately; otherwise it remains queued for the next dream.
 
 Usage:
   /skill bad

@@ -33,6 +33,7 @@ from orchestrator.flexible_backend_registry import (
 )
 from orchestrator.memory_index import MemoryIndex
 from orchestrator.handoff_builder import HandoffBuilder
+from orchestrator.habits import HabitStore
 from orchestrator.media_utils import is_image_file, normalize_image_file
 from orchestrator.parked_topics import ParkedTopicStore
 from orchestrator.skill_manager import SkillDefinition, SkillManager
@@ -110,6 +111,9 @@ class FlexibleAgentRuntime:
         self._think_buffer: list[str] = []
         self._openrouter_think_chunk: str = ""
         self._last_openrouter_think_snippet: str | None = None
+        self._thinking_chars_this_req: int = 0   # CLI thinking token estimation
+        self._last_full_prompt_tokens: int = 0   # set before each request for bg-mode usage
+        self._last_prompt_audit: dict = {}        # prompt section breakdown for token audit
         self.memory_dir = self.workspace_dir / "memory"
         self.sys_prompt_manager = SysPromptManager(self.workspace_dir)
         self.backend_state_dir = self.workspace_dir / "backend_state"
@@ -154,6 +158,12 @@ class FlexibleAgentRuntime:
             active_skill_provider=self._get_active_skill_sections,
             sys_prompt_manager=self.sys_prompt_manager,
         )
+        self.habit_store = HabitStore(
+            self.workspace_dir,
+            self.global_config.project_root,
+            self.name,
+            self._get_agent_class(),
+        )
 
         # Initialize FlexibleBackendManager
         self.backend_manager = FlexibleBackendManager(config, global_config, secrets)
@@ -162,6 +172,78 @@ class FlexibleAgentRuntime:
         if self._authorized_telegram_ids:
             return self._authorized_telegram_ids[0]
         return self.global_config.authorized_id
+
+    def _get_agent_class(self) -> str:
+        extra = self.config.extra or {}
+        direct = getattr(self.config, "agent_class", None)
+        return (direct or extra.get("agent_class") or "general").strip().lower()
+
+    def _build_habit_sections(self, item: QueuedRequest, prompt: str) -> tuple[list[tuple[str, str]], list[str]]:
+        habits = self.habit_store.retrieve(prompt, source=item.source, summary=item.summary)
+        if not habits:
+            item.active_habits = []
+            return [], []
+        self.habit_store.mark_triggered(habits)
+        item.active_habits = self.habit_store.serialize_habits(habits)
+        habit_ids = [habit.habit_id for habit in habits]
+        section = self.habit_store.render_prompt_section(habits)
+        self.logger.info(
+            f"Habit retrieval for {item.request_id}: {len(habit_ids)} matched ({', '.join(habit_ids)})"
+        )
+        self._log_maintenance(item, "habit_retrieval", habit_ids=",".join(habit_ids), habit_count=len(habit_ids))
+        return ([section] if section else []), habit_ids
+
+    def _record_habit_outcome(
+        self,
+        item: QueuedRequest,
+        *,
+        success: bool,
+        response_text: str | None = None,
+        error_text: str | None = None,
+    ) -> None:
+        active_habits = item.active_habits or []
+        if not active_habits:
+            return
+        try:
+            self.habit_store.record_execution_outcome(
+                request_id=item.request_id,
+                prompt=item.prompt,
+                source=item.source,
+                summary=item.summary,
+                active_habits=active_habits,
+                response_text=response_text,
+                error_text=error_text,
+                success=success,
+            )
+        except Exception as exc:
+            self.error_logger.warning(
+                f"Failed to record habit outcome for {item.request_id}: {exc}"
+            )
+
+    def _capture_followup_habit_feedback(self, text: str) -> None:
+        last_response = self.last_response or {}
+        request_id = last_response.get("request_id")
+        responded_at = last_response.get("responded_at")
+        if not request_id:
+            return
+        try:
+            result = self.habit_store.apply_user_feedback(
+                request_id=request_id,
+                feedback_text=text,
+                responded_at=responded_at,
+            )
+        except Exception as exc:
+            self.error_logger.warning(
+                f"Failed to capture habit feedback for {request_id}: {exc}"
+            )
+            return
+        if not result:
+            return
+        self.maintenance_logger.info(
+            f"Habit follow-up feedback for {request_id}: "
+            f"sentiment={result.sentiment} updated_events={result.updated_events} "
+            f"habits={','.join(result.updated_habits)}"
+        )
 
     def _is_authorized_user(self, user_id: int | None) -> bool:
         if user_id is None:
@@ -1363,6 +1445,7 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CommandHandler("hchat", self._wrap_cmd("hchat", self.cmd_hchat)))
         self.app.add_handler(CommandHandler("group", self._wrap_cmd("group", self.cmd_group)))
         self.app.add_handler(CallbackQueryHandler(self.callback_group, pattern=r"^group:"))
+        self.app.add_handler(CommandHandler("token", self._wrap_cmd("token", self.cmd_token)))
         self.app.add_handler(CommandHandler("usage", self._wrap_cmd("usage", self.cmd_usage)))
         self.app.add_handler(CommandHandler("logo", self._wrap_cmd("logo", self.cmd_logo)))
         self.app.add_handler(CommandHandler("move", self._wrap_cmd("move", self.cmd_move)))
@@ -5122,6 +5205,7 @@ class FlexibleAgentRuntime:
             self._long_buffer.append(text)
             return
         _print_user_message(self.name, text)
+        self._capture_followup_habit_feedback(text)
         await self.enqueue_request(update.effective_chat.id, text, "text", _safe_excerpt(text))
 
     # ------------------------------------------------------------------
@@ -5636,6 +5720,12 @@ class FlexibleAgentRuntime:
                     event_queue.put_nowait(event)
                 except asyncio.QueueFull:
                     self.logger.debug(f"Stream event queue full, dropping: {event.summary[:40]!r}")
+            # Always track thinking volume for token estimation (CLI backends only;
+            # OpenRouter gets real counts from response.usage)
+            if event.kind == KIND_THINKING and _engine != "openrouter-api":
+                raw = event.summary or ""
+                if raw and raw not in ("Thinking...",):
+                    self._thinking_chars_this_req += len(raw)
             if think_buffer is not None:
                 if event.kind != KIND_THINKING:
                     return
@@ -5747,6 +5837,7 @@ class FlexibleAgentRuntime:
         try:
             if task.cancelled():
                 self._mark_error(f"Background task cancelled: {item.summary}")
+                self._record_habit_outcome(item, success=False, error_text="background_task_cancelled")
                 self.logger.warning(f"Background task {item.request_id} was cancelled.")
                 await self.send_long_message(
                     item.chat_id,
@@ -5759,6 +5850,7 @@ class FlexibleAgentRuntime:
             exc = task.exception()
             if exc:
                 self._mark_error(str(exc))
+                self._record_habit_outcome(item, success=False, error_text=str(exc))
                 self.error_logger.error(f"Background task {item.request_id} raised: {exc}")
                 await self.send_long_message(
                     item.chat_id,
@@ -5773,6 +5865,7 @@ class FlexibleAgentRuntime:
             if response.is_success and response.text:
                 display_text = self._strip_transfer_accept_prefix(item, response.text)
                 self._mark_success()
+                self._record_habit_outcome(item, success=True, response_text=response.text)
                 if self._should_buffer_during_transfer(item.request_id):
                     self._record_suppressed_transfer_result(item, success=True, text=display_text or response.text)
                     return
@@ -5780,31 +5873,80 @@ class FlexibleAgentRuntime:
                     "chat_id": item.chat_id,
                     "text": display_text or response.text,
                     "request_id": item.request_id,
+                    "responded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
                 }
                 try:
-                    from tools.token_tracker import estimate_tokens, record_usage
+                    from tools.token_tracker import estimate_tokens, record_audit_event, record_usage
+                    import hashlib as _hashlib
                     if response.usage:
                         # Real usage from API backend
+                        _bg_input_tok = response.usage.input_tokens
+                        _bg_output_tok = response.usage.output_tokens
+                        _bg_thinking_tok = response.usage.thinking_tokens
+                        _bg_tok_source = "api"
                         record_usage(
                             self.workspace_dir,
                             model=self.get_current_model(),
                             backend=self.config.active_backend,
-                            input_tokens=response.usage.input_tokens,
-                            output_tokens=response.usage.output_tokens,
-                            thinking_tokens=response.usage.thinking_tokens,
+                            input_tokens=_bg_input_tok,
+                            output_tokens=_bg_output_tok,
+                            thinking_tokens=_bg_thinking_tok,
                             session_id=self.session_id_dt,
                         )
                     else:
-                        # CLI backend: estimate including system prompt context
-                        sys_prompt_tokens = estimate_tokens(self._get_system_prompt_text())
+                        # CLI backend: estimate from full assembled prompt (includes history)
+                        fallback_input = estimate_tokens(self._get_system_prompt_text()) + estimate_tokens(item.prompt)
+                        _bg_input_tok = self._last_full_prompt_tokens or fallback_input
+                        _bg_output_tok = estimate_tokens(display_text or response.text)
+                        _bg_thinking_tok = self._thinking_chars_this_req // 4
+                        _bg_tok_source = "estimated"
                         record_usage(
                             self.workspace_dir,
                             model=self.get_current_model(),
                             backend=self.config.active_backend,
-                            input_tokens=sys_prompt_tokens + estimate_tokens(item.prompt),
-                            output_tokens=estimate_tokens(display_text or response.text),
+                            input_tokens=_bg_input_tok,
+                            output_tokens=_bg_output_tok,
+                            thinking_tokens=_bg_thinking_tok,
                             session_id=self.session_id_dt,
                         )
+                    _pa = self._last_prompt_audit
+                    _sec_chars = {s["key"]: s["chars"] for s in _pa.get("sections", [])}
+                    _sec_tokens = {s["key"]: s.get("tokens_est") or max(1, s["chars"] // 4) for s in _pa.get("sections", [])}
+                    _sec_counts = {s["key"]: s.get("item_count", 0) for s in _pa.get("sections", [])}
+                    record_audit_event(self.workspace_dir, {
+                        "request_id": item.request_id,
+                        "agent": self.name,
+                        "runtime": "flex",
+                        "backend": self.config.active_backend,
+                        "model": self.get_current_model(),
+                        "source": item.source,
+                        "summary": item.summary,
+                        "silent": item.silent,
+                        "is_retry": item.is_retry,
+                        "success": response.is_success,
+                        "incremental_mode": False,
+                        "token_source": _bg_tok_source,
+                        "raw_prompt_chars": len(item.prompt),
+                        "final_prompt_chars": self._last_full_prompt_tokens * 4,
+                        "response_chars": len(response.text or ""),
+                        "input_tokens": _bg_input_tok,
+                        "output_tokens": _bg_output_tok,
+                        "thinking_tokens": _bg_thinking_tok,
+                        "tool_call_count": int(getattr(response, "tool_call_count", 0) or 0),
+                        "tool_loop_count": int(getattr(response, "tool_loop_count", 0) or 0),
+                        "tool_catalog_count": 0,
+                        "tool_schema_chars": 0,
+                        "tool_schema_tokens_est": 0,
+                        "tool_schema_fingerprint": "",
+                        "tool_max_loops": 0,
+                        "budget_applied": bool(_pa.get("budget_applied")),
+                        "context_expansion_ratio": round((_bg_input_tok * 4) / max(len(item.prompt), 1), 3),
+                        "context_fingerprint": _pa.get("context_fingerprint", ""),
+                        "request_fingerprint": _hashlib.sha1((item.prompt or "").encode("utf-8")).hexdigest()[:16],
+                        "section_chars": _sec_chars,
+                        "section_tokens_est": _sec_tokens,
+                        "section_counts": _sec_counts,
+                    })
                 except Exception:
                     pass
                 memory_user_text = item.prompt
@@ -5834,6 +5976,7 @@ class FlexibleAgentRuntime:
             else:
                 err_msg = response.error or "Unknown error"
                 self._mark_error(err_msg)
+                self._record_habit_outcome(item, success=False, error_text=err_msg)
                 if self._should_buffer_during_transfer(item.request_id):
                     self._record_suppressed_transfer_result(item, success=False, error=err_msg)
                     return
@@ -5848,6 +5991,7 @@ class FlexibleAgentRuntime:
 
         except Exception as e:
             self._mark_error(str(e))
+            self._record_habit_outcome(item, success=False, error_text=str(e))
             self.error_logger.exception(
                 f"Unhandled error in _on_background_complete for {item.request_id}: {e}"
             )
@@ -5889,15 +6033,25 @@ class FlexibleAgentRuntime:
                 self.is_generating = True
 
                 effective_prompt = self._consume_session_primer(item)
+                habit_sections, habit_ids = self._build_habit_sections(item, effective_prompt)
+                self.current_request_meta["habit_ids"] = habit_ids
                 # In fixed mode with an active session, use incremental prompts
                 _incremental = (
                     self.backend_manager.agent_mode == "fixed"
                     and hasattr(self.backend_manager.current_backend, "_session_id")
                     and self.backend_manager.current_backend._session_id is not None
                 )
-                final_prompt = self.context_assembler.build_prompt(
-                    effective_prompt, self.config.active_backend, incremental=_incremental
+                _prompt_payload = self.context_assembler.build_prompt_payload(
+                    effective_prompt,
+                    self.config.active_backend,
+                    extra_sections=habit_sections,
+                    inject_memory=not item.skip_memory_injection,
+                    incremental=_incremental,
                 )
+                final_prompt = _prompt_payload["final_prompt"]
+                self._last_prompt_audit = _prompt_payload.get("audit", {})
+                self._thinking_chars_this_req = 0
+                self._last_full_prompt_tokens = len(final_prompt) // 4
                 
                 stop_typing = None
                 typing_task = None
@@ -6090,6 +6244,7 @@ class FlexibleAgentRuntime:
                         f"{item.request_id} — treating as recoverable tool failure"
                     )
                     self._mark_error(err_msg)
+                    self._record_habit_outcome(item, success=False, error_text=err_msg)
                     if self._should_buffer_during_transfer(item.request_id):
                         self._record_suppressed_transfer_result(item, success=False, error=err_msg)
                     if not item.silent:
@@ -6114,6 +6269,7 @@ class FlexibleAgentRuntime:
                 elif response.is_success and response.text:
                     display_text = self._strip_transfer_accept_prefix(item, response.text)
                     self._mark_success()
+                    self._record_habit_outcome(item, success=True, response_text=response.text)
                     await self._notify_request_listeners(
                         item.request_id,
                         {
@@ -6126,27 +6282,79 @@ class FlexibleAgentRuntime:
                         },
                     )
                     try:
-                        from tools.token_tracker import estimate_tokens, record_usage
+                        from tools.token_tracker import estimate_tokens, record_audit_event, record_usage
+                        import hashlib as _hashlib
                         if response.usage:
+                            _input_tok = response.usage.input_tokens
+                            _output_tok = response.usage.output_tokens
+                            _thinking_tok = response.usage.thinking_tokens
+                            _tok_source = "api"
                             record_usage(
                                 self.workspace_dir,
                                 model=self.get_current_model(),
                                 backend=self.config.active_backend,
-                                input_tokens=response.usage.input_tokens,
-                                output_tokens=response.usage.output_tokens,
-                                thinking_tokens=response.usage.thinking_tokens,
+                                input_tokens=_input_tok,
+                                output_tokens=_output_tok,
+                                thinking_tokens=_thinking_tok,
                                 session_id=self.session_id_dt,
                             )
                         else:
-                            sys_prompt_tokens = estimate_tokens(self._get_system_prompt_text())
+                            # CLI backend: estimate from final assembled prompt
+                            _input_tok = estimate_tokens(final_prompt)
+                            _output_tok = estimate_tokens(display_text or response.text)
+                            _thinking_tok = self._thinking_chars_this_req // 4
+                            _tok_source = "estimated"
                             record_usage(
                                 self.workspace_dir,
                                 model=self.get_current_model(),
                                 backend=self.config.active_backend,
-                                input_tokens=sys_prompt_tokens + estimate_tokens(item.prompt),
-                                output_tokens=estimate_tokens(display_text or response.text),
+                                input_tokens=_input_tok,
+                                output_tokens=_output_tok,
+                                thinking_tokens=_thinking_tok,
                                 session_id=self.session_id_dt,
                             )
+                        _pa = self._last_prompt_audit
+                        _sec_chars = {s["key"]: s["chars"] for s in _pa.get("sections", [])}
+                        _sec_tokens = {s["key"]: s.get("tokens_est") or max(1, s["chars"] // 4) for s in _pa.get("sections", [])}
+                        _sec_counts = {s["key"]: s.get("item_count", 0) for s in _pa.get("sections", [])}
+                        record_audit_event(self.workspace_dir, {
+                            "request_id": item.request_id,
+                            "agent": self.name,
+                            "runtime": "flex",
+                            "backend": self.config.active_backend,
+                            "model": self.get_current_model(),
+                            "source": item.source,
+                            "summary": item.summary,
+                            "silent": item.silent,
+                            "is_retry": item.is_retry,
+                            "success": response.is_success,
+                            "incremental_mode": _incremental,
+                            "token_source": _tok_source,
+                            "raw_prompt_chars": len(item.prompt),
+                            "effective_prompt_chars": len(effective_prompt),
+                            "final_prompt_chars": len(final_prompt),
+                            "response_chars": len(response.text or ""),
+                            "input_tokens": _input_tok,
+                            "output_tokens": _output_tok,
+                            "thinking_tokens": _thinking_tok,
+                            "tool_call_count": int(getattr(response, "tool_call_count", 0) or 0),
+                            "tool_loop_count": int(getattr(response, "tool_loop_count", 0) or 0),
+                            "tool_catalog_count": 0,
+                            "tool_schema_chars": 0,
+                            "tool_schema_tokens_est": 0,
+                            "tool_schema_fingerprint": "",
+                            "tool_max_loops": 0,
+                            "budget_applied": bool(_pa.get("budget_applied")),
+                            "budget_limit_chars": _pa.get("budget_limit_chars"),
+                            "context_chars_before_budget": _pa.get("context_chars_before_budget", 0),
+                            "time_fyi_chars": _pa.get("time_fyi_chars", 0),
+                            "context_expansion_ratio": round(len(final_prompt) / max(len(item.prompt), 1), 3),
+                            "context_fingerprint": _pa.get("context_fingerprint", ""),
+                            "request_fingerprint": _hashlib.sha1((item.prompt or "").encode("utf-8")).hexdigest()[:16],
+                            "section_chars": _sec_chars,
+                            "section_tokens_est": _sec_tokens,
+                            "section_counts": _sec_counts,
+                        })
                     except Exception:
                         pass
                     if not item.silent:
@@ -6157,6 +6365,7 @@ class FlexibleAgentRuntime:
                             "chat_id": item.chat_id,
                             "text": display_text or response.text,
                             "request_id": item.request_id,
+                            "responded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
                         }
                         memory_user_text = item.prompt
                         if item.source.lower() in {"document", "photo", "voice", "audio", "video", "sticker"}:
@@ -6211,6 +6420,7 @@ class FlexibleAgentRuntime:
                 else:
                     err_msg = response.error or "Unknown error"
                     self._mark_error(err_msg)
+                    self._record_habit_outcome(item, success=False, error_text=err_msg)
                     if self._should_buffer_during_transfer(item.request_id):
                         self._record_suppressed_transfer_result(item, success=False, error=err_msg)
                     await self._notify_request_listeners(
@@ -6254,6 +6464,8 @@ class FlexibleAgentRuntime:
                 break
             except Exception as e:
                 self._mark_error(str(e))
+                if item is not None:
+                    self._record_habit_outcome(item, success=False, error_text=str(e))
                 self.error_logger.exception(f"Error in flex queue processing: {e}")
                 self.is_generating = False
             finally:
