@@ -38,6 +38,7 @@ class BackendResponse:
     tool_calls: Optional[list] = None   # Raw tool_calls list from API (V2.2+)
     stop_reason: Optional[str] = None   # e.g. "stop", "tool_calls", "length"
     usage: Optional[TokenUsage] = None  # Real token usage from API (V3.0+)
+    cost_usd: Optional[float] = None    # Real cost from CLI/API when available
     tool_call_count: int = 0
     tool_loop_count: int = 0
 

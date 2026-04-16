@@ -1072,12 +1072,12 @@ class BridgeAgentRuntime:
         cron_count = sum(1 for job in self.skill_manager.list_jobs("cron", agent_name=self.name) if job.get("enabled"))
         return heartbeat_count, cron_count
 
-    async def _send_voice_reply(self, chat_id: int, text: str, request_id: str) -> bool:
+    async def _send_voice_reply(self, chat_id: int, text: str, request_id: str, force: bool = False) -> bool:
         # Guard: skip if Telegram not connected
         if not self.telegram_connected:
             return False
         try:
-            asset = await self.voice_manager.synthesize_reply(self.name, request_id, text)
+            asset = await self.voice_manager.synthesize_reply(self.name, request_id, text, force=force)
             if asset is None:
                 return False
             max_attempts = 3
@@ -1085,7 +1085,10 @@ class BridgeAgentRuntime:
             for attempt in range(1, max_attempts + 1):
                 try:
                     with asset.ogg_path.open("rb") as f:
-                        await self.app.bot.send_voice(chat_id=chat_id, voice=f)
+                        await self.app.bot.send_voice(
+                            chat_id=chat_id, voice=f,
+                            read_timeout=30, write_timeout=30, connect_timeout=15,
+                        )
                     self.telegram_logger.info(
                         f"Sent Telegram voice reply for request_id={request_id} "
                         f"(path={asset.ogg_path.name}, attempt={attempt})"
@@ -2158,6 +2161,7 @@ class BridgeAgentRuntime:
                 output_tokens=output_tokens,
                 thinking_tokens=thinking_tokens,
                 session_id=self.session_id_dt,
+                cost_usd=getattr(response, "cost_usd", None),
             )
             record_audit_event(
                 self.workspace_dir,
@@ -3222,6 +3226,154 @@ class BridgeAgentRuntime:
                 "/sys <n> on|off|delete\n/sys <n> save <msg>\n/sys <n> replace <msg>"
             )
 
+    async def cmd_say(self, update, context):
+        """One-shot TTS: synthesize the last assistant message and send as voice."""
+        if update.effective_user.id != self.global_config.authorized_id:
+            return
+        text = self._load_last_text_from_transcript("assistant")
+        if not text:
+            await self._reply_text(update, "No recent message to read.")
+            return
+        chat_id = update.effective_chat.id
+        request_id = f"say-{int(time.time())}"
+        ok = await self._send_voice_reply(chat_id, text, request_id, force=True)
+        if not ok:
+            await self._reply_text(update, "Voice synthesis failed. Check /voice status for provider settings.")
+
+    # ── /loop — recurring task management (legacy runtime) ─────────
+
+    async def cmd_loop(self, update, context):
+        """Manage recurring loop tasks via skill injection.
+
+        /loop <task description>     — create a new loop (agent comprehends & sets up)
+        /loop list                   — list this agent's loops
+        /loop stop [id]              — stop one or all loops
+        """
+        if update.effective_user.id != self.global_config.authorized_id:
+            return
+        raw = (update.message.text or "").strip()
+        parts = raw.split(None, 1)
+        args_text = parts[1].strip() if len(parts) > 1 else ""
+
+        if not args_text:
+            await self._reply_text(
+                update,
+                "🔄 Loop — Recurring Task Manager\n\n"
+                "/loop <task> — create a loop\n"
+                "/loop list — list active loops\n"
+                "/loop stop [id] — stop loop(s)",
+            )
+            return
+
+        sub_lower = args_text.lower().strip()
+
+        if sub_lower == "list":
+            if not self.skill_manager:
+                await self._reply_text(update, "Skill manager not available.")
+                return
+            jobs = self.skill_manager.list_jobs("cron", agent_name=self.name)
+            loops = [j for j in jobs if j.get("loop_meta")]
+            if not loops:
+                await self._reply_text(update, "No loops for this agent.")
+                return
+            lines = ["🔄 Loops\n"]
+            for j in loops:
+                meta = j.get("loop_meta", {})
+                status = "ON" if j.get("enabled") else "OFF"
+                count = meta.get("count", 0)
+                mx = meta.get("max", 100)
+                sched = j.get("schedule", "?")
+                summary = meta.get("task_summary", "")[:60]
+                lines.append(f"[{status}] {j['id']} {sched} ({count}/{mx})")
+                if summary:
+                    lines.append(f"  {summary}")
+            await self._reply_text(update, "\n".join(lines))
+            return
+
+        if sub_lower.startswith("stop"):
+            stop_arg = sub_lower[4:].strip()
+            if not self.skill_manager:
+                await self._reply_text(update, "Skill manager not available.")
+                return
+            jobs = self.skill_manager.list_jobs("cron", agent_name=self.name)
+            loops = [j for j in jobs if j.get("loop_meta") and j.get("enabled")]
+            if not loops:
+                await self._reply_text(update, "No active loops to stop.")
+                return
+            stopped = []
+            for j in loops:
+                if not stop_arg or stop_arg in j["id"]:
+                    self.skill_manager.set_job_enabled("cron", j["id"], enabled=False)
+                    stopped.append(j["id"])
+            if stopped:
+                await self._reply_text(update, f"Stopped: {', '.join(stopped)}")
+            else:
+                await self._reply_text(update, f"No loop matching '{stop_arg}'.")
+            return
+
+        # --- /loop <task> — skill injection: let agent comprehend and set up ---
+        tasks_path = str(self.skill_manager.tasks_path) if self.skill_manager else "tasks.json"
+        loop_skill_prompt = (
+            "--- SKILL CONTEXT [loop] ---\n"
+            "The user wants to create a recurring loop task. Your job is to UNDERSTAND their request "
+            "and set up a cron job in tasks.json.\n\n"
+            "## What you must figure out from the user's message:\n"
+            "1. **WHAT** to do each iteration (the task)\n"
+            "2. **HOW OFTEN** (the interval — e.g., every 10 min, every 30 min, hourly)\n"
+            "3. **WHEN TO STOP** (the completion condition — e.g., after N times, when all items done, etc.)\n\n"
+            "## How to create the cron job:\n"
+            f"1. Read `{tasks_path}` to see the current crons array\n"
+            f"2. Generate a unique ID: `{self.name}-loop-<6char_hash>`\n"
+            "3. Append a new cron entry with this structure:\n"
+            "```json\n"
+            "{\n"
+            f'  "id": "{self.name}-loop-XXXXXX",\n'
+            f'  "agent": "{self.name}",\n'
+            '  "enabled": true,\n'
+            '  "schedule": "<cron expression>",\n'
+            '  "action": "enqueue_prompt",\n'
+            '  "prompt": "<clear instructions for each iteration — include the task, progress tracking method, and stop condition>",\n'
+            f'  "note": "Loop: <brief summary>",\n'
+            '  "loop_meta": {\n'
+            '    "max": 100,\n'
+            '    "count": 0,\n'
+            f'    "created": "<current ISO datetime>",\n'
+            '    "task_summary": "<user request summary>"\n'
+            '  }\n'
+            "}\n"
+            "```\n"
+            f"4. Save `{tasks_path}`\n\n"
+            "## Cron schedule examples:\n"
+            "- Every 5 min: `*/5 * * * *`\n"
+            "- Every 10 min: `*/10 * * * *`\n"
+            "- Every 30 min: `*/30 * * * *`\n"
+            "- Every hour: `0 * * * *`\n"
+            "- Every 2 hours: `0 */2 * * *`\n"
+            "- Daily at midnight: `0 0 * * *`\n\n"
+            "## The prompt you write into the cron entry must tell the future iteration:\n"
+            "- What to do\n"
+            "- How to track progress (use workspace files if needed)\n"
+            f'- When done: read `{tasks_path}`, find the cron by ID, set `"enabled": false`, save\n'
+            "- If unrecoverable error: disable the cron and report\n\n"
+            "## Safety net:\n"
+            "- `loop_meta.max` is a hard cap (default 100). The scheduler auto-disables when count exceeds max.\n"
+            "- The agent should still stop EARLIER when the task is semantically complete.\n\n"
+            "## IMPORTANT:\n"
+            "- Do NOT ask the user for clarification. Infer reasonable defaults from their message.\n"
+            "- If interval is unclear, default to 10 minutes.\n"
+            "- After creating the cron, confirm to the user: the job ID, schedule, and what each iteration will do.\n\n"
+            "--- USER REQUEST ---\n"
+            f"{args_text}"
+        )
+
+        await self.enqueue_request(
+            chat_id=update.effective_chat.id,
+            prompt=loop_skill_prompt,
+            source="loop_skill",
+            summary="Loop setup",
+        )
+        await self._reply_text(update, "🔄 收到！正在理解任务并设置循环…")
+
     async def cmd_voice(self, update, context):
         if update.effective_user.id != self.global_config.authorized_id:
             return
@@ -4209,6 +4361,8 @@ class BridgeAgentRuntime:
         self.app.add_handler(CommandHandler("status", self.cmd_status))
         self.app.add_handler(CommandHandler("sys", self.cmd_sys))
         self.app.add_handler(CommandHandler("voice", self.cmd_voice))
+        self.app.add_handler(CommandHandler("say", self.cmd_say))
+        self.app.add_handler(CommandHandler("loop", self.cmd_loop))
         self.app.add_handler(CommandHandler("active", self.cmd_active))
         self.app.add_handler(CommandHandler("handoff", self.cmd_handoff))
         self.app.add_handler(CommandHandler("ticket", self.cmd_ticket))

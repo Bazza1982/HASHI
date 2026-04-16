@@ -6,7 +6,7 @@ import asyncio
 import logging
 from pathlib import Path
 
-from adapters.base import BaseBackend, BackendCapabilities, BackendResponse
+from adapters.base import BaseBackend, BackendCapabilities, BackendResponse, TokenUsage
 from adapters.stream_events import (
     StreamCallback, StreamEvent,
     KIND_THINKING, KIND_TOOL_END,
@@ -41,6 +41,8 @@ class CodexCLIAdapter(BaseBackend):
         self.events_log_path = self.config.workspace_dir / "codex_exec_events.jsonl"
         # Persistent session state
         self._session_id: str | None = None
+        # Real token usage captured from turn.completed events
+        self._last_usage: TokenUsage | None = None
 
     def _should_use_stdin_transport(self, prompt: str) -> bool:
         if "\n" in prompt or "\r" in prompt:
@@ -228,6 +230,13 @@ class CodexCLIAdapter(BaseBackend):
         item_type = item.get("type", "")
 
         if etype == "turn.completed":
+            usage = event.get("usage")
+            if isinstance(usage, dict):
+                self._last_usage = TokenUsage(
+                    input_tokens=usage.get("input_tokens", 0),
+                    output_tokens=usage.get("output_tokens", 0),
+                    thinking_tokens=0,
+                )
             return None
 
         if pending_agent_message and not (etype == "item.completed" and item_type == "agent_message"):
@@ -294,6 +303,9 @@ class CodexCLIAdapter(BaseBackend):
         self, prompt: str, request_id: str, is_retry: bool = False, silent: bool = False,
         on_stream_event: StreamCallback = None,
     ) -> BackendResponse:
+        # Reset per-request usage tracking
+        self._last_usage = None
+
         started = time.perf_counter()
         output_path = self.config.workspace_dir / f".codex_last_{request_id}.txt"
         if output_path.exists():
@@ -498,7 +510,7 @@ class CodexCLIAdapter(BaseBackend):
                     is_success=False,
                 )
 
-            return BackendResponse(text=response, duration_ms=duration_ms, is_success=True)
+            return BackendResponse(text=response, duration_ms=duration_ms, is_success=True, usage=self._last_usage)
 
         except asyncio.CancelledError:
             self.logger.warning(f"Generation cancelled for {request_id}")
