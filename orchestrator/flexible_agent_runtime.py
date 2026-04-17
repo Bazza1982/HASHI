@@ -129,6 +129,10 @@ class FlexibleAgentRuntime:
         self.voice_manager = VoiceManager(self.workspace_dir, self.media_dir, ffmpeg_cmd="ffmpeg", secrets=self.secrets)
         self._authorized_telegram_ids = resolve_authorized_telegram_ids(self.config.extra, self.global_config.authorized_id)
 
+        # Safe voice confirmation layer
+        self._safevoice_enabled: bool = self._get_skill_state().get("safevoice", True)
+        self._pending_voice: dict = {}  # chat_id -> {prompt, summary, media_kind, timestamp}
+
         # Command policy
         # - default: allow all commands
         # - limited: disable execution/admin commands by default
@@ -1409,6 +1413,7 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CommandHandler("sys", self._wrap_cmd("sys", self.cmd_sys)))
         self.app.add_handler(CommandHandler("credit", self._wrap_cmd("credit", self.cmd_credit)))
         self.app.add_handler(CommandHandler("voice", self._wrap_cmd("voice", self.cmd_voice)))
+        self.app.add_handler(CommandHandler("safevoice", self._wrap_cmd("safevoice", self.cmd_safevoice)))
         self.app.add_handler(CommandHandler("say", self._wrap_cmd("say", self.cmd_say)))
         self.app.add_handler(CommandHandler("loop", self._wrap_cmd("loop", self.cmd_loop)))
         self.app.add_handler(CommandHandler("whisper", self._wrap_cmd("whisper", self.cmd_whisper)))
@@ -1428,6 +1433,7 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CommandHandler("effort", self._wrap_cmd("effort", self.cmd_effort)))
         self.app.add_handler(CallbackQueryHandler(self.callback_model, pattern=r"^(model|backend|bmodel|effort|backend_menu)"))
         self.app.add_handler(CallbackQueryHandler(self.callback_voice, pattern=r"^voice:"))
+        self.app.add_handler(CallbackQueryHandler(self.callback_safevoice, pattern=r"^safevoice:"))
         self.app.add_handler(CallbackQueryHandler(self.callback_start_agent, pattern=r"^startagent:"))
         self.app.add_handler(CommandHandler("agents", self._wrap_cmd("agents", self.cmd_agents)))
         self.app.add_handler(CallbackQueryHandler(self.callback_agents, pattern=r"^agents:"))
@@ -2597,6 +2603,47 @@ class FlexibleAgentRuntime:
             f"Remaining: {limit_remaining}\n"
             f"Free tier: {is_free_tier}"
         )
+
+    # ── /safevoice command ─────────────────────────────────────────────────
+    async def cmd_safevoice(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        args = [a.strip().lower() for a in (context.args or []) if a.strip()]
+        if not args:
+            status = "ON 🛡️" if self._safevoice_enabled else "OFF"
+            await self._reply_text(update, f"Safe Voice: {status}\nUsage: /safevoice on | off")
+            return
+        if args[0] == "on":
+            self._safevoice_enabled = True
+            self._set_skill_state("safevoice", True)
+            await self._reply_text(update, "🛡️ Safe Voice ON — voice messages will require confirmation before sending to agent.")
+        elif args[0] == "off":
+            self._safevoice_enabled = False
+            self._set_skill_state("safevoice", False)
+            self._pending_voice.clear()
+            await self._reply_text(update, "Safe Voice OFF — voice messages go directly to agent.")
+        else:
+            await self._reply_text(update, "Usage: /safevoice on | off")
+
+    async def callback_safevoice(self, update: Update, context: Any):
+        query = update.callback_query
+        if not self._is_authorized_user(query.from_user.id):
+            return
+        parts = (query.data or "").split(":", 2)
+        action = parts[1] if len(parts) > 1 else ""
+        chat_key = parts[2] if len(parts) > 2 else ""
+        pending = self._pending_voice.pop(chat_key, None)
+        if action == "yes" and pending:
+            await query.edit_message_text(f"✅ Confirmed. Sending to agent:\n\n_{pending['transcript']}_", parse_mode="Markdown")
+            await query.answer("Sending...")
+            await self.enqueue_request(int(chat_key), pending["prompt"], "voice_transcript", pending["summary"])
+        elif action == "no":
+            await query.edit_message_text("❌ Voice message discarded.")
+            await query.answer("Discarded")
+        else:
+            await query.edit_message_text("⏰ Voice confirmation expired.")
+            await query.answer("Expired")
+
     async def cmd_voice(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
@@ -5483,7 +5530,32 @@ class FlexibleAgentRuntime:
             self.telegram_logger.info(
                 f"Transcribed {media_kind.lower()} ({filename}): {len(transcript)} chars"
             )
-            await self.enqueue_request(update.effective_chat.id, prompt, "voice_transcript", f"{media_kind}: {filename}")
+
+            # Safe voice: show confirmation before sending to agent
+            if self._safevoice_enabled:
+                chat_id = update.effective_chat.id
+                chat_key = str(chat_id)
+                self._pending_voice[chat_key] = {
+                    "prompt": prompt,
+                    "transcript": transcript,
+                    "summary": f"{media_kind}: {filename}",
+                    "timestamp": datetime.now().isoformat(),
+                }
+                preview = transcript[:300] + ("..." if len(transcript) > 300 else "")
+                keyboard = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("✅ Send", callback_data=f"safevoice:yes:{chat_key}"),
+                        InlineKeyboardButton("❌ Discard", callback_data=f"safevoice:no:{chat_key}"),
+                    ]
+                ])
+                await self._reply_text(
+                    update,
+                    f"🛡️ *Safe Voice — Confirm transcription:*\n\n_{preview}_",
+                    reply_markup=keyboard,
+                    parse_mode="Markdown",
+                )
+            else:
+                await self.enqueue_request(update.effective_chat.id, prompt, "voice_transcript", f"{media_kind}: {filename}")
         except Exception as e:
             self.error_logger.exception(f"{media_kind} voice handler failed for '{filename}': {e}")
             try:
@@ -6648,6 +6720,7 @@ class FlexibleAgentRuntime:
             BotCommand("agents", "List all agents with controls; add <id> <name> [token]"),
             BotCommand("status", "View agent status"),
             BotCommand("voice", "Toggle native voice replies"),
+            BotCommand("safevoice", "Toggle voice confirmation safety layer"),
             BotCommand("whisper", "Set Whisper model size [small|medium|large]"),
             BotCommand("active", "Toggle proactive heartbeat"),
             BotCommand("fyi", "Refresh bridge environment awareness"),

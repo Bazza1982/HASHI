@@ -441,6 +441,9 @@ class BridgeAgentRuntime:
         self._pending_auto_recall_context: str | None = None
         self.runtime_session_path = self.config.workspace_dir / ".runtime_session.json"
         self.voice_manager = VoiceManager(self.config.workspace_dir, self.media_dir, ffmpeg_cmd="ffmpeg", secrets=self.secrets)
+        # Safe voice confirmation layer
+        self._safevoice_enabled: bool = self._load_safevoice_state()
+        self._pending_voice: dict = {}  # chat_id_str -> {prompt, transcript, summary, timestamp}
         self.memory_store = BridgeMemoryStore(self.config.workspace_dir)
         self.handoff_builder = HandoffBuilder(self.config.workspace_dir, transcript_filename="conversation_log.jsonl")
         self.parked_topics = ParkedTopicStore(self.config.workspace_dir)
@@ -2735,8 +2738,32 @@ class BridgeAgentRuntime:
             self.telegram_logger.info(
                 f"Transcribed {media_kind.lower()} ({filename}): {len(transcript)} chars"
             )
-            self.append_conversation_entry("user", f"[{media_kind}] {transcript[:200]}", "voice_transcript")
-            await self.enqueue_request(update.effective_chat.id, prompt, "voice_transcript", f"{media_kind}: {filename}")
+
+            # Safe voice: show confirmation before sending to agent
+            if self._safevoice_enabled:
+                chat_id = update.effective_chat.id
+                chat_key = str(chat_id)
+                self._pending_voice[chat_key] = {
+                    "prompt": prompt,
+                    "transcript": transcript,
+                    "summary": f"{media_kind}: {filename}",
+                    "timestamp": datetime.now().isoformat(),
+                }
+                preview = transcript[:300] + ("..." if len(transcript) > 300 else "")
+                keyboard = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("✅ Send", callback_data=f"safevoice:yes:{chat_key}"),
+                        InlineKeyboardButton("❌ Discard", callback_data=f"safevoice:no:{chat_key}"),
+                    ]
+                ])
+                await update.message.reply_text(
+                    f"🛡️ *Safe Voice — Confirm transcription:*\n\n_{preview}_",
+                    reply_markup=keyboard,
+                    parse_mode="Markdown",
+                )
+            else:
+                self.append_conversation_entry("user", f"[{media_kind}] {transcript[:200]}", "voice_transcript")
+                await self.enqueue_request(update.effective_chat.id, prompt, "voice_transcript", f"{media_kind}: {filename}")
         except Exception as e:
             self.error_logger.exception(f"{media_kind} voice handler failed for '{filename}': {e}")
             try:
@@ -3373,6 +3400,65 @@ class BridgeAgentRuntime:
             summary="Loop setup",
         )
         await self._reply_text(update, "🔄 收到！正在理解任务并设置循环…")
+
+    # ── /safevoice command ─────────────────────────────────────────────────
+    def _load_safevoice_state(self) -> bool:
+        path = self.config.workspace_dir / "skill_state.json"
+        try:
+            if path.exists():
+                return json.loads(path.read_text(encoding="utf-8")).get("safevoice", True)
+        except Exception:
+            pass
+        return True
+
+    def _save_safevoice_state(self, enabled: bool):
+        path = self.config.workspace_dir / "skill_state.json"
+        try:
+            state = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        except Exception:
+            state = {}
+        state["safevoice"] = enabled
+        path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    async def cmd_safevoice(self, update, context):
+        if update.effective_user.id != self.global_config.authorized_id:
+            return
+        args = [a.strip().lower() for a in (context.args or []) if a.strip()]
+        if not args:
+            status = "ON 🛡️" if self._safevoice_enabled else "OFF"
+            await update.message.reply_text(f"Safe Voice: {status}\nUsage: /safevoice on | off")
+            return
+        if args[0] == "on":
+            self._safevoice_enabled = True
+            self._save_safevoice_state(True)
+            await update.message.reply_text("🛡️ Safe Voice ON — voice messages will require confirmation before sending to agent.")
+        elif args[0] == "off":
+            self._safevoice_enabled = False
+            self._save_safevoice_state(False)
+            self._pending_voice.clear()
+            await update.message.reply_text("Safe Voice OFF — voice messages go directly to agent.")
+        else:
+            await update.message.reply_text("Usage: /safevoice on | off")
+
+    async def callback_safevoice(self, update, context):
+        query = update.callback_query
+        if query.from_user.id != self.global_config.authorized_id:
+            return
+        parts = (query.data or "").split(":", 2)
+        action = parts[1] if len(parts) > 1 else ""
+        chat_key = parts[2] if len(parts) > 2 else ""
+        pending = self._pending_voice.pop(chat_key, None)
+        if action == "yes" and pending:
+            await query.edit_message_text(f"✅ Confirmed. Sending to agent:\n\n_{pending['transcript']}_", parse_mode="Markdown")
+            await query.answer("Sending...")
+            self.append_conversation_entry("user", f"[Voice] {pending['transcript'][:200]}", "voice_transcript")
+            await self.enqueue_request(int(chat_key), pending["prompt"], "voice_transcript", pending["summary"])
+        elif action == "no":
+            await query.edit_message_text("❌ Voice message discarded.")
+            await query.answer("Discarded")
+        else:
+            await query.edit_message_text("⏰ Voice confirmation expired.")
+            await query.answer("Expired")
 
     async def cmd_voice(self, update, context):
         if update.effective_user.id != self.global_config.authorized_id:
@@ -4323,6 +4409,7 @@ class BridgeAgentRuntime:
             BotCommand("start", "Start another stopped agent"),
             BotCommand("status", "View agent status"),
             BotCommand("voice", "Toggle native voice replies"),
+            BotCommand("safevoice", "Toggle voice confirmation safety layer"),
             BotCommand("active", "Toggle proactive heartbeat"),
             BotCommand("handoff", "Fresh continuity restore"),
             BotCommand("ticket", "Submit IT support ticket to Arale"),
@@ -4361,6 +4448,7 @@ class BridgeAgentRuntime:
         self.app.add_handler(CommandHandler("status", self.cmd_status))
         self.app.add_handler(CommandHandler("sys", self.cmd_sys))
         self.app.add_handler(CommandHandler("voice", self.cmd_voice))
+        self.app.add_handler(CommandHandler("safevoice", self.cmd_safevoice))
         self.app.add_handler(CommandHandler("say", self.cmd_say))
         self.app.add_handler(CommandHandler("loop", self.cmd_loop))
         self.app.add_handler(CommandHandler("active", self.cmd_active))
@@ -4374,6 +4462,7 @@ class BridgeAgentRuntime:
         self.app.add_handler(CommandHandler("model", self.cmd_model))
         self.app.add_handler(CallbackQueryHandler(self.callback_model, pattern=r"^(model|effort):"))
         self.app.add_handler(CallbackQueryHandler(self.callback_voice, pattern=r"^voice:"))
+        self.app.add_handler(CallbackQueryHandler(self.callback_safevoice, pattern=r"^safevoice:"))
         self.app.add_handler(CallbackQueryHandler(self.callback_start_agent, pattern=r"^startagent:"))
         self.app.add_handler(CallbackQueryHandler(self.callback_skill, pattern=r"^(skill|skilljob):"))
         self.app.add_handler(CommandHandler("new", self.cmd_new))

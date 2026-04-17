@@ -8,6 +8,7 @@ from pathlib import Path
 scheduler_logger = logging.getLogger("BridgeU.Scheduler")
 
 SCHEDULER_JOB_TIMEOUT_S = 30
+SCHEDULER_SKILL_TIMEOUT_S = 300  # action skills (dream etc.) need much longer — they run subprocesses with LLM calls
 PARKED_FOLLOWUP_TIMEOUT_S = 15
 
 try:
@@ -206,6 +207,7 @@ class TaskScheduler:
                                 task_kind="Heartbeat",
                                 task_id=task_id,
                                 agent_name=agent_name,
+                                timeout_s=SCHEDULER_SKILL_TIMEOUT_S,
                             )
                         else:
                             ok = await self._run_scheduler_action(
@@ -291,6 +293,7 @@ class TaskScheduler:
                                 task_kind="Cron",
                                 task_id=task_id,
                                 agent_name=agent_name,
+                                timeout_s=SCHEDULER_SKILL_TIMEOUT_S,
                             )
                         else:
                             if not prompt or not prompt.strip():
@@ -311,9 +314,11 @@ class TaskScheduler:
                                 task_id=task_id,
                                 agent_name=agent_name,
                             )
-                        if ok:
-                            self.state["crons"][task_id] = now
-                            state_changed = True
+                        # Always update last_run to prevent re-triggering on
+                        # timeout/failure.  The cron will fire again at its NEXT
+                        # scheduled time, not in the same minute.
+                        self.state["crons"][task_id] = now
+                        state_changed = True
 
                 # Process parked-topic follow-ups without creating ad hoc task rows.
                 for rt in runtime_map.values():
