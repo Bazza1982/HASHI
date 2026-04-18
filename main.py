@@ -885,9 +885,18 @@ class UniversalOrchestrator:
         # Reload adapters first (leaf), then orchestrator (depends on adapters).
         # Skip transports — WhatsApp transport stays alive across restart.
         prefixes = ("adapters.", "orchestrator.")
+        # Sort order: adapters first (leaf), then orchestrator utilities,
+        # then runtime modules last (they import from utilities like voice_manager).
+        # This ensures `from orchestrator.X import Y` picks up the reloaded version.
+        def _reload_key(n: str):
+            if n.startswith("adapters."):
+                return (0, n)
+            if "_runtime" in n:
+                return (2, n)
+            return (1, n)
         to_reload = sorted(
             (name for name in list(sys.modules) if any(name.startswith(p) for p in prefixes)),
-            key=lambda n: (0 if n.startswith("adapters.") else 1, n),
+            key=_reload_key,
         )
         reloaded = []
         for name in to_reload:
@@ -1001,6 +1010,26 @@ class UniversalOrchestrator:
         finally:
             _handler.removeFilter(_mute)
 
+        # Recreate the scheduler so it picks up reloaded code (e.g. loop_meta logic)
+        if self.scheduler_task is not None:
+            self.scheduler_task.cancel()
+            try:
+                await asyncio.wait_for(self.scheduler_task, timeout=5.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+        # Re-import from reloaded module to get the updated class
+        ReloadedScheduler = sys.modules["orchestrator.scheduler"].TaskScheduler
+        self.scheduler = ReloadedScheduler(
+            self.paths.tasks_path,
+            self.paths.state_path,
+            self.runtimes,
+            self.global_cfg.authorized_id if self.global_cfg else 0,
+            self.skill_manager,
+            orchestrator=self,
+        )
+        self.scheduler_task = asyncio.create_task(self.scheduler.run(), name="scheduler")
+        main_logger.info("Hot restart: scheduler recreated with reloaded code.")
+
         if self.runtimes:
             main_logger.info(f"Hot restart complete. {len(self.runtimes)} agent(s) running.")
             print(f"\033[38;5;108m  ✓ reboot complete — {len(self.runtimes)} agent(s) online\033[0m\n", flush=True)
@@ -1027,6 +1056,12 @@ class UniversalOrchestrator:
         bridge_logger.setLevel(logging.DEBUG)
         bridge_logger.propagate = False
         bridge_logger.addHandler(_bl_handler)
+        # Also route scheduler logs to bridge.log
+        _sched_logger = logging.getLogger("BridgeU.Scheduler")
+        _sched_logger.handlers.clear()
+        _sched_logger.setLevel(logging.DEBUG)
+        _sched_logger.propagate = False
+        _sched_logger.addHandler(_bl_handler)
         bridge_logger.info("=== Bridge starting ===")
 
         # Filter to selected agents

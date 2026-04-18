@@ -351,13 +351,13 @@ class VoiceManager:
         self._save(state)
         return f"Voice preset set to {alias}: {preset['label']}."
 
-    async def synthesize_reply(self, agent_name: str, request_id: str, text: str, max_retries: int = 2) -> VoiceAsset | None:
+    async def synthesize_reply(self, agent_name: str, request_id: str, text: str, max_retries: int = 2, force: bool = False) -> VoiceAsset | None:
         import asyncio
         import logging
         logger = logging.getLogger(f"Runtime.{agent_name}.voice")
 
         state = self._load()
-        if not state.get("enabled"):
+        if not force and not state.get("enabled"):
             return None
 
         last_err = None

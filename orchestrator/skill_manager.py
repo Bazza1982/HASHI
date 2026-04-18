@@ -193,6 +193,7 @@ class SkillManager:
         skill: SkillDefinition,
         workspace_dir: Path,
         args: str = "",
+        extra_env: dict[str, str] | None = None,
     ) -> tuple[bool, str]:
         if skill.id in {"cron", "heartbeat"}:
             return True, self.describe_jobs(skill.id)
@@ -219,6 +220,8 @@ class SkillManager:
         env["BRIDGE_PROJECT_ROOT"] = str(self.project_root)
         env["BRIDGE_WORKSPACE_DIR"] = str(workspace_dir)
         env["BRIDGE_SKILL_ID"] = skill.id
+        if extra_env:
+            env.update({k: str(v) for k, v in extra_env.items() if v is not None})
 
         try:
             proc = await asyncio.create_subprocess_exec(

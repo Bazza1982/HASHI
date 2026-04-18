@@ -22,7 +22,6 @@ import json
 import os
 import sqlite3
 import sys
-import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -39,8 +38,8 @@ from orchestrator.bridge_memory import BridgeMemoryStore
 from orchestrator.habits import HabitStore
 
 TASKS_PATH = PROJECT_ROOT / "tasks.json"
-SECRETS_PATH = PROJECT_ROOT / "secrets.json"
 AGENTS_PATH = PROJECT_ROOT / "agents.json"
+STATE_PATH = WORKSPACE_DIR / "state.json"
 TRANSCRIPT_PATH = WORKSPACE_DIR / "transcript.jsonl"
 AGENT_MD_PATH = WORKSPACE_DIR / "AGENT.md"
 DREAM_DIR = WORKSPACE_DIR / "dream_snapshots"
@@ -50,7 +49,7 @@ MEMORY_DB_PATH = WORKSPACE_DIR / "bridge_memory.sqlite"
 CRON_JOB_ID = f"dream-{AGENT_NAME}-nightly"
 CRON_TIME = "01:30"
 
-MAX_NEW_MEMORIES = 5
+MAX_NEW_MEMORIES = 20          # soft safety cap, not a creative constraint
 MIN_IMPORTANCE = 0.7
 MAX_AGENT_MD_SECTIONS = 3
 SNAPSHOT_RETENTION_DAYS = 7
@@ -59,22 +58,16 @@ MEMORY_FORGET_TARGET = 160      # trim down to this count when threshold exceede
 MAX_FORGET_PER_DREAM = 20       # safety cap — never delete more than this in one run
 _MEMORY_STORE: BridgeMemoryStore | None = None
 _HABIT_STORE: HabitStore | None = None
+SUPPORTED_SAFE_BACKENDS = {"claude-cli", "codex-cli", "gemini-cli"}
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
 
-def _read_secrets() -> dict:
+def _read_state() -> dict:
     try:
-        return json.loads(SECRETS_PATH.read_text())
+        return json.loads(STATE_PATH.read_text(encoding="utf-8"))
     except Exception:
         return {}
-
-
-def _get_openrouter_key(secrets: dict) -> str | None:
-    for key in (f"{AGENT_NAME}_openrouter_key", "openrouter-api_key", "openrouter_key"):
-        if secrets.get(key):
-            return secrets[key]
-    return None
 
 
 def _read_tasks() -> dict:
@@ -101,6 +94,72 @@ def _now_iso() -> str:
 
 def _today_str() -> str:
     return datetime.now().strftime("%Y-%m-%d")
+
+
+def _get_api_gateway_port() -> int:
+    try:
+        raw = json.loads(AGENTS_PATH.read_text(encoding="utf-8"))
+        return int((raw.get("global") or {}).get("api_gateway_port", 18801))
+    except Exception:
+        return 18801
+
+
+def _resolve_backend_context() -> tuple[str | None, str | None]:
+    env_backend = (os.environ.get("BRIDGE_ACTIVE_BACKEND") or "").strip()
+    env_model = (os.environ.get("BRIDGE_ACTIVE_MODEL") or "").strip()
+    if env_backend and env_model:
+        return env_backend, env_model
+
+    state = _read_state()
+    backend = str(state.get("active_backend") or "").strip() or None
+    model = str(state.get("active_model") or "").strip() or None
+    if backend and model:
+        return backend, model
+
+    agents = _read_agents().get("agents", [])
+    for entry in agents:
+        if str(entry.get("name") or "").strip().lower() != AGENT_NAME.lower():
+            continue
+        backend = str(entry.get("active_backend") or entry.get("engine") or "").strip() or None
+        if entry.get("type") == "flex":
+            allowed = entry.get("allowed_backends") or []
+            for option in allowed:
+                if str(option.get("engine") or "").strip() == backend:
+                    model = str(option.get("model") or "").strip() or None
+                    break
+        if not model:
+            model = str(entry.get("model") or "").strip() or None
+        return backend, model
+    return None, None
+
+
+def _call_current_backend(_backend_hint: str | None, messages: list[dict], model: str | None = None) -> str:
+    backend, resolved_model = _resolve_backend_context()
+    if not backend or not resolved_model:
+        raise RuntimeError("Dream could not resolve the agent's current backend/model.")
+    if backend not in SUPPORTED_SAFE_BACKENDS:
+        raise RuntimeError(
+            f"Dream refuses unsafe backend '{backend}'. Allowed backends: {', '.join(sorted(SUPPORTED_SAFE_BACKENDS))}."
+        )
+    target_model = model or resolved_model
+    payload = json.dumps({
+        "model": target_model,
+        "messages": messages,
+        "stream": False,
+    }).encode("utf-8")
+    gateway_url = f"http://127.0.0.1:{_get_api_gateway_port()}/v1/chat/completions"
+    req = urllib.request.Request(
+        gateway_url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+            return result["choices"][0]["message"]["content"]
+    except Exception as exc:
+        raise RuntimeError(f"Current-backend call failed via local API gateway: {exc}") from exc
 
 
 def _load_transcript_for_date(target_date: str) -> list[dict]:
@@ -190,34 +249,6 @@ def _load_transcript_for_date(target_date: str) -> list[dict]:
     return turns
 
 
-def _call_openrouter(api_key: str, messages: list[dict], model: str = "anthropic/claude-sonnet-4-5") -> str:
-    """Call OpenRouter chat completions API. Returns text response."""
-    payload = json.dumps({
-        "model": model,
-        "messages": messages,
-        "max_tokens": 2000,
-        "temperature": 0.3,
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        "https://openrouter.ai/api/v1/chat/completions",
-        data=payload,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/hashi-bridge",
-            "X-Title": "Hashi Dream",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=90) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-            return result["choices"][0]["message"]["content"]
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"OpenRouter HTTP {e.code}: {body[:300]}") from e
-
-
 def _memory_store() -> BridgeMemoryStore:
     global _MEMORY_STORE
     if _MEMORY_STORE is None:
@@ -287,7 +318,7 @@ def _fetch_low_importance_memories(limit: int) -> list[dict]:
         return []
 
 
-def _forget_memories(api_key: str, current_count: int) -> tuple[int, list[str]]:
+def _forget_memories(current_count: int) -> tuple[int, list[str]]:
     """Ask LLM which memories to forget, delete them, return (count_deleted, summaries)."""
     candidates = _fetch_low_importance_memories(limit=min(60, current_count))
     if not candidates:
@@ -323,10 +354,10 @@ Respond ONLY with valid JSON:
 }}
 
 If nothing should be forgotten, return {{"forget_ids": [], "reason": "..."}}
-"""
+    """
 
     try:
-        response = _call_openrouter(api_key, [{"role": "user", "content": forget_prompt}])
+        response = _call_current_backend(None, [{"role": "user", "content": forget_prompt}])
         clean = response.strip()
         if clean.startswith("```"):
             clean = "\n".join(clean.split("\n")[1:])
@@ -518,10 +549,14 @@ def cmd_status() -> str:
 
 def cmd_now(is_scheduled: bool = False) -> str:
     """Run the dream reflection process."""
-    secrets = _read_secrets()
-    api_key = _get_openrouter_key(secrets)
-    if not api_key:
-        return "❌ Dream: No OpenRouter API key found. Cannot run reflection."
+    backend, model = _resolve_backend_context()
+    if not backend or not model:
+        return "❌ Dream: Could not resolve the agent's current backend/model."
+    if backend not in SUPPORTED_SAFE_BACKENDS:
+        return (
+            f"❌ Dream: Current backend '{backend}' is not permitted for dream. "
+            f"Allowed backends: {', '.join(sorted(SUPPORTED_SAFE_BACKENDS))}."
+        )
 
     # Scheduled runs (cron at 01:30) reflect on yesterday; manual runs reflect on today.
     # If today has no turns, also try yesterday as fallback (for manual runs shortly after midnight).
@@ -563,13 +598,13 @@ def cmd_now(is_scheduled: bool = False) -> str:
             f"(transcript unchanged, hash={current_hash[:8]})."
         )
 
-    # Build transcript excerpt (cap at ~6000 chars to stay within context)
+    # Build transcript excerpt (cap at ~12000 chars to give LLM enough context)
     transcript_text = ""
-    for t in turns[-60:]:
+    for t in turns[-80:]:
         role = "User" if t["role"] == "user" else "Assistant"
-        transcript_text += f"{role}: {t['text'][:800]}\n\n"
-    if len(transcript_text) > 6000:
-        transcript_text = transcript_text[-6000:]
+        transcript_text += f"{role}: {t['text'][:1000]}\n\n"
+    if len(transcript_text) > 12000:
+        transcript_text = transcript_text[-12000:]
 
     agent_md_content = AGENT_MD_PATH.read_text(encoding="utf-8") if AGENT_MD_PATH.exists() else ""
 
@@ -594,7 +629,7 @@ Respond ONLY with valid JSON in this exact format:
 {{
   "new_memories": [
     {{
-      "content": "Concise memory text — should be self-contained and useful in future conversations",
+      "content": "Memory text — detail level should match importance",
       "memory_type": "episodic",
       "importance": 0.8,
       "source": "dream:{dream_date}"
@@ -611,18 +646,26 @@ Respond ONLY with valid JSON in this exact format:
 }}
 
 RULES (follow strictly):
-1. new_memories: max {MAX_NEW_MEMORIES} entries, only if importance >= {MIN_IMPORTANCE}
-2. agent_md_updates: max {MAX_AGENT_MD_SECTIONS} sections, only for genuinely significant insights
-3. Do NOT invent facts — only extract from the actual transcript
-4. Do NOT update agent.md for trivial things; only for meaningful behavioral insights
-5. If nothing significant happened, return empty arrays and say so in reflection_summary
-6. new_memories array may be empty, agent_md_updates array may be empty
+1. There is NO fixed quota on memories. Output as many as genuinely warranted — 0 if nothing significant, 15 if it was a rich day. Let the conversation guide you.
+2. IMPORTANCE SCORING — the strongest signal is how much time/turns the user spent on a topic:
+   - Long back-and-forth debugging, deep discussion, multi-step work → 0.9-1.0
+   - Medium conversation, decisions made, clear outcomes → 0.8-0.9
+   - Brief mention, minor preference, small fact → 0.7-0.8
+   - Trivial chit-chat, greetings, noise → skip entirely (below {MIN_IMPORTANCE})
+3. DETAIL MATCHES IMPORTANCE — importance controls how much you write:
+   - 0.9-1.0: Full context — what happened, why, what was decided, key details, consequences. 2-5 sentences.
+   - 0.8-0.9: Clear summary with key decision or outcome. 1-2 sentences.
+   - 0.7-0.8: One-liner fact or preference.
+4. agent_md_updates: max {MAX_AGENT_MD_SECTIONS} sections, only for genuinely significant insights
+5. Do NOT invent facts — only extract from the actual transcript
+6. Do NOT update agent.md for trivial things; only for meaningful behavioral insights
+7. If nothing significant happened, return empty arrays and say so in reflection_summary
 """
 
     try:
-        response = _call_openrouter(api_key, [{"role": "user", "content": dream_prompt}])
+        response = _call_current_backend(backend, [{"role": "user", "content": dream_prompt}], model=model)
     except RuntimeError as e:
-        return f"❌ Dream: LLM call failed — {e}"
+        return f"❌ Dream: backend call failed — {e}"
 
     # Parse JSON response
     try:
@@ -632,7 +675,33 @@ RULES (follow strictly):
             clean = "\n".join(clean.split("\n")[1:])
             if clean.endswith("```"):
                 clean = clean[:-3]
-        dream_result = json.loads(clean.strip())
+        clean = clean.strip()
+        # Fix truncated JSON: if response was cut off, try to salvage what we have
+        dream_result = None
+        try:
+            dream_result = json.loads(clean)
+        except json.JSONDecodeError:
+            # Try to find the last complete JSON object
+            import re
+            # Extract each complete memory object and build a partial result
+            mem_pattern = re.compile(r'\{[^{}]*"content"\s*:\s*"[^"]*"[^{}]*\}')
+            memories = []
+            for m in mem_pattern.finditer(clean):
+                try:
+                    memories.append(json.loads(m.group()))
+                except json.JSONDecodeError:
+                    continue
+            # Extract reflection_summary if present
+            summary_match = re.search(r'"reflection_summary"\s*:\s*"([^"]*)"', clean)
+            summary = summary_match.group(1) if summary_match else "Partial dream — response was truncated."
+            if memories:
+                dream_result = {
+                    "new_memories": memories,
+                    "agent_md_updates": [],
+                    "reflection_summary": summary,
+                }
+        if dream_result is None:
+            raise json.JSONDecodeError("Could not parse or salvage JSON", clean, 0)
     except json.JSONDecodeError as e:
         return f"❌ Dream: Failed to parse LLM response as JSON — {e}\n\nRaw response:\n{response[:500]}"
 
@@ -640,18 +709,22 @@ RULES (follow strictly):
     agent_md_updates: list[dict] = dream_result.get("agent_md_updates", [])
     reflection_summary: str = dream_result.get("reflection_summary", "No summary provided.")
 
-    # Filter memories by importance threshold and cap count
+    # Filter memories by importance threshold (safety cap at MAX_NEW_MEMORIES)
     valid_memories = [
         m for m in new_memories
         if isinstance(m, dict) and float(m.get("importance", 0)) >= MIN_IMPORTANCE
-    ][:MAX_NEW_MEMORIES]
+    ]
+    if len(valid_memories) > MAX_NEW_MEMORIES:
+        # Sort by importance desc, keep the top ones
+        valid_memories.sort(key=lambda m: float(m.get("importance", 0)), reverse=True)
+        valid_memories = valid_memories[:MAX_NEW_MEMORIES]
 
     # ── Forgetting phase (before adding new memories) ──────────────────────────
     current_memory_count = _count_memories()
     forgotten_count = 0
     forgotten_summaries: list[str] = []
     if current_memory_count > MEMORY_FORGET_THRESHOLD:
-        forgotten_count, forgotten_summaries = _forget_memories(api_key, current_memory_count)
+        forgotten_count, forgotten_summaries = _forget_memories(current_memory_count)
 
     # Save snapshot BEFORE applying changes
     agent_md_before = agent_md_content if agent_md_updates else None
@@ -713,8 +786,8 @@ RULES (follow strictly):
 
     # Process user /good and /bad signals (max 3 per dream to avoid overwhelm)
     signal_log_lines = _habit_store().process_user_signals(
-        api_key=api_key,
-        call_llm_fn=_call_openrouter,
+        api_key=backend,
+        call_llm_fn=_call_current_backend,
         max_signals=3,
         max_habits_per_signal=2,
         max_context_words=6000,
@@ -750,8 +823,11 @@ RULES (follow strictly):
     if valid_memories:
         lines.append(f"🧠 {len(valid_memories)} new memories saved:")
         for m in valid_memories:
-            importance_bar = "█" * round(float(m.get("importance", 0.8)) * 5)
-            lines.append(f"  [{importance_bar}] {m['content'][:120]}")
+            imp = float(m.get("importance", 0.8))
+            importance_bar = "█" * round(imp * 5)
+            # Show more text for high-importance memories
+            preview_len = 200 if imp >= 0.9 else 120
+            lines.append(f"  [{importance_bar}] {m['content'][:preview_len]}")
         lines.append("")
     else:
         lines.append("🧠 No new memories — nothing significant enough today.")

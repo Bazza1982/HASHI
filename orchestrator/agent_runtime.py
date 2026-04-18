@@ -441,6 +441,9 @@ class BridgeAgentRuntime:
         self._pending_auto_recall_context: str | None = None
         self.runtime_session_path = self.config.workspace_dir / ".runtime_session.json"
         self.voice_manager = VoiceManager(self.config.workspace_dir, self.media_dir, ffmpeg_cmd="ffmpeg", secrets=self.secrets)
+        # Safe voice confirmation layer
+        self._safevoice_enabled: bool = self._load_safevoice_state()
+        self._pending_voice: dict = {}  # chat_id_str -> {prompt, transcript, summary, timestamp}
         self.memory_store = BridgeMemoryStore(self.config.workspace_dir)
         self.handoff_builder = HandoffBuilder(self.config.workspace_dir, transcript_filename="conversation_log.jsonl")
         self.parked_topics = ParkedTopicStore(self.config.workspace_dir)
@@ -828,6 +831,33 @@ class BridgeAgentRuntime:
             return item.prompt
         return "\n\n".join(sections + [item.prompt])
 
+    def _source_requires_manual_permission(self, source: str) -> bool:
+        normalized = (source or "").strip().lower()
+        if not normalized:
+            return True
+        automated_prefixes = (
+            "scheduler",
+            "bridge:",
+            "bridge-transfer:",
+            "hchat-reply:",
+            "cos-query:",
+            "ticket:",
+            "loop_skill",
+            "startup",
+        )
+        return normalized.startswith(automated_prefixes)
+
+    def _remote_backend_block_reason(self, source: str) -> str | None:
+        engine = (self.config.engine or "").strip().lower()
+        if engine not in {"openrouter-api", "deepseek-api"}:
+            return None
+        if not self._source_requires_manual_permission(source):
+            return None
+        return (
+            f"Blocked {engine} for source '{source}'. Remote API backends are reserved for user-initiated requests only; "
+            "automated/agent-originated flows must not use them."
+        )
+
     def _extract_json_object(self, text: str) -> dict | None:
         raw = (text or "").strip()
         if not raw:
@@ -1072,12 +1102,12 @@ class BridgeAgentRuntime:
         cron_count = sum(1 for job in self.skill_manager.list_jobs("cron", agent_name=self.name) if job.get("enabled"))
         return heartbeat_count, cron_count
 
-    async def _send_voice_reply(self, chat_id: int, text: str, request_id: str) -> bool:
+    async def _send_voice_reply(self, chat_id: int, text: str, request_id: str, force: bool = False) -> bool:
         # Guard: skip if Telegram not connected
         if not self.telegram_connected:
             return False
         try:
-            asset = await self.voice_manager.synthesize_reply(self.name, request_id, text)
+            asset = await self.voice_manager.synthesize_reply(self.name, request_id, text, force=force)
             if asset is None:
                 return False
             max_attempts = 3
@@ -1085,7 +1115,10 @@ class BridgeAgentRuntime:
             for attempt in range(1, max_attempts + 1):
                 try:
                     with asset.ogg_path.open("rb") as f:
-                        await self.app.bot.send_voice(chat_id=chat_id, voice=f)
+                        await self.app.bot.send_voice(
+                            chat_id=chat_id, voice=f,
+                            read_timeout=30, write_timeout=30, connect_timeout=15,
+                        )
                     self.telegram_logger.info(
                         f"Sent Telegram voice reply for request_id={request_id} "
                         f"(path={asset.ogg_path.name}, attempt={attempt})"
@@ -1219,8 +1252,17 @@ class BridgeAgentRuntime:
         if skill.type == "toggle":
             self.error_logger.error(f"Toggle skill cannot be scheduled: {skill_id}")
             return
+        skill_env = {
+            "BRIDGE_ACTIVE_BACKEND": self.config.engine,
+            "BRIDGE_ACTIVE_MODEL": self.config.model,
+        }
         if skill.type == "action":
-            ok, text = await self.skill_manager.run_action_skill(skill, self.config.workspace_dir, args=args)
+            ok, text = await self.skill_manager.run_action_skill(
+                skill,
+                self.config.workspace_dir,
+                args=args,
+                extra_env=skill_env,
+            )
             if ok and text:
                 await self.send_long_message(
                     chat_id=self.global_config.authorized_id,
@@ -2158,6 +2200,7 @@ class BridgeAgentRuntime:
                 output_tokens=output_tokens,
                 thinking_tokens=thinking_tokens,
                 session_id=self.session_id_dt,
+                cost_usd=getattr(response, "cost_usd", None),
             )
             record_audit_event(
                 self.workspace_dir,
@@ -2203,6 +2246,17 @@ class BridgeAgentRuntime:
                     "summary": item.summary,
                     "started_at": datetime.now().isoformat(),
                 }
+                remote_backend_block = self._remote_backend_block_reason(item.source)
+                if remote_backend_block:
+                    self.error_logger.warning(remote_backend_block)
+                    if item.deliver_to_telegram:
+                        await self.send_long_message(
+                            item.chat_id,
+                            f"⚠️ {remote_backend_block}",
+                            request_id=item.request_id,
+                            purpose="remote-backend-policy",
+                        )
+                    continue
                 self.is_generating = True
                 self._mark_activity()
                 self._log_maintenance(
@@ -2731,8 +2785,36 @@ class BridgeAgentRuntime:
             self.telegram_logger.info(
                 f"Transcribed {media_kind.lower()} ({filename}): {len(transcript)} chars"
             )
-            self.append_conversation_entry("user", f"[{media_kind}] {transcript[:200]}", "voice_transcript")
-            await self.enqueue_request(update.effective_chat.id, prompt, "voice_transcript", f"{media_kind}: {filename}")
+
+            # Safe voice: show confirmation before sending to agent
+            if self._safevoice_enabled:
+                chat_id = update.effective_chat.id
+                chat_key = str(chat_id)
+                self._pending_voice[chat_key] = {
+                    "prompt": prompt,
+                    "transcript": transcript,
+                    "summary": f"{media_kind}: {filename}",
+                    "timestamp": datetime.now().isoformat(),
+                }
+                max_preview = 3500
+                if len(transcript) > max_preview:
+                    preview = transcript[:max_preview] + f"\n\n…(共 {len(transcript)} 字，已截断)"
+                else:
+                    preview = transcript
+                keyboard = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("✅ Send", callback_data=f"safevoice:yes:{chat_key}"),
+                        InlineKeyboardButton("❌ Discard", callback_data=f"safevoice:no:{chat_key}"),
+                    ]
+                ])
+                await update.message.reply_text(
+                    f"🛡️ *Safe Voice — Confirm transcription:*\n\n_{preview}_",
+                    reply_markup=keyboard,
+                    parse_mode="Markdown",
+                )
+            else:
+                self.append_conversation_entry("user", f"[{media_kind}] {transcript[:200]}", "voice_transcript")
+                await self.enqueue_request(update.effective_chat.id, prompt, "voice_transcript", f"{media_kind}: {filename}")
         except Exception as e:
             self.error_logger.exception(f"{media_kind} voice handler failed for '{filename}': {e}")
             try:
@@ -3222,6 +3304,213 @@ class BridgeAgentRuntime:
                 "/sys <n> on|off|delete\n/sys <n> save <msg>\n/sys <n> replace <msg>"
             )
 
+    async def cmd_say(self, update, context):
+        """One-shot TTS: synthesize the last assistant message and send as voice."""
+        if update.effective_user.id != self.global_config.authorized_id:
+            return
+        text = self._load_last_text_from_transcript("assistant")
+        if not text:
+            await self._reply_text(update, "No recent message to read.")
+            return
+        chat_id = update.effective_chat.id
+        request_id = f"say-{int(time.time())}"
+        ok = await self._send_voice_reply(chat_id, text, request_id, force=True)
+        if not ok:
+            await self._reply_text(update, "Voice synthesis failed. Check /voice status for provider settings.")
+
+    # ── /loop — recurring task management (legacy runtime) ─────────
+
+    async def cmd_loop(self, update, context):
+        """Manage recurring loop tasks via skill injection.
+
+        /loop <task description>     — create a new loop (agent comprehends & sets up)
+        /loop list                   — list this agent's loops
+        /loop stop [id]              — stop one or all loops
+        """
+        if update.effective_user.id != self.global_config.authorized_id:
+            return
+        raw = (update.message.text or "").strip()
+        parts = raw.split(None, 1)
+        args_text = parts[1].strip() if len(parts) > 1 else ""
+
+        if not args_text:
+            await self._reply_text(
+                update,
+                "🔄 Loop — Recurring Task Manager\n\n"
+                "/loop <task> — create a loop\n"
+                "/loop list — list active loops\n"
+                "/loop stop [id] — stop loop(s)",
+            )
+            return
+
+        sub_lower = args_text.lower().strip()
+
+        if sub_lower == "list":
+            if not self.skill_manager:
+                await self._reply_text(update, "Skill manager not available.")
+                return
+            jobs = self.skill_manager.list_jobs("cron", agent_name=self.name)
+            loops = [j for j in jobs if j.get("loop_meta")]
+            if not loops:
+                await self._reply_text(update, "No loops for this agent.")
+                return
+            lines = ["🔄 Loops\n"]
+            for j in loops:
+                meta = j.get("loop_meta", {})
+                status = "ON" if j.get("enabled") else "OFF"
+                count = meta.get("count", 0)
+                mx = meta.get("max", 100)
+                sched = j.get("schedule", "?")
+                summary = meta.get("task_summary", "")[:60]
+                lines.append(f"[{status}] {j['id']} {sched} ({count}/{mx})")
+                if summary:
+                    lines.append(f"  {summary}")
+            await self._reply_text(update, "\n".join(lines))
+            return
+
+        if sub_lower.startswith("stop"):
+            stop_arg = sub_lower[4:].strip()
+            if not self.skill_manager:
+                await self._reply_text(update, "Skill manager not available.")
+                return
+            jobs = self.skill_manager.list_jobs("cron", agent_name=self.name)
+            loops = [j for j in jobs if j.get("loop_meta") and j.get("enabled")]
+            if not loops:
+                await self._reply_text(update, "No active loops to stop.")
+                return
+            stopped = []
+            for j in loops:
+                if not stop_arg or stop_arg in j["id"]:
+                    self.skill_manager.set_job_enabled("cron", j["id"], enabled=False)
+                    stopped.append(j["id"])
+            if stopped:
+                await self._reply_text(update, f"Stopped: {', '.join(stopped)}")
+            else:
+                await self._reply_text(update, f"No loop matching '{stop_arg}'.")
+            return
+
+        # --- /loop <task> — skill injection: let agent comprehend and set up ---
+        tasks_path = str(self.skill_manager.tasks_path) if self.skill_manager else "tasks.json"
+        loop_skill_prompt = (
+            "--- SKILL CONTEXT [loop] ---\n"
+            "The user wants to create a recurring loop task. Your job is to UNDERSTAND their request "
+            "and set up a cron job in tasks.json.\n\n"
+            "## What you must figure out from the user's message:\n"
+            "1. **WHAT** to do each iteration (the task)\n"
+            "2. **HOW OFTEN** (the interval — e.g., every 10 min, every 30 min, hourly)\n"
+            "3. **WHEN TO STOP** (the completion condition — e.g., after N times, when all items done, etc.)\n\n"
+            "## How to create the cron job:\n"
+            f"1. Read `{tasks_path}` to see the current crons array\n"
+            f"2. Generate a unique ID: `{self.name}-loop-<6char_hash>`\n"
+            "3. Append a new cron entry with this structure:\n"
+            "```json\n"
+            "{\n"
+            f'  "id": "{self.name}-loop-XXXXXX",\n'
+            f'  "agent": "{self.name}",\n'
+            '  "enabled": true,\n'
+            '  "schedule": "<cron expression>",\n'
+            '  "action": "enqueue_prompt",\n'
+            '  "prompt": "<clear instructions for each iteration — include the task, progress tracking method, and stop condition>",\n'
+            f'  "note": "Loop: <brief summary>",\n'
+            '  "loop_meta": {\n'
+            '    "max": 100,\n'
+            '    "count": 0,\n'
+            f'    "created": "<current ISO datetime>",\n'
+            '    "task_summary": "<user request summary>"\n'
+            '  }\n'
+            "}\n"
+            "```\n"
+            f"4. Save `{tasks_path}`\n\n"
+            "## Cron schedule examples:\n"
+            "- Every 5 min: `*/5 * * * *`\n"
+            "- Every 10 min: `*/10 * * * *`\n"
+            "- Every 30 min: `*/30 * * * *`\n"
+            "- Every hour: `0 * * * *`\n"
+            "- Every 2 hours: `0 */2 * * *`\n"
+            "- Daily at midnight: `0 0 * * *`\n\n"
+            "## The prompt you write into the cron entry must tell the future iteration:\n"
+            "- What to do\n"
+            "- How to track progress (use workspace files if needed)\n"
+            f'- When done: read `{tasks_path}`, find the cron by ID, set `"enabled": false`, save\n'
+            "- If unrecoverable error: disable the cron and report\n\n"
+            "## Safety net:\n"
+            "- `loop_meta.max` is a hard cap (default 100). The scheduler auto-disables when count exceeds max.\n"
+            "- The agent should still stop EARLIER when the task is semantically complete.\n\n"
+            "## IMPORTANT:\n"
+            "- Do NOT ask the user for clarification. Infer reasonable defaults from their message.\n"
+            "- If interval is unclear, default to 10 minutes.\n"
+            "- After creating the cron, confirm to the user: the job ID, schedule, and what each iteration will do.\n\n"
+            "--- USER REQUEST ---\n"
+            f"{args_text}"
+        )
+
+        await self.enqueue_request(
+            chat_id=update.effective_chat.id,
+            prompt=loop_skill_prompt,
+            source="loop_skill",
+            summary="Loop setup",
+        )
+        await self._reply_text(update, "🔄 收到！正在理解任务并设置循环…")
+
+    # ── /safevoice command ─────────────────────────────────────────────────
+    def _load_safevoice_state(self) -> bool:
+        path = self.config.workspace_dir / "skill_state.json"
+        try:
+            if path.exists():
+                return json.loads(path.read_text(encoding="utf-8")).get("safevoice", True)
+        except Exception:
+            pass
+        return True
+
+    def _save_safevoice_state(self, enabled: bool):
+        path = self.config.workspace_dir / "skill_state.json"
+        try:
+            state = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        except Exception:
+            state = {}
+        state["safevoice"] = enabled
+        path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    async def cmd_safevoice(self, update, context):
+        if update.effective_user.id != self.global_config.authorized_id:
+            return
+        args = [a.strip().lower() for a in (context.args or []) if a.strip()]
+        if not args:
+            status = "ON 🛡️" if self._safevoice_enabled else "OFF"
+            await update.message.reply_text(f"Safe Voice: {status}\nUsage: /safevoice on | off")
+            return
+        if args[0] == "on":
+            self._safevoice_enabled = True
+            self._save_safevoice_state(True)
+            await update.message.reply_text("🛡️ Safe Voice ON — voice messages will require confirmation before sending to agent.")
+        elif args[0] == "off":
+            self._safevoice_enabled = False
+            self._save_safevoice_state(False)
+            self._pending_voice.clear()
+            await update.message.reply_text("Safe Voice OFF — voice messages go directly to agent.")
+        else:
+            await update.message.reply_text("Usage: /safevoice on | off")
+
+    async def callback_safevoice(self, update, context):
+        query = update.callback_query
+        if query.from_user.id != self.global_config.authorized_id:
+            return
+        parts = (query.data or "").split(":", 2)
+        action = parts[1] if len(parts) > 1 else ""
+        chat_key = parts[2] if len(parts) > 2 else ""
+        pending = self._pending_voice.pop(chat_key, None)
+        if action == "yes" and pending:
+            await query.edit_message_text(f"✅ Confirmed. Sending to agent:\n\n_{pending['transcript']}_", parse_mode="Markdown")
+            await query.answer("Sending...")
+            self.append_conversation_entry("user", f"[Voice] {pending['transcript'][:200]}", "voice_transcript")
+            await self.enqueue_request(int(chat_key), pending["prompt"], "voice_transcript", pending["summary"])
+        elif action == "no":
+            await query.edit_message_text("❌ Voice message discarded.")
+            await query.answer("Discarded")
+        else:
+            await query.edit_message_text("⏰ Voice confirmation expired.")
+            await query.answer("Expired")
+
     async def cmd_voice(self, update, context):
         if update.effective_user.id != self.global_config.authorized_id:
             return
@@ -3399,7 +3688,15 @@ class BridgeAgentRuntime:
             return
 
         if skill.type == "action":
-            ok, message = await self.skill_manager.run_action_skill(skill, self.config.workspace_dir, args=rest)
+            ok, message = await self.skill_manager.run_action_skill(
+                skill,
+                self.config.workspace_dir,
+                args=rest,
+                extra_env={
+                    "BRIDGE_ACTIVE_BACKEND": self.config.engine,
+                    "BRIDGE_ACTIVE_MODEL": self.config.model,
+                },
+            )
             await self.send_long_message(
                 chat_id=update.effective_chat.id,
                 text=message,
@@ -3484,7 +3781,14 @@ class BridgeAgentRuntime:
                 await query.answer()
                 return
             if action == "run":
-                ok, message = await self.skill_manager.run_action_skill(skill, self.config.workspace_dir)
+                ok, message = await self.skill_manager.run_action_skill(
+                    skill,
+                    self.config.workspace_dir,
+                    extra_env={
+                        "BRIDGE_ACTIVE_BACKEND": self.config.engine,
+                        "BRIDGE_ACTIVE_MODEL": self.config.model,
+                    },
+                )
                 await query.answer("Skill executed" if ok else "Skill failed", show_alert=not ok)
                 await self.send_long_message(
                     chat_id=query.message.chat_id,
@@ -4171,6 +4475,7 @@ class BridgeAgentRuntime:
             BotCommand("start", "Start another stopped agent"),
             BotCommand("status", "View agent status"),
             BotCommand("voice", "Toggle native voice replies"),
+            BotCommand("safevoice", "Toggle voice confirmation safety layer"),
             BotCommand("active", "Toggle proactive heartbeat"),
             BotCommand("handoff", "Fresh continuity restore"),
             BotCommand("ticket", "Submit IT support ticket to Arale"),
@@ -4209,6 +4514,9 @@ class BridgeAgentRuntime:
         self.app.add_handler(CommandHandler("status", self.cmd_status))
         self.app.add_handler(CommandHandler("sys", self.cmd_sys))
         self.app.add_handler(CommandHandler("voice", self.cmd_voice))
+        self.app.add_handler(CommandHandler("safevoice", self.cmd_safevoice))
+        self.app.add_handler(CommandHandler("say", self.cmd_say))
+        self.app.add_handler(CommandHandler("loop", self.cmd_loop))
         self.app.add_handler(CommandHandler("active", self.cmd_active))
         self.app.add_handler(CommandHandler("handoff", self.cmd_handoff))
         self.app.add_handler(CommandHandler("ticket", self.cmd_ticket))
@@ -4220,6 +4528,7 @@ class BridgeAgentRuntime:
         self.app.add_handler(CommandHandler("model", self.cmd_model))
         self.app.add_handler(CallbackQueryHandler(self.callback_model, pattern=r"^(model|effort):"))
         self.app.add_handler(CallbackQueryHandler(self.callback_voice, pattern=r"^voice:"))
+        self.app.add_handler(CallbackQueryHandler(self.callback_safevoice, pattern=r"^safevoice:"))
         self.app.add_handler(CallbackQueryHandler(self.callback_start_agent, pattern=r"^startagent:"))
         self.app.add_handler(CallbackQueryHandler(self.callback_skill, pattern=r"^(skill|skilljob):"))
         self.app.add_handler(CommandHandler("new", self.cmd_new))

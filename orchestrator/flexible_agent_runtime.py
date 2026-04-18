@@ -33,6 +33,7 @@ from orchestrator.flexible_backend_registry import (
 )
 from orchestrator.memory_index import MemoryIndex
 from orchestrator.handoff_builder import HandoffBuilder
+from orchestrator.habits import HabitStore
 from orchestrator.media_utils import is_image_file, normalize_image_file
 from orchestrator.parked_topics import ParkedTopicStore
 from orchestrator.skill_manager import SkillDefinition, SkillManager
@@ -110,6 +111,9 @@ class FlexibleAgentRuntime:
         self._think_buffer: list[str] = []
         self._openrouter_think_chunk: str = ""
         self._last_openrouter_think_snippet: str | None = None
+        self._thinking_chars_this_req: int = 0   # CLI thinking token estimation
+        self._last_full_prompt_tokens: int = 0   # set before each request for bg-mode usage
+        self._last_prompt_audit: dict = {}        # prompt section breakdown for token audit
         self.memory_dir = self.workspace_dir / "memory"
         self.sys_prompt_manager = SysPromptManager(self.workspace_dir)
         self.backend_state_dir = self.workspace_dir / "backend_state"
@@ -125,6 +129,10 @@ class FlexibleAgentRuntime:
         self.voice_manager = VoiceManager(self.workspace_dir, self.media_dir, ffmpeg_cmd="ffmpeg", secrets=self.secrets)
         self._authorized_telegram_ids = resolve_authorized_telegram_ids(self.config.extra, self.global_config.authorized_id)
         self._active_chat_ids: dict[int, int] = {}  # user_id -> chat_id, populated on first message
+
+        # Safe voice confirmation layer
+        self._safevoice_enabled: bool = self._get_skill_state().get("safevoice", True)
+        self._pending_voice: dict = {}  # chat_id -> {prompt, summary, media_kind, timestamp}
 
         # Command policy
         # - default: allow all commands
@@ -155,6 +163,12 @@ class FlexibleAgentRuntime:
             active_skill_provider=self._get_active_skill_sections,
             sys_prompt_manager=self.sys_prompt_manager,
         )
+        self.habit_store = HabitStore(
+            self.workspace_dir,
+            self.global_config.project_root,
+            self.name,
+            self._get_agent_class(),
+        )
 
         # Initialize FlexibleBackendManager
         self.backend_manager = FlexibleBackendManager(config, global_config, secrets)
@@ -181,6 +195,78 @@ class FlexibleAgentRuntime:
         if self._authorized_telegram_ids:
             return self._authorized_telegram_ids[0]
         return self.global_config.authorized_id
+
+    def _get_agent_class(self) -> str:
+        extra = self.config.extra or {}
+        direct = getattr(self.config, "agent_class", None)
+        return (direct or extra.get("agent_class") or "general").strip().lower()
+
+    def _build_habit_sections(self, item: QueuedRequest, prompt: str) -> tuple[list[tuple[str, str]], list[str]]:
+        habits = self.habit_store.retrieve(prompt, source=item.source, summary=item.summary)
+        if not habits:
+            item.active_habits = []
+            return [], []
+        self.habit_store.mark_triggered(habits)
+        item.active_habits = self.habit_store.serialize_habits(habits)
+        habit_ids = [habit.habit_id for habit in habits]
+        section = self.habit_store.render_prompt_section(habits)
+        self.logger.info(
+            f"Habit retrieval for {item.request_id}: {len(habit_ids)} matched ({', '.join(habit_ids)})"
+        )
+        self._log_maintenance(item, "habit_retrieval", habit_ids=",".join(habit_ids), habit_count=len(habit_ids))
+        return ([section] if section else []), habit_ids
+
+    def _record_habit_outcome(
+        self,
+        item: QueuedRequest,
+        *,
+        success: bool,
+        response_text: str | None = None,
+        error_text: str | None = None,
+    ) -> None:
+        active_habits = item.active_habits or []
+        if not active_habits:
+            return
+        try:
+            self.habit_store.record_execution_outcome(
+                request_id=item.request_id,
+                prompt=item.prompt,
+                source=item.source,
+                summary=item.summary,
+                active_habits=active_habits,
+                response_text=response_text,
+                error_text=error_text,
+                success=success,
+            )
+        except Exception as exc:
+            self.error_logger.warning(
+                f"Failed to record habit outcome for {item.request_id}: {exc}"
+            )
+
+    def _capture_followup_habit_feedback(self, text: str) -> None:
+        last_response = self.last_response or {}
+        request_id = last_response.get("request_id")
+        responded_at = last_response.get("responded_at")
+        if not request_id:
+            return
+        try:
+            result = self.habit_store.apply_user_feedback(
+                request_id=request_id,
+                feedback_text=text,
+                responded_at=responded_at,
+            )
+        except Exception as exc:
+            self.error_logger.warning(
+                f"Failed to capture habit feedback for {request_id}: {exc}"
+            )
+            return
+        if not result:
+            return
+        self.maintenance_logger.info(
+            f"Habit follow-up feedback for {request_id}: "
+            f"sentiment={result.sentiment} updated_events={result.updated_events} "
+            f"habits={','.join(result.updated_habits)}"
+        )
 
     def _is_authorized_user(self, user_id: int | None) -> bool:
         if user_id is None:
@@ -717,6 +803,33 @@ class FlexibleAgentRuntime:
             return item.prompt
         return "\n\n".join(sections + [item.prompt])
 
+    def _source_requires_manual_permission(self, source: str) -> bool:
+        normalized = (source or "").strip().lower()
+        if not normalized:
+            return True
+        automated_prefixes = (
+            "scheduler",
+            "bridge:",
+            "bridge-transfer:",
+            "hchat-reply:",
+            "cos-query:",
+            "ticket:",
+            "loop_skill",
+            "startup",
+        )
+        return normalized.startswith(automated_prefixes)
+
+    def _remote_backend_block_reason(self, source: str) -> str | None:
+        engine = (self.config.active_backend or "").strip().lower()
+        if engine not in {"openrouter-api", "deepseek-api"}:
+            return None
+        if not self._source_requires_manual_permission(source):
+            return None
+        return (
+            f"Blocked {engine} for source '{source}'. Remote API backends are reserved for user-initiated requests only; "
+            "automated/agent-originated flows must not use them."
+        )
+
     def _extract_json_object(self, text: str) -> dict | None:
         raw = (text or "").strip()
         if not raw:
@@ -949,12 +1062,12 @@ class FlexibleAgentRuntime:
         cron_count = sum(1 for job in self.skill_manager.list_jobs("cron", agent_name=self.name) if job.get("enabled"))
         return heartbeat_count, cron_count
 
-    async def _send_voice_reply(self, chat_id: int, text: str, request_id: str) -> bool:
+    async def _send_voice_reply(self, chat_id: int, text: str, request_id: str, force: bool = False) -> bool:
         # Guard: skip if Telegram not connected
         if not self.telegram_connected:
             return False
         try:
-            asset = await self.voice_manager.synthesize_reply(self.name, request_id, text)
+            asset = await self.voice_manager.synthesize_reply(self.name, request_id, text, force=force)
             if asset is None:
                 return False
             max_attempts = 3
@@ -962,7 +1075,10 @@ class FlexibleAgentRuntime:
             for attempt in range(1, max_attempts + 1):
                 try:
                     with asset.ogg_path.open("rb") as f:
-                        await self.app.bot.send_voice(chat_id=chat_id, voice=f)
+                        await self.app.bot.send_voice(
+                            chat_id=chat_id, voice=f,
+                            read_timeout=30, write_timeout=30, connect_timeout=15,
+                        )
                     self.telegram_logger.info(
                         f"Sent Telegram voice reply for request_id={request_id} "
                         f"(path={asset.ogg_path.name}, attempt={attempt})"
@@ -1115,8 +1231,17 @@ class FlexibleAgentRuntime:
         if skill.type == "toggle":
             self.error_logger.error(f"Toggle skill cannot be scheduled: {skill_id}")
             return
+        skill_env = {
+            "BRIDGE_ACTIVE_BACKEND": self.config.active_backend,
+            "BRIDGE_ACTIVE_MODEL": self.get_current_model(),
+        }
         if skill.type == "action":
-            ok, text = await self.skill_manager.run_action_skill(skill, self.workspace_dir, args=args)
+            ok, text = await self.skill_manager.run_action_skill(
+                skill,
+                self.workspace_dir,
+                args=args,
+                extra_env=skill_env,
+            )
             if ok and text:
                 await self.send_long_message(
                     chat_id=self._primary_chat_id(),
@@ -1344,6 +1469,9 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CommandHandler("sys", self._wrap_cmd("sys", self.cmd_sys)))
         self.app.add_handler(CommandHandler("credit", self._wrap_cmd("credit", self.cmd_credit)))
         self.app.add_handler(CommandHandler("voice", self._wrap_cmd("voice", self.cmd_voice)))
+        self.app.add_handler(CommandHandler("safevoice", self._wrap_cmd("safevoice", self.cmd_safevoice)))
+        self.app.add_handler(CommandHandler("say", self._wrap_cmd("say", self.cmd_say)))
+        self.app.add_handler(CommandHandler("loop", self._wrap_cmd("loop", self.cmd_loop)))
         self.app.add_handler(CommandHandler("whisper", self._wrap_cmd("whisper", self.cmd_whisper)))
         self.app.add_handler(CommandHandler("active", self._wrap_cmd("active", self.cmd_active)))
         self.app.add_handler(CommandHandler("fyi", self._wrap_cmd("fyi", self.cmd_fyi)))
@@ -1361,6 +1489,7 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CommandHandler("effort", self._wrap_cmd("effort", self.cmd_effort)))
         self.app.add_handler(CallbackQueryHandler(self.callback_model, pattern=r"^(model|backend|bmodel|effort|backend_menu)"))
         self.app.add_handler(CallbackQueryHandler(self.callback_voice, pattern=r"^voice:"))
+        self.app.add_handler(CallbackQueryHandler(self.callback_safevoice, pattern=r"^safevoice:"))
         self.app.add_handler(CallbackQueryHandler(self.callback_start_agent, pattern=r"^startagent:"))
         self.app.add_handler(CommandHandler("agents", self._wrap_cmd("agents", self.cmd_agents)))
         self.app.add_handler(CallbackQueryHandler(self.callback_agents, pattern=r"^agents:"))
@@ -1383,6 +1512,7 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CommandHandler("hchat", self._wrap_cmd("hchat", self.cmd_hchat)))
         self.app.add_handler(CommandHandler("group", self._wrap_cmd("group", self.cmd_group)))
         self.app.add_handler(CallbackQueryHandler(self.callback_group, pattern=r"^group:"))
+        self.app.add_handler(CommandHandler("token", self._wrap_cmd("token", self.cmd_token)))
         self.app.add_handler(CommandHandler("usage", self._wrap_cmd("usage", self.cmd_usage)))
         self.app.add_handler(CommandHandler("logo", self._wrap_cmd("logo", self.cmd_logo)))
         self.app.add_handler(CommandHandler("move", self._wrap_cmd("move", self.cmd_move)))
@@ -2529,6 +2659,47 @@ class FlexibleAgentRuntime:
             f"Remaining: {limit_remaining}\n"
             f"Free tier: {is_free_tier}"
         )
+
+    # ── /safevoice command ─────────────────────────────────────────────────
+    async def cmd_safevoice(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        args = [a.strip().lower() for a in (context.args or []) if a.strip()]
+        if not args:
+            status = "ON 🛡️" if self._safevoice_enabled else "OFF"
+            await self._reply_text(update, f"Safe Voice: {status}\nUsage: /safevoice on | off")
+            return
+        if args[0] == "on":
+            self._safevoice_enabled = True
+            self._set_skill_state("safevoice", True)
+            await self._reply_text(update, "🛡️ Safe Voice ON — voice messages will require confirmation before sending to agent.")
+        elif args[0] == "off":
+            self._safevoice_enabled = False
+            self._set_skill_state("safevoice", False)
+            self._pending_voice.clear()
+            await self._reply_text(update, "Safe Voice OFF — voice messages go directly to agent.")
+        else:
+            await self._reply_text(update, "Usage: /safevoice on | off")
+
+    async def callback_safevoice(self, update: Update, context: Any):
+        query = update.callback_query
+        if not self._is_authorized_user(query.from_user.id):
+            return
+        parts = (query.data or "").split(":", 2)
+        action = parts[1] if len(parts) > 1 else ""
+        chat_key = parts[2] if len(parts) > 2 else ""
+        pending = self._pending_voice.pop(chat_key, None)
+        if action == "yes" and pending:
+            await query.edit_message_text(f"✅ Confirmed. Sending to agent:\n\n_{pending['transcript']}_", parse_mode="Markdown")
+            await query.answer("Sending...")
+            await self.enqueue_request(int(chat_key), pending["prompt"], "voice_transcript", pending["summary"])
+        elif action == "no":
+            await query.edit_message_text("❌ Voice message discarded.")
+            await query.answer("Discarded")
+        else:
+            await query.edit_message_text("⏰ Voice confirmation expired.")
+            await query.answer("Expired")
+
     async def cmd_voice(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
@@ -2591,6 +2762,167 @@ class FlexibleAgentRuntime:
             await self._reply_text(update, self.voice_manager.set_enabled(False))
             return
         await self._reply_text(update, "Usage: /voice [status|on|off|voices|use <alias>|providers|provider <name>|name <voice>|rate <n>]")
+
+    async def cmd_say(self, update: Update, context: Any):
+        """One-shot TTS: synthesize the last assistant message and send as voice."""
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        text = self._load_last_text_from_transcript("assistant")
+        if not text:
+            await self._reply_text(update, "No recent message to read.")
+            return
+        chat_id = update.effective_chat.id
+        request_id = f"say-{int(time.time())}"
+        ok = await self._send_voice_reply(chat_id, text, request_id, force=True)
+        if not ok:
+            await self._reply_text(update, "Voice synthesis failed. Check /voice status for provider settings.")
+
+    # ── /loop — recurring task management ──────────────────────────
+
+    _LOOP_FREQ_PATTERNS: list[tuple] = []  # populated once at class level below
+
+    async def cmd_loop(self, update: Update, context: Any):
+        """Manage recurring loop tasks via skill injection.
+
+        /loop <task description>     — create a new loop (agent comprehends & sets up)
+        /loop list                   — list this agent's loops
+        /loop stop [id]              — stop one or all loops
+        """
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+
+        raw = (update.message.text or "").strip()
+        parts = raw.split(None, 1)
+        args_text = parts[1].strip() if len(parts) > 1 else ""
+
+        if not args_text:
+            await self._reply_text(
+                update,
+                "🔄 <b>Loop — Recurring Task Manager</b>\n\n"
+                "<code>/loop &lt;task&gt;</code> — create a loop\n"
+                "<code>/loop list</code> — list active loops\n"
+                "<code>/loop stop [id]</code> — stop loop(s)",
+                parse_mode="HTML",
+            )
+            return
+
+        sub_lower = args_text.lower().strip()
+
+        # --- /loop list ---
+        if sub_lower == "list":
+            if not self.skill_manager:
+                await self._reply_text(update, "Skill manager not available.")
+                return
+            jobs = self.skill_manager.list_jobs("cron", agent_name=self.name)
+            loops = [j for j in jobs if j.get("loop_meta")]
+            if not loops:
+                await self._reply_text(update, "No active loops for this agent.")
+                return
+            lines = ["🔄 <b>Loops</b>\n"]
+            for j in loops:
+                meta = j.get("loop_meta", {})
+                status = "🟢 ON" if j.get("enabled") else "🔴 OFF"
+                count = meta.get("count", 0)
+                mx = meta.get("max", 100)
+                reason = meta.get("stopped_reason", "")
+                sched = j.get("schedule", "?")
+                summary = meta.get("task_summary", j.get("note", ""))[:60]
+                lines.append(f"<code>{j['id']}</code> [{status}] {sched} ({count}/{mx})")
+                if summary:
+                    lines.append(f"  {summary}")
+                if reason:
+                    lines.append(f"  ⚠️ {reason}")
+            await self._reply_text(update, "\n".join(lines), parse_mode="HTML")
+            return
+
+        # --- /loop stop [id] ---
+        if sub_lower.startswith("stop"):
+            stop_arg = sub_lower[4:].strip()
+            if not self.skill_manager:
+                await self._reply_text(update, "Skill manager not available.")
+                return
+            jobs = self.skill_manager.list_jobs("cron", agent_name=self.name)
+            loops = [j for j in jobs if j.get("loop_meta") and j.get("enabled")]
+            if not loops:
+                await self._reply_text(update, "No active loops to stop.")
+                return
+            stopped = []
+            for j in loops:
+                if not stop_arg or stop_arg in j["id"]:
+                    self.skill_manager.set_job_enabled("cron", j["id"], enabled=False)
+                    stopped.append(j["id"])
+            if stopped:
+                await self._reply_text(update, f"⏹ Stopped: {', '.join(stopped)}")
+            else:
+                await self._reply_text(update, f"No loop matching '{stop_arg}' found.")
+            return
+
+        # --- /loop <task> — skill injection: let agent comprehend and set up ---
+        tasks_path = str(self.skill_manager.tasks_path) if self.skill_manager else "tasks.json"
+        loop_skill_prompt = (
+            "--- SKILL CONTEXT [loop] ---\n"
+            "The user wants to create a recurring loop task. Your job is to UNDERSTAND their request "
+            "and set up a cron job in tasks.json.\n\n"
+            "## What you must figure out from the user's message:\n"
+            "1. **WHAT** to do each iteration (the task)\n"
+            "2. **HOW OFTEN** (the interval — e.g., every 10 min, every 30 min, hourly)\n"
+            "3. **WHEN TO STOP** (the completion condition — e.g., after N times, when all items done, etc.)\n\n"
+            "## How to create the cron job:\n"
+            f"1. Read `{tasks_path}` to see the current crons array\n"
+            f"2. Generate a unique ID: `{self.name}-loop-<6char_hash>`\n"
+            "3. Append a new cron entry with this structure:\n"
+            "```json\n"
+            "{\n"
+            f'  "id": "{self.name}-loop-XXXXXX",\n'
+            f'  "agent": "{self.name}",\n'
+            '  "enabled": true,\n'
+            '  "schedule": "<cron expression>",\n'
+            '  "action": "enqueue_prompt",\n'
+            '  "prompt": "<clear instructions for each iteration — include the task, progress tracking method, and stop condition>",\n'
+            f'  "note": "Loop: <brief summary>",\n'
+            '  "loop_meta": {\n'
+            '    "max": 100,\n'
+            '    "count": 0,\n'
+            f'    "created": "<current ISO datetime>",\n'
+            '    "task_summary": "<user request summary>"\n'
+            '  }\n'
+            "}\n"
+            "```\n"
+            f"4. Save `{tasks_path}`\n\n"
+            "## Cron schedule examples:\n"
+            "- Every 5 min: `*/5 * * * *`\n"
+            "- Every 10 min: `*/10 * * * *`\n"
+            "- Every 30 min: `*/30 * * * *`\n"
+            "- Every hour: `0 * * * *`\n"
+            "- Every 2 hours: `0 */2 * * *`\n"
+            "- Daily at midnight: `0 0 * * *`\n\n"
+            "## The prompt you write into the cron entry must tell the future iteration:\n"
+            "- What to do\n"
+            "- How to track progress (use workspace files if needed)\n"
+            f'- When done: read `{tasks_path}`, find the cron by ID, set `"enabled": false`, save\n'
+            "- If unrecoverable error: disable the cron and report\n\n"
+            "## Safety net:\n"
+            "- `loop_meta.max` is a hard cap (default 100). The scheduler auto-disables when count exceeds max.\n"
+            "- The agent should still stop EARLIER when the task is semantically complete.\n\n"
+            "## IMPORTANT:\n"
+            "- Do NOT ask the user for clarification. Infer reasonable defaults from their message.\n"
+            "- If interval is unclear, default to 10 minutes.\n"
+            "- After creating the cron, confirm to the user: the job ID, schedule, and what each iteration will do.\n\n"
+            "--- USER REQUEST ---\n"
+            f"{args_text}"
+        )
+
+        # Inject as a regular prompt for the agent to process
+        await self.enqueue_request(
+            chat_id=update.effective_chat.id,
+            prompt=loop_skill_prompt,
+            source="loop_skill",
+            summary="Loop setup",
+        )
+        await self._reply_text(
+            update,
+            "🔄 收到！正在理解任务并设置循环…",
+        )
 
     async def cmd_whisper(self, update: Update, context: Any):
         """Set the local voice transcription model size.
@@ -2775,7 +3107,15 @@ class FlexibleAgentRuntime:
             return
 
         if skill.type == "action":
-            _, message = await self.skill_manager.run_action_skill(skill, self.workspace_dir, args=rest)
+            _, message = await self.skill_manager.run_action_skill(
+                skill,
+                self.workspace_dir,
+                args=rest,
+                extra_env={
+                    "BRIDGE_ACTIVE_BACKEND": self.config.active_backend,
+                    "BRIDGE_ACTIVE_MODEL": self.get_current_model(),
+                },
+            )
             await self.send_long_message(
                 chat_id=update.effective_chat.id,
                 text=message,
@@ -2920,7 +3260,14 @@ class FlexibleAgentRuntime:
                 await query.answer()
                 return
             if action == "run":
-                ok, message = await self.skill_manager.run_action_skill(skill, self.workspace_dir)
+                ok, message = await self.skill_manager.run_action_skill(
+                    skill,
+                    self.workspace_dir,
+                    extra_env={
+                        "BRIDGE_ACTIVE_BACKEND": self.config.active_backend,
+                        "BRIDGE_ACTIVE_MODEL": self.get_current_model(),
+                    },
+                )
                 await query.answer("Skill executed" if ok else "Skill failed", show_alert=not ok)
                 await self.send_long_message(
                     chat_id=query.message.chat_id,
@@ -5143,6 +5490,7 @@ class FlexibleAgentRuntime:
             self._long_buffer.append(text)
             return
         _print_user_message(self.name, text)
+        self._capture_followup_habit_feedback(text)
         await self.enqueue_request(update.effective_chat.id, text, "text", _safe_excerpt(text))
 
     # ------------------------------------------------------------------
@@ -5255,7 +5603,36 @@ class FlexibleAgentRuntime:
             self.telegram_logger.info(
                 f"Transcribed {media_kind.lower()} ({filename}): {len(transcript)} chars"
             )
-            await self.enqueue_request(update.effective_chat.id, prompt, "voice_transcript", f"{media_kind}: {filename}")
+
+            # Safe voice: show confirmation before sending to agent
+            if self._safevoice_enabled:
+                chat_id = update.effective_chat.id
+                chat_key = str(chat_id)
+                self._pending_voice[chat_key] = {
+                    "prompt": prompt,
+                    "transcript": transcript,
+                    "summary": f"{media_kind}: {filename}",
+                    "timestamp": datetime.now().isoformat(),
+                }
+                max_preview = 3500
+                if len(transcript) > max_preview:
+                    preview = transcript[:max_preview] + f"\n\n…(共 {len(transcript)} 字，已截断)"
+                else:
+                    preview = transcript
+                keyboard = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("✅ Send", callback_data=f"safevoice:yes:{chat_key}"),
+                        InlineKeyboardButton("❌ Discard", callback_data=f"safevoice:no:{chat_key}"),
+                    ]
+                ])
+                await self._reply_text(
+                    update,
+                    f"🛡️ *Safe Voice — Confirm transcription:*\n\n_{preview}_",
+                    reply_markup=keyboard,
+                    parse_mode="Markdown",
+                )
+            else:
+                await self.enqueue_request(update.effective_chat.id, prompt, "voice_transcript", f"{media_kind}: {filename}")
         except Exception as e:
             self.error_logger.exception(f"{media_kind} voice handler failed for '{filename}': {e}")
             try:
@@ -5658,6 +6035,12 @@ class FlexibleAgentRuntime:
                     event_queue.put_nowait(event)
                 except asyncio.QueueFull:
                     self.logger.debug(f"Stream event queue full, dropping: {event.summary[:40]!r}")
+            # Always track thinking volume for token estimation (CLI backends only;
+            # OpenRouter gets real counts from response.usage)
+            if event.kind == KIND_THINKING and _engine != "openrouter-api":
+                raw = event.summary or ""
+                if raw and raw not in ("Thinking...",):
+                    self._thinking_chars_this_req += len(raw)
             if think_buffer is not None:
                 if event.kind != KIND_THINKING:
                     return
@@ -5769,6 +6152,7 @@ class FlexibleAgentRuntime:
         try:
             if task.cancelled():
                 self._mark_error(f"Background task cancelled: {item.summary}")
+                self._record_habit_outcome(item, success=False, error_text="background_task_cancelled")
                 self.logger.warning(f"Background task {item.request_id} was cancelled.")
                 await self.send_long_message(
                     item.chat_id,
@@ -5781,6 +6165,7 @@ class FlexibleAgentRuntime:
             exc = task.exception()
             if exc:
                 self._mark_error(str(exc))
+                self._record_habit_outcome(item, success=False, error_text=str(exc))
                 self.error_logger.error(f"Background task {item.request_id} raised: {exc}")
                 await self.send_long_message(
                     item.chat_id,
@@ -5795,6 +6180,7 @@ class FlexibleAgentRuntime:
             if response.is_success and response.text:
                 display_text = self._strip_transfer_accept_prefix(item, response.text)
                 self._mark_success()
+                self._record_habit_outcome(item, success=True, response_text=response.text)
                 if self._should_buffer_during_transfer(item.request_id):
                     self._record_suppressed_transfer_result(item, success=True, text=display_text or response.text)
                     return
@@ -5802,31 +6188,81 @@ class FlexibleAgentRuntime:
                     "chat_id": item.chat_id,
                     "text": display_text or response.text,
                     "request_id": item.request_id,
+                    "responded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
                 }
                 try:
-                    from tools.token_tracker import estimate_tokens, record_usage
+                    from tools.token_tracker import estimate_tokens, record_audit_event, record_usage
+                    import hashlib as _hashlib
                     if response.usage:
-                        # Real usage from API backend
+                        # Real usage from API/CLI backend
+                        _bg_input_tok = response.usage.input_tokens
+                        _bg_output_tok = response.usage.output_tokens
+                        _bg_thinking_tok = response.usage.thinking_tokens
+                        _bg_tok_source = "api"
                         record_usage(
                             self.workspace_dir,
                             model=self.get_current_model(),
                             backend=self.config.active_backend,
-                            input_tokens=response.usage.input_tokens,
-                            output_tokens=response.usage.output_tokens,
-                            thinking_tokens=response.usage.thinking_tokens,
+                            input_tokens=_bg_input_tok,
+                            output_tokens=_bg_output_tok,
+                            thinking_tokens=_bg_thinking_tok,
                             session_id=self.session_id_dt,
+                            cost_usd=getattr(response, "cost_usd", None),
                         )
                     else:
-                        # CLI backend: estimate including system prompt context
-                        sys_prompt_tokens = estimate_tokens(self._get_system_prompt_text())
+                        # CLI backend: estimate from full assembled prompt (includes history)
+                        fallback_input = estimate_tokens(self._get_system_prompt_text()) + estimate_tokens(item.prompt)
+                        _bg_input_tok = self._last_full_prompt_tokens or fallback_input
+                        _bg_output_tok = estimate_tokens(display_text or response.text)
+                        _bg_thinking_tok = self._thinking_chars_this_req // 4
+                        _bg_tok_source = "estimated"
                         record_usage(
                             self.workspace_dir,
                             model=self.get_current_model(),
                             backend=self.config.active_backend,
-                            input_tokens=sys_prompt_tokens + estimate_tokens(item.prompt),
-                            output_tokens=estimate_tokens(display_text or response.text),
+                            input_tokens=_bg_input_tok,
+                            output_tokens=_bg_output_tok,
+                            thinking_tokens=_bg_thinking_tok,
                             session_id=self.session_id_dt,
                         )
+                    _pa = self._last_prompt_audit
+                    _sec_chars = {s["key"]: s["chars"] for s in _pa.get("sections", [])}
+                    _sec_tokens = {s["key"]: s.get("tokens_est") or max(1, s["chars"] // 4) for s in _pa.get("sections", [])}
+                    _sec_counts = {s["key"]: s.get("item_count", 0) for s in _pa.get("sections", [])}
+                    record_audit_event(self.workspace_dir, {
+                        "request_id": item.request_id,
+                        "agent": self.name,
+                        "runtime": "flex",
+                        "backend": self.config.active_backend,
+                        "model": self.get_current_model(),
+                        "source": item.source,
+                        "summary": item.summary,
+                        "silent": item.silent,
+                        "is_retry": item.is_retry,
+                        "success": response.is_success,
+                        "incremental_mode": False,
+                        "token_source": _bg_tok_source,
+                        "raw_prompt_chars": len(item.prompt),
+                        "final_prompt_chars": self._last_full_prompt_tokens * 4,
+                        "response_chars": len(response.text or ""),
+                        "input_tokens": _bg_input_tok,
+                        "output_tokens": _bg_output_tok,
+                        "thinking_tokens": _bg_thinking_tok,
+                        "tool_call_count": int(getattr(response, "tool_call_count", 0) or 0),
+                        "tool_loop_count": int(getattr(response, "tool_loop_count", 0) or 0),
+                        "tool_catalog_count": 0,
+                        "tool_schema_chars": 0,
+                        "tool_schema_tokens_est": 0,
+                        "tool_schema_fingerprint": "",
+                        "tool_max_loops": 0,
+                        "budget_applied": bool(_pa.get("budget_applied")),
+                        "context_expansion_ratio": round((_bg_input_tok * 4) / max(len(item.prompt), 1), 3),
+                        "context_fingerprint": _pa.get("context_fingerprint", ""),
+                        "request_fingerprint": _hashlib.sha1((item.prompt or "").encode("utf-8")).hexdigest()[:16],
+                        "section_chars": _sec_chars,
+                        "section_tokens_est": _sec_tokens,
+                        "section_counts": _sec_counts,
+                    })
                 except Exception:
                     pass
                 memory_user_text = item.prompt
@@ -5856,6 +6292,7 @@ class FlexibleAgentRuntime:
             else:
                 err_msg = response.error or "Unknown error"
                 self._mark_error(err_msg)
+                self._record_habit_outcome(item, success=False, error_text=err_msg)
                 if self._should_buffer_during_transfer(item.request_id):
                     self._record_suppressed_transfer_result(item, success=False, error=err_msg)
                     return
@@ -5870,6 +6307,7 @@ class FlexibleAgentRuntime:
 
         except Exception as e:
             self._mark_error(str(e))
+            self._record_habit_outcome(item, success=False, error_text=str(e))
             self.error_logger.exception(
                 f"Unhandled error in _on_background_complete for {item.request_id}: {e}"
             )
@@ -5899,6 +6337,17 @@ class FlexibleAgentRuntime:
                     "summary": item.summary,
                     "started_at": datetime.now().isoformat(),
                 }
+                remote_backend_block = self._remote_backend_block_reason(item.source)
+                if remote_backend_block:
+                    self.error_logger.warning(remote_backend_block)
+                    if item.deliver_to_telegram:
+                        await self.send_long_message(
+                            item.chat_id,
+                            f"⚠️ {remote_backend_block}",
+                            request_id=item.request_id,
+                            purpose="remote-backend-policy",
+                        )
+                    continue
                 self._mark_activity()
                 self._log_maintenance(
                     item,
@@ -5911,15 +6360,25 @@ class FlexibleAgentRuntime:
                 self.is_generating = True
 
                 effective_prompt = self._consume_session_primer(item)
+                habit_sections, habit_ids = self._build_habit_sections(item, effective_prompt)
+                self.current_request_meta["habit_ids"] = habit_ids
                 # In fixed mode with an active session, use incremental prompts
                 _incremental = (
                     self.backend_manager.agent_mode == "fixed"
                     and hasattr(self.backend_manager.current_backend, "_session_id")
                     and self.backend_manager.current_backend._session_id is not None
                 )
-                final_prompt = self.context_assembler.build_prompt(
-                    effective_prompt, self.config.active_backend, incremental=_incremental
+                _prompt_payload = self.context_assembler.build_prompt_payload(
+                    effective_prompt,
+                    self.config.active_backend,
+                    extra_sections=habit_sections,
+                    inject_memory=not item.skip_memory_injection,
+                    incremental=_incremental,
                 )
+                final_prompt = _prompt_payload["final_prompt"]
+                self._last_prompt_audit = _prompt_payload.get("audit", {})
+                self._thinking_chars_this_req = 0
+                self._last_full_prompt_tokens = len(final_prompt) // 4
                 
                 stop_typing = None
                 typing_task = None
@@ -6112,6 +6571,7 @@ class FlexibleAgentRuntime:
                         f"{item.request_id} — treating as recoverable tool failure"
                     )
                     self._mark_error(err_msg)
+                    self._record_habit_outcome(item, success=False, error_text=err_msg)
                     if self._should_buffer_during_transfer(item.request_id):
                         self._record_suppressed_transfer_result(item, success=False, error=err_msg)
                     if not item.silent:
@@ -6136,6 +6596,7 @@ class FlexibleAgentRuntime:
                 elif response.is_success and response.text:
                     display_text = self._strip_transfer_accept_prefix(item, response.text)
                     self._mark_success()
+                    self._record_habit_outcome(item, success=True, response_text=response.text)
                     await self._notify_request_listeners(
                         item.request_id,
                         {
@@ -6148,27 +6609,80 @@ class FlexibleAgentRuntime:
                         },
                     )
                     try:
-                        from tools.token_tracker import estimate_tokens, record_usage
+                        from tools.token_tracker import estimate_tokens, record_audit_event, record_usage
+                        import hashlib as _hashlib
                         if response.usage:
+                            _input_tok = response.usage.input_tokens
+                            _output_tok = response.usage.output_tokens
+                            _thinking_tok = response.usage.thinking_tokens
+                            _tok_source = "api"
                             record_usage(
                                 self.workspace_dir,
                                 model=self.get_current_model(),
                                 backend=self.config.active_backend,
-                                input_tokens=response.usage.input_tokens,
-                                output_tokens=response.usage.output_tokens,
-                                thinking_tokens=response.usage.thinking_tokens,
+                                input_tokens=_input_tok,
+                                output_tokens=_output_tok,
+                                thinking_tokens=_thinking_tok,
                                 session_id=self.session_id_dt,
+                                cost_usd=getattr(response, "cost_usd", None),
                             )
                         else:
-                            sys_prompt_tokens = estimate_tokens(self._get_system_prompt_text())
+                            # CLI backend: estimate from final assembled prompt
+                            _input_tok = estimate_tokens(final_prompt)
+                            _output_tok = estimate_tokens(display_text or response.text)
+                            _thinking_tok = self._thinking_chars_this_req // 4
+                            _tok_source = "estimated"
                             record_usage(
                                 self.workspace_dir,
                                 model=self.get_current_model(),
                                 backend=self.config.active_backend,
-                                input_tokens=sys_prompt_tokens + estimate_tokens(item.prompt),
-                                output_tokens=estimate_tokens(display_text or response.text),
+                                input_tokens=_input_tok,
+                                output_tokens=_output_tok,
+                                thinking_tokens=_thinking_tok,
                                 session_id=self.session_id_dt,
                             )
+                        _pa = self._last_prompt_audit
+                        _sec_chars = {s["key"]: s["chars"] for s in _pa.get("sections", [])}
+                        _sec_tokens = {s["key"]: s.get("tokens_est") or max(1, s["chars"] // 4) for s in _pa.get("sections", [])}
+                        _sec_counts = {s["key"]: s.get("item_count", 0) for s in _pa.get("sections", [])}
+                        record_audit_event(self.workspace_dir, {
+                            "request_id": item.request_id,
+                            "agent": self.name,
+                            "runtime": "flex",
+                            "backend": self.config.active_backend,
+                            "model": self.get_current_model(),
+                            "source": item.source,
+                            "summary": item.summary,
+                            "silent": item.silent,
+                            "is_retry": item.is_retry,
+                            "success": response.is_success,
+                            "incremental_mode": _incremental,
+                            "token_source": _tok_source,
+                            "raw_prompt_chars": len(item.prompt),
+                            "effective_prompt_chars": len(effective_prompt),
+                            "final_prompt_chars": len(final_prompt),
+                            "response_chars": len(response.text or ""),
+                            "input_tokens": _input_tok,
+                            "output_tokens": _output_tok,
+                            "thinking_tokens": _thinking_tok,
+                            "tool_call_count": int(getattr(response, "tool_call_count", 0) or 0),
+                            "tool_loop_count": int(getattr(response, "tool_loop_count", 0) or 0),
+                            "tool_catalog_count": 0,
+                            "tool_schema_chars": 0,
+                            "tool_schema_tokens_est": 0,
+                            "tool_schema_fingerprint": "",
+                            "tool_max_loops": 0,
+                            "budget_applied": bool(_pa.get("budget_applied")),
+                            "budget_limit_chars": _pa.get("budget_limit_chars"),
+                            "context_chars_before_budget": _pa.get("context_chars_before_budget", 0),
+                            "time_fyi_chars": _pa.get("time_fyi_chars", 0),
+                            "context_expansion_ratio": round(len(final_prompt) / max(len(item.prompt), 1), 3),
+                            "context_fingerprint": _pa.get("context_fingerprint", ""),
+                            "request_fingerprint": _hashlib.sha1((item.prompt or "").encode("utf-8")).hexdigest()[:16],
+                            "section_chars": _sec_chars,
+                            "section_tokens_est": _sec_tokens,
+                            "section_counts": _sec_counts,
+                        })
                     except Exception:
                         pass
                     if not item.silent:
@@ -6179,6 +6693,7 @@ class FlexibleAgentRuntime:
                             "chat_id": item.chat_id,
                             "text": display_text or response.text,
                             "request_id": item.request_id,
+                            "responded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
                         }
                         memory_user_text = item.prompt
                         if item.source.lower() in {"document", "photo", "voice", "audio", "video", "sticker"}:
@@ -6233,6 +6748,7 @@ class FlexibleAgentRuntime:
                 else:
                     err_msg = response.error or "Unknown error"
                     self._mark_error(err_msg)
+                    self._record_habit_outcome(item, success=False, error_text=err_msg)
                     if self._should_buffer_during_transfer(item.request_id):
                         self._record_suppressed_transfer_result(item, success=False, error=err_msg)
                     await self._notify_request_listeners(
@@ -6276,6 +6792,8 @@ class FlexibleAgentRuntime:
                 break
             except Exception as e:
                 self._mark_error(str(e))
+                if item is not None:
+                    self._record_habit_outcome(item, success=False, error_text=str(e))
                 self.error_logger.exception(f"Error in flex queue processing: {e}")
                 self.is_generating = False
             finally:
@@ -6290,6 +6808,7 @@ class FlexibleAgentRuntime:
             BotCommand("agents", "List all agents with controls; add <id> <name> [token]"),
             BotCommand("status", "View agent status"),
             BotCommand("voice", "Toggle native voice replies"),
+            BotCommand("safevoice", "Toggle voice confirmation safety layer"),
             BotCommand("whisper", "Set Whisper model size [small|medium|large]"),
             BotCommand("active", "Toggle proactive heartbeat"),
             BotCommand("fyi", "Refresh bridge environment awareness"),
@@ -6316,6 +6835,7 @@ class FlexibleAgentRuntime:
             BotCommand("retry", "Resend response or rerun prompt"),
             BotCommand("verbose", "Toggle verbose long-task status [on|off]"),
             BotCommand("think", "Toggle thinking trace display [on|off]"),
+            BotCommand("loop", "Create/manage recurring loop tasks"),
             BotCommand("jobs", "Show cron and heartbeat jobs"),
             BotCommand("timeout", "View or set request timeout [minutes]"),
             BotCommand("hchat", "Send a message to another agent [agent] [message]"),

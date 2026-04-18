@@ -20,28 +20,37 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-# ── Pricing table (USD per million tokens, from OpenRouter) ──────────────────
+# ── Pricing table (USD per million tokens) ────────────────────────────────────
 # Key: model name as used in agents.json / HASHI config (normalized to lowercase)
+# "cached" = per-million price for cached/prompt-cache input tokens.
+# Sources: OpenAI API pricing (2026-04), OpenRouter, Anthropic docs.
 PRICING: dict[str, dict[str, float]] = {
-    # Anthropic
-    "claude-sonnet-4-6":        {"input": 3.00,  "output": 15.00},
-    "claude-opus-4-6":          {"input": 5.00,  "output": 25.00},   # OpenRouter: $5/$25 (Amazon Bedrock)
-    "claude-haiku-4-5":         {"input": 1.00,  "output": 5.00},
-    "claude-sonnet-4-5":        {"input": 3.00,  "output": 15.00},
-    "claude-opus-4-5":          {"input": 15.00, "output": 75.00},
+    # Anthropic  (cached = 10% of input for sonnet/haiku, opus varies)
+    "claude-sonnet-4-6":        {"input": 3.00,  "cached": 0.30,  "output": 15.00},
+    "claude-opus-4-6":          {"input": 5.00,  "cached": 0.50,  "output": 25.00},
+    "claude-haiku-4-5":         {"input": 1.00,  "cached": 0.10,  "output": 5.00},
+    "claude-sonnet-4-5":        {"input": 3.00,  "cached": 0.30,  "output": 15.00},
+    "claude-opus-4-5":          {"input": 15.00, "cached": 1.50,  "output": 75.00},
     # Google
     "gemini-2.5-pro":           {"input": 1.25,  "output": 10.00},
     "gemini-2.0-flash":         {"input": 0.10,  "output": 0.40},
     "gemini-3.1-pro-preview":   {"input": 2.00,  "output": 12.00, "thinking": 12.00},
     "gemini-2.5-flash-preview": {"input": 0.15,  "output": 0.60},
     # DeepSeek
-    "deepseek-chat":            {"input": 0.32,  "output": 0.89},
-    "deepseek-r1":              {"input": 0.70,  "output": 2.50},
-    # OpenAI
-    "gpt-4o":                   {"input": 2.50,  "output": 10.00},
-    "gpt-4o-mini":              {"input": 0.15,  "output": 0.60},
+    "deepseek-chat":            {"input": 0.32,  "cached": 0.032, "output": 0.89},
+    "deepseek-r1":              {"input": 0.70,  "cached": 0.07,  "output": 2.50},
+    # OpenAI  (gpt-5.x cached = 10% of input)
+    "gpt-4o":                   {"input": 2.50,  "cached": 1.25,  "output": 10.00},
+    "gpt-4o-mini":              {"input": 0.15,  "cached": 0.075, "output": 0.60},
+    "gpt-5.1-codex-mini":       {"input": 0.25,  "cached": 0.025, "output": 2.00},
+    "gpt-5.1-codex-max":        {"input": 1.25,  "cached": 0.125, "output": 10.00},
+    "gpt-5.2":                  {"input": 1.75,  "cached": 0.175, "output": 14.00},
+    "gpt-5.2-codex":            {"input": 1.75,  "cached": 0.175, "output": 14.00},
+    "gpt-5.3-codex":            {"input": 1.75,  "cached": 0.175, "output": 14.00},
+    "gpt-5.4":                  {"input": 2.50,  "cached": 0.25,  "output": 15.00},
+    "gpt-5.4-mini":             {"input": 0.75,  "cached": 0.075, "output": 4.50},
     # CLI fallback (treated as claude-sonnet-4-6 equivalent)
-    "default":                  {"input": 3.00,  "output": 15.00},
+    "default":                  {"input": 3.00,  "cached": 0.30,  "output": 15.00},
 }
 
 # Characters that are CJK (each ~0.67 tokens vs 0.25 for ASCII)
@@ -79,11 +88,16 @@ def get_price(model: str) -> dict[str, float]:
 
 
 def calc_cost(input_tokens: int, output_tokens: int, model: str,
-              thinking_tokens: int = 0) -> float:
-    """Calculate cost in USD."""
+              thinking_tokens: int = 0, cached_tokens: int = 0) -> float:
+    """Calculate cost in USD.  *cached_tokens* are the portion of
+    *input_tokens* that hit prompt cache (charged at reduced rate)."""
     prices = get_price(model)
+    cached = min(cached_tokens, input_tokens)
+    non_cached = input_tokens - cached
+    cached_price = prices.get("cached", prices["input"] * 0.5)  # fallback 50%
     cost = (
-        input_tokens * prices["input"] / 1_000_000 +
+        non_cached * prices["input"] / 1_000_000 +
+        cached * cached_price / 1_000_000 +
         output_tokens * prices["output"] / 1_000_000 +
         thinking_tokens * prices.get("thinking", prices["output"]) / 1_000_000
     )
@@ -108,9 +122,10 @@ def record_usage(
     output_tokens: int,
     thinking_tokens: int = 0,
     session_id: str | None = None,
+    cost_usd: float | None = None,
 ) -> None:
     """Append a usage record to the agent's token_usage.jsonl."""
-    cost = calc_cost(input_tokens, output_tokens, model, thinking_tokens)
+    cost = cost_usd if cost_usd is not None else calc_cost(input_tokens, output_tokens, model, thinking_tokens)
     record = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "model": model,

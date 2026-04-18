@@ -6,7 +6,7 @@ import asyncio
 import logging
 from pathlib import Path
 
-from adapters.base import BaseBackend, BackendCapabilities, BackendResponse
+from adapters.base import BaseBackend, BackendCapabilities, BackendResponse, TokenUsage
 from adapters.stream_events import (
     StreamCallback, StreamEvent,
     KIND_THINKING, KIND_TOOL_START, KIND_TOOL_END,
@@ -41,6 +41,9 @@ class ClaudeCLIAdapter(BaseBackend):
         # Session persistence for fixed mode
         self._session_id: str | None = None
         self._session_mode: bool = (self.config.extra or {}).get("session_mode", False)
+        # Real token usage captured from CLI result events
+        self._last_usage: TokenUsage | None = None
+        self._last_cost_usd: float | None = None
 
     def _resolve_system_prompt_source(self) -> Path | None:
         candidates = []
@@ -141,6 +144,19 @@ class ClaudeCLIAdapter(BaseBackend):
             sid = obj.get("session_id")
             if sid:
                 self._session_id = sid
+            # Capture real token usage and cost from CLI result
+            usage = obj.get("usage")
+            if isinstance(usage, dict):
+                self._last_usage = TokenUsage(
+                    input_tokens=usage.get("input_tokens", 0)
+                                + usage.get("cache_creation_input_tokens", 0)
+                                + usage.get("cache_read_input_tokens", 0),
+                    output_tokens=usage.get("output_tokens", 0),
+                    thinking_tokens=0,
+                )
+            cost = obj.get("total_cost_usd")
+            if cost is not None:
+                self._last_cost_usd = float(cost)
             return obj.get("result", "")
 
         # --- Stream event: wrapped Claude API streaming events ---
@@ -235,6 +251,10 @@ class ClaudeCLIAdapter(BaseBackend):
         self, prompt: str, request_id: str, is_retry: bool = False, silent: bool = False,
         on_stream_event: StreamCallback = None,
     ) -> BackendResponse:
+        # Reset per-request usage tracking
+        self._last_usage = None
+        self._last_cost_usd = None
+
         prompt_arg = prompt
         stdin_data = None
         if "\n" in prompt or "\r" in prompt or len(prompt) > self.MAX_PROMPT_ARG_CHARS:
@@ -459,7 +479,10 @@ class ClaudeCLIAdapter(BaseBackend):
         # if result_text and not silent:
             # self.emit_console_text(result_text + "\n", self.logger)
 
-        return BackendResponse(text=result_text, duration_ms=duration_ms, is_success=True)
+        return BackendResponse(
+            text=result_text, duration_ms=duration_ms, is_success=True,
+            usage=self._last_usage, cost_usd=self._last_cost_usd,
+        )
 
     # ------------------------------------------------------------------
     # Blocking path: original communicate() for non-streaming

@@ -7,6 +7,10 @@ from pathlib import Path
 
 scheduler_logger = logging.getLogger("BridgeU.Scheduler")
 
+SCHEDULER_JOB_TIMEOUT_S = 30
+SCHEDULER_SKILL_TIMEOUT_S = 300  # action skills (dream etc.) need much longer — they run subprocesses with LLM calls
+PARKED_FOLLOWUP_TIMEOUT_S = 15
+
 try:
     from croniter import croniter
     HAS_CRONITER = True
@@ -54,15 +58,20 @@ def _should_fire(schedule: str, last_run_ts: float, now_dt: datetime) -> bool:
                 target_hm = f"{hour:02d}:{minute:02d}"
                 if current_hm != target_hm:
                     return False
-                # Ensure not already fired today
-                last_dt = datetime.fromtimestamp(last_run_ts) if last_run_ts else datetime.min
+                # Ensure not already fired today.
+                # If never run (last_run_ts=0), use today's date so it does NOT
+                # fire immediately — it waits for the next scheduled occurrence.
+                last_dt = datetime.fromtimestamp(last_run_ts) if last_run_ts else now_dt
                 return last_dt.date() < now_dt.date()
             except (ValueError, TypeError):
                 return False
         return False
 
     try:
-        last_dt = datetime.fromtimestamp(last_run_ts) if last_run_ts else datetime(2000, 1, 1)
+        # If last_run_ts is 0 (never run), use now_dt as the base so the next
+        # scheduled time is calculated forward from *now*, not from year 2000.
+        # This prevents new cron jobs from firing immediately on first scheduler tick.
+        last_dt = datetime.fromtimestamp(last_run_ts) if last_run_ts else now_dt
         cron = croniter(schedule, last_dt)
         next_fire = cron.get_next(datetime)
         return next_fire <= now_dt
@@ -112,6 +121,13 @@ class TaskScheduler:
             scheduler_logger.error(f"Failed to load tasks: {e}")
             return {"heartbeats": [], "crons": []}
 
+    def _save_tasks(self, tasks: dict):
+        try:
+            with open(self.tasks_path, "w", encoding="utf-8") as f:
+                json.dump(tasks, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            scheduler_logger.error(f"Failed to save tasks: {e}")
+
     def _get_cron_last_run(self, task_id: str) -> float:
         """Get last run timestamp for a cron task, handling both old date-string and new timestamp formats."""
         raw = self.state["crons"].get(task_id)
@@ -127,6 +143,24 @@ class TaskScheduler:
             except ValueError:
                 return 0.0
         return 0.0
+
+    async def _run_scheduler_action(self, action_coro, *, task_kind: str, task_id: str, agent_name: str, timeout_s: int = SCHEDULER_JOB_TIMEOUT_S) -> bool:
+        try:
+            await asyncio.wait_for(action_coro, timeout=timeout_s)
+            return True
+        except asyncio.TimeoutError:
+            scheduler_logger.error(
+                f"{task_kind} {task_id} for {agent_name} timed out after {timeout_s}s; scheduler will continue."
+            )
+            return False
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            scheduler_logger.error(
+                f"{task_kind} {task_id} for {agent_name} failed: {e}",
+                exc_info=True,
+            )
+            return False
 
     async def run(self):
         scheduler_logger.info("Task Scheduler started%s.", " (croniter available)" if HAS_CRONITER else " (croniter NOT available, fallback mode)")
@@ -164,20 +198,32 @@ class TaskScheduler:
                         if action.startswith("skill:"):
                             skill_id = action.split(":", 1)[1]
                             args = hb.get("args", "") or prompt
-                            await rt.invoke_scheduler_skill(
-                                skill_id=skill_id,
-                                args=args,
+                            ok = await self._run_scheduler_action(
+                                rt.invoke_scheduler_skill(
+                                    skill_id=skill_id,
+                                    args=args,
+                                    task_id=task_id,
+                                ),
+                                task_kind="Heartbeat",
                                 task_id=task_id,
+                                agent_name=agent_name,
+                                timeout_s=SCHEDULER_SKILL_TIMEOUT_S,
                             )
                         else:
-                            await rt.enqueue_request(
-                                chat_id=self.authorized_id,
-                                prompt=prompt,
-                                source="scheduler",
-                                summary=f"Heartbeat Task [{task_id}]"
+                            ok = await self._run_scheduler_action(
+                                rt.enqueue_request(
+                                    chat_id=self.authorized_id,
+                                    prompt=prompt,
+                                    source="scheduler",
+                                    summary=f"Heartbeat Task [{task_id}]"
+                                ),
+                                task_kind="Heartbeat",
+                                task_id=task_id,
+                                agent_name=agent_name,
                             )
-                        self.state["heartbeats"][task_id] = now
-                        state_changed = True
+                        if ok:
+                            self.state["heartbeats"][task_id] = now
+                            state_changed = True
 
                 # Process crons (upgraded — cron expression support)
                 for cron in tasks.get("crons", []):
@@ -198,20 +244,56 @@ class TaskScheduler:
 
                     last_run_ts = self._get_cron_last_run(task_id)
 
+                    # Seed new cron jobs: record current time so they fire at the
+                    # next scheduled boundary instead of never (see _should_fire
+                    # which treats last_run_ts=0 as now_dt, causing get_next to
+                    # always return future).
+                    if last_run_ts == 0:
+                        scheduler_logger.info(f"Seeding new cron {task_id} for {agent_name} — will fire at next scheduled boundary.")
+                        self.state["crons"][task_id] = now
+                        state_changed = True
+                        continue
+
                     if _should_fire(schedule, last_run_ts, now_dt):
+                        # --- Loop safety net: count iterations, auto-disable at max ---
+                        loop_meta = cron.get("loop_meta")
+                        if loop_meta is not None:
+                            count = loop_meta.get("count", 0) + 1
+                            max_count = loop_meta.get("max", 100)
+                            if count > max_count:
+                                scheduler_logger.info(
+                                    f"Loop {task_id} reached max ({max_count}). Auto-disabling."
+                                )
+                                cron["enabled"] = False
+                                loop_meta["count"] = count - 1
+                                loop_meta["stopped_reason"] = "max_reached"
+                                self._save_tasks(tasks)
+                                self.state["crons"][task_id] = now
+                                state_changed = True
+                                continue
+                            loop_meta["count"] = count
+                            self._save_tasks(tasks)
+
                         scheduler_logger.info(f"Triggering cron {task_id} for {agent_name} (schedule: {schedule})")
                         rt = runtime_map[agent_name]
                         if action == "export_transcript":
                             exported = rt.export_daily_transcript(now_dt)
                             if not exported:
                                 scheduler_logger.info(f"No transcript entries to export for {agent_name}")
+                            ok = True
                         elif action.startswith("skill:"):
                             skill_id = action.split(":", 1)[1]
                             args = cron.get("args", "") or cron.get("prompt", "")
-                            await rt.invoke_scheduler_skill(
-                                skill_id=skill_id,
-                                args=args,
+                            ok = await self._run_scheduler_action(
+                                rt.invoke_scheduler_skill(
+                                    skill_id=skill_id,
+                                    args=args,
+                                    task_id=task_id,
+                                ),
+                                task_kind="Cron",
                                 task_id=task_id,
+                                agent_name=agent_name,
+                                timeout_s=SCHEDULER_SKILL_TIMEOUT_S,
                             )
                         else:
                             if not prompt or not prompt.strip():
@@ -221,12 +303,20 @@ class TaskScheduler:
                                 self.state["crons"][task_id] = now
                                 state_changed = True
                                 continue
-                            await rt.enqueue_request(
-                                chat_id=self.authorized_id,
-                                prompt=prompt,
-                                source="scheduler",
-                                summary=f"Cron Task [{task_id}]"
+                            ok = await self._run_scheduler_action(
+                                rt.enqueue_request(
+                                    chat_id=self.authorized_id,
+                                    prompt=prompt,
+                                    source="scheduler",
+                                    summary=f"Cron Task [{task_id}]"
+                                ),
+                                task_kind="Cron",
+                                task_id=task_id,
+                                agent_name=agent_name,
                             )
+                        # Always update last_run to prevent re-triggering on
+                        # timeout/failure.  The cron will fire again at its NEXT
+                        # scheduled time, not in the same minute.
                         self.state["crons"][task_id] = now
                         state_changed = True
 
@@ -235,7 +325,19 @@ class TaskScheduler:
                     handler = getattr(rt, "process_parked_topic_followups", None)
                     if handler is None:
                         continue
-                    await handler(now_dt)
+                    try:
+                        await asyncio.wait_for(handler(now_dt), timeout=PARKED_FOLLOWUP_TIMEOUT_S)
+                    except asyncio.TimeoutError:
+                        scheduler_logger.error(
+                            f"Parked-topic follow-up for {rt.name} timed out after {PARKED_FOLLOWUP_TIMEOUT_S}s; scheduler will continue."
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        scheduler_logger.error(
+                            f"Parked-topic follow-up for {rt.name} failed: {e}",
+                            exc_info=True,
+                        )
 
                 if state_changed:
                     self._save_state()

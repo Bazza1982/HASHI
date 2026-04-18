@@ -259,6 +259,44 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "telegram_send_file",
+            "description": (
+                "Send a file (image, document, video, or audio) to the user's Telegram chat. "
+                "Use this to share generated charts, screenshots, reports, or any local file. "
+                "Defaults to sending to the authorized user. Supports photo/document/video/audio types."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute path to the local file to send.",
+                    },
+                    "caption": {
+                        "type": "string",
+                        "description": "Optional caption text for the file.",
+                    },
+                    "file_type": {
+                        "type": "string",
+                        "enum": ["auto", "photo", "document", "video", "audio"],
+                        "description": (
+                            "File type hint. 'auto' (default) detects from extension: "
+                            ".jpg/.png/.webp → photo, .mp4/.mov → video, .mp3/.ogg → audio, "
+                            "everything else → document."
+                        ),
+                    },
+                    "chat_id": {
+                        "type": "string",
+                        "description": "Telegram chat ID to send to. Omit to send to the authorized user.",
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "http_request",
             "description": (
                 "Make an HTTP request (GET, POST, PUT, DELETE, PATCH) to any URL. "

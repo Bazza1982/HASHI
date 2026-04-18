@@ -15,6 +15,7 @@ session cache (in-memory, TTL-based) for clients that don't resend full history.
 """
 
 import asyncio
+from datetime import datetime
 import json
 import logging
 import time
@@ -56,7 +57,8 @@ _C_RESET   = "\033[0m"
 
 
 def _print_api_in(model: str, preview: str):
-    text = f"{_C_API_IN}[api] <- {model}  {preview}{_C_RESET}"
+    ts = datetime.now().strftime("%H:%M:%S")
+    text = f"{_C_API_IN}[api {ts}] <- {model}  {preview}{_C_RESET}"
     try:
         print(text, flush=True)
     except (UnicodeEncodeError, OSError):
@@ -64,8 +66,9 @@ def _print_api_in(model: str, preview: str):
 
 
 def _print_api_out(model: str, elapsed_s: float, chars: int, stream: bool):
+    ts = datetime.now().strftime("%H:%M:%S")
     mode = "stream" if stream else "sync"
-    text = f"{_C_API_OUT}[api] -> {model}  ({mode}, {elapsed_s:.2f}s, {chars} chars){_C_RESET}"
+    text = f"{_C_API_OUT}[api {ts}] -> {model}  ({mode}, {elapsed_s:.2f}s, {chars} chars){_C_RESET}"
     try:
         print(text, flush=True)
     except (UnicodeEncodeError, OSError):

@@ -147,6 +147,7 @@ class ToolRegistry:
             execute_process_list,
             execute_process_kill,
             execute_telegram_send,
+            execute_telegram_send_file,
             execute_http_request,
             execute_web_search,
             execute_web_fetch,
@@ -204,6 +205,12 @@ class ToolRegistry:
                 arguments,
                 secrets=self.secrets,
                 agents_config=self.agents_config,
+            )
+
+        if tool_name == "telegram_send_file":
+            return await execute_telegram_send_file(
+                arguments,
+                secrets=self.secrets,
             )
 
         if tool_name == "http_request":
