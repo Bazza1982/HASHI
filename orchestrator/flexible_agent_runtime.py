@@ -5110,6 +5110,14 @@ class FlexibleAgentRuntime:
             sys_prompt_manager=self.sys_prompt_manager,
         )
 
+        # Re-init habit store (wipe/reset deletes habits.sqlite)
+        self.habit_store = HabitStore(
+            self.workspace_dir,
+            self.global_config.project_root,
+            self.name,
+            self._get_agent_class(),
+        )
+
         # Reset any pending continuity
         self._pending_auto_recall_context = None
         self._pending_session_primer = None
@@ -5192,6 +5200,14 @@ class FlexibleAgentRuntime:
             self.config.system_md,
             active_skill_provider=self._get_active_skill_sections,
             sys_prompt_manager=self.sys_prompt_manager,
+        )
+
+        # Re-init habit store (wipe/reset deletes habits.sqlite)
+        self.habit_store = HabitStore(
+            self.workspace_dir,
+            self.global_config.project_root,
+            self.name,
+            self._get_agent_class(),
         )
 
         # Reset any pending continuity

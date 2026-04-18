@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import sqlite3
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ sys.modules.setdefault("edge_tts", SimpleNamespace())
 from orchestrator.agent_runtime import QueuedRequest
 from orchestrator import flexible_agent_runtime as flex_module
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+from orchestrator.habits import HabitStore
 
 
 def _make_item() -> QueuedRequest:
@@ -103,6 +105,42 @@ def test_capture_followup_habit_feedback_uses_last_response_metadata():
     )
 
 
+def test_habit_store_must_be_reinitialized_after_habits_db_is_deleted(tmp_path):
+    project_root = tmp_path / "project"
+    workspace_dir = project_root / "workspaces" / "akane"
+    (project_root / "workspaces" / "lily").mkdir(parents=True)
+    workspace_dir.mkdir(parents=True)
+
+    store = HabitStore(
+        workspace_dir=workspace_dir,
+        project_root=project_root,
+        agent_id="akane",
+        agent_class="general",
+    )
+    store.upsert_habit(
+        habit_type="do",
+        title="Test Habit",
+        instruction="Verify before answering.",
+        trigger={"keywords": ["verify"]},
+    )
+
+    habits_db = workspace_dir / "habits.sqlite"
+    habits_db.unlink()
+
+    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+        store.retrieve("please verify this", source="text", summary="please verify this")
+
+    reinitialized = HabitStore(
+        workspace_dir=workspace_dir,
+        project_root=project_root,
+        agent_id="akane",
+        agent_class="general",
+    )
+    retrieved = reinitialized.retrieve("please verify this", source="text", summary="please verify this")
+
+    assert retrieved == []
+
+
 @pytest.mark.anyio
 async def test_handle_message_captures_followup_before_enqueue(monkeypatch):
     runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
@@ -116,6 +154,7 @@ async def test_handle_message_captures_followup_before_enqueue(monkeypatch):
     runtime.enqueue_request = AsyncMock()
     runtime.logger = Mock()
     runtime.name = "akane"
+    runtime._active_chat_ids = {}
 
     monkeypatch.setattr(flex_module, "_print_user_message", lambda *args, **kwargs: None)
 
