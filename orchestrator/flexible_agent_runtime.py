@@ -783,6 +783,33 @@ class FlexibleAgentRuntime:
             return item.prompt
         return "\n\n".join(sections + [item.prompt])
 
+    def _source_requires_manual_permission(self, source: str) -> bool:
+        normalized = (source or "").strip().lower()
+        if not normalized:
+            return True
+        automated_prefixes = (
+            "scheduler",
+            "bridge:",
+            "bridge-transfer:",
+            "hchat-reply:",
+            "cos-query:",
+            "ticket:",
+            "loop_skill",
+            "startup",
+        )
+        return normalized.startswith(automated_prefixes)
+
+    def _remote_backend_block_reason(self, source: str) -> str | None:
+        engine = (self.config.active_backend or "").strip().lower()
+        if engine not in {"openrouter-api", "deepseek-api"}:
+            return None
+        if not self._source_requires_manual_permission(source):
+            return None
+        return (
+            f"Blocked {engine} for source '{source}'. Remote API backends are reserved for user-initiated requests only; "
+            "automated/agent-originated flows must not use them."
+        )
+
     def _extract_json_object(self, text: str) -> dict | None:
         raw = (text or "").strip()
         if not raw:
@@ -1184,8 +1211,17 @@ class FlexibleAgentRuntime:
         if skill.type == "toggle":
             self.error_logger.error(f"Toggle skill cannot be scheduled: {skill_id}")
             return
+        skill_env = {
+            "BRIDGE_ACTIVE_BACKEND": self.config.active_backend,
+            "BRIDGE_ACTIVE_MODEL": self.get_current_model(),
+        }
         if skill.type == "action":
-            ok, text = await self.skill_manager.run_action_skill(skill, self.workspace_dir, args=args)
+            ok, text = await self.skill_manager.run_action_skill(
+                skill,
+                self.workspace_dir,
+                args=args,
+                extra_env=skill_env,
+            )
             if ok and text:
                 await self.send_long_message(
                     chat_id=self._primary_chat_id(),
@@ -3051,7 +3087,15 @@ class FlexibleAgentRuntime:
             return
 
         if skill.type == "action":
-            _, message = await self.skill_manager.run_action_skill(skill, self.workspace_dir, args=rest)
+            _, message = await self.skill_manager.run_action_skill(
+                skill,
+                self.workspace_dir,
+                args=rest,
+                extra_env={
+                    "BRIDGE_ACTIVE_BACKEND": self.config.active_backend,
+                    "BRIDGE_ACTIVE_MODEL": self.get_current_model(),
+                },
+            )
             await self.send_long_message(
                 chat_id=update.effective_chat.id,
                 text=message,
@@ -3196,7 +3240,14 @@ class FlexibleAgentRuntime:
                 await query.answer()
                 return
             if action == "run":
-                ok, message = await self.skill_manager.run_action_skill(skill, self.workspace_dir)
+                ok, message = await self.skill_manager.run_action_skill(
+                    skill,
+                    self.workspace_dir,
+                    extra_env={
+                        "BRIDGE_ACTIVE_BACKEND": self.config.active_backend,
+                        "BRIDGE_ACTIVE_MODEL": self.get_current_model(),
+                    },
+                )
                 await query.answer("Skill executed" if ok else "Skill failed", show_alert=not ok)
                 await self.send_long_message(
                     chat_id=query.message.chat_id,
@@ -5541,7 +5592,11 @@ class FlexibleAgentRuntime:
                     "summary": f"{media_kind}: {filename}",
                     "timestamp": datetime.now().isoformat(),
                 }
-                preview = transcript[:300] + ("..." if len(transcript) > 300 else "")
+                max_preview = 3500
+                if len(transcript) > max_preview:
+                    preview = transcript[:max_preview] + f"\n\n…(共 {len(transcript)} 字，已截断)"
+                else:
+                    preview = transcript
                 keyboard = InlineKeyboardMarkup([
                     [
                         InlineKeyboardButton("✅ Send", callback_data=f"safevoice:yes:{chat_key}"),
@@ -6260,6 +6315,17 @@ class FlexibleAgentRuntime:
                     "summary": item.summary,
                     "started_at": datetime.now().isoformat(),
                 }
+                remote_backend_block = self._remote_backend_block_reason(item.source)
+                if remote_backend_block:
+                    self.error_logger.warning(remote_backend_block)
+                    if item.deliver_to_telegram:
+                        await self.send_long_message(
+                            item.chat_id,
+                            f"⚠️ {remote_backend_block}",
+                            request_id=item.request_id,
+                            purpose="remote-backend-policy",
+                        )
+                    continue
                 self._mark_activity()
                 self._log_maintenance(
                     item,

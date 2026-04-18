@@ -22,7 +22,6 @@ import json
 import os
 import sqlite3
 import sys
-import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -39,8 +38,8 @@ from orchestrator.bridge_memory import BridgeMemoryStore
 from orchestrator.habits import HabitStore
 
 TASKS_PATH = PROJECT_ROOT / "tasks.json"
-SECRETS_PATH = PROJECT_ROOT / "secrets.json"
 AGENTS_PATH = PROJECT_ROOT / "agents.json"
+STATE_PATH = WORKSPACE_DIR / "state.json"
 TRANSCRIPT_PATH = WORKSPACE_DIR / "transcript.jsonl"
 AGENT_MD_PATH = WORKSPACE_DIR / "AGENT.md"
 DREAM_DIR = WORKSPACE_DIR / "dream_snapshots"
@@ -59,22 +58,16 @@ MEMORY_FORGET_TARGET = 160      # trim down to this count when threshold exceede
 MAX_FORGET_PER_DREAM = 20       # safety cap — never delete more than this in one run
 _MEMORY_STORE: BridgeMemoryStore | None = None
 _HABIT_STORE: HabitStore | None = None
+SUPPORTED_SAFE_BACKENDS = {"claude-cli", "codex-cli", "gemini-cli"}
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
 
-def _read_secrets() -> dict:
+def _read_state() -> dict:
     try:
-        return json.loads(SECRETS_PATH.read_text())
+        return json.loads(STATE_PATH.read_text(encoding="utf-8"))
     except Exception:
         return {}
-
-
-def _get_openrouter_key(secrets: dict) -> str | None:
-    for key in (f"{AGENT_NAME}_openrouter_key", "openrouter-api_key", "openrouter_key"):
-        if secrets.get(key):
-            return secrets[key]
-    return None
 
 
 def _read_tasks() -> dict:
@@ -101,6 +94,72 @@ def _now_iso() -> str:
 
 def _today_str() -> str:
     return datetime.now().strftime("%Y-%m-%d")
+
+
+def _get_api_gateway_port() -> int:
+    try:
+        raw = json.loads(AGENTS_PATH.read_text(encoding="utf-8"))
+        return int((raw.get("global") or {}).get("api_gateway_port", 18801))
+    except Exception:
+        return 18801
+
+
+def _resolve_backend_context() -> tuple[str | None, str | None]:
+    env_backend = (os.environ.get("BRIDGE_ACTIVE_BACKEND") or "").strip()
+    env_model = (os.environ.get("BRIDGE_ACTIVE_MODEL") or "").strip()
+    if env_backend and env_model:
+        return env_backend, env_model
+
+    state = _read_state()
+    backend = str(state.get("active_backend") or "").strip() or None
+    model = str(state.get("active_model") or "").strip() or None
+    if backend and model:
+        return backend, model
+
+    agents = _read_agents().get("agents", [])
+    for entry in agents:
+        if str(entry.get("name") or "").strip().lower() != AGENT_NAME.lower():
+            continue
+        backend = str(entry.get("active_backend") or entry.get("engine") or "").strip() or None
+        if entry.get("type") == "flex":
+            allowed = entry.get("allowed_backends") or []
+            for option in allowed:
+                if str(option.get("engine") or "").strip() == backend:
+                    model = str(option.get("model") or "").strip() or None
+                    break
+        if not model:
+            model = str(entry.get("model") or "").strip() or None
+        return backend, model
+    return None, None
+
+
+def _call_current_backend(_backend_hint: str | None, messages: list[dict], model: str | None = None) -> str:
+    backend, resolved_model = _resolve_backend_context()
+    if not backend or not resolved_model:
+        raise RuntimeError("Dream could not resolve the agent's current backend/model.")
+    if backend not in SUPPORTED_SAFE_BACKENDS:
+        raise RuntimeError(
+            f"Dream refuses unsafe backend '{backend}'. Allowed backends: {', '.join(sorted(SUPPORTED_SAFE_BACKENDS))}."
+        )
+    target_model = model or resolved_model
+    payload = json.dumps({
+        "model": target_model,
+        "messages": messages,
+        "stream": False,
+    }).encode("utf-8")
+    gateway_url = f"http://127.0.0.1:{_get_api_gateway_port()}/v1/chat/completions"
+    req = urllib.request.Request(
+        gateway_url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+            return result["choices"][0]["message"]["content"]
+    except Exception as exc:
+        raise RuntimeError(f"Current-backend call failed via local API gateway: {exc}") from exc
 
 
 def _load_transcript_for_date(target_date: str) -> list[dict]:
@@ -190,34 +249,6 @@ def _load_transcript_for_date(target_date: str) -> list[dict]:
     return turns
 
 
-def _call_openrouter(api_key: str, messages: list[dict], model: str = "anthropic/claude-sonnet-4-5") -> str:
-    """Call OpenRouter chat completions API. Returns text response."""
-    payload = json.dumps({
-        "model": model,
-        "messages": messages,
-        "max_tokens": 4096,
-        "temperature": 0.3,
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        "https://openrouter.ai/api/v1/chat/completions",
-        data=payload,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/hashi-bridge",
-            "X-Title": "Hashi Dream",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=180) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-            return result["choices"][0]["message"]["content"]
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"OpenRouter HTTP {e.code}: {body[:300]}") from e
-
-
 def _memory_store() -> BridgeMemoryStore:
     global _MEMORY_STORE
     if _MEMORY_STORE is None:
@@ -287,7 +318,7 @@ def _fetch_low_importance_memories(limit: int) -> list[dict]:
         return []
 
 
-def _forget_memories(api_key: str, current_count: int) -> tuple[int, list[str]]:
+def _forget_memories(current_count: int) -> tuple[int, list[str]]:
     """Ask LLM which memories to forget, delete them, return (count_deleted, summaries)."""
     candidates = _fetch_low_importance_memories(limit=min(60, current_count))
     if not candidates:
@@ -323,10 +354,10 @@ Respond ONLY with valid JSON:
 }}
 
 If nothing should be forgotten, return {{"forget_ids": [], "reason": "..."}}
-"""
+    """
 
     try:
-        response = _call_openrouter(api_key, [{"role": "user", "content": forget_prompt}])
+        response = _call_current_backend(None, [{"role": "user", "content": forget_prompt}])
         clean = response.strip()
         if clean.startswith("```"):
             clean = "\n".join(clean.split("\n")[1:])
@@ -518,10 +549,14 @@ def cmd_status() -> str:
 
 def cmd_now(is_scheduled: bool = False) -> str:
     """Run the dream reflection process."""
-    secrets = _read_secrets()
-    api_key = _get_openrouter_key(secrets)
-    if not api_key:
-        return "❌ Dream: No OpenRouter API key found. Cannot run reflection."
+    backend, model = _resolve_backend_context()
+    if not backend or not model:
+        return "❌ Dream: Could not resolve the agent's current backend/model."
+    if backend not in SUPPORTED_SAFE_BACKENDS:
+        return (
+            f"❌ Dream: Current backend '{backend}' is not permitted for dream. "
+            f"Allowed backends: {', '.join(sorted(SUPPORTED_SAFE_BACKENDS))}."
+        )
 
     # Scheduled runs (cron at 01:30) reflect on yesterday; manual runs reflect on today.
     # If today has no turns, also try yesterday as fallback (for manual runs shortly after midnight).
@@ -628,9 +663,9 @@ RULES (follow strictly):
 """
 
     try:
-        response = _call_openrouter(api_key, [{"role": "user", "content": dream_prompt}])
+        response = _call_current_backend(backend, [{"role": "user", "content": dream_prompt}], model=model)
     except RuntimeError as e:
-        return f"❌ Dream: LLM call failed — {e}"
+        return f"❌ Dream: backend call failed — {e}"
 
     # Parse JSON response
     try:
@@ -689,7 +724,7 @@ RULES (follow strictly):
     forgotten_count = 0
     forgotten_summaries: list[str] = []
     if current_memory_count > MEMORY_FORGET_THRESHOLD:
-        forgotten_count, forgotten_summaries = _forget_memories(api_key, current_memory_count)
+        forgotten_count, forgotten_summaries = _forget_memories(current_memory_count)
 
     # Save snapshot BEFORE applying changes
     agent_md_before = agent_md_content if agent_md_updates else None
@@ -751,8 +786,8 @@ RULES (follow strictly):
 
     # Process user /good and /bad signals (max 3 per dream to avoid overwhelm)
     signal_log_lines = _habit_store().process_user_signals(
-        api_key=api_key,
-        call_llm_fn=_call_openrouter,
+        api_key=backend,
+        call_llm_fn=_call_current_backend,
         max_signals=3,
         max_habits_per_signal=2,
         max_context_words=6000,
