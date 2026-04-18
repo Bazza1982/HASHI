@@ -1,19 +1,18 @@
 # HASHI
 
-> **Status (v3.0-alpha):** Complete redesign — **local Ollama LLM support**, **habit-based self-improvement** (agents learn from `/good` and `/bad` feedback), **TUI onboarding** (language selection, auto API key detection), **Minato MCP** (workflow choreography), and **token audit system**. All v2 roadmap delivered; v3 in active development.
+> **Status (v3.0-beta):** Full-featured agentic AI orchestration platform — **6 LLM backends** (Claude, Gemini, Codex, OpenRouter, DeepSeek, Ollama), **habit-based self-improvement** (agents learn from feedback and nightly reflection), **SafeVoice** (voice confirmation before execution), **cross-instance agent messaging**, **token audit & cost tracking**, and **Minato MCP workflow choreography**. All v2 roadmap delivered; v3 in active development.
 >
 > **Changelog:** see [`CHANGELOG.md`](CHANGELOG.md) · **Roadmap:** see [`docs/ROADMAP.md`](docs/ROADMAP.md) · **Nagare Docs:** see [`docs/NAGARE_FLOW_SYSTEM.md`](docs/NAGARE_FLOW_SYSTEM.md).
 
 ## About
 
-**HASHI** is a privacy-first, compliant alternative to OpenClaw designed for a more secure agentic experience. It prioritizes your security by never requiring or storing your Claude, Codex, or Gemini OAuth authentication tokens, ensuring your setup remains fully compliant with current Terms of Service.
+**HASHI** is a privacy-first, universal AI agent orchestration platform. It connects multiple LLM backends through a single interface, enabling multi-agent collaboration with persistent memory, automated scheduling, voice interaction, and self-improving behavior — all running locally on your machine.
 
-Beyond safety, HASHI introduces practical features built for real-world workflows:
-
-• Context Recovery: Use the /handoff command to **instantly restore project context** when work is lost during conversation compression.
-• Multi-Agent Connectivity: Connect and switch between multiple specialized agents through **a single WhatsApp account**.
-
-HASHI is built to evolve. We are committed to adding the tools and functions the community needs to make AI collaboration safer and more productive.
+Key principles:
+- **No Token Storage** — CLI backends use local authentication; no OAuth tokens stored
+- **Multi-Agent, Single Interface** — Chat with multiple specialized agents through one Telegram, WhatsApp, or Workbench session
+- **Self-Improving Agents** — Habit system learns from `/good` and `/bad` feedback, with nightly dream reflection
+- **Built to Evolve** — Modular skills, tools, and backends can be added without touching core code
 
 ## Project History & Name Origin
 
@@ -44,46 +43,52 @@ This project would not exist without **OpenClaw** by **Peter Steinberg** and the
 
 ### Development Codename: bridge-u-f
 
-Throughout the codebase, you'll see references to **`bridge-u-f`** - this was the internal development codename used during the project's evolution from OpenClaw.
+Throughout the codebase, you'll see references to **`bridge-u-f`** — this was the internal development codename used during the project's evolution from OpenClaw.
 
-**Why "bridge"?**
-The core metaphor: HASHI connects human intent with AI intelligence, serving as a **bridge** between natural language requests and computational power.
-
-**Why "u-f"?**
 - `u` = **universal** (multi-backend, multi-agent)
 - `f` = **flexible** (adaptive, modular, extensible)
+
 ---
 
 ## Quick Technical Overview
 
-HASHI is a **universal multi-agent orchestration platform** that runs entirely locally. It routes user requests to AI backends (Claude CLI, Codex CLI, Gemini CLI, or OpenRouter API) through a flexible adapter system, eliminating the need to store sensitive OAuth tokens.
+HASHI is a **universal multi-agent orchestration platform** that runs entirely locally. It routes user requests to AI backends through a flexible adapter system, eliminating the need to store sensitive OAuth tokens.
 
 **Core Components:**
-- **Onboarding** - Multi-language guided setup to create your first agent
-- **Workbench** - Local web UI (React + Vite) for multi-agent conversations
-- **Orchestrator** - Central runtime managing agents, memory, skills, and scheduling
-- **Nagare Flow System** - Multi-agent workflow orchestration engine (v2.1)
-- **Transports** - Connect via Telegram, WhatsApp, or Workbench
-- **Skills** - Modular capabilities (prompts, toggles, actions) that extend agents
-- **Jobs** - Automated scheduling (heartbeats + cron) for periodic agent tasks
+- **Onboarding** — Multi-language guided setup to create your first agent
+- **Workbench** — Local web UI (React + Vite) for multi-agent conversations
+- **Orchestrator** — Central runtime managing agents, memory, skills, and scheduling
+- **Nagare Flow System** — Multi-agent workflow orchestration engine
+- **Transports** — Connect via Telegram, WhatsApp, or Workbench
+- **Skills** — Modular capabilities (prompts, toggles, actions) that extend agents
+- **Jobs** — Automated scheduling (heartbeats + cron) for periodic agent tasks
+- **Habit System** — Self-improving behavior through feedback and nightly reflection
+- **HChat** — Cross-instance agent-to-agent messaging
 
 **What makes HASHI different:**
-1. **No Token Storage** - Uses CLI backends (gemini, claude, codex) with local authentication, not stored tokens
-2. **Multi-Agent, Single Interface** - Chat with multiple specialized agents through one WhatsApp or Telegram account
-3. **Nagare Flow System** - Describe a task in natural language; Nagare designs, executes, and improves a multi-agent workflow automatically — with cross-vendor evaluation, self-improving knowledge base, and autonomous error recovery
-4. **Context Recovery** - `/handoff` command instantly restores project context after compression
-5. **Tool Execution Layer** - OpenRouter agents can take real local actions: run bash commands, read/write files, search the web, call external APIs, and more
-6. **Flex/Fixed Mode Switching** - Agents can switch between CLI backends and OpenRouter mid-conversation via `/backend`
-7. **TUI Interface** - `tui.py` provides a split-panel terminal UI for log monitoring and agent chat without a browser
-8. **Pack & Go** - Build a self-contained USB for Windows or macOS; recipients just plug in and double-click, no setup required
-9. **Vibe-Coded** - Every line written by AI, reviewed by AI, directed by human vision
+1. **No Token Storage** — Uses CLI backends with local authentication, not stored tokens
+2. **6 Backend Adapters** — Claude CLI, Gemini CLI, Codex CLI, OpenRouter API, DeepSeek API, Ollama (local LLM)
+3. **Multi-Agent, Single Interface** — Chat with multiple specialized agents through one account
+4. **Nagare Flow System** — Describe a task in natural language; Nagare designs, executes, and improves a multi-agent workflow automatically
+5. **Self-Improving Agents** — Habit system with `/good` and `/bad` feedback, nightly dream reflection, and cross-agent habit governance
+6. **SafeVoice** — Voice messages are transcribed and shown for confirmation before execution, preventing accidental commands
+7. **Context Recovery** — `/handoff` command instantly restores project context after compression
+8. **Tool Execution Layer** — API-backed agents can take real local actions: run bash commands, read/write files, browse the web, call external APIs, and more
+9. **Flex/Fixed Mode Switching** — Agents can switch between CLI backends and API backends mid-conversation via `/backend`
+10. **Cross-Instance Messaging** — Agents across different HASHI instances can communicate via HChat
+11. **Pack & Go** — Build a self-contained USB for Windows or macOS; recipients just plug in and double-click
+12. **Vibe-Coded** — Every line written by AI, reviewed by AI, directed by human vision
 
 ---
 
 ## Project Status
 
-- **v2.1.0** — **Nagare Flow System** — multi-agent workflow orchestration with cross-vendor evaluation, self-improving knowledge base, DAG execution, and autonomous error recovery. See [`docs/NAGARE_FLOW_SYSTEM.md`](docs/NAGARE_FLOW_SYSTEM.md).
-- **v2.0.0** — Tool execution layer (11 tools), browser automation (Playwright), Pack & Go USB deployment (Windows + macOS), TUI, vector memory, `/dream` skill, `/memory` command. See [`CHANGELOG.md`](CHANGELOG.md).
+- **v3.0-beta** *(current)* — **Self-improving agents**, 6 LLM backends, SafeVoice, cross-instance messaging, token audit, agent behavior audit, remote backend policy, Minato MCP, Obsidian wiki integration
+- **v3.0-alpha** — Ollama local LLM, habit system (Phase 4-5), TUI onboarding, Minato MCP (8-tier), token audit system, dream improvements
+- **v2.1.0** — **Nagare Flow System** — multi-agent workflow orchestration
+- **v2.0.0** — Tool execution layer, browser automation, Pack & Go USB deployment, TUI, vector memory, `/dream` skill
+
+---
 
 ## Habit-Based Self-Improvement
 
@@ -100,7 +105,7 @@ The simplest way to shape agent behavior — give direct feedback while working:
 /skill bad skipped verification, stated file existed without checking
 ```
 
-Each signal captures the full conversation context (including thinking tokens). If an OpenRouter key is available, the signal is processed into habits immediately; otherwise it is stored for the next dream run.
+Each signal captures the full conversation context. If an API key is available, the signal is processed into habits immediately; otherwise it is stored for the next dream run.
 
 ### Dream — Nightly Reflection
 
@@ -109,24 +114,45 @@ Each night, agents run `/skill dream` to consolidate memory and process habit si
 - New habit candidates are extracted from the conversation context and user comment
 - Similar habits are reinforced rather than duplicated
 - Habits accumulate evidence over time before being promoted to active
+- Duplicate detection via mtime gate + content hash prevents redundant dream runs
 
 ### Habit Governance (Lily-mediated)
 
-Lily reviews habits across all agents and governs cross-agent reuse:
-- `/skill habits report` — regenerate Lily's evaluation report
-- `/skill habits dashboard` — advanced evaluation dashboard
+A designated governance agent reviews habits across all agents and governs cross-agent reuse:
+- `/skill habits report` — regenerate evaluation report with Wilson-style evidence scoring
+- `/skill habits dashboard` — advanced evaluation dashboard (task/class/backend breakdown)
 - `/skill habits list pending` — inspect pending copy recommendations
 - `/skill habits approve <ids>` / `/skill habits apply` — approve and apply cross-agent copies
 - `/skill habits shared list` — inspect active shared patterns and protocols
-- `/skill habits shared promote <source_agent> <habit_id> [pattern|protocol] [target_class]` — promote to shared registry
-- `/skill habits shared retire <shared_pattern_id>` — retire a shared pattern
+- `/skill habits shared promote` / `/skill habits shared retire` — manage shared registry
 
 ### Storage
 
 All habit data is local-only and gitignored:
 - Per-agent habits: `workspaces/<agent>/habits.sqlite`
-- Shared evaluation: `workspaces/lily/habit_evaluation.sqlite` (includes user signals)
-- Reports: `workspaces/lily/habit_reports/`
+- Shared evaluation: `workspaces/<governance_agent>/habit_evaluation.sqlite`
+- Reports: `workspaces/<governance_agent>/habit_reports/`
+
+---
+
+## SafeVoice — Voice Confirmation
+
+Voice messages can be misinterpreted by speech-to-text, potentially sending unintended commands to agents. SafeVoice adds a confirmation layer:
+
+```
+Voice message → Transcription → Preview text + [✅ Send] [❌ Cancel] buttons
+                                        ↓                    ↓
+                                  User confirms         User cancels
+                                        ↓                    ↓
+                                  Sent to agent         Discarded
+```
+
+- **Default:** ON for all agents (can be toggled per-agent with `/safevoice`)
+- **Preview limit:** 3500 characters (Telegram's practical limit), with truncation notice for longer messages
+- **Timeout:** 60 seconds auto-discard if no button pressed
+- **State persistence:** Per-agent setting stored in workspace `state.json`
+
+---
 
 ## Installation
 
@@ -134,18 +160,14 @@ All habit data is local-only and gitignored:
 
 ### Nagare Core And Editor
 
-The extracted Nagare workflow engine now ships inside this repo as the `nagare` Python package, with the visual editor under [`nagare-viz/`](nagare-viz).
+The Nagare workflow engine ships as the `nagare` Python package, with the visual editor under [`nagare-viz/`](nagare-viz).
 
 Core install and smoke check:
 
 ```bash
 pip install .
 python -m nagare.cli --help
-pytest tests/contract/test_nagare_core_contract.py \
-  tests/contract/test_logging_contract.py \
-  tests/contract/test_round_trip_contract.py \
-  tests/contract/test_nagare_api_contract.py \
-  tests/contract/test_hashi_adapter_contract.py -q
+pytest tests/contract/ -q
 ```
 
 Editor install and smoke check:
@@ -157,41 +179,30 @@ npm test
 npm run build
 ```
 
-Phase 8 docs:
-- [`docs/MIGRATION_FROM_HASHI.md`](docs/MIGRATION_FROM_HASHI.md)
-- [`docs/HANDLER_GUIDE.md`](docs/HANDLER_GUIDE.md)
-- [`docs/ADAPTER_GUIDE.md`](docs/ADAPTER_GUIDE.md)
-- [`docs/NAGARE_RELEASE_CHECKLIST.md`](docs/NAGARE_RELEASE_CHECKLIST.md)
-- [`docs/NAGARE_KNOWN_LIMITATIONS.md`](docs/NAGARE_KNOWN_LIMITATIONS.md)
-
-### 🚀 Pack & Go — USB Zero-Install (Recommended for sharing)
+### Pack & Go — USB Zero-Install (Recommended for sharing)
 
 Run HASHI on any Windows or macOS machine straight from a USB drive — no Python installation, no `pip install`, nothing to set up on the target machine.
 
 **Windows:**
 ```
 # On your machine (with internet):
-windows\prepare_usb.bat           # builds D:\HASHI9 with embedded Python + all deps
+windows\prepare_usb.bat           # builds USB with embedded Python + all deps
 
 # First time on any Windows PC:
-HASHI9\windows\TUI_onboarding.bat # first-run setup + chat (language, API key, Telegram)
+windows\TUI_onboarding.bat        # first-run setup + chat
 
 # Subsequent launches:
-HASHI9\windows\start_tui.bat      # normal TUI chat
+windows\start_tui.bat             # normal TUI chat
 ```
 
 **macOS:**
 ```bash
 # On your Mac (with internet):
-bash mac/prepare_usb.sh        # builds USB with portable Python + all deps
+bash mac/prepare_usb.sh           # builds USB with portable Python + all deps
 
 # On any Mac:
-# Double-click HASHI9/mac/start_tui.command in Finder
+# Double-click mac/start_tui.command in Finder
 ```
-
-> **Note (macOS):** First run may trigger Gatekeeper. Right-click the `.command` file → Open → Open anyway.
-
----
 
 ### Quick Start (Developer / Standard Install)
 
@@ -203,24 +214,24 @@ cd HASHI
 # Install Python dependencies
 pip install -r requirements.txt
 
-# First run — TUI onboarding (language, API key, Telegram setup via Hashiko)
+# First run — TUI onboarding (language, API key, Telegram setup)
 python tui_onboarding.py
 
 # Start HASHI
 ./bin/bridge-u.sh         # macOS / Linux
-# or
 bin\bridge-u.bat          # Windows
-# or
 python main.py            # Any platform
 ```
 
 ### Prerequisites
-- Python 3.10+ (not required for Pack & Go USB deployments)
+- Python 3.10+
 - At least one AI backend:
-  - [Gemini CLI] (`gemini`)
-  - [Claude Code] (`claude`)
-  - [Codex CLI] (`codex`)
-  - Or an [OpenRouter](https://openrouter.ai/) API key
+  - [Gemini CLI](https://github.com/google-gemini/gemini-cli) (`gemini`)
+  - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`claude`)
+  - [Codex CLI](https://github.com/openai/codex) (`codex`)
+  - [OpenRouter](https://openrouter.ai/) API key
+  - [DeepSeek](https://platform.deepseek.com/) API key
+  - [Ollama](https://ollama.com/) (local LLM, no API key needed)
 - Optional: Node.js 18+ (for Workbench UI)
 
 ---
@@ -232,49 +243,59 @@ python main.py            # Any platform
 HASHI uses a **Universal Orchestrator** pattern where a single Python process manages multiple concurrent agent runtimes:
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                   Universal Orchestrator                     │
-│                                                              │
-│  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐│
-│  │ Agent Runtime  │  │ Agent Runtime  │  │ Agent Runtime  ││
-│  │   (Hashiko)    │  │   (Assistant)  │  │   (Coder)     ││
-│  └────────────────┘  └────────────────┘  └────────────────┘│
-│          ▲                  ▲                  ▲            │
-│          └──────────────────┴──────────────────┘            │
-│                          │                                  │
-│  ┌───────────────────────────────────────────────────────┐ │
-│  │        Flexible Backend Manager                       │ │
-│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐│ │
-│  │  │ Gemini   │ │ Claude   │ │ Codex    │ │OpenRouter││ │
-│  │  │ Adapter  │ │ Adapter  │ │ Adapter  │ │ Adapter  ││ │
-│  │  └──────────┘ └──────────┘ └──────────┘ └──────────┘│ │
-│  └───────────────────────────────────────────────────────┘ │
-│                          ▲                                  │
-│  ┌───────────────────────────────────────────────────────┐ │
-│  │              Transport Layer                          │ │
-│  │    [Telegram] [WhatsApp] [Workbench API]             │ │
-│  └───────────────────────────────────────────────────────┘ │
-│                                                              │
-│  ┌────────────┐  ┌────────────┐  ┌────────────────────┐   │
-│  │   Skill    │  │  Scheduler │  │   Memory System    │   │
-│  │  Manager   │  │ (Jobs/Cron)│  │ (Vector + Recall)  │   │
-│  └────────────┘  └────────────┘  └────────────────────┘   │
-│                                                              │
-│  ┌───────────────────────────────────────────────────────┐ │
-│  │           Nagare Flow System (v2.1)                   │ │
-│  │  ┌──────────┐  ┌──────────┐  ┌──────────────────┐   │ │
-│  │  │FlowRunner│→ │ Workers  │→ │ Evaluation KB    │   │ │
-│  │  │(DAG Orch)│  │(Multi-AI)│  │(Self-Improving)  │   │ │
-│  │  └──────────┘  └──────────┘  └──────────────────┘   │ │
-│  └───────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                    Universal Orchestrator                         │
+│                                                                  │
+│  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐     │
+│  │ Agent Runtime  │  │ Agent Runtime  │  │ Agent Runtime  │ ... │
+│  │   (Agent A)    │  │   (Agent B)    │  │   (Agent C)    │     │
+│  └────────────────┘  └────────────────┘  └────────────────┘     │
+│          ▲                  ▲                  ▲                  │
+│          └──────────────────┴──────────────────┘                  │
+│                          │                                        │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │              Flexible Backend Manager                      │  │
+│  │  ┌────────┐ ┌────────┐ ┌────────┐ ┌──────────┐           │  │
+│  │  │Gemini  │ │Claude  │ │ Codex  │ │OpenRouter│           │  │
+│  │  │Adapter │ │Adapter │ │Adapter │ │ Adapter  │           │  │
+│  │  └────────┘ └────────┘ └────────┘ └──────────┘           │  │
+│  │  ┌──────────┐ ┌────────┐                                  │  │
+│  │  │DeepSeek  │ │ Ollama │                                  │  │
+│  │  │ Adapter  │ │Adapter │                                  │  │
+│  │  └──────────┘ └────────┘                                  │  │
+│  └────────────────────────────────────────────────────────────┘  │
+│                          ▲                                        │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │                Transport Layer                              │  │
+│  │    [Telegram] [WhatsApp] [Workbench API] [HChat]           │  │
+│  └────────────────────────────────────────────────────────────┘  │
+│                                                                  │
+│  ┌────────────┐  ┌────────────┐  ┌────────────────────┐        │
+│  │   Skill    │  │  Scheduler │  │   Memory System    │        │
+│  │  Manager   │  │ (Jobs/Cron)│  │ (Vector + Recall)  │        │
+│  └────────────┘  └────────────┘  └────────────────────┘        │
+│                                                                  │
+│  ┌────────────────────────────┐  ┌────────────────────────┐    │
+│  │    Habit System            │  │   Token Audit          │    │
+│  │ (Feedback → Dream → Grow) │  │  (Usage + Cost Track)  │    │
+│  └────────────────────────────┘  └────────────────────────┘    │
+│                                                                  │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │              Nagare Flow System                              │  │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────────────┐         │  │
+│  │  │FlowRunner│→ │ Workers  │→ │ Evaluation KB    │         │  │
+│  │  │(DAG Orch)│  │(Multi-AI)│  │(Self-Improving)  │         │  │
+│  │  └──────────┘  └──────────┘  └──────────────────┘         │  │
+│  └────────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 **Key Design Principles:**
-- **Backend Agnostic** - Agents work with any supported backend; you can switch mid-conversation
-- **Shared Sessions** - Telegram and Workbench share the same agent queues and memory
-- **Explicit over Automatic** - Skills, jobs, and features are user-activated, never magic
-- **Single Instance** - File-based locking prevents multiple HASHI processes from conflicting
+- **Backend Agnostic** — Agents work with any supported backend; you can switch mid-conversation
+- **Shared Sessions** — Telegram and Workbench share the same agent queues and memory
+- **Explicit over Automatic** — Skills, jobs, and features are user-activated, never magic
+- **Single Instance** — File-based locking prevents multiple HASHI processes from conflicting
+- **Remote Backend Policy** — API backends (OpenRouter, DeepSeek) are reserved for user-initiated requests; automated flows use CLI backends to prevent runaway costs
 
 ### File Structure
 
@@ -282,153 +303,105 @@ HASHI uses a **Universal Orchestrator** pattern where a single Python process ma
 hashi/
 ├── main.py                    # Orchestrator entry point
 ├── agents.json                # Agent definitions (name, backend, system prompt)
-├── secrets.json               # API keys (OpenRouter, etc.)
+├── secrets.json               # API keys (gitignored)
 ├── tasks.json                 # Heartbeat + cron job definitions
 ├── onboarding/                # Multi-language guided setup
-│   ├── onboarding_main.py
-│   └── languages/             # 9 languages (en, ja, zh-Hans, zh-Hant, ko, de, fr, ru, ar)
+│   └── languages/             # 9 languages
 ├── orchestrator/              # Core orchestration logic
-│   ├── agent_runtime.py       # Individual agent runtime (fixed backend)
+│   ├── agent_runtime.py       # Fixed-backend agent runtime
 │   ├── flexible_agent_runtime.py  # Flex agent (switchable backend)
 │   ├── scheduler.py           # Heartbeat + cron job runner
 │   ├── skill_manager.py       # Skills system
 │   ├── bridge_memory.py       # Context assembly + memory retrieval
-│   ├── memory_index.py        # Vector similarity search
+│   ├── habits.py              # Habit evaluation and governance
+│   ├── voice_manager.py       # TTS and voice reply management
 │   ├── workbench_api.py       # Workbench REST API server
 │   └── api_gateway.py         # External API gateway (optional)
 ├── adapters/                  # Backend adapters
 │   ├── base.py                # Abstract base adapter
-│   ├── gemini_cli.py
-│   ├── claude_cli.py
-│   ├── codex_cli.py
-│   └── openrouter_api.py
-├── transports/                # Communication channels
-│   ├── whatsapp.py            # WhatsApp transport (whatsapp-web.js)
-│   └── chat_router.py         # Message routing logic
+│   ├── gemini_cli.py          # Google Gemini CLI
+│   ├── claude_cli.py          # Anthropic Claude Code
+│   ├── codex_cli.py           # OpenAI Codex CLI
+│   ├── openrouter_api.py      # OpenRouter API
+│   ├── deepseek_api.py        # DeepSeek API (direct)
+│   ├── ollama_api.py          # Ollama local LLM
+│   └── registry.py            # Backend auto-discovery
 ├── skills/                    # Skill library
-│   ├── README.md
-│   └── [skill_name]/
-│       ├── skill.md           # Skill definition
-│       └── run.py             # Action script (optional)
-├── workbench/                 # Local web UI
-│   ├── server/                # Node.js API server
-│   └── src/                   # React frontend
-├── flow/                      # Nagare Flow System (v2.1)
-│   ├── engine/                # FlowRunner, WorkerDispatcher, TaskState
-│   ├── workflows/             # Workflow YAML definitions
-│   ├── runs/                  # Workflow run directories (state, artifacts)
-│   ├── evaluation_kb/         # Self-improving knowledge base
-│   └── flow_trigger.py        # CLI launcher for workflows
-├── memory/                    # Agent memory files
-├── state/                     # Runtime state
-├── logs/                      # Log files
-└── workspaces/                # Agent working directories
+│   ├── dream/                 # Nightly memory consolidation
+│   ├── good/ & bad/           # Habit feedback signals
+│   ├── habits/                # Habit governance surface
+│   ├── agent_audit/           # Agent behavior audit
+│   └── [custom_skills]/       # User-defined skills
+├── tools/                     # Tool execution layer
+│   ├── builtins.py            # 11+ built-in tool executors
+│   ├── schemas.py             # Tool JSON Schema definitions
+│   ├── registry.py            # ToolRegistry dispatcher
+│   ├── hchat_send.py          # Cross-instance agent messaging
+│   └── telegram_send_file_cli.py  # File sending via Telegram
+├── nagare/                    # Nagare workflow engine (standalone package)
+├── nagare-viz/                # Visual workflow editor (React + TypeScript)
+├── flow/                      # Legacy flow system + HASHI adapter
+├── remote/                    # Hashi Remote (cross-network agent communication)
+├── workbench/                 # Local web UI (React + Vite + Node.js)
+├── tui.py                     # Terminal UI (Textual)
+├── tui_onboarding.py          # First-run TUI setup
+├── scripts/                   # Utility scripts
+│   ├── token_audit.py         # Token usage analysis
+│   ├── generate_agent_behavior_audit.py  # Agent behavior report
+│   ├── wiki_organise.py       # Obsidian wiki data prep
+│   └── consolidate_memory.py  # Memory consolidation
+├── workspaces/                # Agent working directories (gitignored)
+├── memory/                    # Agent memory files (gitignored)
+├── state/                     # Runtime state (gitignored)
+└── logs/                      # Log files (gitignored)
 ```
 
 ---
 
 ### Onboarding System
 
-First-run setup is handled by the **TUI Onboarding** program, which runs entirely inside the terminal UI — no separate window or web UI needed.
+First-run setup is handled by the **TUI Onboarding** program, which runs entirely inside the terminal UI.
 
 **Entry points:**
 - Windows: `windows/TUI_onboarding.bat` (double-click)
 - Developer: `python tui_onboarding.py`
 
 **First-run flow:**
-1. **Language selection** — 9 languages (English, Japanese, Simplified Chinese, Traditional Chinese, Korean, German, French, Russian, Arabic)
+1. **Language selection** — 9 languages
 2. **AI Ethics & Human Well-being disclaimer** — Enter to confirm
 3. **Mental health & AI relationship reminder** — Enter to confirm
-4. **API key check** — auto-detects OpenRouter or DeepSeek key in `secrets.json` with live ping; prompts for a key if none found or ping fails (key type auto-detected by prefix: `sk-or-v1-...` = OpenRouter, `sk-...` = DeepSeek)
-5. **Generates `agents.json`** from `agents.json.sample` (Hashiko only) if not present
+4. **API key check** — auto-detects OpenRouter or DeepSeek key with live ping; prompts for a key if none found
+5. **Generates `agents.json`** from sample if not present
 6. **Bridge starts** — TUI transitions seamlessly into normal chat
-7. **Hashiko greets the user** in their selected language, asks for their name, and guides Telegram setup — all within the same TUI session
-
-**Completion marker:** `workspaces/hashiko/tui_onboarding_complete` — prevents re-running the onboarding flow on subsequent launches.
-
----
-
-### Workbench
-
-The **Workbench** is a local web interface for multi-agent conversations:
-
-**Architecture:**
-- **Frontend** - React + Vite, runs on `http://localhost:5173`
-- **Backend** - Node.js Express server, runs on `http://localhost:3003`
-- **Bridge API** - Connects to orchestrator at `http://127.0.0.1:18800`
-
-**Features:**
-- Multi-agent chat interface with agent switching
-- Real-time transcript polling
-- File and media upload support
-- System status display
-- Shared sessions with Telegram/WhatsApp
-
-**Start/Stop:**
-```bash
-./workbench.bat              # Start workbench (Windows)
-./workbench-ctl.sh start     # Start workbench (Linux)
-./stop_workbench.bat         # Stop workbench
-```
-
-**How It Works:**
-1. Workbench frontend polls orchestrator `/api/agents` for agent list
-2. User sends message through Workbench → POST `/api/agents/{name}/send`
-3. Orchestrator queues message in agent runtime (same queue as Telegram)
-4. Backend processes message, streams response
-5. Workbench polls `/api/agents/{name}/transcript` for updates
+7. **First agent greets the user** in their selected language and guides Telegram setup
 
 ---
 
 ### Connections (Transports)
 
-HASHI supports multiple communication channels through a **transport layer**:
+HASHI supports multiple communication channels:
 
 #### Telegram
 - Default transport, enabled by default
 - Requires `telegram_bot_token` in `secrets.json`
 - Commands: `/new`, `/stop`, `/reboot`, `/handoff`, `/skill`, etc.
-- Supports inline keyboards, file uploads, voice messages
-
-**Setup:**
-1. Create bot via [@BotFather](https://t.me/botfather)
-2. Add `telegram_bot_token` to `secrets.json`
-3. Add your Telegram user ID to agent's `authorized_id` in `agents.json`
+- Supports inline keyboards, file uploads, voice messages, SafeVoice
+- File sending (photos, documents, videos, audio) from agents
 
 #### WhatsApp
 - Uses `whatsapp-web.js` library
-- Requires QR code scan on first launch
-- **Multi-Agent Support** - Route messages to different agents using `/agent <name>` prefix
-
-**Setup:**
-
-> ⚠️ **Important:** Do NOT run `link_whatsapp.py` directly in a terminal and wait for it — it opens an interactive pairing session that never exits on its own when run that way. Use the relay method below.
-
-**Recommended method (agent-relay via Telegram):**
-1. Ask your HASHI agent (e.g. Hashiko) to set up WhatsApp. She will handle it.
-2. The agent runs `scripts/run_whatsapp_link.sh` in the background, which starts `link_whatsapp.py` with `--qr-image-file /tmp/wa_link_qr.png --completion-file /tmp/wa_link_result.json`.
-3. When the QR PNG appears, the agent automatically sends it to you as a Telegram image.
-4. Scan the QR code from Telegram using your WhatsApp mobile app.
-5. The agent polls `/tmp/wa_link_result.json` and confirms when linking is complete.
-6. Session saved in `wa_session/` — subsequent starts do not require a new QR scan.
-
-**Manual method (if running without an agent):**
-1. Open a terminal and run: `bash scripts/run_whatsapp_link.sh`
-2. Wait a few seconds, then open `/tmp/wa_link_qr.png` in an image viewer.
-3. Scan the QR code with WhatsApp mobile app.
-4. Check `/tmp/wa_link_result.json` for `{"status": "linked"}` to confirm success.
-
-5. Configure routing in agent's `whatsapp_routing` settings.
-
-**WhatsApp Commands:**
-- `/agent hashiko` - Switch to "hashiko" agent
-- `/agents` - List available agents
-- Normal messages → routed to current active agent
+- Requires QR code scan on first launch (agent can relay QR via Telegram)
+- Multi-Agent Support — route messages to different agents using `/agent <name>` prefix
 
 #### Workbench
-- Local web UI (see Workbench section above)
+- Local web UI (React + Vite)
 - No authentication required (localhost only)
 - Shared sessions with Telegram/WhatsApp
+
+#### HChat — Cross-Instance Agent Messaging
+- Agents across different HASHI instances can message each other
+- Routing: local API → remote API → mailbox fallback
+- JSON protocol with sender/receiver identity
 
 ---
 
@@ -436,13 +409,13 @@ HASHI supports multiple communication channels through a **transport layer**:
 
 HASHI agents respond to both natural language and structured commands:
 
-#### Universal Commands (All Agents)
+#### Universal Commands
 
 | Command | Description |
 |---------|-------------|
-| `/new` | Start a fresh session (clears continuity) |
+| `/new` | Start a fresh session |
 | `/stop` | Cancel current processing |
-| `/reboot [min\|max\|#]` | Hot restart agents — shows button menu when called without args |
+| `/reboot [min\|max\|#]` | Hot restart agents |
 | `/status [full]` | Show agent status, backend info |
 | `/handoff` | Restore continuity from recent transcript |
 | `/skill` | Browse and run skills (inline keyboard) |
@@ -452,51 +425,33 @@ HASHI agents respond to both natural language and structured commands:
 
 | Command | Description |
 |---------|-------------|
-| `/mode [fixed\|flex]` | Switch between fixed CLI session and flex multi-backend mode (button menu) |
-| `/backend [engine]` | Switch backend — shows inline button picker (flex mode only) |
-| `/model` | View/change active model (inline keyboard) |
-| `/effort` | View/change effort level — Claude/Codex only (inline keyboard) |
+| `/mode [fixed\|flex]` | Switch between fixed CLI session and flex multi-backend mode |
+| `/backend [engine]` | Switch backend (flex mode only) |
+| `/model` | View/change active model |
+| `/effort` | View/change effort level (Claude/Codex only) |
 | `/fyi [prompt]` | Refresh bridge environment awareness |
-| `/retry` | Resend last response or re-run last prompt (button menu) |
-| `/park [chat\|delete <n>]` | Save or list parked topics |
-| `/load <n>` | Restore a parked topic |
-| `/sys <n> [on\|off\|save\|output]` | Manage system prompt slots; `/sys output <n>` returns raw text |
-| `/clear` | Clear media directory and reset session state |
+| `/retry` | Resend last response or re-run last prompt |
+| `/long` ... `/end` | Buffer long text across multiple messages, submit as one |
+| `/loop <interval> <task>` | Create recurring automated tasks via skill injection |
 
 #### Toggles & Settings
 
 | Command | Description |
 |---------|-------------|
-| `/verbose [on\|off]` | Toggle detailed long-task status (button menu) |
-| `/think [on\|off]` | Toggle thinking trace display (button menu) |
-| `/active [on\|off\|minutes]` | Toggle proactive heartbeat (button menu) |
-| `/whisper [small\|medium\|large]` | Set local voice transcription model (button menu) |
-| `/voice [on\|off\|menu\|use <alias>]` | Control bridge voice replies (inline keyboard) |
-| `/credit` | Show API credit/usage (OpenRouter only) |
+| `/verbose [on\|off]` | Toggle detailed status |
+| `/think [on\|off]` | Toggle thinking trace display |
+| `/safevoice [on\|off]` | Toggle voice confirmation (default: ON) |
+| `/active [on\|off\|minutes]` | Toggle proactive heartbeat |
+| `/whisper [small\|medium\|large]` | Set local voice transcription model |
+| `/voice [on\|off\|menu\|use <alias>]` | Control bridge voice replies |
 
 #### Lifecycle Commands
 
 | Command | Description |
 |---------|-------------|
-| `/start [all\|<name>]` | Start a stopped agent — button menu or `all` to start all |
-| `/terminate` | Shut down this agent gracefully |
-
-#### WhatsApp Commands
-
-| Command | Description |
-|---------|-------------|
-| `/wa_on` | Start WhatsApp transport |
-| `/wa_off` | Stop WhatsApp transport |
-| `/wa_send <+number> <msg>` | Send a WhatsApp message |
-
-#### Job Commands
-
-| Command | Description |
-|---------|-------------|
-| `/jobs` | Show cron and heartbeat jobs with action buttons |
-| `/skill cron` | Full cron job management |
-| `/skill heartbeat` | Full heartbeat job management |
-| `/skill habits` | Lily habit recommendation review and approval surface |
+| `/start [all\|<name>]` | Start a stopped agent |
+| `/terminate` | Shut down agent gracefully |
+| `/jobs` | Show jobs with action buttons (run, enable/disable, transfer, delete) |
 
 ---
 
@@ -508,42 +463,21 @@ HASHI agents respond to both natural language and structured commands:
 
 | Type | Behavior | Example |
 |------|----------|---------|
-| **Action** | One-shot execution, runs a script | `restart_pc`, `system_status` |
+| **Action** | One-shot execution, runs a script | `dream`, `agent_audit`, `system_status` |
 | **Prompt** | Routes user input to a backend/tool | `codex`, `gemini`, `claude` |
 | **Toggle** | Injects instructions while active | `TTS`, `carbon-accounting`, `academic-writing` |
 
-#### Skill Structure
+#### Built-in Skills
 
-Each skill lives in `skills/<skill_id>/`:
-```
-skills/
-  carbon-accounting/
-    skill.md              # Frontmatter + instructions
-    standards/
-      ghg-protocol-summary.md
-      iso14064-notes.md
-```
-
-**skill.md Example:**
-```markdown
----
-id: carbon-accounting
-name: Carbon Accounting Expert
-type: toggle
-description: Activate deep carbon accounting expertise (GHG Protocol, ISO 14064)
----
-
-You now have deep expertise in carbon accounting and GHG reporting.
-
-## Standards
-- GHG Protocol Corporate Standard
-- ISO 14064-1:2018
-- TCFD for climate-related financial disclosure
-
-## Reference files in this skill folder
-- `standards/ghg-protocol-summary.md`
-- `standards/iso14064-notes.md`
-```
+| Skill | Type | Description |
+|-------|------|-------------|
+| `dream` | Action | Nightly memory consolidation + behavioral reflection |
+| `good` / `bad` | Action | Habit feedback signals |
+| `habits` | Action | Habit governance dashboard and approval surface |
+| `agent_audit` | Action | Local-only agent behavior audit report |
+| `cron` | Action | Cron job management |
+| `heartbeat` | Action | Heartbeat job management |
+| `recall` | Toggle | Auto-restore continuity after restart |
 
 #### Using Skills
 
@@ -556,15 +490,6 @@ You now have deep expertise in carbon accounting and GHG reporting.
 /skill <name> off               → Disable toggle skill
 ```
 
-**Toggle Skills in Action:**
-When a toggle skill is `on`, its `skill.md` content is injected into the prompt under `--- ACTIVE SKILLS ---` section. This persists across messages until explicitly turned `off`.
-
-**Action Skills:**
-Action skills execute a script (`run.py` or `run.sh`) and return the output.
-
-**Prompt Skills:**
-Prompt skills route user input to a specific backend or workflow (e.g., `codex` routes to Codex CLI).
-
 ---
 
 ### Job System (Scheduler)
@@ -572,78 +497,51 @@ Prompt skills route user input to a specific backend or workflow (e.g., `codex` 
 HASHI includes a built-in task scheduler for automated agent actions:
 
 #### Heartbeats
-**Heartbeats** are periodic checks that run at fixed intervals:
-
+Periodic checks at fixed intervals:
 ```json
 {
   "id": "email-check",
   "enabled": true,
   "agent": "hashiko",
   "interval_seconds": 1800,
-  "prompt": "Check my email for urgent messages and summarize",
-  "action": "enqueue_prompt"
+  "prompt": "Check my email for urgent messages"
 }
 ```
 
-**Common Use Cases:**
-- Email monitoring
-- Calendar reminders
-- System health checks
-- Market/news updates
-
 #### Cron Jobs
-**Cron jobs** run at specific times (HH:MM format):
-
+Scheduled tasks at specific times:
 ```json
 {
   "id": "morning-briefing",
   "enabled": true,
   "agent": "hashiko",
   "time": "08:00",
-  "prompt": "Provide morning briefing: weather, calendar, top news",
-  "action": "enqueue_prompt"
+  "prompt": "Provide morning briefing"
 }
 ```
-
-**Common Use Cases:**
-- Daily reports
-- Scheduled backups
-- Time-sensitive reminders
 
 #### Skill-Based Jobs
 Jobs can invoke skills instead of prompts:
-
 ```json
 {
-  "id": "daily-backup",
+  "id": "nightly-dream",
   "enabled": true,
-  "agent": "coder",
-  "time": "03:00",
-  "action": "skill:backup_workspace",
-  "args": ""
+  "agent": "hashiko",
+  "time": "01:30",
+  "action": "skill:dream"
 }
 ```
 
-#### Managing Jobs
-
-Via Telegram:
+#### /loop — Recurring Tasks via Natural Language
 ```
-/jobs                       → Show all jobs with action buttons
-/skill cron                 → Cron job management (list, enable/disable, run now)
-/skill heartbeat            → Heartbeat job management (list, enable/disable, run now)
-/skill habits               → Habit recommendation report/list/approve/apply
+/loop every 20 minutes check paper progress, stop when done
 ```
+The `/loop` command uses skill injection — it appends system guidance to your message, letting the LLM understand the task, interval, and stop conditions, then autonomously create the appropriate cron entries.
 
-Via `tasks.json`:
-```json
-{
-  "heartbeats": [
-    { "id": "...", "enabled": true, "agent": "...", ... }
-  ],
-  "crons": [
-    { "id": "...", "enabled": true, "agent": "...", ... }
-  ]
-}
+#### Job Transfer
+Jobs can be transferred between agents (same instance or cross-instance):
+```
+/jobs → click [Transfer] → select target agent → done
 ```
 
 ---
@@ -654,45 +552,43 @@ HASHI's **adapter system** provides a unified interface to multiple AI backends:
 
 #### Supported Backends
 
-| Backend | Engine ID | Requirements |
-|---------|-----------|--------------|
-| Gemini CLI | `gemini-cli` | `gemini` CLI installed and authenticated |
-| Claude CLI | `claude-cli` | `claude` CLI installed and authenticated |
-| Codex CLI | `codex-cli` | `codex` CLI installed and authenticated |
-| OpenRouter API | `openrouter-api` | API key in `secrets.json` |
+| Backend | Engine ID | Requirements | Notes |
+|---------|-----------|--------------|-------|
+| Gemini CLI | `gemini-cli` | `gemini` CLI installed | Local auth |
+| Claude Code | `claude-cli` | `claude` CLI installed | Local auth |
+| Codex CLI | `codex-cli` | `codex` CLI installed | Local auth |
+| OpenRouter API | `openrouter-api` | API key in `secrets.json` | Multi-model access |
+| DeepSeek API | `deepseek-api` | API key in `secrets.json` | Direct API, cost-effective |
+| Ollama | `ollama-api` | Ollama installed locally | Free, no API key needed |
 
-#### Adapter Architecture
+#### Remote Backend Policy
 
-All adapters inherit from `BaseBackendAdapter` (`adapters/base.py`):
+API backends (OpenRouter, DeepSeek) are protected by an automatic cost-control policy:
+- **User-initiated requests** → allowed on any backend
+- **Automated requests** (scheduler, HChat, transfers) → blocked on remote API backends, must use CLI or local backends
 
-```python
-class BaseBackendAdapter:
-    async def send_request(self, messages, tools, thinking, stream_callback):
-        """Send request to backend, stream response"""
-
-    async def cancel_request(self):
-        """Cancel in-flight request"""
-```
-
-**Key Features:**
-- Streaming support (token-by-token)
-- Tool use (file operations, web search, etc.)
-- Thinking mode (extended reasoning)
-- Graceful cancellation
+This prevents runaway API costs from automated workflows.
 
 #### CLI Backends (Gemini, Claude, Codex)
-CLI backends spawn subprocess and communicate via stdin/stdout:
-- No OAuth tokens stored
-- Uses local CLI authentication (Google account, Anthropic API, OpenAI API)
+- Spawn subprocess and communicate via stdin/stdout
+- No OAuth tokens stored — uses local CLI authentication
 - Full tool support
 - Conversation memory managed by CLI
 
-#### OpenRouter Backend
-OpenRouter adapter uses HTTP API:
-- Requires `openrouter_key` (or `<agent_name>_openrouter_key`) in `secrets.json`
-- Supports multiple models via `model` parameter
+#### API Backends (OpenRouter, DeepSeek)
+- HTTP API with streaming support
+- Supports tool calls (function calling)
 - Stateless (HASHI manages conversation history)
-- **Tool execution layer** — enable in `agents.json` with a `tools` key:
+- Per-agent API key overrides supported
+
+#### Ollama Backend
+- Connects to locally-hosted LLMs
+- Intelligent context scaling — smaller models get reduced context injection
+- No API key required
+
+#### Tool Execution Layer
+
+API-backed agents can execute local actions via the tool system:
 
 ```json
 {
@@ -711,19 +607,23 @@ OpenRouter adapter uses HTTP API:
 
 | Tool | Description |
 |------|-------------|
-| `bash` | Run shell commands (sandboxed to workspace, timeout + blocklist controls) |
+| `bash` | Run shell commands (sandboxed, timeout + blocklist controls) |
 | `file_read` | Read files with offset/limit pagination |
-| `file_write` | Write/create files (size-capped, parent dirs auto-created) |
-| `file_list` | List directories with optional glob filter and recursive mode |
-| `apply_patch` | Apply unified diff patches to files (dry-run validated before apply) |
-| `process_list` | List running processes filtered by name (requires `psutil`) |
-| `process_kill` | Send SIGTERM or SIGKILL to a process by PID |
-| `telegram_send` | Send Telegram messages by chat_id or HASHI agent_id |
-| `http_request` | Arbitrary HTTP requests (GET/POST/PUT/DELETE/PATCH) for external APIs |
-| `web_search` | Brave Search API (requires `brave_api_key` in `secrets.json`) |
-| `web_fetch` | Fetch any URL and return content as Markdown |
+| `file_write` | Write/create files |
+| `file_list` | List directories with glob filter |
+| `apply_patch` | Apply unified diff patches |
+| `process_list` | List running processes |
+| `process_kill` | Send signals to processes |
+| `telegram_send` | Send Telegram messages |
+| `telegram_send_file` | Send files via Telegram (photos, documents, video, audio) |
+| `http_request` | Arbitrary HTTP requests for external APIs |
+| `web_search` | Brave Search API integration |
+| `web_fetch` | Fetch any URL as Markdown |
+| `browser_screenshot` | Navigate to URL and capture screenshot |
+| `browser_get_text` | Extract visible text from rendered page |
+| `browser_click` / `browser_fill` | Interact with web elements |
 
-No `tools` key in config = fully backward compatible, tools disabled.
+No `tools` key in config = tools disabled, fully backward compatible.
 
 ---
 
@@ -731,35 +631,16 @@ No `tools` key in config = fully backward compatible, tools disabled.
 
 HASHI includes a **vector-based memory system** for long-term context retrieval:
 
-#### Memory Types
-
-| Type | Storage | Lifetime |
-|------|---------|----------|
-| **Short-term** | In-process (agent runtime) | Current session |
-| **Transcript** | `memory/<agent>_transcript.json` | Permanent, daily rollover |
-| **Long-term** | `memory/<agent>_memory.json` | User-controlled |
-| **Vector Index** | `memory/<agent>_memory_index.json` | Auto-synced with long-term |
-
 #### How It Works
 
-1. **Bridge stores memory automatically** — relevant turns are embedded and saved to `bridge_memory.sqlite` in the agent's workspace.
-
-2. **Memory is vectorized:**
-   - Text embedded using BGE-M3 (local ONNX) when available, falling back to hash-based similarity.
-   - Vector + text stored in `bridge_memory.sqlite` (`memory_vec` / `turns_vec` tables).
-
-3. **Context assembly retrieves relevant memories:**
-   - Current user message is vectorized at request time.
-   - Top-K similar memories retrieved via cosine similarity (`sqlite-vec`).
-   - Injected into prompt under `--- RELEVANT LONG-TERM MEMORY ---`.
-
-4. **Memory skill** (`/skill recall`) — toggle bridge auto-recall: if ON, recent continuity is restored once after an unexpected restart (not after `/new`).
-
-> Memory is bridge-managed. There are no `/remember` / `/recall` / `/forget` slash commands — memory is automatic.
+1. **Automatic storage** — relevant conversation turns are embedded and saved to `bridge_memory.sqlite`
+2. **Vectorized search** — text embedded using BGE-M3 (local ONNX) when available, falling back to hash-based similarity
+3. **Context assembly** — top-K similar memories retrieved via cosine similarity and injected into prompts
+4. **Memory control** — `/memory` command for surgical control (status, pause, wipe, on/off)
 
 #### Memory in Prompts
 
-Every agent request includes:
+Every agent request includes assembled context:
 ```
 --- SYSTEM IDENTITY ---
 {agent.md contents}
@@ -767,11 +648,14 @@ Every agent request includes:
 --- ACTIVE SKILLS ---
 {active toggle skills}
 
+--- ACTIVE HABITS ---
+{habits learned from feedback}
+
 --- RELEVANT LONG-TERM MEMORY ---
-{top 3 retrieved memories}
+{top retrieved memories}
 
 --- RECENT CONTEXT ---
-{last 10 conversation turns}
+{recent conversation turns}
 
 --- NEW REQUEST ---
 {user message}
@@ -779,95 +663,78 @@ Every agent request includes:
 
 ---
 
-### Nagare Flow System (v2.1)
+### Token Audit & Cost Tracking
 
-**Nagare (流れ)** is HASHI's multi-agent workflow orchestration engine — the system's most significant capability upgrade. It enables complex, multi-step tasks to be designed, executed, and improved autonomously.
+HASHI tracks token consumption across all backends:
 
-**The Core Problem Nagare Solves:**
-Every AI model operates in a single reasoning session. It cannot run parallel sub-tasks, critique its own output from a fresh perspective, or learn from previous runs. For tasks requiring more than 2-3 coherent reasoning steps, quality collapses. Nagare solves this at the architecture level.
+- **API backends** — use exact `usage` data from API responses
+- **CLI backends** — estimate based on message content + system prompt + context
+- **Audit log** — `token_usage.jsonl` with per-turn breakdown
+- **Analysis script** — `scripts/token_audit.py` for usage reports and cost analysis
+
+---
+
+### Nagare Flow System
+
+**Nagare (流れ)** is HASHI's multi-agent workflow orchestration engine.
 
 **Key Capabilities:**
 
 | Capability | How It Works |
 |-----------|-------------|
-| **Meta-Workflow** | Describe a task in natural language → Nagare designs a complete multi-agent workflow automatically |
-| **Cross-Vendor Evaluation** | Claude writes → GPT reviews. No model evaluates its own output — architecturally enforced |
-| **Pre-Flight System** | All human decisions collected once upfront; workflow runs uninterrupted with no mid-task blocking |
-| **DAG Orchestration** | Steps execute in dependency order with parallel execution where possible |
-| **Debug Agent** | Auto-recovers from failures (3 attempts), only escalates to human when truly stuck |
-| **Evaluation KB** | Every run feeds lessons back — the 201st workflow is genuinely better than the 1st |
-| **Self-Improving** | A/B/C graded improvements: low-risk auto-applied, high-risk queued for approval |
-| **Crash Recovery** | Atomic `state.json` writes — survives crashes, resumes at exact failure point |
-
-**The 12-Step Meta-Workflow Pipeline:**
-```
-Pre-flight → Analyze Requirements → Generate Questions → Integrate Responses → Validate
-         → Design Workflow → Devil's Advocate Critique → Create Files
-         → Validate → Independent Cross-Vendor Review
-         → Evaluate & Improve → Apply Improvements → Notify
-```
+| **Meta-Workflow** | Describe a task in natural language → Nagare designs a complete workflow |
+| **Cross-Vendor Evaluation** | Claude writes → GPT reviews. No model evaluates its own output |
+| **Pre-Flight System** | All human decisions collected upfront; workflow runs uninterrupted |
+| **DAG Orchestration** | Steps execute in dependency order with parallel execution |
+| **Debug Agent** | Auto-recovers from failures (3 attempts) before human escalation |
+| **Evaluation KB** | Every run feeds lessons back — workflows improve over time |
+| **Crash Recovery** | Atomic state persistence, resume at exact failure point |
 
 **Quick Start:**
 ```bash
-# Create a new workflow from natural language
-python flow/flow_trigger.py start meta '{"task_description": "Describe your task here"}'
-
-# Check status
-python flow/flow_trigger.py status <run_id>
-
-# List all runs
-python flow/flow_trigger.py list
+python -m nagare.cli --help
 ```
 
 > Full technical reference: [`docs/NAGARE_FLOW_SYSTEM.md`](docs/NAGARE_FLOW_SYSTEM.md)
 
 ---
 
-### Handoff System
+### /long ... /end — Long Text Handling
 
-The `/handoff` command generates a **context restoration prompt** for recovering work after conversation compression or session loss:
+Telegram splits long messages automatically, which can cause incomplete understanding. The `/long` command buffers all fragments:
 
-**Use Cases:**
-- Agent conversation hit token limit and compressed
-- Switching to a new agent mid-project
-- Resuming work after system restart
-
-**How It Works:**
 ```
-User: /handoff
-Agent: [Generates comprehensive project summary]
+/long          ← start collecting (optional: /long first line)
+(paste long text — Telegram splits into multiple messages)
+(all messages silently buffered, no LLM triggered)
+/end           ← assemble and submit as one message
+```
 
---- HANDOFF CONTEXT ---
-Project: Building a web scraper for research papers
-Status: Parser module complete, need to add citation extraction
-Files: src/parser.py (500 lines), tests/ (3 files)
-Next: Implement citation regex patterns
-Dependencies: beautifulsoup4, requests
+**Safety:** 5-minute auto-submit timeout, empty buffer warning, duplicate `/long` detection.
+
 ---
-```
 
-User copies this output and sends to a new agent:
-```
-User: [Paste handoff context]
-       Continue building the citation extractor...
-```
+### Hashi Remote
 
-New agent picks up exactly where the previous left off.
+Cross-network agent communication for distributed HASHI instances:
+
+- LAN peer discovery and direct connection
+- Tailscale integration for internet-connected instances
+- TLS encryption with pairing-based authentication
+- Audit logging for all remote operations
+- Terminal execution delegation
 
 ---
 
 ## Configuration Files
 
 ### agents.json
-Defines your agents:
 ```json
 {
   "global": {
     "authorized_id": 123456789,
-    "whatsapp": {
-      "enabled": false,
-      "allowed_numbers": [],
-      "default_agent": "hashiko"
+    "default_tools": {
+      "allowed": ["bash", "file_read", "file_write", "file_list"]
     }
   },
   "agents": [
@@ -878,106 +745,36 @@ Defines your agents:
       "model": "gemini-3-flash",
       "system_md": "workspaces/hashiko/agent.md",
       "workspace_dir": "workspaces/hashiko",
-      "is_active": true
+      "is_active": true,
+      "allowed_backends": ["gemini-cli", "claude-cli", "openrouter-api", "deepseek-api", "ollama-api"]
     }
   ]
 }
 ```
 
 ### secrets.json
-Stores API keys and tokens:
 ```json
 {
   "hashiko": "your_telegram_bot_token",
   "openrouter_key": "sk-or-v1-...",
-  "deepseek-api_key": "sk-...",
+  "deepseek_api_key": "sk-...",
+  "brave_api_key": "BSA...",
   "authorized_telegram_id": 123456789
 }
 ```
 
 ### tasks.json
-Defines scheduled jobs:
 ```json
 {
   "heartbeats": [
-    {
-      "id": "check-email",
-      "enabled": true,
-      "agent": "hashiko",
-      "interval_seconds": 1800,
-      "prompt": "Check email for urgent messages"
-    }
+    { "id": "check-email", "enabled": true, "agent": "hashiko", "interval_seconds": 1800, "prompt": "Check email" }
   ],
   "crons": [
-    {
-      "id": "morning-brief",
-      "enabled": true,
-      "agent": "hashiko",
-      "time": "08:00",
-      "prompt": "Morning briefing: weather, calendar, news"
-    }
+    { "id": "morning-brief", "enabled": true, "agent": "hashiko", "time": "08:00", "prompt": "Morning briefing" },
+    { "id": "nightly-dream", "enabled": true, "agent": "hashiko", "time": "01:30", "action": "skill:dream" }
   ]
 }
 ```
-
----
-
-## Advanced Features
-
-### Multi-Agent WhatsApp Routing
-Connect multiple agents to one WhatsApp account:
-
-1. Configure WhatsApp routing in each agent's config:
-```json
-{
-  "name": "coder",
-  "whatsapp_enabled": true,
-  "whatsapp_routing": {
-    "keywords": ["code", "debug", "fix"],
-    "priority": 10
-  }
-}
-```
-
-2. Use `/agent <name>` to manually switch agents
-3. Messages auto-route based on keywords and priority
-
-### Flexible Backend Switching
-Agents can switch backends mid-conversation:
-
-```
-User: Switch to Codex for the next task
-Agent: [Switches to codex-cli backend]
-```
-
-Configured in agent as:
-```json
-{
-  "name": "flex-agent",
-  "engine": "flexible",
-  "default_backend": "gemini-cli",
-  "fallback_backends": ["claude-cli", "codex-cli"]
-}
-```
-
-### API Gateway (Optional)
-Enable external API access:
-
-```bash
-./bridge-u.sh --api-gateway
-```
-
-Exposes REST API on `http://localhost:18801`:
-```
-POST /api/chat
-{
-  "agent": "hashiko",
-  "message": "Hello",
-  "user_id": "external_user_123"
-}
-```
-
-⚠️ **Security Warning:** API Gateway has no authentication. Use firewall rules or reverse proxy for production.
 
 ---
 
@@ -987,37 +784,27 @@ POST /api/chat
 
 | Log | Location | Contents |
 |-----|----------|----------|
-| Main orchestrator | `logs/bridge_launch.log` | Orchestrator startup, agent launches, errors |
-| Workbench | `state/workbench/logs/` | Workbench server logs |
-| Onboarding | `onboarding_crash.log` | Onboarding errors |
-
-### Debug Mode
-
-Enable verbose logging:
-```bash
-export BRIDGE_DEBUG=1
-./bridge-u.sh
-```
+| Bridge log | `logs/bridge.log` | Orchestrator events, backend checks, agent state |
+| Session errors | `logs/<session>/errors.log` | Per-session error details |
+| Launch log | `logs/bridge_launch.log` | Startup sequence |
+| Token audit | `logs/token_usage.jsonl` | Token consumption records |
 
 ### Common Issues
 
 **"bridge-u-f is already running"**
-- Another instance is active
-- Kill it: `./kill-sessions.sh` (Linux) or `kill_bridge_u_f_sessions.bat` (Windows)
+- Another instance is active; kill it or use a separate instance directory
 
 **"No CLI backends detected"**
-- Install Gemini/Claude/Codex CLI
-- Or provide OpenRouter API key during onboarding
+- Install Gemini/Claude/Codex CLI, or provide an API key during onboarding
 
 **Telegram bot not responding**
 - Check `telegram_bot_token` in `secrets.json`
-- Verify bot token with [@BotFather](https://t.me/botfather)
-- Check `authorized_id` matches your Telegram user ID
+- Verify `authorized_id` matches your Telegram user ID
+- Ensure only one instance uses each bot token (polling conflict)
 
-**WhatsApp QR code not showing / process exits immediately**
-- Do NOT run `link_whatsapp.py` directly — it opens an interactive session that hangs or exits without showing the QR
-- Use `bash scripts/run_whatsapp_link.sh` instead, then open `/tmp/wa_link_qr.png`
-- Or ask your HASHI agent to set up WhatsApp — it will send the QR image to you via Telegram
+**Agent stuck in LOCAL MODE**
+- Usually network-related; check internet connectivity
+- Review `bridge.log` for preflight timeout errors
 
 ---
 
@@ -1030,78 +817,92 @@ python tui.py
 ```
 
 **Panels:**
-- **Log panel** (upper ~80%) — real-time stdout/stderr from the bridge process, auto-scroll
-- **Chat input bar** (lower ~20%) — send messages to any active agent via HTTP API Gateway
-- **Status bar** — current agent, backend, bridge uptime, gateway reachability
-- **Agent selector** — hotkey to switch which agent receives your chat input
-
-`main.py` remains unchanged. Graceful degradation: if API Gateway is unavailable, chat is disabled and logs still stream.
+- **Log panel** (upper) — real-time stdout/stderr from the bridge process
+- **Chat input bar** (lower) — send messages to any active agent
+- **Status bar** — current agent, backend, bridge uptime
+- **Agent selector** — hotkey to switch which agent receives input
 
 ---
 
-## ⚠️ Important Warnings
+## Warnings
 
-### This is Version 2.1.0
+### This is Version 3.0-beta
 
-HASHI v2.1 is a **working prototype** built entirely through AI-assisted development ("Vibe-Coding"). While functional and field-tested by the author, it is **not production-ready**.
+HASHI v3.0-beta is a **working system** built entirely through AI-assisted development ("Vibe-Coding"). While functional and field-tested by the author, it is **not production-ready**.
 
 **Known Limitations:**
-- **Bugs** - Expect edge cases and unexpected behavior
-- **Error Handling** - Some error messages may be cryptic
-- **Performance** - Not optimized for high-volume usage
-- **Security** - Local-only deployment recommended; API Gateway has no auth
-- **Platform Support** - Tested on Windows and Linux only; macOS untested
+- **Stability** — Expect edge cases and unexpected behavior
+- **Performance** — Not optimized for high-volume usage
+- **Security** — Local-only deployment recommended; API Gateway has no auth
+- **Platform Support** — Tested on Windows and Linux; macOS support is experimental
 
-**Use with Caution:**
-- Keep backups of `agents.json`, `secrets.json`, and `memory/` files
+**Best Practices:**
+- Keep backups of `agents.json`, `secrets.json`, and `workspaces/` directories
 - Do not expose API Gateway to public internet without proper authentication
-- Test thoroughly before relying on scheduled jobs for critical tasks
+- Test scheduled jobs before relying on them for critical tasks
 - Review agent outputs for sensitive information before sharing
 
 **Reporting Issues:**
-If you encounter bugs or unexpected behavior, please report them on the GitHub Issues page with:
+Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) page with:
 - Your OS and Python version
-- Backend(s) you're using (Gemini/Claude/Codex/OpenRouter)
-- Relevant log excerpts from `logs/bridge_launch.log`
+- Backend(s) you're using
+- Relevant log excerpts
 - Steps to reproduce
-
 
 ---
 
 ## Release History
 
+### v3.0-beta *(current)* — Self-Improving Agents (April 2026)
+
+- **6 LLM backends** — added DeepSeek API (direct) and Ollama (local LLM) alongside existing Claude/Gemini/Codex/OpenRouter
+- **Habit-based self-improvement** — agents learn from `/good` and `/bad` feedback, with nightly dream reflection and cross-agent habit governance (Phase 4-5)
+- **SafeVoice** — voice confirmation before execution, default ON, 3500-char preview
+- **Cross-instance agent messaging (HChat)** — agents communicate across HASHI instances via API routing
+- **Token audit & cost tracking** — precise API usage tracking, CLI estimation, cost analysis
+- **Agent behavior audit** — local-only daily audit report generation
+- **Remote backend policy** — API backends blocked for automated requests, preventing runaway costs
+- **`/loop` command** — recurring tasks via natural language skill injection
+- **`/long` ... `/end`** — buffer long Telegram messages for single submission
+- **`/say` TTS** — text-to-speech with multiple voice providers
+- **Minato MCP** — 8-tier workflow choreography with KASUMI tool delegation
+- **Obsidian wiki integration** — knowledge vault with daily sync and weekly LLM curation
+- **Hashi Remote** — cross-network agent communication (LAN + Tailscale)
+- **TUI onboarding** — guided first-run setup inside terminal UI
+- **Telegram file sending** — agents can send photos, documents, video, audio
+- **Job transfer** — move jobs between agents (same or cross-instance)
+- **Dream improvements** — mtime gate + content hash dedup, legacy transcript handling
+- **Scheduler hardening** — skill timeout increased, failed runs update last_run to prevent loops
+
 ### v2.1.0 — Nagare Flow System (March 2026)
 
-- ✅ **Nagare Flow System** — multi-agent workflow orchestration engine
-- ✅ **Meta-Workflow** — natural language → complete workflow design, automatically
-- ✅ **Cross-vendor evaluation** — Claude writes, GPT reviews (architecturally enforced)
-- ✅ **Pre-flight system** — smart question filtering, max 5 questions, auto-timeout
-- ✅ **DAG orchestration** — topological step ordering with parallel execution
-- ✅ **Debug agent** — auto-recovery with 3 retries before human escalation
-- ✅ **Evaluation Knowledge Base** — self-improving with A/B/C graded improvements
-- ✅ **Crash recovery** — atomic state persistence, resume at exact failure point
+- **Nagare Flow System** — multi-agent workflow orchestration engine
+- **Meta-Workflow** — natural language → complete workflow design
+- **Cross-vendor evaluation** — architecturally enforced independent review
+- **DAG orchestration** — topological step ordering with parallel execution
+- **Debug agent** — auto-recovery with 3 retries
+- **Evaluation KB** — self-improving knowledge base
+- **Crash recovery** — atomic state persistence
 
 ### v2.0.0 — Tool Execution & Platform (March 2026)
 
-- ✅ Multi-language onboarding (9 languages)
-- ✅ Support for 4 backends (Gemini CLI, Claude CLI, Codex CLI, OpenRouter)
-- ✅ Telegram + WhatsApp + Workbench transports
-- ✅ Skills system (action, prompt, toggle)
-- ✅ Job scheduler (heartbeats + cron)
-- ✅ Memory system (vector-based retrieval)
-- ✅ Handoff context recovery
-- ✅ Multi-agent workspace management
-- ✅ **Flex/fixed backend switching** — `/backend` switches CLI ↔ OpenRouter mid-conversation
-- ✅ **TUI interface** — `tui.py` split-panel terminal UI (log stream + chat input)
-- ✅ **Tool execution layer** — 11 built-in tools for OpenRouter agents (bash, file ops, web, APIs)
-- ✅ **/dream skill** — nightly AI memory consolidation with undo snapshot
-- ✅ **Process-tree stop** — `/stop` kills entire subprocess tree, no zombie processes
-- ✅ **/retry persistence** — resends last prompt or reruns last response
+- Tool execution layer (11+ tools for API agents)
+- Browser automation (Playwright)
+- Pack & Go USB deployment (Windows + macOS)
+- TUI terminal interface
+- Vector memory system
+- `/dream` skill — nightly memory consolidation
+- `/memory` command — surgical memory control
+- Flex/fixed backend switching
 
-**Coming in Future Versions:**
-- Enhanced security (API Gateway authentication)
-- Expanded skill library
-- Performance optimizations
+### v1.0.0 — Initial Release (March 2026)
+
+- Multi-backend support (Gemini, Claude, Codex, OpenRouter)
+- Multi-agent orchestration
+- Telegram + WhatsApp + Workbench transports
+- Skills system, job scheduler, memory system
+- Handoff context recovery
+- Multi-language onboarding (9 languages)
 
 ---
 
@@ -1109,17 +910,15 @@ If you encounter bugs or unexpected behavior, please report them on the GitHub I
 
 HASHI is released under the [MIT License](LICENSE).
 
-You are free to use, modify, and distribute this software. See `LICENSE` file for full terms.
-
 ---
 
 ## Support & Community
 
 - **GitHub Issues:** [Report bugs and request features](https://github.com/Bazza1982/HASHI/issues)
 - **Discussions:** [Ask questions and share tips](https://github.com/Bazza1982/HASHI/discussions)
-- **Author:** HASHI Team
+- **Author:** Barry Li
 
 ---
 
 **Built with Vision. Written by AI. Directed by Human.**
-*HASHI - The Bridge to the Future of AI Collaboration.*
+*HASHI — The Bridge to the Future of AI Collaboration.*

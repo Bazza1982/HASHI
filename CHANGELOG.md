@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.0.0-beta] - 2026-04-18
+
+### ✨ Added
+
+- **DeepSeek API Backend** — direct API adapter (`adapters/deepseek_api.py`) connecting to `api.deepseek.com/v1/`, with streaming, tool calls, and reasoning_content support. More cost-effective than routing through OpenRouter.
+- **SafeVoice** — voice confirmation system preventing accidental command execution from speech-to-text errors
+  - Voice messages are transcribed, displayed as preview text with [✅ Send] / [❌ Cancel] buttons
+  - Default ON for all agents, toggleable per-agent via `/safevoice`
+  - Preview expanded to 3500 characters (was 300), with truncation notice for longer messages
+  - 60-second auto-discard timeout
+- **Remote Backend Policy** — API backends (OpenRouter, DeepSeek) automatically blocked for automated requests (scheduler, HChat, transfers), preventing runaway costs. Only user-initiated requests allowed on remote backends.
+- **Cross-Instance Agent Messaging (HChat v2)** — agents communicate across HASHI instances via Workbench API endpoints, with automatic routing based on `instances.json`
+- **Agent Behavior Audit** — `scripts/generate_agent_behavior_audit.py` and `/skill agent_audit` for local-only daily behavior reports
+- **`/loop` Command Redesign** — replaced hardcoded parsing with skill injection pattern; LLM autonomously creates cron entries from natural language task descriptions
+- **`/long` ... `/end`** — buffer long Telegram messages across multiple fragments, submit as single message (5-minute auto-submit timeout)
+- **`/say` TTS** — text-to-speech with multiple providers (Windows, Edge, Piper, Kokoro, Coqui)
+- **Telegram File Sending** — all agents can send photos, documents, video, audio via `telegram_send_file` tool
+- **Job Transfer System** — `/jobs transfer` supports same-instance and cross-instance job migration
+- **Skill Environment Variables** — action skills receive `BRIDGE_ACTIVE_BACKEND` and `BRIDGE_ACTIVE_MODEL` via environment
+- **Wiki Organisation** — Obsidian knowledge vault integration with daily tagging and weekly LLM curation
+- **Hashi Remote** — cross-network agent communication with LAN discovery, Tailscale support, TLS encryption, and pairing-based auth
+
+### 🔧 Fixed
+
+- **Dream duplicate prevention** — mtime gate + content hash dedup prevents redundant dream runs from duplicate cron triggers
+- **Scheduler timeout** — skill timeout increased from 30s to 300s for long-running skills like dream
+- **Scheduler loop prevention** — failed skill runs now update `last_run` timestamp, preventing infinite retry loops
+- **Dream legacy transcript handling** — forward scan for dated entries, tail scan for trailing undated entries
+
+---
+
 ## [3.0.0-alpha] - 2026-04-04
 
 ### ✨ Added
