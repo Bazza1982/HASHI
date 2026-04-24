@@ -20,8 +20,11 @@ def execute_live_probe_plan(
     *,
     runner: Any = subprocess.run,
     dry_run: bool = True,
+    confirm_live: bool = False,
 ) -> dict[str, Any]:
     plan = load_live_probe_plan(root_dir)
+    if not dry_run and not confirm_live:
+        raise ValueError("live probe execution requires explicit confirm_live=True")
     results: list[dict[str, Any]] = []
     overall = "dry_run" if dry_run else "passed"
 
@@ -69,9 +72,14 @@ def main() -> int:
     parser.add_argument("command", choices=["run"])
     parser.add_argument("--root", required=True)
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--confirm-live", action="store_true")
     args = parser.parse_args()
 
-    report = execute_live_probe_plan(Path(args.root), dry_run=not args.execute)
+    report = execute_live_probe_plan(
+        Path(args.root),
+        dry_run=not args.execute,
+        confirm_live=args.confirm_live,
+    )
     print(json.dumps(report))
     return 0 if report["status"] in {"dry_run", "passed"} else 1
 
