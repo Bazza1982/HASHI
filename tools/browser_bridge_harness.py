@@ -142,3 +142,63 @@ def write_wsl_host_wrapper(
     script_path.parent.mkdir(parents=True, exist_ok=True)
     script_path.write_text(script, encoding="utf-8")
     return script
+
+
+def write_smoke_plan(
+    plan_path: Path,
+    *,
+    socket_path: str,
+    host_log_path: str,
+    browser_action_log_path: str,
+    start_url: str,
+) -> dict[str, object]:
+    plan = {
+        "checks": [
+            "extension_loaded",
+            "service_worker_started",
+            "native_host_handshake",
+            "socket_alive",
+            "ping",
+            "active_tab",
+            "get_text",
+            "screenshot",
+        ],
+        "artifacts": {
+            "socket_path": socket_path,
+            "host_log_path": host_log_path,
+            "browser_action_log_path": browser_action_log_path,
+        },
+        "start_url": start_url,
+    }
+    plan_path.parent.mkdir(parents=True, exist_ok=True)
+    plan_path.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
+    return plan
+
+
+def validate_harness_artifacts(root_dir: Path) -> dict[str, object]:
+    native_host_manifest = next((root_dir / "native_host").glob("*.json"), None)
+    required_paths = {
+        "extension_manifest": root_dir / "extension" / "manifest.json",
+        "extension_service_worker": root_dir / "extension" / "service_worker.js",
+        "native_host_manifest": native_host_manifest or (root_dir / "native_host" / "missing.json"),
+        "native_host_wrapper": root_dir / "native_host" / "hashi_browser_bridge_test_host.cmd",
+        "launch_script": root_dir / "launch_chrome_test.cmd",
+        "config": root_dir / "state" / "config.json",
+        "smoke_plan": root_dir / "state" / "smoke_plan.json",
+        "readme": root_dir / "README.md",
+    }
+
+    missing = [name for name, path in required_paths.items() if not path.exists()]
+    config = {}
+    smoke_plan = {}
+    if not missing:
+        config = json.loads(required_paths["config"].read_text(encoding="utf-8"))
+        smoke_plan = json.loads(required_paths["smoke_plan"].read_text(encoding="utf-8"))
+
+    return {
+        "ok": not missing,
+        "missing": missing,
+        "files": {name: str(path) for name, path in required_paths.items()},
+        "config": config,
+        "smoke_plan": smoke_plan,
+    }

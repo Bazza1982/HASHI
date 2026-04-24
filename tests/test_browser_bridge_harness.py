@@ -8,9 +8,11 @@ from tools.browser_bridge_harness import (
     create_harness_layout,
     rewrite_manifest_name,
     rewrite_service_worker_host_name,
+    validate_harness_artifacts,
     write_chrome_launch_script,
     write_harness_config,
     write_native_host_manifest,
+    write_smoke_plan,
     write_wsl_host_wrapper,
 )
 
@@ -117,3 +119,67 @@ def test_write_wsl_host_wrapper(tmp_path: Path) -> None:
     assert "browser_native_host.py" in script
     assert "--socket /tmp/harness.sock" in script
     assert script_path.read_text(encoding="utf-8") == script
+
+
+def test_write_smoke_plan(tmp_path: Path) -> None:
+    plan_path = tmp_path / "state" / "smoke_plan.json"
+    plan = write_smoke_plan(
+        plan_path,
+        socket_path="/tmp/harness.sock",
+        host_log_path="/tmp/harness.log",
+        browser_action_log_path="/tmp/browser_action_audit.jsonl",
+        start_url="https://example.com",
+    )
+    saved = json.loads(plan_path.read_text(encoding="utf-8"))
+    assert saved == plan
+    assert "ping" in saved["checks"]
+    assert saved["artifacts"]["browser_action_log_path"] == "/tmp/browser_action_audit.jsonl"
+
+
+def test_validate_harness_artifacts(tmp_path: Path) -> None:
+    root = tmp_path / "harness"
+    layout = create_harness_layout(root)
+    (root / "extension" / "manifest.json").write_text("{}", encoding="utf-8")
+    (root / "extension" / "service_worker.js").write_text("const x = 1;\n", encoding="utf-8")
+    write_native_host_manifest(
+        root / "native_host" / "com.hashi.browser_bridge.test.json",
+        host_name="com.hashi.browser_bridge.test",
+        host_command_path="C:\\test\\host.cmd",
+        allowed_origins=[],
+    )
+    write_wsl_host_wrapper(
+        root / "native_host" / "hashi_browser_bridge_test_host.cmd",
+        distro_name="Ubuntu-22.04",
+        repo_root="/home/lily/projects/hashi",
+        socket_path="/tmp/harness.sock",
+        log_path="/tmp/harness.log",
+    )
+    write_harness_config(
+        Path(layout["state_dir"]) / "config.json",
+        chrome_exe="C:\\Chrome\\chrome.exe",
+        user_data_dir="C:\\Harness\\profile",
+        extension_dir="C:\\Harness\\extension",
+        native_host_manifest_path="C:\\Harness\\native_host\\host.json",
+        socket_path="/tmp/harness.sock",
+        log_path="/tmp/harness.log",
+    )
+    write_chrome_launch_script(
+        root / "launch_chrome_test.cmd",
+        chrome_exe="C:\\Chrome\\chrome.exe",
+        user_data_dir="C:\\Harness\\profile",
+        extension_dir="C:\\Harness\\extension",
+    )
+    write_smoke_plan(
+        Path(layout["state_dir"]) / "smoke_plan.json",
+        socket_path="/tmp/harness.sock",
+        host_log_path="/tmp/harness.log",
+        browser_action_log_path="/tmp/browser_action_audit.jsonl",
+        start_url="about:blank",
+    )
+    (root / "README.md").write_text("# test\n", encoding="utf-8")
+
+    validation = validate_harness_artifacts(root)
+    assert validation["ok"] is True
+    assert validation["missing"] == []
+    assert validation["config"]["socket_path"] == "/tmp/harness.sock"
+    assert validation["smoke_plan"]["checks"][0] == "extension_loaded"

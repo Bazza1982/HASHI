@@ -18,7 +18,7 @@ def test_materialize_option_d_test_harness(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    layout = materialize_option_d_test_harness(
+    result = materialize_option_d_test_harness(
         tmp_path / "harness",
         source_extension_dir=source,
         chrome_exe="C:\\Chrome\\chrome.exe",
@@ -33,6 +33,7 @@ def test_materialize_option_d_test_harness(tmp_path: Path) -> None:
         start_url="https://example.com",
     )
 
+    layout = result["layout"]
     root = Path(layout["root"])
     assert (root / "extension" / "manifest.json").exists()
     assert (root / "extension" / "service_worker.js").exists()
@@ -40,8 +41,12 @@ def test_materialize_option_d_test_harness(tmp_path: Path) -> None:
     assert (root / "native_host" / "hashi_browser_bridge_test_host.cmd").exists()
     assert (root / "launch_chrome_test.cmd").exists()
     assert (root / "state" / "config.json").exists()
+    assert (root / "state" / "smoke_plan.json").exists()
     assert (root / "README.md").exists()
 
     config = json.loads((root / "state" / "config.json").read_text(encoding="utf-8"))
     assert config["chrome_exe"] == "C:\\Chrome\\chrome.exe"
     assert config["socket_path"] == "/tmp/harness.sock"
+    smoke_plan = json.loads((root / "state" / "smoke_plan.json").read_text(encoding="utf-8"))
+    assert smoke_plan["start_url"] == "https://example.com"
+    assert result["validation"]["ok"] is True

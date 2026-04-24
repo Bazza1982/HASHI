@@ -5,9 +5,11 @@ from pathlib import Path
 from tools.browser_bridge_harness import (
     build_extension_bundle,
     create_harness_layout,
+    validate_harness_artifacts,
     write_chrome_launch_script,
     write_harness_config,
     write_native_host_manifest,
+    write_smoke_plan,
     write_wsl_host_wrapper,
 )
 
@@ -25,11 +27,13 @@ def materialize_option_d_test_harness(
     distro_name: str,
     socket_path: str,
     log_path: str,
+    browser_action_log_path: str | None = None,
     host_name: str = "com.hashi.browser_bridge.test",
     extension_name: str = "HASHI Browser Bridge Test",
     start_url: str = "about:blank",
-) -> dict[str, str]:
+) -> dict[str, object]:
     layout = create_harness_layout(root_dir)
+    browser_action_log_path = browser_action_log_path or str(root_dir / "logs" / "browser_action_audit.jsonl")
 
     build_extension_bundle(
         source_extension_dir,
@@ -66,6 +70,13 @@ def materialize_option_d_test_harness(
         socket_path=socket_path,
         log_path=log_path,
     )
+    write_smoke_plan(
+        Path(layout["state_dir"]) / "smoke_plan.json",
+        socket_path=socket_path,
+        host_log_path=log_path,
+        browser_action_log_path=browser_action_log_path,
+        start_url=start_url,
+    )
     (root_dir / "README.md").write_text(
         "\n".join(
             [
@@ -77,9 +88,13 @@ def materialize_option_d_test_harness(
                 f"- Windows profile dir: `{windows_user_data_dir}`",
                 f"- Socket path: `{socket_path}`",
                 f"- Log path: `{log_path}`",
+                f"- Browser action audit log: `{browser_action_log_path}`",
             ]
         )
         + "\n",
         encoding="utf-8",
     )
-    return layout
+    return {
+        "layout": layout,
+        "validation": validate_harness_artifacts(root_dir),
+    }
