@@ -16,6 +16,32 @@ def load_smoke_results(root_dir: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def load_stub_trace(root_dir: Path) -> list[dict[str, Any]]:
+    path = root_dir / "logs" / "stub_bridge_trace.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def summarize_stub_trace(root_dir: Path) -> dict[str, Any] | None:
+    events = load_stub_trace(root_dir)
+    if not events:
+        return None
+    request_actions = [event["action"] for event in events if event.get("event") == "request"]
+    expected_actions = ["ping", "ping", "active_tab", "get_text", "screenshot"]
+    trace_ok = (
+        events[0].get("event") == "server_started"
+        and events[-1].get("event") == "server_stopped"
+        and request_actions == expected_actions
+    )
+    return {
+        "event_count": len(events),
+        "request_actions": request_actions,
+        "trace_ok": trace_ok,
+        "expected_request_actions": expected_actions,
+    }
+
+
 def summarize_smoke_results(root_dir: Path) -> dict[str, Any]:
     results = load_smoke_results(root_dir)
     steps = results.get("results", [])
@@ -23,9 +49,12 @@ def summarize_smoke_results(root_dir: Path) -> dict[str, Any]:
     failed_steps = [step["id"] for step in steps if step.get("status") == "failed"]
     manual_steps = [step["id"] for step in steps if step.get("status") == "manual_required"]
     passed_steps = [step["id"] for step in steps if step.get("status") == "passed"]
+    trace_summary = summarize_stub_trace(root_dir)
 
     non_manual_steps = [step for step in steps if step.get("status") != "manual_required"]
     promotable = bool(non_manual_steps) and all(step.get("status") == "passed" for step in non_manual_steps)
+    if trace_summary is not None:
+        promotable = promotable and trace_summary["trace_ok"]
 
     return {
         "root_dir": str(root_dir),
@@ -35,6 +64,7 @@ def summarize_smoke_results(root_dir: Path) -> dict[str, Any]:
         "passed_steps": passed_steps,
         "manual_required_steps": manual_steps,
         "failed_steps": failed_steps,
+        "trace_summary": trace_summary,
         "promotable_to_live_acceptance": promotable and not failed_steps,
         "blockers": failed_steps,
     }
