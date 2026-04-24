@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 from tools.browser_bridge_harness import (
@@ -13,6 +14,8 @@ from tools.browser_bridge_harness import (
 )
 from tools.browser_bridge_smoke_runner import (
     build_smoke_steps,
+    execute_smoke_plan,
+    execute_smoke_step,
     load_harness_state,
     write_smoke_command_plan,
 )
@@ -95,3 +98,41 @@ def test_write_smoke_command_plan(tmp_path: Path) -> None:
     saved = json.loads((root / "state" / "smoke_commands.json").read_text(encoding="utf-8"))
     assert saved == plan
     assert saved["steps"][0]["id"] == "launch_chrome"
+
+
+def test_execute_smoke_step_manual_windows() -> None:
+    result = execute_smoke_step(
+        {
+            "id": "launch_chrome",
+            "kind": "manual_windows",
+            "command": "C:\\test\\launch.cmd",
+            "description": "launch",
+        }
+    )
+    assert result["status"] == "manual_required"
+
+
+def test_execute_smoke_plan(tmp_path: Path) -> None:
+    root = tmp_path / "harness"
+    _build_minimal_harness(root)
+
+    def fake_runner(argv, capture_output, text):
+        if argv[2] == "ping":
+            return subprocess.CompletedProcess(argv, 0, stdout='{"ok": true}\n', stderr="")
+        if argv[2] == "healthcheck":
+            return subprocess.CompletedProcess(argv, 0, stdout='{"connected": true}\n', stderr="")
+        if argv[2] == "get_text":
+            return subprocess.CompletedProcess(argv, 0, stdout='{"ok": true, "output": "Example"}\n', stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout='{"ok": true, "saved_to": "x"}\n', stderr="")
+
+    report = execute_smoke_plan(
+        root,
+        repo_root=Path("/home/lily/projects/hashi"),
+        runner=fake_runner,
+        stop_on_failure=True,
+    )
+    saved = json.loads((root / "state" / "smoke_results.json").read_text(encoding="utf-8"))
+    assert saved == report
+    assert report["status"] == "manual_required"
+    assert report["results"][0]["status"] == "manual_required"
+    assert report["results"][1]["status"] == "passed"

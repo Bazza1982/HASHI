@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -85,6 +87,65 @@ def write_smoke_command_plan(root_dir: Path, *, repo_root: Path) -> dict[str, An
     return output
 
 
+def execute_smoke_step(
+    step: dict[str, Any],
+    *,
+    runner: Any = subprocess.run,
+) -> dict[str, Any]:
+    if step["kind"] == "manual_windows":
+        return {
+            "id": step["id"],
+            "kind": step["kind"],
+            "status": "manual_required",
+            "command": step["command"],
+            "description": step["description"],
+        }
+
+    completed = runner(step["argv"], capture_output=True, text=True)
+    return {
+        "id": step["id"],
+        "kind": step["kind"],
+        "status": "passed" if completed.returncode == 0 else "failed",
+        "argv": step["argv"],
+        "returncode": completed.returncode,
+        "stdout": completed.stdout,
+        "stderr": completed.stderr,
+        "description": step["description"],
+    }
+
+
+def execute_smoke_plan(
+    root_dir: Path,
+    *,
+    repo_root: Path,
+    runner: Any = subprocess.run,
+    stop_on_failure: bool = True,
+) -> dict[str, Any]:
+    plan = write_smoke_command_plan(root_dir, repo_root=repo_root)
+    results: list[dict[str, Any]] = []
+    overall_status = "passed"
+
+    for step in plan["steps"]:
+        result = execute_smoke_step(step, runner=runner)
+        results.append(result)
+        if result["status"] == "failed":
+            overall_status = "failed"
+            if stop_on_failure:
+                break
+        elif result["status"] == "manual_required" and overall_status != "failed":
+            overall_status = "manual_required"
+
+    report = {
+        "root_dir": str(root_dir),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "status": overall_status,
+        "results": results,
+    }
+    report_path = root_dir / "state" / "smoke_results.json"
+    report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    return report
+
+
 def _run_healthcheck(socket_path: Path) -> dict[str, Any]:
     return healthcheck(socket_path=socket_path)
 
@@ -98,12 +159,32 @@ def _run_bridge_action(action: str, socket_path: Path, *, url: str | None = None
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Option D isolated smoke runner")
-    parser.add_argument("command", choices=["healthcheck", "ping", "get_text", "screenshot"])
-    parser.add_argument("--socket", required=True)
+    parser.add_argument(
+        "command",
+        choices=["healthcheck", "ping", "get_text", "screenshot", "write-plan", "execute-plan"],
+    )
+    parser.add_argument("--socket")
     parser.add_argument("--url")
     parser.add_argument("--out")
+    parser.add_argument("--root")
+    parser.add_argument("--repo-root")
     args = parser.parse_args()
 
+    if args.command in {"write-plan", "execute-plan"}:
+        if not args.root or not args.repo_root:
+            parser.error("--root and --repo-root are required for plan commands")
+        root_dir = Path(args.root)
+        repo_root = Path(args.repo_root)
+        if args.command == "write-plan":
+            result = write_smoke_command_plan(root_dir, repo_root=repo_root)
+            print(json.dumps(result))
+            return 0
+        result = execute_smoke_plan(root_dir, repo_root=repo_root)
+        print(json.dumps(result))
+        return 0 if result["status"] == "passed" else 1
+
+    if not args.socket:
+        parser.error("--socket is required for bridge commands")
     socket_path = Path(args.socket)
     try:
         if args.command == "healthcheck":
