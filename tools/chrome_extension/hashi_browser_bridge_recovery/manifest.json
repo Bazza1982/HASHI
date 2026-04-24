@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "HASHI Browser Bridge Recovery",
+  "version": "0.1.0",
+  "description": "Minimal recovery build for HASHI browser bridge.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArC3zDEpU6+qyv8Wlb+4yx3Uq3dWvD6+QbUZ/7M6Fo0S/f2HY6Rsvx79iGq5syj8J0tbHVf8e4lvS/y6CnqSgU1iKZd4igjK0qmqKQSM8SPUAnDJcr9eT2c3D+HhV34+OhOIZsSj4mQ1eKDU9mlknbpVjTMvOZm8nNJx3HJ5yqJZZawqg6f0cGAtLkxz56+Uv0xWde8mJ19Etg+qM2ANV4Z3UnG/F5hh6rb0pf37qYv7B4r5AL0qLTu3fP9xYL0m2zPlNofq1Dd1vGgFhQpkNQ+CYK1n5V89A2R8Hg0zhPOBmxgBfRZmtz6Qh8UuPJ7C2XqzvgAsvxMT7F5EnJQY1/wIDAQAB",
+  "background": {
+    "service_worker": "service_worker.js"
+  },
+  "permissions": [
+    "tabs",
+    "scripting",
+    "storage",
+    "alarms",
+    "nativeMessaging"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "action": {
+    "default_title": "HASHI Browser Bridge Recovery"
+  }
+}

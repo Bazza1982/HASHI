@@ -70,6 +70,12 @@ async def _run(args: argparse.Namespace) -> int:
         base["cdp_url"] = args.cdp_url
     if getattr(args, "headed", False):
         base["headed"] = True
+    if getattr(args, "session_id", None):
+        base["session_id"] = args.session_id
+    if getattr(args, "safety_mode", None):
+        base["safety_mode"] = args.safety_mode
+    if getattr(args, "agent_name", None):
+        base["agent_name"] = args.agent_name
 
     cmd = args.command
     result = ""
@@ -246,6 +252,12 @@ def main() -> None:
                         help="CDP endpoint to attach to existing Chrome (e.g. http://localhost:9222)")
     parser.add_argument("--headed", action="store_true", default=False,
                         help="Launch a visible browser window (standalone mode only)")
+    parser.add_argument("--session-id", dest="session_id", default=None,
+                        help="Optional browser session id for isolated tab reuse")
+    parser.add_argument("--safety-mode", dest="safety_mode", default=None,
+                        help="Optional browser safety mode, e.g. read_write or read_only")
+    parser.add_argument("--agent-name", dest="agent_name", default=None,
+                        help="Optional agent identity for browser audit logs")
     parser.add_argument("--out", default=None, help="Write output to this file path")
 
     # Content controls

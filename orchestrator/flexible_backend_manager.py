@@ -176,6 +176,11 @@ class FlexibleBackendManager:
                 secrets=enriched_secrets,
                 tool_options=tool_options,
                 max_loops=max_loops,
+                audit_context={
+                    "agent_name": getattr(adapter_cfg, "name", workspace_dir.name),
+                    "workspace_dir": str(workspace_dir),
+                    "safety_mode": "read_write",
+                },
             )
             self.current_backend.tool_registry = registry
             self.logger.info(

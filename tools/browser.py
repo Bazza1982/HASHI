@@ -6,15 +6,26 @@ Supports two modes:
     --remote-debugging-port, reusing the user's existing session/cookies.
   - Standalone mode: launch a fresh headless (or headed) Chromium instance.
 
+When no cdp_url is explicitly provided, the browser bridge auto-discovery
+is used to find a running Chrome instance (localhost or WSL2 host).
+
 Cross-platform: Linux, macOS, Windows.
 """
 from __future__ import annotations
 
 import asyncio
 import base64
+import logging
+import os
 import platform
 import sys
+import uuid
 from typing import Optional
+
+logger = logging.getLogger("hashi.browser")
+
+_BRIDGE_BACKEND_ENV = "HASHI_BROWSER_BACKEND"
+_EXTENSION_BACKENDS = {"extension", "native", "option_d"}
 
 
 # ---------------------------------------------------------------------------
@@ -65,8 +76,20 @@ async def _get_page(
 
     cdp_url  — e.g. "http://localhost:9222"  → CDP attach mode
     headed   — ignored in CDP mode; in standalone mode launches visible window
+
+    If cdp_url is not provided, attempts auto-discovery via browser_bridge.
     """
     from playwright.async_api import async_playwright
+
+    # Auto-discover CDP if not explicitly provided
+    if not cdp_url:
+        try:
+            from tools.browser_bridge import get_cdp_url
+            cdp_url = get_cdp_url()
+            if cdp_url:
+                logger.info("Auto-discovered CDP: %s", cdp_url)
+        except ImportError:
+            pass
 
     pw = await async_playwright().start()
 
@@ -98,6 +121,78 @@ async def _get_page(
     return pw, browser, context, page
 
 
+def _prefer_extension_bridge(args: dict) -> bool:
+    mode = str(args.get("bridge_backend") or os.environ.get(_BRIDGE_BACKEND_ENV, "auto")).lower()
+    return mode == "auto" or mode in _EXTENSION_BACKENDS
+
+
+async def _maybe_execute_extension_bridge(action: str, args: dict) -> Optional[str]:
+    if args.get("cdp_url"):
+        return None
+    if not _prefer_extension_bridge(args):
+        return None
+
+    try:
+        from tools.browser_extension_bridge import (
+            BrowserBridgeError,
+            bridge_available,
+            ensure_bridge_session,
+            send_bridge_command,
+        )
+    except ImportError:
+        return None
+
+    if not bridge_available():
+        mode = str(args.get("bridge_backend") or os.environ.get(_BRIDGE_BACKEND_ENV, "auto")).lower()
+        if mode in _EXTENSION_BACKENDS:
+            return (
+                "Error: HASHI browser extension bridge is not connected. "
+                "Install the Option D bridge and ensure Chrome is running."
+            )
+        return None
+
+    bridge_args = dict(args)
+    audit = dict(bridge_args.get("_audit") or {})
+    owner = str(
+        bridge_args.get("agent_name")
+        or audit.get("agent_name")
+        or os.environ.get("HASHI_AGENT_NAME")
+        or os.environ.get("CLAUDE_FLOW_WORKER")
+        or (audit.get("workspace_dir") and os.path.basename(str(audit.get("workspace_dir"))))
+        or "unknown"
+    )
+    safety_mode = str(bridge_args.get("safety_mode") or audit.get("safety_mode") or "read_write")
+    requested_session_id = bridge_args.get("session_id") or audit.get("session_id")
+    try:
+        session = await asyncio.to_thread(
+            ensure_bridge_session,
+            session_id=requested_session_id or f"default::{owner}",
+            args={**bridge_args, "_audit": audit, "agent_name": owner},
+            url=bridge_args.get("url"),
+            safety_mode=safety_mode,
+        )
+        if session.get("session", {}).get("session_id"):
+            bridge_args["session_id"] = session["session"]["session_id"]
+        bridge_args["_audit"] = {
+            **audit,
+            "agent_name": owner,
+            "call_id": audit.get("call_id") or str(uuid.uuid4()),
+        }
+        bridge_args.setdefault("agent_name", owner)
+        bridge_args.setdefault("safety_mode", safety_mode)
+    except BrowserBridgeError as exc:
+        return f"Error: extension bridge session failure: {exc}"
+
+    try:
+        response = await asyncio.to_thread(send_bridge_command, action, bridge_args)
+    except BrowserBridgeError as exc:
+        return f"Error: extension bridge failure: {exc}"
+
+    if response.get("ok"):
+        return str(response.get("output", ""))
+    return f"Error: {response.get('error', 'unknown extension bridge error')}"
+
+
 # ---------------------------------------------------------------------------
 # Public executors (called by ToolRegistry)
 # ---------------------------------------------------------------------------
@@ -115,6 +210,10 @@ async def execute_browser_screenshot(args: dict) -> str:
     headed = bool(args.get("headed", False))
     wait_ms = int(args.get("wait_ms", 1500))
     full_page = bool(args.get("full_page", False))
+
+    bridge_result = await _maybe_execute_extension_bridge("screenshot", args)
+    if bridge_result is not None:
+        return bridge_result
 
     pw = browser = context = page = None
     try:
@@ -156,6 +255,10 @@ async def execute_browser_get_text(args: dict) -> str:
     wait_ms = int(args.get("wait_ms", 1500))
     max_length = int(args.get("max_length", 15000))
 
+    bridge_result = await _maybe_execute_extension_bridge("get_text", args)
+    if bridge_result is not None:
+        return bridge_result
+
     pw = browser = context = page = None
     try:
         pw, browser, context, page = await _get_page(cdp_url=cdp_url, headed=headed)
@@ -192,6 +295,10 @@ async def execute_browser_get_html(args: dict) -> str:
     headed = bool(args.get("headed", False))
     wait_ms = int(args.get("wait_ms", 1500))
     max_length = int(args.get("max_length", 20000))
+
+    bridge_result = await _maybe_execute_extension_bridge("get_html", args)
+    if bridge_result is not None:
+        return bridge_result
 
     pw = browser = context = page = None
     try:
@@ -230,6 +337,10 @@ async def execute_browser_click(args: dict) -> str:
     cdp_url = args.get("cdp_url")
     headed = bool(args.get("headed", False))
 
+    bridge_result = await _maybe_execute_extension_bridge("click", args)
+    if bridge_result is not None:
+        return bridge_result
+
     pw = browser = context = page = None
     try:
         pw, browser, context, page = await _get_page(cdp_url=cdp_url, headed=headed)
@@ -263,6 +374,10 @@ async def execute_browser_fill(args: dict) -> str:
     cdp_url = args.get("cdp_url")
     headed = bool(args.get("headed", False))
     submit = bool(args.get("submit", False))
+
+    bridge_result = await _maybe_execute_extension_bridge("fill", args)
+    if bridge_result is not None:
+        return bridge_result
 
     pw = browser = context = page = None
     try:
@@ -300,6 +415,10 @@ async def execute_browser_scroll(args: dict) -> str:
     selector = args.get("selector")
     x = int(args.get("x", 0))
     y = int(args.get("y", 500))
+
+    bridge_result = await _maybe_execute_extension_bridge("scroll", args)
+    if bridge_result is not None:
+        return bridge_result
 
     pw = browser = context = page = None
     try:
@@ -341,6 +460,10 @@ async def execute_browser_hover(args: dict) -> str:
     cdp_url = args.get("cdp_url")
     headed = bool(args.get("headed", False))
 
+    bridge_result = await _maybe_execute_extension_bridge("hover", args)
+    if bridge_result is not None:
+        return bridge_result
+
     pw = browser = context = page = None
     try:
         pw, browser, context, page = await _get_page(cdp_url=cdp_url, headed=headed)
@@ -376,6 +499,10 @@ async def execute_browser_key(args: dict) -> str:
     cdp_url = args.get("cdp_url")
     headed = bool(args.get("headed", False))
     selector = args.get("selector")  # optional: focus this element first
+
+    bridge_result = await _maybe_execute_extension_bridge("key", args)
+    if bridge_result is not None:
+        return bridge_result
 
     pw = browser = context = page = None
     try:
@@ -416,6 +543,10 @@ async def execute_browser_select(args: dict) -> str:
 
     if value is None and label is None and index is None:
         return "Error: one of value, label, or index is required"
+
+    bridge_result = await _maybe_execute_extension_bridge("select", args)
+    if bridge_result is not None:
+        return bridge_result
 
     pw = browser = context = page = None
     try:
@@ -461,6 +592,10 @@ async def execute_browser_wait_for(args: dict) -> str:
     headed = bool(args.get("headed", False))
     timeout_ms = int(args.get("timeout_ms", 10000))
 
+    bridge_result = await _maybe_execute_extension_bridge("wait_for", args)
+    if bridge_result is not None:
+        return bridge_result
+
     pw = browser = context = page = None
     try:
         pw, browser, context, page = await _get_page(cdp_url=cdp_url, headed=headed)
@@ -496,6 +631,10 @@ async def execute_browser_get_attribute(args: dict) -> str:
     cdp_url = args.get("cdp_url")
     headed = bool(args.get("headed", False))
 
+    bridge_result = await _maybe_execute_extension_bridge("get_attribute", args)
+    if bridge_result is not None:
+        return bridge_result
+
     pw = browser = context = page = None
     try:
         pw, browser, context, page = await _get_page(cdp_url=cdp_url, headed=headed)
@@ -530,6 +669,10 @@ async def execute_browser_drag(args: dict) -> str:
     cdp_url = args.get("cdp_url")
     headed = bool(args.get("headed", False))
 
+    bridge_result = await _maybe_execute_extension_bridge("drag", args)
+    if bridge_result is not None:
+        return bridge_result
+
     pw = browser = context = page = None
     try:
         pw, browser, context, page = await _get_page(cdp_url=cdp_url, headed=headed)
@@ -563,6 +706,10 @@ async def execute_browser_upload(args: dict) -> str:
 
     cdp_url = args.get("cdp_url")
     headed = bool(args.get("headed", False))
+
+    bridge_result = await _maybe_execute_extension_bridge("upload", args)
+    if bridge_result is not None:
+        return bridge_result
 
     pw = browser = context = page = None
     try:
@@ -616,6 +763,10 @@ async def execute_browser_session(args: dict) -> str:
 
     cdp_url = args.get("cdp_url")
     headed = bool(args.get("headed", False))
+
+    bridge_result = await _maybe_execute_extension_bridge("session", args)
+    if bridge_result is not None:
+        return bridge_result
 
     pw = browser = context = page = None
     results: list[str] = []
@@ -770,6 +921,10 @@ async def execute_browser_evaluate(args: dict) -> str:
     cdp_url = args.get("cdp_url")
     headed = bool(args.get("headed", False))
     wait_ms = int(args.get("wait_ms", 1000))
+
+    bridge_result = await _maybe_execute_extension_bridge("evaluate", args)
+    if bridge_result is not None:
+        return bridge_result
 
     pw = browser = context = page = None
     try:

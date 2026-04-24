@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "HASHI Browser Bridge",
+  "version": "0.1.0",
+  "description": "HASHI Option D browser bridge for real-profile automation via a trusted extension.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsca8zc+2WbTqWgQ6y3tNl2jx0PUsxSqlql71OSdxaTevgps8dxGlz/jValD0Bztn2tEWGWkotVqfsoPHBUKz+Kjq8Y1OLdM9ty7zgnuDWhuoJGzW9E3+7s+QKyej6mVL5EzBEUPW9509UJuGulVKHuhVVf8sJkWAH8hp1UEKXAH485oEPHG7azWnBb5G1zl09hMoaLwTZI1JoBVv695e5tRee9KCmNOi0Ww313T+sffyG158k++mQ5rqZUnCNxGIhI/hCo44Kzo5n4biuuMfhff1IdRIjYjhX7EbhosE0aSWsuUrZUm3kP+LtpIyNWGlQvU7rIjA7LEs0pGndFLwcQIDAQAB",
+  "background": {
+    "service_worker": "service_worker.js"
+  },
+  "permissions": [
+    "tabs",
+    "scripting",
+    "storage",
+    "alarms",
+    "nativeMessaging",
+    "debugger"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "action": {
+    "default_title": "HASHI Browser Bridge"
+  }
+}

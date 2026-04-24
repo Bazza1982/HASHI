@@ -78,6 +78,7 @@ class ToolRegistry:
         tool_options: Optional[dict] = None,
         max_loops: int = 25,
         agents_config: Optional[list] = None,
+        audit_context: Optional[dict] = None,
     ):
         self.logger = logging.getLogger("Tools.Registry")
         self.access_root = Path(access_root)
@@ -86,6 +87,7 @@ class ToolRegistry:
         self.tool_options = tool_options or {}
         self.max_loops = max_loops
         self.agents_config = agents_config or []
+        self.audit_context = audit_context or {}
 
         if allowed_tools == ["*"]:
             self._allowed = set(ALL_TOOL_NAMES)
@@ -259,7 +261,9 @@ class ToolRegistry:
                 "browser_session":       execute_browser_session,
             }
             if tool_name in _browser_dispatch:
-                return await _browser_dispatch[tool_name](arguments)
+                browser_args = dict(arguments)
+                browser_args.setdefault("_audit", self.audit_context)
+                return await _browser_dispatch[tool_name](browser_args)
             return f"Error: unknown browser tool '{tool_name}'"
 
         if tool_name.startswith("obsidian_"):

@@ -673,6 +673,42 @@ TOOL_SCHEMAS = [
 from tools.obsidian_mcp.schemas import OBSIDIAN_TOOL_SCHEMAS
 TOOL_SCHEMAS.extend(OBSIDIAN_TOOL_SCHEMAS)
 
+_BROWSER_EXTRA_FIELDS = {
+    "session_id": {
+        "type": "string",
+        "description": "Optional browser session identifier. Omit to use the agent's default session.",
+    },
+    "safety_mode": {
+        "type": "string",
+        "description": "Optional safety mode, e.g. 'read_write' or 'read_only'.",
+    },
+    "agent_name": {
+        "type": "string",
+        "description": "Optional agent identity for browser audit logs.",
+    },
+}
+
+for _tool_name in [
+    "browser_session",
+    "browser_scroll",
+    "browser_hover",
+    "browser_key",
+    "browser_select",
+    "browser_wait_for",
+    "browser_get_attribute",
+    "browser_drag",
+    "browser_upload",
+    "browser_screenshot",
+    "browser_get_text",
+    "browser_get_html",
+    "browser_click",
+    "browser_fill",
+    "browser_evaluate",
+]:
+    if _tool_name in {s["function"]["name"] for s in TOOL_SCHEMAS}:
+        fn = next(s["function"] for s in TOOL_SCHEMAS if s["function"]["name"] == _tool_name)
+        fn["parameters"]["properties"].update(_BROWSER_EXTRA_FIELDS)
+
 # Map tool name -> schema for quick lookup
 TOOL_SCHEMA_MAP = {s["function"]["name"]: s for s in TOOL_SCHEMAS}
 
