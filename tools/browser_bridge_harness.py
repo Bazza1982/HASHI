@@ -1,0 +1,79 @@
+from __future__ import annotations
+
+import json
+import re
+import shutil
+from pathlib import Path
+
+
+HOST_NAME_PATTERN = re.compile(r'const HOST_NAME = "[^"]+";')
+EXTENSION_NAME_PATTERN = re.compile(r'"name":\s*"[^"]+"')
+
+
+def rewrite_service_worker_host_name(content: str, host_name: str) -> str:
+    return HOST_NAME_PATTERN.sub(f'const HOST_NAME = "{host_name}";', content, count=1)
+
+
+def rewrite_manifest_name(content: str, extension_name: str) -> str:
+    return EXTENSION_NAME_PATTERN.sub(f'"name": "{extension_name}"', content, count=1)
+
+
+def build_extension_bundle(
+    source_dir: Path,
+    target_dir: Path,
+    *,
+    host_name: str,
+    extension_name: str,
+) -> dict[str, str]:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    manifest_content = (source_dir / "manifest.json").read_text(encoding="utf-8")
+    service_worker_content = (source_dir / "service_worker.js").read_text(encoding="utf-8")
+
+    (target_dir / "manifest.json").write_text(
+        rewrite_manifest_name(manifest_content, extension_name) + "\n",
+        encoding="utf-8",
+    )
+    (target_dir / "service_worker.js").write_text(
+        rewrite_service_worker_host_name(service_worker_content, host_name),
+        encoding="utf-8",
+    )
+
+    return {
+        "manifest": str(target_dir / "manifest.json"),
+        "service_worker": str(target_dir / "service_worker.js"),
+    }
+
+
+def write_native_host_manifest(
+    manifest_path: Path,
+    *,
+    host_name: str,
+    host_command_path: str,
+    allowed_origins: list[str],
+) -> dict[str, object]:
+    manifest = {
+        "name": host_name,
+        "description": f"{host_name} native host",
+        "path": host_command_path,
+        "type": "stdio",
+        "allowed_origins": allowed_origins,
+    }
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(manifest, indent=4) + "\n", encoding="utf-8")
+    return manifest
+
+
+def create_harness_layout(root_dir: Path) -> dict[str, str]:
+    if root_dir.exists():
+        shutil.rmtree(root_dir)
+    (root_dir / "extension").mkdir(parents=True, exist_ok=True)
+    (root_dir / "native_host").mkdir(parents=True, exist_ok=True)
+    (root_dir / "logs").mkdir(parents=True, exist_ok=True)
+    (root_dir / "state").mkdir(parents=True, exist_ok=True)
+    return {
+        "root": str(root_dir),
+        "extension_dir": str(root_dir / "extension"),
+        "native_host_dir": str(root_dir / "native_host"),
+        "logs_dir": str(root_dir / "logs"),
+        "state_dir": str(root_dir / "state"),
+    }
