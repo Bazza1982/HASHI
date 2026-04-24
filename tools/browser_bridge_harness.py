@@ -77,3 +77,68 @@ def create_harness_layout(root_dir: Path) -> dict[str, str]:
         "logs_dir": str(root_dir / "logs"),
         "state_dir": str(root_dir / "state"),
     }
+
+
+def write_harness_config(
+    config_path: Path,
+    *,
+    chrome_exe: str,
+    user_data_dir: str,
+    extension_dir: str,
+    native_host_manifest_path: str,
+    socket_path: str,
+    log_path: str,
+) -> dict[str, str]:
+    config = {
+        "chrome_exe": chrome_exe,
+        "user_data_dir": user_data_dir,
+        "extension_dir": extension_dir,
+        "native_host_manifest_path": native_host_manifest_path,
+        "socket_path": socket_path,
+        "log_path": log_path,
+    }
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    return config
+
+
+def write_chrome_launch_script(
+    script_path: Path,
+    *,
+    chrome_exe: str,
+    user_data_dir: str,
+    extension_dir: str,
+    start_url: str = "about:blank",
+) -> str:
+    script = (
+        "@echo off\n"
+        f"\"{chrome_exe}\" "
+        f"--user-data-dir=\"{user_data_dir}\" "
+        "--no-first-run --no-default-browser-check "
+        f"--load-extension=\"{extension_dir}\" "
+        f"\"{start_url}\"\n"
+    )
+    script_path.parent.mkdir(parents=True, exist_ok=True)
+    script_path.write_text(script, encoding="utf-8")
+    return script
+
+
+def write_wsl_host_wrapper(
+    script_path: Path,
+    *,
+    distro_name: str,
+    repo_root: str,
+    socket_path: str,
+    log_path: str,
+) -> str:
+    script = (
+        "@echo off\n"
+        "C:\\Windows\\System32\\wsl.exe "
+        f"-d {distro_name} bash -lc "
+        f"\"cd '{repo_root}' && /usr/bin/env python3 "
+        f"'{repo_root}/tools/browser_native_host.py' --stdio "
+        f"--socket {socket_path} --log-file '{log_path}'\"\n"
+    )
+    script_path.parent.mkdir(parents=True, exist_ok=True)
+    script_path.write_text(script, encoding="utf-8")
+    return script

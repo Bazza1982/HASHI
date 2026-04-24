@@ -8,7 +8,10 @@ from tools.browser_bridge_harness import (
     create_harness_layout,
     rewrite_manifest_name,
     rewrite_service_worker_host_name,
+    write_chrome_launch_script,
+    write_harness_config,
     write_native_host_manifest,
+    write_wsl_host_wrapper,
 )
 
 
@@ -70,3 +73,47 @@ def test_write_native_host_manifest(tmp_path: Path) -> None:
     saved = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert saved == manifest
     assert saved["allowed_origins"] == ["chrome-extension://testid/"]
+
+
+def test_write_harness_config(tmp_path: Path) -> None:
+    config_path = tmp_path / "state" / "config.json"
+    config = write_harness_config(
+        config_path,
+        chrome_exe="C:\\Chrome\\chrome.exe",
+        user_data_dir="C:\\Harness\\profile",
+        extension_dir="C:\\Harness\\extension",
+        native_host_manifest_path="C:\\Harness\\native_host\\host.json",
+        socket_path="/tmp/harness.sock",
+        log_path="/tmp/harness.log",
+    )
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    assert saved == config
+    assert saved["chrome_exe"] == "C:\\Chrome\\chrome.exe"
+
+
+def test_write_chrome_launch_script(tmp_path: Path) -> None:
+    script_path = tmp_path / "launch_chrome.cmd"
+    script = write_chrome_launch_script(
+        script_path,
+        chrome_exe="C:\\Chrome\\chrome.exe",
+        user_data_dir="C:\\Harness\\profile",
+        extension_dir="C:\\Harness\\extension",
+        start_url="https://example.com",
+    )
+    assert "--load-extension=\"C:\\Harness\\extension\"" in script
+    assert "\"https://example.com\"" in script
+    assert script_path.read_text(encoding="utf-8") == script
+
+
+def test_write_wsl_host_wrapper(tmp_path: Path) -> None:
+    script_path = tmp_path / "host.cmd"
+    script = write_wsl_host_wrapper(
+        script_path,
+        distro_name="Ubuntu-22.04",
+        repo_root="/home/lily/projects/hashi",
+        socket_path="/tmp/harness.sock",
+        log_path="/tmp/harness.log",
+    )
+    assert "browser_native_host.py" in script
+    assert "--socket /tmp/harness.sock" in script
+    assert script_path.read_text(encoding="utf-8") == script
