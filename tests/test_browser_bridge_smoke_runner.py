@@ -148,9 +148,10 @@ def test_execute_smoke_plan(tmp_path: Path) -> None:
 def test_execute_smoke_plan_with_stub_bridge(tmp_path: Path) -> None:
     root = tmp_path / "harness"
     socket_path = tmp_path / "bridge.sock"
+    trace_path = tmp_path / "stub_trace.jsonl"
     _build_minimal_harness(root, socket_path=str(socket_path))
 
-    with running_stub_bridge(socket_path):
+    with running_stub_bridge(socket_path, trace_path=trace_path):
         report = execute_smoke_plan(
             root,
             repo_root=Path("/home/lily/projects/hashi"),
@@ -161,6 +162,10 @@ def test_execute_smoke_plan_with_stub_bridge(tmp_path: Path) -> None:
     assert report["status"] == "manual_required"
     assert [item["status"] for item in report["results"][1:]] == ["passed", "passed", "passed", "passed", "passed"]
     assert (root / "logs" / "smoke_screenshot.png").exists()
+    trace_lines = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    assert trace_lines[0]["event"] == "server_started"
+    assert any(item["event"] == "request" and item["action"] == "ping" for item in trace_lines)
+    assert trace_lines[-1]["event"] == "server_stopped"
 
 
 def test_execute_smoke_plan_waits_for_delayed_stub_bridge(tmp_path: Path) -> None:
