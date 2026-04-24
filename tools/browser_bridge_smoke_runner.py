@@ -4,6 +4,7 @@ import argparse
 import json
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,7 @@ def build_smoke_steps(root_dir: Path, *, repo_root: Path) -> list[dict[str, Any]
     smoke_plan = state["smoke_plan"]
     socket_path = config["socket_path"]
     start_url = smoke_plan["start_url"]
+    startup_wait_s = str(smoke_plan.get("startup_wait_s", 3.0))
     screenshot_path = str(root_dir / "logs" / "smoke_screenshot.png")
     script_path = str(repo_root / "tools" / "browser_bridge_smoke_runner.py")
 
@@ -45,25 +47,61 @@ def build_smoke_steps(root_dir: Path, *, repo_root: Path) -> list[dict[str, Any]
         {
             "id": "healthcheck",
             "kind": "wsl_python",
-            "argv": ["python3", script_path, "healthcheck", "--socket", socket_path],
+            "argv": [
+                "python3",
+                script_path,
+                "healthcheck",
+                "--socket",
+                socket_path,
+                "--wait-for-socket-s",
+                startup_wait_s,
+            ],
             "description": "Verify the Unix socket exists and the bridge responds to ping.",
         },
         {
             "id": "ping",
             "kind": "wsl_python",
-            "argv": ["python3", script_path, "ping", "--socket", socket_path],
+            "argv": [
+                "python3",
+                script_path,
+                "ping",
+                "--socket",
+                socket_path,
+                "--wait-for-socket-s",
+                startup_wait_s,
+            ],
             "description": "Send a direct ping request through the extension bridge.",
         },
         {
             "id": "active_tab",
             "kind": "wsl_python",
-            "argv": ["python3", script_path, "active_tab", "--socket", socket_path, "--url", start_url],
+            "argv": [
+                "python3",
+                script_path,
+                "active_tab",
+                "--socket",
+                socket_path,
+                "--url",
+                start_url,
+                "--wait-for-socket-s",
+                startup_wait_s,
+            ],
             "description": "Read the active tab metadata through the extension bridge.",
         },
         {
             "id": "get_text",
             "kind": "wsl_python",
-            "argv": ["python3", script_path, "get_text", "--socket", socket_path, "--url", start_url],
+            "argv": [
+                "python3",
+                script_path,
+                "get_text",
+                "--socket",
+                socket_path,
+                "--url",
+                start_url,
+                "--wait-for-socket-s",
+                startup_wait_s,
+            ],
             "description": "Fetch page text through the extension bridge.",
         },
         {
@@ -77,6 +115,8 @@ def build_smoke_steps(root_dir: Path, *, repo_root: Path) -> list[dict[str, Any]
                 socket_path,
                 "--url",
                 start_url,
+                "--wait-for-socket-s",
+                startup_wait_s,
                 "--out",
                 screenshot_path,
             ],
@@ -166,6 +206,17 @@ def _run_bridge_action(action: str, socket_path: Path, *, url: str | None = None
     return send_bridge_command(action, args, socket_path=socket_path)
 
 
+def wait_for_socket(socket_path: Path, timeout_s: float) -> bool:
+    if timeout_s <= 0:
+        return socket_path.exists()
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if socket_path.exists():
+            return True
+        time.sleep(0.1)
+    return socket_path.exists()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Option D isolated smoke runner")
     parser.add_argument(
@@ -177,6 +228,7 @@ def main() -> int:
     parser.add_argument("--out")
     parser.add_argument("--root")
     parser.add_argument("--repo-root")
+    parser.add_argument("--wait-for-socket-s", type=float, default=0.0)
     args = parser.parse_args()
 
     if args.command in {"write-plan", "execute-plan"}:
@@ -195,6 +247,9 @@ def main() -> int:
     if not args.socket:
         parser.error("--socket is required for bridge commands")
     socket_path = Path(args.socket)
+    if args.wait_for_socket_s and not wait_for_socket(socket_path, args.wait_for_socket_s):
+        print(json.dumps({"ok": False, "error": f"socket not ready within {args.wait_for_socket_s}s"}))
+        return 1
     try:
         if args.command == "healthcheck":
             result = _run_healthcheck(socket_path)

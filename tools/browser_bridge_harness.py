@@ -151,6 +151,7 @@ def write_smoke_plan(
     host_log_path: str,
     browser_action_log_path: str,
     start_url: str,
+    startup_wait_s: float = 3.0,
 ) -> dict[str, object]:
     plan = {
         "checks": [
@@ -169,6 +170,7 @@ def write_smoke_plan(
             "browser_action_log_path": browser_action_log_path,
         },
         "start_url": start_url,
+        "startup_wait_s": startup_wait_s,
     }
     plan_path.parent.mkdir(parents=True, exist_ok=True)
     plan_path.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")

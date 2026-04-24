@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 from tools.browser_bridge_harness import (
@@ -89,6 +91,7 @@ def test_build_smoke_steps(tmp_path: Path) -> None:
         "screenshot",
     ]
     assert steps[1]["argv"][1].endswith("tools/browser_bridge_smoke_runner.py")
+    assert "--wait-for-socket-s" in steps[1]["argv"]
     assert steps[-1]["argv"][-1].endswith("smoke_screenshot.png")
 
 
@@ -158,3 +161,31 @@ def test_execute_smoke_plan_with_stub_bridge(tmp_path: Path) -> None:
     assert report["status"] == "manual_required"
     assert [item["status"] for item in report["results"][1:]] == ["passed", "passed", "passed", "passed", "passed"]
     assert (root / "logs" / "smoke_screenshot.png").exists()
+
+
+def test_execute_smoke_plan_waits_for_delayed_stub_bridge(tmp_path: Path) -> None:
+    root = tmp_path / "harness"
+    socket_path = tmp_path / "delayed_bridge.sock"
+    _build_minimal_harness(root, socket_path=str(socket_path))
+    stop_event = threading.Event()
+
+    def start_later() -> None:
+        time.sleep(0.6)
+        with running_stub_bridge(socket_path):
+            stop_event.wait(3)
+
+    thread = threading.Thread(target=start_later, daemon=True)
+    thread.start()
+    try:
+        report = execute_smoke_plan(
+            root,
+            repo_root=Path("/home/lily/projects/hashi"),
+            runner=subprocess.run,
+            stop_on_failure=True,
+        )
+    finally:
+        stop_event.set()
+        thread.join(timeout=2)
+
+    assert report["status"] == "manual_required"
+    assert [item["status"] for item in report["results"][1:]] == ["passed", "passed", "passed", "passed", "passed"]
