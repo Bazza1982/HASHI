@@ -55,6 +55,12 @@ def build_smoke_steps(root_dir: Path, *, repo_root: Path) -> list[dict[str, Any]
             "description": "Send a direct ping request through the extension bridge.",
         },
         {
+            "id": "active_tab",
+            "kind": "wsl_python",
+            "argv": ["python3", script_path, "active_tab", "--socket", socket_path, "--url", start_url],
+            "description": "Read the active tab metadata through the extension bridge.",
+        },
+        {
             "id": "get_text",
             "kind": "wsl_python",
             "argv": ["python3", script_path, "get_text", "--socket", socket_path, "--url", start_url],
@@ -164,7 +170,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Option D isolated smoke runner")
     parser.add_argument(
         "command",
-        choices=["healthcheck", "ping", "get_text", "screenshot", "write-plan", "execute-plan"],
+        choices=["healthcheck", "ping", "active_tab", "get_text", "screenshot", "write-plan", "execute-plan"],
     )
     parser.add_argument("--socket")
     parser.add_argument("--url")

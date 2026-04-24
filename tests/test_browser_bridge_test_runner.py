@@ -56,6 +56,7 @@ def test_materialize_option_d_test_harness(tmp_path: Path) -> None:
     assert smoke_plan["start_url"] == "https://example.com"
     assert result["validation"]["ok"] is True
     assert result["smoke_commands"]["steps"][1]["id"] == "healthcheck"
+    assert result["smoke_commands"]["steps"][3]["id"] == "active_tab"
 
 
 def test_run_option_d_isolated_acceptance(tmp_path: Path) -> None:
@@ -76,6 +77,8 @@ def test_run_option_d_isolated_acceptance(tmp_path: Path) -> None:
             return subprocess.CompletedProcess(argv, 0, stdout='{"connected": true}\n', stderr="")
         if command == "ping":
             return subprocess.CompletedProcess(argv, 0, stdout='{"ok": true}\n', stderr="")
+        if command == "active_tab":
+            return subprocess.CompletedProcess(argv, 0, stdout='{"ok": true, "output": {"url": "https://example.com"}}\n', stderr="")
         if command == "get_text":
             return subprocess.CompletedProcess(argv, 0, stdout='{"ok": true, "output": "Example"}\n', stderr="")
         return subprocess.CompletedProcess(argv, 0, stdout='{"ok": true, "saved_to": "x"}\n', stderr="")

@@ -21,6 +21,7 @@ def _write_smoke_results(root: Path, *, status: str = "manual_required") -> None
             {"id": "launch_chrome", "status": "manual_required"},
             {"id": "healthcheck", "status": "passed"},
             {"id": "ping", "status": "passed"},
+            {"id": "active_tab", "status": "passed"},
             {"id": "get_text", "status": "passed"},
             {"id": "screenshot", "status": "passed"},
         ],
@@ -37,7 +38,7 @@ def test_load_smoke_results(tmp_path: Path) -> None:
 def test_summarize_smoke_results_promotable(tmp_path: Path) -> None:
     _write_smoke_results(tmp_path)
     summary = summarize_smoke_results(tmp_path)
-    assert summary["counts"]["passed"] == 4
+    assert summary["counts"]["passed"] == 5
     assert summary["counts"]["manual_required"] == 1
     assert summary["promotable_to_live_acceptance"] is True
     assert summary["failed_steps"] == []

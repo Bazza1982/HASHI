@@ -84,6 +84,7 @@ def test_build_smoke_steps(tmp_path: Path) -> None:
         "launch_chrome",
         "healthcheck",
         "ping",
+        "active_tab",
         "get_text",
         "screenshot",
     ]
@@ -122,6 +123,8 @@ def test_execute_smoke_plan(tmp_path: Path) -> None:
             return subprocess.CompletedProcess(argv, 0, stdout='{"ok": true}\n', stderr="")
         if argv[2] == "healthcheck":
             return subprocess.CompletedProcess(argv, 0, stdout='{"connected": true}\n', stderr="")
+        if argv[2] == "active_tab":
+            return subprocess.CompletedProcess(argv, 0, stdout='{"ok": true, "output": {"url": "https://example.com"}}\n', stderr="")
         if argv[2] == "get_text":
             return subprocess.CompletedProcess(argv, 0, stdout='{"ok": true, "output": "Example"}\n', stderr="")
         return subprocess.CompletedProcess(argv, 0, stdout='{"ok": true, "saved_to": "x"}\n', stderr="")
@@ -153,5 +156,5 @@ def test_execute_smoke_plan_with_stub_bridge(tmp_path: Path) -> None:
         )
 
     assert report["status"] == "manual_required"
-    assert [item["status"] for item in report["results"][1:]] == ["passed", "passed", "passed", "passed"]
+    assert [item["status"] for item in report["results"][1:]] == ["passed", "passed", "passed", "passed", "passed"]
     assert (root / "logs" / "smoke_screenshot.png").exists()
