@@ -12,6 +12,7 @@ from tools.browser_bridge_harness import (
     write_smoke_plan,
     write_wsl_host_wrapper,
 )
+from tools.browser_bridge_smoke_runner import write_smoke_command_plan
 
 
 def materialize_option_d_test_harness(
@@ -94,7 +95,9 @@ def materialize_option_d_test_harness(
         + "\n",
         encoding="utf-8",
     )
+    smoke_commands = write_smoke_command_plan(root_dir, repo_root=Path(repo_root))
     return {
         "layout": layout,
         "validation": validate_harness_artifacts(root_dir),
+        "smoke_commands": smoke_commands,
     }

@@ -42,6 +42,7 @@ def test_materialize_option_d_test_harness(tmp_path: Path) -> None:
     assert (root / "launch_chrome_test.cmd").exists()
     assert (root / "state" / "config.json").exists()
     assert (root / "state" / "smoke_plan.json").exists()
+    assert (root / "state" / "smoke_commands.json").exists()
     assert (root / "README.md").exists()
 
     config = json.loads((root / "state" / "config.json").read_text(encoding="utf-8"))
@@ -50,3 +51,4 @@ def test_materialize_option_d_test_harness(tmp_path: Path) -> None:
     smoke_plan = json.loads((root / "state" / "smoke_plan.json").read_text(encoding="utf-8"))
     assert smoke_plan["start_url"] == "https://example.com"
     assert result["validation"]["ok"] is True
+    assert result["smoke_commands"]["steps"][1]["id"] == "healthcheck"
