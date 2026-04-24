@@ -3,9 +3,12 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tools.browser_bridge_harness import validate_harness_artifacts
 from tools.browser_extension_bridge import BrowserBridgeError, healthcheck, send_bridge_command

@@ -19,9 +19,10 @@ from tools.browser_bridge_smoke_runner import (
     load_harness_state,
     write_smoke_command_plan,
 )
+from tools.browser_bridge_stub_server import running_stub_bridge
 
 
-def _build_minimal_harness(root: Path) -> None:
+def _build_minimal_harness(root: Path, *, socket_path: str = "/tmp/harness.sock") -> None:
     layout = create_harness_layout(root)
     (root / "extension" / "manifest.json").write_text("{}", encoding="utf-8")
     (root / "extension" / "service_worker.js").write_text("const HOST_NAME = \"x\";\n", encoding="utf-8")
@@ -35,7 +36,7 @@ def _build_minimal_harness(root: Path) -> None:
         root / "native_host" / "hashi_browser_bridge_test_host.cmd",
         distro_name="Ubuntu-22.04",
         repo_root="/home/lily/projects/hashi",
-        socket_path="/tmp/harness.sock",
+        socket_path=socket_path,
         log_path="/tmp/harness.log",
     )
     write_harness_config(
@@ -44,7 +45,7 @@ def _build_minimal_harness(root: Path) -> None:
         user_data_dir="C:\\Harness\\profile",
         extension_dir="C:\\Harness\\extension",
         native_host_manifest_path="C:\\Harness\\native_host\\host.json",
-        socket_path="/tmp/harness.sock",
+        socket_path=socket_path,
         log_path="/tmp/harness.log",
     )
     write_chrome_launch_script(
@@ -56,7 +57,7 @@ def _build_minimal_harness(root: Path) -> None:
     )
     write_smoke_plan(
         Path(layout["state_dir"]) / "smoke_plan.json",
-        socket_path="/tmp/harness.sock",
+        socket_path=socket_path,
         host_log_path="/tmp/harness.log",
         browser_action_log_path="/tmp/browser_action_audit.jsonl",
         start_url="https://example.com",
@@ -136,3 +137,21 @@ def test_execute_smoke_plan(tmp_path: Path) -> None:
     assert report["status"] == "manual_required"
     assert report["results"][0]["status"] == "manual_required"
     assert report["results"][1]["status"] == "passed"
+
+
+def test_execute_smoke_plan_with_stub_bridge(tmp_path: Path) -> None:
+    root = tmp_path / "harness"
+    socket_path = tmp_path / "bridge.sock"
+    _build_minimal_harness(root, socket_path=str(socket_path))
+
+    with running_stub_bridge(socket_path):
+        report = execute_smoke_plan(
+            root,
+            repo_root=Path("/home/lily/projects/hashi"),
+            runner=subprocess.run,
+            stop_on_failure=True,
+        )
+
+    assert report["status"] == "manual_required"
+    assert [item["status"] for item in report["results"][1:]] == ["passed", "passed", "passed", "passed"]
+    assert (root / "logs" / "smoke_screenshot.png").exists()
