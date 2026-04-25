@@ -633,6 +633,7 @@ API-backed agents can execute local actions via the tool system:
 | `windows_click` / `windows_type` | Interact with the real Windows desktop |
 | `windows_key` / `windows_mouse_move` / `windows_scroll` | Send Windows desktop input |
 | `windows_info` | Query Windows-side mouse / display / window info |
+| `windows_window_list` / `windows_window_focus` / `windows_window_close` | Enumerate and control Windows top-level windows |
 
 No `tools` key in config = tools disabled, fully backward compatible.
 

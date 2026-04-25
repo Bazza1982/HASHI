@@ -302,7 +302,9 @@ gh run list                             # list workflow runs
 HASHI also supports a separate `windows_*` tool tier for controlling the real Windows desktop.
 
 - Intended for agents running on Windows directly, or inside WSL using `powershell.exe` interop
-- Current backend: Windows-host `usecomputer`
+- Current backends:
+  - Windows-host `usecomputer`
+  - `windows-mcp` for screenshot + input actions
 - Best reliability when the Windows desktop is unlocked
 - Separate from `desktop_*`, which targets the Linux virtual desktop
 
