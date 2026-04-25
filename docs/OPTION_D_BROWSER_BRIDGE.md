@@ -1,9 +1,9 @@
 # Option D Browser Bridge
 
-This is the HASHI "real profile" bridge for Chrome on Windows:
+This is the HASHI "real profile" bridge for Chrome:
 
 - Chrome extension runs inside the user's real browser profile.
-- Chrome native messaging launches a WSL-side host.
+- Chrome native messaging launches a local host process.
 - HASHI agents in WSL talk to the host over a Unix socket.
 
 ## Why this exists
@@ -24,10 +24,12 @@ Components:
   - WSL client used by HASHI browser tools.
 - `tools/install_browser_option_d.sh`
   - Installs the Windows native host manifest and copies the extension to `%LOCALAPPDATA%`.
+- `tools/install_browser_option_d_linux.sh`
+  - Installs an isolated Linux native host manifest for Chrome running inside WSL/X11 and copies a WSL-specific extension bundle to `~/.local/share/hashi/browser_bridge_wsl/extension`.
 
 ## Install
 
-From WSL:
+From WSL for Windows Chrome:
 
 ```bash
 cd /home/lily/projects/hashi
@@ -46,6 +48,25 @@ Expected extension id:
 ```text
 jdeaedmoejdapldleofeggedgenogpka
 ```
+
+For Linux Chrome running inside WSL/X11:
+
+```bash
+cd /home/lily/projects/hashi
+bash tools/install_browser_option_d_linux.sh
+```
+
+Then in Linux Chrome:
+
+1. Open `chrome://extensions`
+2. Turn on `Developer mode`
+3. Click `Load unpacked`
+4. Select the printed extension directory under `~/.local/share/hashi/browser_bridge_wsl/extension`
+
+By default this Linux installer uses an isolated host/socket pair so it does not get stolen by a Windows Chrome instance that is already reconnecting:
+
+- host name: `com.hashi.browser_bridge.wsl`
+- socket: `/tmp/hashi-browser-bridge-wsl.sock`
 
 ## Runtime
 

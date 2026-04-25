@@ -828,6 +828,205 @@ DESKTOP_TOOL_SCHEMAS = [
         },
     },
 ]
+
+WINDOWS_USE_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "windows_screenshot",
+            "description": (
+                "Take a screenshot of the real Windows desktop via the Windows host. "
+                "Returns a base64-encoded PNG plus metadata from the Windows-side executor. "
+                "Works when called from Windows or from WSL agents through powershell.exe interop. "
+                "The Windows desktop usually needs to be unlocked for reliable results."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "provider": {
+                        "type": "string",
+                        "enum": ["auto", "usecomputer", "windows-mcp"],
+                        "description": "Desktop executor backend. Current implementation supports 'usecomputer'. Default auto.",
+                    },
+                    "annotate": {
+                        "type": "boolean",
+                        "description": "Overlay a grid if supported by the backend. Default false.",
+                    },
+                    "display": {
+                        "type": "integer",
+                        "description": "Optional Windows display index for screenshot backends that support it.",
+                    },
+                    "window": {
+                        "type": "integer",
+                        "description": "Optional target window id for backends that support window capture.",
+                    },
+                    "save_path": {
+                        "type": "string",
+                        "description": "Optional absolute path to save the PNG file. WSL paths are converted automatically.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "windows_mouse_move",
+            "description": "Move the mouse cursor to absolute (x, y) on the real Windows desktop.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x": {"type": "integer", "description": "X coordinate in Windows desktop pixels."},
+                    "y": {"type": "integer", "description": "Y coordinate in Windows desktop pixels."},
+                    "provider": {
+                        "type": "string",
+                        "enum": ["auto", "usecomputer", "windows-mcp"],
+                        "description": "Desktop executor backend. Current implementation supports 'usecomputer'.",
+                    },
+                },
+                "required": ["x", "y"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "windows_click",
+            "description": (
+                "Click the mouse at (x, y) on the real Windows desktop. "
+                "Supports left/right/middle buttons and double-click."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x": {"type": "integer", "description": "X coordinate."},
+                    "y": {"type": "integer", "description": "Y coordinate."},
+                    "button": {
+                        "type": "string",
+                        "enum": ["left", "right", "middle"],
+                        "description": "Mouse button. Default 'left'.",
+                    },
+                    "count": {
+                        "type": "integer",
+                        "description": "Click count. Use 2 for double-click. Default 1.",
+                    },
+                    "provider": {
+                        "type": "string",
+                        "enum": ["auto", "usecomputer", "windows-mcp"],
+                        "description": "Desktop executor backend. Current implementation supports 'usecomputer'.",
+                    },
+                },
+                "required": ["x", "y"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "windows_type",
+            "description": (
+                "Type text into the currently focused window on the real Windows desktop. "
+                "Click the target window first with windows_click if needed."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Text to type."},
+                    "provider": {
+                        "type": "string",
+                        "enum": ["auto", "usecomputer", "windows-mcp"],
+                        "description": "Desktop executor backend. Current implementation supports 'usecomputer'.",
+                    },
+                },
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "windows_key",
+            "description": (
+                "Press a key or key combination on the real Windows desktop. "
+                "Examples: 'ctrl+s', 'alt+f4', 'Return', 'Escape', 'ctrl+z'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "description": "Key or combo, e.g. 'ctrl+s', 'alt+f4', 'Return', 'space'.",
+                    },
+                    "provider": {
+                        "type": "string",
+                        "enum": ["auto", "usecomputer", "windows-mcp"],
+                        "description": "Desktop executor backend. Current implementation supports 'usecomputer'.",
+                    },
+                },
+                "required": ["key"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "windows_scroll",
+            "description": "Scroll the mouse wheel on the real Windows desktop.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "direction": {
+                        "type": "string",
+                        "enum": ["up", "down", "left", "right"],
+                        "description": "Scroll direction. Default 'down'.",
+                    },
+                    "amount": {
+                        "type": "integer",
+                        "description": "Number of scroll steps. Default 3.",
+                    },
+                    "x": {"type": "integer", "description": "Optional X coordinate to scroll at."},
+                    "y": {"type": "integer", "description": "Optional Y coordinate to scroll at."},
+                    "provider": {
+                        "type": "string",
+                        "enum": ["auto", "usecomputer", "windows-mcp"],
+                        "description": "Desktop executor backend. Current implementation supports 'usecomputer'.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "windows_info",
+            "description": (
+                "Get info about the Windows desktop bridge: current mouse position, "
+                "connected displays, visible windows, and executor availability. "
+                "Useful to confirm WSL-to-Windows interop is working."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "provider": {
+                        "type": "string",
+                        "enum": ["auto", "usecomputer", "windows-mcp"],
+                        "description": "Desktop executor backend. Current implementation supports 'usecomputer'.",
+                    },
+                    "include_windows": {
+                        "type": "boolean",
+                        "description": "Include visible window list. Default true.",
+                    },
+                    "include_displays": {
+                        "type": "boolean",
+                        "description": "Include connected display metadata. Default true.",
+                    },
+                },
+            },
+        },
+    },
+]
+
+TOOL_SCHEMAS.extend(WINDOWS_USE_TOOL_SCHEMAS)
 TOOL_SCHEMAS.extend(DESKTOP_TOOL_SCHEMAS)
 
 # ------------------------------------------------------------------ obsidian

@@ -297,6 +297,23 @@ gh run list                             # list workflow runs
 4. Python/pip/node inside WSL2 are separate installs from Windows — don't assume packages installed on Windows are available in WSL2.
 5. When building or running Linux-native services (e.g., Docker Compose stacks), prefer working from `~/projects/` inside WSL2 for best performance.
 
+### Windows Use Tools
+
+HASHI also supports a separate `windows_*` tool tier for controlling the real Windows desktop.
+
+- Intended for agents running on Windows directly, or inside WSL using `powershell.exe` interop
+- Current backend: Windows-host `usecomputer`
+- Best reliability when the Windows desktop is unlocked
+- Separate from `desktop_*`, which targets the Linux virtual desktop
+
+Suggested tier config:
+
+```json
+"tools": {
+  "tiers": ["core", "windows_use"]
+}
+```
+
 ## Important Behavior Notes
 - Bridge owns continuity; backends are treated as stateless.
 - Backend capabilities are not identical — session model, file handling, tool use, and streaming vary per backend.

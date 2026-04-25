@@ -32,6 +32,11 @@ TOOL_TIERS: dict[str, list[str]] = {
         "desktop_screenshot", "desktop_mouse_move", "desktop_click",
         "desktop_type", "desktop_key", "desktop_scroll", "desktop_info",
     ],
+    "windows_use": [
+        "windows_screenshot", "windows_mouse_move", "windows_click",
+        "windows_type", "windows_key", "windows_scroll", "windows_info",
+        "windows_window_list", "windows_window_focus", "windows_window_close",
+    ],
 }
 
 def resolve_tiers(tier_names: list[str]) -> list[str]:
@@ -292,6 +297,35 @@ class ToolRegistry:
             if tool_name in _desktop_dispatch:
                 return await _desktop_dispatch[tool_name](arguments)
             return f"Error: unknown desktop tool '{tool_name}'"
+
+        if tool_name.startswith("windows_"):
+            from tools.windows_use import (
+                execute_windows_screenshot,
+                execute_windows_mouse_move,
+                execute_windows_click,
+                execute_windows_type,
+                execute_windows_key,
+                execute_windows_scroll,
+                execute_windows_info,
+                execute_windows_window_list,
+                execute_windows_window_focus,
+                execute_windows_window_close,
+            )
+            _windows_dispatch = {
+                "windows_screenshot": execute_windows_screenshot,
+                "windows_mouse_move": execute_windows_mouse_move,
+                "windows_click": execute_windows_click,
+                "windows_type": execute_windows_type,
+                "windows_key": execute_windows_key,
+                "windows_scroll": execute_windows_scroll,
+                "windows_info": execute_windows_info,
+                "windows_window_list": execute_windows_window_list,
+                "windows_window_focus": execute_windows_window_focus,
+                "windows_window_close": execute_windows_window_close,
+            }
+            if tool_name in _windows_dispatch:
+                return await _windows_dispatch[tool_name](arguments)
+            return f"Error: unknown windows tool '{tool_name}'"
 
         if tool_name.startswith("obsidian_"):
             from tools.obsidian_mcp.client import ObsidianClient

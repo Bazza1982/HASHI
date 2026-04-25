@@ -166,6 +166,33 @@ Requires `xdotool` installed: `sudo apt-get install -y xdotool`
 
 **Binary:** vendored at `tools/bin/usecomputer` (MIT license, native Zig binary, no runtime deps).
 
+## Windows Use Tool
+
+Agents can control the real Windows desktop through the `windows_*` tool tier.
+This is designed for HASHI agents running either directly on Windows or inside WSL.
+
+**Available tools:** `windows_screenshot`, `windows_click`, `windows_type`, `windows_key`, `windows_mouse_move`, `windows_scroll`, `windows_info`
+
+**Current backend:** `usecomputer` on the Windows host, launched through `powershell.exe`.
+
+**Important behavior:**
+- Intended for the real interactive Windows desktop, not the Linux virtual desktop.
+- Best reliability when Windows is unlocked.
+- From WSL, tool calls cross the WSL ↔ Windows boundary automatically.
+
+**For OpenRouter API agents** — add the `windows_use` tier to `agents.json`:
+```json
+"tools": {
+  "tiers": ["core", "windows_use"],
+  "max_loops": 15
+}
+```
+
+**Current environment requirement on Windows host:**
+```powershell
+npm install -g usecomputer
+```
+
 ## Telegram File Sending
 
 Agents can send photos, documents, videos, and audio files to the user via Telegram.

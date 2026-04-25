@@ -629,6 +629,10 @@ API-backed agents can execute local actions via the tool system:
 | `desktop_mouse_move` | Move mouse to absolute coordinates |
 | `desktop_scroll` | Scroll mouse wheel in any direction |
 | `desktop_info` | Query display info and current mouse position |
+| `windows_screenshot` | Capture the real Windows desktop as base64 PNG |
+| `windows_click` / `windows_type` | Interact with the real Windows desktop |
+| `windows_key` / `windows_mouse_move` / `windows_scroll` | Send Windows desktop input |
+| `windows_info` | Query Windows-side mouse / display / window info |
 
 No `tools` key in config = tools disabled, fully backward compatible.
 
