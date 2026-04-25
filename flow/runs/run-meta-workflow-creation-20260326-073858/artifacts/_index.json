@@ -1,9 +1,0 @@
-{
-  "task_analysis": {
-    "path": "flow/runs/run-meta-workflow-creation-20260326-073858/artifacts/task_analysis/task_analysis.json",
-    "original_path": "/home/lily/projects/hashi/flow/runs/run-meta-workflow-creation-20260326-073858/workers/analyst_01/outbox/task_analysis.json",
-    "step_id": null,
-    "size_bytes": 16346,
-    "registered_at": "2026-03-25T20:39:58.428144+00:00"
-  }
-}

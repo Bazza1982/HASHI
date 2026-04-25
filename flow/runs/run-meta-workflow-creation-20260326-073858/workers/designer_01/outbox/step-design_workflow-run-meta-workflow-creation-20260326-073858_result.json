@@ -1,7 +1,0 @@
-{
-  "status": "failed",
-  "error_type": "timeout",
-  "error_message": "Worker designer_01 超时 (300s)",
-  "suggested_fix": "增加 timeout_seconds 或简化任务",
-  "ts": "2026-03-25T20:44:45.459829+00:00"
-}

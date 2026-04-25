@@ -153,3 +153,7 @@ docs/local_minato.md
 # Browser bridge — local runtime state (never commit user browser details)
 tools/browser_bridge_state.json
 tools/browser_bridge.log
+
+# Local runtime backups/state
+backups/
+managed_active_heartbeats.json

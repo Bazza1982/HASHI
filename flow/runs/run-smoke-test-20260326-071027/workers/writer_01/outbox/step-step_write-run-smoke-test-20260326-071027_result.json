@@ -1,8 +1,0 @@
-{
-  "status": "failed",
-  "error_type": "cli_error",
-  "error_message": "claude CLI exited with code 1: Error: Claude Code cannot be launched inside another Claude Code session.\nNested sessions share runtime resources and will crash all active sessions.\nTo bypass this check, unset the CLAUDECODE environment variable.\n",
-  "suggested_fix": "检查 claude CLI 是否安装，model 是否可访问",
-  "raw_output": "",
-  "ts": "2026-03-25T20:10:28.089393+00:00"
-}

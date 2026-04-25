@@ -1,7 +1,0 @@
-{
-  "status": "failed",
-  "error_type": "timeout",
-  "error_message": "Worker validator_01 超时 (60s)",
-  "suggested_fix": "增加 timeout_seconds 或简化任务",
-  "ts": "2026-03-25T21:09:57.969022+00:00"
-}
