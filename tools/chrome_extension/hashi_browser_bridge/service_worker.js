@@ -164,6 +164,20 @@ function tabMeta(tab) {
   };
 }
 
+function stringifyOutput(value) {
+  if (value === undefined || value === null) {
+    return "";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  try {
+    return JSON.stringify(value);
+  } catch (_error) {
+    return String(value);
+  }
+}
+
 async function withDebugger(tabId, callback) {
   const target = { tabId };
   let attached = false;
@@ -224,6 +238,178 @@ async function actionGetHtml(args) {
   };
 }
 
+async function actionClick(args) {
+  const tab = await resolveTab(args);
+  assertScriptableTab(tab);
+  const selector = String(args.selector || "").trim();
+  const timeoutMs = Number(args.timeout_ms || 10000);
+  if (!selector) {
+    throw new Error("selector is required");
+  }
+  const results = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    args: [selector, timeoutMs],
+    func: async (selector, timeoutMs) => {
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const started = Date.now();
+      let element = null;
+      while (Date.now() - started < timeoutMs) {
+        element = document.querySelector(selector);
+        if (element) {
+          break;
+        }
+        await sleep(100);
+      }
+      if (!element) {
+        throw new Error(`selector not found: ${selector}`);
+      }
+      element.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+      if (typeof element.focus === "function") {
+        element.focus({ preventScroll: true });
+      }
+      const rect = element.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) {
+        throw new Error(`selector is not visible: ${selector}`);
+      }
+      element.click();
+      return {
+        selector,
+        tagName: element.tagName,
+        text: String(element.innerText || element.textContent || "").slice(0, 200)
+      };
+    }
+  });
+  if (Number(args.wait_ms || 0) > 0) {
+    await sleep(Number(args.wait_ms));
+  }
+  const updatedTab = await chrome.tabs.get(tab.id);
+  const details = results?.[0]?.result || {};
+  return {
+    output: `OK: clicked '${selector}'`,
+    meta: {
+      ...tabMeta(updatedTab),
+      action: "click",
+      selector,
+      details
+    }
+  };
+}
+
+async function actionFill(args) {
+  const tab = await resolveTab(args);
+  assertScriptableTab(tab);
+  const selector = String(args.selector || "").trim();
+  const text = String(args.text || "");
+  const submit = Boolean(args.submit);
+  const timeoutMs = Number(args.timeout_ms || 10000);
+  if (!selector) {
+    throw new Error("selector is required");
+  }
+  const results = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    args: [selector, text, submit, timeoutMs],
+    func: async (selector, text, submit, timeoutMs) => {
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const started = Date.now();
+      let element = null;
+      while (Date.now() - started < timeoutMs) {
+        element = document.querySelector(selector);
+        if (element) {
+          break;
+        }
+        await sleep(100);
+      }
+      if (!element) {
+        throw new Error(`selector not found: ${selector}`);
+      }
+      element.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+      if (typeof element.focus === "function") {
+        element.focus({ preventScroll: true });
+      }
+
+      if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+        element.value = text;
+      } else if (element instanceof HTMLSelectElement) {
+        element.value = text;
+      } else if (element instanceof HTMLElement && element.isContentEditable) {
+        element.textContent = text;
+      } else if ("value" in element) {
+        element.value = text;
+      } else {
+        throw new Error(`selector is not fillable: ${selector}`);
+      }
+
+      element.dispatchEvent(new Event("input", { bubbles: true }));
+      element.dispatchEvent(new Event("change", { bubbles: true }));
+
+      let submitted = false;
+      if (submit) {
+        const form = element.form || element.closest("form");
+        if (form && typeof form.requestSubmit === "function") {
+          form.requestSubmit();
+          submitted = true;
+        }
+      }
+
+      return {
+        selector,
+        tagName: element.tagName,
+        value: "value" in element ? String(element.value || "") : String(element.textContent || ""),
+        submitted
+      };
+    }
+  });
+  if (Number(args.wait_ms || 0) > 0) {
+    await sleep(Number(args.wait_ms));
+  }
+  const updatedTab = await chrome.tabs.get(tab.id);
+  const details = results?.[0]?.result || {};
+  return {
+    output: `OK: filled '${selector}'`,
+    meta: {
+      ...tabMeta(updatedTab),
+      action: "fill",
+      selector,
+      submitted: Boolean(details.submitted),
+      details
+    }
+  };
+}
+
+async function actionEvaluate(args) {
+  const tab = await resolveTab(args);
+  assertScriptableTab(tab);
+  const script = String(args.script || "").trim();
+  if (!script) {
+    throw new Error("script is required");
+  }
+  const results = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    world: "MAIN",
+    args: [script],
+    func: async (script) => {
+      try {
+        let result = globalThis.eval(script);
+        if (typeof result === "function") {
+          result = result();
+        }
+        return await Promise.resolve(result);
+      } catch (_evalError) {
+        const statement = new Function(script);
+        const result = statement();
+        return await Promise.resolve(result);
+      }
+    }
+  });
+  return {
+    output: stringifyOutput(results?.[0]?.result),
+    meta: {
+      ...tabMeta(tab),
+      action: "evaluate"
+    }
+  };
+}
+
 async function actionScreenshot(args) {
   const tab = await resolveTab(args);
   await chrome.tabs.update(tab.id, { active: true });
@@ -272,6 +458,15 @@ async function executeAction(action, args) {
   }
   if (action === "get_html") {
     return actionGetHtml(args);
+  }
+  if (action === "click") {
+    return actionClick(args);
+  }
+  if (action === "fill") {
+    return actionFill(args);
+  }
+  if (action === "evaluate") {
+    return actionEvaluate(args);
   }
   if (action === "screenshot") {
     return actionScreenshot(args);
