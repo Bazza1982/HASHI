@@ -10,11 +10,18 @@ install_root="${HASHI_BROWSER_BRIDGE_INSTALL_ROOT:-${XDG_DATA_HOME:-$HOME/.local
 extension_install_dir="$install_root/extension"
 wrapper_path="$install_root/hashi_browser_bridge_host.sh"
 
-chrome_config_home="${XDG_CONFIG_HOME:-$HOME/.config}/google-chrome"
-manifest_dir="$chrome_config_home/NativeMessagingHosts"
-manifest_path="$manifest_dir/$host_name.json"
+default_chrome_config_home="${XDG_CONFIG_HOME:-$HOME/.config}/google-chrome"
+isolated_profile_config_home="${HASHI_BROWSER_BRIDGE_PROFILE_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/google-chrome-wsl-bridge}"
 
-mkdir -p "$install_root" "$manifest_dir"
+manifest_dirs=("$default_chrome_config_home/NativeMessagingHosts")
+if [[ "$isolated_profile_config_home" != "$default_chrome_config_home" ]]; then
+  manifest_dirs+=("$isolated_profile_config_home/NativeMessagingHosts")
+fi
+
+mkdir -p "$install_root"
+for manifest_dir in "${manifest_dirs[@]}"; do
+  mkdir -p "$manifest_dir"
+done
 
 python3 - <<'PY' "$repo_root" "$extension_install_dir" "$host_name"
 from pathlib import Path
@@ -46,7 +53,9 @@ exec /usr/bin/env python3 -m tools.browser_native_host --stdio --socket "$socket
 EOF
 chmod 0755 "$wrapper_path"
 
-cat > "$manifest_path" <<EOF
+for manifest_dir in "${manifest_dirs[@]}"; do
+  manifest_path="$manifest_dir/$host_name.json"
+  cat > "$manifest_path" <<EOF
 {
   "name": "$host_name",
   "description": "HASHI Browser Bridge native host",
@@ -57,10 +66,13 @@ cat > "$manifest_path" <<EOF
   ]
 }
 EOF
+done
 
 echo "[HASHI Option D Linux] Copied extension to: $extension_install_dir"
 echo "[HASHI Option D Linux] Wrote wrapper: $wrapper_path"
-echo "[HASHI Option D Linux] Wrote manifest: $manifest_path"
+for manifest_dir in "${manifest_dirs[@]}"; do
+  echo "[HASHI Option D Linux] Wrote manifest: $manifest_dir/$host_name.json"
+done
 echo "[HASHI Option D Linux] Host name: $host_name"
 echo "[HASHI Option D Linux] Socket path: $socket_path"
 echo

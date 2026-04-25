@@ -68,6 +68,13 @@ By default this Linux installer uses an isolated host/socket pair so it does not
 - host name: `com.hashi.browser_bridge.wsl`
 - socket: `/tmp/hashi-browser-bridge-wsl.sock`
 
+When using the isolated WSL Chrome profile at `~/.config/google-chrome-wsl-bridge`, Chrome looks for native messaging manifests under that profile's own `NativeMessagingHosts` directory. The Linux installer now writes the manifest to both:
+
+- `~/.config/google-chrome/NativeMessagingHosts`
+- `~/.config/google-chrome-wsl-bridge/NativeMessagingHosts`
+
+This avoids the failure mode where the extension loads and its service worker runs, but `connectNative("com.hashi.browser_bridge.wsl")` returns `Specified native messaging host not found.` because the manifest only exists under the default Chrome config path.
+
 ## Runtime
 
 When Chrome starts, the extension connects to the native host automatically. The native host creates:
