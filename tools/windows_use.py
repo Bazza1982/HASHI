@@ -25,8 +25,12 @@ import os
 import platform
 import subprocess
 from pathlib import Path
+from urllib import request as urllib_request
+from urllib.error import URLError, HTTPError
 
 logger = logging.getLogger("Tools.WindowsUse")
+_WINDOWS_HELPER_ENV = "HASHI_WINDOWS_HELPER"
+_WINDOWS_HELPER_PORT = int(os.environ.get("HASHI_WINDOWS_HELPER_PORT", "47831"))
 
 
 def _is_wsl() -> bool:
@@ -53,6 +57,14 @@ def _normalize_provider(provider: str | None) -> str:
     if value == "windows-mcp":
         return value
     return "invalid"
+
+
+def _windows_helper_enabled() -> bool:
+    return os.environ.get(_WINDOWS_HELPER_ENV, "1").strip().lower() not in {"0", "false", "off", "no"}
+
+
+def _windows_helper_base_url() -> str:
+    return f"http://127.0.0.1:{_WINDOWS_HELPER_PORT}"
 
 
 def _resolve_windows_save_path(path_value: str | None) -> tuple[str | None, str | None]:
@@ -425,6 +437,95 @@ async def _run_powershell_json(body: str, timeout: int = 30) -> tuple[dict | Non
         return None, f"invalid JSON response from Windows host: {exc}"
 
 
+async def _helper_post(action: str, args: dict, timeout: int = 30) -> tuple[str | None, str | None]:
+    payload = json.dumps({"action": action, "args": args}, ensure_ascii=False).encode("utf-8")
+    req = urllib_request.Request(
+        _windows_helper_base_url() + "/action",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    def _do_request():
+        with urllib_request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    try:
+        data = await asyncio.to_thread(_do_request)
+        return str(data.get("output", "")), None
+    except HTTPError as exc:
+        return None, f"helper HTTP error: {exc.code}"
+    except URLError as exc:
+        return None, str(exc)
+    except Exception as exc:
+        return None, str(exc)
+
+
+async def _helper_healthcheck(timeout: int = 3) -> bool:
+    req = urllib_request.Request(_windows_helper_base_url() + "/health", method="GET")
+
+    def _do_request():
+        with urllib_request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    try:
+        data = await asyncio.to_thread(_do_request)
+        return bool(data.get("ok"))
+    except Exception:
+        return False
+
+
+async def _ensure_windows_helper_started() -> bool:
+    if await _helper_healthcheck():
+        return True
+
+    repo_root_path, repo_root_error = _resolve_windows_save_path(str(Path(__file__).resolve().parent.parent))
+    if repo_root_error:
+        logger.warning("windows helper repo root resolution failed: %s", repo_root_error)
+        return False
+
+    body = f"""
+$repoRoot = {_ps_quote(repo_root_path)}
+$logDir = Join-Path $env:LOCALAPPDATA "HASHI\\windows_helper\\logs"
+$uv = Resolve-UvInvocation
+if (-not $uv) {{
+    throw "uv not found on Windows host. Install with: python -m pip install uv"
+}}
+$argsList = @()
+$argsList += $uv.base_args
+$argsList += @('run', '--no-project', '--with', 'fastapi', '--with', 'uvicorn', '--with', 'fastmcp', '--with', 'windows-mcp', 'python', '-m', 'tools.windows_helper.server', '--host', '127.0.0.1', '--port', {_ps_quote(str(_WINDOWS_HELPER_PORT))}, '--log-dir', $logDir)
+Start-Process -FilePath $uv.command -ArgumentList $argsList -WorkingDirectory $repoRoot -WindowStyle Hidden | Out-Null
+@{{ ok = $true }} | ConvertTo-Json -Compress
+"""
+    data, error = await _run_powershell_json(body, timeout=20)
+    if error or not data or not data.get("ok"):
+        logger.warning("windows helper start failed: %s", error or data)
+        return False
+
+    for _ in range(20):
+        await asyncio.sleep(0.25)
+        if await _helper_healthcheck():
+            return True
+    logger.warning("windows helper did not become healthy in time")
+    return False
+
+
+async def _maybe_execute_windows_helper(action: str, args: dict) -> str | None:
+    if not _windows_helper_enabled():
+        return None
+    output, error = await _helper_post(action, args, timeout=60)
+    if output is not None:
+        return output
+    if not await _ensure_windows_helper_started():
+        logger.info("windows helper unavailable for %s, falling back to local path (%s)", action, error)
+        return None
+    output, error = await _helper_post(action, args, timeout=60)
+    if output is not None:
+        return output
+    logger.warning("windows helper call failed for %s, falling back to local path: %s", action, error)
+    return None
+
+
 async def _run_usecomputer_json(body: str, timeout: int = 30) -> tuple[dict | None, str | None]:
     return await _run_powershell_json(body, timeout=timeout)
 
@@ -574,6 +675,9 @@ def _extract_mcp_image(content: list[dict] | None) -> tuple[str | None, str | No
 
 
 async def execute_windows_screenshot(args: dict) -> str:
+    helper_result = await _maybe_execute_windows_helper("screenshot", args)
+    if helper_result is not None:
+        return helper_result
     requested_provider = args.get("provider")
     if error := _provider_error(requested_provider):
         return error
@@ -689,6 +793,9 @@ try {{
 
 
 async def execute_windows_mouse_move(args: dict) -> str:
+    helper_result = await _maybe_execute_windows_helper("mouse_move", args)
+    if helper_result is not None:
+        return helper_result
     requested_provider = args.get("provider")
     if error := _provider_error(requested_provider):
         return error
@@ -728,6 +835,9 @@ $result = Invoke-Usecomputer -Args @('mouse', 'move', '-x', {_ps_quote(str(x))},
 
 
 async def execute_windows_click(args: dict) -> str:
+    helper_result = await _maybe_execute_windows_helper("click", args)
+    if helper_result is not None:
+        return helper_result
     requested_provider = args.get("provider")
     if error := _provider_error(requested_provider):
         return error
@@ -779,6 +889,9 @@ $result = Invoke-Usecomputer -Args @('click', '-x', {_ps_quote(str(x))}, '-y', {
 
 
 async def execute_windows_type(args: dict) -> str:
+    helper_result = await _maybe_execute_windows_helper("type", args)
+    if helper_result is not None:
+        return helper_result
     requested_provider = args.get("provider")
     if error := _provider_error(requested_provider):
         return error
@@ -835,6 +948,9 @@ $result = Invoke-Usecomputer -Args @('type', {_ps_quote(text)})
 
 
 async def execute_windows_key(args: dict) -> str:
+    helper_result = await _maybe_execute_windows_helper("key", args)
+    if helper_result is not None:
+        return helper_result
     requested_provider = args.get("provider")
     if error := _provider_error(requested_provider):
         return error
@@ -881,6 +997,9 @@ $result = Invoke-Usecomputer -Args @('press', {_ps_quote(key)})
 
 
 async def execute_windows_scroll(args: dict) -> str:
+    helper_result = await _maybe_execute_windows_helper("scroll", args)
+    if helper_result is not None:
+        return helper_result
     requested_provider = args.get("provider")
     if error := _provider_error(requested_provider):
         return error
@@ -936,6 +1055,9 @@ $result = Invoke-Usecomputer -Args @({', '.join(arg_parts)})
 
 
 async def execute_windows_reset_input_state(args: dict) -> str:
+    helper_result = await _maybe_execute_windows_helper("reset_input_state", args)
+    if helper_result is not None:
+        return helper_result
     await _best_effort_reset_windows_input_state()
     state, error = await _get_windows_input_state()
     if error:
@@ -952,6 +1074,9 @@ async def execute_windows_reset_input_state(args: dict) -> str:
 
 
 async def execute_windows_window_list(args: dict) -> str:
+    helper_result = await _maybe_execute_windows_helper("window_list", args)
+    if helper_result is not None:
+        return helper_result
     requested_provider = args.get("provider")
     if error := _provider_error(requested_provider):
         return error
@@ -977,6 +1102,9 @@ if ({_ps_bool(pid > 0)}) {{
 
 
 async def execute_windows_window_focus(args: dict) -> str:
+    helper_result = await _maybe_execute_windows_helper("window_focus", args)
+    if helper_result is not None:
+        return helper_result
     requested_provider = args.get("provider")
     if error := _provider_error(requested_provider):
         return error
@@ -1017,6 +1145,9 @@ Start-Sleep -Milliseconds 120
 
 
 async def execute_windows_window_close(args: dict) -> str:
+    helper_result = await _maybe_execute_windows_helper("window_close", args)
+    if helper_result is not None:
+        return helper_result
     requested_provider = args.get("provider")
     if error := _provider_error(requested_provider):
         return error
@@ -1086,6 +1217,9 @@ if ($remaining -and {_ps_bool(force)}) {{
 
 
 async def execute_windows_info(args: dict) -> str:
+    helper_result = await _maybe_execute_windows_helper("info", args)
+    if helper_result is not None:
+        return helper_result
     requested_provider = args.get("provider")
     if error := _provider_error(requested_provider):
         return error

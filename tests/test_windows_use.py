@@ -6,6 +6,11 @@ from tools.schemas import TOOL_SCHEMA_MAP
 from tools import windows_use
 
 
+@pytest.fixture(autouse=True)
+def _disable_helper_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HASHI_WINDOWS_HELPER", "0")
+
+
 def test_resolve_provider_auto_routes_by_action() -> None:
     assert windows_use._resolve_provider("auto", "screenshot") == "windows-mcp"
     assert windows_use._resolve_provider("auto", "mouse_move") == "windows-mcp"
@@ -128,6 +133,44 @@ async def test_windows_key_focuses_selected_window_inline(monkeypatch: pytest.Mo
     )
 
     assert result == "Pressed 'ctrl+l' on Windows host via usecomputer"
+    assert reset_calls == ["reset"]
+
+
+@pytest.mark.asyncio
+async def test_windows_click_prefers_helper_when_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_helper(action: str, args: dict) -> str | None:
+        assert action == "click"
+        assert args["x"] == 10
+        return "helper-click-ok"
+
+    monkeypatch.setattr(windows_use, "_maybe_execute_windows_helper", fake_helper)
+
+    result = await windows_use.execute_windows_click({"x": 10, "y": 20})
+
+    assert result == "helper-click-ok"
+
+
+@pytest.mark.asyncio
+async def test_windows_click_falls_back_when_helper_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    reset_calls: list[str] = []
+
+    async def fake_helper(action: str, args: dict) -> str | None:
+        return None
+
+    async def fake_usecomputer(body: str, timeout: int = 30):
+        assert "Invoke-Usecomputer -Args @('click'" in body
+        return {"ok": True, "output": ""}, None
+
+    async def fake_reset() -> None:
+        reset_calls.append("reset")
+
+    monkeypatch.setattr(windows_use, "_maybe_execute_windows_helper", fake_helper)
+    monkeypatch.setattr(windows_use, "_run_usecomputer_json", fake_usecomputer)
+    monkeypatch.setattr(windows_use, "_best_effort_reset_windows_input_state", fake_reset)
+
+    result = await windows_use.execute_windows_click({"provider": "usecomputer", "x": 10, "y": 20})
+
+    assert result == "Clicked (10, 20) button=left count=1 on Windows host"
     assert reset_calls == ["reset"]
 
 
