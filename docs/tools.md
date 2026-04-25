@@ -299,6 +299,13 @@ gh run list                             # list workflow runs
 
 ### Windows Use Tools
 
+The Linux virtual-desktop tier (`desktop_*`) now follows the same stability pattern more closely:
+
+- prefers native `xdotool` actions for mouse / click / key / scroll when available
+- keeps `usecomputer` as the screenshot and fallback path
+- exposes `desktop_window_list` / `desktop_window_focus` for WSL/X11 window introspection and targeting
+- makes `desktop_info` more explicit about live display sockets and active-window state
+
 HASHI also supports a separate `windows_*` tool tier for controlling the real Windows desktop.
 
 - Intended for agents running on Windows directly, or inside WSL using `powershell.exe` interop

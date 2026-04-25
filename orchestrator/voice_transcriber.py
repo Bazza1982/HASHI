@@ -97,14 +97,12 @@ class VoiceTranscriber:
         if not audio_path.exists():
             return f"[Transcription error] File not found: {audio_path}"
 
-        async with self._lock:
-            # Lazy load on first call
-            if self._model is None:
-                loop = asyncio.get_event_loop()
-                await loop.run_in_executor(None, self._load_model)
-
         loop = asyncio.get_event_loop()
         try:
+            async with self._lock:
+                # Lazy load on first call
+                if self._model is None:
+                    await loop.run_in_executor(None, self._load_model)
             text = await loop.run_in_executor(None, self._transcribe_sync, str(audio_path))
             return text
         except Exception as e:
