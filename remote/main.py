@@ -19,6 +19,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import signal
 import socket
 import sys
@@ -35,6 +36,7 @@ from remote.api.server import create_app
 from remote.peer.base import PeerInfo
 from remote.peer.lan import LanDiscovery
 from remote.peer.registry import PeerRegistry
+from remote.peer.tailscale import TailscaleDiscovery
 from remote.security.pairing import PairingManager
 from remote.security.tls import load_or_generate_cert
 from remote.terminal.executor import TerminalExecutor, AuthLevel
@@ -42,6 +44,39 @@ from remote.terminal.executor import TerminalExecutor, AuthLevel
 logger = logging.getLogger(__name__)
 
 DEFAULT_PORT = 8766
+
+
+def _load_remote_config(hashi_root: Path) -> dict:
+    config_path = hashi_root / "remote" / "config.yaml"
+    if not config_path.exists():
+        return {}
+    server = {}
+    security = {}
+    discovery = {}
+    current = None
+    for raw_line in config_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.split("#", 1)[0].rstrip()
+        if not line:
+            continue
+        if not line.startswith(" "):
+            key = line.rstrip(":")
+            current = key
+            continue
+        if ":" not in line or not current:
+            continue
+        key, value = [part.strip() for part in line.split(":", 1)]
+        value = value.strip("\"'")
+        target = {"server": server, "security": security, "discovery": discovery}.get(current)
+        if target is None:
+            continue
+        if value.lower() in {"true", "false"}:
+            target[key] = value.lower() == "true"
+        else:
+            try:
+                target[key] = int(value)
+            except ValueError:
+                target[key] = value
+    return {"server": server, "security": security, "discovery": discovery}
 
 
 def _load_agents_config(hashi_root: Path) -> dict:
@@ -103,6 +138,7 @@ class HashiRemoteApplication:
         use_tls: bool = True,
         lan_mode: bool = True,
         max_terminal_level: str = "L2_WRITE",
+        discovery_backend: str = "lan",
         verbose: bool = False,
     ):
         self._hashi_root = hashi_root or Path(__file__).resolve().parent.parent
@@ -111,11 +147,12 @@ class HashiRemoteApplication:
         self._use_tls = use_tls
         self._lan_mode = lan_mode
         self._max_terminal_level = AuthLevel[max_terminal_level]
+        self._discovery_backend = discovery_backend
         self._verbose = verbose
 
         self._shutdown_event = threading.Event()
         self._uvicorn_server: Optional[uvicorn.Server] = None
-        self._discovery: Optional[LanDiscovery] = None
+        self._discovery = None
         self._registry: Optional[PeerRegistry] = None
 
     def _setup_logging(self) -> None:
@@ -144,6 +181,7 @@ class HashiRemoteApplication:
         logger.info("  Platform : %s", instance_info["platform"])
         logger.info("  Peer port: %d  |  Workbench: %d", self._port, workbench_port)
         logger.info("  LAN mode : %s", "on" if self._lan_mode else "off")
+        logger.info("  Discovery: %s", self._discovery_backend)
         logger.info("═" * 55)
 
         # Components
@@ -155,10 +193,17 @@ class HashiRemoteApplication:
 
         # Peer registry + discovery
         self._registry = PeerRegistry(self._hashi_root, instance_id)
-        self._discovery = LanDiscovery(
-            self_instance_id=instance_id,
-            on_peers_changed=self._registry.on_peers_changed,
-        )
+        if self._discovery_backend == "tailscale":
+            self._discovery = TailscaleDiscovery(
+                self_instance_id=instance_id,
+                hashi_root=self._hashi_root,
+                on_peers_changed=self._registry.on_peers_changed,
+            )
+        else:
+            self._discovery = LanDiscovery(
+                self_instance_id=instance_id,
+                on_peers_changed=self._registry.on_peers_changed,
+            )
 
         peer_self = PeerInfo(
             instance_id=instance_id,
@@ -170,12 +215,12 @@ class HashiRemoteApplication:
             hashi_version=instance_info["hashi_version"],
         )
 
-        # Start mDNS advertising
+        # Start discovery/advertising
         ok = await self._discovery.advertise(peer_self)
         if ok:
-            logger.info("mDNS: advertising as %s", instance_id)
+            logger.info("%s: advertising as %s", self._discovery.backend_name, instance_id)
         else:
-            logger.warning("mDNS: failed to start advertising — peer discovery unavailable")
+            logger.warning("%s: failed to start discovery/advertising", self._discovery_backend)
 
         # Create FastAPI app
         app = create_app(
@@ -244,11 +289,13 @@ def parse_args() -> argparse.Namespace:
         description="Hashi Remote — LAN peer communication for HASHI instances",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--host", default="0.0.0.0", help="Bind address")
+    parser.add_argument("--host", default=None, help="Bind address")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Peer API port")
     parser.add_argument("--no-tls", action="store_true", help="Disable TLS (dev/debug only)")
     parser.add_argument("--no-lan-mode", action="store_true",
                         help="Require token auth even on LAN (for internet deployments)")
+    parser.add_argument("--discovery", choices=["lan", "tailscale"], default=None,
+                        help="Peer discovery backend")
     parser.add_argument("--max-terminal-level", default="L2_WRITE",
                         choices=["L0_READ_ONLY", "L1_READ_FILES", "L2_WRITE", "L3_RESTART"],
                         help="Maximum allowed terminal auth level")
@@ -263,14 +310,25 @@ def main() -> int:
     hashi_root = args.hashi_root
     if hashi_root is None:
         hashi_root = Path(__file__).resolve().parent.parent
+    config = _load_remote_config(hashi_root)
+    server_cfg = config.get("server", {})
+    security_cfg = config.get("security", {})
+    discovery_cfg = config.get("discovery", {})
+
+    host = args.host or server_cfg.get("host", "0.0.0.0")
+    port = args.port if args.port != DEFAULT_PORT else server_cfg.get("port", DEFAULT_PORT)
+    use_tls = not args.no_tls if args.no_tls else server_cfg.get("use_tls", True)
+    lan_mode = not args.no_lan_mode if args.no_lan_mode else security_cfg.get("lan_mode", True)
+    discovery_backend = args.discovery or os.getenv("HASHI_REMOTE_DISCOVERY") or discovery_cfg.get("backend", "lan")
 
     app = HashiRemoteApplication(
         hashi_root=hashi_root,
-        host=args.host,
-        port=args.port,
-        use_tls=not args.no_tls,
-        lan_mode=not args.no_lan_mode,
+        host=host,
+        port=port,
+        use_tls=use_tls,
+        lan_mode=lan_mode,
         max_terminal_level=args.max_terminal_level,
+        discovery_backend=discovery_backend,
         verbose=args.verbose,
     )
     return app.run()

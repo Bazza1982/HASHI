@@ -5,7 +5,7 @@ Born from Lily Remote (the first real project by Barry & XiaoLei 🌸),
 repurposed and upgraded as an official HASHI component.
 
 Architecture:
-  - peer/     : Discovery abstraction (LAN mDNS today, Tailscale-ready tomorrow)
+  - peer/     : Discovery abstraction (LAN mDNS + Tailscale)
   - api/      : FastAPI server (hchat relay, terminal exec, peer listing)
   - security/ : TLS, auth, pairing
   - terminal/ : Shell command execution with authorization levels

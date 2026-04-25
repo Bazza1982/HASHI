@@ -23,7 +23,7 @@ terminal:
   timeout_seconds: 30
 
 discovery:
-  # Backend: "lan" (mDNS) or "tailscale" (future)
+  # Backend: "lan" (mDNS) or "tailscale"
   backend: "lan"
   # mDNS service type — do not change unless you know what you're doing
   service_type: "_hashi._tcp.local."

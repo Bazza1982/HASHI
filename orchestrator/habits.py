@@ -101,7 +101,7 @@ def infer_task_type(prompt: str, source: str = "", summary: str = "") -> str | N
 
     hchat_terms = (
         "hchat", "lily", "shared context", "shared memory", "handoff",
-        "cross-agent", "cross instance", "coordination", "mailbox",
+        "cross-agent", "cross instance", "coordination", "hchat",
         "上下文", "共享记忆", "共享上下文", "发消息给", "找小蕾", "问小蕾", "跨 agent",
     )
     cron_terms = (
@@ -3391,7 +3391,7 @@ class HabitStore:
 
         if task_type == "coordination_hchat":
             evidence = (
-                "hchat", "lily", "mailbox", "handoff", "shared context",
+                "hchat", "lily", "handoff", "shared context",
                 "shared memory", "小蕾", "共享上下文", "共享记忆", "跨 agent",
             )
             return any(token in corpus for token in evidence)
@@ -3484,13 +3484,13 @@ class HabitStore:
             ("coordination_hchat", True): {
                 "habit_type": "do",
                 "title": "Use Lily For Shared Context",
-                "instruction": "遇到共享上下文、跨 agent 协作或系统记忆相关请求时，优先通过 Lily、Hchat 或 mailbox 获取桥接证据，不要假设当前会话记忆可靠。",
+                "instruction": "遇到共享上下文、跨 agent 协作或系统记忆相关请求时，优先通过 Lily、Hchat、instances.json 或其它桥接证据获取事实，不要假设当前会话记忆可靠。",
                 "rationale": "runtime success pattern for cross-agent/shared-context coordination",
             },
             ("coordination_hchat", False): {
                 "habit_type": "avoid",
                 "title": "Avoid Session-Only Coordination Assumptions",
-                "instruction": "处理共享上下文、跨 agent 协作或系统记忆问题时，不要只依赖当前会话记忆；先查 Lily、Hchat、mailbox 或其它 bridge 证据。",
+                "instruction": "处理共享上下文、跨 agent 协作或系统记忆问题时，不要只依赖当前会话记忆；先查 Lily、Hchat、instances.json、contacts 或其它 bridge 证据。",
                 "rationale": "runtime failure pattern for cross-agent/shared-context coordination",
             },
             ("scheduling_cron", True): {
@@ -3510,7 +3510,7 @@ class HabitStore:
 
     def _candidate_synonyms_for_task(self, task_type: str) -> list[str]:
         if task_type == "coordination_hchat":
-            return ["shared context", "shared memory", "handoff", "mailbox", "小蕾", "共享上下文", "共享记忆"]
+            return ["shared context", "shared memory", "handoff", "hchat", "小蕾", "共享上下文", "共享记忆"]
         if task_type == "scheduling_cron":
             return ["cron", "scheduler", "heartbeat", "tasks.json", "定时任务", "计划任务", "调度"]
         return []
@@ -3519,7 +3519,7 @@ class HabitStore:
         normalized = _normalize_text(corpus)
         keywords: list[str] = []
         if task_type == "coordination_hchat":
-            candidates = ["lily", "hchat", "mailbox", "handoff", "小蕾", "共享上下文", "共享记忆", "跨 agent"]
+            candidates = ["lily", "hchat", "instances.json", "contacts", "handoff", "小蕾", "共享上下文", "共享记忆", "跨 agent"]
         elif task_type == "scheduling_cron":
             candidates = ["cron", "scheduler", "heartbeat", "tasks.json", "systemd", "timer", "定时任务", "计划任务", "调度"]
         else:

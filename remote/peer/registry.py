@@ -10,6 +10,7 @@ This is the bridge between mDNS discovery and HASHI's existing routing.
 
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -22,9 +23,11 @@ class PeerRegistry:
     """
     Maintains the live peer list and syncs it to instances.json.
 
-    When a peer is discovered via mDNS, we update instances.json with:
-      - lan_ip: the real IP address on the local network
-      - remote_port: the Hashi Remote peer port (8766)
+    When a peer is discovered, we update instances.json with:
+      - lan_ip or tailscale_ip depending on discovery backend
+      - remote_port: the Hashi Remote peer port
+      - workbench_port: the peer's Workbench API port
+      - last_seen: unix timestamp
       - active: true
 
     hchat_send.py reads lan_ip (if present) instead of api_host,
@@ -61,30 +64,45 @@ class PeerRegistry:
             changed = False
             for iid, peer in self._peers.items():
                 key = iid.lower()
+                discovery = peer.properties.get("discovery", "mdns")
+                host_key = "tailscale_ip" if discovery == "tailscale" else "lan_ip"
+                now = int(time.time())
                 if key not in instances:
                     # New instance discovered on LAN — add it
                     instances[key] = {
                         "display_name": peer.display_name,
+                        "instance_id": iid,
                         "platform": peer.platform,
                         "workbench_port": peer.workbench_port,
                         "api_host": peer.host,
-                        "lan_ip": peer.host,
+                        host_key: peer.host,
                         "remote_port": peer.port,
                         "active": True,
-                        "_discovery": "mdns",
+                        "_discovery": discovery,
+                        "last_seen": now,
                     }
                     logger.info("Registry: added new peer %s @ %s", iid, peer.host)
                     changed = True
                 else:
                     # Update IP/port if changed
                     entry = instances[key]
-                    if entry.get("lan_ip") != peer.host or entry.get("remote_port") != peer.port:
-                        entry["lan_ip"] = peer.host
+                    if (
+                        entry.get(host_key) != peer.host
+                        or entry.get("remote_port") != peer.port
+                        or entry.get("workbench_port") != peer.workbench_port
+                        or entry.get("_discovery") != discovery
+                    ):
+                        entry[host_key] = peer.host
                         entry["remote_port"] = peer.port
+                        entry["workbench_port"] = peer.workbench_port
                         entry["api_host"] = peer.host
                         entry["active"] = True
-                        entry["_discovery"] = "mdns"
+                        entry["_discovery"] = discovery
+                        entry["last_seen"] = now
                         logger.info("Registry: updated peer %s → %s:%d", iid, peer.host, peer.port)
+                        changed = True
+                    elif entry.get("last_seen") != now:
+                        entry["last_seen"] = now
                         changed = True
 
             if changed:

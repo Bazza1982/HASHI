@@ -37,7 +37,6 @@ AUTO_IGNORE_PATTERNS = [
     ("log_file", r"\.log$", "日志文件"),
     ("sqlite_file", r"\.sqlite(-shm|-wal)?$", "SQLite 数据库文件"),
     # 已知私有目录
-    ("mailbox", r"^mailbox/", "内部通讯目录"),
     ("flow_runs", r"^flow/runs/", "Flow 运行记录"),
     ("flow_lib", r"^flow/workflows/library/", "Flow 私有工作流"),
     ("sessions", r"workspaces/.*/sessions/", "会话状态目录"),
