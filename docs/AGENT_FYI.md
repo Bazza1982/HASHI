@@ -171,14 +171,17 @@ Requires `xdotool` installed: `sudo apt-get install -y xdotool`
 Agents can control the real Windows desktop through the `windows_*` tool tier.
 This is designed for HASHI agents running either directly on Windows or inside WSL.
 
-**Available tools:** `windows_screenshot`, `windows_click`, `windows_type`, `windows_key`, `windows_mouse_move`, `windows_scroll`, `windows_info`
+**Available tools:** `windows_screenshot`, `windows_click`, `windows_type`, `windows_key`, `windows_mouse_move`, `windows_scroll`, `windows_info`, `windows_window_list`, `windows_window_focus`, `windows_window_close`
 
-**Current backend:** `usecomputer` on the Windows host, launched through `powershell.exe`.
+**Current backends:** `usecomputer` plus `windows-mcp` on the Windows host, launched through `powershell.exe`.
 
 **Important behavior:**
 - Intended for the real interactive Windows desktop, not the Linux virtual desktop.
 - Best reliability when Windows is unlocked.
 - From WSL, tool calls cross the WSL ↔ Windows boundary automatically.
+- `provider=auto` picks the smoother backend per action.
+- `windows_type` can focus a target window first.
+- `windows_window_close` supports optional unsaved-prompt dismissal and explicit force close.
 
 **For OpenRouter API agents** — add the `windows_use` tier to `agents.json`:
 ```json
@@ -192,6 +195,91 @@ This is designed for HASHI agents running either directly on Windows or inside W
 ```powershell
 npm install -g usecomputer
 ```
+
+**Effective Windows Chrome extension workflow (known good):**
+
+1. Use `windows_window_list` to find a Chrome window.
+2. Use `windows_window_focus` to bring that window forward.
+3. Navigate with:
+   - `windows_key` → `ctrl+l`
+   - `windows_type` → target URL
+   - `windows_key` → `ENTER`
+4. Prefer a real site for bridge verification:
+   - `https://scholar.google.com`
+   - `https://www.wikipedia.org/`
+   - `https://arxiv.org/`
+5. Verify the bridge from WSL/Linux side with bridge-owned evidence:
+```bash
+python3 - <<'PY'
+from tools.browser_extension_bridge import healthcheck, send_bridge_command
+import json
+print(json.dumps(healthcheck(socket_path='/tmp/hashi-browser-bridge.sock'), indent=2))
+print(json.dumps(send_bridge_command('active_tab', {}, socket_path='/tmp/hashi-browser-bridge.sock'), ensure_ascii=False)[:2000])
+PY
+```
+
+**Known good Windows live socket:**
+- `/tmp/hashi-browser-bridge.sock`
+
+**Known good Windows live extension action surface:**
+- `active_tab`
+- `get_text`
+- `get_html`
+- `screenshot`
+- `click`
+- `fill`
+- `evaluate`
+
+**Important control detail:**
+- `active_tab(args.url=...)` is a live control action.
+- It updates the real active Windows Chrome tab to the target URL and waits for completion.
+- This means the extension can be used on authenticated sites too, if the user's Chrome session is already logged in.
+
+**Known live extension id on this host:**
+- `jdeaedmoejdapldleofeggedgenogpka`
+
+**Important Windows live cautions:**
+- `chrome://` pages are usually non-scriptable:
+  - `get_text` may fail there by design
+- `screenshot` can fail on `chrome://newtab/` or other internal pages before the extension has an effective page invocation
+- The visible Chrome UI may be misleading:
+  - a narrow side-window or suggestions overlay can remain on screen
+  - the bridge may still be fully healthy behind that UI
+- If UI and bridge state disagree, trust bridge-owned evidence first:
+  - `/tmp/hashi-browser-bridge.sock`
+  - `logs/browser_native_host.log`
+  - Chrome profile `Secure Preferences`
+
+**Known good Windows live outcomes already verified:**
+- `active_tab` on real sites
+- `get_text` on Google Scholar / Wikipedia / arXiv
+- `screenshot` on Wikipedia / arXiv
+- Gmail inbox access through the already logged-in Chrome session
+- `fill` on the Wikipedia search input
+- `evaluate('document.title')` returning `Wikipedia`
+- `evaluate('JSON.stringify({title: document.title})')` returning serialized JSON
+- `click('button[type="submit"]')` causing real navigation to Wikipedia search results
+
+**Important unpacked-extension update detail:**
+- after changing service worker code on disk, a plain Chrome restart was not always enough for the running unpacked extension
+- on this host, the reliable update sequence was:
+  - focus the real Chrome window
+  - open `chrome://extensions`
+  - press `Tab` 11 times
+  - press `Enter`
+- this was the step that changed live Windows behavior from:
+  - `unsupported action: fill`
+  - `unsupported action: evaluate`
+  to:
+  - working `fill`, `click`, and `evaluate`
+- for `evaluate`, the known-good implementation uses `chrome.scripting.executeScript(..., world: "MAIN")`
+
+**Practical rule moving forward:**
+- Do not assume the Windows desktop view alone tells the truth.
+- Always pair `windows_*` actions with:
+  - bridge socket checks
+  - native host log checks
+  - direct `send_bridge_command(...)` verification
 
 ## Telegram File Sending
 
@@ -248,7 +336,7 @@ Session is saved in `wa_session/` — subsequent starts do not need a QR scan.
 
 **方法：**
 - **同实例（HASHI1）：** 直接发消息给 lily
-- **跨实例（HASHI2/HASHI9等）：** 通过 Cross-Instance Mailbox 发消息到 HASHI1 的 lily，或使用 `/ask lily 你的问题`
+- **跨实例（HASHI2/HASHI9等）：** 优先使用 Hchat / Workbench live chat 联系 HASHI1 的 lily，或使用 `/ask lily 你的问题`
 
 **查询权限：**
 - system 域（系统知识）：所有 agent 可查询
@@ -297,70 +385,26 @@ Arale serves as the system's IT Support agent. When you encounter a technical is
 
 **Ticket statuses:** `open` → `in_progress` → `resolved`
 
-## Cross-Instance Mailbox — Inter-Instance Agent Messaging
+## Mailbox Status
 
-HASHI instances can send messages to agents on other instances via a shared file-based mailbox. No API or network protocol is needed — all instances share filesystem access.
+Cross-Instance Mailbox is retired.
 
-### Instance Paths
-
-| Instance | Mailbox Path (from WSL) |
-|----------|------------------------|
-| HASHI1 | `/home/lily/projects/hashi/mailbox/incoming/` |
-| HASHI2 | `/home/lily/projects/hashi2/mailbox/incoming/` |
-| HASHI9 | `/mnt/c/Users/thene/projects/HASHI/mailbox/incoming/` |
-
-From Windows, use the equivalent UNC/native paths:
-- HASHI1: `\\wsl.localhost\Ubuntu-22.04\home\lily\projects\hashi\mailbox\incoming\`
-- HASHI2: `\\wsl.localhost\Ubuntu-22.04\home\lily\projects\hashi2\mailbox\incoming\`
-- HASHI9: `C:\Users\thene\projects\HASHI\mailbox\incoming\`
-
-### Sending a Message
-
-Write a JSON file to the **target instance's** `mailbox/incoming/` directory.
-
-**Filename format:** `{timestamp}_{from_instance}_{from_agent}.json`
-Example: `20260324-053200_HASHI1_hashiko.json`
-
-**Message format:**
-```json
-{
-  "msg_id": "xmsg-20260324-053200-hashiko-akane",
-  "from_instance": "HASHI1",
-  "from_agent": "hashiko",
-  "to_instance": "HASHI9",
-  "to_agent": "hashiko",
-  "intent": "ask",
-  "reply_required": true,
-  "text": "Your message here",
-  "ts": "2026-03-24T05:32:00Z"
-}
-```
-
-**Fields:**
-- `intent`: `ask` | `inform` | `reply` | `task`
-- `reply_required`: if `true`, recipient should reply to sender's mailbox
-- For replies, include `reply_to` with the original `msg_id`
-
-### Receiving Messages
-
-Agents check their instance's `mailbox/incoming/` on demand (when told to check, or during `/fyi`). This is manual — no background polling.
-
-**Processing flow:**
-1. Read files in `mailbox/incoming/`
-2. Move processed messages to `mailbox/done/`
-3. If reply needed, write reply JSON to the sender's `mailbox/incoming/`
-
-### Conflict Prevention
-
-- Filenames include timestamp + source instance + agent — guaranteed unique
-- Write via temp file + rename for atomicity (prevents reading half-written files)
-- Each instance only processes its own `incoming/` — no cross-reading of processing state
+- Do not use mailbox for cross-instance delivery.
+- Do not document mailbox as a fallback path.
+- Hchat / Workbench live chat is the official inter-instance protocol.
 
 ## Hchat — Real-Time Direct Agent Messaging
 
-**Hchat** is the official name for real-time direct messaging between agents across HASHI instances via HTTP API. Use this name to avoid confusion with the file-based mailbox system.
+**Hchat** is the official name for real-time direct messaging between agents across HASHI instances via HTTP API.
 
-Beyond file-based mailbox, agents can communicate **in real-time** via HTTP API between WSL instances and Windows (HASHI9).
+The formal protocol is:
+
+- Identity and routing metadata are separate.
+- Workbench `/api/chat` is the final delivery surface.
+- `instances.json + agents.json + live health` are authoritative.
+- `contacts.json` is only a short-lived cache.
+- `Remote /hchat` is a restricted-network fallback for LAN / internet relay.
+- Mailbox is retired and banned from the formal protocol.
 
 ### Prerequisites — WSL Mirrored Networking
 
@@ -393,10 +437,10 @@ curl -s -X POST http://127.0.0.1:18819/api/chat \
 
 ### Communication Protocol Summary
 
-| Method | Speed | Use Case |
-|--------|-------|---------|
-| **File Mailbox** | Async (manual check) | Reliable delivery, agent offline OK |
-| **Real-Time API** | Synchronous | Live queries, immediate responses |
+| Method | Priority | Use Case |
+|--------|----------|---------|
+| **Workbench `/api/chat`** | Primary | Same instance, cross-instance, and registry-assisted LAN delivery |
+| **`contacts.json` cache** | Secondary | Recently learned routes, refreshed against registry before use |
+| **Remote `/hchat`** | Fallback | Restricted network, relay, or future internet-paired delivery |
 
-Use **file mailbox** when the target instance may be offline or the message can wait.
-Use **real-time API** when you need an immediate response and know the target is running.
+Do not fall back to mailbox.

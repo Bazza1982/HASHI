@@ -400,7 +400,7 @@ HASHI supports multiple communication channels:
 
 #### HChat — Cross-Instance Agent Messaging
 - Agents across different HASHI instances can message each other
-- Routing: local API → remote API → mailbox fallback
+- Routing: local Workbench → contacts cache → registry-assisted Workbench → Remote /hchat fallback
 - JSON protocol with sender/receiver identity
 
 ---
@@ -636,6 +636,81 @@ API-backed agents can execute local actions via the tool system:
 | `windows_window_list` / `windows_window_focus` / `windows_window_close` | Enumerate and control Windows top-level windows |
 
 No `tools` key in config = tools disabled, fully backward compatible.
+
+#### Windows Live Browser Bridge — Known Good Workflow
+
+The Windows desktop-control tier is now good enough to drive a real Windows Chrome extension recovery / verification loop.
+
+Recommended workflow for agents:
+
+1. Use `windows_window_list` to find the real Chrome window.
+2. Use `windows_window_focus` on that window.
+3. Drive navigation with:
+   - `windows_key` → `ctrl+l`
+   - `windows_type` → target URL
+   - `windows_key` → `ENTER`
+4. Verify the extension bridge through bridge-owned evidence, not only by what the desktop looks like:
+   - native host log: `logs/browser_native_host.log`
+   - socket: `/tmp/hashi-browser-bridge.sock`
+   - `tools.browser_extension_bridge.healthcheck(...)`
+5. On real pages, verify:
+   - `active_tab`
+   - `get_text`
+   - `screenshot`
+
+What the installed Windows extension is confirmed to do:
+
+- `active_tab`
+- `get_text`
+- `get_html`
+- `screenshot`
+- `click`
+- `fill`
+- `evaluate`
+
+Important detail:
+
+- `active_tab(args.url=...)` is a real control action, not just inspection.
+- It can drive the active Windows Chrome tab to a target URL and wait for load completion.
+- That makes it usable for authenticated-session checks too, as long as the user's Chrome session is already logged in.
+
+Known-good Windows live results have been verified on:
+
+- Google Scholar
+- Wikipedia
+- arXiv
+- Gmail inbox access through the user's already logged-in Chrome session
+
+Known-good Windows live interaction details:
+
+- after editing an unpacked extension already running in Chrome, a plain browser restart was not always enough to pick up the new service worker code
+- on this host, the reliable update sequence was:
+  - focus the real Chrome window
+  - open `chrome://extensions`
+  - press `Tab` 11 times
+  - press `Enter`
+- this was the sequence that moved the live bridge from:
+  - `unsupported action: fill`
+  - `unsupported action: evaluate`
+  to:
+  - real `fill`, `click`, and `evaluate` execution
+- `evaluate` is now known-good when executed in the page main world:
+  - `evaluate('document.title')` returned `Wikipedia`
+  - `evaluate('JSON.stringify({title: document.title})')` returned serialized JSON
+- `fill` successfully wrote `OpenAI` into the Wikipedia search input
+- `click('button[type="submit"]')` triggered real navigation to Wikipedia search results
+
+Known caveats:
+
+- `chrome://` pages are often non-scriptable, so `get_text` can fail there by design.
+- `screenshot` can fail on Chrome internal pages before the extension has an effective page-level invocation.
+- The visible Windows Chrome UI can be misleading:
+  - a narrow side window or suggestions overlay may remain visible
+  - the bridge itself can still be healthy behind that UI
+- When desktop visuals and bridge status disagree, prefer bridge-owned evidence:
+  - socket
+  - native host log
+  - Chrome profile extension state
 
 ---
 
