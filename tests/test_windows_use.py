@@ -12,10 +12,10 @@ def _disable_helper_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_resolve_provider_auto_routes_by_action() -> None:
-    assert windows_use._resolve_provider("auto", "screenshot") == "windows-mcp"
-    assert windows_use._resolve_provider("auto", "mouse_move") == "windows-mcp"
-    assert windows_use._resolve_provider("auto", "click") == "windows-mcp"
-    assert windows_use._resolve_provider("auto", "scroll") == "windows-mcp"
+    assert windows_use._resolve_provider("auto", "screenshot") == "usecomputer"
+    assert windows_use._resolve_provider("auto", "mouse_move") == "usecomputer"
+    assert windows_use._resolve_provider("auto", "click") == "usecomputer"
+    assert windows_use._resolve_provider("auto", "scroll") == "usecomputer"
     assert windows_use._resolve_provider("auto", "type") == "usecomputer"
     assert windows_use._resolve_provider("auto", "key") == "usecomputer"
     assert windows_use._resolve_provider("auto", "window_focus") == "usecomputer"
@@ -57,6 +57,7 @@ def test_windows_tool_schemas_include_window_controls_and_stability_args() -> No
     assert "windows_window_list" in TOOL_SCHEMA_MAP
     assert "windows_window_focus" in TOOL_SCHEMA_MAP
     assert "windows_reset_input_state" in TOOL_SCHEMA_MAP
+    assert "windows_helper_warmup" in TOOL_SCHEMA_MAP
     close_props = TOOL_SCHEMA_MAP["windows_window_close"]["function"]["parameters"]["properties"]
     type_props = TOOL_SCHEMA_MAP["windows_type"]["function"]["parameters"]["properties"]
     key_props = TOOL_SCHEMA_MAP["windows_key"]["function"]["parameters"]["properties"]
@@ -90,6 +91,29 @@ async def test_windows_screenshot_auto_falls_back_to_usecomputer(monkeypatch: py
     result = await windows_use.execute_windows_screenshot({"provider": "auto"})
 
     assert "provider=usecomputer" in result
+
+
+@pytest.mark.asyncio
+async def test_windows_screenshot_passes_resolved_save_path_to_helper(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = {}
+
+    async def fake_helper(action: str, args: dict) -> str | None:
+        seen["action"] = action
+        seen["args"] = dict(args)
+        return "helper-screenshot-ok"
+
+    monkeypatch.setattr(windows_use, "_maybe_execute_windows_helper", fake_helper)
+    monkeypatch.setattr(
+        windows_use,
+        "_resolve_windows_save_path",
+        lambda value: (r"C:\tmp\shot.png", None) if value else (None, None),
+    )
+
+    result = await windows_use.execute_windows_screenshot({"save_path": "/tmp/shot.png"})
+
+    assert result == "helper-screenshot-ok"
+    assert seen["action"] == "screenshot"
+    assert seen["args"]["save_path"] == r"C:\tmp\shot.png"
 
 
 @pytest.mark.asyncio
@@ -148,6 +172,39 @@ async def test_windows_click_prefers_helper_when_available(monkeypatch: pytest.M
     result = await windows_use.execute_windows_click({"x": 10, "y": 20})
 
     assert result == "helper-click-ok"
+
+
+@pytest.mark.asyncio
+async def test_ensure_windows_helper_started_uses_pythonpath_not_working_directory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    health_calls = {"count": 0}
+    seen = {}
+
+    async def fake_healthcheck(timeout: int = 3) -> bool:
+        health_calls["count"] += 1
+        return health_calls["count"] >= 2
+
+    async def fake_run_powershell_json(body: str, timeout: int = 30):
+        seen["body"] = body
+        return {"ok": True}, None
+
+    monkeypatch.setattr(windows_use, "_helper_healthcheck", fake_healthcheck)
+    monkeypatch.setattr(windows_use, "_run_powershell_json", fake_run_powershell_json)
+    monkeypatch.setattr(
+        windows_use,
+        "_resolve_windows_save_path",
+        lambda path: (r"\\\\wsl.localhost\\Ubuntu-22.04\\home\\lily\\projects\\hashi", None),
+    )
+
+    started = await windows_use._ensure_windows_helper_started()
+
+    assert started is True
+    assert "$env:PYTHONPATH" in seen["body"]
+    assert "-WorkingDirectory $repoRoot" not in seen["body"]
+    assert "-WorkingDirectory $helperWorkingDir" in seen["body"]
+    assert "-WindowStyle Hidden" not in seen["body"]
+    assert "'--with', 'pillow'" in seen["body"]
 
 
 @pytest.mark.asyncio
@@ -215,3 +272,23 @@ async def test_windows_reset_input_state_reports_state(monkeypatch: pytest.Monke
     assert reset_calls == ["reset"]
     assert '"message": "Windows input state reset completed"' in result
     assert '"title": "Chrome"' in result
+
+
+@pytest.mark.asyncio
+async def test_windows_helper_warmup_reports_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HASHI_WINDOWS_HELPER", "1")
+
+    async def fake_start() -> bool:
+        return True
+
+    async def fake_healthcheck(timeout: int = 3) -> bool:
+        return True
+
+    monkeypatch.setattr(windows_use, "_ensure_windows_helper_started", fake_start)
+    monkeypatch.setattr(windows_use, "_helper_healthcheck", fake_healthcheck)
+
+    result = await windows_use.execute_windows_helper_warmup({})
+
+    assert '"ok": true' in result
+    assert '"healthy": true' in result
+    assert "warm and ready" in result

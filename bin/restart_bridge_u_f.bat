@@ -83,10 +83,21 @@ exit /b %ERRORLEVEL%
 rem Exit 0 if a bridge-u-f python process is alive, exit 1 if none found.
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$project = (Resolve-Path '.').Path; " ^
+  "$mainPath = Join-Path $project 'main.py'; " ^
   "$bridgeHome = $env:BRIDGE_HOME; " ^
+  "$bridgeHome = [System.IO.Path]::GetFullPath($bridgeHome).TrimEnd('\'); " ^
+  "function Test-BridgeCmd([string]$cmd){ " ^
+  "  if(-not $cmd){ return $false }; " ^
+  "  if($cmd -match '(?i)--bridge-home\s+(""([^""]+)""|(\S+))'){ " ^
+  "    $candidate = if($matches[2]){ $matches[2] } else { $matches[3] }; " ^
+  "    try { $resolved = [System.IO.Path]::GetFullPath($candidate).TrimEnd('\') } catch { $resolved = $candidate.TrimEnd('\') }; " ^
+  "    return $resolved -ieq $bridgeHome; " ^
+  "  }; " ^
+  "  return [regex]::IsMatch($cmd, '(?i)(^|[""\s])' + [regex]::Escape($mainPath) + '("|\s|$)'); " ^
+  "}; " ^
   "$alive = Get-CimInstance Win32_Process | Where-Object { " ^
   "  $n = [string]$_.Name; $c = [string]$_.CommandLine; " ^
-  "  (($n -ieq 'python.exe' -or $n -ieq 'py.exe') -and $c -and $c -like ('*' + $project + '*main.py*') -and (($c -like ('*--bridge-home*' + $bridgeHome + '*')) -or ($c -notlike '*--bridge-home*'))) " ^
+  "  (($n -ieq 'python.exe' -or $n -ieq 'py.exe') -and (Test-BridgeCmd $c)) " ^
   "} | Select-Object -First 1; " ^
   "if($alive){ exit 0 } else { exit 1 }"
 exit /b %ERRORLEVEL%

@@ -54,6 +54,7 @@ DRY_RUN=0
 
 # State file for resuming
 STATE_FILE="$BRIDGE_HOME/.bridge_u_last_agents.txt"
+BRIDGE_AUDIT_LOG="$SCRIPT_DIR/logs/bridge.log"
 
 # Agent arrays
 declare -a ACTIVE_AGENTS=()
@@ -158,6 +159,11 @@ load_last_state() {
     if [[ -f "$STATE_FILE" ]]; then
         IFS='|' read -r LAST_MODE LAST_AGENTS < "$STATE_FILE" || true
     fi
+}
+
+cmdline_matches_bridge_home() {
+    local cmdline="$1"
+    [[ "$cmdline" == *"main.py --bridge-home $SCRIPT_DIR "* || "$cmdline" == *"main.py --bridge-home $SCRIPT_DIR" ]]
 }
 
 is_in_last() {
@@ -316,6 +322,17 @@ render_menu() {
     echo ""
 }
 
+log_launcher_event() {
+    local message="$1"
+    local ts_launch
+    local ts_bridge
+    ts_launch="$(date +%T)"
+    ts_bridge="$(date '+%Y-%m-%d %H:%M:%S')"
+    echo "[$ts_launch] $message" >> "$BRIDGE_LOG"
+    mkdir -p "$(dirname "$BRIDGE_AUDIT_LOG")" 2>/dev/null || true
+    echo "$ts_bridge [BridgeU.Bridge] INFO     launcher: $message" >> "$BRIDGE_AUDIT_LOG"
+}
+
 choose_agents() {
     clear
     print_banner "AGENT SELECTION" "Choose one or more active agents"
@@ -401,7 +418,7 @@ preflight_check() {
         if [[ -n "$existing_pid" ]] && kill -0 "$existing_pid" 2>/dev/null; then
             local cmdline
             cmdline=$(ps -p "$existing_pid" -o args= 2>/dev/null || true)
-            if [[ ! "$cmdline" =~ main\.py ]]; then
+            if ! cmdline_matches_bridge_home "$cmdline"; then
                 # Not our process, reset
                 existing_pid=""
             fi
@@ -412,20 +429,17 @@ preflight_check() {
     
     # Method 2: Search for running main.py process
     if [[ -z "$existing_pid" ]]; then
-        # Find python processes running main.py with our bridge-home
-        existing_pid=$(pgrep -f "main.py --bridge-home $SCRIPT_DIR" 2>/dev/null | head -1 || true)
-        
-        # Fallback: search all python main.py processes
-        if [[ -z "$existing_pid" ]]; then
-            for pid in $(pgrep -f "python.*main.py" 2>/dev/null || true); do
-                local cmdline
-                cmdline=$(ps -p "$pid" -o args= 2>/dev/null || true)
-                if [[ "$cmdline" =~ "$SCRIPT_DIR/" ]]; then
-                    existing_pid="$pid"
-                    break
-                fi
-            done
-        fi
+        # Search all python main.py processes and require an exact bridge-home match.
+        # This avoids prefix collisions such as /home/lily/projects/hashi matching
+        # /home/lily/projects/hashi2.
+        for pid in $(pgrep -f "python.*main.py" 2>/dev/null || true); do
+            local cmdline
+            cmdline=$(ps -p "$pid" -o args= 2>/dev/null || true)
+            if cmdline_matches_bridge_home "$cmdline"; then
+                existing_pid="$pid"
+                break
+            fi
+        done
     fi
     
     # No running instance found
@@ -446,20 +460,24 @@ preflight_check() {
     echo -e "  ${C_WARN}HASHI is already running (PID $existing_pid)${C_RESET}"
     echo ""
 
-    echo "[$(date +%T)] preflight: found existing PID=$existing_pid FORCE=$FORCE_LAUNCH" >> "$BRIDGE_LOG"
+    log_launcher_event "preflight: found existing PID=$existing_pid FORCE=$FORCE_LAUNCH cmdline=$(ps -p "$existing_pid" -o args= 2>/dev/null || echo '?')"
     if [[ "$FORCE_LAUNCH" == "1" ]]; then
         echo -e "  ${C_MUTED}Force mode: stopping existing instance automatically...${C_RESET}"
+        log_launcher_event "preflight: auto-confirmed shutdown of PID=$existing_pid because --force was set"
     else
         echo -ne "  Kill existing instance and continue? [y/N] "
         read -r -n 1 confirm
         echo ""
         if [[ "${confirm,,}" != "y" ]]; then
+            log_launcher_event "preflight: operator declined shutdown of PID=$existing_pid"
             echo -e "  ${C_MUTED}Aborted.${C_RESET}"
             return 1
         fi
+        log_launcher_event "preflight: operator confirmed shutdown of PID=$existing_pid"
     fi
     
     echo -e "  ${C_MUTED}Stopping existing instance...${C_RESET}"
+    log_launcher_event "preflight: sending SIGTERM to PID=$existing_pid"
     
     # Try graceful kill first
     kill "$existing_pid" 2>/dev/null || true
@@ -470,18 +488,23 @@ preflight_check() {
         sleep 1
         ((waited++)) || true
     done
+    log_launcher_event "preflight: waited ${waited}s for PID=$existing_pid to exit after SIGTERM"
     
     # Force kill if still running
     if kill -0 "$existing_pid" 2>/dev/null; then
         echo -e "  ${C_WARN}Force killing...${C_RESET}"
+        log_launcher_event "preflight: PID=$existing_pid still alive; escalating to SIGKILL"
         kill -9 "$existing_pid" 2>/dev/null || true
         sleep 1
+    else
+        log_launcher_event "preflight: PID=$existing_pid exited cleanly after SIGTERM"
     fi
     
     # Clean up files
     rm -f "$pid_file" "$lock_file" 2>/dev/null
     
     echo -e "  ${C_OK}Previous instance stopped.${C_RESET}"
+    log_launcher_event "preflight: previous instance PID=$existing_pid stopped; cleaned stale lock files"
     sleep 1
     return 0
 }
@@ -572,12 +595,12 @@ else:
     if [[ -f "$wakeup_file" ]]; then
         local hashi_api="http://localhost:${WORKBENCH_PORT:-18800}"
         (
-            echo "[$(date +%T)] wakeup-injector: waiting for HASHI API..." >> "$BRIDGE_LOG"
+            log_launcher_event "wakeup-injector: waiting for HASHI API"
             for i in $(seq 1 40); do
                 sleep 1
                 if curl -sf --max-time 2 "$hashi_api/api/health" >/dev/null 2>&1; then
                     sleep 1  # reduced grace: let agent fully register
-                    echo "[$(date +%T)] wakeup-injector: sending prompt..." >> "$BRIDGE_LOG"
+                    log_launcher_event "wakeup-injector: sending prompt"
                     json_body=$(python3 -c "
 import json, sys
 prompt = open(sys.argv[1], encoding='utf-8').read()
@@ -588,7 +611,7 @@ print(json.dumps({'agent': 'hashiko', 'text': prompt}))
                         -d "$json_body" \
                         >/dev/null 2>&1 && \
                     rm -f "$wakeup_file" && \
-                    echo "[$(date +%T)] wakeup-injector: done, prompt sent and file removed" >> "$BRIDGE_LOG"
+                    log_launcher_event "wakeup-injector: done, prompt sent and file removed"
                     break
                 fi
             done
@@ -596,10 +619,10 @@ print(json.dumps({'agent': 'hashiko', 'text': prompt}))
     fi
     # ────────────────────────────────────────────────────────────────────────
 
-    echo "[$(date +%T)] launching: python3 main.py --bridge-home $BRIDGE_HOME $py_args" >> "$BRIDGE_LOG"
+    log_launcher_event "launching: python3 main.py --bridge-home $BRIDGE_HOME $py_args"
     python3 main.py --bridge-home "$BRIDGE_HOME" $py_args
     local py_exit=$?
-    echo "[$(date +%T)] main.py exited: code=$py_exit" >> "$BRIDGE_LOG"
+    log_launcher_event "main.py exited: code=$py_exit"
 
     echo ""
     echo -e "${C_MUTED}HASHI stopped.${C_RESET}"
@@ -614,14 +637,14 @@ BRIDGE_LOG="$SCRIPT_DIR/bridge_launch.log"
 echo "=== bridge-u.sh start: $(date) args=$* ===" >> "$BRIDGE_LOG"
 _bridge_exit_trap() {
     local code=$?
-    echo "[$(date +%T)] bridge-u.sh EXIT code=$code" >> "$BRIDGE_LOG"
+    log_launcher_event "bridge-u.sh EXIT code=$code"
 }
 trap '_bridge_exit_trap' EXIT
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Initial setup
 ensure_env
-echo "[$(date +%T)] ensure_env done" >> "$BRIDGE_LOG"
+log_launcher_event "ensure_env done"
 
 # -- Onboarding gate --------------------------------------------------------
 _onboarding_complete() {

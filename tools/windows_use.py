@@ -487,14 +487,17 @@ async def _ensure_windows_helper_started() -> bool:
     body = f"""
 $repoRoot = {_ps_quote(repo_root_path)}
 $logDir = Join-Path $env:LOCALAPPDATA "HASHI\\windows_helper\\logs"
+$helperWorkingDir = Join-Path $env:LOCALAPPDATA "HASHI\\windows_helper"
+New-Item -ItemType Directory -Force -Path $helperWorkingDir | Out-Null
 $uv = Resolve-UvInvocation
 if (-not $uv) {{
     throw "uv not found on Windows host. Install with: python -m pip install uv"
 }}
 $argsList = @()
 $argsList += $uv.base_args
-$argsList += @('run', '--no-project', '--with', 'fastapi', '--with', 'uvicorn', '--with', 'fastmcp', '--with', 'windows-mcp', 'python', '-m', 'tools.windows_helper.server', '--host', '127.0.0.1', '--port', {_ps_quote(str(_WINDOWS_HELPER_PORT))}, '--log-dir', $logDir)
-Start-Process -FilePath $uv.command -ArgumentList $argsList -WorkingDirectory $repoRoot -WindowStyle Hidden | Out-Null
+$argsList += @('run', '--no-project', '--with', 'fastapi', '--with', 'uvicorn', '--with', 'fastmcp', '--with', 'windows-mcp', '--with', 'pillow', 'python', '-m', 'tools.windows_helper.server', '--host', '127.0.0.1', '--port', {_ps_quote(str(_WINDOWS_HELPER_PORT))}, '--log-dir', $logDir)
+$env:PYTHONPATH = $(if ($env:PYTHONPATH) {{ $repoRoot + ';' + $env:PYTHONPATH }} else {{ $repoRoot }})
+Start-Process -FilePath $uv.command -ArgumentList $argsList -WorkingDirectory $helperWorkingDir | Out-Null
 @{{ ok = $true }} | ConvertTo-Json -Compress
 """
     data, error = await _run_powershell_json(body, timeout=20)
@@ -535,10 +538,10 @@ def _resolve_provider(provider: str | None, action: str) -> str:
     if normalized != "auto":
         return normalized
     preferred = {
-        "screenshot": "windows-mcp",
-        "mouse_move": "windows-mcp",
-        "click": "windows-mcp",
-        "scroll": "windows-mcp",
+        "screenshot": "usecomputer",
+        "mouse_move": "usecomputer",
+        "click": "usecomputer",
+        "scroll": "usecomputer",
         "type": "usecomputer",
         "key": "usecomputer",
         "window_list": "usecomputer",
@@ -675,17 +678,21 @@ def _extract_mcp_image(content: list[dict] | None) -> tuple[str | None, str | No
 
 
 async def execute_windows_screenshot(args: dict) -> str:
-    helper_result = await _maybe_execute_windows_helper("screenshot", args)
+    save_path, save_path_error = _resolve_windows_save_path(args.get("save_path"))
+    if save_path_error:
+        return f"Error: {save_path_error}"
+
+    helper_args = dict(args)
+    if save_path:
+        helper_args["save_path"] = save_path
+
+    helper_result = await _maybe_execute_windows_helper("screenshot", helper_args)
     if helper_result is not None:
         return helper_result
     requested_provider = args.get("provider")
     if error := _provider_error(requested_provider):
         return error
     provider = _resolve_provider(requested_provider, "screenshot")
-
-    save_path, save_path_error = _resolve_windows_save_path(args.get("save_path"))
-    if save_path_error:
-        return f"Error: {save_path_error}"
 
     annotate = bool(args.get("annotate", False))
     display = args.get("display")
@@ -1067,6 +1074,38 @@ async def execute_windows_reset_input_state(args: dict) -> str:
             "ok": True,
             "message": "Windows input state reset completed",
             "state": state,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+async def execute_windows_helper_warmup(args: dict) -> str:
+    if not _windows_helper_enabled():
+        return json.dumps(
+            {
+                "ok": False,
+                "enabled": False,
+                "message": "Windows helper warmup skipped because HASHI_WINDOWS_HELPER is disabled",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    started = await _ensure_windows_helper_started()
+    healthy = await _helper_healthcheck()
+    return json.dumps(
+        {
+            "ok": bool(started and healthy),
+            "enabled": True,
+            "started": bool(started),
+            "healthy": bool(healthy),
+            "message": (
+                "Windows helper is warm and ready"
+                if started and healthy
+                else "Windows helper warmup failed"
+            ),
+            "base_url": _windows_helper_base_url(),
         },
         ensure_ascii=False,
         indent=2,

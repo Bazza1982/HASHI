@@ -19,6 +19,7 @@ replaced with hchat relay and terminal execution.
 import json
 import logging
 import platform
+import re
 import socket
 import time
 from contextlib import asynccontextmanager
@@ -45,6 +46,7 @@ _pairing_manager: Optional[PairingManager] = None
 _terminal_executor: Optional[TerminalExecutor] = None
 _hashi_root: Optional[str] = None
 _workbench_port: int = 18800
+_HCHAT_HEADER_RE = re.compile(r"^\[hchat from (?P<agent>\w+)(?:@(?P<instance>[\w-]+))?\]\s*(?P<body>.*)$", re.DOTALL)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -55,6 +57,7 @@ class HchatPayload(BaseModel):
     from_instance: str          # e.g. "HASHI9"
     to_agent: str               # e.g. "lily"
     text: str                   # The message content (already formatted)
+    to_instance: Optional[str] = None  # Final target instance for HASHI1 exchange
     source_hchat_format: bool = False  # If True, text is raw hchat format
     reply_route: Optional[dict] = None  # Sender's routing info for reply delivery
 
@@ -149,6 +152,49 @@ def create_app(
             to_agent=payload.to_agent,
             text_snippet=payload.text,
         )
+
+        local_instance_id = str(_instance_info.get("instance_id", "")).upper()
+        requested_instance = (payload.to_instance or "").strip().upper()
+
+        if requested_instance and requested_instance != local_instance_id:
+            try:
+                from tools.hchat_send import parse_hchat_message, send_hchat
+
+                parsed = parse_hchat_message(payload.text, default_instance=payload.from_instance)
+                if not parsed:
+                    return JSONResponse(
+                        status_code=400,
+                        content={"ok": False, "error": "Invalid exchange hchat format"},
+                    )
+
+                ok = send_hchat(
+                    payload.to_agent,
+                    parsed["agent"],
+                    parsed["body"],
+                    target_instance=requested_instance,
+                    source_instance=parsed["instance_id"] or payload.from_instance,
+                    reply_route_override=payload.reply_route,
+                )
+                if ok:
+                    logger.info(
+                        "HChat exchange relayed: %s/%s → %s@%s via %s",
+                        parsed["instance_id"] or payload.from_instance,
+                        parsed["agent"],
+                        payload.to_agent,
+                        requested_instance,
+                        local_instance_id,
+                    )
+                    return {"ok": True, "relayed": True, "exchange": True}
+                return JSONResponse(
+                    status_code=502,
+                    content={"ok": False, "error": "Exchange forwarding failed"},
+                )
+            except Exception as e:
+                logger.exception("HChat exchange failed")
+                return JSONResponse(
+                    status_code=500,
+                    content={"ok": False, "error": "Exchange forwarding error", "detail": str(e)},
+                )
 
         # Format for workbench injection
         if payload.source_hchat_format:

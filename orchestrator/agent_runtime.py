@@ -1540,36 +1540,53 @@ class BridgeAgentRuntime:
         """If this request was an hchat message, route the reply back to the sender.
 
         Supports both [hchat from name] and [hchat from name@INSTANCE] header formats.
-        Falls back to cross-instance delivery via send_hchat when the sender is not a
-        local runtime (e.g. when the message originates from Minato or another instance).
+        Uses explicit instance routing when the sender is cross-instance.
         """
-        import re
-        # Accept both [hchat from name] and [hchat from name@INSTANCE]
-        match = re.match(r"^\[hchat from (\w+)(?:@\w+)?\]", item.prompt)
-        if not match:
+        from tools.hchat_send import parse_return_address
+        sender = parse_return_address(item.prompt)
+        if not sender:
             return
-        sender_name = match.group(1).lower()
+        sender_name = sender["agent"].lower()
+        sender_instance = (sender.get("instance_id") or "").upper()
+        try:
+            from tools.hchat_send import _get_instance_id, _load_config
+            local_instance = str(_get_instance_id(_load_config()) or "").upper()
+        except Exception:
+            local_instance = ""
         reply_text = f"[hchat reply from {self.name}] {response_text}"
 
         orchestrator = getattr(self, "orchestrator", None)
-        if orchestrator is None:
-            return
+        if orchestrator is not None and (not sender_instance or sender_instance == local_instance):
+            for rt in getattr(orchestrator, "runtimes", []):
+                if getattr(rt, "name", "") == sender_name and hasattr(rt, "enqueue_api_text"):
+                    try:
+                        await rt.enqueue_api_text(
+                            reply_text,
+                            source=f"hchat-reply:{self.name}",
+                            deliver_to_telegram=True,
+                        )
+                        self.logger.info(f"Hchat reply routed back to {sender_name} (local)")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to route hchat reply to {sender_name}: {e}")
+                    return
 
-        # ── 1. Try local runtime first ────────────────────────────────────────
-        for rt in getattr(orchestrator, "runtimes", []):
-            if getattr(rt, "name", "") == sender_name and hasattr(rt, "enqueue_api_text"):
-                try:
-                    await rt.enqueue_api_text(
-                        reply_text,
-                        source=f"hchat-reply:{self.name}",
-                        deliver_to_telegram=True,
-                    )
-                    self.logger.info(f"Hchat reply routed back to {sender_name} (local)")
-                except Exception as e:
-                    self.logger.warning(f"Failed to route hchat reply to {sender_name}: {e}")
-                return
+        if sender_instance and sender_instance != local_instance:
+            try:
+                from tools.hchat_send import send_hchat
+                import asyncio
+                loop = asyncio.get_event_loop()
+                ok = await loop.run_in_executor(
+                    None,
+                    lambda: send_hchat(sender_name, self.name, reply_text, target_instance=sender_instance),
+                )
+                if ok:
+                    self.logger.info(f"Hchat reply delivered to {sender_name}@{sender_instance} via send_hchat")
+                    return
+                self.logger.warning(f"Hchat reply: send_hchat failed for '{sender_name}@{sender_instance}'")
+            except Exception as e:
+                self.logger.warning(f"Hchat reply: cross-instance delivery failed for '{sender_name}@{sender_instance}': {e}")
 
-        # ── 2. Fallback: cross-instance delivery via send_hchat (contacts.json) ──
+        # ── Fallback: cross-instance delivery via send_hchat (legacy/no instance) ──
         try:
             from tools.hchat_send import send_hchat
             import asyncio
@@ -4543,12 +4560,15 @@ class BridgeAgentRuntime:
         if len(args) < 2:
             await update.message.reply_text(
                 "💬 Hchat — Ask this agent to compose & send a message to another agent\n\n"
-                "Usage: /hchat <agent> <intent>\n"
-                "       /hchat all <intent>  — broadcast to all active agents (excludes temp)\n\n"
+                "Usage: /hchat <agent> <intent>  — local instance only\n"
+                "       /hchat <agent>@<INSTANCE> <intent>  — cross-instance via HASHI1 exchange\n"
+                "       /hchat all <intent>  — broadcast to all local active agents (excludes temp)\n\n"
                 "Example: /hchat lily give her an update on what we've been doing\n"
+                "Example: /hchat rika@HASHI2 ask her for the latest test result\n"
+                "Example: /hchat hashiko@MSI tell her the route is fixed\n"
                 "Example: /hchat arale 告诉她新的 debug toggle 功能已完成\n"
                 "Example: /hchat all 告诉大家新功能上线了\n\n"
-                "Note: YOU compose the message based on context — intent is what to communicate, not the literal text."
+                "Note: no @ means local only. Cross-instance targets must be written as agent@INSTANCE."
             )
             return
         target_name = args[0].lower()

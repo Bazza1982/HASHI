@@ -35,6 +35,7 @@ TOOL_TIERS: dict[str, list[str]] = {
     "windows_use": [
         "windows_screenshot", "windows_mouse_move", "windows_click",
         "windows_type", "windows_key", "windows_scroll", "windows_info",
+        "windows_helper_warmup",
         "windows_window_list", "windows_window_focus", "windows_window_close",
     ],
 }
@@ -284,6 +285,8 @@ class ToolRegistry:
                 execute_desktop_key,
                 execute_desktop_scroll,
                 execute_desktop_info,
+                execute_desktop_window_list,
+                execute_desktop_window_focus,
             )
             _desktop_dispatch = {
                 "desktop_screenshot": execute_desktop_screenshot,
@@ -293,6 +296,8 @@ class ToolRegistry:
                 "desktop_key": execute_desktop_key,
                 "desktop_scroll": execute_desktop_scroll,
                 "desktop_info": execute_desktop_info,
+                "desktop_window_list": execute_desktop_window_list,
+                "desktop_window_focus": execute_desktop_window_focus,
             }
             if tool_name in _desktop_dispatch:
                 return await _desktop_dispatch[tool_name](arguments)
@@ -306,6 +311,7 @@ class ToolRegistry:
                 execute_windows_type,
                 execute_windows_key,
                 execute_windows_scroll,
+                execute_windows_helper_warmup,
                 execute_windows_reset_input_state,
                 execute_windows_info,
                 execute_windows_window_list,
@@ -319,6 +325,7 @@ class ToolRegistry:
                 "windows_type": execute_windows_type,
                 "windows_key": execute_windows_key,
                 "windows_scroll": execute_windows_scroll,
+                "windows_helper_warmup": execute_windows_helper_warmup,
                 "windows_reset_input_state": execute_windows_reset_input_state,
                 "windows_info": execute_windows_info,
                 "windows_window_list": execute_windows_window_list,

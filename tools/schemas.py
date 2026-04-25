@@ -827,6 +827,44 @@ DESKTOP_TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "desktop_window_list",
+            "description": (
+                "List visible top-level windows on the Linux X11 desktop, including active-window state "
+                "and basic geometry when available."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "display": {"type": "string", "description": "X11 display to query. Auto-detected if omitted."},
+                    "title_contains": {
+                        "type": "string",
+                        "description": "Optional case-insensitive title filter.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "desktop_window_focus",
+            "description": "Focus a visible Linux X11 window by id or title match.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "display": {"type": "string", "description": "X11 display to target. Auto-detected if omitted."},
+                    "window_id": {"type": "integer", "description": "Exact X11 window id to focus."},
+                    "title_contains": {
+                        "type": "string",
+                        "description": "Fallback case-insensitive title match when window_id is omitted.",
+                    },
+                },
+            },
+        },
+    },
 ]
 
 WINDOWS_USE_TOOL_SCHEMAS = [
@@ -847,7 +885,7 @@ WINDOWS_USE_TOOL_SCHEMAS = [
                     "provider": {
                         "type": "string",
                         "enum": ["auto", "usecomputer", "windows-mcp"],
-                        "description": "Desktop executor backend. 'auto' prefers windows-mcp for screenshots, else falls back to usecomputer.",
+                        "description": "Desktop executor backend. 'auto' prefers usecomputer for lower-latency screenshots, else falls back to windows-mcp.",
                     },
                     "annotate": {
                         "type": "boolean",
@@ -882,7 +920,7 @@ WINDOWS_USE_TOOL_SCHEMAS = [
                     "provider": {
                         "type": "string",
                         "enum": ["auto", "usecomputer", "windows-mcp"],
-                        "description": "Desktop executor backend. 'auto' prefers windows-mcp for pointer moves.",
+                        "description": "Desktop executor backend. 'auto' prefers usecomputer for lower-latency pointer moves.",
                     },
                 },
                 "required": ["x", "y"],
@@ -914,7 +952,7 @@ WINDOWS_USE_TOOL_SCHEMAS = [
                     "provider": {
                         "type": "string",
                         "enum": ["auto", "usecomputer", "windows-mcp"],
-                        "description": "Desktop executor backend. 'auto' prefers windows-mcp for clicks.",
+                        "description": "Desktop executor backend. 'auto' prefers usecomputer for lower-latency clicks.",
                     },
                 },
                 "required": ["x", "y"],
@@ -1008,9 +1046,23 @@ WINDOWS_USE_TOOL_SCHEMAS = [
                     "provider": {
                         "type": "string",
                         "enum": ["auto", "usecomputer", "windows-mcp"],
-                        "description": "Desktop executor backend. 'auto' prefers windows-mcp for scroll.",
+                        "description": "Desktop executor backend. 'auto' prefers usecomputer for lower-latency scroll.",
                     },
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "windows_helper_warmup",
+            "description": (
+                "Pre-start and health-check the Windows helper service before doing real desktop actions. "
+                "Useful to hide the first-call startup delay from later screenshot or input steps."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
             },
         },
     },

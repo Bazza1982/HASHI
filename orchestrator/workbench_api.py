@@ -86,6 +86,7 @@ class WorkbenchApiServer:
         self.app.router.add_post("/api/chat", self.handle_chat)
         self.app.router.add_post("/api/bridge/message", self.handle_bridge_message)
         self.app.router.add_post("/api/bridge/reply", self.handle_bridge_reply)
+        self.app.router.add_post("/api/bridge/hchat-exchange", self.handle_hchat_exchange)
         self.app.router.add_post("/api/bridge/transfer", self.handle_bridge_transfer)
         self.app.router.add_post("/api/bridge/fork", self.handle_bridge_fork)
         self.app.router.add_post("/api/bridge/cos", self.handle_bridge_cos)
@@ -422,6 +423,34 @@ class WorkbenchApiServer:
 
         request_id = await runtime.enqueue_api_text(text)
         return web.json_response({"ok": True, "request_id": request_id})
+
+    async def handle_hchat_exchange(self, request):
+        payload = await request.json()
+        to_agent = (payload.get("to_agent") or "").strip().lower()
+        to_instance = (payload.get("to_instance") or "").strip().upper()
+        from_agent = (payload.get("from_agent") or "").strip().lower()
+        from_instance = (payload.get("from_instance") or "").strip().upper()
+        text = (payload.get("text") or "").strip()
+        reply_route = payload.get("reply_route")
+
+        if not to_agent or not to_instance or not from_agent or not from_instance or not text:
+            return web.json_response({"ok": False, "error": "missing required fields"}, status=400)
+
+        try:
+            from tools.hchat_send import send_hchat
+            ok = send_hchat(
+                to_agent,
+                from_agent,
+                text,
+                target_instance=to_instance,
+                source_instance=from_instance,
+                reply_route_override=reply_route if isinstance(reply_route, dict) else None,
+            )
+            if ok:
+                return web.json_response({"ok": True, "relayed": True, "exchange": True})
+            return web.json_response({"ok": False, "error": "exchange delivery failed"}, status=502)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
 
     async def handle_bridge_message(self, request):
         self._refresh_bridge_router()

@@ -4,6 +4,7 @@ import ctypes
 from ctypes import wintypes
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
+ULONG_PTR = getattr(wintypes, "ULONG_PTR", ctypes.c_size_t)
 
 EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
@@ -33,18 +34,118 @@ user32.GetKeyboardLayout.argtypes = [wintypes.DWORD]
 user32.GetKeyboardLayout.restype = wintypes.HKL
 user32.GetKeyboardLayoutNameW.argtypes = [wintypes.LPWSTR]
 user32.GetKeyboardLayoutNameW.restype = wintypes.BOOL
-user32.keybd_event.argtypes = [ctypes.c_ubyte, ctypes.c_ubyte, wintypes.DWORD, wintypes.ULONG_PTR]
+user32.keybd_event.argtypes = [ctypes.c_ubyte, ctypes.c_ubyte, wintypes.DWORD, ULONG_PTR]
 user32.keybd_event.restype = None
-user32.mouse_event.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.ULONG_PTR]
+user32.mouse_event.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, ULONG_PTR]
 user32.mouse_event.restype = None
+user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
+user32.SetCursorPos.restype = wintypes.BOOL
+user32.GetCursorPos.argtypes = [ctypes.c_void_p]
+user32.GetCursorPos.restype = wintypes.BOOL
+user32.MapVirtualKeyW.argtypes = [wintypes.UINT, wintypes.UINT]
+user32.MapVirtualKeyW.restype = wintypes.UINT
+user32.VkKeyScanW.argtypes = [wintypes.WCHAR]
+user32.VkKeyScanW.restype = ctypes.c_short
 
 SW_RESTORE = 9
 SW_SHOW = 5
 WM_CLOSE = 0x0010
 KEYEVENTF_KEYUP = 0x0002
+KEYEVENTF_UNICODE = 0x0004
 MOUSEEVENTF_LEFTUP = 0x0004
+MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_RIGHTUP = 0x0010
+MOUSEEVENTF_RIGHTDOWN = 0x0008
 MOUSEEVENTF_MIDDLEUP = 0x0040
+MOUSEEVENTF_MIDDLEDOWN = 0x0020
+MOUSEEVENTF_WHEEL = 0x0800
+MOUSEEVENTF_HWHEEL = 0x01000
+MAPVK_VK_TO_VSC = 0
+WHEEL_DELTA = 120
+
+INPUT_MOUSE = 0
+INPUT_KEYBOARD = 1
+
+
+class POINT(ctypes.Structure):
+    _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+
+
+class MOUSEINPUT(ctypes.Structure):
+    _fields_ = [
+        ("dx", wintypes.LONG),
+        ("dy", wintypes.LONG),
+        ("mouseData", wintypes.DWORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ULONG_PTR),
+    ]
+
+
+class KEYBDINPUT(ctypes.Structure):
+    _fields_ = [
+        ("wVk", wintypes.WORD),
+        ("wScan", wintypes.WORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ULONG_PTR),
+    ]
+
+
+class HARDWAREINPUT(ctypes.Structure):
+    _fields_ = [
+        ("uMsg", wintypes.DWORD),
+        ("wParamL", wintypes.WORD),
+        ("wParamH", wintypes.WORD),
+    ]
+
+
+class INPUT_UNION(ctypes.Union):
+    _fields_ = [
+        ("mi", MOUSEINPUT),
+        ("ki", KEYBDINPUT),
+        ("hi", HARDWAREINPUT),
+    ]
+
+
+class INPUT(ctypes.Structure):
+    _anonymous_ = ("u",)
+    _fields_ = [
+        ("type", wintypes.DWORD),
+        ("u", INPUT_UNION),
+    ]
+
+
+user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int]
+user32.SendInput.restype = wintypes.UINT
+
+VK_ALIASES = {
+    "shift": 0x10,
+    "ctrl": 0x11,
+    "control": 0x11,
+    "alt": 0x12,
+    "win": 0x5B,
+    "meta": 0x5B,
+    "cmd": 0x5B,
+    "enter": 0x0D,
+    "return": 0x0D,
+    "tab": 0x09,
+    "esc": 0x1B,
+    "escape": 0x1B,
+    "space": 0x20,
+    "backspace": 0x08,
+    "delete": 0x2E,
+    "del": 0x2E,
+    "insert": 0x2D,
+    "home": 0x24,
+    "end": 0x23,
+    "pageup": 0x21,
+    "pagedown": 0x22,
+    "up": 0x26,
+    "down": 0x28,
+    "left": 0x25,
+    "right": 0x27,
+}
 
 
 def _window_title(hwnd: int) -> str:
@@ -54,6 +155,60 @@ def _window_title(hwnd: int) -> str:
     buffer = ctypes.create_unicode_buffer(length + 1)
     user32.GetWindowTextW(hwnd, buffer, len(buffer))
     return buffer.value.strip()
+
+
+def _keyboard_input(vk: int = 0, scan: int = 0, flags: int = 0) -> INPUT:
+    return INPUT(
+        type=INPUT_KEYBOARD,
+        ki=KEYBDINPUT(
+            wVk=vk,
+            wScan=scan,
+            dwFlags=flags,
+            time=0,
+            dwExtraInfo=0,
+        ),
+    )
+
+
+def _mouse_input(flags: int, data: int = 0) -> INPUT:
+    return INPUT(
+        type=INPUT_MOUSE,
+        mi=MOUSEINPUT(
+            dx=0,
+            dy=0,
+            mouseData=data,
+            dwFlags=flags,
+            time=0,
+            dwExtraInfo=0,
+        ),
+    )
+
+
+def _send_inputs(inputs: list[INPUT]) -> None:
+    if not inputs:
+        return
+    array = (INPUT * len(inputs))(*inputs)
+    sent = user32.SendInput(len(inputs), array, ctypes.sizeof(INPUT))
+    if sent != len(inputs):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
+def _vk_for_token(token: str) -> int:
+    lowered = token.strip().lower()
+    if lowered in VK_ALIASES:
+        return VK_ALIASES[lowered]
+    if len(lowered) == 2 and lowered.startswith("f") and lowered[1].isdigit():
+        return 0x70 + int(lowered[1]) - 1
+    if len(lowered) == 3 and lowered.startswith("f") and lowered[1:].isdigit():
+        number = int(lowered[1:])
+        if 1 <= number <= 24:
+            return 0x70 + number - 1
+    if len(token) == 1:
+        mapped = user32.VkKeyScanW(token)
+        if mapped == -1:
+            raise ValueError(f"unsupported key token: {token}")
+        return mapped & 0xFF
+    raise ValueError(f"unsupported key token: {token}")
 
 
 def list_windows() -> list[dict]:
@@ -126,6 +281,79 @@ def reset_input_state() -> dict:
         "released_keys": ["SHIFT", "CTRL", "ALT", "LWIN", "RWIN"],
         "released_mouse": ["left", "right", "middle"],
     }
+
+
+def get_cursor_position() -> dict:
+    point = POINT()
+    if not user32.GetCursorPos(ctypes.byref(point)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return {"x": int(point.x), "y": int(point.y)}
+
+
+def move_mouse(x: int, y: int) -> dict:
+    if not user32.SetCursorPos(int(x), int(y)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return get_cursor_position()
+
+
+def click_mouse(x: int, y: int, button: str = "left", count: int = 1) -> dict:
+    move_mouse(x, y)
+    button_value = button.strip().lower()
+    flag_map = {
+        "left": (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+        "right": (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+        "middle": (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
+    }
+    if button_value not in flag_map:
+        raise ValueError(f"unsupported mouse button: {button}")
+    down_flag, up_flag = flag_map[button_value]
+    inputs: list[INPUT] = []
+    for _ in range(max(1, int(count))):
+        inputs.append(_mouse_input(down_flag))
+        inputs.append(_mouse_input(up_flag))
+    _send_inputs(inputs)
+    return {"x": int(x), "y": int(y), "button": button_value, "count": max(1, int(count))}
+
+
+def scroll_mouse(direction: str = "down", amount: int = 1, *, horizontal: bool = False) -> dict:
+    direction_value = direction.strip().lower()
+    step = WHEEL_DELTA * max(1, int(amount))
+    if direction_value in {"down", "right"}:
+        step = -step
+    elif direction_value not in {"up", "left"}:
+        raise ValueError(f"unsupported scroll direction: {direction}")
+    flag = MOUSEEVENTF_HWHEEL if horizontal else MOUSEEVENTF_WHEEL
+    _send_inputs([_mouse_input(flag, step)])
+    return {"direction": direction_value, "amount": max(1, int(amount)), "horizontal": horizontal}
+
+
+def press_key_combo(shortcut: str) -> dict:
+    tokens = [token.strip() for token in shortcut.split("+") if token.strip()]
+    if not tokens:
+        raise ValueError("shortcut must not be empty")
+    modifier_vks = [_vk_for_token(token) for token in tokens[:-1]]
+    main_vk = _vk_for_token(tokens[-1])
+    inputs: list[INPUT] = []
+    for vk in modifier_vks:
+        inputs.append(_keyboard_input(vk=vk, scan=user32.MapVirtualKeyW(vk, MAPVK_VK_TO_VSC), flags=0))
+    inputs.append(_keyboard_input(vk=main_vk, scan=user32.MapVirtualKeyW(main_vk, MAPVK_VK_TO_VSC), flags=0))
+    inputs.append(_keyboard_input(vk=main_vk, scan=user32.MapVirtualKeyW(main_vk, MAPVK_VK_TO_VSC), flags=KEYEVENTF_KEYUP))
+    for vk in reversed(modifier_vks):
+        inputs.append(_keyboard_input(vk=vk, scan=user32.MapVirtualKeyW(vk, MAPVK_VK_TO_VSC), flags=KEYEVENTF_KEYUP))
+    _send_inputs(inputs)
+    return {"shortcut": shortcut}
+
+
+def type_text(text: str) -> dict:
+    if not text:
+        return {"text_length": 0}
+    inputs: list[INPUT] = []
+    for char in text:
+        codepoint = ord(char)
+        inputs.append(_keyboard_input(scan=codepoint, flags=KEYEVENTF_UNICODE))
+        inputs.append(_keyboard_input(scan=codepoint, flags=KEYEVENTF_UNICODE | KEYEVENTF_KEYUP))
+    _send_inputs(inputs)
+    return {"text_length": len(text)}
 
 
 def get_input_state() -> dict:

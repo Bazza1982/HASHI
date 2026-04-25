@@ -39,11 +39,13 @@ param(
 $ErrorActionPreference = "Stop"
 
 # Constants
-$ProjectDir = $PSScriptRoot
+$ProjectDir = ([System.IO.Path]::GetFullPath($PSScriptRoot)).TrimEnd('\')
 $BridgeHome = if ($env:BRIDGE_HOME) { $env:BRIDGE_HOME } else { $ProjectDir }
+$BridgeHome = ([System.IO.Path]::GetFullPath($BridgeHome)).TrimEnd('\')
 $LockFile = Join-Path $BridgeHome ".bridge_u_f.lock"
 $PidFile = Join-Path $BridgeHome ".bridge_u_f.pid"
 $LauncherBat = Join-Path $ProjectDir "bridge-u.bat"
+$MainPyPath = Join-Path $ProjectDir "main.py"
 $AgentsJson = Join-Path $BridgeHome "agents.json"
 if (-not (Test-Path $AgentsJson)) { $AgentsJson = Join-Path $ProjectDir "agents.json" }
 $SecretsJson = Join-Path $BridgeHome "secrets.json"
@@ -82,6 +84,39 @@ function Write-Log {
     }
 }
 
+function Test-BridgeCommandLine {
+    param([string]$CommandLine)
+
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) {
+        return $false
+    }
+
+    $cmd = $CommandLine
+    if ($cmd -match '(?i)--bridge-home\s+("([^"]+)"|(\S+))') {
+        $candidate = if ($matches[2]) { $matches[2] } else { $matches[3] }
+        try {
+            $resolved = ([System.IO.Path]::GetFullPath($candidate)).TrimEnd('\')
+        } catch {
+            $resolved = $candidate.TrimEnd('\')
+        }
+        return $resolved.Equals($BridgeHome, [System.StringComparison]::OrdinalIgnoreCase)
+    }
+
+    $mainPattern = '(?i)(^|["\s])' + [Regex]::Escape($MainPyPath) + '("|\s|$)'
+    return [Regex]::IsMatch($cmd, $mainPattern)
+}
+
+function Test-LauncherCommandLine {
+    param([string]$CommandLine)
+
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) {
+        return $false
+    }
+
+    $launcherPattern = '(?i)(^|["\s])' + [Regex]::Escape($LauncherBat) + '("|\s|$)'
+    return [Regex]::IsMatch($CommandLine, $launcherPattern)
+}
+
 function Get-BridgeProcesses {
     <#
     .DESCRIPTION
@@ -114,13 +149,13 @@ function Get-BridgeProcesses {
         $cmd = [string]$p.CommandLine
         
         # Python running main.py from this project
-        if (($name -ieq 'python.exe' -or $name -ieq 'py.exe') -and $cmd -and $cmd -like "*$ProjectDir*main.py*") {
+        if (($name -ieq 'python.exe' -or $name -ieq 'py.exe') -and (Test-BridgeCommandLine $cmd)) {
             $targets[$procId] = @{ Name = $name; Cmd = $cmd; Type = "python" }
             continue
         }
         
         # cmd.exe running bridge-u.bat
-        if ($name -ieq 'cmd.exe' -and $cmd -and $cmd -like "*$ProjectDir*bridge-u.bat*") {
+        if ($name -ieq 'cmd.exe' -and (Test-LauncherCommandLine $cmd)) {
             $targets[$procId] = @{ Name = $name; Cmd = $cmd; Type = "launcher" }
             continue
         }

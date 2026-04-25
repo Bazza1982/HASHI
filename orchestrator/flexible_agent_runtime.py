@@ -1572,34 +1572,61 @@ class FlexibleAgentRuntime:
 
         Supports both [hchat from name] and [hchat from name@INSTANCE] header formats.
         Priority:
-        1. Local runtime (same orchestrator) — enqueue_api_text.
-        2. contacts.json entry (external caller such as Minato) — HTTP POST.
-        3. Cross-instance delivery via send_hchat.
+        1. Local runtime for local senders.
+        2. Explicit cross-instance reply via send_hchat(name@INSTANCE).
+        3. contacts.json entry for legacy external callers.
+        4. Cross-instance delivery via send_hchat(name) when no instance is known.
         """
-        # Accept both [hchat from name] and [hchat from name@INSTANCE]
-        match = re.match(r"^\[hchat from (\w+)(?:@\w+)?\]", item.prompt)
-        if not match:
+        try:
+            from tools.hchat_send import parse_return_address
+            sender = parse_return_address(item.prompt)
+        except Exception:
+            sender = None
+        if not sender:
             return
-        sender_name = match.group(1).lower()
+        sender_name = sender["agent"].lower()
+        sender_instance = (sender.get("instance_id") or "").upper()
+        try:
+            from tools.hchat_send import _get_instance_id, _load_config
+            local_instance = str(_get_instance_id(_load_config()) or "").upper()
+        except Exception:
+            local_instance = ""
         reply_text = response_text
 
-        # ── 1. Try local runtime first ────────────────────────────────────────
-        orchestrator = getattr(self, "orchestrator", None)
-        if orchestrator:
-            for rt in getattr(orchestrator, "runtimes", []):
-                if getattr(rt, "name", "") == sender_name and hasattr(rt, "enqueue_api_text"):
-                    try:
-                        await rt.enqueue_api_text(
-                            reply_text,
-                            source=f"hchat-reply:{self.name}",
-                            deliver_to_telegram=True,
-                        )
-                        self.logger.info(f"Hchat reply routed to local runtime '{sender_name}'")
-                    except Exception as e:
-                        self.logger.warning(f"Failed to route hchat reply to '{sender_name}': {e}")
-                    return
+        # ── 1. Try local runtime only when sender is local/unspecified ────────
+        if not sender_instance or sender_instance == local_instance:
+            orchestrator = getattr(self, "orchestrator", None)
+            if orchestrator:
+                for rt in getattr(orchestrator, "runtimes", []):
+                    if getattr(rt, "name", "") == sender_name and hasattr(rt, "enqueue_api_text"):
+                        try:
+                            await rt.enqueue_api_text(
+                                reply_text,
+                                source=f"hchat-reply:{self.name}",
+                                deliver_to_telegram=True,
+                            )
+                            self.logger.info(f"Hchat reply routed to local runtime '{sender_name}'")
+                        except Exception as e:
+                            self.logger.warning(f"Failed to route hchat reply to '{sender_name}': {e}")
+                        return
 
-        # ── 2. Fall back to contacts.json (external callers e.g. Minato) ──────
+        # ── 2. Explicit cross-instance reply when sender instance is known ────
+        if sender_instance and sender_instance != local_instance:
+            try:
+                from tools.hchat_send import send_hchat
+                import functools
+                loop = asyncio.get_event_loop()
+                ok = await loop.run_in_executor(
+                    None,
+                    functools.partial(send_hchat, sender_name, self.name, reply_text, target_instance=sender_instance),
+                )
+                if ok:
+                    self.logger.info(f"Hchat reply cross-instance delivered to '{sender_name}@{sender_instance}'")
+                    return
+            except Exception as e:
+                self.logger.warning(f"Hchat reply: cross-instance delivery to '{sender_name}@{sender_instance}' failed: {e}")
+
+        # ── 3. Fall back to contacts.json (legacy external callers) ───────────
         try:
             from tools.hchat_send import _get_cached_route
             contact = _get_cached_route(sender_name)
@@ -1625,7 +1652,7 @@ class FlexibleAgentRuntime:
         except Exception as e:
             self.logger.warning(f"Hchat reply: contacts fallback for '{sender_name}' failed: {e}")
 
-        # ── 3. Fall back to cross-instance delivery via send_hchat ────────────
+        # ── 4. Last resort: cross-instance delivery without instance hint ─────
         try:
             from tools.hchat_send import send_hchat
             import functools
@@ -1637,7 +1664,9 @@ class FlexibleAgentRuntime:
         except Exception as e:
             self.logger.warning(f"Hchat reply: cross-instance delivery to '{sender_name}' failed: {e}")
 
-        self.logger.warning(f"Hchat reply: sender '{sender_name}' not found locally, in contacts, or cross-instance")
+        self.logger.warning(
+            f"Hchat reply: sender '{sender_name}' not found locally, in contacts, or cross-instance"
+        )
 
     async def enqueue_api_media(
         self,
@@ -3859,14 +3888,17 @@ class FlexibleAgentRuntime:
             await self._reply_text(
                 update,
                 "<b>💬 Hchat — Ask this agent to compose &amp; send a message to another agent</b>\n\n"
-                "Usage: <code>/hchat &lt;agent&gt; &lt;intent&gt;</code>\n"
-                "       <code>/hchat all &lt;intent&gt;</code> — broadcast to all active agents (excludes temp)\n"
-                "       <code>/hchat @&lt;group&gt; &lt;intent&gt;</code> — broadcast to a group (use /group to manage)\n\n"
+                "Usage: <code>/hchat &lt;agent&gt; &lt;intent&gt;</code> — local instance only\n"
+                "       <code>/hchat &lt;agent&gt;@&lt;INSTANCE&gt; &lt;intent&gt;</code> — cross-instance via HASHI1 exchange\n"
+                "       <code>/hchat all &lt;intent&gt;</code> — broadcast to all local active agents (excludes temp)\n"
+                "       <code>/hchat @&lt;group&gt; &lt;intent&gt;</code> — broadcast to a local group (use /group to manage)\n\n"
                 "Example: <code>/hchat lily give her an update on what we've been doing</code>\n"
+                "Example: <code>/hchat rika@HASHI2 ask her for the latest test result</code>\n"
+                "Example: <code>/hchat hashiko@MSI tell her the route is fixed</code>\n"
                 "Example: <code>/hchat arale 告诉她新功能已完成</code>\n"
                 "Example: <code>/hchat all 告诉大家新功能上线了</code>\n"
                 "Example: <code>/hchat @staff 告诉核心团队系统已重启</code>\n\n"
-                "<i>Note: YOU compose the message based on context — intent is what to communicate, not the literal text.</i>",
+                "<i>Note: no @ means local only. Cross-instance targets must be written as agent@INSTANCE.</i>",
                 parse_mode="HTML",
             )
             return

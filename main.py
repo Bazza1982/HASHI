@@ -6,9 +6,11 @@ import shutil
 import asyncio
 import argparse
 import logging
+import signal
 import traceback
 from pathlib import Path
 from contextlib import suppress
+from datetime import datetime
 
 import httpx
 
@@ -157,6 +159,26 @@ logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
 logging.getLogger("aiohttp.server").setLevel(logging.WARNING)
 
 
+def _write_bridge_audit_line(log_path: Path, level: int, message: str):
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        level_name = logging.getLevelName(level)
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(f"{ts} [BridgeU.Bridge] {level_name:<8} {message}\n")
+    except Exception:
+        pass
+
+
+def _emit_bridge_audit(paths: BridgePaths | None, level: int, message: str):
+    if bridge_logger.handlers:
+        bridge_logger.log(level, message)
+        return
+    if paths is None:
+        return
+    _write_bridge_audit_line(paths.bridge_home / "logs" / "bridge.log", level, message)
+
+
 class InstanceLock:
     """
     Single-instance guard using OS-level file locking.
@@ -266,18 +288,130 @@ class UniversalOrchestrator:
         self._agent_locks: dict[str, asyncio.Lock] = {}
         self._startup_tasks: dict[str, asyncio.Task] = {}
         self._restart_request: dict | None = None  # set by request_restart()
+        self._shutdown_request = {
+            "reason": "external",
+            "source": "unknown",
+            "detail": "",
+            "requested_at": None,
+        }
+        self._orchestrator_state_path: Path | None = None
 
-    def request_shutdown(self, reason: str = "external"):
+    def _load_orchestrator_state(self) -> dict:
+        if self._orchestrator_state_path is None or not self._orchestrator_state_path.exists():
+            return {}
+        try:
+            return json.loads(self._orchestrator_state_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def _save_orchestrator_state(self, state: dict):
+        if self._orchestrator_state_path is None:
+            return
+        try:
+            self._orchestrator_state_path.parent.mkdir(parents=True, exist_ok=True)
+            self._orchestrator_state_path.write_text(
+                json.dumps(state, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+        except Exception as e:
+            main_logger.warning(f"Failed to save orchestrator state: {e}")
+
+    def _shutdown_meta_text(self) -> str:
+        req = self._shutdown_request or {}
+        reason = req.get("reason") or "external"
+        source = req.get("source") or "unknown"
+        detail = req.get("detail") or "-"
+        requested_at = req.get("requested_at") or "-"
+        return (
+            f"reason={reason} source={source} detail={detail} "
+            f"requested_at={requested_at}"
+        )
+
+    def _mark_orchestrator_started(self) -> tuple[dict, bool]:
+        previous = self._load_orchestrator_state()
+        unexpected_previous_exit = bool(previous) and not previous.get("clean_shutdown", True)
+        state = dict(previous)
+        state.update({
+            "pid": os.getpid(),
+            "last_started_at": datetime.now().isoformat(),
+            "clean_shutdown": False,
+            "pending_shutdown_reason": None,
+            "pending_shutdown_source": None,
+            "pending_shutdown_detail": None,
+            "pending_shutdown_requested_at": None,
+        })
+        self._save_orchestrator_state(state)
+        return previous, unexpected_previous_exit
+
+    def _record_shutdown_request_in_state(self):
+        state = self._load_orchestrator_state()
+        state["pending_shutdown_reason"] = self._shutdown_request.get("reason")
+        state["pending_shutdown_source"] = self._shutdown_request.get("source")
+        state["pending_shutdown_detail"] = self._shutdown_request.get("detail")
+        state["pending_shutdown_requested_at"] = self._shutdown_request.get("requested_at")
+        self._save_orchestrator_state(state)
+
+    def _mark_orchestrator_shutdown(self, clean: bool, phase: str):
+        state = self._load_orchestrator_state()
+        state["last_stopped_at"] = datetime.now().isoformat()
+        state["clean_shutdown"] = bool(clean)
+        state["last_shutdown_reason"] = self._shutdown_request.get("reason")
+        state["last_shutdown_source"] = self._shutdown_request.get("source")
+        state["last_shutdown_detail"] = self._shutdown_request.get("detail")
+        state["last_shutdown_requested_at"] = self._shutdown_request.get("requested_at")
+        state["last_exit_phase"] = phase
+        state["pending_shutdown_reason"] = None
+        state["pending_shutdown_source"] = None
+        state["pending_shutdown_detail"] = None
+        state["pending_shutdown_requested_at"] = None
+        self._save_orchestrator_state(state)
+
+    def _install_signal_handlers(self):
+        loop = asyncio.get_running_loop()
+        for sig_name in ("SIGTERM", "SIGINT", "SIGHUP"):
+            sig = getattr(signal, sig_name, None)
+            if sig is None:
+                continue
+            try:
+                loop.add_signal_handler(
+                    sig,
+                    self.request_shutdown,
+                    f"signal:{sig_name}",
+                    "os-signal",
+                    sig_name,
+                )
+                bridge_logger.info(f"Installed shutdown signal handler for {sig_name}")
+            except (NotImplementedError, RuntimeError):
+                continue
+
+    def request_shutdown(self, reason: str = "external", source: str = "unknown", detail: str = ""):
         if self.shutdown_event.is_set():
             main_logger.info(f"Shutdown already requested; ignoring duplicate request ({reason}).")
+            bridge_logger.warning(
+                f"Duplicate shutdown request ignored ({self._shutdown_meta_text()}) "
+                f"new_reason={reason} new_source={source} new_detail={detail or '-'}"
+            )
             return
+        self._shutdown_request = {
+            "reason": reason,
+            "source": source,
+            "detail": detail,
+            "requested_at": datetime.now().isoformat(),
+        }
         main_logger.info(f"Shutdown requested ({reason}).")
+        bridge_logger.warning(f"Shutdown requested ({self._shutdown_meta_text()})")
+        self._record_shutdown_request_in_state()
         self.shutdown_event.set()
 
     def request_restart(self, mode: str = "same", agent_name: str | None = None, agent_number: int | None = None):
         """Signal a hot restart. Modes: same, min, max, number."""
         self._restart_request = {"mode": mode, "agent_name": agent_name, "agent_number": agent_number}
         main_logger.info(f"Restart requested (mode={mode}, agent={agent_name}, number={agent_number}).")
+        bridge_logger.warning(
+            f"Restart requested (mode={mode}, agent={agent_name or '-'}, "
+            f"number={agent_number if agent_number is not None else '-'}"
+            ")"
+        )
         self.shutdown_event.set()
 
     def _runtime_map(self):
@@ -822,7 +956,7 @@ class UniversalOrchestrator:
             except Exception:
                 self._startup_tasks.pop(agent_name, None)
 
-    async def stop_agent(self, agent_name: str) -> tuple[bool, str]:
+    async def stop_agent(self, agent_name: str, reason: str = "manual-stop") -> tuple[bool, str]:
         async with self._lifecycle_lock:
             if agent_name in self._startup_tasks:
                 return False, f"Agent '{agent_name}' is still starting."
@@ -830,10 +964,12 @@ class UniversalOrchestrator:
             if runtime is None:
                 return False, f"Agent '{agent_name}' is not running."
 
+            bridge_logger.info(f"Stopping agent '{agent_name}' (reason={reason})")
             await self._teardown_runtime(runtime)
 
             self.runtimes = [rt for rt in self.runtimes if rt.name != agent_name]
             main_logger.info(f"Agent '{agent_name}' stopped.")
+            bridge_logger.info(f"Agent '{agent_name}' stopped (reason={reason})")
             print(f"{C_STOP}[system] Agent '{agent_name}' stopped{C_RESET}", flush=True)
             return True, f"Stopped agent '{agent_name}'."
 
@@ -850,8 +986,10 @@ class UniversalOrchestrator:
             await asyncio.wait_for(runtime.shutdown(), timeout=timeout)
         except asyncio.TimeoutError:
             main_logger.warning(f"Shutdown timed out for '{runtime.name}'.")
+            bridge_logger.warning(f"Agent '{runtime.name}' shutdown timed out after {timeout:.1f}s")
         except Exception as e:
             main_logger.warning(f"Shutdown warning for '{runtime.name}': {e}")
+            bridge_logger.warning(f"Agent '{runtime.name}' shutdown warning: {type(e).__name__}: {e}")
 
     async def _shutdown_all_agents(self, timeout: float = 30.0):
         """Parallel shutdown of all agents. Used during orchestrator exit."""
@@ -860,10 +998,12 @@ class UniversalOrchestrator:
             return
 
         main_logger.info(f"Shutting down {len(agents)} agents in parallel...")
+        bridge_logger.warning(f"Shutting down {len(agents)} active agents in parallel")
 
         async def _stop_one(rt):
             await self._teardown_runtime(rt, timeout=timeout - 2.0)
             main_logger.info(f"Agent '{rt.name}' stopped.")
+            bridge_logger.info(f"Agent '{rt.name}' fully torn down")
             print(f"{C_STOP}[system] Agent '{rt.name}' stopped{C_RESET}", flush=True)
 
         try:
@@ -876,6 +1016,7 @@ class UniversalOrchestrator:
                 f"Parallel agent shutdown timed out after {timeout}s. "
                 f"Some agents may not have exited cleanly."
             )
+            bridge_logger.warning(f"Parallel agent shutdown timed out after {timeout:.1f}s")
 
         self.runtimes.clear()
 
@@ -938,11 +1079,16 @@ class UniversalOrchestrator:
         boot_reason = {}
 
         main_logger.info(f"Hot restart: stopping {len(targets)} agent(s): {targets}")
+        bridge_logger.warning(
+            f"Hot restart begin (mode={mode}, requester={requesting_agent or '-'}, "
+            f"number={agent_number if agent_number is not None else '-'}, targets={targets})"
+        )
         for name in targets:
             try:
-                await self.stop_agent(name)
+                await self.stop_agent(name, reason=f"hot-restart:{mode}")
             except Exception as e:
                 main_logger.warning(f"Hot restart: failed to stop '{name}': {e}")
+                bridge_logger.warning(f"Hot restart failed to stop '{name}': {type(e).__name__}: {e}")
 
         # Reload Python modules to pick up code changes
         self._reload_project_modules()
@@ -1029,12 +1175,15 @@ class UniversalOrchestrator:
         )
         self.scheduler_task = asyncio.create_task(self.scheduler.run(), name="scheduler")
         main_logger.info("Hot restart: scheduler recreated with reloaded code.")
+        bridge_logger.info("Hot restart: scheduler recreated with reloaded code")
 
         if self.runtimes:
             main_logger.info(f"Hot restart complete. {len(self.runtimes)} agent(s) running.")
+            bridge_logger.warning(f"Hot restart complete ({len(self.runtimes)} agent(s) running)")
             print(f"\033[38;5;108m  ✓ reboot complete — {len(self.runtimes)} agent(s) online\033[0m\n", flush=True)
         else:
             main_logger.critical("Hot restart: no agents running after restart.")
+            bridge_logger.critical("Hot restart failed: no agents running after restart")
             print("\033[38;5;203m  ✗ reboot failed — no agents running\033[0m\n", flush=True)
 
     async def run(self):
@@ -1062,7 +1211,27 @@ class UniversalOrchestrator:
         _sched_logger.setLevel(logging.DEBUG)
         _sched_logger.propagate = False
         _sched_logger.addHandler(_bl_handler)
+        self.global_cfg = global_cfg
+        self.secrets = secrets
+        self._orchestrator_state_path = global_cfg.base_logs_dir / "orchestrator_state.json"
         bridge_logger.info("=== Bridge starting ===")
+        previous_state, unexpected_previous_exit = self._mark_orchestrator_started()
+        if unexpected_previous_exit:
+            bridge_logger.error(
+                "Previous bridge session ended unexpectedly "
+                f"(pid={previous_state.get('pid', '?')} "
+                f"started_at={previous_state.get('last_started_at', '?')} "
+                f"pending_reason={previous_state.get('pending_shutdown_reason') or '-'} "
+                f"pending_source={previous_state.get('pending_shutdown_source') or '-'} "
+                f"last_exit_phase={previous_state.get('last_exit_phase') or '-'})"
+            )
+        self._install_signal_handlers()
+        bridge_logger.info(
+            "Process bootstrap: "
+            f"pid={os.getpid()} ppid={os.getppid()} exe={sys.executable} cwd={Path.cwd()} "
+            f"code_root={self.paths.code_root} bridge_home={self.paths.bridge_home} "
+            f"config={self.paths.config_path}"
+        )
 
         # Filter to selected agents
         selected_configs = [
@@ -1281,6 +1450,7 @@ class UniversalOrchestrator:
                 await self.shutdown_event.wait()
             except asyncio.CancelledError:
                 main_logger.info("Shutdown signal received.")
+                bridge_logger.warning(f"Shutdown wait interrupted ({self._shutdown_meta_text()})")
 
             restart = self._restart_request
             self._restart_request = None
@@ -1293,29 +1463,45 @@ class UniversalOrchestrator:
 
             # --- Full shutdown ---
             main_logger.info("Shutting down active agents...")
+            bridge_logger.warning(
+                f"Full shutdown begin ({self._shutdown_meta_text()}) "
+                f"active_agents={len(self.runtimes)} "
+                f"workbench={'on' if self.workbench_api is not None else 'off'} "
+                f"api_gateway={'on' if self.api_gateway is not None else 'off'} "
+                f"whatsapp={'on' if self.whatsapp is not None else 'off'}"
+            )
             if self.scheduler_task is not None:
+                bridge_logger.info("Stopping scheduler task")
                 self.scheduler_task.cancel()
                 try:
                     await asyncio.wait_for(self.scheduler_task, timeout=5.0)
                 except (asyncio.CancelledError, asyncio.TimeoutError):
-                    pass
+                    bridge_logger.warning("Scheduler task stop timed out or was cancelled")
             if self.workbench_api is not None:
+                bridge_logger.info("Stopping Workbench API")
                 try:
                     await asyncio.wait_for(self.workbench_api.shutdown(), timeout=5.0)
                 except (asyncio.TimeoutError, Exception) as e:
                     main_logger.warning(f"Workbench API shutdown warning: {e}")
+                    bridge_logger.warning(f"Workbench API shutdown warning: {type(e).__name__}: {e}")
             if self.api_gateway is not None:
+                bridge_logger.info("Stopping API Gateway")
                 try:
                     await asyncio.wait_for(self.api_gateway.stop(), timeout=5.0)
                 except (asyncio.TimeoutError, Exception) as e:
                     main_logger.warning(f"API Gateway shutdown warning: {e}")
+                    bridge_logger.warning(f"API Gateway shutdown warning: {type(e).__name__}: {e}")
             if self.whatsapp is not None:
+                bridge_logger.info("Stopping WhatsApp transport")
                 try:
                     await asyncio.wait_for(self.whatsapp.shutdown(), timeout=5.0)
                 except (asyncio.TimeoutError, Exception) as e:
                     main_logger.warning(f"WhatsApp shutdown warning: {e}")
+                    bridge_logger.warning(f"WhatsApp shutdown warning: {type(e).__name__}: {e}")
                 self.whatsapp = None
             await self._shutdown_all_agents()
+            self._mark_orchestrator_shutdown(clean=True, phase="python-cleanup-complete")
+            bridge_logger.warning(f"Full shutdown complete ({self._shutdown_meta_text()})")
 
             # All Python-side cleanup is done. Start watchdog for the
             # asyncio.run() executor-shutdown phase: neonize's Go DLL runs
@@ -1326,7 +1512,9 @@ class UniversalOrchestrator:
             def _exit_watchdog():
                 import time as _time
                 _time.sleep(5)
-                main_logger.warning("Shutdown watchdog: forcing exit (Go runtime threads did not stop).")
+                msg = "Shutdown watchdog: forcing exit (Go runtime threads did not stop)."
+                main_logger.warning(msg)
+                _emit_bridge_audit(self.paths, logging.WARNING, msg)
                 os._exit(0)
             _threading.Thread(target=_exit_watchdog, daemon=True, name="exit-watchdog").start()
             break
@@ -1360,16 +1548,22 @@ if __name__ == "__main__":
     lock = InstanceLock(paths.lock_path)
     try:
         lock.acquire()
-        main_logger.info(
+        bootstrap_msg = (
             "Process bootstrap: "
             f"pid={os.getpid()} ppid={os.getppid()} exe={sys.executable} cwd={Path.cwd()} "
             f"code_root={paths.code_root} bridge_home={paths.bridge_home} config={paths.config_path}"
         )
+        main_logger.info(bootstrap_msg)
+        _emit_bridge_audit(paths, logging.INFO, bootstrap_msg)
         asyncio.run(orchestrator.run())
     except KeyboardInterrupt:
-        main_logger.info("KeyboardInterrupt received. Exiting.")
+        msg = "KeyboardInterrupt received. Exiting."
+        main_logger.info(msg)
+        _emit_bridge_audit(paths, logging.WARNING, msg)
     except Exception as e:
-        main_logger.critical(f"Fatal crash: {e}\n{traceback.format_exc()}")
+        crash_msg = f"Fatal crash: {type(e).__name__}: {e}"
+        main_logger.critical(f"{crash_msg}\n{traceback.format_exc()}")
+        _emit_bridge_audit(paths, logging.CRITICAL, crash_msg)
     finally:
         lock.release()
     # If asyncio.run() returned but Go runtime threads are still alive, kill them.

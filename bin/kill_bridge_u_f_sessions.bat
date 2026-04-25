@@ -28,6 +28,16 @@ if exist "%~dp0workbench_ctl.ps1" (
     powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0workbench_ctl.ps1" -Action stop >nul 2>&1
 )
 
+if exist "%~dp0bridge_ctl.ps1" (
+    if "!QUIET!"=="1" (
+        powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0bridge_ctl.ps1" -Action kill -Quiet >nul 2>&1
+    ) else (
+        powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0bridge_ctl.ps1" -Action kill
+    )
+    set "PS_EXIT=%ERRORLEVEL%"
+    if "%PS_EXIT%"=="0" exit /b 0
+)
+
 rem NOTE: On Windows, the venv python.exe shim spawns a child python.exe,
 rem so a single bridge-u-f instance appears as TWO python.exe processes
 rem (both with "main.py" in the command line). This is normal.
@@ -37,6 +47,8 @@ if exist "%PID_FILE%" del "%PID_FILE%" >nul 2>&1
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$project = (Resolve-Path '.').Path; " ^
+  "$mainPath = Join-Path $project 'main.py'; " ^
+  "$bridgeHome = [System.IO.Path]::GetFullPath($project).TrimEnd('\'); " ^
   "$selfPid = [int]$PID; " ^
   "$procs = Get-CimInstance Win32_Process; " ^
   "$byPid = @{}; $children = @{}; " ^
@@ -49,6 +61,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$parentPid = 0; if($byPid.ContainsKey($selfPid)){ $parentPid = [int]$byPid[$selfPid].ParentProcessId }; " ^
   "$targets = New-Object System.Collections.Generic.HashSet[int]; " ^
   "$roots = New-Object System.Collections.Generic.Queue[int]; " ^
+  "function Test-BridgeCmd([string]$cmd){ " ^
+  "  if(-not $cmd){ return $false }; " ^
+  "  if($cmd -match '(?i)--bridge-home\s+(""([^""]+)""|(\S+))'){ " ^
+  "    $candidate = if($matches[2]){ $matches[2] } else { $matches[3] }; " ^
+  "    try { $resolved = [System.IO.Path]::GetFullPath($candidate).TrimEnd('\') } catch { $resolved = $candidate.TrimEnd('\') }; " ^
+  "    return $resolved -ieq $bridgeHome; " ^
+  "  }; " ^
+  "  return [regex]::IsMatch($cmd, '(?i)(^|[""\s])' + [regex]::Escape($mainPath) + '("|\s|$)'); " ^
+  "}; " ^
   "function Add-Root([int]$rootProcId){ " ^
   "  if($rootProcId -gt 0 -and $rootProcId -ne $selfPid -and $rootProcId -ne $parentPid -and $targets.Add($rootProcId)){ $roots.Enqueue($rootProcId) } " ^
   "}; " ^
@@ -57,8 +78,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "  if($procId -eq $selfPid -or $procId -eq $parentPid){ continue }; " ^
   "  $name = [string]$p.Name; " ^
   "  $cmd = [string]$p.CommandLine; " ^
-  "  if($name -ieq 'python.exe' -and $cmd -and $cmd -like ('*' + $project + '*main.py*')){ Add-Root $procId; continue }; " ^
-  "  if($name -ieq 'py.exe' -and $cmd -and $cmd -like ('*' + $project + '*main.py*')){ Add-Root $procId; continue }; " ^
+  "  if($name -ieq 'python.exe' -and (Test-BridgeCmd $cmd)){ Add-Root $procId; continue }; " ^
+  "  if($name -ieq 'py.exe' -and (Test-BridgeCmd $cmd)){ Add-Root $procId; continue }; " ^
   "  if($name -ieq 'cmd.exe' -and $cmd -and $cmd -like ('*' + $project + '\bridge-u.bat*')){ Add-Root $procId; continue } " ^
   "}; " ^
   "foreach($port in 18800,18801){ " ^
@@ -98,9 +119,20 @@ if "%FOUND_ANY%"=="0" (
 set "BRIDGE_STILL_RUNNING=0"
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$project = (Resolve-Path '.').Path; " ^
+  "$mainPath = Join-Path $project 'main.py'; " ^
+  "$bridgeHome = [System.IO.Path]::GetFullPath($project).TrimEnd('\'); " ^
+  "function Test-BridgeCmd([string]$cmd){ " ^
+  "  if(-not $cmd){ return $false }; " ^
+  "  if($cmd -match '(?i)--bridge-home\s+(""([^""]+)""|(\S+))'){ " ^
+  "    $candidate = if($matches[2]){ $matches[2] } else { $matches[3] }; " ^
+  "    try { $resolved = [System.IO.Path]::GetFullPath($candidate).TrimEnd('\') } catch { $resolved = $candidate.TrimEnd('\') }; " ^
+  "    return $resolved -ieq $bridgeHome; " ^
+  "  }; " ^
+  "  return [regex]::IsMatch($cmd, '(?i)(^|[""\s])' + [regex]::Escape($mainPath) + '("|\s|$)'); " ^
+  "}; " ^
   "$alive = Get-CimInstance Win32_Process | Where-Object { " ^
   "  $name = [string]$_.Name; $cmd = [string]$_.CommandLine; " ^
-  "  (($name -ieq 'python.exe' -or $name -ieq 'py.exe') -and $cmd -and $cmd -like ('*' + $project + '*main.py*')) " ^
+  "  (($name -ieq 'python.exe' -or $name -ieq 'py.exe') -and (Test-BridgeCmd $cmd)) " ^
   "} | Select-Object -First 1; " ^
   "if($alive){ exit 1 } else { exit 0 }"
 if errorlevel 1 set "BRIDGE_STILL_RUNNING=1"

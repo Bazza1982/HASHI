@@ -400,7 +400,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$p = Get-CimInstance Win32_Process -Filter 'ProcessId = %EXISTING_PID%' -ErrorAction SilentlyContinue; " ^
   "if(-not $p){ exit 1 }; " ^
   "$cmd = [string]$p.CommandLine; " ^
-  "if($cmd -and $cmd -like '*main.py*'){ exit 0 } else { exit 1 }"
+  "$bridgeHome = [System.IO.Path]::GetFullPath('%BRIDGE_HOME%').TrimEnd('\'); " ^
+  "$mainPath = Join-Path ([System.IO.Path]::GetFullPath('%BRIDGE_CODE_ROOT%')) 'main.py'; " ^
+  "if(-not $cmd){ exit 1 }; " ^
+  "if($cmd -match '(?i)--bridge-home\s+(""([^""]+)""|(\S+))'){ " ^
+  "  $candidate = if($matches[2]){ $matches[2] } else { $matches[3] }; " ^
+  "  try { $resolved = [System.IO.Path]::GetFullPath($candidate).TrimEnd('\') } catch { $resolved = $candidate.TrimEnd('\') }; " ^
+  "  if($resolved -ieq $bridgeHome){ exit 0 } else { exit 1 } " ^
+  "}; " ^
+  "if([regex]::IsMatch($cmd, '(?i)(^|[""\s])' + [regex]::Escape($mainPath) + '("|\s|$)')){ exit 0 } else { exit 1 }"
 if errorlevel 1 (
     rem PID file is stale â€” process is gone or not bridge-u-f
     del /f /q "%BRIDGE_HOME%\.bridge_u_f.pid" >nul 2>&1

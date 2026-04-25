@@ -307,6 +307,10 @@ HASHI also supports a separate `windows_*` tool tier for controlling the real Wi
   - `windows-mcp` for screenshot + input actions
 - Best reliability when the Windows desktop is unlocked
 - Separate from `desktop_*`, which targets the Linux virtual desktop
+- Treat multi-display setups as the default case
+- Before any screenshot-driven action, call `windows_info` and inspect `displays`
+- Use `windows_screenshot(display=N)` on the chosen monitor before input actions
+- Use `windows_window_list` / `windows_window_focus` alongside screenshots; screenshots alone do not guarantee focus
 
 Suggested tier config:
 
@@ -315,6 +319,14 @@ Suggested tier config:
   "tiers": ["core", "windows_use"]
 }
 ```
+
+Recommended protocol for Windows UI work:
+
+1. `windows_info` — inspect `displays` and current layout.
+2. Decide which display should contain the target app.
+3. `windows_screenshot(display=N)` — verify that screen visually.
+4. `windows_window_list` / `windows_window_focus` — find and target the window.
+5. `windows_screenshot(display=N)` again before typing or clicking if focus matters.
 
 ## Important Behavior Notes
 - Bridge owns continuity; backends are treated as stateless.

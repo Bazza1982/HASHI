@@ -399,9 +399,11 @@ HASHI supports multiple communication channels:
 - Shared sessions with Telegram/WhatsApp
 
 #### HChat — Cross-Instance Agent Messaging
-- Agents across different HASHI instances can message each other
-- Routing: local Workbench → contacts cache → registry-assisted Workbench → Remote /hchat fallback
-- JSON protocol with sender/receiver identity
+- `name` means local-instance delivery only
+- `name@INSTANCE` means cross-instance delivery
+- Cross-instance traffic is normalized through the `HASHI1` exchange
+- Routing: local Workbench → HASHI1 exchange → registry-assisted Workbench / Remote `/hchat`
+- JSON protocol preserves both sender agent and sender instance identity
 
 ---
 
@@ -641,19 +643,24 @@ No `tools` key in config = tools disabled, fully backward compatible.
 
 The Windows desktop-control tier is now good enough to drive a real Windows Chrome extension recovery / verification loop.
 
+On multi-display Windows hosts, do not assume the first screenshot is the only screen. Start with `windows_info` and inspect `displays`, choose the target monitor, then call `windows_screenshot(display=N)` for that screen. Pair screenshots with `windows_window_list` / `windows_window_focus`; visual confirmation alone is not enough when windows can live on different monitors or focus can fail silently.
+
 Recommended workflow for agents:
 
-1. Use `windows_window_list` to find the real Chrome window.
-2. Use `windows_window_focus` on that window.
-3. Drive navigation with:
+1. Use `windows_info` and inspect `displays`.
+2. Capture `windows_screenshot(display=N)` for the monitor that should contain the real Chrome window.
+3. Use `windows_window_list` to find the real Chrome window.
+4. Use `windows_window_focus` on that window.
+5. Re-capture `windows_screenshot(display=N)` before typing if focus matters.
+6. Drive navigation with:
    - `windows_key` → `ctrl+l`
    - `windows_type` → target URL
    - `windows_key` → `ENTER`
-4. Verify the extension bridge through bridge-owned evidence, not only by what the desktop looks like:
+7. Verify the extension bridge through bridge-owned evidence, not only by what the desktop looks like:
    - native host log: `logs/browser_native_host.log`
    - socket: `/tmp/hashi-browser-bridge.sock`
    - `tools.browser_extension_bridge.healthcheck(...)`
-5. On real pages, verify:
+8. On real pages, verify:
    - `active_tab`
    - `get_text`
    - `screenshot`

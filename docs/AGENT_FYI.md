@@ -180,6 +180,10 @@ This is designed for HASHI agents running either directly on Windows or inside W
 - Best reliability when Windows is unlocked.
 - From WSL, tool calls cross the WSL ↔ Windows boundary automatically.
 - `provider=auto` picks the smoother backend per action.
+- Treat multi-display Windows setups as normal, not exceptional.
+- Before any screenshot-led Windows task, call `windows_info` first and inspect `displays`.
+- Decide which display should contain the target window, then use `windows_screenshot(display=N)` for that monitor before clicking or typing.
+- Pair screenshots with `windows_window_list` / `windows_window_focus`; a screenshot alone is not proof that focus landed on the expected window or monitor.
 - `windows_type` can focus a target window first.
 - `windows_window_close` supports optional unsaved-prompt dismissal and explicit force close.
 
@@ -198,17 +202,20 @@ npm install -g usecomputer
 
 **Effective Windows Chrome extension workflow (known good):**
 
-1. Use `windows_window_list` to find a Chrome window.
-2. Use `windows_window_focus` to bring that window forward.
-3. Navigate with:
+1. Use `windows_info` first and inspect `displays`.
+2. Choose the display that should contain the real Chrome window and capture `windows_screenshot(display=N)` for that screen.
+3. Use `windows_window_list` to find a Chrome window.
+4. Use `windows_window_focus` to bring that window forward.
+5. Re-capture `windows_screenshot(display=N)` before typing if focus or monitor placement matters.
+6. Navigate with:
    - `windows_key` → `ctrl+l`
    - `windows_type` → target URL
    - `windows_key` → `ENTER`
-4. Prefer a real site for bridge verification:
+7. Prefer a real site for bridge verification:
    - `https://scholar.google.com`
    - `https://www.wikipedia.org/`
    - `https://arxiv.org/`
-5. Verify the bridge from WSL/Linux side with bridge-owned evidence:
+8. Verify the bridge from WSL/Linux side with bridge-owned evidence:
 ```bash
 python3 - <<'PY'
 from tools.browser_extension_bridge import healthcheck, send_bridge_command
@@ -405,6 +412,9 @@ The formal protocol is:
 - `contacts.json` is only a short-lived cache.
 - `Remote /hchat` is a restricted-network fallback for LAN / internet relay.
 - Mailbox is retired and banned from the formal protocol.
+- `name` means local delivery only. Do not guess cross-instance targets.
+- `name@INSTANCE` means cross-instance delivery and must go through the `HASHI1` exchange.
+- If the sender included `@INSTANCE`, replies must preserve that instance identity and must not be redirected to a same-name local agent.
 
 ### Prerequisites — WSL Mirrored Networking
 
@@ -439,8 +449,9 @@ curl -s -X POST http://127.0.0.1:18819/api/chat \
 
 | Method | Priority | Use Case |
 |--------|----------|---------|
-| **Workbench `/api/chat`** | Primary | Same instance, cross-instance, and registry-assisted LAN delivery |
+| **Workbench `/api/chat`** | Primary | Same-instance delivery |
+| **`HASHI1` exchange** | Primary for cross-instance | Any `agent@INSTANCE` delivery between `HASHI1/HASHI2/HASHI9/MSI` |
 | **`contacts.json` cache** | Secondary | Recently learned routes, refreshed against registry before use |
-| **Remote `/hchat`** | Fallback | Restricted network, relay, or future internet-paired delivery |
+| **Remote `/hchat`** | Transport | Carry exchange traffic or restricted-network relay |
 
 Do not fall back to mailbox.

@@ -8,6 +8,8 @@ import shutil
 import tempfile
 from pathlib import Path
 
+from PIL import ImageGrab
+
 from tools.windows_use_mcp_client import _run as run_windows_mcp
 from . import win32
 
@@ -47,10 +49,10 @@ def _resolve_provider(provider: str | None, action: str) -> str:
     if value and value != "auto":
         return value
     preferred = {
-        "screenshot": "windows-mcp",
-        "mouse_move": "windows-mcp",
-        "click": "windows-mcp",
-        "scroll": "windows-mcp",
+        "screenshot": "usecomputer",
+        "mouse_move": "usecomputer",
+        "click": "usecomputer",
+        "scroll": "usecomputer",
         "type": "usecomputer",
         "key": "usecomputer",
     }
@@ -159,6 +161,10 @@ async def execute_action(action: str, args: dict) -> str:
     if action == "mouse_move":
         x = int(args["x"])
         y = int(args["y"])
+        if provider == "usecomputer":
+            pos = win32.move_mouse(x, y)
+            win32.reset_input_state()
+            return f"Mouse moved to ({pos['x']}, {pos['y']}) on Windows host via helper-native"
         if provider == "windows-mcp":
             text = await _mcp_text("Move", {"loc": [x, y]})
             win32.reset_input_state()
@@ -172,6 +178,10 @@ async def execute_action(action: str, args: dict) -> str:
         y = int(args["y"])
         button = str(args.get("button", "left"))
         count = int(args.get("count", 1))
+        if provider == "usecomputer":
+            win32.click_mouse(x, y, button=button, count=count)
+            win32.reset_input_state()
+            return f"Clicked ({x}, {y}) button={button} count={count} on Windows host via helper-native"
         if provider == "windows-mcp":
             text = await _mcp_text("Click", {"loc": [x, y], "button": button, "clicks": count})
             win32.reset_input_state()
@@ -182,6 +192,10 @@ async def execute_action(action: str, args: dict) -> str:
 
     if action == "type":
         text = str(args.get("text", ""))
+        if provider == "usecomputer":
+            typed = win32.type_text(text)
+            win32.reset_input_state()
+            return f"Typed {typed['text_length']} chars on Windows host via helper-native"
         if provider == "windows-mcp":
             x = args.get("x")
             y = args.get("y")
@@ -196,6 +210,10 @@ async def execute_action(action: str, args: dict) -> str:
 
     if action == "key":
         key = str(args.get("key", ""))
+        if provider == "usecomputer":
+            win32.press_key_combo(key)
+            win32.reset_input_state()
+            return f"Pressed '{key}' on Windows host via helper-native"
         if provider == "windows-mcp":
             text = await _mcp_text("Shortcut", {"shortcut": key})
             win32.reset_input_state()
@@ -207,6 +225,13 @@ async def execute_action(action: str, args: dict) -> str:
     if action == "scroll":
         direction = str(args.get("direction", "down"))
         amount = int(args.get("amount", 3))
+        if provider == "usecomputer":
+            if args.get("x") is not None and args.get("y") is not None:
+                win32.move_mouse(int(args["x"]), int(args["y"]))
+            horizontal = direction in {"left", "right"}
+            win32.scroll_mouse(direction=direction, amount=amount, horizontal=horizontal)
+            win32.reset_input_state()
+            return f"Scrolled {direction} x{amount} on Windows host via helper-native"
         if provider == "windows-mcp":
             payload = {
                 "direction": direction,
@@ -226,6 +251,25 @@ async def execute_action(action: str, args: dict) -> str:
         return f"Scrolled {direction} x{amount} on Windows host via helper" if rc == 0 else f"Error: scroll failed: {err or out}"
 
     if action == "screenshot":
+        save_path = str(args.get("save_path", "") or "")
+        if provider == "usecomputer" and args.get("display") is None and not args.get("annotate"):
+            image = ImageGrab.grab(all_screens=True)
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+                tmp = Path(tf.name)
+            try:
+                image.save(tmp, format="PNG")
+                data = tmp.read_bytes()
+            finally:
+                tmp.unlink(missing_ok=True)
+            if save_path:
+                Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+                Path(save_path).write_bytes(data)
+            saved_note = f"\nSaved to: {save_path}" if save_path else ""
+            return (
+                f"Windows screenshot OK — provider=helper-native, {len(data)//1024}KB\n"
+                f"Metadata: {{\"all_screens\": true}}{saved_note}\n"
+                f"data:image/png;base64,{base64.b64encode(data).decode('ascii')}"
+            )
         if provider == "windows-mcp":
             payload = {}
             if args.get("display") is not None:
@@ -233,11 +277,21 @@ async def execute_action(action: str, args: dict) -> str:
             if args.get("annotate"):
                 payload["use_annotation"] = True
             result = await run_windows_mcp({"tool": "Screenshot", "arguments": payload})
-            text = await _mcp_text("Screenshot", payload)
+            texts = [item.get("text", "").strip() for item in result.get("content", []) if item.get("type") == "text"]
+            text = "\n".join(part for part in texts if part).strip()
             image = next((item for item in result.get("content", []) if item.get("type") == "image"), None)
             if not image:
                 return f"Error: screenshot failed: {text or 'no image returned'}"
-            return f"Windows screenshot OK — provider=windows-mcp-helper\nDetails: {text}\ndata:{image.get('mimeType','image/png')};base64,{image.get('data','')}"
+            raw = base64.b64decode(image.get("data", ""))
+            if save_path:
+                Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+                Path(save_path).write_bytes(raw)
+            saved_note = f"\nSaved to: {save_path}" if save_path else ""
+            return (
+                f"Windows screenshot OK — provider=windows-mcp-helper\n"
+                f"Details: {text}{saved_note}\n"
+                f"data:{image.get('mimeType','image/png')};base64,{image.get('data','')}"
+            )
 
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
             tmp = tf.name
@@ -251,13 +305,16 @@ async def execute_action(action: str, args: dict) -> str:
             if rc != 0:
                 return f"Error: screenshot failed: {err or out}"
             data = Path(tmp).read_bytes()
+            if save_path:
+                Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+                Path(save_path).write_bytes(data)
+            saved_note = f"\nSaved to: {save_path}" if save_path else ""
             return (
                 f"Windows screenshot OK — provider=helper, {len(data)//1024}KB\n"
-                f"Metadata: {out or '{}'}\n"
+                f"Metadata: {out or '{}'}{saved_note}\n"
                 f"data:image/png;base64,{base64.b64encode(data).decode('ascii')}"
             )
         finally:
             Path(tmp).unlink(missing_ok=True)
 
     return f"Error: unknown helper action '{action}'"
-
