@@ -114,6 +114,29 @@ async def _run(cmd: list[str], display: str, timeout: int = 15) -> tuple[int, st
         return 1, "", str(e)
 
 
+async def _best_effort_reset_desktop_input_state(display: str) -> None:
+    xdotool = shutil.which("xdotool")
+    if not xdotool:
+        logger.debug("desktop input-state reset skipped: xdotool not available")
+        return
+
+    reset_cmds = [
+        [xdotool, "keyup", "Shift_L"],
+        [xdotool, "keyup", "Shift_R"],
+        [xdotool, "keyup", "Control_L"],
+        [xdotool, "keyup", "Control_R"],
+        [xdotool, "keyup", "Alt_L"],
+        [xdotool, "keyup", "Alt_R"],
+        [xdotool, "keyup", "Super_L"],
+        [xdotool, "keyup", "Super_R"],
+        [xdotool, "mouseup", "1"],
+        [xdotool, "mouseup", "2"],
+        [xdotool, "mouseup", "3"],
+    ]
+    for cmd in reset_cmds:
+        await _run(cmd, display, timeout=5)
+
+
 # ---------------------------------------------------------------------------
 # desktop_screenshot
 # ---------------------------------------------------------------------------
@@ -190,6 +213,7 @@ async def execute_desktop_mouse_move(args: dict) -> str:
         return "Error: x and y are required"
 
     rc, out, err = await _run([uc, "mouse", "move", "-x", str(x), "-y", str(y)], display)
+    await _best_effort_reset_desktop_input_state(display)
     if rc != 0:
         return f"Error: mouse move failed: {err or out}"
     return f"Mouse moved to ({x}, {y}) on DISPLAY={display}"
@@ -217,6 +241,7 @@ async def execute_desktop_click(args: dict) -> str:
     cmd = [uc, "click", "-x", str(x), "-y", str(y),
            "--button", button, "--count", str(count)]
     rc, out, err = await _run(cmd, display)
+    await _best_effort_reset_desktop_input_state(display)
     if rc != 0:
         return f"Error: click failed: {err or out}"
     return f"Clicked ({x}, {y}) button={button} count={count} on DISPLAY={display}"
@@ -243,6 +268,7 @@ async def execute_desktop_type(args: dict) -> str:
             [xdotool, "type", "--delay", str(delay_ms), "--", text],
             display,
         )
+        await _best_effort_reset_desktop_input_state(display)
         if rc == 0:
             return f"Typed {len(text)} chars via xdotool on DISPLAY={display}"
         # xdotool failed — fall through to usecomputer
@@ -253,6 +279,7 @@ async def execute_desktop_type(args: dict) -> str:
         return "Error: neither xdotool nor usecomputer found."
 
     rc, out, err = await _run([uc, "type", text], display)
+    await _best_effort_reset_desktop_input_state(display)
     if rc != 0:
         return f"Error: type failed (xdotool unavailable, usecomputer): {err or out}"
     return f"Typed {len(text)} chars via usecomputer on DISPLAY={display}"
@@ -274,6 +301,7 @@ async def execute_desktop_key(args: dict) -> str:
         return "Error: key is required (e.g. 'ctrl+s', 'alt+F4', 'Return')"
 
     rc, out, err = await _run([uc, "press", key], display)
+    await _best_effort_reset_desktop_input_state(display)
     if rc != 0:
         return f"Error: key press failed: {err or out}"
     return f"Pressed '{key}' on DISPLAY={display}"
@@ -303,6 +331,7 @@ async def execute_desktop_scroll(args: dict) -> str:
         cmd += ["--at", f"{x},{y}"]
 
     rc, out, err = await _run(cmd, display)
+    await _best_effort_reset_desktop_input_state(display)
     if rc != 0:
         return f"Error: scroll failed: {err or out}"
     return f"Scrolled {direction} x{amount} on DISPLAY={display}"
