@@ -91,3 +91,43 @@ async def test_windows_screenshot_auto_falls_back_to_usecomputer(monkeypatch: py
     result = await windows_use.execute_windows_screenshot({"provider": "auto"})
 
     assert "provider=usecomputer" in result
+
+
+@pytest.mark.asyncio
+async def test_windows_key_resets_input_state_after_usecomputer(monkeypatch: pytest.MonkeyPatch) -> None:
+    reset_calls: list[str] = []
+
+    async def fake_usecomputer(body: str, timeout: int = 30):
+        assert "Invoke-Usecomputer -Args @('press'" in body
+        return {"ok": True, "output": ""}, None
+
+    async def fake_reset() -> None:
+        reset_calls.append("reset")
+
+    monkeypatch.setattr(windows_use, "_run_usecomputer_json", fake_usecomputer)
+    monkeypatch.setattr(windows_use, "_best_effort_reset_windows_input_state", fake_reset)
+
+    result = await windows_use.execute_windows_key({"provider": "auto", "key": "ctrl+l"})
+
+    assert result == "Pressed 'ctrl+l' on Windows host via usecomputer"
+    assert reset_calls == ["reset"]
+
+
+@pytest.mark.asyncio
+async def test_windows_click_resets_input_state_after_windows_mcp(monkeypatch: pytest.MonkeyPatch) -> None:
+    reset_calls: list[str] = []
+
+    async def fake_mcp(payload: dict, timeout: int = 90):
+        assert payload["tool"] == "Click"
+        return {"content": [{"type": "text", "text": "clicked"}]}, None
+
+    async def fake_reset() -> None:
+        reset_calls.append("reset")
+
+    monkeypatch.setattr(windows_use, "_run_windows_mcp_json", fake_mcp)
+    monkeypatch.setattr(windows_use, "_best_effort_reset_windows_input_state", fake_reset)
+
+    result = await windows_use.execute_windows_click({"provider": "windows-mcp", "x": 10, "y": 20})
+
+    assert result == "clicked"
+    assert reset_calls == ["reset"]

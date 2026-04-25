@@ -262,6 +262,12 @@ public static class HashiWin {
 
     [DllImport("user32.dll")]
     public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
+    [DllImport("user32.dll")]
+    public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
 }
 "@
 }
@@ -323,6 +329,21 @@ function Resolve-HashiWindow {
         return $windows | Where-Object { $_.title -like ("*" + $TitleContains + "*") } | Select-Object -First 1
     }
     return $null
+}
+
+function Reset-HashiInputState {
+    $keyUp = 0x0002
+    foreach ($vk in @(0x10, 0x11, 0x12, 0x5B, 0x5C)) {
+        [HashiWin]::keybd_event([byte]$vk, 0, $keyUp, [UIntPtr]::Zero)
+    }
+    foreach ($flag in @(0x0004, 0x0010, 0x0040)) {
+        [HashiWin]::mouse_event([uint32]$flag, 0, 0, 0, [UIntPtr]::Zero)
+    }
+    [pscustomobject]@{
+        ok = $true
+        released_keys = @("SHIFT", "CTRL", "ALT", "LWIN", "RWIN")
+        released_mouse = @("left", "right", "middle")
+    }
 }
 """
 
@@ -457,6 +478,20 @@ $obj | ConvertTo-Json -Compress -Depth 8
     if data.get("ok") is False:
         return None, data.get("error") or "windows-mcp helper returned failure"
     return data, None
+
+
+async def _best_effort_reset_windows_input_state() -> None:
+    data, error = await _run_powershell_json(
+        """
+$result = Reset-HashiInputState
+$result | ConvertTo-Json -Compress -Depth 4
+""",
+        timeout=10,
+    )
+    if error:
+        logger.warning("windows_use input-state reset failed: %s", error)
+        return
+    logger.debug("windows_use input-state reset: %s", data)
 
 
 def _extract_mcp_text(content: list[dict] | None) -> str:
@@ -604,6 +639,7 @@ async def execute_windows_mouse_move(args: dict) -> str:
 
     if provider == "windows-mcp":
         data, error = await _run_windows_mcp_json({"tool": "Move", "arguments": {"loc": [int(x), int(y)]}})
+        await _best_effort_reset_windows_input_state()
         if error:
             if not _is_auto_provider(requested_provider):
                 return f"Error: mouse move failed: {error}"
@@ -621,6 +657,7 @@ $result = Invoke-Usecomputer -Args @('mouse', 'move', '-x', {_ps_quote(str(x))},
 }} | ConvertTo-Json -Compress
 """
     data, error = await _run_usecomputer_json(body)
+    await _best_effort_reset_windows_input_state()
     if error:
         return f"Error: mouse move failed: {error}"
     if not data or not data.get("ok"):
@@ -654,6 +691,7 @@ async def execute_windows_click(args: dict) -> str:
                 },
             }
         )
+        await _best_effort_reset_windows_input_state()
         if error:
             if not _is_auto_provider(requested_provider):
                 return f"Error: click failed: {error}"
@@ -670,6 +708,7 @@ $result = Invoke-Usecomputer -Args @('click', '-x', {_ps_quote(str(x))}, '-y', {
 }} | ConvertTo-Json -Compress
 """
     data, error = await _run_usecomputer_json(body)
+    await _best_effort_reset_windows_input_state()
     if error:
         return f"Error: click failed: {error}"
     if not data or not data.get("ok"):
@@ -718,6 +757,7 @@ async def execute_windows_type(args: dict) -> str:
             },
             timeout=120,
         )
+        await _best_effort_reset_windows_input_state()
         if error:
             return f"Error: type failed: {error}"
         text_result = _extract_mcp_text(data.get("content"))
@@ -735,6 +775,7 @@ $result = Invoke-Usecomputer -Args @('type', {_ps_quote(text)})
 }} | ConvertTo-Json -Compress
 """
     data, error = await _run_usecomputer_json(body, timeout=45)
+    await _best_effort_reset_windows_input_state()
     if error:
         return f"Error: type failed: {error}"
     if not data or not data.get("ok"):
@@ -761,6 +802,7 @@ async def execute_windows_key(args: dict) -> str:
                 },
             }
         )
+        await _best_effort_reset_windows_input_state()
         if error:
             return f"Error: key press failed: {error}"
         text = _extract_mcp_text(data.get("content"))
@@ -774,6 +816,7 @@ $result = Invoke-Usecomputer -Args @('press', {_ps_quote(key)})
 }} | ConvertTo-Json -Compress
 """
     data, error = await _run_usecomputer_json(body)
+    await _best_effort_reset_windows_input_state()
     if error:
         return f"Error: key press failed: {error}"
     if not data or not data.get("ok"):
@@ -803,6 +846,7 @@ async def execute_windows_scroll(args: dict) -> str:
         if x is not None and y is not None:
             mcp_args["loc"] = [int(x), int(y)]
         data, error = await _run_windows_mcp_json({"tool": "Scroll", "arguments": mcp_args})
+        await _best_effort_reset_windows_input_state()
         if error:
             if not _is_auto_provider(requested_provider):
                 return f"Error: scroll failed: {error}"
@@ -827,6 +871,7 @@ $result = Invoke-Usecomputer -Args @({', '.join(arg_parts)})
 }} | ConvertTo-Json -Compress
 """
     data, error = await _run_usecomputer_json(body)
+    await _best_effort_reset_windows_input_state()
     if error:
         return f"Error: scroll failed: {error}"
     if not data or not data.get("ok"):
