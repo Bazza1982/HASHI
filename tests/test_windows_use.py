@@ -61,6 +61,7 @@ async def test_windows_type_focuses_selected_window_before_typing(monkeypatch: p
 def test_windows_tool_schemas_include_window_controls_and_stability_args() -> None:
     assert "windows_window_list" in TOOL_SCHEMA_MAP
     assert "windows_window_focus" in TOOL_SCHEMA_MAP
+    assert "windows_reset_input_state" in TOOL_SCHEMA_MAP
     close_props = TOOL_SCHEMA_MAP["windows_window_close"]["function"]["parameters"]["properties"]
     type_props = TOOL_SCHEMA_MAP["windows_type"]["function"]["parameters"]["properties"]
 
@@ -131,3 +132,26 @@ async def test_windows_click_resets_input_state_after_windows_mcp(monkeypatch: p
 
     assert result == "clicked"
     assert reset_calls == ["reset"]
+
+
+@pytest.mark.asyncio
+async def test_windows_reset_input_state_reports_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    reset_calls: list[str] = []
+
+    async def fake_reset() -> None:
+        reset_calls.append("reset")
+
+    async def fake_state():
+        return {
+            "foreground_window": {"id": 1, "title": "Chrome"},
+            "keyboard_layout": {"hkl": "0x00000409", "klid": "00000409"},
+        }, None
+
+    monkeypatch.setattr(windows_use, "_best_effort_reset_windows_input_state", fake_reset)
+    monkeypatch.setattr(windows_use, "_get_windows_input_state", fake_state)
+
+    result = await windows_use.execute_windows_reset_input_state({})
+
+    assert reset_calls == ["reset"]
+    assert '"message": "Windows input state reset completed"' in result
+    assert '"title": "Chrome"' in result

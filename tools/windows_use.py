@@ -268,6 +268,15 @@ public static class HashiWin {
 
     [DllImport("user32.dll")]
     public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetKeyboardLayout(uint idThread);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern bool GetKeyboardLayoutName(StringBuilder pwszKLID);
 }
 "@
 }
@@ -343,6 +352,28 @@ function Reset-HashiInputState {
         ok = $true
         released_keys = @("SHIFT", "CTRL", "ALT", "LWIN", "RWIN")
         released_mouse = @("left", "right", "middle")
+    }
+}
+
+function Get-HashiInputState {
+    $foreground = [HashiWin]::GetForegroundWindow()
+    [uint32]$foregroundPid = 0
+    [void][HashiWin]::GetWindowThreadProcessId($foreground, [ref]$foregroundPid)
+    $foregroundThread = [HashiWin]::GetWindowThreadProcessId($foreground, [ref]$foregroundPid)
+    $layoutHandle = [HashiWin]::GetKeyboardLayout($foregroundThread)
+    $layoutHex = ("0x{0:X8}" -f ([int64]$layoutHandle -band 0xFFFFFFFF))
+    $layoutSb = New-Object System.Text.StringBuilder 9
+    $layoutNameOk = [HashiWin]::GetKeyboardLayoutName($layoutSb)
+    $window = $null
+    if ($foreground -ne [IntPtr]::Zero) {
+        $window = Resolve-HashiWindow -WindowId ([int64]$foreground)
+    }
+    [pscustomobject]@{
+        foreground_window = $window
+        keyboard_layout = [pscustomobject]@{
+            hkl = $layoutHex
+            klid = $(if ($layoutNameOk) { $layoutSb.ToString() } else { $null })
+        }
     }
 }
 """
@@ -492,6 +523,19 @@ $result | ConvertTo-Json -Compress -Depth 4
         logger.warning("windows_use input-state reset failed: %s", error)
         return
     logger.debug("windows_use input-state reset: %s", data)
+
+
+async def _get_windows_input_state() -> tuple[dict | None, str | None]:
+    data, error = await _run_powershell_json(
+        """
+$result = Get-HashiInputState
+$result | ConvertTo-Json -Compress -Depth 6
+""",
+        timeout=10,
+    )
+    if error:
+        return None, error
+    return _normalize_ps_value(data), None
 
 
 def _extract_mcp_text(content: list[dict] | None) -> str:
@@ -879,6 +923,22 @@ $result = Invoke-Usecomputer -Args @({', '.join(arg_parts)})
     return f"Scrolled {direction} x{amount} on Windows host"
 
 
+async def execute_windows_reset_input_state(args: dict) -> str:
+    await _best_effort_reset_windows_input_state()
+    state, error = await _get_windows_input_state()
+    if error:
+        return "Windows input state reset requested, but current state could not be read back."
+    return json.dumps(
+        {
+            "ok": True,
+            "message": "Windows input state reset completed",
+            "state": state,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
 async def execute_windows_window_list(args: dict) -> str:
     requested_provider = args.get("provider")
     if error := _provider_error(requested_provider):
@@ -1049,6 +1109,7 @@ if ($includeDisplays) {
 $includeWindows = {_ps_bool(include_windows)}
 $includeDisplays = {_ps_bool(include_displays)}
 $uc = Resolve-UsecomputerPath
+$inputState = Get-HashiInputState
 $mouse = $null
 if ($uc) {{
     $mouseResult = Invoke-Usecomputer -Args @('mouse', 'position', '--json')
@@ -1067,6 +1128,7 @@ if ($uc) {{
     powershell = $PSVersionTable.PSVersion.ToString()
     is_wsl_caller = {_ps_bool(_is_wsl())}
     usecomputer_path = $uc
+    input_state = $inputState
     mouse_position = $mouse
     displays = $displays
     windows = $windows

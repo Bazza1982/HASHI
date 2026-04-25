@@ -838,7 +838,8 @@ WINDOWS_USE_TOOL_SCHEMAS = [
                 "Take a screenshot of the real Windows desktop via the Windows host. "
                 "Returns a base64-encoded PNG plus metadata from the Windows-side executor. "
                 "Works when called from Windows or from WSL agents through powershell.exe interop. "
-                "The Windows desktop usually needs to be unlocked for reliable results."
+                "The Windows desktop usually needs to be unlocked for reliable results. "
+                "On multi-display hosts, call windows_info first, inspect displays, and pass display=N explicitly."
             ),
             "parameters": {
                 "type": "object",
@@ -1008,11 +1009,27 @@ WINDOWS_USE_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "windows_reset_input_state",
+            "description": (
+                "Explicitly release common modifier keys and mouse buttons on the real Windows desktop, "
+                "then report the current foreground window and keyboard layout. "
+                "Use when automation may have left the user's desktop input state feeling wrong."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "windows_info",
             "description": (
                 "Get info about the Windows desktop bridge: current mouse position, "
-                "connected displays, visible windows, and executor availability. "
-                "Useful to confirm WSL-to-Windows interop is working."
+                "connected displays, visible windows, foreground window, keyboard layout, and executor availability. "
+                "Useful to confirm WSL-to-Windows interop is working. "
+                "Use this first on multi-display systems before taking screenshots or driving input."
             ),
             "parameters": {
                 "type": "object",
@@ -1038,7 +1055,7 @@ WINDOWS_USE_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "windows_window_list",
-            "description": "List visible top-level windows on the real Windows desktop. Useful for selecting a target window before focus, type, or close.",
+            "description": "List visible top-level windows on the real Windows desktop. Useful for selecting a target window before focus, type, or close, especially after choosing the correct display with windows_info.",
             "parameters": {
                 "type": "object",
                 "properties": {
