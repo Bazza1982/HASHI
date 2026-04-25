@@ -116,7 +116,8 @@ def test_write_wsl_host_wrapper(tmp_path: Path) -> None:
         socket_path="/tmp/harness.sock",
         log_path="/tmp/harness.log",
     )
-    assert "browser_native_host.py" in script
+    assert "cd /d %LOCALAPPDATA%" in script
+    assert "python3 -m tools.browser_native_host" in script
     assert "--socket /tmp/harness.sock" in script
     assert script_path.read_text(encoding="utf-8") == script
 

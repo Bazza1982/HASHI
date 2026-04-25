@@ -24,11 +24,13 @@ class SkillDefinition:
 
 class SkillManager:
     ACTIVE_HEARTBEAT_DEFAULT_MINUTES = 10
+    ACTION_SKILL_TIMEOUT_S = 360
 
     def __init__(self, project_root: Path, tasks_path: Path):
         self.project_root = project_root
         self.skills_dir = project_root / "skills"
         self.tasks_path = tasks_path
+        self.active_heartbeats_path = project_root / "managed_active_heartbeats.json"
 
     def _now(self) -> str:
         return datetime.now().isoformat(timespec="seconds")
@@ -231,7 +233,12 @@ class SkillManager:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120.0)
+            # Keep the local action-skill watchdog longer than the scheduler's
+            # outer timeout so nightly jobs do not get marked failed early.
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=float(self.ACTION_SKILL_TIMEOUT_S),
+            )
         except asyncio.TimeoutError:
             with suppress(Exception):
                 proc.kill()
@@ -258,10 +265,48 @@ class SkillManager:
     def _save_tasks(self, payload: dict[str, Any]):
         self._save_json(self.tasks_path, payload)
 
+    def _is_managed_active_heartbeat(self, job: dict[str, Any]) -> bool:
+        if not isinstance(job, dict):
+            return False
+        return (
+            job.get("managed_by") == "active-command"
+            or str(job.get("id", "")).endswith("-active-heartbeat")
+        )
+
+    def _load_active_heartbeats(self) -> list[dict[str, Any]]:
+        payload = self._load_json(self.active_heartbeats_path, {"heartbeats": []})
+        if isinstance(payload, list):
+            jobs = payload
+        else:
+            jobs = payload.get("heartbeats", [])
+        return [dict(job) for job in jobs if isinstance(job, dict)]
+
+    def _save_active_heartbeats(self, jobs: list[dict[str, Any]]):
+        self._save_json(self.active_heartbeats_path, {"heartbeats": jobs})
+
+    def _ensure_active_heartbeats_migrated(self):
+        tasks = self._load_tasks()
+        heartbeats = list(tasks.get("heartbeats", []))
+        migrated = [dict(job) for job in heartbeats if self._is_managed_active_heartbeat(job)]
+        if not migrated:
+            return
+
+        remaining = [job for job in heartbeats if not self._is_managed_active_heartbeat(job)]
+        existing = {job.get("id"): dict(job) for job in self._load_active_heartbeats()}
+        for job in migrated:
+            existing[job.get("id")] = job
+
+        tasks["heartbeats"] = remaining
+        self._save_tasks(tasks)
+        self._save_active_heartbeats(list(existing.values()))
+
     def list_jobs(self, kind: str, agent_name: str | None = None) -> list[dict[str, Any]]:
+        self._ensure_active_heartbeats_migrated()
         tasks = self._load_tasks()
         key = "crons" if kind == "cron" else "heartbeats"
         jobs = list(tasks.get(key, []))
+        if kind == "heartbeat":
+            jobs.extend(self._load_active_heartbeats())
         if agent_name:
             jobs = [job for job in jobs if job.get("agent") == agent_name]
         return jobs
@@ -293,6 +338,15 @@ class SkillManager:
         return "\n".join(lines)
 
     def set_job_enabled(self, kind: str, task_id: str, enabled: bool) -> tuple[bool, str]:
+        self._ensure_active_heartbeats_migrated()
+        if kind == "heartbeat":
+            jobs = self._load_active_heartbeats()
+            for job in jobs:
+                if job.get("id") != task_id:
+                    continue
+                job["enabled"] = enabled
+                self._save_active_heartbeats(jobs)
+                return True, f"{task_id} is now {'ON' if enabled else 'OFF'}."
         tasks = self._load_tasks()
         key = "crons" if kind == "cron" else "heartbeats"
         for job in tasks.get(key, []):
@@ -304,6 +358,14 @@ class SkillManager:
         return False, f"Unknown {kind} task: {task_id}"
 
     def delete_job(self, kind: str, task_id: str) -> tuple[bool, str]:
+        self._ensure_active_heartbeats_migrated()
+        if kind == "heartbeat":
+            jobs = self._load_active_heartbeats()
+            for i, job in enumerate(jobs):
+                if job.get("id") == task_id:
+                    jobs.pop(i)
+                    self._save_active_heartbeats(jobs)
+                    return True, f"Deleted {task_id}."
         tasks = self._load_tasks()
         key = "crons" if kind == "cron" else "heartbeats"
         jobs = tasks.get(key, [])
@@ -363,7 +425,12 @@ class SkillManager:
         return f"{agent_name}-active-heartbeat"
 
     def get_active_heartbeat_job(self, agent_name: str) -> dict[str, Any] | None:
-        return self.get_job("heartbeat", self.get_active_heartbeat_job_id(agent_name))
+        self._ensure_active_heartbeats_migrated()
+        task_id = self.get_active_heartbeat_job_id(agent_name)
+        for job in self._load_active_heartbeats():
+            if job.get("id") == task_id:
+                return job
+        return None
 
     def describe_active_heartbeat(self, agent_name: str) -> str:
         job = self.get_active_heartbeat_job(agent_name)
@@ -394,8 +461,8 @@ class SkillManager:
         )
 
     def set_active_heartbeat(self, agent_name: str, enabled: bool, minutes: int | None = None) -> tuple[bool, str]:
-        tasks = self._load_tasks()
-        heartbeats = list(tasks.get("heartbeats", []))
+        self._ensure_active_heartbeats_migrated()
+        heartbeats = self._load_active_heartbeats()
         task_id = self.get_active_heartbeat_job_id(agent_name)
         interval_minutes = max(1, int(minutes or self.ACTIVE_HEARTBEAT_DEFAULT_MINUTES))
         if not enabled:
@@ -434,8 +501,7 @@ class SkillManager:
             job["note"] = f"Managed proactive follow-up heartbeat for {agent_name}"
             job["managed_by"] = "active-command"
 
-        tasks["heartbeats"] = heartbeats
-        self._save_tasks(tasks)
+        self._save_active_heartbeats(heartbeats)
 
         if enabled:
             return True, f"Active mode is now ON. Proactive heartbeat set to every {interval_minutes} min."

@@ -47,16 +47,16 @@ def send_bridge_command(
         "args": args or {},
     }
 
-    deadline = __import__("time").monotonic() + connect_wait_s
+    deadline = time.monotonic() + connect_wait_s
     last_error: Optional[Exception] = None
     while True:
         if not path.exists():
-            if __import__("time").monotonic() >= deadline:
+            if time.monotonic() >= deadline:
                 raise BrowserBridgeError(
                     f"extension bridge socket not found: {path}. "
                     "Install the Chrome extension and native host first."
                 )
-            __import__("time").sleep(DEFAULT_RETRY_DELAY_S)
+            time.sleep(DEFAULT_RETRY_DELAY_S)
             continue
 
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
@@ -75,14 +75,9 @@ def send_bridge_command(
                 break
             except (OSError, socket.timeout) as exc:
                 last_error = exc
-                if isinstance(exc, OSError) and getattr(exc, "errno", None) == 111 and path.exists():
-                    try:
-                        path.unlink()
-                    except OSError:
-                        pass
-                if __import__("time").monotonic() >= deadline:
+                if time.monotonic() >= deadline:
                     raise BrowserBridgeError(f"failed talking to extension bridge: {exc}") from exc
-                __import__("time").sleep(DEFAULT_RETRY_DELAY_S)
+                time.sleep(DEFAULT_RETRY_DELAY_S)
                 continue
 
     payload = b"".join(chunks).decode("utf-8").strip()

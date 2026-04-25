@@ -199,6 +199,19 @@ async function actionGetHtml(args) {
 
 async function actionScreenshot(args) {
   const tab = await resolveTab(args);
+  await chrome.tabs.update(tab.id, { active: true });
+  if (tab.windowId) {
+    try {
+      await chrome.windows.update(tab.windowId, { focused: true });
+    } catch (error) {
+      log("warn", "failed to focus Chrome window before screenshot", {
+        tabId: tab.id,
+        windowId: tab.windowId,
+        error: String(error)
+      });
+    }
+  }
+  await sleep(Number(args.wait_ms || 300));
   const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
   return {
     output: String(dataUrl || ""),

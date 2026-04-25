@@ -42,7 +42,8 @@ Write-Log "Copied extension to $ExtensionInstallDir"
 
 $WrapperContent = @"
 @echo off
-C:\Windows\System32\wsl.exe -d $DistroName bash -lc "cd '$LinuxRepoRoot' && /usr/bin/env python3 '$LinuxRepoRoot/tools/browser_native_host.py' --stdio --socket /tmp/hashi-browser-bridge.sock --log-file '$LinuxRepoRoot/logs/browser_native_host.log'"
+cd /d %LOCALAPPDATA%
+C:\Windows\System32\wsl.exe -d $DistroName bash -lc "cd '$LinuxRepoRoot' && /usr/bin/env python3 -m tools.browser_native_host --stdio --socket /tmp/hashi-browser-bridge.sock --log-file '$LinuxRepoRoot/logs/browser_native_host.log'"
 "@
 Set-Content -Path $WrapperPath -Value $WrapperContent -Encoding ASCII
 Write-Log "Wrote wrapper: $WrapperPath"

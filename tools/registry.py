@@ -28,6 +28,10 @@ TOOL_TIERS: dict[str, list[str]] = {
         "browser_key", "browser_select", "browser_wait_for",
         "browser_get_attribute", "browser_drag", "browser_upload",
     ],
+    "desktop": [
+        "desktop_screenshot", "desktop_mouse_move", "desktop_click",
+        "desktop_type", "desktop_key", "desktop_scroll", "desktop_info",
+    ],
 }
 
 def resolve_tiers(tier_names: list[str]) -> list[str]:
@@ -265,6 +269,29 @@ class ToolRegistry:
                 browser_args.setdefault("_audit", self.audit_context)
                 return await _browser_dispatch[tool_name](browser_args)
             return f"Error: unknown browser tool '{tool_name}'"
+
+        if tool_name.startswith("desktop_"):
+            from tools.desktop import (
+                execute_desktop_screenshot,
+                execute_desktop_mouse_move,
+                execute_desktop_click,
+                execute_desktop_type,
+                execute_desktop_key,
+                execute_desktop_scroll,
+                execute_desktop_info,
+            )
+            _desktop_dispatch = {
+                "desktop_screenshot": execute_desktop_screenshot,
+                "desktop_mouse_move": execute_desktop_mouse_move,
+                "desktop_click": execute_desktop_click,
+                "desktop_type": execute_desktop_type,
+                "desktop_key": execute_desktop_key,
+                "desktop_scroll": execute_desktop_scroll,
+                "desktop_info": execute_desktop_info,
+            }
+            if tool_name in _desktop_dispatch:
+                return await _desktop_dispatch[tool_name](arguments)
+            return f"Error: unknown desktop tool '{tool_name}'"
 
         if tool_name.startswith("obsidian_"):
             from tools.obsidian_mcp.client import ObsidianClient

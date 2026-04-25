@@ -2,6 +2,7 @@ const HOST_NAME = "com.hashi.browser_bridge";
 const BRIDGE_VERSION = "0.1.0";
 const RECONNECT_DELAY_MS = 5000;
 const HEARTBEAT_INTERVAL_MS = 10000;
+const DEBUGGER_VERSION = "1.3";
 
 let nativePort = null;
 let reconnectTimer = null;
@@ -163,6 +164,32 @@ function tabMeta(tab) {
   };
 }
 
+async function withDebugger(tabId, callback) {
+  const target = { tabId };
+  let attached = false;
+  try {
+    await chrome.debugger.attach(target, DEBUGGER_VERSION);
+    attached = true;
+  } catch (error) {
+    const message = String(error?.message || error);
+    if (!message.includes("Another debugger is already attached")) {
+      throw error;
+    }
+  }
+
+  try {
+    return await callback(target);
+  } finally {
+    if (attached) {
+      try {
+        await chrome.debugger.detach(target);
+      } catch (_error) {
+        // ignore detach failures on cleanup
+      }
+    }
+  }
+}
+
 async function actionActiveTab(args) {
   const tab = await resolveTab(args);
   return {
@@ -199,7 +226,37 @@ async function actionGetHtml(args) {
 
 async function actionScreenshot(args) {
   const tab = await resolveTab(args);
-  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+  await chrome.tabs.update(tab.id, { active: true });
+  if (tab.windowId) {
+    try {
+      await chrome.windows.update(tab.windowId, { focused: true });
+    } catch (error) {
+      log("warn", "failed to focus Chrome window before screenshot", {
+        tabId: tab.id,
+        windowId: tab.windowId,
+        error: String(error)
+      });
+    }
+  }
+  await sleep(Number(args.wait_ms || 300));
+  let dataUrl = "";
+  try {
+    dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+  } catch (_error) {
+    await sleep(500);
+    try {
+      dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+    } catch (_retryError) {
+      const base64 = await withDebugger(tab.id, async (target) => {
+        await chrome.debugger.sendCommand(target, "Page.enable");
+        const result = await chrome.debugger.sendCommand(target, "Page.captureScreenshot", {
+          format: "png"
+        });
+        return String(result?.data || "");
+      });
+      dataUrl = base64 ? `data:image/png;base64,${base64}` : "";
+    }
+  }
   return {
     output: String(dataUrl || ""),
     meta: tabMeta(tab)

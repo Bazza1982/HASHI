@@ -129,6 +129,43 @@ python tools/browser_cli.py evaluate   --url <url> --script "() => document.titl
 
 **Prerequisites:** `playwright install chromium` (one-time setup).
 
+## Desktop Tool
+
+Agents can control a Linux virtual desktop (Xvfb or XRDP session) using the `desktop_*` tool tier.
+This is fully independent of the Windows host — it works even when the Windows screen is locked.
+
+**Available tools:** `desktop_screenshot`, `desktop_click`, `desktop_type`, `desktop_key`, `desktop_mouse_move`, `desktop_scroll`, `desktop_info`
+
+**For CLI-backend agents (Claude CLI, Gemini CLI, Codex CLI)** — use `bash` directly:
+```bash
+DISPLAY=:10 ~/projects/hashi2/tools/bin/usecomputer screenshot /tmp/shot.png --json
+DISPLAY=:10 xdotool type "hello world"
+DISPLAY=:10 ~/projects/hashi2/tools/bin/usecomputer press "ctrl+s"
+```
+
+**For OpenRouter API agents** — add the `desktop` tier to `agents.json`:
+```json
+"tools": {
+  "tiers": ["core", "desktop"],
+  "max_loops": 15
+}
+```
+
+**DISPLAY resolution** (automatic, override with `HASHI_DESKTOP_DISPLAY` env var):
+- Prefers `:10` (XRDP/Xvfb virtual session — works when Windows is locked)
+- Falls back to `:0` (WSLg — requires Windows unlocked)
+
+**Start a persistent virtual desktop:**
+```bash
+Xvfb :10 -screen 0 1920x1080x24 -ac &
+DISPLAY=:10 WAYLAND_DISPLAY="" dbus-launch xfwm4 &
+```
+
+**Keyboard note:** `desktop_type` uses `xdotool` for full Unicode/space/symbol support.
+Requires `xdotool` installed: `sudo apt-get install -y xdotool`
+
+**Binary:** vendored at `tools/bin/usecomputer` (MIT license, native Zig binary, no runtime deps).
+
 ## Telegram File Sending
 
 Agents can send photos, documents, videos, and audio files to the user via Telegram.

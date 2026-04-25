@@ -84,6 +84,7 @@ class TaskScheduler:
     def __init__(self, tasks_path: Path, state_path: Path, runtimes: list | None, authorized_id: int, skill_manager=None, orchestrator=None):
         self.tasks_path = tasks_path
         self.state_path = state_path
+        self.active_heartbeats_path = tasks_path.parent / "managed_active_heartbeats.json"
         self.runtimes = {rt.name: rt for rt in (runtimes or [])}
         self.authorized_id = authorized_id
         self.skill_manager = skill_manager
@@ -112,14 +113,43 @@ class TaskScheduler:
             scheduler_logger.error(f"Failed to save state: {e}")
 
     def _load_tasks(self):
+        def is_managed_active_heartbeat(job: dict) -> bool:
+            return (
+                isinstance(job, dict)
+                and (
+                    job.get("managed_by") == "active-command"
+                    or str(job.get("id", "")).endswith("-active-heartbeat")
+                )
+            )
+
         if not self.tasks_path.exists():
-            return {"heartbeats": [], "crons": []}
-        try:
-            with open(self.tasks_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            scheduler_logger.error(f"Failed to load tasks: {e}")
-            return {"heartbeats": [], "crons": []}
+            tasks = {"heartbeats": [], "crons": []}
+        else:
+            try:
+                with open(self.tasks_path, "r", encoding="utf-8") as f:
+                    tasks = json.load(f)
+            except Exception as e:
+                scheduler_logger.error(f"Failed to load tasks: {e}")
+                tasks = {"heartbeats": [], "crons": []}
+
+        heartbeats = [
+            hb for hb in tasks.get("heartbeats", [])
+            if not is_managed_active_heartbeat(hb)
+        ]
+        if self.active_heartbeats_path.exists():
+            try:
+                with open(self.active_heartbeats_path, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+                managed = payload if isinstance(payload, list) else payload.get("heartbeats", [])
+                heartbeats.extend(
+                    hb for hb in managed
+                    if isinstance(hb, dict) and is_managed_active_heartbeat(hb)
+                )
+            except Exception as e:
+                scheduler_logger.error(f"Failed to load managed active heartbeats: {e}")
+
+        tasks["heartbeats"] = heartbeats
+        return tasks
 
     def _save_tasks(self, tasks: dict):
         try:

@@ -81,7 +81,6 @@ class BridgeState:
     pending: dict[str, queue.Queue[dict[str, Any]]] = field(default_factory=dict)
     pending_lock: threading.Lock = field(default_factory=threading.Lock)
     native_write_lock: threading.Lock = field(default_factory=threading.Lock)
-    dispatch_lock: threading.Lock = field(default_factory=threading.Lock)
     extension_connected: threading.Event = field(default_factory=threading.Event)
     extension_meta: dict[str, Any] = field(default_factory=dict)
     shutting_down: threading.Event = field(default_factory=threading.Event)
@@ -113,60 +112,59 @@ class BridgeState:
         if str(args.get("safety_mode", "read_write")).lower() == "read_only" and action in MUTATING_ACTIONS:
             return {"ok": False, "error": f"action '{action}' is blocked in read_only mode"}
         session_id = str(args.get("session_id", "")).strip() or None
-        with self.dispatch_lock:
-            request_id = str(uuid.uuid4())
-            wait_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=1)
-            with self.pending_lock:
-                self.pending[request_id] = wait_queue
-            try:
-                request_args = dict(args)
-                if session_id:
-                    with self.session_lock:
-                        session = self.sessions.get(session_id)
+        request_id = str(uuid.uuid4())
+        wait_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=1)
+        with self.pending_lock:
+            self.pending[request_id] = wait_queue
+        try:
+            request_args = dict(args)
+            if session_id:
+                with self.session_lock:
+                    session = self.sessions.get(session_id)
+                if session:
+                    request_args.setdefault("tabId", session.get("tab_id"))
+                    request_args.setdefault("session_id", session_id)
+                    request_args.setdefault("safety_mode", session.get("safety_mode", "read_write"))
+            started = time.time()
+            self.send_to_extension(
+                {
+                    "type": "request",
+                    "request_id": request_id,
+                    "action": action,
+                    "args": request_args,
+                }
+            )
+            response = wait_queue.get(timeout=self.request_timeout_s)
+            self.write_audit(
+                {
+                    "kind": "browser_action",
+                    "action": action,
+                    "request_id": request_id,
+                    "session_id": session_id or request_args.get("session_id", ""),
+                    "args": request_args,
+                    "response": response,
+                    "elapsed_ms": int((time.time() - started) * 1000),
+                }
+            )
+            if session_id and response.get("ok"):
+                with self.session_lock:
+                    session = self.sessions.get(session_id)
                     if session:
-                        request_args.setdefault("tabId", session.get("tab_id"))
-                        request_args.setdefault("session_id", session_id)
-                        request_args.setdefault("safety_mode", session.get("safety_mode", "read_write"))
-                started = time.time()
-                self.send_to_extension(
-                    {
-                        "type": "request",
-                        "request_id": request_id,
-                        "action": action,
-                        "args": request_args,
-                    }
-                )
-                response = wait_queue.get(timeout=self.request_timeout_s)
-                self.write_audit(
-                    {
-                        "kind": "browser_action",
-                        "action": action,
-                        "request_id": request_id,
-                        "session_id": session_id or request_args.get("session_id", ""),
-                        "args": request_args,
-                        "response": response,
-                        "elapsed_ms": int((time.time() - started) * 1000),
-                    }
-                )
-                if session_id and response.get("ok"):
-                    with self.session_lock:
-                        session = self.sessions.get(session_id)
-                        if session:
-                            session["updated_at"] = time.time()
-                            meta = response.get("meta") or {}
-                            if meta.get("tabId"):
-                                session["tab_id"] = meta["tabId"]
-                            if meta.get("url"):
-                                session["url"] = meta["url"]
-                            if meta.get("title"):
-                                session["title"] = meta["title"]
-                return response
-            except queue.Empty:
-                self.logger.error("timeout waiting for extension response: %s", request_id)
-                return {"ok": False, "error": f"timeout waiting for extension action '{action}'"}
-            finally:
-                with self.pending_lock:
-                    self.pending.pop(request_id, None)
+                        session["updated_at"] = time.time()
+                        meta = response.get("meta") or {}
+                        if meta.get("tabId"):
+                            session["tab_id"] = meta["tabId"]
+                        if meta.get("url"):
+                            session["url"] = meta["url"]
+                        if meta.get("title"):
+                            session["title"] = meta["title"]
+            return response
+        except queue.Empty:
+            self.logger.error("timeout waiting for extension response: %s", request_id)
+            return {"ok": False, "error": f"timeout waiting for extension action '{action}'"}
+        finally:
+            with self.pending_lock:
+                self.pending.pop(request_id, None)
 
     def complete_request(self, request_id: str, response: dict[str, Any]) -> None:
         with self.pending_lock:

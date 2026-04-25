@@ -95,6 +95,23 @@ def test_send_bridge_command_waits_for_socket(tmp_path: Path) -> None:
     assert response["ok"] is True
 
 
+def test_send_bridge_command_does_not_unlink_existing_socket_path_on_connect_failure(tmp_path: Path) -> None:
+    socket_path = tmp_path / "stale.sock"
+    stale_server = _UnixServer(str(socket_path), _UnixHandler)
+    stale_server.server_close()
+
+    assert socket_path.exists()
+    with pytest.raises(BrowserBridgeError):
+        send_bridge_command(
+            "ping",
+            {},
+            socket_path=socket_path,
+            timeout_s=0.1,
+            connect_wait_s=0.1,
+        )
+    assert socket_path.exists()
+
+
 def test_append_audit_record_writes_jsonl(tmp_path: Path) -> None:
     path = tmp_path / "audit.jsonl"
     append_audit_record({"kind": "browser_action", "action": "get_text"}, path=path)

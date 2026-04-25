@@ -525,7 +525,30 @@ launch() {
     else
         echo -e "${C_RAIL}│${C_RESET} ${C_LABEL}WhatsApp         ${C_RESET} ${C_MUTED}disabled${C_RESET}"
     fi
-    
+
+    # Browser Bridge (CDP) status probe
+    local cdp_status
+    cdp_status=$(python3 -c "
+from tools.browser_bridge import probe_cdp, detect_wsl_host_ip, is_wsl
+port = 9222
+if probe_cdp('localhost', port):
+    print('connected|localhost:' + str(port))
+elif is_wsl():
+    host = detect_wsl_host_ip()
+    if host and probe_cdp(host, port):
+        print('connected|' + host + ':' + str(port))
+    else:
+        print('disconnected')
+else:
+    print('disconnected')
+" 2>/dev/null)
+    if [[ "$cdp_status" == connected* ]]; then
+        local cdp_target="${cdp_status#connected|}"
+        echo -e "${C_RAIL}│${C_RESET} ${C_LABEL}Browser Bridge   ${C_RESET} ${C_OK}connected${C_RESET} (${cdp_target})"
+    else
+        echo -e "${C_RAIL}│${C_RESET} ${C_LABEL}Browser Bridge   ${C_RESET} ${C_MUTED}disconnected${C_RESET}"
+    fi
+
     echo -e "${C_RAIL}│${C_RESET}"
     
     if [[ "$DRY_RUN" == "1" ]]; then

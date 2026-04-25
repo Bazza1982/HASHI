@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import re
 from pathlib import Path
 
 
@@ -16,14 +17,8 @@ def extract_summary(report_text: str) -> list[str]:
     lines = report_text.splitlines()
     findings: list[str] = []
     for i, line in enumerate(lines):
-        if line.startswith("### "):
-            title = line[4:].strip()
-            severity = ""
-            for j in range(i + 1, min(i + 8, len(lines))):
-                if lines[j].startswith("Severity:"):
-                    severity = lines[j].split("**")[1] if "**" in lines[j] else lines[j]
-                    break
-            findings.append(f"{severity}: {title}" if severity else title)
+        if re.match(r"^\d+\.\s+\*\*\[", line):
+            findings.append(re.sub(r"^\d+\.\s+", "", line).strip("*"))
         if len(findings) >= 4:
             break
     return findings
@@ -58,15 +53,16 @@ def main() -> int:
     if LATEST_REPORT.exists():
         findings = extract_summary(LATEST_REPORT.read_text(encoding="utf-8"))
 
-    print("Daily agent behavior audit completed successfully.")
+    print("Daily agent behavior audit executed.")
     print(f"Report path: {report_path}")
     print(f"Latest report: {LATEST_REPORT}")
     print("Execution mode: local-only action skill (no external API, no OpenRouter, no DeepSeek)")
-    print("Highest-severity finding: Critical")
     if findings:
         print("Key findings:")
         for item in findings:
             print(f"- {item}")
+    else:
+        print("Key findings: none in checked scope")
     return 0
 
 

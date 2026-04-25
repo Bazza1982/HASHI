@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -19,12 +20,14 @@ from orchestrator.habits import HabitStore
 def _usage() -> str:
     return "\n".join(
         [
-            "Habit Recommendations",
+            "Habit Commands",
             "",
             "Usage:",
-            "  /skill habits",
-            "  /skill habits report",
-            "  /skill habits dashboard",
+            "  /skill habits                       # show this agent's local habits",
+            "  /skill habits local [status] [limit]",
+            "  /skill habits status                # governance queue summary",
+            "  /skill habits report                # regenerate Lily governance report",
+            "  /skill habits dashboard             # regenerate Lily governance dashboard",
             "  /skill habits list [pending|approved|applied|rejected|obsolete] [limit]",
             "  /skill habits approve <id[,id...]> [note...]",
             "  /skill habits reject <id[,id...]> [note...]",
@@ -79,24 +82,137 @@ def _format_shared_pattern(row) -> str:
     )
 
 
+def _format_local_habit(row) -> str:
+    title = str(row["title"] or "").strip()
+    instruction = str(row["instruction"] or "").strip()
+    label = title or instruction or "(untitled)"
+    task_type = str(row["task_type"] or "general")
+    return (
+        f"- {row['habit_id']} [{row['status']}/{row['habit_type']}] ({task_type}) conf={float(row['confidence'] or 0):.2f}\n"
+        f"  {label}"
+    )
+
+
+def _local_habit_counts() -> dict[str, int]:
+    db_path = WORKSPACE_DIR / "habits.sqlite"
+    counts = {"total": 0, "active": 0, "candidate": 0, "paused": 0, "disabled": 0}
+    if not db_path.exists():
+        return counts
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS total,
+                COALESCE(SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END), 0) AS active,
+                COALESCE(SUM(CASE WHEN status = 'candidate' THEN 1 ELSE 0 END), 0) AS candidate,
+                COALESCE(SUM(CASE WHEN status = 'paused' THEN 1 ELSE 0 END), 0) AS paused,
+                COALESCE(SUM(CASE WHEN status = 'disabled' THEN 1 ELSE 0 END), 0) AS disabled
+            FROM habits
+            WHERE agent_id = ?
+            """,
+            (AGENT_NAME,),
+        ).fetchone()
+    if row:
+        counts = {key: int(row[key] or 0) for key in counts}
+    return counts
+
+
+def cmd_local(argv: list[str]) -> str:
+    db_path = WORKSPACE_DIR / "habits.sqlite"
+    counts = _local_habit_counts()
+    status = None
+    limit = 20
+    valid_statuses = {"active", "candidate", "paused", "disabled"}
+    if argv:
+        first = argv[0].lower()
+        if first in valid_statuses:
+            status = first
+            argv = argv[1:]
+    if argv:
+        try:
+            limit = int(argv[0])
+        except ValueError as exc:
+            raise SystemExit(f"Invalid limit: {argv[0]}") from exc
+
+    lines = [
+        "Local Habits",
+        f"Agent: {AGENT_NAME}",
+        (
+            f"Total: {counts['total']} | Active: {counts['active']} | "
+            f"Candidate: {counts['candidate']} | Paused: {counts['paused']} | "
+            f"Disabled: {counts['disabled']}"
+        ),
+        "",
+    ]
+    if not db_path.exists():
+        lines.append("No local habit store yet.")
+        lines.extend(["", _usage()])
+        return "\n".join(lines)
+
+    query = """
+        SELECT habit_id, status, habit_type, title, instruction, task_type, confidence
+        FROM habits
+        WHERE agent_id = ?
+    """
+    params: list[object] = [AGENT_NAME]
+    if status:
+        query += " AND status = ?"
+        params.append(status)
+    query += """
+        ORDER BY
+            CASE status WHEN 'active' THEN 0 WHEN 'candidate' THEN 1 WHEN 'paused' THEN 2 ELSE 3 END,
+            confidence DESC,
+            updated_at DESC
+        LIMIT ?
+    """
+    params.append(limit)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(query, params).fetchall()
+
+    if status:
+        lines.append(f"Showing: {status}")
+        lines.append("")
+    if rows:
+        lines.extend(_format_local_habit(row) for row in rows)
+    else:
+        lines.append("No local habits found.")
+    lines.extend(["", "Tip: use /skill habits status to see governance queue.", "", _usage()])
+    return "\n".join(lines)
+
+
 def _status_text(project_root: Path) -> str:
     rows = HabitStore.list_copy_recommendations(project_root=project_root, limit=100)
     shared_rows = HabitStore.list_shared_patterns(project_root=project_root, limit=100)
+    local_counts = _local_habit_counts()
     counts: dict[str, int] = {status: 0 for status in ("pending", "approved", "applied", "rejected", "obsolete")}
     for row in rows:
         counts[row.status] = counts.get(row.status, 0) + 1
     lines = [
-        "Habit Recommendations",
+        "Habit Status",
         f"Agent: {AGENT_NAME}",
-        f"Pending: {counts['pending']} | Approved: {counts['approved']} | Applied: {counts['applied']} | Rejected: {counts['rejected']} | Obsolete: {counts['obsolete']}",
-        f"Shared active: {len([item for item in shared_rows if item.status == HabitStore.SHARED_PATTERN_STATUS_ACTIVE])}",
         "",
-        "Recent items:",
+        "Local habits on this agent:",
+        (
+            f"Total: {local_counts['total']} | Active: {local_counts['active']} | "
+            f"Candidate: {local_counts['candidate']} | Paused: {local_counts['paused']} | "
+            f"Disabled: {local_counts['disabled']}"
+        ),
+        "",
+        "Global governance queue (not the same as local habit counts):",
+        (
+            f"Pending copy approvals: {counts['pending']} | Approved: {counts['approved']} | "
+            f"Applied: {counts['applied']} | Rejected: {counts['rejected']} | Obsolete: {counts['obsolete']}"
+        ),
+        f"Active shared patterns: {len([item for item in shared_rows if item.status == HabitStore.SHARED_PATTERN_STATUS_ACTIVE])}",
+        "",
+        "Recent governance items:",
     ]
     if rows:
         lines.extend(_format_row(row) for row in rows[:5])
     else:
-        lines.append("- No copy recommendations yet.")
+        lines.append("- No copy recommendations right now.")
     lines.extend(["", _usage()])
     return "\n".join(lines)
 
@@ -413,15 +529,21 @@ def cmd_signal(project_root: Path, signal: str, argv: list[str]) -> str:
 def main() -> int:
     raw = " ".join(sys.argv[1:]).strip()
     if not raw:
-        print(_status_text(PROJECT_ROOT))
+        print(cmd_local([]))
         return 0
 
     argv = shlex.split(raw)
     action = argv[0].lower()
     rest = argv[1:]
 
-    if action in {"status", "help"}:
-        print(_status_text(PROJECT_ROOT) if action == "status" else _usage())
+    if action == "help":
+        print(_usage())
+        return 0
+    if action == "status":
+        print(_status_text(PROJECT_ROOT))
+        return 0
+    if action == "local":
+        print(cmd_local(rest))
         return 0
     if action == "report":
         print(cmd_report(PROJECT_ROOT, rest))

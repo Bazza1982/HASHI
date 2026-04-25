@@ -22,7 +22,8 @@ import json
 import os
 import sqlite3
 import sys
-import urllib.request
+import time
+import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -35,10 +36,14 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from orchestrator.bridge_memory import BridgeMemoryStore
+from orchestrator.config import AgentConfig, ConfigManager, FlexibleAgentConfig
+from orchestrator.flexible_backend_registry import get_secret_lookup_order
 from orchestrator.habits import HabitStore
+from adapters.registry import get_backend_class
 
 TASKS_PATH = PROJECT_ROOT / "tasks.json"
 AGENTS_PATH = PROJECT_ROOT / "agents.json"
+SECRETS_PATH = PROJECT_ROOT / "secrets.json"
 STATE_PATH = WORKSPACE_DIR / "state.json"
 TRANSCRIPT_PATH = WORKSPACE_DIR / "transcript.jsonl"
 AGENT_MD_PATH = WORKSPACE_DIR / "AGENT.md"
@@ -59,6 +64,7 @@ MAX_FORGET_PER_DREAM = 20       # safety cap — never delete more than this in 
 _MEMORY_STORE: BridgeMemoryStore | None = None
 _HABIT_STORE: HabitStore | None = None
 SUPPORTED_SAFE_BACKENDS = {"claude-cli", "codex-cli", "gemini-cli"}
+_CONFIG_CACHE: tuple | None = None
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
@@ -96,14 +102,6 @@ def _today_str() -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
 
-def _get_api_gateway_port() -> int:
-    try:
-        raw = json.loads(AGENTS_PATH.read_text(encoding="utf-8"))
-        return int((raw.get("global") or {}).get("api_gateway_port", 18801))
-    except Exception:
-        return 18801
-
-
 def _resolve_backend_context() -> tuple[str | None, str | None]:
     env_backend = (os.environ.get("BRIDGE_ACTIVE_BACKEND") or "").strip()
     env_model = (os.environ.get("BRIDGE_ACTIVE_MODEL") or "").strip()
@@ -133,6 +131,126 @@ def _resolve_backend_context() -> tuple[str | None, str | None]:
     return None, None
 
 
+def _messages_to_prompt(messages: list[dict]) -> str:
+    system_parts: list[str] = []
+    history_parts: list[str] = []
+
+    for msg in messages:
+        role = str(msg.get("role") or "").lower()
+        content = msg.get("content") or ""
+        if isinstance(content, list):
+            content = " ".join(
+                part.get("text", "")
+                for part in content
+                if isinstance(part, dict) and part.get("type") == "text"
+            )
+        content = str(content).strip()
+        if not content:
+            continue
+        if role == "system":
+            system_parts.append(content)
+        elif role == "user":
+            history_parts.append(f"User: {content}")
+        elif role == "assistant":
+            history_parts.append(f"Assistant: {content}")
+
+    parts: list[str] = []
+    if system_parts:
+        parts.append("\n\n".join(system_parts))
+    if history_parts:
+        parts.append("\n".join(history_parts))
+    return "\n\n".join(parts)
+
+
+def _load_runtime_config():
+    global _CONFIG_CACHE
+    if _CONFIG_CACHE is not None:
+        return _CONFIG_CACHE
+
+    manager = ConfigManager(AGENTS_PATH, SECRETS_PATH, bridge_home=PROJECT_ROOT)
+    global_cfg, agents, secrets = manager.load()
+    agent_cfg = next(
+        (entry for entry in agents if str(getattr(entry, "name", "")).lower() == AGENT_NAME.lower()),
+        None,
+    )
+    if agent_cfg is None:
+        raise RuntimeError(f"Dream could not find agent config for '{AGENT_NAME}'.")
+    _CONFIG_CACHE = (global_cfg, agent_cfg, secrets)
+    return _CONFIG_CACHE
+
+
+def _resolve_api_key_direct(engine: str, secrets: dict) -> str | None:
+    for secret_key in get_secret_lookup_order(engine, AGENT_NAME):
+        api_key = secrets.get(secret_key)
+        if api_key:
+            return api_key
+    return None
+
+
+def _build_direct_adapter_config(
+    engine: str,
+    model: str,
+    loaded_agent_cfg: FlexibleAgentConfig | AgentConfig,
+):
+    if isinstance(loaded_agent_cfg, FlexibleAgentConfig):
+        backend_cfg_raw = next((b for b in loaded_agent_cfg.allowed_backends if b["engine"] == engine), None)
+        if not backend_cfg_raw:
+            raise RuntimeError(f"Dream could not find backend '{engine}' in allowed_backends for '{AGENT_NAME}'.")
+        agent_extra = dict(getattr(loaded_agent_cfg, "extra", None) or {})
+        backend_extra = dict(backend_cfg_raw)
+        backend_extra.pop("engine", None)
+        backend_extra.pop("model", None)
+        backend_scope = backend_cfg_raw.get("access_scope", loaded_agent_cfg.access_scope)
+        backend_extra.pop("access_scope", None)
+        extra = {**agent_extra, **backend_extra}
+        return AgentConfig(
+            name=loaded_agent_cfg.name,
+            engine=engine,
+            workspace_dir=loaded_agent_cfg.workspace_dir,
+            system_md=loaded_agent_cfg.system_md,
+            model=model,
+            is_active=True,
+            extra=extra,
+            access_scope=backend_scope,
+            project_root=loaded_agent_cfg.project_root,
+        )
+
+    extra = dict(getattr(loaded_agent_cfg, "extra", None) or {})
+    return AgentConfig(
+        name=loaded_agent_cfg.name,
+        engine=engine,
+        workspace_dir=loaded_agent_cfg.workspace_dir,
+        system_md=loaded_agent_cfg.system_md,
+        model=model,
+        is_active=True,
+        resume_policy=getattr(loaded_agent_cfg, "resume_policy", "latest"),
+        extra=extra,
+        access_scope=loaded_agent_cfg.access_scope,
+        project_root=loaded_agent_cfg.project_root,
+    )
+
+
+async def _call_current_backend_direct(prompt: str, backend: str, model: str) -> str:
+    global_cfg, loaded_agent_cfg, secrets = _load_runtime_config()
+    adapter_cfg = _build_direct_adapter_config(backend, model, loaded_agent_cfg)
+    backend_class = get_backend_class(backend)
+    api_key = _resolve_api_key_direct(backend, secrets)
+    adapter = backend_class(adapter_cfg, global_cfg, api_key)
+
+    if not await adapter.initialize():
+        raise RuntimeError(f"Dream failed to initialize backend '{backend}'.")
+
+    request_id = f"dream-{AGENT_NAME}-{int(time.time() * 1000)}"
+    try:
+        response = await adapter.generate_response(prompt, request_id, silent=True)
+    finally:
+        await adapter.shutdown()
+
+    if not response.is_success:
+        raise RuntimeError(response.error or f"Dream backend '{backend}' returned failure.")
+    return response.text
+
+
 def _call_current_backend(_backend_hint: str | None, messages: list[dict], model: str | None = None) -> str:
     backend, resolved_model = _resolve_backend_context()
     if not backend or not resolved_model:
@@ -141,25 +259,12 @@ def _call_current_backend(_backend_hint: str | None, messages: list[dict], model
         raise RuntimeError(
             f"Dream refuses unsafe backend '{backend}'. Allowed backends: {', '.join(sorted(SUPPORTED_SAFE_BACKENDS))}."
         )
+    prompt = _messages_to_prompt(messages)
     target_model = model or resolved_model
-    payload = json.dumps({
-        "model": target_model,
-        "messages": messages,
-        "stream": False,
-    }).encode("utf-8")
-    gateway_url = f"http://127.0.0.1:{_get_api_gateway_port()}/v1/chat/completions"
-    req = urllib.request.Request(
-        gateway_url,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-            return result["choices"][0]["message"]["content"]
+        return asyncio.run(_call_current_backend_direct(prompt, backend, target_model))
     except Exception as exc:
-        raise RuntimeError(f"Current-backend call failed via local API gateway: {exc}") from exc
+        raise RuntimeError(f"Current-backend direct call failed: {exc}") from exc
 
 
 def _load_transcript_for_date(target_date: str) -> list[dict]:

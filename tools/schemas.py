@@ -669,6 +669,167 @@ TOOL_SCHEMAS = [
     },
 ]
 
+DESKTOP_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "desktop_screenshot",
+            "description": (
+                "Take a screenshot of the Linux virtual desktop (Xvfb / XRDP session). "
+                "Returns a base64-encoded PNG plus display metadata. "
+                "Works even when the Windows host screen is locked. "
+                "Optionally annotate with grid overlay or save to a file path."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "display": {
+                        "type": "string",
+                        "description": "X11 display to capture, e.g. ':10' or ':0'. Auto-detected if omitted.",
+                    },
+                    "annotate": {
+                        "type": "boolean",
+                        "description": "Overlay a grid to help identify coordinates. Default false.",
+                    },
+                    "save_path": {
+                        "type": "string",
+                        "description": "Optional absolute path to save the PNG file.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "desktop_mouse_move",
+            "description": "Move the mouse cursor to absolute (x, y) on the Linux virtual desktop.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x": {"type": "integer", "description": "X coordinate in desktop pixels."},
+                    "y": {"type": "integer", "description": "Y coordinate in desktop pixels."},
+                    "display": {"type": "string", "description": "X11 display. Auto-detected if omitted."},
+                },
+                "required": ["x", "y"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "desktop_click",
+            "description": (
+                "Click the mouse at (x, y) on the Linux virtual desktop. "
+                "Supports left/right/middle buttons and double-click."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x": {"type": "integer", "description": "X coordinate."},
+                    "y": {"type": "integer", "description": "Y coordinate."},
+                    "button": {
+                        "type": "string",
+                        "enum": ["left", "right", "middle"],
+                        "description": "Mouse button. Default 'left'.",
+                    },
+                    "count": {
+                        "type": "integer",
+                        "description": "Click count. Use 2 for double-click. Default 1.",
+                    },
+                    "display": {"type": "string", "description": "X11 display. Auto-detected if omitted."},
+                },
+                "required": ["x", "y"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "desktop_type",
+            "description": (
+                "Type text into the currently focused window on the Linux virtual desktop. "
+                "Handles all characters including spaces, dashes, and Unicode via xdotool. "
+                "Click the target window first with desktop_click if needed."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Text to type."},
+                    "delay_ms": {
+                        "type": "integer",
+                        "description": "Delay between keystrokes in milliseconds. Default 30.",
+                    },
+                    "display": {"type": "string", "description": "X11 display. Auto-detected if omitted."},
+                },
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "desktop_key",
+            "description": (
+                "Press a key or key combination on the Linux virtual desktop. "
+                "Examples: 'ctrl+s', 'alt+F4', 'Return', 'Escape', 'ctrl+z', 'super'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "description": "Key or combo, e.g. 'ctrl+s', 'alt+F4', 'Return', 'space'.",
+                    },
+                    "display": {"type": "string", "description": "X11 display. Auto-detected if omitted."},
+                },
+                "required": ["key"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "desktop_scroll",
+            "description": "Scroll the mouse wheel on the Linux virtual desktop.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "direction": {
+                        "type": "string",
+                        "enum": ["up", "down", "left", "right"],
+                        "description": "Scroll direction. Default 'down'.",
+                    },
+                    "amount": {
+                        "type": "integer",
+                        "description": "Number of scroll steps. Default 3.",
+                    },
+                    "x": {"type": "integer", "description": "Optional X coordinate to scroll at."},
+                    "y": {"type": "integer", "description": "Optional Y coordinate to scroll at."},
+                    "display": {"type": "string", "description": "X11 display. Auto-detected if omitted."},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "desktop_info",
+            "description": (
+                "Get info about the Linux virtual desktop: active DISPLAY, "
+                "current mouse position, connected displays, and tool availability."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "display": {"type": "string", "description": "X11 display to query. Auto-detected if omitted."},
+                },
+            },
+        },
+    },
+]
+TOOL_SCHEMAS.extend(DESKTOP_TOOL_SCHEMAS)
+
 # ------------------------------------------------------------------ obsidian
 from tools.obsidian_mcp.schemas import OBSIDIAN_TOOL_SCHEMAS
 TOOL_SCHEMAS.extend(OBSIDIAN_TOOL_SCHEMAS)

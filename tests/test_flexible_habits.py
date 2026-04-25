@@ -18,6 +18,59 @@ from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.habits import HabitStore
 
 
+def _seed_local_habits_db(workspace_dir: Path, agent_name: str) -> Path:
+    db_path = workspace_dir / "habits.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE habits (
+                habit_id TEXT PRIMARY KEY,
+                agent_id TEXT,
+                status TEXT,
+                enabled INTEGER,
+                habit_type TEXT,
+                title TEXT,
+                instruction TEXT,
+                task_type TEXT,
+                confidence REAL,
+                updated_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE habit_state_changes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                habit_id TEXT,
+                change_type TEXT,
+                old_value TEXT,
+                new_value TEXT,
+                reason TEXT,
+                changed_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO habits (habit_id, agent_id, status, enabled, habit_type, title, instruction, task_type, confidence, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "habit-1",
+                agent_name,
+                "active",
+                1,
+                "do",
+                "Verify first",
+                "Verify before answering.",
+                "general",
+                0.95,
+                "2026-04-21T13:00:00",
+            ),
+        )
+    return db_path
+
+
 def _make_item() -> QueuedRequest:
     return QueuedRequest(
         request_id="req-0001",
@@ -168,3 +221,47 @@ async def test_handle_message_captures_followup_before_enqueue(monkeypatch):
 
     runtime._capture_followup_habit_feedback.assert_called_once_with("Please continue")
     runtime.enqueue_request.assert_awaited_once_with(456, "Please continue", "text", "Please continue")
+
+
+def test_build_habit_browser_view_renders_local_habits(tmp_path):
+    workspace_dir = tmp_path / "workspaces" / "arale"
+    workspace_dir.mkdir(parents=True)
+    _seed_local_habits_db(workspace_dir, "arale")
+
+    runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
+    runtime.name = "arale"
+    runtime.workspace_dir = workspace_dir
+    runtime.global_config = SimpleNamespace(project_root=tmp_path)
+
+    text, markup = runtime._build_habit_browser_view(selected_habit_id="habit-1")
+
+    assert "Local Habits" in text
+    assert "Verify first" in text
+    assert "Verify before answering." in text
+    assert markup.inline_keyboard[0][0].callback_data == "skill:habits:view:habit-1:0"
+
+
+def test_set_local_habit_status_updates_db_and_records_change(tmp_path):
+    workspace_dir = tmp_path / "workspaces" / "arale"
+    workspace_dir.mkdir(parents=True)
+    db_path = _seed_local_habits_db(workspace_dir, "arale")
+
+    runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
+    runtime.name = "arale"
+    runtime.workspace_dir = workspace_dir
+
+    ok, message = runtime._set_local_habit_status("habit-1", "paused")
+
+    assert ok is True
+    assert message == "Habit set to paused."
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT status, enabled FROM habits WHERE habit_id = ?",
+            ("habit-1",),
+        ).fetchone()
+        change = conn.execute(
+            "SELECT old_value, new_value, reason FROM habit_state_changes WHERE habit_id = ?",
+            ("habit-1",),
+        ).fetchone()
+    assert row == ("paused", 0)
+    assert change == ("active", "paused", "telegram:arale")

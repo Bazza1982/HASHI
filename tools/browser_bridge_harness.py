@@ -133,10 +133,11 @@ def write_wsl_host_wrapper(
 ) -> str:
     script = (
         "@echo off\n"
+        "cd /d %LOCALAPPDATA%\n"
         "C:\\Windows\\System32\\wsl.exe "
         f"-d {distro_name} bash -lc "
         f"\"cd '{repo_root}' && /usr/bin/env python3 "
-        f"'{repo_root}/tools/browser_native_host.py' --stdio "
+        f"-m tools.browser_native_host --stdio "
         f"--socket {socket_path} --log-file '{log_path}'\"\n"
     )
     script_path.parent.mkdir(parents=True, exist_ok=True)
