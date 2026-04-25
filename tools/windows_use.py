@@ -468,6 +468,24 @@ def _window_selector_args(args: dict) -> tuple[int, int, str, str]:
     )
 
 
+def _focus_window_snippet(window_id: int, pid: int, title_contains: str, exact_title: str) -> str:
+    return f"""
+$target = Resolve-HashiWindow -WindowId {window_id} -TargetPid {pid} -TitleContains {_ps_quote(title_contains)} -ExactTitle {_ps_quote(exact_title)}
+if (-not $target) {{
+    throw "target window not found"
+}}
+$handle = [IntPtr]$target.id
+if ([HashiWin]::IsIconic($handle)) {{
+    [void][HashiWin]::ShowWindowAsync($handle, 9)
+}} else {{
+    [void][HashiWin]::ShowWindowAsync($handle, 5)
+}}
+Start-Sleep -Milliseconds 120
+[void][HashiWin]::BringWindowToTop($handle)
+[void][HashiWin]::SetForegroundWindow($handle)
+"""
+
+
 def _normalize_ps_value(value):
     if isinstance(value, dict):
         if set(value.keys()) == {"value", "Count"} and isinstance(value.get("value"), list):
@@ -774,19 +792,7 @@ async def execute_windows_type(args: dict) -> str:
     focus_first = bool(args.get("focus_first", True))
     window_id, pid, title_contains, exact_title = _window_selector_args(args)
     has_selector = any([window_id, pid, title_contains, exact_title])
-
-    if focus_first and has_selector:
-        focus_result = await execute_windows_window_focus(
-            {
-                "provider": requested_provider,
-                "window_id": window_id,
-                "pid": pid,
-                "title_contains": title_contains,
-                "exact_title": exact_title,
-            }
-        )
-        if focus_result.startswith("Error:"):
-            return focus_result
+    focus_prefix = _focus_window_snippet(window_id, pid, title_contains, exact_title) if focus_first and has_selector else ""
 
     if provider == "windows-mcp":
         if x is None or y is None:
@@ -811,6 +817,7 @@ async def execute_windows_type(args: dict) -> str:
     if x is not None and y is not None:
         click_prefix = f"$null = Invoke-Usecomputer -Args @('click', '-x', {_ps_quote(str(x))}, '-y', {_ps_quote(str(y))})\n"
     body = f"""
+{focus_prefix}
 {click_prefix}
 $result = Invoke-Usecomputer -Args @('type', {_ps_quote(text)})
 @{{
@@ -836,6 +843,10 @@ async def execute_windows_key(args: dict) -> str:
     key = args.get("key", "")
     if not key:
         return "Error: key is required (e.g. 'ctrl+s', 'alt+f4', 'Return')"
+    focus_first = bool(args.get("focus_first", True))
+    window_id, pid, title_contains, exact_title = _window_selector_args(args)
+    has_selector = any([window_id, pid, title_contains, exact_title])
+    focus_prefix = _focus_window_snippet(window_id, pid, title_contains, exact_title) if focus_first and has_selector else ""
 
     if provider == "windows-mcp":
         data, error = await _run_windows_mcp_json(
@@ -853,6 +864,7 @@ async def execute_windows_key(args: dict) -> str:
         return text or f"Pressed '{key}' on Windows host via windows-mcp"
 
     body = f"""
+{focus_prefix}
 $result = Invoke-Usecomputer -Args @('press', {_ps_quote(key)})
 @{{
     ok = ($result.exit_code -eq 0)

@@ -25,18 +25,17 @@ def test_is_auto_provider_only_matches_auto() -> None:
 
 @pytest.mark.asyncio
 async def test_windows_type_focuses_selected_window_before_typing(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[dict] = []
-
-    async def fake_focus(args: dict) -> str:
-        calls.append(args)
-        return "Focused window id=1 title=Notepad"
-
     async def fake_usecomputer(body: str, timeout: int = 30):
+        assert "Resolve-HashiWindow" in body
+        assert "TitleContains 'Notepad'" in body
         assert "Invoke-Usecomputer -Args @('type'" in body
         return {"ok": True, "output": ""}, None
 
-    monkeypatch.setattr(windows_use, "execute_windows_window_focus", fake_focus)
+    async def fake_reset() -> None:
+        return None
+
     monkeypatch.setattr(windows_use, "_run_usecomputer_json", fake_usecomputer)
+    monkeypatch.setattr(windows_use, "_best_effort_reset_windows_input_state", fake_reset)
 
     result = await windows_use.execute_windows_type(
         {
@@ -47,15 +46,6 @@ async def test_windows_type_focuses_selected_window_before_typing(monkeypatch: p
     )
 
     assert result == "Typed 5 chars on Windows host via usecomputer"
-    assert calls == [
-        {
-            "provider": "auto",
-            "window_id": 0,
-            "pid": 0,
-            "title_contains": "Notepad",
-            "exact_title": "",
-        }
-    ]
 
 
 def test_windows_tool_schemas_include_window_controls_and_stability_args() -> None:
@@ -64,12 +54,15 @@ def test_windows_tool_schemas_include_window_controls_and_stability_args() -> No
     assert "windows_reset_input_state" in TOOL_SCHEMA_MAP
     close_props = TOOL_SCHEMA_MAP["windows_window_close"]["function"]["parameters"]["properties"]
     type_props = TOOL_SCHEMA_MAP["windows_type"]["function"]["parameters"]["properties"]
+    key_props = TOOL_SCHEMA_MAP["windows_key"]["function"]["parameters"]["properties"]
 
     assert "dismiss_unsaved" in close_props
     assert "force" in close_props
     assert "wait_ms" in close_props
     assert "focus_first" in type_props
     assert "title_contains" in type_props
+    assert "focus_first" in key_props
+    assert "title_contains" in key_props
 
 
 @pytest.mark.asyncio
@@ -109,6 +102,30 @@ async def test_windows_key_resets_input_state_after_usecomputer(monkeypatch: pyt
     monkeypatch.setattr(windows_use, "_best_effort_reset_windows_input_state", fake_reset)
 
     result = await windows_use.execute_windows_key({"provider": "auto", "key": "ctrl+l"})
+
+    assert result == "Pressed 'ctrl+l' on Windows host via usecomputer"
+    assert reset_calls == ["reset"]
+
+
+@pytest.mark.asyncio
+async def test_windows_key_focuses_selected_window_inline(monkeypatch: pytest.MonkeyPatch) -> None:
+    reset_calls: list[str] = []
+
+    async def fake_usecomputer(body: str, timeout: int = 30):
+        assert "Resolve-HashiWindow" in body
+        assert "TitleContains 'Chrome'" in body
+        assert "Invoke-Usecomputer -Args @('press', 'ctrl+l')" in body
+        return {"ok": True, "output": ""}, None
+
+    async def fake_reset() -> None:
+        reset_calls.append("reset")
+
+    monkeypatch.setattr(windows_use, "_run_usecomputer_json", fake_usecomputer)
+    monkeypatch.setattr(windows_use, "_best_effort_reset_windows_input_state", fake_reset)
+
+    result = await windows_use.execute_windows_key(
+        {"provider": "auto", "key": "ctrl+l", "title_contains": "Chrome"}
+    )
 
     assert result == "Pressed 'ctrl+l' on Windows host via usecomputer"
     assert reset_calls == ["reset"]
