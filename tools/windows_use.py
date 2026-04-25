@@ -47,7 +47,7 @@ def _powershell_exe() -> str | None:
 def _normalize_provider(provider: str | None) -> str:
     value = (provider or "auto").strip().lower()
     if value in {"", "auto"}:
-        return "usecomputer"
+        return "auto"
     if value == "usecomputer":
         return value
     if value == "windows-mcp":
@@ -126,12 +126,21 @@ function Invoke-Usecomputer {
         throw "usecomputer not found on Windows host. Install with: npm install -g usecomputer"
     }
 
-    $output = & $uc @Args 2>&1 | Out-String
-    $exitCode = $LASTEXITCODE
-    return @{
-        path = $uc
-        output = $output.Trim()
-        exit_code = $exitCode
+    $stdoutFile = Join-Path $env:TEMP ("hashi-usecomputer-stdout-" + [guid]::NewGuid().ToString() + ".log")
+    $stderrFile = Join-Path $env:TEMP ("hashi-usecomputer-stderr-" + [guid]::NewGuid().ToString() + ".log")
+    try {
+        $proc = Start-Process -FilePath $uc -ArgumentList $Args -WorkingDirectory $env:TEMP -NoNewWindow -Wait -PassThru `
+            -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
+        $stdout = if (Test-Path $stdoutFile) { Get-Content -LiteralPath $stdoutFile -Raw -ErrorAction SilentlyContinue } else { "" }
+        $stderr = if (Test-Path $stderrFile) { Get-Content -LiteralPath $stderrFile -Raw -ErrorAction SilentlyContinue } else { "" }
+        $output = (($stdout, $stderr) -join "`n").Trim()
+        return @{
+            path = $uc
+            output = $output
+            exit_code = $proc.ExitCode
+        }
+    } finally {
+        Remove-Item -LiteralPath $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -193,15 +202,25 @@ function Invoke-UvPythonScriptJson {
     }
     $argsList += @('python', $ScriptPath, $PayloadBase64)
 
-    $output = & $uv.command @argsList 2>&1 | Out-String
-    $jsonLine = ($output -split "`r?`n" | Where-Object { $_ -like 'HASHI_JSON:*' } | Select-Object -Last 1)
-    if (-not $jsonLine) {
-        throw ("no HASHI_JSON line returned. Raw output: " + $output.Trim())
-    }
-
-    return @{
-        raw = $output.Trim()
-        json = $jsonLine.Substring(11)
+    $stdoutFile = Join-Path $env:TEMP ("hashi-windows-use-stdout-" + [guid]::NewGuid().ToString() + ".log")
+    $stderrFile = Join-Path $env:TEMP ("hashi-windows-use-stderr-" + [guid]::NewGuid().ToString() + ".log")
+    try {
+        $proc = Start-Process -FilePath $uv.command -ArgumentList $argsList -NoNewWindow -Wait -PassThru `
+            -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
+        $stdout = if (Test-Path $stdoutFile) { Get-Content -LiteralPath $stdoutFile -Raw -ErrorAction SilentlyContinue } else { "" }
+        $stderr = if (Test-Path $stderrFile) { Get-Content -LiteralPath $stderrFile -Raw -ErrorAction SilentlyContinue } else { "" }
+        $output = (($stdout, $stderr) -join "`n").Trim()
+        $jsonLine = ($output -split "`r?`n" | Where-Object { $_ -like 'HASHI_JSON:*' } | Select-Object -Last 1)
+        if (-not $jsonLine) {
+            throw ("no HASHI_JSON line returned. Raw output: " + $output)
+        }
+        return @{
+            raw = $output
+            json = $jsonLine.Substring(11)
+            exit_code = $proc.ExitCode
+        }
+    } finally {
+        Remove-Item -LiteralPath $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -264,15 +283,15 @@ function Get-HashiWindowList {
         if ([string]::IsNullOrWhiteSpace($title)) {
             return $true
         }
-        [uint32]$pid = 0
-        [void][HashiWin]::GetWindowThreadProcessId($hWnd, [ref]$pid)
+        [uint32]$windowPid = 0
+        [void][HashiWin]::GetWindowThreadProcessId($hWnd, [ref]$windowPid)
         $procName = $null
         try {
-            $procName = (Get-Process -Id $pid -ErrorAction Stop).ProcessName
+            $procName = (Get-Process -Id $windowPid -ErrorAction Stop).ProcessName
         } catch {}
         $items.Add([pscustomobject]@{
             id = [int64]$hWnd
-            pid = [int]$pid
+            pid = [int]$windowPid
             ownerName = $procName
             title = $title
         }) | Out-Null
@@ -285,7 +304,7 @@ function Get-HashiWindowList {
 function Resolve-HashiWindow {
     param(
         [Int64]$WindowId = 0,
-        [int]$Pid = 0,
+        [int]$TargetPid = 0,
         [string]$TitleContains = "",
         [string]$ExactTitle = ""
     )
@@ -294,8 +313,8 @@ function Resolve-HashiWindow {
     if ($WindowId) {
         return $windows | Where-Object { $_.id -eq $WindowId } | Select-Object -First 1
     }
-    if ($Pid) {
-        return $windows | Where-Object { $_.pid -eq $Pid } | Select-Object -First 1
+    if ($TargetPid) {
+        return $windows | Where-Object { $_.pid -eq $TargetPid } | Select-Object -First 1
     }
     if ($ExactTitle) {
         return $windows | Where-Object { $_.title -eq $ExactTitle } | Select-Object -First 1
@@ -358,11 +377,43 @@ async def _run_usecomputer_json(body: str, timeout: int = 30) -> tuple[dict | No
     return await _run_powershell_json(body, timeout=timeout)
 
 
-def _provider_error(provider: str) -> str | None:
+def _resolve_provider(provider: str | None, action: str) -> str:
+    normalized = _normalize_provider(provider)
+    if normalized != "auto":
+        return normalized
+    preferred = {
+        "screenshot": "windows-mcp",
+        "mouse_move": "windows-mcp",
+        "click": "windows-mcp",
+        "scroll": "windows-mcp",
+        "type": "usecomputer",
+        "key": "usecomputer",
+        "window_list": "usecomputer",
+        "window_focus": "usecomputer",
+        "window_close": "usecomputer",
+        "info": "usecomputer",
+    }
+    return preferred.get(action, "usecomputer")
+
+
+def _provider_error(provider: str | None) -> str | None:
     normalized = _normalize_provider(provider)
     if normalized == "invalid":
         return "Error: provider must be one of: auto, usecomputer, windows-mcp"
     return None
+
+
+def _is_auto_provider(provider: str | None) -> bool:
+    return _normalize_provider(provider) == "auto"
+
+
+def _window_selector_args(args: dict) -> tuple[int, int, str, str]:
+    return (
+        int(args.get("window_id", 0) or 0),
+        int(args.get("pid", 0) or 0),
+        str(args.get("title_contains", "") or ""),
+        str(args.get("exact_title", "") or ""),
+    )
 
 
 def _normalize_ps_value(value):
@@ -426,9 +477,10 @@ def _extract_mcp_image(content: list[dict] | None) -> tuple[str | None, str | No
 
 
 async def execute_windows_screenshot(args: dict) -> str:
-    provider = _normalize_provider(args.get("provider"))
-    if error := _provider_error(provider):
+    requested_provider = args.get("provider")
+    if error := _provider_error(requested_provider):
         return error
+    provider = _resolve_provider(requested_provider, "screenshot")
 
     save_path, save_path_error = _resolve_windows_save_path(args.get("save_path"))
     if save_path_error:
@@ -445,26 +497,35 @@ async def execute_windows_screenshot(args: dict) -> str:
         if display is not None:
             mcp_args["display"] = [int(display)]
         if window is not None:
-            return "Error: windows-mcp screenshot provider does not yet support window-targeted capture in windows_use"
-        data, error = await _run_windows_mcp_json({"tool": "Screenshot", "arguments": mcp_args}, timeout=120)
-        if error:
-            return f"Error: screenshot failed: {error}"
-        content = data.get("content") or []
-        image_b64, mime_type = _extract_mcp_image(content)
-        text = _extract_mcp_text(content)
-        if not image_b64:
-            return f"Error: screenshot failed: no image returned from windows-mcp. Text: {text}"
-        raw_bytes = base64.b64decode(image_b64)
-        if save_path:
-            Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-            Path(save_path).write_bytes(raw_bytes)
-        size_kb = len(raw_bytes) // 1024
-        saved_note = f"\nSaved to: {save_path}" if save_path else ""
-        return (
-            f"Windows screenshot OK — provider=windows-mcp, {size_kb}KB\n"
-            f"Details: {text}{saved_note}\n"
-            f"data:{mime_type or 'image/png'};base64,{image_b64}"
-        )
+            if not _is_auto_provider(requested_provider):
+                return "Error: windows-mcp screenshot provider does not yet support window-targeted capture in windows_use"
+            provider = "usecomputer"
+        else:
+            data, error = await _run_windows_mcp_json({"tool": "Screenshot", "arguments": mcp_args}, timeout=120)
+            if error:
+                if not _is_auto_provider(requested_provider):
+                    return f"Error: screenshot failed: {error}"
+                provider = "usecomputer"
+            else:
+                content = data.get("content") or []
+                image_b64, mime_type = _extract_mcp_image(content)
+                text = _extract_mcp_text(content)
+                if not image_b64:
+                    if not _is_auto_provider(requested_provider):
+                        return f"Error: screenshot failed: no image returned from windows-mcp. Text: {text}"
+                    provider = "usecomputer"
+                else:
+                    raw_bytes = base64.b64decode(image_b64)
+                    if save_path:
+                        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+                        Path(save_path).write_bytes(raw_bytes)
+                    size_kb = len(raw_bytes) // 1024
+                    saved_note = f"\nSaved to: {save_path}" if save_path else ""
+                    return (
+                        f"Windows screenshot OK — provider=windows-mcp, {size_kb}KB\n"
+                        f"Details: {text}{saved_note}\n"
+                        f"data:{mime_type or 'image/png'};base64,{image_b64}"
+                    )
 
     extra = []
     if annotate:
@@ -531,9 +592,10 @@ try {{
 
 
 async def execute_windows_mouse_move(args: dict) -> str:
-    provider = _normalize_provider(args.get("provider"))
-    if error := _provider_error(provider):
+    requested_provider = args.get("provider")
+    if error := _provider_error(requested_provider):
         return error
+    provider = _resolve_provider(requested_provider, "mouse_move")
 
     x = args.get("x")
     y = args.get("y")
@@ -543,9 +605,12 @@ async def execute_windows_mouse_move(args: dict) -> str:
     if provider == "windows-mcp":
         data, error = await _run_windows_mcp_json({"tool": "Move", "arguments": {"loc": [int(x), int(y)]}})
         if error:
-            return f"Error: mouse move failed: {error}"
-        text = _extract_mcp_text(data.get("content"))
-        return text or f"Mouse moved to ({x}, {y}) on Windows host via windows-mcp"
+            if not _is_auto_provider(requested_provider):
+                return f"Error: mouse move failed: {error}"
+            provider = "usecomputer"
+        else:
+            text = _extract_mcp_text(data.get("content"))
+            return text or f"Mouse moved to ({x}, {y}) on Windows host via windows-mcp"
 
     body = f"""
 $result = Invoke-Usecomputer -Args @('mouse', 'move', '-x', {_ps_quote(str(x))}, '-y', {_ps_quote(str(y))})
@@ -564,9 +629,10 @@ $result = Invoke-Usecomputer -Args @('mouse', 'move', '-x', {_ps_quote(str(x))},
 
 
 async def execute_windows_click(args: dict) -> str:
-    provider = _normalize_provider(args.get("provider"))
-    if error := _provider_error(provider):
+    requested_provider = args.get("provider")
+    if error := _provider_error(requested_provider):
         return error
+    provider = _resolve_provider(requested_provider, "click")
 
     x = args.get("x")
     y = args.get("y")
@@ -589,9 +655,12 @@ async def execute_windows_click(args: dict) -> str:
             }
         )
         if error:
-            return f"Error: click failed: {error}"
-        text = _extract_mcp_text(data.get("content"))
-        return text or f"Clicked ({x}, {y}) button={button} count={count} on Windows host via windows-mcp"
+            if not _is_auto_provider(requested_provider):
+                return f"Error: click failed: {error}"
+            provider = "usecomputer"
+        else:
+            text = _extract_mcp_text(data.get("content"))
+            return text or f"Clicked ({x}, {y}) button={button} count={count} on Windows host via windows-mcp"
 
     body = f"""
 $result = Invoke-Usecomputer -Args @('click', '-x', {_ps_quote(str(x))}, '-y', {_ps_quote(str(y))}, '--button', {_ps_quote(button)}, '--count', {_ps_quote(str(count))})
@@ -609,15 +678,32 @@ $result = Invoke-Usecomputer -Args @('click', '-x', {_ps_quote(str(x))}, '-y', {
 
 
 async def execute_windows_type(args: dict) -> str:
-    provider = _normalize_provider(args.get("provider"))
-    if error := _provider_error(provider):
+    requested_provider = args.get("provider")
+    if error := _provider_error(requested_provider):
         return error
+    provider = _resolve_provider(requested_provider, "type")
 
     text = args.get("text", "")
     if not text:
         return "Error: text is required"
     x = args.get("x")
     y = args.get("y")
+    focus_first = bool(args.get("focus_first", True))
+    window_id, pid, title_contains, exact_title = _window_selector_args(args)
+    has_selector = any([window_id, pid, title_contains, exact_title])
+
+    if focus_first and has_selector:
+        focus_result = await execute_windows_window_focus(
+            {
+                "provider": requested_provider,
+                "window_id": window_id,
+                "pid": pid,
+                "title_contains": title_contains,
+                "exact_title": exact_title,
+            }
+        )
+        if focus_result.startswith("Error:"):
+            return focus_result
 
     if provider == "windows-mcp":
         if x is None or y is None:
@@ -657,9 +743,10 @@ $result = Invoke-Usecomputer -Args @('type', {_ps_quote(text)})
 
 
 async def execute_windows_key(args: dict) -> str:
-    provider = _normalize_provider(args.get("provider"))
-    if error := _provider_error(provider):
+    requested_provider = args.get("provider")
+    if error := _provider_error(requested_provider):
         return error
+    provider = _resolve_provider(requested_provider, "key")
 
     key = args.get("key", "")
     if not key:
@@ -695,9 +782,10 @@ $result = Invoke-Usecomputer -Args @('press', {_ps_quote(key)})
 
 
 async def execute_windows_scroll(args: dict) -> str:
-    provider = _normalize_provider(args.get("provider"))
-    if error := _provider_error(provider):
+    requested_provider = args.get("provider")
+    if error := _provider_error(requested_provider):
         return error
+    provider = _resolve_provider(requested_provider, "scroll")
 
     direction = args.get("direction", "down")
     amount = int(args.get("amount", 3))
@@ -716,9 +804,12 @@ async def execute_windows_scroll(args: dict) -> str:
             mcp_args["loc"] = [int(x), int(y)]
         data, error = await _run_windows_mcp_json({"tool": "Scroll", "arguments": mcp_args})
         if error:
-            return f"Error: scroll failed: {error}"
-        text = _extract_mcp_text(data.get("content"))
-        return text or f"Scrolled {direction} x{amount} on Windows host via windows-mcp"
+            if not _is_auto_provider(requested_provider):
+                return f"Error: scroll failed: {error}"
+            provider = "usecomputer"
+        else:
+            text = _extract_mcp_text(data.get("content"))
+            return text or f"Scrolled {direction} x{amount} on Windows host via windows-mcp"
 
     arg_parts = [
         "'scroll'",
@@ -744,9 +835,10 @@ $result = Invoke-Usecomputer -Args @({', '.join(arg_parts)})
 
 
 async def execute_windows_window_list(args: dict) -> str:
-    provider = _normalize_provider(args.get("provider"))
-    if error := _provider_error(provider):
+    requested_provider = args.get("provider")
+    if error := _provider_error(requested_provider):
         return error
+    provider = _resolve_provider(requested_provider, "window_list")
 
     title_contains = args.get("title_contains", "")
     pid = int(args.get("pid", 0) or 0)
@@ -758,7 +850,7 @@ if ({_ps_bool(bool(title_contains))}) {{
 if ({_ps_bool(pid > 0)}) {{
     $windows = $windows | Where-Object {{ $_.pid -eq {pid} }}
 }}
-$windows | ConvertTo-Json -Compress -Depth 6
+@($windows) | ConvertTo-Json -Compress -Depth 6
 """
     data, error = await _run_powershell_json(body)
     if error:
@@ -768,9 +860,10 @@ $windows | ConvertTo-Json -Compress -Depth 6
 
 
 async def execute_windows_window_focus(args: dict) -> str:
-    provider = _normalize_provider(args.get("provider"))
-    if error := _provider_error(provider):
+    requested_provider = args.get("provider")
+    if error := _provider_error(requested_provider):
         return error
+    provider = _resolve_provider(requested_provider, "window_focus")
 
     window_id = int(args.get("window_id", 0) or 0)
     pid = int(args.get("pid", 0) or 0)
@@ -780,7 +873,7 @@ async def execute_windows_window_focus(args: dict) -> str:
         return "Error: provide one of: window_id, pid, title_contains, exact_title"
 
     body = f"""
-$target = Resolve-HashiWindow -WindowId {window_id} -Pid {pid} -TitleContains {_ps_quote(title_contains)} -ExactTitle {_ps_quote(exact_title)}
+$target = Resolve-HashiWindow -WindowId {window_id} -TargetPid {pid} -TitleContains {_ps_quote(title_contains)} -ExactTitle {_ps_quote(exact_title)}
 if (-not $target) {{
     throw "target window not found"
 }}
@@ -807,27 +900,56 @@ Start-Sleep -Milliseconds 120
 
 
 async def execute_windows_window_close(args: dict) -> str:
-    provider = _normalize_provider(args.get("provider"))
-    if error := _provider_error(provider):
+    requested_provider = args.get("provider")
+    if error := _provider_error(requested_provider):
         return error
+    provider = _resolve_provider(requested_provider, "window_close")
 
     window_id = int(args.get("window_id", 0) or 0)
     pid = int(args.get("pid", 0) or 0)
     title_contains = str(args.get("title_contains", "") or "")
     exact_title = str(args.get("exact_title", "") or "")
+    dismiss_unsaved = bool(args.get("dismiss_unsaved", False))
+    force = bool(args.get("force", False))
+    wait_ms = max(0, min(int(args.get("wait_ms", 1200) or 1200), 10000))
     if not any([window_id, pid, title_contains, exact_title]):
         return "Error: provide one of: window_id, pid, title_contains, exact_title"
 
     body = f"""
-$target = Resolve-HashiWindow -WindowId {window_id} -Pid {pid} -TitleContains {_ps_quote(title_contains)} -ExactTitle {_ps_quote(exact_title)}
+$target = Resolve-HashiWindow -WindowId {window_id} -TargetPid {pid} -TitleContains {_ps_quote(title_contains)} -ExactTitle {_ps_quote(exact_title)}
 if (-not $target) {{
     throw "target window not found"
 }}
 $handle = [IntPtr]$target.id
+[void][HashiWin]::ShowWindowAsync($handle, 5)
+[void][HashiWin]::BringWindowToTop($handle)
+[void][HashiWin]::SetForegroundWindow($handle)
+[System.Threading.Thread]::Sleep(150)
 [void][HashiWin]::PostMessage($handle, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
+Start-Sleep -Milliseconds {wait_ms}
+$remaining = Resolve-HashiWindow -WindowId $target.id
+$dismissAttempted = $false
+$forced = $false
+if ($remaining -and {_ps_bool(dismiss_unsaved)}) {{
+    $dismissAttempted = $true
+    try {{
+        $null = Invoke-Usecomputer -Args @('press', 'n')
+    }} catch {{}}
+    Start-Sleep -Milliseconds 500
+    $remaining = Resolve-HashiWindow -WindowId $target.id
+}}
+if ($remaining -and {_ps_bool(force)}) {{
+    Stop-Process -Id $target.pid -Force -ErrorAction Stop
+    $forced = $true
+    Start-Sleep -Milliseconds 250
+    $remaining = Resolve-HashiWindow -WindowId $target.id
+}}
 @{{
     ok = $true
     window = $target
+    dismiss_attempted = $dismissAttempted
+    forced = $forced
+    closed = (-not $remaining)
 }} | ConvertTo-Json -Compress -Depth 6
 """
     data, error = await _run_powershell_json(body)
@@ -835,13 +957,22 @@ $handle = [IntPtr]$target.id
         return f"Error: window close failed: {error}"
     data = _normalize_ps_value(data)
     target = (data or {}).get("window") or {}
-    return f"Sent WM_CLOSE to window id={target.get('id')} title={target.get('title', '')}"
+    if data.get("closed"):
+        if data.get("forced"):
+            return f"Closed window id={target.get('id')} title={target.get('title', '')} with force=true"
+        if data.get("dismiss_attempted"):
+            return f"Closed window id={target.get('id')} title={target.get('title', '')} after dismissing unsaved prompt"
+        return f"Closed window id={target.get('id')} title={target.get('title', '')}"
+    note = " (dismiss_unsaved attempted)" if data.get("dismiss_attempted") else ""
+    note += " (force not requested)" if not data.get("forced") else ""
+    return f"Sent close request to window id={target.get('id')} title={target.get('title', '')}, but it is still open{note}"
 
 
 async def execute_windows_info(args: dict) -> str:
-    provider = _normalize_provider(args.get("provider"))
-    if error := _provider_error(provider):
+    requested_provider = args.get("provider")
+    if error := _provider_error(requested_provider):
         return error
+    provider = _resolve_provider(requested_provider, "info")
 
     include_windows = bool(args.get("include_windows", True))
     include_displays = bool(args.get("include_displays", True))

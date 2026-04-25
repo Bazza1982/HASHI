@@ -846,7 +846,7 @@ WINDOWS_USE_TOOL_SCHEMAS = [
                     "provider": {
                         "type": "string",
                         "enum": ["auto", "usecomputer", "windows-mcp"],
-                        "description": "Desktop executor backend. Current implementation supports 'usecomputer'. Default auto.",
+                        "description": "Desktop executor backend. 'auto' prefers windows-mcp for screenshots, else falls back to usecomputer.",
                     },
                     "annotate": {
                         "type": "boolean",
@@ -881,7 +881,7 @@ WINDOWS_USE_TOOL_SCHEMAS = [
                     "provider": {
                         "type": "string",
                         "enum": ["auto", "usecomputer", "windows-mcp"],
-                        "description": "Desktop executor backend. Current implementation supports 'usecomputer'.",
+                        "description": "Desktop executor backend. 'auto' prefers windows-mcp for pointer moves.",
                     },
                 },
                 "required": ["x", "y"],
@@ -913,7 +913,7 @@ WINDOWS_USE_TOOL_SCHEMAS = [
                     "provider": {
                         "type": "string",
                         "enum": ["auto", "usecomputer", "windows-mcp"],
-                        "description": "Desktop executor backend. Current implementation supports 'usecomputer'.",
+                        "description": "Desktop executor backend. 'auto' prefers windows-mcp for clicks.",
                     },
                 },
                 "required": ["x", "y"],
@@ -932,10 +932,20 @@ WINDOWS_USE_TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "text": {"type": "string", "description": "Text to type."},
+                    "x": {"type": "integer", "description": "Optional X coordinate. Required for explicit windows-mcp typing."},
+                    "y": {"type": "integer", "description": "Optional Y coordinate. Required for explicit windows-mcp typing."},
+                    "focus_first": {
+                        "type": "boolean",
+                        "description": "If a window selector is provided, focus it before typing. Default true.",
+                    },
+                    "window_id": {"type": "integer", "description": "Optional target window id to focus before typing."},
+                    "pid": {"type": "integer", "description": "Optional target process id to focus before typing."},
+                    "title_contains": {"type": "string", "description": "Optional partial window title to focus before typing."},
+                    "exact_title": {"type": "string", "description": "Optional exact window title to focus before typing."},
                     "provider": {
                         "type": "string",
                         "enum": ["auto", "usecomputer", "windows-mcp"],
-                        "description": "Desktop executor backend. Current implementation supports 'usecomputer'.",
+                        "description": "Desktop executor backend. 'auto' prefers usecomputer for typing because it works without coordinates.",
                     },
                 },
                 "required": ["text"],
@@ -960,7 +970,7 @@ WINDOWS_USE_TOOL_SCHEMAS = [
                     "provider": {
                         "type": "string",
                         "enum": ["auto", "usecomputer", "windows-mcp"],
-                        "description": "Desktop executor backend. Current implementation supports 'usecomputer'.",
+                        "description": "Desktop executor backend. 'auto' prefers usecomputer for keyboard shortcuts.",
                     },
                 },
                 "required": ["key"],
@@ -989,7 +999,7 @@ WINDOWS_USE_TOOL_SCHEMAS = [
                     "provider": {
                         "type": "string",
                         "enum": ["auto", "usecomputer", "windows-mcp"],
-                        "description": "Desktop executor backend. Current implementation supports 'usecomputer'.",
+                        "description": "Desktop executor backend. 'auto' prefers windows-mcp for scroll.",
                     },
                 },
             },
@@ -1010,7 +1020,7 @@ WINDOWS_USE_TOOL_SCHEMAS = [
                     "provider": {
                         "type": "string",
                         "enum": ["auto", "usecomputer", "windows-mcp"],
-                        "description": "Desktop executor backend. Current implementation supports 'usecomputer'.",
+                        "description": "Desktop executor backend. 'auto' prefers usecomputer for bridge inspection.",
                     },
                     "include_windows": {
                         "type": "boolean",
@@ -1019,6 +1029,79 @@ WINDOWS_USE_TOOL_SCHEMAS = [
                     "include_displays": {
                         "type": "boolean",
                         "description": "Include connected display metadata. Default true.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "windows_window_list",
+            "description": "List visible top-level windows on the real Windows desktop. Useful for selecting a target window before focus, type, or close.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "provider": {
+                        "type": "string",
+                        "enum": ["auto", "usecomputer", "windows-mcp"],
+                        "description": "Desktop executor backend. 'auto' uses the built-in PowerShell window enumerator.",
+                    },
+                    "pid": {"type": "integer", "description": "Optional process id filter."},
+                    "title_contains": {"type": "string", "description": "Optional partial title filter."},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "windows_window_focus",
+            "description": "Bring a Windows window to the foreground by window id, pid, exact title, or partial title.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "provider": {
+                        "type": "string",
+                        "enum": ["auto", "usecomputer", "windows-mcp"],
+                        "description": "Desktop executor backend. 'auto' uses the built-in PowerShell window controller.",
+                    },
+                    "window_id": {"type": "integer", "description": "Optional target window id."},
+                    "pid": {"type": "integer", "description": "Optional target process id."},
+                    "title_contains": {"type": "string", "description": "Optional partial title match."},
+                    "exact_title": {"type": "string", "description": "Optional exact title match."},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "windows_window_close",
+            "description": "Close a Windows window by selector. Can optionally dismiss an unsaved prompt with 'n' and force-kill the process if needed.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "provider": {
+                        "type": "string",
+                        "enum": ["auto", "usecomputer", "windows-mcp"],
+                        "description": "Desktop executor backend. 'auto' uses the built-in PowerShell window controller.",
+                    },
+                    "window_id": {"type": "integer", "description": "Optional target window id."},
+                    "pid": {"type": "integer", "description": "Optional target process id."},
+                    "title_contains": {"type": "string", "description": "Optional partial title match."},
+                    "exact_title": {"type": "string", "description": "Optional exact title match."},
+                    "dismiss_unsaved": {
+                        "type": "boolean",
+                        "description": "If the app shows an unsaved prompt, press 'n' after close. Default false.",
+                    },
+                    "force": {
+                        "type": "boolean",
+                        "description": "If the window is still open after waiting, force-kill its process. Default false.",
+                    },
+                    "wait_ms": {
+                        "type": "integer",
+                        "description": "Milliseconds to wait after the initial close request before checking again. Default 1200.",
                     },
                 },
             },
