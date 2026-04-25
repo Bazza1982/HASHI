@@ -14,10 +14,21 @@ from pathlib import Path
 
 # ─── 配置 ───────────────────────────────────────────────────────────────────
 
+
+def _default_hashi9_path() -> str:
+    explicit = os.getenv("HASHI9_WSL_ROOT")
+    if explicit:
+        return explicit
+    for candidate in Path("/mnt/c/Users").glob("*/projects/HASHI"):
+        if candidate.is_dir():
+            return str(candidate)
+    username = os.getenv("USERNAME") or os.getenv("USER") or "<user>"
+    return f"/mnt/c/Users/{username}/projects/HASHI"
+
 INSTANCES = [
     {"name": "HASHI1", "path": "/home/lily/projects/hashi"},
     {"name": "HASHI2", "path": "/home/lily/projects/hashi2"},
-    {"name": "HASHI9", "path": "/mnt/c/Users/thene/projects/HASHI"},
+    {"name": "HASHI9", "path": _default_hashi9_path()},
 ]
 
 STATE_FILE = Path("/home/lily/projects/hashi2/scripts/.gitwatch_state.json")

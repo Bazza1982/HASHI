@@ -57,6 +57,24 @@ def _linux_root_to_local_path(root: str) -> Path:
     return Path(root)
 
 
+def _default_hashi9_paths() -> tuple[str, str]:
+    explicit_windows = os.getenv("HASHI9_ROOT")
+    explicit_wsl = os.getenv("HASHI9_WSL_ROOT")
+    if explicit_windows and explicit_wsl:
+        return explicit_windows, explicit_wsl
+
+    for candidate in Path("/mnt/c/Users").glob("*/projects/HASHI"):
+        if candidate.is_dir():
+            user = candidate.parts[4]
+            windows_root = explicit_windows or f"C:\\Users\\{user}\\projects\\HASHI"
+            return windows_root, explicit_wsl or str(candidate)
+
+    username = os.getenv("USERNAME") or os.getenv("USER") or "<user>"
+    windows_root = explicit_windows or f"C:\\Users\\{username}\\projects\\HASHI"
+    wsl_root = explicit_wsl or f"/mnt/c/Users/{username}/projects/HASHI"
+    return windows_root, wsl_root
+
+
 def _load_config() -> dict:
     config_path = ROOT / "agents.json"
     if config_path.exists():
@@ -70,6 +88,7 @@ def _load_config() -> dict:
 def _temporary_default_instances(cfg: dict) -> dict:
     local_instance_id = cfg.get("global", {}).get("instance_id") or _infer_instance_id_from_root()
     local_workbench = cfg.get("global", {}).get("workbench_port", 18819 if local_instance_id == "HASHI9" else 18800)
+    hashi9_root, hashi9_wsl_root = _default_hashi9_paths()
     return {
         "hashi1": {
             "instance_id": "HASHI1",
@@ -97,8 +116,8 @@ def _temporary_default_instances(cfg: dict) -> dict:
             "instance_id": "HASHI9",
             "display_name": "HASHI9",
             "platform": "windows",
-            "root": "C:\\Users\\thene\\projects\\HASHI",
-            "wsl_root": "/mnt/c/Users/thene/projects/HASHI",
+            "root": hashi9_root,
+            "wsl_root": hashi9_wsl_root,
             "workbench_port": local_workbench if local_instance_id.upper() == "HASHI9" else 18819,
             "api_host": "127.0.0.1",
             "remote_port": DEFAULT_REMOTE_PORT,
