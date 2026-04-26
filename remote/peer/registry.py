@@ -64,11 +64,15 @@ class PeerRegistry:
             iid = peer.instance_id.upper()
             current_ids.add(iid)
             self._observations.setdefault(iid, {})[backend] = peer
-        for iid, by_backend in list(self._observations.items()):
-            if backend in by_backend and iid not in current_ids:
-                del by_backend[backend]
-            if not by_backend:
-                del self._observations[iid]
+        # Only discovery backends that report a full current snapshot should
+        # prune peers that are missing from this callback. Incremental sources
+        # like bootstrap/handshake_inbound would otherwise delete each other.
+        if backend in {"lan", "tailscale", "unknown"}:
+            for iid, by_backend in list(self._observations.items()):
+                if backend in by_backend and iid not in current_ids:
+                    del by_backend[backend]
+                if not by_backend:
+                    del self._observations[iid]
         self._rebuild_canonical_peers()
         self._sync_to_instances_json()
         self._save_state()

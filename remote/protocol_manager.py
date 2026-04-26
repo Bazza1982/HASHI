@@ -15,6 +15,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import ssl
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -261,50 +262,52 @@ class ProtocolManager:
 
             succeeded = False
             for host in candidate_hosts:
-                url = f"http://{host}:{peer.port}/protocol/handshake"
-                try:
-                    result = await asyncio.get_running_loop().run_in_executor(
-                        None,
-                        lambda u=url: self._post_json(u, payload, timeout=self._handshake_timeout_seconds),
-                    )
-                    if str(result.get("status") or "").lower() == "handshake_reject":
+                for url in self._candidate_urls(host, peer.port, "/protocol/handshake"):
+                    try:
+                        result = await asyncio.get_running_loop().run_in_executor(
+                            None,
+                            lambda u=url: self._post_json(u, payload, timeout=self._handshake_timeout_seconds),
+                        )
+                        if str(result.get("status") or "").lower() == "handshake_reject":
+                            self._peer_registry.mark_handshake_result(
+                                peer.instance_id,
+                                state="handshake_rejected",
+                                last_error=str(result.get("reason") or "rejected"),
+                            )
+                            succeeded = True
+                            break
+                        # If a fallback host worked, re-register peer with the working host
+                        if host != peer.host:
+                            from remote.peer.base import PeerInfo
+                            updated = dataclasses.replace(peer, host=host)
+                            updated.properties = {
+                                key: value
+                                for key, value in dict(peer.properties or {}).items()
+                                if key not in {
+                                    "preferred_backend",
+                                    "alternate_backends",
+                                    "handshake_state",
+                                    "last_handshake_at",
+                                    "last_error",
+                                    "remote_agents",
+                                }
+                            }
+                            updated.properties["discovery"] = "bootstrap_fallback"
+                            self._peer_registry.on_peers_changed([updated])
+                            logger.info("Handshake: switched %s host from %s to %s", peer.instance_id, peer.host, host)
                         self._peer_registry.mark_handshake_result(
                             peer.instance_id,
-                            state="handshake_rejected",
-                            last_error=str(result.get("reason") or "rejected"),
+                            state="handshake_accepted",
+                            protocol_version=str(result.get("protocol_version") or PROTOCOL_VERSION),
+                            capabilities=list(result.get("capabilities") or []),
+                            remote_agents=list(result.get("agents") or []),
                         )
                         succeeded = True
                         break
-                    # If a fallback host worked, re-register peer with the working host
-                    if host != peer.host:
-                        from remote.peer.base import PeerInfo
-                        updated = dataclasses.replace(peer, host=host)
-                        updated.properties = {
-                            key: value
-                            for key, value in dict(peer.properties or {}).items()
-                            if key not in {
-                                "preferred_backend",
-                                "alternate_backends",
-                                "handshake_state",
-                                "last_handshake_at",
-                                "last_error",
-                                "remote_agents",
-                            }
-                        }
-                        updated.properties["discovery"] = "bootstrap_fallback"
-                        self._peer_registry.on_peers_changed([updated])
-                        logger.info("Handshake: switched %s host from %s to %s", peer.instance_id, peer.host, host)
-                    self._peer_registry.mark_handshake_result(
-                        peer.instance_id,
-                        state="handshake_accepted",
-                        protocol_version=str(result.get("protocol_version") or PROTOCOL_VERSION),
-                        capabilities=list(result.get("capabilities") or []),
-                        remote_agents=list(result.get("agents") or []),
-                    )
-                    succeeded = True
+                    except Exception as exc:
+                        logger.debug("Handshake: %s via %s failed: %s", peer.instance_id, url, exc)
+                if succeeded:
                     break
-                except Exception as exc:
-                    logger.debug("Handshake: %s @ %s:%d failed: %s", peer.instance_id, host, peer.port, exc)
 
             if not succeeded:
                 self._peer_registry.mark_handshake_result(
@@ -426,16 +429,16 @@ class ProtocolManager:
             fwd_hosts = self._candidate_hosts_for_peer(peer)
             fwd_exc = None
             for fwd_host in fwd_hosts:
-                fwd_url = f"http://{fwd_host}:{peer.port}/protocol/message"
-                try:
-                    result = await asyncio.get_running_loop().run_in_executor(
-                        None,
-                        lambda u=fwd_url: self._post_json(u, forward_payload, timeout=4),
-                    )
-                    return 202, result
-                except Exception as exc:
-                    fwd_exc = exc
-                    logger.debug("Forward: %s @ %s:%d failed: %s", to_instance, fwd_host, peer.port, exc)
+                for fwd_url in self._candidate_urls(fwd_host, peer.port, "/protocol/message"):
+                    try:
+                        result = await asyncio.get_running_loop().run_in_executor(
+                            None,
+                            lambda u=fwd_url: self._post_json(u, forward_payload, timeout=4),
+                        )
+                        return 202, result
+                    except Exception as exc:
+                        fwd_exc = exc
+                        logger.debug("Forward: %s via %s failed: %s", to_instance, fwd_url, exc)
             return 502, self._error_payload(
                 "forward_failed",
                 f"Failed to forward to {to_instance} (tried {fwd_hosts}): {fwd_exc}",
@@ -639,16 +642,19 @@ class ProtocolManager:
             "route_trace": [str(self._instance_info.get("instance_id") or "").upper()],
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
-        url = f"http://{route['host']}:{route['port']}/protocol/message"
-        try:
-            result = await asyncio.get_running_loop().run_in_executor(
-                None,
-                lambda: self._post_json(url, payload, timeout=10),
-            )
-            return bool(result.get("ok", True))
-        except Exception as exc:
-            logger.warning("Reply send failed to %s: %s", route.get("instance_id"), exc)
-            return False
+        last_exc = None
+        for url in self._candidate_urls(route["host"], route["port"], "/protocol/message"):
+            try:
+                result = await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    lambda u=url: self._post_json(u, payload, timeout=10),
+                )
+                return bool(result.get("ok", True))
+            except Exception as exc:
+                last_exc = exc
+                logger.warning("Reply send via %s failed: %s", url, exc)
+        logger.warning("Reply send failed to %s: %s", route.get("instance_id"), last_exc)
+        return False
 
     def _error_payload(self, code: str, message: str, *, retryable: bool, payload: dict) -> dict:
         return {
@@ -670,7 +676,8 @@ class ProtocolManager:
 
     def _get_json(self, url: str, timeout: int = 10) -> dict:
         req = urllib_request.Request(url, method="GET")
-        with urllib_request.urlopen(req, timeout=timeout) as resp:
+        context = ssl._create_unverified_context() if str(url).startswith("https://") else None
+        with urllib_request.urlopen(req, timeout=timeout, context=context) as resp:
             return json.loads(resp.read().decode("utf-8"))
 
     def _post_json(self, url: str, payload: dict, timeout: int = 10) -> dict:
@@ -680,8 +687,17 @@ class ProtocolManager:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib_request.urlopen(req, timeout=timeout) as resp:
+        context = ssl._create_unverified_context() if str(url).startswith("https://") else None
+        with urllib_request.urlopen(req, timeout=timeout, context=context) as resp:
             return json.loads(resp.read().decode("utf-8"))
+
+    def _candidate_urls(self, host: str, port: int, path: str) -> list[str]:
+        try:
+            port_num = int(port)
+        except Exception:
+            port_num = 0
+        schemes = ("https", "http") if port_num == 8766 else ("http", "https")
+        return [f"{scheme}://{host}:{port_num}{path}" for scheme in schemes]
 
     def _load_json(self, path: Path) -> dict:
         if not path.exists():
@@ -749,6 +765,8 @@ class ProtocolManager:
                 hosts.append(host)
         for host in (entry.get("lan_ip"), entry.get("tailscale_ip"), entry.get("api_host")):
             host = str(host or "").strip()
+            if host in {"127.0.0.1", "localhost"} and not (loopback or self._same_machine_hint(entry)):
+                continue
             if host and host not in hosts and host not in {"0.0.0.0", "localhost"}:
                 hosts.append(host)
         return hosts
@@ -776,16 +794,19 @@ class ProtocolManager:
         return hosts
 
     def _probe_route(self, host: str, port: int, timeout: int = 2) -> bool:
-        req = urllib_request.Request(f"http://{host}:{port}/health", method="GET")
-        try:
-            with urllib_request.urlopen(req, timeout=timeout):
+        for url in self._candidate_urls(host, port, "/health"):
+            req = urllib_request.Request(url, method="GET")
+            try:
+                context = ssl._create_unverified_context() if str(url).startswith("https://") else None
+                with urllib_request.urlopen(req, timeout=timeout, context=context):
+                    return True
+            except HTTPError:
                 return True
-        except HTTPError:
-            return True
-        except URLError:
-            return False
-        except Exception:
-            return True
+            except URLError:
+                continue
+            except Exception:
+                continue
+        return False
 
     def _resolve_peer_route(self, instance_id: str):
         peer = self._peer_registry.get_peer(str(instance_id or "")) if self._peer_registry else None

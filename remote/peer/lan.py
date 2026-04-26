@@ -75,99 +75,10 @@ def _decode_candidate_records(raw: str) -> list[dict]:
 
 
 def _get_local_ip() -> str:
-    """Get the primary non-loopback local IP, preferring LAN (192.168/172.16) over Tailscale/CGNAT (100.64)."""
-    import ipaddress
-    import subprocess
-
-    # Priority: 192.168.x.x (Wi-Fi LAN) > 10.x.x.x > 172.16.x.x (may be WSL vEthernet) > CGNAT
-    _P0 = ipaddress.IPv4Network("192.168.0.0/16")   # typical home/office LAN
-    _P1 = ipaddress.IPv4Network("10.0.0.0/8")        # corporate LAN
-    _P2 = ipaddress.IPv4Network("172.16.0.0/12")     # includes WSL vEthernet 172.29.x.x
-    _CGNAT = ipaddress.IPv4Network("100.64.0.0/10")  # Tailscale / VPN
-
-    def _classify(ip_str: str):
-        try:
-            addr = ipaddress.IPv4Address(ip_str)
-            if addr.is_loopback or addr.is_link_local:
-                return None
-            if addr in _P0:
-                return (0, ip_str)
-            if addr in _P1:
-                return (1, ip_str)
-            if addr in _P2:
-                return (2, ip_str)
-            if addr in _CGNAT:
-                return (3, ip_str)  # lowest (Tailscale / VPN)
-            return (1, ip_str)      # other routable
-        except Exception:
-            return None
-
-    try:
-        result = subprocess.run(
-            ["ip", "-4", "addr", "show"],
-            capture_output=True, text=True, timeout=3,
-        )
-        candidates = []
-        for line in result.stdout.splitlines():
-            line = line.strip()
-            if not line.startswith("inet "):
-                continue
-            cidr = line.split()[1]
-            ip = cidr.split("/")[0]
-            ranked = _classify(ip)
-            if ranked is not None:
-                candidates.append(ranked)
-        if candidates:
-            candidates.sort(key=lambda x: x[0])
-            return candidates[0][1]
-    except Exception:
-        pass
-
-    try:
-        result = subprocess.run(["ipconfig"], capture_output=True, text=True, timeout=5)
-        candidates = []
-        for line in result.stdout.splitlines():
-            if ":" not in line:
-                continue
-            raw = line.split(":", 1)[1].strip()
-            if not raw:
-                continue
-            ranked = _classify(raw)
-            if ranked is not None:
-                candidates.append(ranked)
-        if candidates:
-            candidates.sort(key=lambda x: x[0])
-            return candidates[0][1]
-    except Exception:
-        pass
-
-    # Routing-based fallback works better on Windows than raw adapter ordering.
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("8.8.8.8", 80))
-            routed_ip = s.getsockname()[0]
-            ranked = _classify(routed_ip)
-            if ranked is not None:
-                return ranked[1]
-    except OSError:
-        pass
-
-    # Cross-platform fallback: use ifaddr (ships with zeroconf, works on Windows)
-    try:
-        import ifaddr
-        candidates = []
-        for adapter in ifaddr.get_adapters():
-            for addr in adapter.ips:
-                if isinstance(addr.ip, str):  # IPv4 only (IPv6 is a tuple)
-                    ranked = _classify(addr.ip)
-                    if ranked is not None:
-                        candidates.append(ranked)
-        if candidates:
-            candidates.sort(key=lambda x: x[0])
-            return candidates[0][1]
-    except Exception:
-        pass
-
+    candidates, _observed = _collect_ipv4_candidates()
+    for item in candidates:
+        if str(item.get("scope") or "") in {"lan", "overlay", "routable"}:
+            return str(item.get("host") or "127.0.0.1")
     return "127.0.0.1"
 
 
@@ -187,7 +98,7 @@ def _classify_address_scope(ip_str: str, adapter_name: str = "") -> str:
     adapter_hint = str(adapter_name or "").strip().lower()
     if adapter_hint.startswith("lo"):
         return "host_virtual"
-    if adapter_hint and any(token in adapter_hint for token in ("wsl", "hyper-v", "vethernet")):
+    if adapter_hint and any(token in adapter_hint for token in ("wsl", "hyper-v", "vethernet", "virtualbox", "vmware", "host-only")):
         return "host_virtual"
     if addr in ipaddress.IPv4Network("100.64.0.0/10"):
         return "overlay"

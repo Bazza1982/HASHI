@@ -301,10 +301,25 @@ class HashiRemoteApplication:
         self._shutdown_event.set()
         if self._uvicorn_server:
             self._uvicorn_server.should_exit = True
+        loop = None
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = None
+
+        def _stop(coro) -> None:
+            if loop is None:
+                asyncio.run(coro)
+                return
+            if loop.is_running():
+                loop.create_task(coro)
+            else:
+                loop.run_until_complete(coro)
+
         for discovery in self._discoveries:
-            asyncio.get_event_loop().run_until_complete(discovery.stop())
+            _stop(discovery.stop())
         if self._protocol_manager:
-            asyncio.get_event_loop().run_until_complete(self._protocol_manager.stop())
+            _stop(self._protocol_manager.stop())
 
 
 def parse_args() -> argparse.Namespace:
