@@ -14,7 +14,7 @@ import logging
 import socket
 from typing import Optional, Callable
 
-from zeroconf import IPVersion, ServiceBrowser, ServiceInfo, ServiceListener, Zeroconf
+from zeroconf import IPVersion, InterfaceChoice, ServiceBrowser, ServiceInfo, ServiceListener, Zeroconf
 
 from .base import PeerDiscovery, PeerInfo
 
@@ -22,16 +22,292 @@ logger = logging.getLogger(__name__)
 
 HASHI_SERVICE_TYPE = "_hashi._tcp.local."
 HASHI_REMOTE_VERSION = "1.0.0"
+_SCOPE_TO_CODE = {
+    "same_host": "s",
+    "lan": "l",
+    "overlay": "o",
+    "host_virtual": "v",
+    "routable": "r",
+    "peer": "p",
+}
+_CODE_TO_SCOPE = {value: key for key, value in _SCOPE_TO_CODE.items()}
+
+
+def _normalize_host_identity(value: str) -> str:
+    value = str(value or "").strip().lower()
+    return "".join(ch for ch in value if ch.isalnum())
+
+
+def _encode_candidate_records(items: list[dict]) -> str:
+    packed = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        host = str(item.get("host") or "").strip()
+        scope = str(item.get("scope") or "").strip()
+        source = str(item.get("source") or "").strip()
+        if not host:
+            continue
+        packed.append([host, _SCOPE_TO_CODE.get(scope, scope[:1] or "?"), source[:2] or "?"])
+    return json.dumps(packed, separators=(",", ":"))
+
+
+def _decode_candidate_records(raw: str) -> list[dict]:
+    try:
+        data = json.loads(raw or "[]")
+    except Exception:
+        return []
+    items: list[dict] = []
+    for item in data:
+        if isinstance(item, dict):
+            host = str(item.get("host") or "").strip()
+            scope = str(item.get("scope") or "").strip()
+            source = str(item.get("source") or "").strip()
+        elif isinstance(item, list) and item:
+            host = str(item[0] or "").strip() if len(item) >= 1 else ""
+            scope = _CODE_TO_SCOPE.get(str(item[1] or "").strip(), str(item[1] or "").strip()) if len(item) >= 2 else ""
+            source = str(item[2] or "").strip() if len(item) >= 3 else ""
+        else:
+            continue
+        if host:
+            items.append({"host": host, "scope": scope or "unknown", "source": source or "peer"})
+    return items
 
 
 def _get_local_ip() -> str:
-    """Get the primary non-loopback local IP address."""
+    """Get the primary non-loopback local IP, preferring LAN (192.168/172.16) over Tailscale/CGNAT (100.64)."""
+    import ipaddress
+    import subprocess
+
+    # Priority: 192.168.x.x (Wi-Fi LAN) > 10.x.x.x > 172.16.x.x (may be WSL vEthernet) > CGNAT
+    _P0 = ipaddress.IPv4Network("192.168.0.0/16")   # typical home/office LAN
+    _P1 = ipaddress.IPv4Network("10.0.0.0/8")        # corporate LAN
+    _P2 = ipaddress.IPv4Network("172.16.0.0/12")     # includes WSL vEthernet 172.29.x.x
+    _CGNAT = ipaddress.IPv4Network("100.64.0.0/10")  # Tailscale / VPN
+
+    def _classify(ip_str: str):
+        try:
+            addr = ipaddress.IPv4Address(ip_str)
+            if addr.is_loopback or addr.is_link_local:
+                return None
+            if addr in _P0:
+                return (0, ip_str)
+            if addr in _P1:
+                return (1, ip_str)
+            if addr in _P2:
+                return (2, ip_str)
+            if addr in _CGNAT:
+                return (3, ip_str)  # lowest (Tailscale / VPN)
+            return (1, ip_str)      # other routable
+        except Exception:
+            return None
+
+    try:
+        result = subprocess.run(
+            ["ip", "-4", "addr", "show"],
+            capture_output=True, text=True, timeout=3,
+        )
+        candidates = []
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line.startswith("inet "):
+                continue
+            cidr = line.split()[1]
+            ip = cidr.split("/")[0]
+            ranked = _classify(ip)
+            if ranked is not None:
+                candidates.append(ranked)
+        if candidates:
+            candidates.sort(key=lambda x: x[0])
+            return candidates[0][1]
+    except Exception:
+        pass
+
+    try:
+        result = subprocess.run(["ipconfig"], capture_output=True, text=True, timeout=5)
+        candidates = []
+        for line in result.stdout.splitlines():
+            if ":" not in line:
+                continue
+            raw = line.split(":", 1)[1].strip()
+            if not raw:
+                continue
+            ranked = _classify(raw)
+            if ranked is not None:
+                candidates.append(ranked)
+        if candidates:
+            candidates.sort(key=lambda x: x[0])
+            return candidates[0][1]
+    except Exception:
+        pass
+
+    # Routing-based fallback works better on Windows than raw adapter ordering.
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("8.8.8.8", 80))
-            return s.getsockname()[0]
+            routed_ip = s.getsockname()[0]
+            ranked = _classify(routed_ip)
+            if ranked is not None:
+                return ranked[1]
     except OSError:
-        return "127.0.0.1"
+        pass
+
+    # Cross-platform fallback: use ifaddr (ships with zeroconf, works on Windows)
+    try:
+        import ifaddr
+        candidates = []
+        for adapter in ifaddr.get_adapters():
+            for addr in adapter.ips:
+                if isinstance(addr.ip, str):  # IPv4 only (IPv6 is a tuple)
+                    ranked = _classify(addr.ip)
+                    if ranked is not None:
+                        candidates.append(ranked)
+        if candidates:
+            candidates.sort(key=lambda x: x[0])
+            return candidates[0][1]
+    except Exception:
+        pass
+
+    return "127.0.0.1"
+
+
+def _classify_address_scope(ip_str: str, adapter_name: str = "") -> str:
+    import ipaddress
+
+    try:
+        addr = ipaddress.IPv4Address(ip_str)
+    except Exception:
+        return "unknown"
+    if addr.is_unspecified or addr.is_link_local or addr.is_multicast or addr.is_reserved:
+        return "unknown"
+    if str(ip_str).startswith("255."):
+        return "unknown"
+    if addr.is_loopback:
+        return "same_host"
+    adapter_hint = str(adapter_name or "").strip().lower()
+    if adapter_hint.startswith("lo"):
+        return "host_virtual"
+    if adapter_hint and any(token in adapter_hint for token in ("wsl", "hyper-v", "vethernet")):
+        return "host_virtual"
+    if addr in ipaddress.IPv4Network("100.64.0.0/10"):
+        return "overlay"
+    if addr.is_private:
+        return "lan"
+    return "routable"
+
+
+def _collect_ipv4_candidates() -> tuple[list[dict], list[dict]]:
+    import ipaddress
+    import subprocess
+
+    seen: set[str] = set()
+    observed_seen: set[tuple[str, str]] = set()
+    routing_items: list[tuple[int, dict]] = []
+    observed_items: list[tuple[int, dict]] = []
+
+    def _priority(host: str, scope: str) -> int:
+        try:
+            addr = ipaddress.IPv4Address(host)
+        except Exception:
+            return 90
+        if addr.is_loopback:
+            return 0
+        if scope == "lan" and addr in ipaddress.IPv4Network("192.168.0.0/16"):
+            return 10
+        if scope == "lan" and addr in ipaddress.IPv4Network("10.0.0.0/8"):
+            return 20
+        if scope == "host_virtual":
+            return 30
+        if scope == "lan" and addr in ipaddress.IPv4Network("172.16.0.0/12"):
+            return 35
+        if scope == "overlay":
+            return 40
+        return 50
+
+    def _record_observed(host: str, scope: str, source: str) -> None:
+        key = (host, scope)
+        if key in observed_seen:
+            return
+        observed_seen.add(key)
+        observed_items.append(
+            (
+                _priority(host, scope),
+                {
+                    "host": host,
+                    "scope": scope,
+                    "source": source,
+                },
+            )
+        )
+
+    def _add(host: str, source: str, adapter_name: str = "") -> None:
+        host = str(host or "").strip()
+        if not host or host in seen:
+            return
+        scope = _classify_address_scope(host, adapter_name=adapter_name)
+        if scope == "unknown":
+            return
+        _record_observed(host, scope, source)
+        if scope == "host_virtual":
+            return
+        seen.add(host)
+        routing_items.append(
+            (
+                _priority(host, scope),
+                {
+                    "host": host,
+                    "scope": scope,
+                    "source": source,
+                },
+            )
+        )
+
+    _add("127.0.0.1", "loopback")
+
+    try:
+        import ifaddr
+
+        for adapter in ifaddr.get_adapters():
+            adapter_name = str(getattr(adapter, "nice_name", "") or getattr(adapter, "name", "") or "")
+            for addr in adapter.ips:
+                if isinstance(addr.ip, str):
+                    _add(addr.ip, "interface_scan", adapter_name=adapter_name)
+    except Exception:
+        pass
+
+    try:
+        result = subprocess.run(["ip", "-4", "addr", "show"], capture_output=True, text=True, timeout=3)
+        current_adapter = ""
+        for line in result.stdout.splitlines():
+            if line and not line.startswith(" "):
+                try:
+                    current_adapter = line.split(":", 2)[1].strip()
+                except Exception:
+                    current_adapter = ""
+                continue
+            line = line.strip()
+            if line.startswith("inet "):
+                _add(line.split()[1].split("/")[0], "ip_addr_show", adapter_name=current_adapter)
+    except Exception:
+        pass
+
+    routing_items.sort(key=lambda item: (item[0], item[1]["host"]))
+    observed_items.sort(key=lambda item: (item[0], item[1]["host"]))
+    return (
+        [item for _, item in routing_items],
+        [item for _, item in observed_items],
+    )
+
+
+def build_local_network_profile(info: PeerInfo) -> dict:
+    candidates, observed_candidates = _collect_ipv4_candidates()
+    environment_kind = str(info.platform or "unknown").lower()
+    return {
+        "host_identity": _normalize_host_identity(socket.gethostname()),
+        "environment_kind": environment_kind,
+        "address_candidates": candidates,
+        "observed_candidates": observed_candidates,
+    }
 
 
 def _service_info_to_peer(info: ServiceInfo, self_instance_id: str) -> Optional[PeerInfo]:
@@ -42,6 +318,8 @@ def _service_info_to_peer(info: ServiceInfo, self_instance_id: str) -> Optional[
             v.decode() if isinstance(v, bytes) else v
             for k, v in (info.properties or {}).items()
         }
+        address_candidates = _decode_candidate_records(props.get("address_candidates_json", "[]") or "[]")
+        observed_candidates = _decode_candidate_records(props.get("observed_candidates_json", "[]") or "[]")
 
         instance_id = props.get("instance_id", "unknown").upper()
         if instance_id == self_instance_id.upper():
@@ -59,6 +337,16 @@ def _service_info_to_peer(info: ServiceInfo, self_instance_id: str) -> Optional[
             platform=props.get("platform", "unknown"),
             version=props.get("version", "unknown"),
             hashi_version=props.get("hashi_version", "unknown"),
+            display_handle=props.get("display_handle", f"@{instance_id.lower()}"),
+            protocol_version=props.get("protocol_version", "1.0"),
+            capabilities=[c for c in props.get("capabilities", "").split(",") if c],
+            properties={
+                "discovery": "lan",
+                "host_identity": _normalize_host_identity(props.get("host_identity", "")),
+                "environment_kind": props.get("environment_kind", "").strip().lower(),
+                "address_candidates": address_candidates,
+                "observed_candidates": observed_candidates,
+            },
         )
     except Exception as e:
         logger.warning("Failed to parse ServiceInfo: %s", e)
@@ -141,14 +429,22 @@ class LanDiscovery(PeerDiscovery):
     def _start_advertising(self, info: PeerInfo) -> None:
         hostname = socket.gethostname()
         local_ip = _get_local_ip()
+        network_profile = build_local_network_profile(info)
 
         props = {
             "instance_id": info.instance_id,
             "display_name": info.display_name,
+            "display_handle": info.display_handle or f"@{info.instance_id.lower()}",
             "platform": info.platform,
             "workbench_port": str(info.workbench_port),
             "version": HASHI_REMOTE_VERSION,
             "hashi_version": info.hashi_version,
+            "protocol_version": info.protocol_version or "1.0",
+            "capabilities": ",".join(info.capabilities or []),
+            "host_identity": str(network_profile.get("host_identity") or ""),
+            "environment_kind": str(network_profile.get("environment_kind") or ""),
+            "address_candidates_json": _encode_candidate_records(network_profile.get("address_candidates") or []),
+            "observed_candidates_json": _encode_candidate_records(network_profile.get("observed_candidates") or []),
         }
         props_bytes = {k: v.encode() for k, v in props.items()}
 
@@ -163,7 +459,9 @@ class LanDiscovery(PeerDiscovery):
             addresses=[socket.inet_aton(local_ip)],
         )
 
-        self._zeroconf = Zeroconf(ip_version=IPVersion.V4Only)
+        # Bind to all interfaces so mDNS multicast reaches LAN even when
+        # Tailscale is the default route (which would otherwise shadow the LAN NIC).
+        self._zeroconf = Zeroconf(ip_version=IPVersion.V4Only, interfaces=InterfaceChoice.All)
 
         # Start browser to discover other peers
         self._listener = _HashiListener(self._self_id, self._on_peers_changed)

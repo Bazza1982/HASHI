@@ -44,6 +44,7 @@ _instance_info: dict = {}
 _peer_registry = None
 _pairing_manager: Optional[PairingManager] = None
 _terminal_executor: Optional[TerminalExecutor] = None
+_protocol_manager = None
 _hashi_root: Optional[str] = None
 _workbench_port: int = 18800
 _HCHAT_HEADER_RE = re.compile(r"^\[hchat from (?P<agent>\w+)(?:@(?P<instance>[\w-]+))?\]\s*(?P<body>.*)$", re.DOTALL)
@@ -72,6 +73,38 @@ class PairRequestPayload(BaseModel):
     client_name: str
 
 
+class ProtocolHandshakePayload(BaseModel):
+    from_instance: str
+    display_handle: Optional[str] = None
+    protocol_version: str = "2.0"
+    capabilities: list[str] = []
+    hashi_version: Optional[str] = None
+    agents: list[dict] = []
+    remote_port: Optional[int] = None          # Sender's own Hashi Remote port
+    workbench_port: Optional[int] = None       # Sender's workbench port
+    platform: Optional[str] = None             # Sender's platform
+    host_identity: Optional[str] = None
+    environment_kind: Optional[str] = None
+    address_candidates: list[dict] = []
+    observed_candidates: list[dict] = []
+
+
+class ProtocolMessagePayload(BaseModel):
+    message_id: str
+    conversation_id: str
+    in_reply_to: Optional[str] = None
+    from_instance: str
+    from_agent: str
+    to_instance: str
+    to_agent: str
+    body: dict
+    hop_count: int = 0
+    ttl: int = 8
+    route_trace: list[str] = []
+    message_type: str = "agent_message"
+    created_at: Optional[str] = None
+
+
 # ─────────────────────────────────────────────────────────────
 # App factory
 # ─────────────────────────────────────────────────────────────
@@ -81,18 +114,20 @@ def create_app(
     pairing_manager: PairingManager,
     terminal_executor: TerminalExecutor,
     peer_registry=None,
+    protocol_manager=None,
     workbench_port: int = 18800,
     hashi_root: str = None,
 ) -> FastAPI:
     """Create the FastAPI application with all context injected."""
 
     global _instance_info, _peer_registry, _pairing_manager, _terminal_executor
-    global _workbench_port, _hashi_root
+    global _workbench_port, _hashi_root, _protocol_manager
 
     _instance_info = instance_info
     _peer_registry = peer_registry
     _pairing_manager = pairing_manager
     _terminal_executor = terminal_executor
+    _protocol_manager = protocol_manager
     _workbench_port = workbench_port
     _hashi_root = hashi_root
 
@@ -120,12 +155,14 @@ def create_app(
         peers = []
         if _peer_registry:
             peers = [p.to_dict() for p in _peer_registry.get_peers()]
+        local_network_profile = _protocol_manager._local_network_profile() if _protocol_manager else None
         return {
             "ok": True,
             "instance": _instance_info,
             "hostname": socket.gethostname(),
             "platform": platform.system().lower(),
             "ts": time.time(),
+            "local_network_profile": local_network_profile,
             "peers": peers,
         }
 
@@ -137,6 +174,37 @@ def create_app(
         if _peer_registry:
             peers = [p.to_dict() for p in _peer_registry.get_peers()]
         return {"ok": True, "peers": peers, "count": len(peers)}
+
+    @app.get("/protocol/status")
+    async def protocol_status():
+        if _protocol_manager is None:
+            return {"ok": False, "error": "protocol manager unavailable"}
+        return {"ok": True, **_protocol_manager.get_protocol_status()}
+
+    @app.post("/protocol/handshake")
+    async def protocol_handshake(request: Request, payload: ProtocolHandshakePayload):
+        if _protocol_manager is None:
+            return JSONResponse(status_code=503, content={"status": "handshake_reject", "reason": "protocol unavailable"})
+        # Pass the sender's IP so we can register them as a peer (reverse registration)
+        client_ip = request.client.host if request.client else None
+        data = payload.model_dump()
+        data["_client_ip"] = client_ip
+        result = _protocol_manager.handle_handshake(data)
+        status = 200 if str(result.get("status")) == "handshake_accept" else 409
+        return JSONResponse(status_code=status, content=result)
+
+    @app.get("/protocol/agents")
+    async def protocol_agents():
+        if _protocol_manager is None:
+            return JSONResponse(status_code=503, content={"ok": False, "error": "protocol manager unavailable"})
+        return {"ok": True, "agents": _protocol_manager.get_local_agents_snapshot()}
+
+    @app.post("/protocol/message")
+    async def protocol_message(payload: ProtocolMessagePayload):
+        if _protocol_manager is None:
+            return JSONResponse(status_code=503, content={"ok": False, "error": "protocol manager unavailable"})
+        status, result = await _protocol_manager.handle_protocol_message(payload.model_dump())
+        return JSONResponse(status_code=status, content=result)
 
     # ── HChat relay ─────────────────────────────────────────
 
