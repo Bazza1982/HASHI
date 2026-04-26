@@ -15,6 +15,7 @@ from typing import Optional, Any
 import json
 
 import aiohttp
+import yaml
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update, constants
 from telegram.error import TimedOut as TelegramTimedOut
 from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler, MessageHandler, filters
@@ -5689,19 +5690,101 @@ class FlexibleAgentRuntime:
     # /remote — one-click Hashi Remote start/stop
     # ------------------------------------------------------------------
 
+    def _remote_config_snapshot(self) -> dict[str, Any]:
+        root = self.global_config.project_root
+        config_path = root / "remote" / "config.yaml"
+        data: dict[str, Any] = {}
+        try:
+            data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            data = {}
+        server = data.get("server") or {}
+        discovery = data.get("discovery") or {}
+        return {
+            "root": root,
+            "port": int(server.get("port") or 8766),
+            "use_tls": bool(server.get("use_tls", True)),
+            "backend": str(discovery.get("backend") or "lan"),
+        }
+
+    def _remote_urls(self, path: str) -> list[str]:
+        cfg = self._remote_config_snapshot()
+        port = int(cfg["port"])
+        schemes = ("https", "http") if cfg["use_tls"] else ("http", "https")
+        return [f"{scheme}://127.0.0.1:{port}{path}" for scheme in schemes]
+
+    async def _fetch_remote_json(self, path: str) -> tuple[dict[str, Any] | None, str | None]:
+        timeout = aiohttp.ClientTimeout(total=4)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            for url in self._remote_urls(path):
+                try:
+                    async with session.get(url, ssl=False) as resp:
+                        if resp.status >= 500:
+                            continue
+                        return await resp.json(), url
+                except Exception:
+                    continue
+        return None, None
+
     async def cmd_remote(self, update: Update, context: Any):
-        """Start/stop Hashi Remote. Usage: /remote [on|off|status]"""
+        """Start/stop Hashi Remote. Usage: /remote [on|off|status|list]"""
         if not self._is_authorized_user(update.effective_user.id):
             return
         arg = (context.args[0].lower() if context.args else "").strip()
+        cfg = self._remote_config_snapshot()
+        alive = self._remote_process is not None and self._remote_process.returncode is None
 
-        # Status check
         if arg == "status" or not arg:
-            alive = self._remote_process is not None and self._remote_process.returncode is None
-            if alive:
-                await self._reply_text(update, "🟢 Hashi Remote is running (PID %d)" % self._remote_process.pid)
-            else:
-                await self._reply_text(update, "⚪ Hashi Remote is not running. Use /remote on to start.")
+            health, health_url = await self._fetch_remote_json("/health")
+            status, _status_url = await self._fetch_remote_json("/protocol/status")
+            if not health:
+                if alive:
+                    await self._reply_text(
+                        update,
+                        "🟡 Hashi Remote process is running, but the API did not respond.\n"
+                        f"PID: {self._remote_process.pid}\n"
+                        f"Expected port: {cfg['port']}  ·  TLS: {'on' if cfg['use_tls'] else 'off'}"
+                    )
+                else:
+                    await self._reply_text(update, "⚪ Hashi Remote is not running. Use /remote on to start.")
+                return
+            instance = health.get("instance") or {}
+            peers = list((health.get("peers") or []))
+            lines = [
+                "🟢 <b>Hashi Remote Status</b>",
+                f"Instance: <code>{instance.get('instance_id') or self.global_config.project_root.name.upper()}</code>",
+                f"API: <code>{health_url}</code>",
+                f"Port: <code>{cfg['port']}</code>  ·  TLS: <code>{'on' if cfg['use_tls'] else 'off'}</code>",
+                f"Discovery: <code>{cfg['backend']}</code>",
+                f"Process: <code>{'running' if alive else 'external/unknown'}</code>" + (f" (PID {self._remote_process.pid})" if alive else ""),
+                f"Peers: <code>{len(peers)}</code>",
+            ]
+            if status:
+                inflight = int(status.get("inflight_count") or 0)
+                lines.append(f"Inflight: <code>{inflight}</code>")
+            await self._reply_text(update, "\n".join(lines), parse_mode="HTML")
+            return
+
+        if arg == "list":
+            data, _url = await self._fetch_remote_json("/peers")
+            peers = list((data or {}).get("peers") or [])
+            if not peers:
+                await self._reply_text(update, "⚪ No remote peers are currently visible.")
+                return
+            lines = ["📡 <b>Remote Instances</b>"]
+            for peer in peers:
+                props = peer.get("properties") or {}
+                state = props.get("handshake_state") or "unknown"
+                backend = props.get("preferred_backend") or props.get("discovery") or "unknown"
+                agents = len(props.get("remote_agents") or [])
+                lines.append(
+                    f"• <code>{peer.get('instance_id')}</code>  "
+                    f"<code>{peer.get('host')}:{peer.get('port')}</code>  "
+                    f"<code>{state}</code>  "
+                    f"backend=<code>{backend}</code>  "
+                    f"agents=<code>{agents}</code>"
+                )
+            await self._reply_text(update, "\n".join(lines), parse_mode="HTML")
             return
 
         if arg == "off":
@@ -5718,32 +5801,36 @@ class FlexibleAgentRuntime:
             return
 
         if arg == "on":
-            alive = self._remote_process is not None and self._remote_process.returncode is None
             if alive:
                 await self._reply_text(update, "🟢 Already running (PID %d)." % self._remote_process.pid)
                 return
 
-            root = self.global_config.project_root
+            root = cfg["root"]
             venv_python = root / ".venv" / "bin" / "python3"
             if not venv_python.exists():
                 venv_python = root / ".venv" / "Scripts" / "python.exe"  # Windows
 
+            cmd = [str(venv_python), "-m", "remote"]
+            if not cfg["use_tls"]:
+                cmd.append("--no-tls")
+            if cfg["backend"] in {"lan", "tailscale", "both"}:
+                cmd.extend(["--discovery", cfg["backend"]])
+
             self._remote_process = await asyncio.create_subprocess_exec(
-                str(venv_python), "-m", "remote", "--no-tls",
+                *cmd,
                 cwd=str(root),
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
             await self._reply_text(
                 update,
-                "🟢 Hashi Remote started (PID %d)\n"
-                "   Port 8766 · mDNS discovery active\n"
-                "   Use /remote off to stop." % self._remote_process.pid,
+                f"🟢 Hashi Remote started (PID {self._remote_process.pid})\n"
+                f"   Port {cfg['port']} · TLS {'on' if cfg['use_tls'] else 'off'} · discovery {cfg['backend']}\n"
+                "   Use /remote off to stop.",
             )
             return
 
-        await self._reply_text(update, "Usage: /remote [on|off|status]")
-
+        await self._reply_text(update, "Usage: /remote [on|off|status|list]")
     # ------------------------------------------------------------------
     # /long ... /end buffering (collect split Telegram messages)
     # ------------------------------------------------------------------
@@ -7189,7 +7276,7 @@ class FlexibleAgentRuntime:
             BotCommand("timeout", "View or set request timeout [minutes]"),
             BotCommand("hchat", "Send a message to another agent [agent] [message]"),
             BotCommand("logo", "Play startup animation"),
-            BotCommand("remote", "Start/stop Hashi Remote [on|off|status]"),
+            BotCommand("remote", "Start/stop Hashi Remote [on|off|status|list]"),
             BotCommand("wa_on", "Start WhatsApp transport"),
             BotCommand("wa_off", "Stop WhatsApp transport"),
             BotCommand("wa_send", "Send a WhatsApp message"),
