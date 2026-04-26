@@ -101,6 +101,8 @@ def supported_commands(runtime) -> list[str]:
         "transfer",
         "fork",
         "cos",
+        "usecomputer",
+        "usercomputer",
     ]
     if hasattr(runtime, "cmd_backend"):
         names.extend(["backend"])

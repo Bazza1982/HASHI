@@ -32,6 +32,7 @@ Two operating modes:
 - `/clear` — clear workspace context files
 - `/handoff` — restore recent continuity from bridge transcript into a fresh session
 - `/fyi [prompt]` — refresh bridge environment awareness; optionally append a follow-up prompt
+- `/usecomputer [on|off|status|examples|task]` — load managed GUI-aware computer-use guidance; unified shortcut for desktop/browser/Windows interaction when needed
 - `/status` — agent state, workspace, last activity
 - `/debug` — detailed debug info (backend, PID, process state)
 - `/start` — inline keyboard to start a stopped agent
@@ -45,6 +46,7 @@ Two operating modes:
 - `/active [on|off] [minutes]` — toggle bridge-managed proactive heartbeat (default 10 min)
 - `/voice [status|on|off|provider|providers|voices|use <alias>]` — control native bridge-owned voice replies
 - `/reboot [min|max|number|help]` — hot restart agents with live Python code reload; preserves scheduler, workbench API, WhatsApp
+- Alias: `/usercomputer`
 
 **Flex-only:**
 - `/backend` — switch active backend (inline keyboard; `+` variant carries continuity handoff)
@@ -298,6 +300,14 @@ gh run list                             # list workflow runs
 5. When building or running Linux-native services (e.g., Docker Compose stacks), prefer working from `~/projects/` inside WSL2 for best performance.
 
 ### Windows Use Tools
+
+`/usecomputer` sits above the raw GUI tool tiers. It does not replace `desktop_*` or `windows_*`; it tells the agent when and how to use them coherently.
+
+- prefer non-GUI methods first when available
+- use `desktop_*` for Linux/X11 virtual desktop work
+- use `windows_*` for the real Windows desktop
+- inspect environment, focus, and screenshots before acting
+- re-check after important actions instead of assuming UI state
 
 The Linux virtual-desktop tier (`desktop_*`) now follows the same stability pattern more closely:
 

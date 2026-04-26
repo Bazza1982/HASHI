@@ -432,6 +432,7 @@ HASHI agents respond to both natural language and structured commands:
 | `/model` | View/change active model |
 | `/effort` | View/change effort level (Claude/Codex only) |
 | `/fyi [prompt]` | Refresh bridge environment awareness |
+| `/usecomputer [on\|off\|status\|examples\|task]` | Load managed GUI-aware computer-use guidance; prefers non-GUI methods first |
 | `/retry` | Resend last response or re-run last prompt |
 | `/long` ... `/end` | Buffer long text across multiple messages, submit as one |
 | `/loop <interval> <task>` | Create recurring automated tasks via skill injection |
@@ -638,6 +639,25 @@ API-backed agents can execute local actions via the tool system:
 | `windows_window_list` / `windows_window_focus` / `windows_window_close` | Enumerate and control Windows top-level windows |
 
 No `tools` key in config = tools disabled, fully backward compatible.
+
+#### `/usecomputer` Consolidated Command
+
+`/usecomputer` is a unified operator shortcut for tasks that may require browser, desktop, or full GUI control.
+
+- It is not a forced GUI mode.
+- It loads managed guidance so the agent knows to use computer interaction when needed.
+- It prefers direct APIs, shell commands, and file edits first when those are more reliable.
+- When GUI work is necessary, it chooses between `desktop_*` and `windows_*` based on the target environment.
+- Alias: `/usercomputer`
+
+Examples:
+
+```text
+/usecomputer on
+/usecomputer status
+/usecomputer Please do some qualitative coding for me in NVivo here, using mouse and keyboard if needed.
+/usecomputer Please verify this Chrome extension on the real Windows desktop.
+```
 
 #### Windows Live Browser Bridge — Known Good Workflow
 

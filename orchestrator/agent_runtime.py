@@ -23,6 +23,12 @@ from orchestrator.handoff_builder import HandoffBuilder
 from orchestrator.habits import HabitStore
 from orchestrator.media_utils import is_image_file, normalize_image_file
 from orchestrator.parked_topics import ParkedTopicStore
+from orchestrator.usecomputer_mode import (
+    build_usecomputer_task_prompt,
+    get_usecomputer_examples_text,
+    get_usecomputer_status,
+    set_usecomputer_mode,
+)
 from orchestrator.skill_manager import SkillDefinition, SkillManager
 from orchestrator.voice_manager import VoiceManager
 
@@ -3503,6 +3509,48 @@ class BridgeAgentRuntime:
                 "/sys <n> on|off|delete\n/sys <n> save <msg>\n/sys <n> replace <msg>"
             )
 
+    async def cmd_usecomputer(self, update, context):
+        if update.effective_user.id != self.global_config.authorized_id:
+            return
+        args = [a.strip() for a in (context.args or []) if a.strip()]
+        if not args:
+            await update.message.reply_text(
+                "Usage:\n"
+                "/usecomputer on - enable managed GUI-aware mode\n"
+                "/usecomputer off - disable it and clear the managed /sys slot\n"
+                "/usecomputer status - show current state\n"
+                "/usecomputer examples - show example prompts\n"
+                "/usecomputer <task> - run a task with computer-use guidance loaded"
+            )
+            return
+
+        sub = args[0].lower()
+        if sub == "on":
+            await update.message.reply_text(set_usecomputer_mode(self.sys_prompt_manager, True))
+            return
+        if sub == "off":
+            await update.message.reply_text(set_usecomputer_mode(self.sys_prompt_manager, False))
+            return
+        if sub == "status":
+            await update.message.reply_text(get_usecomputer_status(self.sys_prompt_manager))
+            return
+        if sub == "examples":
+            await update.message.reply_text(get_usecomputer_examples_text())
+            return
+
+        task = " ".join(args).strip()
+        set_usecomputer_mode(self.sys_prompt_manager, True)
+        await update.message.reply_text("Running in /usecomputer mode...")
+        await self.enqueue_request(
+            update.effective_chat.id,
+            build_usecomputer_task_prompt(task),
+            "usecomputer",
+            "Computer-use task",
+        )
+
+    async def cmd_usercomputer(self, update, context):
+        await self.cmd_usecomputer(update, context)
+
     async def cmd_say(self, update, context):
         """One-shot TTS: synthesize the last assistant message and send as voice."""
         if update.effective_user.id != self.global_config.authorized_id:
@@ -4108,6 +4156,7 @@ class BridgeAgentRuntime:
             "/wa_on - Start WhatsApp transport and show QR in console if needed",
             "/wa_off - Stop WhatsApp transport",
             "/wa_send <number> <message> - Send a WhatsApp message through bridge-u-f",
+            "/usecomputer [on|off|status|examples|task] - Enable or run GUI-aware computer-use mode",
         ]
         if self.config.engine == "openrouter-api":
             lines.append("/credit - Show OpenRouter key balance info")
@@ -4742,6 +4791,7 @@ class BridgeAgentRuntime:
             BotCommand("wa_on", "Start WhatsApp transport"),
             BotCommand("wa_off", "Stop WhatsApp transport"),
             BotCommand("wa_send", "Send a WhatsApp message"),
+            BotCommand("usecomputer", "Enable or run GUI-aware computer-use mode"),
         ]
         if self.config.engine == "openrouter-api":
             commands.append(BotCommand("credit", "Show OpenRouter balance"))
@@ -4790,6 +4840,8 @@ class BridgeAgentRuntime:
         self.app.add_handler(CommandHandler("wa_on", self.cmd_wa_on))
         self.app.add_handler(CommandHandler("wa_off", self.cmd_wa_off))
         self.app.add_handler(CommandHandler("wa_send", self.cmd_wa_send))
+        self.app.add_handler(CommandHandler("usecomputer", self.cmd_usecomputer))
+        self.app.add_handler(CommandHandler("usercomputer", self.cmd_usercomputer))
         self.app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), self.handle_message))
         self.app.add_handler(MessageHandler(filters.PHOTO, self.handle_photo))
         self.app.add_handler(MessageHandler(filters.VOICE, self.handle_voice))

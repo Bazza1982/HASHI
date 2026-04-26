@@ -37,6 +37,12 @@ from orchestrator.handoff_builder import HandoffBuilder
 from orchestrator.habits import HabitStore
 from orchestrator.media_utils import is_image_file, normalize_image_file
 from orchestrator.parked_topics import ParkedTopicStore
+from orchestrator.usecomputer_mode import (
+    build_usecomputer_task_prompt,
+    get_usecomputer_examples_text,
+    get_usecomputer_status,
+    set_usecomputer_mode,
+)
 from orchestrator.skill_manager import SkillDefinition, SkillManager
 from orchestrator.voice_manager import VoiceManager
 
@@ -1759,6 +1765,8 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CommandHandler("wa_on", self._wrap_cmd("wa_on", self.cmd_wa_on)))
         self.app.add_handler(CommandHandler("wa_off", self._wrap_cmd("wa_off", self.cmd_wa_off)))
         self.app.add_handler(CommandHandler("wa_send", self._wrap_cmd("wa_send", self.cmd_wa_send)))
+        self.app.add_handler(CommandHandler("usecomputer", self._wrap_cmd("usecomputer", self.cmd_usecomputer)))
+        self.app.add_handler(CommandHandler("usercomputer", self._wrap_cmd("usercomputer", self.cmd_usercomputer)))
         self.app.add_handler(CommandHandler("long", self._wrap_cmd("long", self.cmd_long)))
         self.app.add_handler(CommandHandler("end", self._wrap_cmd("end", self.cmd_end)))
         self.app.add_handler(CommandHandler("remote", self._wrap_cmd("remote", self.cmd_remote)))
@@ -2873,6 +2881,49 @@ class FlexibleAgentRuntime:
                 "/sys <n> on|off|delete\n/sys <n> save <msg>\n/sys <n> replace <msg>\n"
                 "/sys output <n> - return raw content of slot"
             )
+
+    async def cmd_usecomputer(self, update, context):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        args = [a.strip() for a in (context.args or []) if a.strip()]
+        if not args:
+            await self._reply_text(
+                update,
+                "Usage:\n"
+                "/usecomputer on - enable managed GUI-aware mode\n"
+                "/usecomputer off - disable it and clear the managed /sys slot\n"
+                "/usecomputer status - show current state\n"
+                "/usecomputer examples - show example prompts\n"
+                "/usecomputer <task> - run a task with computer-use guidance loaded",
+            )
+            return
+
+        sub = args[0].lower()
+        if sub == "on":
+            await self._reply_text(update, set_usecomputer_mode(self.sys_prompt_manager, True))
+            return
+        if sub == "off":
+            await self._reply_text(update, set_usecomputer_mode(self.sys_prompt_manager, False))
+            return
+        if sub == "status":
+            await self._reply_text(update, get_usecomputer_status(self.sys_prompt_manager))
+            return
+        if sub == "examples":
+            await self._reply_text(update, get_usecomputer_examples_text())
+            return
+
+        task = " ".join(args).strip()
+        set_usecomputer_mode(self.sys_prompt_manager, True)
+        await self._reply_text(update, "Running in /usecomputer mode...")
+        await self.enqueue_request(
+            update.effective_chat.id,
+            build_usecomputer_task_prompt(task),
+            "usecomputer",
+            "Computer-use task",
+        )
+
+    async def cmd_usercomputer(self, update, context):
+        await self.cmd_usecomputer(update, context)
 
     async def cmd_credit(self, update, context):
         if not self._is_authorized_user(update.effective_user.id):
@@ -7142,6 +7193,7 @@ class FlexibleAgentRuntime:
             BotCommand("wa_on", "Start WhatsApp transport"),
             BotCommand("wa_off", "Stop WhatsApp transport"),
             BotCommand("wa_send", "Send a WhatsApp message"),
+            BotCommand("usecomputer", "Enable or run GUI-aware computer-use mode"),
             BotCommand("sys", "Manage system prompt slots"),
             BotCommand("credit", "Check API credit/usage"),
         ]

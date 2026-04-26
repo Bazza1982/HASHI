@@ -27,6 +27,7 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - `/voice [status|on|off|provider|providers|voices|use <alias>]`: control native bridge-owned voice replies.
 - `/retry`: resend last response or rerun last prompt.
 - `/debug <prompt>`: strict debug mode with verification-first behavior.
+- `/usecomputer [on|off|status|examples|task]`: load managed GUI-aware operating guidance. This is a unified shortcut for desktop/browser/Windows computer use, but it does not force GUI when a better non-GUI path exists.
 - `/skill`: browse built-in and custom skills.
 - `/model`: inspect or switch model where supported.
 - `/verbose [on|off]`: toggle richer long-task status display.
@@ -129,10 +130,35 @@ python tools/browser_cli.py evaluate   --url <url> --script "() => document.titl
 
 **Prerequisites:** `playwright install chromium` (one-time setup).
 
+## Usecomputer Command
+
+`/usecomputer` is the consolidated operator-facing shortcut for "use the computer like a human if needed".
+
+- It activates managed guidance through `/sys 10`.
+- It is a prompt-level operating mode, not a separate tool tier.
+- It tells the agent to prefer non-GUI methods first, then use `desktop_*` or `windows_*` when GUI interaction is actually the best path.
+- Alias: `/usercomputer`
+
+Supported forms:
+- `/usecomputer on`
+- `/usecomputer off`
+- `/usecomputer status`
+- `/usecomputer examples`
+- `/usecomputer <task>`
+
+When GUI work is needed, the expected behavior is:
+- inspect the environment first
+- choose the correct family: `desktop_*` for Linux/X11 virtual desktop, `windows_*` for the real Windows desktop
+- verify window focus and screenshots before acting
+- work in small reversible steps
+- re-check after important actions instead of assuming state
+
 ## Desktop Tool
 
 Agents can control a Linux virtual desktop (Xvfb or XRDP session) using the `desktop_*` tool tier.
 This is fully independent of the Windows host — it works even when the Windows screen is locked.
+
+This tier is one of the backends that `/usecomputer` may choose when Linux/X11 desktop interaction is the right method.
 
 **Available tools:** `desktop_screenshot`, `desktop_click`, `desktop_type`, `desktop_key`, `desktop_mouse_move`, `desktop_scroll`, `desktop_info`
 
@@ -170,6 +196,8 @@ Requires `xdotool` installed: `sudo apt-get install -y xdotool`
 
 Agents can control the real Windows desktop through the `windows_*` tool tier.
 This is designed for HASHI agents running either directly on Windows or inside WSL.
+
+This tier is one of the backends that `/usecomputer` may choose when real Windows desktop interaction is the right method.
 
 **Available tools:** `windows_screenshot`, `windows_click`, `windows_type`, `windows_key`, `windows_mouse_move`, `windows_scroll`, `windows_info`, `windows_window_list`, `windows_window_focus`, `windows_window_close`
 
