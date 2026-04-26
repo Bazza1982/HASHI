@@ -37,6 +37,7 @@ from remote.peer.base import PeerInfo
 from remote.peer.lan import LanDiscovery
 from remote.peer.registry import PeerRegistry
 from remote.peer.tailscale import TailscaleDiscovery
+from remote.protocol_manager import ProtocolManager, PROTOCOL_VERSION, DEFAULT_CAPABILITIES
 from remote.security.pairing import PairingManager
 from remote.security.tls import load_or_generate_cert
 from remote.terminal.executor import TerminalExecutor, AuthLevel
@@ -152,8 +153,9 @@ class HashiRemoteApplication:
 
         self._shutdown_event = threading.Event()
         self._uvicorn_server: Optional[uvicorn.Server] = None
-        self._discovery = None
+        self._discoveries: list = []
         self._registry: Optional[PeerRegistry] = None
+        self._protocol_manager: Optional[ProtocolManager] = None
 
     def _setup_logging(self) -> None:
         level = logging.DEBUG if self._verbose else logging.INFO
@@ -193,16 +195,21 @@ class HashiRemoteApplication:
 
         # Peer registry + discovery
         self._registry = PeerRegistry(self._hashi_root, instance_id)
-        if self._discovery_backend == "tailscale":
-            self._discovery = TailscaleDiscovery(
-                self_instance_id=instance_id,
-                hashi_root=self._hashi_root,
-                on_peers_changed=self._registry.on_peers_changed,
+        self._discoveries = []
+        if self._discovery_backend in {"lan", "both"}:
+            self._discoveries.append(
+                LanDiscovery(
+                    self_instance_id=instance_id,
+                    on_peers_changed=self._registry.on_peers_changed,
+                )
             )
-        else:
-            self._discovery = LanDiscovery(
-                self_instance_id=instance_id,
-                on_peers_changed=self._registry.on_peers_changed,
+        if self._discovery_backend in {"tailscale", "both"}:
+            self._discoveries.append(
+                TailscaleDiscovery(
+                    self_instance_id=instance_id,
+                    hashi_root=self._hashi_root,
+                    on_peers_changed=self._registry.on_peers_changed,
+                )
             )
 
         peer_self = PeerInfo(
@@ -213,14 +220,27 @@ class HashiRemoteApplication:
             workbench_port=workbench_port,
             platform=instance_info["platform"],
             hashi_version=instance_info["hashi_version"],
+            display_handle=f"@{instance_id.lower()}",
+            protocol_version=PROTOCOL_VERSION,
+            capabilities=list(DEFAULT_CAPABILITIES),
         )
 
         # Start discovery/advertising
-        ok = await self._discovery.advertise(peer_self)
-        if ok:
-            logger.info("%s: advertising as %s", self._discovery.backend_name, instance_id)
-        else:
-            logger.warning("%s: failed to start discovery/advertising", self._discovery_backend)
+        for discovery in self._discoveries:
+            ok = await discovery.advertise(peer_self)
+            if ok:
+                logger.info("%s: advertising as %s", discovery.backend_name, instance_id)
+            else:
+                logger.warning("%s: failed to start discovery/advertising", discovery.backend_name)
+
+        instance_info["remote_port"] = self._port
+        self._protocol_manager = ProtocolManager(
+            hashi_root=self._hashi_root,
+            instance_info=instance_info,
+            peer_registry=self._registry,
+            workbench_port=workbench_port,
+        )
+        await self._protocol_manager.start()
 
         # Create FastAPI app
         app = create_app(
@@ -228,6 +248,7 @@ class HashiRemoteApplication:
             pairing_manager=pairing_manager,
             terminal_executor=terminal_executor,
             peer_registry=self._registry,
+            protocol_manager=self._protocol_manager,
             workbench_port=workbench_port,
             hashi_root=str(self._hashi_root),
         )
@@ -280,8 +301,10 @@ class HashiRemoteApplication:
         self._shutdown_event.set()
         if self._uvicorn_server:
             self._uvicorn_server.should_exit = True
-        if self._discovery:
-            asyncio.get_event_loop().run_until_complete(self._discovery.stop())
+        for discovery in self._discoveries:
+            asyncio.get_event_loop().run_until_complete(discovery.stop())
+        if self._protocol_manager:
+            asyncio.get_event_loop().run_until_complete(self._protocol_manager.stop())
 
 
 def parse_args() -> argparse.Namespace:
@@ -294,7 +317,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-tls", action="store_true", help="Disable TLS (dev/debug only)")
     parser.add_argument("--no-lan-mode", action="store_true",
                         help="Require token auth even on LAN (for internet deployments)")
-    parser.add_argument("--discovery", choices=["lan", "tailscale"], default=None,
+    parser.add_argument("--discovery", choices=["lan", "tailscale", "both"], default=None,
                         help="Peer discovery backend")
     parser.add_argument("--max-terminal-level", default="L2_WRITE",
                         choices=["L0_READ_ONLY", "L1_READ_FILES", "L2_WRITE", "L3_RESTART"],

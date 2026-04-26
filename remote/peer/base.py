@@ -28,6 +28,9 @@ class PeerInfo:
     platform: str           # "wsl", "windows", "linux", "macos"
     version: str = "unknown"
     hashi_version: str = "unknown"
+    display_handle: str = ""
+    protocol_version: str = "1.0"
+    capabilities: list[str] = field(default_factory=list)
     properties: dict = field(default_factory=dict)
 
     @property
@@ -47,12 +50,16 @@ class PeerInfo:
         return {
             "instance_id": self.instance_id,
             "display_name": self.display_name,
+            "display_handle": self.display_handle or f"@{self.instance_id.lower()}",
             "host": self.host,
             "port": self.port,
             "workbench_port": self.workbench_port,
             "platform": self.platform,
             "version": self.version,
             "hashi_version": self.hashi_version,
+            "protocol_version": self.protocol_version,
+            "capabilities": list(self.capabilities or []),
+            "properties": dict(self.properties or {}),
         }
 
 
