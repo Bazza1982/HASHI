@@ -5861,16 +5861,17 @@ class FlexibleAgentRuntime:
         props = peer.get("properties") or {}
         _rank, presence, state = self._remote_peer_presence(peer)
         instance_id = html.escape(str(peer.get("instance_id") or "unknown"))
-        host = html.escape(str(peer.get("host") or "?"))
         port = html.escape(str(peer.get("port") or "?"))
         backend = html.escape(str(props.get("preferred_backend") or props.get("discovery") or "unknown"))
         agents = len(props.get("remote_agents") or [])
         last_handshake = html.escape(self._format_remote_age(props.get("last_handshake_at")))
         last_seen_ok = html.escape(self._format_remote_age(props.get("last_seen_ok")))
         state_safe = html.escape(state)
+        endpoint_lines = self._render_remote_peer_endpoints(peer)
         lines = [
             f"{presence} <b>{instance_id}</b>",
-            f"addr: <code>{host}:{port}</code>  ·  backend: <code>{backend}</code>  ·  agents: <code>{agents}</code>",
+            *endpoint_lines,
+            f"backend: <code>{backend}</code>  ·  port: <code>{port}</code>  ·  agents: <code>{agents}</code>",
             f"state: <code>{state_safe}</code>  ·  last handshake: <code>{last_handshake}</code>  ·  last seen: <code>{last_seen_ok}</code>",
         ]
         last_error = html.escape(str(props.get("last_error") or "").strip())
@@ -5880,6 +5881,63 @@ class FlexibleAgentRuntime:
         if refresh_error:
             lines.append(f"refresh: <code>{refresh_error}</code>")
         return lines
+
+    def _load_remote_instances(self) -> dict[str, dict[str, Any]]:
+        path = self.global_config.project_root / "instances.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        instances = data.get("instances") or {}
+        return instances if isinstance(instances, dict) else {}
+
+    def _peer_network_hosts(self, peer: dict[str, Any], entry: dict[str, Any]) -> list[str]:
+        props = peer.get("properties") or {}
+        hosts: list[str] = []
+        seen: set[str] = set()
+
+        def _add(value: Any) -> None:
+            host = str(value or "").strip()
+            if not host or host in {"127.0.0.1", "localhost", "0.0.0.0"}:
+                return
+            if host in seen:
+                return
+            seen.add(host)
+            hosts.append(host)
+
+        for key in ("lan_ip", "tailscale_ip", "api_host"):
+            _add(entry.get(key))
+        for field in ("address_candidates", "observed_candidates"):
+            for item in props.get(field) or []:
+                if not isinstance(item, dict):
+                    continue
+                scope = str(item.get("scope") or "").strip().lower()
+                if scope in {"lan", "overlay", "routable", "peer"}:
+                    _add(item.get("host"))
+        return hosts
+
+    def _render_remote_peer_endpoints(self, peer: dict[str, Any]) -> list[str]:
+        instance_id = str(peer.get("instance_id") or "").strip().lower()
+        entry = self._load_remote_instances().get(instance_id, {}) if instance_id else {}
+        route_host = str(peer.get("host") or entry.get("api_host") or "?").strip() or "?"
+        route_port = str(peer.get("port") or entry.get("remote_port") or "?").strip() or "?"
+        network_hosts = self._peer_network_hosts(peer, entry if isinstance(entry, dict) else {})
+        same_host = bool(str((entry or {}).get("same_host_loopback") or "").strip())
+
+        if same_host and route_host in {"127.0.0.1", "localhost"}:
+            network_host = network_hosts[0] if network_hosts else ""
+            line = f"route: <code>{html.escape(route_host)}:{html.escape(route_port)}</code>  ·  <code>same host</code>"
+            if network_host:
+                line += f"  ·  network: <code>{html.escape(network_host)}:{html.escape(route_port)}</code>"
+            return [line]
+
+        if network_hosts and route_host not in network_hosts and route_host not in {"?", ""}:
+            return [
+                f"route: <code>{html.escape(route_host)}:{html.escape(route_port)}</code>",
+                f"network: <code>{html.escape(network_hosts[0])}:{html.escape(route_port)}</code>",
+            ]
+
+        return [f"addr: <code>{html.escape(route_host)}:{html.escape(route_port)}</code>"]
 
     async def cmd_remote(self, update: Update, context: Any):
         """Start/stop Hashi Remote. Usage: /remote [on|off|status|list]"""

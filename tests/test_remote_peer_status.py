@@ -2,6 +2,7 @@
 
 import sys
 import time
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -30,6 +31,12 @@ class _PresenceDummy:
 
 class _RemoteStartDummy:
     _read_remote_start_log_excerpt = FlexibleAgentRuntime._read_remote_start_log_excerpt
+
+
+class _RemoteRenderDummy:
+    _render_remote_peer_endpoints = FlexibleAgentRuntime._render_remote_peer_endpoints
+    _load_remote_instances = FlexibleAgentRuntime._load_remote_instances
+    _peer_network_hosts = FlexibleAgentRuntime._peer_network_hosts
 
 
 def test_registry_derives_offline_for_timed_out_peer_without_live_fields(tmp_path):
@@ -199,3 +206,69 @@ def test_remote_start_failure_message_falls_back_to_log_path(tmp_path):
 
     assert "health endpoint did not become ready within timeout" in message
     assert str(log_path) in message
+
+
+def test_render_remote_peer_endpoints_explains_same_host_loopback(tmp_path):
+    (tmp_path / "instances.json").write_text(
+        json.dumps(
+            {
+                "instances": {
+                    "hashi9": {
+                        "instance_id": "HASHI9",
+                        "api_host": "127.0.0.1",
+                        "lan_ip": "192.168.0.211",
+                        "remote_port": 8768,
+                        "same_host_loopback": "127.0.0.1",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    dummy = _RemoteRenderDummy()
+    dummy.global_config = SimpleNamespace(project_root=tmp_path)
+    peer = {
+        "instance_id": "HASHI9",
+        "host": "127.0.0.1",
+        "port": 8768,
+        "properties": {},
+    }
+
+    lines = FlexibleAgentRuntime._render_remote_peer_endpoints(dummy, peer)
+
+    assert lines == [
+        "route: <code>127.0.0.1:8768</code>  ·  <code>same host</code>  ·  network: <code>192.168.0.211:8768</code>"
+    ]
+
+
+def test_render_remote_peer_endpoints_shows_route_and_network_when_they_differ(tmp_path):
+    (tmp_path / "instances.json").write_text(
+        json.dumps(
+            {
+                "instances": {
+                    "msi": {
+                        "instance_id": "MSI",
+                        "api_host": "192.168.0.41",
+                        "lan_ip": "192.168.0.41",
+                        "remote_port": 8767,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    dummy = _RemoteRenderDummy()
+    dummy.global_config = SimpleNamespace(project_root=tmp_path)
+    peer = {
+        "instance_id": "MSI",
+        "host": "desktopvn0amd7",
+        "port": 8767,
+        "properties": {},
+    }
+
+    lines = FlexibleAgentRuntime._render_remote_peer_endpoints(dummy, peer)
+
+    assert lines == [
+        "route: <code>desktopvn0amd7:8767</code>",
+        "network: <code>192.168.0.41:8767</code>",
+    ]
