@@ -39,7 +39,8 @@ param(
 $ErrorActionPreference = "Stop"
 
 # Constants
-$ProjectDir = ([System.IO.Path]::GetFullPath($PSScriptRoot)).TrimEnd('\')
+$ScriptDir = ([System.IO.Path]::GetFullPath($PSScriptRoot)).TrimEnd('\')
+$ProjectDir = [System.IO.Path]::GetFullPath((Join-Path $ScriptDir "..")).TrimEnd('\')
 $BridgeHome = if ($env:BRIDGE_HOME) { $env:BRIDGE_HOME } else { $ProjectDir }
 $BridgeHome = ([System.IO.Path]::GetFullPath($BridgeHome)).TrimEnd('\')
 $LockFile = Join-Path $BridgeHome ".bridge_u_f.lock"

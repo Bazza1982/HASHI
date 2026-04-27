@@ -91,6 +91,31 @@ def _load_agents_config(hashi_root: Path) -> dict:
     return {}
 
 
+def _resolve_configured_remote_port(hashi_root: Path, config: dict | None = None) -> int:
+    cfg = _load_agents_config(hashi_root)
+    global_cfg = cfg.get("global", {}) if isinstance(cfg, dict) else {}
+    instance_id = str(global_cfg.get("instance_id") or "").strip().lower()
+    instances_path = hashi_root / "instances.json"
+    instances = {}
+    if instances_path.exists():
+        try:
+            instances = json.loads(instances_path.read_text(encoding="utf-8")).get("instances", {}) or {}
+        except Exception:
+            instances = {}
+    entry = instances.get(instance_id, {}) if instance_id else {}
+    value = entry.get("remote_port") or global_cfg.get("remote_port")
+    if value:
+        try:
+            return int(value)
+        except Exception:
+            pass
+    server = (config or {}).get("server") or {}
+    try:
+        return int(server.get("port") or DEFAULT_PORT)
+    except Exception:
+        return DEFAULT_PORT
+
+
 def _load_instance_info(hashi_root: Path) -> dict:
     """Extract this instance's info from agents.json global section."""
     cfg = _load_agents_config(hashi_root)
@@ -352,9 +377,10 @@ def main() -> int:
     server_cfg = config.get("server", {})
     security_cfg = config.get("security", {})
     discovery_cfg = config.get("discovery", {})
+    configured_port = _resolve_configured_remote_port(hashi_root, config)
 
     host = args.host or server_cfg.get("host", "0.0.0.0")
-    port = args.port if args.port != DEFAULT_PORT else server_cfg.get("port", DEFAULT_PORT)
+    port = args.port if args.port != DEFAULT_PORT else configured_port
     use_tls = not args.no_tls if args.no_tls else server_cfg.get("use_tls", True)
     lan_mode = not args.no_lan_mode if args.no_lan_mode else security_cfg.get("lan_mode", True)
     discovery_backend = args.discovery or os.getenv("HASHI_REMOTE_DISCOVERY") or discovery_cfg.get("backend", "lan")

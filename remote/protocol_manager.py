@@ -30,6 +30,18 @@ def _normalize_identity(value: str) -> str:
     value = str(value or "").strip().lower()
     return "".join(ch for ch in value if ch.isalnum())
 
+
+def _wsl_unc_anchor(value: str) -> str:
+    text = str(value or "").strip().lower().replace("/", "\\")
+    while text.startswith("\\\\\\"):
+        text = text[1:]
+    if not text.startswith("\\\\wsl$\\"):
+        return ""
+    parts = [part for part in text.split("\\") if part]
+    if len(parts) < 2:
+        return ""
+    return f"\\\\{parts[0]}\\{parts[1]}\\"
+
 PROTOCOL_VERSION = "2.0"
 DEFAULT_CAPABILITIES = [
     "handshake_v2",
@@ -866,23 +878,26 @@ class ProtocolManager:
             return True
         instances = self._load_instances()
         local_entry = instances.get(str(self._instance_info.get("instance_id") or "").lower(), {})
-        local_platform = str(self._instance_info.get("platform") or local_entry.get("platform") or "").lower()
+        local_profile = self._local_network_profile()
+        local_platform = str(
+            self._instance_info.get("platform")
+            or local_entry.get("platform")
+            or local_profile.get("environment_kind")
+            or ""
+        ).lower()
         target_platform = str(entry.get("platform") or "").lower()
-        if {local_platform, target_platform} != {"windows", "wsl"}:
-            return False
-        if local_platform == "windows" and entry.get("wsl_root_from_windows"):
-            return True
-        if local_platform == "wsl" and entry.get("wsl_root"):
-            return True
-        local_identity = _normalize_identity(local_entry.get("host_identity") or "")
+        local_identity = _normalize_identity(local_entry.get("host_identity") or local_profile.get("host_identity") or "")
         target_identity = _normalize_identity(entry.get("host_identity") or "")
-        if local_identity and target_identity and local_identity == target_identity:
-            return True
         local_hosts = {
             str(local_entry.get("api_host") or "").strip().lower(),
             str(local_entry.get("lan_ip") or "").strip().lower(),
             str(local_entry.get("tailscale_ip") or "").strip().lower(),
         }
+        for item in local_profile.get("address_candidates") or []:
+            if isinstance(item, dict):
+                host = str(item.get("host") or "").strip().lower()
+                if host:
+                    local_hosts.add(host)
         target_hosts = {
             str(entry.get("api_host") or "").strip().lower(),
             str(entry.get("lan_ip") or "").strip().lower(),
@@ -890,7 +905,24 @@ class ProtocolManager:
         }
         local_hosts.discard("")
         target_hosts.discard("")
-        return bool(local_hosts and target_hosts and local_hosts.intersection(target_hosts))
+        if {local_platform, target_platform} == {"windows", "wsl"}:
+            if local_platform == "windows" and entry.get("wsl_root_from_windows"):
+                return True
+            if local_platform == "wsl" and entry.get("wsl_root"):
+                return True
+            if local_identity and target_identity and local_identity == target_identity:
+                return True
+            return bool(local_hosts and target_hosts and local_hosts.intersection(target_hosts))
+        if local_platform == "wsl" and target_platform == "wsl":
+            if local_identity and target_identity and local_identity != target_identity:
+                return False
+            local_anchor = _wsl_unc_anchor(local_entry.get("wsl_root_from_windows") or "")
+            target_anchor = _wsl_unc_anchor(entry.get("wsl_root_from_windows") or "")
+            if local_anchor and target_anchor and local_anchor == target_anchor:
+                return True
+            if local_identity and target_identity and local_identity == target_identity:
+                return True
+        return False
 
     def _candidate_hosts_for_entry(self, entry: dict) -> list[str]:
         hosts: list[str] = []
@@ -957,9 +989,15 @@ class ProtocolManager:
 
     def _resolve_peer_route(self, instance_id: str):
         peer = self._peer_registry.get_peer(str(instance_id or "")) if self._peer_registry else None
-        if peer is not None:
-            return {"host": peer.host, "port": peer.port, "instance_id": peer.instance_id}
         entry = self._load_instances().get(str(instance_id or "").lower())
+        if peer is not None:
+            candidates = self._candidate_hosts_for_peer(peer)
+            selected_host = str(peer.host or "").strip() or (candidates[0] if candidates else "")
+            for host in candidates:
+                if self._probe_route(host, int(peer.port)):
+                    selected_host = host
+                    break
+            return {"host": selected_host, "port": peer.port, "instance_id": peer.instance_id}
         if not isinstance(entry, dict):
             return None
         port = entry.get("remote_port")
@@ -978,6 +1016,49 @@ class ProtocolManager:
             "port": int(port),
             "instance_id": str(entry.get("instance_id") or instance_id).upper(),
         }
+
+    def _display_network_host(self, entry: dict, peer) -> str:
+        candidates: list[str] = []
+        seen: set[str] = set()
+
+        def _add(host: str) -> None:
+            host = str(host or "").strip()
+            if not host or host in {"127.0.0.1", "localhost", "0.0.0.0"} or host in seen:
+                return
+            seen.add(host)
+            candidates.append(host)
+
+        if isinstance(entry, dict):
+            for key in ("lan_ip", "tailscale_ip", "api_host"):
+                _add(entry.get(key))
+        for item in (peer.properties or {}).get("address_candidates") or []:
+            if isinstance(item, dict):
+                scope = str(item.get("scope") or "").strip().lower()
+                if scope in {"lan", "overlay", "routable", "peer"}:
+                    _add(item.get("host"))
+        return candidates[0] if candidates else ""
+
+    def get_peer_view(self, peer) -> dict:
+        data = peer.to_dict()
+        entry = self._load_instances().get(str(peer.instance_id or "").lower(), {})
+        route_host = str(peer.host or "").strip()
+        route_port = int(peer.port or 0)
+        if not route_host and isinstance(entry, dict):
+            candidates = self._candidate_hosts_for_entry(entry)
+            if candidates:
+                route_host = candidates[0]
+        if not route_port and isinstance(entry, dict):
+            try:
+                route_port = int(entry.get("remote_port") or 0)
+            except (TypeError, ValueError):
+                route_port = 0
+        same_host = route_host in {"127.0.0.1", "localhost"} and self._same_machine_hint(entry)
+        data["resolved_route_host"] = route_host
+        data["resolved_route_port"] = route_port
+        data["display_network_host"] = self._display_network_host(entry, peer)
+        data["same_host"] = same_host
+        data["route_kind"] = "same_host" if same_host else str((peer.properties or {}).get("preferred_backend") or (peer.properties or {}).get("discovery") or "unknown")
+        return data
 
     def _save_inflight(self) -> None:
         self._inflight_path.write_text(

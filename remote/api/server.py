@@ -154,7 +154,10 @@ def create_app(
     async def health():
         peers = []
         if _peer_registry:
-            peers = [p.to_dict() for p in _peer_registry.get_peers()]
+            if _protocol_manager:
+                peers = [_protocol_manager.get_peer_view(p) for p in _peer_registry.get_peers()]
+            else:
+                peers = [p.to_dict() for p in _peer_registry.get_peers()]
         local_network_profile = _protocol_manager._local_network_profile() if _protocol_manager else None
         return {
             "ok": True,
@@ -172,7 +175,10 @@ def create_app(
     async def list_peers():
         peers = []
         if _peer_registry:
-            peers = [p.to_dict() for p in _peer_registry.get_peers()]
+            if _protocol_manager:
+                peers = [_protocol_manager.get_peer_view(p) for p in _peer_registry.get_peers()]
+            else:
+                peers = [p.to_dict() for p in _peer_registry.get_peers()]
         return {"ok": True, "peers": peers, "count": len(peers)}
 
     @app.get("/protocol/status")

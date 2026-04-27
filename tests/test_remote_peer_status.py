@@ -21,6 +21,7 @@ sys.modules.setdefault(
 )
 
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+from remote.peer.base import PeerInfo
 from remote.peer.registry import PeerRegistry
 from remote.protocol_manager import ProtocolManager
 
@@ -37,6 +38,10 @@ class _RemoteRenderDummy:
     _render_remote_peer_endpoints = FlexibleAgentRuntime._render_remote_peer_endpoints
     _load_remote_instances = FlexibleAgentRuntime._load_remote_instances
     _peer_network_hosts = FlexibleAgentRuntime._peer_network_hosts
+
+
+class _RemoteConfigDummy:
+    _remote_config_snapshot = FlexibleAgentRuntime._remote_config_snapshot
 
 
 def test_registry_derives_offline_for_timed_out_peer_without_live_fields(tmp_path):
@@ -128,6 +133,71 @@ def test_registry_marks_healthy_peer_stale_after_refresh_window_expires(tmp_path
     assert status == "stale"
 
 
+def test_registry_refresh_success_derives_live_status_via_common_path(tmp_path):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    (hashi_root / "instances.json").write_text('{"instances": {}}', encoding="utf-8")
+    registry = PeerRegistry(hashi_root, "HASHI2")
+    registry._peers["HASHI1"] = PeerInfo(
+        instance_id="HASHI1",
+        display_name="HASHI1",
+        host="192.168.0.211",
+        port=8766,
+        workbench_port=18800,
+        platform="wsl",
+        properties={"handshake_state": "handshake_accepted"},
+    )
+
+    now = int(time.time())
+    registry.mark_refresh_result("HASHI1", ok=True, checked_at=now)
+
+    assert registry._peers["HASHI1"].properties["live_status"] == "online"
+
+
+def test_registry_rebuild_prefers_loopback_for_same_host_wsl_peer(tmp_path):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    (hashi_root / "instances.json").write_text(
+        json.dumps(
+            {
+                "instances": {
+                    "hashi2": {
+                        "instance_id": "HASHI2",
+                        "platform": "wsl",
+                        "wsl_root_from_windows": r"\\\\wsl$\\Ubuntu-22.04\\home\\lily\\projects\\hashi2",
+                    },
+                    "hashi1": {
+                        "instance_id": "HASHI1",
+                        "platform": "wsl",
+                        "wsl_root_from_windows": r"\\\\wsl$\\Ubuntu-22.04\\home\\lily\\projects\\hashi",
+                        "host_identity": "a9max",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    registry = PeerRegistry(hashi_root, "HASHI2")
+    registry._observations["HASHI1"] = {
+        "lan": PeerInfo(
+            instance_id="HASHI1",
+            display_name="HASHI1",
+            host="192.168.0.211",
+            port=8766,
+            workbench_port=18800,
+            platform="wsl",
+            properties={"discovery": "lan", "host_identity": "a9max", "environment_kind": "wsl"},
+        )
+    }
+
+    registry._rebuild_canonical_peers()
+
+    peer = registry.get_peer("HASHI1")
+    assert peer is not None
+    assert peer.host == "127.0.0.1"
+    assert peer.properties["same_host_loopback"] == "127.0.0.1"
+
+
 def test_bootstrap_dedupes_legacy_aliases_on_same_endpoint():
     manager = object.__new__(ProtocolManager)
     manager._instance_info = {"instance_id": "HASHI2", "platform": "wsl"}
@@ -164,6 +234,84 @@ def test_bootstrap_dedupes_legacy_aliases_on_same_endpoint():
 
     assert "msi" in deduped
     assert "hashi-desktop" not in deduped
+
+
+def test_same_machine_hint_recognizes_same_host_wsl_siblings():
+    manager = object.__new__(ProtocolManager)
+    manager._instance_info = {"instance_id": "HASHI2", "platform": "wsl"}
+    manager._local_network_profile = lambda: {
+        "host_identity": "a9max",
+        "environment_kind": "wsl",
+        "address_candidates": [{"host": "192.168.0.211", "scope": "lan"}],
+    }
+    manager._load_instances = lambda: {
+        "hashi2": {
+            "instance_id": "HASHI2",
+            "platform": "wsl",
+            "wsl_root_from_windows": r"\\\\wsl$\\Ubuntu-22.04\\home\\lily\\projects\\hashi2",
+        }
+    }
+
+    entry = {
+        "instance_id": "HASHI1",
+        "platform": "wsl",
+        "host_identity": "a9max",
+        "wsl_root_from_windows": r"\\\\wsl$\\Ubuntu-22.04\\home\\lily\\projects\\hashi",
+        "lan_ip": "192.168.0.211",
+    }
+
+    assert ProtocolManager._same_machine_hint(manager, entry) is True
+
+
+def test_same_machine_hint_does_not_falsely_match_wsl_siblings_on_different_hosts():
+    manager = object.__new__(ProtocolManager)
+    manager._instance_info = {"instance_id": "HASHI2", "platform": "wsl"}
+    manager._local_network_profile = lambda: {
+        "host_identity": "a9max",
+        "environment_kind": "wsl",
+        "address_candidates": [{"host": "192.168.0.211", "scope": "lan"}],
+    }
+    manager._load_instances = lambda: {
+        "hashi2": {
+            "instance_id": "HASHI2",
+            "platform": "wsl",
+            "host_identity": "a9max",
+            "wsl_root_from_windows": r"\\\\wsl$\\Ubuntu-22.04\\home\\lily\\projects\\hashi2",
+        }
+    }
+
+    entry = {
+        "instance_id": "HASHI-REMOTE",
+        "platform": "wsl",
+        "host_identity": "otherhost",
+        "wsl_root_from_windows": r"\\\\wsl$\\Ubuntu-22.04\\home\\remote\\projects\\hashi",
+        "lan_ip": "192.168.50.12",
+    }
+
+    assert ProtocolManager._same_machine_hint(manager, entry) is False
+
+
+def test_resolve_peer_route_uses_loopback_candidate_for_live_same_host_peer():
+    manager = object.__new__(ProtocolManager)
+    peer = PeerInfo(
+        instance_id="HASHI1",
+        display_name="HASHI1",
+        host="192.168.0.211",
+        port=8766,
+        workbench_port=18800,
+        platform="wsl",
+        properties={"address_candidates": [{"host": "127.0.0.1", "scope": "same_host"}]},
+    )
+    manager._peer_registry = SimpleNamespace(get_peer=lambda _iid: peer)
+    manager._load_instances = lambda: {
+        "hashi1": {"instance_id": "HASHI1", "same_host_loopback": "127.0.0.1", "remote_port": 8766}
+    }
+    manager._candidate_hosts_for_peer = lambda _peer: ["127.0.0.1", "192.168.0.211"]
+    manager._probe_route = lambda host, port: host == "127.0.0.1" and port == 8766
+
+    route = ProtocolManager._resolve_peer_route(manager, "HASHI1")
+
+    assert route == {"host": "127.0.0.1", "port": 8766, "instance_id": "HASHI1"}
 
 
 def test_remote_start_failure_message_includes_exit_code_and_log_excerpt(tmp_path):
@@ -206,6 +354,28 @@ def test_remote_start_failure_message_falls_back_to_log_path(tmp_path):
 
     assert "health endpoint did not become ready within timeout" in message
     assert str(log_path) in message
+
+
+def test_remote_config_snapshot_prefers_instances_remote_port_over_agents_and_yaml(tmp_path):
+    (tmp_path / "remote").mkdir()
+    (tmp_path / "remote" / "config.yaml").write_text(
+        "server:\n  port: 8767\n  use_tls: false\ndiscovery:\n  backend: lan\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "agents.json").write_text(
+        json.dumps({"global": {"instance_id": "HASHI1", "remote_port": 9999}}),
+        encoding="utf-8",
+    )
+    (tmp_path / "instances.json").write_text(
+        json.dumps({"instances": {"hashi1": {"instance_id": "HASHI1", "remote_port": 8766}}}),
+        encoding="utf-8",
+    )
+    dummy = _RemoteConfigDummy()
+    dummy.global_config = SimpleNamespace(project_root=tmp_path)
+
+    cfg = FlexibleAgentRuntime._remote_config_snapshot(dummy)
+
+    assert cfg["port"] == 8766
 
 
 def test_render_remote_peer_endpoints_explains_same_host_loopback(tmp_path):

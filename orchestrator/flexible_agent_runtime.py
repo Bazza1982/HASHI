@@ -5694,6 +5694,8 @@ class FlexibleAgentRuntime:
     def _remote_config_snapshot(self) -> dict[str, Any]:
         root = self.global_config.project_root
         config_path = root / "remote" / "config.yaml"
+        agents_path = root / "agents.json"
+        instances_path = root / "instances.json"
         data: dict[str, Any] = {}
         try:
             data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
@@ -5701,9 +5703,24 @@ class FlexibleAgentRuntime:
             data = {}
         server = data.get("server") or {}
         discovery = data.get("discovery") or {}
+        configured_port = server.get("port") or 8766
+        try:
+            agents = json.loads(agents_path.read_text(encoding="utf-8-sig")) if agents_path.exists() else {}
+        except Exception:
+            agents = {}
+        global_cfg = agents.get("global") or {}
+        if global_cfg.get("remote_port"):
+            configured_port = global_cfg.get("remote_port")
+        instance_id = str(global_cfg.get("instance_id") or "").strip().lower()
+        if instances_path.exists() and instance_id:
+            try:
+                instances = json.loads(instances_path.read_text(encoding="utf-8")).get("instances", {}) or {}
+                configured_port = (instances.get(instance_id) or {}).get("remote_port") or configured_port
+            except Exception:
+                pass
         return {
             "root": root,
-            "port": int(server.get("port") or 8766),
+            "port": int(configured_port or 8766),
             "use_tls": bool(server.get("use_tls", True)),
             "backend": str(discovery.get("backend") or "lan"),
         }
@@ -5919,10 +5936,13 @@ class FlexibleAgentRuntime:
     def _render_remote_peer_endpoints(self, peer: dict[str, Any]) -> list[str]:
         instance_id = str(peer.get("instance_id") or "").strip().lower()
         entry = self._load_remote_instances().get(instance_id, {}) if instance_id else {}
-        route_host = str(peer.get("host") or entry.get("api_host") or "?").strip() or "?"
-        route_port = str(peer.get("port") or entry.get("remote_port") or "?").strip() or "?"
+        route_host = str(peer.get("resolved_route_host") or peer.get("host") or entry.get("api_host") or "?").strip() or "?"
+        route_port = str(peer.get("resolved_route_port") or peer.get("port") or entry.get("remote_port") or "?").strip() or "?"
         network_hosts = self._peer_network_hosts(peer, entry if isinstance(entry, dict) else {})
-        same_host = bool(str((entry or {}).get("same_host_loopback") or "").strip())
+        display_network_host = str(peer.get("display_network_host") or "").strip()
+        if display_network_host and display_network_host not in network_hosts:
+            network_hosts.insert(0, display_network_host)
+        same_host = bool(peer.get("same_host")) or bool(str((entry or {}).get("same_host_loopback") or "").strip())
 
         if same_host and route_host in {"127.0.0.1", "localhost"}:
             network_host = network_hosts[0] if network_hosts else ""
@@ -6044,6 +6064,7 @@ class FlexibleAgentRuntime:
                 return
 
             cmd = [str(venv_python), "-m", "remote"]
+            cmd.extend(["--port", str(cfg["port"])])
             if not cfg["use_tls"]:
                 cmd.append("--no-tls")
             if cfg["backend"] in {"lan", "tailscale", "both"}:

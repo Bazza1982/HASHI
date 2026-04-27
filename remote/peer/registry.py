@@ -26,6 +26,18 @@ def _normalize_identity(value: str) -> str:
     return "".join(ch for ch in value if ch.isalnum())
 
 
+def _wsl_unc_anchor(value: str) -> str:
+    text = str(value or "").strip().lower().replace("/", "\\")
+    while text.startswith("\\\\\\"):
+        text = text[1:]
+    if not text.startswith("\\\\wsl$\\"):
+        return ""
+    parts = [part for part in text.split("\\") if part]
+    if len(parts) < 2:
+        return ""
+    return f"\\\\{parts[0]}\\{parts[1]}\\"
+
+
 class PeerRegistry:
     """
     Maintains the live peer list and syncs it to instances.json.
@@ -187,7 +199,6 @@ class PeerRegistry:
         if ok:
             props["last_seen_ok"] = now_ts
             props["consecutive_failures"] = 0
-            props["live_status"] = "online"
             props.pop("last_refresh_error", None)
             if address_candidates is not None:
                 props["address_candidates"] = list(address_candidates)
@@ -207,6 +218,7 @@ class PeerRegistry:
             if next_host != peer.host or next_port != peer.port or next_workbench != peer.workbench_port:
                 self._update_observed_route(iid, host=next_host, port=next_port, workbench_port=next_workbench)
                 peer = dataclasses.replace(peer, host=next_host, port=next_port, workbench_port=next_workbench)
+            props["live_status"] = self._derive_live_status(props, now=now_ts)
         else:
             props["last_seen_error"] = now_ts
             props["consecutive_failures"] = int(props.get("consecutive_failures") or 0) + 1
@@ -237,19 +249,20 @@ class PeerRegistry:
             peer = dataclasses.replace(fallback)
         props = self._normalize_live_props(peer.properties or {})
         props["handshake_state"] = state
-        props["last_handshake_at"] = int(time.time())
+        now_ts = int(time.time())
+        props["last_handshake_at"] = now_ts
         props.setdefault("preferred_backend", props.get("discovery"))
         props.setdefault("alternate_backends", [])
         if state == "handshake_accepted":
-            props["last_seen_ok"] = int(time.time())
+            props["last_seen_ok"] = now_ts
             props["consecutive_failures"] = 0
-            props["live_status"] = "online"
             props.pop("last_error", None)
+            props["live_status"] = self._derive_live_status(props, now=now_ts)
         elif last_error:
             props["last_error"] = last_error
-            props["last_seen_error"] = int(time.time())
+            props["last_seen_error"] = now_ts
             props["consecutive_failures"] = int(props.get("consecutive_failures") or 0) + 1
-            props["live_status"] = self._derive_live_status(props)
+            props["live_status"] = self._derive_live_status(props, now=now_ts)
         if remote_agents is not None:
             props["remote_agents"] = remote_agents
         if protocol_version:
@@ -370,6 +383,69 @@ class PeerRegistry:
                 return value
         return ""
 
+    def _same_machine_hint(self, instance_id: str, observations: dict[str, PeerInfo], chosen: PeerInfo) -> bool:
+        try:
+            data = json.loads(self._instances_path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        instances = data.get("instances", {}) if isinstance(data, dict) else {}
+        local_entry = instances.get(self._self_id.lower(), {}) if isinstance(instances, dict) else {}
+        target_entry = instances.get(str(instance_id or "").lower(), {}) if isinstance(instances, dict) else {}
+
+        if str(target_entry.get("same_host_loopback") or "").strip():
+            return True
+
+        local_platform = str(local_entry.get("platform") or "").strip().lower()
+        target_platform = str(target_entry.get("platform") or chosen.platform or "").strip().lower()
+
+        local_identity = _normalize_identity(local_entry.get("host_identity") or "")
+        target_identity = _normalize_identity(
+            target_entry.get("host_identity")
+            or (chosen.properties or {}).get("host_identity")
+            or self._merged_property(observations, "host_identity")
+            or ""
+        )
+
+        local_wsl_anchor = _wsl_unc_anchor(local_entry.get("wsl_root_from_windows") or "")
+        target_wsl_anchor = _wsl_unc_anchor(
+            target_entry.get("wsl_root_from_windows")
+            or (chosen.properties or {}).get("wsl_root_from_windows")
+            or ""
+        )
+
+        local_hosts = {
+            str(local_entry.get("api_host") or "").strip().lower(),
+            str(local_entry.get("lan_ip") or "").strip().lower(),
+            str(local_entry.get("tailscale_ip") or "").strip().lower(),
+        }
+        target_hosts = {
+            str(target_entry.get("api_host") or chosen.host or "").strip().lower(),
+            str(target_entry.get("lan_ip") or "").strip().lower(),
+            str(target_entry.get("tailscale_ip") or "").strip().lower(),
+        }
+        local_hosts.discard("")
+        target_hosts.discard("")
+
+        if {local_platform, target_platform} == {"windows", "wsl"}:
+            if local_platform == "windows" and target_entry.get("wsl_root_from_windows"):
+                return True
+            if local_platform == "wsl" and target_entry.get("wsl_root"):
+                return True
+            if local_identity and target_identity and local_identity == target_identity:
+                return True
+            if local_hosts and target_hosts and local_hosts.intersection(target_hosts):
+                return True
+            return False
+
+        if local_platform == "wsl" and target_platform == "wsl":
+            if local_identity and target_identity and local_identity != target_identity:
+                return False
+            if local_wsl_anchor and target_wsl_anchor and local_wsl_anchor == target_wsl_anchor:
+                return True
+            if local_identity and target_identity and local_identity == target_identity:
+                return True
+        return False
+
     def _rebuild_canonical_peers(self) -> None:
         canonical: dict[str, PeerInfo] = {}
         for iid, by_backend in self._observations.items():
@@ -407,9 +483,13 @@ class PeerRegistry:
                     "consecutive_failures",
                     "live_status",
                     "last_refresh_error",
+                    "same_host_loopback",
                 ):
                     if key in prev_props and key not in merged.properties:
                         merged.properties[key] = prev_props[key]
+            if self._same_machine_hint(iid, by_backend, chosen):
+                merged.host = "127.0.0.1"
+                merged.properties["same_host_loopback"] = "127.0.0.1"
             merged.properties = self._normalize_live_props(merged.properties)
             merged.properties["live_status"] = self._derive_live_status(merged.properties)
             canonical[iid] = merged
@@ -454,6 +534,8 @@ class PeerRegistry:
                 host_identity = _normalize_identity((peer.properties or {}).get("host_identity") or self._merged_property(observations, "host_identity") or "")
                 environment_kind = str((peer.properties or {}).get("environment_kind") or self._merged_property(observations, "environment_kind") or "").strip().lower()
                 same_machine_hint = False
+                local_wsl_anchor = _wsl_unc_anchor(local_entry.get("wsl_root_from_windows") or "")
+                peer_wsl_anchor = _wsl_unc_anchor(existing_entry.get("wsl_root_from_windows") or "")
                 if {local_platform, peer_platform} == {"windows", "wsl"}:
                     if local_platform == "windows" and existing_entry.get("wsl_root_from_windows"):
                         same_machine_hint = True
@@ -462,6 +544,11 @@ class PeerRegistry:
                     elif local_host_identity and host_identity and local_host_identity == host_identity:
                         same_machine_hint = True
                     elif local_hosts and peer_hosts and local_hosts.intersection(peer_hosts):
+                        same_machine_hint = True
+                elif local_platform == "wsl" and peer_platform == "wsl":
+                    if local_wsl_anchor and peer_wsl_anchor and local_wsl_anchor == peer_wsl_anchor:
+                        same_machine_hint = True
+                    elif local_host_identity and host_identity and local_host_identity == host_identity:
                         same_machine_hint = True
                 same_host_loopback = "127.0.0.1" if same_machine_hint else None
                 handshake_state = str(peer.properties.get("handshake_state") or "")
