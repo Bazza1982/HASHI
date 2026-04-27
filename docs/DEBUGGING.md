@@ -101,6 +101,7 @@ Questions:
 - was the output empty?
 - was the session resume path corrupt?
 - did prompt construction make the request too large or malformed?
+- if `codex_exec_events.jsonl` shows a final `agent_message` and `turn.completed` but `/status` still shows `busy`, treat that as a backend-exit edge case rather than a missing answer. Newer HASHI builds accept that completed turn after a short grace period and force-close the lingering Codex subprocess.
 
 ### Flex continuity / switching issues
 

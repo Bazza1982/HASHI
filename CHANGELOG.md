@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### 🔧 Fixed
+
+- **Codex CLI completion hang** — `adapters/codex_cli.py` now accepts a completed Codex turn as a valid finish signal even if the outer CLI process does not exit immediately.
+  - Existing success path is preserved: normal subprocess exit still completes exactly as before.
+  - Added a backward-compatible fallback: if Codex emits the final `agent_message` and `turn.completed`, HASHI gives the CLI a short grace window to exit, then force-closes it and returns the completed answer instead of hanging in `busy`.
+  - Idle timeout enforcement is now active for Codex CLI requests, preventing stalled subprocesses from waiting until the hard timeout.
+  - Added regression tests covering both the post-`turn.completed` forced-exit path and idle-timeout path.
+
 ## [3.0.0-beta] - 2026-04-18
 
 ### ✨ Added

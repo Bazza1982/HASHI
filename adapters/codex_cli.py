@@ -18,6 +18,7 @@ class CodexCLIAdapter(BaseBackend):
     MAX_PROMPT_CHARS = 24000
     DEFAULT_IDLE_TIMEOUT_SEC = 300
     DEFAULT_HARD_TIMEOUT_SEC = 3600
+    POST_TURN_COMPLETION_GRACE_SEC = 15
 
     def _define_capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
@@ -218,8 +219,6 @@ class CodexCLIAdapter(BaseBackend):
         pending_agent_message: dict | None = None,
     ) -> dict | None:
         """Parse a single Codex JSONL line and emit stream events when possible."""
-        if on_stream_event is None:
-            return pending_agent_message
         try:
             event = json.loads(raw_line)
         except json.JSONDecodeError:
@@ -299,6 +298,26 @@ class CodexCLIAdapter(BaseBackend):
         cmd += ["--", prompt_arg]
         return cmd
 
+    def _extract_response_text(self, output_path: Path, stdout_lines: list[str]) -> str:
+        response = ""
+        if output_path.exists():
+            response = output_path.read_text(encoding="utf-8").strip()
+            output_path.unlink(missing_ok=True)
+
+        if response:
+            return response
+
+        for raw_line in stdout_lines:
+            try:
+                event = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            item = event.get("item")
+            if event.get("type") == "item.completed" and isinstance(item, dict):
+                if item.get("type") == "agent_message" and item.get("text"):
+                    response = item["text"].strip()
+        return response
+
     async def generate_response(
         self, prompt: str, request_id: str, is_retry: bool = False, silent: bool = False,
         on_stream_event: StreamCallback = None,
@@ -356,11 +375,14 @@ class CodexCLIAdapter(BaseBackend):
             timeout_kind: str | None = None
             pending_agent_message: dict | None = None
             captured_thread_id: str | None = None
+            turn_completed_at: float | None = None
+            forced_completion = False
 
             async def _read_stdout():
                 nonlocal pending_agent_message
                 nonlocal timeout_kind
                 nonlocal captured_thread_id
+                nonlocal turn_completed_at
                 while True:
                     try:
                         line = await proc.stdout.readline()
@@ -381,14 +403,15 @@ class CodexCLIAdapter(BaseBackend):
                     self._touch_activity()
                     decoded = line.decode(errors="replace")
                     stdout_lines.append(decoded)
-                    # Capture thread_id from the first thread.started event
-                    if captured_thread_id is None:
-                        try:
-                            event = json.loads(decoded)
-                            if event.get("type") == "thread.started" and event.get("thread_id"):
-                                captured_thread_id = event["thread_id"]
-                        except (json.JSONDecodeError, KeyError):
-                            pass
+                    try:
+                        event = json.loads(decoded)
+                    except json.JSONDecodeError:
+                        event = None
+                    if event is not None:
+                        if captured_thread_id is None and event.get("type") == "thread.started" and event.get("thread_id"):
+                            captured_thread_id = event["thread_id"]
+                        if event.get("type") == "turn.completed":
+                            turn_completed_at = time.perf_counter()
                     pending_agent_message = self._parse_codex_event(
                         decoded,
                         on_stream_event,
@@ -414,11 +437,22 @@ class CodexCLIAdapter(BaseBackend):
 
             hard_deadline = started + self.HARD_TIMEOUT_SEC
             while proc.returncode is None and timeout_kind is None:
+                now_perf = time.perf_counter()
+                idle_for = max(0.0, time.time() - (self.last_activity_at or time.time()))
+                if idle_for >= self.IDLE_TIMEOUT_SEC:
+                    timeout_kind = "idle"
+                    break
                 remaining_hard = hard_deadline - time.perf_counter()
                 if remaining_hard <= 0:
                     timeout_kind = "hard"
                     break
-                wait_slice = min(5.0, remaining_hard)
+                wait_slice = min(5.0, remaining_hard, max(0.1, self.IDLE_TIMEOUT_SEC - idle_for))
+                if turn_completed_at is not None:
+                    remaining_turn = (turn_completed_at + self.POST_TURN_COMPLETION_GRACE_SEC) - now_perf
+                    if remaining_turn <= 0:
+                        forced_completion = True
+                        break
+                    wait_slice = min(wait_slice, max(0.1, remaining_turn))
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=wait_slice)
                 except asyncio.TimeoutError:
@@ -453,10 +487,22 @@ class CodexCLIAdapter(BaseBackend):
                     is_success=False,
                 )
 
+            if forced_completion and proc.returncode is None:
+                self.logger.warning(
+                    f"Codex request {request_id} produced turn.completed but the subprocess "
+                    f"did not exit within {self.POST_TURN_COMPLETION_GRACE_SEC}s; forcing shutdown."
+                )
+                await self.force_kill_process_tree(
+                    proc,
+                    logger=self.logger,
+                    reason=f"turn-completed-grace-expired:{request_id}",
+                )
+
             await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
             self._active_read_tasks = []
             stderr_data = b"".join(stderr_chunks)
-            await proc.wait()
+            if proc.returncode is None:
+                await proc.wait()
             returncode = proc.returncode
             self.current_proc = None
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
@@ -472,7 +518,9 @@ class CodexCLIAdapter(BaseBackend):
                 f"stdout_lines={len(stdout_lines)}, stderr_bytes={len(stderr_data)})"
             )
 
-            if returncode != 0:
+            response = self._extract_response_text(output_path, stdout_lines)
+
+            if returncode != 0 and not forced_completion:
                 err_msg = stderr_data.decode(errors="replace").strip()
                 if not err_msg:
                     err_msg = "".join(stdout_lines).strip() or "Codex CLI exited with a non-zero status."
@@ -485,22 +533,6 @@ class CodexCLIAdapter(BaseBackend):
                     f"(was: {self._session_id or 'none'})"
                 )
                 self._session_id = captured_thread_id
-
-            response = ""
-            if output_path.exists():
-                response = output_path.read_text(encoding="utf-8").strip()
-                output_path.unlink(missing_ok=True)
-
-            if not response:
-                for raw_line in stdout_lines:
-                    try:
-                        event = json.loads(raw_line)
-                    except json.JSONDecodeError:
-                        continue
-                    item = event.get("item")
-                    if event.get("type") == "item.completed" and isinstance(item, dict):
-                        if item.get("type") == "agent_message" and item.get("text"):
-                            response = item["text"].strip()
 
             if not response:
                 return BackendResponse(
