@@ -6,6 +6,7 @@ import time
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.modules.setdefault("edge_tts", SimpleNamespace())
@@ -500,3 +501,49 @@ def test_parse_hchat_message_exposes_reply_body_for_loop_guard():
     assert parsed["agent"] == "rain"
     assert parsed["instance_id"] == "HASHI2"
     assert parsed["body"] == "[hchat reply from lily] hello"
+
+
+def test_flex_hchat_cross_instance_reply_is_tagged(monkeypatch):
+    runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
+    runtime.name = "sakura"
+    runtime.logger = Mock()
+    runtime.orchestrator = None
+
+    sent = {}
+
+    def fake_send_hchat(to_agent, from_agent, text, target_instance=None, **kwargs):
+        sent["to_agent"] = to_agent
+        sent["from_agent"] = from_agent
+        sent["text"] = text
+        sent["target_instance"] = target_instance
+        sent["kwargs"] = kwargs
+        return True
+
+    monkeypatch.setattr("tools.hchat_send.send_hchat", fake_send_hchat)
+    monkeypatch.setattr("tools.hchat_send._load_config", lambda: {})
+    monkeypatch.setattr("tools.hchat_send._get_instance_id", lambda _cfg: "HASHI1")
+
+    item = SimpleNamespace(prompt="[hchat from rika@HASHI2] hello")
+
+    asyncio.run(runtime._hchat_route_reply(item, "Roger that"))
+
+    assert sent["to_agent"] == "rika"
+    assert sent["from_agent"] == "sakura"
+    assert sent["target_instance"] == "HASHI2"
+    assert sent["text"] == "[hchat reply from sakura] Roger that"
+
+
+def test_flex_hchat_reply_body_is_not_replied_again(monkeypatch):
+    runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
+    runtime.name = "sakura"
+    runtime.logger = Mock()
+    runtime.orchestrator = None
+
+    send_mock = Mock(return_value=True)
+    monkeypatch.setattr("tools.hchat_send.send_hchat", send_mock)
+
+    item = SimpleNamespace(prompt="[hchat from rika@HASHI2] [hchat reply from rika] done")
+
+    asyncio.run(runtime._hchat_route_reply(item, "ack"))
+
+    send_mock.assert_not_called()

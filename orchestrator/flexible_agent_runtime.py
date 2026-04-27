@@ -1604,7 +1604,7 @@ class FlexibleAgentRuntime:
             local_instance = str(_get_instance_id(_load_config()) or "").upper()
         except Exception:
             local_instance = ""
-        reply_text = response_text
+        reply_text = f"[hchat reply from {self.name}] {response_text}"
 
         # ── 1. Try local runtime only when sender is local/unspecified ────────
         if not sender_instance or sender_instance == local_instance:
@@ -1652,7 +1652,7 @@ class FlexibleAgentRuntime:
                     url = f"http://{host}:{wb_port}/api/chat"
                     payload = {
                         "agent": sender_name,
-                        "text": f"[hchat reply from {self.name}] {reply_text}",
+                        "text": reply_text,
                     }
                     async with aiohttp.ClientSession() as session:
                         async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
