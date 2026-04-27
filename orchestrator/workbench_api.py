@@ -436,6 +436,24 @@ class WorkbenchApiServer:
         if not to_agent or not to_instance or not from_agent or not from_instance or not text:
             return web.json_response({"ok": False, "error": "missing required fields"}, status=400)
 
+        from orchestrator.ticket_manager import detect_instance
+        local_instance = str(detect_instance(self.global_config.project_root)).upper()
+
+        if to_instance == local_instance:
+            # Target is this instance: deliver directly to avoid blocking the event loop
+            # with a synchronous HTTP self-call (which would deadlock for 10s and cause
+            # the sender to fall back to Remote, resulting in duplicate delivery).
+            runtime_map = self._runtime_map()
+            runtime = runtime_map.get(to_agent)
+            if runtime is None:
+                return web.json_response({"ok": False, "error": f"agent '{to_agent}' not found on {local_instance}"}, status=404)
+            message_text = f"[hchat from {from_agent}@{from_instance}] {text}"
+            if reply_route and isinstance(reply_route, dict):
+                self._learn_reply_route(message_text, reply_route)
+            await runtime.enqueue_api_text(message_text)
+            return web.json_response({"ok": True, "relayed": True, "exchange": True})
+
+        # Target is a different instance: relay via send_hchat
         try:
             from tools.hchat_send import send_hchat
             ok = send_hchat(
