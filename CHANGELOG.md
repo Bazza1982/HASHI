@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Remote handshake alias false-positive** — `remote/protocol_manager.py` now verifies that a handshake success response comes from the expected `instance_id` before marking that peer healthy.
   - Prevents stale or duplicated bootstrap endpoints from making one instance appear online when a different instance answers on the same host/port.
   - Stops `/remote list` from inheriting another peer's agents and recent handshake timestamp through alias collisions.
+- **Cross-instance Hchat auto-reply loop** — `agent_runtime.py` and `flexible_agent_runtime.py` now suppress automatic hchat replies when the incoming hchat body is already a reply payload.
+  - Prevents cross-instance reply traffic from being rewrapped as a fresh hchat and bounced back indefinitely.
+  - Keeps first-hop hchat behavior unchanged while adding a hard stop for reply-on-reply ping-pong.
 
 ## [3.0.0-beta] - 2026-04-18
 

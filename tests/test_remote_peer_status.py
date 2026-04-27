@@ -25,6 +25,7 @@ from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from remote.peer.base import PeerInfo
 from remote.peer.registry import PeerRegistry
 from remote.protocol_manager import ProtocolManager
+from tools.hchat_send import parse_hchat_message
 
 
 class _PresenceDummy:
@@ -490,3 +491,12 @@ def test_handshake_ignores_successful_response_from_wrong_instance():
     assert recorded[0] == ("INTEL", {"state": "handshake_in_progress"})
     assert recorded[-1][0] == "INTEL"
     assert recorded[-1][1]["state"] == "handshake_timed_out"
+
+
+def test_parse_hchat_message_exposes_reply_body_for_loop_guard():
+    parsed = parse_hchat_message("[hchat from rain@HASHI2] [hchat reply from lily] hello")
+
+    assert parsed is not None
+    assert parsed["agent"] == "rain"
+    assert parsed["instance_id"] == "HASHI2"
+    assert parsed["body"] == "[hchat reply from lily] hello"

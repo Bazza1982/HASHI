@@ -1548,9 +1548,14 @@ class BridgeAgentRuntime:
         Supports both [hchat from name] and [hchat from name@INSTANCE] header formats.
         Uses explicit instance routing when the sender is cross-instance.
         """
-        from tools.hchat_send import parse_return_address
+        from tools.hchat_send import parse_hchat_message, parse_return_address
         sender = parse_return_address(item.prompt)
         if not sender:
+            return
+        parsed_hchat = parse_hchat_message(item.prompt)
+        body_text = str((parsed_hchat or {}).get("body") or "").lstrip().lower()
+        if body_text.startswith("[hchat reply from "):
+            self.logger.info("Hchat auto-reply suppressed for reply message to avoid loop")
             return
         sender_name = sender["agent"].lower()
         sender_instance = (sender.get("instance_id") or "").upper()
