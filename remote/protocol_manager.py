@@ -417,6 +417,15 @@ class ProtocolManager:
                             None,
                             lambda u=url: self._post_json(u, payload, timeout=self._handshake_timeout_seconds),
                         )
+                        remote_instance = str(result.get("instance_id") or "").strip().upper()
+                        if remote_instance and remote_instance != peer.instance_id.upper():
+                            logger.warning(
+                                "Handshake: expected %s via %s but %s responded; ignoring alias endpoint",
+                                peer.instance_id,
+                                url,
+                                remote_instance,
+                            )
+                            continue
                         if str(result.get("status") or "").lower() == "handshake_reject":
                             self._peer_registry.mark_handshake_result(
                                 peer.instance_id,

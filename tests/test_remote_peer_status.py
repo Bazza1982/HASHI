@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import asyncio
 import sys
 import time
 import json
@@ -442,3 +443,50 @@ def test_render_remote_peer_endpoints_shows_route_and_network_when_they_differ(t
         "route: <code>desktopvn0amd7:8767</code>",
         "network: <code>192.168.0.41:8767</code>",
     ]
+
+
+def test_handshake_ignores_successful_response_from_wrong_instance():
+    manager = object.__new__(ProtocolManager)
+    peer = PeerInfo(
+        instance_id="INTEL",
+        display_name="INTEL",
+        host="10.0.0.2",
+        port=8767,
+        workbench_port=18802,
+        platform="windows",
+        properties={"handshake_state": "handshake_pending"},
+    )
+    recorded: list[tuple[str, dict]] = []
+
+    class _Registry:
+        def get_peers(self):
+            return [peer]
+
+        def mark_handshake_result(self, instance_id, **kwargs):
+            recorded.append((instance_id, kwargs))
+
+    manager._peer_registry = _Registry()
+    manager._instance_info = {"instance_id": "MSI", "remote_port": 8766, "workbench_port": 8779, "platform": "windows"}
+    manager._handshake_timeout_seconds = 1
+    manager._candidate_hosts_for_peer = lambda _peer: ["10.0.0.2"]
+    manager._candidate_urls = lambda host, port, path: [f"http://{host}:{port}{path}"]
+    manager._local_network_profile = lambda: {
+        "host_identity": "desktopvn0amd7",
+        "environment_kind": "windows",
+        "address_candidates": [],
+        "observed_candidates": [],
+    }
+    manager.get_local_agents_snapshot = lambda: []
+    manager._post_json = lambda _url, _payload, timeout=0: {
+        "status": "handshake_accept",
+        "instance_id": "HASHI2",
+        "protocol_version": "2.0",
+        "capabilities": ["handshake_v2"],
+        "agents": [{"agent_name": "rika"}],
+    }
+
+    asyncio.run(ProtocolManager._handshake_once(manager))
+
+    assert recorded[0] == ("INTEL", {"state": "handshake_in_progress"})
+    assert recorded[-1][0] == "INTEL"
+    assert recorded[-1][1]["state"] == "handshake_timed_out"

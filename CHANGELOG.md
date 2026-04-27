@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added a backward-compatible fallback: if Codex emits the final `agent_message` and `turn.completed`, HASHI gives the CLI a short grace window to exit, then force-closes it and returns the completed answer instead of hanging in `busy`.
   - Idle timeout enforcement is now active for Codex CLI requests, preventing stalled subprocesses from waiting until the hard timeout.
   - Added regression tests covering both the post-`turn.completed` forced-exit path and idle-timeout path.
+- **Remote handshake alias false-positive** — `remote/protocol_manager.py` now verifies that a handshake success response comes from the expected `instance_id` before marking that peer healthy.
+  - Prevents stale or duplicated bootstrap endpoints from making one instance appear online when a different instance answers on the same host/port.
+  - Stops `/remote list` from inheriting another peer's agents and recent handshake timestamp through alias collisions.
 
 ## [3.0.0-beta] - 2026-04-18
 
