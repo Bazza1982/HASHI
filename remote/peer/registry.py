@@ -485,7 +485,7 @@ class PeerRegistry:
                     "last_refresh_error",
                     "same_host_loopback",
                 ):
-                    if key in prev_props and key not in merged.properties:
+                    if key in prev_props:
                         merged.properties[key] = prev_props[key]
             if self._same_machine_hint(iid, by_backend, chosen):
                 merged.host = "127.0.0.1"
