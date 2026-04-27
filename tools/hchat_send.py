@@ -307,6 +307,9 @@ def _load_remote_agents(instance_id: str, instance_info: dict) -> list[str]:
 
 
 def _preferred_host(instance_info: dict, *, for_remote: bool = False) -> str:
+    loopback = instance_info.get("same_host_loopback")
+    if loopback:
+        return loopback
     if for_remote:
         keys = ["internet_host", "tailscale_ip", "lan_ip", "api_host", "host"]
     else:

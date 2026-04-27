@@ -6,8 +6,8 @@
 
 server:
   host: "0.0.0.0"
-  port: 8766                # Hashi Remote peer port (8766 to avoid clash with Lily Remote 8765)
-  use_tls: true
+  port: 8767                # Hashi Remote peer port (8767 — 8766 reserved for HASHI1 legacy remote)
+  use_tls: false
 
 security:
   # LAN mode: skip token authentication for local network peers
@@ -23,7 +23,7 @@ terminal:
   timeout_seconds: 30
 
 discovery:
-  # Backend: "lan" (mDNS) or "tailscale"
+  # Backend: "lan", "tailscale", or "both"
   backend: "lan"
   # mDNS service type — do not change unless you know what you're doing
   service_type: "_hashi._tcp.local."

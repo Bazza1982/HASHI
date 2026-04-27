@@ -96,6 +96,128 @@ class PeerRegistry:
             },
         }
 
+    def _normalize_live_props(self, props: dict) -> dict:
+        data = dict(props or {})
+        try:
+            data["last_seen_ok"] = int(data.get("last_seen_ok") or 0)
+        except Exception:
+            data["last_seen_ok"] = 0
+        try:
+            data["last_seen_error"] = int(data.get("last_seen_error") or 0)
+        except Exception:
+            data["last_seen_error"] = 0
+        try:
+            data["consecutive_failures"] = max(0, int(data.get("consecutive_failures") or 0))
+        except Exception:
+            data["consecutive_failures"] = 0
+        live_status = str(data.get("live_status") or "").strip().lower()
+        data["live_status"] = live_status or "unknown"
+        return data
+
+    def _derive_live_status(self, props: dict, *, now: int | None = None) -> str:
+        data = self._normalize_live_props(props)
+        now_ts = int(now or time.time())
+        last_seen_ok = int(data.get("last_seen_ok") or 0)
+        consecutive_failures = int(data.get("consecutive_failures") or 0)
+        state = str(data.get("handshake_state") or "").strip().lower()
+        if last_seen_ok > 0:
+            age = max(0, now_ts - last_seen_ok)
+            # Keep healthy peers online across the 30s liveness refresh window.
+            if age <= 75 and consecutive_failures == 0:
+                return "online"
+            if age <= 150 and consecutive_failures < 2:
+                return "stale"
+            return "offline"
+        if state in {"handshake_timed_out", "handshake_rejected", "unreachable"}:
+            return "offline"
+        if consecutive_failures >= 2:
+            return "offline"
+        if consecutive_failures == 1:
+            return "stale"
+        if state == "handshake_accepted":
+            return "stale"
+        if state == "handshake_in_progress" and (data.get("last_seen_error") or data.get("last_error")):
+            return "offline"
+        return "unknown"
+
+    def _update_observed_route(
+        self,
+        instance_id: str,
+        *,
+        host: str | None = None,
+        port: int | None = None,
+        workbench_port: int | None = None,
+    ) -> None:
+        iid = instance_id.upper()
+        observations = self._observations.get(iid) or {}
+        preferred = None
+        peer = self._peers.get(iid)
+        if peer:
+            preferred = str((peer.properties or {}).get("preferred_backend") or "").strip().lower() or None
+        if preferred and preferred in observations:
+            info = observations[preferred]
+            observations[preferred] = dataclasses.replace(
+                info,
+                host=str(host or info.host),
+                port=int(port or info.port),
+                workbench_port=int(workbench_port or info.workbench_port),
+            )
+
+    def mark_refresh_result(
+        self,
+        instance_id: str,
+        *,
+        ok: bool,
+        checked_at: int | None = None,
+        last_error: str | None = None,
+        host: str | None = None,
+        port: int | None = None,
+        workbench_port: int | None = None,
+        address_candidates: list[dict] | None = None,
+        observed_candidates: list[dict] | None = None,
+        host_identity: str | None = None,
+        environment_kind: str | None = None,
+    ) -> None:
+        iid = instance_id.upper()
+        peer = self._peers.get(iid)
+        if peer is None:
+            return
+        now_ts = int(checked_at or time.time())
+        props = self._normalize_live_props(peer.properties or {})
+        if ok:
+            props["last_seen_ok"] = now_ts
+            props["consecutive_failures"] = 0
+            props["live_status"] = "online"
+            props.pop("last_refresh_error", None)
+            if address_candidates is not None:
+                props["address_candidates"] = list(address_candidates)
+            if observed_candidates is not None:
+                props["observed_candidates"] = list(observed_candidates)
+            if host_identity is not None:
+                normalized = _normalize_identity(host_identity)
+                if normalized:
+                    props["host_identity"] = normalized
+            if environment_kind is not None:
+                normalized_kind = str(environment_kind or "").strip().lower()
+                if normalized_kind:
+                    props["environment_kind"] = normalized_kind
+            next_host = str(host or peer.host)
+            next_port = int(port or peer.port)
+            next_workbench = int(workbench_port or peer.workbench_port)
+            if next_host != peer.host or next_port != peer.port or next_workbench != peer.workbench_port:
+                self._update_observed_route(iid, host=next_host, port=next_port, workbench_port=next_workbench)
+                peer = dataclasses.replace(peer, host=next_host, port=next_port, workbench_port=next_workbench)
+        else:
+            props["last_seen_error"] = now_ts
+            props["consecutive_failures"] = int(props.get("consecutive_failures") or 0) + 1
+            if last_error:
+                props["last_refresh_error"] = str(last_error)
+            props["live_status"] = self._derive_live_status(props, now=now_ts)
+        peer.properties = props
+        self._peers[iid] = peer
+        self._sync_to_instances_json()
+        self._save_state()
+
     def mark_handshake_result(
         self,
         instance_id: str,
@@ -113,15 +235,21 @@ class PeerRegistry:
         fallback = (self._observations.get(iid) or {}).get("bootstrap_fallback")
         if state == "handshake_accepted" and fallback and str(fallback.host or "").strip() in {"127.0.0.1", "localhost"}:
             peer = dataclasses.replace(fallback)
-        props = dict(peer.properties or {})
+        props = self._normalize_live_props(peer.properties or {})
         props["handshake_state"] = state
         props["last_handshake_at"] = int(time.time())
         props.setdefault("preferred_backend", props.get("discovery"))
         props.setdefault("alternate_backends", [])
         if state == "handshake_accepted":
+            props["last_seen_ok"] = int(time.time())
+            props["consecutive_failures"] = 0
+            props["live_status"] = "online"
             props.pop("last_error", None)
         elif last_error:
             props["last_error"] = last_error
+            props["last_seen_error"] = int(time.time())
+            props["consecutive_failures"] = int(props.get("consecutive_failures") or 0) + 1
+            props["live_status"] = self._derive_live_status(props)
         if remote_agents is not None:
             props["remote_agents"] = remote_agents
         if protocol_version:
@@ -269,9 +397,21 @@ class PeerRegistry:
             previous = self._peers.get(iid)
             if previous:
                 prev_props = dict(previous.properties or {})
-                for key in ("handshake_state", "last_handshake_at", "last_error", "remote_agents"):
+                for key in (
+                    "handshake_state",
+                    "last_handshake_at",
+                    "last_error",
+                    "remote_agents",
+                    "last_seen_ok",
+                    "last_seen_error",
+                    "consecutive_failures",
+                    "live_status",
+                    "last_refresh_error",
+                ):
                     if key in prev_props and key not in merged.properties:
                         merged.properties[key] = prev_props[key]
+            merged.properties = self._normalize_live_props(merged.properties)
+            merged.properties["live_status"] = self._derive_live_status(merged.properties)
             canonical[iid] = merged
         self._peers = canonical
 
@@ -325,7 +465,17 @@ class PeerRegistry:
                         same_machine_hint = True
                 same_host_loopback = "127.0.0.1" if same_machine_hint else None
                 handshake_state = str(peer.properties.get("handshake_state") or "")
-                is_active = handshake_state not in {"handshake_timed_out", "handshake_rejected", "unreachable"}
+                live_status = str(peer.properties.get("live_status") or "unknown").strip().lower() or "unknown"
+                last_seen_ok = int(peer.properties.get("last_seen_ok") or 0)
+                last_seen_error = int(peer.properties.get("last_seen_error") or 0)
+                consecutive_failures = int(peer.properties.get("consecutive_failures") or 0)
+                last_refresh_error = str(peer.properties.get("last_refresh_error") or "").strip()
+                is_active = (
+                    live_status != "offline"
+                    if live_status != "unknown"
+                    else handshake_state not in {"handshake_timed_out", "handshake_rejected", "unreachable"}
+                )
+                last_seen_value = last_seen_ok or int(peer.properties.get("last_handshake_at") or 0) or now
                 if key not in instances:
                     # New instance discovered on LAN — add it
                     instances[key] = {
@@ -341,10 +491,16 @@ class PeerRegistry:
                         "protocol_version": peer.protocol_version,
                         "capabilities": list(peer.capabilities or []),
                         "handshake_state": handshake_state,
-                        "last_seen": now,
+                        "last_seen": last_seen_value,
+                        "last_seen_ok": last_seen_ok,
+                        "last_seen_error": last_seen_error,
+                        "consecutive_failures": consecutive_failures,
+                        "live_status": live_status,
                         "address_candidates": address_candidates,
                         "observed_candidates": observed_candidates,
                     }
+                    if last_refresh_error:
+                        instances[key]["last_refresh_error"] = last_refresh_error
                     if host_identity:
                         instances[key]["host_identity"] = host_identity
                     if environment_kind:
@@ -375,6 +531,11 @@ class PeerRegistry:
                         or entry.get("_discovery") != preferred
                         or entry.get("active") != is_active
                         or entry.get("handshake_state") != handshake_state
+                        or entry.get("last_seen_ok") != last_seen_ok
+                        or entry.get("last_seen_error") != last_seen_error
+                        or entry.get("consecutive_failures") != consecutive_failures
+                        or entry.get("live_status") != live_status
+                        or entry.get("last_refresh_error") != last_refresh_error
                         or entry.get("same_host_loopback") != same_host_loopback
                         or entry.get("address_candidates") != address_candidates
                         or entry.get("observed_candidates") != observed_candidates
@@ -390,9 +551,17 @@ class PeerRegistry:
                         entry["protocol_version"] = peer.protocol_version
                         entry["capabilities"] = list(peer.capabilities or [])
                         entry["handshake_state"] = handshake_state
-                        entry["last_seen"] = now
+                        entry["last_seen"] = last_seen_value
+                        entry["last_seen_ok"] = last_seen_ok
+                        entry["last_seen_error"] = last_seen_error
+                        entry["consecutive_failures"] = consecutive_failures
+                        entry["live_status"] = live_status
                         entry["address_candidates"] = address_candidates
                         entry["observed_candidates"] = observed_candidates
+                        if last_refresh_error:
+                            entry["last_refresh_error"] = last_refresh_error
+                        else:
+                            entry.pop("last_refresh_error", None)
                         if host_identity:
                             entry["host_identity"] = host_identity
                         else:
@@ -416,8 +585,26 @@ class PeerRegistry:
                         if entry.get("observed_candidates") != observed_candidates:
                             entry["observed_candidates"] = observed_candidates
                             refreshed = True
-                        if entry.get("last_seen") != now:
-                            entry["last_seen"] = now
+                        if entry.get("last_seen") != last_seen_value:
+                            entry["last_seen"] = last_seen_value
+                            refreshed = True
+                        if entry.get("last_seen_ok") != last_seen_ok:
+                            entry["last_seen_ok"] = last_seen_ok
+                            refreshed = True
+                        if entry.get("last_seen_error") != last_seen_error:
+                            entry["last_seen_error"] = last_seen_error
+                            refreshed = True
+                        if entry.get("consecutive_failures") != consecutive_failures:
+                            entry["consecutive_failures"] = consecutive_failures
+                            refreshed = True
+                        if entry.get("live_status") != live_status:
+                            entry["live_status"] = live_status
+                            refreshed = True
+                        if entry.get("last_refresh_error") != last_refresh_error:
+                            if last_refresh_error:
+                                entry["last_refresh_error"] = last_refresh_error
+                            else:
+                                entry.pop("last_refresh_error", None)
                             refreshed = True
                         if refreshed:
                             changed = True

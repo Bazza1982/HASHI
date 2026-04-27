@@ -1,4 +1,5 @@
 from __future__ import annotations
+import html
 import re
 import sys
 import time
@@ -5726,6 +5727,80 @@ class FlexibleAgentRuntime:
                     continue
         return None, None
 
+    def _format_remote_age(self, timestamp: Any) -> str:
+        try:
+            value = int(float(timestamp or 0))
+        except (TypeError, ValueError):
+            return "n/a"
+        if value <= 0:
+            return "n/a"
+        delta = max(0, int(time.time()) - value)
+        if delta < 60:
+            return f"{delta}s ago"
+        if delta < 3600:
+            return f"{delta // 60}m ago"
+        if delta < 86400:
+            return f"{delta // 3600}h ago"
+        return f"{delta // 86400}d ago"
+
+    def _remote_peer_presence(self, peer: dict[str, Any]) -> tuple[int, str, str]:
+        props = peer.get("properties") or {}
+        live_status = str(props.get("live_status") or "").strip().lower()
+        state = str(props.get("handshake_state") or "unknown")
+        last_handshake_at = props.get("last_handshake_at")
+        last_seen_ok = props.get("last_seen_ok")
+        last_seen_error = props.get("last_seen_error")
+        last_error = props.get("last_error")
+        last_age = self._format_remote_age(last_handshake_at)
+        stale = last_age != "n/a" and isinstance(last_handshake_at, (int, float, str))
+        if stale:
+            try:
+                stale = (time.time() - float(last_handshake_at)) > 45
+            except (TypeError, ValueError):
+                stale = False
+        if live_status == "online":
+            return 0, "🟢 online", state
+        if live_status == "stale":
+            return 2, "🟠 stale", state
+        if live_status == "offline":
+            return 3, "🔴 offline", state
+        if state in {"handshake_timed_out", "handshake_rejected", "unreachable"}:
+            return 3, "🔴 offline", state
+        if state == "handshake_in_progress" and (last_seen_error or last_error) and not last_seen_ok:
+            return 3, "🔴 offline", state
+        if state == "handshake_accepted" and not stale:
+            return 0, "🟢 online", state
+        if state == "handshake_in_progress":
+            return 1, "🟡 connecting", state
+        if state in {"handshake_pending", "unknown"}:
+            return 1, "🟡 pending", state
+        if state == "handshake_accepted" and stale:
+            return 2, "🟠 stale", state
+        return 3, "🔴 offline", state
+
+    def _render_remote_peer_block(self, peer: dict[str, Any]) -> list[str]:
+        props = peer.get("properties") or {}
+        _rank, presence, state = self._remote_peer_presence(peer)
+        instance_id = html.escape(str(peer.get("instance_id") or "unknown"))
+        host = html.escape(str(peer.get("host") or "?"))
+        port = html.escape(str(peer.get("port") or "?"))
+        backend = html.escape(str(props.get("preferred_backend") or props.get("discovery") or "unknown"))
+        agents = len(props.get("remote_agents") or [])
+        last_handshake = html.escape(self._format_remote_age(props.get("last_handshake_at")))
+        last_seen_ok = html.escape(self._format_remote_age(props.get("last_seen_ok")))
+        state_safe = html.escape(state)
+        lines = [
+            f"{presence} <b>{instance_id}</b>",
+            f"addr: <code>{host}:{port}</code>  ·  backend: <code>{backend}</code>  ·  agents: <code>{agents}</code>",
+            f"state: <code>{state_safe}</code>  ·  last handshake: <code>{last_handshake}</code>  ·  last seen: <code>{last_seen_ok}</code>",
+        ]
+        last_error = html.escape(str(props.get("last_error") or "").strip())
+        if last_error:
+            lines.append(f"error: <code>{last_error}</code>")
+        refresh_error = html.escape(str(props.get("last_refresh_error") or "").strip())
+        if refresh_error:
+            lines.append(f"refresh: <code>{refresh_error}</code>")
+        return lines
     async def cmd_remote(self, update: Update, context: Any):
         """Start/stop Hashi Remote. Usage: /remote [on|off|status|list]"""
         if not self._is_authorized_user(update.effective_user.id):
@@ -5771,19 +5846,32 @@ class FlexibleAgentRuntime:
             if not peers:
                 await self._reply_text(update, "⚪ No remote peers are currently visible.")
                 return
-            lines = ["📡 <b>Remote Instances</b>"]
+            peers = sorted(
+                peers,
+                key=lambda peer: (
+                    self._remote_peer_presence(peer)[0],
+                    str(peer.get("instance_id") or ""),
+                ),
+            )
+            counts = {"online": 0, "attention": 0, "offline": 0}
             for peer in peers:
-                props = peer.get("properties") or {}
-                state = props.get("handshake_state") or "unknown"
-                backend = props.get("preferred_backend") or props.get("discovery") or "unknown"
-                agents = len(props.get("remote_agents") or [])
-                lines.append(
-                    f"• <code>{peer.get('instance_id')}</code>  "
-                    f"<code>{peer.get('host')}:{peer.get('port')}</code>  "
-                    f"<code>{state}</code>  "
-                    f"backend=<code>{backend}</code>  "
-                    f"agents=<code>{agents}</code>"
-                )
+                rank, _presence, _state = self._remote_peer_presence(peer)
+                if rank == 0:
+                    counts["online"] += 1
+                elif rank in {1, 2}:
+                    counts["attention"] += 1
+                else:
+                    counts["offline"] += 1
+            lines = [
+                "📡 <b>Remote Instances</b>",
+                f"online: <code>{counts['online']}</code>  ·  attention: <code>{counts['attention']}</code>  ·  offline: <code>{counts['offline']}</code>",
+                f"refreshed: <code>{datetime.now().strftime('%H:%M:%S')}</code>",
+                "",
+            ]
+            for idx, peer in enumerate(peers):
+                lines.extend(self._render_remote_peer_block(peer))
+                if idx != len(peers) - 1:
+                    lines.append("")
             await self._reply_text(update, "\n".join(lines), parse_mode="HTML")
             return
 

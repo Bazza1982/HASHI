@@ -72,6 +72,7 @@ class ProtocolManager:
         self._task: asyncio.Task | None = None
         self._running = False
         self._last_handshake_run = 0.0
+        self._last_refresh_run = 0.0
 
     def get_protocol_status(self) -> dict:
         peers = []
@@ -175,7 +176,7 @@ class ProtocolManager:
         """
         await asyncio.sleep(2)  # Give mDNS a moment to discover what it can
         local_id = str(self._instance_info.get("instance_id") or "").upper()
-        instances = self._load_instances()
+        instances = self._dedupe_bootstrap_instances(self._load_instances())
         for key, entry in instances.items():
             if not isinstance(entry, dict):
                 continue
@@ -218,10 +219,91 @@ class ProtocolManager:
                 else:
                     logger.debug("Bootstrap: %s @ %s:%d not reachable", instance_id, host, remote_port)
 
+    def _bootstrap_entry_score(self, entry: dict) -> tuple[int, int, str]:
+        caps = list(entry.get("capabilities") or [])
+        try:
+            protocol = int(float(entry.get("protocol_version") or 0) * 100)
+        except Exception:
+            protocol = 0
+        score = 0
+        score += protocol
+        score += len(caps) * 10
+        if _normalize_identity(entry.get("host_identity") or ""):
+            score += 25
+        if str(entry.get("environment_kind") or "").strip().lower():
+            score += 10
+        if entry.get("same_host_loopback"):
+            score += 5
+        return score, len(caps), str(entry.get("instance_id") or "").upper()
+
+    def _bootstrap_entry_primary_host(self, entry: dict) -> str:
+        if not isinstance(entry, dict):
+            return ""
+        for key in ("lan_ip", "api_host", "tailscale_ip"):
+            host = str(entry.get(key) or "").strip().lower()
+            if host and host not in {"127.0.0.1", "localhost", "0.0.0.0"}:
+                return host
+        for item in entry.get("address_candidates") or []:
+            if not isinstance(item, dict):
+                continue
+            host = str(item.get("host") or "").strip().lower()
+            scope = str(item.get("scope") or "").strip().lower()
+            if host and host not in {"127.0.0.1", "localhost", "0.0.0.0"} and scope in {"lan", "peer", "overlay", "routable"}:
+                return host
+        hosts = self._candidate_hosts_for_entry(entry)
+        for host in hosts:
+            host = str(host or "").strip().lower()
+            if host and host not in {"127.0.0.1", "localhost", "0.0.0.0"}:
+                return host
+        return ""
+
+    def _bootstrap_entry_endpoint_key(self, entry: dict) -> tuple[str, int, int] | None:
+        if not isinstance(entry, dict):
+            return None
+        remote_port = int(entry.get("remote_port") or 0)
+        if remote_port <= 0:
+            return None
+        workbench_port = int(entry.get("workbench_port") or 18800)
+        primary_host = self._bootstrap_entry_primary_host(entry)
+        if not primary_host:
+            return None
+        return primary_host, remote_port, workbench_port
+
+    def _dedupe_bootstrap_instances(self, instances: dict) -> dict:
+        if not isinstance(instances, dict):
+            return {}
+        best_by_endpoint: dict[tuple[str, int, int], tuple[str, dict]] = {}
+        for key, entry in instances.items():
+            if not isinstance(entry, dict):
+                continue
+            endpoint_key = self._bootstrap_entry_endpoint_key(entry)
+            if endpoint_key is None:
+                continue
+            chosen = best_by_endpoint.get(endpoint_key)
+            if chosen is None or self._bootstrap_entry_score(entry) > self._bootstrap_entry_score(chosen[1]):
+                best_by_endpoint[endpoint_key] = (key, entry)
+        keep_keys = {key for key, _entry in best_by_endpoint.values()}
+        deduped: dict[str, dict] = {}
+        for key, entry in instances.items():
+            if not isinstance(entry, dict):
+                continue
+            endpoint_key = self._bootstrap_entry_endpoint_key(entry)
+            if endpoint_key is not None and key not in keep_keys:
+                instance_id = str(entry.get("instance_id") or key).upper()
+                winner = best_by_endpoint[endpoint_key][1]
+                winner_id = str(winner.get("instance_id") or best_by_endpoint[endpoint_key][0]).upper()
+                logger.info("Bootstrap: skipping duplicate alias %s in favor of %s", instance_id, winner_id)
+                continue
+            deduped[key] = entry
+        return deduped
+
     async def _control_loop(self) -> None:
         while self._running:
             try:
                 now = time.time()
+                if now - self._last_refresh_run >= 30:
+                    await self._refresh_peer_liveness_once()
+                    self._last_refresh_run = now
                 if now - self._last_handshake_run >= 5:
                     await self._handshake_once()
                     self._last_handshake_run = now
@@ -229,6 +311,61 @@ class ProtocolManager:
             except Exception as exc:
                 logger.warning("Protocol control loop failed: %s", exc)
             await asyncio.sleep(self._poll_interval_seconds)
+
+    async def _refresh_peer_liveness_once(self) -> None:
+        if not self._peer_registry:
+            return
+        for peer in self._peer_registry.get_peers():
+            await self._refresh_single_peer_liveness(peer)
+
+    async def _refresh_single_peer_liveness(self, peer) -> bool:
+        if not self._peer_registry or peer is None:
+            return False
+        candidate_hosts = self._candidate_hosts_for_peer(peer)
+        last_exc = None
+        refreshed = False
+        for host in candidate_hosts:
+            for url in self._candidate_urls(host, peer.port, "/health"):
+                try:
+                    health = await asyncio.get_running_loop().run_in_executor(
+                        None,
+                        lambda u=url: self._get_json(u, timeout=4),
+                    )
+                    if not health or not health.get("ok", True):
+                        continue
+                    instance = health.get("instance") or {}
+                    remote_instance = str(instance.get("instance_id") or peer.instance_id).strip().upper()
+                    if remote_instance and remote_instance != peer.instance_id.upper():
+                        logger.debug("Liveness refresh ignored mismatched peer %s via %s", remote_instance, url)
+                        continue
+                    network_profile = health.get("local_network_profile") or {}
+                    remote_port = int(instance.get("remote_port") or peer.port or 0)
+                    workbench_port = int(instance.get("workbench_port") or peer.workbench_port or 18800)
+                    self._peer_registry.mark_refresh_result(
+                        peer.instance_id,
+                        ok=True,
+                        host=host,
+                        port=remote_port,
+                        workbench_port=workbench_port,
+                        address_candidates=list(network_profile.get("address_candidates") or []),
+                        observed_candidates=list(network_profile.get("observed_candidates") or []),
+                        host_identity=str(network_profile.get("host_identity") or ""),
+                        environment_kind=str(network_profile.get("environment_kind") or ""),
+                    )
+                    refreshed = True
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    logger.debug("Liveness refresh: %s via %s failed: %s", peer.instance_id, url, exc)
+            if refreshed:
+                break
+        if not refreshed:
+            self._peer_registry.mark_refresh_result(
+                peer.instance_id,
+                ok=False,
+                last_error=str(last_exc or f"all health probes failed: {candidate_hosts}"),
+            )
+        return refreshed
 
     async def _handshake_once(self) -> None:
         if not self._peer_registry:
@@ -421,6 +558,10 @@ class ProtocolManager:
                     f"Target instance '{to_instance}' not in peer registry",
                     retryable=True, payload=payload,
                 )
+            live_status = str((peer.properties or {}).get("live_status") or "").strip().lower()
+            if live_status in {"stale", "offline"}:
+                await self._refresh_single_peer_liveness(peer)
+                peer = self._peer_registry.get_peer(to_instance) if self._peer_registry else peer
             # Add ourselves to route_trace before forwarding
             forward_payload = dict(payload)
             forward_payload["route_trace"] = list(route_trace) + [local_instance]
@@ -623,7 +764,13 @@ class ProtocolManager:
         return changed
 
     async def _send_agent_reply(self, item: dict, reply_text: str) -> bool:
-        route = self._resolve_peer_route(str(item.get("from_instance") or ""))
+        instance_id = str(item.get("from_instance") or "")
+        peer = self._peer_registry.get_peer(instance_id) if self._peer_registry else None
+        if peer is not None:
+            live_status = str((peer.properties or {}).get("live_status") or "").strip().lower()
+            if live_status in {"stale", "offline"}:
+                await self._refresh_single_peer_liveness(peer)
+        route = self._resolve_peer_route(instance_id)
         if route is None:
             logger.warning("Cannot send reply for %s: origin peer unavailable", item.get("message_id"))
             return False

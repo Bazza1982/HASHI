@@ -134,6 +134,9 @@ class TailscaleDiscovery(PeerDiscovery):
                     workbench_port=int(instance_info.get("workbench_port", 18800)),
                     platform=instance_info.get("platform", "unknown"),
                     hashi_version=node.get("OS", "unknown"),
+                    display_handle=f"@{instance_id.lower()}",
+                    protocol_version=str(instance_info.get("protocol_version", "1.0")),
+                    capabilities=list(instance_info.get("capabilities", [])) if isinstance(instance_info.get("capabilities"), list) else [],
                     properties={"discovery": "tailscale"},
                 )
             )
