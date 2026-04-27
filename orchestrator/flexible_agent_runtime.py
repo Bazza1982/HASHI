@@ -5727,6 +5727,85 @@ class FlexibleAgentRuntime:
                     continue
         return None, None
 
+    def _remote_start_log_path(self) -> Path:
+        log_dir = self.global_config.project_root / "tmp"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        agent_name = getattr(self.config, "agent_name", None) or "agent"
+        return log_dir / f"{agent_name}_remote_startup.log"
+
+    def _read_remote_start_log_excerpt(self, path: Path, max_chars: int = 1200) -> str:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace").strip()
+        except Exception:
+            return ""
+        if not text:
+            return ""
+        return text[-max_chars:]
+
+    def _build_remote_start_failure_message(
+        self,
+        *,
+        cfg: dict[str, Any],
+        cmd: list[str],
+        reason: str,
+        log_path: Path,
+        exit_code: int | None = None,
+    ) -> str:
+        cmd_text = html.escape(" ".join(str(part) for part in cmd))
+        reason_text = html.escape(str(reason or "unknown startup failure"))
+        lines = [
+            "🔴 Hashi Remote failed to start.",
+            f"Reason: <code>{reason_text}</code>",
+            f"Port: <code>{cfg['port']}</code>  ·  TLS: <code>{'on' if cfg['use_tls'] else 'off'}</code>  ·  discovery: <code>{cfg['backend']}</code>",
+        ]
+        if exit_code is not None:
+            lines.append(f"Exit code: <code>{exit_code}</code>")
+        lines.append(f"Command: <code>{cmd_text}</code>")
+        excerpt = self._read_remote_start_log_excerpt(log_path)
+        if excerpt:
+            lines.append(f"log tail: <code>{html.escape(excerpt)}</code>")
+        else:
+            lines.append(f"log file: <code>{html.escape(str(log_path))}</code>")
+        return "\n".join(lines)
+
+    async def _await_remote_start_health(
+        self,
+        *,
+        process: asyncio.subprocess.Process,
+        cfg: dict[str, Any],
+        cmd: list[str],
+        log_path: Path,
+        timeout_seconds: float = 8.0,
+    ) -> tuple[bool, str]:
+        deadline = time.time() + max(1.0, float(timeout_seconds))
+        while time.time() < deadline:
+            if process.returncode is not None:
+                return False, self._build_remote_start_failure_message(
+                    cfg=cfg,
+                    cmd=cmd,
+                    reason="process exited before /health became ready",
+                    log_path=log_path,
+                    exit_code=process.returncode,
+                )
+            health, health_url = await self._fetch_remote_json("/health")
+            if health:
+                return True, str(health_url or "")
+            await asyncio.sleep(0.5)
+
+        try:
+            process.terminate()
+            await asyncio.wait_for(process.wait(), timeout=2)
+        except Exception:
+            with suppress(Exception):
+                process.kill()
+        return False, self._build_remote_start_failure_message(
+            cfg=cfg,
+            cmd=cmd,
+            reason="health endpoint did not become ready within timeout",
+            log_path=log_path,
+            exit_code=process.returncode,
+        )
+
     def _format_remote_age(self, timestamp: Any) -> str:
         try:
             value = int(float(timestamp or 0))
@@ -5801,6 +5880,7 @@ class FlexibleAgentRuntime:
         if refresh_error:
             lines.append(f"refresh: <code>{refresh_error}</code>")
         return lines
+
     async def cmd_remote(self, update: Update, context: Any):
         """Start/stop Hashi Remote. Usage: /remote [on|off|status|list]"""
         if not self._is_authorized_user(update.effective_user.id):
@@ -5897,24 +5977,50 @@ class FlexibleAgentRuntime:
             venv_python = root / ".venv" / "bin" / "python3"
             if not venv_python.exists():
                 venv_python = root / ".venv" / "Scripts" / "python.exe"  # Windows
+            if not venv_python.exists():
+                await self._reply_text(
+                    update,
+                    f"🔴 Hashi Remote could not start.\nMissing interpreter: <code>{html.escape(str(venv_python))}</code>",
+                    parse_mode="HTML",
+                )
+                return
 
             cmd = [str(venv_python), "-m", "remote"]
             if not cfg["use_tls"]:
                 cmd.append("--no-tls")
             if cfg["backend"] in {"lan", "tailscale", "both"}:
                 cmd.extend(["--discovery", cfg["backend"]])
+            log_path = self._remote_start_log_path()
+            with suppress(Exception):
+                log_path.unlink()
+            log_handle = log_path.open("ab")
+            try:
+                self._remote_process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    cwd=str(root),
+                    stdout=log_handle,
+                    stderr=log_handle,
+                )
+            finally:
+                log_handle.close()
 
-            self._remote_process = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=str(root),
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
+            ok, detail = await self._await_remote_start_health(
+                process=self._remote_process,
+                cfg=cfg,
+                cmd=cmd,
+                log_path=log_path,
             )
+            if not ok:
+                self._remote_process = None
+                await self._reply_text(update, detail, parse_mode="HTML")
+                return
             await self._reply_text(
                 update,
                 f"🟢 Hashi Remote started (PID {self._remote_process.pid})\n"
                 f"   Port {cfg['port']} · TLS {'on' if cfg['use_tls'] else 'off'} · discovery {cfg['backend']}\n"
+                f"   API <code>{html.escape(detail)}</code>\n"
                 "   Use /remote off to stop.",
+                parse_mode="HTML",
             )
             return
 

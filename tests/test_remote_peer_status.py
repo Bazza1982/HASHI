@@ -28,6 +28,10 @@ class _PresenceDummy:
     _format_remote_age = FlexibleAgentRuntime._format_remote_age
 
 
+class _RemoteStartDummy:
+    _read_remote_start_log_excerpt = FlexibleAgentRuntime._read_remote_start_log_excerpt
+
+
 def test_registry_derives_offline_for_timed_out_peer_without_live_fields(tmp_path):
     hashi_root = tmp_path / "hashi"
     hashi_root.mkdir()
@@ -153,3 +157,45 @@ def test_bootstrap_dedupes_legacy_aliases_on_same_endpoint():
 
     assert "msi" in deduped
     assert "hashi-desktop" not in deduped
+
+
+def test_remote_start_failure_message_includes_exit_code_and_log_excerpt(tmp_path):
+    dummy = _RemoteStartDummy()
+    dummy.global_config = SimpleNamespace(project_root=tmp_path)
+    dummy.config = SimpleNamespace(agent_name="lin_yueru")
+    log_path = tmp_path / "tmp" / "lin_yueru_remote_startup.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("Traceback\nModuleNotFoundError: No module named 'uvicorn'\n", encoding="utf-8")
+
+    message = FlexibleAgentRuntime._build_remote_start_failure_message(
+        dummy,
+        cfg={"port": 8766, "use_tls": False, "backend": "lan"},
+        cmd=["/tmp/python", "-m", "remote", "--no-tls"],
+        reason="process exited before /health became ready",
+        log_path=log_path,
+        exit_code=1,
+    )
+
+    assert "failed to start" in message
+    assert "Exit code: <code>1</code>" in message
+    assert "uvicorn" in message
+
+
+def test_remote_start_failure_message_falls_back_to_log_path(tmp_path):
+    dummy = _RemoteStartDummy()
+    dummy.global_config = SimpleNamespace(project_root=tmp_path)
+    dummy.config = SimpleNamespace(agent_name="lin_yueru")
+    log_path = tmp_path / "tmp" / "lin_yueru_remote_startup.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    message = FlexibleAgentRuntime._build_remote_start_failure_message(
+        dummy,
+        cfg={"port": 8767, "use_tls": True, "backend": "tailscale"},
+        cmd=["/tmp/python", "-m", "remote"],
+        reason="health endpoint did not become ready within timeout",
+        log_path=log_path,
+        exit_code=None,
+    )
+
+    assert "health endpoint did not become ready within timeout" in message
+    assert str(log_path) in message
