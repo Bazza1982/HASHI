@@ -400,10 +400,12 @@ HASHI supports multiple communication channels:
 
 #### HChat — Cross-Instance Agent Messaging
 - `name` means local-instance delivery only
-- `name@INSTANCE` means cross-instance delivery
-- Cross-instance traffic is normalized through the `HASHI1` exchange
-- Routing: local Workbench → HASHI1 exchange → registry-assisted Workbench / Remote `/hchat`
-- JSON protocol preserves both sender agent and sender instance identity
+- `name@INSTANCE` means cross-instance delivery via Hashi Remote
+- Each HASHI instance has its own direct P2P identity (e.g., `@hashi2`); no central relay required
+- Routing: local Workbench exchange API → Hashi Remote registry lookup → direct delivery to target `/hchat` or `/protocol/message`
+- Fallback path: if the exchange endpoint is unavailable, direct Remote delivery is attempted automatically
+- JSON protocol preserves sender agent identity, sender instance, and TTL for loop prevention
+- Reply path: remote instance delivers reply directly back to the originating instance via Hashi Remote
 
 ---
 
@@ -830,13 +832,58 @@ Telegram splits long messages automatically, which can cause incomplete understa
 
 ### Hashi Remote
 
-Cross-network agent communication for distributed HASHI instances:
+Hashi Remote is the P2P communication layer that gives each HASHI instance a direct, addressable network identity. It runs as an independent sidecar service and can be started or stopped via `/remote on` / `/remote off` without restarting the core HASHI process.
 
-- LAN peer discovery and direct connection
-- Tailscale integration for internet-connected instances
-- TLS encryption with pairing-based authentication
-- Audit logging for all remote operations
-- Terminal execution delegation
+#### Peer Discovery
+
+- **LAN discovery** — mDNS advertisement and scanning over `_hashi._tcp.local.`; finds instances on the same network automatically with no configuration
+- **Tailscale discovery** — polls Tailscale status for internet-connected instances, enabling cross-location communication through a private overlay network
+- **Multi-backend merge** — observations from LAN and Tailscale for the same instance are merged into a single canonical peer record; duplicate entries are suppressed
+- **Persistent registry** — discovered peers and their last-known addresses are persisted to `instances.json` and survive restarts
+
+#### Protocol Handshake
+
+When a peer is discovered, Hashi Remote performs a mutual handshake before any messaging:
+
+- Exchanges protocol version and capability list
+- Transfers a live snapshot of the local agent directory (so each side knows what agents the other hosts, e.g., `rika@hashi2`)
+- Reverse-registers the caller as a peer from the receiver's perspective (bi-directional registration from a single handshake)
+- Revalidates every 30 seconds to confirm continued liveness; state transitions: `handshake_pending → handshake_in_progress → handshake_accepted`
+
+#### Peer Liveness
+
+- Each peer tracks `last_seen_ok`, `last_handshake_at`, `consecutive_failures`, and a derived `live_status`
+- Status thresholds: **online** (seen ≤ 75s, no failures) · **stale** (≤ 150s or 1 failure) · **offline** (otherwise)
+- Live status is recomputed on every rebuild; stale observations never overwrite runtime liveness
+
+#### Same-Host Routing
+
+- Instances on the same machine (including WSL co-location) are detected via host-identity fingerprinting
+- Same-host peers are routed through `127.0.0.1` loopback, bypassing LAN addressing
+- Bootstrap fallback: if the registered address is unreachable, alternative candidate hosts (including loopback) are tried automatically
+
+#### P2P Message Protocol
+
+Direct agent-to-agent messaging over Hashi Remote (`/protocol/message`):
+
+- **TTL-based loop prevention** — each message carries a hop count; messages exceeding the limit are dropped
+- **Deduplication** — message IDs are tracked to suppress duplicate deliveries
+- **In-flight tracking** — sent messages are persisted to `~/.hashi-remote/protocol_inflight_<id>.json`; state is recovered across restarts
+- **Reply correlation** — the sending instance polls for a reply (soft timeout 45s, hard timeout 180s) and forwards it back to the originating agent
+- **Agent directory resolution** — target `agent@instance` addresses are resolved against the live peer registry before delivery
+
+#### Security
+
+- TLS encryption on all remote connections
+- Pairing-based client authentication; LAN peers can be set to auto-approve
+- Auth-gated terminal execution delegation (`/terminal/exec`)
+- Full audit logging for all inbound hchat and remote operations
+
+#### Diagnostics
+
+- `GET /peers` — live peer list with liveness status, route kind, and agent directory
+- `GET /protocol/status` — full protocol state: handshake states, in-flight count, local network profile, agent snapshot
+- `GET /health` — instance info and peer summary
 
 ---
 
