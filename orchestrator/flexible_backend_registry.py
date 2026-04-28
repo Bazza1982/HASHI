@@ -18,18 +18,20 @@ BACKEND_REGISTRY: dict[str, dict] = {
     "claude-cli": {
         "label": "claude",
         "models": [
+            "claude-opus-4-7",
             "claude-sonnet-4-6",
             "claude-opus-4-6",
             "claude-haiku-4-5",
         ],
         "default_model": "claude-sonnet-4-6",
-        "efforts": ["low", "medium", "high"],
+        "efforts": ["low", "medium", "high", "xhigh", "max"],
         "default_effort": "medium",
         "secret_keys": ["claude-cli_key"],
     },
     "codex-cli": {
         "label": "codex",
         "models": [
+            "gpt-5.5",
             "gpt-5.4",
             "gpt-5.3-codex",
             "gpt-5.2-codex",
@@ -38,7 +40,7 @@ BACKEND_REGISTRY: dict[str, dict] = {
             "gpt-5.1-codex-mini",
         ],
         "default_model": "gpt-5.4",
-        "efforts": ["low", "medium", "high", "extra_high"],
+        "efforts": ["low", "medium", "high", "xhigh"],
         "default_effort": "medium",
         "secret_keys": ["codex-cli_key"],
     },
@@ -94,8 +96,10 @@ CLAUDE_MODEL_ALIASES = {
     "claude-sonnet": "claude-sonnet-4-6",
     "claude-sonnet-4": "claude-sonnet-4-6",
     "claude-sonnet-4.6": "claude-sonnet-4-6",
-    "opus": "claude-opus-4-6",
-    "claude-opus": "claude-opus-4-6",
+    "opus": "claude-opus-4-7",
+    "claude-opus": "claude-opus-4-7",
+    "claude-opus-4": "claude-opus-4-7",
+    "claude-opus-4.7": "claude-opus-4-7",
     "haiku": "claude-haiku-4-5",
 }
 
@@ -144,8 +148,8 @@ def get_default_effort(engine: str) -> str | None:
 
 
 def normalize_effort(engine: str, effort: str | None) -> str | None:
-    if effort == "extra":
-        effort = "extra_high"
+    if effort in ("extra", "extra_high"):
+        effort = "xhigh"
     efforts = get_available_efforts(engine)
     if not efforts:
         return None

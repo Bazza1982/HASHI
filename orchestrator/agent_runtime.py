@@ -47,6 +47,7 @@ AVAILABLE_OPENROUTER_MODELS = [
 ]
 
 AVAILABLE_CLAUDE_MODELS = [
+    "claude-opus-4-7",
     "claude-sonnet-4-6",
     "claude-opus-4-6",
     "claude-haiku-4-5",
@@ -54,13 +55,14 @@ AVAILABLE_CLAUDE_MODELS = [
 
 CLAUDE_MODEL_ALIASES = {
     "sonnet": "claude-sonnet-4-6",
-    "opus": "claude-opus-4-6",
+    "opus": "claude-opus-4-7",
     "haiku": "claude-haiku-4-5",
 }
 
-AVAILABLE_CLAUDE_EFFORTS = ["low", "medium", "high"]
+AVAILABLE_CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"]
 
 AVAILABLE_CODEX_MODELS = [
+    "gpt-5.5",
     "gpt-5.3-codex",
     "gpt-5.4",
     "gpt-5.2-codex",
@@ -69,7 +71,7 @@ AVAILABLE_CODEX_MODELS = [
     "gpt-5.1-codex-mini",
 ]
 
-AVAILABLE_CODEX_EFFORTS = ["low", "medium", "high", "extra_high"]
+AVAILABLE_CODEX_EFFORTS = ["low", "medium", "high", "xhigh"]
 HABIT_BROWSER_PAGE_SIZE = 5
 
 

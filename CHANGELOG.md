@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.1.0] - 2026-04-29
+
+### ✨ Added
+
+- **Claude Opus 4.7 support** — `claude-opus-4-7` added to `claude-cli` backend in both fixed and flex agent runtimes; `opus` / `claude-opus` aliases updated to point to the latest model
+- **GPT-5.5 (Codex) support** — `gpt-5.5` added as the newest model in `codex-cli` backend; available in both fixed and flex agents
+- **`max` effort level for Claude** — `claude-cli` now exposes the `max` reasoning effort tier (previously undocumented); valid values: `low`, `medium`, `high`, `xhigh`, `max`
+- **`xhigh` effort level unified** — both `claude-cli` and `codex-cli` now correctly expose `xhigh` as the top effort tier; HASHI API model list updated accordingly
+
+### 🔧 Fixed
+
+- **Codex effort `extra_high` → `xhigh`** — the Codex CLI has never accepted `extra_high`; HASHI was silently passing an invalid value. Registry and normalize logic corrected to use `xhigh`, with backward-compatible auto-remapping so any existing config using `extra_high` or `extra` is transparently upgraded
+- **Claude effort list was incomplete** — `claude-cli` efforts were hardcoded as `[low, medium, high]`; the CLI actually supports `xhigh` and `max`, both now registered and selectable via `/model` or `/backend`
+
+### ⬆️ Upgraded
+
+- **Codex CLI** — upgraded from `0.116.0` to `0.125.0` (`npm install -g @openai/codex`)
+
+---
+
 ## [Unreleased]
 
 ### 🔧 Fixed

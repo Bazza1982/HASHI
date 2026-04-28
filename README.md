@@ -1,6 +1,6 @@
 # HASHI
 
-> **Status (v3.0-beta):** Full-featured agentic AI orchestration platform — **6 LLM backends** (Claude, Gemini, Codex, OpenRouter, DeepSeek, Ollama), **habit-based self-improvement** (agents learn from feedback and nightly reflection), **SafeVoice** (voice confirmation before execution), **cross-instance agent messaging**, **token audit & cost tracking**, and **Minato MCP workflow choreography**. All v2 roadmap delivered; v3 in active development.
+> **Status (v3.1):** Full-featured agentic AI orchestration platform — **6 LLM backends** (Claude, Gemini, Codex, OpenRouter, DeepSeek, Ollama), **habit-based self-improvement** (agents learn from feedback and nightly reflection), **SafeVoice** (voice confirmation before execution), **cross-instance agent messaging**, **token audit & cost tracking**, and **Minato MCP workflow choreography**. Now with **Claude Opus 4.7**, **GPT-5.5**, and full `xhigh`/`max` reasoning effort support.
 >
 > **Changelog:** see [`CHANGELOG.md`](CHANGELOG.md) · **Roadmap:** see [`docs/ROADMAP.md`](docs/ROADMAP.md) · **Nagare Docs:** see [`docs/NAGARE_FLOW_SYSTEM.md`](docs/NAGARE_FLOW_SYSTEM.md).
 
@@ -83,7 +83,8 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
 
 ## Project Status
 
-- **v3.0-beta** *(current)* — **Self-improving agents**, 6 LLM backends, SafeVoice, cross-instance messaging, token audit, agent behavior audit, remote backend policy, Minato MCP, Obsidian wiki integration
+- **v3.1** *(current)* — Claude Opus 4.7, GPT-5.5, Codex CLI 0.125.0, `xhigh`/`max` effort levels, HASHI Remote remediation
+- **v3.0-beta** — **Self-improving agents**, 6 LLM backends, SafeVoice, cross-instance messaging, token audit, agent behavior audit, remote backend policy, Minato MCP, Obsidian wiki integration
 - **v3.0-alpha** — Ollama local LLM, habit system (Phase 4-5), TUI onboarding, Minato MCP (8-tier), token audit system, dream improvements
 - **v2.1.0** — **Nagare Flow System** — multi-agent workflow orchestration
 - **v2.0.0** — Tool execution layer, browser automation, Pack & Go USB deployment, TUI, vector memory, `/dream` skill
@@ -1014,7 +1015,14 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
 
 ## Release History
 
-### v3.0-beta *(current)* — Self-Improving Agents (April 2026)
+### v3.1 *(current)* — Backend Model Upgrade (April 2026)
+
+- **Claude Opus 4.7** — newest Claude model added to `claude-cli` backend; `opus` alias updated
+- **GPT-5.5** — newest Codex model added to `codex-cli` backend
+- **Codex CLI 0.125.0** — upgraded from 0.116.0
+- **Effort levels corrected** — `xhigh` is the correct top tier for Codex (was incorrectly `extra_high`); Claude gains `xhigh` and `max`; backward-compatible auto-remapping for old configs
+
+### v3.0-beta — Self-Improving Agents (April 2026)
 
 - **6 LLM backends** — added DeepSeek API (direct) and Ollama (local LLM) alongside existing Claude/Gemini/Codex/OpenRouter
 - **Habit-based self-improvement** — agents learn from `/good` and `/bad` feedback, with nightly dream reflection and cross-agent habit governance (Phase 4-5)
