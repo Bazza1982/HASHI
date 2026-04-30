@@ -38,6 +38,15 @@ def _wsl_unc_anchor(value: str) -> str:
     return f"\\\\{parts[0]}\\{parts[1]}\\"
 
 
+def _protocol_version_score(value: str) -> tuple[int, str]:
+    text = str(value or "").strip()
+    try:
+        major, dot, rest = text.partition(".")
+        return (int(major), rest if dot else "")
+    except Exception:
+        return (0, text)
+
+
 class PeerRegistry:
     """
     Maintains the live peer list and syncs it to instances.json.
@@ -288,6 +297,8 @@ class PeerRegistry:
                     name: PeerInfo(**obs)
                     for name, obs in observations.items()
                 }
+            if self._observations:
+                self._rebuild_canonical_peers()
         except Exception as exc:
             logger.warning("Registry: failed to load peer state: %s", exc)
 
@@ -310,15 +321,111 @@ class PeerRegistry:
             logger.warning("Registry: failed to save peer state: %s", exc)
 
     def _select_preferred_backend(self, observations: dict[str, PeerInfo]) -> str | None:
-        fallback = observations.get("bootstrap_fallback")
-        if fallback and str(fallback.host or "").strip() in {"127.0.0.1", "localhost"}:
-            return "bootstrap_fallback"
         for backend in ("lan", "tailscale"):
             if backend in observations:
                 return backend
+        fallback = observations.get("bootstrap_fallback")
+        if fallback and str(fallback.host or "").strip() in {"127.0.0.1", "localhost"}:
+            if "bootstrap" in observations:
+                return "bootstrap"
+            return "bootstrap_fallback"
         for backend in sorted(observations):
             return backend
         return None
+
+    def _peer_host_keys(self, peer: PeerInfo, observations: dict[str, PeerInfo]) -> set[str]:
+        hosts: set[str] = set()
+
+        def _add(host: str | None) -> None:
+            value = str(host or "").strip().lower()
+            if value:
+                hosts.add(value)
+
+        _add(peer.host)
+        for field in ("address_candidates", "observed_candidates"):
+            for item in (peer.properties or {}).get(field) or []:
+                if isinstance(item, dict):
+                    _add(item.get("host"))
+        for info in observations.values():
+            _add(info.host)
+            for field in ("address_candidates", "observed_candidates"):
+                for item in (info.properties or {}).get(field) or []:
+                    if isinstance(item, dict):
+                        _add(item.get("host"))
+        return hosts
+
+    def _peer_rank(self, peer: PeerInfo) -> tuple:
+        props = dict(peer.properties or {})
+        preferred = str(props.get("preferred_backend") or props.get("discovery") or "").strip().lower()
+        backend_score = {
+            "lan": 5,
+            "tailscale": 4,
+            "bootstrap_fallback": 3,
+            "bootstrap": 2,
+            "handshake_inbound": 1,
+        }.get(preferred, 0)
+        return (
+            1 if _normalize_identity(props.get("host_identity") or "") else 0,
+            len(peer.capabilities or []),
+            1 if str(props.get("live_status") or "") == "online" else 0,
+            1 if str(props.get("handshake_state") or "") == "handshake_accepted" else 0,
+            backend_score,
+            _protocol_version_score(peer.protocol_version),
+            len(str(peer.display_name or "")),
+        )
+
+    def _should_drop_legacy_alias(
+        self,
+        loser_id: str,
+        loser_peer: PeerInfo,
+        loser_observations: dict[str, PeerInfo],
+        winner_peer: PeerInfo,
+        winner_observations: dict[str, PeerInfo],
+    ) -> bool:
+        if loser_id == winner_peer.instance_id:
+            return False
+        if int(loser_peer.workbench_port or 0) != int(winner_peer.workbench_port or 0):
+            return False
+        loser_hosts = self._peer_host_keys(loser_peer, loser_observations)
+        winner_hosts = self._peer_host_keys(winner_peer, winner_observations)
+        if loser_hosts and winner_hosts and not loser_hosts.intersection(winner_hosts):
+            return False
+
+        loser_props = dict(loser_peer.properties or {})
+        winner_props = dict(winner_peer.properties or {})
+        loser_backend = str(loser_props.get("preferred_backend") or loser_props.get("discovery") or "").strip().lower()
+        winner_backend = str(winner_props.get("preferred_backend") or winner_props.get("discovery") or "").strip().lower()
+        loser_identity = _normalize_identity(loser_props.get("host_identity") or "")
+        winner_identity = _normalize_identity(winner_props.get("host_identity") or "")
+
+        return (
+            loser_backend in {"bootstrap", "handshake_inbound"}
+            and not loser_identity
+            and not (loser_peer.capabilities or [])
+            and (winner_backend in {"lan", "tailscale", "bootstrap_fallback"} or winner_identity or (winner_peer.capabilities or []))
+        )
+
+    def _prune_legacy_aliases(self, canonical: dict[str, PeerInfo]) -> dict[str, PeerInfo]:
+        kept = dict(canonical)
+        for loser_id, loser_peer in list(canonical.items()):
+            if loser_id not in kept:
+                continue
+            for winner_id, winner_peer in canonical.items():
+                if loser_id == winner_id or winner_id not in kept:
+                    continue
+                if self._peer_rank(winner_peer) < self._peer_rank(loser_peer):
+                    continue
+                if self._should_drop_legacy_alias(
+                    loser_id,
+                    loser_peer,
+                    self._observations.get(loser_id, {}),
+                    winner_peer,
+                    self._observations.get(winner_id, {}),
+                ):
+                    kept.pop(loser_id, None)
+                    self._observations.pop(loser_id, None)
+                    break
+        return kept
 
     def _extract_address_candidates(self, peer: PeerInfo, observations: dict[str, PeerInfo]) -> list[dict]:
         candidates: list[dict] = []
@@ -385,7 +492,7 @@ class PeerRegistry:
 
     def _same_machine_hint(self, instance_id: str, observations: dict[str, PeerInfo], chosen: PeerInfo) -> bool:
         try:
-            data = json.loads(self._instances_path.read_text(encoding="utf-8"))
+            data = json.loads(self._instances_path.read_text(encoding="utf-8-sig"))
         except Exception:
             data = {}
         instances = data.get("instances", {}) if isinstance(data, dict) else {}
@@ -473,27 +580,59 @@ class PeerRegistry:
             previous = self._peers.get(iid)
             if previous:
                 prev_props = dict(previous.properties or {})
-                for key in (
-                    "handshake_state",
-                    "last_handshake_at",
-                    "last_error",
-                    "remote_agents",
-                    "last_seen_ok",
-                    "last_seen_error",
-                    "consecutive_failures",
-                    "live_status",
-                    "last_refresh_error",
-                    "same_host_loopback",
-                ):
-                    if key in prev_props:
-                        merged.properties[key] = prev_props[key]
+                try:
+                    prev_handshake = int(prev_props.get("last_handshake_at") or 0)
+                except Exception:
+                    prev_handshake = 0
+                try:
+                    chosen_handshake = int(merged.properties.get("last_handshake_at") or 0)
+                except Exception:
+                    chosen_handshake = 0
+                if prev_handshake > chosen_handshake:
+                    for key in ("handshake_state", "last_handshake_at", "last_error", "remote_agents"):
+                        if key in prev_props:
+                            merged.properties[key] = prev_props[key]
+                else:
+                    for key in ("handshake_state", "last_handshake_at", "last_error", "remote_agents"):
+                        if key not in merged.properties and key in prev_props:
+                            merged.properties[key] = prev_props[key]
+
+                try:
+                    prev_seen_ok = int(prev_props.get("last_seen_ok") or 0)
+                except Exception:
+                    prev_seen_ok = 0
+                try:
+                    chosen_seen_ok = int(merged.properties.get("last_seen_ok") or 0)
+                except Exception:
+                    chosen_seen_ok = 0
+                try:
+                    prev_seen_error = int(prev_props.get("last_seen_error") or 0)
+                except Exception:
+                    prev_seen_error = 0
+                try:
+                    chosen_seen_error = int(merged.properties.get("last_seen_error") or 0)
+                except Exception:
+                    chosen_seen_error = 0
+
+                if prev_seen_ok > chosen_seen_ok:
+                    for key in ("last_seen_ok", "consecutive_failures"):
+                        if key in prev_props:
+                            merged.properties[key] = prev_props[key]
+                if prev_seen_error > chosen_seen_error:
+                    for key in ("last_seen_error", "last_refresh_error"):
+                        if key in prev_props:
+                            merged.properties[key] = prev_props[key]
+                    if prev_seen_error >= chosen_seen_ok and "consecutive_failures" in prev_props:
+                        merged.properties["consecutive_failures"] = prev_props["consecutive_failures"]
+                if "same_host_loopback" in prev_props:
+                    merged.properties["same_host_loopback"] = prev_props["same_host_loopback"]
             if self._same_machine_hint(iid, by_backend, chosen):
                 merged.host = "127.0.0.1"
                 merged.properties["same_host_loopback"] = "127.0.0.1"
             merged.properties = self._normalize_live_props(merged.properties)
             merged.properties["live_status"] = self._derive_live_status(merged.properties)
             canonical[iid] = merged
-        self._peers = canonical
+        self._peers = self._prune_legacy_aliases(canonical)
 
     def _sync_to_instances_json(self) -> None:
         """Write discovered peer IPs into instances.json for hchat routing."""
@@ -502,7 +641,7 @@ class PeerRegistry:
             return
 
         try:
-            data = json.loads(self._instances_path.read_text(encoding="utf-8"))
+            data = json.loads(self._instances_path.read_text(encoding="utf-8-sig"))
             instances = data.get("instances", {})
             local_entry = instances.get(self._self_id.lower(), {})
             local_platform = str(local_entry.get("platform") or "").lower()

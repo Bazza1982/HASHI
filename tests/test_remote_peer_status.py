@@ -201,6 +201,295 @@ def test_registry_rebuild_prefers_loopback_for_same_host_wsl_peer(tmp_path):
     assert peer.properties["same_host_loopback"] == "127.0.0.1"
 
 
+def test_registry_prefers_bootstrap_over_loopback_fallback_when_bootstrap_exists(tmp_path):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    (hashi_root / "instances.json").write_text(
+        json.dumps(
+            {
+                "instances": {
+                    "hashi9": {"instance_id": "HASHI9", "platform": "windows"},
+                    "hashi1": {"instance_id": "HASHI1", "platform": "wsl"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    registry = PeerRegistry(hashi_root, "HASHI9")
+    registry._observations["HASHI1"] = {
+        "bootstrap": PeerInfo(
+            instance_id="HASHI1",
+            display_name="HASHI1",
+            host="127.0.0.1",
+            port=8766,
+            workbench_port=18800,
+            platform="wsl",
+            properties={"discovery": "bootstrap"},
+        ),
+        "bootstrap_fallback": PeerInfo(
+            instance_id="HASHI1",
+            display_name="HASHI1",
+            host="127.0.0.1",
+            port=8767,
+            workbench_port=18800,
+            platform="wsl",
+            properties={"discovery": "bootstrap_fallback"},
+        ),
+    }
+
+    registry._rebuild_canonical_peers()
+
+    peer = registry.get_peer("HASHI1")
+    assert peer is not None
+    assert peer.port == 8766
+    assert peer.properties["preferred_backend"] == "bootstrap"
+
+
+def test_registry_prunes_legacy_alias_when_new_identity_shares_same_endpoint(tmp_path):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    (hashi_root / "instances.json").write_text('{"instances": {}}', encoding="utf-8")
+    registry = PeerRegistry(hashi_root, "HASHI9")
+    registry._observations["MSI"] = {
+        "lan": PeerInfo(
+            instance_id="MSI",
+            display_name="MSI",
+            host="192.168.0.41",
+            port=8767,
+            workbench_port=8779,
+            platform="windows",
+            protocol_version="2.0",
+            capabilities=["handshake_v2"],
+            properties={
+                "discovery": "lan",
+                "host_identity": "desktopvn0amd7",
+                "address_candidates": [{"host": "192.168.0.41", "scope": "lan"}],
+                "observed_candidates": [{"host": "192.168.0.41", "scope": "lan"}],
+            },
+        )
+    }
+    registry._observations["HASHI-DESKTOP"] = {
+        "bootstrap": PeerInfo(
+            instance_id="HASHI-DESKTOP",
+            display_name="HASHI Desktop",
+            host="192.168.0.41",
+            port=8766,
+            workbench_port=8779,
+            platform="windows",
+            protocol_version="1.0",
+            capabilities=[],
+            properties={"discovery": "bootstrap"},
+        )
+    }
+
+    registry._rebuild_canonical_peers()
+
+    assert registry.get_peer("MSI") is not None
+    assert registry.get_peer("HASHI-DESKTOP") is None
+
+
+def test_registry_load_state_prunes_legacy_alias_when_new_identity_exists(tmp_path):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    (hashi_root / "instances.json").write_text('{"instances": {}}', encoding="utf-8")
+    state_dir = tmp_path / "state-home"
+    state_dir.mkdir()
+    original_home = Path.home
+    Path.home = staticmethod(lambda: state_dir)
+    try:
+        state_path = state_dir / ".hashi-remote" / "peers_state_hashi9.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(
+            json.dumps(
+                {
+                    "peers": {
+                        "MSI": {
+                            "canonical": {
+                                "instance_id": "MSI",
+                                "display_name": "MSI",
+                                "display_handle": "@msi",
+                                "host": "192.168.0.41",
+                                "port": 8767,
+                                "workbench_port": 8779,
+                                "platform": "windows",
+                                "version": "unknown",
+                                "hashi_version": "unknown",
+                                "protocol_version": "2.0",
+                                "capabilities": ["handshake_v2"],
+                                "properties": {
+                                    "discovery": "lan",
+                                    "preferred_backend": "lan",
+                                    "host_identity": "desktopvn0amd7",
+                                },
+                            },
+                            "observations": {
+                                "lan": {
+                                    "instance_id": "MSI",
+                                    "display_name": "MSI",
+                                    "display_handle": "@msi",
+                                    "host": "192.168.0.41",
+                                    "port": 8767,
+                                    "workbench_port": 8779,
+                                    "platform": "windows",
+                                    "version": "unknown",
+                                    "hashi_version": "unknown",
+                                    "protocol_version": "2.0",
+                                    "capabilities": ["handshake_v2"],
+                                    "properties": {
+                                        "discovery": "lan",
+                                        "host_identity": "desktopvn0amd7",
+                                    },
+                                }
+                            },
+                        },
+                        "HASHI-DESKTOP": {
+                            "canonical": {
+                                "instance_id": "HASHI-DESKTOP",
+                                "display_name": "HASHI Desktop",
+                                "display_handle": "@hashi-desktop",
+                                "host": "192.168.0.41",
+                                "port": 8766,
+                                "workbench_port": 8779,
+                                "platform": "windows",
+                                "version": "unknown",
+                                "hashi_version": "unknown",
+                                "protocol_version": "1.0",
+                                "capabilities": [],
+                                "properties": {
+                                    "discovery": "bootstrap",
+                                    "preferred_backend": "bootstrap",
+                                },
+                            },
+                            "observations": {
+                                "bootstrap": {
+                                    "instance_id": "HASHI-DESKTOP",
+                                    "display_name": "HASHI Desktop",
+                                    "display_handle": "@hashi-desktop",
+                                    "host": "192.168.0.41",
+                                    "port": 8766,
+                                    "workbench_port": 8779,
+                                    "platform": "windows",
+                                    "version": "unknown",
+                                    "hashi_version": "unknown",
+                                    "protocol_version": "1.0",
+                                    "capabilities": [],
+                                    "properties": {
+                                        "discovery": "bootstrap",
+                                    },
+                                }
+                            },
+                        },
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        registry = PeerRegistry(hashi_root, "HASHI9")
+
+        assert registry.get_peer("MSI") is not None
+        assert registry.get_peer("HASHI-DESKTOP") is None
+    finally:
+        Path.home = original_home
+
+
+def test_registry_load_state_rebuilds_stale_canonical_from_fresher_observation(tmp_path):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    (hashi_root / "instances.json").write_text('{"instances": {}}', encoding="utf-8")
+    state_dir = tmp_path / "state-home"
+    state_dir.mkdir()
+    original_home = Path.home
+    Path.home = staticmethod(lambda: state_dir)
+    try:
+        state_path = state_dir / ".hashi-remote" / "peers_state_hashi9.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        now = int(time.time())
+        state_path.write_text(
+            json.dumps(
+                {
+                    "peers": {
+                        "HASHI2": {
+                            "canonical": {
+                                "instance_id": "HASHI2",
+                                "display_name": "HASHI2 (WSL)",
+                                "display_handle": "@hashi2",
+                                "host": "127.0.0.1",
+                                "port": 8767,
+                                "workbench_port": 18802,
+                                "platform": "wsl",
+                                "version": "1.0.0",
+                                "hashi_version": "unknown",
+                                "protocol_version": "2.0",
+                                "capabilities": ["handshake_v2"],
+                                "properties": {
+                                    "discovery": "bootstrap_fallback",
+                                    "preferred_backend": "bootstrap_fallback",
+                                    "handshake_state": "handshake_accepted",
+                                    "last_handshake_at": now,
+                                    "last_seen_ok": now - 9 * 3600,
+                                    "live_status": "offline",
+                                },
+                            },
+                            "observations": {
+                                "bootstrap_fallback": {
+                                    "instance_id": "HASHI2",
+                                    "display_name": "HASHI2 (WSL)",
+                                    "display_handle": "@hashi2",
+                                    "host": "127.0.0.1",
+                                    "port": 8767,
+                                    "workbench_port": 18802,
+                                    "platform": "wsl",
+                                    "version": "1.0.0",
+                                    "hashi_version": "unknown",
+                                    "protocol_version": "2.0",
+                                    "capabilities": ["handshake_v2"],
+                                    "properties": {
+                                        "discovery": "bootstrap_fallback",
+                                        "host_identity": "a9max",
+                                        "environment_kind": "wsl",
+                                        "handshake_state": "handshake_accepted",
+                                        "last_seen_ok": now,
+                                        "consecutive_failures": 0,
+                                        "live_status": "online",
+                                    },
+                                },
+                                "handshake_inbound": {
+                                    "instance_id": "HASHI2",
+                                    "display_name": "@hashi2",
+                                    "display_handle": "@hashi2",
+                                    "host": "127.0.0.1",
+                                    "port": 8767,
+                                    "workbench_port": 18802,
+                                    "platform": "wsl",
+                                    "version": "unknown",
+                                    "hashi_version": "unknown",
+                                    "protocol_version": "2.0",
+                                    "capabilities": ["handshake_v2"],
+                                    "properties": {
+                                        "discovery": "handshake_inbound",
+                                        "host_identity": "a9max",
+                                        "environment_kind": "wsl",
+                                    },
+                                },
+                            },
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        registry = PeerRegistry(hashi_root, "HASHI9")
+        peer = registry.get_peer("HASHI2")
+
+        assert peer is not None
+        assert peer.properties["live_status"] == "online"
+        assert peer.properties["last_seen_ok"] == now
+    finally:
+        Path.home = original_home
+
+
 def test_bootstrap_dedupes_legacy_aliases_on_same_endpoint():
     manager = object.__new__(ProtocolManager)
     manager._instance_info = {"instance_id": "HASHI2", "platform": "wsl"}
