@@ -40,6 +40,24 @@ def _resolve_schedule(task: dict) -> str | None:
     return None
 
 
+def _fallback_supports_schedule(schedule: str) -> bool:
+    """Return True only for fixed HH:MM-style daily cron schedules.
+
+    In fallback mode we intentionally support a very small subset:
+    `M H * * *` where both minute and hour are literal integers.
+    Interval-style cron such as `*/15 * * * *` must use heartbeats instead.
+    """
+    parts = schedule.split()
+    if len(parts) != 5 or parts[2] != "*" or parts[3] != "*" or parts[4] != "*":
+        return False
+    try:
+        int(parts[0])
+        int(parts[1])
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
 def _should_fire(schedule: str, last_run_ts: float, now_dt: datetime) -> bool:
     """Check whether *schedule* has a fire time between *last_run_ts* (exclusive) and *now_dt* (inclusive).
 
@@ -113,6 +131,11 @@ class TaskScheduler:
             scheduler_logger.error(f"Failed to save state: {e}")
 
     def _load_tasks(self):
+        # Mind the gap:
+        # - Heartbeats are for interval loops ("every 10 minutes until done").
+        # - Crons are only for fixed wall-clock schedules.
+        # We validate this when loading tasks so unsupported interval crons do
+        # not silently seed and then never fire in fallback mode.
         def is_managed_active_heartbeat(job: dict) -> bool:
             return (
                 isinstance(job, dict)
@@ -131,6 +154,24 @@ class TaskScheduler:
             except Exception as e:
                 scheduler_logger.error(f"Failed to load tasks: {e}")
                 tasks = {"heartbeats": [], "crons": []}
+
+        valid_crons = []
+        for job in tasks.get("crons", []):
+            schedule = _resolve_schedule(job)
+            if not schedule:
+                valid_crons.append(job)
+                continue
+            if HAS_CRONITER or _fallback_supports_schedule(schedule):
+                valid_crons.append(job)
+                continue
+            scheduler_logger.error(
+                "Rejecting cron %s for agent %s: fallback mode only supports fixed daily HH:MM schedules. "
+                "Use a heartbeat for interval loops such as every 10 or 15 minutes. Unsupported schedule: %s",
+                job.get("id", "<unknown>"),
+                job.get("agent", "<unknown>"),
+                schedule,
+            )
+        tasks["crons"] = valid_crons
 
         heartbeats = [
             hb for hb in tasks.get("heartbeats", [])
