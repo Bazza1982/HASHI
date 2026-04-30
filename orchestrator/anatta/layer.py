@@ -132,7 +132,7 @@ def build_anatta_layer(
     config = AnattaConfig(workspace_dir)
     bridge_adapter = BridgeMemoryAdapter(bridge_memory_store)
     memory_store = AnattaMemoryStore(bridge_adapter=bridge_adapter, config=config)
-    cue_interpreter = BackendLLMInterpreter(backend_manager=backend_manager)
+    cue_interpreter = BackendLLMInterpreter(backend_manager=backend_manager, config=config)
     relationship_interpreter = RelationshipInterpreter(memory_store=memory_store)
     aggregator = DriveAggregator(config=config)
     composer = PromptComposer(config=config)
