@@ -183,6 +183,8 @@ class FlexibleAgentRuntime:
 
         # Initialize FlexibleBackendManager
         self.backend_manager = FlexibleBackendManager(config, global_config, secrets)
+        self.anatta = None
+        self._init_anatta_layer()
 
     def _record_active_chat(self, update) -> None:
         """Track the chat_id for each authorized user who messages this bot."""
@@ -564,6 +566,78 @@ class FlexibleAgentRuntime:
             if backend.get("engine") == self.config.active_backend:
                 return backend.get("model", "unknown")
         return "unknown"
+
+    def _init_anatta_layer(self) -> None:
+        try:
+            from orchestrator.anatta import build_anatta_layer
+
+            self.anatta = build_anatta_layer(
+                workspace_dir=self.workspace_dir,
+                bridge_memory_store=self.memory_store,
+                backend_manager=self.backend_manager,
+            )
+            self.logger.info("Anatta layer initialized (mode=%s)", self.anatta.mode())
+        except Exception as exc:
+            self.anatta = None
+            self.logger.warning("Failed to initialize Anatta layer: %s", exc)
+
+    def _anatta_mode(self) -> str:
+        if self.anatta is None:
+            return "off"
+        try:
+            return str(self.anatta.mode())
+        except Exception:
+            return "off"
+
+    def _build_anatta_turn_context(self, item: QueuedRequest, user_text: str):
+        from orchestrator.anatta import TurnContext
+
+        metadata = {
+            "request_id": item.request_id,
+            "summary": item.summary,
+            "source": item.source,
+        }
+        relationship_key = None
+        if self.anatta is not None:
+            relationship_key = self.anatta.resolve_relationship_key(
+                source=item.source,
+                chat_id=item.chat_id,
+                metadata=metadata,
+            )
+        return TurnContext(
+            user_text=user_text,
+            source=item.source,
+            request_id=item.request_id,
+            relationship_key=relationship_key,
+            bridge_recent_turns=self.memory_store.get_recent_turns(limit=8),
+            bridge_memories=self.memory_store.retrieve_memories(user_text, limit=6),
+            metadata=metadata,
+        )
+
+    async def _run_anatta_shadow(self, item: QueuedRequest, user_text: str, assistant_text: str) -> None:
+        if self.anatta is None or self._anatta_mode() != "shadow":
+            return
+        turn_context = self._build_anatta_turn_context(item, user_text)
+        state, _ = await self.anatta.build_turn_state(turn_context, self.get_current_model())
+        await self.anatta.record_async(turn_context, assistant_text, state)
+        self.logger.info(
+            "Anatta shadow recorded for %s (dominant_drives=%s)",
+            item.request_id,
+            ",".join(state.dominant_drives),
+        )
+
+    def _schedule_anatta_shadow(self, item: QueuedRequest, user_text: str, assistant_text: str) -> None:
+        if self.anatta is None or self._anatta_mode() != "shadow":
+            return
+        task = asyncio.create_task(self._run_anatta_shadow(item, user_text, assistant_text))
+
+        def _done_callback(completed: asyncio.Task) -> None:
+            with suppress(asyncio.CancelledError):
+                exc = completed.exception()
+                if exc:
+                    self.logger.warning("Anatta shadow task failed for %s: %s", item.request_id, exc)
+
+        task.add_done_callback(_done_callback)
 
     def _get_system_prompt_text(self) -> str:
         """Return combined system prompt text for token estimation (CLI backends)."""
@@ -5486,6 +5560,7 @@ class FlexibleAgentRuntime:
             active_skill_provider=self._get_active_skill_sections,
             sys_prompt_manager=self.sys_prompt_manager,
         )
+        self._init_anatta_layer()
 
         # Re-init habit store (wipe/reset deletes habits.sqlite)
         self.habit_store = HabitStore(
@@ -5578,6 +5653,7 @@ class FlexibleAgentRuntime:
             active_skill_provider=self._get_active_skill_sections,
             sys_prompt_manager=self.sys_prompt_manager,
         )
+        self._init_anatta_layer()
 
         # Re-init habit store (wipe/reset deletes habits.sqlite)
         self.habit_store = HabitStore(
@@ -7023,6 +7099,7 @@ class FlexibleAgentRuntime:
                     self.memory_store.record_turn("user", item.source, memory_user_text)
                     self.memory_store.record_turn("assistant", self.config.active_backend, display_text or response.text)
                     self.memory_store.record_exchange(memory_user_text, display_text or response.text, item.source)
+                    self._schedule_anatta_shadow(item, memory_user_text, display_text or response.text)
                 self.handoff_builder.append_transcript("user", item.prompt, item.source)
                 self.handoff_builder.append_transcript("assistant", display_text or response.text)
                 self.handoff_builder.refresh_recent_context()
@@ -7453,6 +7530,7 @@ class FlexibleAgentRuntime:
                             self.memory_store.record_turn("user", item.source, memory_user_text)
                             self.memory_store.record_turn("assistant", self.config.active_backend, display_text or response.text)
                             self.memory_store.record_exchange(memory_user_text, display_text or response.text, item.source)
+                            self._schedule_anatta_shadow(item, memory_user_text, display_text or response.text)
                         if not is_bridge_request:
                             self.handoff_builder.append_transcript("user", item.prompt, item.source)
                             self.handoff_builder.append_transcript("assistant", display_text or response.text)
