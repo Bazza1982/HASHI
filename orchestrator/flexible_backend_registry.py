@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+CLI_ENGINES = frozenset({"gemini-cli", "claude-cli", "codex-cli"})
+
 BACKEND_REGISTRY: dict[str, dict] = {
     "gemini-cli": {
         "label": "gemini",
@@ -108,6 +110,10 @@ CLAUDE_MODEL_ALIASES = {
 
 def get_backend_entry(engine: str) -> dict:
     return BACKEND_REGISTRY.get(engine, {})
+
+
+def is_cli_backend(engine: str | None) -> bool:
+    return bool(engine and engine in CLI_ENGINES)
 
 
 def get_backend_label(engine: str) -> str:

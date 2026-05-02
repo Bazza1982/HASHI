@@ -28,7 +28,9 @@ Two operating modes:
 
 **Common (all agents):**
 - `/help` — list available commands
-- `/new` — fresh session (re-primes with FYI catalog)
+- `/new` — fresh CLI session reset; non-CLI backends should use `/fresh`
+- `/fresh` — clean API context for non-CLI backends; clears recent turns and preserves saved memories without auto-injecting them
+- `/memory [status|on|pause|saved on|saved off|saved status]` — inspect or change bridge memory injection
 - `/clear` — clear workspace context files
 - `/handoff` — restore recent continuity from bridge transcript into a fresh session
 - `/fyi [prompt]` — refresh bridge environment awareness; optionally append a follow-up prompt

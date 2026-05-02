@@ -395,7 +395,7 @@ HASHI supports multiple communication channels:
 #### Telegram
 - Default transport, enabled by default
 - Requires `telegram_bot_token` in `secrets.json`
-- Commands: `/new`, `/stop`, `/reboot`, `/handoff`, `/skill`, etc.
+- Commands: `/new`, `/fresh`, `/stop`, `/reboot`, `/handoff`, `/skill`, etc.
 - Supports inline keyboards, file uploads, voice messages, SafeVoice
 - File sending (photos, documents, videos, audio) from agents
 
@@ -428,7 +428,8 @@ HASHI agents respond to both natural language and structured commands:
 
 | Command | Description |
 |---------|-------------|
-| `/new` | Start a fresh session |
+| `/new` | Start a fresh CLI session |
+| `/fresh` | Start a clean API context without deleting saved memories |
 | `/stop` | Cancel current processing |
 | `/reboot [min\|max\|#]` | Hot restart agents |
 | `/status [full]` | Show agent status, backend info |

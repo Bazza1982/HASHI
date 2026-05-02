@@ -33,6 +33,7 @@ from orchestrator.skill_manager import SkillDefinition, SkillManager
 from orchestrator.voice_manager import VoiceManager
 from orchestrator.private_wol import describe_wol_targets, private_wol_available, run_private_wol
 from orchestrator.workzone import access_root_for_workzone, build_workzone_prompt, clear_workzone, load_workzone, resolve_workzone_input, save_workzone
+from orchestrator.flexible_backend_registry import is_cli_backend
 
 AVAILABLE_GEMINI_MODELS = [
     "gemini-3.1-pro-preview",
@@ -4260,7 +4261,9 @@ class BridgeAgentRuntime:
             "/load <slot> - Restore a parked topic into active context",
             "/fyi [prompt] - Refresh bridge environment awareness",
             "/model - View or change model",
-            "/new - Start a fresh session",
+            "/new - Start a fresh CLI session",
+            "/fresh - Start a clean API context without deleting saved memories",
+            "/memory [status|on|pause|saved on|saved off] - Control memory injection",
             "/clear - Clear local media/history and start fresh",
             "/stop - Stop current execution and clear queued messages",
             "/terminate - Shut down this agent",
@@ -4287,6 +4290,11 @@ class BridgeAgentRuntime:
     async def cmd_new(self, update, context):
         if update.effective_user.id != self.global_config.authorized_id:
             return
+        if not is_cli_backend(self.config.engine):
+            await update.message.reply_text(
+                "This agent is using a non-CLI backend. Use /fresh for a clean API context; /new is reserved for CLI session reset."
+            )
+            return
         # /new semantics (author intent): start stateless and ONLY rely on the agent's own agent.md
         # - No Bridge FYI injection
         # - No README/doc auto-reading claims
@@ -4307,6 +4315,84 @@ class BridgeAgentRuntime:
             update.effective_chat.id, prompt, "system", "New session",
             skip_memory_injection=True,
         )
+
+    async def cmd_fresh(self, update, context):
+        if update.effective_user.id != self.global_config.authorized_id:
+            return
+        if is_cli_backend(self.config.engine):
+            await update.message.reply_text(
+                "This agent is using a CLI backend. Use /new to reset the CLI session."
+            )
+            return
+
+        self._pending_auto_recall_context = None
+        assembler = getattr(self, "context_assembler", None)
+        memory_store = getattr(assembler, "memory_store", None)
+        if memory_store is not None and hasattr(memory_store, "clear_turns"):
+            memory_store.clear_turns()
+        if assembler is not None:
+            assembler.turns_injection_enabled = True
+            assembler.saved_memory_injection_enabled = False
+
+        await update.message.reply_text(
+            "Starting a fresh API context. Recent turns were cleared; saved memories are preserved but will not be auto-injected."
+        )
+        prompt = (
+            "SYSTEM: Fresh API context started. Do not reference previous chat or saved memories unless the user explicitly asks. "
+            "Follow ONLY your agent.md instructions. Ask the user what they want to do next."
+        )
+        await self.enqueue_request(
+            update.effective_chat.id,
+            prompt,
+            "system",
+            "Fresh API context",
+            skip_memory_injection=True,
+        )
+
+    async def cmd_memory(self, update, context):
+        if update.effective_user.id != self.global_config.authorized_id:
+            return
+        args = " ".join(context.args).strip().lower() if context.args else ""
+        assembler = getattr(self, "context_assembler", None)
+
+        def state_line() -> str:
+            if not assembler:
+                return "Memory injection: unknown (assembler not ready)"
+            turns_state = "ON" if assembler.turns_injection_enabled else "PAUSED"
+            saved_state = "ON" if assembler.saved_memory_injection_enabled else "PAUSED"
+            return f"Memory injection: turns={turns_state}, saved={saved_state}"
+
+        if args in ("", "status", "saved status"):
+            stats = self.memory_store.get_stats() if hasattr(self, "memory_store") else {}
+            turns = stats.get("turns", "?")
+            memories = stats.get("memories", "?")
+            await update.message.reply_text(
+                f"{state_line()}\n"
+                f"Stored: {turns} turns, {memories} memories\n\n"
+                f"Commands: /memory on | pause | saved on | saved off | saved status"
+            )
+        elif args == "on":
+            if assembler:
+                assembler.turns_injection_enabled = True
+                assembler.saved_memory_injection_enabled = True
+            await update.message.reply_text("Memory injection ON for recent turns and saved memories.")
+        elif args == "pause":
+            if assembler:
+                assembler.turns_injection_enabled = False
+                assembler.saved_memory_injection_enabled = False
+            await update.message.reply_text("Memory injection PAUSED. Stored turns and memories are preserved.")
+        elif args == "saved on":
+            if assembler:
+                assembler.saved_memory_injection_enabled = True
+            await update.message.reply_text("Saved memory auto-injection ON.")
+        elif args == "saved off":
+            if assembler:
+                assembler.saved_memory_injection_enabled = False
+            await update.message.reply_text("Saved memory auto-injection OFF. Saved memories are preserved.")
+        else:
+            await update.message.reply_text(
+                "Usage: /memory [on | pause | saved on | saved off | saved status | status]"
+            )
 
     async def cmd_workzone(self, update, context):
         if update.effective_user.id != self.global_config.authorized_id:
@@ -4980,7 +5066,9 @@ class BridgeAgentRuntime:
             BotCommand("fyi", "Refresh bridge environment awareness"),
             BotCommand("model", "View or change model"),
             BotCommand("workzone", "Set temporary working directory [path|off]"),
-            BotCommand("new", "Start a fresh session"),
+            BotCommand("new", "Start a fresh CLI session"),
+            BotCommand("fresh", "Start a clean API context"),
+            BotCommand("memory", "Control memory injection"),
             BotCommand("clear", "Clear media/history"),
             BotCommand("stop", "Stop execution"),
             BotCommand("reboot", "Hot restart agents"),
@@ -5036,6 +5124,8 @@ class BridgeAgentRuntime:
         self.app.add_handler(CallbackQueryHandler(self.callback_start_agent, pattern=r"^startagent:"))
         self.app.add_handler(CallbackQueryHandler(self.callback_skill, pattern=r"^(skill|skilljob):"))
         self.app.add_handler(CommandHandler("new", self.cmd_new))
+        self.app.add_handler(CommandHandler("fresh", self.cmd_fresh))
+        self.app.add_handler(CommandHandler("memory", self.cmd_memory))
         self.app.add_handler(CommandHandler("clear", self.cmd_clear))
         self.app.add_handler(CommandHandler("stop", self.cmd_stop))
         self.app.add_handler(CommandHandler("terminate", self.cmd_terminate))

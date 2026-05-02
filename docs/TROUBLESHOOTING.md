@@ -22,9 +22,11 @@
 - [ ] `http://127.0.0.1:3001/api/config` returns JSON
 - [ ] `bridgeUApi` in that JSON points to the correct `workbench_port`
 
-### /new semantics
-- [ ] `/new` starts a **bare** session (no FYI injection)
-- [ ] Agent follows only its `agent.md` (workspace)
+### /new and /fresh semantics
+- [ ] CLI backends use `/new` for a fresh CLI session reset
+- [ ] Non-CLI backends use `/fresh` for a clean API context
+- [ ] `/fresh` clears recent turns but preserves saved memories
+- [ ] `/fresh` disables saved-memory auto-injection until `/memory saved on` or `/memory on`
 
 ### /reboot semantics
 - [ ] `/reboot min` restarts the requester and rebuilds hot managers
@@ -56,7 +58,7 @@
   - Branch: `v1.1-debugging`
   - Commit: (fill)
   - Date: 2026-03-17
-- [x] `/new` is **bare** (no Bridge FYI injection; follows agent.md only).
+- [x] `/new` is **bare** for CLI session reset; non-CLI clean context uses `/fresh`.
   - Branch: `v1.1-debugging`
   - Commit: (fill)
   - Date: 2026-03-17

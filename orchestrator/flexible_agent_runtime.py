@@ -31,6 +31,7 @@ from orchestrator.flexible_backend_registry import (
     get_available_efforts,
     get_available_models,
     get_backend_label,
+    is_cli_backend,
     normalize_effort,
     normalize_model,
 )
@@ -330,8 +331,8 @@ class FlexibleAgentRuntime:
                 if isinstance(name, str) and name.strip():
                     self._enabled_commands.add(name.strip().lstrip("/").lower())
 
-        # help/status/new/wipe/clear/model/effort/mode should always be available
-        self._enabled_commands.update({"help", "status", "new", "wipe", "reset", "clear", "memory", "model", "effort", "mode", "jobs", "verbose", "think", "voice", "whisper", "transfer", "fork", "cos", "long", "end", "oll"})
+        # help/status/new/fresh/wipe/clear/model/effort/mode should always be available
+        self._enabled_commands.update({"help", "status", "new", "fresh", "wipe", "reset", "clear", "memory", "model", "effort", "mode", "jobs", "verbose", "think", "voice", "whisper", "transfer", "fork", "cos", "long", "end", "oll"})
 
     def _is_command_allowed(self, cmd: str) -> bool:
         cmd = (cmd or "").lstrip("/").lower()
@@ -460,6 +461,7 @@ class FlexibleAgentRuntime:
         silent: bool = False,
         is_retry: bool = False,
         deliver_to_telegram: bool = True,
+        skip_memory_injection: bool = False,
     ):
         if not prompt or not prompt.strip():
             self.error_logger.error(f"Rejected empty prompt from {source} (summary={summary!r})")
@@ -474,6 +476,7 @@ class FlexibleAgentRuntime:
             silent=silent,
             is_retry=is_retry,
             deliver_to_telegram=deliver_to_telegram,
+            skip_memory_injection=skip_memory_injection,
         )
         await self.queue.put(item)
         self.message_logger.info(f"Queued {item.request_id} from {source} (summary={summary!r})")
@@ -1803,6 +1806,7 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CommandHandler("workzone", self._wrap_cmd("workzone", self.cmd_workzone)))
         self.app.add_handler(CommandHandler("worzone", self._wrap_cmd("worzone", self.cmd_workzone)))
         self.app.add_handler(CommandHandler("new", self._wrap_cmd("new", self.cmd_new)))
+        self.app.add_handler(CommandHandler("fresh", self._wrap_cmd("fresh", self.cmd_fresh)))
         self.app.add_handler(CommandHandler("memory", self._wrap_cmd("memory", self.cmd_memory)))
         self.app.add_handler(CommandHandler("wipe", self._wrap_cmd("wipe", self.cmd_wipe)))
         self.app.add_handler(CommandHandler("reset", self._wrap_cmd("reset", self.cmd_reset)))
@@ -5433,6 +5437,12 @@ class FlexibleAgentRuntime:
             return
         if not self.backend_manager.current_backend:
             return
+        if not is_cli_backend(self.config.active_backend):
+            await self._reply_text(
+                update,
+                "This agent is using a non-CLI backend. Use /fresh for a clean API context; /new is reserved for CLI session reset.",
+            )
+            return
         self._clear_transfer_state()
         # /new semantics (author intent): start stateless and ONLY rely on the agent's own agent.md
         # - No Bridge FYI injection
@@ -5467,7 +5477,51 @@ class FlexibleAgentRuntime:
             "SYSTEM: Fresh session started. Do not reference any previous chat. "
             "Follow ONLY your agent.md instructions. Ask the user what they want to do next."
         )
-        await self.enqueue_request(update.effective_chat.id, prompt, "system", "New session")
+        await self.enqueue_request(
+            update.effective_chat.id,
+            prompt,
+            "system",
+            "New session",
+            skip_memory_injection=True,
+        )
+
+    async def cmd_fresh(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        if not self.backend_manager.current_backend:
+            return
+        if is_cli_backend(self.config.active_backend):
+            await self._reply_text(
+                update,
+                "This agent is using a CLI backend. Use /new to reset the CLI session.",
+            )
+            return
+
+        self._clear_transfer_state()
+        self._pending_auto_recall_context = None
+        assembler = getattr(self, "context_assembler", None)
+        memory_store = getattr(assembler, "memory_store", None)
+        if memory_store is not None and hasattr(memory_store, "clear_turns"):
+            memory_store.clear_turns()
+        if assembler is not None:
+            assembler.turns_injection_enabled = True
+            assembler.saved_memory_injection_enabled = False
+
+        await self._reply_text(
+            update,
+            "Starting a fresh API context. Recent turns were cleared; saved memories are preserved but will not be auto-injected.",
+        )
+        prompt = (
+            "SYSTEM: Fresh API context started. Do not reference previous chat or saved memories unless the user explicitly asks. "
+            "Follow ONLY your agent.md instructions. Ask the user what they want to do next."
+        )
+        await self.enqueue_request(
+            update.effective_chat.id,
+            prompt,
+            "system",
+            "Fresh API context",
+            skip_memory_injection=True,
+        )
 
     def _get_skill_state(self) -> dict:
         path = self.workspace_dir / "skill_state.json"
@@ -5500,7 +5554,9 @@ class FlexibleAgentRuntime:
 
         if args in ("", "status"):
             if assembler:
-                state = "ON ✅" if assembler.memory_injection_enabled else "PAUSED ⏸️"
+                turns_state = "ON ✅" if assembler.turns_injection_enabled else "PAUSED ⏸️"
+                saved_state = "ON ✅" if assembler.saved_memory_injection_enabled else "PAUSED ⏸️"
+                state = f"turns={turns_state}, saved={saved_state}"
             else:
                 state = "unknown (assembler not ready)"
             stats = self.memory_store.get_stats() if hasattr(self, "memory_store") else {}
@@ -5512,30 +5568,58 @@ class FlexibleAgentRuntime:
                 f"Memory injection: {state}\n"
                 f"Stored: {turns} turns, {memories} memories\n"
                 f"BGE sync: {sync_state}\n\n"
-                f"Commands: /memory on | pause | wipe | sync on | sync off"
+                f"Commands: /memory on | pause | saved on | saved off | saved status | wipe | sync on | sync off"
             )
 
         elif args == "on":
             if assembler:
-                assembler.memory_injection_enabled = True
+                assembler.turns_injection_enabled = True
+                assembler.saved_memory_injection_enabled = True
             await self._reply_text(update,
-                "✅ Memory injection ON. Long-term memories will be included in context."
+                "✅ Memory injection ON. Recent turns and saved memories will be included in context."
             )
 
         elif args == "pause":
             if assembler:
-                assembler.memory_injection_enabled = False
+                assembler.turns_injection_enabled = False
+                assembler.saved_memory_injection_enabled = False
             await self._reply_text(update,
-                "⏸️ Memory injection PAUSED. Memories are preserved but not injected into context.\n"
+                "⏸️ Memory injection PAUSED. Recent turns and saved memories are preserved but not injected into context.\n"
                 "Use /memory on to resume."
             )
+
+        elif args == "saved on":
+            if assembler:
+                assembler.saved_memory_injection_enabled = True
+            await self._reply_text(update,
+                "✅ Saved memory auto-injection ON. Long-term memories may be included in future context."
+            )
+
+        elif args == "saved off":
+            if assembler:
+                assembler.saved_memory_injection_enabled = False
+            await self._reply_text(update,
+                "⏸️ Saved memory auto-injection OFF. Long-term memories are preserved but not automatically injected."
+            )
+
+        elif args == "saved status":
+            if assembler:
+                state = "ON ✅" if assembler.saved_memory_injection_enabled else "PAUSED ⏸️"
+            else:
+                state = "unknown (assembler not ready)"
+            await self._reply_text(update, f"Saved memory auto-injection: {state}")
 
         elif args == "wipe":
             if hasattr(self, "memory_store"):
                 result = self.memory_store.clear_all()
                 turns = result.get("deleted_turns", 0)
                 mems = result.get("deleted_memories", 0)
-                state = "ON ✅" if (assembler and assembler.memory_injection_enabled) else "PAUSED ⏸️"
+                if assembler:
+                    turns_state = "ON" if assembler.turns_injection_enabled else "PAUSED"
+                    saved_state = "ON" if assembler.saved_memory_injection_enabled else "PAUSED"
+                    state = f"turns={turns_state}, saved={saved_state}"
+                else:
+                    state = "unknown"
                 await self._reply_text(update,
                     f"🗑️ Memory wiped: {turns} turns and {mems} memories deleted.\n"
                     f"Database structure preserved. Injection is still {state}."
@@ -5563,7 +5647,7 @@ class FlexibleAgentRuntime:
 
         else:
             await self._reply_text(update,
-                "Usage: /memory [on | pause | wipe | sync on | sync off | status]"
+                "Usage: /memory [on | pause | saved on | saved off | saved status | wipe | sync on | sync off | status]"
             )
 
     async def cmd_wipe(self, update: Update, context: Any):
@@ -7822,7 +7906,9 @@ class FlexibleAgentRuntime:
             BotCommand("workzone", "Set temporary working directory [path|off]"),
             BotCommand("model", "View or change model"),
             BotCommand("effort", "View or change effort"),
-            BotCommand("new", "Start a fresh session"),
+            BotCommand("new", "Start a fresh CLI session"),
+            BotCommand("fresh", "Start a clean API context"),
+            BotCommand("memory", "Control memory injection"),
             BotCommand("clear", "Clear media/history"),
             BotCommand("stop", "Stop execution"),
             BotCommand("reboot", "Hot restart agents"),

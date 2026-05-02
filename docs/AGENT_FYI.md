@@ -20,7 +20,8 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 
 ## Important Commands
 - `/help`: command list for this agent.
-- `/new`: fresh session start with bridge FYI primer.
+- `/new`: fresh CLI session reset. Use this for CLI-backed agents (`claude-cli`, `gemini-cli`, `codex-cli`).
+- `/fresh`: clean API context for non-CLI backends (`openrouter-api`, `deepseek-api`, `ollama-api`). Clears recent turns and stops saved memories from being auto-injected without deleting them.
 - `/handoff`: fresh continuity restore from recent chat history.
 - `/fyi [prompt]`: explicit bridge environment awareness refresh.
 - `/active [on|off] [minutes]`: toggle proactive follow-up heartbeat; default is 10 minutes.
@@ -67,7 +68,8 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 ## Core Memory Model
 - Backend CLI/API sessions are treated as stateless by bridge.
 - Bridge owns continuity and context injection.
-- `/new` starts fresh and re-primes the agent with this FYI catalog.
+- `/new` starts a fresh CLI session and re-primes the agent with this FYI catalog.
+- `/fresh` starts a clean API context. It clears recent turns, preserves saved memories, and disables saved-memory auto-injection until `/memory saved on` or `/memory on` restores it.
 - `/handoff` restores recent continuity from bridge transcript, not CLI resume state.
 - `/fyi` explicitly refreshes awareness of this bridge environment and can carry a follow-up prompt.
 
@@ -81,7 +83,7 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
   - `recall`
 - Toggle skills persist in workspace state until turned off.
 - `/skill` is the main browser for the skill catalog.
-- `recall` is a bridge policy toggle: if ON, recent continuity is auto-restored once after an unexpected restart, but not after `/new`.
+- `recall` is a bridge policy toggle: if ON, recent continuity is auto-restored once after an unexpected restart, but not after `/new` or `/fresh`.
 
 ## Workspaces And Files
 - Main repo guide: `README.md`

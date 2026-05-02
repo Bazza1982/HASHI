@@ -672,7 +672,18 @@ class BridgeContextAssembler:
         self.system_md = system_md
         self.active_skill_provider = active_skill_provider
         self.sys_prompt_manager = sys_prompt_manager
-        self.memory_injection_enabled: bool = True
+        self.turns_injection_enabled: bool = True
+        self.saved_memory_injection_enabled: bool = True
+
+    @property
+    def memory_injection_enabled(self) -> bool:
+        return self.turns_injection_enabled and self.saved_memory_injection_enabled
+
+    @memory_injection_enabled.setter
+    def memory_injection_enabled(self, enabled: bool) -> None:
+        value = bool(enabled)
+        self.turns_injection_enabled = value
+        self.saved_memory_injection_enabled = value
 
     def _load_system_prompt(self) -> str:
         if not self.system_md:
@@ -763,8 +774,8 @@ class BridgeContextAssembler:
                 recent turns, and memories — the CLI session already has them.
                 Only include /sys slots, active skills, and the user prompt.
             inject_memory: When False, skip recent turns and memory retrieval
-                even if memory_injection_enabled is True. Used by /new to
-                ensure a clean slate.
+                even if the per-section injection flags are enabled. Used by
+                /new and /fresh to ensure a clean first prompt.
         """
         # Per-engine memory injection limits — smaller models get less context
         _memory_limits = {
@@ -778,9 +789,11 @@ class BridgeContextAssembler:
         limits = _memory_limits.get(engine, {"recent_turns": 10, "memories": 6})
 
         system_text = "" if incremental else self._load_system_prompt()
-        inject = self.memory_injection_enabled and not incremental and inject_memory
-        recent_turns = self.memory_store.get_recent_turns(limit=limits["recent_turns"]) if inject else []
-        memories = self.memory_store.retrieve_memories(user_prompt, limit=limits["memories"]) if inject else []
+        inject_base = not incremental and inject_memory
+        inject_turns = inject_base and self.turns_injection_enabled
+        inject_saved_memory = inject_base and self.saved_memory_injection_enabled
+        recent_turns = self.memory_store.get_recent_turns(limit=limits["recent_turns"]) if inject_turns else []
+        memories = self.memory_store.retrieve_memories(user_prompt, limit=limits["memories"]) if inject_saved_memory else []
         active_skills = []
         if callable(self.active_skill_provider):
             try:
