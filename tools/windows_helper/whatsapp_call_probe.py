@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import subprocess
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -27,6 +28,7 @@ class ProbeResult:
     detection_method: str
     checked_at: float
     windows: list[dict[str, Any]]
+    processes: list[dict[str, Any]]
     signals: list[dict[str, Any]]
     answer_attempted: bool = False
     answer_clicked: bool = False
@@ -46,11 +48,55 @@ def _whatsapp_windows() -> list[dict[str, Any]]:
     ]
 
 
+def _whatsapp_processes() -> list[dict[str, Any]]:
+    try:
+        proc = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-Command",
+                (
+                    "Get-Process | "
+                    "Where-Object { $_.ProcessName -match 'WhatsApp' } | "
+                    "Select-Object Id,ProcessName,MainWindowTitle,Path | ConvertTo-Json -Compress"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except Exception:
+        return []
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return []
+    try:
+        import json
+
+        payload = json.loads(proc.stdout)
+    except Exception:
+        return []
+    if isinstance(payload, dict):
+        payload = [payload]
+    if not isinstance(payload, list):
+        return []
+    return [
+        {
+            "pid": int(item.get("Id", 0) or 0),
+            "process_name": str(item.get("ProcessName", "") or ""),
+            "main_window_title": str(item.get("MainWindowTitle", "") or ""),
+            "path": str(item.get("Path", "") or ""),
+        }
+        for item in payload
+        if int(item.get("Id", 0) or 0)
+    ]
+
+
 def _is_strong_call_signal(text: str) -> bool:
     return _matches_any(text, STRONG_CALL_TEXT_NEEDLES)
 
 
-def _uia_probe(auto_answer: bool) -> tuple[list[dict[str, Any]], bool, str | None]:
+def _uia_probe(auto_answer: bool, whatsapp_pids: set[int]) -> tuple[list[dict[str, Any]], bool, str | None]:
     try:
         import uiautomation as auto  # type: ignore
     except Exception as exc:  # pragma: no cover - depends on Windows host packages
@@ -65,7 +111,12 @@ def _uia_probe(auto_answer: bool) -> tuple[list[dict[str, Any]], bool, str | Non
         for window in windows:
             name = str(getattr(window, "Name", "") or "")
             class_name = str(getattr(window, "ClassName", "") or "")
-            if not _matches_any(name, WHATSAPP_TITLE_NEEDLES) and not _matches_any(class_name, WHATSAPP_TITLE_NEEDLES):
+            process_id = int(getattr(window, "ProcessId", 0) or 0)
+            if (
+                process_id not in whatsapp_pids
+                and not _matches_any(name, WHATSAPP_TITLE_NEEDLES)
+                and not _matches_any(class_name, WHATSAPP_TITLE_NEEDLES)
+            ):
                 continue
 
             stack = [(window, 0)]
@@ -83,6 +134,7 @@ def _uia_probe(auto_answer: bool) -> tuple[list[dict[str, Any]], bool, str | Non
                         {
                             "source": "uia",
                             "window_name": name,
+                            "window_process_id": process_id,
                             "control_name": control_name,
                             "control_type": control_type,
                             "automation_id": automation_id,
@@ -119,6 +171,8 @@ def probe_whatsapp_call(*, auto_answer: bool = False, use_uia: bool = True) -> d
     """
 
     windows = _whatsapp_windows()
+    processes = _whatsapp_processes()
+    whatsapp_pids = {int(item["pid"]) for item in processes if item.get("pid")}
     signals: list[dict[str, Any]] = []
     errors: list[str] = []
 
@@ -129,7 +183,7 @@ def probe_whatsapp_call(*, auto_answer: bool = False, use_uia: bool = True) -> d
 
     answer_clicked = False
     if use_uia:
-        uia_signals, clicked, error = _uia_probe(auto_answer=auto_answer)
+        uia_signals, clicked, error = _uia_probe(auto_answer=auto_answer, whatsapp_pids=whatsapp_pids)
         signals.extend(uia_signals)
         answer_clicked = clicked
         if error:
@@ -146,6 +200,7 @@ def probe_whatsapp_call(*, auto_answer: bool = False, use_uia: bool = True) -> d
         detection_method="uia" if any(item.get("source") == "uia" for item in signals) else "window_title",
         checked_at=time.time(),
         windows=windows,
+        processes=processes,
         signals=signals,
         answer_attempted=auto_answer,
         answer_clicked=answer_clicked,
