@@ -58,7 +58,10 @@ orchestrator/backend_preflight.py
 orchestrator/agent_lifecycle.py
 orchestrator/reboot_manager.py
 orchestrator/service_manager.py
+orchestrator/startup_manager.py
+orchestrator/shutdown_manager.py
 orchestrator/whatsapp_manager.py
+orchestrator/onboarding_gate.py
 ```
 
 ## Important Architecture Note
@@ -73,6 +76,8 @@ self.backend_preflight = BackendPreflight(self)
 self.agent_lifecycle = AgentLifecycleManager(self)
 self.reboot_manager = RebootManager(self)
 self.services = ServiceManager(self)
+self.startup_manager = StartupManager(self)
+self.shutdown_manager = ShutdownManager(self)
 self.whatsapp_manager = WhatsAppManager(self)
 ```
 
@@ -527,3 +532,48 @@ Move WhatsApp transport control out of main
 Slim orchestrator run loop into high-level flow
 Slim main.py to process bootstrap only
 ```
+
+## v3.2-alpha Implementation Status
+
+Updated: 2026-05-02.
+
+Completed on branch `v3.2-alpha`:
+
+- `d01be3b` - `Refactor bootstrap infrastructure out of main`
+- `96f062f` - `Move config admin and backend preflight out of main`
+- `f63ff29` - `Move agent lifecycle into hot-reloadable manager`
+- `c10d8de` - `Move runtime services into hot-reloadable manager`
+- `7255967` - `Move hot restart orchestration out of main`
+- `4f64407` - `Move WhatsApp lifecycle into hot-reloadable manager`
+- `c92a31d` - `Preserve runtime list identity when stopping agents`
+- `ed42242` - `Move bridge file logging into bootstrap`
+- `d07c60e` - `Move initial startup orchestration out of main`
+- `67b0fb3` - `Move shutdown and onboarding boundaries out of main`
+
+Current shape:
+
+- `main.py` reduced from about 1570 lines to 337 lines.
+- Feature behavior moved into hot-reloadable managers for config administration, backend preflight, agent lifecycle, runtime services, reboot, startup, shutdown, WhatsApp, and skill management.
+- Long-lived service and transport handles remain on the kernel.
+- Manager rebuild is transaction-style: build replacements first, commit only after construction succeeds.
+- `stop_agent()` now preserves `self.kernel.runtimes` list identity, so Workbench API and AgentDirectory do not hold stale list references after `/reboot min`.
+- `SkillManager` is now rebuilt during hot manager rebuild.
+
+Validation completed without live restart:
+
+```text
+python3 -m py_compile main.py orchestrator/*.py
+pytest
+203 passed, 2 warnings
+git status --short --branch
+## v3.2-alpha
+```
+
+Live `/reboot min` and `/reboot max` validation has not been run yet by request. Do not mark the upgrade fully accepted until live reboot checks and health endpoint checks have been performed.
+
+Remaining closeout:
+
+- Perform live `/reboot min` and `/reboot max` checks when allowed.
+- Verify Workbench API and API Gateway health after live reboot.
+- Decide whether to reduce `main.py` further toward the original 200-line target, or accept the current 337-line kernel wrapper shape for v3.2-alpha.
+- Document WhatsApp transport implementation hot reload as transport-restart-only unless a dedicated warm-restart path is added.
