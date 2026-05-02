@@ -2,7 +2,7 @@
 
 This directory contains developer documentation and operational notes for HASHI.
 
-> **Status:** v2.1.0 — Nagare Flow System released. All v2 roadmap delivered.
+> **Status:** v3.2-alpha — slim core architecture accepted, browser gateway and runtime hardening active.
 >
 > **Changelog:** see [`../CHANGELOG.md`](../CHANGELOG.md) · **Roadmap:** see [ROADMAP.md](ROADMAP.md).
 
@@ -15,6 +15,8 @@ This directory contains developer documentation and operational notes for HASHI.
 - [initial.md](initial.md) — Onboarding prompt template (onboarding-only)
 - [tools.md](tools.md) — Tools & operations reference
 - [WORKBENCH_NOTES.md](WORKBENCH_NOTES.md) — Workbench/runtime semantics
+- [HASHI_SLIM_CORE_ARCHITECTURE.md](HASHI_SLIM_CORE_ARCHITECTURE.md) — v3.2 slim core architecture and hot manager rebuild contract
+- [HASHI_CORE_SLIMMING_PLAN.md](HASHI_CORE_SLIMMING_PLAN.md) — implementation plan and acceptance record for the slim core migration
 
 ### Nagare Flow System (v2.1)
 - [NAGARE_FLOW_SYSTEM.md](NAGARE_FLOW_SYSTEM.md) — Complete technical reference for the multi-agent workflow orchestration engine

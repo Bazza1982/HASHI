@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.2.0-alpha] - 2026-05-02
+
+### ✨ Added
+
+- **Slim core architecture** — `main.py` is now a slim process bootstrap/kernel wrapper, with frequently changed bridge behavior moved into hot-reloadable managers under `orchestrator/`.
+  - Added manager boundaries for skill management, config administration, backend preflight, agent lifecycle, runtime services, hot reboot, startup, shutdown, and WhatsApp control.
+  - Hot reboot now rebuilds managers transaction-style after module reload: replacement managers are built first, then committed only if the full set initializes successfully.
+  - Long-lived live handles remain on the kernel, including Workbench API, API Gateway, scheduler, WhatsApp transport, agent directory, and runtime list state.
+  - Accepted with cold restart, `/reboot min`, `/reboot max`, Workbench/API health checks, and full `pytest` validation.
+- **Browser gateway alpha** — local browser gateway package and test coverage for browser-facing bridge capabilities.
+- **OLL HASHI Chrome extension scaffold** — extension files and implementation plan for browser bridge workflows.
+- **Private wake-on-LAN tooling** — local helper and tests for private wake-on-LAN flows.
+- **Workzone support** — project/workspace zone helper module and tests.
+
+### 🔧 Fixed
+
+- **Runtime list identity during reboot** — stopping an agent now mutates `kernel.runtimes` in place, preserving references held by Workbench API and AgentDirectory after `/reboot min` or `/reboot max`.
+- **Startup task result logging** — unexpected exceptions while reading startup task results are now logged instead of being silently swallowed.
+- **Codex CLI completion hang** — `adapters/codex_cli.py` now accepts a completed Codex turn as a valid finish signal even if the outer CLI process does not exit immediately.
+  - Existing success path is preserved: normal subprocess exit still completes exactly as before.
+  - Added a backward-compatible fallback: if Codex emits the final `agent_message` and `turn.completed`, HASHI gives the CLI a short grace window to exit, then force-closes it and returns the completed answer instead of hanging in `busy`.
+  - Idle timeout enforcement is now active for Codex CLI requests, preventing stalled subprocesses from waiting until the hard timeout.
+  - Added regression tests covering both the post-`turn.completed` forced-exit path and idle-timeout path.
+- **Remote handshake alias false-positive** — `remote/protocol_manager.py` now verifies that a handshake success response comes from the expected `instance_id` before marking that peer healthy.
+  - Prevents stale or duplicated bootstrap endpoints from making one instance appear online when a different instance answers on the same host/port.
+  - Stops `/remote list` from inheriting another peer's agents and recent handshake timestamp through alias collisions.
+- **Cross-instance Hchat auto-reply loop** — `agent_runtime.py` and `flexible_agent_runtime.py` now share the same explicit reply-body semantics and suppress automatic hchat replies when the incoming hchat body is already a reply payload.
+  - Flex agents now tag cross-instance auto-replies as `[hchat reply from ...]` before routing through `send_hchat`, matching the legacy runtime behavior.
+  - Prevents cross-instance reply traffic from being rewrapped as a fresh hchat and bounced back indefinitely.
+  - Keeps first-hop hchat behavior unchanged while adding a hard stop for reply-on-reply ping-pong.
+
 ## [3.1.0] - 2026-04-29
 
 ### ✨ Added
@@ -26,30 +57,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Codex CLI** — upgraded from `0.116.0` to `0.125.0` (`npm install -g @openai/codex`)
 
 ---
-
-## [3.2.0-alpha] - 2026-05-02
-
-### ✨ Added
-
-- **Browser gateway alpha** — local browser gateway package and test coverage for browser-facing bridge capabilities.
-- **OLL HASHI Chrome extension scaffold** — extension files and implementation plan for browser bridge workflows.
-- **Private wake-on-LAN tooling** — local helper and tests for private wake-on-LAN flows.
-- **Workzone support** — project/workspace zone helper module and tests.
-
-### 🔧 Fixed
-
-- **Codex CLI completion hang** — `adapters/codex_cli.py` now accepts a completed Codex turn as a valid finish signal even if the outer CLI process does not exit immediately.
-  - Existing success path is preserved: normal subprocess exit still completes exactly as before.
-  - Added a backward-compatible fallback: if Codex emits the final `agent_message` and `turn.completed`, HASHI gives the CLI a short grace window to exit, then force-closes it and returns the completed answer instead of hanging in `busy`.
-  - Idle timeout enforcement is now active for Codex CLI requests, preventing stalled subprocesses from waiting until the hard timeout.
-  - Added regression tests covering both the post-`turn.completed` forced-exit path and idle-timeout path.
-- **Remote handshake alias false-positive** — `remote/protocol_manager.py` now verifies that a handshake success response comes from the expected `instance_id` before marking that peer healthy.
-  - Prevents stale or duplicated bootstrap endpoints from making one instance appear online when a different instance answers on the same host/port.
-  - Stops `/remote list` from inheriting another peer's agents and recent handshake timestamp through alias collisions.
-- **Cross-instance Hchat auto-reply loop** — `agent_runtime.py` and `flexible_agent_runtime.py` now share the same explicit reply-body semantics and suppress automatic hchat replies when the incoming hchat body is already a reply payload.
-  - Flex agents now tag cross-instance auto-replies as `[hchat reply from ...]` before routing through `send_hchat`, matching the legacy runtime behavior.
-  - Prevents cross-instance reply traffic from being rewrapped as a fresh hchat and bounced back indefinitely.
-  - Keeps first-hop hchat behavior unchanged while adding a hard stop for reply-on-reply ping-pong.
 
 ## [3.0.0-beta] - 2026-04-18
 

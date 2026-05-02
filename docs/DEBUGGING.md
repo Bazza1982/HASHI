@@ -54,6 +54,31 @@ This means:
 
 ## Where To Look First
 
+### Slim core / hot reboot
+
+Look at:
+
+- `main.py`
+- `orchestrator/reboot_manager.py`
+- `orchestrator/service_manager.py`
+- `orchestrator/agent_lifecycle.py`
+- `docs/HASHI_SLIM_CORE_ARCHITECTURE.md`
+- `logs/bridge.log`
+
+Questions:
+
+- did `/reboot` log `Hot restart begin` with the expected mode and targets?
+- did selected agents stop with the expected `hot-restart:<mode>` reason?
+- did module reload finish before manager rebuild?
+- did the hot manager rebuild log include skill, config, backend preflight, agent lifecycle, service, reboot, shutdown, startup, and WhatsApp managers?
+- did every restarted agent reach `ONLINE` or an expected `LOCAL MODE`?
+- did scheduler recreation happen after the agent restart phase?
+- did Workbench health still report the expected agent list?
+
+Important rule:
+
+- long-lived handles should remain on the kernel; managers should control them through `self.kernel.*`, not cache or own them directly.
+
 ### Bridge startup
 
 Look at:
@@ -482,7 +507,7 @@ The flex runtime doesn't call `log_transcript()` after responses, unlike the fix
 
 ### 15. Backend init retry logic
 
-**Where:** `main.py` — `_try_init_backend()`
+**Where:** `orchestrator/backend_preflight.py` — backend availability and initialization checks
 
 Backend initialization uses a `--version` check that either passes or fails with no retry. A transient failure (e.g., CLI not yet on PATH after install) would permanently skip the agent for that session.
 

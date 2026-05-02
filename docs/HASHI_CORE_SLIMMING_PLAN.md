@@ -1,5 +1,7 @@
 # HASHI v3.2-alpha Core Slimming Plan
 
+Status: accepted for `v3.2-alpha` on 2026-05-02. See the implementation status and validation record at the end of this document.
+
 ## Goal
 
 Make `main.py` a minimal, stable process bootstrap shell.
@@ -41,11 +43,13 @@ Logic that remains inside `main.py` is not hot-reloaded. This means changes to a
 - Capture top-level fatal crashes.
 - Preserve final `os._exit(0)` behavior for stubborn runtime threads.
 
-Target size:
+Original target size:
 
 ```text
 main.py <= 200 lines
 ```
+
+Accepted `v3.2-alpha` outcome: `main.py` is 337 lines. The final shape is a slim kernel wrapper rather than a pure bootstrap-only file.
 
 Most behavior should live in hot-reloadable modules:
 
@@ -507,7 +511,7 @@ curl http://127.0.0.1:18801/health
 
 ## Success Criteria
 
-- `main.py` is less than or equal to 200 lines.
+- `main.py` is slim enough to act as a stable process bootstrap/kernel wrapper. Original target was less than or equal to 200 lines; accepted `v3.2-alpha` outcome is 337 lines.
 - Full test suite passes.
 - `/reboot min` picks up agent lifecycle changes.
 - `/reboot max` picks up scheduler/runtime/backend changes.
@@ -537,7 +541,9 @@ Slim main.py to process bootstrap only
 
 Updated: 2026-05-02.
 
-Completed on branch `v3.2-alpha`:
+Accepted on branch `v3.2-alpha`.
+
+Completed structural commits:
 
 - `d01be3b` - `Refactor bootstrap infrastructure out of main`
 - `96f062f` - `Move config admin and backend preflight out of main`
@@ -558,8 +564,9 @@ Current shape:
 - Manager rebuild is transaction-style: build replacements first, commit only after construction succeeds.
 - `stop_agent()` now preserves `self.kernel.runtimes` list identity, so Workbench API and AgentDirectory do not hold stale list references after `/reboot min`.
 - `SkillManager` is now rebuilt during hot manager rebuild.
+- `StartupManager` is rebuilt with the rest of the manager set for consistency, although initial agent startup only runs during cold start.
 
-Validation completed without live restart:
+Validation completed:
 
 ```text
 python3 -m py_compile main.py orchestrator/*.py
@@ -569,11 +576,37 @@ git status --short --branch
 ## v3.2-alpha
 ```
 
-Live `/reboot min` and `/reboot max` validation has not been run yet by request. Do not mark the upgrade fully accepted until live reboot checks and health endpoint checks have been performed.
+Live validation completed on 2026-05-02:
+
+```text
+/reboot min: passed
+/reboot max: passed
+cold restart: passed
+Workbench API health: ok
+API Gateway health: ok when enabled
+12 agents online after /reboot max
+```
+
+The accepted `/reboot max` run showed:
+
+- `Hot restart begin (mode=max, requester=zelda, ...)`.
+- 12 agents stopped with `reason=hot-restart:max`.
+- 12 agents restarted and reached `ONLINE (backend + Telegram)`.
+- Scheduler was recreated with reloaded code and restarted.
+- Workbench API returned `ok: true` with 12 agents.
+- API Gateway returned `status: ok` on the active gateway port.
+- Post-reboot log scan found no `ERROR`, `CRITICAL`, `Traceback`, `failed`, or `LOCAL MODE` entries.
+
+Known non-blocking warning:
+
+```text
+Scheduler task stop timed out or was cancelled
+```
+
+This warning is acceptable for the current release because the scheduler was immediately recreated and started successfully after the warning.
 
 Remaining closeout:
 
-- Perform live `/reboot min` and `/reboot max` checks when allowed.
-- Verify Workbench API and API Gateway health after live reboot.
-- Decide whether to reduce `main.py` further toward the original 200-line target, or accept the current 337-line kernel wrapper shape for v3.2-alpha.
+- Keep `docs/HASHI_SLIM_CORE_ARCHITECTURE.md` current when adding or removing managers.
+- Decide in a later release whether to reduce `main.py` further toward the original 200-line target, or continue accepting the 337-line kernel wrapper shape.
 - Document WhatsApp transport implementation hot reload as transport-restart-only unless a dedicated warm-restart path is added.

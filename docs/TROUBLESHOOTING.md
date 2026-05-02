@@ -26,6 +26,13 @@
 - [ ] `/new` starts a **bare** session (no FYI injection)
 - [ ] Agent follows only its `agent.md` (workspace)
 
+### /reboot semantics
+- [ ] `/reboot min` restarts the requester and rebuilds hot managers
+- [ ] `/reboot max` restarts all running agents and rebuilds hot managers
+- [ ] Workbench API stays healthy after reboot
+- [ ] Scheduler is recreated and started after reboot
+- [ ] No post-reboot `ERROR`, `CRITICAL`, `Traceback`, `failed`, or unexpected `LOCAL MODE` entries appear in `logs/bridge.log`
+
 ---
 
 ## Fixed / Outstanding Tracking
@@ -62,4 +69,6 @@
 ## Where to look for logs
 
 - Bridge logs: `logs/`
+- Main bridge lifecycle log: `logs/bridge.log`
+- Browser/native host log: `logs/browser_native_host.log`
 - Workbench control logs (Windows): `state/workbench/logs/`

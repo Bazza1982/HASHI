@@ -1,6 +1,6 @@
 # HASHI
 
-> **Status (v3.2-alpha):** Active alpha branch for browser gateway work, OLL HASHI Chrome extension integration, private wake-on-LAN tooling, Workzone support, and runtime/remote hardening. This branch builds on the full-featured v3.1 agentic AI orchestration platform with **6 LLM backends** (Claude, Gemini, Codex, OpenRouter, DeepSeek, Ollama), **habit-based self-improvement**, **SafeVoice**, **cross-instance agent messaging**, **token audit & cost tracking**, and **Minato MCP workflow choreography**.
+> **Status (v3.2-alpha):** Active alpha branch with the slim core architecture accepted, plus browser gateway work, OLL HASHI Chrome extension integration, private wake-on-LAN tooling, Workzone support, and runtime/remote hardening. This branch builds on the full-featured v3.1 agentic AI orchestration platform with **6 LLM backends** (Claude, Gemini, Codex, OpenRouter, DeepSeek, Ollama), **habit-based self-improvement**, **SafeVoice**, **cross-instance agent messaging**, **token audit & cost tracking**, and **Minato MCP workflow choreography**.
 >
 > **Changelog:** see [`CHANGELOG.md`](CHANGELOG.md) · **Roadmap:** see [`docs/ROADMAP.md`](docs/ROADMAP.md) · **Nagare Docs:** see [`docs/NAGARE_FLOW_SYSTEM.md`](docs/NAGARE_FLOW_SYSTEM.md).
 
@@ -83,7 +83,7 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
 
 ## Project Status
 
-- **v3.2-alpha** *(current)* — Browser gateway, OLL HASHI Chrome extension integration, private wake-on-LAN tooling, Workzone support, runtime/backend hardening
+- **v3.2-alpha** *(current)* — Slim core architecture, live hot-reboot validation, browser gateway, OLL HASHI Chrome extension integration, private wake-on-LAN tooling, Workzone support, runtime/backend hardening
 - **v3.1** — Claude Opus 4.7, GPT-5.5, Codex CLI 0.125.0, `xhigh`/`max` effort levels, HASHI Remote remediation
 - **v3.0-beta** — **Self-improving agents**, 6 LLM backends, SafeVoice, cross-instance messaging, token audit, agent behavior audit, remote backend policy, Minato MCP, Obsidian wiki integration
 - **v3.0-alpha** — Ollama local LLM, habit system (Phase 4-5), TUI onboarding, Minato MCP (8-tier), token audit system, dream improvements
@@ -298,18 +298,27 @@ HASHI uses a **Universal Orchestrator** pattern where a single Python process ma
 - **Explicit over Automatic** — Skills, jobs, and features are user-activated, never magic
 - **Single Instance** — File-based locking prevents multiple HASHI processes from conflicting
 - **Remote Backend Policy** — API backends (OpenRouter, DeepSeek) are reserved for user-initiated requests; automated flows use CLI backends to prevent runaway costs
+- **Slim Core** — process bootstrap stays small while hot-reloadable managers own feature behavior
 
 ### File Structure
 
 ```
 hashi/
-├── main.py                    # Orchestrator entry point
+├── main.py                    # Slim process bootstrap and kernel wrapper
 ├── agents.json                # Agent definitions (name, backend, system prompt)
 ├── secrets.json               # API keys (gitignored)
 ├── tasks.json                 # Heartbeat + cron job definitions
 ├── onboarding/                # Multi-language guided setup
 │   └── languages/             # 9 languages
-├── orchestrator/              # Core orchestration logic
+├── orchestrator/              # Hot-reloadable orchestration managers and runtime logic
+│   ├── config_admin.py        # Config administration manager
+│   ├── backend_preflight.py   # Backend availability/preflight manager
+│   ├── agent_lifecycle.py     # Agent start/stop/teardown manager
+│   ├── service_manager.py     # Workbench, API gateway, scheduler services
+│   ├── reboot_manager.py      # /reboot reload and manager rebuild flow
+│   ├── startup_manager.py     # Cold-start orchestration
+│   ├── shutdown_manager.py    # Final shutdown orchestration
+│   ├── whatsapp_manager.py    # WhatsApp control manager
 │   ├── agent_runtime.py       # Fixed-backend agent runtime
 │   ├── flexible_agent_runtime.py  # Flex agent (switchable backend)
 │   ├── scheduler.py           # Heartbeat + cron job runner
@@ -1016,8 +1025,10 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
 
 ## Release History
 
-### v3.2-alpha *(current)* — Browser Gateway & Runtime Hardening (May 2026)
+### v3.2-alpha *(current)* — Slim Core, Browser Gateway & Runtime Hardening (May 2026)
 
+- **Slim core architecture accepted** — `main.py` reduced from a large feature host into a slim process bootstrap/kernel wrapper; hot-reloadable managers now own agent lifecycle, service management, reboot, startup, shutdown, config, backend preflight, skills, and WhatsApp control
+- **Live reboot validation passed** — cold restart, `/reboot min`, `/reboot max`, Workbench health, API Gateway health, and `pytest` all passed on 2026-05-02
 - **Browser gateway work** — local gateway package and tests for browser-facing bridge capabilities
 - **OLL HASHI Chrome extension integration** — extension scaffold and planning for browser bridge workflows
 - **Private wake-on-LAN tooling** — local private WOL helper and tests

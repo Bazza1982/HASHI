@@ -7,7 +7,7 @@ Two operating modes:
 - **Fixed agents:** one Telegram bot, one backend, one workspace.
 - **Flex agents:** one Telegram bot, one workspace, one shared identity, switchable backend via `/backend`.
 
-- **Supported backends:** `gemini-cli`, `claude-cli`, `codex-cli`, and `openrouter-api`.
+- **Supported backends:** `gemini-cli`, `claude-cli`, `codex-cli`, `openrouter-api`, `deepseek-api`, and `ollama-api`.
 - **Adding agents:** Add a new block to `<project_root>\agents.json`. Required fields:
   - `name`, `engine` (fixed) or `type: "flex"` (flex), `workspace_dir`, `system_md`, `model`, `is_active`
   - Optional: `display_name`, `emoji`, `typing_message`, `typing_parse_mode`, `effort`, `resume_policy`
@@ -45,7 +45,7 @@ Two operating modes:
 - `/skill` — browse, toggle, and run skills (inline keyboard)
 - `/active [on|off] [minutes]` — toggle bridge-managed proactive heartbeat (default 10 min)
 - `/voice [status|on|off|provider|providers|voices|use <alias>]` — control native bridge-owned voice replies
-- `/reboot [min|max|number|help]` — hot restart agents with live Python code reload; preserves scheduler, workbench API, WhatsApp
+- `/reboot [min|max|number|help]` — hot restart agents with live Python code reload and hot manager rebuild; preserves Workbench/API gateway/WhatsApp handles and recreates the scheduler
 - Alias: `/usercomputer`
 
 **Flex-only:**
