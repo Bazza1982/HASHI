@@ -23,6 +23,15 @@ from orchestrator.workbench_api import WorkbenchApiServer
 from orchestrator.api_gateway import APIGatewayServer
 from orchestrator.flexible_backend_registry import get_secret_lookup_order
 from orchestrator.pathing import BridgePaths, build_bridge_paths
+from orchestrator.bootstrap_logging import (
+    C_RESET,
+    C_STOP,
+    AnimMute as _AnimMute,
+    emit_bridge_audit,
+    setup_console_logging,
+)
+from orchestrator.instance_lock import InstanceLock
+from orchestrator.lifecycle_state import LifecycleState
 from adapters.registry import get_backend_class
 
 # --- Global Orchestrator Setup ---
@@ -31,242 +40,14 @@ CODE_ROOT = Path(__file__).resolve().parent
 main_logger = logging.getLogger("BridgeU.Orchestrator")
 bridge_logger = logging.getLogger("BridgeU.Bridge")  # file-only orchestrator log
 
-C_RESET = "\033[0m"
-C_MUTED = "\033[38;5;242m"
-C_WARN = "\033[38;5;180m"
-C_ERROR = "\033[38;5;203m"
-C_OK = "\033[38;5;108m"
-C_STOP = "\033[38;5;179m"
 INITIAL_AGENT_STARTUP_CONCURRENCY = 2
 
 
-class _AnimMute(logging.Filter):
-    """Suppresses console log output during startup/reboot animations."""
-    def filter(self, _): return False
-
-
-def _configure_console_encoding():
-    os.environ["PYTHONUTF8"] = "1"
-    os.environ["PYTHONIOENCODING"] = "utf-8"
-
-    if os.name == "nt":
-        with suppress(Exception):
-            import ctypes
-
-            kernel32 = ctypes.windll.kernel32
-            kernel32.SetConsoleCP(65001)
-            kernel32.SetConsoleOutputCP(65001)
-
-    for stream in (sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if callable(reconfigure):
-            try:
-                reconfigure(encoding="utf-8", errors="backslashreplace")
-            except Exception:
-                pass
-
-
-class ColorFormatter(logging.Formatter):
-    COLORS = {
-        logging.DEBUG: C_MUTED,
-        logging.INFO: C_MUTED,
-        logging.WARNING: C_WARN,
-        logging.ERROR: C_ERROR,
-        logging.CRITICAL: C_ERROR,
-    }
-
-    def format(self, record):
-        msg = record.getMessage()
-        if "Telegram polling error" in msg and "NetworkError" in msg:
-            color = C_MUTED
-        else:
-            color = self.COLORS.get(record.levelno, C_RESET)
-        ts = self.formatTime(record, "%H:%M:%S")
-        return f"{color}{ts} [{record.name}] {msg}{C_RESET}"
-
-
-_configure_console_encoding()
-
-
-class _ConsoleOutputFilter(logging.Filter):
-    """
-    Keep the console focused on operator-relevant events only.
-    Conversations and external traffic use dedicated colorized print helpers.
-    Routine backend/runtime chatter still goes to log files.
-    """
-    _SUPPRESS_INFO_PREFIXES = (
-        "Backend.",
-        "BackendMgr.",
-        "Runtime.",
-        "FlexRuntime.",
-        "BridgeU.APIGateway",
-        "WhatsApp",
-        "telegram",
-        "aiohttp.",
-        "httpx",
-        "httpcore",
-    )
-    _ALLOW_INFO_FRAGMENTS = (
-        "Process bootstrap:",
-        "Configured ",
-        "Universal Orchestrator is online.",
-        "Workbench API listening on",
-        "API Gateway listening on",
-        "API Gateway disabled",
-        "API Gateway failed to start",
-        "Shutdown requested",
-        "Shutdown already requested",
-        "Shutdown signal received.",
-        "Shutting down active agents",
-        "Shutting down ",
-        "Telegram preflight failed",
-        "WhatsApp transport started.",
-        "WhatsApp transport stopped.",
-        "WhatsApp transport failed to start",
-        "WhatsApp shutdown warning",
-        "All agents failed to start.",
-        "No agents can start",
-        "Skipping agent",
-        "Will start ",
-        "Flex agent '",
-        "Restart requested",
-        "Hot restart:",
-        "Hot restart complete.",
-    )
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        if record.levelno >= logging.WARNING:
-            return True
-        msg = record.getMessage()
-        name = record.name
-        for prefix in self._SUPPRESS_INFO_PREFIXES:
-            if name.startswith(prefix):
-                return any(frag in msg for frag in self._ALLOW_INFO_FRAGMENTS)
-        return any(frag in msg for frag in self._ALLOW_INFO_FRAGMENTS)
-
-
-_handler = logging.StreamHandler(sys.stdout)
-_handler.setFormatter(ColorFormatter())
-_handler.addFilter(_ConsoleOutputFilter())
-logging.basicConfig(level=logging.INFO, handlers=[_handler], force=True)
-
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
-logging.getLogger("telegram").setLevel(logging.WARNING)
-logging.getLogger("telegram.ext").setLevel(logging.WARNING)
-logging.getLogger("telegram.ext.Updater").setLevel(logging.CRITICAL)
-logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
-logging.getLogger("aiohttp.server").setLevel(logging.WARNING)
-
-
-def _write_bridge_audit_line(log_path: Path, level: int, message: str):
-    try:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        level_name = logging.getLevelName(level)
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with log_path.open("a", encoding="utf-8") as fh:
-            fh.write(f"{ts} [BridgeU.Bridge] {level_name:<8} {message}\n")
-    except Exception:
-        pass
+_handler = setup_console_logging()
 
 
 def _emit_bridge_audit(paths: BridgePaths | None, level: int, message: str):
-    if bridge_logger.handlers:
-        bridge_logger.log(level, message)
-        return
-    if paths is None:
-        return
-    _write_bridge_audit_line(paths.bridge_home / "logs" / "bridge.log", level, message)
-
-
-class InstanceLock:
-    """
-    Single-instance guard using OS-level file locking.
-
-    Uses msvcrt on Windows and fcntl on Unix-like systems.
-    The lock is tied to the process file descriptor and auto-released by the OS.
-    """
-
-    def __init__(self, path: Path):
-        self.path = path
-        self._fh = None
-
-    def acquire(self):
-        fh = None
-        try:
-            try:
-                fh = open(str(self.path), "r+b")
-            except FileNotFoundError:
-                fh = open(str(self.path), "w+b")
-
-            fh.seek(0)
-            if sys.platform == "win32":
-                import msvcrt
-                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-
-            our_pid = str(os.getpid())
-            fh.seek(0)
-            fh.truncate(0)
-            fh.write(our_pid.encode("utf-8"))
-            fh.flush()
-            self._fh = fh
-            self._write_pid_file(our_pid)
-
-        except (OSError, IOError) as exc:
-            with suppress(Exception):
-                if fh:
-                    fh.close()
-            pid = self._read_pid_file()
-            hint = f"Run: taskkill /PID {pid} /T /F" if sys.platform == "win32" else f"Run: kill {pid}"
-            raise RuntimeError(
-                f"bridge-u-f is already running (PID {pid}). "
-                f"Shut down the existing instance first. Hint: {hint}"
-            ) from exc
-
-    def _write_pid_file(self, pid_str: str):
-        pid_path = self.path.parent / ".bridge_u_f.pid"
-        try:
-            pid_path.write_text(pid_str, encoding="utf-8")
-            main_logger.debug(f"Wrote PID {pid_str} to {pid_path}")
-        except Exception as e:
-            main_logger.warning(f"Failed to write PID file {pid_path}: {e}")
-
-    def _read_pid_file(self) -> str:
-        pid_path = self.path.parent / ".bridge_u_f.pid"
-        try:
-            return pid_path.read_text(encoding="utf-8").strip() or "?"
-        except Exception:
-            return "?"
-
-    def release(self):
-        if self._fh is not None:
-            try:
-                if sys.platform == "win32":
-                    import msvcrt
-                    self._fh.seek(0)
-                    msvcrt.locking(self._fh.fileno(), msvcrt.LK_UNLCK, 1)
-                else:
-                    import fcntl
-                    fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
-            except Exception as e:
-                main_logger.debug(f"Lock unlock warning (non-fatal): {e}")
-            try:
-                self._fh.close()
-            except Exception as e:
-                main_logger.debug(f"Lock file close warning (non-fatal): {e}")
-            self._fh = None
-        try:
-            self.path.unlink(missing_ok=True)
-        except Exception as e:
-            main_logger.debug(f"Lock file unlink warning (non-fatal): {e}")
-        pid_path = self.path.parent / ".bridge_u_f.pid"
-        try:
-            pid_path.unlink(missing_ok=True)
-        except Exception as e:
-            main_logger.debug(f"PID file unlink warning (non-fatal): {e}")
+    emit_bridge_audit(paths, level, message, bridge_logger)
 
 class UniversalOrchestrator:
     def __init__(self, paths: BridgePaths, selected_agents: set[str] | None = None, enable_api_gateway: bool = False):
@@ -294,77 +75,7 @@ class UniversalOrchestrator:
             "detail": "",
             "requested_at": None,
         }
-        self._orchestrator_state_path: Path | None = None
-
-    def _load_orchestrator_state(self) -> dict:
-        if self._orchestrator_state_path is None or not self._orchestrator_state_path.exists():
-            return {}
-        try:
-            return json.loads(self._orchestrator_state_path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-
-    def _save_orchestrator_state(self, state: dict):
-        if self._orchestrator_state_path is None:
-            return
-        try:
-            self._orchestrator_state_path.parent.mkdir(parents=True, exist_ok=True)
-            self._orchestrator_state_path.write_text(
-                json.dumps(state, indent=2, ensure_ascii=False) + "\n",
-                encoding="utf-8",
-            )
-        except Exception as e:
-            main_logger.warning(f"Failed to save orchestrator state: {e}")
-
-    def _shutdown_meta_text(self) -> str:
-        req = self._shutdown_request or {}
-        reason = req.get("reason") or "external"
-        source = req.get("source") or "unknown"
-        detail = req.get("detail") or "-"
-        requested_at = req.get("requested_at") or "-"
-        return (
-            f"reason={reason} source={source} detail={detail} "
-            f"requested_at={requested_at}"
-        )
-
-    def _mark_orchestrator_started(self) -> tuple[dict, bool]:
-        previous = self._load_orchestrator_state()
-        unexpected_previous_exit = bool(previous) and not previous.get("clean_shutdown", True)
-        state = dict(previous)
-        state.update({
-            "pid": os.getpid(),
-            "last_started_at": datetime.now().isoformat(),
-            "clean_shutdown": False,
-            "pending_shutdown_reason": None,
-            "pending_shutdown_source": None,
-            "pending_shutdown_detail": None,
-            "pending_shutdown_requested_at": None,
-        })
-        self._save_orchestrator_state(state)
-        return previous, unexpected_previous_exit
-
-    def _record_shutdown_request_in_state(self):
-        state = self._load_orchestrator_state()
-        state["pending_shutdown_reason"] = self._shutdown_request.get("reason")
-        state["pending_shutdown_source"] = self._shutdown_request.get("source")
-        state["pending_shutdown_detail"] = self._shutdown_request.get("detail")
-        state["pending_shutdown_requested_at"] = self._shutdown_request.get("requested_at")
-        self._save_orchestrator_state(state)
-
-    def _mark_orchestrator_shutdown(self, clean: bool, phase: str):
-        state = self._load_orchestrator_state()
-        state["last_stopped_at"] = datetime.now().isoformat()
-        state["clean_shutdown"] = bool(clean)
-        state["last_shutdown_reason"] = self._shutdown_request.get("reason")
-        state["last_shutdown_source"] = self._shutdown_request.get("source")
-        state["last_shutdown_detail"] = self._shutdown_request.get("detail")
-        state["last_shutdown_requested_at"] = self._shutdown_request.get("requested_at")
-        state["last_exit_phase"] = phase
-        state["pending_shutdown_reason"] = None
-        state["pending_shutdown_source"] = None
-        state["pending_shutdown_detail"] = None
-        state["pending_shutdown_requested_at"] = None
-        self._save_orchestrator_state(state)
+        self.lifecycle_state = LifecycleState()
 
     def _install_signal_handlers(self):
         loop = asyncio.get_running_loop()
@@ -388,7 +99,7 @@ class UniversalOrchestrator:
         if self.shutdown_event.is_set():
             main_logger.info(f"Shutdown already requested; ignoring duplicate request ({reason}).")
             bridge_logger.warning(
-                f"Duplicate shutdown request ignored ({self._shutdown_meta_text()}) "
+                f"Duplicate shutdown request ignored ({self.lifecycle_state.shutdown_meta_text(self._shutdown_request)}) "
                 f"new_reason={reason} new_source={source} new_detail={detail or '-'}"
             )
             return
@@ -399,8 +110,8 @@ class UniversalOrchestrator:
             "requested_at": datetime.now().isoformat(),
         }
         main_logger.info(f"Shutdown requested ({reason}).")
-        bridge_logger.warning(f"Shutdown requested ({self._shutdown_meta_text()})")
-        self._record_shutdown_request_in_state()
+        bridge_logger.warning(f"Shutdown requested ({self.lifecycle_state.shutdown_meta_text(self._shutdown_request)})")
+        self.lifecycle_state.record_shutdown_request(self._shutdown_request)
         self.shutdown_event.set()
 
     def request_restart(self, mode: str = "same", agent_name: str | None = None, agent_number: int | None = None):
@@ -1213,9 +924,9 @@ class UniversalOrchestrator:
         _sched_logger.addHandler(_bl_handler)
         self.global_cfg = global_cfg
         self.secrets = secrets
-        self._orchestrator_state_path = global_cfg.base_logs_dir / "orchestrator_state.json"
+        self.lifecycle_state.state_path = global_cfg.base_logs_dir / "orchestrator_state.json"
         bridge_logger.info("=== Bridge starting ===")
-        previous_state, unexpected_previous_exit = self._mark_orchestrator_started()
+        previous_state, unexpected_previous_exit = self.lifecycle_state.mark_started(os.getpid())
         if unexpected_previous_exit:
             bridge_logger.error(
                 "Previous bridge session ended unexpectedly "
@@ -1450,7 +1161,9 @@ class UniversalOrchestrator:
                 await self.shutdown_event.wait()
             except asyncio.CancelledError:
                 main_logger.info("Shutdown signal received.")
-                bridge_logger.warning(f"Shutdown wait interrupted ({self._shutdown_meta_text()})")
+                bridge_logger.warning(
+                    f"Shutdown wait interrupted ({self.lifecycle_state.shutdown_meta_text(self._shutdown_request)})"
+                )
 
             restart = self._restart_request
             self._restart_request = None
@@ -1464,7 +1177,7 @@ class UniversalOrchestrator:
             # --- Full shutdown ---
             main_logger.info("Shutting down active agents...")
             bridge_logger.warning(
-                f"Full shutdown begin ({self._shutdown_meta_text()}) "
+                f"Full shutdown begin ({self.lifecycle_state.shutdown_meta_text(self._shutdown_request)}) "
                 f"active_agents={len(self.runtimes)} "
                 f"workbench={'on' if self.workbench_api is not None else 'off'} "
                 f"api_gateway={'on' if self.api_gateway is not None else 'off'} "
@@ -1500,8 +1213,14 @@ class UniversalOrchestrator:
                     bridge_logger.warning(f"WhatsApp shutdown warning: {type(e).__name__}: {e}")
                 self.whatsapp = None
             await self._shutdown_all_agents()
-            self._mark_orchestrator_shutdown(clean=True, phase="python-cleanup-complete")
-            bridge_logger.warning(f"Full shutdown complete ({self._shutdown_meta_text()})")
+            self.lifecycle_state.mark_shutdown(
+                self._shutdown_request,
+                clean=True,
+                phase="python-cleanup-complete",
+            )
+            bridge_logger.warning(
+                f"Full shutdown complete ({self.lifecycle_state.shutdown_meta_text(self._shutdown_request)})"
+            )
 
             # All Python-side cleanup is done. Start watchdog for the
             # asyncio.run() executor-shutdown phase: neonize's Go DLL runs
