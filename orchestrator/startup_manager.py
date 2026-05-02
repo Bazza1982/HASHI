@@ -154,5 +154,5 @@ class StartupManager:
                 _agent_name, (ok, message) = task.result()
                 if not ok:
                     main_logger.error(message)
-            except Exception:
-                pass
+            except Exception as e:
+                main_logger.error("Unexpected error reading startup task result: %s", e)
