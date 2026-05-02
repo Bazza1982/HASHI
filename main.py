@@ -8,14 +8,10 @@ import logging
 import signal
 import traceback
 from pathlib import Path
-from contextlib import suppress
 from datetime import datetime
 
 from orchestrator.config import ConfigManager
-from orchestrator.scheduler import TaskScheduler
 from orchestrator.skill_manager import SkillManager
-from orchestrator.workbench_api import WorkbenchApiServer
-from orchestrator.api_gateway import APIGatewayServer
 from orchestrator.pathing import BridgePaths, build_bridge_paths
 from orchestrator.agent_lifecycle import AgentLifecycleManager
 from orchestrator.backend_preflight import BackendPreflight
@@ -27,6 +23,7 @@ from orchestrator.bootstrap_logging import (
 from orchestrator.config_admin import ConfigAdmin
 from orchestrator.instance_lock import InstanceLock
 from orchestrator.lifecycle_state import LifecycleState
+from orchestrator.service_manager import ServiceManager
 
 # --- Global Orchestrator Setup ---
 CODE_ROOT = Path(__file__).resolve().parent
@@ -56,6 +53,7 @@ class UniversalOrchestrator:
         self.config_admin = ConfigAdmin(self.paths)
         self.backend_preflight = BackendPreflight()
         self.agent_lifecycle = AgentLifecycleManager(self)
+        self.service_manager = ServiceManager(self)
         self.workbench_api = None
         self.api_gateway = None
         self.scheduler = None
@@ -330,15 +328,18 @@ class UniversalOrchestrator:
         ConfigAdminCls = sys.modules["orchestrator.config_admin"].ConfigAdmin
         BackendPreflightCls = sys.modules["orchestrator.backend_preflight"].BackendPreflight
         AgentLifecycleCls = sys.modules["orchestrator.agent_lifecycle"].AgentLifecycleManager
+        ServiceManagerCls = sys.modules["orchestrator.service_manager"].ServiceManager
 
         new_config_admin = ConfigAdminCls(self.paths)
         new_backend_preflight = BackendPreflightCls()
         new_agent_lifecycle = AgentLifecycleCls(self)
+        new_service_manager = ServiceManagerCls(self)
 
         self.config_admin = new_config_admin
         self.backend_preflight = new_backend_preflight
         self.agent_lifecycle = new_agent_lifecycle
-        main_logger.info("Hot reload: rebuilt config, backend preflight, and agent lifecycle managers.")
+        self.service_manager = new_service_manager
+        main_logger.info("Hot reload: rebuilt config, backend preflight, agent lifecycle, and service managers.")
 
     def _reload_project_modules(self):
         """Reload all project Python modules so hot restart picks up code changes."""
@@ -477,26 +478,7 @@ class UniversalOrchestrator:
         finally:
             _handler.removeFilter(_mute)
 
-        # Recreate the scheduler so it picks up reloaded code (e.g. loop_meta logic)
-        if self.scheduler_task is not None:
-            self.scheduler_task.cancel()
-            try:
-                await asyncio.wait_for(self.scheduler_task, timeout=5.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
-                pass
-        # Re-import from reloaded module to get the updated class
-        ReloadedScheduler = sys.modules["orchestrator.scheduler"].TaskScheduler
-        self.scheduler = ReloadedScheduler(
-            self.paths.tasks_path,
-            self.paths.state_path,
-            self.runtimes,
-            self.global_cfg.authorized_id if self.global_cfg else 0,
-            self.skill_manager,
-            orchestrator=self,
-        )
-        self.scheduler_task = asyncio.create_task(self.scheduler.run(), name="scheduler")
-        main_logger.info("Hot restart: scheduler recreated with reloaded code.")
-        bridge_logger.info("Hot restart: scheduler recreated with reloaded code")
+        await self.service_manager.restart_scheduler()
 
         if self.runtimes:
             main_logger.info(f"Hot restart complete. {len(self.runtimes)} agent(s) running.")
@@ -702,59 +684,7 @@ class UniversalOrchestrator:
 
         main_logger.info("Universal Orchestrator is online. Awaiting messages.")
 
-        # Build agent directory so /hchat and other agent-to-agent commands can resolve runtimes
-        from orchestrator.agent_directory import AgentDirectory as _AgentDirectory
-        capabilities_path = self.paths.bridge_home / "agent_capabilities.json"
-        self.agent_directory = _AgentDirectory(self.paths.config_path, capabilities_path, self.runtimes)
-
-        try:
-            self.workbench_api = WorkbenchApiServer(
-                self.paths.config_path,
-                global_cfg,
-                self.runtimes,
-                secrets=secrets,
-                orchestrator=self,
-            )
-            await self.workbench_api.start()
-            main_logger.info(
-                f"Workbench API listening on http://127.0.0.1:{global_cfg.workbench_port}"
-            )
-        except Exception as e:
-            self.workbench_api = None
-            main_logger.warning(
-                f"Workbench API failed to start; continuing without workbench integration: {e}"
-            )
-            main_logger.debug(traceback.format_exc())
-
-        if self.enable_api_gateway:
-            try:
-                self.api_gateway = APIGatewayServer(
-                    global_cfg,
-                    secrets,
-                    workspace_root=self.paths.workspaces_root,
-                )
-                await self.api_gateway.start()
-                main_logger.info(
-                    f"API Gateway listening on http://127.0.0.1:{global_cfg.api_gateway_port}"
-                )
-            except Exception as e:
-                self.api_gateway = None
-                main_logger.warning(
-                    f"API Gateway failed to start; continuing without it: {e}"
-                )
-                main_logger.debug(traceback.format_exc())
-        else:
-            main_logger.info("API Gateway disabled (use --api-gateway to enable).")
-
-        self.scheduler = TaskScheduler(
-            self.paths.tasks_path,
-            self.paths.state_path,
-            self.runtimes,
-            global_cfg.authorized_id,
-            self.skill_manager,
-            orchestrator=self,
-        )
-        self.scheduler_task = asyncio.create_task(self.scheduler.run(), name="scheduler")
+        await self.service_manager.start_runtime_services(global_cfg, secrets)
 
         try:
             _, wa_cfg = self._load_whatsapp_cfg()
@@ -793,27 +723,7 @@ class UniversalOrchestrator:
                 f"api_gateway={'on' if self.api_gateway is not None else 'off'} "
                 f"whatsapp={'on' if self.whatsapp is not None else 'off'}"
             )
-            if self.scheduler_task is not None:
-                bridge_logger.info("Stopping scheduler task")
-                self.scheduler_task.cancel()
-                try:
-                    await asyncio.wait_for(self.scheduler_task, timeout=5.0)
-                except (asyncio.CancelledError, asyncio.TimeoutError):
-                    bridge_logger.warning("Scheduler task stop timed out or was cancelled")
-            if self.workbench_api is not None:
-                bridge_logger.info("Stopping Workbench API")
-                try:
-                    await asyncio.wait_for(self.workbench_api.shutdown(), timeout=5.0)
-                except (asyncio.TimeoutError, Exception) as e:
-                    main_logger.warning(f"Workbench API shutdown warning: {e}")
-                    bridge_logger.warning(f"Workbench API shutdown warning: {type(e).__name__}: {e}")
-            if self.api_gateway is not None:
-                bridge_logger.info("Stopping API Gateway")
-                try:
-                    await asyncio.wait_for(self.api_gateway.stop(), timeout=5.0)
-                except (asyncio.TimeoutError, Exception) as e:
-                    main_logger.warning(f"API Gateway shutdown warning: {e}")
-                    bridge_logger.warning(f"API Gateway shutdown warning: {type(e).__name__}: {e}")
+            await self.service_manager.stop_runtime_services()
             if self.whatsapp is not None:
                 bridge_logger.info("Stopping WhatsApp transport")
                 try:
