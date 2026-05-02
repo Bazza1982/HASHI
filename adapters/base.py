@@ -7,6 +7,7 @@ import asyncio
 import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 from adapters.stream_events import StreamCallback
@@ -102,6 +103,31 @@ class BaseBackend(ABC):
         """Record that the backend just produced output. Call on every stdout/stderr chunk."""
         self.last_activity_at = time.time()
         self.output_line_count += 1
+
+    @property
+    def workzone_dir(self) -> Path | None:
+        extra = getattr(self.config, "extra", {}) or {}
+        zone = str(extra.get("workzone_dir") or "").strip()
+        if not zone:
+            return None
+        path = Path(zone).expanduser()
+        try:
+            path = path.resolve()
+        except Exception:
+            pass
+        return path if path.is_dir() else None
+
+    @property
+    def effective_workdir(self) -> Path:
+        if self.workzone_dir is not None:
+            return self.workzone_dir
+        return self.config.workspace_dir
+
+    @property
+    def effective_add_dir(self) -> str:
+        if self.workzone_dir is not None:
+            return str(self.workzone_dir)
+        return str(self.config.resolve_access_root())
 
     def _preview_text(self, text: str | bytes | None, limit: int = 400) -> str:
         if text is None:

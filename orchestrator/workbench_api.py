@@ -84,6 +84,7 @@ class WorkbenchApiServer:
         self.app.router.add_get("/api/transcript/{name}/poll", self.handle_transcript_poll)
         self.app.router.add_get("/api/project-chat/{name}/{project}", self.handle_project_chat_log)
         self.app.router.add_post("/api/chat", self.handle_chat)
+        self.app.router.add_post("/api/browser/chat/send", self.handle_browser_chat_send)
         self.app.router.add_post("/api/bridge/message", self.handle_bridge_message)
         self.app.router.add_post("/api/bridge/reply", self.handle_bridge_reply)
         self.app.router.add_post("/api/bridge/hchat-exchange", self.handle_hchat_exchange)
@@ -98,6 +99,7 @@ class WorkbenchApiServer:
         self.app.router.add_get("/api/admin/commands/{name}", self.handle_admin_commands)
         self.app.router.add_post("/api/admin/command", self.handle_admin_command)
         self.app.router.add_post("/api/agents/{name}/command", self.handle_agent_command)
+        self.app.router.add_post("/api/agents/{name}/jobs/run", self.handle_agent_run_job)
         self.app.router.add_post("/api/admin/smoke", self.handle_admin_smoke)
         self.app.router.add_post("/api/admin/start-agent", self.handle_admin_start_agent)
         self.app.router.add_post("/api/admin/stop-agent", self.handle_admin_stop_agent)
@@ -469,6 +471,63 @@ class WorkbenchApiServer:
             return web.json_response({"ok": False, "error": "exchange delivery failed"}, status=502)
         except Exception as e:
             return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def handle_browser_chat_send(self, request):
+        payload = await request.json()
+        runtime_map = self._runtime_map()
+
+        agent_name = (payload.get("agent") or payload.get("agentId") or "").strip()
+        text = (payload.get("text") or "").strip()
+        source = (payload.get("source") or "browser-api").strip()
+        timeout_s = max(5.0, min(float(payload.get("timeout_s") or 120.0), 600.0))
+
+        runtime = runtime_map.get(agent_name)
+        if runtime is None:
+            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+        if not text:
+            return web.json_response({"ok": False, "error": "text is required"}, status=400)
+
+        loop = asyncio.get_running_loop()
+        completion_future = loop.create_future()
+
+        async def _listener(result: dict) -> None:
+            if completion_future.done():
+                return
+            completion_future.set_result(result)
+
+        request_id = await runtime.enqueue_api_text(
+            text,
+            source=source,
+            deliver_to_telegram=False,
+        )
+        if request_id is None:
+            return web.json_response({"ok": False, "error": "failed to enqueue browser request"}, status=500)
+
+        runtime.register_request_listener(request_id, _listener)
+
+        try:
+            result = await asyncio.wait_for(completion_future, timeout=timeout_s)
+        except asyncio.TimeoutError:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "request_id": request_id,
+                    "status": "timeout",
+                    "error": f"browser request did not complete within {int(timeout_s)}s",
+                },
+                status=504,
+            )
+
+        response_payload = {
+            "ok": bool(result.get("success")),
+            "request_id": request_id,
+            "status": "completed" if result.get("success") else "failed",
+            "text": result.get("text"),
+            "error": result.get("error"),
+            "source": result.get("source") or source,
+            "summary": result.get("summary"),
+        }
+        return web.json_response(response_payload, status=200 if response_payload["ok"] else 502)
 
     async def handle_bridge_message(self, request):
         self._refresh_bridge_router()
@@ -878,6 +937,44 @@ class WorkbenchApiServer:
         status_code = 200 if result.get("ok") else 400
         result["agent"] = agent_name
         return web.json_response(result, status=status_code)
+
+    async def handle_agent_run_job(self, request):
+        """Run one cron/heartbeat job immediately for a specific agent."""
+        agent_name = request.match_info.get("name")
+        payload = await request.json()
+        kind = str(payload.get("kind") or "cron").strip().lower()
+        job_id = str(payload.get("job_id") or payload.get("id") or "").strip()
+
+        runtime = self._runtime_map().get(agent_name)
+        if runtime is None:
+            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+        if kind not in {"cron", "heartbeat"}:
+            return web.json_response({"ok": False, "error": "kind must be cron or heartbeat"}, status=400)
+        if not job_id:
+            return web.json_response({"ok": False, "error": "job_id is required"}, status=400)
+
+        skill_manager = getattr(runtime, "skill_manager", None)
+        if skill_manager is None:
+            return web.json_response({"ok": False, "error": "skill manager unavailable"}, status=503)
+        job = skill_manager.get_job(kind, job_id)
+        if not job or job.get("agent") != agent_name:
+            return web.json_response({"ok": False, "error": "job not found for agent"}, status=404)
+
+        try:
+            ok, message = await runtime._run_job_now(job)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": f"{type(e).__name__}: {e}"}, status=500)
+        status_code = 200 if ok else 409
+        return web.json_response(
+            {
+                "ok": ok,
+                "agent": agent_name,
+                "kind": kind,
+                "job_id": job_id,
+                "message": message,
+            },
+            status=status_code,
+        )
 
     async def handle_admin_smoke(self, request):
         if not self._check_admin_auth(request):

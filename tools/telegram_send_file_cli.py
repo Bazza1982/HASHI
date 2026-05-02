@@ -8,7 +8,6 @@ Usage:
     python tools/telegram_send_file_cli.py --path /tmp/chart.png
     python tools/telegram_send_file_cli.py --path /tmp/chart.png --caption "Daily report"
     python tools/telegram_send_file_cli.py --path /tmp/doc.pdf --type document
-    python tools/telegram_send_file_cli.py --path /tmp/chart.png --agent zelda
 
 File type is auto-detected from extension:
     .jpg/.jpeg/.png/.webp → photo
@@ -22,6 +21,7 @@ Override with --type photo|document|video|audio
 import argparse
 import json
 import mimetypes
+import os
 import sys
 from pathlib import Path
 from urllib import request as urllib_request
@@ -60,67 +60,47 @@ def _load_agents_json() -> dict:
     sys.exit(1)
 
 
-def _resolve_token(secrets: dict, agents_cfg: dict, agent_name: str | None) -> str:
-    """Resolve Telegram bot token for the given agent (or first available)."""
-    agents = agents_cfg.get("agents", [])
+def _detect_current_agent() -> str | None:
+    """Resolve the current HASHI agent name from runtime context."""
+    env_name = os.environ.get("HASHI_AGENT_NAME") or os.environ.get("AGENT_NAME")
+    if env_name:
+        return str(env_name).strip()
 
-    if agent_name:
-        for ag in agents:
-            if ag.get("name") == agent_name:
-                token_key = ag.get("telegram_token_key", agent_name)
-                token = secrets.get(token_key)
-                if token:
-                    return token
-                break
+    cwd = Path.cwd().resolve()
+    parts = list(cwd.parts)
+    if "workspaces" in parts:
+        idx = parts.index("workspaces")
+        if idx + 1 < len(parts):
+            return parts[idx + 1]
 
-    # Fallback: try common keys
-    for key in ["arale", "akane", "hashiko"]:
-        if secrets.get(key) and len(str(secrets[key])) > 20:
-            return secrets[key]
+    return None
 
-    print("Error: no Telegram bot token found", file=sys.stderr)
+
+def _resolve_token(secrets: dict, agent_name: str | None) -> str:
+    """Resolve the Telegram bot token for the current HASHI agent."""
+    if not agent_name:
+        print("Error: could not determine current HASHI agent name", file=sys.stderr)
+        sys.exit(1)
+
+    token = secrets.get(agent_name)
+    if token:
+        return str(token)
+
+    print(f"Error: no Telegram bot token found for agent '{agent_name}'", file=sys.stderr)
     sys.exit(1)
 
 
-def _resolve_chat_id(agents_cfg: dict, secrets: dict, agent_name: str | None) -> str:
-    """Resolve target Telegram chat ID.
+def _resolve_chat_id(secrets: dict) -> str:
+    """Resolve the current request's Telegram chat ID from runtime context."""
+    chat_id = (
+        os.environ.get("HASHI_AUTHORIZED_TELEGRAM_ID")
+        or os.environ.get("AUTHORIZED_TELEGRAM_ID")
+        or secrets.get("_authorized_telegram_id")
+    )
+    if chat_id and int(chat_id) != 0:
+        return str(chat_id)
 
-    Resolution order:
-    1. agent-specific secrets key: ``<agent_name>_authorized_telegram_id``
-    2. agent-specific fields in ``agents.json``: ``telegram_chat_id`` / ``chat_id``
-    3. global secrets key: ``authorized_telegram_id``
-    4. global ``agents.json`` key: ``global.authorized_id``
-    """
-    agents = agents_cfg.get("agents", [])
-
-    if agent_name:
-        secret_key = f"{agent_name}_authorized_telegram_id"
-        auth_id = secrets.get(secret_key)
-        if auth_id and int(auth_id) != 0:
-            return str(auth_id)
-
-        for ag in agents:
-            if ag.get("name") == agent_name:
-                auth_id = ag.get("telegram_chat_id") or ag.get("chat_id")
-                if auth_id and int(auth_id) != 0:
-                    return str(auth_id)
-                print(
-                    f"Warning: agent '{agent_name}' has no dedicated Telegram chat configured; "
-                    "falling back to global authorized target",
-                    file=sys.stderr,
-                )
-                break
-
-    # secrets.json global
-    auth_id = secrets.get("authorized_telegram_id")
-    if auth_id and int(auth_id) != 0:
-        return str(auth_id)
-    # agents.json global
-    g = agents_cfg.get("global", {})
-    auth_id = g.get("authorized_id")
-    if auth_id and int(auth_id) != 0:
-        return str(auth_id)
-    print("Error: no authorized_telegram_id found", file=sys.stderr)
+    print("Error: no current Telegram chat_id available in HASHI runtime context", file=sys.stderr)
     sys.exit(1)
 
 
@@ -203,7 +183,6 @@ def main():
     parser.add_argument("--type", dest="file_type", default="auto",
                         choices=["auto", "photo", "document", "video", "audio"],
                         help="File type (default: auto-detect)")
-    parser.add_argument("--agent", default=None, help="Agent name (for token resolution)")
     parser.add_argument("--chat-id", default=None, help="Override chat ID")
     args = parser.parse_args()
 
@@ -218,9 +197,10 @@ def main():
     file_type = args.file_type if args.file_type != "auto" else _detect_file_type(file_path)
 
     secrets = _load_secrets()
-    agents_cfg = _load_agents_json()
-    token = _resolve_token(secrets, agents_cfg, args.agent)
-    chat_id = args.chat_id or _resolve_chat_id(agents_cfg, secrets, args.agent)
+    _load_agents_json()  # fail early if HASHI config is missing
+    detected_agent = _detect_current_agent()
+    token = _resolve_token(secrets, detected_agent)
+    chat_id = args.chat_id or _resolve_chat_id(secrets)
 
     success = send_file(file_path, args.caption, file_type, token, chat_id)
     sys.exit(0 if success else 1)

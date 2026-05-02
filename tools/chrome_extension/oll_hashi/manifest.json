@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "OLL for HASHI",
+  "version": "0.1.0",
+  "description": "HASHI browser companion for chat, threads, and future page tools.",
+  "permissions": [
+    "sidePanel",
+    "storage"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "service_worker.js"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "action": {
+    "default_title": "Open OLL for HASHI"
+  }
+}

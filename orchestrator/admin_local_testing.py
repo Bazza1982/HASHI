@@ -94,6 +94,8 @@ def supported_commands(runtime) -> list[str]:
         "effort",
         "skill",
         "debug",
+        "cron",
+        "heartbeat",
         "wa_on",
         "wa_off",
         "wa_send",
@@ -103,6 +105,7 @@ def supported_commands(runtime) -> list[str]:
         "cos",
         "usecomputer",
         "usercomputer",
+        "wol",
     ]
     if hasattr(runtime, "cmd_backend"):
         names.extend(["backend"])

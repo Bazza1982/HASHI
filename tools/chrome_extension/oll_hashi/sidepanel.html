@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OLL for HASHI</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app">
+    <header>
+      <div>
+        <h1>OLL for HASHI</h1>
+        <p id="status">未连接</p>
+      </div>
+    </header>
+
+    <section class="panel">
+      <label>Gateway URL</label>
+      <input id="gatewayUrl" type="text" placeholder="https://hashi.example.com">
+      <label>设备名称</label>
+      <input id="deviceLabel" type="text" placeholder="Office Chrome">
+      <div class="row">
+        <button id="btnPair">快速配对</button>
+        <button id="btnHealth">测试连接</button>
+      </div>
+      <small id="pairInfo"></small>
+    </section>
+
+    <section class="panel">
+      <label>Agent</label>
+      <select id="agentSelect"></select>
+      <div class="row">
+        <button id="btnLoadAgents">刷新 Agents</button>
+        <button id="btnNewThread">新线程</button>
+      </div>
+      <label>Thread</label>
+      <select id="threadSelect"></select>
+    </section>
+
+    <section class="panel">
+      <label>附件加密</label>
+      <div class="row">
+        <button id="btnBackupKey">备份恢复码</button>
+        <button id="btnRestoreKey">恢复密钥</button>
+      </div>
+      <small id="recoveryInfo">未备份</small>
+      <label>上传文件</label>
+      <input id="fileInput" type="file">
+      <input id="fileNote" type="text" placeholder="附件备注（可选）">
+      <button id="btnUpload">加密上传</button>
+    </section>
+
+    <section class="messages" id="messages"></section>
+
+    <section class="composer">
+      <textarea id="messageInput" rows="4" placeholder="输入消息..."></textarea>
+      <button id="btnSend">发送</button>
+    </section>
+  </div>
+  <script src="sidepanel.js"></script>
+</body>
+</html>

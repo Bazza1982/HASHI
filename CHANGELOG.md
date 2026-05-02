@@ -27,7 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [3.2.0-alpha] - 2026-05-02
+
+### ✨ Added
+
+- **Browser gateway alpha** — local browser gateway package and test coverage for browser-facing bridge capabilities.
+- **OLL HASHI Chrome extension scaffold** — extension files and implementation plan for browser bridge workflows.
+- **Private wake-on-LAN tooling** — local helper and tests for private wake-on-LAN flows.
+- **Workzone support** — project/workspace zone helper module and tests.
 
 ### 🔧 Fixed
 

@@ -288,6 +288,8 @@ class PeerRegistry:
                     name: PeerInfo(**obs)
                     for name, obs in observations.items()
                 }
+            if self._prune_duplicate_peer_aliases():
+                self._save_state()
         except Exception as exc:
             logger.warning("Registry: failed to load peer state: %s", exc)
 
@@ -308,6 +310,178 @@ class PeerRegistry:
             self._state_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
         except Exception as exc:
             logger.warning("Registry: failed to save peer state: %s", exc)
+
+    def _alias_host_candidates_from_entry(self, entry: dict) -> list[str]:
+        hosts: list[str] = []
+        seen: set[str] = set()
+
+        def _add(value: str) -> None:
+            host = str(value or "").strip().lower()
+            if not host or host in {"127.0.0.1", "localhost", "0.0.0.0"} or host in seen:
+                return
+            seen.add(host)
+            hosts.append(host)
+
+        for key in ("lan_ip", "api_host", "tailscale_ip"):
+            _add(entry.get(key))
+        for item in entry.get("address_candidates") or []:
+            if not isinstance(item, dict):
+                continue
+            scope = str(item.get("scope") or "").strip().lower()
+            if scope in {"lan", "overlay", "routable", "peer"}:
+                _add(item.get("host"))
+        return hosts
+
+    def _alias_host_candidates_for_peer(self, peer: PeerInfo, observations: dict[str, PeerInfo] | None = None) -> list[str]:
+        hosts: list[str] = []
+        seen: set[str] = set()
+
+        def _add(value: str) -> None:
+            host = str(value or "").strip().lower()
+            if not host or host in {"127.0.0.1", "localhost", "0.0.0.0"} or host in seen:
+                return
+            seen.add(host)
+            hosts.append(host)
+
+        for item in (peer.properties or {}).get("address_candidates") or []:
+            if not isinstance(item, dict):
+                continue
+            scope = str(item.get("scope") or "").strip().lower()
+            if scope in {"lan", "overlay", "routable", "peer"}:
+                _add(item.get("host"))
+        for info in (observations or {}).values():
+            _add(info.host)
+        _add(peer.host)
+        return hosts
+
+    def _instance_alias_key(self, entry: dict) -> tuple[str, int] | None:
+        if not isinstance(entry, dict):
+            return None
+        try:
+            workbench_port = int(entry.get("workbench_port") or 0)
+        except Exception:
+            workbench_port = 0
+        if workbench_port <= 0:
+            return None
+        hosts = self._alias_host_candidates_from_entry(entry)
+        if not hosts:
+            return None
+        return hosts[0], workbench_port
+
+    def _peer_alias_key(self, peer: PeerInfo, observations: dict[str, PeerInfo] | None = None) -> tuple[str, int] | None:
+        try:
+            workbench_port = int(peer.workbench_port or 0)
+        except Exception:
+            workbench_port = 0
+        if workbench_port <= 0:
+            return None
+        hosts = self._alias_host_candidates_for_peer(peer, observations)
+        if not hosts:
+            return None
+        return hosts[0], workbench_port
+
+    def _entry_alias_score(self, entry: dict) -> tuple[int, int, str]:
+        caps = list(entry.get("capabilities") or [])
+        try:
+            protocol = int(float(entry.get("protocol_version") or 0) * 100)
+        except Exception:
+            protocol = 0
+        score = protocol + len(caps) * 10
+        if _normalize_identity(entry.get("host_identity") or ""):
+            score += 25
+        if str(entry.get("environment_kind") or "").strip().lower():
+            score += 10
+        state = str(entry.get("handshake_state") or "").strip().lower()
+        live_status = str(entry.get("live_status") or "").strip().lower()
+        if state == "handshake_accepted":
+            score += 40
+        if live_status == "online":
+            score += 80
+        elif live_status == "stale":
+            score += 20
+        return score, len(caps), str(entry.get("instance_id") or "").upper()
+
+    def _peer_alias_score(self, peer: PeerInfo) -> tuple[int, int, str]:
+        props = peer.properties or {}
+        caps = list(peer.capabilities or [])
+        try:
+            protocol = int(float(peer.protocol_version or 0) * 100)
+        except Exception:
+            protocol = 0
+        score = protocol + len(caps) * 10
+        if _normalize_identity(props.get("host_identity") or ""):
+            score += 25
+        if str(props.get("environment_kind") or "").strip().lower():
+            score += 10
+        state = str(props.get("handshake_state") or "").strip().lower()
+        live_status = str(props.get("live_status") or "").strip().lower()
+        if state == "handshake_accepted":
+            score += 40
+        if live_status == "online":
+            score += 80
+        elif live_status == "stale":
+            score += 20
+        return score, len(caps), peer.instance_id.upper()
+
+    def _prune_duplicate_instance_aliases(self, instances: dict) -> tuple[dict, bool]:
+        if not isinstance(instances, dict):
+            return {}, False
+        keep_keys: set[str] = set()
+        best_by_alias: dict[tuple[str, int], tuple[str, dict]] = {}
+        for key, entry in instances.items():
+            if not isinstance(entry, dict):
+                continue
+            alias_key = self._instance_alias_key(entry)
+            if alias_key is None:
+                keep_keys.add(key)
+                continue
+            chosen = best_by_alias.get(alias_key)
+            if chosen is None or self._entry_alias_score(entry) > self._entry_alias_score(chosen[1]):
+                best_by_alias[alias_key] = (key, entry)
+        keep_keys.update(key for key, _entry in best_by_alias.values())
+
+        pruned: dict[str, dict] = {}
+        changed = False
+        for key, entry in instances.items():
+            if not isinstance(entry, dict):
+                continue
+            alias_key = self._instance_alias_key(entry)
+            if alias_key is not None and key not in keep_keys:
+                winner = best_by_alias[alias_key][1]
+                logger.info(
+                    "Registry: pruning duplicate instance alias %s in favor of %s",
+                    str(entry.get("instance_id") or key).upper(),
+                    str(winner.get("instance_id") or best_by_alias[alias_key][0]).upper(),
+                )
+                changed = True
+                continue
+            pruned[key] = entry
+        return pruned, changed
+
+    def _prune_duplicate_peer_aliases(self) -> bool:
+        if not self._peers:
+            return False
+        best_by_alias: dict[tuple[str, int], str] = {}
+        for iid, peer in self._peers.items():
+            alias_key = self._peer_alias_key(peer, self._observations.get(iid, {}))
+            if alias_key is None:
+                continue
+            chosen_iid = best_by_alias.get(alias_key)
+            if chosen_iid is None or self._peer_alias_score(peer) > self._peer_alias_score(self._peers[chosen_iid]):
+                best_by_alias[alias_key] = iid
+
+        keep_iids = set(best_by_alias.values())
+        removed = False
+        for iid, peer in list(self._peers.items()):
+            alias_key = self._peer_alias_key(peer, self._observations.get(iid, {}))
+            if alias_key is None or iid in keep_iids:
+                continue
+            winner = best_by_alias[alias_key]
+            logger.info("Registry: pruning duplicate peer alias %s in favor of %s", iid, winner)
+            self._peers.pop(iid, None)
+            self._observations.pop(iid, None)
+            removed = True
+        return removed
 
     def _select_preferred_backend(self, observations: dict[str, PeerInfo]) -> str | None:
         fallback = observations.get("bootstrap_fallback")
@@ -494,6 +668,7 @@ class PeerRegistry:
             merged.properties["live_status"] = self._derive_live_status(merged.properties)
             canonical[iid] = merged
         self._peers = canonical
+        self._prune_duplicate_peer_aliases()
 
     def _sync_to_instances_json(self) -> None:
         """Write discovered peer IPs into instances.json for hchat routing."""
@@ -504,6 +679,9 @@ class PeerRegistry:
         try:
             data = json.loads(self._instances_path.read_text(encoding="utf-8"))
             instances = data.get("instances", {})
+            instances, pruned_instances = self._prune_duplicate_instance_aliases(instances)
+            if pruned_instances:
+                data["instances"] = instances
             local_entry = instances.get(self._self_id.lower(), {})
             local_platform = str(local_entry.get("platform") or "").lower()
             local_hosts = {
@@ -696,7 +874,7 @@ class PeerRegistry:
                         if refreshed:
                             changed = True
 
-            if changed:
+            if changed or pruned_instances:
                 data["instances"] = instances
                 self._instances_path.write_text(
                     json.dumps(data, indent=4, ensure_ascii=False),

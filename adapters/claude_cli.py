@@ -281,7 +281,7 @@ class ClaudeCLIAdapter(BaseBackend):
             self.effort,
             "--dangerously-skip-permissions",
             "--add-dir",
-            self.access_root,
+            self.effective_add_dir,
         ]
         # Session persistence: use --resume when in session mode with an active session
         if self._session_mode and self._session_id:
@@ -296,10 +296,11 @@ class ClaudeCLIAdapter(BaseBackend):
 
         try:
             started = time.perf_counter()
+            effective_workdir = self.effective_workdir
             self.logger.info(
                 f"Launching Claude request {request_id} "
                 f"(stateless=True, retry={is_retry}, stdin={stdin_data is not None}, "
-                f"streaming={use_streaming}, prompt_len={len(prompt)}, cwd={self.config.workspace_dir})"
+                f"streaming={use_streaming}, prompt_len={len(prompt)}, cwd={effective_workdir})"
             )
             _extra_kwargs = {}
             if os.name != "nt":
@@ -309,7 +310,7 @@ class ClaudeCLIAdapter(BaseBackend):
                 stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=str(self.config.workspace_dir),
+                cwd=str(effective_workdir),
                 limit=1024 * 1024,  # 1 MB readline buffer (default 64 KB too small for large JSON events)
                 **_extra_kwargs,
             )
@@ -582,7 +583,7 @@ class ClaudeCLIAdapter(BaseBackend):
             stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=str(self.config.workspace_dir),
+            cwd=str(self.effective_workdir),
             limit=1024 * 1024,
         )
         self.current_proc = proc

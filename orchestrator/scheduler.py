@@ -8,7 +8,7 @@ from pathlib import Path
 scheduler_logger = logging.getLogger("BridgeU.Scheduler")
 
 SCHEDULER_JOB_TIMEOUT_S = 30
-SCHEDULER_SKILL_TIMEOUT_S = 300  # action skills (dream etc.) need much longer — they run subprocesses with LLM calls
+SCHEDULER_SKILL_TIMEOUT_S = 1860  # Keep longer than the action-skill watchdog so the skill layer owns timeout/cleanup.
 PARKED_FOLLOWUP_TIMEOUT_S = 15
 
 try:

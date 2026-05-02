@@ -157,3 +157,7 @@ tools/browser_bridge.log
 # Local runtime backups/state
 backups/
 managed_active_heartbeats.json
+tasks.json.bak.*
+
+# Private local-only commands/config (never commit)
+private/

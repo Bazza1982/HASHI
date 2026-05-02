@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Optional, Any
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig, AgentConfig
 from orchestrator.flexible_backend_registry import get_secret_lookup_order
+from orchestrator.workzone import access_root_for_workzone
 
 class FlexibleBackendManager:
     def __init__(self, config: FlexibleAgentConfig, global_config: GlobalConfig, secrets: dict):
@@ -153,8 +154,9 @@ class FlexibleBackendManager:
             if not allowed:
                 return
 
-            access_root = adapter_cfg.resolve_access_root()
-            workspace_dir = adapter_cfg.workspace_dir
+            workzone_dir = (adapter_cfg.extra or {}).get("workzone_dir")
+            workspace_dir = Path(workzone_dir).expanduser().resolve() if workzone_dir else adapter_cfg.workspace_dir
+            access_root = access_root_for_workzone(adapter_cfg.resolve_access_root(), workspace_dir if workzone_dir else None)
             max_loops = int(tools_cfg.get("max_loops", 25))
 
             # Per-tool options (e.g. bash.timeout_max, file_write.max_file_size_kb)

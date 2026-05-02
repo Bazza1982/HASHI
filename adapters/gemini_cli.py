@@ -274,15 +274,16 @@ class GeminiCLIAdapter(BaseBackend):
             "--approval-mode",
             "yolo",
             "--include-directories",
-            self.access_root,
+            self.effective_add_dir,
         ]
         try:
             started = time.perf_counter()
+            effective_workdir = self.effective_workdir
             self.logger.info(
                 f"Launching Gemini request {request_id} "
                 f"(stateless=True, retry={is_retry}, stdin={stdin_data is not None}, "
                 f"streaming={use_streaming}, "
-                f"prompt_len={len(prompt)}, cwd={self.config.workspace_dir}, system_md={self.system_md_path})"
+                f"prompt_len={len(prompt)}, cwd={effective_workdir}, system_md={self.system_md_path})"
             )
             _extra_kwargs = {}
             if os.name != "nt":
@@ -295,7 +296,7 @@ class GeminiCLIAdapter(BaseBackend):
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=str(self.config.workspace_dir),
+                cwd=str(effective_workdir),
                 limit=1024 * 1024,  # 1 MB readline buffer (default 64 KB too small for large output lines)
                 **_extra_kwargs,
             )

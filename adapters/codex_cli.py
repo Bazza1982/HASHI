@@ -293,7 +293,7 @@ class CodexCLIAdapter(BaseBackend):
             cmd = [self.cmd_base, "exec", "resume", self._session_id] + base_flags
         else:
             # First turn: start a new persistent session (no --ephemeral), include --add-dir
-            cmd = [self.cmd_base, "exec", "--add-dir", self.access_root] + base_flags
+            cmd = [self.cmd_base, "exec", "--add-dir", self.effective_add_dir] + base_flags
 
         cmd += ["--", prompt_arg]
         return cmd
@@ -317,6 +317,21 @@ class CodexCLIAdapter(BaseBackend):
                 if item.get("type") == "agent_message" and item.get("text"):
                     response = item["text"].strip()
         return response
+
+    def _persist_stdout_lines(self, stdout_lines: list[str]) -> None:
+        if not stdout_lines:
+            return
+        with open(self.events_log_path, "a", encoding="utf-8") as f:
+            for raw_line in stdout_lines:
+                f.write(raw_line)
+                if not raw_line.endswith("\n"):
+                    f.write("\n")
+
+    def _error_with_last_message(self, prefix: str, response: str) -> str:
+        response = (response or "").strip()
+        if not response:
+            return prefix
+        return f"{prefix}\n\nLast Codex message before exit:\n{response}"
 
     async def generate_response(
         self, prompt: str, request_id: str, is_retry: bool = False, silent: bool = False,
@@ -342,13 +357,15 @@ class CodexCLIAdapter(BaseBackend):
 
         cmd = self._build_cmd(prompt_arg, output_path)
         session_mode = "resume" if self._session_id else "new"
+        effective_workdir = self.effective_workdir
+        stdout_lines: list[str] = []
 
         try:
             self.logger.info(
                 f"Launching Codex request {request_id} "
                 f"(session={session_mode}, session_id={self._session_id or 'none'}, "
                 f"retry={is_retry}, stdin={stdin_data is not None}, "
-                f"prompt_len={len(built_prompt)}, cwd={self.config.workspace_dir})"
+                f"prompt_len={len(built_prompt)}, cwd={effective_workdir})"
             )
             _extra_kwargs = {}
             if os.name != "nt":
@@ -358,7 +375,7 @@ class CodexCLIAdapter(BaseBackend):
                 stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=str(self.config.workspace_dir),
+                cwd=str(effective_workdir),
                 limit=16 * 1024 * 1024,  # 16 MB readline buffer — Codex embeds full command output in single JSON lines
                 **_extra_kwargs,
             )
@@ -370,7 +387,6 @@ class CodexCLIAdapter(BaseBackend):
             )
             self._touch_activity()  # mark process launch as initial activity
 
-            stdout_lines = []
             stderr_chunks: list[bytes] = []
             timeout_kind: str | None = None
             pending_agent_message: dict | None = None
@@ -476,14 +492,17 @@ class CodexCLIAdapter(BaseBackend):
                 self.current_proc = None
                 await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
                 self._active_read_tasks = []
+                self._persist_stdout_lines(stdout_lines)
+                response = self._extract_response_text(output_path, stdout_lines)
+                error_text = (
+                    f"Codex CLI was idle for {self.IDLE_TIMEOUT_SEC}s with no output."
+                    if timeout_kind == "idle"
+                    else f"Codex CLI exceeded hard timeout of {self.HARD_TIMEOUT_SEC}s."
+                )
                 return BackendResponse(
                     text="",
                     duration_ms=duration_ms,
-                    error=(
-                        f"Codex CLI was idle for {self.IDLE_TIMEOUT_SEC}s with no output."
-                        if timeout_kind == "idle"
-                        else f"Codex CLI exceeded hard timeout of {self.HARD_TIMEOUT_SEC}s."
-                    ),
+                    error=self._error_with_last_message(error_text, response),
                     is_success=False,
                 )
 
@@ -507,10 +526,7 @@ class CodexCLIAdapter(BaseBackend):
             self.current_proc = None
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
 
-            if stdout_lines:
-                with open(self.events_log_path, "a", encoding="utf-8") as f:
-                    for raw_line in stdout_lines:
-                        f.write(raw_line)
+            self._persist_stdout_lines(stdout_lines)
 
             self.logger.info(
                 f"Codex request {request_id} exited "
@@ -523,7 +539,8 @@ class CodexCLIAdapter(BaseBackend):
             if returncode != 0 and not forced_completion:
                 err_msg = stderr_data.decode(errors="replace").strip()
                 if not err_msg:
-                    err_msg = "".join(stdout_lines).strip() or "Codex CLI exited with a non-zero status."
+                    err_msg = "Codex CLI exited with a non-zero status."
+                err_msg = self._error_with_last_message(err_msg, response)
                 return BackendResponse(text="", duration_ms=duration_ms, error=err_msg, is_success=False)
 
             # Persist the session ID from this turn so the next request can resume it
@@ -552,6 +569,7 @@ class CodexCLIAdapter(BaseBackend):
                     logger=self.logger,
                     reason=f"cancelled:{request_id}",
                 )
+            self._persist_stdout_lines(stdout_lines)
             raise
         except Exception as e:
             return BackendResponse(text="", duration_ms=0, error=str(e), is_success=False)

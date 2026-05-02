@@ -47,6 +47,8 @@ from orchestrator.usecomputer_mode import (
 )
 from orchestrator.skill_manager import SkillDefinition, SkillManager
 from orchestrator.voice_manager import VoiceManager
+from orchestrator.private_wol import describe_wol_targets, private_wol_available, run_private_wol
+from orchestrator.workzone import access_root_for_workzone, build_workzone_prompt, clear_workzone, load_workzone, resolve_workzone_input, save_workzone
 
 HABIT_BROWSER_PAGE_SIZE = 5
 
@@ -137,6 +139,8 @@ class FlexibleAgentRuntime:
         self.runtime_session_path = self.workspace_dir / ".runtime_session.json"
         self.transfer_state_path = self.workspace_dir / "active_transfer.json"
         self._cos_enabled: bool = (self.workspace_dir / ".cos_on").exists()
+        self._workzone_dir: Path | None = load_workzone(self.workspace_dir)
+        self._sync_workzone_to_backend_config()
         self.voice_manager = VoiceManager(self.workspace_dir, self.media_dir, ffmpeg_cmd="ffmpeg", secrets=self.secrets)
         self._authorized_telegram_ids = resolve_authorized_telegram_ids(self.config.extra, self.global_config.authorized_id)
         self._active_chat_ids: dict[int, int] = {}  # user_id -> chat_id, populated on first message
@@ -327,7 +331,7 @@ class FlexibleAgentRuntime:
                     self._enabled_commands.add(name.strip().lstrip("/").lower())
 
         # help/status/new/wipe/clear/model/effort/mode should always be available
-        self._enabled_commands.update({"help", "status", "new", "wipe", "reset", "clear", "memory", "model", "effort", "mode", "jobs", "verbose", "think", "voice", "whisper", "transfer", "fork", "cos", "long", "end"})
+        self._enabled_commands.update({"help", "status", "new", "wipe", "reset", "clear", "memory", "model", "effort", "mode", "jobs", "verbose", "think", "voice", "whisper", "transfer", "fork", "cos", "long", "end", "oll"})
 
     def _is_command_allowed(self, cmd: str) -> bool:
         cmd = (cmd or "").lstrip("/").lower()
@@ -525,6 +529,44 @@ class FlexibleAgentRuntime:
 
     def _backend_busy(self) -> bool:
         return self.is_generating or (not self.queue.empty())
+
+    def _sync_workzone_to_backend_config(self) -> None:
+        if self.config.extra is None:
+            self.config.extra = {}
+        if self._workzone_dir is not None:
+            self.config.extra["workzone_dir"] = str(self._workzone_dir)
+        else:
+            self.config.extra.pop("workzone_dir", None)
+        backend = getattr(getattr(self, "backend_manager", None), "current_backend", None)
+        if backend is not None and getattr(backend, "config", None) is not None:
+            if backend.config.extra is None:
+                backend.config.extra = {}
+            if self._workzone_dir is not None:
+                backend.config.extra["workzone_dir"] = str(self._workzone_dir)
+            else:
+                backend.config.extra.pop("workzone_dir", None)
+            registry = getattr(backend, "tool_registry", None)
+            if registry is not None:
+                if self._workzone_dir is not None:
+                    registry.workspace_dir = self._workzone_dir
+                    registry.access_root = access_root_for_workzone(backend.config.resolve_access_root(), self._workzone_dir)
+                else:
+                    registry.workspace_dir = self.workspace_dir
+                    registry.access_root = backend.config.resolve_access_root()
+
+    def _workzone_prompt_section(self) -> list[tuple[str, str]]:
+        self._workzone_dir = load_workzone(self.workspace_dir)
+        self._sync_workzone_to_backend_config()
+        backend = getattr(self.backend_manager, "current_backend", None)
+        can_access_files = bool(
+            backend
+            and (
+                getattr(getattr(backend, "capabilities", None), "supports_files", False)
+                or getattr(backend, "tool_registry", None) is not None
+            )
+        )
+        section = build_workzone_prompt(self._workzone_dir, self.workspace_dir, can_access_files=can_access_files)
+        return [section] if section else []
 
     def _extract_task_id(self, summary: str) -> Optional[str]:
         if not summary:
@@ -1438,17 +1480,20 @@ class FlexibleAgentRuntime:
         else:
             await self._reply_text(update_or_query, text, parse_mode="HTML", reply_markup=markup)
 
-    async def invoke_scheduler_skill(self, skill_id: str, args: str, task_id: str):
+    async def invoke_scheduler_skill(self, skill_id: str, args: str, task_id: str) -> tuple[bool, str | None]:
         if not self.skill_manager:
-            self.error_logger.error(f"Scheduler skill invocation requested without skill manager: {skill_id}")
-            return
+            message = f"Scheduler skill invocation requested without skill manager: {skill_id}"
+            self.error_logger.error(message)
+            return False, message
         skill = self.skill_manager.get_skill(skill_id)
         if skill is None:
-            self.error_logger.error(f"Unknown scheduler skill: {skill_id}")
-            return
+            message = f"Unknown scheduler skill: {skill_id}"
+            self.error_logger.error(message)
+            return False, message
         if skill.type == "toggle":
-            self.error_logger.error(f"Toggle skill cannot be scheduled: {skill_id}")
-            return
+            message = f"Toggle skill cannot be scheduled: {skill_id}"
+            self.error_logger.error(message)
+            return False, message
         skill_env = {
             "BRIDGE_ACTIVE_BACKEND": self.config.active_backend,
             "BRIDGE_ACTIVE_MODEL": self.get_current_model(),
@@ -1469,20 +1514,26 @@ class FlexibleAgentRuntime:
                 )
             elif text:
                 self.error_logger.error(text)
-            return
+            return ok, text
         prompt = self.skill_manager.build_prompt_for_skill(skill, args or "")
         if skill.backend:
             allowed = [b["engine"] for b in self.config.allowed_backends]
             if skill.backend not in allowed:
-                self.error_logger.error(
-                    f"Scheduled prompt skill {skill.id} targets disallowed backend {skill.backend}."
-                )
-                return
+                message = f"Scheduled prompt skill {skill.id} targets disallowed backend {skill.backend}."
+                self.error_logger.error(message)
+                return False, message
             if self.config.active_backend != skill.backend:
+                self._workzone_dir = load_workzone(self.workspace_dir)
+                self._sync_workzone_to_backend_config()
                 switch_ok = await self.backend_manager.switch_backend(skill.backend)
                 if not switch_ok:
-                    self.error_logger.error(f"Failed to switch backend for scheduled skill {skill.id}.")
-                    return
+                    message = f"Failed to switch backend for scheduled skill {skill.id}."
+                    self.error_logger.error(message)
+                    return False, message
+                self._sync_workzone_to_backend_config()
+                backend = self.backend_manager.current_backend
+                if backend and getattr(backend.capabilities, "supports_sessions", False):
+                    await backend.handle_new_session()
         await self.enqueue_request(
             chat_id=self._primary_chat_id(),
             prompt=prompt,
@@ -1490,6 +1541,7 @@ class FlexibleAgentRuntime:
             summary=f"Skill Task [{task_id}]",
             silent=False,
         )
+        return True, f"Scheduled prompt skill queued: {skill.id}"
 
     def get_typing_placeholder(self) -> tuple[str, str | None]:
         extra = self.config.extra or {}
@@ -1748,6 +1800,8 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CallbackQueryHandler(self.callback_skill, pattern=r"^(skill|skilljob):"))
         self.app.add_handler(CallbackQueryHandler(self.callback_toggle, pattern=r"^tgl:"))
         self.app.add_handler(CommandHandler("mode", self._wrap_cmd("mode", self.cmd_mode)))
+        self.app.add_handler(CommandHandler("workzone", self._wrap_cmd("workzone", self.cmd_workzone)))
+        self.app.add_handler(CommandHandler("worzone", self._wrap_cmd("worzone", self.cmd_workzone)))
         self.app.add_handler(CommandHandler("new", self._wrap_cmd("new", self.cmd_new)))
         self.app.add_handler(CommandHandler("memory", self._wrap_cmd("memory", self.cmd_memory)))
         self.app.add_handler(CommandHandler("wipe", self._wrap_cmd("wipe", self.cmd_wipe)))
@@ -1760,6 +1814,8 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CommandHandler("verbose", self._wrap_cmd("verbose", self.cmd_verbose)))
         self.app.add_handler(CommandHandler("think", self._wrap_cmd("think", self.cmd_think)))
         self.app.add_handler(CommandHandler("jobs", self._wrap_cmd("jobs", self.cmd_jobs)))
+        self.app.add_handler(CommandHandler("cron", self._wrap_cmd("cron", self.cmd_cron)))
+        self.app.add_handler(CommandHandler("heartbeat", self._wrap_cmd("heartbeat", self.cmd_heartbeat)))
         self.app.add_handler(CommandHandler("timeout", self._wrap_cmd("timeout", self.cmd_timeout)))
         self.app.add_handler(CommandHandler("hchat", self._wrap_cmd("hchat", self.cmd_hchat)))
         self.app.add_handler(CommandHandler("group", self._wrap_cmd("group", self.cmd_group)))
@@ -1777,6 +1833,8 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CommandHandler("long", self._wrap_cmd("long", self.cmd_long)))
         self.app.add_handler(CommandHandler("end", self._wrap_cmd("end", self.cmd_end)))
         self.app.add_handler(CommandHandler("remote", self._wrap_cmd("remote", self.cmd_remote)))
+        self.app.add_handler(CommandHandler("oll", self._wrap_cmd("oll", self.cmd_oll)))
+        self.app.add_handler(CommandHandler("wol", self._wrap_cmd("wol", self.cmd_wol)))
         self.app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), self.handle_message))
         self.app.add_handler(MessageHandler(filters.PHOTO, self.handle_photo))
         self.app.add_handler(MessageHandler(filters.VOICE, self.handle_voice))
@@ -3751,7 +3809,7 @@ class FlexibleAgentRuntime:
         except URLError as e:
             return False, f"Connection failed ({host}:{wb_port}): {e}"
 
-    async def _run_job_now(self, job: dict[str, Any]):
+    async def _run_job_now(self, job: dict[str, Any]) -> tuple[bool, str]:
         action = job.get("action", "enqueue_prompt")
         if action == "export_transcript":
             await self.send_long_message(
@@ -3760,14 +3818,13 @@ class FlexibleAgentRuntime:
                 request_id=f"job-{job.get('id')}",
                 purpose="skill-job-run",
             )
-            return
+            return False, "Transcript export is only implemented for fixed agents."
         if action.startswith("skill:"):
-            await self.invoke_scheduler_skill(
+            return await self.invoke_scheduler_skill(
                 skill_id=action.split(":", 1)[1],
                 args=job.get("args", "") or job.get("prompt", ""),
                 task_id=job.get("id", "manual"),
             )
-            return
         prompt = job.get("prompt", "")
         if not prompt.strip():
             await self.send_long_message(
@@ -3776,7 +3833,7 @@ class FlexibleAgentRuntime:
                 request_id=f"job-{job.get('id')}",
                 purpose="skill-job-run",
             )
-            return
+            return False, f"Job {job.get('id')} has no prompt."
         summary_prefix = "Heartbeat Task" if "interval_seconds" in job else "Cron Task"
         await self.enqueue_request(
             chat_id=self._primary_chat_id(),
@@ -3784,6 +3841,35 @@ class FlexibleAgentRuntime:
             source="scheduler",
             summary=f"{summary_prefix} [{job.get('id')}]",
         )
+        return True, f"Queued {summary_prefix.lower()} [{job.get('id')}]"
+
+    async def _handle_job_command(self, update: Update, kind: str, args: list[str]):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        if not self.skill_manager:
+            await self._reply_text(update, "No task scheduler configured.")
+            return
+        if not args or args[0].strip().lower() in {"list", "show"}:
+            from orchestrator.agent_runtime import _build_jobs_with_buttons
+            text, markup = _build_jobs_with_buttons(self.name, self.skill_manager, filter_agent=self.name)
+            await self._reply_text(update, text, parse_mode="HTML", reply_markup=markup)
+            return
+        if args[0].strip().lower() != "run" or len(args) < 2:
+            await self._reply_text(update, f"Usage: /{kind} [list] | /{kind} run <job_id>")
+            return
+        task_id = args[1].strip()
+        job = self.skill_manager.get_job(kind, task_id)
+        if not job or job.get("agent") != self.name:
+            await self._reply_text(update, f"{kind} job not found for this agent: {task_id}")
+            return
+        await self._reply_text(update, f"Running {kind} job now: {task_id}")
+        await self._run_job_now(job)
+
+    async def cmd_cron(self, update: Update, context: Any):
+        await self._handle_job_command(update, "cron", list(context.args or []))
+
+    async def cmd_heartbeat(self, update: Update, context: Any):
+        await self._handle_job_command(update, "heartbeat", list(context.args or []))
 
     async def cmd_status(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -5028,12 +5114,18 @@ class FlexibleAgentRuntime:
         if self._backend_busy():
             return False, "Backend switch blocked while a request is running or queued."
 
+        self._workzone_dir = load_workzone(self.workspace_dir)
+        self._sync_workzone_to_backend_config()
         switch_ok = await self.backend_manager.switch_backend(
             target_engine,
             target_model=target_model,
         )
         if not switch_ok:
             return False, f"Failed to switch backend to: {target_engine}"
+        self._sync_workzone_to_backend_config()
+        backend = self.backend_manager.current_backend
+        if backend and getattr(backend.capabilities, "supports_sessions", False):
+            await backend.handle_new_session()
 
         if with_context:
             with suppress(Exception):
@@ -5243,6 +5335,61 @@ class FlexibleAgentRuntime:
                 "• `/backend` switching re-enabled",
                 parse_mode="Markdown",
             )
+
+    async def cmd_workzone(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        args = context.args or []
+        current = load_workzone(self.workspace_dir)
+        if not args:
+            if current:
+                await self._reply_text(
+                    update,
+                    f"Workzone is ON:\n<code>{html.escape(str(current))}</code>\n\n"
+                    "Use <code>/workzone off</code> to return to the agent home workspace.",
+                    parse_mode="HTML",
+                )
+            else:
+                await self._reply_text(
+                    update,
+                    f"Workzone is OFF. Agent home workspace:\n<code>{html.escape(str(self.workspace_dir))}</code>",
+                    parse_mode="HTML",
+                )
+            return
+        arg_text = " ".join(args).strip()
+        if self._backend_busy():
+            await self._reply_text(update, "Workzone change is blocked while a request is running or queued.")
+            return
+        if arg_text.lower() == "off":
+            clear_workzone(self.workspace_dir)
+            self._workzone_dir = None
+            self._sync_workzone_to_backend_config()
+            backend = self.backend_manager.current_backend
+            if backend and getattr(backend.capabilities, "supports_sessions", False):
+                await backend.handle_new_session()
+            await self._reply_text(
+                update,
+                f"Workzone OFF. Working directory reset to agent home workspace:\n<code>{html.escape(str(self.workspace_dir))}</code>",
+                parse_mode="HTML",
+            )
+            return
+        try:
+            zone = resolve_workzone_input(arg_text, self.global_config.project_root, self.workspace_dir)
+        except ValueError as exc:
+            await self._reply_text(update, f"Workzone not changed: {html.escape(str(exc))}", parse_mode="HTML")
+            return
+        save_workzone(self.workspace_dir, zone)
+        self._workzone_dir = zone
+        self._sync_workzone_to_backend_config()
+        backend = self.backend_manager.current_backend
+        if backend and getattr(backend.capabilities, "supports_sessions", False):
+            await backend.handle_new_session()
+        await self._reply_text(
+            update,
+            f"Workzone ON:\n<code>{html.escape(str(zone))}</code>\n\n"
+            "Next request will run from this directory and include a workzone prompt.",
+            parse_mode="HTML",
+        )
 
     async def cmd_new(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -5963,7 +6110,6 @@ class FlexibleAgentRuntime:
             ]
 
         return [f"addr: <code>{html.escape(route_host)}:{html.escape(route_port)}</code>"]
-
     async def cmd_remote(self, update: Update, context: Any):
         """Start/stop Hashi Remote. Usage: /remote [on|off|status|list]"""
         if not self._is_authorized_user(update.effective_user.id):
@@ -5972,6 +6118,7 @@ class FlexibleAgentRuntime:
         cfg = self._remote_config_snapshot()
         alive = self._remote_process is not None and self._remote_process.returncode is None
 
+        # Status check
         if arg == "status" or not arg:
             health, health_url = await self._fetch_remote_json("/health")
             status, _status_url = await self._fetch_remote_json("/protocol/status")
@@ -6109,6 +6256,101 @@ class FlexibleAgentRuntime:
             return
 
         await self._reply_text(update, "Usage: /remote [on|off|status|list]")
+
+    async def cmd_oll(self, update: Update, context: Any):
+        """Start/stop OLL Browser Gateway. Usage: /oll [on|off|status]"""
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        from browser_gateway.service_control import start as start_oll_service, status as oll_status, stop as stop_oll_service
+
+        arg = (context.args[0].lower() if context.args else "").strip()
+        root = self.global_config.project_root
+
+        if arg == "on":
+            state = start_oll_service(root)
+            await self._reply_text(
+                update,
+                "🟢 OLL Browser Gateway started.\n"
+                f"PID: {state.get('pid') or 'unknown'}\n"
+                f"Base URL: {state.get('base_url')}\n"
+                f"Log: {state.get('log_file')}"
+            )
+            return
+
+        if arg == "off":
+            was_running = oll_status(root)
+            state = stop_oll_service(root)
+            if was_running.get("running"):
+                await self._reply_text(update, "🔴 OLL Browser Gateway stopped.")
+            else:
+                await self._reply_text(update, "⚪ OLL Browser Gateway is not running.")
+            return
+
+        if arg == "status" or not arg:
+            state = oll_status(root)
+            if state.get("running"):
+                await self._reply_text(
+                    update,
+                    "🟢 OLL Browser Gateway is running.\n"
+                    f"PID: {state.get('pid')}\n"
+                    f"Base URL: {state.get('base_url')}\n"
+                    f"Log: {state.get('log_file')}\n"
+                    f"State DB: {state.get('state_db')}"
+                )
+            else:
+                await self._reply_text(
+                    update,
+                    "⚪ OLL Browser Gateway is not running.\n"
+                    f"Base URL: {state.get('base_url')}\n"
+                    "Use /oll on to start."
+                )
+            return
+
+        await self._reply_text(update, "Usage: /oll [on|off|status]")
+
+    async def cmd_wol(self, update: Update, context: Any):
+        """Private local-only Wake-on-LAN helper. Usage: /wol [target]"""
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+
+        project_root = self.global_config.project_root
+        if not private_wol_available(project_root):
+            await self._reply_text(update, "⚪ /wol is not enabled on this instance.")
+            return
+
+        arg = (context.args[0].strip().lower() if context.args else "")
+        if not arg or arg in {"list", "status", "help"}:
+            targets = describe_wol_targets(project_root)
+            lines = ["🪄 Private WoL targets on this instance:"]
+            for row in targets:
+                desc = f" — {row['description']}" if row["description"] else ""
+                lines.append(f"- {row['name']} ({row['label']}){desc}")
+            lines.append("")
+            lines.append("Usage: /wol <pc_name>")
+            await self._reply_text(update, "\n".join(lines))
+            return
+
+        await self._reply_text(update, f"🪄 Sending Wake-on-LAN packet for `{arg}`…")
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, lambda: run_private_wol(project_root, arg))
+        if result.get("ok"):
+            output = (result.get("stdout") or "").strip()
+            if len(output) > 2500:
+                output = output[:2500] + "\n...[truncated]"
+            lines = [f"✅ WoL completed for {result.get('label') or arg}."]
+            if output:
+                lines.append("")
+                lines.append(output)
+            await self._reply_text(update, "\n".join(lines))
+            return
+
+        error = result.get("error") or result.get("stderr") or "unknown error"
+        available = result.get("available_targets") or []
+        lines = [f"❌ WoL failed for {arg}: {error}"]
+        if available:
+            lines.append(f"Available targets: {', '.join(available)}")
+        await self._reply_text(update, "\n".join(lines))
+
     # ------------------------------------------------------------------
     # /long ... /end buffering (collect split Telegram messages)
     # ------------------------------------------------------------------
@@ -7075,6 +7317,7 @@ class FlexibleAgentRuntime:
 
                 effective_prompt = self._consume_session_primer(item)
                 habit_sections, habit_ids = self._build_habit_sections(item, effective_prompt)
+                extra_sections = self._workzone_prompt_section() + habit_sections
                 self.current_request_meta["habit_ids"] = habit_ids
                 # In fixed mode with an active session, use incremental prompts
                 _incremental = (
@@ -7085,7 +7328,7 @@ class FlexibleAgentRuntime:
                 _prompt_payload = self.context_assembler.build_prompt_payload(
                     effective_prompt,
                     self.config.active_backend,
-                    extra_sections=habit_sections,
+                    extra_sections=extra_sections,
                     inject_memory=not item.skip_memory_injection,
                     incremental=_incremental,
                 )
@@ -7516,7 +7759,7 @@ class FlexibleAgentRuntime:
                     self.queue.task_done()
 
     def get_bot_commands(self) -> list[BotCommand]:
-        return [
+        commands = [
             BotCommand("help", "Show help menu"),
             BotCommand("start", "Start another stopped agent"),
             BotCommand("agents", "List all agents with controls; add <id> <name> [token]"),
@@ -7539,6 +7782,7 @@ class FlexibleAgentRuntime:
             BotCommand("long", "Start multi-message input (end with /end)"),
             BotCommand("end", "Submit collected /long input"),
             BotCommand("mode", "Switch fixed/flex mode"),
+            BotCommand("workzone", "Set temporary working directory [path|off]"),
             BotCommand("model", "View or change model"),
             BotCommand("effort", "View or change effort"),
             BotCommand("new", "Start a fresh session"),
@@ -7551,10 +7795,13 @@ class FlexibleAgentRuntime:
             BotCommand("think", "Toggle thinking trace display [on|off]"),
             BotCommand("loop", "Create/manage recurring loop tasks"),
             BotCommand("jobs", "Show cron and heartbeat jobs"),
+            BotCommand("cron", "Run or list cron jobs"),
+            BotCommand("heartbeat", "Run or list heartbeat jobs"),
             BotCommand("timeout", "View or set request timeout [minutes]"),
             BotCommand("hchat", "Send a message to another agent [agent] [message]"),
             BotCommand("logo", "Play startup animation"),
-            BotCommand("remote", "Start/stop Hashi Remote [on|off|status|list]"),
+            BotCommand("remote", "Start/stop Hashi Remote [on|off|status]"),
+            BotCommand("oll", "Start/stop OLL Browser Gateway [on|off|status]"),
             BotCommand("wa_on", "Start WhatsApp transport"),
             BotCommand("wa_off", "Stop WhatsApp transport"),
             BotCommand("wa_send", "Send a WhatsApp message"),
@@ -7562,6 +7809,9 @@ class FlexibleAgentRuntime:
             BotCommand("sys", "Manage system prompt slots"),
             BotCommand("credit", "Check API credit/usage"),
         ]
+        if private_wol_available(self.global_config.project_root):
+            commands.append(BotCommand("wol", "Send Wake-on-LAN magic packet [pc_name]"))
+        return commands
 
     async def shutdown(self):
         self.logger.info(f"Shutting down flex agent '{self.name}'...")

@@ -24,13 +24,14 @@ class SkillDefinition:
 
 class SkillManager:
     ACTIVE_HEARTBEAT_DEFAULT_MINUTES = 10
-    ACTION_SKILL_TIMEOUT_S = 360
+    ACTION_SKILL_TIMEOUT_S = 1800
 
     def __init__(self, project_root: Path, tasks_path: Path):
         self.project_root = project_root
         self.skills_dir = project_root / "skills"
         self.tasks_path = tasks_path
         self.active_heartbeats_path = project_root / "managed_active_heartbeats.json"
+        self._action_skill_locks: dict[str, asyncio.Lock] = {}
 
     def _now(self) -> str:
         return datetime.now().isoformat(timespec="seconds")
@@ -196,6 +197,7 @@ class SkillManager:
         workspace_dir: Path,
         args: str = "",
         extra_env: dict[str, str] | None = None,
+        timeout_s: float | None = None,
     ) -> tuple[bool, str]:
         if skill.id in {"cron", "heartbeat"}:
             return True, self.describe_jobs(skill.id)
@@ -217,6 +219,11 @@ class SkillManager:
             cmd = [str(run_path)]
         if args.strip():
             cmd.append(args.strip())
+        effective_timeout_s = float(timeout_s or self.ACTION_SKILL_TIMEOUT_S)
+        lock_key = f"{workspace_dir.resolve()}::{skill.id}"
+        lock = self._action_skill_locks.setdefault(lock_key, asyncio.Lock())
+        if lock.locked():
+            return False, f"Action skill '{skill.id}' is already running."
 
         env = os.environ.copy()
         env["BRIDGE_PROJECT_ROOT"] = str(self.project_root)
@@ -225,26 +232,39 @@ class SkillManager:
         if extra_env:
             env.update({k: str(v) for k, v in extra_env.items() if v is not None})
 
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=str(workspace_dir),
-                env=env,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            # Keep the local action-skill watchdog longer than the scheduler's
-            # outer timeout so nightly jobs do not get marked failed early.
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(),
-                timeout=float(self.ACTION_SKILL_TIMEOUT_S),
-            )
-        except asyncio.TimeoutError:
-            with suppress(Exception):
-                proc.kill()
-            return False, f"Action skill '{skill.id}' timed out."
-        except Exception as e:
-            return False, f"Action skill '{skill.id}' failed to start: {e}"
+        async with lock:
+            proc = None
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    cwd=str(workspace_dir),
+                    env=env,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(),
+                    timeout=effective_timeout_s,
+                )
+            except asyncio.CancelledError:
+                if proc is not None:
+                    with suppress(Exception):
+                        proc.kill()
+                    with suppress(Exception):
+                        await proc.wait()
+                raise
+            except asyncio.TimeoutError:
+                if proc is not None:
+                    with suppress(Exception):
+                        proc.kill()
+                    with suppress(Exception):
+                        await proc.wait()
+                return False, (
+                    f"Action skill '{skill.id}' timed out after "
+                    f"{int(effective_timeout_s)}s."
+                )
+            except Exception as e:
+                return False, f"Action skill '{skill.id}' failed to start: {e}"
 
         out_text = stdout.decode("utf-8", errors="replace").strip()
         err_text = stderr.decode("utf-8", errors="replace").strip()

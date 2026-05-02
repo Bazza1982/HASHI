@@ -31,6 +31,8 @@ from orchestrator.usecomputer_mode import (
 )
 from orchestrator.skill_manager import SkillDefinition, SkillManager
 from orchestrator.voice_manager import VoiceManager
+from orchestrator.private_wol import describe_wol_targets, private_wol_available, run_private_wol
+from orchestrator.workzone import access_root_for_workzone, build_workzone_prompt, clear_workzone, load_workzone, resolve_workzone_input, save_workzone
 
 AVAILABLE_GEMINI_MODELS = [
     "gemini-3.1-pro-preview",
@@ -450,6 +452,8 @@ class BridgeAgentRuntime:
         self._pending_session_primer: str | None = None
         self._pending_auto_recall_context: str | None = None
         self.runtime_session_path = self.config.workspace_dir / ".runtime_session.json"
+        self._workzone_dir: Path | None = load_workzone(self.config.workspace_dir)
+        self._sync_workzone_to_backend_config()
         self.voice_manager = VoiceManager(self.config.workspace_dir, self.media_dir, ffmpeg_cmd="ffmpeg", secrets=self.secrets)
         # Safe voice confirmation layer
         self._safevoice_enabled: bool = self._load_safevoice_state()
@@ -478,6 +482,40 @@ class BridgeAgentRuntime:
         if text:
             return text, parse_mode
         return f"{self.name} is thinking...", None
+
+    def _sync_workzone_to_backend_config(self) -> None:
+        if self.config.extra is None:
+            self.config.extra = {}
+        if self._workzone_dir is not None:
+            self.config.extra["workzone_dir"] = str(self._workzone_dir)
+        else:
+            self.config.extra.pop("workzone_dir", None)
+        backend = getattr(self, "backend", None)
+        if backend is not None and getattr(backend, "config", None) is not None:
+            if backend.config.extra is None:
+                backend.config.extra = {}
+            if self._workzone_dir is not None:
+                backend.config.extra["workzone_dir"] = str(self._workzone_dir)
+            else:
+                backend.config.extra.pop("workzone_dir", None)
+            registry = getattr(backend, "tool_registry", None)
+            if registry is not None:
+                if self._workzone_dir is not None:
+                    registry.workspace_dir = self._workzone_dir
+                    registry.access_root = access_root_for_workzone(backend.config.resolve_access_root(), self._workzone_dir)
+                else:
+                    registry.workspace_dir = self.config.workspace_dir
+                    registry.access_root = backend.config.resolve_access_root()
+
+    def _workzone_prompt_section(self) -> list[tuple[str, str]]:
+        self._workzone_dir = load_workzone(self.config.workspace_dir)
+        self._sync_workzone_to_backend_config()
+        can_access_files = bool(
+            getattr(getattr(self.backend, "capabilities", None), "supports_files", False)
+            or getattr(self.backend, "tool_registry", None) is not None
+        )
+        section = build_workzone_prompt(self._workzone_dir, self.config.workspace_dir, can_access_files=can_access_files)
+        return [section] if section else []
 
     def _get_agent_class(self) -> str:
         extra = self.config.extra or {}
@@ -1431,17 +1469,20 @@ class BridgeAgentRuntime:
         ]
         return "\n".join(lines)
 
-    async def invoke_scheduler_skill(self, skill_id: str, args: str, task_id: str):
+    async def invoke_scheduler_skill(self, skill_id: str, args: str, task_id: str) -> tuple[bool, str | None]:
         if not self.skill_manager:
-            self.error_logger.error(f"Scheduler skill invocation requested without skill manager: {skill_id}")
-            return
+            message = f"Scheduler skill invocation requested without skill manager: {skill_id}"
+            self.error_logger.error(message)
+            return False, message
         skill = self.skill_manager.get_skill(skill_id)
         if skill is None:
-            self.error_logger.error(f"Unknown scheduler skill: {skill_id}")
-            return
+            message = f"Unknown scheduler skill: {skill_id}"
+            self.error_logger.error(message)
+            return False, message
         if skill.type == "toggle":
-            self.error_logger.error(f"Toggle skill cannot be scheduled: {skill_id}")
-            return
+            message = f"Toggle skill cannot be scheduled: {skill_id}"
+            self.error_logger.error(message)
+            return False, message
         skill_env = {
             "BRIDGE_ACTIVE_BACKEND": self.config.engine,
             "BRIDGE_ACTIVE_MODEL": self.config.model,
@@ -1462,13 +1503,15 @@ class BridgeAgentRuntime:
                 )
             elif text:
                 self.error_logger.error(text)
-            return
+            return ok, text
         prompt = self.skill_manager.build_prompt_for_skill(skill, args or "")
         if skill.backend and skill.backend != self.config.engine:
-            self.error_logger.error(
-                f"Scheduled prompt skill {skill.id} targets {skill.backend} but agent {self.name} runs {self.config.engine}."
+            message = (
+                f"Scheduled prompt skill {skill.id} targets {skill.backend} "
+                f"but agent {self.name} runs {self.config.engine}."
             )
-            return
+            self.error_logger.error(message)
+            return False, message
         await self.enqueue_request(
             chat_id=self.global_config.authorized_id,
             prompt=prompt,
@@ -1476,6 +1519,7 @@ class BridgeAgentRuntime:
             summary=f"Skill Task [{task_id}]",
             silent=False,
         )
+        return True, f"Scheduled prompt skill queued: {skill.id}"
 
     def _build_media_prompt(self, media_kind: str, filename: str, caption: str = "", emoji: str = "") -> tuple[str, str]:
         kind = media_kind.lower()
@@ -2553,11 +2597,12 @@ class BridgeAgentRuntime:
                 backend_started = datetime.now()
                 effective_prompt = self._consume_session_primer(item)
                 habit_sections, habit_ids = self._build_habit_sections(item, effective_prompt)
+                extra_sections = self._workzone_prompt_section() + habit_sections
                 self.current_request_meta["habit_ids"] = habit_ids
                 prompt_payload = self.context_assembler.build_prompt_payload(
                     effective_prompt,
                     self.config.engine,
-                    extra_sections=habit_sections,
+                    extra_sections=extra_sections,
                     inject_memory=not item.skip_memory_injection,
                 )
                 final_prompt = prompt_payload["final_prompt"]
@@ -4097,7 +4142,7 @@ class BridgeAgentRuntime:
                 return
         await query.answer()
 
-    async def _run_job_now(self, job: dict[str, Any]):
+    async def _run_job_now(self, job: dict[str, Any]) -> tuple[bool, str]:
         action = job.get("action", "enqueue_prompt")
         if action == "export_transcript":
             exported = self.export_daily_transcript(datetime.now())
@@ -4108,14 +4153,13 @@ class BridgeAgentRuntime:
                 request_id=f"job-{job.get('id')}",
                 purpose="skill-job-run",
             )
-            return
+            return True, text
         if action.startswith("skill:"):
-            await self.invoke_scheduler_skill(
+            return await self.invoke_scheduler_skill(
                 skill_id=action.split(":", 1)[1],
                 args=job.get("args", "") or job.get("prompt", ""),
                 task_id=job.get("id", "manual"),
             )
-            return
         prompt = job.get("prompt", "")
         if not prompt.strip():
             await self.send_long_message(
@@ -4124,7 +4168,7 @@ class BridgeAgentRuntime:
                 request_id=f"job-{job.get('id')}",
                 purpose="skill-job-run",
             )
-            return
+            return False, f"Job {job.get('id')} has no prompt."
         summary_prefix = "Heartbeat Task" if "interval_seconds" in job else "Cron Task"
         await self.enqueue_request(
             chat_id=self.global_config.authorized_id,
@@ -4132,6 +4176,34 @@ class BridgeAgentRuntime:
             source="scheduler",
             summary=f"{summary_prefix} [{job.get('id')}]",
         )
+        return True, f"Queued {summary_prefix.lower()} [{job.get('id')}]"
+
+    async def _handle_job_command(self, update, kind: str, args: list[str]):
+        if update.effective_user.id != self.global_config.authorized_id:
+            return
+        if not self.skill_manager:
+            await update.message.reply_text("No task scheduler configured.")
+            return
+        if not args or args[0].strip().lower() in {"list", "show"}:
+            text, markup = _build_jobs_with_buttons(self.name, self.skill_manager, filter_agent=self.name)
+            await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+            return
+        if args[0].strip().lower() != "run" or len(args) < 2:
+            await update.message.reply_text(f"Usage: /{kind} [list] | /{kind} run <job_id>")
+            return
+        task_id = args[1].strip()
+        job = self.skill_manager.get_job(kind, task_id)
+        if not job or job.get("agent") != self.name:
+            await update.message.reply_text(f"{kind} job not found for this agent: {task_id}")
+            return
+        await update.message.reply_text(f"Running {kind} job now: {task_id}")
+        await self._run_job_now(job)
+
+    async def cmd_cron(self, update, context):
+        await self._handle_job_command(update, "cron", list(context.args or []))
+
+    async def cmd_heartbeat(self, update, context):
+        await self._handle_job_command(update, "heartbeat", list(context.args or []))
 
     async def cmd_help(self, update, context):
         if update.effective_user.id != self.global_config.authorized_id:
@@ -4158,6 +4230,8 @@ class BridgeAgentRuntime:
             "/retry [response|prompt] - Resend last response (default) or rerun last prompt",
             "/debug <prompt> - Run the task in strict debug mode",
             "/skill - Browse and run skills",
+            "/cron [list] | /cron run <job_id> - Run one cron job now",
+            "/heartbeat [list] | /heartbeat run <job_id> - Run one heartbeat now",
             "/think - Toggle thinking trace display [on|off]",
             "/verbose [on|off] - Toggle verbose long-task status display",
             "/wa_on - Start WhatsApp transport and show QR in console if needed",
@@ -4195,6 +4269,51 @@ class BridgeAgentRuntime:
         await self.enqueue_request(
             update.effective_chat.id, prompt, "system", "New session",
             skip_memory_injection=True,
+        )
+
+    async def cmd_workzone(self, update, context):
+        if update.effective_user.id != self.global_config.authorized_id:
+            return
+        args = context.args or []
+        current = load_workzone(self.config.workspace_dir)
+        if not args:
+            if current:
+                await update.message.reply_text(
+                    f"Workzone is ON:\n{current}\n\n"
+                    "Use /workzone off to return to the agent home workspace."
+                )
+            else:
+                await update.message.reply_text(
+                    f"Workzone is OFF. Agent home workspace:\n{self.config.workspace_dir}"
+                )
+            return
+        if self.is_generating or not self.queue.empty():
+            await update.message.reply_text("Workzone change is blocked while a request is running or queued.")
+            return
+        arg_text = " ".join(args).strip()
+        if arg_text.lower() == "off":
+            clear_workzone(self.config.workspace_dir)
+            self._workzone_dir = None
+            self._sync_workzone_to_backend_config()
+            if self.backend.capabilities.supports_sessions:
+                await self.backend.handle_new_session()
+            await update.message.reply_text(
+                f"Workzone OFF. Working directory reset to agent home workspace:\n{self.config.workspace_dir}"
+            )
+            return
+        try:
+            zone = resolve_workzone_input(arg_text, self.global_config.project_root, self.config.workspace_dir)
+        except ValueError as exc:
+            await update.message.reply_text(f"Workzone not changed: {exc}")
+            return
+        save_workzone(self.config.workspace_dir, zone)
+        self._workzone_dir = zone
+        self._sync_workzone_to_backend_config()
+        if self.backend.capabilities.supports_sessions:
+            await self.backend.handle_new_session()
+        await update.message.reply_text(
+            f"Workzone ON:\n{zone}\n\n"
+            "Next request will run from this directory and include a workzone prompt."
         )
 
     async def cmd_status(self, update, context):
@@ -4767,6 +4886,48 @@ class BridgeAgentRuntime:
         ok, message = await orchestrator.send_whatsapp_text(phone_number, text)
         await update.message.reply_text(message)
 
+    async def cmd_wol(self, update, context):
+        if update.effective_user.id != self.global_config.authorized_id:
+            return
+
+        project_root = self.config.project_root
+        if not private_wol_available(project_root):
+            await update.message.reply_text("⚪ /wol is not enabled on this instance.")
+            return
+
+        arg = (context.args[0].strip().lower() if context.args else "")
+        if not arg or arg in {"list", "status", "help"}:
+            targets = describe_wol_targets(project_root)
+            lines = ["🪄 Private WoL targets on this instance:"]
+            for row in targets:
+                desc = f" — {row['description']}" if row["description"] else ""
+                lines.append(f"- {row['name']} ({row['label']}){desc}")
+            lines.append("")
+            lines.append("Usage: /wol <pc_name>")
+            await update.message.reply_text("\n".join(lines))
+            return
+
+        await update.message.reply_text(f"🪄 Sending Wake-on-LAN packet for `{arg}`…")
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, lambda: run_private_wol(project_root, arg))
+        if result.get("ok"):
+            output = (result.get("stdout") or "").strip()
+            if len(output) > 2500:
+                output = output[:2500] + "\n...[truncated]"
+            lines = [f"✅ WoL completed for {result.get('label') or arg}."]
+            if output:
+                lines.append("")
+                lines.append(output)
+            await update.message.reply_text("\n".join(lines))
+            return
+
+        error = result.get("error") or result.get("stderr") or "unknown error"
+        available = result.get("available_targets") or []
+        lines = [f"❌ WoL failed for {arg}: {error}"]
+        if available:
+            lines.append(f"Available targets: {', '.join(available)}")
+        await update.message.reply_text("\n".join(lines))
+
     def get_bot_commands(self) -> list[BotCommand]:
         commands = [
             BotCommand("help", "Show help menu"),
@@ -4781,6 +4942,7 @@ class BridgeAgentRuntime:
             BotCommand("load", "Restore a parked topic"),
             BotCommand("fyi", "Refresh bridge environment awareness"),
             BotCommand("model", "View or change model"),
+            BotCommand("workzone", "Set temporary working directory [path|off]"),
             BotCommand("new", "Start a fresh session"),
             BotCommand("clear", "Clear media/history"),
             BotCommand("stop", "Stop execution"),
@@ -4792,6 +4954,8 @@ class BridgeAgentRuntime:
             BotCommand("think", "Toggle thinking trace display [on|off]"),
             BotCommand("verbose", "Toggle verbose long-task status [on|off]"),
             BotCommand("jobs", "Show cron and heartbeat jobs"),
+            BotCommand("cron", "Run or list cron jobs"),
+            BotCommand("heartbeat", "Run or list heartbeat jobs"),
             BotCommand("timeout", "View or set request timeout [minutes]"),
             BotCommand("hchat", "Send a message to another agent [agent] [message]"),
             BotCommand("logo", "Play startup animation"),
@@ -4800,6 +4964,8 @@ class BridgeAgentRuntime:
             BotCommand("wa_send", "Send a WhatsApp message"),
             BotCommand("usecomputer", "Enable or run GUI-aware computer-use mode"),
         ]
+        if private_wol_available(self.config.project_root):
+            commands.append(BotCommand("wol", "Send Wake-on-LAN magic packet [pc_name]"))
         if self.config.engine == "openrouter-api":
             commands.append(BotCommand("credit", "Show OpenRouter balance"))
         if self.config.engine in {"claude-cli", "codex-cli"}:
@@ -4825,6 +4991,8 @@ class BridgeAgentRuntime:
         self.app.add_handler(CommandHandler("debug", self.cmd_debug))
         self.app.add_handler(CommandHandler("skill", self.cmd_skill))
         self.app.add_handler(CommandHandler("model", self.cmd_model))
+        self.app.add_handler(CommandHandler("workzone", self.cmd_workzone))
+        self.app.add_handler(CommandHandler("worzone", self.cmd_workzone))
         self.app.add_handler(CallbackQueryHandler(self.callback_model, pattern=r"^(model|effort):"))
         self.app.add_handler(CallbackQueryHandler(self.callback_voice, pattern=r"^voice:"))
         self.app.add_handler(CallbackQueryHandler(self.callback_safevoice, pattern=r"^safevoice:"))
@@ -4841,12 +5009,15 @@ class BridgeAgentRuntime:
         self.app.add_handler(CommandHandler("credit", self.cmd_credit))
         self.app.add_handler(CommandHandler("effort", self.cmd_effort))
         self.app.add_handler(CommandHandler("jobs", self.cmd_jobs))
+        self.app.add_handler(CommandHandler("cron", self.cmd_cron))
+        self.app.add_handler(CommandHandler("heartbeat", self.cmd_heartbeat))
         self.app.add_handler(CommandHandler("timeout", self.cmd_timeout))
         self.app.add_handler(CommandHandler("hchat", self.cmd_hchat))
         self.app.add_handler(CommandHandler("logo", self.cmd_logo))
         self.app.add_handler(CommandHandler("wa_on", self.cmd_wa_on))
         self.app.add_handler(CommandHandler("wa_off", self.cmd_wa_off))
         self.app.add_handler(CommandHandler("wa_send", self.cmd_wa_send))
+        self.app.add_handler(CommandHandler("wol", self.cmd_wol))
         self.app.add_handler(CommandHandler("usecomputer", self.cmd_usecomputer))
         self.app.add_handler(CommandHandler("usercomputer", self.cmd_usercomputer))
         self.app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), self.handle_message))

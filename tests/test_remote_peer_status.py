@@ -494,6 +494,133 @@ def test_handshake_ignores_successful_response_from_wrong_instance():
     assert recorded[-1][1]["state"] == "handshake_timed_out"
 
 
+def test_control_loop_retries_bootstrap_after_startup_window():
+    manager = object.__new__(ProtocolManager)
+    manager._running = True
+    manager._bootstrap_retry_seconds = 0
+    manager._last_bootstrap_run = 0.0
+    now = time.time()
+    manager._last_refresh_run = now
+    manager._last_handshake_run = now
+    manager._poll_interval_seconds = 0
+
+    calls: list[float] = []
+
+    async def fake_bootstrap(*, initial_delay=0.0):
+        calls.append(initial_delay)
+        manager._last_bootstrap_run = time.time()
+
+    async def fake_refresh():
+        manager._last_refresh_run = time.time()
+
+    async def fake_handshake():
+        manager._last_handshake_run = time.time()
+
+    async def fake_process():
+        manager._running = False
+
+    manager._bootstrap_known_peers = fake_bootstrap
+    manager._refresh_peer_liveness_once = fake_refresh
+    manager._handshake_once = fake_handshake
+    manager._process_inflight_once = fake_process
+
+    asyncio.run(ProtocolManager._control_loop(manager))
+
+    assert calls == [0.0]
+
+
+def test_registry_prunes_legacy_alias_with_same_host_and_workbench(tmp_path):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    (hashi_root / "instances.json").write_text(
+        json.dumps(
+            {
+                "instances": {
+                    "hashi1": {"instance_id": "HASHI1", "platform": "wsl"},
+                    "msi": {
+                        "instance_id": "MSI",
+                        "display_name": "MSI",
+                        "platform": "windows",
+                        "api_host": "192.168.0.41",
+                        "lan_ip": "192.168.0.41",
+                        "remote_port": 8767,
+                        "workbench_port": 8779,
+                        "protocol_version": "2.0",
+                        "capabilities": ["handshake_v2"],
+                        "host_identity": "desktopvn0amd7",
+                        "environment_kind": "windows",
+                        "handshake_state": "handshake_accepted",
+                        "live_status": "online",
+                    },
+                    "hashi-desktop": {
+                        "instance_id": "HASHI-DESKTOP",
+                        "display_name": "HASHI Desktop",
+                        "platform": "windows",
+                        "api_host": "192.168.0.41",
+                        "lan_ip": "192.168.0.41",
+                        "remote_port": 8766,
+                        "workbench_port": 8779,
+                        "protocol_version": "1.0",
+                        "capabilities": [],
+                        "handshake_state": "handshake_timed_out",
+                        "live_status": "offline",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    registry = PeerRegistry(hashi_root, "HASHI1")
+    registry._peers = {
+        "MSI": PeerInfo(
+            instance_id="MSI",
+            display_name="MSI",
+            host="192.168.0.41",
+            port=8767,
+            workbench_port=8779,
+            platform="windows",
+            protocol_version="2.0",
+            capabilities=["handshake_v2"],
+            properties={
+                "address_candidates": [{"host": "192.168.0.41", "scope": "lan"}],
+                "handshake_state": "handshake_accepted",
+                "live_status": "online",
+                "host_identity": "desktopvn0amd7",
+                "environment_kind": "windows",
+            },
+        ),
+        "HASHI-DESKTOP": PeerInfo(
+            instance_id="HASHI-DESKTOP",
+            display_name="HASHI Desktop",
+            host="192.168.0.41",
+            port=8766,
+            workbench_port=8779,
+            platform="windows",
+            protocol_version="1.0",
+            capabilities=[],
+            properties={
+                "address_candidates": [{"host": "192.168.0.41", "scope": "peer"}],
+                "handshake_state": "handshake_timed_out",
+                "live_status": "offline",
+            },
+        ),
+    }
+    registry._observations = {
+        "MSI": {"lan": registry._peers["MSI"]},
+        "HASHI-DESKTOP": {"bootstrap": registry._peers["HASHI-DESKTOP"]},
+    }
+
+    assert registry._prune_duplicate_peer_aliases() is True
+    assert set(registry._peers) == {"MSI"}
+
+    instances = json.loads((hashi_root / "instances.json").read_text(encoding="utf-8"))["instances"]
+    pruned, changed = registry._prune_duplicate_instance_aliases(instances)
+
+    assert changed is True
+    assert "msi" in pruned
+    assert "hashi-desktop" not in pruned
+
+
 def test_parse_hchat_message_exposes_reply_body_for_loop_guard():
     parsed = parse_hchat_message("[hchat from rain@HASHI2] [hchat reply from lily] hello")
 

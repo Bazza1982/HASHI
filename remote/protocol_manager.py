@@ -76,6 +76,7 @@ class ProtocolManager:
         self._settle_window_seconds = max(0.5, float(settle_window_seconds))
         self._reply_soft_timeout_seconds = max(5, int(reply_soft_timeout_seconds))
         self._reply_hard_timeout_seconds = max(self._reply_soft_timeout_seconds, int(reply_hard_timeout_seconds))
+        self._bootstrap_retry_seconds = 60.0
         self._state_dir = Path.home() / ".hashi-remote"
         self._state_dir.mkdir(parents=True, exist_ok=True)
         instance_key = str(instance_info.get("instance_id") or "hashi").lower()
@@ -83,6 +84,7 @@ class ProtocolManager:
         self._inflight: dict[str, dict[str, Any]] = self._load_json(self._inflight_path).get("messages", {})
         self._task: asyncio.Task | None = None
         self._running = False
+        self._last_bootstrap_run = 0.0
         self._last_handshake_run = 0.0
         self._last_refresh_run = 0.0
 
@@ -164,7 +166,7 @@ class ProtocolManager:
         # Bootstrap known peers from instances.json before first handshake cycle.
         # This ensures peers are reachable even when mDNS multicast fails
         # (e.g. WSL2 → physical LAN boundary).
-        asyncio.create_task(self._bootstrap_known_peers())
+        asyncio.create_task(self._bootstrap_known_peers(initial_delay=2.0))
         self._task = asyncio.create_task(self._control_loop())
 
     async def stop(self) -> None:
@@ -177,7 +179,7 @@ class ProtocolManager:
                 pass
             self._task = None
 
-    async def _bootstrap_known_peers(self) -> None:
+    async def _bootstrap_known_peers(self, *, initial_delay: float = 0.0) -> None:
         """
         Probe peers listed in instances.json and register reachable ones.
 
@@ -186,7 +188,9 @@ class ProtocolManager:
         a remote_port and a reachable host is injected into the peer registry so
         the normal handshake cycle can then proceed with it.
         """
-        await asyncio.sleep(2)  # Give mDNS a moment to discover what it can
+        if initial_delay > 0:
+            await asyncio.sleep(initial_delay)  # Give discovery backends a moment before first bootstrap
+        self._last_bootstrap_run = time.time()
         local_id = str(self._instance_info.get("instance_id") or "").upper()
         instances = self._dedupe_bootstrap_instances(self._load_instances())
         for key, entry in instances.items():
@@ -313,6 +317,9 @@ class ProtocolManager:
         while self._running:
             try:
                 now = time.time()
+                if now - self._last_bootstrap_run >= self._bootstrap_retry_seconds:
+                    await self._bootstrap_known_peers()
+                    self._last_bootstrap_run = now
                 if now - self._last_refresh_run >= 30:
                     await self._refresh_peer_liveness_once()
                     self._last_refresh_run = now

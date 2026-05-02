@@ -47,10 +47,12 @@ BACKEND_REGISTRY: dict[str, dict] = {
     "deepseek-api": {
         "label": "deepseek",
         "models": [
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
             "deepseek-reasoner",
             "deepseek-chat",
         ],
-        "default_model": "deepseek-reasoner",
+        "default_model": "deepseek-v4-pro",
         "efforts": [],
         "default_effort": None,
         "secret_keys": [
