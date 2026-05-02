@@ -188,16 +188,14 @@ apps/
   voice_local.py
   voice_whatsapp_desktop_runtime.py
 
-windows_helpers/
-  voice_windows_bridge.py
-  whatsapp_ui_probe.py
-  whatsapp_call_control.py
-  README.md
+tools/windows_helper/
+  server.py
+  whatsapp_call_probe.py
 
 tests/voice/
 ```
 
-`orchestrator/voice/` contains reusable WSL-side voice logic. `windows_helpers/` contains Windows-native helper entrypoints and must be run with native Windows Python, for example `py.exe`, not WSL Python. `apps/` contains WSL-side entrypoints and may require cold restart unless a dedicated service restart is added.
+`orchestrator/voice/` contains reusable WSL-side voice logic. `tools/windows_helper/` contains the existing Windows-native helper service and WhatsApp call-probe actions; it must be run with native Windows Python, for example `py.exe`, not WSL Python. `apps/` contains WSL-side entrypoints and may require cold restart unless a dedicated service restart is added.
 
 ## Hot-Reboot Boundary
 
@@ -207,7 +205,7 @@ Therefore:
 
 - Changes under `orchestrator/voice/` should be designed to be adopted by `/reboot` where possible.
 - Changes under `apps/` are entrypoint/service changes and should be treated as requiring cold restart or a dedicated voice service restart.
-- Changes under `windows_helpers/` require restarting the Windows helper process.
+- Changes under `tools/windows_helper/` require restarting the Windows helper process.
 - Active WhatsApp Desktop calls cannot be assumed to survive runtime code replacement.
 - UI automation handles, audio device handles, and active call state should not be stored in module-level globals.
 
@@ -229,9 +227,31 @@ The Windows helper owns:
 Until then, the WhatsApp Desktop bridge can run as explicit paired processes:
 
 ```text
-Windows: py.exe windows_helpers\voice_windows_bridge.py
+Windows: py.exe -m tools.windows_helper.server
 WSL2:    python -m apps.voice_whatsapp_desktop_runtime
 ```
+
+Phase 0 starter commands:
+
+```text
+# Windows side, from the HASHI repo checkout:
+uv run --no-project --with fastapi --with uvicorn --with fastmcp --with windows-mcp --with pillow --with uiautomation python -m tools.windows_helper.server
+
+# WSL2 side, detect only:
+python -m apps.voice_whatsapp_desktop_runtime --duration 60 --exit-on-detect
+
+# WSL2 side, allow automatic answering when an answer control is detected:
+python -m apps.voice_whatsapp_desktop_runtime --duration 60 --exit-on-detect --auto-answer
+```
+
+If the default Windows helper port is occupied or unhealthy, use an explicit port on both sides:
+
+```text
+Windows: uv run --no-project --with fastapi --with uvicorn --with fastmcp --with windows-mcp --with pillow --with uiautomation python -m tools.windows_helper.server --port 48999
+WSL2:    python -m apps.voice_whatsapp_desktop_runtime --helper-url http://127.0.0.1:48999 --duration 60 --exit-on-detect
+```
+
+Use detect-only mode first. Enable `--auto-answer` only after manual preflight confirms the incoming-call UI and false-positive behavior.
 
 ## Audio Type Contracts
 
@@ -637,7 +657,7 @@ Only use the fallback if the internal API path is not available or too slow.
 
 Deliverables:
 
-- `windows_helpers.voice_windows_bridge`.
+- `tools.windows_helper.server` with the `whatsapp_call_probe` action.
 - WSL-side helper client stub for logging helper events.
 - UI detection for incoming WhatsApp Desktop call.
 - Manual or automated answer path.
@@ -861,7 +881,7 @@ These are future transport adapters, not the current main path.
 
 1. Confirm HASHI1 WhatsApp Desktop can receive manual incoming calls.
 2. Record the incoming-call UI shape for focused/minimized/hidden WhatsApp Desktop.
-3. Build `windows_helpers.voice_windows_bridge` with UIA-based incoming-call detection.
+3. Extend `tools.windows_helper.server` with UIA-based incoming-call detection.
 4. Add WSL-side helper client and minimal voice event logger.
 5. Log `call.incoming_detected`, detection method, pickup latency, and false-positive checks.
 6. Define `AudioFrame`, `AudioBuffer`, and transport interface.

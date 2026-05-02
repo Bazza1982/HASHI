@@ -12,6 +12,7 @@ from PIL import ImageGrab
 
 from tools.windows_use_mcp_client import _run as run_windows_mcp
 from . import win32
+from .whatsapp_call_probe import probe_whatsapp_call
 
 
 def find_usecomputer() -> str | None:
@@ -93,6 +94,13 @@ def _maybe_focus(args: dict) -> dict | None:
 
 async def execute_action(action: str, args: dict) -> str:
     provider = _resolve_provider(args.get("provider"), action)
+    if action == "whatsapp_call_probe":
+        result = probe_whatsapp_call(
+            auto_answer=bool(args.get("auto_answer", False)),
+            use_uia=bool(args.get("use_uia", True)),
+        )
+        return json.dumps(result, ensure_ascii=False, indent=2)
+
     if action == "reset_input_state":
         result = win32.reset_input_state()
         result["state"] = win32.get_input_state()

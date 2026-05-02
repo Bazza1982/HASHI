@@ -495,7 +495,7 @@ if (-not $uv) {{
 }}
 $argsList = @()
 $argsList += $uv.base_args
-$argsList += @('run', '--no-project', '--with', 'fastapi', '--with', 'uvicorn', '--with', 'fastmcp', '--with', 'windows-mcp', '--with', 'pillow', 'python', '-m', 'tools.windows_helper.server', '--host', '127.0.0.1', '--port', {_ps_quote(str(_WINDOWS_HELPER_PORT))}, '--log-dir', $logDir)
+$argsList += @('run', '--no-project', '--with', 'fastapi', '--with', 'uvicorn', '--with', 'fastmcp', '--with', 'windows-mcp', '--with', 'pillow', '--with', 'uiautomation', 'python', '-m', 'tools.windows_helper.server', '--host', '127.0.0.1', '--port', {_ps_quote(str(_WINDOWS_HELPER_PORT))}, '--log-dir', $logDir)
 $env:PYTHONPATH = $(if ($env:PYTHONPATH) {{ $repoRoot + ';' + $env:PYTHONPATH }} else {{ $repoRoot }})
 Start-Process -FilePath $uv.command -ArgumentList $argsList -WorkingDirectory $helperWorkingDir | Out-Null
 @{{ ok = $true }} | ConvertTo-Json -Compress
