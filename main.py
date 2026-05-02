@@ -1,7 +1,6 @@
 from __future__ import annotations
 import os
 import sys
-import json
 import asyncio
 import argparse
 import logging
@@ -23,8 +22,10 @@ from orchestrator.bootstrap_logging import (
 from orchestrator.config_admin import ConfigAdmin
 from orchestrator.instance_lock import InstanceLock
 from orchestrator.lifecycle_state import LifecycleState
+from orchestrator.onboarding_gate import run_onboarding_gate
 from orchestrator.reboot_manager import RebootManager
 from orchestrator.service_manager import ServiceManager
+from orchestrator.shutdown_manager import ShutdownManager
 from orchestrator.startup_manager import StartupManager
 from orchestrator.whatsapp_manager import WhatsAppManager
 
@@ -55,6 +56,7 @@ class UniversalOrchestrator:
         self.agent_lifecycle = AgentLifecycleManager(self)
         self.service_manager = ServiceManager(self)
         self.reboot_manager = RebootManager(self, _handler)
+        self.shutdown_manager = ShutdownManager(self)
         self.startup_manager = StartupManager(self, _handler)
         self.whatsapp_manager = WhatsAppManager(self)
         self.workbench_api = None
@@ -294,44 +296,7 @@ class UniversalOrchestrator:
                 self.shutdown_event.clear()
                 continue
 
-            # --- Full shutdown ---
-            main_logger.info("Shutting down active agents...")
-            bridge_logger.warning(
-                f"Full shutdown begin ({self.lifecycle_state.shutdown_meta_text(self._shutdown_request)}) "
-                f"active_agents={len(self.runtimes)} "
-                f"workbench={'on' if self.workbench_api is not None else 'off'} "
-                f"api_gateway={'on' if self.api_gateway is not None else 'off'} "
-                f"whatsapp={'on' if self.whatsapp is not None else 'off'}"
-            )
-            await self.service_manager.stop_runtime_services()
-            if self.whatsapp is not None:
-                ok, message = await self.stop_whatsapp_transport(persist_enabled=False)
-                if not ok:
-                    bridge_logger.warning(message)
-            await self._shutdown_all_agents()
-            self.lifecycle_state.mark_shutdown(
-                self._shutdown_request,
-                clean=True,
-                phase="python-cleanup-complete",
-            )
-            bridge_logger.warning(
-                f"Full shutdown complete ({self.lifecycle_state.shutdown_meta_text(self._shutdown_request)})"
-            )
-
-            # All Python-side cleanup is done. Start watchdog for the
-            # asyncio.run() executor-shutdown phase: neonize's Go DLL runs
-            # in asyncio.to_thread() workers that cannot be cancelled, so
-            # shutdown_default_executor() blocks indefinitely.  Give it 5s
-            # then force exit — everything important is already torn down.
-            import threading as _threading
-            def _exit_watchdog():
-                import time as _time
-                _time.sleep(5)
-                msg = "Shutdown watchdog: forcing exit (Go runtime threads did not stop)."
-                main_logger.warning(msg)
-                _emit_bridge_audit(self.paths, logging.WARNING, msg)
-                os._exit(0)
-            _threading.Thread(target=_exit_watchdog, daemon=True, name="exit-watchdog").start()
+            await self.shutdown_manager.full_shutdown()
             break
 
 if __name__ == "__main__":
@@ -343,20 +308,7 @@ if __name__ == "__main__":
     selected_agents = set(args.agents) if args.agents else None
     paths = build_bridge_paths(CODE_ROOT, bridge_home=args.bridge_home)
 
-    # Onboarding gate: if onboarding not complete, redirect to onboarding
-    _agents_path = paths.bridge_home / "agents.json"
-    _onboarding_done = False
-    try:
-        with open(_agents_path, encoding="utf-8") as _f:
-            _cfg = json.load(_f)
-            if _cfg.get("agents"):
-                _onboarding_done = True
-    except Exception:
-        pass
-    if not _onboarding_done:
-        print("\033[38;5;180mOnboarding required. Starting onboarding program...\033[0m")
-        import subprocess as _sp
-        _sp.run([sys.executable, str(CODE_ROOT / "onboarding" / "onboarding_main.py")])
+    if run_onboarding_gate(paths, CODE_ROOT):
         sys.exit(0)
 
     orchestrator = UniversalOrchestrator(paths=paths, selected_agents=selected_agents, enable_api_gateway=args.api_gateway)
