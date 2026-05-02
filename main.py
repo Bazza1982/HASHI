@@ -16,7 +16,6 @@ from orchestrator.pathing import BridgePaths, build_bridge_paths
 from orchestrator.agent_lifecycle import AgentLifecycleManager
 from orchestrator.backend_preflight import BackendPreflight
 from orchestrator.bootstrap_logging import (
-    AnimMute as _AnimMute,
     emit_bridge_audit,
     setup_bridge_file_logging,
     setup_console_logging,
@@ -26,6 +25,7 @@ from orchestrator.instance_lock import InstanceLock
 from orchestrator.lifecycle_state import LifecycleState
 from orchestrator.reboot_manager import RebootManager
 from orchestrator.service_manager import ServiceManager
+from orchestrator.startup_manager import StartupManager
 from orchestrator.whatsapp_manager import WhatsAppManager
 
 # --- Global Orchestrator Setup ---
@@ -33,9 +33,6 @@ CODE_ROOT = Path(__file__).resolve().parent
 
 main_logger = logging.getLogger("BridgeU.Orchestrator")
 bridge_logger = logging.getLogger("BridgeU.Bridge")  # file-only orchestrator log
-
-INITIAL_AGENT_STARTUP_CONCURRENCY = 2
-
 
 _handler = setup_console_logging()
 
@@ -58,6 +55,7 @@ class UniversalOrchestrator:
         self.agent_lifecycle = AgentLifecycleManager(self)
         self.service_manager = ServiceManager(self)
         self.reboot_manager = RebootManager(self, _handler)
+        self.startup_manager = StartupManager(self, _handler)
         self.whatsapp_manager = WhatsAppManager(self)
         self.workbench_api = None
         self.api_gateway = None
@@ -260,150 +258,8 @@ class UniversalOrchestrator:
             f"config={self.paths.config_path}"
         )
 
-        # Filter to selected agents
-        selected_configs = [
-            cfg for cfg in agent_configs
-            if (self.selected_agents is not None and cfg.name in self.selected_agents) or
-               (self.selected_agents is None and cfg.is_active)
-        ]
-        
-        # Collect inactive agents for UI display
-        inactive_agent_names = [
-            cfg.name for cfg in agent_configs
-            if cfg.name not in [c.name for c in selected_configs]
-        ]
-        
-        if not selected_configs:
-            print("\n" + "!" * 64)
-            print("  CRITICAL ERROR: No active agents found.")
-            print("  Please ensure at least one agent is set to 'is_active: true'")
-            print("  in your 'agents.json' file.")
-            print("!" * 64 + "\n")
-            main_logger.critical("Aborting launch: No active agents configured.")
-            return
-
-        # --- Backend preflight check ---
-        engine_status = self._check_backend_availability(global_cfg, selected_configs, secrets)
-        startable_configs, skipped = self._partition_agents_by_availability(selected_configs, engine_status)
-        initial_agent_names = [cfg.name for cfg in startable_configs]
-        bridge_logger.info(f"Agents to start: {initial_agent_names}")
-        if skipped:
-            for name, reason in skipped:
-                bridge_logger.warning(f"Skipping agent '{name}': {reason}")
-
-        try:
-            _, wa_cfg = self._load_whatsapp_cfg()
-        except Exception:
-            wa_cfg = {}
-
-        if not initial_agent_names:
-            print("\n" + "=" * 64)
-            print("  CRITICAL ERROR: No agents can start.")
-            print("  Reason: All backend engines (Gemini, Claude, etc.) are unavailable.")
-            print("  Please check your 'secrets.json' for API keys and ensure")
-            print("  CLI tools are installed as per the README.")
-            print("=" * 64 + "\n")
-            main_logger.critical(
-                "No agents can start — all backends are unavailable."
-            )
-            return
-
-        # ── Concurrent startup: agents boot while animation plays ─────────────
-        # boot_state is a plain dict written by agent tasks (CPython GIL makes
-        # simple key writes safe from a thread) and read by the banner thread.
-        boot_state    = {name: "pending" for name in initial_agent_names}
-        boot_reason   = {}  # last failure reason per agent, shown in banner
-        startup_limit = max(1, min(INITIAL_AGENT_STARTUP_CONCURRENCY, len(initial_agent_names) or 1))
-        startup_sem   = asyncio.Semaphore(startup_limit)
-
-        async def _start_initial_agent(agent_name: str):
-            async with startup_sem:
-                boot_state[agent_name] = "connecting"
-                bridge_logger.info(f"{agent_name}: pending → connecting")
-                try:
-                    ok, msg = await self.start_agent(agent_name)
-                except Exception as e:
-                    main_logger.exception(f"Unexpected startup error for '{agent_name}': {e}")
-                    boot_state[agent_name] = "failed"
-                    boot_reason[agent_name] = f"{type(e).__name__}: {e}"
-                    bridge_logger.error(f"{agent_name}: connecting → failed (exception: {e})")
-                    return agent_name, (False, str(e))
-                if ok:
-                    # Distinguish online (Telegram connected) from local (Telegram unavailable)
-                    new_state = "local" if "LOCAL MODE" in msg.upper() else "online"
-                    boot_state[agent_name] = new_state
-                    if new_state == "local":
-                        boot_reason[agent_name] = "Telegram unavailable"
-                    bridge_logger.info(f"{agent_name}: connecting → {new_state}")
-                else:
-                    boot_state[agent_name] = "failed"
-                    boot_reason[agent_name] = msg
-                    bridge_logger.error(f"{agent_name}: connecting → failed ({msg})")
-                return agent_name, (ok, msg)
-
-        # Create all tasks first — they are queued and begin running as soon as
-        # the event loop gets control (i.e. the moment we await anything below).
-        startup_tasks = [
-            asyncio.create_task(_start_initial_agent(name), name=f"boot-{name}")
-            for name in initial_agent_names
-        ]
-
-        # Suppress console log output during the animation so log lines don't
-        # corrupt the terminal.  Log records are not lost — file handlers still
-        # receive them; only the console StreamHandler is muted here.
-        _mute = _AnimMute()
-        _handler.addFilter(_mute)
-
-        from orchestrator.banner import show_startup_banner
-
-        def _run_banner():
-            show_startup_banner(
-                agent_names=initial_agent_names,
-                boot_state=boot_state,
-                workbench_port=global_cfg.workbench_port,
-                wa_enabled=bool(wa_cfg.get("enabled")),
-                api_gateway_enabled=self.enable_api_gateway,
-                skipped_agents=skipped,
-                inactive_agents=inactive_agent_names,
-                boot_reason=boot_reason,
-            )
-
-        try:
-            # run_in_executor puts the animation in a thread-pool thread so
-            # time.sleep() inside it does NOT block the asyncio event loop.
-            # asyncio.gather waits for BOTH the animation AND all agent tasks.
-            await asyncio.gather(
-                asyncio.get_running_loop().run_in_executor(None, _run_banner),
-                *startup_tasks,
-                return_exceptions=True,
-            )
-        finally:
-            _handler.removeFilter(_mute)
-
-        # Emit deferred log messages now that the console is restored
-        if skipped:
-            for name, reason in skipped:
-                main_logger.warning(f"Skipping agent '{name}': {reason}")
-
-        for task in startup_tasks:
-            if task.cancelled():
-                continue
-            try:
-                agent_name, (ok, message) = task.result()
-                if not ok:
-                    main_logger.error(message)
-            except Exception:
-                pass
-
-        if not self.runtimes:
-            print("\n" + "*" * 64)
-            print("  CRITICAL ERROR: All agents failed to connect to Telegram.")
-            print("  Please check that:")
-            print("  1. Your Bot Tokens in 'secrets.json' are correct.")
-            print("  2. Your internet connection is active.")
-            print("  3. The Telegram API is not being blocked.")
-            print("*" * 64 + "\n")
-            main_logger.critical("All agents failed to start. Exiting.")
+        startup_ok, wa_cfg = await self.startup_manager.start_initial_agents(global_cfg, agent_configs, secrets)
+        if not startup_ok:
             return
 
         main_logger.info("Universal Orchestrator is online. Awaiting messages.")
