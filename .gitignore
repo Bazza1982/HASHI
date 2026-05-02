@@ -75,6 +75,7 @@ state/
 
 # Temp and stress test artifacts
 .tmp_*/
+tmp/
 phaseA_lily_report.json
 phaseA1_lily_report.json
 phaseA_lily_stress.py
