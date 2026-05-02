@@ -2,7 +2,6 @@ from __future__ import annotations
 import os
 import sys
 import json
-import shutil
 import asyncio
 import argparse
 import logging
@@ -21,8 +20,8 @@ from orchestrator.scheduler import TaskScheduler
 from orchestrator.skill_manager import SkillManager
 from orchestrator.workbench_api import WorkbenchApiServer
 from orchestrator.api_gateway import APIGatewayServer
-from orchestrator.flexible_backend_registry import get_secret_lookup_order
 from orchestrator.pathing import BridgePaths, build_bridge_paths
+from orchestrator.backend_preflight import BackendPreflight
 from orchestrator.bootstrap_logging import (
     C_RESET,
     C_STOP,
@@ -30,6 +29,7 @@ from orchestrator.bootstrap_logging import (
     emit_bridge_audit,
     setup_console_logging,
 )
+from orchestrator.config_admin import ConfigAdmin
 from orchestrator.instance_lock import InstanceLock
 from orchestrator.lifecycle_state import LifecycleState
 from adapters.registry import get_backend_class
@@ -59,6 +59,8 @@ class UniversalOrchestrator:
         self.global_cfg = None
         self.secrets = {}
         self.skill_manager = SkillManager(self.paths.code_root, self.paths.tasks_path)
+        self.config_admin = ConfigAdmin(self.paths)
+        self.backend_preflight = BackendPreflight()
         self.workbench_api = None
         self.api_gateway = None
         self.scheduler = None
@@ -136,14 +138,10 @@ class UniversalOrchestrator:
         return lock
 
     def _load_raw_config(self) -> dict:
-        return json.loads(self.paths.config_path.read_text(encoding="utf-8-sig"))
+        return self.config_admin.load_raw_config()
 
     def _write_raw_config(self, raw_cfg: dict):
-        self.paths.config_path.write_text(
-            json.dumps(raw_cfg, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8-sig",
-            newline="\r\n",
-        )
+        self.config_admin.write_raw_config(raw_cfg)
 
     def _load_whatsapp_cfg(self) -> tuple[dict, dict]:
         raw_cfg = self._load_raw_config()
@@ -276,158 +274,34 @@ class UniversalOrchestrator:
         return global_cfg, agent_configs, secrets
 
     def get_all_agents_raw(self) -> list[dict]:
-        raw = json.loads(self.paths.config_path.read_text(encoding="utf-8-sig"))
-        return raw.get("agents", [])
+        return self.config_admin.get_all_agents_raw()
 
     def set_agent_active(self, agent_name: str, active: bool) -> bool:
-        """Toggle is_active for an agent. Returns True if found and updated."""
-        raw = self._load_raw_config()
-        for ag in raw.get("agents", []):
-            if ag.get("name") == agent_name:
-                ag["is_active"] = active
-                self._write_raw_config(raw)
-                return True
-        return False
+        return self.config_admin.set_agent_active(agent_name, active)
 
     def delete_agent_from_config(self, agent_name: str) -> bool:
-        """Remove an agent entry from config. Returns True if found and removed."""
-        raw = self._load_raw_config()
-        agents = raw.get("agents", [])
-        orig_len = len(agents)
-        raw["agents"] = [ag for ag in agents if ag.get("name") != agent_name]
-        if len(raw["agents"]) < orig_len:
-            self._write_raw_config(raw)
-            return True
-        return False
+        return self.config_admin.delete_agent_from_config(agent_name)
 
-    def add_agent_to_config(self, agent_name: str, agent_cfg: dict | None = None) -> bool:
-        """Add a new flex agent to config, create workspace dir + AGENT.md scaffold.
-        Returns True on success, False if agent already exists."""
-        raw = self._load_raw_config()
-        existing_names = {ag.get("name") for ag in raw.get("agents", [])}
-        if agent_name in existing_names:
-            return False
-
-        ws_dir = self.paths.workspaces_root / agent_name
-        ws_dir.mkdir(parents=True, exist_ok=True)
-
-        agent_md = ws_dir / "AGENT.md"
-        if not agent_md.exists():
-            agent_md.write_text(f"# {agent_name}\n\nNew HASHI agent.\n", encoding="utf-8")
-
-        new_entry = agent_cfg or {}
-        new_entry.setdefault("name", agent_name)
-        new_entry.setdefault("workspace_dir", f"workspaces/{agent_name}")
-        new_entry.setdefault("system_md", f"workspaces/{agent_name}/AGENT.md")
-        new_entry.setdefault("is_active", True)
-        new_entry.setdefault("type", "flex")
-
-        raw.setdefault("agents", []).append(new_entry)
-        self._write_raw_config(raw)
-        return True
+    def add_agent_to_config(self, agent_name: str, agent_cfg: dict | str | None = None, token: str | None = None):
+        return self.config_admin.add_agent_to_config(agent_name, agent_cfg, token)
 
     def configured_agent_names(self) -> list[str]:
-        raw = json.loads(self.paths.config_path.read_text(encoding="utf-8-sig"))
-        return [agent["name"] for agent in raw.get("agents", []) if agent.get("is_active", True)]
+        return self.config_admin.configured_agent_names()
 
     def get_startable_agent_names(self, exclude_name: str | None = None) -> list[str]:
-        running = set(self._runtime_map())
-        starting = set(self._startup_tasks)
-        return [
-            name for name in self.configured_agent_names()
-            if name not in running and name not in starting and name != exclude_name
-        ]
-
-    def _has_openrouter_api_key(self, agent_configs, secrets) -> bool:
-        for cfg in agent_configs:
-            for secret_key in get_secret_lookup_order("openrouter-api", getattr(cfg, "name", "")):
-                if secrets.get(secret_key):
-                    return True
-        return False
+        return self.config_admin.get_startable_agent_names(
+            running=set(self._runtime_map()),
+            starting=set(self._startup_tasks),
+            exclude_name=exclude_name,
+        )
 
     def _check_backend_availability(self, global_cfg, agent_configs, secrets) -> dict[str, tuple[bool, str]]:
-        """
-        Check which backend engines are available. Returns {engine: (available, reason)}.
-
-        CLI backends: check shutil.which().
-        openrouter-api: check that the API key exists in secrets.
-        """
-        engines = set()
-        for cfg in agent_configs:
-            if hasattr(cfg, "allowed_backends"):  # flex agent
-                for b in cfg.allowed_backends:
-                    engines.add(b.get("engine", ""))
-            engines.add(getattr(cfg, "engine", "") or getattr(cfg, "active_backend", ""))
-        engines.discard("")
-
-        result = {}
-        cli_map = {
-            "gemini-cli": global_cfg.gemini_cmd,
-            "claude-cli": global_cfg.claude_cmd,
-            "codex-cli": global_cfg.codex_cmd,
-        }
-        for engine in engines:
-            if engine in cli_map:
-                cmd = cli_map[engine]
-                found = shutil.which(cmd)
-                if found:
-                    result[engine] = (True, found)
-                else:
-                    result[engine] = (False, f"'{cmd}' not found on PATH")
-            elif engine == "openrouter-api":
-                if self._has_openrouter_api_key(agent_configs, secrets):
-                    result[engine] = (True, "API key present")
-                else:
-                    result[engine] = (False, "no API key in secrets.json")
-            else:
-                result[engine] = (True, "unknown engine, assuming available")
-        return result
+        return self.backend_preflight.check_backend_availability(global_cfg, agent_configs, secrets)
 
     def _partition_agents_by_availability(
         self, agent_configs, engine_status: dict[str, tuple[bool, str]]
     ) -> tuple[list, list[tuple[str, str]]]:
-        """
-        Split agents into (startable_configs, skipped_list).
-        skipped_list is [(agent_name, reason), ...].
-        For flex agents: startable if active_backend is available OR any allowed_backend is.
-        """
-        startable = []
-        skipped = []
-        for cfg in agent_configs:
-            if hasattr(cfg, "allowed_backends"):  # flex
-                active_ok, _ = engine_status.get(cfg.active_backend, (False, "unknown"))
-                if active_ok:
-                    startable.append(cfg)
-                    continue
-                # Try fallback to any available backend
-                fallback = None
-                for b in cfg.allowed_backends:
-                    eng = b.get("engine", "")
-                    ok, _ = engine_status.get(eng, (False, ""))
-                    if ok:
-                        fallback = eng
-                        break
-                if fallback:
-                    main_logger.info(
-                        f"Flex agent '{cfg.name}': active backend '{cfg.active_backend}' unavailable, "
-                        f"will start with '{fallback}' instead."
-                    )
-                    cfg = type(cfg)(**{**cfg.__dict__, "active_backend": fallback})
-                    startable.append(cfg)
-                else:
-                    reasons = [
-                        f"{b.get('engine')}: {engine_status.get(b.get('engine', ''), (False, '?'))[1]}"
-                        for b in cfg.allowed_backends
-                    ]
-                    skipped.append((cfg.name, f"no available backend ({', '.join(reasons)})"))
-            else:  # fixed
-                engine = cfg.engine
-                ok, reason = engine_status.get(engine, (False, "unknown engine"))
-                if ok:
-                    startable.append(cfg)
-                else:
-                    skipped.append((cfg.name, f"{engine}: {reason}"))
-        return startable, skipped
+        return self.backend_preflight.partition_agents_by_availability(agent_configs, engine_status)
 
     def _build_runtime(self, agent_cfg, global_cfg, secrets):
         # Local imports so hot restart picks up reloaded module code.
