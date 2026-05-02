@@ -268,7 +268,7 @@ class AgentLifecycleManager:
             bridge_logger.info("Stopping agent '%s' (reason=%s)", agent_name, reason)
             await self.teardown_runtime(runtime)
 
-            self.kernel.runtimes = [rt for rt in self.kernel.runtimes if rt.name != agent_name]
+            self.kernel.runtimes[:] = [rt for rt in self.kernel.runtimes if rt.name != agent_name]
             main_logger.info("Agent '%s' stopped.", agent_name)
             bridge_logger.info("Agent '%s' stopped (reason=%s)", agent_name, reason)
             print(f"{C_STOP}[system] Agent '{agent_name}' stopped{C_RESET}", flush=True)
