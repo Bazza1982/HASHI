@@ -139,6 +139,30 @@ def setup_console_logging() -> logging.StreamHandler:
     return handler
 
 
+def setup_bridge_file_logging(global_cfg, bridge_logger: logging.Logger, scheduler_logger: logging.Logger | None = None):
+    """Route bridge-level audit logs and scheduler logs to bridge.log."""
+    bridge_log_path = global_cfg.base_logs_dir / "bridge.log"
+    global_cfg.base_logs_dir.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(bridge_log_path, encoding="utf-8")
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(name)s] %(levelname)s  %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+
+    bridge_logger.handlers.clear()
+    bridge_logger.setLevel(logging.DEBUG)
+    bridge_logger.propagate = False
+    bridge_logger.addHandler(handler)
+
+    if scheduler_logger is not None:
+        scheduler_logger.handlers.clear()
+        scheduler_logger.setLevel(logging.DEBUG)
+        scheduler_logger.propagate = False
+        scheduler_logger.addHandler(handler)
+
+    return handler
+
+
 def write_bridge_audit_line(log_path: Path, level: int, message: str) -> None:
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)

@@ -26,7 +26,9 @@ class RebootManager:
         service_cls = sys.modules["orchestrator.service_manager"].ServiceManager
         reboot_cls = sys.modules["orchestrator.reboot_manager"].RebootManager
         whatsapp_cls = sys.modules["orchestrator.whatsapp_manager"].WhatsAppManager
+        skill_cls = sys.modules["orchestrator.skill_manager"].SkillManager
 
+        new_skill_manager = skill_cls(self.kernel.paths.code_root, self.kernel.paths.tasks_path)
         new_config_admin = config_cls(self.kernel.paths)
         new_backend_preflight = preflight_cls()
         new_agent_lifecycle = lifecycle_cls(self.kernel)
@@ -34,6 +36,7 @@ class RebootManager:
         new_reboot_manager = reboot_cls(self.kernel, self.console_handler)
         new_whatsapp_manager = whatsapp_cls(self.kernel)
 
+        self.kernel.skill_manager = new_skill_manager
         self.kernel.config_admin = new_config_admin
         self.kernel.backend_preflight = new_backend_preflight
         self.kernel.agent_lifecycle = new_agent_lifecycle
@@ -41,7 +44,7 @@ class RebootManager:
         self.kernel.reboot_manager = new_reboot_manager
         self.kernel.whatsapp_manager = new_whatsapp_manager
         main_logger.info(
-            "Hot reload: rebuilt config, backend preflight, agent lifecycle, service, reboot, and WhatsApp managers."
+            "Hot reload: rebuilt skill, config, backend preflight, agent lifecycle, service, reboot, and WhatsApp managers."
         )
 
     def reload_project_modules(self):

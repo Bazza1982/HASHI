@@ -18,6 +18,7 @@ from orchestrator.backend_preflight import BackendPreflight
 from orchestrator.bootstrap_logging import (
     AnimMute as _AnimMute,
     emit_bridge_audit,
+    setup_bridge_file_logging,
     setup_console_logging,
 )
 from orchestrator.config_admin import ConfigAdmin
@@ -236,24 +237,7 @@ class UniversalOrchestrator:
             main_logger.critical(f"Failed to load configuration: {e}")
             return
 
-        # ── Set up bridge.log (orchestrator-level, file-only) ───────────
-        _bridge_log_path = global_cfg.base_logs_dir / "bridge.log"
-        global_cfg.base_logs_dir.mkdir(parents=True, exist_ok=True)
-        _bl_handler = logging.FileHandler(_bridge_log_path, encoding="utf-8")
-        _bl_handler.setFormatter(logging.Formatter(
-            "%(asctime)s [%(name)s] %(levelname)s  %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        ))
-        bridge_logger.handlers.clear()
-        bridge_logger.setLevel(logging.DEBUG)
-        bridge_logger.propagate = False
-        bridge_logger.addHandler(_bl_handler)
-        # Also route scheduler logs to bridge.log
-        _sched_logger = logging.getLogger("BridgeU.Scheduler")
-        _sched_logger.handlers.clear()
-        _sched_logger.setLevel(logging.DEBUG)
-        _sched_logger.propagate = False
-        _sched_logger.addHandler(_bl_handler)
+        setup_bridge_file_logging(global_cfg, bridge_logger, logging.getLogger("BridgeU.Scheduler"))
         self.global_cfg = global_cfg
         self.secrets = secrets
         self.lifecycle_state.state_path = global_cfg.base_logs_dir / "orchestrator_state.json"
