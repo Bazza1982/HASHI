@@ -23,6 +23,7 @@ from orchestrator.bootstrap_logging import (
 from orchestrator.config_admin import ConfigAdmin
 from orchestrator.instance_lock import InstanceLock
 from orchestrator.lifecycle_state import LifecycleState
+from orchestrator.reboot_manager import RebootManager
 from orchestrator.service_manager import ServiceManager
 
 # --- Global Orchestrator Setup ---
@@ -54,6 +55,7 @@ class UniversalOrchestrator:
         self.backend_preflight = BackendPreflight()
         self.agent_lifecycle = AgentLifecycleManager(self)
         self.service_manager = ServiceManager(self)
+        self.reboot_manager = RebootManager(self, _handler)
         self.workbench_api = None
         self.api_gateway = None
         self.scheduler = None
@@ -324,170 +326,13 @@ class UniversalOrchestrator:
         await self.agent_lifecycle.shutdown_all_agents(timeout)
 
     def _rebuild_hot_managers(self):
-        """Rebuild hot-reloadable managers after project module reload."""
-        ConfigAdminCls = sys.modules["orchestrator.config_admin"].ConfigAdmin
-        BackendPreflightCls = sys.modules["orchestrator.backend_preflight"].BackendPreflight
-        AgentLifecycleCls = sys.modules["orchestrator.agent_lifecycle"].AgentLifecycleManager
-        ServiceManagerCls = sys.modules["orchestrator.service_manager"].ServiceManager
-
-        new_config_admin = ConfigAdminCls(self.paths)
-        new_backend_preflight = BackendPreflightCls()
-        new_agent_lifecycle = AgentLifecycleCls(self)
-        new_service_manager = ServiceManagerCls(self)
-
-        self.config_admin = new_config_admin
-        self.backend_preflight = new_backend_preflight
-        self.agent_lifecycle = new_agent_lifecycle
-        self.service_manager = new_service_manager
-        main_logger.info("Hot reload: rebuilt config, backend preflight, agent lifecycle, and service managers.")
+        self.reboot_manager.rebuild_hot_managers()
 
     def _reload_project_modules(self):
-        """Reload all project Python modules so hot restart picks up code changes."""
-        import importlib
-        # Reload adapters first (leaf), then orchestrator (depends on adapters).
-        # Skip transports — WhatsApp transport stays alive across restart.
-        prefixes = ("adapters.", "orchestrator.")
-        # Sort order: adapters first (leaf), then orchestrator utilities,
-        # then runtime modules last (they import from utilities like voice_manager).
-        # This ensures `from orchestrator.X import Y` picks up the reloaded version.
-        def _reload_key(n: str):
-            if n.startswith("adapters."):
-                return (0, n)
-            if "_runtime" in n:
-                return (2, n)
-            return (1, n)
-        to_reload = sorted(
-            (name for name in list(sys.modules) if any(name.startswith(p) for p in prefixes)),
-            key=_reload_key,
-        )
-        reloaded = []
-        for name in to_reload:
-            mod = sys.modules.get(name)
-            if mod is None:
-                continue
-            try:
-                importlib.reload(mod)
-                reloaded.append(name)
-            except Exception as e:
-                main_logger.warning(f"Hot reload failed for {name}: {e}")
-        if reloaded:
-            main_logger.info(f"Hot reload: reloaded {len(reloaded)} modules.")
+        self.reboot_manager.reload_project_modules()
 
     async def _do_hot_restart(self, restart: dict):
-        """Stop agents per restart mode, reload Python code + config, start new agents."""
-        mode = restart.get("mode", "same")
-        requesting_agent = restart.get("agent_name")
-        agent_number = restart.get("agent_number")
-
-        # Determine which agents to restart
-        if mode == "min" and requesting_agent:
-            targets = [requesting_agent]
-        elif mode == "number" and agent_number is not None:
-            all_names = self.configured_agent_names()
-            idx = agent_number - 1
-            if 0 <= idx < len(all_names):
-                targets = [all_names[idx]]
-            else:
-                main_logger.warning(f"Restart: invalid agent number {agent_number}, restarting all.")
-                targets = [rt.name for rt in self.runtimes]
-        elif mode == "max":
-            targets = [rt.name for rt in self.runtimes]
-        else:  # "same" — restart whatever is currently running
-            targets = [rt.name for rt in self.runtimes]
-
-        # Set up boot_state for the banner animation
-        boot_state = {name: "pending" for name in targets}
-        boot_reason = {}
-
-        main_logger.info(f"Hot restart: stopping {len(targets)} agent(s): {targets}")
-        bridge_logger.warning(
-            f"Hot restart begin (mode={mode}, requester={requesting_agent or '-'}, "
-            f"number={agent_number if agent_number is not None else '-'}, targets={targets})"
-        )
-        for name in targets:
-            try:
-                await self.stop_agent(name, reason=f"hot-restart:{mode}")
-            except Exception as e:
-                main_logger.warning(f"Hot restart: failed to stop '{name}': {e}")
-                bridge_logger.warning(f"Hot restart failed to stop '{name}': {type(e).__name__}: {e}")
-
-        # Reload Python modules to pick up code changes
-        self._reload_project_modules()
-        self._rebuild_hot_managers()
-
-        # Reload config and start the same agents
-        main_logger.info(f"Hot restart: starting agents: {targets}")
-        try:
-            _, agent_configs, _ = self._load_config_bundle()
-            active_config_names = {cfg.name for cfg in agent_configs}
-            # Agents that were running but have since been deactivated — skip them
-            newly_inactive = [name for name in targets if name not in active_config_names]
-            targets = [name for name in targets if name in active_config_names]
-            for name in newly_inactive:
-                boot_state.pop(name, None)
-            inactive_agent_names = [cfg.name for cfg in agent_configs if cfg.name not in targets] + newly_inactive
-        except Exception as e:
-            main_logger.error(f"Hot restart: config reload failed: {e}")
-            inactive_agent_names = []
-
-        # Run banner animation concurrently with agent startups
-        from orchestrator.banner import show_startup_banner
-        loop = asyncio.get_running_loop()
-
-        wa_enabled = self.whatsapp is not None
-        workbench_port = getattr(self.global_cfg, "workbench_port", None) if self.global_cfg else None
-        api_gw = self.api_gateway is not None
-
-        async def _start_agent_with_state(name):
-            boot_state[name] = "connecting"
-            try:
-                ok, msg = await self.start_agent(name)
-                if ok:
-                    new_state = "local" if "LOCAL MODE" in msg.upper() else "online"
-                    boot_state[name] = new_state
-                    if new_state == "local":
-                        boot_reason[name] = "Telegram unavailable"
-                else:
-                    boot_state[name] = "failed"
-                    boot_reason[name] = msg
-                    main_logger.error(f"Hot restart: {msg}")
-            except Exception as e:
-                boot_state[name] = "failed"
-                boot_reason[name] = f"{type(e).__name__}: {e}"
-                main_logger.error(f"Hot restart: failed to start '{name}': {e}")
-
-        def _run_banner():
-            show_startup_banner(
-                agent_names=targets,
-                boot_state=boot_state,
-                workbench_port=workbench_port,
-                wa_enabled=wa_enabled,
-                api_gateway_enabled=api_gw,
-                inactive_agents=inactive_agent_names,
-                boot_reason=boot_reason,
-            )
-
-        _mute = _AnimMute()
-        _handler.addFilter(_mute)
-        try:
-            await asyncio.gather(
-                loop.run_in_executor(None, _run_banner),
-                *[_start_agent_with_state(name) for name in targets],
-                return_exceptions=True,
-            )
-        finally:
-            _handler.removeFilter(_mute)
-
-        await self.service_manager.restart_scheduler()
-
-        if self.runtimes:
-            main_logger.info(f"Hot restart complete. {len(self.runtimes)} agent(s) running.")
-            bridge_logger.warning(f"Hot restart complete ({len(self.runtimes)} agent(s) running)")
-            print(f"\033[38;5;108m  ✓ reboot complete — {len(self.runtimes)} agent(s) online\033[0m\n", flush=True)
-        else:
-            main_logger.critical("Hot restart: no agents running after restart.")
-            bridge_logger.critical("Hot restart failed: no agents running after restart")
-            print("\033[38;5;203m  ✗ reboot failed — no agents running\033[0m\n", flush=True)
+        await self.reboot_manager.hot_restart(restart)
 
     async def run(self):
         try:
