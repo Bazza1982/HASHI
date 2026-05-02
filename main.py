@@ -25,6 +25,7 @@ from orchestrator.instance_lock import InstanceLock
 from orchestrator.lifecycle_state import LifecycleState
 from orchestrator.reboot_manager import RebootManager
 from orchestrator.service_manager import ServiceManager
+from orchestrator.whatsapp_manager import WhatsAppManager
 
 # --- Global Orchestrator Setup ---
 CODE_ROOT = Path(__file__).resolve().parent
@@ -56,6 +57,7 @@ class UniversalOrchestrator:
         self.agent_lifecycle = AgentLifecycleManager(self)
         self.service_manager = ServiceManager(self)
         self.reboot_manager = RebootManager(self, _handler)
+        self.whatsapp_manager = WhatsAppManager(self)
         self.workbench_api = None
         self.api_gateway = None
         self.scheduler = None
@@ -139,126 +141,19 @@ class UniversalOrchestrator:
         self.config_admin.write_raw_config(raw_cfg)
 
     def _load_whatsapp_cfg(self) -> tuple[dict, dict]:
-        raw_cfg = self._load_raw_config()
-        wa_cfg = raw_cfg.get("global", {}).get("whatsapp", {}) or {}
-        return raw_cfg, wa_cfg
+        return self.whatsapp_manager.load_config()
 
     async def start_whatsapp_transport(self, persist_enabled: bool = True) -> tuple[bool, str]:
-        async with self._lifecycle_lock:
-            if self.whatsapp is not None:
-                return False, "WhatsApp transport is already running."
-
-            try:
-                raw_cfg, wa_cfg = self._load_whatsapp_cfg()
-            except Exception as e:
-                return False, f"Failed to load WhatsApp config: {e}"
-
-            if persist_enabled and not wa_cfg.get("enabled"):
-                raw_cfg.setdefault("global", {}).setdefault("whatsapp", {})
-                raw_cfg["global"]["whatsapp"]["enabled"] = True
-                try:
-                    self._write_raw_config(raw_cfg)
-                except Exception as e:
-                    return False, f"Failed to persist WhatsApp enabled flag: {e}"
-                wa_cfg = raw_cfg["global"]["whatsapp"]
-
-            if self.global_cfg is None:
-                try:
-                    global_cfg, _, secrets = self._load_config_bundle()
-                    self.global_cfg = global_cfg
-                    self.secrets = secrets
-                except Exception as e:
-                    return False, f"Failed to load runtime configuration: {e}"
-            else:
-                global_cfg = self.global_cfg
-
-            try:
-                from transports.whatsapp import WhatsAppTransport
-
-                self.whatsapp = WhatsAppTransport(self, global_cfg, wa_cfg)
-                await self.whatsapp.start()
-                main_logger.info(
-                    "WhatsApp transport started. If this account is not paired yet, "
-                    "scan the QR code in this bridge-u-f console window."
-                )
-                return True, (
-                    "WhatsApp transport started. "
-                    "If this is the first login, scan the QR code in the bridge-u-f console window."
-                )
-            except Exception as e:
-                self.whatsapp = None
-                main_logger.warning(f"WhatsApp transport failed to start: {e}")
-                main_logger.debug(traceback.format_exc())
-                return False, f"WhatsApp transport failed to start: {e}"
+        return await self.whatsapp_manager.start_transport(persist_enabled)
 
     async def stop_whatsapp_transport(self, persist_enabled: bool = True) -> tuple[bool, str]:
-        async with self._lifecycle_lock:
-            config_note = ""
-            if persist_enabled:
-                try:
-                    raw_cfg, wa_cfg = self._load_whatsapp_cfg()
-                    if wa_cfg.get("enabled"):
-                        raw_cfg.setdefault("global", {}).setdefault("whatsapp", {})
-                        raw_cfg["global"]["whatsapp"]["enabled"] = False
-                        self._write_raw_config(raw_cfg)
-                    config_note = " Future startups will keep WhatsApp disabled."
-                except Exception as e:
-                    return False, f"Failed to persist WhatsApp disabled flag: {e}"
-
-            if self.whatsapp is None:
-                return True, f"WhatsApp transport is already stopped.{config_note}"
-
-            try:
-                await asyncio.wait_for(self.whatsapp.shutdown(), timeout=5.0)
-            except Exception as e:
-                self.whatsapp = None
-                main_logger.warning(f"WhatsApp shutdown warning: {e}")
-                return False, f"WhatsApp shutdown warning: {e}"
-
-            self.whatsapp = None
-            main_logger.info("WhatsApp transport stopped.")
-            return True, f"WhatsApp transport stopped.{config_note}"
+        return await self.whatsapp_manager.stop_transport(persist_enabled)
 
     async def send_whatsapp_text(self, phone_number: str, text: str) -> tuple[bool, str]:
-        async with self._lifecycle_lock:
-            if self.whatsapp is None:
-                return False, "WhatsApp transport is not running."
-            try:
-                await self.whatsapp.send_text_to_number(phone_number, text)
-                return True, f"Sent WhatsApp message to {phone_number}."
-            except Exception as e:
-                main_logger.warning(f"WhatsApp admin send failed for {phone_number}: {e}")
-                return False, f"Failed to send WhatsApp message to {phone_number}: {e}"
+        return await self.whatsapp_manager.send_text(phone_number, text)
 
     async def _send_whatsapp_startup_notification(self, runtime):
-        """Send startup notification via WhatsApp when agent starts in local mode."""
-        if self.whatsapp is None:
-            return
-        try:
-            # Get the admin's phone number from WhatsApp config
-            wa_cfg = self.global_cfg.__dict__.get("whatsapp", {}) if self.global_cfg else {}
-            admin_numbers = wa_cfg.get("allowed_numbers", []) if isinstance(wa_cfg, dict) else []
-            if not admin_numbers:
-                main_logger.debug(f"No WhatsApp admin numbers configured for startup notification.")
-                return
-            
-            display_name = getattr(runtime, "get_display_name", lambda: runtime.name)()
-            emoji = getattr(runtime, "get_agent_emoji", lambda: "🤖")()
-            message = (
-                f"{emoji} {display_name} started in LOCAL MODE\n"
-                f"⚠️ Telegram unavailable — using Workbench + WhatsApp\n"
-                f"Use /agent to check status"
-            )
-            
-            for phone in admin_numbers[:1]:  # Send to first admin only
-                try:
-                    await self.whatsapp.send_text_to_number(phone, message)
-                    main_logger.info(f"Sent WhatsApp startup notification for '{runtime.name}' to {phone}")
-                    break
-                except Exception as e:
-                    main_logger.warning(f"Failed to send WhatsApp startup notification: {e}")
-        except Exception as e:
-            main_logger.debug(f"WhatsApp startup notification skipped: {e}")
+        await self.whatsapp_manager.send_startup_notification(runtime)
 
     def _load_config_bundle(self):
         from orchestrator.config import ConfigManager
@@ -570,13 +465,9 @@ class UniversalOrchestrator:
             )
             await self.service_manager.stop_runtime_services()
             if self.whatsapp is not None:
-                bridge_logger.info("Stopping WhatsApp transport")
-                try:
-                    await asyncio.wait_for(self.whatsapp.shutdown(), timeout=5.0)
-                except (asyncio.TimeoutError, Exception) as e:
-                    main_logger.warning(f"WhatsApp shutdown warning: {e}")
-                    bridge_logger.warning(f"WhatsApp shutdown warning: {type(e).__name__}: {e}")
-                self.whatsapp = None
+                ok, message = await self.stop_whatsapp_transport(persist_enabled=False)
+                if not ok:
+                    bridge_logger.warning(message)
             await self._shutdown_all_agents()
             self.lifecycle_state.mark_shutdown(
                 self._shutdown_request,
