@@ -80,6 +80,35 @@ Decision:
 - Keep this document and the experimental helper code as future reference.
 - Revisit only when the team has spare time or a more stable call-control surface becomes available.
 
+## Experimental Files Preserved
+
+The following Phase 0 files exist in the repository and are intentionally preserved as reference material:
+
+- `apps/voice_whatsapp_desktop_runtime.py`
+  - WSL-side Phase 0 runner.
+  - Talks to the Windows helper over local HTTP.
+  - Logs JSONL voice events under `logs/voice_sessions/`.
+  - Supports detect-only mode, optional auto-answer, deeper UIA diagnostics, and screenshot OCR fallback.
+- `tools/windows_helper/whatsapp_call_probe.py`
+  - Windows-side WhatsApp Desktop call probe.
+  - Scans WhatsApp windows/processes and UI Automation controls.
+  - Separates active-call evidence from missed-call evidence.
+- `tools/windows_helper/backends.py`
+  - Exposes the `whatsapp_call_probe` helper action through the Windows helper server.
+- `orchestrator/voice/events.py`
+  - Minimal JSONL event logger used by the Phase 0 probe.
+- `orchestrator/voice/windows_helper_client.py`
+  - WSL-side client for calling Windows helper actions.
+- `tests/test_voice_phase0.py`
+  - Focused tests for helper-client parsing, voice event logging, active/missed call classification, and OCR fallback classification.
+
+Relevant commits:
+
+- `d8d748d Add WhatsApp desktop call probe`
+- `bc9b1e3 Improve WhatsApp desktop process probing`
+- `35c5898 Enhance WhatsApp call probe diagnostics`
+- `5ba8a0b Document deferred WhatsApp voice research`
+
 ## Original Goals
 
 - Prove that an incoming WhatsApp Desktop call on HASHI1 can be detected and answered.
@@ -234,7 +263,8 @@ tools/windows_helper/
   server.py
   whatsapp_call_probe.py
 
-tests/voice/
+tests/
+  test_voice_phase0.py
 ```
 
 `orchestrator/voice/` contains reusable WSL-side voice logic. `tools/windows_helper/` contains the existing Windows-native helper service and WhatsApp call-probe actions; it must be run with native Windows Python, for example `py.exe`, not WSL Python. `apps/` contains WSL-side entrypoints and may require cold restart unless a dedicated service restart is added.
@@ -281,6 +311,9 @@ uv run --no-project --with fastapi --with uvicorn --with fastmcp --with windows-
 
 # WSL2 side, detect only:
 python -m apps.voice_whatsapp_desktop_runtime --duration 60 --exit-on-detect
+
+# WSL2 side, detect only with UIA tree diagnostics and screenshot OCR fallback:
+python -m apps.voice_whatsapp_desktop_runtime --duration 60 --exit-on-detect --include-uia-tree --ocr-fallback
 
 # WSL2 side, allow automatic answering when an answer control is detected:
 python -m apps.voice_whatsapp_desktop_runtime --duration 60 --exit-on-detect --auto-answer
