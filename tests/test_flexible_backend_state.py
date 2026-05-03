@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from pathlib import Path
+
+import pytest
 
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
@@ -160,3 +163,86 @@ def test_update_wrapper_blocks_removes_stale_active_model_when_override_cleared(
     state = _read_state(workspace)
     assert "active_model" not in state
     assert state["wrapper_slots"] == {"1": "Keep facts exact."}
+
+
+def test_create_ephemeral_backend_does_not_replace_current_backend(tmp_path, monkeypatch):
+    import adapters.registry
+
+    created = []
+
+    class FakeBackend:
+        def __init__(self, config, global_config, api_key):
+            self.config = config
+            self.global_config = global_config
+            self.api_key = api_key
+            created.append(self)
+
+        async def initialize(self):
+            return True
+
+        async def generate_response(self, prompt, request_id, is_retry=False, silent=False, on_stream_event=None):
+            return SimpleNamespace(text=f"wrapped:{prompt}", is_success=True, error=None)
+
+        async def shutdown(self):
+            self.shutdown_called = True
+
+    monkeypatch.setattr(adapters.registry, "get_backend_class", lambda engine: FakeBackend)
+    workspace = tmp_path / "agent"
+    manager = _make_manager(workspace)
+    manager.current_backend = object()
+    original_backend = manager.current_backend
+    original_active = manager.config.active_backend
+
+    backend = manager.create_ephemeral_backend("claude-cli", target_model="claude-haiku-4-5")
+
+    assert backend is created[0]
+    assert backend.config.engine == "claude-cli"
+    assert backend.config.model == "claude-haiku-4-5"
+    assert manager.current_backend is original_backend
+    assert manager.config.active_backend == original_active
+
+
+@pytest.mark.asyncio
+async def test_generate_ephemeral_response_shuts_down_and_preserves_active_backend(tmp_path, monkeypatch):
+    import adapters.registry
+
+    created = []
+
+    class FakeBackend:
+        def __init__(self, config, global_config, api_key):
+            self.config = config
+            self.shutdown_called = False
+            created.append(self)
+
+        async def initialize(self):
+            return True
+
+        async def generate_response(self, prompt, request_id, is_retry=False, silent=False, on_stream_event=None):
+            assert request_id == "req-wrapper"
+            assert silent is True
+            return SimpleNamespace(text=f"wrapped:{prompt}", is_success=True, error=None)
+
+        async def shutdown(self):
+            self.shutdown_called = True
+
+    monkeypatch.setattr(adapters.registry, "get_backend_class", lambda engine: FakeBackend)
+    workspace = tmp_path / "agent"
+    manager = _make_manager(workspace)
+    manager.current_backend = object()
+    original_backend = manager.current_backend
+    original_active = manager.config.active_backend
+
+    response = await manager.generate_ephemeral_response(
+        engine="claude-cli",
+        model="claude-haiku-4-5",
+        prompt="rewrite me",
+        request_id="req-wrapper",
+        silent=True,
+    )
+
+    assert response.text == "wrapped:rewrite me"
+    assert created[0].config.engine == "claude-cli"
+    assert created[0].config.model == "claude-haiku-4-5"
+    assert created[0].shutdown_called is True
+    assert manager.current_backend is original_backend
+    assert manager.config.active_backend == original_active

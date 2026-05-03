@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
+
+import pytest
+
 from orchestrator.wrapper_mode import (
     DEFAULT_CONTEXT_WINDOW,
     MAX_CONTEXT_WINDOW,
@@ -145,3 +150,82 @@ def test_passthrough_result_is_safe_fallback():
     assert result.wrapper_failed is False
     assert result.fallback_reason == "wrapper_disabled"
     assert result.latency_ms == 1.5
+
+
+@pytest.mark.asyncio
+async def test_wrapper_processor_success_path_calls_wrapper_backend():
+    calls = []
+
+    async def fake_invoker(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(text="Gentle visible answer", is_success=True, error=None)
+
+    processor = WrapperProcessor(backend_invoker=fake_invoker)
+
+    result = await processor.process(
+        request_id="req-1",
+        source="text",
+        core_raw="Core raw answer",
+        visible_context=[{"role": "user", "text": "hello"}],
+        wrapper_slots={"1": "Be gentle."},
+    )
+
+    assert result.final_text == "Gentle visible answer"
+    assert result.wrapper_used is True
+    assert result.wrapper_failed is False
+    assert result.fallback_reason is None
+    assert calls[0]["engine"] == "claude-cli"
+    assert calls[0]["model"] == "claude-haiku-4-5"
+    assert calls[0]["request_id"] == "req-1:wrapper"
+    assert "<core_raw>" in calls[0]["prompt"]
+    assert "Core raw answer" in calls[0]["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_wrapper_processor_failure_falls_back_to_core_raw():
+    async def fake_invoker(**kwargs):
+        return SimpleNamespace(text="", is_success=False, error="bad wrapper")
+
+    processor = WrapperProcessor(backend_invoker=fake_invoker)
+
+    result = await processor.process(request_id="req-2", source="text", core_raw="Core raw answer")
+
+    assert result.final_text == "Core raw answer"
+    assert result.wrapper_used is False
+    assert result.wrapper_failed is True
+    assert result.fallback_reason == "bad wrapper"
+
+
+@pytest.mark.asyncio
+async def test_wrapper_processor_timeout_falls_back_to_core_raw():
+    async def slow_invoker(**kwargs):
+        await asyncio.sleep(0.05)
+        return SimpleNamespace(text="late", is_success=True)
+
+    processor = WrapperProcessor(backend_invoker=slow_invoker, timeout_s=0.001)
+
+    result = await processor.process(request_id="req-3", source="text", core_raw="Core raw answer")
+
+    assert result.final_text == "Core raw answer"
+    assert result.wrapper_used is False
+    assert result.wrapper_failed is True
+    assert result.fallback_reason == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_wrapper_processor_bypassed_source_does_not_call_backend():
+    calls = []
+
+    async def fake_invoker(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(text="should not run", is_success=True)
+
+    processor = WrapperProcessor(backend_invoker=fake_invoker)
+
+    result = await processor.process(request_id="req-4", source="scheduler", core_raw="Core raw answer")
+
+    assert result.final_text == "Core raw answer"
+    assert result.wrapper_used is False
+    assert result.wrapper_failed is False
+    assert result.fallback_reason == "source_bypassed"
+    assert calls == []

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from typing import Any, Awaitable, Callable, Mapping, Sequence
 
 
 DEFAULT_CORE_BACKEND = "codex-cli"
@@ -11,6 +13,8 @@ DEFAULT_WRAPPER_BACKEND = "claude-cli"
 DEFAULT_WRAPPER_MODEL = "claude-haiku-4-5"
 DEFAULT_CONTEXT_WINDOW = 3
 MAX_CONTEXT_WINDOW = 20
+DEFAULT_WRAPPER_TIMEOUT_S = 30.0
+BackendInvoker = Callable[..., Awaitable[Any]]
 
 USER_WRAPPABLE_SOURCES = frozenset(
     {
@@ -160,10 +164,18 @@ def passthrough_result(
 
 
 class WrapperProcessor:
-    """Build wrapper prompts; backend invocation is added in a later phase."""
+    """Build wrapper prompts and invoke the wrapper backend without session reuse."""
 
-    def __init__(self, config: WrapperConfig | None = None):
+    def __init__(
+        self,
+        config: WrapperConfig | None = None,
+        *,
+        backend_invoker: BackendInvoker | None = None,
+        timeout_s: float = DEFAULT_WRAPPER_TIMEOUT_S,
+    ):
         self.config = config or WrapperConfig()
+        self.backend_invoker = backend_invoker
+        self.timeout_s = timeout_s
 
     def build_payload(
         self,
@@ -180,6 +192,87 @@ class WrapperProcessor:
                 context_window=self.config.context_window,
             ),
         }
+
+    def build_prompt_text(
+        self,
+        *,
+        core_raw: str,
+        visible_context: Sequence[Mapping[str, Any]] | None = None,
+        wrapper_slots: Mapping[str, Any] | None = None,
+        config: WrapperConfig | None = None,
+    ) -> str:
+        effective_config = config or self.config
+        system = build_wrapper_system_prompt(wrapper_slots)
+        user = build_wrapper_user_prompt(
+            core_raw=core_raw,
+            visible_context=visible_context,
+            context_window=effective_config.context_window,
+        )
+        return "\n\n".join(
+            [
+                "SYSTEM INSTRUCTIONS:",
+                system,
+                "USER MESSAGE:",
+                user,
+            ]
+        )
+
+    async def process(
+        self,
+        *,
+        request_id: str,
+        source: str,
+        core_raw: str,
+        visible_context: Sequence[Mapping[str, Any]] | None = None,
+        wrapper_slots: Mapping[str, Any] | None = None,
+        config: WrapperConfig | None = None,
+        silent: bool = True,
+    ) -> WrapperResult:
+        if not should_wrap_source(source):
+            return passthrough_result(core_raw, fallback_reason="source_bypassed")
+        if self.backend_invoker is None:
+            return _failed_result(core_raw, "backend_invoker_missing", 0.0)
+
+        effective_config = config or self.config
+        prompt = self.build_prompt_text(
+            core_raw=core_raw,
+            visible_context=visible_context,
+            wrapper_slots=wrapper_slots,
+            config=effective_config,
+        )
+
+        start = time.perf_counter()
+        try:
+            response = await asyncio.wait_for(
+                self.backend_invoker(
+                    engine=effective_config.wrapper_backend,
+                    model=effective_config.wrapper_model,
+                    prompt=prompt,
+                    request_id=f"{request_id}:wrapper",
+                    silent=silent,
+                ),
+                timeout=self.timeout_s,
+            )
+        except asyncio.TimeoutError:
+            return _failed_result(core_raw, "timeout", _elapsed_ms(start))
+        except Exception as exc:
+            return _failed_result(core_raw, f"exception:{type(exc).__name__}", _elapsed_ms(start))
+
+        if not getattr(response, "is_success", True):
+            reason = getattr(response, "error", None) or "backend_error"
+            return _failed_result(core_raw, str(reason), _elapsed_ms(start))
+
+        final_text = str(getattr(response, "text", "") or "").strip()
+        if not final_text:
+            return _failed_result(core_raw, "empty_response", _elapsed_ms(start))
+
+        return WrapperResult(
+            final_text=final_text,
+            wrapper_used=True,
+            wrapper_failed=False,
+            fallback_reason=None,
+            latency_ms=_elapsed_ms(start),
+        )
 
 
 def _read_nonempty_str(mapping: Mapping[str, Any], key: str, default: str) -> str:
@@ -252,10 +345,25 @@ def _context_value(item: Mapping[str, Any], key: str, default: str) -> str:
     return str(value)
 
 
+def _elapsed_ms(start: float) -> float:
+    return (time.perf_counter() - start) * 1000
+
+
+def _failed_result(core_raw: str, fallback_reason: str, latency_ms: float) -> WrapperResult:
+    return WrapperResult(
+        final_text=core_raw or "",
+        wrapper_used=False,
+        wrapper_failed=True,
+        fallback_reason=fallback_reason,
+        latency_ms=latency_ms,
+    )
+
+
 __all__ = [
     "DEFAULT_CONTEXT_WINDOW",
     "DEFAULT_CORE_BACKEND",
     "DEFAULT_CORE_MODEL",
+    "DEFAULT_WRAPPER_TIMEOUT_S",
     "DEFAULT_WRAPPER_BACKEND",
     "DEFAULT_WRAPPER_MODEL",
     "USER_WRAPPABLE_SOURCES",

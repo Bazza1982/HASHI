@@ -104,6 +104,68 @@ class FlexibleBackendManager:
             state["wrapper_slots"] = dict(wrapper_slots)
         self._write_state_dict(state)
 
+    def _build_adapter_config(
+        self,
+        engine: str,
+        backend_cfg_raw: dict[str, Any],
+        *,
+        target_model: str | None = None,
+    ) -> AgentConfig:
+        agent_extra = dict(getattr(self.config, "extra", None) or {})
+        backend_extra = dict(backend_cfg_raw)
+        backend_extra.pop("engine", None)
+        backend_extra.pop("model", None)
+        backend_scope = backend_cfg_raw.get("access_scope", self.config.access_scope)
+        backend_extra.pop("access_scope", None)
+        extra = {**agent_extra, **backend_extra}
+        return AgentConfig(
+            name=self.config.name,
+            engine=engine,
+            workspace_dir=self.config.workspace_dir,
+            system_md=self.config.system_md,
+            model=target_model or backend_cfg_raw.get("model", "default"),
+            is_active=True,
+            extra=extra,
+            access_scope=backend_scope,
+            project_root=self.config.project_root,
+        )
+
+    def create_ephemeral_backend(self, engine: str, target_model: str | None = None):
+        backend_cfg_raw = next((b for b in self.config.allowed_backends if b["engine"] == engine), None)
+        if not backend_cfg_raw:
+            raise ValueError(f"Backend {engine} not allowed for {self.config.name}.")
+
+        adapter_cfg = self._build_adapter_config(engine, backend_cfg_raw, target_model=target_model)
+        from adapters.registry import get_backend_class
+
+        BackendClass = get_backend_class(engine)
+        api_key = self._resolve_api_key(engine)
+        return BackendClass(adapter_cfg, self.global_config, api_key)
+
+    async def generate_ephemeral_response(
+        self,
+        *,
+        engine: str,
+        model: str,
+        prompt: str,
+        request_id: str,
+        silent: bool = True,
+    ):
+        backend = self.create_ephemeral_backend(engine, target_model=model)
+        try:
+            initialized = await backend.initialize()
+            if not initialized:
+                raise RuntimeError(f"Failed to initialize ephemeral backend {engine}.")
+            return await backend.generate_response(
+                prompt,
+                request_id,
+                is_retry=False,
+                silent=silent,
+                on_stream_event=None,
+            )
+        finally:
+            await backend.shutdown()
+
     def _resolve_api_key(self, engine: str) -> Optional[Any]:
         for secret_key in get_secret_lookup_order(engine, self.config.name):
             api_key = self.secrets.get(secret_key)
@@ -122,26 +184,10 @@ class FlexibleBackendManager:
             self.logger.error(f"Active backend {engine} not found in allowed_backends.")
             return False
 
-        # Create a mock AgentConfig for the adapter
-        # Start with agent-level extra (e.g. process_timeout, background_mode) as base
-        agent_extra = dict(getattr(self.config, "extra", None) or {})
-        # Overlay per-backend values (minus routing fields)
-        backend_extra = dict(backend_cfg_raw)
-        backend_extra.pop("engine", None)
-        backend_extra.pop("model", None)
-        backend_scope = backend_cfg_raw.get("access_scope", self.config.access_scope)
-        backend_extra.pop("access_scope", None)
-        extra = {**agent_extra, **backend_extra}
-        adapter_cfg = AgentConfig(
-            name=self.config.name,
-            engine=engine,
-            workspace_dir=self.config.workspace_dir,
-            system_md=self.config.system_md,
-            model=target_model or getattr(self, "_active_model_override", None) or backend_cfg_raw.get("model", "default"),
-            is_active=True,
-            extra=extra,
-            access_scope=backend_scope,
-            project_root=self.config.project_root,
+        adapter_cfg = self._build_adapter_config(
+            engine,
+            backend_cfg_raw,
+            target_model=target_model or getattr(self, "_active_model_override", None),
         )
 
         try:
