@@ -519,6 +519,12 @@ async def _maybe_execute_windows_helper(action: str, args: dict) -> str | None:
     output, error = await _helper_post(action, args, timeout=60)
     if output is not None:
         return output
+    if error and "HTTP error: 500" in error:
+        await _best_effort_reset_windows_input_state()
+        output, retry_error = await _helper_post(action, args, timeout=60)
+        if output is not None:
+            return output
+        error = retry_error or error
     if not await _ensure_windows_helper_started():
         logger.info("windows helper unavailable for %s, falling back to local path (%s)", action, error)
         return None
@@ -541,6 +547,7 @@ def _resolve_provider(provider: str | None, action: str) -> str:
         "screenshot": "usecomputer",
         "mouse_move": "usecomputer",
         "click": "usecomputer",
+        "drag": "usecomputer",
         "scroll": "usecomputer",
         "type": "usecomputer",
         "key": "usecomputer",
@@ -825,7 +832,7 @@ async def execute_windows_mouse_move(args: dict) -> str:
             return text or f"Mouse moved to ({x}, {y}) on Windows host via windows-mcp"
 
     body = f"""
-$result = Invoke-Usecomputer -Args @('mouse', 'move', '-x', {_ps_quote(str(x))}, '-y', {_ps_quote(str(y))})
+    $result = Invoke-Usecomputer -Args @('hover', '-x', {_ps_quote(str(x))}, '-y', {_ps_quote(str(y))})
 @{{
     ok = ($result.exit_code -eq 0)
     output = $result.output
@@ -893,6 +900,57 @@ $result = Invoke-Usecomputer -Args @('click', '-x', {_ps_quote(str(x))}, '-y', {
     if not data or not data.get("ok"):
         return f"Error: click failed: {(data or {}).get('output', 'unknown error')}"
     return f"Clicked ({x}, {y}) button={button} count={count} on Windows host"
+
+
+async def execute_windows_drag(args: dict) -> str:
+    helper_result = await _maybe_execute_windows_helper("drag", args)
+    if helper_result is not None:
+        return helper_result
+    requested_provider = args.get("provider")
+    if error := _provider_error(requested_provider):
+        return error
+    provider = _resolve_provider(requested_provider, "drag")
+
+    from_x = args.get("from_x")
+    from_y = args.get("from_y")
+    to_x = args.get("to_x")
+    to_y = args.get("to_y")
+    curve_x = args.get("curve_x")
+    curve_y = args.get("curve_y")
+    button = str(args.get("button", "left"))
+    if None in {from_x, from_y, to_x, to_y}:
+        return "Error: from_x, from_y, to_x, and to_y are required"
+    if button not in {"left", "right", "middle"}:
+        return "Error: button must be one of: left, right, middle"
+    if (curve_x is None) != (curve_y is None):
+        return "Error: curve_x and curve_y must be provided together"
+    if provider == "windows-mcp":
+        if not _is_auto_provider(requested_provider):
+            return "Error: windows-mcp drag is not yet supported for windows_use"
+        provider = "usecomputer"
+
+    drag_parts = [
+        "'drag'",
+        _ps_quote(f"{int(from_x)},{int(from_y)}"),
+        _ps_quote(f"{int(to_x)},{int(to_y)}"),
+    ]
+    if curve_x is not None and curve_y is not None:
+        drag_parts.append(_ps_quote(f"{int(curve_x)},{int(curve_y)}"))
+    drag_parts.extend(["'--button'", _ps_quote(button)])
+    body = f"""
+$result = Invoke-Usecomputer -Args @({', '.join(drag_parts)})
+@{{
+    ok = ($result.exit_code -eq 0)
+    output = $result.output
+}} | ConvertTo-Json -Compress
+"""
+    data, error = await _run_usecomputer_json(body, timeout=45)
+    await _best_effort_reset_windows_input_state()
+    if error:
+        return f"Error: drag failed: {error}"
+    if not data or not data.get("ok"):
+        return f"Error: drag failed: {(data or {}).get('output', 'unknown error')}"
+    return f"Dragged from ({int(from_x)}, {int(from_y)}) to ({int(to_x)}, {int(to_y)}) button={button} on Windows host"
 
 
 async def execute_windows_type(args: dict) -> str:

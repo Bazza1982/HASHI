@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 from pathlib import Path
 
 from PIL import ImageGrab
@@ -27,8 +28,7 @@ def find_usecomputer() -> str | None:
         ):
             if candidate.exists():
                 return str(candidate)
-    found = shutil.which("usecomputer")
-    return found
+    return shutil.which("usecomputer")
 
 
 async def _run(cmd: list[str], timeout: int = 30) -> tuple[int, str, str]:
@@ -45,6 +45,17 @@ async def _run(cmd: list[str], timeout: int = 30) -> tuple[int, str, str]:
     )
 
 
+async def _run_usecomputer(args: list[str], timeout: int = 30) -> tuple[int, str, str]:
+    uc = find_usecomputer()
+    if not uc:
+        return 1, "", "usecomputer not found"
+    return await _run([uc, *args], timeout=timeout)
+
+
+def _quote_point(x: int, y: int) -> str:
+    return f"{int(x)},{int(y)}"
+
+
 def _resolve_provider(provider: str | None, action: str) -> str:
     value = (provider or "auto").strip().lower()
     if value and value != "auto":
@@ -53,6 +64,7 @@ def _resolve_provider(provider: str | None, action: str) -> str:
         "screenshot": "usecomputer",
         "mouse_move": "usecomputer",
         "click": "usecomputer",
+        "drag": "usecomputer",
         "scroll": "usecomputer",
         "type": "usecomputer",
         "key": "usecomputer",
@@ -90,6 +102,18 @@ def _maybe_focus(args: dict) -> dict | None:
     if not target:
         raise RuntimeError("target window not found")
     return win32.focus_window(target)
+
+
+def _helper_screenshot_response(data: bytes, provider: str, save_path: str = "", metadata: str = '{"all_screens": true}') -> str:
+    if save_path:
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(save_path).write_bytes(data)
+    saved_note = f"\nSaved to: {save_path}" if save_path else ""
+    return (
+        f"Windows screenshot OK — provider={provider}, {len(data)//1024}KB\n"
+        f"Metadata: {metadata}{saved_note}\n"
+        f"data:image/png;base64,{base64.b64encode(data).decode('ascii')}"
+    )
 
 
 async def execute_action(action: str, args: dict) -> str:
@@ -166,20 +190,23 @@ async def execute_action(action: str, args: dict) -> str:
         )
 
     _maybe_focus(args)
-    uc = find_usecomputer()
 
     if action == "mouse_move":
         x = int(args["x"])
         y = int(args["y"])
         if provider == "usecomputer":
-            pos = win32.move_mouse(x, y)
-            win32.reset_input_state()
-            return f"Mouse moved to ({pos['x']}, {pos['y']}) on Windows host via helper-native"
+            try:
+                win32.reset_input_state()
+                pos = win32.move_mouse(x, y)
+                win32.reset_input_state()
+                return f"Mouse moved to ({pos['x']}, {pos['y']}) on Windows host via helper-native"
+            except Exception:
+                pass
         if provider == "windows-mcp":
             text = await _mcp_text("Move", {"loc": [x, y]})
             win32.reset_input_state()
             return text or f"Mouse moved to ({x}, {y}) on Windows host via windows-mcp-helper"
-        rc, out, err = await _run([uc, "mouse", "move", "-x", str(x), "-y", str(y)])
+        rc, out, err = await _run_usecomputer(["hover", "-x", str(x), "-y", str(y)])
         win32.reset_input_state()
         return f"Mouse moved to ({x}, {y}) on Windows host via helper" if rc == 0 else f"Error: mouse move failed: {err or out}"
 
@@ -189,23 +216,76 @@ async def execute_action(action: str, args: dict) -> str:
         button = str(args.get("button", "left"))
         count = int(args.get("count", 1))
         if provider == "usecomputer":
-            win32.click_mouse(x, y, button=button, count=count)
-            win32.reset_input_state()
-            return f"Clicked ({x}, {y}) button={button} count={count} on Windows host via helper-native"
+            try:
+                win32.reset_input_state(release_mouse=False)
+                win32.click_mouse(x, y, button=button, count=count)
+                win32.reset_input_state(release_mouse=False)
+                return f"Clicked ({x}, {y}) button={button} count={count} on Windows host via helper-native"
+            except Exception:
+                pass
         if provider == "windows-mcp":
             text = await _mcp_text("Click", {"loc": [x, y], "button": button, "clicks": count})
             win32.reset_input_state()
             return text or f"Clicked ({x}, {y}) button={button} count={count} on Windows host via windows-mcp-helper"
-        rc, out, err = await _run([uc, "click", "-x", str(x), "-y", str(y), "--button", button, "--count", str(count)])
+        rc, out, err = await _run_usecomputer(["click", "-x", str(x), "-y", str(y), "--button", button, "--count", str(count)])
         win32.reset_input_state()
         return f"Clicked ({x}, {y}) button={button} count={count} on Windows host via helper" if rc == 0 else f"Error: click failed: {err or out}"
+
+    if action == "drag":
+        from_x = int(args["from_x"])
+        from_y = int(args["from_y"])
+        to_x = int(args["to_x"])
+        to_y = int(args["to_y"])
+        button = str(args.get("button", "left"))
+        curve_x = args.get("curve_x")
+        curve_y = args.get("curve_y")
+        if provider == "usecomputer":
+            try:
+                win32.reset_input_state(release_mouse=True)
+                win32.drag_mouse(
+                    from_x,
+                    from_y,
+                    to_x,
+                    to_y,
+                    button=button,
+                    curve_x=int(curve_x) if curve_x is not None else None,
+                    curve_y=int(curve_y) if curve_y is not None else None,
+                )
+                win32.reset_input_state(release_mouse=False)
+                return f"Dragged from ({from_x}, {from_y}) to ({to_x}, {to_y}) button={button} on Windows host via helper-native"
+            except Exception:
+                pass
+        cmd = ["drag", _quote_point(from_x, from_y), _quote_point(to_x, to_y)]
+        if curve_x is not None and curve_y is not None:
+            cmd.append(_quote_point(int(curve_x), int(curve_y)))
+        cmd += ["--button", button]
+        rc, out, err = await _run_usecomputer(cmd, timeout=45)
+        win32.reset_input_state()
+        return f"Dragged from ({from_x}, {from_y}) to ({to_x}, {to_y}) button={button} on Windows host via helper" if rc == 0 else f"Error: drag failed: {err or out}"
 
     if action == "type":
         text = str(args.get("text", ""))
         if provider == "usecomputer":
-            typed = win32.type_text(text)
-            win32.reset_input_state()
-            return f"Typed {typed['text_length']} chars on Windows host via helper-native"
+            try:
+                x = args.get("x")
+                y = args.get("y")
+                win32.reset_input_state(release_mouse=False)
+                if x is not None and y is not None:
+                    win32.click_mouse(int(x), int(y), button="left", count=1)
+                    time.sleep(0.12)
+                method = str(args.get("input_method", "auto")).strip().lower()
+                if method not in {"auto", "keys", "paste"}:
+                    return "Error: input_method must be one of: auto, keys, paste"
+                use_paste = method == "paste" or (
+                    method == "auto" and ("\t" in text or "\r" in text or "\n" in text)
+                )
+                restore_clipboard = bool(args.get("restore_clipboard", False))
+                typed = win32.paste_text(text, restore_clipboard=restore_clipboard) if use_paste else win32.type_text(text)
+                win32.reset_input_state(release_mouse=False)
+                typed_method = typed.get("method", "sendinput")
+                return f"Typed {typed['text_length']} chars on Windows host via helper-native ({typed_method})"
+            except Exception:
+                pass
         if provider == "windows-mcp":
             x = args.get("x")
             y = args.get("y")
@@ -214,21 +294,25 @@ async def execute_action(action: str, args: dict) -> str:
             text_out = await _mcp_text("Type", {"loc": [int(x), int(y)], "text": text})
             win32.reset_input_state()
             return text_out or f"Typed {len(text)} chars on Windows host via windows-mcp-helper"
-        rc, out, err = await _run([uc, "type", text], timeout=45)
+        rc, out, err = await _run_usecomputer(["type", text], timeout=45)
         win32.reset_input_state()
         return f"Typed {len(text)} chars on Windows host via helper" if rc == 0 else f"Error: type failed: {err or out}"
 
     if action == "key":
         key = str(args.get("key", ""))
         if provider == "usecomputer":
-            win32.press_key_combo(key)
-            win32.reset_input_state()
-            return f"Pressed '{key}' on Windows host via helper-native"
+            try:
+                win32.reset_input_state()
+                win32.press_key_combo(key)
+                win32.reset_input_state()
+                return f"Pressed '{key}' on Windows host via helper-native"
+            except Exception:
+                pass
         if provider == "windows-mcp":
             text = await _mcp_text("Shortcut", {"shortcut": key})
             win32.reset_input_state()
             return text or f"Pressed '{key}' on Windows host via windows-mcp-helper"
-        rc, out, err = await _run([uc, "press", key])
+        rc, out, err = await _run_usecomputer(["press", key])
         win32.reset_input_state()
         return f"Pressed '{key}' on Windows host via helper" if rc == 0 else f"Error: key press failed: {err or out}"
 
@@ -236,12 +320,15 @@ async def execute_action(action: str, args: dict) -> str:
         direction = str(args.get("direction", "down"))
         amount = int(args.get("amount", 3))
         if provider == "usecomputer":
-            if args.get("x") is not None and args.get("y") is not None:
-                win32.move_mouse(int(args["x"]), int(args["y"]))
-            horizontal = direction in {"left", "right"}
-            win32.scroll_mouse(direction=direction, amount=amount, horizontal=horizontal)
-            win32.reset_input_state()
-            return f"Scrolled {direction} x{amount} on Windows host via helper-native"
+            try:
+                if args.get("x") is not None and args.get("y") is not None:
+                    win32.move_mouse(int(args["x"]), int(args["y"]))
+                horizontal = direction in {"left", "right"}
+                win32.scroll_mouse(direction=direction, amount=amount, horizontal=horizontal)
+                win32.reset_input_state()
+                return f"Scrolled {direction} x{amount} on Windows host via helper-native"
+            except Exception:
+                pass
         if provider == "windows-mcp":
             payload = {
                 "direction": direction,
@@ -253,33 +340,28 @@ async def execute_action(action: str, args: dict) -> str:
             text = await _mcp_text("Scroll", payload)
             win32.reset_input_state()
             return text or f"Scrolled {direction} x{amount} on Windows host via windows-mcp-helper"
-        cmd = [uc, "scroll", direction, str(amount)]
+        cmd = ["scroll", direction, str(amount)]
         if args.get("x") is not None and args.get("y") is not None:
             cmd += ["--at", f"{args['x']},{args['y']}"]
-        rc, out, err = await _run(cmd)
+        rc, out, err = await _run_usecomputer(cmd)
         win32.reset_input_state()
         return f"Scrolled {direction} x{amount} on Windows host via helper" if rc == 0 else f"Error: scroll failed: {err or out}"
 
     if action == "screenshot":
         save_path = str(args.get("save_path", "") or "")
         if provider == "usecomputer" and args.get("display") is None and not args.get("annotate"):
-            image = ImageGrab.grab(all_screens=True)
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-                tmp = Path(tf.name)
             try:
-                image.save(tmp, format="PNG")
-                data = tmp.read_bytes()
-            finally:
-                tmp.unlink(missing_ok=True)
-            if save_path:
-                Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-                Path(save_path).write_bytes(data)
-            saved_note = f"\nSaved to: {save_path}" if save_path else ""
-            return (
-                f"Windows screenshot OK — provider=helper-native, {len(data)//1024}KB\n"
-                f"Metadata: {{\"all_screens\": true}}{saved_note}\n"
-                f"data:image/png;base64,{base64.b64encode(data).decode('ascii')}"
-            )
+                image = ImageGrab.grab(all_screens=True)
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+                    tmp = Path(tf.name)
+                try:
+                    image.save(tmp, format="PNG")
+                    data = tmp.read_bytes()
+                finally:
+                    tmp.unlink(missing_ok=True)
+                return _helper_screenshot_response(data, "helper-native", save_path)
+            except Exception:
+                pass
         if provider == "windows-mcp":
             payload = {}
             if args.get("display") is not None:
@@ -306,6 +388,9 @@ async def execute_action(action: str, args: dict) -> str:
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
             tmp = tf.name
         try:
+            uc = find_usecomputer()
+            if not uc:
+                return "Error: screenshot failed: usecomputer not found"
             cmd = [uc, "screenshot", tmp, "--json"]
             if args.get("annotate"):
                 cmd.append("--annotate")
@@ -315,15 +400,7 @@ async def execute_action(action: str, args: dict) -> str:
             if rc != 0:
                 return f"Error: screenshot failed: {err or out}"
             data = Path(tmp).read_bytes()
-            if save_path:
-                Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-                Path(save_path).write_bytes(data)
-            saved_note = f"\nSaved to: {save_path}" if save_path else ""
-            return (
-                f"Windows screenshot OK — provider=helper, {len(data)//1024}KB\n"
-                f"Metadata: {out or '{}'}{saved_note}\n"
-                f"data:image/png;base64,{base64.b64encode(data).decode('ascii')}"
-            )
+            return _helper_screenshot_response(data, "helper", save_path, out or "{}")
         finally:
             Path(tmp).unlink(missing_ok=True)
 

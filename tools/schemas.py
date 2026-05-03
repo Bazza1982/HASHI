@@ -985,6 +985,38 @@ WINDOWS_USE_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "windows_drag",
+            "description": (
+                "Drag the mouse on the real Windows desktop from one absolute coordinate to another. "
+                "Useful for desktop file drag-and-drop and other pointer-drag gestures."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "from_x": {"type": "integer", "description": "Drag start X coordinate."},
+                    "from_y": {"type": "integer", "description": "Drag start Y coordinate."},
+                    "to_x": {"type": "integer", "description": "Drag end X coordinate."},
+                    "to_y": {"type": "integer", "description": "Drag end Y coordinate."},
+                    "curve_x": {"type": "integer", "description": "Optional Bezier control point X for a curved drag path."},
+                    "curve_y": {"type": "integer", "description": "Optional Bezier control point Y for a curved drag path."},
+                    "button": {
+                        "type": "string",
+                        "enum": ["left", "right", "middle"],
+                        "description": "Mouse button to hold during the drag. Default 'left'.",
+                    },
+                    "provider": {
+                        "type": "string",
+                        "enum": ["auto", "usecomputer", "windows-mcp"],
+                        "description": "Desktop executor backend. 'auto' prefers usecomputer/native helper for drag gestures.",
+                    },
+                },
+                "required": ["from_x", "from_y", "to_x", "to_y"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "windows_type",
             "description": (
                 "Type text into the currently focused window on the real Windows desktop. "
@@ -1004,6 +1036,15 @@ WINDOWS_USE_TOOL_SCHEMAS = [
                     "pid": {"type": "integer", "description": "Optional target process id to focus before typing."},
                     "title_contains": {"type": "string", "description": "Optional partial window title to focus before typing."},
                     "exact_title": {"type": "string", "description": "Optional exact window title to focus before typing."},
+                    "input_method": {
+                        "type": "string",
+                        "enum": ["auto", "keys", "paste"],
+                        "description": "How to enter text. Auto uses clipboard paste only for tabular or multiline text; plain text uses key input.",
+                    },
+                    "restore_clipboard": {
+                        "type": "boolean",
+                        "description": "Restore the previous clipboard after paste input. Default false for reliability with Office apps.",
+                    },
                     "provider": {
                         "type": "string",
                         "enum": ["auto", "usecomputer", "windows-mcp"],
