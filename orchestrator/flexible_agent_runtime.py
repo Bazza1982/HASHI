@@ -50,7 +50,13 @@ from orchestrator.skill_manager import SkillDefinition, SkillManager
 from orchestrator.voice_manager import VoiceManager
 from orchestrator.private_wol import describe_wol_targets, private_wol_available, run_private_wol
 from orchestrator.workzone import access_root_for_workzone, build_workzone_prompt, clear_workzone, load_workzone, resolve_workzone_input, save_workzone
-from orchestrator.wrapper_mode import WrapperProcessor, load_wrapper_config, passthrough_result
+from orchestrator.wrapper_mode import (
+    SESSION_RESET_SOURCE,
+    WrapperProcessor,
+    load_wrapper_config,
+    passthrough_result,
+    should_wrap_source,
+)
 
 HABIT_BROWSER_PAGE_SIZE = 5
 
@@ -6055,7 +6061,7 @@ class FlexibleAgentRuntime:
         await self.enqueue_request(
             update.effective_chat.id,
             prompt,
-            "system",
+            SESSION_RESET_SOURCE,
             "New session",
             skip_memory_injection=True,
         )
@@ -6093,7 +6099,7 @@ class FlexibleAgentRuntime:
         await self.enqueue_request(
             update.effective_chat.id,
             prompt,
-            "system",
+            SESSION_RESET_SOURCE,
             "Fresh API context",
             skip_memory_injection=True,
         )
@@ -7874,6 +7880,35 @@ class FlexibleAgentRuntime:
         except Exception as exc:
             self.error_logger.warning(f"Failed to append core transcript: {exc}")
 
+    async def _send_wrapper_polishing_placeholder(self, item: QueuedRequest):
+        if item.silent or not item.deliver_to_telegram or not self.telegram_connected:
+            return None
+        if not should_wrap_source(item.source):
+            return None
+        bot = getattr(getattr(self, "app", None), "bot", None)
+        if bot is None or not hasattr(bot, "send_message"):
+            return None
+        try:
+            return await bot.send_message(
+                chat_id=item.chat_id,
+                text="✨ Polishing the final voice...",
+            )
+        except Exception as exc:
+            self.telegram_logger.warning(f"Failed to send wrapper polishing placeholder: {exc}")
+            return None
+
+    async def _delete_wrapper_polishing_placeholder(self, item: QueuedRequest, placeholder) -> None:
+        if placeholder is None:
+            return
+        bot = getattr(getattr(self, "app", None), "bot", None)
+        message_id = getattr(placeholder, "message_id", None)
+        if bot is None or message_id is None or not hasattr(bot, "delete_message"):
+            return
+        try:
+            await bot.delete_message(chat_id=item.chat_id, message_id=message_id)
+        except Exception:
+            pass
+
     async def _apply_wrapper_to_visible_text(self, item: QueuedRequest, visible_text: str):
         if not self._wrapper_enabled():
             return visible_text, passthrough_result(visible_text, fallback_reason="wrapper_mode_disabled")
@@ -7891,6 +7926,7 @@ class FlexibleAgentRuntime:
 
         stop_wrapper_typing = None
         wrapper_typing_task = None
+        wrapper_placeholder = await self._send_wrapper_polishing_placeholder(item)
         if not item.silent and item.deliver_to_telegram and self.telegram_connected:
             stop_wrapper_typing = asyncio.Event()
             wrapper_typing_task = asyncio.create_task(self.typing_loop(item.chat_id, stop_wrapper_typing))
@@ -7908,6 +7944,7 @@ class FlexibleAgentRuntime:
             if stop_wrapper_typing and wrapper_typing_task:
                 stop_wrapper_typing.set()
                 await wrapper_typing_task
+            await self._delete_wrapper_polishing_placeholder(item, wrapper_placeholder)
 
         return wrapper_result.final_text, wrapper_result
 
@@ -8150,7 +8187,7 @@ class FlexibleAgentRuntime:
                 memory_user_text = item.prompt
                 if item.source.lower() in {"document", "photo", "voice", "audio", "video", "sticker"}:
                     memory_user_text = f"[{item.source}] {item.summary}"
-                if item.source not in {"startup", "system"}:
+                if item.source not in {"startup", "system", SESSION_RESET_SOURCE}:
                     self.memory_store.record_turn("user", item.source, memory_user_text)
                     self.memory_store.record_turn("assistant", self.config.active_backend, visible_text)
                     self.memory_store.record_exchange(memory_user_text, visible_text, item.source)
@@ -8605,7 +8642,7 @@ class FlexibleAgentRuntime:
                         memory_user_text = item.prompt
                         if item.source.lower() in {"document", "photo", "voice", "audio", "video", "sticker"}:
                             memory_user_text = f"[{item.source}] {item.summary}"
-                        if item.source not in {"startup", "system"} and not is_bridge_request:
+                        if item.source not in {"startup", "system", SESSION_RESET_SOURCE} and not is_bridge_request:
                             self.memory_store.record_turn("user", item.source, memory_user_text)
                             self.memory_store.record_turn("assistant", self.config.active_backend, visible_text)
                             self.memory_store.record_exchange(memory_user_text, visible_text, item.source)

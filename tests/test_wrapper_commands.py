@@ -18,6 +18,7 @@ from orchestrator.agent_runtime import QueuedRequest
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
+from orchestrator.wrapper_mode import SESSION_RESET_SOURCE
 
 
 def _make_manager(workspace: Path) -> FlexibleBackendManager:
@@ -168,6 +169,8 @@ def _make_background_runtime(tmp_path: Path, wrapper_response: BackendResponse |
     runtime._format_wrapper_verbose_trace = FlexibleAgentRuntime._format_wrapper_verbose_trace.__get__(runtime, FlexibleAgentRuntime)
     runtime._send_wrapper_verbose_trace = FlexibleAgentRuntime._send_wrapper_verbose_trace.__get__(runtime, FlexibleAgentRuntime)
     runtime._append_core_transcript = FlexibleAgentRuntime._append_core_transcript.__get__(runtime, FlexibleAgentRuntime)
+    runtime._send_wrapper_polishing_placeholder = FlexibleAgentRuntime._send_wrapper_polishing_placeholder.__get__(runtime, FlexibleAgentRuntime)
+    runtime._delete_wrapper_polishing_placeholder = FlexibleAgentRuntime._delete_wrapper_polishing_placeholder.__get__(runtime, FlexibleAgentRuntime)
     runtime._apply_wrapper_to_visible_text = FlexibleAgentRuntime._apply_wrapper_to_visible_text.__get__(runtime, FlexibleAgentRuntime)
     runtime._notify_request_listeners = FlexibleAgentRuntime._notify_request_listeners.__get__(runtime, FlexibleAgentRuntime)
     sent = []
@@ -196,6 +199,9 @@ class FakeBot:
 
     async def delete_message(self, chat_id, message_id):
         self.deleted.append({"chat_id": chat_id, "message_id": message_id})
+
+    async def send_chat_action(self, chat_id, action):
+        return None
 
 
 class FakeContextAssembler:
@@ -443,6 +449,47 @@ async def test_wrapper_config_buttons_update_core_model(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_cmd_new_queues_session_reset_source_for_wrapper(tmp_path):
+    manager = _make_manager(tmp_path)
+    manager.agent_mode = "wrapper"
+    runtime, messages = _make_runtime(manager)
+    handled = []
+    queued = []
+
+    async def handle_new_session():
+        handled.append(True)
+
+    manager.current_backend = SimpleNamespace(
+        capabilities=SimpleNamespace(supports_sessions=True),
+        handle_new_session=handle_new_session,
+    )
+    runtime._clear_transfer_state = lambda: None
+    runtime._pending_auto_recall_context = "old"
+    runtime.context_assembler = SimpleNamespace(memory_store=SimpleNamespace(clear_turns=lambda: None))
+
+    async def enqueue_request(chat_id, prompt, source, summary, **kwargs):
+        queued.append(
+            {
+                "chat_id": chat_id,
+                "prompt": prompt,
+                "source": source,
+                "summary": summary,
+                **kwargs,
+            }
+        )
+
+    runtime.enqueue_request = enqueue_request
+    update, context = _update([])
+
+    await FlexibleAgentRuntime.cmd_new(runtime, update, context)
+
+    assert handled == [True]
+    assert messages[-1] == "Starting a fresh session..."
+    assert queued[0]["source"] == SESSION_RESET_SOURCE
+    assert queued[0]["skip_memory_injection"] is True
+
+
+@pytest.mark.asyncio
 async def test_wrapper_config_buttons_update_wrapper_model_across_backends(tmp_path):
     manager = _make_manager(tmp_path / "agent")
     manager.config.allowed_backends.extend(
@@ -614,6 +661,29 @@ async def test_foreground_wrapper_verbose_shows_core_and_final_outputs(tmp_path)
         assert "Wrapper final output" in sent[0]["text"]
         assert "wrapped visible" in sent[0]["text"]
         assert sent[-1]["purpose"] == "response"
+        assert sent[-1]["text"] == "wrapped visible"
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_wrapper_polishing_placeholder_bridges_after_core_output(tmp_path):
+    runtime, sent, voices, hchat_replies = _make_foreground_runtime(tmp_path)
+    runtime.telegram_connected = True
+    item = _queued_request()
+    await runtime.queue.put(item)
+
+    task = asyncio.create_task(runtime.process_queue())
+    try:
+        for _ in range(50):
+            if sent and voices and hchat_replies and len(runtime.app.bot.messages) >= 2:
+                break
+            await asyncio.sleep(0.01)
+        assert runtime.app.bot.messages[0]["text"] == "typing"
+        assert runtime.app.bot.messages[1]["text"] == "✨ Polishing the final voice..."
+        assert runtime.app.bot.deleted[-1]["message_id"] == 2
         assert sent[-1]["text"] == "wrapped visible"
     finally:
         task.cancel()

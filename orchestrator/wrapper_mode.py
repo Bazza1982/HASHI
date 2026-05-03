@@ -14,6 +14,7 @@ DEFAULT_WRAPPER_MODEL = "claude-haiku-4-5"
 DEFAULT_CONTEXT_WINDOW = 3
 MAX_CONTEXT_WINDOW = 20
 DEFAULT_WRAPPER_TIMEOUT_S = 30.0
+SESSION_RESET_SOURCE = "session_reset"
 BackendInvoker = Callable[..., Awaitable[Any]]
 
 USER_WRAPPABLE_SOURCES = frozenset(
@@ -27,6 +28,7 @@ USER_WRAPPABLE_SOURCES = frozenset(
         "document",
         "video",
         "sticker",
+        SESSION_RESET_SOURCE,
     }
 )
 
@@ -372,6 +374,7 @@ __all__ = [
     "DEFAULT_WRAPPER_TIMEOUT_S",
     "DEFAULT_WRAPPER_BACKEND",
     "DEFAULT_WRAPPER_MODEL",
+    "SESSION_RESET_SOURCE",
     "USER_WRAPPABLE_SOURCES",
     "WRAPPER_BYPASS_PREFIXES",
     "WRAPPER_BYPASS_SOURCES",
