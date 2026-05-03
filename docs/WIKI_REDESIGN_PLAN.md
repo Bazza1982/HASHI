@@ -304,7 +304,14 @@ This is rendered as an Obsidian comment (invisible in reading mode, visible in s
 
 ### 5.1 Daily update design
 
-The normal production run is daily. Lily's HASHI cron triggers the pipeline once per day after memory consolidation has completed.
+The normal production run is daily. Lily's HASHI cron triggers the pipeline once per day after memory consolidation has completed. Production schedule:
+
+```text
+03:05  lily-memory-consolidation
+04:05  lily-wiki-daily-update
+```
+
+The one-hour gap gives consolidation enough time to finish normal and moderately heavy runs before the wiki reads consolidated memory. The wiki pipeline must still verify that today's consolidation completed before it advances its own watermark.
 
 Daily run behavior:
 
@@ -316,7 +323,7 @@ Daily run behavior:
 6. Write `wiki_organise_report_latest.md`.
 7. Lily reads the report and sends a concise summary to the user.
 
-The daily run does **not** generate the weekly digest unless `--weekly` is passed.
+The daily run normally refreshes the wiki once per day. On Saturdays, the same daily job also emits the weekly digest via `--weekly-if-saturday`; use one cron job rather than separate daily and weekly jobs so the wiki update does not run twice or race itself.
 
 ### 5.2 Weekly digest two-pass design
 
@@ -715,22 +722,22 @@ Daily update cron:
   "id": "lily-wiki-daily-update",
   "agent": "lily",
   "enabled": true,
-  "schedule": "20 2 * * *",
+  "schedule": "5 4 * * *",
   "action": "enqueue_prompt",
-  "prompt": "每日 Wiki 增量更新任务！执行：cd /home/lily/projects/hashi && python3 scripts/wiki/run_pipeline.py --daily\\n\\n必须读取 wiki_organise_report_latest.md 后汇报：\\n- 新分类 memories 数量\\n- changed topic/project pages\\n- low-confidence assignments\\n- UNCATEGORIZED_REVIEW clusters\\n- 失败 batches / retry 状态\\n- backend policy 是否确认未使用 OpenRouter/DeepSeek API\\n\\n禁止只粘 stdout；必须给出 Lily 的质量判断。"
+  "prompt": "每日 Wiki 增量更新任务！先确认今天 03:05 的 lily-memory-consolidation 已完成；若未完成，不得推进 wiki watermark，必须报告并停止。执行：cd /home/lily/projects/hashi && python3 scripts/wiki/run_pipeline.py --daily --weekly-if-saturday\\n\\n必须读取 wiki_organise_report_latest.md 后汇报：\\n- consolidation completion check\\n- 新分类 memories 数量\\n- changed topic/project pages\\n- low-confidence assignments\\n- UNCATEGORIZED_REVIEW clusters\\n- 失败 batches / retry 状态\\n- 周六 weekly digest 是否生成\\n- backend policy 是否确认未使用 OpenRouter/DeepSeek API\\n\\n禁止只粘 stdout；必须给出 Lily 的质量判断。"
 }
 ```
 
-Weekly digest cron:
+The old weekly wiki cron is disabled in `tasks.json` during migration:
 
 ```json
 {
-  "id": "lily-wiki-weekly-digest",
+  "id": "lily-wiki-organise-weekly",
   "agent": "lily",
-  "enabled": true,
+  "enabled": false,
   "schedule": "10 2 * * 6",
   "action": "enqueue_prompt",
-  "prompt": "每周 Wiki digest 任务！执行：cd /home/lily/projects/hashi && python3 scripts/wiki/run_pipeline.py --daily --weekly\\n\\n必须读取 wiki_organise_report_latest.md 后汇报：\\n- 本周 digest 是否生成\\n- 本周主题变化\\n- 重要 decisions/highlights/open issues\\n- taxonomy drift / weak pages\\n- backend policy 是否确认未使用 OpenRouter/DeepSeek API\\n\\n禁止只粘 stdout；必须给出 Lily 的质量判断。"
+  "note": "Disabled: superseded by planned lily-wiki-daily-update at 04:05 after memory consolidation; old keyword pipeline kept only as fallback during migration"
 }
 ```
 
@@ -833,8 +840,10 @@ python3 scripts/wiki/run_pipeline.py --reclassify-topic Carbon_Accounting --sinc
 
 The plan is ready to start once these implementation boundaries are accepted:
 
-- Daily production update is owned by Lily's HASHI cron job (`lily-wiki-daily-update`).
-- Weekly digest is a separate Lily HASHI cron job (`lily-wiki-weekly-digest`).
+- Memory consolidation is scheduled at 03:05 and owned by Lily's HASHI cron job (`lily-memory-consolidation`).
+- Daily production update is owned by Lily's HASHI cron job (`lily-wiki-daily-update`) at 04:05, after consolidation.
+- Weekly digest is emitted by the same daily job on Saturday via `--weekly-if-saturday`, not a separate cron.
+- The wiki pipeline checks today's consolidation completion before advancing its watermark.
 - No system crontab is used for production scheduling.
 - No OpenRouter API or DeepSeek API is used for automated wiki generation.
 - Backend client refuses remote API backends and reports the policy block to Lily.
