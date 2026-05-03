@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 import types
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,6 +12,8 @@ import pytest
 
 sys.modules.setdefault("edge_tts", types.ModuleType("edge_tts"))
 
+from adapters.base import BackendResponse
+from orchestrator.agent_runtime import QueuedRequest
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
@@ -61,6 +65,117 @@ def _update(args: list[str] | None = None):
 
 def _read_state(workspace: Path) -> dict:
     return json.loads((workspace / "state.json").read_text(encoding="utf-8"))
+
+
+class FakeMemoryStore:
+    def __init__(self):
+        self.turns = []
+        self.exchanges = []
+
+    def record_turn(self, role, source, text):
+        self.turns.append((role, source, text))
+
+    def record_exchange(self, user_text, assistant_text, source):
+        self.exchanges.append((user_text, assistant_text, source))
+
+
+class FakeHandoffBuilder:
+    def __init__(self):
+        self.transcript = []
+        self.refresh_count = 0
+
+    def get_recent_rounds(self, max_rounds=10):
+        return [[{"role": "user", "text": "Earlier question", "source": "text"}]]
+
+    def append_transcript(self, role, text, source="text"):
+        self.transcript.append((role, text, source))
+
+    def refresh_recent_context(self):
+        self.refresh_count += 1
+
+
+class FakeProjectChatLogger:
+    def __init__(self):
+        self.exchanges = []
+
+    def log_exchange(self, prompt, response, source):
+        self.exchanges.append((prompt, response, source))
+
+
+def _make_background_runtime(tmp_path: Path):
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.is_shutting_down = False
+    runtime.name = "zelda"
+    runtime.config = SimpleNamespace(active_backend="codex-cli", extra={})
+    runtime.workspace_dir = tmp_path
+    runtime.session_id_dt = "session-test"
+    runtime.telegram_connected = False
+    runtime.memory_store = FakeMemoryStore()
+    runtime.handoff_builder = FakeHandoffBuilder()
+    runtime.project_chat_logger = FakeProjectChatLogger()
+    runtime._last_prompt_audit = {}
+    runtime._last_full_prompt_tokens = 10
+    runtime._thinking_chars_this_req = 0
+    runtime.last_response = None
+    runtime.logger = SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None)
+    runtime.error_logger = SimpleNamespace(error=lambda *a, **k: None)
+    runtime._request_listeners = {}
+    runtime._pending_request_results = {}
+    runtime._suppressed_transfer_results = []
+
+    async def fake_wrapper_response(**kwargs):
+        return BackendResponse(text="wrapped visible", duration_ms=1.0)
+
+    runtime.backend_manager = SimpleNamespace(
+        agent_mode="wrapper",
+        get_state_snapshot=lambda: {
+            "wrapper": {"backend": "claude-cli", "model": "claude-haiku-4-5", "context_window": 1},
+            "wrapper_slots": {"1": "Be warm."},
+        },
+        generate_ephemeral_response=fake_wrapper_response,
+    )
+    runtime._mark_success = lambda: None
+    runtime._mark_error = lambda error: None
+    runtime._record_habit_outcome = lambda *a, **k: None
+    runtime._should_buffer_during_transfer = lambda request_id: False
+    runtime._record_suppressed_transfer_result = lambda item, **kwargs: runtime._suppressed_transfer_results.append(kwargs)
+    runtime.get_current_model = lambda: "gpt-5.5"
+    runtime._get_system_prompt_text = lambda: "system"
+    runtime.typing_loop = FlexibleAgentRuntime.typing_loop.__get__(runtime, FlexibleAgentRuntime)
+    runtime._wrapper_enabled = FlexibleAgentRuntime._wrapper_enabled.__get__(runtime, FlexibleAgentRuntime)
+    runtime._wrapper_timeout_s = FlexibleAgentRuntime._wrapper_timeout_s.__get__(runtime, FlexibleAgentRuntime)
+    runtime._wrapper_visible_context = FlexibleAgentRuntime._wrapper_visible_context.__get__(runtime, FlexibleAgentRuntime)
+    runtime._wrapper_audit_fields = FlexibleAgentRuntime._wrapper_audit_fields.__get__(runtime, FlexibleAgentRuntime)
+    runtime._apply_wrapper_to_visible_text = FlexibleAgentRuntime._apply_wrapper_to_visible_text.__get__(runtime, FlexibleAgentRuntime)
+    runtime._notify_request_listeners = FlexibleAgentRuntime._notify_request_listeners.__get__(runtime, FlexibleAgentRuntime)
+    sent = []
+    voices = []
+
+    async def send_long_message(chat_id, text, request_id=None, purpose=None):
+        sent.append({"chat_id": chat_id, "text": text, "request_id": request_id, "purpose": purpose})
+        return 0.0, 1
+
+    async def send_voice_reply(chat_id, text, request_id):
+        voices.append({"chat_id": chat_id, "text": text, "request_id": request_id})
+
+    runtime.send_long_message = send_long_message
+    runtime._send_voice_reply = send_voice_reply
+    return runtime, sent, voices
+
+
+def _queued_request() -> QueuedRequest:
+    return QueuedRequest(
+        request_id="req-001",
+        chat_id=123,
+        prompt="hello",
+        source="text",
+        summary="hello",
+        created_at=datetime.now().isoformat(),
+    )
+
+
+async def _completed_task(response):
+    return response
 
 
 @pytest.mark.asyncio
@@ -162,3 +277,39 @@ async def test_cmd_wrapper_set_list_and_clear_slots(tmp_path):
 
     state = _read_state(tmp_path / "agent")
     assert state["wrapper_slots"] == {}
+
+
+@pytest.mark.asyncio
+async def test_background_completion_uses_wrapper_output_for_visible_surfaces(tmp_path):
+    runtime, sent, voices = _make_background_runtime(tmp_path)
+    listener_payloads = []
+    runtime.register_request_listener = FlexibleAgentRuntime.register_request_listener.__get__(runtime, FlexibleAgentRuntime)
+    runtime.register_request_listener("req-001", lambda payload: listener_payloads.append(payload))
+    item = _queued_request()
+    task = asyncio.create_task(_completed_task(BackendResponse(text="core raw", duration_ms=1.0)))
+    await task
+
+    await FlexibleAgentRuntime._on_background_complete(runtime, task, item)
+
+    assert listener_payloads[0]["text"] == "wrapped visible"
+    assert runtime.last_response["text"] == "wrapped visible"
+    assert ("assistant", "codex-cli", "wrapped visible") in runtime.memory_store.turns
+    assert ("assistant", "wrapped visible", "text") in runtime.handoff_builder.transcript
+    assert runtime.project_chat_logger.exchanges[0] == ("hello", "wrapped visible", "text")
+    assert sent[0]["text"] == "wrapped visible"
+    assert voices[0]["text"] == "wrapped visible"
+
+
+@pytest.mark.asyncio
+async def test_background_transfer_suppression_buffers_wrapper_output(tmp_path):
+    runtime, sent, voices = _make_background_runtime(tmp_path)
+    runtime._should_buffer_during_transfer = lambda request_id: True
+    item = _queued_request()
+    task = asyncio.create_task(_completed_task(BackendResponse(text="core raw", duration_ms=1.0)))
+    await task
+
+    await FlexibleAgentRuntime._on_background_complete(runtime, task, item)
+
+    assert runtime._suppressed_transfer_results == [{"success": True, "text": "wrapped visible"}]
+    assert sent == []
+    assert voices == []

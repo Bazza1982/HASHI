@@ -50,7 +50,7 @@ from orchestrator.skill_manager import SkillDefinition, SkillManager
 from orchestrator.voice_manager import VoiceManager
 from orchestrator.private_wol import describe_wol_targets, private_wol_available, run_private_wol
 from orchestrator.workzone import access_root_for_workzone, build_workzone_prompt, clear_workzone, load_workzone, resolve_workzone_input, save_workzone
-from orchestrator.wrapper_mode import load_wrapper_config
+from orchestrator.wrapper_mode import WrapperProcessor, load_wrapper_config, passthrough_result
 
 HABIT_BROWSER_PAGE_SIZE = 5
 
@@ -7448,6 +7448,87 @@ class FlexibleAgentRuntime:
                 pass  # 6s elapsed — flush
             await self._flush_thinking(chat_id)
 
+    def _wrapper_enabled(self) -> bool:
+        return getattr(self.backend_manager, "agent_mode", "flex") == "wrapper"
+
+    def _wrapper_timeout_s(self) -> float:
+        try:
+            value = float((self.config.extra or {}).get("wrapper_timeout_s", 30.0))
+        except (TypeError, ValueError):
+            value = 30.0
+        return value if value > 0 else 30.0
+
+    def _wrapper_visible_context(self, context_window: int) -> list[dict[str, str]]:
+        if context_window <= 0:
+            return []
+        try:
+            rounds = self.handoff_builder.get_recent_rounds(max_rounds=context_window)
+        except Exception:
+            return []
+        context: list[dict[str, str]] = []
+        for round_entries in rounds:
+            for entry in round_entries:
+                if not isinstance(entry, dict):
+                    continue
+                text = str(entry.get("text") or "").strip()
+                if not text:
+                    continue
+                context.append(
+                    {
+                        "role": str(entry.get("role") or "unknown"),
+                        "text": text,
+                        "source": str(entry.get("source") or ""),
+                    }
+                )
+        return context
+
+    def _wrapper_audit_fields(self, wrapper_result) -> dict[str, Any]:
+        return {
+            "wrapper_mode": self._wrapper_enabled(),
+            "wrapper_used": bool(getattr(wrapper_result, "wrapper_used", False)),
+            "wrapper_failed": bool(getattr(wrapper_result, "wrapper_failed", False)),
+            "wrapper_latency_ms": round(float(getattr(wrapper_result, "latency_ms", 0.0) or 0.0), 3),
+            "wrapper_fallback_reason": getattr(wrapper_result, "fallback_reason", None),
+            "wrapper_final_chars": len(getattr(wrapper_result, "final_text", "") or ""),
+        }
+
+    async def _apply_wrapper_to_visible_text(self, item: QueuedRequest, visible_text: str):
+        if not self._wrapper_enabled():
+            return visible_text, passthrough_result(visible_text, fallback_reason="wrapper_mode_disabled")
+
+        state = self.backend_manager.get_state_snapshot()
+        cfg = load_wrapper_config(state)
+        slots = state.get("wrapper_slots")
+        if not isinstance(slots, dict):
+            slots = None
+        processor = WrapperProcessor(
+            cfg,
+            backend_invoker=self.backend_manager.generate_ephemeral_response,
+            timeout_s=self._wrapper_timeout_s(),
+        )
+
+        stop_wrapper_typing = None
+        wrapper_typing_task = None
+        if not item.silent and item.deliver_to_telegram and self.telegram_connected:
+            stop_wrapper_typing = asyncio.Event()
+            wrapper_typing_task = asyncio.create_task(self.typing_loop(item.chat_id, stop_wrapper_typing))
+        try:
+            wrapper_result = await processor.process(
+                request_id=item.request_id,
+                source=item.source,
+                core_raw=visible_text,
+                visible_context=self._wrapper_visible_context(cfg.context_window),
+                wrapper_slots=slots,
+                config=cfg,
+                silent=True,
+            )
+        finally:
+            if stop_wrapper_typing and wrapper_typing_task:
+                stop_wrapper_typing.set()
+                await wrapper_typing_task
+
+        return wrapper_result.final_text, wrapper_result
+
     # ------------------------------------------------------------------
     # Stage 4: Background-mode helpers
     # ------------------------------------------------------------------
@@ -7476,6 +7557,17 @@ class FlexibleAgentRuntime:
                 self._mark_error(f"Background task cancelled: {item.summary}")
                 self._record_habit_outcome(item, success=False, error_text="background_task_cancelled")
                 self.logger.warning(f"Background task {item.request_id} was cancelled.")
+                await self._notify_request_listeners(
+                    item.request_id,
+                    {
+                        "request_id": item.request_id,
+                        "success": False,
+                        "text": None,
+                        "error": "background_task_cancelled",
+                        "source": item.source,
+                        "summary": item.summary,
+                    },
+                )
                 await self.send_long_message(
                     item.chat_id,
                     f"⚠️ Background task [{item.summary}] was cancelled before completing.",
@@ -7489,6 +7581,17 @@ class FlexibleAgentRuntime:
                 self._mark_error(str(exc))
                 self._record_habit_outcome(item, success=False, error_text=str(exc))
                 self.error_logger.error(f"Background task {item.request_id} raised: {exc}")
+                await self._notify_request_listeners(
+                    item.request_id,
+                    {
+                        "request_id": item.request_id,
+                        "success": False,
+                        "text": None,
+                        "error": str(exc),
+                        "source": item.source,
+                        "summary": item.summary,
+                    },
+                )
                 await self.send_long_message(
                     item.chat_id,
                     f"⚠️ Background task error ({self.config.active_backend}): {exc}",
@@ -7503,12 +7606,24 @@ class FlexibleAgentRuntime:
                 display_text = self._strip_transfer_accept_prefix(item, response.text)
                 self._mark_success()
                 self._record_habit_outcome(item, success=True, response_text=response.text)
+                visible_text, wrapper_result = await self._apply_wrapper_to_visible_text(item, display_text or response.text)
+                await self._notify_request_listeners(
+                    item.request_id,
+                    {
+                        "request_id": item.request_id,
+                        "success": True,
+                        "text": visible_text,
+                        "error": None,
+                        "source": item.source,
+                        "summary": item.summary,
+                    },
+                )
                 if self._should_buffer_during_transfer(item.request_id):
-                    self._record_suppressed_transfer_result(item, success=True, text=display_text or response.text)
+                    self._record_suppressed_transfer_result(item, success=True, text=visible_text)
                     return
                 self.last_response = {
                     "chat_id": item.chat_id,
-                    "text": display_text or response.text,
+                    "text": visible_text,
                     "request_id": item.request_id,
                     "responded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
                 }
@@ -7535,7 +7650,7 @@ class FlexibleAgentRuntime:
                         # CLI backend: estimate from full assembled prompt (includes history)
                         fallback_input = estimate_tokens(self._get_system_prompt_text()) + estimate_tokens(item.prompt)
                         _bg_input_tok = self._last_full_prompt_tokens or fallback_input
-                        _bg_output_tok = estimate_tokens(display_text or response.text)
+                        _bg_output_tok = estimate_tokens(visible_text)
                         _bg_thinking_tok = self._thinking_chars_this_req // 4
                         _bg_tok_source = "estimated"
                         record_usage(
@@ -7566,7 +7681,8 @@ class FlexibleAgentRuntime:
                         "token_source": _bg_tok_source,
                         "raw_prompt_chars": len(item.prompt),
                         "final_prompt_chars": self._last_full_prompt_tokens * 4,
-                        "response_chars": len(response.text or ""),
+                        "response_chars": len(visible_text or ""),
+                        "core_raw_chars": len(response.text or ""),
                         "input_tokens": _bg_input_tok,
                         "output_tokens": _bg_output_tok,
                         "thinking_tokens": _bg_thinking_tok,
@@ -7584,6 +7700,7 @@ class FlexibleAgentRuntime:
                         "section_chars": _sec_chars,
                         "section_tokens_est": _sec_tokens,
                         "section_counts": _sec_counts,
+                        **self._wrapper_audit_fields(wrapper_result),
                     })
                 except Exception:
                     pass
@@ -7592,21 +7709,21 @@ class FlexibleAgentRuntime:
                     memory_user_text = f"[{item.source}] {item.summary}"
                 if item.source not in {"startup", "system"}:
                     self.memory_store.record_turn("user", item.source, memory_user_text)
-                    self.memory_store.record_turn("assistant", self.config.active_backend, display_text or response.text)
-                    self.memory_store.record_exchange(memory_user_text, display_text or response.text, item.source)
+                    self.memory_store.record_turn("assistant", self.config.active_backend, visible_text)
+                    self.memory_store.record_exchange(memory_user_text, visible_text, item.source)
                 self.handoff_builder.append_transcript("user", item.prompt, item.source)
-                self.handoff_builder.append_transcript("assistant", display_text or response.text)
+                self.handoff_builder.append_transcript("assistant", visible_text)
                 self.handoff_builder.refresh_recent_context()
-                self.project_chat_logger.log_exchange(item.prompt, display_text or response.text, item.source)
-                _print_final_response(self.name, display_text or response.text)
+                self.project_chat_logger.log_exchange(item.prompt, visible_text, item.source)
+                _print_final_response(self.name, visible_text)
                 total_s = (datetime.now() - datetime.fromisoformat(item.created_at)).total_seconds()
                 send_elapsed_s, chunk_count = await self.send_long_message(
                     chat_id=item.chat_id,
-                    text=display_text or response.text,
+                    text=visible_text,
                     request_id=item.request_id,
                     purpose="bg-response",
                 )
-                await self._send_voice_reply(item.chat_id, display_text or response.text, item.request_id)
+                await self._send_voice_reply(item.chat_id, visible_text, item.request_id)
                 self.logger.info(
                     f"Background task {item.request_id} delivered "
                     f"(total_s={total_s:.2f}, chunks={chunk_count}, send_s={send_elapsed_s:.2f})"
@@ -7615,6 +7732,17 @@ class FlexibleAgentRuntime:
                 err_msg = response.error or "Unknown error"
                 self._mark_error(err_msg)
                 self._record_habit_outcome(item, success=False, error_text=err_msg)
+                await self._notify_request_listeners(
+                    item.request_id,
+                    {
+                        "request_id": item.request_id,
+                        "success": False,
+                        "text": None,
+                        "error": err_msg,
+                        "source": item.source,
+                        "summary": item.summary,
+                    },
+                )
                 if self._should_buffer_during_transfer(item.request_id):
                     self._record_suppressed_transfer_result(item, success=False, error=err_msg)
                     return
@@ -7920,12 +8048,13 @@ class FlexibleAgentRuntime:
                     display_text = self._strip_transfer_accept_prefix(item, response.text)
                     self._mark_success()
                     self._record_habit_outcome(item, success=True, response_text=response.text)
+                    visible_text, wrapper_result = await self._apply_wrapper_to_visible_text(item, display_text or response.text)
                     await self._notify_request_listeners(
                         item.request_id,
                         {
                             "request_id": item.request_id,
                             "success": True,
-                            "text": response.text,
+                            "text": visible_text,
                             "error": None,
                             "source": item.source,
                             "summary": item.summary,
@@ -7952,7 +8081,7 @@ class FlexibleAgentRuntime:
                         else:
                             # CLI backend: estimate from final assembled prompt
                             _input_tok = estimate_tokens(final_prompt)
-                            _output_tok = estimate_tokens(display_text or response.text)
+                            _output_tok = estimate_tokens(visible_text)
                             _thinking_tok = self._thinking_chars_this_req // 4
                             _tok_source = "estimated"
                             record_usage(
@@ -7984,7 +8113,8 @@ class FlexibleAgentRuntime:
                             "raw_prompt_chars": len(item.prompt),
                             "effective_prompt_chars": len(effective_prompt),
                             "final_prompt_chars": len(final_prompt),
-                            "response_chars": len(response.text or ""),
+                            "response_chars": len(visible_text or ""),
+                            "core_raw_chars": len(response.text or ""),
                             "input_tokens": _input_tok,
                             "output_tokens": _output_tok,
                             "thinking_tokens": _thinking_tok,
@@ -8005,16 +8135,17 @@ class FlexibleAgentRuntime:
                             "section_chars": _sec_chars,
                             "section_tokens_est": _sec_tokens,
                             "section_counts": _sec_counts,
+                            **self._wrapper_audit_fields(wrapper_result),
                         })
                     except Exception:
                         pass
                     if not item.silent:
                         if self._should_buffer_during_transfer(item.request_id):
-                            self._record_suppressed_transfer_result(item, success=True, text=display_text or response.text)
+                            self._record_suppressed_transfer_result(item, success=True, text=visible_text)
                             continue
                         self.last_response = {
                             "chat_id": item.chat_id,
-                            "text": display_text or response.text,
+                            "text": visible_text,
                             "request_id": item.request_id,
                             "responded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
                         }
@@ -8023,17 +8154,17 @@ class FlexibleAgentRuntime:
                             memory_user_text = f"[{item.source}] {item.summary}"
                         if item.source not in {"startup", "system"} and not is_bridge_request:
                             self.memory_store.record_turn("user", item.source, memory_user_text)
-                            self.memory_store.record_turn("assistant", self.config.active_backend, display_text or response.text)
-                            self.memory_store.record_exchange(memory_user_text, display_text or response.text, item.source)
+                            self.memory_store.record_turn("assistant", self.config.active_backend, visible_text)
+                            self.memory_store.record_exchange(memory_user_text, visible_text, item.source)
                         if not is_bridge_request:
                             self.handoff_builder.append_transcript("user", item.prompt, item.source)
-                            self.handoff_builder.append_transcript("assistant", display_text or response.text)
+                            self.handoff_builder.append_transcript("assistant", visible_text)
                             self.handoff_builder.refresh_recent_context()
-                            self.project_chat_logger.log_exchange(item.prompt, display_text or response.text, item.source)
+                            self.project_chat_logger.log_exchange(item.prompt, visible_text, item.source)
                         if not item.deliver_to_telegram:
                             continue
                         # CoS intercept: if /cos on and response ends with ?, route to Lily first
-                        _response_text = display_text or response.text
+                        _response_text = visible_text
                         _cos_handled = False
                         if (
                             self._cos_enabled
