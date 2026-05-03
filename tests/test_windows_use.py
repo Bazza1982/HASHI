@@ -15,6 +15,7 @@ def test_resolve_provider_auto_routes_by_action() -> None:
     assert windows_use._resolve_provider("auto", "screenshot") == "usecomputer"
     assert windows_use._resolve_provider("auto", "mouse_move") == "usecomputer"
     assert windows_use._resolve_provider("auto", "click") == "usecomputer"
+    assert windows_use._resolve_provider("auto", "drag") == "usecomputer"
     assert windows_use._resolve_provider("auto", "scroll") == "usecomputer"
     assert windows_use._resolve_provider("auto", "type") == "usecomputer"
     assert windows_use._resolve_provider("auto", "key") == "usecomputer"
@@ -58,9 +59,11 @@ def test_windows_tool_schemas_include_window_controls_and_stability_args() -> No
     assert "windows_window_focus" in TOOL_SCHEMA_MAP
     assert "windows_reset_input_state" in TOOL_SCHEMA_MAP
     assert "windows_helper_warmup" in TOOL_SCHEMA_MAP
+    assert "windows_drag" in TOOL_SCHEMA_MAP
     close_props = TOOL_SCHEMA_MAP["windows_window_close"]["function"]["parameters"]["properties"]
     type_props = TOOL_SCHEMA_MAP["windows_type"]["function"]["parameters"]["properties"]
     key_props = TOOL_SCHEMA_MAP["windows_key"]["function"]["parameters"]["properties"]
+    drag_props = TOOL_SCHEMA_MAP["windows_drag"]["function"]["parameters"]["properties"]
 
     assert "dismiss_unsaved" in close_props
     assert "force" in close_props
@@ -69,6 +72,8 @@ def test_windows_tool_schemas_include_window_controls_and_stability_args() -> No
     assert "title_contains" in type_props
     assert "focus_first" in key_props
     assert "title_contains" in key_props
+    assert "curve_x" in drag_props
+    assert "curve_y" in drag_props
 
 
 @pytest.mark.asyncio
@@ -172,6 +177,44 @@ async def test_windows_click_prefers_helper_when_available(monkeypatch: pytest.M
     result = await windows_use.execute_windows_click({"x": 10, "y": 20})
 
     assert result == "helper-click-ok"
+
+
+@pytest.mark.asyncio
+async def test_windows_drag_calls_helper_when_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_helper(action: str, args: dict) -> str | None:
+        assert action == "drag"
+        assert args["from_x"] == 10
+        assert args["to_y"] == 40
+        return "helper-drag-ok"
+
+    monkeypatch.setattr(windows_use, "_maybe_execute_windows_helper", fake_helper)
+
+    result = await windows_use.execute_windows_drag({"from_x": 10, "from_y": 20, "to_x": 30, "to_y": 40})
+
+    assert result == "helper-drag-ok"
+
+
+@pytest.mark.asyncio
+async def test_windows_drag_falls_back_to_usecomputer(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_helper(action: str, args: dict) -> str | None:
+        return None
+
+    async def fake_usecomputer(body: str, timeout: int = 30):
+        assert "Invoke-Usecomputer -Args @('drag'" in body
+        assert "10,20" in body
+        assert "30,40" in body
+        return {"ok": True, "output": ""}, None
+
+    async def fake_reset() -> None:
+        return None
+
+    monkeypatch.setattr(windows_use, "_maybe_execute_windows_helper", fake_helper)
+    monkeypatch.setattr(windows_use, "_run_usecomputer_json", fake_usecomputer)
+    monkeypatch.setattr(windows_use, "_best_effort_reset_windows_input_state", fake_reset)
+
+    result = await windows_use.execute_windows_drag({"from_x": 10, "from_y": 20, "to_x": 30, "to_y": 40})
+
+    assert result == "Dragged from (10, 20) to (30, 40) button=left on Windows host"
 
 
 @pytest.mark.asyncio
