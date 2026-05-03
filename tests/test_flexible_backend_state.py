@@ -110,3 +110,53 @@ def test_save_state_recovers_from_invalid_existing_json(tmp_path):
     state = _read_state(workspace)
     assert state["active_backend"] == "codex-cli"
     assert state["agent_mode"] == "flex"
+
+
+def test_update_wrapper_blocks_preserves_managed_state_and_unknown_keys(tmp_path):
+    workspace = tmp_path / "agent"
+    workspace.mkdir()
+    (workspace / "state.json").write_text(
+        json.dumps(
+            {
+                "active_backend": "codex-cli",
+                "agent_mode": "wrapper",
+                "active_model": "gpt-5.5",
+                "unrelated": {"keep": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager = _make_manager(workspace)
+    manager.agent_mode = "wrapper"
+
+    manager.update_wrapper_blocks(
+        core={"backend": "codex-cli", "model": "gpt-5.5"},
+        wrapper={"backend": "claude-cli", "model": "claude-haiku-4-5", "context_window": 3},
+        wrapper_slots={"1": "Use a warm tone."},
+    )
+
+    state = _read_state(workspace)
+    assert state["active_backend"] == "codex-cli"
+    assert state["agent_mode"] == "wrapper"
+    assert state["unrelated"] == {"keep": True}
+    assert state["core"] == {"backend": "codex-cli", "model": "gpt-5.5"}
+    assert state["wrapper"] == {"backend": "claude-cli", "model": "claude-haiku-4-5", "context_window": 3}
+    assert state["wrapper_slots"] == {"1": "Use a warm tone."}
+
+
+def test_update_wrapper_blocks_removes_stale_active_model_when_override_cleared(tmp_path):
+    workspace = tmp_path / "agent"
+    workspace.mkdir()
+    (workspace / "state.json").write_text(
+        json.dumps({"active_backend": "codex-cli", "agent_mode": "wrapper", "active_model": "gpt-5.5"}),
+        encoding="utf-8",
+    )
+    manager = _make_manager(workspace)
+    manager.agent_mode = "wrapper"
+    manager._active_model_override = None
+
+    manager.update_wrapper_blocks(wrapper_slots={"1": "Keep facts exact."})
+
+    state = _read_state(workspace)
+    assert "active_model" not in state
+    assert state["wrapper_slots"] == {"1": "Keep facts exact."}

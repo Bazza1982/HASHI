@@ -50,6 +50,7 @@ from orchestrator.skill_manager import SkillDefinition, SkillManager
 from orchestrator.voice_manager import VoiceManager
 from orchestrator.private_wol import describe_wol_targets, private_wol_available, run_private_wol
 from orchestrator.workzone import access_root_for_workzone, build_workzone_prompt, clear_workzone, load_workzone, resolve_workzone_input, save_workzone
+from orchestrator.wrapper_mode import load_wrapper_config
 
 HABIT_BROWSER_PAGE_SIZE = 5
 
@@ -332,7 +333,7 @@ class FlexibleAgentRuntime:
                     self._enabled_commands.add(name.strip().lstrip("/").lower())
 
         # help/status/new/fresh/wipe/clear/model/effort/mode should always be available
-        self._enabled_commands.update({"help", "status", "new", "fresh", "wipe", "reset", "clear", "memory", "model", "effort", "mode", "jobs", "verbose", "think", "voice", "whisper", "transfer", "fork", "cos", "long", "end", "oll"})
+        self._enabled_commands.update({"help", "status", "new", "fresh", "wipe", "reset", "clear", "memory", "model", "effort", "mode", "wrapper", "core", "wrap", "jobs", "verbose", "think", "voice", "whisper", "transfer", "fork", "cos", "long", "end", "oll"})
 
     def _is_command_allowed(self, cmd: str) -> bool:
         cmd = (cmd or "").lstrip("/").lower()
@@ -1803,6 +1804,9 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CallbackQueryHandler(self.callback_skill, pattern=r"^(skill|skilljob):"))
         self.app.add_handler(CallbackQueryHandler(self.callback_toggle, pattern=r"^tgl:"))
         self.app.add_handler(CommandHandler("mode", self._wrap_cmd("mode", self.cmd_mode)))
+        self.app.add_handler(CommandHandler("wrapper", self._wrap_cmd("wrapper", self.cmd_wrapper)))
+        self.app.add_handler(CommandHandler("core", self._wrap_cmd("core", self.cmd_core)))
+        self.app.add_handler(CommandHandler("wrap", self._wrap_cmd("wrap", self.cmd_wrap)))
         self.app.add_handler(CommandHandler("workzone", self._wrap_cmd("workzone", self.cmd_workzone)))
         self.app.add_handler(CommandHandler("worzone", self._wrap_cmd("worzone", self.cmd_workzone)))
         self.app.add_handler(CommandHandler("new", self._wrap_cmd("new", self.cmd_new)))
@@ -2214,6 +2218,10 @@ class FlexibleAgentRuntime:
                 if hasattr(backend, "set_session_mode"):
                     backend.set_session_mode(True)
                 detail = "CLI session persists · /backend disabled"
+            elif value == "wrapper":
+                if hasattr(backend, "set_session_mode"):
+                    backend.set_session_mode(False)
+                detail = "Core/wrapper config mode · use /core and /wrap"
             else:
                 if hasattr(backend, "set_session_mode"):
                     backend.set_session_mode(False)
@@ -2221,6 +2229,7 @@ class FlexibleAgentRuntime:
             markup = InlineKeyboardMarkup([[
                 InlineKeyboardButton("✅ Fixed" if value == "fixed" else "Fixed", callback_data="tgl:mode:fixed"),
                 InlineKeyboardButton("✅ Flex" if value == "flex" else "Flex", callback_data="tgl:mode:flex"),
+                InlineKeyboardButton("✅ Wrapper" if value == "wrapper" else "Wrapper", callback_data="tgl:mode:wrapper"),
             ]])
             await query.edit_message_text(f"Mode: <b>{value}</b>\n{detail}", parse_mode="HTML", reply_markup=markup)
             await query.answer(f"Switched to {value}")
@@ -4691,6 +4700,13 @@ class FlexibleAgentRuntime:
                 parse_mode="Markdown",
             )
             return
+        if self.backend_manager.agent_mode == "wrapper":
+            await self._reply_text(
+                update,
+                "Backend switching is managed by `/core` and `/wrap` in **wrapper** mode.\nUse `/mode flex` for normal `/backend` switching.",
+                parse_mode="Markdown",
+            )
+            return
 
         args = context.args
         allowed_engines = [b["engine"] for b in self.config.allowed_backends]
@@ -5196,6 +5212,13 @@ class FlexibleAgentRuntime:
             return
         if not self.backend_manager.current_backend:
             return
+        if self.backend_manager.agent_mode == "wrapper":
+            await self._reply_text(
+                update,
+                "Model switching is managed by `/core` and `/wrap` in **wrapper** mode.\nUse `/mode flex` for normal `/model` switching.",
+                parse_mode="Markdown",
+            )
+            return
 
         current_model = self.backend_manager.current_backend.config.model
         args = context.args
@@ -5253,6 +5276,213 @@ class FlexibleAgentRuntime:
             f"Current effort: {current_effort}\nSelect:",
             reply_markup=self._effort_keyboard(current_effort),
         )
+
+    def _is_wrapper_mode(self) -> bool:
+        return getattr(self.backend_manager, "agent_mode", "flex") == "wrapper"
+
+    async def _require_wrapper_mode(self, update: Update, command_name: str) -> bool:
+        if self._is_wrapper_mode():
+            return True
+        await self._reply_text(
+            update,
+            f"`/{command_name}` only applies in **wrapper** mode.\nUse `/mode wrapper` first.",
+            parse_mode="Markdown",
+        )
+        return False
+
+    def _parse_backend_model_args(self, args: list[str]) -> tuple[dict[str, str], list[str]]:
+        values: dict[str, str] = {}
+        positional: list[str] = []
+        for raw in args:
+            if "=" in raw:
+                key, value = raw.split("=", 1)
+                key = key.strip().lower().replace("-", "_")
+                value = value.strip()
+                if key and value:
+                    values[key] = value
+            elif raw.strip():
+                positional.append(raw.strip())
+        return values, positional
+
+    def _allowed_wrapper_engine(self, engine: str) -> bool:
+        return any(b.get("engine") == engine for b in self.config.allowed_backends)
+
+    def _normalize_wrapper_model(self, engine: str, model: str) -> str:
+        if engine == "claude-cli":
+            model = CLAUDE_MODEL_ALIASES.get(model.lower(), model)
+        return normalize_model(engine, model) or model
+
+    def _validate_wrapper_backend_model(self, engine: str, model: str) -> str | None:
+        if not self._allowed_wrapper_engine(engine):
+            allowed = ", ".join(b.get("engine", "?") for b in self.config.allowed_backends)
+            return f"Backend not allowed for this agent: {engine}\nAllowed: {allowed}"
+        available = self._get_available_models_for(engine)
+        if available and model not in available:
+            return f"Unknown model for {engine}: {model}"
+        return None
+
+    async def cmd_core(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        if not await self._require_wrapper_mode(update, "core"):
+            return
+
+        state = self.backend_manager.get_state_snapshot()
+        cfg = load_wrapper_config(state)
+        args = context.args or []
+        if not args:
+            await self._reply_text(
+                update,
+                "Wrapper core model:\n"
+                f"• Backend: `{cfg.core_backend}`\n"
+                f"• Model: `{cfg.core_model}`\n\n"
+                "Usage: `/core backend=codex-cli model=gpt-5.5`",
+                parse_mode="Markdown",
+            )
+            return
+
+        values, positional = self._parse_backend_model_args(args)
+        backend = values.get("backend") or (positional[0] if positional else cfg.core_backend)
+        model = values.get("model") or (positional[1] if len(positional) > 1 else cfg.core_model)
+        backend = backend.strip().lower()
+        model = self._normalize_wrapper_model(backend, model.strip())
+
+        error = self._validate_wrapper_backend_model(backend, model)
+        if error:
+            await self._reply_text(update, error)
+            return
+
+        self.backend_manager.update_wrapper_blocks(core={"backend": backend, "model": model})
+        await self._reply_text(
+            update,
+            "Wrapper core updated:\n"
+            f"• Backend: `{backend}`\n"
+            f"• Model: `{model}`",
+            parse_mode="Markdown",
+        )
+
+    async def cmd_wrap(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        if not await self._require_wrapper_mode(update, "wrap"):
+            return
+
+        state = self.backend_manager.get_state_snapshot()
+        cfg = load_wrapper_config(state)
+        args = context.args or []
+        if not args:
+            await self._reply_text(
+                update,
+                "Wrapper translator model:\n"
+                f"• Backend: `{cfg.wrapper_backend}`\n"
+                f"• Model: `{cfg.wrapper_model}`\n"
+                f"• Context window: `{cfg.context_window}`\n"
+                f"• Fallback: `{cfg.fallback}`\n\n"
+                "Usage: `/wrap backend=claude-cli model=claude-haiku-4-5 context=3`",
+                parse_mode="Markdown",
+            )
+            return
+
+        values, positional = self._parse_backend_model_args(args)
+        backend = values.get("backend") or (positional[0] if positional else cfg.wrapper_backend)
+        model = values.get("model") or (positional[1] if len(positional) > 1 else cfg.wrapper_model)
+        context_value = values.get("context_window") or values.get("context") or values.get("window")
+        fallback = values.get("fallback") or cfg.fallback
+        backend = backend.strip().lower()
+        model = self._normalize_wrapper_model(backend, model.strip())
+
+        error = self._validate_wrapper_backend_model(backend, model)
+        if error:
+            await self._reply_text(update, error)
+            return
+
+        context_window = cfg.context_window
+        if context_value is not None:
+            try:
+                context_window = max(0, min(int(context_value), 20))
+            except ValueError:
+                await self._reply_text(update, "Context window must be an integer.")
+                return
+
+        self.backend_manager.update_wrapper_blocks(
+            wrapper={
+                "backend": backend,
+                "model": model,
+                "context_window": context_window,
+                "fallback": fallback,
+            }
+        )
+        await self._reply_text(
+            update,
+            "Wrapper translator updated:\n"
+            f"• Backend: `{backend}`\n"
+            f"• Model: `{model}`\n"
+            f"• Context window: `{context_window}`\n"
+            f"• Fallback: `{fallback}`",
+            parse_mode="Markdown",
+        )
+
+    async def cmd_wrapper(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        if not await self._require_wrapper_mode(update, "wrapper"):
+            return
+
+        args = context.args or []
+        action = (args[0].lower() if args else "list").strip()
+        state = self.backend_manager.get_state_snapshot()
+        slots = state.get("wrapper_slots")
+        if not isinstance(slots, dict):
+            slots = {}
+
+        if action in {"list", "status"}:
+            cfg = load_wrapper_config(state)
+            lines = [
+                "Wrapper mode configuration:",
+                f"• Core: <code>{html.escape(cfg.core_backend)} / {html.escape(cfg.core_model)}</code>",
+                f"• Wrapper: <code>{html.escape(cfg.wrapper_backend)} / {html.escape(cfg.wrapper_model)}</code>",
+                f"• Context window: <code>{cfg.context_window}</code>",
+                "",
+                "Persona/style slots:",
+            ]
+            if slots:
+                for key in sorted(slots, key=lambda value: (not str(value).isdigit(), int(value) if str(value).isdigit() else str(value))):
+                    lines.append(f"• <code>{html.escape(str(key))}</code>: {html.escape(str(slots[key]))}")
+            else:
+                lines.append("• none")
+            await self._reply_text(update, "\n".join(lines), parse_mode="HTML")
+            return
+
+        if action == "set":
+            if len(args) < 3:
+                await self._reply_text(update, "Usage: /wrapper set <slot> <text>")
+                return
+            slot = args[1].strip()
+            text = " ".join(args[2:]).strip()
+            if not slot or not text:
+                await self._reply_text(update, "Usage: /wrapper set <slot> <text>")
+                return
+            slots[slot] = text
+            self.backend_manager.update_wrapper_blocks(wrapper_slots=slots)
+            await self._reply_text(update, f"Wrapper slot `{slot}` updated.", parse_mode="Markdown")
+            return
+
+        if action == "clear":
+            if len(args) < 2:
+                await self._reply_text(update, "Usage: /wrapper clear <slot|all>")
+                return
+            target = args[1].strip()
+            if target.lower() == "all":
+                slots = {}
+                message = "All wrapper slots cleared."
+            else:
+                slots.pop(target, None)
+                message = f"Wrapper slot `{target}` cleared."
+            self.backend_manager.update_wrapper_blocks(wrapper_slots=slots)
+            await self._reply_text(update, message, parse_mode="Markdown")
+            return
+
+        await self._reply_text(update, "Usage: /wrapper [list|set <slot> <text>|clear <slot|all>]")
 
     async def callback_model(self, update: Update, context: Any):
         query = update.callback_query
@@ -5320,25 +5550,27 @@ class FlexibleAgentRuntime:
         await query.answer()
 
     async def cmd_mode(self, update: Update, context: Any):
-        """Switch between fixed (continuous CLI session) and flex (multi-backend) modes.
+        """Switch between fixed, flex, and wrapper configuration modes.
 
-        Usage: /mode [fixed|flex]
+        Usage: /mode [fixed|flex|wrapper]
         """
         if not self._is_authorized_user(update.effective_user.id):
             return
         args = (context.args[0].lower() if context.args else "").strip()
         current = self.backend_manager.agent_mode
 
-        if not args or args not in ("fixed", "flex"):
+        if not args or args not in ("fixed", "flex", "wrapper"):
             markup = InlineKeyboardMarkup([[
                 InlineKeyboardButton("✅ Fixed" if current == "fixed" else "Fixed", callback_data="tgl:mode:fixed"),
                 InlineKeyboardButton("✅ Flex" if current == "flex" else "Flex", callback_data="tgl:mode:flex"),
+                InlineKeyboardButton("✅ Wrapper" if current == "wrapper" else "Wrapper", callback_data="tgl:mode:wrapper"),
             ]])
             await self._reply_text(
                 update,
                 f"Current mode: <b>{current}</b>\n\n"
                 f"• <b>fixed</b> — continuous CLI session, incremental prompts\n"
-                f"• <b>flex</b> — multi-backend switching, full context injection",
+                f"• <b>flex</b> — multi-backend switching, full context injection\n"
+                f"• <b>wrapper</b> — configure core/wrapper model pair with /core and /wrap",
                 parse_mode="HTML",
                 reply_markup=markup,
             )
@@ -5365,7 +5597,7 @@ class FlexibleAgentRuntime:
                 "• `/new` will terminate the current session and start fresh",
                 parse_mode="Markdown",
             )
-        else:
+        elif args == "flex":
             # Disable session persistence
             if hasattr(backend, "set_session_mode"):
                 backend.set_session_mode(False)
@@ -5374,6 +5606,19 @@ class FlexibleAgentRuntime:
                 "Switched to **flex** mode.\n"
                 "• Full context injection per request\n"
                 "• `/backend` switching re-enabled",
+                parse_mode="Markdown",
+            )
+        else:
+            if hasattr(backend, "set_session_mode"):
+                backend.set_session_mode(False)
+            cfg = load_wrapper_config(self.backend_manager.get_state_snapshot())
+            await self._reply_text(
+                update,
+                "Switched to **wrapper** mode.\n"
+                f"• Core: `{cfg.core_backend}` / `{cfg.core_model}`\n"
+                f"• Wrapper: `{cfg.wrapper_backend}` / `{cfg.wrapper_model}`\n"
+                "• Use `/core`, `/wrap`, and `/wrapper` to configure\n"
+                "• Response rewriting is enabled in a later implementation phase",
                 parse_mode="Markdown",
             )
 
@@ -7902,7 +8147,10 @@ class FlexibleAgentRuntime:
             BotCommand("cos", "Chief of Staff decision routing (on/off)"),
             BotCommand("long", "Start multi-message input (end with /end)"),
             BotCommand("end", "Submit collected /long input"),
-            BotCommand("mode", "Switch fixed/flex mode"),
+            BotCommand("mode", "Switch fixed/flex/wrapper mode"),
+            BotCommand("wrapper", "Configure wrapper persona slots"),
+            BotCommand("core", "Configure wrapper core model"),
+            BotCommand("wrap", "Configure wrapper translator model"),
             BotCommand("workzone", "Set temporary working directory [path|off]"),
             BotCommand("model", "View or change model"),
             BotCommand("effort", "View or change effort"),

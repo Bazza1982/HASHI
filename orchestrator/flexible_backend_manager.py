@@ -44,20 +44,18 @@ class FlexibleBackendManager:
             except Exception as e:
                 self.logger.error(f"Failed to load state.json: {e}")
 
-    def _save_state(self, active_model: str | None = None):
-        if active_model is not None:
-            self._active_model_override = active_model
-        # Preserve state blocks owned by newer/optional features. This method is
-        # called from the runtime event loop and is expected to stay serialized.
-        state: dict[str, Any] = {}
-        if self.state_file.exists():
-            try:
-                loaded = json.loads(self.state_file.read_text(encoding="utf-8"))
-                if isinstance(loaded, dict):
-                    state.update(loaded)
-            except Exception as e:
-                self.logger.error(f"Failed to merge existing state.json: {e}")
+    def _read_state_dict(self) -> dict[str, Any]:
+        if not self.state_file.exists():
+            return {}
+        try:
+            loaded = json.loads(self.state_file.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                return loaded
+        except Exception as e:
+            self.logger.error(f"Failed to read state.json: {e}")
+        return {}
 
+    def _apply_managed_state_fields(self, state: dict[str, Any]) -> None:
         state["active_backend"] = self.config.active_backend
         state["agent_mode"] = self.agent_mode
         if getattr(self, "_active_model_override", None):
@@ -65,6 +63,8 @@ class FlexibleBackendManager:
         else:
             state.pop("active_model", None)
 
+    def _write_state_dict(self, state: dict[str, Any]) -> None:
+        self._apply_managed_state_fields(state)
         try:
             self.state_file.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = self.state_file.with_name(f".{self.state_file.name}.tmp-{os.getpid()}")
@@ -73,8 +73,36 @@ class FlexibleBackendManager:
         except Exception as e:
             self.logger.error(f"Failed to save state.json: {e}")
 
+    def _save_state(self, active_model: str | None = None):
+        if active_model is not None:
+            self._active_model_override = active_model
+        # Preserve state blocks owned by newer/optional features. This method is
+        # called from the runtime event loop and is expected to stay serialized.
+        self._write_state_dict(self._read_state_dict())
+
     def persist_state(self, active_model: str | None = None):
         self._save_state(active_model=active_model)
+
+    def get_state_snapshot(self) -> dict[str, Any]:
+        state = self._read_state_dict()
+        self._apply_managed_state_fields(state)
+        return state
+
+    def update_wrapper_blocks(
+        self,
+        *,
+        core: dict[str, Any] | None = None,
+        wrapper: dict[str, Any] | None = None,
+        wrapper_slots: dict[str, Any] | None = None,
+    ) -> None:
+        state = self._read_state_dict()
+        if core is not None:
+            state["core"] = dict(core)
+        if wrapper is not None:
+            state["wrapper"] = dict(wrapper)
+        if wrapper_slots is not None:
+            state["wrapper_slots"] = dict(wrapper_slots)
+        self._write_state_dict(state)
 
     def _resolve_api_key(self, engine: str) -> Optional[Any]:
         for secret_key in get_secret_lookup_order(engine, self.config.name):
