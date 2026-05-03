@@ -1,6 +1,6 @@
 # Wrapper Agent Mode Development Plan
 
-Status: proposed implementation plan for HASHI1 `v3.2-alpha`.
+Status: implemented for HASHI1 `v3.2-alpha` on 2026-05-03.
 
 Owner: HASHI1 implementation.
 
@@ -9,6 +9,17 @@ Source reviews:
 - Zhao Ling's HASHI2 proposal: `/home/lily/projects/hashi2/workspaces/zhao_ling/wrapper_agent_plan.md`
 - Ajiao review, relayed by Zhao Ling.
 - HASHI1 local review by Zelda on 2026-05-03.
+
+Implementation record:
+
+- Runtime mode: `/mode wrapper`
+- Core config: `/core`, default `codex-cli / gpt-5.5`
+- Wrapper config: `/wrap`, default `claude-cli / claude-haiku-4-5 / context=3`
+- Persona/style slots: `/wrapper set <slot> <text>`, stored in `state.json` as `wrapper_slots`
+- Telegram controls: `/core`, `/wrap`, and `/wrapper` expose inline configuration buttons.
+- Wrapper picker: Claude Haiku/Sonnet, Gemini Flash/Lite, DeepSeek Flash/Chat, and OpenRouter DeepSeek/Gemini. Claude Opus is intentionally omitted from the picker because it is too expensive for routine wrapping.
+- Visibility: `/verbose on` shows a labeled wrapper trace with core raw output, wrapper final output, status, latency, and fallback reason. `/verbose off` shows only the final reply.
+- Reset semantics: `/reset CONFIRM` preserves `state.json` wrapper config and prompt slots, matching `/sys` preservation behavior. `/wipe CONFIRM` remains a hard workspace clear.
 
 ## 1. Purpose
 
@@ -42,17 +53,19 @@ For GPT-5.5 on HASHI1, use:
 
 If a future OpenAI API adapter is added, it can become another valid core backend. Do not hardcode `openai` into the wrapper design.
 
-### 2.2 Current state writing is not merge-safe
+### 2.2 State writing must be merge-safe
 
-`orchestrator/flexible_backend_manager.py::_save_state()` currently writes a new `state.json` containing only managed keys:
+At planning time, `orchestrator/flexible_backend_manager.py::_save_state()` wrote a new `state.json` containing only managed keys:
 
 - `active_backend`
 - `agent_mode`
 - `active_model` when present
 
-It does not read existing state first. Unknown keys would be lost.
+It did not read existing state first. Unknown keys would be lost.
 
-This blocks wrapper mode because future `core`, `wrapper`, and wrapper prompt-slot keys must survive unrelated mode/model/backend updates.
+This blocked wrapper mode because `core`, `wrapper`, and wrapper prompt-slot keys must survive unrelated mode/model/backend updates.
+
+Implemented outcome: state writes now read, merge, and atomically write state so wrapper config survives unrelated `/mode`, `/backend`, `/model`, and `/reset CONFIRM` operations.
 
 ### 2.3 Command names are available
 
@@ -405,8 +418,9 @@ Manages wrapper prompt slots.
 Examples:
 
 ```text
-/wrapper 1 Speak in Zelda's gentle assistant persona.
-/wrapper 2 Preserve all technical facts exactly.
+/wrapper
+/wrapper set 1 Speak in Zelda's gentle assistant persona.
+/wrapper set 2 Preserve all technical facts exactly.
 /wrapper list
 /wrapper clear 1
 /wrapper clear all
@@ -444,7 +458,9 @@ Examples:
 ```text
 /wrap
 /wrap model=claude-haiku-4-5 backend=claude-cli
-/wrap model=deepseek-v4-flash backend=deepseek-api
+/wrap model=deepseek-chat backend=deepseek-api
+/wrap model=gemini-2.5-flash backend=gemini-cli
+/wrap model=deepseek/deepseek-v3.2-exp backend=openrouter-api
 /wrap context=3
 ```
 
@@ -465,6 +481,13 @@ For wrapper agents:
 For fixed/flex agents:
 
 - `/core`, `/wrap`, `/wrapper` should explain that these are wrapper-mode commands.
+
+Current Telegram controls:
+
+- `/core` shows core model buttons such as `gpt-5.5`, `gpt-5.4`, and `gpt-5.3-codex`.
+- `/wrap` groups wrapper choices by provider: Claude Haiku/Sonnet, Gemini Flash/Lite, DeepSeek Flash/Chat, and OpenRouter DeepSeek/Gemini.
+- Context buttons adjust only the wrapper's recent visible context window.
+- `/wrapper` summarizes the active core/wrapper pair and persona/style slots, with navigation buttons to `/core` and `/wrap`.
 
 ## 10. Implementation Phases
 
@@ -685,6 +708,7 @@ Scenarios:
 - Wrapper agent: scheduler input bypasses wrapper.
 - Wrapper failure falls back to core raw.
 - `/new` preserves wrapper config.
+- `/reset CONFIRM` preserves wrapper config and wrapper prompt slots.
 - `/mode fixed` then `/mode wrapper` preserves wrapper config.
 - `/core` model swap survives reboot.
 - `/wrap` model swap survives reboot.
@@ -783,11 +807,12 @@ Suggested commit message:
 Make flex state writes preserve unknown keys
 ```
 
-## 14. Open Questions
+## 14. Resolved Implementation Decisions
 
-- Should `agent_mode == "wrapper"` be switchable with `/mode wrapper`, or only configured through `agents.json` initially?
-- Should wrapper slots live in `state.json`, a `.wrapper_slots.json`, or a dedicated helper file?
-- Should core transcript be a new file, or should it be represented only in audit logs at first?
-- Should wrapper calls use CLI backends initially, or should API backends be preferred for lower overhead?
-- What timeout should wrapper calls use by default?
-- Should wrapper output preserve Markdown formatting exactly, or should it be allowed to reflow prose?
+- `agent_mode == "wrapper"` is switchable with `/mode wrapper`.
+- Wrapper slots live in `state.json` as `wrapper_slots`.
+- Core raw output is stored in `core_transcript.jsonl`; visible transcript and memory-facing surfaces use wrapper-visible output.
+- Wrapper calls use stateless ephemeral backend invocation and can target CLI or API backends allowed for the agent.
+- Default wrapper backend/model is `claude-cli / claude-haiku-4-5`.
+- Wrapper output should preserve technical facts, commands, numbers, code blocks, markers, and generated artifacts. It may lightly reflow prose for persona/style unless that would alter meaning.
+- `/reset CONFIRM` preserves wrapper config and prompt slots; `/wipe CONFIRM` remains the hard workspace clear.

@@ -1,6 +1,6 @@
 # HASHI
 
-> **Status (v3.2-alpha):** Active alpha branch with the slim core architecture accepted, plus browser gateway work, OLL HASHI Chrome extension integration, private wake-on-LAN tooling, Workzone support, and runtime/remote hardening. This branch builds on the full-featured v3.1 agentic AI orchestration platform with **6 LLM backends** (Claude, Gemini, Codex, OpenRouter, DeepSeek, Ollama), **habit-based self-improvement**, **SafeVoice**, **cross-instance agent messaging**, **token audit & cost tracking**, and **Minato MCP workflow choreography**.
+> **Status (v3.2-alpha):** Active alpha branch with the slim core architecture accepted, Wrapper Agent Mode implemented, plus browser gateway work, OLL HASHI Chrome extension integration, private wake-on-LAN tooling, Workzone support, and runtime/remote hardening. This branch builds on the full-featured v3.1 agentic AI orchestration platform with **6 LLM backends** (Claude, Gemini, Codex, OpenRouter, DeepSeek, Ollama), **habit-based self-improvement**, **SafeVoice**, **cross-instance agent messaging**, **token audit & cost tracking**, and **Minato MCP workflow choreography**.
 >
 > **Changelog:** see [`CHANGELOG.md`](CHANGELOG.md) · **Roadmap:** see [`docs/ROADMAP.md`](docs/ROADMAP.md) · **Nagare Docs:** see [`docs/NAGARE_FLOW_SYSTEM.md`](docs/NAGARE_FLOW_SYSTEM.md).
 
@@ -75,15 +75,16 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
 7. **Context Recovery** — `/handoff` command instantly restores project context after compression
 8. **Tool Execution Layer** — API-backed agents can take real local actions: run bash commands, read/write files, browse the web, call external APIs, and more
 9. **Flex/Fixed Mode Switching** — Agents can switch between CLI backends and API backends mid-conversation via `/backend`
-10. **Cross-Instance Messaging** — Agents across different HASHI instances can communicate via HChat
-11. **Pack & Go** — Build a self-contained USB for Windows or macOS; recipients just plug in and double-click
-12. **Vibe-Coded** — Every line written by AI, reviewed by AI, directed by human vision
+10. **Wrapper Agent Mode** — Pair a strong core model with a stateless persona wrapper so GPT/Codex can do the work while another model controls the final visible voice
+11. **Cross-Instance Messaging** — Agents across different HASHI instances can communicate via HChat
+12. **Pack & Go** — Build a self-contained USB for Windows or macOS; recipients just plug in and double-click
+13. **Vibe-Coded** — Every line written by AI, reviewed by AI, directed by human vision
 
 ---
 
 ## Project Status
 
-- **v3.2-alpha** *(current)* — Slim core architecture, live hot-reboot validation, browser gateway, OLL HASHI Chrome extension integration, private wake-on-LAN tooling, Workzone support, runtime/backend hardening
+- **v3.2-alpha** *(current)* — Slim core architecture, Wrapper Agent Mode, live hot-reboot validation, browser gateway, OLL HASHI Chrome extension integration, private wake-on-LAN tooling, Workzone support, runtime/backend hardening
 - **v3.1** — Claude Opus 4.7, GPT-5.5, Codex CLI 0.125.0, `xhigh`/`max` effort levels, HASHI Remote remediation
 - **v3.0-beta** — **Self-improving agents**, 6 LLM backends, SafeVoice, cross-instance messaging, token audit, agent behavior audit, remote backend policy, Minato MCP, Obsidian wiki integration
 - **v3.0-alpha** — Ollama local LLM, habit system (Phase 4-5), TUI onboarding, Minato MCP (8-tier), token audit system, dream improvements
@@ -441,9 +442,12 @@ HASHI agents respond to both natural language and structured commands:
 
 | Command | Description |
 |---------|-------------|
-| `/mode [fixed\|flex]` | Switch between fixed CLI session and flex multi-backend mode |
+| `/mode [fixed\|flex\|wrapper]` | Switch between fixed CLI session, flex multi-backend mode, and wrapper mode |
 | `/backend [engine]` | Switch backend (flex mode only) |
 | `/model` | View/change active model |
+| `/core` | View/change wrapper-mode functional core backend/model |
+| `/wrap` | View/change wrapper-mode persona wrapper backend/model/context |
+| `/wrapper` | View/edit wrapper-mode persona/style slots |
 | `/effort` | View/change effort level (Claude/Codex only) |
 | `/fyi [prompt]` | Refresh bridge environment awareness |
 | `/usecomputer [on\|off\|status\|examples\|task]` | Load managed GUI-aware computer-use guidance; prefers non-GUI methods first |
@@ -455,7 +459,7 @@ HASHI agents respond to both natural language and structured commands:
 
 | Command | Description |
 |---------|-------------|
-| `/verbose [on\|off]` | Toggle detailed status |
+| `/verbose [on\|off]` | Toggle detailed status; in wrapper mode, `on` also shows core raw output and wrapper final output |
 | `/think [on\|off]` | Toggle thinking trace display |
 | `/safevoice [on\|off]` | Toggle voice confirmation (default: ON) |
 | `/active [on\|off\|minutes]` | Toggle proactive heartbeat |
@@ -1026,9 +1030,15 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
 
 ## Release History
 
-### v3.2-alpha *(current)* — Slim Core, Browser Gateway & Runtime Hardening (May 2026)
+### v3.2-alpha *(current)* — Slim Core, Wrapper Mode, Browser Gateway & Runtime Hardening (May 2026)
 
 - **Slim core architecture accepted** — `main.py` reduced from a large feature host into a slim process bootstrap/kernel wrapper; hot-reloadable managers now own agent lifecycle, service management, reboot, startup, shutdown, config, backend preflight, skills, and WhatsApp control
+- **Wrapper Agent Mode implemented** — agents can run a functional core model and a separate stateless wrapper model for final visible persona/style rewriting
+  - `/core`, `/wrap`, and `/wrapper` configure core model, wrapper model/context, and persona/style slots with Telegram inline controls
+  - `/verbose on` shows a labeled wrapper trace with the core raw output, wrapper final output, wrapper status, latency, and fallback reason
+  - Foreground and background responses, listeners, transfer suppression, memory, handoff, project chat, voice replies, and HChat routing use the wrapper-visible text where appropriate
+  - Core transcript, visible transcript, and audit metadata are separated so core raw output remains debuggable without leaking into normal user-facing chat
+  - `/reset CONFIRM` preserves wrapper mode configuration and prompt slots, matching `/sys` preservation behavior; `/wipe CONFIRM` remains a hard workspace clear
 - **Live reboot validation passed** — cold restart, `/reboot min`, `/reboot max`, Workbench health, API Gateway health, and `pytest` all passed on 2026-05-02
 - **Browser gateway work** — local gateway package and tests for browser-facing bridge capabilities
 - **OLL HASHI Chrome extension integration** — extension scaffold and planning for browser bridge workflows

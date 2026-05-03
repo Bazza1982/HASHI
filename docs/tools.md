@@ -3,9 +3,10 @@
 ## Universal Multi-Agent Telegram Orchestrator (`bridge-u-f`)
 The `bridge-u-f` project located at `<project_root>` is a local multi-agent bridge that connects Telegram bots (and optionally WhatsApp) to multiple AI backends, with an optional browser workbench.
 
-Two operating modes:
+Three operating modes:
 - **Fixed agents:** one Telegram bot, one backend, one workspace.
 - **Flex agents:** one Telegram bot, one workspace, one shared identity, switchable backend via `/backend`.
+- **Wrapper agents:** one shared identity with a functional core backend/model plus a stateless wrapper backend/model that rewrites only the final user-facing response.
 
 - **Supported backends:** `gemini-cli`, `claude-cli`, `codex-cli`, `openrouter-api`, `deepseek-api`, and `ollama-api`.
 - **Adding agents:** Add a new block to `<project_root>\agents.json`. Required fields:
@@ -43,7 +44,7 @@ Two operating modes:
 - `/retry` — retry last request
 - `/model` — switch model (inline keyboard)
 - `/think [on|off]` — toggle thinking trace display (periodic italic messages, ~60s intervals, independent of `/verbose`)
-- `/verbose [on|off]` — toggle real-time streaming display
+- `/verbose [on|off]` — toggle real-time streaming display; in wrapper mode, `on` also shows core raw output, wrapper final output, wrapper status, latency, and fallback reason
 - `/skill` — browse, toggle, and run skills (inline keyboard)
 - `/active [on|off] [minutes]` — toggle bridge-managed proactive heartbeat (default 10 min)
 - `/voice [status|on|off|provider|providers|voices|use <alias>]` — control native bridge-owned voice replies
@@ -53,6 +54,18 @@ Two operating modes:
 **Flex-only:**
 - `/backend` — switch active backend (inline keyboard; `+` variant carries continuity handoff)
 - `/effort` — reasoning effort (when active backend is Claude or Codex)
+
+**Wrapper-mode:**
+- `/mode wrapper` — switch a flex-capable agent into wrapper mode.
+- `/core [backend=<engine> model=<model>]` — show or change the functional core backend/model. Default: `codex-cli / gpt-5.5`.
+- `/wrap [backend=<engine> model=<model> context=<n>]` — show or change the stateless wrapper backend/model and recent visible context window. Default: `claude-cli / claude-haiku-4-5 / context=3`.
+- `/wrapper` — show wrapper configuration, persona/style slots, and navigation buttons.
+- `/wrapper set <slot> <text>` — set a wrapper persona/style slot.
+- `/wrapper clear <slot>` or `/wrapper clear all` — clear wrapper persona/style slots.
+- `/model` and `/backend` guide wrapper agents to `/core` or `/wrap` instead of changing the active wrapper-mode pair directly.
+- `/reset CONFIRM` preserves wrapper mode config and wrapper slots; `/wipe CONFIRM` remains a hard workspace clear.
+
+Wrapper model picker buttons currently group recommended choices by provider: Claude Haiku/Sonnet, Gemini Flash/Lite, DeepSeek Flash/Chat, and OpenRouter DeepSeek/Gemini. Claude Opus is intentionally omitted from the picker because it is too expensive for routine wrapping.
 
 **Backend-specific (fixed):**
 - `/effort` — Claude, Codex

@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Hot reboot now rebuilds managers transaction-style after module reload: replacement managers are built first, then committed only if the full set initializes successfully.
   - Long-lived live handles remain on the kernel, including Workbench API, API Gateway, scheduler, WhatsApp transport, agent directory, and runtime list state.
   - Accepted with cold restart, `/reboot min`, `/reboot max`, Workbench/API health checks, and full `pytest` validation.
+- **Wrapper Agent Mode** — new `wrapper` runtime mode pairs a functional core backend/model with a stateless wrapper backend/model for final user-facing persona/style rewriting.
+  - Added `/mode wrapper`, `/core`, `/wrap`, and `/wrapper` configuration commands, with Telegram inline controls for core model, wrapper model, context window, and persona/style slots.
+  - Default wrapper configuration remains `claude-cli / claude-haiku-4-5`; the wrapper picker also exposes Gemini, DeepSeek, and OpenRouter choices while avoiding expensive Claude Opus as a recommended wrapper option.
+  - Foreground and background delivery paths now use wrapper final text for user-visible replies, request listeners, transfer suppression, memory, handoff, project chat, voice replies, and HChat routing where appropriate.
+  - `core_transcript.jsonl`, visible transcript writes, and audit payloads are separated so core raw output remains inspectable without becoming the normal visible conversation.
+  - `/verbose on` now shows a labeled wrapper trace containing core raw output, wrapper final output, wrapper status, latency, and fallback reason; `/verbose off` shows only the final reply.
+  - `/reset CONFIRM` preserves wrapper config and wrapper prompt slots, matching `/sys` preservation behavior; `/wipe CONFIRM` remains a hard workspace clear.
 - **Browser gateway alpha** — local browser gateway package and test coverage for browser-facing bridge capabilities.
 - **OLL HASHI Chrome extension scaffold** — extension files and implementation plan for browser bridge workflows.
 - **Private wake-on-LAN tooling** — local helper and tests for private wake-on-LAN flows.

@@ -73,15 +73,19 @@
 
 ### Wrapper Agent Mode
 
-Status: **planned / Phase 0 next**.
+Status: **implemented in v3.2-alpha**.
 
-Wrapper Agent Mode is a proposed third runtime mode beside fixed and flex. It lets a strong core model do the actual work while a separate stateless wrapper model rewrites only the final user-facing tone/persona.
+Wrapper Agent Mode is a third runtime mode beside fixed and flex. It lets a strong core model do the actual work while a separate stateless wrapper model rewrites only the final user-facing tone/persona.
 
-Immediate next step:
+Implemented scope:
 
-- Make flex `state.json` writes read existing state, merge managed keys, and write atomically, so future `core` and `wrapper` config blocks are not destroyed by unrelated `/mode`, `/backend`, or `/model` saves.
+- Merge-safe `state.json` writes preserve `core`, `wrapper`, and `wrapper_slots`.
+- `/mode wrapper`, `/core`, `/wrap`, and `/wrapper` configure wrapper agents.
+- Foreground/background responses, listeners, transfer suppression, memory, handoff, project chat, voice replies, and HChat routing use wrapper-visible output where appropriate.
+- `/verbose on` shows labeled core raw and wrapper final output for debugging.
+- `/reset CONFIRM` preserves wrapper configuration and prompt slots, matching `/sys` preservation behavior.
 
-Design doc:
+Design and acceptance record:
 
 - `docs/WRAPPER_AGENT_MODE_PLAN.md`
 
