@@ -98,6 +98,8 @@ async def execute_action(action: str, args: dict) -> str:
         result = probe_whatsapp_call(
             auto_answer=bool(args.get("auto_answer", False)),
             use_uia=bool(args.get("use_uia", True)),
+            uia_max_depth=int(args.get("uia_max_depth", 10) or 10),
+            include_uia_tree=bool(args.get("include_uia_tree", False)),
         )
         return json.dumps(result, ensure_ascii=False, indent=2)
 
