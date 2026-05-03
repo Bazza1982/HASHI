@@ -174,6 +174,12 @@ def _queued_request() -> QueuedRequest:
     )
 
 
+def _queued_request_from(source: str) -> QueuedRequest:
+    item = _queued_request()
+    item.source = source
+    return item
+
+
 async def _completed_task(response):
     return response
 
@@ -292,6 +298,9 @@ async def test_background_completion_uses_wrapper_output_for_visible_surfaces(tm
     await FlexibleAgentRuntime._on_background_complete(runtime, task, item)
 
     assert listener_payloads[0]["text"] == "wrapped visible"
+    assert listener_payloads[0]["visible_text"] == "wrapped visible"
+    assert listener_payloads[0]["core_raw"] == "core raw"
+    assert listener_payloads[0]["wrapper_used"] is True
     assert runtime.last_response["text"] == "wrapped visible"
     assert ("assistant", "codex-cli", "wrapped visible") in runtime.memory_store.turns
     assert ("assistant", "wrapped visible", "text") in runtime.handoff_builder.transcript
@@ -313,3 +322,22 @@ async def test_background_transfer_suppression_buffers_wrapper_output(tmp_path):
     assert runtime._suppressed_transfer_results == [{"success": True, "text": "wrapped visible"}]
     assert sent == []
     assert voices == []
+
+
+@pytest.mark.asyncio
+async def test_background_bypass_source_does_not_wrap(tmp_path):
+    runtime, sent, voices = _make_background_runtime(tmp_path)
+    listener_payloads = []
+    runtime.register_request_listener = FlexibleAgentRuntime.register_request_listener.__get__(runtime, FlexibleAgentRuntime)
+    runtime.register_request_listener("req-001", lambda payload: listener_payloads.append(payload))
+    item = _queued_request_from("scheduler")
+    task = asyncio.create_task(_completed_task(BackendResponse(text="core raw", duration_ms=1.0)))
+    await task
+
+    await FlexibleAgentRuntime._on_background_complete(runtime, task, item)
+
+    assert listener_payloads[0]["text"] == "core raw"
+    assert listener_payloads[0]["visible_text"] == "core raw"
+    assert listener_payloads[0]["wrapper_used"] is False
+    assert sent[0]["text"] == "core raw"
+    assert voices[0]["text"] == "core raw"

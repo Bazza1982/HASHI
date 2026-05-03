@@ -7492,6 +7492,15 @@ class FlexibleAgentRuntime:
             "wrapper_final_chars": len(getattr(wrapper_result, "final_text", "") or ""),
         }
 
+    def _wrapper_listener_fields(self, core_raw: str, visible_text: str, wrapper_result) -> dict[str, Any]:
+        return {
+            "core_raw": core_raw,
+            "visible_text": visible_text,
+            "wrapper_used": bool(getattr(wrapper_result, "wrapper_used", False)),
+            "wrapper_failed": bool(getattr(wrapper_result, "wrapper_failed", False)),
+            "wrapper_fallback_reason": getattr(wrapper_result, "fallback_reason", None),
+        }
+
     async def _apply_wrapper_to_visible_text(self, item: QueuedRequest, visible_text: str):
         if not self._wrapper_enabled():
             return visible_text, passthrough_result(visible_text, fallback_reason="wrapper_mode_disabled")
@@ -7616,6 +7625,7 @@ class FlexibleAgentRuntime:
                         "error": None,
                         "source": item.source,
                         "summary": item.summary,
+                        **self._wrapper_listener_fields(response.text, visible_text, wrapper_result),
                     },
                 )
                 if self._should_buffer_during_transfer(item.request_id):
@@ -7670,6 +7680,7 @@ class FlexibleAgentRuntime:
                         "request_id": item.request_id,
                         "agent": self.name,
                         "runtime": "flex",
+                        "completion_path": "background",
                         "backend": self.config.active_backend,
                         "model": self.get_current_model(),
                         "source": item.source,
@@ -8058,6 +8069,7 @@ class FlexibleAgentRuntime:
                             "error": None,
                             "source": item.source,
                             "summary": item.summary,
+                            **self._wrapper_listener_fields(response.text, visible_text, wrapper_result),
                         },
                     )
                     try:
@@ -8101,6 +8113,7 @@ class FlexibleAgentRuntime:
                             "request_id": item.request_id,
                             "agent": self.name,
                             "runtime": "flex",
+                            "completion_path": "foreground",
                             "backend": self.config.active_backend,
                             "model": self.get_current_model(),
                             "source": item.source,
