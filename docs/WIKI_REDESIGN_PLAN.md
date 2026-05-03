@@ -952,7 +952,42 @@ Page dry-run safety:
 - The live smoke produced no pages because live `classification_assignment` rows have not yet been written.
 - Tests verify page generation using temporary classified state.
 
-### 14.5 Remaining implementation boundaries
+### 14.5 Milestone 5 live smoke record
+
+Status: completed on 2026-05-04.
+
+Live safety checkpoint:
+
+```text
+Backup created:
+workspaces/lily/wiki_state.sqlite.bak-20260504-074816
+
+Command:
+python3 scripts/wiki/run_pipeline.py --daily --classify --persist-classifications --pages-dry-run --limit 20 --max-classify 3
+```
+
+Result:
+
+```text
+Backend: claude-cli
+Model: claude-sonnet-4-6
+Assignments: 3
+Topic Counts:
+- AI_Memory_Systems: 3
+last_classified_id: 5
+Page draft:
+workspaces/lily/wiki_pages_dry_run/Topics/AI_Memory_Systems.md
+```
+
+Manual review:
+
+- The three persisted assignments are all early memory-system / vector migration / memory backup items.
+- Classification to `AI_Memory_Systems` is acceptable for this smoke test.
+- The safe watermark stopped at `5` because later classifiable rows in the `--limit 20` window were intentionally not classified under `--max-classify 3`.
+- No Obsidian vault files were written.
+- The old DB backup remains available for rollback.
+
+### 14.6 Remaining implementation boundaries
 
 The plan is ready to start once these implementation boundaries are accepted:
 
