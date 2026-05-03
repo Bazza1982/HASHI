@@ -17,11 +17,13 @@ if __package__ in {None, ""}:
     from scripts.wiki.classifier import ClassificationDryRunResult, classify_memories_dry_run
     from scripts.wiki.config import WikiConfig, default_config
     from scripts.wiki.fetcher import FetchResult, fetch_new_memories
+    from scripts.wiki.page_generator import PageDraft, generate_dry_run_pages
     from scripts.wiki.state import WikiState
 else:
     from .classifier import ClassificationDryRunResult, classify_memories_dry_run
     from .config import WikiConfig, default_config
     from .fetcher import FetchResult, fetch_new_memories
+    from .page_generator import PageDraft, generate_dry_run_pages
     from .state import WikiState
 
 
@@ -58,6 +60,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Persist classifier assignments and advance the safe watermark.",
     )
     parser.add_argument(
+        "--pages-dry-run",
+        action="store_true",
+        help="Generate topic page drafts to the local dry-run directory.",
+    )
+    parser.add_argument(
         "--skip-consolidation-check",
         action="store_true",
         help="Skip today's memory consolidation completion check.",
@@ -81,6 +88,7 @@ def run_stage0(config: WikiConfig, args: argparse.Namespace) -> list[str]:
 
         fetch_result = fetch_new_memories(config, state, limit=args.limit)
         classifier_result = None
+        page_drafts: list[PageDraft] = []
         run_classifier = bool(args.classify or args.classify_dry_run)
         if args.classify_dry_run:
             args.dry_run = True
@@ -101,6 +109,8 @@ def run_stage0(config: WikiConfig, args: argparse.Namespace) -> list[str]:
                         records_to_classify,
                         classifier_result,
                     )
+        if args.pages_dry_run:
+            page_drafts = generate_dry_run_pages(config)
         lines = build_report(
             config,
             state,
@@ -110,6 +120,7 @@ def run_stage0(config: WikiConfig, args: argparse.Namespace) -> list[str]:
             now,
             args,
             classifier_result,
+            page_drafts,
         )
         report_path = config.dry_run_report_latest if args.dry_run else config.report_latest
         report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -161,6 +172,7 @@ def build_report(
     now: datetime,
     args: argparse.Namespace,
     classifier_result: ClassificationDryRunResult | None = None,
+    page_drafts: list[PageDraft] | None = None,
 ) -> list[str]:
     reason_counts = Counter(record.reason for record in fetch_result.skipped)
     domain_counts = Counter(record.domain for record in fetch_result.classifiable)
@@ -174,6 +186,7 @@ def build_report(
         f"- Dry run: {bool(args.dry_run)}",
         f"- Classifier stage: {bool(args.classify or args.classify_dry_run)}",
         f"- Persist classifications: {bool(args.persist_classifications)}",
+        f"- Pages dry run: {bool(args.pages_dry_run)}",
         f"- Consolidation check: {'ok' if consolidation_ok else 'blocked'} — {consolidation_reason}",
         f"- Weekly digest due: {weekly_due}",
         "",
@@ -223,6 +236,14 @@ def build_report(
             lines.extend(f"- {topic}: {count}" for topic, count in sorted(topic_counts.items()))
         else:
             lines.append("- none")
+    lines.extend(["", "## Page Drafts"])
+    if not page_drafts:
+        lines.append("- not generated")
+    else:
+        lines.extend(
+            f"- {draft.topic_id}: {draft.memory_count} memories -> {draft.path}"
+            for draft in page_drafts
+        )
     lines.extend(
         [
             "",

@@ -926,7 +926,33 @@ Persistence safety:
 - No Obsidian vault pages are written.
 - Page generation remains disabled until the classified state is reviewed.
 
-### 14.4 Remaining implementation boundaries
+### 14.4 Milestone 4 implementation record
+
+Status: implemented on 2026-05-04.
+
+Implemented behavior:
+
+- `scripts/wiki/page_generator.py` reads classified memories from `wiki_state.sqlite` joined to `consolidated_memory.sqlite`.
+- Topic page drafts are generated from persisted classification assignments.
+- Draft output is written only to `workspaces/lily/wiki_pages_dry_run/Topics/`.
+- `scripts/wiki/run_pipeline.py` supports `--pages-dry-run`.
+
+Validation record:
+
+```text
+python3 -m py_compile scripts/wiki/*.py tests/test_wiki_pipeline.py
+pytest tests/test_wiki_pipeline.py -q
+python3 scripts/wiki/run_pipeline.py --daily --dry-run --classify-dry-run --mock-classifier --pages-dry-run --limit 20
+```
+
+Page dry-run safety:
+
+- No Obsidian vault files are written.
+- `wiki_pages_dry_run` pages include `status: dry-run` and a generated-draft comment.
+- The live smoke produced no pages because live `classification_assignment` rows have not yet been written.
+- Tests verify page generation using temporary classified state.
+
+### 14.5 Remaining implementation boundaries
 
 The plan is ready to start once these implementation boundaries are accepted:
 

@@ -16,6 +16,7 @@ from scripts.wiki.classifier import (
 )
 from scripts.wiki.config import WikiConfig
 from scripts.wiki.fetcher import fetch_new_memories
+from scripts.wiki.page_generator import fetch_topic_memories, generate_dry_run_pages
 from scripts.wiki.run_pipeline import check_today_consolidation, run_stage0
 from scripts.wiki.state import WikiState
 
@@ -178,6 +179,7 @@ def test_run_pipeline_mock_classifier_dry_run(tmp_path: Path) -> None:
         limit=10,
         max_classify=None,
         persist_classifications=False,
+        pages_dry_run=False,
         skip_consolidation_check=False,
     )
     lines = run_stage0(config, args)
@@ -249,6 +251,7 @@ def test_run_pipeline_persists_mock_classifier_assignments(tmp_path: Path) -> No
         limit=10,
         max_classify=None,
         persist_classifications=True,
+        pages_dry_run=False,
         skip_consolidation_check=False,
     )
     run_stage0(config, args)
@@ -257,6 +260,74 @@ def test_run_pipeline_persists_mock_classifier_assignments(tmp_path: Path) -> No
         assert state.get_last_classified_id() == 4
         assert state.count_rows("classification_run") == 4
         assert state.count_rows("classification_assignment") == 1
+
+
+def test_page_generator_writes_dry_run_topic_pages(tmp_path: Path) -> None:
+    consolidated = tmp_path / "consolidated_memory.sqlite"
+    _make_consolidated_db(consolidated)
+    state_path = tmp_path / "wiki_state.sqlite"
+    config = WikiConfig(
+        consolidated_db=consolidated,
+        wiki_state_db=state_path,
+        dry_run_pages_dir=tmp_path / "wiki_pages_dry_run",
+    )
+    with WikiState(state_path) as state:
+        state.init_schema()
+        state.record_assignments(
+            [_record(1, "HASHI scheduler design")],
+            [
+                ClassificationAssignment(
+                    consolidated_id=1,
+                    topics=("HASHI_Architecture",),
+                    confidence=0.9,
+                )
+            ],
+            batch_id="batch-1",
+            classifier_model="mock/mock",
+        )
+
+    memories = fetch_topic_memories(config, "HASHI_Architecture")
+    assert len(memories) == 1
+    drafts = generate_dry_run_pages(config)
+    assert [draft.topic_id for draft in drafts] == ["HASHI_Architecture"]
+    page = drafts[0].path.read_text(encoding="utf-8")
+    assert "status: dry-run" in page
+    assert "Memory 1" in page
+
+
+def test_run_pipeline_generates_page_drafts_from_persisted_state(tmp_path: Path) -> None:
+    consolidated = tmp_path / "consolidated_memory.sqlite"
+    _make_consolidated_db(consolidated)
+    log = tmp_path / "consolidation_log.jsonl"
+    log.write_text(
+        '{"timestamp":"2026-05-03T18:08:00+00:00","phase":"embed","embedded":10,"errors":0}\n',
+        encoding="utf-8",
+    )
+    config = WikiConfig(
+        hashi_root=tmp_path,
+        consolidated_db=consolidated,
+        wiki_state_db=tmp_path / "wiki_state.sqlite",
+        consolidation_log=log,
+        report_latest=tmp_path / "wiki_latest.md",
+        dry_run_pages_dir=tmp_path / "wiki_pages_dry_run",
+    )
+    args = argparse.Namespace(
+        daily=True,
+        weekly_if_saturday=False,
+        dry_run=False,
+        classify=True,
+        classify_dry_run=False,
+        mock_classifier=True,
+        limit=10,
+        max_classify=None,
+        persist_classifications=True,
+        pages_dry_run=True,
+        skip_consolidation_check=False,
+    )
+    lines = run_stage0(config, args)
+    text = "\n".join(lines)
+    assert "Page Drafts" in text
+    assert "HASHI_Architecture" in text
 
 
 def _record(consolidated_id: int, content: str):

@@ -22,6 +22,7 @@ class WikiConfig:
     report_latest: Path = HASHI_ROOT / "workspaces/lily/wiki_organise_report_latest.md"
     dry_run_report_latest: Path = HASHI_ROOT / "workspaces/lily/wiki_reports/wiki_dry_run_latest.md"
     local_pages_dir: Path = HASHI_ROOT / "workspaces/lily/wiki_pages"
+    dry_run_pages_dir: Path = HASHI_ROOT / "workspaces/lily/wiki_pages_dry_run"
     vault_root: Path = Path("/mnt/c/Users/thene/Documents/lily_hashi_wiki")
     min_content_chars: int = 40
     classify_chars: int = 512
