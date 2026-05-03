@@ -69,6 +69,24 @@
 
 ---
 
+## Active Design Items
+
+### Wrapper Agent Mode
+
+Status: **planned / Phase 0 next**.
+
+Wrapper Agent Mode is a proposed third runtime mode beside fixed and flex. It lets a strong core model do the actual work while a separate stateless wrapper model rewrites only the final user-facing tone/persona.
+
+Immediate next step:
+
+- Make flex `state.json` writes read existing state, merge managed keys, and write atomically, so future `core` and `wrapper` config blocks are not destroyed by unrelated `/mode`, `/backend`, or `/model` saves.
+
+Design doc:
+
+- `docs/WRAPPER_AGENT_MODE_PLAN.md`
+
+---
+
 ## Deferred Research Items
 
 ### WhatsApp Real-Time Voice Calls For HASHI
@@ -120,4 +138,4 @@ Preferred future direction:
 
 ## Notes
 - This roadmap is outcome-based; implementation details live in dedicated design docs.
-- Design docs: `docs/V2.2_TOOL_EXECUTION_PLAN.md`, `docs/HASHI_VOICE_BRIDGE_PLAN.md`
+- Design docs: `docs/V2.2_TOOL_EXECUTION_PLAN.md`, `docs/HASHI_VOICE_BRIDGE_PLAN.md`, `docs/WRAPPER_AGENT_MODE_PLAN.md`
