@@ -1047,7 +1047,53 @@ Live DB correction:
 - These rows are security-scan / maintenance-action memories, so the live `wiki_state.sqlite` assignments were updated to `HASHI_Ops_Security` after a fresh backup.
 - No watermark rollback was required because only topic assignments changed; the rows remain processed.
 
-### 14.8 Remaining implementation boundaries
+### 14.8 Milestone 8 larger backfill quality record
+
+Status: completed on 2026-05-04.
+
+Live safety checkpoint:
+
+```text
+Backup created:
+workspaces/lily/wiki_state.sqlite.bak-20260504-084100
+
+Command:
+python3 scripts/wiki/run_pipeline.py --daily --classify --persist-classifications --pages-dry-run --limit 300 --max-classify 60
+```
+
+Result:
+
+```text
+Backend: claude-cli
+Model: claude-sonnet-4-6
+Assignments: 60
+Topic Counts:
+- AI_Memory_Systems: 5
+- Dream_System: 5
+- HASHI_Architecture: 17
+- HASHI_Ops_Security: 15
+- NONE: 18
+last_classified_id: 104
+Page drafts:
+workspaces/lily/wiki_pages_dry_run/Topics/AI_Memory_Systems.md
+workspaces/lily/wiki_pages_dry_run/Topics/Dream_System.md
+workspaces/lily/wiki_pages_dry_run/Topics/HASHI_Architecture.md
+workspaces/lily/wiki_pages_dry_run/Topics/HASHI_Ops_Security.md
+```
+
+Quality review:
+
+- `HASHI_Ops_Security` is working as intended. Startup conflicts, Windows Task Scheduler, exposed API keys, OpenRouter key rotation, WSL admin/UAC limits, file permission checks, and port/firewall review are now grouped separately from architecture.
+- `AI_Memory_Systems` and `Dream_System` assignments are semantically clean in this batch.
+- `HASHI_Architecture` remains useful for command implementation, agent lifecycle, backend/session bugs, `/reset`, `/retry`, OpenClaw command integration, and general instance/config design.
+- `NONE` is mostly behaving as a low-durable-value sink for greetings, short path checks, push/commit confirmations, and relationship/persona content that should not become a wiki page.
+- The quality pass exposed a privacy-filter gap: a few personal/relationship memories were excluded from pages by `NONE`, but they were not skipped at Stage 0 because the source domain was not always marked `personal`.
+- Stage 0 now includes a narrow content-based private-pattern skip (`private_content_pattern`) for obvious relationship/intimacy phrases. This is intentionally conservative so ordinary technical conversations that merely use a familiar agent address are not over-filtered.
+- Follow-up: watch for a possible future `Release_Deployment` or `Agent_Personas` topic, but do not add either yet. In this batch the evidence is not stable enough to justify more topic splits.
+- No Obsidian vault files were written.
+- The old DB backup remains available for rollback.
+
+### 14.9 Remaining implementation boundaries
 
 The plan is ready to start once these implementation boundaries are accepted:
 

@@ -47,6 +47,7 @@ def _make_consolidated_db(path: Path) -> None:
         ("HASHI1", "lily", 2, "personal", "episodic", "Private relationship memory that should not become wiki material.", "2026-05-04T03:11:00+10:00"),
         ("HASHI1", "temp", 3, "project", "semantic", "Temporary agent output should not become durable wiki material.", "2026-05-04T03:12:00+10:00"),
         ("HASHI1", "lily", 4, "project", "semantic", "api_key = sk-abcdefghijklmnopqrstuvwxyz1234567890 should redact.", "2026-05-04T03:13:00+10:00"),
+        ("HASHI1", "lily", 5, "project", "episodic", "User: 好想你，亲一下。 Assistant: This is private relationship content.", "2026-05-04T03:14:00+10:00"),
     ]
     con.executemany(
         """
@@ -79,8 +80,12 @@ def test_fetcher_applies_privacy_and_redaction_filters(tmp_path: Path) -> None:
 
     assert [record.id for record in result.classifiable] == [1]
     assert [record.id for record in result.redacted] == [4]
-    assert {record.reason for record in result.skipped} == {"private_domain:personal", "temp_agent"}
-    assert result.max_seen_id == 4
+    assert {record.reason for record in result.skipped} == {
+        "private_domain:personal",
+        "private_content_pattern",
+        "temp_agent",
+    }
+    assert result.max_seen_id == 5
 
 
 def test_consolidation_check_requires_today_embed_phase(tmp_path: Path) -> None:
@@ -269,8 +274,8 @@ def test_run_pipeline_persists_mock_classifier_assignments(tmp_path: Path) -> No
     run_stage0(config, args)
     with WikiState(state_path) as state:
         state.init_schema()
-        assert state.get_last_classified_id() == 4
-        assert state.count_rows("classification_run") == 4
+        assert state.get_last_classified_id() == 5
+        assert state.count_rows("classification_run") == 5
         assert state.count_rows("classification_assignment") == 1
 
 

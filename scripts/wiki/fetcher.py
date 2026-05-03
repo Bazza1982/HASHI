@@ -21,6 +21,17 @@ SENSITIVE_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     )
 )
 
+PRIVATE_CONTENT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"爱的拥抱",
+        r"深情的吻",
+        r"亲一下",
+        r"好想你",
+        r"(?i)\brelationship\b",
+    )
+)
+
 
 @dataclass(frozen=True)
 class MemoryRecord:
@@ -57,6 +68,10 @@ def has_sensitive_content(content: str) -> bool:
     return any(pattern.search(content or "") for pattern in SENSITIVE_PATTERNS)
 
 
+def has_private_content(content: str) -> bool:
+    return any(pattern.search(content or "") for pattern in PRIVATE_CONTENT_PATTERNS)
+
+
 def filter_record(record: MemoryRecord, config: WikiConfig) -> MemoryRecord:
     if record.agent_id == "temp":
         return _replace_status(record, "skipped", "temp_agent")
@@ -66,6 +81,8 @@ def filter_record(record: MemoryRecord, config: WikiConfig) -> MemoryRecord:
         return _replace_status(record, "skipped", "private_memory_type")
     if len((record.content or "").strip()) < config.min_content_chars:
         return _replace_status(record, "skipped", "too_short")
+    if has_private_content(record.content):
+        return _replace_status(record, "skipped", "private_content_pattern")
     if has_sensitive_content(record.content):
         return MemoryRecord(
             id=record.id,
