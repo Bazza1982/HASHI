@@ -5344,21 +5344,38 @@ class FlexibleAgentRuntime:
         ])
         return InlineKeyboardMarkup(rows)
 
+    def _wrapper_model_choices(self) -> list[tuple[str, str, str, str]]:
+        return [
+            ("claude_haiku", "Claude Haiku", "claude-cli", "claude-haiku-4-5"),
+            ("claude_sonnet", "Claude Sonnet", "claude-cli", "claude-sonnet-4-6"),
+            ("claude_opus", "Claude Opus", "claude-cli", "claude-opus-4-6"),
+            ("gemini_flash", "Gemini Flash", "gemini-cli", "gemini-2.5-flash"),
+            ("gemini_lite", "Gemini Lite", "gemini-cli", "gemini-2.5-flash-lite"),
+            ("deepseek_flash", "DeepSeek Flash", "deepseek-api", "deepseek-v4-flash"),
+            ("deepseek_chat", "DeepSeek Chat", "deepseek-api", "deepseek-chat"),
+            ("or_deepseek", "OR DeepSeek", "openrouter-api", "deepseek/deepseek-v3.2-exp"),
+            ("or_gemini", "OR Gemini", "openrouter-api", "google/gemini-3.1-flash-lite-preview"),
+        ]
+
+    def _wrapper_model_choice(self, choice_id: str) -> tuple[str, str, str, str] | None:
+        return next((choice for choice in self._wrapper_model_choices() if choice[0] == choice_id), None)
+
     def _wrapper_wrap_keyboard(self, cfg) -> InlineKeyboardMarkup:
-        models = ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-6"]
         rows: list[list[InlineKeyboardButton]] = []
-        for model in models:
-            label = f"✅ {model}" if cfg.wrapper_backend == "claude-cli" and cfg.wrapper_model == model else model
-            rows.append([
-                InlineKeyboardButton(
-                    label,
-                    callback_data=f"wcfg:wrap:claude-cli:{model}:{cfg.context_window}",
-                )
-            ])
+        for choice_id, label, backend, model in self._wrapper_model_choices():
+            active = cfg.wrapper_backend == backend and cfg.wrapper_model == model
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        f"✅ {label}" if active else label,
+                        callback_data=f"wcfg:wrapid:{choice_id}:{cfg.context_window}",
+                    )
+                ]
+            )
         rows.append([
             InlineKeyboardButton(
                 f"ctx {value}{' ✅' if cfg.context_window == value else ''}",
-                callback_data=f"wcfg:wrap:{cfg.wrapper_backend}:{cfg.wrapper_model}:{value}",
+                callback_data=f"wcfg:wrapctx:{value}",
             )
             for value in (0, 3, 5)
         ])
@@ -5396,7 +5413,10 @@ class FlexibleAgentRuntime:
             f"• Context window: `{cfg.context_window}`\n"
             f"• Fallback: `{cfg.fallback}`\n\n"
             "Tap a button to change the wrapper model/context, or type:\n"
-            "`/wrap backend=claude-cli model=claude-haiku-4-5 context=3`"
+            "`/wrap backend=claude-cli model=claude-haiku-4-5 context=3`\n"
+            "`/wrap backend=gemini-cli model=gemini-2.5-flash context=3`\n"
+            "`/wrap backend=deepseek-api model=deepseek-chat context=3`\n"
+            "`/wrap backend=openrouter-api model=deepseek/deepseek-v3.2-exp context=3`"
         )
 
     def _wrapper_status_text(self, state: dict, slots: dict) -> str:
@@ -5685,6 +5705,72 @@ class FlexibleAgentRuntime:
                     f"• Model: `{model}`\n"
                     f"• Context window: `{context_window}`\n"
                     f"• Fallback: `{cfg.fallback}`",
+                    parse_mode="Markdown",
+                    reply_markup=self._wrapper_wrap_keyboard(refreshed),
+                )
+            elif data.startswith("wcfg:wrapid:"):
+                parts = data.split(":", 3)
+                if len(parts) != 4:
+                    await query.answer("Invalid wrapper selection.", show_alert=True)
+                    return
+                _, _, choice_id, context_value = parts
+                choice = self._wrapper_model_choice(choice_id)
+                if choice is None:
+                    await query.answer("Unknown wrapper choice.", show_alert=True)
+                    return
+                _, _label, backend, model = choice
+                error = self._validate_wrapper_backend_model(backend, model)
+                if error:
+                    await query.answer(error, show_alert=True)
+                    return
+                try:
+                    context_window = max(0, min(int(context_value), 20))
+                except ValueError:
+                    await query.answer("Context window must be an integer.", show_alert=True)
+                    return
+                self.backend_manager.update_wrapper_blocks(
+                    wrapper={
+                        "backend": backend,
+                        "model": model,
+                        "context_window": context_window,
+                        "fallback": cfg.fallback,
+                    }
+                )
+                refreshed = load_wrapper_config(self.backend_manager.get_state_snapshot())
+                await query.edit_message_text(
+                    "Wrapper translator updated:\n"
+                    f"• Backend: `{backend}`\n"
+                    f"• Model: `{model}`\n"
+                    f"• Context window: `{context_window}`\n"
+                    f"• Fallback: `{cfg.fallback}`",
+                    parse_mode="Markdown",
+                    reply_markup=self._wrapper_wrap_keyboard(refreshed),
+                )
+            elif data.startswith("wcfg:wrapctx:"):
+                parts = data.split(":", 2)
+                if len(parts) != 3:
+                    await query.answer("Invalid context selection.", show_alert=True)
+                    return
+                try:
+                    context_window = max(0, min(int(parts[2]), 20))
+                except ValueError:
+                    await query.answer("Context window must be an integer.", show_alert=True)
+                    return
+                self.backend_manager.update_wrapper_blocks(
+                    wrapper={
+                        "backend": cfg.wrapper_backend,
+                        "model": cfg.wrapper_model,
+                        "context_window": context_window,
+                        "fallback": cfg.fallback,
+                    }
+                )
+                refreshed = load_wrapper_config(self.backend_manager.get_state_snapshot())
+                await query.edit_message_text(
+                    "Wrapper translator updated:\n"
+                    f"• Backend: `{refreshed.wrapper_backend}`\n"
+                    f"• Model: `{refreshed.wrapper_model}`\n"
+                    f"• Context window: `{context_window}`\n"
+                    f"• Fallback: `{refreshed.fallback}`",
                     parse_mode="Markdown",
                     reply_markup=self._wrapper_wrap_keyboard(refreshed),
                 )

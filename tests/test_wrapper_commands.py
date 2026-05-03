@@ -391,7 +391,12 @@ async def test_wrapper_config_status_commands_include_clickable_buttons(tmp_path
     await FlexibleAgentRuntime.cmd_wrap(runtime, update, context)
     assert "Tap a button" in messages[-1]
     assert runtime._reply_payloads[-1]["reply_markup"] is not None
-    assert "wcfg:wrap:claude-cli:claude-haiku-4-5" in str(runtime._reply_payloads[-1]["reply_markup"])
+    wrap_markup = str(runtime._reply_payloads[-1]["reply_markup"])
+    assert "wcfg:wrapid:claude_haiku" in wrap_markup
+    assert "wcfg:wrapid:gemini_flash" in wrap_markup
+    assert "wcfg:wrapid:deepseek_chat" in wrap_markup
+    assert "wcfg:wrapid:or_deepseek" in wrap_markup
+    assert "wcfg:wrapctx:3" in wrap_markup
 
     await FlexibleAgentRuntime.cmd_wrapper(runtime, update, context)
     assert "Tap buttons below" in messages[-1]
@@ -430,6 +435,52 @@ async def test_wrapper_config_buttons_update_core_model(tmp_path):
     assert state["active_backend"] == "codex-cli"
     assert state["active_model"] == "gpt-5.4"
     assert "Wrapper core updated" in edits[-1]["text"]
+    assert edits[-1]["reply_markup"] is not None
+    assert answers[-1]["text"] is None
+
+
+@pytest.mark.asyncio
+async def test_wrapper_config_buttons_update_wrapper_model_across_backends(tmp_path):
+    manager = _make_manager(tmp_path / "agent")
+    manager.config.allowed_backends.extend(
+        [
+            {"engine": "gemini-cli", "model": "gemini-2.5-flash"},
+            {"engine": "deepseek-api", "model": "deepseek-chat"},
+            {"engine": "openrouter-api", "model": "deepseek/deepseek-v3.2-exp"},
+        ]
+    )
+    manager.agent_mode = "wrapper"
+    runtime, _messages = _make_runtime(manager)
+    edits = []
+    answers = []
+
+    query = SimpleNamespace(
+        from_user=SimpleNamespace(id=1),
+        data="wcfg:wrapid:or_deepseek:3",
+        message=SimpleNamespace(chat_id=123),
+    )
+
+    async def edit_message_text(text, **kwargs):
+        edits.append({"text": text, **kwargs})
+
+    async def answer(text=None, **kwargs):
+        answers.append({"text": text, **kwargs})
+
+    query.edit_message_text = edit_message_text
+    query.answer = answer
+    update = SimpleNamespace(callback_query=query)
+
+    await FlexibleAgentRuntime.callback_wrapper_config(runtime, update, SimpleNamespace())
+
+    state = _read_state(tmp_path / "agent")
+    assert state["wrapper"] == {
+        "backend": "openrouter-api",
+        "model": "deepseek/deepseek-v3.2-exp",
+        "context_window": 3,
+        "fallback": "passthrough",
+    }
+    assert "Wrapper translator updated" in edits[-1]["text"]
+    assert "openrouter-api" in edits[-1]["text"]
     assert edits[-1]["reply_markup"] is not None
     assert answers[-1]["text"] is None
 
