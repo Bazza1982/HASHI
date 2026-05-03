@@ -102,7 +102,7 @@ class FakeProjectChatLogger:
         self.exchanges.append((prompt, response, source))
 
 
-def _make_background_runtime(tmp_path: Path):
+def _make_background_runtime(tmp_path: Path, wrapper_response: BackendResponse | None = None):
     runtime = object.__new__(FlexibleAgentRuntime)
     runtime.is_shutting_down = False
     runtime.name = "zelda"
@@ -125,7 +125,7 @@ def _make_background_runtime(tmp_path: Path):
     runtime._suppressed_transfer_results = []
 
     async def fake_wrapper_response(**kwargs):
-        return BackendResponse(text="wrapped visible", duration_ms=1.0)
+        return wrapper_response or BackendResponse(text="wrapped visible", duration_ms=1.0)
 
     runtime.backend_manager = SimpleNamespace(
         agent_mode="wrapper",
@@ -348,6 +348,53 @@ async def test_background_bypass_source_does_not_wrap(tmp_path):
     assert listener_payloads[0]["wrapper_used"] is False
     assert sent[0]["text"] == "core raw"
     assert voices[0]["text"] == "core raw"
+
+
+@pytest.mark.asyncio
+async def test_background_voice_source_wraps(tmp_path):
+    runtime, sent, voices = _make_background_runtime(tmp_path)
+    item = _queued_request_from("voice")
+    task = asyncio.create_task(_completed_task(BackendResponse(text="core raw voice", duration_ms=1.0)))
+    await task
+
+    await FlexibleAgentRuntime._on_background_complete(runtime, task, item)
+
+    assert sent[0]["text"] == "wrapped visible"
+    assert voices[0]["text"] == "wrapped visible"
+
+
+@pytest.mark.asyncio
+async def test_background_hchat_source_bypasses_wrapper(tmp_path):
+    runtime, sent, voices = _make_background_runtime(tmp_path)
+    item = _queued_request_from("bridge:hchat")
+    task = asyncio.create_task(_completed_task(BackendResponse(text="core raw hchat", duration_ms=1.0)))
+    await task
+
+    await FlexibleAgentRuntime._on_background_complete(runtime, task, item)
+
+    assert sent[0]["text"] == "core raw hchat"
+    assert voices[0]["text"] == "core raw hchat"
+
+
+@pytest.mark.asyncio
+async def test_background_wrapper_failure_falls_back_to_core_raw(tmp_path):
+    runtime, sent, voices = _make_background_runtime(
+        tmp_path,
+        wrapper_response=BackendResponse(text="", duration_ms=1.0, error="wrapper failed", is_success=False),
+    )
+    listener_payloads = []
+    runtime.register_request_listener = FlexibleAgentRuntime.register_request_listener.__get__(runtime, FlexibleAgentRuntime)
+    runtime.register_request_listener("req-001", lambda payload: listener_payloads.append(payload))
+    item = _queued_request()
+    task = asyncio.create_task(_completed_task(BackendResponse(text="core raw fallback", duration_ms=1.0)))
+    await task
+
+    await FlexibleAgentRuntime._on_background_complete(runtime, task, item)
+
+    assert listener_payloads[0]["text"] == "core raw fallback"
+    assert listener_payloads[0]["wrapper_failed"] is True
+    assert sent[0]["text"] == "core raw fallback"
+    assert voices[0]["text"] == "core raw fallback"
 
 
 def test_core_transcript_helper_records_foreground_path(tmp_path):

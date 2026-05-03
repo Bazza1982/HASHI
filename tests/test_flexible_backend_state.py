@@ -8,6 +8,7 @@ import pytest
 
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
+from orchestrator.wrapper_mode import load_wrapper_config
 
 
 def _make_manager(workspace: Path) -> FlexibleBackendManager:
@@ -246,3 +247,30 @@ async def test_generate_ephemeral_response_shuts_down_and_preserves_active_backe
     assert created[0].shutdown_called is True
     assert manager.current_backend is original_backend
     assert manager.config.active_backend == original_active
+
+
+def test_wrapper_config_survives_manager_reload_and_unrelated_state_saves(tmp_path):
+    workspace = tmp_path / "agent"
+    manager = _make_manager(workspace)
+    manager.agent_mode = "wrapper"
+    manager.update_wrapper_blocks(
+        core={"backend": "codex-cli", "model": "gpt-5.5"},
+        wrapper={"backend": "claude-cli", "model": "claude-haiku-4-5", "context_window": 5},
+        wrapper_slots={"1": "Be gentle."},
+    )
+
+    manager.agent_mode = "fixed"
+    manager._save_state()
+    manager.agent_mode = "wrapper"
+    manager.persist_state(active_model="gpt-5.5")
+
+    reloaded = _make_manager(workspace)
+    cfg = load_wrapper_config(reloaded.get_state_snapshot())
+    state = reloaded.get_state_snapshot()
+
+    assert cfg.core_backend == "codex-cli"
+    assert cfg.core_model == "gpt-5.5"
+    assert cfg.wrapper_backend == "claude-cli"
+    assert cfg.wrapper_model == "claude-haiku-4-5"
+    assert cfg.context_window == 5
+    assert state["wrapper_slots"] == {"1": "Be gentle."}
