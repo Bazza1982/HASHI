@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Core prompt memory stores core raw assistant output, while `core_transcript.jsonl`, visible transcript writes, and audit payloads remain separated so wrapper persona does not drift back into the core model.
   - `/verbose on` now shows a labeled wrapper trace containing core raw output, wrapper final output, wrapper status, latency, and fallback reason; `/verbose off` shows only the final reply.
   - `/reset CONFIRM` preserves wrapper config and wrapper prompt slots, matching `/sys` preservation behavior; `/wipe CONFIRM` remains a hard workspace clear.
+  - Final wrapper hardening record: `677212b` prevents wrapper persona from being written back into core prompt memory.
 - **Browser gateway alpha** — local browser gateway package and test coverage for browser-facing bridge capabilities.
 - **OLL HASHI Chrome extension scaffold** — extension files and implementation plan for browser bridge workflows.
 - **Private wake-on-LAN tooling** — local helper and tests for private wake-on-LAN flows.

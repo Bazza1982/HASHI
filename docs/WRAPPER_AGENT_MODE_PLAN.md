@@ -818,3 +818,26 @@ Make flex state writes preserve unknown keys
 - Default wrapper backend/model is `claude-cli / claude-haiku-4-5`.
 - Wrapper output should preserve technical facts, commands, numbers, code blocks, markers, and generated artifacts. It may lightly reflow prose for persona/style unless that would alter meaning.
 - `/reset CONFIRM` preserves wrapper config and prompt slots; `/wipe CONFIRM` remains the hard workspace clear.
+
+## 15. Implementation Closure Record
+
+Final wrapper-mode hardening was completed on 2026-05-03.
+
+- `88419cc` — clarified that `<core_raw>` is the assistant core draft, not user-supplied text.
+- `97578ec` — wrapped `/new` and `/fresh` session-reset replies and added the polishing placeholder during wrapper latency.
+- `843ab65` — preserved wrapper config and prompt slots across `/reset CONFIRM`.
+- `7d56ac2` — removed expensive Claude Opus from the recommended wrapper picker.
+- `677212b` — kept wrapper persona out of core prompt memory by storing core raw assistant output in memory while preserving wrapper final text for user-visible surfaces.
+
+Validation at closure:
+
+```text
+pytest tests/test_wrapper_commands.py -q
+22 passed
+
+pytest tests/test_wrapper_mode.py tests/test_wrapper_commands.py tests/test_flexible_backend_state.py tests/test_fresh_context.py -q
+53 passed
+
+pytest tests/contract/test_release_readiness_contract.py -q
+4 passed
+```

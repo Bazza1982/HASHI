@@ -1039,6 +1039,7 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
   - Foreground and background responses, listeners, transfer suppression, handoff, project chat, voice replies, and HChat routing use the wrapper-visible text where appropriate
   - Core prompt memory stores core raw assistant output, while visible transcript, project chat, core transcript, and audit metadata remain separated for debugging and user-facing continuity
   - `/reset CONFIRM` preserves wrapper mode configuration and prompt slots, matching `/sys` preservation behavior; `/wipe CONFIRM` remains a hard workspace clear
+  - Final hardening commit `677212b` prevents wrapper persona from drifting back into the core model through prompt memory
 - **Live reboot validation passed** — cold restart, `/reboot min`, `/reboot max`, Workbench health, API Gateway health, and `pytest` all passed on 2026-05-02
 - **Browser gateway work** — local gateway package and tests for browser-facing bridge capabilities
 - **OLL HASHI Chrome extension integration** — extension scaffold and planning for browser bridge workflows
