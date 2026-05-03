@@ -108,6 +108,7 @@ def _make_background_runtime(tmp_path: Path):
     runtime.name = "zelda"
     runtime.config = SimpleNamespace(active_backend="codex-cli", extra={})
     runtime.workspace_dir = tmp_path
+    runtime.core_transcript_log_path = tmp_path / "core_transcript.jsonl"
     runtime.session_id_dt = "session-test"
     runtime.telegram_connected = False
     runtime.memory_store = FakeMemoryStore()
@@ -146,6 +147,7 @@ def _make_background_runtime(tmp_path: Path):
     runtime._wrapper_timeout_s = FlexibleAgentRuntime._wrapper_timeout_s.__get__(runtime, FlexibleAgentRuntime)
     runtime._wrapper_visible_context = FlexibleAgentRuntime._wrapper_visible_context.__get__(runtime, FlexibleAgentRuntime)
     runtime._wrapper_audit_fields = FlexibleAgentRuntime._wrapper_audit_fields.__get__(runtime, FlexibleAgentRuntime)
+    runtime._append_core_transcript = FlexibleAgentRuntime._append_core_transcript.__get__(runtime, FlexibleAgentRuntime)
     runtime._apply_wrapper_to_visible_text = FlexibleAgentRuntime._apply_wrapper_to_visible_text.__get__(runtime, FlexibleAgentRuntime)
     runtime._notify_request_listeners = FlexibleAgentRuntime._notify_request_listeners.__get__(runtime, FlexibleAgentRuntime)
     sent = []
@@ -307,6 +309,11 @@ async def test_background_completion_uses_wrapper_output_for_visible_surfaces(tm
     assert runtime.project_chat_logger.exchanges[0] == ("hello", "wrapped visible", "text")
     assert sent[0]["text"] == "wrapped visible"
     assert voices[0]["text"] == "wrapped visible"
+    core_entry = json.loads((tmp_path / "core_transcript.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert core_entry["text"] == "core raw"
+    assert core_entry["visible_text"] == "wrapped visible"
+    assert core_entry["completion_path"] == "background"
+    assert core_entry["wrapper_used"] is True
 
 
 @pytest.mark.asyncio
@@ -341,3 +348,28 @@ async def test_background_bypass_source_does_not_wrap(tmp_path):
     assert listener_payloads[0]["wrapper_used"] is False
     assert sent[0]["text"] == "core raw"
     assert voices[0]["text"] == "core raw"
+
+
+def test_core_transcript_helper_records_foreground_path(tmp_path):
+    runtime, _sent, _voices = _make_background_runtime(tmp_path)
+    item = _queued_request()
+
+    wrapper_result = SimpleNamespace(
+        wrapper_used=True,
+        wrapper_failed=False,
+        fallback_reason=None,
+    )
+    runtime._append_core_transcript(
+        item,
+        core_raw="core raw foreground",
+        visible_text="wrapped foreground",
+        completion_path="foreground",
+        wrapper_result=wrapper_result,
+    )
+
+    entry = json.loads((tmp_path / "core_transcript.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert entry["role"] == "assistant_core"
+    assert entry["text"] == "core raw foreground"
+    assert entry["visible_text"] == "wrapped foreground"
+    assert entry["completion_path"] == "foreground"
+    assert entry["wrapper_used"] is True

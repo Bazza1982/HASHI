@@ -133,6 +133,7 @@ class FlexibleAgentRuntime:
         self.sys_prompt_manager = SysPromptManager(self.workspace_dir)
         self.backend_state_dir = self.workspace_dir / "backend_state"
         self.transcript_log_path = self.workspace_dir / "transcript.jsonl"
+        self.core_transcript_log_path = self.workspace_dir / "core_transcript.jsonl"
         self.recent_context_path = self.workspace_dir / "recent_context.jsonl"
         self.handoff_path = self.workspace_dir / "handoff.md"
         self.state_path = self.workspace_dir / "state.json"
@@ -7501,6 +7502,37 @@ class FlexibleAgentRuntime:
             "wrapper_fallback_reason": getattr(wrapper_result, "fallback_reason", None),
         }
 
+    def _append_core_transcript(
+        self,
+        item: QueuedRequest,
+        *,
+        core_raw: str,
+        visible_text: str,
+        completion_path: str,
+        wrapper_result,
+    ) -> None:
+        path = getattr(self, "core_transcript_log_path", None) or (self.workspace_dir / "core_transcript.jsonl")
+        entry = {
+            "role": "assistant_core",
+            "text": core_raw or "",
+            "visible_text": visible_text or "",
+            "source": item.source,
+            "request_id": item.request_id,
+            "summary": item.summary,
+            "completion_path": completion_path,
+            "backend": self.config.active_backend,
+            "wrapper_used": bool(getattr(wrapper_result, "wrapper_used", False)),
+            "wrapper_failed": bool(getattr(wrapper_result, "wrapper_failed", False)),
+            "wrapper_fallback_reason": getattr(wrapper_result, "fallback_reason", None),
+            "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
+        }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry) + "\n")
+        except Exception as exc:
+            self.error_logger.warning(f"Failed to append core transcript: {exc}")
+
     async def _apply_wrapper_to_visible_text(self, item: QueuedRequest, visible_text: str):
         if not self._wrapper_enabled():
             return visible_text, passthrough_result(visible_text, fallback_reason="wrapper_mode_disabled")
@@ -7616,6 +7648,13 @@ class FlexibleAgentRuntime:
                 self._mark_success()
                 self._record_habit_outcome(item, success=True, response_text=response.text)
                 visible_text, wrapper_result = await self._apply_wrapper_to_visible_text(item, display_text or response.text)
+                self._append_core_transcript(
+                    item,
+                    core_raw=response.text,
+                    visible_text=visible_text,
+                    completion_path="background",
+                    wrapper_result=wrapper_result,
+                )
                 await self._notify_request_listeners(
                     item.request_id,
                     {
@@ -8060,6 +8099,13 @@ class FlexibleAgentRuntime:
                     self._mark_success()
                     self._record_habit_outcome(item, success=True, response_text=response.text)
                     visible_text, wrapper_result = await self._apply_wrapper_to_visible_text(item, display_text or response.text)
+                    self._append_core_transcript(
+                        item,
+                        core_raw=response.text,
+                        visible_text=visible_text,
+                        completion_path="foreground",
+                        wrapper_result=wrapper_result,
+                    )
                     await self._notify_request_listeners(
                         item.request_id,
                         {
