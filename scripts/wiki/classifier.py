@@ -130,7 +130,18 @@ def _mock_classify(memories: list[MemoryRecord]) -> ClassificationDryRunResult:
     assignments = []
     for record in memories:
         lower = record.content.lower()
-        if "memory" in lower or "consolidat" in lower or "embedding" in lower:
+        if (
+            "security" in lower
+            or "permission" in lower
+            or "firewall" in lower
+            or "port" in lower
+            or "chmod" in lower
+            or "pip-audit" in lower
+            or "vulnerability" in lower
+            or "operational risk" in lower
+        ):
+            topics = ("HASHI_Ops_Security",)
+        elif "memory" in lower or "consolidat" in lower or "embedding" in lower:
             topics = ("AI_Memory_Systems",)
         elif "wiki" in lower or "obsidian" in lower:
             topics = ("Obsidian_Wiki",)

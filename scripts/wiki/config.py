@@ -45,6 +45,10 @@ TOPICS: dict[str, dict[str, str]] = {
         "display": "AI Memory Systems",
         "desc": "Bridge memory, consolidation, embeddings, vector search, SQLite memory schema, and retrieval behavior.",
     },
+    "HASHI_Ops_Security": {
+        "display": "HASHI Operations & Security",
+        "desc": "HASHI operations, routine maintenance, security scans, dependency updates, file permissions, firewall/port review, Windows/WSL operational risk, and safe maintenance actions.",
+    },
     "Nagare_Workflow": {
         "display": "Nagare Workflow Engine",
         "desc": "Nagare, Shimanto, HITL workflow steps, approvals, checkpoints, and JobQueue design.",

@@ -173,6 +173,10 @@ Topics and their precise semantic scope (NOT keyword matching):
 - AI_Memory_Systems: How memories are stored/retrieved/embedded/consolidated.
   BGE-M3 embeddings, SQLite schema, consolidation pipeline, vector search.
   NOT just any mention of "memory".
+- HASHI_Ops_Security: HASHI operations and security maintenance — system security
+  scans, dependency update checks, chmod/file-permission reviews, firewall/port
+  checks, Windows/WSL operational risk, and safe maintenance action planning.
+  NOT the general HASHI orchestrator design itself.
 - Nagare_Workflow: Nagare HITL workflow engine — JobQueue, Shimanto, workflow
   step design, checkpoint/approval flows. NOT generic task loops.
 - Minato_Platform: Minato universal agentic AI OS — plugin-socket architecture,
@@ -1026,7 +1030,24 @@ Manual review:
 - No Obsidian vault files were written.
 - The old DB backup remains available for rollback.
 
-### 14.7 Remaining implementation boundaries
+### 14.7 Milestone 7 taxonomy expansion record
+
+Status: completed on 2026-05-04.
+
+Change:
+
+- Added `HASHI_Ops_Security` to the topic taxonomy.
+- Scope: HASHI operations, routine maintenance, security scans, dependency update checks, file permissions, firewall/port review, Windows/WSL operational risk, and safe maintenance actions.
+- Kept `HASHI_Architecture` focused on orchestrator, lifecycle, HChat, scheduler, gateway, instance topology, and architecture decisions.
+- Updated the mock classifier so security/maintenance samples route to `HASHI_Ops_Security` in tests.
+
+Live DB correction:
+
+- The expanded live smoke had already classified `consolidated_id` 25, 26, and 27 as `HASHI_Architecture`.
+- These rows are security-scan / maintenance-action memories, so the live `wiki_state.sqlite` assignments were updated to `HASHI_Ops_Security` after a fresh backup.
+- No watermark rollback was required because only topic assignments changed; the rows remain processed.
+
+### 14.8 Remaining implementation boundaries
 
 The plan is ready to start once these implementation boundaries are accepted:
 
@@ -1056,7 +1077,7 @@ The plan is ready to start once these implementation boundaries are accepted:
 
 1. **LLM backend confirmed:** All pipeline LLM calls use Lily-owned CLI/local backend. Production default is `claude-cli`. OpenRouter API and DeepSeek API are explicitly blocked for automated wiki runs. `CLAUDE_BIN` path is read from HASHI global config at runtime.
 
-2. **Topic taxonomy expansion:** Several active areas have no topic (e.g. "Security Operations" for arale's daily scans, "Agent Personas" for character/identity work). Consider adding before backfill so they are classified correctly from the start.
+2. **Topic taxonomy expansion:** `HASHI_Ops_Security` has been added for operations/security maintenance. Another likely future topic is "Agent Personas" for character/identity work if those memories should become wiki material rather than `NONE` or private-domain skips.
 
 3. **Confidence threshold:** Validate `confidence >= 0.7` during backfill pass. If a topic consistently gets 70%+ low-confidence, the taxonomy definition needs refinement, not the threshold.
 

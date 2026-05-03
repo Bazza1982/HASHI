@@ -119,6 +119,7 @@ def test_classifier_prompt_contains_topic_taxonomy(tmp_path: Path) -> None:
     prompt = build_classification_prompt([record])
     assert "HASHI_Architecture" in prompt
     assert "AI_Memory_Systems" in prompt
+    assert "HASHI_Ops_Security" in prompt
     assert '"id": 1' in prompt
 
 
@@ -187,6 +188,17 @@ def test_run_pipeline_mock_classifier_dry_run(tmp_path: Path) -> None:
     assert "Classifier stage: True" in text
     assert "Backend: mock" in text
     assert "Assignments: 1" in text
+
+
+def test_mock_classifier_routes_security_operations_to_ops_topic() -> None:
+    from scripts.wiki.classifier import classify_memories_dry_run
+
+    result = classify_memories_dry_run(
+        [_record(9, "Run pip-audit, review chmod permissions, and check exposed port 3390.")],
+        WikiConfig(),
+        mock=True,
+    )
+    assert result.assignments[0].topics == ("HASHI_Ops_Security",)
 
 
 def test_state_persists_assignments_and_advances_watermark(tmp_path: Path) -> None:
