@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Optional, Any
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig, AgentConfig
@@ -46,14 +47,29 @@ class FlexibleBackendManager:
     def _save_state(self, active_model: str | None = None):
         if active_model is not None:
             self._active_model_override = active_model
-        state = {
-            "active_backend": self.config.active_backend,
-            "agent_mode": self.agent_mode,
-        }
+        # Preserve state blocks owned by newer/optional features. This method is
+        # called from the runtime event loop and is expected to stay serialized.
+        state: dict[str, Any] = {}
+        if self.state_file.exists():
+            try:
+                loaded = json.loads(self.state_file.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    state.update(loaded)
+            except Exception as e:
+                self.logger.error(f"Failed to merge existing state.json: {e}")
+
+        state["active_backend"] = self.config.active_backend
+        state["agent_mode"] = self.agent_mode
         if getattr(self, "_active_model_override", None):
             state["active_model"] = self._active_model_override
+        else:
+            state.pop("active_model", None)
+
         try:
-            self.state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
+            self.state_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self.state_file.with_name(f".{self.state_file.name}.tmp-{os.getpid()}")
+            tmp_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+            tmp_path.replace(self.state_file)
         except Exception as e:
             self.logger.error(f"Failed to save state.json: {e}")
 
