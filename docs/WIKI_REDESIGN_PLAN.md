@@ -838,6 +838,34 @@ python3 scripts/wiki/run_pipeline.py --reclassify-topic Carbon_Accounting --sinc
 
 ## 14. Implementation Start Readiness
 
+### 14.1 Milestone 1 implementation record
+
+Status: implemented on 2026-05-04.
+
+Implemented modules:
+
+- `scripts/wiki/config.py` — paths, privacy domains, approved CLI backend policy, topic taxonomy seed.
+- `scripts/wiki/state.py` — `wiki_state.sqlite` schema initialization for `classification_assignment`, `classification_run`, and `run_state`.
+- `scripts/wiki/fetcher.py` — Stage 0 fetcher for new rows from `consolidated_memory.sqlite`, with private-domain skips and credential redaction.
+- `scripts/wiki/run_pipeline.py` — dry-run orchestration, consolidation completion check, and no-LLM/no-vault report.
+
+Validation record:
+
+```text
+python3 -m py_compile scripts/wiki/*.py tests/test_wiki_pipeline.py
+pytest tests/test_wiki_pipeline.py -q
+python3 scripts/wiki/run_pipeline.py --daily --dry-run --limit 20
+```
+
+Dry-run safety:
+
+- No LLM classifier is called.
+- No Obsidian vault pages are written.
+- Dry-run reports write to `workspaces/lily/wiki_reports/wiki_dry_run_latest.md`, not the production `wiki_organise_report_latest.md`.
+- `wiki_state.sqlite` schema initialization is the only persistent setup side effect.
+
+### 14.2 Remaining implementation boundaries
+
 The plan is ready to start once these implementation boundaries are accepted:
 
 - Memory consolidation is scheduled at 03:05 and owned by Lily's HASHI cron job (`lily-memory-consolidation`).
