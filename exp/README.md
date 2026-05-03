@@ -63,3 +63,7 @@ state, or alter core orchestration behavior.
 EXP should be trained, not merely written. See `training.md` for the standard
 program for turning templates, examples, goals, practice, validators, and
 failure memory into a stable EXP.
+
+Future agents should also read `AGENT.md` before continuing EXP training or
+handing over a final artefact. It contains trainer-side review rules and
+mistakes that must not be repeated.

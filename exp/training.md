@@ -146,3 +146,7 @@ For Office desktop EXP, a strong training packet might include:
 Do not promote a candidate EXP to stable just because the instructions sound
 good. Promote it only when the agent has used it successfully, produced
 evidence, and recovered from at least one realistic failure mode.
+
+Before any handover, also follow the trainer-side checklist in `AGENT.md`.
+That guide records cross-EXP review lessons, including the rule that visual
+comparison alone is not enough for PowerPoint or document rebuilds.
