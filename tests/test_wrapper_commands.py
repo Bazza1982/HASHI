@@ -4,6 +4,7 @@ import asyncio
 import json
 import sys
 import types
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -179,6 +180,76 @@ def _make_background_runtime(tmp_path: Path, wrapper_response: BackendResponse |
     return runtime, sent, voices
 
 
+class FakeBot:
+    def __init__(self):
+        self.messages = []
+        self.deleted = []
+
+    async def send_message(self, chat_id, text, parse_mode=None):
+        self.messages.append({"chat_id": chat_id, "text": text, "parse_mode": parse_mode})
+        return SimpleNamespace(message_id=len(self.messages))
+
+    async def delete_message(self, chat_id, message_id):
+        self.deleted.append({"chat_id": chat_id, "message_id": message_id})
+
+
+class FakeContextAssembler:
+    def build_prompt_payload(
+        self,
+        prompt,
+        backend,
+        *,
+        extra_sections=None,
+        inject_memory=True,
+        incremental=False,
+    ):
+        return {
+            "final_prompt": f"system\n\n{prompt}",
+            "audit": {
+                "sections": [],
+                "budget_applied": False,
+                "budget_limit_chars": 24000,
+                "context_chars_before_budget": 0,
+                "time_fyi_chars": 0,
+                "context_fingerprint": "test",
+            },
+        }
+
+
+def _make_foreground_runtime(tmp_path: Path, wrapper_response: BackendResponse | None = None):
+    runtime, sent, voices = _make_background_runtime(tmp_path, wrapper_response=wrapper_response)
+    runtime.queue = asyncio.Queue()
+    runtime.app = SimpleNamespace(bot=FakeBot())
+    runtime.telegram_logger = SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None)
+    runtime.context_assembler = FakeContextAssembler()
+    runtime.backend_manager.current_backend = SimpleNamespace(_session_id=None)
+    runtime.backend_manager.generate_response = lambda *a, **k: _completed_task(
+        BackendResponse(text="core raw foreground", duration_ms=1.0)
+    )
+    runtime._remote_backend_block_reason = lambda source: None
+    runtime._mark_activity = lambda: None
+    runtime._log_maintenance = lambda *a, **k: None
+    runtime._consume_session_primer = lambda item: item.prompt
+    runtime._build_habit_sections = lambda item, effective_prompt: ([], [])
+    runtime._workzone_prompt_section = lambda: []
+    runtime.get_typing_placeholder = lambda: ("typing", None)
+    runtime.typing_loop = lambda chat_id, stop_event: stop_event.wait()
+    runtime._strip_transfer_accept_prefix = lambda item, text: text
+    runtime._verbose = False
+    runtime._think = False
+    runtime._cos_enabled = False
+    runtime.is_generating = False
+    runtime.current_request_meta = None
+    hchat_replies = []
+
+    async def hchat_route_reply(item, text):
+        hchat_replies.append({"request_id": item.request_id, "text": text, "source": item.source})
+
+    runtime._hchat_route_reply = hchat_route_reply
+    runtime.process_queue = FlexibleAgentRuntime.process_queue.__get__(runtime, FlexibleAgentRuntime)
+    return runtime, sent, voices, hchat_replies
+
+
 def _queued_request() -> QueuedRequest:
     return QueuedRequest(
         request_id="req-001",
@@ -226,6 +297,25 @@ async def test_cmd_mode_wrapper_persists_mode(tmp_path):
     assert state["active_backend"] == "codex-cli"
     assert state["active_model"] == "gpt-5.5"
     assert "Switched to **wrapper** mode" in messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_cmd_mode_wrapper_does_not_activate_when_core_switch_fails(tmp_path):
+    manager = _make_manager(tmp_path / "agent")
+    runtime, messages = _make_runtime(manager)
+
+    async def fail_switch(chat_id, target_engine, target_model=None, with_context=False):
+        return False, "Backend not allowed"
+
+    runtime._switch_backend_mode = fail_switch
+    update, context = _update(["wrapper"])
+
+    await FlexibleAgentRuntime.cmd_mode(runtime, update, context)
+
+    assert manager.agent_mode == "flex"
+    assert not (tmp_path / "agent" / "state.json").exists()
+    assert "Wrapper mode was not activated" in messages[-1]
+    assert "Backend not allowed" in messages[-1]
 
 
 @pytest.mark.asyncio
@@ -303,6 +393,42 @@ async def test_cmd_wrapper_set_list_and_clear_slots(tmp_path):
 
     state = _read_state(tmp_path / "agent")
     assert state["wrapper_slots"] == {}
+
+
+@pytest.mark.asyncio
+async def test_foreground_completion_uses_wrapper_output_for_visible_surfaces(tmp_path):
+    runtime, sent, voices, hchat_replies = _make_foreground_runtime(tmp_path)
+    listener_payloads = []
+    runtime.register_request_listener = FlexibleAgentRuntime.register_request_listener.__get__(runtime, FlexibleAgentRuntime)
+    runtime.register_request_listener("req-001", lambda payload: listener_payloads.append(payload))
+    item = _queued_request()
+    await runtime.queue.put(item)
+
+    task = asyncio.create_task(runtime.process_queue())
+    try:
+        for _ in range(50):
+            if sent and voices and listener_payloads and hchat_replies:
+                break
+            await asyncio.sleep(0.01)
+        assert sent[0]["text"] == "wrapped visible"
+        assert voices[0]["text"] == "wrapped visible"
+        assert listener_payloads[0]["text"] == "wrapped visible"
+        assert listener_payloads[0]["visible_text"] == "wrapped visible"
+        assert listener_payloads[0]["core_raw"] == "core raw foreground"
+        assert listener_payloads[0]["wrapper_used"] is True
+        assert runtime.last_response["text"] == "wrapped visible"
+        assert ("assistant", "codex-cli", "wrapped visible") in runtime.memory_store.turns
+        assert ("assistant", "wrapped visible", "text") in runtime.handoff_builder.transcript
+        assert runtime.project_chat_logger.exchanges[0] == ("hello", "wrapped visible", "text")
+        assert hchat_replies[0]["text"] == "wrapped visible"
+        core_entry = json.loads((tmp_path / "core_transcript.jsonl").read_text(encoding="utf-8").splitlines()[0])
+        assert core_entry["text"] == "core raw foreground"
+        assert core_entry["visible_text"] == "wrapped visible"
+        assert core_entry["completion_path"] == "foreground"
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
 
 
 @pytest.mark.asyncio

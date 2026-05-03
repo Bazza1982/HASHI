@@ -5614,11 +5614,10 @@ class FlexibleAgentRuntime:
             await self._reply_text(update, f"Already in **{current}** mode.", parse_mode="Markdown")
             return
 
-        self.backend_manager.agent_mode = args
-        self.backend_manager._save_state()
-
         backend = self.backend_manager.current_backend
         if args == "fixed":
+            self.backend_manager.agent_mode = args
+            self.backend_manager._save_state()
             # Enable session persistence on compatible backends
             if hasattr(backend, "set_session_mode"):
                 backend.set_session_mode(True)
@@ -5632,6 +5631,8 @@ class FlexibleAgentRuntime:
                 parse_mode="Markdown",
             )
         elif args == "flex":
+            self.backend_manager.agent_mode = args
+            self.backend_manager._save_state()
             # Disable session persistence
             if hasattr(backend, "set_session_mode"):
                 backend.set_session_mode(False)
@@ -5651,6 +5652,17 @@ class FlexibleAgentRuntime:
                 backend=cfg.core_backend,
                 model=cfg.core_model,
             )
+            if not switch_ok:
+                await self._reply_text(
+                    update,
+                    "Wrapper mode was not activated.\n"
+                    f"• Core: `{cfg.core_backend}` / `{cfg.core_model}`\n"
+                    f"• Reason: {switch_message}",
+                    parse_mode="Markdown",
+                )
+                return
+            self.backend_manager.agent_mode = args
+            self.backend_manager._save_state()
             await self._reply_text(
                 update,
                 "Switched to **wrapper** mode.\n"
@@ -7504,7 +7516,8 @@ class FlexibleAgentRuntime:
             return []
         try:
             rounds = self.handoff_builder.get_recent_rounds(max_rounds=context_window)
-        except Exception:
+        except Exception as exc:
+            self.logger.warning(f"_wrapper_visible_context: get_recent_rounds failed: {exc}")
             return []
         context: list[dict[str, str]] = []
         for round_entries in rounds:
