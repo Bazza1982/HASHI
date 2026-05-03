@@ -1,0 +1,39 @@
+{
+  "id": "barry/office_desktop",
+  "type": "exp",
+  "version": 1,
+  "owner": "barry",
+  "domain": "office_desktop",
+  "summary": "context-specific Office desktop expertise for Barry's HASHI Windows environment.",
+  "context": {
+    "user": "Barry",
+    "machine": "HASHI Windows desktop",
+    "toolchain": [
+      "use_computer",
+      "windows_helper",
+      "Office COM when quality or validation requires object-level control"
+    ],
+    "applications": [
+      "Microsoft Word",
+      "Microsoft Excel",
+      "Microsoft PowerPoint"
+    ]
+  },
+  "playbooks": {
+    "word": "playbooks/word.exp.md",
+    "excel": "playbooks/excel.exp.md",
+    "powerpoint": "playbooks/powerpoint.exp.md",
+    "integrated_workflows": "playbooks/integrated_workflows.exp.md"
+  },
+  "failure_memory": "failures/failure_memory.jsonl",
+  "validators": [
+    "validators/office_validators.md"
+  ],
+  "templates": "templates",
+  "evidence": "evidence",
+  "scope_limits": [
+    "This EXP is not a generic Office skill.",
+    "Assume it applies to Barry's HASHI Windows desktop unless revalidated elsewhere.",
+    "Prefer validation evidence over visual impressions."
+  ]
+}

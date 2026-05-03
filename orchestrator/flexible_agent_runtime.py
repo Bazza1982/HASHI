@@ -25,6 +25,7 @@ from orchestrator.config import FlexibleAgentConfig, GlobalConfig
 from orchestrator.agent_runtime import QueuedRequest, _safe_excerpt, _md_to_html, _print_user_message, _print_final_response, _print_thinking, resolve_authorized_telegram_ids
 from orchestrator.agent_fyi import build_agent_fyi_primer
 from orchestrator.bridge_memory import BridgeMemoryStore, BridgeContextAssembler, SysPromptManager
+from orchestrator.exp_mode import build_exp_task_prompt, get_exp_usage_text
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
 from orchestrator.flexible_backend_registry import (
     CLAUDE_MODEL_ALIASES,
@@ -311,7 +312,7 @@ class FlexibleAgentRuntime:
                 }
             )
             # explicitly allowed convenience commands for conversational agents
-            self._enabled_commands.update({"jobs", "verbose", "think", "voice", "whisper"})
+            self._enabled_commands.update({"jobs", "verbose", "think", "voice", "whisper", "exp"})
 
         # Optional overrides (per-agent): extra.limited_policy
         policy = extra.get("limited_policy") if isinstance(extra, dict) else None
@@ -327,7 +328,7 @@ class FlexibleAgentRuntime:
                     self._enabled_commands.add(name.strip().lstrip("/").lower())
 
         # help/status/new/wipe/clear/model/effort/mode should always be available
-        self._enabled_commands.update({"help", "status", "new", "wipe", "reset", "clear", "memory", "model", "effort", "mode", "jobs", "verbose", "think", "voice", "whisper", "transfer", "fork", "cos", "long", "end"})
+        self._enabled_commands.update({"help", "status", "new", "wipe", "reset", "clear", "memory", "model", "effort", "mode", "jobs", "verbose", "think", "voice", "whisper", "transfer", "fork", "cos", "long", "end", "exp"})
 
     def _is_command_allowed(self, cmd: str) -> bool:
         cmd = (cmd or "").lstrip("/").lower()
@@ -1728,6 +1729,7 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CommandHandler("active", self._wrap_cmd("active", self.cmd_active)))
         self.app.add_handler(CommandHandler("fyi", self._wrap_cmd("fyi", self.cmd_fyi)))
         self.app.add_handler(CommandHandler("debug", self._wrap_cmd("debug", self.cmd_debug)))
+        self.app.add_handler(CommandHandler("exp", self._wrap_cmd("exp", self.cmd_exp)))
         self.app.add_handler(CommandHandler("skill", self._wrap_cmd("skill", self.cmd_skill)))
         self.app.add_handler(CommandHandler("backend", self._wrap_cmd("backend", self.cmd_backend)))
         self.app.add_handler(CommandHandler("handoff", self._wrap_cmd("handoff", self.cmd_handoff)))
@@ -3495,6 +3497,22 @@ class FlexibleAgentRuntime:
             prompt,
             f"skill:{skill.id}",
             f"Skill {skill.id}",
+        )
+
+    async def cmd_exp(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        task = " ".join(context.args or []).strip()
+        if not task:
+            await self._reply_text(update, get_exp_usage_text())
+            return
+        prompt = build_exp_task_prompt(task)
+        await self._reply_text(update, "Running with EXP guidebook...")
+        await self.enqueue_request(
+            update.effective_chat.id,
+            prompt,
+            "exp",
+            "EXP-guided task",
         )
 
     async def callback_skill(self, update: Update, context: Any):
@@ -7564,6 +7582,7 @@ class FlexibleAgentRuntime:
             BotCommand("active", "Toggle proactive heartbeat"),
             BotCommand("fyi", "Refresh bridge environment awareness"),
             BotCommand("debug", "Run in strict debug mode"),
+            BotCommand("exp", "Run with context-specific EXP guidebook"),
             BotCommand("skill", "Browse and run skills"),
             BotCommand("backend", "Show backend buttons (+ means context)"),
             BotCommand("handoff", "Fresh session with recent continuity"),

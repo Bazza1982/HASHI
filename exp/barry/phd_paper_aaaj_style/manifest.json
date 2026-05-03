@@ -1,0 +1,42 @@
+{
+  "id": "barry/phd_paper_aaaj_style",
+  "type": "exp",
+  "version": 1,
+  "owner": "barry",
+  "domain": "phd_paper_aaaj_style",
+  "status": "stable",
+  "summary": "stable EXP for editing Barry's specific PhD Paper 1 AAAJ Word draft from scratch using its source template context.",
+  "context": {
+    "user": "Barry",
+    "project": "PhD Paper 1 systematic literature review",
+    "style_family": "AAAJ journal template",
+    "preference_sources": [
+      "journal requirements",
+      "supervisor preferences",
+      "Barry's draft writing and formatting style"
+    ],
+    "applications": [
+      "Microsoft Word"
+    ]
+  },
+  "training_materials": {
+    "source_copy": "training_materials/with_new_template_paper_1_slr_aaaj_jan_2026",
+    "note": "Copied from Barry's OneDrive desktop paper draft folder on 2026-04-30."
+  },
+  "training_runs": {
+    "blank_rebuild_001": "training_runs/blank_rebuild_001/RUN.md"
+  },
+  "playbooks": {
+    "word_style": "playbooks/word_style.exp.md",
+    "edit_specific_draft_from_scratch": "playbooks/edit_specific_draft_from_scratch.exp.md"
+  },
+  "failure_memory": "failures/failure_memory.jsonl",
+  "validators": [
+    "validators/style_validators.md"
+  ],
+  "scope_limits": [
+    "This EXP is stable only for Barry's specific PhD Paper 1 AAAJ-style draft and close edits derived from it.",
+    "Do not assume it applies to other journals, later templates, or different supervisor preferences without new training materials.",
+    "Exact reconstruction requires preserving the source template context and validating rendered pages."
+  ]
+}
