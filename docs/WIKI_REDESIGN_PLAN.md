@@ -864,7 +864,42 @@ Dry-run safety:
 - Dry-run reports write to `workspaces/lily/wiki_reports/wiki_dry_run_latest.md`, not the production `wiki_organise_report_latest.md`.
 - `wiki_state.sqlite` schema initialization is the only persistent setup side effect.
 
-### 14.2 Remaining implementation boundaries
+### 14.2 Milestone 2 implementation record
+
+Status: implemented on 2026-05-04.
+
+Implemented modules:
+
+- `scripts/wiki/backend_client.py` — resolves Lily's active backend from `workspaces/lily/state.json`, refuses remote API backends, and invokes only approved CLI/local backends.
+- `scripts/wiki/classifier.py` — builds the topic taxonomy prompt, parses strict JSON classifier output, validates topic IDs, and supports deterministic mock dry-runs.
+- `scripts/wiki/run_pipeline.py` — supports `--classify-dry-run`, `--mock-classifier`, and `--max-classify`.
+
+Validation record:
+
+```text
+python3 -m py_compile scripts/wiki/*.py tests/test_wiki_pipeline.py
+pytest tests/test_wiki_pipeline.py -q
+python3 scripts/wiki/run_pipeline.py --daily --dry-run --classify-dry-run --mock-classifier --limit 20
+python3 scripts/wiki/run_pipeline.py --daily --dry-run --classify-dry-run --limit 20 --max-classify 1
+```
+
+The real CLI smoke used Lily's active backend:
+
+```text
+Backend: claude-cli
+Model: claude-sonnet-4-6
+Assignments: 1
+Topic Counts: AI_Memory_Systems: 1
+```
+
+Dry-run safety:
+
+- Classifier assignments are parsed and reported but not written to `classification_assignment`.
+- `last_classified_id` is not advanced.
+- No Obsidian vault pages are written.
+- Remote API backends such as `openrouter-api` and `deepseek-api` are refused before any call.
+
+### 14.3 Remaining implementation boundaries
 
 The plan is ready to start once these implementation boundaries are accepted:
 

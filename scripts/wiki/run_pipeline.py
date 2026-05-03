@@ -13,10 +13,12 @@ from zoneinfo import ZoneInfo
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from scripts.wiki.classifier import ClassificationDryRunResult, classify_memories_dry_run
     from scripts.wiki.config import WikiConfig, default_config
     from scripts.wiki.fetcher import FetchResult, fetch_new_memories
     from scripts.wiki.state import WikiState
 else:
+    from .classifier import ClassificationDryRunResult, classify_memories_dry_run
     from .config import WikiConfig, default_config
     from .fetcher import FetchResult, fetch_new_memories
     from .state import WikiState
@@ -30,8 +32,24 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Emit weekly digest when the local day is Saturday.",
     )
-    parser.add_argument("--dry-run", action="store_true", help="Do not classify or write pages.")
+    parser.add_argument("--dry-run", action="store_true", help="Do not persist classifications or write pages.")
+    parser.add_argument(
+        "--classify-dry-run",
+        action="store_true",
+        help="Call the Lily CLI backend classifier but do not persist assignments.",
+    )
+    parser.add_argument(
+        "--mock-classifier",
+        action="store_true",
+        help="Use deterministic local mock classifications for tests and pipeline smoke checks.",
+    )
     parser.add_argument("--limit", type=int, default=None, help="Limit fetched consolidated rows.")
+    parser.add_argument(
+        "--max-classify",
+        type=int,
+        default=None,
+        help="Limit classifiable rows sent to the classifier during dry-run.",
+    )
     parser.add_argument(
         "--skip-consolidation-check",
         action="store_true",
@@ -55,7 +73,26 @@ def run_stage0(config: WikiConfig, args: argparse.Namespace) -> list[str]:
             consolidation_ok, consolidation_reason = check_today_consolidation(config, now)
 
         fetch_result = fetch_new_memories(config, state, limit=args.limit)
-        lines = build_report(config, state, fetch_result, consolidation_ok, consolidation_reason, now, args)
+        classifier_result = None
+        if args.classify_dry_run:
+            if not args.dry_run:
+                raise ValueError("--classify-dry-run currently requires --dry-run")
+            if consolidation_ok:
+                classifier_result = classify_memories_dry_run(
+                    fetch_result.classifiable[: args.max_classify],
+                    config,
+                    mock=args.mock_classifier,
+                )
+        lines = build_report(
+            config,
+            state,
+            fetch_result,
+            consolidation_ok,
+            consolidation_reason,
+            now,
+            args,
+            classifier_result,
+        )
         report_path = config.dry_run_report_latest if args.dry_run else config.report_latest
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -105,6 +142,7 @@ def build_report(
     consolidation_reason: str,
     now: datetime,
     args: argparse.Namespace,
+    classifier_result: ClassificationDryRunResult | None = None,
 ) -> list[str]:
     reason_counts = Counter(record.reason for record in fetch_result.skipped)
     domain_counts = Counter(record.domain for record in fetch_result.classifiable)
@@ -116,6 +154,7 @@ def build_report(
         f"- Timestamp: {now.isoformat()}",
         f"- Mode: {'daily' if args.daily else 'manual'}",
         f"- Dry run: {bool(args.dry_run)}",
+        f"- Classifier dry run: {bool(args.classify_dry_run)}",
         f"- Consolidation check: {'ok' if consolidation_ok else 'blocked'} — {consolidation_reason}",
         f"- Weekly digest due: {weekly_due}",
         "",
@@ -139,14 +178,40 @@ def build_report(
         lines.extend(f"- {reason}: {count}" for reason, count in sorted(reason_counts.items()))
     else:
         lines.append("- none")
+    lines.extend(["", "## Classifier Dry Run"])
+    if classifier_result is None:
+        lines.append("- not run")
+    else:
+        topic_counts = Counter()
+        low_confidence = 0
+        for assignment in classifier_result.assignments:
+            for topic in assignment.topics:
+                topic_counts[topic] += 1
+            if assignment.confidence < 0.7:
+                low_confidence += 1
+        lines.extend(
+            [
+                f"- Backend: {classifier_result.backend}",
+                f"- Model: {classifier_result.model}",
+                f"- Assignments: {len(classifier_result.assignments)}",
+                f"- Low confidence: {low_confidence}",
+                f"- Raw response chars: {classifier_result.raw_chars}",
+            ]
+        )
+        lines.append("")
+        lines.append("### Topic Counts")
+        if topic_counts:
+            lines.extend(f"- {topic}: {count}" for topic, count in sorted(topic_counts.items()))
+        else:
+            lines.append("- none")
     lines.extend(
         [
             "",
             "## Safety",
             "",
-            "- No LLM classifier was called in Milestone 1.",
+            "- LLM classifier assignments are not persisted in dry-run mode.",
             "- No Obsidian vault pages were written.",
-            "- `wiki_state.sqlite` schema was initialized only.",
+            "- `wiki_state.sqlite` schema exists, but watermark is not advanced.",
         ]
     )
     return lines

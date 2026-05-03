@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
+from scripts.wiki.backend_client import BackendPolicyError, call_lily_cli_backend
+from scripts.wiki.classifier import build_classification_prompt, parse_classification_response
 from scripts.wiki.config import WikiConfig
 from scripts.wiki.fetcher import fetch_new_memories
-from scripts.wiki.run_pipeline import check_today_consolidation
+from scripts.wiki.run_pipeline import check_today_consolidation, run_stage0
 from scripts.wiki.state import WikiState
 
 
@@ -102,3 +107,108 @@ def test_consolidation_check_blocks_without_embed_phase(tmp_path: Path) -> None:
     )
     assert ok is False
     assert "embed phase not complete" in reason
+
+
+def test_classifier_prompt_contains_topic_taxonomy(tmp_path: Path) -> None:
+    record = _record(1, "HASHI scheduler and memory consolidation decision.")
+    prompt = build_classification_prompt([record])
+    assert "HASHI_Architecture" in prompt
+    assert "AI_Memory_Systems" in prompt
+    assert '"id": 1' in prompt
+
+
+def test_classifier_response_parser_validates_topics() -> None:
+    record = _record(7, "HASHI wiki design.")
+    call = subprocess.CompletedProcess(
+        ["claude"],
+        0,
+        stdout='[{"id":7,"topics":["Obsidian_Wiki"],"confidence":0.91}]',
+        stderr="",
+    )
+    result = parse_classification_response(
+        call=type("Call", (), {"text": call.stdout, "backend": "claude-cli", "model": "claude-sonnet-4-6"})(),
+        memories=[record],
+    )
+    assert result.assignments[0].topics == ("Obsidian_Wiki",)
+
+
+def test_backend_client_refuses_remote_api_backend(tmp_path: Path) -> None:
+    _write_lily_state(tmp_path, "openrouter-api", "anthropic/claude-sonnet-4.6")
+    config = WikiConfig(hashi_root=tmp_path)
+    with pytest.raises(BackendPolicyError):
+        call_lily_cli_backend("hello", config, runner=_fake_runner)
+
+
+def test_backend_client_calls_lily_cli_backend(tmp_path: Path) -> None:
+    _write_lily_state(tmp_path, "claude-cli", "claude-sonnet-4-6")
+    (tmp_path / "agents.json").write_text('{"global":{"claude_cmd":"/usr/bin/claude"}}', encoding="utf-8")
+    config = WikiConfig(hashi_root=tmp_path)
+    result = call_lily_cli_backend("hello", config, runner=_fake_runner)
+    assert result.backend == "claude-cli"
+    assert result.model == "claude-sonnet-4-6"
+    assert result.text.startswith("[")
+
+
+def test_run_pipeline_mock_classifier_dry_run(tmp_path: Path) -> None:
+    consolidated = tmp_path / "consolidated_memory.sqlite"
+    _make_consolidated_db(consolidated)
+    log = tmp_path / "consolidation_log.jsonl"
+    log.write_text(
+        '{"timestamp":"2026-05-03T18:08:00+00:00","phase":"embed","embedded":10,"errors":0}\n',
+        encoding="utf-8",
+    )
+    config = WikiConfig(
+        hashi_root=tmp_path,
+        consolidated_db=consolidated,
+        wiki_state_db=tmp_path / "wiki_state.sqlite",
+        consolidation_log=log,
+        dry_run_report_latest=tmp_path / "wiki_dry_run.md",
+    )
+    args = argparse.Namespace(
+        daily=True,
+        weekly_if_saturday=False,
+        dry_run=True,
+        classify_dry_run=True,
+        mock_classifier=True,
+        limit=10,
+        max_classify=None,
+        skip_consolidation_check=False,
+    )
+    lines = run_stage0(config, args)
+    text = "\n".join(lines)
+    assert "Classifier dry run: True" in text
+    assert "Backend: mock" in text
+    assert "Assignments: 1" in text
+
+
+def _record(consolidated_id: int, content: str):
+    from scripts.wiki.fetcher import MemoryRecord
+
+    return MemoryRecord(
+        id=consolidated_id,
+        instance="HASHI1",
+        agent_id="lily",
+        domain="project",
+        memory_type="semantic",
+        content=content,
+        source_ts="2026-05-04T03:10:00+10:00",
+        ts_source="test",
+    )
+
+
+def _write_lily_state(root: Path, backend: str, model: str) -> None:
+    state_dir = root / "workspaces/lily"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "state.json").write_text(
+        f'{{"active_backend":"{backend}","active_model":"{model}"}}',
+        encoding="utf-8",
+    )
+
+
+def _fake_runner(argv, **kwargs):
+    return subprocess.CompletedProcess(
+        argv,
+        0,
+        stdout='[{"id":1,"topics":["HASHI_Architecture"],"confidence":0.9}]',
+        stderr="",
+    )
