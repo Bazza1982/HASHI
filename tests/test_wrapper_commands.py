@@ -57,9 +57,11 @@ def _make_runtime(manager: FlexibleBackendManager) -> tuple[FlexibleAgentRuntime
     runtime._get_current_effort = lambda: None
     runtime.last_backend_switch_at = None
     messages: list[str] = []
+    runtime._reply_payloads = []
 
     async def _reply_text(update, text, **kwargs):
         messages.append(text)
+        runtime._reply_payloads.append({"text": text, **kwargs})
 
     async def _switch_backend_mode(chat_id, target_engine, target_model=None, with_context=False):
         manager.config.active_backend = target_engine
@@ -369,6 +371,64 @@ async def test_cmd_wrap_updates_wrapper_translator_state(tmp_path):
         "fallback": "passthrough",
     }
     assert "Wrapper translator updated" in messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_wrapper_config_status_commands_include_clickable_buttons(tmp_path):
+    manager = _make_manager(tmp_path / "agent")
+    manager.agent_mode = "wrapper"
+    runtime, messages = _make_runtime(manager)
+    update, context = _update([])
+
+    await FlexibleAgentRuntime.cmd_core(runtime, update, context)
+    assert "Tap a button" in messages[-1]
+    assert runtime._reply_payloads[-1]["reply_markup"] is not None
+    assert "wcfg:core:codex-cli:gpt-5.5" in str(runtime._reply_payloads[-1]["reply_markup"])
+
+    await FlexibleAgentRuntime.cmd_wrap(runtime, update, context)
+    assert "Tap a button" in messages[-1]
+    assert runtime._reply_payloads[-1]["reply_markup"] is not None
+    assert "wcfg:wrap:claude-cli:claude-haiku-4-5" in str(runtime._reply_payloads[-1]["reply_markup"])
+
+    await FlexibleAgentRuntime.cmd_wrapper(runtime, update, context)
+    assert "Tap buttons below" in messages[-1]
+    assert runtime._reply_payloads[-1]["reply_markup"] is not None
+    assert "wcfg:menu:core" in str(runtime._reply_payloads[-1]["reply_markup"])
+
+
+@pytest.mark.asyncio
+async def test_wrapper_config_buttons_update_core_model(tmp_path):
+    manager = _make_manager(tmp_path / "agent")
+    manager.agent_mode = "wrapper"
+    runtime, _messages = _make_runtime(manager)
+    edits = []
+    answers = []
+
+    query = SimpleNamespace(
+        from_user=SimpleNamespace(id=1),
+        data="wcfg:core:codex-cli:gpt-5.4",
+        message=SimpleNamespace(chat_id=123),
+    )
+
+    async def edit_message_text(text, **kwargs):
+        edits.append({"text": text, **kwargs})
+
+    async def answer(text=None, **kwargs):
+        answers.append({"text": text, **kwargs})
+
+    query.edit_message_text = edit_message_text
+    query.answer = answer
+    update = SimpleNamespace(callback_query=query)
+
+    await FlexibleAgentRuntime.callback_wrapper_config(runtime, update, SimpleNamespace())
+
+    state = _read_state(tmp_path / "agent")
+    assert state["core"] == {"backend": "codex-cli", "model": "gpt-5.4"}
+    assert state["active_backend"] == "codex-cli"
+    assert state["active_model"] == "gpt-5.4"
+    assert "Wrapper core updated" in edits[-1]["text"]
+    assert edits[-1]["reply_markup"] is not None
+    assert answers[-1]["text"] is None
 
 
 @pytest.mark.asyncio
