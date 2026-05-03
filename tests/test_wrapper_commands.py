@@ -166,6 +166,9 @@ def _make_background_runtime(tmp_path: Path, wrapper_response: BackendResponse |
     runtime._wrapper_timeout_s = FlexibleAgentRuntime._wrapper_timeout_s.__get__(runtime, FlexibleAgentRuntime)
     runtime._wrapper_visible_context = FlexibleAgentRuntime._wrapper_visible_context.__get__(runtime, FlexibleAgentRuntime)
     runtime._wrapper_audit_fields = FlexibleAgentRuntime._wrapper_audit_fields.__get__(runtime, FlexibleAgentRuntime)
+    runtime._core_memory_assistant_text = FlexibleAgentRuntime._core_memory_assistant_text.__get__(
+        runtime, FlexibleAgentRuntime
+    )
     runtime._format_wrapper_verbose_trace = FlexibleAgentRuntime._format_wrapper_verbose_trace.__get__(runtime, FlexibleAgentRuntime)
     runtime._send_wrapper_verbose_trace = FlexibleAgentRuntime._send_wrapper_verbose_trace.__get__(runtime, FlexibleAgentRuntime)
     runtime._append_core_transcript = FlexibleAgentRuntime._append_core_transcript.__get__(runtime, FlexibleAgentRuntime)
@@ -628,7 +631,8 @@ async def test_foreground_completion_uses_wrapper_output_for_visible_surfaces(tm
         assert listener_payloads[0]["core_raw"] == "core raw foreground"
         assert listener_payloads[0]["wrapper_used"] is True
         assert runtime.last_response["text"] == "wrapped visible"
-        assert ("assistant", "codex-cli", "wrapped visible") in runtime.memory_store.turns
+        assert ("assistant", "codex-cli", "core raw foreground") in runtime.memory_store.turns
+        assert ("hello", "core raw foreground", "text") in runtime.memory_store.exchanges
         assert ("assistant", "wrapped visible", "text") in runtime.handoff_builder.transcript
         assert runtime.project_chat_logger.exchanges[0] == ("hello", "wrapped visible", "text")
         assert hchat_replies[0]["text"] == "wrapped visible"
@@ -708,7 +712,8 @@ async def test_background_completion_uses_wrapper_output_for_visible_surfaces(tm
     assert listener_payloads[0]["core_raw"] == "core raw"
     assert listener_payloads[0]["wrapper_used"] is True
     assert runtime.last_response["text"] == "wrapped visible"
-    assert ("assistant", "codex-cli", "wrapped visible") in runtime.memory_store.turns
+    assert ("assistant", "codex-cli", "core raw") in runtime.memory_store.turns
+    assert ("hello", "core raw", "text") in runtime.memory_store.exchanges
     assert ("assistant", "wrapped visible", "text") in runtime.handoff_builder.transcript
     assert runtime.project_chat_logger.exchanges[0] == ("hello", "wrapped visible", "text")
     assert sent[0]["text"] == "wrapped visible"

@@ -7849,6 +7849,14 @@ class FlexibleAgentRuntime:
             "wrapper_fallback_reason": getattr(wrapper_result, "fallback_reason", None),
         }
 
+    def _core_memory_assistant_text(self, core_raw: str, visible_text: str, wrapper_result) -> str:
+        if self._wrapper_enabled() and (
+            bool(getattr(wrapper_result, "wrapper_used", False))
+            or bool(getattr(wrapper_result, "wrapper_failed", False))
+        ):
+            return core_raw or visible_text
+        return visible_text
+
     def _append_core_transcript(
         self,
         item: QueuedRequest,
@@ -8188,9 +8196,10 @@ class FlexibleAgentRuntime:
                 if item.source.lower() in {"document", "photo", "voice", "audio", "video", "sticker"}:
                     memory_user_text = f"[{item.source}] {item.summary}"
                 if item.source not in {"startup", "system", SESSION_RESET_SOURCE}:
+                    memory_assistant_text = self._core_memory_assistant_text(response.text, visible_text, wrapper_result)
                     self.memory_store.record_turn("user", item.source, memory_user_text)
-                    self.memory_store.record_turn("assistant", self.config.active_backend, visible_text)
-                    self.memory_store.record_exchange(memory_user_text, visible_text, item.source)
+                    self.memory_store.record_turn("assistant", self.config.active_backend, memory_assistant_text)
+                    self.memory_store.record_exchange(memory_user_text, memory_assistant_text, item.source)
                 self.handoff_builder.append_transcript("user", item.prompt, item.source)
                 self.handoff_builder.append_transcript("assistant", visible_text)
                 self.handoff_builder.refresh_recent_context()
@@ -8643,9 +8652,10 @@ class FlexibleAgentRuntime:
                         if item.source.lower() in {"document", "photo", "voice", "audio", "video", "sticker"}:
                             memory_user_text = f"[{item.source}] {item.summary}"
                         if item.source not in {"startup", "system", SESSION_RESET_SOURCE} and not is_bridge_request:
+                            memory_assistant_text = self._core_memory_assistant_text(response.text, visible_text, wrapper_result)
                             self.memory_store.record_turn("user", item.source, memory_user_text)
-                            self.memory_store.record_turn("assistant", self.config.active_backend, visible_text)
-                            self.memory_store.record_exchange(memory_user_text, visible_text, item.source)
+                            self.memory_store.record_turn("assistant", self.config.active_backend, memory_assistant_text)
+                            self.memory_store.record_exchange(memory_user_text, memory_assistant_text, item.source)
                         if not is_bridge_request:
                             self.handoff_builder.append_transcript("user", item.prompt, item.source)
                             self.handoff_builder.append_transcript("assistant", visible_text)

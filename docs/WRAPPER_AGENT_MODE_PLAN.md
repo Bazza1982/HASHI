@@ -614,6 +614,7 @@ Tasks:
   - visible transcript,
   - handoff/project chat logs.
 - Use core raw for:
+  - core prompt memory,
   - core transcript,
   - audit log,
   - optional `/verbose on` display.
@@ -811,7 +812,8 @@ Make flex state writes preserve unknown keys
 
 - `agent_mode == "wrapper"` is switchable with `/mode wrapper`.
 - Wrapper slots live in `state.json` as `wrapper_slots`.
-- Core raw output is stored in `core_transcript.jsonl`; visible transcript and memory-facing surfaces use wrapper-visible output.
+- Core prompt memory stores core raw assistant output; visible transcript and project-chat surfaces use wrapper-visible output.
+- Core raw output is also stored in `core_transcript.jsonl` for audit/debug without letting wrapper presentation drift back into the core model.
 - Wrapper calls use stateless ephemeral backend invocation and can target CLI or API backends allowed for the agent.
 - Default wrapper backend/model is `claude-cli / claude-haiku-4-5`.
 - Wrapper output should preserve technical facts, commands, numbers, code blocks, markers, and generated artifacts. It may lightly reflow prose for persona/style unless that would alter meaning.
