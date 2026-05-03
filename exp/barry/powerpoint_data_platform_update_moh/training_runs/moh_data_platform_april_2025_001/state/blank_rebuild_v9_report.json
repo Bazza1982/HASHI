@@ -1,0 +1,231 @@
+{
+  "method": "selective template-context rebuild: skip table slide assets; rich-clear-paste text on other slides with wait",
+  "slides": [
+    {
+      "slide": 1,
+      "skipped_table_slide": false,
+      "rebuilt_shapes": [
+        {
+          "index": 1,
+          "kind": "rich_text_rebuild"
+        },
+        {
+          "index": 2,
+          "kind": "asset_retained"
+        },
+        {
+          "index": 3,
+          "kind": "rich_text_rebuild"
+        },
+        {
+          "index": 4,
+          "kind": "rich_text_rebuild"
+        }
+      ]
+    },
+    {
+      "slide": 2,
+      "skipped_table_slide": false,
+      "rebuilt_shapes": []
+    },
+    {
+      "slide": 3,
+      "skipped_table_slide": false,
+      "rebuilt_shapes": [
+        {
+          "index": 1,
+          "kind": "rich_text_rebuild"
+        },
+        {
+          "index": 2,
+          "kind": "rich_text_rebuild"
+        },
+        {
+          "index": 3,
+          "kind": "rich_text_rebuild"
+        }
+      ]
+    },
+    {
+      "slide": 4,
+      "skipped_table_slide": false,
+      "rebuilt_shapes": [
+        {
+          "index": 1,
+          "kind": "rich_text_rebuild"
+        },
+        {
+          "index": 2,
+          "kind": "asset_retained"
+        },
+        {
+          "index": 3,
+          "kind": "rich_text_rebuild"
+        },
+        {
+          "index": 4,
+          "kind": "rich_text_rebuild"
+        }
+      ]
+    },
+    {
+      "slide": 5,
+      "skipped_table_slide": false,
+      "rebuilt_shapes": [
+        {
+          "index": 1,
+          "kind": "rich_text_rebuild"
+        },
+        {
+          "index": 2,
+          "kind": "asset_retained"
+        },
+        {
+          "index": 3,
+          "kind": "rich_text_rebuild"
+        },
+        {
+          "index": 4,
+          "kind": "rich_text_rebuild"
+        }
+      ]
+    },
+    {
+      "slide": 6,
+      "skipped_table_slide": false,
+      "rebuilt_shapes": [
+        {
+          "index": 1,
+          "kind": "rich_text_rebuild"
+        },
+        {
+          "index": 2,
+          "kind": "asset_retained"
+        },
+        {
+          "index": 3,
+          "kind": "rich_text_rebuild"
+        },
+        {
+          "index": 4,
+          "kind": "rich_text_rebuild"
+        }
+      ]
+    },
+    {
+      "slide": 7,
+      "skipped_table_slide": false,
+      "rebuilt_shapes": [
+        {
+          "index": 1,
+          "kind": "rich_text_rebuild"
+        },
+        {
+          "index": 2,
+          "kind": "asset_retained"
+        },
+        {
+          "index": 3,
+          "kind": "rich_text_rebuild"
+        },
+        {
+          "index": 4,
+          "kind": "asset_retained"
+        }
+      ]
+    },
+    {
+      "slide": 8,
+      "skipped_table_slide": true,
+      "rebuilt_shapes": []
+    },
+    {
+      "slide": 9,
+      "skipped_table_slide": false,
+      "rebuilt_shapes": [
+        {
+          "index": 1,
+          "kind": "rich_text_rebuild"
+        },
+        {
+          "index": 2,
+          "kind": "rich_text_rebuild"
+        },
+        {
+          "index": 3,
+          "kind": "rich_text_rebuild"
+        }
+      ]
+    },
+    {
+      "slide": 10,
+      "skipped_table_slide": false,
+      "rebuilt_shapes": [
+        {
+          "index": 1,
+          "kind": "rich_text_rebuild"
+        },
+        {
+          "index": 2,
+          "kind": "asset_retained"
+        },
+        {
+          "index": 3,
+          "kind": "rich_text_rebuild"
+        },
+        {
+          "index": 4,
+          "kind": "rich_text_rebuild"
+        }
+      ]
+    },
+    {
+      "slide": 11,
+      "skipped_table_slide": false,
+      "rebuilt_shapes": [
+        {
+          "index": 1,
+          "kind": "rich_text_rebuild"
+        },
+        {
+          "index": 2,
+          "kind": "rich_text_rebuild"
+        },
+        {
+          "index": 3,
+          "kind": "rich_text_rebuild"
+        }
+      ]
+    },
+    {
+      "slide": 12,
+      "skipped_table_slide": false,
+      "rebuilt_shapes": [
+        {
+          "index": 1,
+          "kind": "rich_text_rebuild"
+        },
+        {
+          "index": 2,
+          "kind": "asset_retained"
+        },
+        {
+          "index": 3,
+          "kind": "rich_text_rebuild"
+        },
+        {
+          "index": 4,
+          "kind": "rich_text_rebuild"
+        }
+      ]
+    },
+    {
+      "slide": 13,
+      "skipped_table_slide": false,
+      "rebuilt_shapes": []
+    }
+  ],
+  "deck": "C:\\Users\\Print\\HASHI\\exp\\barry\\powerpoint_data_platform_update_moh\\training_runs\\moh_data_platform_april_2025_001\\output\\blank_rebuild_001\\moh_data_platform_blank_rebuild_v9_selective_rich_rebuild.pptx",
+  "pdf": "C:\\Users\\Print\\HASHI\\exp\\barry\\powerpoint_data_platform_update_moh\\training_runs\\moh_data_platform_april_2025_001\\output\\blank_rebuild_001\\moh_data_platform_blank_rebuild_v9_selective_rich_rebuild.pdf",
+  "png_dir": "C:\\Users\\Print\\HASHI\\exp\\barry\\powerpoint_data_platform_update_moh\\training_runs\\moh_data_platform_april_2025_001\\artifacts\\blank_rebuild_001\\rebuilt_png_v9"
+}

@@ -1,0 +1,282 @@
+{
+  "source_file": "C:\\Users\\Print\\HASHI\\exp\\barry\\powerpoint_data_platform_update_moh\\training_runs\\moh_data_platform_april_2025_001\\training_materials\\MoH Data Platform Project - April 2025.pptx",
+  "slide_count": 13,
+  "media_file_count": 7,
+  "notes_slide_xml_count": 0,
+  "slides": [
+    {
+      "slide_number": 1,
+      "title_guess": "NSW Health",
+      "text_blocks": [
+        {
+          "shape_name": "Title 1",
+          "text": "NSW Health\nAudit Office of New South Wales"
+        },
+        {
+          "shape_name": "Text Placeholder 3",
+          "text": "Data Platform Project Update"
+        },
+        {
+          "shape_name": "Text Placeholder 4",
+          "text": "14 April 2026"
+        }
+      ],
+      "tables": [],
+      "picture_count": 1,
+      "table_count": 0,
+      "chart_reference_count": 0,
+      "text_line_count": 4
+    },
+    {
+      "slide_number": 2,
+      "title_guess": "",
+      "text_blocks": [],
+      "tables": [],
+      "picture_count": 0,
+      "table_count": 0,
+      "chart_reference_count": 0,
+      "text_line_count": 0
+    },
+    {
+      "slide_number": 3,
+      "title_guess": "Monthly Update",
+      "text_blocks": [
+        {
+          "shape_name": "Title 1",
+          "text": "Monthly Update"
+        },
+        {
+          "shape_name": "Text Placeholder 2",
+          "text": "March – April 2026"
+        },
+        {
+          "shape_name": "Text Placeholder 3",
+          "text": "01"
+        }
+      ],
+      "tables": [],
+      "picture_count": 0,
+      "table_count": 0,
+      "chart_reference_count": 0,
+      "text_line_count": 3
+    },
+    {
+      "slide_number": 4,
+      "title_guess": "Key Developments",
+      "text_blocks": [
+        {
+          "shape_name": "Title 1",
+          "text": "Key Developments"
+        },
+        {
+          "shape_name": "Text Placeholder 4",
+          "text": "4"
+        },
+        {
+          "shape_name": "Text Placeholder 5",
+          "text": "9 March 2026:\nMoH Data Platform Project\nintroduction\n(previous meeting)\n16 March 2026\n: Initial Data Platform\nproject briefing\nheld with NSW Health project team\n16 March 2026\n:\nData matching clarification\nprovided to eHealth\n25 March 2026\n: Data Platform\nproject timeline\nshared with NSW Health project team\n2 April 2026\n:\nTechnical discussion\nheld with DAC and NSW Health on the Data Platform project, with a preliminary decision to ingest data from ADLS into Snowflake to reuse existing engineering and simplify NSW Health integration\n13 April 2026\n: Confirmation provided to NSW Health on\ndata transfer encryption and endpoint setup\n16 April 2026\n: MoH Data Platform Project update (this meeting)"
+        }
+      ],
+      "tables": [],
+      "picture_count": 0,
+      "table_count": 0,
+      "chart_reference_count": 0,
+      "text_line_count": 27
+    },
+    {
+      "slide_number": 5,
+      "title_guess": "Project Timeline Overview",
+      "text_blocks": [
+        {
+          "shape_name": "Title 1",
+          "text": "Project Timeline Overview"
+        },
+        {
+          "shape_name": "Text Placeholder 4",
+          "text": "5"
+        },
+        {
+          "shape_name": "Text Placeholder 5",
+          "text": "March 2026\nFinalise foundational design and onboarding activities.\nConfirm scope, sequencing and readiness for the main build phase.\nProject tracking indicates this phase is on track and approaching a critical transition point.\nApril 2026\nComplete remaining foundation work and close out early-stage dependencies.\nRamp up core build activities for delivery across the remainder of the year.\nFinal opportunity to stabilise the overall approach before downstream activities accelerate.\nMay 2026\nEnter full report build phase for datasets.\nData ingestion, transformation and platform components progress in parallel.\nDependencies between workstreams become active and closely coordinated."
+        }
+      ],
+      "tables": [],
+      "picture_count": 0,
+      "table_count": 0,
+      "chart_reference_count": 0,
+      "text_line_count": 14
+    },
+    {
+      "slide_number": 6,
+      "title_guess": "Project Timeline Overview (continued)",
+      "text_blocks": [
+        {
+          "shape_name": "Title 1",
+          "text": "Project Timeline Overview (continued)"
+        },
+        {
+          "shape_name": "Text Placeholder 4",
+          "text": "6"
+        },
+        {
+          "shape_name": "Text Placeholder 5",
+          "text": "June 2026\nContinue core build with increasing integration between components.\nEarly outputs emerge, supporting progressive validation.\nJuly 2026 to February 2027 (expected project completion)\nTransition from core build into stabilisation and rollout, with expanding platform capability across data domains and increasing focus on controls, validation and reliable end to end operation.\nThrough August and September, data flows are strengthened and the platform progresses toward operational readiness.\nBy October and November, implementation winds down and attention shifts to consolidation, optimisation and structured handover.\nCore delivery is completed in December 2026, with the platform confirmed to be operating as intended.\nJanuary 2027 focuses on training, documentation and transition to business-as-usual operations, leading to formal project closure in February 2027 with the NSW Health data platform fully established and embedded."
+        }
+      ],
+      "tables": [],
+      "picture_count": 0,
+      "table_count": 0,
+      "chart_reference_count": 0,
+      "text_line_count": 11
+    },
+    {
+      "slide_number": 7,
+      "title_guess": "Data Pipeline (to be updated)",
+      "text_blocks": [
+        {
+          "shape_name": "Title 1",
+          "text": "Data Pipeline (to be updated)"
+        },
+        {
+          "shape_name": "Text Placeholder 4",
+          "text": "7"
+        }
+      ],
+      "tables": [],
+      "picture_count": 1,
+      "table_count": 0,
+      "chart_reference_count": 0,
+      "text_line_count": 2
+    },
+    {
+      "slide_number": 8,
+      "title_guess": "Key Risks and Forward Plan",
+      "text_blocks": [
+        {
+          "shape_name": "Title 1",
+          "text": "Key Risks and Forward Plan"
+        },
+        {
+          "shape_name": "Text Placeholder 4",
+          "text": "8"
+        }
+      ],
+      "tables": [
+        [
+          [
+            "Audit and IT General Controls (ITGC) Data extracted from business warehouses will be subject to ITGC review by systems assurance. Initial testing will use non‑production environments. Final ITGC scope will be determined with warehouse owners and relevant stakeholders. Timeline and Quarterly Extraction Target is quarterly extraction, typically from 15 days after quarter end, subject to ledger closure. Testing and development are planned this calendar year. Production go‑live is targeted for FY27, subject to dependencies including warehouse cloud migration. Manual processes will remain as a fallback if timelines shift"
+          ],
+          [
+            ""
+          ]
+        ]
+      ],
+      "picture_count": 0,
+      "table_count": 1,
+      "chart_reference_count": 0,
+      "text_line_count": 3
+    },
+    {
+      "slide_number": 9,
+      "title_guess": "Related Business",
+      "text_blocks": [
+        {
+          "shape_name": "Title 1",
+          "text": "Related Business"
+        },
+        {
+          "shape_name": "Text Placeholder 2",
+          "text": "March – April 2026"
+        },
+        {
+          "shape_name": "Text Placeholder 3",
+          "text": "02"
+        }
+      ],
+      "tables": [],
+      "picture_count": 0,
+      "table_count": 0,
+      "chart_reference_count": 0,
+      "text_line_count": 3
+    },
+    {
+      "slide_number": 10,
+      "title_guess": "Related Business",
+      "text_blocks": [
+        {
+          "shape_name": "Title 1",
+          "text": "Related Business"
+        },
+        {
+          "shape_name": "Text Placeholder 4",
+          "text": "10"
+        },
+        {
+          "shape_name": "Text Placeholder 5",
+          "text": "Regular Data Download\nInterim download due today (16 April 2026)\nOther Data Requests\nPremium labour data request\nInternal controls and governance data request"
+        }
+      ],
+      "tables": [],
+      "picture_count": 0,
+      "table_count": 0,
+      "chart_reference_count": 0,
+      "text_line_count": 7
+    },
+    {
+      "slide_number": 11,
+      "title_guess": "Questions & Answers",
+      "text_blocks": [
+        {
+          "shape_name": "Title 1",
+          "text": "Questions & Answers"
+        },
+        {
+          "shape_name": "Text Placeholder 3",
+          "text": "03"
+        },
+        {
+          "shape_name": "Text Placeholder 5",
+          "text": "Thank you for your time!"
+        }
+      ],
+      "tables": [],
+      "picture_count": 0,
+      "table_count": 0,
+      "chart_reference_count": 0,
+      "text_line_count": 3
+    },
+    {
+      "slide_number": 12,
+      "title_guess": "Upcoming Meetings",
+      "text_blocks": [
+        {
+          "shape_name": "Title 1",
+          "text": "Upcoming Meetings"
+        },
+        {
+          "shape_name": "Text Placeholder 4",
+          "text": "12"
+        },
+        {
+          "shape_name": "Text Placeholder 5",
+          "text": "Already scheduled:\n15 May 2026\n16 June 2026\n15 July 2026\n18 August 2026\n15 September 2026\n15 October 2026\n17 November 2026\n16 December 2026"
+        }
+      ],
+      "tables": [],
+      "picture_count": 0,
+      "table_count": 0,
+      "chart_reference_count": 0,
+      "text_line_count": 11
+    },
+    {
+      "slide_number": 13,
+      "title_guess": "",
+      "text_blocks": [],
+      "tables": [],
+      "picture_count": 0,
+      "table_count": 0,
+      "chart_reference_count": 0,
+      "text_line_count": 0
+    }
+  ]
+}
