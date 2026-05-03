@@ -1,8 +1,12 @@
 # HASHI Voice Bridge Plan
 
-Status: planning for `v3.2-alpha` and later.
+Status: **deferred research note** for `v3.2-alpha` and later.
 
-This document records the current plan for adding a real voice-call interface to HASHI. The primary near-term path is **not** the official WhatsApp Business API and not OpenAI Realtime. The primary path is a local desktop call bridge:
+This document records the research and paused plan for adding a real voice-call interface to HASHI.
+
+The WhatsApp Desktop route was investigated as a low-cost local playground, not as an official WhatsApp integration. After Phase 0 experiments, the route is **deferred** because stable unattended call detection/answering through WhatsApp Desktop is too fragile for the current roadmap.
+
+The original local desktop bridge idea was:
 
 ```text
 Barry calls the WhatsApp account already logged in on HASHI1
@@ -15,32 +19,68 @@ Barry calls the WhatsApp account already logged in on HASHI1
  -> the same WhatsApp call continues for the next turn
 ```
 
-This is an unsupported local desktop integration, not an official WhatsApp integration. It is acceptable because the target is a personal HASHI add-on for the main user, using two already-owned WhatsApp numbers, on a machine where WhatsApp Desktop is already logged in and configured.
+This is an unsupported local desktop integration, not an official WhatsApp integration. It was acceptable as a personal HASHI experiment using two already-owned WhatsApp numbers on a machine where WhatsApp Desktop was already logged in and configured. It is **not** currently accepted as a stable unattended production feature.
 
 Use the spelling **HASHI** everywhere.
 
 ## Current Decision
 
-Primary route:
+Current status:
 
 ```text
-WhatsApp Desktop local-call bridge
+deferred / revisit later
 ```
 
-Deferred routes:
+Deferred or future routes:
 
-- Official WhatsApp Business Calling / Cloud API.
+- WhatsApp Desktop local-call bridge.
+- WhatsApp Web + Chrome/CDP call automation if browser-call controls become stable enough.
+- Official WhatsApp Business Calling / Cloud API if account eligibility and media access fit the use case.
 - Twilio WhatsApp Business Calling.
-- Twilio normal phone number.
+- Twilio normal phone number / Programmable Voice.
 - Outgoing calls from HASHI to Barry.
 
 Rejected routes:
 
 - Telegram bot real-time voice calls: the official Telegram Bot API does not provide normal bot voice-call media access.
 - WhatsApp text messages or voice messages: the target is a real call.
-- WhatsApp Desktop automation as a production-grade integration: this route is for a local personal bridge and fast validation only.
+- Self-implementing the WhatsApp real-time call protocol in WSL2: message transport support does not imply call transport support. Calls require a separate real-time stack, including WebRTC/media/signaling/encryption behavior. This is not practical for HASHI's roadmap.
+- WhatsApp Desktop automation as a production-grade unattended integration: this route is only suitable for a local personal playground unless major new background-capable signals become available.
 
-## Goals
+## Research Summary
+
+What was tested:
+
+- Windows-native helper process launched from WSL2.
+- WhatsApp Desktop process/window probing.
+- Windows UI Automation scan of WhatsApp Desktop.
+- Screenshot-based diagnostics.
+- OCR fallback planning for visible call text.
+- Real manual WhatsApp calls into the account logged in on HASHI1.
+
+What worked:
+
+- HASHI1 WhatsApp Desktop could receive a real incoming call.
+- Windows helper could communicate with WSL-side HASHI over local HTTP.
+- The helper could capture desktop screenshots and inspect WhatsApp Desktop window/process state.
+- Phase 0 event logs were written under `logs/voice_sessions/`.
+
+What blocked the route:
+
+- UI Automation mostly exposed the WhatsApp WebView shell, not reliable call/chat content or answer buttons.
+- Screenshot/OCR depends on an unlocked interactive Windows desktop.
+- Locked-screen behavior hides the useful WhatsApp UI from screenshots and UI automation.
+- Minimized/background/focused behavior may differ.
+- WhatsApp Desktop can update and change UI structure without warning.
+- Automatic answering would still require a reliable active-call detector plus either a stable button target or another call-control mechanism.
+
+Decision:
+
+- Pause WhatsApp Desktop call integration.
+- Keep this document and the experimental helper code as future reference.
+- Revisit only when the team has spare time or a more stable call-control surface becomes available.
+
+## Original Goals
 
 - Prove that an incoming WhatsApp Desktop call on HASHI1 can be detected and answered.
 - Keep one WhatsApp call open across multiple turns.
@@ -53,7 +93,9 @@ Rejected routes:
 - Keep voice feature code modular, debuggable, and compatible with the slim-core/hot-reboot architecture.
 - Log every state transition, turn, and audio/agent step clearly enough to debug failed calls.
 
-## Non-Goals For The First Experiments
+These goals are preserved for future reference. They are not active implementation commitments while this feature remains deferred.
+
+## Non-Goals From The First Experiments
 
 - Do not start with OpenAI Realtime.
 - Do not require WhatsApp Business.
@@ -64,9 +106,9 @@ Rejected routes:
 - Do not decode WhatsApp network traffic or bypass WhatsApp encryption.
 - Do not put long-lived audio/call handles into `main.py`.
 
-## Fastest Proof
+## Archived Fastest Proof
 
-The first proof is intentionally smaller than voice AI:
+The first proof was intentionally smaller than voice AI:
 
 ```text
 Incoming WhatsApp call to HASHI1 can be picked up.
@@ -83,7 +125,7 @@ Acceptance for the first proof:
 - The call stays connected for at least 60 seconds.
 - The probe can log call state and optionally hang up.
 
-No VAD, STT, TTS, or agent backend is required for this first proof.
+No VAD, STT, TTS, or agent backend was required for this first proof.
 
 Manual preflight before writing automation:
 
@@ -100,7 +142,7 @@ Manual preflight before writing automation:
 - The team confirms whether the same UI appears when WhatsApp Desktop is focused, minimized, and hidden behind another window.
 - The team confirms the call rings long enough for automation to answer, target at least 30 seconds.
 
-## High-Level Architecture
+## Proposed High-Level Architecture
 
 ```text
 Windows native helper process
@@ -877,13 +919,15 @@ The same runtime should later support:
 
 These are future transport adapters, not the current main path.
 
-## Initial Development Checklist
+## Archived Initial Development Checklist
 
-1. Confirm HASHI1 WhatsApp Desktop can receive manual incoming calls.
+This checklist is paused with the feature. Items completed or partially completed during the research phase remain useful evidence for a future revisit.
+
+1. Confirm HASHI1 WhatsApp Desktop can receive manual incoming calls. `partial`: confirmed once via missed-call screenshot evidence.
 2. Record the incoming-call UI shape for focused/minimized/hidden WhatsApp Desktop.
-3. Extend `tools.windows_helper.server` with UIA-based incoming-call detection.
-4. Add WSL-side helper client and minimal voice event logger.
-5. Log `call.incoming_detected`, detection method, pickup latency, and false-positive checks.
+3. Extend `tools.windows_helper.server` with UIA-based incoming-call detection. `partial`: helper action and diagnostics exist, but active-call detection was not reliable.
+4. Add WSL-side helper client and minimal voice event logger. `done`: Phase 0 helper client and JSONL event logger exist.
+5. Log `call.incoming_detected`, detection method, pickup latency, and false-positive checks. `partial`: event structure exists; reliable active-call detection is still blocked.
 6. Define `AudioFrame`, `AudioBuffer`, and transport interface.
 7. Configure VB-CABLE or VoiceMeeter on HASHI1.
 8. Add helper audio device enumeration and `audio.device_selected` logs.
@@ -896,7 +940,7 @@ These are future transport adapters, not the current main path.
 15. Add `phone_operator` prompt overlay if latency or verbosity hurts the call experience.
 16. Run five-turn WhatsApp Desktop call test.
 
-## Open Questions
+## Open Questions For Future Revisit
 
 - Does WhatsApp Desktop expose answer/hangup controls through UIA reliably, or do we need screenshot fallback for those buttons?
 - Which virtual audio tool is already installed or easiest to install on HASHI1?

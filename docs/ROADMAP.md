@@ -69,6 +69,55 @@
 
 ---
 
+## Deferred Research Items
+
+### WhatsApp Real-Time Voice Calls For HASHI
+
+Status: **deferred / revisit later**.
+
+We investigated adding a real WhatsApp call interface to HASHI, using the already-linked WhatsApp account on HASHI1 rather than WhatsApp Business or OpenAI Realtime.
+
+What we explored:
+
+- A local WhatsApp Desktop call bridge on HASHI1.
+- A Windows-native helper process because HASHI runs in WSL2 while WhatsApp Desktop UI and audio devices live on Windows.
+- Incoming-call detection through:
+  - Windows UI Automation,
+  - window-title/process probing,
+  - screenshot diagnostics,
+  - OCR fallback,
+  - missed-call evidence.
+- A future audio path with VB-CABLE/VoiceMeeter, local VAD/STT/TTS, and existing HASHI agent routing.
+
+What we learned:
+
+- WhatsApp Desktop can receive the real incoming call on HASHI1.
+- Current WhatsApp Desktop call detection is not reliable enough for a stable HASHI feature.
+- UI Automation mostly sees the WhatsApp WebView shell, not the useful call/chat content.
+- Screenshot/OCR can help with diagnostics, but it still depends on an unlocked interactive Windows desktop.
+- Lock screen, minimized/background behavior, app updates, and WebView layout changes make this route fragile.
+- The current WhatsApp message bridge cannot be simply extended into a call bridge. WhatsApp voice calls require a different real-time calling stack, including WebRTC/media/signaling/encryption behavior, and self-implementing that is not a practical HASHI roadmap item.
+
+Current decision:
+
+- Do **not** continue WhatsApp Desktop real-time calls as a near-term implementation path.
+- Keep the research and experimental code as a reference for later.
+- Treat the current route as a possible future playground/demo only, not a production-grade unattended call feature.
+
+Revisit when:
+
+- HASHI has spare development time for experimental local desktop automation.
+- WhatsApp Web/Desktop exposes more stable browser-call controls that can be handled through Chrome/CDP.
+- A suitable official WhatsApp call media API becomes available for the intended account type.
+- We choose to use ordinary phone numbers through a provider such as Twilio Programmable Voice.
+
+Preferred future direction:
+
+- For reliable unattended voice calls, use a normal phone number and a voice provider transport.
+- Keep HASHI's voice runtime transport-agnostic so WhatsApp, phone, local microphone, or future official call APIs can share the same VAD/STT/TTS/agent pipeline.
+
+---
+
 ## Notes
 - This roadmap is outcome-based; implementation details live in dedicated design docs.
-- Design docs: `docs/V2.2_TOOL_EXECUTION_PLAN.md`
+- Design docs: `docs/V2.2_TOOL_EXECUTION_PLAN.md`, `docs/HASHI_VOICE_BRIDGE_PLAN.md`
