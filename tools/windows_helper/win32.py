@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import ctypes
+import math
+import time
+from contextlib import contextmanager
 from ctypes import wintypes
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 ULONG_PTR = getattr(wintypes, "ULONG_PTR", ctypes.c_size_t)
+HGLOBAL = getattr(wintypes, "HGLOBAL", wintypes.HANDLE)
 
 EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
@@ -42,10 +47,28 @@ user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
 user32.SetCursorPos.restype = wintypes.BOOL
 user32.GetCursorPos.argtypes = [ctypes.c_void_p]
 user32.GetCursorPos.restype = wintypes.BOOL
+user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+user32.GetAsyncKeyState.restype = ctypes.c_short
 user32.MapVirtualKeyW.argtypes = [wintypes.UINT, wintypes.UINT]
 user32.MapVirtualKeyW.restype = wintypes.UINT
 user32.VkKeyScanW.argtypes = [wintypes.WCHAR]
 user32.VkKeyScanW.restype = ctypes.c_short
+user32.OpenClipboard.argtypes = [wintypes.HWND]
+user32.OpenClipboard.restype = wintypes.BOOL
+user32.CloseClipboard.argtypes = []
+user32.CloseClipboard.restype = wintypes.BOOL
+user32.EmptyClipboard.argtypes = []
+user32.EmptyClipboard.restype = wintypes.BOOL
+user32.GetClipboardData.argtypes = [wintypes.UINT]
+user32.GetClipboardData.restype = HGLOBAL
+user32.SetClipboardData.argtypes = [wintypes.UINT, HGLOBAL]
+user32.SetClipboardData.restype = HGLOBAL
+kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+kernel32.GlobalAlloc.restype = HGLOBAL
+kernel32.GlobalLock.argtypes = [HGLOBAL]
+kernel32.GlobalLock.restype = ctypes.c_void_p
+kernel32.GlobalUnlock.argtypes = [HGLOBAL]
+kernel32.GlobalUnlock.restype = wintypes.BOOL
 
 SW_RESTORE = 9
 SW_SHOW = 5
@@ -62,6 +85,12 @@ MOUSEEVENTF_WHEEL = 0x0800
 MOUSEEVENTF_HWHEEL = 0x01000
 MAPVK_VK_TO_VSC = 0
 WHEEL_DELTA = 120
+CF_UNICODETEXT = 13
+GMEM_MOVEABLE = 0x0002
+GMEM_ZEROINIT = 0x0040
+VK_LBUTTON = 0x01
+VK_RBUTTON = 0x02
+VK_MBUTTON = 0x04
 
 INPUT_MOUSE = 0
 INPUT_KEYBOARD = 1
@@ -193,6 +222,55 @@ def _send_inputs(inputs: list[INPUT]) -> None:
         raise ctypes.WinError(ctypes.get_last_error())
 
 
+@contextmanager
+def _open_clipboard(retries: int = 8, delay: float = 0.025):
+    opened = False
+    for _ in range(max(1, retries)):
+        if user32.OpenClipboard(None):
+            opened = True
+            break
+        time.sleep(delay)
+    if not opened:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        yield
+    finally:
+        user32.CloseClipboard()
+
+
+def _get_clipboard_unicode_text() -> str | None:
+    with _open_clipboard():
+        handle = user32.GetClipboardData(CF_UNICODETEXT)
+        if not handle:
+            return None
+        ptr = kernel32.GlobalLock(handle)
+        if not ptr:
+            return None
+        try:
+            return ctypes.wstring_at(ptr)
+        finally:
+            kernel32.GlobalUnlock(handle)
+
+
+def _set_clipboard_unicode_text(text: str) -> None:
+    data = (text + "\0").encode("utf-16-le")
+    handle = kernel32.GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, len(data))
+    if not handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    ptr = kernel32.GlobalLock(handle)
+    if not ptr:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        ctypes.memmove(ptr, data, len(data))
+    finally:
+        kernel32.GlobalUnlock(handle)
+    with _open_clipboard():
+        if not user32.EmptyClipboard():
+            raise ctypes.WinError(ctypes.get_last_error())
+        if not user32.SetClipboardData(CF_UNICODETEXT, handle):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+
 def _vk_for_token(token: str) -> int:
     lowered = token.strip().lower()
     if lowered in VK_ALIASES:
@@ -271,15 +349,29 @@ def close_window(window: dict) -> bool:
     return bool(user32.PostMessageW(int(window["id"]), WM_CLOSE, 0, 0))
 
 
-def reset_input_state() -> dict:
-    for vk in (0x10, 0x11, 0x12, 0x5B, 0x5C):
+def _is_key_down(vk: int) -> bool:
+    return bool(user32.GetAsyncKeyState(vk) & 0x8000)
+
+
+def reset_input_state(*, release_mouse: bool = True) -> dict:
+    released_keys = []
+    for vk, name in ((0x10, "SHIFT"), (0x11, "CTRL"), (0x12, "ALT"), (0x5B, "LWIN"), (0x5C, "RWIN")):
         user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
-    for flag in (MOUSEEVENTF_LEFTUP, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_MIDDLEUP):
-        user32.mouse_event(flag, 0, 0, 0, 0)
+        released_keys.append(name)
+    released_mouse = []
+    if release_mouse:
+        for vk, flag, name in (
+            (VK_LBUTTON, MOUSEEVENTF_LEFTUP, "left"),
+            (VK_RBUTTON, MOUSEEVENTF_RIGHTUP, "right"),
+            (VK_MBUTTON, MOUSEEVENTF_MIDDLEUP, "middle"),
+        ):
+            if _is_key_down(vk):
+                user32.mouse_event(flag, 0, 0, 0, 0)
+                released_mouse.append(name)
     return {
         "ok": True,
-        "released_keys": ["SHIFT", "CTRL", "ALT", "LWIN", "RWIN"],
-        "released_mouse": ["left", "right", "middle"],
+        "released_keys": released_keys,
+        "released_mouse": released_mouse,
     }
 
 
@@ -297,6 +389,7 @@ def move_mouse(x: int, y: int) -> dict:
 
 
 def click_mouse(x: int, y: int, button: str = "left", count: int = 1) -> dict:
+    reset_input_state(release_mouse=True)
     move_mouse(x, y)
     button_value = button.strip().lower()
     flag_map = {
@@ -312,7 +405,76 @@ def click_mouse(x: int, y: int, button: str = "left", count: int = 1) -> dict:
         inputs.append(_mouse_input(down_flag))
         inputs.append(_mouse_input(up_flag))
     _send_inputs(inputs)
+    time.sleep(0.025)
     return {"x": int(x), "y": int(y), "button": button_value, "count": max(1, int(count))}
+
+
+def drag_mouse(
+    from_x: int,
+    from_y: int,
+    to_x: int,
+    to_y: int,
+    *,
+    button: str = "left",
+    curve_x: int | None = None,
+    curve_y: int | None = None,
+) -> dict:
+    button_value = button.strip().lower()
+    flag_map = {
+        "left": (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+        "right": (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+        "middle": (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
+    }
+    if button_value not in flag_map:
+        raise ValueError(f"unsupported mouse button: {button}")
+
+    move_mouse(from_x, from_y)
+    down_flag, up_flag = flag_map[button_value]
+    _send_inputs([_mouse_input(down_flag)])
+    time.sleep(0.03)
+
+    start = (float(from_x), float(from_y))
+    end = (float(to_x), float(to_y))
+    control = (
+        (float(curve_x), float(curve_y))
+        if curve_x is not None and curve_y is not None
+        else None
+    )
+    distance = math.hypot(end[0] - start[0], end[1] - start[1])
+    steps = max(8, min(120, int(distance / 8) or 8))
+
+    for i in range(1, steps + 1):
+        t = i / steps
+        if control is None:
+            x = start[0] + (end[0] - start[0]) * t
+            y = start[1] + (end[1] - start[1]) * t
+        else:
+            one_minus_t = 1.0 - t
+            x = (
+                one_minus_t * one_minus_t * start[0]
+                + 2.0 * one_minus_t * t * control[0]
+                + t * t * end[0]
+            )
+            y = (
+                one_minus_t * one_minus_t * start[1]
+                + 2.0 * one_minus_t * t * control[1]
+                + t * t * end[1]
+            )
+        move_mouse(int(round(x)), int(round(y)))
+        time.sleep(0.005)
+
+    time.sleep(0.03)
+    _send_inputs([_mouse_input(up_flag)])
+    return {
+        "from": {"x": int(from_x), "y": int(from_y)},
+        "to": {"x": int(to_x), "y": int(to_y)},
+        "button": button_value,
+        "curve": (
+            {"x": int(curve_x), "y": int(curve_y)}
+            if curve_x is not None and curve_y is not None
+            else None
+        ),
+    }
 
 
 def scroll_mouse(direction: str = "down", amount: int = 1, *, horizontal: bool = False) -> dict:
@@ -354,6 +516,19 @@ def type_text(text: str) -> dict:
         inputs.append(_keyboard_input(scan=codepoint, flags=KEYEVENTF_UNICODE | KEYEVENTF_KEYUP))
     _send_inputs(inputs)
     return {"text_length": len(text)}
+
+
+def paste_text(text: str, *, restore_clipboard: bool = True) -> dict:
+    if not text:
+        return {"text_length": 0, "method": "clipboard_paste"}
+    previous = _get_clipboard_unicode_text() if restore_clipboard else None
+    _set_clipboard_unicode_text(text)
+    time.sleep(0.08)
+    press_key_combo("ctrl+v")
+    time.sleep(max(0.35, min(1.25, len(text) / 1200)))
+    if restore_clipboard and previous is not None:
+        _set_clipboard_unicode_text(previous)
+    return {"text_length": len(text), "method": "clipboard_paste"}
 
 
 def get_input_state() -> dict:
