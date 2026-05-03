@@ -79,6 +79,7 @@ Initial user-source allowlist:
 ```python
 USER_WRAPPABLE_SOURCES = {
     "text",
+    "voice",
     "voice_transcript",
     "photo",
     "audio",
@@ -127,6 +128,11 @@ def should_wrap_source(source: str) -> bool:
 ```
 
 Unknown sources should default to bypass until explicitly reviewed.
+
+Implementation note from safety review:
+
+- HASHI1 has used both `voice` and `voice_transcript` in different voice-message paths. Phase 1 must confirm the actual queued source values before finalizing the allowlist. Until confirmed, include both and add tests for both.
+- `retry` handling must be explicitly decided. The queue has both a `source` string and `is_retry` boolean. If retry preserves the original source, wrapper behavior should be intentional rather than accidental.
 
 ### 2.5 Two response completion paths must be covered
 
@@ -477,6 +483,7 @@ Tasks:
   - read existing `state.json` if it exists,
   - preserve unknown keys,
   - update managed keys,
+  - preserve current deletion semantics for `active_model`,
   - write atomically through a temp file and `replace()`.
 - Keep behavior unchanged for:
   - `active_backend`,
@@ -492,6 +499,7 @@ Acceptance:
 
 - Existing fixed/flex state still loads.
 - Unknown keys such as `core`, `wrapper`, and `wrapper_slots` are preserved.
+- If `_active_model_override is None`, any existing `active_model` key is removed from the merged state. Do not accidentally keep stale model overrides after moving to merge semantics.
 - Invalid existing JSON is handled no worse than today.
 - `pytest` focused tests pass.
 - `git diff --check` passes.
@@ -575,6 +583,8 @@ Tasks:
 - Detect `agent_mode == "wrapper"`.
 - Run core model as normal.
 - If source is wrappable, call `WrapperProcessor` after `core_raw`.
+- Run wrapper processing before request listeners are notified.
+- Run wrapper processing before transfer suppression checks.
 - Use wrapper final text for:
   - user delivery,
   - voice reply,
@@ -589,9 +599,25 @@ Acceptance:
 
 - User text source is wrapped.
 - Scheduler/hchat/system source is not wrapped.
+- Request listeners receive the same visible text that the user receives, or receive a documented payload where visible text is explicit and backward-compatible.
+- Transfer-suppressed responses store wrapper final text, not core raw text.
 - `/verbose on` exposes labeled core raw.
 - `/verbose off` hides core raw.
 - Wrapper failure sends core raw.
+
+Ordering constraint:
+
+```text
+core response received
+ -> wrapper_process() if source is wrappable
+ -> transfer suppression check
+ -> request listeners
+ -> memory/handoff/project_chat logging
+ -> Telegram delivery
+ -> voice reply
+```
+
+Do not notify listeners or buffer transfer output before wrapper output is known. Otherwise internal consumers and flushed transfer messages may receive `core_raw` while the user sees `wrapper_final`.
 
 ## Phase 5: Runtime Integration - Background Path
 
@@ -601,6 +627,8 @@ Tasks:
 
 - Apply the same wrapper post-processing in `_on_background_complete()`.
 - Reuse shared helper functions to avoid drift between paths.
+- Run wrapper processing before transfer suppression checks.
+- Run wrapper processing before listener notification or any result buffering.
 - Keep transfer buffering behavior intact.
 - Keep request listener payload semantics explicit:
   - include `core_raw`,
@@ -613,6 +641,11 @@ Acceptance:
 - Background response from bypass source is not wrapped.
 - Transfer-suppressed responses do not leak duplicate wrapper output.
 - Audit log marks path as background.
+- Background audit records `core_raw_chars` and `wrapper_final_chars`, matching the foreground path.
+
+Safety note:
+
+Foreground and background paths currently differ in how they guard bridge requests for memory/handoff/project chat logging. Wrapper integration must explicitly document which text variable is used in each path and must not let one path write `core_raw` while another writes `wrapper_final`.
 
 ## Phase 6: Transcript Layering
 
@@ -683,6 +716,7 @@ Minimum event fields:
 Control:
 
 - Phase 0 merge-safe atomic state write first.
+- Explicitly remove stale `active_model` when `_active_model_override is None`; read-merge-write must not change deletion semantics.
 
 ### Risk: command confusion
 
@@ -704,6 +738,7 @@ Control:
 
 - Shared wrapper completion helper.
 - Tests for both paths.
+- Place wrapper processing before transfer buffering and listener notification in both paths.
 
 ### Risk: wrapper changes facts
 
