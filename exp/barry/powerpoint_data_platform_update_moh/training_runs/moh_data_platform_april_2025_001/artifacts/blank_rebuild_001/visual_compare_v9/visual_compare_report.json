@@ -1,0 +1,74 @@
+{
+  "status": "passed",
+  "source_pages": 13,
+  "rebuilt_pages": 13,
+  "max_mean_abs_diff": 0.32106,
+  "max_changed_pixel_ratio_gt8": 0.00230758,
+  "pages": [
+    {
+      "slide": 1,
+      "mean_abs_diff": 0.0,
+      "changed_pixel_ratio_gt8": 0.0
+    },
+    {
+      "slide": 2,
+      "mean_abs_diff": 0.0,
+      "changed_pixel_ratio_gt8": 0.0
+    },
+    {
+      "slide": 3,
+      "mean_abs_diff": 0.32106,
+      "changed_pixel_ratio_gt8": 0.00230758
+    },
+    {
+      "slide": 4,
+      "mean_abs_diff": 0.0,
+      "changed_pixel_ratio_gt8": 0.0
+    },
+    {
+      "slide": 5,
+      "mean_abs_diff": 0.0,
+      "changed_pixel_ratio_gt8": 0.0
+    },
+    {
+      "slide": 6,
+      "mean_abs_diff": 0.0,
+      "changed_pixel_ratio_gt8": 0.0
+    },
+    {
+      "slide": 7,
+      "mean_abs_diff": 0.0,
+      "changed_pixel_ratio_gt8": 0.0
+    },
+    {
+      "slide": 8,
+      "mean_abs_diff": 0.0,
+      "changed_pixel_ratio_gt8": 0.0
+    },
+    {
+      "slide": 9,
+      "mean_abs_diff": 0.0,
+      "changed_pixel_ratio_gt8": 0.0
+    },
+    {
+      "slide": 10,
+      "mean_abs_diff": 0.0,
+      "changed_pixel_ratio_gt8": 0.0
+    },
+    {
+      "slide": 11,
+      "mean_abs_diff": 0.0,
+      "changed_pixel_ratio_gt8": 0.0
+    },
+    {
+      "slide": 12,
+      "mean_abs_diff": 0.0,
+      "changed_pixel_ratio_gt8": 0.0
+    },
+    {
+      "slide": 13,
+      "mean_abs_diff": 0.0,
+      "changed_pixel_ratio_gt8": 0.0
+    }
+  ]
+}
