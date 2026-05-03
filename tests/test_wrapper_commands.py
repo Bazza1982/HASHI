@@ -47,18 +47,32 @@ def _make_runtime(manager: FlexibleBackendManager) -> tuple[FlexibleAgentRuntime
     runtime.backend_manager = manager
     runtime.config = manager.config
     runtime._is_authorized_user = lambda user_id: user_id == 1
+    runtime._backend_busy = lambda: False
+    runtime._workzone_dir = None
+    runtime._sync_workzone_to_backend_config = lambda: None
+    runtime._clear_handoff_state = lambda: None
+    runtime._arm_session_primer = lambda note: None
+    runtime.get_current_model = lambda: getattr(manager, "_active_model_override", None) or "gpt-5.4"
+    runtime._get_current_effort = lambda: None
+    runtime.last_backend_switch_at = None
     messages: list[str] = []
 
     async def _reply_text(update, text, **kwargs):
         messages.append(text)
 
+    async def _switch_backend_mode(chat_id, target_engine, target_model=None, with_context=False):
+        manager.config.active_backend = target_engine
+        manager._save_state(active_model=target_model)
+        return True, f"Backend switched to: {target_engine}\nModel: {target_model}"
+
     runtime._reply_text = _reply_text
+    runtime._switch_backend_mode = _switch_backend_mode
     return runtime, messages
 
 
 def _update(args: list[str] | None = None):
     return (
-        SimpleNamespace(effective_user=SimpleNamespace(id=1)),
+        SimpleNamespace(effective_user=SimpleNamespace(id=1), effective_chat=SimpleNamespace(id=123)),
         SimpleNamespace(args=args or []),
     )
 
@@ -209,6 +223,8 @@ async def test_cmd_mode_wrapper_persists_mode(tmp_path):
 
     state = _read_state(tmp_path / "agent")
     assert state["agent_mode"] == "wrapper"
+    assert state["active_backend"] == "codex-cli"
+    assert state["active_model"] == "gpt-5.5"
     assert "Switched to **wrapper** mode" in messages[-1]
 
 
@@ -241,6 +257,8 @@ async def test_cmd_core_updates_wrapper_core_state(tmp_path):
     state = _read_state(tmp_path / "agent")
     assert state["agent_mode"] == "wrapper"
     assert state["core"] == {"backend": "codex-cli", "model": "gpt-5.5"}
+    assert state["active_backend"] == "codex-cli"
+    assert state["active_model"] == "gpt-5.5"
     assert "Wrapper core updated" in messages[-1]
 
 

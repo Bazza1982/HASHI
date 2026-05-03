@@ -2222,7 +2222,16 @@ class FlexibleAgentRuntime:
             elif value == "wrapper":
                 if hasattr(backend, "set_session_mode"):
                     backend.set_session_mode(False)
-                detail = "Core/wrapper config mode · use /core and /wrap"
+                cfg = load_wrapper_config(self.backend_manager.get_state_snapshot())
+                switch_ok, switch_message = await self._activate_wrapper_core_backend(
+                    query.message.chat_id,
+                    backend=cfg.core_backend,
+                    model=cfg.core_model,
+                )
+                detail = (
+                    "Core/wrapper mode · use /core and /wrap · "
+                    f"{'core ready' if switch_ok else 'core unchanged'} ({switch_message})"
+                )
             else:
                 if hasattr(backend, "set_session_mode"):
                     backend.set_session_mode(False)
@@ -5322,6 +5331,23 @@ class FlexibleAgentRuntime:
             return f"Unknown model for {engine}: {model}"
         return None
 
+    async def _activate_wrapper_core_backend(
+        self,
+        chat_id: int,
+        *,
+        backend: str,
+        model: str,
+    ) -> tuple[bool, str]:
+        current_model = self.get_current_model() if self.backend_manager.current_backend else None
+        if self.config.active_backend == backend and current_model == model:
+            return True, "Core backend already active."
+        return await self._switch_backend_mode(
+            chat_id,
+            backend,
+            target_model=model,
+            with_context=False,
+        )
+
     async def cmd_core(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
@@ -5354,11 +5380,18 @@ class FlexibleAgentRuntime:
             return
 
         self.backend_manager.update_wrapper_blocks(core={"backend": backend, "model": model})
+        switch_ok, switch_message = await self._activate_wrapper_core_backend(
+            update.effective_chat.id,
+            backend=backend,
+            model=model,
+        )
         await self._reply_text(
             update,
             "Wrapper core updated:\n"
             f"• Backend: `{backend}`\n"
-            f"• Model: `{model}`",
+            f"• Model: `{model}`\n"
+            f"• Active core: {'updated' if switch_ok else 'not changed'}\n"
+            f"{switch_message}",
             parse_mode="Markdown",
         )
 
@@ -5613,13 +5646,20 @@ class FlexibleAgentRuntime:
             if hasattr(backend, "set_session_mode"):
                 backend.set_session_mode(False)
             cfg = load_wrapper_config(self.backend_manager.get_state_snapshot())
+            switch_ok, switch_message = await self._activate_wrapper_core_backend(
+                update.effective_chat.id,
+                backend=cfg.core_backend,
+                model=cfg.core_model,
+            )
             await self._reply_text(
                 update,
                 "Switched to **wrapper** mode.\n"
                 f"• Core: `{cfg.core_backend}` / `{cfg.core_model}`\n"
                 f"• Wrapper: `{cfg.wrapper_backend}` / `{cfg.wrapper_model}`\n"
+                f"• Active core: {'ready' if switch_ok else 'not changed'}\n"
+                f"{switch_message}\n"
                 "• Use `/core`, `/wrap`, and `/wrapper` to configure\n"
-                "• Response rewriting is enabled in a later implementation phase",
+                "• User-visible responses are rewritten through the wrapper model",
                 parse_mode="Markdown",
             )
 
