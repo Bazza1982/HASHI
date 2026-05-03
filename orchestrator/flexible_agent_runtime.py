@@ -5362,16 +5362,25 @@ class FlexibleAgentRuntime:
 
     def _wrapper_wrap_keyboard(self, cfg) -> InlineKeyboardMarkup:
         rows: list[list[InlineKeyboardButton]] = []
-        for choice_id, label, backend, model in self._wrapper_model_choices():
-            active = cfg.wrapper_backend == backend and cfg.wrapper_model == model
-            rows.append(
-                [
+        choices = {choice_id: (label, backend, model) for choice_id, label, backend, model in self._wrapper_model_choices()}
+        grouped_rows = [
+            ["claude_haiku", "claude_sonnet", "claude_opus"],
+            ["gemini_flash", "gemini_lite"],
+            ["deepseek_flash", "deepseek_chat"],
+            ["or_deepseek", "or_gemini"],
+        ]
+        for group in grouped_rows:
+            row: list[InlineKeyboardButton] = []
+            for choice_id in group:
+                label, backend, model = choices[choice_id]
+                active = cfg.wrapper_backend == backend and cfg.wrapper_model == model
+                row.append(
                     InlineKeyboardButton(
                         f"✅ {label}" if active else label,
                         callback_data=f"wcfg:wrapid:{choice_id}:{cfg.context_window}",
                     )
-                ]
-            )
+                )
+            rows.append(row)
         rows.append([
             InlineKeyboardButton(
                 f"ctx {value}{' ✅' if cfg.context_window == value else ''}",
@@ -5412,7 +5421,11 @@ class FlexibleAgentRuntime:
             f"• Model: `{cfg.wrapper_model}`\n"
             f"• Context window: `{cfg.context_window}`\n"
             f"• Fallback: `{cfg.fallback}`\n\n"
-            "Tap a button to change the wrapper model/context, or type:\n"
+            "Tap a provider/model button below. Buttons are grouped by provider.\n"
+            "Each model button changes both wrapper backend and model.\n"
+            "Context buttons only change how many recent visible turns the wrapper sees.\n"
+            "Default/recommended: `claude-cli / claude-haiku-4-5`.\n\n"
+            "Or type one of these:\n"
             "`/wrap backend=claude-cli model=claude-haiku-4-5 context=3`\n"
             "`/wrap backend=gemini-cli model=gemini-2.5-flash context=3`\n"
             "`/wrap backend=deepseek-api model=deepseek-chat context=3`\n"

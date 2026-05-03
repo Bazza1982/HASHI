@@ -389,7 +389,10 @@ async def test_wrapper_config_status_commands_include_clickable_buttons(tmp_path
     assert "wcfg:core:codex-cli:gpt-5.5" in str(runtime._reply_payloads[-1]["reply_markup"])
 
     await FlexibleAgentRuntime.cmd_wrap(runtime, update, context)
-    assert "Tap a button" in messages[-1]
+    assert "Tap a provider/model button" in messages[-1]
+    assert "Buttons are grouped by provider" in messages[-1]
+    assert "Each model button changes both wrapper backend and model" in messages[-1]
+    assert "Context buttons only change" in messages[-1]
     assert runtime._reply_payloads[-1]["reply_markup"] is not None
     wrap_markup = str(runtime._reply_payloads[-1]["reply_markup"])
     assert "wcfg:wrapid:claude_haiku" in wrap_markup
