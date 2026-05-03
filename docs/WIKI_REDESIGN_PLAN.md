@@ -987,7 +987,46 @@ Manual review:
 - No Obsidian vault files were written.
 - The old DB backup remains available for rollback.
 
-### 14.6 Remaining implementation boundaries
+### 14.6 Milestone 6 expanded live smoke record
+
+Status: completed on 2026-05-04.
+
+Live safety checkpoint:
+
+```text
+Backup created:
+workspaces/lily/wiki_state.sqlite.bak-20260504-080930
+
+Command:
+python3 scripts/wiki/run_pipeline.py --daily --classify --persist-classifications --pages-dry-run --limit 100 --max-classify 20
+```
+
+Result:
+
+```text
+Backend: claude-cli
+Model: claude-sonnet-4-6
+Assignments: 20
+Topic Counts:
+- AI_Memory_Systems: 4
+- HASHI_Architecture: 11
+- NONE: 5
+last_classified_id: 36
+Page drafts:
+workspaces/lily/wiki_pages_dry_run/Topics/AI_Memory_Systems.md
+workspaces/lily/wiki_pages_dry_run/Topics/HASHI_Architecture.md
+```
+
+Manual review:
+
+- `AI_Memory_Systems` assignments remain correct for memory migration, memory sync, BGE-M3, vector search, and SQLite memory-system work.
+- `NONE` correctly captured low-durable-value greetings, workspace-path checks, and generic memory-sync confirmations.
+- Several security-scan and routine-maintenance memories were assigned to `HASHI_Architecture` with acceptable but lower confidence (`0.75`). This is not a data-integrity error, but it shows the taxonomy is too coarse for operational maintenance.
+- Before a larger backfill, add a dedicated operations/security topic, for example `HASHI_Ops_Security`, covering system security scans, dependency update checks, file permissions, firewall/port review, Windows/WSL operational risk, and routine maintenance actions.
+- No Obsidian vault files were written.
+- The old DB backup remains available for rollback.
+
+### 14.7 Remaining implementation boundaries
 
 The plan is ready to start once these implementation boundaries are accepted:
 
