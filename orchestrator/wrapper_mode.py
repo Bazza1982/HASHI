@@ -18,6 +18,7 @@ BackendInvoker = Callable[..., Awaitable[Any]]
 
 USER_WRAPPABLE_SOURCES = frozenset(
     {
+        "api",
         "text",
         "voice",
         "voice_transcript",

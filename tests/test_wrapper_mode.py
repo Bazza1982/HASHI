@@ -19,7 +19,7 @@ from orchestrator.wrapper_mode import (
 
 
 def test_should_wrap_user_sources():
-    for source in ["text", "voice", "voice_transcript", "photo", "audio", "document", "video", "sticker"]:
+    for source in ["api", "text", "voice", "voice_transcript", "photo", "audio", "document", "video", "sticker"]:
         assert should_wrap_source(source)
 
 
