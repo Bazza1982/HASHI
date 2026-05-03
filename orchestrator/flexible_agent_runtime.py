@@ -6321,8 +6321,8 @@ class FlexibleAgentRuntime:
         """Soft reset: wipe workspace state but preserve agent identity and /sys prompts.
 
         Goal: after /reset, agent.md, AGENT.md, and sys_prompts.json are kept intact —
-        personality and /sys slots survive. Everything else (memory, transcripts,
-        handoff, backend_state, etc.) is cleared.
+        personality, /sys slots, and wrapper configuration survive. Everything
+        else (memory, transcripts, handoff, backend_state, etc.) is cleared.
 
         Usage:
           /reset           -> shows warning
@@ -6347,6 +6347,14 @@ class FlexibleAgentRuntime:
         keep_names = {"agent.md", "AGENT.md", "sys_prompts.json"}
         removed_files = 0
         removed_dirs = 0
+        preserved_state: dict[str, Any] = {}
+        try:
+            state_snapshot = self.backend_manager.get_state_snapshot()
+            for key in ("active_backend", "active_model", "agent_mode", "core", "wrapper", "wrapper_slots"):
+                if key in state_snapshot:
+                    preserved_state[key] = state_snapshot[key]
+        except Exception as exc:
+            self.logger.warning(f"Reset could not preserve wrapper state: {exc}")
 
         # Stop any backend process just in case.
         if self.backend_manager.current_backend:
@@ -6397,6 +6405,9 @@ class FlexibleAgentRuntime:
         self._pending_auto_recall_context = None
         self._pending_session_primer = None
         self._clear_transfer_state()
+        if preserved_state:
+            with suppress(Exception):
+                self.backend_manager._write_state_dict(dict(preserved_state))
 
         # Start a fresh backend session if supported
         if self.backend_manager.current_backend and getattr(self.backend_manager.current_backend.capabilities, "supports_sessions", False):
@@ -6406,7 +6417,7 @@ class FlexibleAgentRuntime:
         await self._reply_text(
             update,
             f"✅ Reset workspace for {self.name}. Removed {removed_dirs} dirs and {removed_files} files.\n"
-            "Agent identity and /sys slots are intact. Start fresh with /new.",
+            "Agent identity, /sys slots, and wrapper config are intact. Start fresh with /new.",
         )
 
     async def cmd_clear(self, update: Update, context: Any):

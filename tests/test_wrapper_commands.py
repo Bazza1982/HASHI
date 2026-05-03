@@ -513,6 +513,53 @@ async def test_cmd_wrapper_set_list_and_clear_slots(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_reset_preserves_wrapper_config_and_sys_prompts(tmp_path):
+    manager = _make_manager(tmp_path / "agent")
+    manager.agent_mode = "wrapper"
+    manager.config.active_backend = "codex-cli"
+    manager._active_model_override = "gpt-5.5"
+    manager.update_wrapper_blocks(
+        core={"backend": "codex-cli", "model": "gpt-5.5"},
+        wrapper={"backend": "claude-cli", "model": "claude-haiku-4-5", "context_window": 3},
+        wrapper_slots={"1": "Keep the Xishi persona."},
+    )
+    workspace = manager.config.workspace_dir
+    (workspace / "agent.md").write_text("identity", encoding="utf-8")
+    (workspace / "sys_prompts.json").write_text('{"slots":[]}', encoding="utf-8")
+    (workspace / "transcript.jsonl").write_text("old transcript", encoding="utf-8")
+    (workspace / "memory").mkdir(exist_ok=True)
+    (workspace / "memory" / "old.txt").write_text("old memory", encoding="utf-8")
+
+    runtime, messages = _make_runtime(manager)
+    runtime.name = "test-flex"
+    runtime.workspace_dir = workspace
+    runtime.global_config = manager.global_config
+    runtime.sys_prompt_manager = None
+    runtime.logger = SimpleNamespace(warning=lambda *a, **k: None)
+    runtime._get_active_skill_sections = lambda: []
+    runtime._get_agent_class = lambda: "persona"
+    runtime._pending_auto_recall_context = "old"
+    runtime._pending_session_primer = "old"
+    runtime._clear_transfer_state = lambda: None
+    update, context = _update(["CONFIRM"])
+
+    await FlexibleAgentRuntime.cmd_reset(runtime, update, context)
+
+    state = _read_state(workspace)
+    assert state["agent_mode"] == "wrapper"
+    assert state["active_backend"] == "codex-cli"
+    assert state["active_model"] == "gpt-5.5"
+    assert state["core"] == {"backend": "codex-cli", "model": "gpt-5.5"}
+    assert state["wrapper"] == {"backend": "claude-cli", "model": "claude-haiku-4-5", "context_window": 3}
+    assert state["wrapper_slots"] == {"1": "Keep the Xishi persona."}
+    assert (workspace / "agent.md").exists()
+    assert (workspace / "sys_prompts.json").exists()
+    assert not (workspace / "transcript.jsonl").exists()
+    assert not (workspace / "memory" / "old.txt").exists()
+    assert "wrapper config are intact" in messages[-1]
+
+
+@pytest.mark.asyncio
 async def test_foreground_completion_uses_wrapper_output_for_visible_surfaces(tmp_path):
     runtime, sent, voices, hchat_replies = _make_foreground_runtime(tmp_path)
     listener_payloads = []
