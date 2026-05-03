@@ -376,6 +376,56 @@ async function actionFill(args) {
   };
 }
 
+async function actionTypeText(args) {
+  const tab = await resolveTab(args);
+  assertScriptableTab(tab);
+  const selector = String(args.selector || "").trim();
+  const text = String(args.text || "");
+  const timeoutMs = Number(args.timeout_ms || 10000);
+  if (!selector) {
+    throw new Error("selector is required");
+  }
+  // Wait for element to appear (same timeout-poll pattern as actionFill)
+  await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    args: [selector, timeoutMs],
+    func: async (sel, timeoutMs) => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const started = Date.now();
+      let el = null;
+      while (Date.now() - started < timeoutMs) {
+        el = document.querySelector(sel);
+        if (el) break;
+        await sleep(100);
+      }
+      if (!el) throw new Error(`selector not found: ${sel}`);
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) {
+        throw new Error(`element is not visible: ${sel}`);
+      }
+      el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+      if (typeof el.focus === "function") {
+        el.focus({ preventScroll: true });
+      }
+      if (typeof el.click === "function") {
+        el.click();
+      }
+    }
+  });
+  await sleep(150);
+  // CDP Input.insertText — bypasses CSP, triggers real beforeinput events (React-compatible)
+  // NOTE: withDebugger lacks per-tab serialisation; concurrent type_text + screenshot-fallback
+  // calls on the same tab may race. Tracked as a known risk for future improvement.
+  await withDebugger(tab.id, async (target) => {
+    await chrome.debugger.sendCommand(target, "Input.insertText", { text });
+  });
+  const updatedTab = await chrome.tabs.get(tab.id);
+  return {
+    output: `OK: typed text into '${selector}'`,
+    meta: { ...tabMeta(updatedTab), action: "type_text", selector }
+  };
+}
+
 async function actionEvaluate(args) {
   const tab = await resolveTab(args);
   assertScriptableTab(tab);
@@ -464,6 +514,9 @@ async function executeAction(action, args) {
   }
   if (action === "fill") {
     return actionFill(args);
+  }
+  if (action === "type_text") {
+    return actionTypeText(args);
   }
   if (action === "evaluate") {
     return actionEvaluate(args);

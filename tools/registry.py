@@ -23,7 +23,7 @@ TOOL_TIERS: dict[str, list[str]] = {
     "communication": ["telegram_send"],
     "browser": [
         "browser_session", "browser_screenshot", "browser_get_text",
-        "browser_get_html", "browser_click", "browser_fill",
+        "browser_get_html", "browser_click", "browser_fill", "browser_type_text",
         "browser_evaluate", "browser_scroll", "browser_hover",
         "browser_key", "browser_select", "browser_wait_for",
         "browser_get_attribute", "browser_drag", "browser_upload",
@@ -252,6 +252,7 @@ class ToolRegistry:
                 execute_browser_drag,
                 execute_browser_upload,
                 execute_browser_session,
+                execute_browser_type_text,
             )
             _browser_dispatch = {
                 "browser_screenshot":    execute_browser_screenshot,
@@ -259,6 +260,7 @@ class ToolRegistry:
                 "browser_get_html":      execute_browser_get_html,
                 "browser_click":         execute_browser_click,
                 "browser_fill":          execute_browser_fill,
+                "browser_type_text":     execute_browser_type_text,
                 "browser_evaluate":      execute_browser_evaluate,
                 "browser_scroll":        execute_browser_scroll,
                 "browser_hover":         execute_browser_hover,

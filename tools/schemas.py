@@ -646,6 +646,29 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "browser_type_text",
+            "description": (
+                "Type text into a contenteditable element on a page using CDP Input.insertText. "
+                "Unlike browser_fill, this triggers real browser input events (including beforeinput), "
+                "making it compatible with React-controlled editors such as LinkedIn's post composer. "
+                "Requires the HASHI browser bridge extension."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL the tab is already on (used for routing)."},
+                    "selector": {"type": "string", "description": "CSS selector of the contenteditable element."},
+                    "text": {"type": "string", "description": "Text to insert (supports Unicode/emoji)."},
+                    "timeout_ms": {"type": "integer", "description": "Max wait for element to appear. Default 10000."},
+                    "cdp_url": {"type": "string", "description": "CDP endpoint to reuse existing browser."},
+                },
+                "required": ["url", "selector", "text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "browser_evaluate",
             "description": (
                 "Navigate to a URL and execute custom JavaScript, returning the result. "
@@ -1223,6 +1246,7 @@ for _tool_name in [
     "browser_get_html",
     "browser_click",
     "browser_fill",
+    "browser_type_text",
     "browser_evaluate",
 ]:
     if _tool_name in {s["function"]["name"] for s in TOOL_SCHEMAS}:

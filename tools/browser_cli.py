@@ -11,6 +11,7 @@ Usage:
   python tools/browser_cli.py get_html      --url <url>
   python tools/browser_cli.py click         --url <url> --selector <css>
   python tools/browser_cli.py fill          --url <url> --selector <css> --text <text> [--submit]
+  python tools/browser_cli.py type_text     --url <url> --selector <css> --text <text>
   python tools/browser_cli.py evaluate      --url <url> --script <js>
   python tools/browser_cli.py scroll        --url <url> [--x 0] [--y 500] [--selector <css>]
   python tools/browser_cli.py hover         --url <url> --selector <css>
@@ -62,6 +63,7 @@ async def _run(args: argparse.Namespace) -> int:
         execute_browser_drag,
         execute_browser_upload,
         execute_browser_session,
+        execute_browser_type_text,
     )
 
     # Build base kwargs shared by most commands
@@ -199,6 +201,16 @@ async def _run(args: argparse.Namespace) -> int:
             {**base, "selector": args.selector, "file_path": args.file_path}
         )
 
+    # ------------------------------------------------------------------ type_text
+    elif cmd == "type_text":
+        if not args.selector:
+            print("Error: --selector is required for type_text"); return 1
+        if args.text is None:
+            print("Error: --text is required for type_text"); return 1
+        result = await execute_browser_type_text(
+            {**base, "selector": args.selector, "text": args.text}
+        )
+
     # ------------------------------------------------------------------ session
     elif cmd == "session":
         if not args.steps:
@@ -238,7 +250,7 @@ def main() -> None:
         "command",
         choices=[
             "screenshot", "get_text", "get_html",
-            "click", "fill", "evaluate",
+            "click", "fill", "type_text", "evaluate",
             "scroll", "hover", "key", "select",
             "wait_for", "get_attribute", "drag", "upload",
             "session",

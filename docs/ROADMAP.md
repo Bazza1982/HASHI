@@ -136,6 +136,34 @@ Preferred future direction:
 
 ---
 
+### Stable Public Tunnel for OLL Browser Bridge (`oll.barryli.phd`)
+
+Status: **deferred / revisit later**.
+
+We set up a Cloudflare Tunnel (`hashi-oll`) to expose the OLL browser gateway at `oll.barryli.phd`, pointing to `http://127.0.0.1:8876` on HASHI1. DNS was fully propagated and the tunnel was verified working.
+
+What we completed:
+
+- Cloudflare Tunnel `hashi-oll` created (ID: `e04e2f57-d337-4a6c-96b8-144a77e23c5a`).
+- DNS CNAME `oll.barryli.phd` → tunnel, confirmed propagated on public resolvers.
+- `barryli.phd` nameservers moved to Cloudflare (achiel/val).
+- `cloudflared` successfully ran as a background process on HASHI1 with `http2` protocol fallback.
+- Blog (`barryli.phd`) verified unaffected throughout.
+
+What still needs to be done:
+
+- `cloudflared` tunnel credentials were not persisted; the process stopped after WSL restart.
+- Re-authenticate: run `cloudflared login` to regenerate `~/.cloudflared/cert.pem`, then retrieve the permanent token via `cloudflared tunnel token hashi-oll`.
+- Set up `cloudflared` as a persistent systemd/openrc service on HASHI1 so it survives restarts.
+- Start `browser_gateway` (port 8876) as a persistent service alongside HASHI instead of a manual background process.
+
+Revisit when:
+
+- There is time to properly set up `cloudflared` as a system service.
+- OLL browser bridge usage is needed for stable off-LAN access.
+
+---
+
 ## Notes
 - This roadmap is outcome-based; implementation details live in dedicated design docs.
 - Design docs: `docs/V2.2_TOOL_EXECUTION_PLAN.md`, `docs/HASHI_VOICE_BRIDGE_PLAN.md`, `docs/WRAPPER_AGENT_MODE_PLAN.md`

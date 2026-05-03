@@ -97,6 +97,7 @@ Implemented:
 - get_html
 - click
 - fill
+- type_text  (CDP Input.insertText — for React/contenteditable editors; use instead of fill on LinkedIn etc.)
 - evaluate
 - scroll
 - hover

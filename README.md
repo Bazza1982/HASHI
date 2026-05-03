@@ -638,7 +638,7 @@ API-backed agents can execute local actions via the tool system:
 | `web_fetch` | Fetch any URL as Markdown |
 | `browser_screenshot` | Navigate to URL and capture screenshot |
 | `browser_get_text` | Extract visible text from rendered page |
-| `browser_click` / `browser_fill` | Interact with web elements |
+| `browser_click` / `browser_fill` / `browser_type_text` | Interact with web elements (`type_text` uses CDP for React/contenteditable editors) |
 | `desktop_screenshot` | Capture Linux virtual desktop (Xvfb/XRDP) as base64 PNG |
 | `desktop_click` | Click at (x, y) on the virtual desktop |
 | `desktop_type` | Type text into focused window (all chars via xdotool) |

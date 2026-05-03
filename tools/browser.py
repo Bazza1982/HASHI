@@ -401,6 +401,23 @@ async def execute_browser_fill(args: dict) -> str:
                 pass
 
 
+async def execute_browser_type_text(args: dict) -> str:
+    """Type text into a contenteditable element using CDP Input.insertText (React-compatible)."""
+    url = str(args.get("url", "")).strip()
+    selector = str(args.get("selector", "")).strip()
+    text = str(args.get("text", ""))
+    if not url:
+        return "Error: url is required"
+    if not selector:
+        return "Error: selector is required"
+
+    bridge_result = await _maybe_execute_extension_bridge("type_text", args)
+    if bridge_result is not None:
+        return bridge_result
+
+    return "Error: type_text requires the HASHI browser bridge extension (not available in standalone Playwright mode)"
+
+
 async def execute_browser_scroll(args: dict) -> str:
     """
     Scroll the page or a specific element.
