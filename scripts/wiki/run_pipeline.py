@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import uuid
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -33,10 +34,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Emit weekly digest when the local day is Saturday.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Do not persist classifications or write pages.")
+    parser.add_argument("--classify", action="store_true", help="Run the classifier stage.")
     parser.add_argument(
         "--classify-dry-run",
         action="store_true",
-        help="Call the Lily CLI backend classifier but do not persist assignments.",
+        help="Alias for --classify --dry-run.",
     )
     parser.add_argument(
         "--mock-classifier",
@@ -49,6 +51,11 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=None,
         help="Limit classifiable rows sent to the classifier during dry-run.",
+    )
+    parser.add_argument(
+        "--persist-classifications",
+        action="store_true",
+        help="Persist classifier assignments and advance the safe watermark.",
     )
     parser.add_argument(
         "--skip-consolidation-check",
@@ -74,15 +81,26 @@ def run_stage0(config: WikiConfig, args: argparse.Namespace) -> list[str]:
 
         fetch_result = fetch_new_memories(config, state, limit=args.limit)
         classifier_result = None
+        run_classifier = bool(args.classify or args.classify_dry_run)
         if args.classify_dry_run:
-            if not args.dry_run:
-                raise ValueError("--classify-dry-run currently requires --dry-run")
+            args.dry_run = True
+        if args.persist_classifications and args.dry_run:
+            raise ValueError("--persist-classifications cannot be combined with --dry-run")
+        if run_classifier:
             if consolidation_ok:
+                records_to_classify = fetch_result.classifiable[: args.max_classify]
                 classifier_result = classify_memories_dry_run(
-                    fetch_result.classifiable[: args.max_classify],
+                    records_to_classify,
                     config,
                     mock=args.mock_classifier,
                 )
+                if args.persist_classifications:
+                    persist_classification_state(
+                        state,
+                        fetch_result,
+                        records_to_classify,
+                        classifier_result,
+                    )
         lines = build_report(
             config,
             state,
@@ -154,7 +172,8 @@ def build_report(
         f"- Timestamp: {now.isoformat()}",
         f"- Mode: {'daily' if args.daily else 'manual'}",
         f"- Dry run: {bool(args.dry_run)}",
-        f"- Classifier dry run: {bool(args.classify_dry_run)}",
+        f"- Classifier stage: {bool(args.classify or args.classify_dry_run)}",
+        f"- Persist classifications: {bool(args.persist_classifications)}",
         f"- Consolidation check: {'ok' if consolidation_ok else 'blocked'} — {consolidation_reason}",
         f"- Weekly digest due: {weekly_due}",
         "",
@@ -209,12 +228,30 @@ def build_report(
             "",
             "## Safety",
             "",
-            "- LLM classifier assignments are not persisted in dry-run mode.",
+            "- Classifier assignments are persisted only when `--persist-classifications` is set.",
             "- No Obsidian vault pages were written.",
-            "- `wiki_state.sqlite` schema exists, but watermark is not advanced.",
+            "- `last_classified_id` advances only across contiguous ok/skipped/redacted rows.",
         ]
     )
     return lines
+
+
+def persist_classification_state(
+    state: WikiState,
+    fetch_result: FetchResult,
+    records_to_classify,
+    classifier_result: ClassificationDryRunResult,
+) -> int:
+    batch_id = f"wiki-classify-{uuid.uuid4().hex[:12]}"
+    state.record_skipped_runs(fetch_result.skipped, batch_id=batch_id, status="skipped")
+    state.record_skipped_runs(fetch_result.redacted, batch_id=batch_id, status="redacted")
+    state.record_assignments(
+        records_to_classify,
+        classifier_result.assignments,
+        batch_id=batch_id,
+        classifier_model=f"{classifier_result.backend}/{classifier_result.model}",
+    )
+    return state.advance_watermark()
 
 
 if __name__ == "__main__":

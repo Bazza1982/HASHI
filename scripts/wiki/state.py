@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
+
+if TYPE_CHECKING:
+    from .classifier import ClassificationAssignment
+    from .fetcher import MemoryRecord
 
 
 SCHEMA_STATEMENTS: tuple[str, ...] = (
@@ -105,3 +110,113 @@ class WikiState:
             ids,
         ).fetchall()
         return {int(row["consolidated_id"]) for row in rows}
+
+    def record_skipped_runs(
+        self,
+        records: Iterable["MemoryRecord"],
+        *,
+        batch_id: str,
+        status: str,
+        classified_at: str | None = None,
+    ) -> None:
+        if status not in {"skipped", "redacted", "failed"}:
+            raise ValueError(f"Unsupported run status: {status}")
+        ts = classified_at or _utc_now()
+        with self.conn:
+            self.conn.executemany(
+                """
+                INSERT INTO classification_run(
+                    consolidated_id, agent_id, batch_id, status, classified_at
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(consolidated_id) DO UPDATE SET
+                    batch_id = excluded.batch_id,
+                    status = excluded.status,
+                    classified_at = excluded.classified_at
+                """,
+                [(record.id, record.agent_id, batch_id, status, ts) for record in records],
+            )
+
+    def record_assignments(
+        self,
+        records: Iterable["MemoryRecord"],
+        assignments: Iterable["ClassificationAssignment"],
+        *,
+        batch_id: str,
+        classifier_model: str,
+        classified_at: str | None = None,
+    ) -> None:
+        record_by_id = {record.id: record for record in records}
+        assignment_list = list(assignments)
+        missing = [a.consolidated_id for a in assignment_list if a.consolidated_id not in record_by_id]
+        if missing:
+            raise ValueError(f"Assignments contain unknown consolidated ids: {missing}")
+        ts = classified_at or _utc_now()
+        with self.conn:
+            for assignment in assignment_list:
+                record = record_by_id[assignment.consolidated_id]
+                self.conn.execute(
+                    """
+                    INSERT INTO classification_run(
+                        consolidated_id, agent_id, batch_id, status, classified_at
+                    )
+                    VALUES (?, ?, ?, 'ok', ?)
+                    ON CONFLICT(consolidated_id) DO UPDATE SET
+                        batch_id = excluded.batch_id,
+                        status = excluded.status,
+                        classified_at = excluded.classified_at
+                    """,
+                    (record.id, record.agent_id, batch_id, ts),
+                )
+                self.conn.execute(
+                    "DELETE FROM classification_assignment WHERE consolidated_id = ?",
+                    (record.id,),
+                )
+                self.conn.executemany(
+                    """
+                    INSERT INTO classification_assignment(
+                        consolidated_id, topic_id, confidence, classified_at, classifier_model, status
+                    )
+                    VALUES (?, ?, ?, ?, ?, 'ok')
+                    """,
+                    [
+                        (
+                            record.id,
+                            topic_id,
+                            assignment.confidence,
+                            ts,
+                            classifier_model,
+                        )
+                        for topic_id in assignment.topics
+                    ],
+                )
+
+    def advance_watermark(self) -> int:
+        current = self.get_last_classified_id()
+        rows = self.conn.execute(
+            """
+            SELECT consolidated_id, status
+            FROM classification_run
+            WHERE consolidated_id > ?
+            ORDER BY consolidated_id ASC
+            """,
+            (current,),
+        ).fetchall()
+        next_expected = current + 1
+        advanced_to = current
+        for row in rows:
+            consolidated_id = int(row["consolidated_id"])
+            status = str(row["status"])
+            if consolidated_id != next_expected:
+                break
+            if status not in {"ok", "skipped", "redacted"}:
+                break
+            advanced_to = consolidated_id
+            next_expected += 1
+        if advanced_to != current:
+            self.set_run_state("last_classified_id", str(advanced_to))
+        return advanced_to
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()

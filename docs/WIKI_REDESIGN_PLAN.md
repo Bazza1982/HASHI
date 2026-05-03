@@ -899,7 +899,34 @@ Dry-run safety:
 - No Obsidian vault pages are written.
 - Remote API backends such as `openrouter-api` and `deepseek-api` are refused before any call.
 
-### 14.3 Remaining implementation boundaries
+### 14.3 Milestone 3 implementation record
+
+Status: implemented on 2026-05-04.
+
+Implemented behavior:
+
+- `scripts/wiki/state.py` can persist `classification_run` rows for `ok`, `skipped`, `redacted`, and `failed` outcomes.
+- `classification_assignment` stores one row per `(consolidated_id, topic_id)` for successful classifier assignments.
+- `last_classified_id` advances only across contiguous rows whose status is `ok`, `skipped`, or `redacted`.
+- `failed` rows deliberately block watermark advancement so they can be retried.
+- `scripts/wiki/run_pipeline.py` supports `--persist-classifications` for classifier-only persistence.
+
+Validation record:
+
+```text
+python3 -m py_compile scripts/wiki/*.py tests/test_wiki_pipeline.py
+pytest tests/test_wiki_pipeline.py -q
+python3 scripts/wiki/run_pipeline.py --daily --dry-run --classify-dry-run --mock-classifier --limit 20
+```
+
+Persistence safety:
+
+- Tests persist only to temporary SQLite databases.
+- Live smoke remains dry-run only; no live `classification_assignment` rows have been written yet.
+- No Obsidian vault pages are written.
+- Page generation remains disabled until the classified state is reviewed.
+
+### 14.4 Remaining implementation boundaries
 
 The plan is ready to start once these implementation boundaries are accepted:
 

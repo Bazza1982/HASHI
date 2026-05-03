@@ -9,7 +9,11 @@ from pathlib import Path
 import pytest
 
 from scripts.wiki.backend_client import BackendPolicyError, call_lily_cli_backend
-from scripts.wiki.classifier import build_classification_prompt, parse_classification_response
+from scripts.wiki.classifier import (
+    ClassificationAssignment,
+    build_classification_prompt,
+    parse_classification_response,
+)
 from scripts.wiki.config import WikiConfig
 from scripts.wiki.fetcher import fetch_new_memories
 from scripts.wiki.run_pipeline import check_today_consolidation, run_stage0
@@ -168,17 +172,91 @@ def test_run_pipeline_mock_classifier_dry_run(tmp_path: Path) -> None:
         daily=True,
         weekly_if_saturday=False,
         dry_run=True,
+        classify=False,
         classify_dry_run=True,
         mock_classifier=True,
         limit=10,
         max_classify=None,
+        persist_classifications=False,
         skip_consolidation_check=False,
     )
     lines = run_stage0(config, args)
     text = "\n".join(lines)
-    assert "Classifier dry run: True" in text
+    assert "Classifier stage: True" in text
     assert "Backend: mock" in text
     assert "Assignments: 1" in text
+
+
+def test_state_persists_assignments_and_advances_watermark(tmp_path: Path) -> None:
+    state_path = tmp_path / "wiki_state.sqlite"
+    with WikiState(state_path) as state:
+        state.init_schema()
+        skipped = [_record(1, "personal skipped")]
+        classified = [_record(2, "HASHI scheduler design")]
+        state.record_skipped_runs(skipped, batch_id="batch-1", status="skipped")
+        state.record_assignments(
+            classified,
+            [
+                ClassificationAssignment(
+                    consolidated_id=2,
+                    topics=("HASHI_Architecture",),
+                    confidence=0.92,
+                )
+            ],
+            batch_id="batch-1",
+            classifier_model="claude-cli/claude-sonnet-4-6",
+        )
+        assert state.advance_watermark() == 2
+        assert state.get_last_classified_id() == 2
+        assert state.count_rows("classification_run") == 2
+        assert state.count_rows("classification_assignment") == 1
+
+
+def test_state_does_not_advance_watermark_across_failed_row(tmp_path: Path) -> None:
+    state_path = tmp_path / "wiki_state.sqlite"
+    with WikiState(state_path) as state:
+        state.init_schema()
+        state.record_skipped_runs([_record(1, "failed")], batch_id="batch-1", status="failed")
+        state.record_skipped_runs([_record(2, "ok skipped")], batch_id="batch-1", status="skipped")
+        assert state.advance_watermark() == 0
+        assert state.get_last_classified_id() == 0
+
+
+def test_run_pipeline_persists_mock_classifier_assignments(tmp_path: Path) -> None:
+    consolidated = tmp_path / "consolidated_memory.sqlite"
+    _make_consolidated_db(consolidated)
+    log = tmp_path / "consolidation_log.jsonl"
+    log.write_text(
+        '{"timestamp":"2026-05-03T18:08:00+00:00","phase":"embed","embedded":10,"errors":0}\n',
+        encoding="utf-8",
+    )
+    state_path = tmp_path / "wiki_state.sqlite"
+    config = WikiConfig(
+        hashi_root=tmp_path,
+        consolidated_db=consolidated,
+        wiki_state_db=state_path,
+        consolidation_log=log,
+        report_latest=tmp_path / "wiki_latest.md",
+        dry_run_report_latest=tmp_path / "wiki_dry_run.md",
+    )
+    args = argparse.Namespace(
+        daily=True,
+        weekly_if_saturday=False,
+        dry_run=False,
+        classify=True,
+        classify_dry_run=False,
+        mock_classifier=True,
+        limit=10,
+        max_classify=None,
+        persist_classifications=True,
+        skip_consolidation_check=False,
+    )
+    run_stage0(config, args)
+    with WikiState(state_path) as state:
+        state.init_schema()
+        assert state.get_last_classified_id() == 4
+        assert state.count_rows("classification_run") == 4
+        assert state.count_rows("classification_assignment") == 1
 
 
 def _record(consolidated_id: int, content: str):
