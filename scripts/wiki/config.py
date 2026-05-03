@@ -39,7 +39,7 @@ class WikiConfig:
 TOPICS: dict[str, dict[str, str]] = {
     "HASHI_Architecture": {
         "display": "HASHI Architecture",
-        "desc": "HASHI multi-agent OS, orchestrator, hot-restart, HChat, scheduler, gateway, and agent lifecycle.",
+        "desc": "HASHI multi-agent OS, orchestrator, hot-restart, HChat, scheduler, gateway, and agent lifecycle. Security incidents, vulnerability scans, and operational restart procedures belong in HASHI_Ops_Security even when they mention core components.",
     },
     "AI_Memory_Systems": {
         "display": "AI Memory Systems",

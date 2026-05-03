@@ -291,10 +291,18 @@ def test_page_generator_writes_dry_run_topic_pages(tmp_path: Path) -> None:
     with WikiState(state_path) as state:
         state.init_schema()
         state.record_assignments(
-            [_record(1, "HASHI scheduler design")],
+            [
+                _record(1, "HASHI scheduler design"),
+                _record(5, "User: 好想你，亲一下。 Assistant: This is private relationship content."),
+            ],
             [
                 ClassificationAssignment(
                     consolidated_id=1,
+                    topics=("HASHI_Architecture",),
+                    confidence=0.9,
+                ),
+                ClassificationAssignment(
+                    consolidated_id=5,
                     topics=("HASHI_Architecture",),
                     confidence=0.9,
                 )
@@ -304,12 +312,15 @@ def test_page_generator_writes_dry_run_topic_pages(tmp_path: Path) -> None:
         )
 
     memories = fetch_topic_memories(config, "HASHI_Architecture")
-    assert len(memories) == 1
+    assert len(memories) == 2
+    assert "[private content filtered]" in {memory.content for memory in memories}
     drafts = generate_dry_run_pages(config)
     assert [draft.topic_id for draft in drafts] == ["HASHI_Architecture"]
     page = drafts[0].path.read_text(encoding="utf-8")
     assert "status: dry-run" in page
     assert "Memory 1" in page
+    assert "[private content filtered]" in page
+    assert "好想你" not in page
 
 
 def test_run_pipeline_generates_page_drafts_from_persisted_state(tmp_path: Path) -> None:

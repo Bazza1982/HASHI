@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import TOPICS, WikiConfig
+from .fetcher import has_private_content, has_sensitive_content
 
 
 @dataclass(frozen=True)
@@ -104,7 +105,7 @@ def fetch_topic_memories(
             instance=row["instance"],
             domain=row["domain"],
             memory_type=row["memory_type"],
-            content=row["content"],
+            content=sanitize_page_content(row["content"]),
             source_ts=row["source_ts"],
             ts_source=row["ts_source"],
         )
@@ -151,6 +152,13 @@ def build_topic_page(topic_id: str, memories: list[ClassifiedMemory]) -> str:
             ]
         )
     return "\n".join(lines).rstrip() + "\n"
+
+
+def sanitize_page_content(content: str) -> str:
+    """Apply output-side privacy filtering before writing generated wiki pages."""
+    if has_private_content(content) or has_sensitive_content(content):
+        return "[private content filtered]"
+    return content
 
 
 def truncate_for_page(content: str, limit: int = 900) -> str:

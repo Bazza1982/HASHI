@@ -266,6 +266,7 @@ def persist_classification_state(
     batch_id = f"wiki-classify-{uuid.uuid4().hex[:12]}"
     state.record_skipped_runs(fetch_result.skipped, batch_id=batch_id, status="skipped")
     state.record_skipped_runs(fetch_result.redacted, batch_id=batch_id, status="redacted")
+    # Rows beyond --max-classify are intentionally left unrecorded so they are refetched next run.
     state.record_assignments(
         records_to_classify,
         classifier_result.assignments,

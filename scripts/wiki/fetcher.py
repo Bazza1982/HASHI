@@ -126,7 +126,11 @@ def fetch_new_memories(
         query += " LIMIT ?"
         params.append(limit)
 
-    rows = _connect_readonly(config.consolidated_db).execute(query, params).fetchall()
+    con = _connect_readonly(config.consolidated_db)
+    try:
+        rows = con.execute(query, params).fetchall()
+    finally:
+        con.close()
     classifiable: list[MemoryRecord] = []
     skipped: list[MemoryRecord] = []
     redacted: list[MemoryRecord] = []

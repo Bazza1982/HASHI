@@ -1093,7 +1093,29 @@ Quality review:
 - No Obsidian vault files were written.
 - The old DB backup remains available for rollback.
 
-### 14.9 Remaining implementation boundaries
+### 14.9 Milestone 9 Akane review response record
+
+Status: completed on 2026-05-04.
+
+Scope decision:
+
+- Do not implement automatic emerging-topic discovery yet.
+- Do not add `Anatta_Emotional` in this pass. New topic lifecycle review is deferred to a later weekly human/Lily review stage after the daily wiki workflow is stable.
+- Keep the current taxonomy plus `HASHI_Ops_Security` for the next backfill pass.
+
+Fixes applied from Akane review:
+
+- Page generation now applies output-side privacy filtering through `sanitize_page_content()`. If generated page content matches `has_private_content()` or `has_sensitive_content()`, the page writes `[private content filtered]` instead of raw content.
+- `HASHI_Architecture` now explicitly excludes security incidents, vulnerability scans, and operational restart procedures; those belong to `HASHI_Ops_Security` even when they mention core components.
+- `fetch_new_memories()` now explicitly closes the read-only SQLite connection.
+- `persist_classification_state()` now documents that classifiable rows beyond `--max-classify` are intentionally left unrecorded so they are refetched next run.
+
+Still deferred:
+
+- Topic lifecycle / emerging-topic review will be handled as a later weekly review workflow, not as an automatic Python clustering workflow.
+- Obsidian vault publishing remains disabled until the dry-run pages receive at least one human review pass.
+
+### 14.10 Remaining implementation boundaries
 
 The plan is ready to start once these implementation boundaries are accepted:
 
