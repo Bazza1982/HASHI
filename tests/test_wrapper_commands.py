@@ -134,6 +134,7 @@ def _make_background_runtime(tmp_path: Path, wrapper_response: BackendResponse |
     runtime._last_prompt_audit = {}
     runtime._last_full_prompt_tokens = 10
     runtime._thinking_chars_this_req = 0
+    runtime._verbose = False
     runtime.last_response = None
     runtime.logger = SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None)
     runtime.error_logger = SimpleNamespace(error=lambda *a, **k: None)
@@ -164,6 +165,8 @@ def _make_background_runtime(tmp_path: Path, wrapper_response: BackendResponse |
     runtime._wrapper_timeout_s = FlexibleAgentRuntime._wrapper_timeout_s.__get__(runtime, FlexibleAgentRuntime)
     runtime._wrapper_visible_context = FlexibleAgentRuntime._wrapper_visible_context.__get__(runtime, FlexibleAgentRuntime)
     runtime._wrapper_audit_fields = FlexibleAgentRuntime._wrapper_audit_fields.__get__(runtime, FlexibleAgentRuntime)
+    runtime._format_wrapper_verbose_trace = FlexibleAgentRuntime._format_wrapper_verbose_trace.__get__(runtime, FlexibleAgentRuntime)
+    runtime._send_wrapper_verbose_trace = FlexibleAgentRuntime._send_wrapper_verbose_trace.__get__(runtime, FlexibleAgentRuntime)
     runtime._append_core_transcript = FlexibleAgentRuntime._append_core_transcript.__get__(runtime, FlexibleAgentRuntime)
     runtime._apply_wrapper_to_visible_text = FlexibleAgentRuntime._apply_wrapper_to_visible_text.__get__(runtime, FlexibleAgentRuntime)
     runtime._notify_request_listeners = FlexibleAgentRuntime._notify_request_listeners.__get__(runtime, FlexibleAgentRuntime)
@@ -485,6 +488,32 @@ async def test_foreground_completion_uses_wrapper_output_for_visible_surfaces(tm
         assert core_entry["text"] == "core raw foreground"
         assert core_entry["visible_text"] == "wrapped visible"
         assert core_entry["completion_path"] == "foreground"
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_foreground_wrapper_verbose_shows_core_and_final_outputs(tmp_path):
+    runtime, sent, voices, hchat_replies = _make_foreground_runtime(tmp_path)
+    runtime._verbose = True
+    item = _queued_request()
+    await runtime.queue.put(item)
+
+    task = asyncio.create_task(runtime.process_queue())
+    try:
+        for _ in range(50):
+            if len(sent) >= 2 and voices and hchat_replies:
+                break
+            await asyncio.sleep(0.01)
+        assert sent[0]["purpose"] == "wrapper-verbose"
+        assert "Core output" in sent[0]["text"]
+        assert "core raw foreground" in sent[0]["text"]
+        assert "Wrapper final output" in sent[0]["text"]
+        assert "wrapped visible" in sent[0]["text"]
+        assert sent[-1]["purpose"] == "response"
+        assert sent[-1]["text"] == "wrapped visible"
     finally:
         task.cancel()
         with suppress(asyncio.CancelledError):

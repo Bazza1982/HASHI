@@ -7802,6 +7802,58 @@ class FlexibleAgentRuntime:
 
         return wrapper_result.final_text, wrapper_result
 
+    @staticmethod
+    def _wrapper_verbose_excerpt(text: str, *, limit: int = 1800) -> str:
+        value = text or ""
+        if len(value) <= limit:
+            return value
+        head = value[: limit - 180].rstrip()
+        tail = value[-140:].lstrip()
+        return f"{head}\n\n... [truncated for verbose display] ...\n\n{tail}"
+
+    def _format_wrapper_verbose_trace(self, core_raw: str, visible_text: str, wrapper_result) -> str:
+        status = "used" if bool(getattr(wrapper_result, "wrapper_used", False)) else "bypassed"
+        if bool(getattr(wrapper_result, "wrapper_failed", False)):
+            status = "failed"
+        fallback_reason = getattr(wrapper_result, "fallback_reason", None)
+        latency_ms = round(float(getattr(wrapper_result, "latency_ms", 0.0) or 0.0), 1)
+        lines = [
+            "🔍 Wrapper verbose trace",
+            f"- Status: `{status}`",
+            f"- Latency: `{latency_ms}ms`",
+        ]
+        if fallback_reason:
+            lines.append(f"- Fallback: `{fallback_reason}`")
+        lines.extend(
+            [
+                "",
+                "**Core output**",
+                "```text",
+                self._wrapper_verbose_excerpt(core_raw),
+                "```",
+                "",
+                "**Wrapper final output**",
+                "```text",
+                self._wrapper_verbose_excerpt(visible_text),
+                "```",
+            ]
+        )
+        return "\n".join(lines)
+
+    async def _send_wrapper_verbose_trace(self, item: QueuedRequest, core_raw: str, visible_text: str, wrapper_result) -> None:
+        if not self._verbose:
+            return
+        if item.silent or not item.deliver_to_telegram:
+            return
+        if not bool(getattr(wrapper_result, "wrapper_used", False)) and not bool(getattr(wrapper_result, "wrapper_failed", False)):
+            return
+        await self.send_long_message(
+            chat_id=item.chat_id,
+            text=self._format_wrapper_verbose_trace(core_raw, visible_text, wrapper_result),
+            request_id=item.request_id,
+            purpose="wrapper-verbose",
+        )
+
     # ------------------------------------------------------------------
     # Stage 4: Background-mode helpers
     # ------------------------------------------------------------------
@@ -7999,6 +8051,7 @@ class FlexibleAgentRuntime:
                 self.project_chat_logger.log_exchange(item.prompt, visible_text, item.source)
                 _print_final_response(self.name, visible_text)
                 total_s = (datetime.now() - datetime.fromisoformat(item.created_at)).total_seconds()
+                await self._send_wrapper_verbose_trace(item, response.text, visible_text, wrapper_result)
                 send_elapsed_s, chunk_count = await self.send_long_message(
                     chat_id=item.chat_id,
                     text=visible_text,
@@ -8457,6 +8510,7 @@ class FlexibleAgentRuntime:
                         # CoS intercept: if /cos on and response ends with ?, route to Lily first
                         _response_text = visible_text
                         _cos_handled = False
+                        await self._send_wrapper_verbose_trace(item, response.text, visible_text, wrapper_result)
                         if (
                             self._cos_enabled
                             and self.name != "lily"
