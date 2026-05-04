@@ -100,17 +100,6 @@ class WikiState:
             raise ValueError(f"Unsupported table: {table}")
         return int(self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
 
-    def existing_runs(self, consolidated_ids: Iterable[int]) -> set[int]:
-        ids = list(consolidated_ids)
-        if not ids:
-            return set()
-        placeholders = ",".join("?" for _ in ids)
-        rows = self.conn.execute(
-            f"SELECT consolidated_id FROM classification_run WHERE consolidated_id IN ({placeholders})",
-            ids,
-        ).fetchall()
-        return {int(row["consolidated_id"]) for row in rows}
-
     def existing_completed_runs(self, consolidated_ids: Iterable[int]) -> set[int]:
         ids = list(consolidated_ids)
         if not ids:
