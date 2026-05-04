@@ -19,6 +19,7 @@ from scripts.wiki.fetcher import FetchResult, fetch_new_memories
 from scripts.wiki.page_generator import fetch_topic_memories, generate_dry_run_pages
 from scripts.wiki.run_pipeline import check_today_consolidation, drop_existing_completed_runs, run_stage0
 from scripts.wiki.state import WikiState
+from scripts.wiki.vault_publisher import publish_vault, rollback_latest_publish
 
 
 def _make_consolidated_db(path: Path) -> None:
@@ -486,6 +487,62 @@ def test_page_generator_writes_dry_run_topic_pages(tmp_path: Path) -> None:
     assert "好想你" not in page
 
 
+def test_vault_publisher_writes_generated_zone_with_manifest_and_rollback(tmp_path: Path) -> None:
+    consolidated = tmp_path / "consolidated_memory.sqlite"
+    _make_consolidated_db(consolidated)
+    state_path = tmp_path / "wiki_state.sqlite"
+    config = WikiConfig(
+        consolidated_db=consolidated,
+        wiki_state_db=state_path,
+        dry_run_pages_dir=tmp_path / "wiki_pages_dry_run",
+        vault_root=tmp_path / "vault",
+    )
+    with WikiState(state_path) as state:
+        state.init_schema()
+        state.record_assignments(
+            [_record(1, "HASHI scheduler design")],
+            [
+                ClassificationAssignment(
+                    consolidated_id=1,
+                    topics=("HASHI_Architecture",),
+                    confidence=0.9,
+                )
+            ],
+            batch_id="batch-1",
+            classifier_model="mock/mock",
+        )
+
+    drafts = generate_dry_run_pages(config)
+    first = publish_vault(
+        config,
+        drafts,
+        now=datetime.fromisoformat("2026-05-04T04:05:00+10:00"),
+    )
+    destination = config.vault_root / "10_GENERATED_TOPICS" / "HASHI_Architecture.md"
+    assert first.created == 1
+    assert destination.exists()
+    assert "status: auto-generated" in destination.read_text(encoding="utf-8")
+    assert first.latest_manifest_path.exists()
+
+    original = destination.read_text(encoding="utf-8")
+    drafts[0].path.write_text(
+        drafts[0].path.read_text(encoding="utf-8") + "\nExtra generated line.\n",
+        encoding="utf-8",
+    )
+    second = publish_vault(
+        config,
+        drafts,
+        now=datetime.fromisoformat("2026-05-04T04:06:00+10:00"),
+    )
+    assert second.updated == 1
+    assert second.files[0].backup is not None
+    assert "Extra generated line." in destination.read_text(encoding="utf-8")
+
+    rollback = rollback_latest_publish(config)
+    assert rollback.restored == 1
+    assert destination.read_text(encoding="utf-8") == original
+
+
 def test_run_pipeline_generates_page_drafts_from_persisted_state(tmp_path: Path) -> None:
     consolidated = tmp_path / "consolidated_memory.sqlite"
     _make_consolidated_db(consolidated)
@@ -513,12 +570,51 @@ def test_run_pipeline_generates_page_drafts_from_persisted_state(tmp_path: Path)
         max_classify=None,
         persist_classifications=True,
         pages_dry_run=True,
+        publish_vault=False,
         skip_consolidation_check=False,
     )
     lines = run_stage0(config, args)
     text = "\n".join(lines)
     assert "Page Drafts" in text
     assert "HASHI_Architecture" in text
+
+
+def test_run_pipeline_publishes_generated_vault_pages(tmp_path: Path) -> None:
+    consolidated = tmp_path / "consolidated_memory.sqlite"
+    _make_consolidated_db(consolidated)
+    log = tmp_path / "consolidation_log.jsonl"
+    log.write_text(
+        '{"timestamp":"2026-05-03T18:08:00+00:00","phase":"embed","embedded":10,"errors":0}\n',
+        encoding="utf-8",
+    )
+    config = WikiConfig(
+        hashi_root=tmp_path,
+        consolidated_db=consolidated,
+        wiki_state_db=tmp_path / "wiki_state.sqlite",
+        consolidation_log=log,
+        report_latest=tmp_path / "wiki_latest.md",
+        dry_run_pages_dir=tmp_path / "wiki_pages_dry_run",
+        vault_root=tmp_path / "vault",
+    )
+    args = argparse.Namespace(
+        daily=True,
+        weekly_if_saturday=False,
+        dry_run=False,
+        classify=True,
+        classify_dry_run=False,
+        mock_classifier=True,
+        limit=10,
+        max_classify=None,
+        persist_classifications=True,
+        pages_dry_run=False,
+        publish_vault=True,
+        skip_consolidation_check=False,
+    )
+    lines = run_stage0(config, args)
+    text = "\n".join(lines)
+    assert "Vault Publish" in text
+    assert "Created: 1" in text
+    assert (config.vault_root / "10_GENERATED_TOPICS" / "HASHI_Architecture.md").exists()
 
 
 def _record(consolidated_id: int, content: str):

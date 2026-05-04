@@ -19,12 +19,14 @@ if __package__ in {None, ""}:
     from scripts.wiki.fetcher import FetchResult, fetch_new_memories
     from scripts.wiki.page_generator import PageDraft, generate_dry_run_pages
     from scripts.wiki.state import WikiState
+    from scripts.wiki.vault_publisher import VaultPublishResult, publish_vault, rollback_latest_publish
 else:
     from .classifier import ClassificationDryRunResult, classify_memories_dry_run
     from .config import WikiConfig, default_config
     from .fetcher import FetchResult, fetch_new_memories
     from .page_generator import PageDraft, generate_dry_run_pages
     from .state import WikiState
+    from .vault_publisher import VaultPublishResult, publish_vault, rollback_latest_publish
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -65,6 +67,16 @@ def main(argv: list[str] | None = None) -> int:
         help="Generate topic page drafts to the local dry-run directory.",
     )
     parser.add_argument(
+        "--publish-vault",
+        action="store_true",
+        help="Publish generated pages into the generated-only Obsidian vault zones.",
+    )
+    parser.add_argument(
+        "--rollback-vault-publish",
+        action="store_true",
+        help="Rollback the latest generated-only Obsidian vault publish and exit.",
+    )
+    parser.add_argument(
         "--skip-consolidation-check",
         action="store_true",
         help="Skip today's memory consolidation completion check.",
@@ -72,6 +84,21 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     config = default_config()
+    if args.rollback_vault_publish:
+        result = rollback_latest_publish(config)
+        print(
+            "\n".join(
+                [
+                    "# HASHI Wiki Vault Rollback",
+                    "",
+                    f"- Publish id: {result.publish_id}",
+                    f"- Restored: {result.restored}",
+                    f"- Removed: {result.removed}",
+                    f"- Skipped: {result.skipped}",
+                ]
+            )
+        )
+        return 0
     report_lines = run_stage0(config, args)
     print("\n".join(report_lines))
     return 0
@@ -90,6 +117,7 @@ def run_stage0(config: WikiConfig, args: argparse.Namespace) -> list[str]:
         fetch_result = drop_existing_completed_runs(state, fetch_result)
         classifier_result = None
         page_drafts: list[PageDraft] = []
+        vault_publish_result: VaultPublishResult | None = None
         run_classifier = bool(args.classify or args.classify_dry_run)
         if args.classify_dry_run:
             args.dry_run = True
@@ -110,8 +138,10 @@ def run_stage0(config: WikiConfig, args: argparse.Namespace) -> list[str]:
                         records_to_classify,
                         classifier_result,
                     )
-        if args.pages_dry_run:
+        if args.pages_dry_run or getattr(args, "publish_vault", False):
             page_drafts = generate_dry_run_pages(config)
+        if getattr(args, "publish_vault", False):
+            vault_publish_result = publish_vault(config, page_drafts, now=now)
         lines = build_report(
             config,
             state,
@@ -122,6 +152,7 @@ def run_stage0(config: WikiConfig, args: argparse.Namespace) -> list[str]:
             args,
             classifier_result,
             page_drafts,
+            vault_publish_result,
         )
         report_path = config.dry_run_report_latest if args.dry_run else config.report_latest
         report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -174,6 +205,7 @@ def build_report(
     args: argparse.Namespace,
     classifier_result: ClassificationDryRunResult | None = None,
     page_drafts: list[PageDraft] | None = None,
+    vault_publish_result: VaultPublishResult | None = None,
 ) -> list[str]:
     reason_counts = Counter(record.reason for record in fetch_result.skipped)
     domain_counts = Counter(record.domain for record in fetch_result.classifiable)
@@ -188,6 +220,7 @@ def build_report(
         f"- Classifier stage: {bool(args.classify or args.classify_dry_run)}",
         f"- Persist classifications: {bool(args.persist_classifications)}",
         f"- Pages dry run: {bool(args.pages_dry_run)}",
+        f"- Vault publish: {bool(getattr(args, 'publish_vault', False))}",
         f"- Consolidation check: {'ok' if consolidation_ok else 'blocked'} — {consolidation_reason}",
         f"- Weekly digest due: {weekly_due}",
         "",
@@ -245,13 +278,27 @@ def build_report(
             f"- {draft.topic_id}: {draft.memory_count} memories -> {draft.path}"
             for draft in page_drafts
         )
+    lines.extend(["", "## Vault Publish"])
+    if vault_publish_result is None:
+        lines.append("- not published")
+    else:
+        lines.extend(
+            [
+                f"- Publish id: {vault_publish_result.publish_id}",
+                f"- Created: {vault_publish_result.created}",
+                f"- Updated: {vault_publish_result.updated}",
+                f"- Unchanged: {vault_publish_result.unchanged}",
+                f"- Manifest: {vault_publish_result.manifest_path}",
+                f"- Latest manifest: {vault_publish_result.latest_manifest_path}",
+            ]
+        )
     lines.extend(
         [
             "",
             "## Safety",
             "",
             "- Classifier assignments are persisted only when `--persist-classifications` is set.",
-            "- No Obsidian vault pages were written.",
+            "- Obsidian vault publishing writes only generated zones when `--publish-vault` is set.",
             "- `last_classified_id` advances only across real source rows with ok/skipped/redacted state.",
         ]
     )
