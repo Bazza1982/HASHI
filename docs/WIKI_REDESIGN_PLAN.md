@@ -1182,7 +1182,81 @@ Quality review:
 - `UNCATEGORIZED_REVIEW` is meaningful rather than random noise. The inspected examples are mostly AIPM, KASUMI, WORDO, milestone planning, and project-delivery work. Per Zelda's decision, these are kept as weekly review evidence rather than automatically promoted into new Python-defined topics.
 - No Obsidian vault files were written.
 
-### 14.11 Remaining implementation boundaries
+### 14.11 Milestone 11 backfill efficiency record
+
+Status: completed on 2026-05-04.
+
+Efficiency problem found:
+
+- One `--max-classify 250` run produced `249` classifier assignments.
+- Because the missing memory id was not represented in `classification_run`, the conservative watermark stopped before the missing row.
+- Later rows in the same fetch window had already been classified, but the next run would still refetch them because the watermark had not crossed the gap.
+
+Fixes:
+
+- Missing classifier assignments are now recorded as `failed` rows in `classification_run`, making the gap explicit and retryable.
+- Future runs now skip already completed rows after the current watermark (`ok`, `skipped`, `redacted`) and only retry gaps or new rows.
+- Failed rows are not skipped; they remain eligible for retry.
+
+Validation:
+
+```text
+python3 -m py_compile scripts/wiki/*.py tests/test_wiki_pipeline.py
+pytest tests/test_wiki_pipeline.py tests/contract/test_release_readiness_contract.py -q
+# 22 passed
+git diff --check
+# passed
+```
+
+Live efficiency checkpoint:
+
+```text
+Backup created:
+workspaces/lily/wiki_state.sqlite.bak-20260504-110200
+
+Command:
+python3 scripts/wiki/run_pipeline.py --daily --classify --persist-classifications --pages-dry-run --limit 1000 --max-classify 250
+
+Elapsed:
+239.71 seconds
+```
+
+Result:
+
+```text
+Assignments: 250
+Rows seen after completed-row filtering: 407
+Classifiable in fetch window: 400
+Skipped: 7
+last_classified_id: 1131
+
+Topic counts:
+- AI_Memory_Systems: 1
+- HASHI_Architecture: 56
+- HASHI_Ops_Security: 52
+- Minato_Platform: 14
+- NONE: 38
+- Nagare_Workflow: 89
+```
+
+Remaining manual backfill after this run:
+
+```text
+Current watermark: 1131
+Raw remaining rows: 15,130
+Classifiable remaining rows: 10,420
+Skipped remaining rows: 4,696
+Redacted remaining rows: 14
+```
+
+Current best configuration:
+
+- Manual backfill: `--limit 1000 --max-classify 250`
+- Classifier timeout: `600s`
+- Daily steady-state cron: `--max-classify 100` with no explicit `--limit`
+- Keep Obsidian vault publishing disabled until dry-run pages are reviewed.
+
+### 14.12 Remaining implementation boundaries
 
 The plan is ready to start once these implementation boundaries are accepted:
 

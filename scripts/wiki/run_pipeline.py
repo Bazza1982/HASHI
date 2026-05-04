@@ -87,6 +87,7 @@ def run_stage0(config: WikiConfig, args: argparse.Namespace) -> list[str]:
             consolidation_ok, consolidation_reason = check_today_consolidation(config, now)
 
         fetch_result = fetch_new_memories(config, state, limit=args.limit)
+        fetch_result = drop_existing_completed_runs(state, fetch_result)
         classifier_result = None
         page_drafts: list[PageDraft] = []
         run_classifier = bool(args.classify or args.classify_dry_run)
@@ -274,6 +275,23 @@ def persist_classification_state(
         classifier_model=f"{classifier_result.backend}/{classifier_result.model}",
     )
     return state.advance_watermark()
+
+
+def drop_existing_completed_runs(state: WikiState, fetch_result: FetchResult) -> FetchResult:
+    all_ids = [
+        record.id
+        for records in (fetch_result.classifiable, fetch_result.skipped, fetch_result.redacted)
+        for record in records
+    ]
+    completed = state.existing_completed_runs(all_ids)
+    if not completed:
+        return fetch_result
+    return FetchResult(
+        classifiable=[record for record in fetch_result.classifiable if record.id not in completed],
+        skipped=[record for record in fetch_result.skipped if record.id not in completed],
+        redacted=[record for record in fetch_result.redacted if record.id not in completed],
+        max_seen_id=fetch_result.max_seen_id,
+    )
 
 
 if __name__ == "__main__":

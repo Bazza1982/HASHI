@@ -15,9 +15,9 @@ from scripts.wiki.classifier import (
     parse_classification_response,
 )
 from scripts.wiki.config import WikiConfig
-from scripts.wiki.fetcher import fetch_new_memories
+from scripts.wiki.fetcher import FetchResult, fetch_new_memories
 from scripts.wiki.page_generator import fetch_topic_memories, generate_dry_run_pages
-from scripts.wiki.run_pipeline import check_today_consolidation, run_stage0
+from scripts.wiki.run_pipeline import check_today_consolidation, drop_existing_completed_runs, run_stage0
 from scripts.wiki.state import WikiState
 
 
@@ -254,6 +254,52 @@ def test_state_does_not_advance_watermark_across_failed_row(tmp_path: Path) -> N
         state.record_skipped_runs([_record(2, "ok skipped")], batch_id="batch-1", status="skipped")
         assert state.advance_watermark() == 0
         assert state.get_last_classified_id() == 0
+
+
+def test_state_records_missing_classifier_assignments_as_failed(tmp_path: Path) -> None:
+    state_path = tmp_path / "wiki_state.sqlite"
+    with WikiState(state_path) as state:
+        state.init_schema()
+        state.record_assignments(
+            [_record(1, "HASHI scheduler design"), _record(2, "missing classifier result")],
+            [
+                ClassificationAssignment(
+                    consolidated_id=1,
+                    topics=("HASHI_Architecture",),
+                    confidence=0.9,
+                )
+            ],
+            batch_id="batch-1",
+            classifier_model="mock/mock",
+        )
+        failed = state.conn.execute(
+            "SELECT status FROM classification_run WHERE consolidated_id = 2"
+        ).fetchone()
+        assert failed["status"] == "failed"
+        assert state.advance_watermark() == 1
+
+
+def test_drop_existing_completed_runs_keeps_failed_rows_for_retry(tmp_path: Path) -> None:
+    state_path = tmp_path / "wiki_state.sqlite"
+    records = [_record(1, "done"), _record(2, "retry"), _record(3, "new")]
+    fetch_result = FetchResult(classifiable=records, skipped=[], redacted=[], max_seen_id=3)
+    with WikiState(state_path) as state:
+        state.init_schema()
+        state.record_assignments(
+            [records[0]],
+            [
+                ClassificationAssignment(
+                    consolidated_id=1,
+                    topics=("HASHI_Architecture",),
+                    confidence=0.9,
+                )
+            ],
+            batch_id="batch-1",
+            classifier_model="mock/mock",
+        )
+        state.record_skipped_runs([records[1]], batch_id="batch-1", status="failed")
+        filtered = drop_existing_completed_runs(state, fetch_result)
+        assert [record.id for record in filtered.classifiable] == [2, 3]
 
 
 def test_run_pipeline_persists_mock_classifier_assignments(tmp_path: Path) -> None:

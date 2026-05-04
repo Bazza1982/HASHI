@@ -111,6 +111,22 @@ class WikiState:
         ).fetchall()
         return {int(row["consolidated_id"]) for row in rows}
 
+    def existing_completed_runs(self, consolidated_ids: Iterable[int]) -> set[int]:
+        ids = list(consolidated_ids)
+        if not ids:
+            return set()
+        placeholders = ",".join("?" for _ in ids)
+        rows = self.conn.execute(
+            f"""
+            SELECT consolidated_id
+            FROM classification_run
+            WHERE consolidated_id IN ({placeholders})
+              AND status IN ('ok', 'skipped', 'redacted')
+            """,
+            ids,
+        ).fetchall()
+        return {int(row["consolidated_id"]) for row in rows}
+
     def record_skipped_runs(
         self,
         records: Iterable["MemoryRecord"],
@@ -151,6 +167,8 @@ class WikiState:
         missing = [a.consolidated_id for a in assignment_list if a.consolidated_id not in record_by_id]
         if missing:
             raise ValueError(f"Assignments contain unknown consolidated ids: {missing}")
+        assigned_ids = {assignment.consolidated_id for assignment in assignment_list}
+        missing_records = [record for record in record_by_id.values() if record.id not in assigned_ids]
         ts = classified_at or _utc_now()
         with self.conn:
             for assignment in assignment_list:
@@ -189,6 +207,24 @@ class WikiState:
                         )
                         for topic_id in assignment.topics
                     ],
+                )
+            for record in missing_records:
+                self.conn.execute(
+                    """
+                    INSERT INTO classification_run(
+                        consolidated_id, agent_id, batch_id, status, classified_at
+                    )
+                    VALUES (?, ?, ?, 'failed', ?)
+                    ON CONFLICT(consolidated_id) DO UPDATE SET
+                        batch_id = excluded.batch_id,
+                        status = excluded.status,
+                        classified_at = excluded.classified_at
+                    """,
+                    (record.id, record.agent_id, batch_id, ts),
+                )
+                self.conn.execute(
+                    "DELETE FROM classification_assignment WHERE consolidated_id = ?",
+                    (record.id,),
                 )
 
     def advance_watermark(self) -> int:
