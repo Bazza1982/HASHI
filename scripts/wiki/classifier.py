@@ -83,8 +83,8 @@ def parse_classification_response(
     call: BackendCallResult,
     memories: list[MemoryRecord],
 ) -> ClassificationDryRunResult:
-    payload = _extract_json_array(call.text)
     valid_ids = {record.id for record in memories}
+    payload = _extract_json_array(call.text, valid_ids=valid_ids)
     valid_topics = set(TOPICS)
     assignments: list[ClassificationAssignment] = []
     for item in payload:
@@ -113,17 +113,40 @@ def parse_classification_response(
     )
 
 
-def _extract_json_array(text: str):
+def _extract_json_array(text: str, *, valid_ids: set[int] | None = None):
     stripped = (text or "").strip()
-    if stripped.startswith("["):
-        return json.loads(stripped)
     fenced = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", stripped, re.S)
     if fenced:
-        return json.loads(fenced.group(1))
-    match = re.search(r"\[.*\]", stripped, re.S)
-    if not match:
-        raise ValueError("Classifier output did not contain a JSON array")
-    return json.loads(match.group(0))
+        payload = _decode_first_assignment_array(fenced.group(1), valid_ids=valid_ids)
+        if payload is not None:
+            return payload
+    payload = _decode_first_assignment_array(stripped, valid_ids=valid_ids)
+    if payload is None:
+        raise ValueError("Classifier output did not contain a JSON assignment array")
+    return payload
+
+
+def _decode_first_assignment_array(text: str, *, valid_ids: set[int] | None = None):
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\[", text or ""):
+        try:
+            payload, _ = decoder.raw_decode(text[match.start() :])
+        except json.JSONDecodeError:
+            continue
+        if _looks_like_assignment_array(payload, valid_ids=valid_ids):
+            return payload
+    return None
+
+
+def _looks_like_assignment_array(payload, *, valid_ids: set[int] | None = None) -> bool:
+    if not isinstance(payload, list):
+        return False
+    if not all(isinstance(item, dict) and "id" in item for item in payload):
+        return False
+    if valid_ids is None:
+        return True
+    returned_ids = {int(item["id"]) for item in payload}
+    return bool(returned_ids & valid_ids)
 
 
 def _mock_classify(memories: list[MemoryRecord]) -> ClassificationDryRunResult:

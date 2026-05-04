@@ -143,6 +143,21 @@ def test_classifier_response_parser_validates_topics() -> None:
     assert result.assignments[0].topics == ("Obsidian_Wiki",)
 
 
+def test_classifier_response_parser_ignores_extra_text_and_format_examples() -> None:
+    record = _record(7, "HASHI wiki design.")
+    text = """
+    Here is the output format: [{"id": 0, "topics": ["TOPIC_ID"], "confidence": 0.95}]
+    Actual result:
+    [{"id":7,"topics":["Obsidian_Wiki"],"confidence":0.91}]
+    """
+    result = parse_classification_response(
+        call=type("Call", (), {"text": text, "backend": "claude-cli", "model": "claude-sonnet-4-6"})(),
+        memories=[record],
+    )
+    assert result.assignments[0].consolidated_id == 7
+    assert result.assignments[0].topics == ("Obsidian_Wiki",)
+
+
 def test_backend_client_refuses_remote_api_backend(tmp_path: Path) -> None:
     _write_lily_state(tmp_path, "openrouter-api", "anthropic/claude-sonnet-4.6")
     config = WikiConfig(hashi_root=tmp_path)
