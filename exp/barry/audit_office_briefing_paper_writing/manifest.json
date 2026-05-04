@@ -1,0 +1,39 @@
+{
+  "id": "barry/audit_office_briefing_paper_writing",
+  "type": "exp",
+  "version": 1,
+  "owner": "barry",
+  "domain": "audit_office_briefing_paper_writing",
+  "status": "training",
+  "summary": "Training EXP for reproducing and writing Audit Office briefing papers with the correct document structure, fonts, colour, tables, and executive language style.",
+  "context": {
+    "user": "Barry",
+    "task_family": "Audit Office briefing paper writing",
+    "primary_training_material": "training_runs/sample_paper_001/training_materials/sample_paper.docx",
+    "output_focus": [
+      "briefing paper structure",
+      "Word fonts and paragraph styles",
+      "red heading colour and hierarchy",
+      "front briefing table",
+      "strategic alignment tables",
+      "executive and audit-office language style",
+      "not source content"
+    ]
+  },
+  "training_runs": {
+    "sample_paper_001": "training_runs/sample_paper_001/RUN.md"
+  },
+  "playbooks": {
+    "briefing_paper_rebuild": "playbooks/briefing_paper_rebuild.exp.md",
+    "briefing_paper_writing": "playbooks/briefing_paper_writing.exp.md"
+  },
+  "validators": [
+    "validators/briefing_paper_validators.md"
+  ],
+  "failure_memory": "failures/failure_memory.jsonl",
+  "scope_limits": [
+    "This EXP learns structure, format, and language style, not confidential source content.",
+    "Do not use the sample paper topic as default content for future papers.",
+    "Do not mark stable until a blank/template-context rebuild passes visual, structural, and text-style checks."
+  ]
+}
