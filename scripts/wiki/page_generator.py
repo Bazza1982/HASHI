@@ -36,11 +36,13 @@ def generate_dry_run_pages(
     *,
     min_confidence: float = 0.7,
     max_memories_per_topic: int = 30,
+    topics: dict[str, dict[str, str]] | None = None,
 ) -> list[PageDraft]:
+    active_topics = topics or TOPICS
     config.dry_run_pages_dir.mkdir(parents=True, exist_ok=True)
     drafts: list[PageDraft] = []
     topic_drafts: list[PageDraft] = []
-    for topic_id in sorted(TOPICS):
+    for topic_id in sorted(active_topics):
         if topic_id == "NONE":
             continue
         memories = fetch_topic_memories(
@@ -51,7 +53,7 @@ def generate_dry_run_pages(
         )
         if not memories:
             continue
-        content = build_topic_page(topic_id, memories)
+        content = build_topic_page(topic_id, memories, topics=active_topics)
         path = config.dry_run_pages_dir / "Topics" / f"{topic_id}.md"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
@@ -60,7 +62,7 @@ def generate_dry_run_pages(
         topic_drafts.append(draft)
     if topic_drafts:
         index_path = config.dry_run_pages_dir / "Wiki_Index.md"
-        index_path.write_text(build_wiki_index(topic_drafts), encoding="utf-8")
+        index_path.write_text(build_wiki_index(topic_drafts, topics=active_topics), encoding="utf-8")
         drafts.append(
             PageDraft(
                 topic_id="WIKI_INDEX",
@@ -128,8 +130,14 @@ def fetch_topic_memories(
     ]
 
 
-def build_topic_page(topic_id: str, memories: list[ClassifiedMemory]) -> str:
-    meta = TOPICS[topic_id]
+def build_topic_page(
+    topic_id: str,
+    memories: list[ClassifiedMemory],
+    *,
+    topics: dict[str, dict[str, str]] | None = None,
+) -> str:
+    active_topics = topics or TOPICS
+    meta = active_topics[topic_id]
     lines = [
         "---",
         f'topic_id: "{topic_id}"',
@@ -169,7 +177,12 @@ def build_topic_page(topic_id: str, memories: list[ClassifiedMemory]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def build_wiki_index(topic_drafts: list[PageDraft]) -> str:
+def build_wiki_index(
+    topic_drafts: list[PageDraft],
+    *,
+    topics: dict[str, dict[str, str]] | None = None,
+) -> str:
+    active_topics = topics or TOPICS
     total_memories = sum(draft.memory_count for draft in topic_drafts)
     lines = [
         "---",
@@ -188,7 +201,7 @@ def build_wiki_index(topic_drafts: list[PageDraft]) -> str:
         "",
     ]
     for draft in sorted(topic_drafts, key=lambda item: item.topic_id):
-        meta = TOPICS[draft.topic_id]
+        meta = active_topics[draft.topic_id]
         lines.append(
             f"- [[10_GENERATED_TOPICS/{draft.topic_id}|{meta['display']}]] "
             f"({draft.memory_count} memories)"

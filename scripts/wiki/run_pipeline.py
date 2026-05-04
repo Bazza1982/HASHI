@@ -15,14 +15,14 @@ from zoneinfo import ZoneInfo
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from scripts.wiki.classifier import ClassificationDryRunResult, classify_memories_dry_run
-    from scripts.wiki.config import WikiConfig, default_config
+    from scripts.wiki.config import TOPICS, WikiConfig, default_config
     from scripts.wiki.fetcher import FetchResult, fetch_new_memories
     from scripts.wiki.page_generator import PageDraft, generate_dry_run_pages
     from scripts.wiki.state import WikiState
     from scripts.wiki.vault_publisher import VaultPublishResult, publish_vault, rollback_latest_publish
 else:
     from .classifier import ClassificationDryRunResult, classify_memories_dry_run
-    from .config import WikiConfig, default_config
+    from .config import TOPICS, WikiConfig, default_config
     from .fetcher import FetchResult, fetch_new_memories
     from .page_generator import PageDraft, generate_dry_run_pages
     from .state import WikiState
@@ -108,6 +108,8 @@ def run_stage0(config: WikiConfig, args: argparse.Namespace) -> list[str]:
     now = datetime.now(ZoneInfo(config.timezone))
     with WikiState(config.wiki_state_db) as state:
         state.init_schema()
+        state.seed_topic_registry(TOPICS)
+        active_topics = state.load_active_topics()
         consolidation_ok = True
         consolidation_reason = "skipped by flag"
         if not args.skip_consolidation_check:
@@ -130,6 +132,7 @@ def run_stage0(config: WikiConfig, args: argparse.Namespace) -> list[str]:
                     records_to_classify,
                     config,
                     mock=args.mock_classifier,
+                    topics=active_topics,
                 )
                 if args.persist_classifications:
                     persist_classification_state(
@@ -139,7 +142,7 @@ def run_stage0(config: WikiConfig, args: argparse.Namespace) -> list[str]:
                         classifier_result,
                     )
         if args.pages_dry_run or getattr(args, "publish_vault", False):
-            page_drafts = generate_dry_run_pages(config)
+            page_drafts = generate_dry_run_pages(config, topics=active_topics)
         if getattr(args, "publish_vault", False):
             vault_publish_result = publish_vault(config, page_drafts, now=now)
         lines = build_report(

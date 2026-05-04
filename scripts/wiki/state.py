@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,12 +41,83 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS topic_registry (
+        topic_id                   TEXT PRIMARY KEY,
+        display                    TEXT NOT NULL,
+        description                TEXT NOT NULL,
+        topic_type                 TEXT NOT NULL DEFAULT 'concept',
+        owner_domain               TEXT NOT NULL DEFAULT '',
+        canonical_page_path        TEXT NOT NULL,
+        aliases_json               TEXT NOT NULL DEFAULT '[]',
+        status                     TEXT NOT NULL DEFAULT 'active',
+        privacy_level              TEXT NOT NULL DEFAULT 'internal',
+        quality_score              REAL,
+        uncertainty_score          REAL,
+        last_synthesized_at        TEXT,
+        human_locked               INTEGER NOT NULL DEFAULT 0,
+        ai_mutable                 INTEGER NOT NULL DEFAULT 1,
+        merge_lineage_json         TEXT NOT NULL DEFAULT '[]',
+        split_lineage_json         TEXT NOT NULL DEFAULT '[]',
+        created_at                 TEXT NOT NULL,
+        updated_at                 TEXT NOT NULL,
+        created_by                 TEXT NOT NULL,
+        promoted_from_candidate_id TEXT,
+        review_note                TEXT NOT NULL DEFAULT ''
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS topic_candidate (
+        candidate_id        TEXT PRIMARY KEY,
+        proposed_topic_id   TEXT NOT NULL,
+        display             TEXT NOT NULL,
+        description         TEXT NOT NULL,
+        topic_type          TEXT NOT NULL DEFAULT 'concept',
+        owner_domain        TEXT NOT NULL DEFAULT '',
+        aliases_json        TEXT NOT NULL DEFAULT '[]',
+        evidence_ids_json   TEXT NOT NULL,
+        source_terms_json   TEXT NOT NULL DEFAULT '[]',
+        curator_reason      TEXT NOT NULL,
+        recommended_action  TEXT NOT NULL,
+        merge_target        TEXT,
+        confidence          REAL NOT NULL,
+        quality_score       REAL,
+        uncertainty_score   REAL,
+        privacy_level       TEXT NOT NULL DEFAULT 'internal',
+        status              TEXT NOT NULL DEFAULT 'pending',
+        created_at          TEXT NOT NULL,
+        reviewed_at         TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS topic_claim (
+        claim_id          TEXT PRIMARY KEY,
+        topic_id          TEXT NOT NULL,
+        claim             TEXT NOT NULL,
+        section           TEXT NOT NULL,
+        claim_type        TEXT NOT NULL,
+        evidence_ids_json TEXT NOT NULL,
+        confidence        REAL NOT NULL,
+        status            TEXT NOT NULL DEFAULT 'active',
+        created_at        TEXT NOT NULL,
+        updated_at        TEXT NOT NULL,
+        FOREIGN KEY(topic_id) REFERENCES topic_registry(topic_id)
+    )
+    """,
+    """
     CREATE INDEX IF NOT EXISTS idx_classification_assignment_topic
     ON classification_assignment(topic_id, confidence, consolidated_id)
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_classification_run_status
     ON classification_run(status, consolidated_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_topic_registry_status
+    ON topic_registry(status, topic_type, topic_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_topic_candidate_status
+    ON topic_candidate(status, confidence, proposed_topic_id)
     """,
 )
 
@@ -96,9 +168,153 @@ class WikiState:
         return int(value or "0")
 
     def count_rows(self, table: str) -> int:
-        if table not in {"classification_assignment", "classification_run", "run_state"}:
+        if table not in {
+            "classification_assignment",
+            "classification_run",
+            "run_state",
+            "topic_registry",
+            "topic_candidate",
+            "topic_claim",
+        }:
             raise ValueError(f"Unsupported table: {table}")
         return int(self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+
+    def seed_topic_registry(self, topics: dict[str, dict[str, str]], *, created_by: str = "seed") -> None:
+        """Seed current code-defined topics into the mutable runtime registry."""
+        ts = _utc_now()
+        with self.conn:
+            self.conn.executemany(
+                """
+                INSERT INTO topic_registry(
+                    topic_id,
+                    display,
+                    description,
+                    topic_type,
+                    canonical_page_path,
+                    aliases_json,
+                    created_at,
+                    updated_at,
+                    created_by
+                )
+                VALUES (?, ?, ?, ?, ?, '[]', ?, ?, ?)
+                ON CONFLICT(topic_id) DO NOTHING
+                """,
+                [
+                    (
+                        topic_id,
+                        meta["display"],
+                        meta["desc"],
+                        _infer_topic_type(topic_id),
+                        f"10_GENERATED_TOPICS/{topic_id}.md",
+                        ts,
+                        ts,
+                        created_by,
+                    )
+                    for topic_id, meta in topics.items()
+                ],
+            )
+
+    def load_active_topics(self) -> dict[str, dict[str, str]]:
+        """Return active runtime topics in the shape expected by classifier/page generation."""
+        rows = self.conn.execute(
+            """
+            SELECT topic_id, display, description, topic_type
+            FROM topic_registry
+            WHERE status = 'active'
+            ORDER BY topic_id
+            """
+        ).fetchall()
+        return {
+            row["topic_id"]: {
+                "display": row["display"],
+                "desc": row["description"],
+                "topic_type": row["topic_type"],
+            }
+            for row in rows
+        }
+
+    def upsert_topic_candidate(
+        self,
+        *,
+        candidate_id: str,
+        proposed_topic_id: str,
+        display: str,
+        description: str,
+        topic_type: str,
+        evidence_ids: list[int],
+        curator_reason: str,
+        recommended_action: str,
+        confidence: float,
+        aliases: list[str] | None = None,
+        source_terms: list[str] | None = None,
+        merge_target: str | None = None,
+        quality_score: float | None = None,
+        uncertainty_score: float | None = None,
+        privacy_level: str = "internal",
+        status: str = "pending",
+        created_at: str | None = None,
+    ) -> None:
+        ts = created_at or _utc_now()
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO topic_candidate(
+                    candidate_id,
+                    proposed_topic_id,
+                    display,
+                    description,
+                    topic_type,
+                    aliases_json,
+                    evidence_ids_json,
+                    source_terms_json,
+                    curator_reason,
+                    recommended_action,
+                    merge_target,
+                    confidence,
+                    quality_score,
+                    uncertainty_score,
+                    privacy_level,
+                    status,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(candidate_id) DO UPDATE SET
+                    proposed_topic_id = excluded.proposed_topic_id,
+                    display = excluded.display,
+                    description = excluded.description,
+                    topic_type = excluded.topic_type,
+                    aliases_json = excluded.aliases_json,
+                    evidence_ids_json = excluded.evidence_ids_json,
+                    source_terms_json = excluded.source_terms_json,
+                    curator_reason = excluded.curator_reason,
+                    recommended_action = excluded.recommended_action,
+                    merge_target = excluded.merge_target,
+                    confidence = excluded.confidence,
+                    quality_score = excluded.quality_score,
+                    uncertainty_score = excluded.uncertainty_score,
+                    privacy_level = excluded.privacy_level,
+                    status = excluded.status
+                """,
+                (
+                    candidate_id,
+                    proposed_topic_id,
+                    display,
+                    description,
+                    topic_type,
+                    json.dumps(aliases or [], ensure_ascii=False),
+                    json.dumps(evidence_ids, ensure_ascii=False),
+                    json.dumps(source_terms or [], ensure_ascii=False),
+                    curator_reason,
+                    recommended_action,
+                    merge_target,
+                    confidence,
+                    quality_score,
+                    uncertainty_score,
+                    privacy_level,
+                    status,
+                    ts,
+                ),
+            )
 
     def existing_completed_runs(self, consolidated_ids: Iterable[int]) -> set[int]:
         ids = list(consolidated_ids)
@@ -268,3 +484,16 @@ class WikiState:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _infer_topic_type(topic_id: str) -> str:
+    lower = topic_id.lower()
+    if "workflow" in lower:
+        return "workflow"
+    if "research" in lower or "carbon" in lower:
+        return "research"
+    if "remote" in lower or "platform" in lower:
+        return "system"
+    if "wiki" in lower or "memory" in lower or "architecture" in lower or "security" in lower:
+        return "system"
+    return "concept"

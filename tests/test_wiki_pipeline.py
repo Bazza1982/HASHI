@@ -69,6 +69,19 @@ def test_wiki_state_schema_initializes(tmp_path: Path) -> None:
         state.init_schema()
         assert state.get_last_classified_id() == 0
         assert state.count_rows("run_state") == 1
+        assert state.count_rows("topic_registry") == 0
+
+
+def test_topic_registry_seeds_and_loads_active_topics(tmp_path: Path) -> None:
+    state_path = tmp_path / "wiki_state.sqlite"
+    with WikiState(state_path) as state:
+        state.init_schema()
+        state.seed_topic_registry(TOPICS)
+        topics = state.load_active_topics()
+
+    assert "HASHI_Architecture" in topics
+    assert topics["HASHI_Architecture"]["display"] == "HASHI Architecture"
+    assert topics["HASHI_Architecture"]["topic_type"] == "system"
 
 
 def test_fetcher_applies_privacy_and_redaction_filters(tmp_path: Path) -> None:
@@ -182,6 +195,30 @@ def test_classifier_response_parser_validates_topics() -> None:
         memories=[record],
     )
     assert result.assignments[0].topics == ("Obsidian_Wiki",)
+
+
+def test_classifier_response_parser_accepts_runtime_registry_topics() -> None:
+    record = _record(7, "Manchuria AI MUD implementation plan.")
+    runtime_topics = {
+        "Manchuria_Game": {
+            "display": "Manchuria Game",
+            "desc": "AI MUD game project.",
+        }
+    }
+    result = parse_classification_response(
+        call=type(
+            "Call",
+            (),
+            {
+                "text": '[{"id":7,"topics":["Manchuria_Game"],"confidence":0.91}]',
+                "backend": "claude-cli",
+                "model": "claude-sonnet-4-6",
+            },
+        )(),
+        memories=[record],
+        topics=runtime_topics,
+    )
+    assert result.assignments[0].topics == ("Manchuria_Game",)
 
 
 def test_classifier_response_parser_ignores_extra_text_and_format_examples() -> None:
@@ -488,6 +525,48 @@ def test_page_generator_writes_dry_run_topic_pages(tmp_path: Path) -> None:
     index = drafts[1].path.read_text(encoding="utf-8")
     assert "# Generated Wiki Index" in index
     assert "[[10_GENERATED_TOPICS/HASHI_Architecture|HASHI Architecture]]" in index
+
+
+def test_page_generator_uses_runtime_registry_topics(tmp_path: Path) -> None:
+    consolidated = tmp_path / "consolidated_memory.sqlite"
+    _make_consolidated_db(consolidated)
+    state_path = tmp_path / "wiki_state.sqlite"
+    config = WikiConfig(
+        consolidated_db=consolidated,
+        wiki_state_db=state_path,
+        dry_run_pages_dir=tmp_path / "wiki_pages_dry_run",
+    )
+    with WikiState(state_path) as state:
+        state.init_schema()
+        state.seed_topic_registry(
+            {
+                "Manchuria_Game": {
+                    "display": "Manchuria Game",
+                    "desc": "AI MUD game project with durable project knowledge.",
+                }
+            }
+        )
+        state.record_assignments(
+            [_record(1, "Manchuria AI MUD implementation plan.")],
+            [
+                ClassificationAssignment(
+                    consolidated_id=1,
+                    topics=("Manchuria_Game",),
+                    confidence=0.9,
+                )
+            ],
+            batch_id="batch-1",
+            classifier_model="mock/mock",
+        )
+        active_topics = state.load_active_topics()
+
+    drafts = generate_dry_run_pages(config, topics=active_topics)
+    assert [draft.topic_id for draft in drafts] == ["Manchuria_Game", "WIKI_INDEX"]
+    page = drafts[0].path.read_text(encoding="utf-8")
+    index = drafts[1].path.read_text(encoding="utf-8")
+    assert "# Manchuria Game" in page
+    assert "AI MUD game project" in page
+    assert "[[10_GENERATED_TOPICS/Manchuria_Game|Manchuria Game]]" in index
 
 
 def test_vault_publisher_writes_generated_zone_with_manifest_and_rollback(tmp_path: Path) -> None:

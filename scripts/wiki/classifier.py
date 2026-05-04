@@ -31,20 +31,27 @@ def classify_memories_dry_run(
     config: WikiConfig,
     *,
     mock: bool = False,
+    topics: dict[str, dict[str, str]] | None = None,
 ) -> ClassificationDryRunResult:
     if not memories:
         return ClassificationDryRunResult(assignments=[], backend="none", model="none", raw_chars=0)
     if mock:
         return _mock_classify(memories)
-    prompt = build_classification_prompt(memories)
+    active_topics = topics or TOPICS
+    prompt = build_classification_prompt(memories, topics=active_topics)
     call = call_lily_cli_backend(prompt, config)
-    return parse_classification_response(call, memories)
+    return parse_classification_response(call, memories, topics=active_topics)
 
 
-def build_classification_prompt(memories: list[MemoryRecord]) -> str:
+def build_classification_prompt(
+    memories: list[MemoryRecord],
+    *,
+    topics: dict[str, dict[str, str]] | None = None,
+) -> str:
+    active_topics = topics or TOPICS
     topics_text = "\n".join(
         f"- {topic_id}: {meta['display']} — {meta['desc']}"
-        for topic_id, meta in TOPICS.items()
+        for topic_id, meta in active_topics.items()
     )
     payload = [
         {
@@ -82,10 +89,12 @@ Classify these memories:
 def parse_classification_response(
     call: BackendCallResult,
     memories: list[MemoryRecord],
+    *,
+    topics: dict[str, dict[str, str]] | None = None,
 ) -> ClassificationDryRunResult:
     valid_ids = {record.id for record in memories}
     payload = _extract_json_array(call.text, valid_ids=valid_ids)
-    valid_topics = set(TOPICS)
+    valid_topics = set(topics or TOPICS)
     assignments: list[ClassificationAssignment] = []
     for item in payload:
         consolidated_id = int(item["id"])
