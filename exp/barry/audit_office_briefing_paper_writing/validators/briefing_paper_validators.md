@@ -20,6 +20,10 @@ Use these checks before handing a briefing paper artefact to Barry.
 - Render each PDF page to image and compare visually when reproducing a sample.
 - Check the front metadata box against the source: it should use the learned
   rule-line layout, not a generic visible grid table.
+- If Barry provides a manually adjusted screenshot, treat screenshot page flow
+  and density as the target, not only the original sample document.
+- When metadata fields are removed, compact the metadata block and merge broad
+  value fields so remaining values do not wrap awkwardly.
 - Check heading colours and hierarchy.
 - Check bullet indentation and spacing.
 - Check Word numbering context, not only visible bullet text.

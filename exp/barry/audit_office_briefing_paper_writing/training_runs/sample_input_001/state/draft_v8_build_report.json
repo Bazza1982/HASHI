@@ -1,0 +1,14 @@
+{
+  "status": "docx_generated",
+  "revision": "v8_screenshot_flow",
+  "output_docx": "exp\\barry\\audit_office_briefing_paper_writing\\training_runs\\sample_input_001\\output\\draft_001\\data_platform_retention_briefing_note_draft_v8_screenshot_flow.docx",
+  "planned_output_pdf": "exp\\barry\\audit_office_briefing_paper_writing\\training_runs\\sample_input_001\\output\\draft_001\\data_platform_retention_briefing_note_draft_v8_screenshot_flow.pdf",
+  "goal": "match screenshot page flow and compact formatting",
+  "changes": [
+    "compressed metadata row heights",
+    "kept four-row metadata target",
+    "forced page break before lifecycle section",
+    "balanced page 1/page 2 flow",
+    "slightly relaxed typography from v7"
+  ]
+}

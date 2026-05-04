@@ -1,0 +1,9 @@
+{
+  "status": "rendered",
+  "pdf": "exp\\barry\\audit_office_briefing_paper_writing\\training_runs\\sample_input_001\\output\\draft_001\\data_platform_retention_briefing_note_draft_v7_screenshot_target.pdf",
+  "page_count": 2,
+  "pages": [
+    "exp\\barry\\audit_office_briefing_paper_writing\\training_runs\\sample_input_001\\artifacts\\draft_007_screenshot_target_pages\\page_001.png",
+    "exp\\barry\\audit_office_briefing_paper_writing\\training_runs\\sample_input_001\\artifacts\\draft_007_screenshot_target_pages\\page_002.png"
+  ]
+}
