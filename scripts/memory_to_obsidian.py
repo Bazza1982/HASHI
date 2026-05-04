@@ -451,6 +451,7 @@ def update_home_stats(total_memories: int, total_agents: int, now: str, dry_run:
         return
     with open(path, encoding="utf-8") as f:
         content = f.read()
+    content = ensure_generated_index_nav(content)
     stats_block = (
         f"## 统计\n\n"
         f"- **总记忆数:** {total_memories:,} 条\n"
@@ -464,6 +465,21 @@ def update_home_stats(total_memories: int, total_agents: int, now: str, dry_run:
         content, flags=re.DOTALL
     )
     write_file(path, content, dry_run)
+
+
+def ensure_generated_index_nav(content: str) -> str:
+    """Keep the AI-maintained generated wiki index reachable from the vault home."""
+    generated_link = "[[30_GENERATED_INDEXES/Wiki_Index]]"
+    if generated_link in content:
+        return content
+    topics_row = "| 💡 **Topics** | 研究与知识主题 | [[Topics/_Index]] |"
+    generated_row = (
+        "| 🧭 **Generated Wiki Index** | AI-maintained topic index | "
+        f"{generated_link} |"
+    )
+    if topics_row in content:
+        return content.replace(topics_row, f"{topics_row}\n{generated_row}", 1)
+    return content
 
 # ── Email reports sync ─────────────────────────────────────────────────────────
 def sync_email_reports(dry_run: bool) -> int:
