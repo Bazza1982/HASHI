@@ -65,6 +65,12 @@ The third training step performed a semantic date update:
 This proves the EXP can now support assisted Gantt update work where bars are
 derived from dates, provided visual QA is still performed before handover.
 
+The fourth training step reconstructed the source workbook from a blank workbook
+structure rather than copying the original file. It passed Excel PDF visual
+comparison with zero rendered-pixel difference. This required copying not only
+cell values and styles, but also the workbook theme palette, header/footer
+labels, and the drawing connector used as the red today line.
+
 ## Operating Rule
 
 For this EXP, treat the rendered PDF and Excel print layout as the first visual
@@ -80,3 +86,7 @@ For semantic updates, derive bar positions from the timeline row before editing.
 Capture a known-good bar style before clearing any existing bars. Do not use a
 cell as a style source after it may have been cleared or overwritten in the same
 editing pass.
+
+For from-blank reconstruction, treat the xlsx as both a workbook and an Office
+package. Cell content alone is not enough. Theme palette, drawings, VML,
+headers/footers, print setup, and relationship files can affect the final PDF.

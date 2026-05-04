@@ -1,0 +1,14 @@
+{
+  "status": "patched_clean_zip",
+  "source_base": "C:\\Users\\Print\\HASHI\\exp\\barry\\excel_project_management_gantt\\training_runs\\gantt_chart_training_001\\output\\gantt_chart_training_rebuild_v2.xlsx",
+  "output": "C:\\Users\\Print\\HASHI\\exp\\barry\\excel_project_management_gantt\\training_runs\\gantt_chart_training_001\\output\\gantt_chart_training_rebuild_v4.xlsx",
+  "patched_parts": [
+    "[Content_Types].xml",
+    "xl/drawings/drawing1.xml",
+    "xl/drawings/vmlDrawing1.vml",
+    "xl/printerSettings/printerSettings1.bin",
+    "xl/worksheets/_rels/sheet1.xml.rels",
+    "xl/worksheets/sheet1.xml"
+  ],
+  "note": "Rewrites xlsx package without duplicate zip members."
+}
