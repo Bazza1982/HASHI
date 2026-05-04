@@ -39,6 +39,7 @@ def generate_dry_run_pages(
 ) -> list[PageDraft]:
     config.dry_run_pages_dir.mkdir(parents=True, exist_ok=True)
     drafts: list[PageDraft] = []
+    topic_drafts: list[PageDraft] = []
     for topic_id in sorted(TOPICS):
         if topic_id == "NONE":
             continue
@@ -54,7 +55,19 @@ def generate_dry_run_pages(
         path = config.dry_run_pages_dir / "Topics" / f"{topic_id}.md"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
-        drafts.append(PageDraft(topic_id=topic_id, path=path, memory_count=len(memories)))
+        draft = PageDraft(topic_id=topic_id, path=path, memory_count=len(memories))
+        drafts.append(draft)
+        topic_drafts.append(draft)
+    if topic_drafts:
+        index_path = config.dry_run_pages_dir / "Wiki_Index.md"
+        index_path.write_text(build_wiki_index(topic_drafts), encoding="utf-8")
+        drafts.append(
+            PageDraft(
+                topic_id="WIKI_INDEX",
+                path=index_path,
+                memory_count=sum(draft.memory_count for draft in topic_drafts),
+            )
+        )
     return drafts
 
 
@@ -153,6 +166,43 @@ def build_topic_page(topic_id: str, memories: list[ClassifiedMemory]) -> str:
                 "",
             ]
         )
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def build_wiki_index(topic_drafts: list[PageDraft]) -> str:
+    total_memories = sum(draft.memory_count for draft in topic_drafts)
+    lines = [
+        "---",
+        'index_id: "WIKI_INDEX"',
+        'title: "Generated Wiki Index"',
+        "status: dry-run",
+        f"topic_count: {len(topic_drafts)}",
+        f"memory_count: {total_memories}",
+        "---",
+        "",
+        "# Generated Wiki Index",
+        "",
+        "<!-- WIKI-GENERATED: dry-run draft; do not treat as final synthesis. -->",
+        "",
+        "## Generated Topics",
+        "",
+    ]
+    for draft in sorted(topic_drafts, key=lambda item: item.topic_id):
+        meta = TOPICS[draft.topic_id]
+        lines.append(
+            f"- [[10_GENERATED_TOPICS/{draft.topic_id}|{meta['display']}]] "
+            f"({draft.memory_count} memories)"
+        )
+    lines.extend(
+        [
+            "",
+            "## Agent Entry Points",
+            "",
+            "- Use this page to discover current generated topic pages.",
+            "- Topic pages are auto-published under `10_GENERATED_TOPICS/`.",
+            "- Publish manifests and rollback data live under `00_SYSTEM/`.",
+        ]
+    )
     return "\n".join(lines).rstrip() + "\n"
 
 

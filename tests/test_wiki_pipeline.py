@@ -479,12 +479,15 @@ def test_page_generator_writes_dry_run_topic_pages(tmp_path: Path) -> None:
     assert len(memories) == 2
     assert "[private content filtered]" in {memory.content for memory in memories}
     drafts = generate_dry_run_pages(config)
-    assert [draft.topic_id for draft in drafts] == ["HASHI_Architecture"]
+    assert [draft.topic_id for draft in drafts] == ["HASHI_Architecture", "WIKI_INDEX"]
     page = drafts[0].path.read_text(encoding="utf-8")
     assert "status: dry-run" in page
     assert "Memory 1" in page
     assert "[private content filtered]" in page
     assert "好想你" not in page
+    index = drafts[1].path.read_text(encoding="utf-8")
+    assert "# Generated Wiki Index" in index
+    assert "[[10_GENERATED_TOPICS/HASHI_Architecture|HASHI Architecture]]" in index
 
 
 def test_vault_publisher_writes_generated_zone_with_manifest_and_rollback(tmp_path: Path) -> None:
@@ -519,9 +522,12 @@ def test_vault_publisher_writes_generated_zone_with_manifest_and_rollback(tmp_pa
         now=datetime.fromisoformat("2026-05-04T04:05:00+10:00"),
     )
     destination = config.vault_root / "10_GENERATED_TOPICS" / "HASHI_Architecture.md"
-    assert first.created == 1
+    index_destination = config.vault_root / "30_GENERATED_INDEXES" / "Wiki_Index.md"
+    assert first.created == 2
     assert destination.exists()
+    assert index_destination.exists()
     assert "status: auto-generated" in destination.read_text(encoding="utf-8")
+    assert "status: auto-generated" in index_destination.read_text(encoding="utf-8")
     assert first.latest_manifest_path.exists()
 
     original = destination.read_text(encoding="utf-8")
@@ -535,7 +541,7 @@ def test_vault_publisher_writes_generated_zone_with_manifest_and_rollback(tmp_pa
         now=datetime.fromisoformat("2026-05-04T04:06:00+10:00"),
     )
     assert second.updated == 1
-    assert second.files[0].backup is not None
+    assert any(file.backup is not None for file in second.files)
     assert "Extra generated line." in destination.read_text(encoding="utf-8")
 
     rollback = rollback_latest_publish(config)
@@ -613,8 +619,9 @@ def test_run_pipeline_publishes_generated_vault_pages(tmp_path: Path) -> None:
     lines = run_stage0(config, args)
     text = "\n".join(lines)
     assert "Vault Publish" in text
-    assert "Created: 1" in text
+    assert "Created: 2" in text
     assert (config.vault_root / "10_GENERATED_TOPICS" / "HASHI_Architecture.md").exists()
+    assert (config.vault_root / "30_GENERATED_INDEXES" / "Wiki_Index.md").exists()
 
 
 def _record(consolidated_id: int, content: str):
