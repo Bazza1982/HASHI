@@ -90,7 +90,7 @@ def parse_classification_response(
     for item in payload:
         consolidated_id = int(item["id"])
         if consolidated_id not in valid_ids:
-            raise ValueError(f"Classifier returned unknown memory id: {consolidated_id}")
+            continue
         topics = tuple(str(topic) for topic in item.get("topics") or [])
         if not topics:
             raise ValueError(f"Classifier returned no topics for memory id: {consolidated_id}")
