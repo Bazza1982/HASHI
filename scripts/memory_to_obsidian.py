@@ -9,6 +9,8 @@ Usage:
     python memory_to_obsidian.py               # incremental (new memories only)
     python memory_to_obsidian.py --full         # full re-export of everything
     python memory_to_obsidian.py --dry-run      # print what would be written, no files
+    python memory_to_obsidian.py --legacy-topic-writes
+                                                # explicitly allow old keyword topic pages
 
 Design: one-way (DB → Obsidian). DB is source of truth.
 """
@@ -527,6 +529,7 @@ def sync_email_reports(dry_run: bool) -> int:
 def main():
     full_export = "--full" in sys.argv
     dry_run     = "--dry-run" in sys.argv
+    legacy_topic_writes = "--legacy-topic-writes" in sys.argv or os.getenv("HASHI_WIKI_LEGACY_TOPIC_WRITES") == "1"
 
     if not os.path.exists(CONSOLIDATED_DB):
         print(f"ERROR: consolidated_memory.sqlite not found at {CONSOLIDATED_DB}")
@@ -614,12 +617,19 @@ def main():
 
             last_ids[key] = max_id
 
-    # Write topic pages
+    # Write legacy keyword topic pages only when explicitly requested. The
+    # generated AI-curated wiki owns topic pages for normal agent lookup.
     if topic_memories:
-        print(f"\n[Topics] Updating {len(topic_memories)} topic pages...")
-        update_topic_pages(topic_memories, dry_run)
-        for t, mems in topic_memories.items():
-            print(f"  {t}: +{len(mems)} entries")
+        if legacy_topic_writes:
+            print(f"\n[Topics] Updating {len(topic_memories)} legacy keyword topic pages...")
+            update_topic_pages(topic_memories, dry_run)
+            for t, mems in topic_memories.items():
+                print(f"  {t}: +{len(mems)} entries")
+        else:
+            print(
+                "\n[Topics] Skipped legacy keyword topic writes. "
+                "Use --legacy-topic-writes only for archive maintenance."
+            )
 
     # Write dream pages
     if dream_data:
@@ -653,7 +663,8 @@ def main():
     print(f"Export complete.")
     print(f"  Agents processed : {len(AGENT_MAP)}")
     print(f"  New memories     : {total_exported:,}")
-    print(f"  Topics updated   : {len(topic_memories)}")
+    print(f"  Topic candidates : {len(topic_memories)}")
+    print(f"  Legacy topics    : {'enabled' if legacy_topic_writes else 'disabled'}")
     print(f"  Dream pages      : {len(dream_data)}")
     print(f"  Daily pages      : {daily_count}")
     print(f"  Email reports    : {email_count}")
