@@ -1,0 +1,22 @@
+{
+  "status": "rebuild_generated",
+  "source": "C:\\Users\\Print\\HASHI\\exp\\barry\\excel_project_management_gantt\\training_runs\\gantt_chart_training_001\\training_materials\\Gantt Chart training.xlsx",
+  "output": "C:\\Users\\Print\\HASHI\\exp\\barry\\excel_project_management_gantt\\training_runs\\gantt_chart_training_001\\output\\gantt_chart_training_rebuild_v1.xlsx",
+  "sheet": "Project Timeline",
+  "max_row": 219,
+  "max_column": 33,
+  "merged_ranges": [
+    "A13:A50",
+    "D4:I4",
+    "A165:A197",
+    "A51:A88",
+    "A89:A121",
+    "A127:A159",
+    "A6:A12",
+    "V4:AG4",
+    "J4:U4"
+  ],
+  "source_sha256": "726e5836fc88a5ff019b28e4405e91a200ce4c290b1e9f55bae0761fe0845b52",
+  "output_sha256": "802b9fa4bfe1f266ba1862d0f6143f5bcfbbaee23d3e2877fae6f1d9bd041641",
+  "note": "Workbook was reconstructed into a new file rather than copied byte-for-byte; styles were copied as objects, not internal style ids."
+}

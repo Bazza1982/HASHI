@@ -32,7 +32,7 @@
   "scope_limits": [
     "This EXP is not stable yet.",
     "The first run proves exact duplication by file copy and PDF visual parity.",
-    "The current run also proves controlled manual update and semantic date-driven bar update.",
+    "The current run also proves controlled manual update, semantic date-driven bar update, and from-blank workbook reconstruction with PDF visual parity.",
     "Do not mark stable until Barry reviews at least one edited project chart or asks to stabilise it."
   ]
 }

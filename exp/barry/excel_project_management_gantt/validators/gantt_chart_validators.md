@@ -37,3 +37,14 @@ Use these checks before handing an Excel Gantt artefact to Barry.
 - PDF preview exists.
 - Visual comparison or visual inspection report exists.
 - Known deviations are documented.
+
+## From-Blank Reconstruction Checks
+
+- Source and rebuilt workbook hashes differ when the task forbids direct copying.
+- Excel can open the rebuilt workbook without repair prompts.
+- The source workbook theme is preserved.
+- Header/footer marks are present in the PDF.
+- Drawing elements such as the red today line are present.
+- The xlsx zip has no duplicate package members after patching.
+- For exact reconstruction, rendered PDF pixel difference should be zero or
+  explicitly explained.

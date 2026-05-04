@@ -1,0 +1,13 @@
+{
+  "status": "patched_clean_zip",
+  "source_base": "C:\\Users\\Print\\HASHI\\exp\\barry\\excel_project_management_gantt\\training_runs\\gantt_chart_training_001\\output\\gantt_chart_training_rebuild_v2.xlsx",
+  "output": "C:\\Users\\Print\\HASHI\\exp\\barry\\excel_project_management_gantt\\training_runs\\gantt_chart_training_001\\output\\gantt_chart_training_rebuild_v5.xlsx",
+  "patched_parts": [
+    "[Content_Types].xml",
+    "xl/drawings/drawing1.xml",
+    "xl/drawings/vmlDrawing1.vml",
+    "xl/worksheets/_rels/sheet1.xml.rels",
+    "xl/worksheets/sheet1.xml"
+  ],
+  "note": "Removed pre-existing drawing/legacyDrawing refs before inserting source red-line drawing and header/footer."
+}

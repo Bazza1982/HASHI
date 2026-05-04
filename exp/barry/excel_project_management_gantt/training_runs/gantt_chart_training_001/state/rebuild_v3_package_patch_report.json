@@ -1,0 +1,14 @@
+{
+  "status": "patched",
+  "source_base": "C:\\Users\\Print\\HASHI\\exp\\barry\\excel_project_management_gantt\\training_runs\\gantt_chart_training_001\\output\\gantt_chart_training_rebuild_v2.xlsx",
+  "output": "C:\\Users\\Print\\HASHI\\exp\\barry\\excel_project_management_gantt\\training_runs\\gantt_chart_training_001\\output\\gantt_chart_training_rebuild_v3.xlsx",
+  "patched_parts": [
+    "sheet1.xml headerFooter/drawing refs",
+    "sheet1.xml.rels",
+    "drawing1.xml",
+    "vmlDrawing1.vml",
+    "printerSettings1.bin",
+    "content types"
+  ],
+  "note": "Adds non-cell visual elements omitted by openpyxl reconstruction."
+}

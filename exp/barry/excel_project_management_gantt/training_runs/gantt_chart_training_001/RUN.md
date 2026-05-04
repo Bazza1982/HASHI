@@ -183,3 +183,73 @@ This proves the agent can perform a date-driven semantic Gantt update and
 preserve the one-page visual layout. The EXP is now useful for assisted
 project-chart editing, but should remain in training until Barry reviews an
 edited workbook or asks to stabilise it.
+
+## From-Blank Workbook Reconstruction Training
+
+Final passing output:
+
+```text
+output/gantt_chart_training_rebuild_v5.xlsx
+artifacts/gantt_chart_training_rebuild_v5.pdf
+```
+
+Purpose:
+
+```text
+recreate the workbook from a blank Excel file structure, not by byte-for-byte
+copying the original xlsx
+```
+
+Method:
+
+```text
+1. Create a new workbook.
+2. Rebuild the Project Timeline sheet.
+3. Copy cell values, fonts, fills, borders, alignment, row heights, column
+   widths, merged ranges, print setup, page margins, and print scaling.
+4. Copy the workbook theme palette so theme-based bar colours render correctly.
+5. Add the non-cell visual elements that openpyxl does not preserve by default:
+   header/footer OFFICIAL labels and the red today-line drawing.
+6. Rewrite the xlsx package as a clean zip, with no duplicate XML members.
+```
+
+Validation:
+
+```text
+Excel export status: pass
+page count: 1
+visual diff status: pass
+changed pixel ratio >8: 0.0
+max mean pixel difference: 0.0
+```
+
+Reports:
+
+```text
+state/rebuild_v1_report.json
+state/rebuild_v2_report.json
+state/rebuild_v5_package_patch_report.json
+state/rebuild_v5_excel_export_report.json
+state/rebuild_v5_visual_compare_report.json
+```
+
+Visual artifacts:
+
+```text
+artifacts/visual_compare_rebuild_v5/
+```
+
+Key lessons:
+
+- Do not copy openpyxl internal `_style` ids between workbooks; copy style
+  objects such as font, fill, border, alignment, number format, and protection.
+- Theme colours require the source workbook's theme palette; otherwise the Gantt
+  bars can render with the wrong colours.
+- The red today line is a drawing connector, not a cell border.
+- The OFFICIAL marks are header/footer content, not worksheet cells.
+- When patching xlsx package parts, rewrite a clean zip. Appending replacement
+  XML creates duplicate members and can make Excel refuse to open the workbook.
+
+This proves the EXP can exactly reconstruct this source chart from a blank
+workbook structure and reach PDF visual parity with zero rendered-pixel
+difference.
