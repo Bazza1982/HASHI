@@ -24,8 +24,8 @@ briefing note using the learned briefing paper EXP.
 Final draft:
 
 ```text
-output/draft_001/data_platform_retention_briefing_note_draft_v6.docx
-output/draft_001/data_platform_retention_briefing_note_draft_v6.pdf
+output/draft_001/data_platform_retention_briefing_note_draft_v10_screenshot_candidate.docx
+output/draft_001/data_platform_retention_briefing_note_draft_v10_screenshot_candidate.pdf
 ```
 
 Earlier internal drafts:
@@ -36,6 +36,10 @@ output/draft_001/data_platform_retention_briefing_note_draft_v2.docx
 output/draft_001/data_platform_retention_briefing_note_draft_v3.docx
 output/draft_001/data_platform_retention_briefing_note_draft_v4.docx
 output/draft_001/data_platform_retention_briefing_note_draft_v5.docx
+output/draft_001/data_platform_retention_briefing_note_draft_v6.docx
+output/draft_001/data_platform_retention_briefing_note_draft_v7_screenshot_target.docx
+output/draft_001/data_platform_retention_briefing_note_draft_v8_screenshot_flow.docx
+output/draft_001/data_platform_retention_briefing_note_draft_v9_metadata_compact.docx
 ```
 
 ## Method
@@ -60,10 +64,10 @@ The input content was mapped into:
 ## QA Results
 
 ```text
-pages: 3
-words: 868
-paragraphs: 106 by Word export / 43 meaningful text paragraphs by XML QA
-tables: 3
+pages: 2
+words: 638
+paragraphs: 62 by Word export / 32 meaningful text paragraphs by XML QA
+tables: 2
 required sections: all present
 section order: pass
 mojibake check: pass
@@ -73,15 +77,15 @@ PDF render: pass
 Reports:
 
 ```text
-state/draft_v6_word_export_report.json
-state/draft_v6_pdf_render_report.json
-state/draft_v6_text_qa_report.json
+state/draft_v10_word_export_report.json
+state/draft_v10_pdf_render_report.json
+state/draft_v10_text_qa_report.json
 ```
 
 Rendered page previews:
 
 ```text
-artifacts/draft_006_pages/
+artifacts/draft_010_screenshot_candidate_pages/
 ```
 
 ## Review Notes
@@ -103,3 +107,17 @@ alignment table in the wrong order. Draft v6 is the first post-review candidate
 that passes visual inspection and text/structure QA: metadata table layout is
 source-like, body tables are in the correct order, sections are complete, and
 no mojibake was detected.
+
+Barry then supplied a screenshot of his manually adjusted target layout. The
+screenshot established a more specific formatting goal: compact metadata block,
+four visible metadata fields, two-page flow, legal/privacy content at the end of
+page 1, lifecycle/risk/recommendation content on page 2, tighter body density,
+and compact risk table formatting.
+
+Draft v7 over-compressed the content and placed too much material on page 1.
+Draft v8 matched the screenshot page flow but still inherited excessive
+metadata row height from the original template. Draft v9 rebuilt the metadata
+block with compact horizontal rules but left value columns too narrow, causing
+awkward wrapping. Draft v10 is the current screenshot-target candidate: broad
+metadata value cells are merged, the metadata block is compact, the page flow is
+two pages, and text/section QA passes.

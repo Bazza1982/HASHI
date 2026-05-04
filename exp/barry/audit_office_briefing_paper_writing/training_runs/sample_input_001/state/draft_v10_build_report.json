@@ -1,0 +1,12 @@
+{
+  "status": "docx_generated",
+  "revision": "v10_screenshot_candidate",
+  "output_docx": "exp\\barry\\audit_office_briefing_paper_writing\\training_runs\\sample_input_001\\output\\draft_001\\data_platform_retention_briefing_note_draft_v10_screenshot_candidate.docx",
+  "planned_output_pdf": "exp\\barry\\audit_office_briefing_paper_writing\\training_runs\\sample_input_001\\output\\draft_001\\data_platform_retention_briefing_note_draft_v10_screenshot_candidate.pdf",
+  "goal": "screenshot-based candidate after metadata merge fix",
+  "changes": [
+    "merged broad metadata value cells",
+    "kept compact metadata block",
+    "kept screenshot page flow"
+  ]
+}
