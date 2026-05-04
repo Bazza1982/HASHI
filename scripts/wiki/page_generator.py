@@ -69,33 +69,35 @@ def fetch_topic_memories(
         return []
     if not config.consolidated_db.exists():
         return []
-    con = sqlite3.connect(config.wiki_state_db)
-    con.row_factory = sqlite3.Row
-    con.execute("ATTACH DATABASE ? AS mem", (str(config.consolidated_db),))
-    rows = con.execute(
-        """
-        SELECT
-            a.consolidated_id,
-            a.topic_id,
-            a.confidence,
-            c.agent_id,
-            c.instance,
-            c.domain,
-            c.memory_type,
-            c.content,
-            c.source_ts,
-            c.ts_source
-        FROM classification_assignment AS a
-        JOIN mem.consolidated AS c ON c.id = a.consolidated_id
-        WHERE a.topic_id = ?
-          AND a.status = 'ok'
-          AND a.confidence >= ?
-        ORDER BY c.source_ts DESC, a.consolidated_id DESC
-        LIMIT ?
-        """,
-        (topic_id, min_confidence, limit),
-    ).fetchall()
-    con.close()
+    con = _connect_readonly(config.wiki_state_db)
+    try:
+        con.row_factory = sqlite3.Row
+        con.execute("ATTACH DATABASE ? AS mem", (_readonly_uri(config.consolidated_db),))
+        rows = con.execute(
+            """
+            SELECT
+                a.consolidated_id,
+                a.topic_id,
+                a.confidence,
+                c.agent_id,
+                c.instance,
+                c.domain,
+                c.memory_type,
+                c.content,
+                c.source_ts,
+                c.ts_source
+            FROM classification_assignment AS a
+            JOIN mem.consolidated AS c ON c.id = a.consolidated_id
+            WHERE a.topic_id = ?
+              AND a.status = 'ok'
+              AND a.confidence >= ?
+            ORDER BY c.source_ts DESC, a.consolidated_id DESC
+            LIMIT ?
+            """,
+            (topic_id, min_confidence, limit),
+        ).fetchall()
+    finally:
+        con.close()
     return [
         ClassifiedMemory(
             consolidated_id=int(row["consolidated_id"]),
@@ -159,6 +161,14 @@ def sanitize_page_content(content: str) -> str:
     if has_private_content(content) or has_sensitive_content(content):
         return "[private content filtered]"
     return content
+
+
+def _connect_readonly(path: Path) -> sqlite3.Connection:
+    return sqlite3.connect(_readonly_uri(path), uri=True)
+
+
+def _readonly_uri(path: Path) -> str:
+    return f"file:{path}?mode=ro"
 
 
 def truncate_for_page(content: str, limit: int = 900) -> str:

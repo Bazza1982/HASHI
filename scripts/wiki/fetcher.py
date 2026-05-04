@@ -28,6 +28,12 @@ PRIVATE_CONTENT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"深情的吻",
         r"亲一下",
         r"好想你",
+        r"想念你",
+        r"喜欢你",
+        r"我爱你",
+        r"(?i)\bintimate\b",
+        r"(?i)\bromantic\b",
+        r"(?i)\bpersonal life\b",
         r"(?i)\brelationship\b",
     )
 )

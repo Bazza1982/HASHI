@@ -40,7 +40,7 @@ class WikiConfig:
 TOPICS: dict[str, dict[str, str]] = {
     "HASHI_Architecture": {
         "display": "HASHI Architecture",
-        "desc": "HASHI multi-agent OS, orchestrator, hot-restart, HChat, scheduler, gateway, and agent lifecycle. Security incidents, vulnerability scans, and operational restart procedures belong in HASHI_Ops_Security even when they mention core components.",
+        "desc": "HASHI multi-agent OS, orchestrator, hot-restart, HChat, scheduler, gateway, and agent lifecycle. Security incidents, vulnerability scans, and operational restart procedures belong in HASHI_Ops_Security even when they mention core components. Emotional modeling, Anatta, drive experiments, and persona state belong in Anatta_Emotional_Intelligence.",
     },
     "AI_Memory_Systems": {
         "display": "AI Memory Systems",
@@ -61,6 +61,10 @@ TOPICS: dict[str, dict[str, str]] = {
     "Dream_System": {
         "display": "Dream & Memory Reflection",
         "desc": "Nightly dream reflection, memory promotion, habit tracking, and dream reports.",
+    },
+    "Anatta_Emotional_Intelligence": {
+        "display": "Anatta Emotional Intelligence",
+        "desc": "Anatta layer, EmotionalSelfLayer, DriveContribution, PostTurnObserver, CARE/PLAY/SEEKING drive experiments, emotion-driven response shaping, and persona state modeling.",
     },
     "Obsidian_Wiki": {
         "display": "Obsidian Wiki",

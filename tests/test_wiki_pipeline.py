@@ -14,7 +14,7 @@ from scripts.wiki.classifier import (
     build_classification_prompt,
     parse_classification_response,
 )
-from scripts.wiki.config import WikiConfig
+from scripts.wiki.config import TOPICS, WikiConfig
 from scripts.wiki.fetcher import FetchResult, fetch_new_memories
 from scripts.wiki.page_generator import fetch_topic_memories, generate_dry_run_pages
 from scripts.wiki.run_pipeline import check_today_consolidation, drop_existing_completed_runs, run_stage0
@@ -88,6 +88,39 @@ def test_fetcher_applies_privacy_and_redaction_filters(tmp_path: Path) -> None:
     assert result.max_seen_id == 5
 
 
+def test_fetcher_catches_broader_private_content_patterns(tmp_path: Path) -> None:
+    consolidated = tmp_path / "consolidated_memory.sqlite"
+    _make_consolidated_db(consolidated)
+    con = sqlite3.connect(consolidated)
+    con.execute(
+        """
+        INSERT INTO consolidated(
+            instance, agent_id, source_id, domain, memory_type, content, source_ts, consolidated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, '2026-05-04T03:20:00+10:00')
+        """,
+        (
+            "HASHI1",
+            "lily",
+            6,
+            "project",
+            "semantic",
+            "我爱你 content deliberately mislabeled as project and should be skipped.",
+            "2026-05-04T03:15:00+10:00",
+        ),
+    )
+    con.commit()
+    con.close()
+
+    config = WikiConfig(consolidated_db=consolidated, wiki_state_db=tmp_path / "wiki_state.sqlite")
+    with WikiState(config.wiki_state_db) as state:
+        state.init_schema()
+        result = fetch_new_memories(config, state)
+
+    assert 6 not in [record.id for record in result.classifiable]
+    assert any(record.id == 6 and record.reason == "private_content_pattern" for record in result.skipped)
+
+
 def test_consolidation_check_requires_today_embed_phase(tmp_path: Path) -> None:
     log = tmp_path / "consolidation_log.jsonl"
     log.write_text(
@@ -123,9 +156,16 @@ def test_classifier_prompt_contains_topic_taxonomy(tmp_path: Path) -> None:
     record = _record(1, "HASHI scheduler and memory consolidation decision.")
     prompt = build_classification_prompt([record])
     assert "HASHI_Architecture" in prompt
+    assert "Anatta_Emotional_Intelligence" in prompt
     assert "AI_Memory_Systems" in prompt
     assert "HASHI_Ops_Security" in prompt
     assert '"id": 1' in prompt
+
+
+def test_anatta_topic_is_available_and_separate_from_architecture() -> None:
+    assert "Anatta_Emotional_Intelligence" in TOPICS
+    assert "EmotionalSelfLayer" in TOPICS["Anatta_Emotional_Intelligence"]["desc"]
+    assert "Anatta_Emotional_Intelligence" in TOPICS["HASHI_Architecture"]["desc"]
 
 
 def test_classifier_response_parser_validates_topics() -> None:
