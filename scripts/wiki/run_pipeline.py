@@ -252,7 +252,7 @@ def build_report(
             "",
             "- Classifier assignments are persisted only when `--persist-classifications` is set.",
             "- No Obsidian vault pages were written.",
-            "- `last_classified_id` advances only across contiguous ok/skipped/redacted rows.",
+            "- `last_classified_id` advances only across real source rows with ok/skipped/redacted state.",
         ]
     )
     return lines
@@ -274,7 +274,7 @@ def persist_classification_state(
         batch_id=batch_id,
         classifier_model=f"{classifier_result.backend}/{classifier_result.model}",
     )
-    return state.advance_watermark()
+    return state.advance_watermark(fetch_result.source_ids)
 
 
 def drop_existing_completed_runs(state: WikiState, fetch_result: FetchResult) -> FetchResult:
@@ -291,6 +291,7 @@ def drop_existing_completed_runs(state: WikiState, fetch_result: FetchResult) ->
         skipped=[record for record in fetch_result.skipped if record.id not in completed],
         redacted=[record for record in fetch_result.redacted if record.id not in completed],
         max_seen_id=fetch_result.max_seen_id,
+        source_ids=fetch_result.source_ids,
     )
 
 

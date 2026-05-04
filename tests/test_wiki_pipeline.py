@@ -286,6 +286,38 @@ def test_state_does_not_advance_watermark_across_failed_row(tmp_path: Path) -> N
         assert state.get_last_classified_id() == 0
 
 
+def test_state_advances_watermark_across_source_id_gaps(tmp_path: Path) -> None:
+    state_path = tmp_path / "wiki_state.sqlite"
+    with WikiState(state_path) as state:
+        state.init_schema()
+        state.record_skipped_runs([_record(1, "ok skipped")], batch_id="batch-1", status="skipped")
+        state.record_assignments(
+            [_record(5, "HASHI scheduler design")],
+            [
+                ClassificationAssignment(
+                    consolidated_id=5,
+                    topics=("HASHI_Architecture",),
+                    confidence=0.9,
+                )
+            ],
+            batch_id="batch-1",
+            classifier_model="mock/mock",
+        )
+        assert state.advance_watermark(source_ids=(1, 5)) == 5
+        assert state.get_last_classified_id() == 5
+
+
+def test_state_source_aware_watermark_still_blocks_on_failed_row(tmp_path: Path) -> None:
+    state_path = tmp_path / "wiki_state.sqlite"
+    with WikiState(state_path) as state:
+        state.init_schema()
+        state.record_skipped_runs([_record(1, "ok skipped")], batch_id="batch-1", status="skipped")
+        state.record_skipped_runs([_record(5, "failed")], batch_id="batch-1", status="failed")
+        state.record_skipped_runs([_record(6, "ok skipped")], batch_id="batch-1", status="skipped")
+        assert state.advance_watermark(source_ids=(1, 5, 6)) == 1
+        assert state.get_last_classified_id() == 1
+
+
 def test_state_records_missing_classifier_assignments_as_failed(tmp_path: Path) -> None:
     state_path = tmp_path / "wiki_state.sqlite"
     with WikiState(state_path) as state:

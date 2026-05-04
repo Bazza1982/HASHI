@@ -53,6 +53,7 @@ class FetchResult:
     skipped: list[MemoryRecord]
     redacted: list[MemoryRecord]
     max_seen_id: int
+    source_ids: tuple[int, ...] = ()
 
     @property
     def total_seen(self) -> int:
@@ -161,6 +162,7 @@ def fetch_new_memories(
         skipped=skipped,
         redacted=redacted,
         max_seen_id=max_seen_id,
+        source_ids=tuple(int(row[0]) for row in rows),
     )
 
 

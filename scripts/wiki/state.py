@@ -227,8 +227,31 @@ class WikiState:
                     (record.id,),
                 )
 
-    def advance_watermark(self) -> int:
+    def advance_watermark(self, source_ids: Iterable[int] | None = None) -> int:
         current = self.get_last_classified_id()
+        if source_ids is not None:
+            ordered_ids = sorted({int(source_id) for source_id in source_ids if int(source_id) > current})
+            if not ordered_ids:
+                return current
+            placeholders = ",".join("?" for _ in ordered_ids)
+            rows = self.conn.execute(
+                f"""
+                SELECT consolidated_id, status
+                FROM classification_run
+                WHERE consolidated_id IN ({placeholders})
+                """,
+                ordered_ids,
+            ).fetchall()
+            status_by_id = {int(row["consolidated_id"]): str(row["status"]) for row in rows}
+            advanced_to = current
+            for source_id in ordered_ids:
+                if status_by_id.get(source_id) not in {"ok", "skipped", "redacted"}:
+                    break
+                advanced_to = source_id
+            if advanced_to != current:
+                self.set_run_state("last_classified_id", str(advanced_to))
+            return advanced_to
+
         rows = self.conn.execute(
             """
             SELECT consolidated_id, status
