@@ -91,6 +91,16 @@ def main(argv: list[str] | None = None) -> int:
         help="Run AI topic discovery and write the generated candidate review page.",
     )
     parser.add_argument(
+        "--promote-topic-candidates",
+        action="store_true",
+        help="Promote safe AI topic candidates into the runtime registry after discovery.",
+    )
+    parser.add_argument(
+        "--full-library-novelty-scan",
+        action="store_true",
+        help="During topic discovery, scan recent classified memories too, not only review buckets.",
+    )
+    parser.add_argument(
         "--rollback-vault-publish",
         action="store_true",
         help="Rollback the latest generated-only Obsidian vault publish and exit.",
@@ -138,6 +148,7 @@ def run_stage0(config: WikiConfig, args: argparse.Namespace) -> list[str]:
         fetch_result = drop_existing_completed_runs(state, fetch_result)
         classifier_result = None
         discovery_result: TopicDiscoveryResult | None = None
+        promoted_candidates = 0
         page_drafts: list[PageDraft] = []
         vault_publish_result: VaultPublishResult | None = None
         run_classifier = bool(args.classify or args.classify_dry_run)
@@ -162,7 +173,10 @@ def run_stage0(config: WikiConfig, args: argparse.Namespace) -> list[str]:
                         classifier_result,
                     )
         if getattr(args, "discover_topics", False):
-            discovery_memories = fetch_discovery_memories(config)
+            discovery_memories = fetch_discovery_memories(
+                config,
+                full_library_scan=getattr(args, "full_library_novelty_scan", False),
+            )
             discovery_result = discover_topic_candidates(
                 discovery_memories,
                 active_topics,
@@ -170,6 +184,11 @@ def run_stage0(config: WikiConfig, args: argparse.Namespace) -> list[str]:
                 mock=args.mock_classifier,
             )
             persist_topic_candidates(state, discovery_result.candidates)
+            if getattr(args, "promote_topic_candidates", False):
+                for candidate in discovery_result.candidates:
+                    if state.promote_topic_candidate(candidate.candidate_id):
+                        promoted_candidates += 1
+                active_topics = state.load_active_topics()
         if args.pages_dry_run or getattr(args, "publish_vault", False):
             page_drafts = generate_dry_run_pages(config, topics=active_topics)
         if getattr(args, "discover_topics", False):
@@ -200,6 +219,7 @@ def run_stage0(config: WikiConfig, args: argparse.Namespace) -> list[str]:
             page_drafts,
             vault_publish_result,
             discovery_result,
+            promoted_candidates,
         )
         report_path = config.dry_run_report_latest if args.dry_run else config.report_latest
         report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -254,6 +274,7 @@ def build_report(
     page_drafts: list[PageDraft] | None = None,
     vault_publish_result: VaultPublishResult | None = None,
     discovery_result: TopicDiscoveryResult | None = None,
+    promoted_candidates: int = 0,
 ) -> list[str]:
     reason_counts = Counter(record.reason for record in fetch_result.skipped)
     domain_counts = Counter(record.domain for record in fetch_result.classifiable)
@@ -335,6 +356,7 @@ def build_report(
                 f"- Backend: {discovery_result.backend}",
                 f"- Model: {discovery_result.model}",
                 f"- Candidates: {len(discovery_result.candidates)}",
+                f"- Promoted: {promoted_candidates}",
                 f"- Raw response chars: {discovery_result.raw_chars}",
             ]
         )

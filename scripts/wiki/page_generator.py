@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .config import TOPICS, WikiConfig
 from .fetcher import has_private_content, has_sensitive_content
+from .page_synthesizer import render_claim_sections, synthesize_claims_from_memories
 
 
 @dataclass(frozen=True)
@@ -138,6 +139,7 @@ def build_topic_page(
 ) -> str:
     active_topics = topics or TOPICS
     meta = active_topics[topic_id]
+    claims = synthesize_claims_from_memories(topic_id, memories)
     lines = [
         "---",
         f'topic_id: "{topic_id}"',
@@ -154,9 +156,11 @@ def build_topic_page(
         "",
         meta["desc"],
         "",
-        "## Draft Evidence",
+        "## Claim-Backed Synthesis",
         "",
     ]
+    lines.extend(render_claim_sections(claims))
+    lines.extend(["## Source Evidence", ""])
     for memory in memories:
         lines.extend(
             [

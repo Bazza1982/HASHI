@@ -264,6 +264,8 @@ def test_topic_discovery_parses_and_persists_candidates(tmp_path: Path) -> None:
         state.init_schema()
         persist_topic_candidates(state, result.candidates)
         assert state.count_rows("topic_candidate") == 1
+        assert state.promote_topic_candidate("Manchuria_Game") is True
+        assert "Manchuria_Game" in state.load_active_topics()
 
     page = build_topic_candidates_page(result.candidates)
     assert "Manchuria Game" in page
@@ -585,6 +587,8 @@ def test_page_generator_writes_dry_run_topic_pages(tmp_path: Path) -> None:
     assert [draft.topic_id for draft in drafts] == ["HASHI_Architecture", "WIKI_INDEX"]
     page = drafts[0].path.read_text(encoding="utf-8")
     assert "status: dry-run" in page
+    assert "## Claim-Backed Synthesis" in page
+    assert "claim_type=current_state" in page
     assert "Memory 1" in page
     assert "[private content filtered]" in page
     assert "好想你" not in page
@@ -674,6 +678,7 @@ def test_vault_publisher_writes_generated_zone_with_manifest_and_rollback(tmp_pa
     assert "status: auto-generated" in destination.read_text(encoding="utf-8")
     assert "status: auto-generated" in index_destination.read_text(encoding="utf-8")
     assert first.latest_manifest_path.exists()
+    assert (config.vault_root / "00_SYSTEM" / "wiki_publish_staging" / first.publish_id / "manifest.json").exists()
 
     original = destination.read_text(encoding="utf-8")
     drafts[0].path.write_text(
@@ -815,16 +820,20 @@ def test_run_pipeline_discovers_topic_candidates(tmp_path: Path) -> None:
         limit=10,
         max_classify=None,
         persist_classifications=True,
-        pages_dry_run=False,
+        pages_dry_run=True,
         publish_vault=False,
         discover_topics=True,
+        promote_topic_candidates=True,
+        full_library_novelty_scan=True,
         skip_consolidation_check=False,
     )
     lines = run_stage0(config, args)
     text = "\n".join(lines)
     assert "Topic Discovery" in text
     assert "Manchuria_Game" in text
+    assert "Promoted: 1" in text
     assert (config.dry_run_pages_dir / "Topic_Candidates.md").exists()
+    assert (config.dry_run_pages_dir / "Topics" / "Manchuria_Game.md").exists()
 
 
 def _record(consolidated_id: int, content: str):

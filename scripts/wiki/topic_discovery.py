@@ -57,6 +57,7 @@ def fetch_discovery_memories(
     config: WikiConfig,
     *,
     limit: int = 100,
+    full_library_scan: bool = False,
 ) -> list[DiscoveryMemory]:
     """Fetch recent memories that should be reviewed for topic novelty."""
     if not config.wiki_state_db.exists() or not config.consolidated_db.exists():
@@ -65,8 +66,19 @@ def fetch_discovery_memories(
     try:
         con.row_factory = sqlite3.Row
         con.execute("ATTACH DATABASE ? AS mem", (_readonly_uri(config.consolidated_db),))
-        rows = con.execute(
+        where_clause = (
+            "a.status = 'ok'"
+            if full_library_scan
+            else """
+            a.status = 'ok'
+              AND (
+                    a.topic_id IN ('UNCATEGORIZED_REVIEW', 'NONE')
+                    OR a.confidence < 0.75
+                  )
             """
+        )
+        rows = con.execute(
+            f"""
             SELECT
                 a.consolidated_id,
                 a.topic_id,
@@ -78,11 +90,7 @@ def fetch_discovery_memories(
                 c.source_ts
             FROM classification_assignment AS a
             JOIN mem.consolidated AS c ON c.id = a.consolidated_id
-            WHERE a.status = 'ok'
-              AND (
-                    a.topic_id IN ('UNCATEGORIZED_REVIEW', 'NONE')
-                    OR a.confidence < 0.75
-                  )
+            WHERE {where_clause}
             ORDER BY a.consolidated_id DESC
             LIMIT ?
             """,

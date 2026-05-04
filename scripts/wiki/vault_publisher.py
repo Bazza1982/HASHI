@@ -11,6 +11,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .config import WikiConfig
+from .fetcher import has_private_content, has_sensitive_content
 from .page_generator import PageDraft
 
 
@@ -19,6 +20,7 @@ GENERATED_INDEX_DIR = "30_GENERATED_INDEXES"
 SYSTEM_DIR = "00_SYSTEM"
 HISTORY_DIR = "wiki_publish_history"
 BACKUP_DIR = "wiki_publish_backups"
+STAGING_DIR = "wiki_publish_staging"
 LATEST_MANIFEST = "wiki_publish_manifest_latest.json"
 
 
@@ -72,14 +74,44 @@ def publish_vault(
     system_dir = config.vault_root / SYSTEM_DIR
     history_dir = system_dir / HISTORY_DIR
     backup_root = system_dir / BACKUP_DIR / publish_id
+    staging_root = system_dir / STAGING_DIR / publish_id
     history_dir.mkdir(parents=True, exist_ok=True)
     backup_root.mkdir(parents=True, exist_ok=True)
+    staging_root.mkdir(parents=True, exist_ok=True)
 
     published: list[PublishedFile] = []
+    staged: list[tuple[PageDraft, Path, Path]] = []
     for draft in drafts:
         relative_source = _relative_draft_path(config, draft.path)
         destination = _destination_for(config, relative_source)
         content = _prepare_vault_content(draft.path.read_text(encoding="utf-8"))
+        _validate_staged_content(content, draft.path)
+        staging_path = staging_root / relative_source
+        staging_path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(staging_path, content)
+        staged.append((draft, destination, staging_path))
+
+    staging_manifest = {
+        "publish_id": publish_id,
+        "generated_at": timestamp.isoformat(),
+        "staging_root": str(staging_root),
+        "files": [
+            {
+                "source": str(draft.path),
+                "staging": str(staging_path),
+                "destination": str(destination),
+                "sha256": _file_sha256(staging_path),
+            }
+            for draft, destination, staging_path in staged
+        ],
+    }
+    _atomic_write(
+        staging_root / "manifest.json",
+        json.dumps(staging_manifest, ensure_ascii=False, indent=2) + "\n",
+    )
+
+    for draft, destination, staging_path in staged:
+        content = staging_path.read_text(encoding="utf-8")
         new_hash = _sha256(content)
         previous_hash = _file_sha256(destination) if destination.exists() else None
         if previous_hash == new_hash:
@@ -123,6 +155,7 @@ def publish_vault(
         "generated_at": timestamp.isoformat(),
         "vault_root": str(config.vault_root),
         "generated_zones": [GENERATED_TOPIC_DIR, GENERATED_INDEX_DIR],
+        "staging_root": str(staging_root),
         "backup_root": str(backup_root),
         "files": [asdict(item) for item in published],
         "summary": {
@@ -210,6 +243,15 @@ def _prepare_vault_content(content: str) -> str:
         1,
     )
     return text
+
+
+def _validate_staged_content(content: str, source: Path) -> None:
+    if not content.strip():
+        raise ValueError(f"Refusing to publish empty generated page: {source}")
+    if "status: auto-generated" not in content:
+        raise ValueError(f"Generated page did not pass auto-generated marker check: {source}")
+    if has_private_content(content) or has_sensitive_content(content):
+        raise ValueError(f"Generated page failed privacy scan: {source}")
 
 
 def _atomic_write(path: Path, content: str) -> None:

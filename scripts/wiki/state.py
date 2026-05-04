@@ -316,6 +316,114 @@ class WikiState:
                 ),
             )
 
+    def promote_topic_candidate(self, candidate_id: str, *, created_by: str = "ai_curator") -> bool:
+        """Promote a reviewed AI topic candidate into the active topic registry."""
+        row = self.conn.execute(
+            "SELECT * FROM topic_candidate WHERE candidate_id = ?",
+            (candidate_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        if row["recommended_action"] != "promote":
+            return False
+        if row["privacy_level"] == "private_blocked" or float(row["confidence"]) < 0.7:
+            return False
+
+        topic_id = row["proposed_topic_id"]
+        existing = self.conn.execute(
+            "SELECT human_locked FROM topic_registry WHERE topic_id = ?",
+            (topic_id,),
+        ).fetchone()
+        if existing is not None and int(existing["human_locked"]):
+            return False
+
+        ts = _utc_now()
+        evidence_ids = json.loads(row["evidence_ids_json"])
+        aliases_json = row["aliases_json"] or "[]"
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO topic_registry(
+                    topic_id,
+                    display,
+                    description,
+                    topic_type,
+                    canonical_page_path,
+                    aliases_json,
+                    status,
+                    privacy_level,
+                    quality_score,
+                    uncertainty_score,
+                    created_at,
+                    updated_at,
+                    created_by,
+                    promoted_from_candidate_id,
+                    review_note
+                )
+                VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(topic_id) DO UPDATE SET
+                    display = excluded.display,
+                    description = excluded.description,
+                    topic_type = excluded.topic_type,
+                    canonical_page_path = excluded.canonical_page_path,
+                    aliases_json = excluded.aliases_json,
+                    status = 'active',
+                    privacy_level = excluded.privacy_level,
+                    quality_score = excluded.quality_score,
+                    uncertainty_score = excluded.uncertainty_score,
+                    updated_at = excluded.updated_at,
+                    promoted_from_candidate_id = excluded.promoted_from_candidate_id,
+                    review_note = excluded.review_note
+                """,
+                (
+                    topic_id,
+                    row["display"],
+                    row["description"],
+                    row["topic_type"],
+                    f"10_GENERATED_TOPICS/{topic_id}.md",
+                    aliases_json,
+                    row["privacy_level"],
+                    row["quality_score"],
+                    row["uncertainty_score"],
+                    ts,
+                    ts,
+                    created_by,
+                    candidate_id,
+                    row["curator_reason"],
+                ),
+            )
+            self.conn.execute(
+                """
+                UPDATE topic_candidate
+                SET status = 'promoted', reviewed_at = ?
+                WHERE candidate_id = ?
+                """,
+                (ts, candidate_id),
+            )
+            self.conn.executemany(
+                """
+                INSERT INTO classification_assignment(
+                    consolidated_id, topic_id, confidence, classified_at, classifier_model, status
+                )
+                VALUES (?, ?, ?, ?, 'topic-discovery/promoted', 'ok')
+                ON CONFLICT(consolidated_id, topic_id) DO UPDATE SET
+                    confidence = excluded.confidence,
+                    classified_at = excluded.classified_at,
+                    classifier_model = excluded.classifier_model,
+                    status = 'ok'
+                """,
+                [
+                    (
+                        int(evidence_id),
+                        topic_id,
+                        float(row["confidence"]),
+                        ts,
+                    )
+                    for evidence_id in evidence_ids
+                ],
+            )
+        return True
+
     def existing_completed_runs(self, consolidated_ids: Iterable[int]) -> set[int]:
         ids = list(consolidated_ids)
         if not ids:
