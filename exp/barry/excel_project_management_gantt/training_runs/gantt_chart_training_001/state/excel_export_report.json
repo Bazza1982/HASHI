@@ -1,0 +1,37 @@
+{
+  "status": "exported",
+  "exports": [
+    {
+      "label": "source",
+      "xlsx": "C:\\Users\\Print\\HASHI\\exp\\barry\\excel_project_management_gantt\\training_runs\\gantt_chart_training_001\\training_materials\\Gantt Chart training.xlsx",
+      "pdf": "C:\\Users\\Print\\HASHI\\exp\\barry\\excel_project_management_gantt\\training_runs\\gantt_chart_training_001\\artifacts\\source_gantt_chart_training.pdf",
+      "sheet_count": 1,
+      "sheets": [
+        {
+          "name": "Project Timeline",
+          "used_rows": 219,
+          "used_cols": 33,
+          "page_setup_zoom": false,
+          "fit_wide": 1,
+          "fit_tall": 1
+        }
+      ]
+    },
+    {
+      "label": "duplicate",
+      "xlsx": "C:\\Users\\Print\\HASHI\\exp\\barry\\excel_project_management_gantt\\training_runs\\gantt_chart_training_001\\output\\gantt_chart_training_duplicate_v1.xlsx",
+      "pdf": "C:\\Users\\Print\\HASHI\\exp\\barry\\excel_project_management_gantt\\training_runs\\gantt_chart_training_001\\artifacts\\duplicate_gantt_chart_training_v1.pdf",
+      "sheet_count": 1,
+      "sheets": [
+        {
+          "name": "Project Timeline",
+          "used_rows": 219,
+          "used_cols": 33,
+          "page_setup_zoom": false,
+          "fit_wide": 1,
+          "fit_tall": 1
+        }
+      ]
+    }
+  ]
+}
