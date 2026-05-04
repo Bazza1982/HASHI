@@ -25,6 +25,10 @@ Use these checks before handing a briefing paper artefact to Barry.
 - When metadata fields are removed, compact the metadata block and merge broad
   value fields so remaining values do not wrap awkwardly.
 - Check heading colours and hierarchy.
+- Check heading colour consistency against the visual target. Do not accept
+  different red tones simply because Word uses different heading style names.
+- When a screenshot target is available, sample or visually compare the rendered
+  heading/subheading colours and record the intended colour token.
 - Check bullet indentation and spacing.
 - Check Word numbering context, not only visible bullet text.
 - Check table width, columns, borders, shading, and text wrapping.
