@@ -18,11 +18,15 @@ Use these checks before handing a briefing paper artefact to Barry.
 - Export both source and rebuilt document to PDF.
 - Compare page count and page flow.
 - Render each PDF page to image and compare visually when reproducing a sample.
+- Check the front metadata box against the source: it should use the learned
+  rule-line layout, not a generic visible grid table.
 - Check heading colours and hierarchy.
 - Check bullet indentation and spacing.
 - Check Word numbering context, not only visible bullet text.
 - Check table width, columns, borders, shading, and text wrapping.
 - Check fonts and sizes against source styles.
+- Check that no direct font overrides have been introduced where the learned
+  paragraph styles should control the appearance.
 
 ## Content Checks
 
