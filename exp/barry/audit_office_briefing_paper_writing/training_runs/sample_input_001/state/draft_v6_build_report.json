@@ -1,0 +1,12 @@
+{
+  "status": "docx_generated",
+  "revision": "v6",
+  "output_docx": "exp\\barry\\audit_office_briefing_paper_writing\\training_runs\\sample_input_001\\output\\draft_001\\data_platform_retention_briefing_note_draft_v6.docx",
+  "planned_output_pdf": "exp\\barry\\audit_office_briefing_paper_writing\\training_runs\\sample_input_001\\output\\draft_001\\data_platform_retention_briefing_note_draft_v6.pdf",
+  "changes": [
+    "kept source metadata table formatting",
+    "inserted strategic table in correct document order",
+    "kept template paragraph styles",
+    "used simple grid only for body tables"
+  ]
+}
