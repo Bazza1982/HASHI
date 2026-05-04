@@ -1,0 +1,129 @@
+{
+  "status": "pass",
+  "source_pdf": "exp\\barry\\audit_office_briefing_paper_writing\\training_runs\\sample_paper_001\\artifacts\\source_sample_paper.pdf",
+  "rebuilt_pdf": "exp\\barry\\audit_office_briefing_paper_writing\\training_runs\\sample_paper_001\\output\\blank_rebuild_001\\audit_office_briefing_paper_rebuild_v2_template_context.pdf",
+  "source_pages": 9,
+  "rebuilt_pages": 9,
+  "extra_page_count_delta": 0,
+  "max_mean_abs_diff": 0.0,
+  "max_changed_pixel_ratio_gt8": 0.0,
+  "pages": [
+    {
+      "page": 1,
+      "same_size": true,
+      "size": [
+        893,
+        1263
+      ],
+      "mean_abs_diff": 0.0,
+      "max_abs_diff": 0,
+      "changed_pixel_ratio_gt8": 0.0,
+      "diff_bbox": null,
+      "diff_image": "exp\\barry\\audit_office_briefing_paper_writing\\training_runs\\sample_paper_001\\artifacts\\blank_rebuild_001\\visual_compare_v2\\diff_page_001.png"
+    },
+    {
+      "page": 2,
+      "same_size": true,
+      "size": [
+        893,
+        1263
+      ],
+      "mean_abs_diff": 0.0,
+      "max_abs_diff": 0,
+      "changed_pixel_ratio_gt8": 0.0,
+      "diff_bbox": null,
+      "diff_image": "exp\\barry\\audit_office_briefing_paper_writing\\training_runs\\sample_paper_001\\artifacts\\blank_rebuild_001\\visual_compare_v2\\diff_page_002.png"
+    },
+    {
+      "page": 3,
+      "same_size": true,
+      "size": [
+        893,
+        1263
+      ],
+      "mean_abs_diff": 0.0,
+      "max_abs_diff": 0,
+      "changed_pixel_ratio_gt8": 0.0,
+      "diff_bbox": null,
+      "diff_image": "exp\\barry\\audit_office_briefing_paper_writing\\training_runs\\sample_paper_001\\artifacts\\blank_rebuild_001\\visual_compare_v2\\diff_page_003.png"
+    },
+    {
+      "page": 4,
+      "same_size": true,
+      "size": [
+        893,
+        1263
+      ],
+      "mean_abs_diff": 0.0,
+      "max_abs_diff": 0,
+      "changed_pixel_ratio_gt8": 0.0,
+      "diff_bbox": null,
+      "diff_image": "exp\\barry\\audit_office_briefing_paper_writing\\training_runs\\sample_paper_001\\artifacts\\blank_rebuild_001\\visual_compare_v2\\diff_page_004.png"
+    },
+    {
+      "page": 5,
+      "same_size": true,
+      "size": [
+        893,
+        1263
+      ],
+      "mean_abs_diff": 0.0,
+      "max_abs_diff": 0,
+      "changed_pixel_ratio_gt8": 0.0,
+      "diff_bbox": null,
+      "diff_image": "exp\\barry\\audit_office_briefing_paper_writing\\training_runs\\sample_paper_001\\artifacts\\blank_rebuild_001\\visual_compare_v2\\diff_page_005.png"
+    },
+    {
+      "page": 6,
+      "same_size": true,
+      "size": [
+        893,
+        1263
+      ],
+      "mean_abs_diff": 0.0,
+      "max_abs_diff": 0,
+      "changed_pixel_ratio_gt8": 0.0,
+      "diff_bbox": null,
+      "diff_image": "exp\\barry\\audit_office_briefing_paper_writing\\training_runs\\sample_paper_001\\artifacts\\blank_rebuild_001\\visual_compare_v2\\diff_page_006.png"
+    },
+    {
+      "page": 7,
+      "same_size": true,
+      "size": [
+        893,
+        1263
+      ],
+      "mean_abs_diff": 0.0,
+      "max_abs_diff": 0,
+      "changed_pixel_ratio_gt8": 0.0,
+      "diff_bbox": null,
+      "diff_image": "exp\\barry\\audit_office_briefing_paper_writing\\training_runs\\sample_paper_001\\artifacts\\blank_rebuild_001\\visual_compare_v2\\diff_page_007.png"
+    },
+    {
+      "page": 8,
+      "same_size": true,
+      "size": [
+        893,
+        1263
+      ],
+      "mean_abs_diff": 0.0,
+      "max_abs_diff": 0,
+      "changed_pixel_ratio_gt8": 0.0,
+      "diff_bbox": null,
+      "diff_image": "exp\\barry\\audit_office_briefing_paper_writing\\training_runs\\sample_paper_001\\artifacts\\blank_rebuild_001\\visual_compare_v2\\diff_page_008.png"
+    },
+    {
+      "page": 9,
+      "same_size": true,
+      "size": [
+        893,
+        1263
+      ],
+      "mean_abs_diff": 0.0,
+      "max_abs_diff": 0,
+      "changed_pixel_ratio_gt8": 0.0,
+      "diff_bbox": null,
+      "diff_image": "exp\\barry\\audit_office_briefing_paper_writing\\training_runs\\sample_paper_001\\artifacts\\blank_rebuild_001\\visual_compare_v2\\diff_page_009.png"
+    }
+  ]
+}
