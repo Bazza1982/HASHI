@@ -118,3 +118,68 @@ This proves the agent can perform a controlled manual schedule update while
 preserving the workbook's one-page print layout. The EXP is still not stable:
 future training should test deriving bars from dates and updating multiple
 dependent tasks without manual cell-range selection.
+
+## Semantic Date Update Training
+
+Output:
+
+```text
+output/gantt_chart_training_semantic_update_v4.xlsx
+artifacts/gantt_chart_training_semantic_update_v4.pdf
+```
+
+Purpose:
+
+```text
+derive Gantt bar columns from date text and timeline headers, instead of manually
+choosing cell ranges
+```
+
+Edits applied:
+
+```text
+Row 60: August 2026 to June 2026 -> August 2025 to June 2026
+Row 60 derived bar: K60:U60
+Row 67: March 2026 to June 2026 -> April 2026 to July 2026
+Row 67 derived bar: S67:V67
+Row 203: added "6. Added semantic checkpoint task"
+Row 203 derived bar: AF203:AG203
+```
+
+Validation:
+
+```text
+Excel export status: pass
+page count: 1
+print scaling: 1 page wide by 1 page tall
+visual diff status: pass
+changed pixel ratio >8: 0.0011253243347273993
+max mean pixel difference: 0.08379403323820178
+```
+
+Reports:
+
+```text
+state/semantic_update_v4_report.json
+state/semantic_update_v4_excel_export_report.json
+state/semantic_update_v4_visual_compare_report.json
+```
+
+Visual artifacts:
+
+```text
+artifacts/visual_compare_semantic_update_v4/
+```
+
+Key lessons:
+
+- Map row 5 timeline headers to columns before placing bars.
+- Copy source bar style before clearing an old bar range.
+- For new rows, use a captured style sample from a known existing bar, not a
+  cell that may be cleared by an earlier update in the same pass.
+- Validate both cell fills and Excel-rendered PDF output.
+
+This proves the agent can perform a date-driven semantic Gantt update and
+preserve the one-page visual layout. The EXP is now useful for assisted
+project-chart editing, but should remain in training until Barry reviews an
+edited workbook or asks to stabilise it.

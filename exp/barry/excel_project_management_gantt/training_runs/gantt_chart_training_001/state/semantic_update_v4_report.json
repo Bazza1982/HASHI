@@ -1,0 +1,28 @@
+{
+  "status": "semantic_update_generated",
+  "output": "exp\\barry\\excel_project_management_gantt\\training_runs\\gantt_chart_training_001\\output\\gantt_chart_training_semantic_update_v4.xlsx",
+  "updates": [
+    {
+      "row": 60,
+      "date_text": "August 2025 to June 2026",
+      "derived_bar": "K60:U60",
+      "style_ref": "K60"
+    },
+    {
+      "row": 67,
+      "date_text": "April 2026 to July 2026",
+      "derived_bar": "S67:V67",
+      "style_ref": "R67"
+    },
+    {
+      "row": 203,
+      "date_text": "May 2027 to June 2027",
+      "derived_bar": "AF203:AG203",
+      "style_ref": "captured R67 before edits"
+    }
+  ],
+  "lessons": [
+    "copy source style before clearing old bar cells",
+    "use captured style for new rows instead of a cell that may be cleared by a prior semantic update"
+  ]
+}

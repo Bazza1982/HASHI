@@ -22,10 +22,18 @@ Use these checks before handing an Excel Gantt artefact to Barry.
 - For edits, visual differences should be localised to the intended changed
   tasks/dates/bars.
 
+## Semantic Update Checks
+
+- Timeline headers are parsed from the workbook, not hard-coded from memory.
+- Date text and derived bar columns match.
+- Old bar cells are cleared only for the target row.
+- Existing bar style is captured before clearing.
+- New rows use a captured style sample from a known-good bar.
+- Added rows preserve row height, indentation, borders, and print fit.
+
 ## Handover Checks
 
 - Output `.xlsx` exists.
 - PDF preview exists.
 - Visual comparison or visual inspection report exists.
 - Known deviations are documented.
-

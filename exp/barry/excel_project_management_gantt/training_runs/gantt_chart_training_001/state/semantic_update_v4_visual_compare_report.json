@@ -1,0 +1,27 @@
+{
+  "status": "pass",
+  "source_pdf": "C:\\Users\\Print\\HASHI\\exp\\barry\\excel_project_management_gantt\\training_runs\\gantt_chart_training_001\\artifacts\\source_gantt_chart_training.pdf",
+  "update_pdf": "C:\\Users\\Print\\HASHI\\exp\\barry\\excel_project_management_gantt\\training_runs\\gantt_chart_training_001\\artifacts\\gantt_chart_training_semantic_update_v4.pdf",
+  "source_pages": 1,
+  "update_pages": 1,
+  "pages": [
+    {
+      "page": 1,
+      "size": [
+        1684,
+        1191
+      ],
+      "mean_abs_diff": 0.08379403323820178,
+      "changed_pixel_ratio_gt8": 0.0011253243347273993,
+      "diff_bbox": [
+        103,
+        43,
+        851,
+        1147
+      ],
+      "source_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\excel_project_management_gantt\\training_runs\\gantt_chart_training_001\\artifacts\\visual_compare_semantic_update_v4\\source_page_1.png",
+      "update_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\excel_project_management_gantt\\training_runs\\gantt_chart_training_001\\artifacts\\visual_compare_semantic_update_v4\\semantic_update_v4_page_1.png",
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\excel_project_management_gantt\\training_runs\\gantt_chart_training_001\\artifacts\\visual_compare_semantic_update_v4\\diff_page_1.png"
+    }
+  ]
+}

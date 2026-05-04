@@ -31,7 +31,8 @@
   "failure_memory": "failures/failure_memory.jsonl",
   "scope_limits": [
     "This EXP is not stable yet.",
-    "The first run proves exact duplication by file copy and PDF visual parity only.",
-    "Do not mark stable until the agent can create or update the Gantt chart structure, then pass visual QA."
+    "The first run proves exact duplication by file copy and PDF visual parity.",
+    "The current run also proves controlled manual update and semantic date-driven bar update.",
+    "Do not mark stable until Barry reviews at least one edited project chart or asks to stabilise it."
   ]
 }
