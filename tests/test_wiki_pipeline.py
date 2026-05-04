@@ -160,6 +160,21 @@ def test_backend_client_calls_lily_cli_backend(tmp_path: Path) -> None:
     assert result.text.startswith("[")
 
 
+def test_backend_client_sends_claude_prompt_via_stdin(tmp_path: Path) -> None:
+    _write_lily_state(tmp_path, "claude-cli", "claude-sonnet-4-6")
+    (tmp_path / "agents.json").write_text('{"global":{"claude_cmd":"/usr/bin/claude"}}', encoding="utf-8")
+    seen = {}
+
+    def runner(argv, **kwargs):
+        seen["argv"] = argv
+        seen["input"] = kwargs.get("input")
+        return _fake_runner(argv, **kwargs)
+
+    call_lily_cli_backend("large prompt body", WikiConfig(hashi_root=tmp_path), runner=runner)
+    assert seen["argv"] == ["/usr/bin/claude", "--model", "claude-sonnet-4-6", "--print"]
+    assert seen["input"] == "large prompt body"
+
+
 def test_run_pipeline_mock_classifier_dry_run(tmp_path: Path) -> None:
     consolidated = tmp_path / "consolidated_memory.sqlite"
     _make_consolidated_db(consolidated)

@@ -1115,7 +1115,74 @@ Still deferred:
 - Topic lifecycle / emerging-topic review will be handled as a later weekly review workflow, not as an automatic Python clustering workflow.
 - Obsidian vault publishing remains disabled until the dry-run pages receive at least one human review pass.
 
-### 14.10 Remaining implementation boundaries
+### 14.10 Milestone 10 manual backfill transport and quality record
+
+Status: completed on 2026-05-04.
+
+Problem found during larger manual backfill:
+
+- `claude-cli` initially received the whole classifier prompt as a command-line argument.
+- A larger batch hit the operating-system argument length limit:
+  `OSError: [Errno 7] Argument list too long: 'claude'`.
+- After moving the prompt to stdin, the next large batch reached the default `120s` timeout, which was too short for `--max-classify 250`.
+
+Fixes:
+
+- `claude-cli` prompts are now sent through stdin while keeping the same Lily-owned CLI backend policy.
+- Wiki classifier timeout is now configurable through `WikiConfig.classifier_timeout_s`; the default is `600s`.
+- No OpenRouter, DeepSeek, or other remote API backend is used.
+
+Live safety checkpoint:
+
+```text
+Backup created:
+workspaces/lily/wiki_state.sqlite.bak-20260504-100300
+
+Command:
+python3 scripts/wiki/run_pipeline.py --daily --classify --persist-classifications --pages-dry-run --limit 1000 --max-classify 250
+```
+
+Result:
+
+```text
+Backend: claude-cli
+Model: claude-sonnet-4-6
+Assignments: 250
+Skipped: 262
+Rows seen: 1000
+Classifiable in fetch window: 738
+last_classified_id: 424
+
+New batch topic counts:
+- AI_Memory_Systems: 27
+- Carbon_Accounting: 1
+- HASHI_Architecture: 80
+- HASHI_Ops_Security: 81
+- NONE: 9
+- UNCATEGORIZED_REVIEW: 55
+```
+
+Remaining manual backfill after this run:
+
+```text
+Total consolidated rows: 16,261
+Current watermark: 424
+Raw remaining rows: 15,837
+Classifiable remaining rows: 10,919
+Skipped remaining rows: 4,904
+Redacted remaining rows: 14
+```
+
+Quality review:
+
+- `HASHI_Ops_Security` is routing credential exposure, git-history cleanup, release safety checks, and sensitive-info audits correctly.
+- `AI_Memory_Systems` remains semantically clean for memory injection, bridge memory, retrieval, and reset/fresh-context behavior.
+- `HASHI_Architecture` remains broad but useful for HASHI release, packaging, command/runtime, and system design work.
+- `NONE` is still mostly low-durable-value content such as language correction, skill-context wrapper text, and interaction-quality complaints.
+- `UNCATEGORIZED_REVIEW` is meaningful rather than random noise. The inspected examples are mostly AIPM, KASUMI, WORDO, milestone planning, and project-delivery work. Per Zelda's decision, these are kept as weekly review evidence rather than automatically promoted into new Python-defined topics.
+- No Obsidian vault files were written.
+
+### 14.11 Remaining implementation boundaries
 
 The plan is ready to start once these implementation boundaries are accepted:
 

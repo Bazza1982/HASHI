@@ -26,6 +26,7 @@ class WikiConfig:
     vault_root: Path = Path("/mnt/c/Users/thene/Documents/lily_hashi_wiki")
     min_content_chars: int = 40
     classify_chars: int = 512
+    classifier_timeout_s: int = 600
     private_domains: frozenset[str] = field(
         default_factory=lambda: frozenset(
             {"identity", "personal", "relationship", "private", "emotional"}

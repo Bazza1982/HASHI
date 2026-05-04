@@ -34,6 +34,12 @@ class BackendCallResult:
     returncode: int
 
 
+@dataclass(frozen=True)
+class BackendInvocation:
+    argv: list[str]
+    stdin: str | None = None
+
+
 def resolve_backend_context(config: WikiConfig) -> BackendContext:
     state = _read_json(config.hashi_root / "workspaces/lily/state.json", {})
     backend = str(state.get("active_backend") or "").strip()
@@ -53,15 +59,17 @@ def call_lily_cli_backend(
     config: WikiConfig,
     *,
     runner: Runner = subprocess.run,
-    timeout_s: int = 120,
+    timeout_s: int | None = None,
 ) -> BackendCallResult:
     context = resolve_backend_context(config)
-    argv = _argv_for_context(context, prompt)
+    invocation = _invocation_for_context(context, prompt)
+    effective_timeout_s = timeout_s if timeout_s is not None else config.classifier_timeout_s
     result = runner(
-        argv,
+        invocation.argv,
+        input=invocation.stdin,
         capture_output=True,
         text=True,
-        timeout=timeout_s,
+        timeout=effective_timeout_s,
         cwd=str(config.hashi_root),
         env=os.environ.copy(),
     )
@@ -93,9 +101,10 @@ def _command_for_backend(config: WikiConfig, backend: str) -> str:
     raise BackendPolicyError(f"Unsupported CLI backend for wiki pipeline: {backend}")
 
 
-def _argv_for_context(context: BackendContext, prompt: str) -> list[str]:
+def _invocation_for_context(context: BackendContext, prompt: str) -> BackendInvocation:
     if context.backend == "claude-cli":
-        return [context.command, "--model", context.model, "--print", prompt]
+        # Send prompt through stdin so large classification batches do not hit argv limits.
+        return BackendInvocation([context.command, "--model", context.model, "--print"], prompt)
     if context.backend == "gemini-cli":
-        return [context.command, "--model", context.model, "--prompt", prompt]
+        return BackendInvocation([context.command, "--model", context.model, "--prompt", prompt])
     raise BackendPolicyError(f"Unsupported CLI backend for wiki pipeline: {context.backend}")
