@@ -1,0 +1,57 @@
+{
+  "status": "semantic_update_generated",
+  "source": "exp\\barry\\excel_project_management_gantt\\training_runs\\gantt_chart_training_001\\training_materials\\Gantt Chart training.xlsx",
+  "output": "exp\\barry\\excel_project_management_gantt\\training_runs\\gantt_chart_training_001\\output\\gantt_chart_training_semantic_update_v2.xlsx",
+  "month_map": {
+    "2025-01": "D5",
+    "2025-02": "E5",
+    "2025-03": "F5",
+    "2025-04": "G5",
+    "2025-05": "H5",
+    "2025-06": "I5",
+    "2025-07": "J5",
+    "2025-08": "K5",
+    "2025-09": "L5",
+    "2025-10": "M5",
+    "2025-11": "N5",
+    "2025-12": "O5",
+    "2026-01": "P5",
+    "2026-02": "Q5",
+    "2026-03": "R5",
+    "2026-04": "S5",
+    "2026-05": "T5",
+    "2026-06": "U5",
+    "2026-07": "V5",
+    "2026-08": "W5",
+    "2026-09": "X5",
+    "2026-10": "Y5",
+    "2026-11": "Z5",
+    "2026-12": "AA5",
+    "2027-01": "AB5",
+    "2027-02": "AC5",
+    "2027-03": "AD5",
+    "2027-04": "AE5",
+    "2027-05": "AF5",
+    "2027-06": "AG5"
+  },
+  "updates": [
+    {
+      "row": 60,
+      "date_text": "August 2025 to June 2026",
+      "derived_bar": "K60:U60",
+      "style_ref": "K60"
+    },
+    {
+      "row": 67,
+      "date_text": "April 2026 to July 2026",
+      "derived_bar": "S67:V67",
+      "style_ref": "R67"
+    },
+    {
+      "row": 203,
+      "date_text": "May 2027 to June 2027",
+      "derived_bar": "AF203:AG203",
+      "style_ref": "R67"
+    }
+  ]
+}

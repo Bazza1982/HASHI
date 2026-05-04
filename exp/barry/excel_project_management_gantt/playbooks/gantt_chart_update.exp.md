@@ -15,8 +15,21 @@ or Gantt bars.
 6. Render the PDF and inspect the timeline visually.
 7. Compare against the previous version when the edit should be localised.
 
-## Early Training Warning
+## Date-Driven Bar Updates
 
-This EXP is not yet stable for update work. The first run only established an
-exact duplicate baseline.
+When the date text drives the Gantt bar:
 
+1. Parse the timeline header row into month-to-column mappings.
+2. Parse task or phase date text into start and end months.
+3. Capture the existing bar style before clearing old bars.
+4. Clear only the old bar cells for the target row.
+5. Apply the captured style to the derived month columns.
+6. For a new row, use a captured known-good style sample from an existing bar,
+   not a cell that may have been modified earlier in the same update.
+7. Export to PDF and confirm changes are localised.
+
+## Current Capability
+
+This EXP has passed exact duplication, controlled manual update, and semantic
+date-driven update training. It is suitable for assisted editing with visual QA,
+but not yet stable for fully independent from-scratch project chart creation.

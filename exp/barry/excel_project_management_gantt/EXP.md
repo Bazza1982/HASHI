@@ -51,7 +51,19 @@ The second training step performed a controlled update:
 - confirmed the output still fits 1 page wide by 1 page tall
 
 This proves exact duplication and a controlled manual schedule edit. The EXP is
-not yet stable for from-scratch creation or fully semantic schedule updates.
+not yet stable for from-scratch creation.
+
+The third training step performed a semantic date update:
+
+- parsed the timeline headers in row 5
+- corrected one inconsistent date range
+- moved existing bars based on date text
+- added one new task with a derived bar
+- preserved page count and one-page print scaling
+- passed rendered PDF visual comparison
+
+This proves the EXP can now support assisted Gantt update work where bars are
+derived from dates, provided visual QA is still performed before handover.
 
 ## Operating Rule
 
@@ -63,3 +75,8 @@ values.
 When updating bars, preserve the Gantt's cell-based nature: bars are created by
 cell fills, borders, alignment, and blank-space values rather than embedded chart
 objects.
+
+For semantic updates, derive bar positions from the timeline row before editing.
+Capture a known-good bar style before clearing any existing bars. Do not use a
+cell as a style source after it may have been cleared or overwritten in the same
+editing pass.
