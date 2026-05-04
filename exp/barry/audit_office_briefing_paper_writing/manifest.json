@@ -21,7 +21,8 @@
     ]
   },
   "training_runs": {
-    "sample_paper_001": "training_runs/sample_paper_001/RUN.md"
+    "sample_paper_001": "training_runs/sample_paper_001/RUN.md",
+    "sample_input_001": "training_runs/sample_input_001/RUN.md"
   },
   "playbooks": {
     "briefing_paper_rebuild": "playbooks/briefing_paper_rebuild.exp.md",

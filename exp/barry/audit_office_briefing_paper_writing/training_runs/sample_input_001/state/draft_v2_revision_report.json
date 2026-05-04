@@ -1,0 +1,9 @@
+{
+  "status": "docx_revised",
+  "revision": "v2",
+  "changes": [
+    "set all table rows to not split across pages",
+    "repeat key table header rows across pages"
+  ],
+  "output_docx": "exp\\barry\\audit_office_briefing_paper_writing\\training_runs\\sample_input_001\\output\\draft_001\\data_platform_retention_briefing_note_draft_v2.docx"
+}
