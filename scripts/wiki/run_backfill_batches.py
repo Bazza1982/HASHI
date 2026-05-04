@@ -48,7 +48,12 @@ class BackfillProgress:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run resumable HASHI wiki manual backfill batches.")
     parser.add_argument("--batches", type=int, default=42, help="Maximum number of batches to run.")
-    parser.add_argument("--limit", type=int, default=1000, help="Rows to fetch per batch.")
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Optional raw rows to fetch per batch. Omit for historical backfill so completed-row gaps do not cause empty batches.",
+    )
     parser.add_argument("--max-classify", type=int, default=250, help="Classifiable rows per batch.")
     parser.add_argument("--sleep-s", type=float, default=0.0, help="Optional pause between batches.")
     parser.add_argument(
@@ -120,11 +125,11 @@ def run_batches(
             "--classify",
             "--persist-classifications",
             "--pages-dry-run",
-            "--limit",
-            str(args.limit),
             "--max-classify",
             str(args.max_classify),
         ]
+        if args.limit is not None:
+            command.extend(["--limit", str(args.limit)])
         if args.skip_consolidation_check:
             command.append("--skip-consolidation-check")
 

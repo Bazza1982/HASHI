@@ -1251,7 +1251,7 @@ Redacted remaining rows: 14
 
 Current best configuration:
 
-- Manual backfill: `--limit 1000 --max-classify 250`
+- Manual backfill runner: `--max-classify 250` with no explicit `--limit`
 - Classifier timeout: `600s`
 - Daily steady-state cron: `--max-classify 100` with no explicit `--limit`
 - Keep Obsidian vault publishing disabled until dry-run pages are reviewed.
@@ -1270,7 +1270,7 @@ Purpose:
 Command:
 
 ```text
-python3 scripts/wiki/run_backfill_batches.py --batches 42 --limit 1000 --max-classify 250
+python3 scripts/wiki/run_backfill_batches.py --batches 42 --max-classify 250
 ```
 
 Progress files:
@@ -1284,7 +1284,8 @@ workspaces/lily/wiki_reports/wiki_backfill_runner.lock
 
 Operational behavior:
 
-- Each batch runs `scripts/wiki/run_pipeline.py --daily --classify --persist-classifications --pages-dry-run --limit 1000 --max-classify 250`.
+- Each batch runs `scripts/wiki/run_pipeline.py --daily --classify --persist-classifications --pages-dry-run --max-classify 250`.
+- Historical backfill intentionally omits `--limit`; otherwise completed-row windows after a watermark gap can cause empty batches while later unprocessed rows still exist.
 - A lock file prevents duplicate runners.
 - Each batch writes one JSON progress event with elapsed time, return code, watermark before/after, and remaining classifiable rows.
 - If a batch fails, the runner stops and leaves progress evidence for review.
