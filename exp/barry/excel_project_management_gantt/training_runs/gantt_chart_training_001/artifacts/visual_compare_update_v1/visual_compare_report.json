@@ -1,0 +1,26 @@
+{
+  "status": "pass",
+  "source_pages": 1,
+  "update_pages": 1,
+  "pages": [
+    {
+      "page": 1,
+      "size": [
+        1263,
+        893
+      ],
+      "mean_abs_diff": 0.08595430220739768,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.001376945167791364,
+      "diff_bbox": [
+        77,
+        32,
+        639,
+        861
+      ],
+      "diff_image": "exp\\barry\\excel_project_management_gantt\\training_runs\\gantt_chart_training_001\\artifacts\\visual_compare_update_v1\\diff_page_001.png"
+    }
+  ],
+  "max_changed_pixel_ratio_gt8": 0.001376945167791364,
+  "max_mean_abs_diff": 0.08595430220739768
+}
