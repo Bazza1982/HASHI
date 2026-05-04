@@ -41,8 +41,17 @@ and validating it through:
 
 The duplicate passed with zero rendered-pixel difference.
 
-This only proves exact duplication of an existing workbook. The EXP is not yet
-stable for from-scratch creation or semantic schedule updates.
+The second training step performed a controlled update:
+
+- changed one phase date label
+- moved a phase Gantt bar one month later
+- moved one task Gantt bar one month later
+- added one new checkpoint task and bar
+- exported the edited workbook through Excel
+- confirmed the output still fits 1 page wide by 1 page tall
+
+This proves exact duplication and a controlled manual schedule edit. The EXP is
+not yet stable for from-scratch creation or fully semantic schedule updates.
 
 ## Operating Rule
 
@@ -51,3 +60,6 @@ truth. Excel grid appearance, merged ranges, row heights, column widths, fills,
 and print scaling must be validated visually, not only through workbook cell
 values.
 
+When updating bars, preserve the Gantt's cell-based nature: bars are created by
+cell fills, borders, alignment, and blank-space values rather than embedded chart
+objects.
