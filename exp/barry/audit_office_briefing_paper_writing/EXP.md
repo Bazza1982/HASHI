@@ -1,6 +1,6 @@
 # Audit Office Briefing Paper Writing EXP
 
-Status: training
+Status: candidate_handover
 
 This EXP trains agents to create Audit Office briefing papers in Barry's
 expected Word format and language style.
@@ -47,5 +47,27 @@ Current extraction shows:
 ## Training Status
 
 The source document has been copied, exported to PDF, rendered to page images,
-and structurally extracted. The next step is blank/template-context rebuild
-training, followed by visual and text/style parity checks.
+structurally extracted, and rebuilt in training.
+
+The first blank Word rebuild failed because it lost bullet/indent/page-flow
+fidelity. The successful route is a template-context rebuild: keep the learned
+Word style context, clear the document body, and rebuild the briefing paper
+inside that context.
+
+The candidate rebuild passed:
+
+- PDF visual parity: 9 pages vs 9 pages, pixel difference `0.0`
+- paragraph parity: 52 vs 52
+- table parity: pass
+- media/drawing parity: pass
+- style usage parity: pass
+
+This EXP is ready for a supervised real briefing paper run.
+
+## Operating Rule
+
+For this EXP, do not use Word's default blank document when exact Audit Office
+briefing style is required. Use the learned style context as the starting shell,
+then write new briefing content into an empty body. The reusable knowledge is
+the structure, fonts, colours, bullet behaviour, tables, and briefing language,
+not the source content.

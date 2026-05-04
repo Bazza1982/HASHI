@@ -1,6 +1,6 @@
 # Audit Office Briefing Paper Training Run 001
 
-Status: source saved and initial structure extracted.
+Status: rebuild training passed; ready for supervised real-paper training.
 
 ## Source
 
@@ -63,11 +63,85 @@ active paragraph styles: 7
 Train an EXP that can reproduce the document's structure, fonts, colour, table
 style, and language rhythm from a sample without copying the sample's content.
 
+## Rebuild Training
+
+### Attempt v1 - Blank Word Paste
+
+Output:
+
+```text
+output/blank_rebuild_001/audit_office_briefing_paper_rebuild_v1_blank_paste.docx
+output/blank_rebuild_001/audit_office_briefing_paper_rebuild_v1_blank_paste.pdf
+```
+
+Result: failed visual parity.
+
+The document kept the broad content but did not preserve the source's bullet
+symbols, bullet indentation, and page flow. This showed that a truly empty Word
+document does not carry enough style and numbering context for this family of
+briefing papers.
+
+Validation report:
+
+```text
+artifacts/blank_rebuild_001/visual_compare_v1/visual_compare_report.json
+```
+
+### Attempt v2 - Template-Context Rebuild
+
+Output:
+
+```text
+output/blank_rebuild_001/audit_office_briefing_paper_rebuild_v2_template_context.docx
+output/blank_rebuild_001/audit_office_briefing_paper_rebuild_v2_template_context.pdf
+```
+
+Result: passed visual, text, table, media, drawing, and style parity.
+
+Method:
+
+1. Preserve the source Word style context.
+2. Clear the body content.
+3. Rebuild the document content inside that context.
+4. Export both source and rebuilt documents to PDF.
+5. Compare visual page render and internal DOCX structure.
+
+Validation results:
+
+```text
+visual status: pass
+source pages: 9
+rebuilt pages: 9
+max mean pixel difference: 0.0
+max changed pixel ratio: 0.0
+
+text/table/style status: pass
+paragraphs: 52 / 52
+tables: 2 / 2 by DOCX body extraction
+media objects: equal
+drawing objects: 1 / 1
+style usage: equal
+paragraph mismatches: 0
+table mismatches: 0
+```
+
+Validation reports:
+
+```text
+artifacts/blank_rebuild_001/visual_compare_v2/visual_compare_report.json
+state/blank_rebuild_v2_text_table_style_parity_report.json
+```
+
+## Training Lesson
+
+For this EXP, "from scratch" should not mean starting from Word's default blank
+style set. It should mean creating new content from an empty body while keeping
+the learned briefing-paper style context available. The style context is part of
+the EXP, because it carries the red heading hierarchy, table behaviour, bullet
+numbering, indentation, spacing, and page flow.
+
 ## Next Step
 
-Run blank/template-context rebuild training:
-
-1. create a practice document using the learned structure
-2. export source and rebuilt documents to PDF
-3. compare page flow, styles, bullets, and tables
-4. add failure memory and validators before handover
+Use this EXP on a real Audit Office briefing paper task. Before handover, run
+the same validation gates: PDF page preview, structural review, table review,
+and a human-readability pass for the executive briefing language.

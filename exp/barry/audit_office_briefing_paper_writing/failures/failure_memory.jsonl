@@ -1,1 +1,2 @@
 {"date":"2026-05-04","run":"sample_paper_001","lesson":"Initial training must focus on fonts, structure, colour, table layout, and executive language style, not on reusing the sample paper's audit/data/AI content."}
+{"date":"2026-05-04","run":"sample_paper_001","lesson":"A default blank Word document is not enough for this EXP. The v1 blank paste rebuild lost bullet symbols, bullet indentation, and page flow. Preserve the learned Word style/numbering/table context, clear the body, then rebuild new content inside that context."}

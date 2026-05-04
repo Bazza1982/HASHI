@@ -1,0 +1,43 @@
+{
+  "status": "pass",
+  "source_docx": "exp\\barry\\audit_office_briefing_paper_writing\\training_runs\\sample_paper_001\\training_materials\\sample_paper.docx",
+  "rebuilt_docx": "exp\\barry\\audit_office_briefing_paper_writing\\training_runs\\sample_paper_001\\output\\blank_rebuild_001\\audit_office_briefing_paper_rebuild_v2_template_context.docx",
+  "paragraph_count_source": 52,
+  "paragraph_count_rebuilt": 52,
+  "table_count_source": 2,
+  "table_count_rebuilt": 2,
+  "media_source": [
+    "word/media/image1.png",
+    "word/media/image2.JPG"
+  ],
+  "media_rebuilt": [
+    "word/media/image1.png",
+    "word/media/image2.JPG"
+  ],
+  "drawing_count_source": 1,
+  "drawing_count_rebuilt": 1,
+  "style_counts_source": {
+    "SingleLineText-Half": 1,
+    "Heading2Red": 1,
+    "Heading3": 9,
+    "(none)": 6,
+    "Bullet1stlevel": 17,
+    "Bullet2ndlevel": 7,
+    "BodyText": 1,
+    "ListParagraph": 10
+  },
+  "style_counts_rebuilt": {
+    "SingleLineText-Half": 1,
+    "Heading2Red": 1,
+    "Heading3": 9,
+    "(none)": 6,
+    "Bullet1stlevel": 17,
+    "Bullet2ndlevel": 7,
+    "BodyText": 1,
+    "ListParagraph": 10
+  },
+  "paragraph_mismatch_count_limited": 0,
+  "paragraph_mismatches_first_20": [],
+  "table_mismatch_count_limited": 0,
+  "table_mismatches_first_10": []
+}
