@@ -1,17 +1,19 @@
 # Briefing Paper Writing Playbook
 
-Use this playbook when Barry asks for a real Audit Office briefing paper after
-the format EXP is validated.
+Use this playbook when Barry asks for a real Audit Office briefing paper or
+briefing note in the trained Audit Office style.
 
 ## Writing Pattern
 
-1. Start with the briefing metadata table:
+1. Start with the briefing metadata block:
    - To
    - Date
    - Ref
    - Subject
    - Prepared by
    - Presented by
+   Use only fields needed for the task. When fields are removed, compact the
+   block rather than leaving inherited row height.
 2. Write `Purpose` as a short executive paragraph.
 3. Explain what is proposed and why it matters.
 4. Summarise executive feedback or stakeholder feedback.
@@ -19,6 +21,20 @@ the format EXP is validated.
 6. Define what is out of scope.
 7. Connect the proposal to strategies, governance, or operating priorities.
 8. Identify governance, project team, owners, and advisors.
+
+## Formatting Pattern
+
+- Use the learned Audit Office template context, not Word's default blank
+  styles.
+- Use the compact rule-line metadata block for Barry's preferred briefing note
+  drafts.
+- Merge broad metadata value fields such as To, Subject, and Prepared by so
+  values do not wrap awkwardly.
+- Treat Barry's screenshot-target layout as the visual density target when
+  available.
+- Keep heading/subheading reds visually consistent with the target, not merely
+  with Word style names.
+- Run a PDF render check before handover.
 
 ## Language Style
 

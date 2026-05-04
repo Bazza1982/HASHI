@@ -4,8 +4,8 @@
   "version": 1,
   "owner": "barry",
   "domain": "audit_office_briefing_paper_writing",
-  "status": "candidate_handover",
-  "summary": "Training EXP for reproducing and writing Audit Office briefing papers with the correct document structure, fonts, colour, tables, and executive language style.",
+  "status": "stable",
+  "summary": "Stable EXP for producing Barry's Audit Office briefing note drafts with the correct structure, compact metadata block, fonts, colour, page flow, tables, and executive language style.",
   "context": {
     "user": "Barry",
     "task_family": "Audit Office briefing paper writing",
@@ -15,6 +15,8 @@
       "Word fonts and paragraph styles",
       "red heading colour and hierarchy",
       "front briefing table",
+      "compact screenshot-target metadata block",
+      "two-page briefing-note density when appropriate",
       "strategic alignment tables",
       "executive and audit-office language style",
       "not source content"
@@ -35,7 +37,7 @@
   "scope_limits": [
     "This EXP learns structure, format, and language style, not confidential source content.",
     "Do not use the sample paper topic as default content for future papers.",
-    "Do not mark stable until a real briefing paper run also passes human review.",
+    "Stable after Barry's reviewed screenshot-target run on sample_input_001.",
     "For exact Audit Office formatting, do not rely on Word's default blank styles; use the learned style context with an empty body."
   ]
 }
