@@ -1256,7 +1256,41 @@ Current best configuration:
 - Daily steady-state cron: `--max-classify 100` with no explicit `--limit`
 - Keep Obsidian vault publishing disabled until dry-run pages are reviewed.
 
-### 14.12 Remaining implementation boundaries
+### 14.12 Milestone 12 resumable manual backfill runner
+
+Status: implemented on 2026-05-04.
+
+Purpose:
+
+- Run the manual historical backfill batch-by-batch without requiring an operator to launch each batch.
+- Keep the same safe pipeline path: Python orchestration, Lily-owned CLI backend, SQLite watermark, page dry-run only.
+- Make progress inspectable while the runner is active.
+- Resume safely after interruption by relying on `wiki_state.sqlite`, completed-run filtering, and failed-row retry semantics.
+
+Command:
+
+```text
+python3 scripts/wiki/run_backfill_batches.py --batches 42 --limit 1000 --max-classify 250
+```
+
+Progress files:
+
+```text
+workspaces/lily/wiki_reports/wiki_backfill_progress_latest.json
+workspaces/lily/wiki_reports/wiki_backfill_progress.jsonl
+workspaces/lily/wiki_reports/wiki_backfill_runner.pid
+workspaces/lily/wiki_reports/wiki_backfill_runner.lock
+```
+
+Operational behavior:
+
+- Each batch runs `scripts/wiki/run_pipeline.py --daily --classify --persist-classifications --pages-dry-run --limit 1000 --max-classify 250`.
+- A lock file prevents duplicate runners.
+- Each batch writes one JSON progress event with elapsed time, return code, watermark before/after, and remaining classifiable rows.
+- If a batch fails, the runner stops and leaves progress evidence for review.
+- If the process is interrupted, re-running the same command resumes from existing persisted state; already completed rows after a watermark gap are filtered out.
+
+### 14.13 Remaining implementation boundaries
 
 The plan is ready to start once these implementation boundaries are accepted:
 
