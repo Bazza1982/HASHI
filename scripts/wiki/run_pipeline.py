@@ -19,6 +19,13 @@ if __package__ in {None, ""}:
     from scripts.wiki.fetcher import FetchResult, fetch_new_memories
     from scripts.wiki.page_generator import PageDraft, generate_dry_run_pages
     from scripts.wiki.state import WikiState
+    from scripts.wiki.topic_discovery import (
+        TopicDiscoveryResult,
+        build_topic_candidates_page,
+        discover_topic_candidates,
+        fetch_discovery_memories,
+        persist_topic_candidates,
+    )
     from scripts.wiki.vault_publisher import VaultPublishResult, publish_vault, rollback_latest_publish
 else:
     from .classifier import ClassificationDryRunResult, classify_memories_dry_run
@@ -26,6 +33,13 @@ else:
     from .fetcher import FetchResult, fetch_new_memories
     from .page_generator import PageDraft, generate_dry_run_pages
     from .state import WikiState
+    from .topic_discovery import (
+        TopicDiscoveryResult,
+        build_topic_candidates_page,
+        discover_topic_candidates,
+        fetch_discovery_memories,
+        persist_topic_candidates,
+    )
     from .vault_publisher import VaultPublishResult, publish_vault, rollback_latest_publish
 
 
@@ -70,6 +84,11 @@ def main(argv: list[str] | None = None) -> int:
         "--publish-vault",
         action="store_true",
         help="Publish generated pages into the generated-only Obsidian vault zones.",
+    )
+    parser.add_argument(
+        "--discover-topics",
+        action="store_true",
+        help="Run AI topic discovery and write the generated candidate review page.",
     )
     parser.add_argument(
         "--rollback-vault-publish",
@@ -118,6 +137,7 @@ def run_stage0(config: WikiConfig, args: argparse.Namespace) -> list[str]:
         fetch_result = fetch_new_memories(config, state, limit=args.limit)
         fetch_result = drop_existing_completed_runs(state, fetch_result)
         classifier_result = None
+        discovery_result: TopicDiscoveryResult | None = None
         page_drafts: list[PageDraft] = []
         vault_publish_result: VaultPublishResult | None = None
         run_classifier = bool(args.classify or args.classify_dry_run)
@@ -141,8 +161,31 @@ def run_stage0(config: WikiConfig, args: argparse.Namespace) -> list[str]:
                         records_to_classify,
                         classifier_result,
                     )
+        if getattr(args, "discover_topics", False):
+            discovery_memories = fetch_discovery_memories(config)
+            discovery_result = discover_topic_candidates(
+                discovery_memories,
+                active_topics,
+                config,
+                mock=args.mock_classifier,
+            )
+            persist_topic_candidates(state, discovery_result.candidates)
         if args.pages_dry_run or getattr(args, "publish_vault", False):
             page_drafts = generate_dry_run_pages(config, topics=active_topics)
+        if getattr(args, "discover_topics", False):
+            config.dry_run_pages_dir.mkdir(parents=True, exist_ok=True)
+            candidate_path = config.dry_run_pages_dir / "Topic_Candidates.md"
+            candidate_path.write_text(
+                build_topic_candidates_page(discovery_result.candidates if discovery_result else []),
+                encoding="utf-8",
+            )
+            page_drafts.append(
+                PageDraft(
+                    topic_id="TOPIC_CANDIDATES",
+                    path=candidate_path,
+                    memory_count=len(discovery_result.candidates if discovery_result else []),
+                )
+            )
         if getattr(args, "publish_vault", False):
             vault_publish_result = publish_vault(config, page_drafts, now=now)
         lines = build_report(
@@ -156,6 +199,7 @@ def run_stage0(config: WikiConfig, args: argparse.Namespace) -> list[str]:
             classifier_result,
             page_drafts,
             vault_publish_result,
+            discovery_result,
         )
         report_path = config.dry_run_report_latest if args.dry_run else config.report_latest
         report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -209,6 +253,7 @@ def build_report(
     classifier_result: ClassificationDryRunResult | None = None,
     page_drafts: list[PageDraft] | None = None,
     vault_publish_result: VaultPublishResult | None = None,
+    discovery_result: TopicDiscoveryResult | None = None,
 ) -> list[str]:
     reason_counts = Counter(record.reason for record in fetch_result.skipped)
     domain_counts = Counter(record.domain for record in fetch_result.classifiable)
@@ -281,6 +326,23 @@ def build_report(
             f"- {draft.topic_id}: {draft.memory_count} memories -> {draft.path}"
             for draft in page_drafts
         )
+    lines.extend(["", "## Topic Discovery"])
+    if discovery_result is None:
+        lines.append("- not run")
+    else:
+        lines.extend(
+            [
+                f"- Backend: {discovery_result.backend}",
+                f"- Model: {discovery_result.model}",
+                f"- Candidates: {len(discovery_result.candidates)}",
+                f"- Raw response chars: {discovery_result.raw_chars}",
+            ]
+        )
+        for candidate in discovery_result.candidates:
+            lines.append(
+                f"- {candidate.proposed_topic_id}: {candidate.recommended_action} "
+                f"confidence={candidate.confidence:.2f}"
+            )
     lines.extend(["", "## Vault Publish"])
     if vault_publish_result is None:
         lines.append("- not published")

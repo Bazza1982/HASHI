@@ -19,6 +19,13 @@ from scripts.wiki.fetcher import FetchResult, fetch_new_memories
 from scripts.wiki.page_generator import fetch_topic_memories, generate_dry_run_pages
 from scripts.wiki.run_pipeline import check_today_consolidation, drop_existing_completed_runs, run_stage0
 from scripts.wiki.state import WikiState
+from scripts.wiki.topic_discovery import (
+    DiscoveryMemory,
+    build_topic_candidates_page,
+    discover_topic_candidates,
+    parse_topic_discovery_response,
+    persist_topic_candidates,
+)
 from scripts.wiki.vault_publisher import publish_vault, rollback_latest_publish
 
 
@@ -219,6 +226,65 @@ def test_classifier_response_parser_accepts_runtime_registry_topics() -> None:
         topics=runtime_topics,
     )
     assert result.assignments[0].topics == ("Manchuria_Game",)
+
+
+def test_topic_discovery_parses_and_persists_candidates(tmp_path: Path) -> None:
+    memories = [
+        DiscoveryMemory(
+            consolidated_id=10,
+            current_topic_id="UNCATEGORIZED_REVIEW",
+            confidence=0.8,
+            agent_id="zhao_ling",
+            domain="project",
+            memory_type="episodic",
+            content="Manchuria: The AI MUD PDR and implementation milestone.",
+            source_ts="2026-04-01T00:00:00+10:00",
+        )
+    ]
+    call = type(
+        "Call",
+        (),
+        {
+            "text": """
+            [{"proposed_topic_id":"Manchuria_Game","display":"Manchuria Game",
+              "description":"AI MUD game project.","topic_type":"game",
+              "aliases":["Manchuria"],"evidence_ids":[10],
+              "source_terms":["manchuria"],"recommended_action":"promote",
+              "merge_target":null,"confidence":0.91,"quality_score":0.86,
+              "uncertainty_score":0.12,"privacy_level":"internal",
+              "curator_reason":"Project identity, PDR, repo, and implementation evidence justify a page."}]
+            """,
+            "backend": "claude-cli",
+            "model": "claude-sonnet-4-6",
+        },
+    )()
+    result = parse_topic_discovery_response(call, memories=memories)
+    state_path = tmp_path / "wiki_state.sqlite"
+    with WikiState(state_path) as state:
+        state.init_schema()
+        persist_topic_candidates(state, result.candidates)
+        assert state.count_rows("topic_candidate") == 1
+
+    page = build_topic_candidates_page(result.candidates)
+    assert "Manchuria Game" in page
+    assert "Evidence IDs: `10`" in page
+
+
+def test_topic_discovery_mock_finds_project_candidates() -> None:
+    memories = [
+        DiscoveryMemory(
+            consolidated_id=10,
+            current_topic_id="UNCATEGORIZED_REVIEW",
+            confidence=0.8,
+            agent_id="zhao_ling",
+            domain="project",
+            memory_type="episodic",
+            content="Manchuria AI MUD uses 奉天城 and an angel REST API.",
+            source_ts="2026-04-01T00:00:00+10:00",
+        )
+    ]
+    result = discover_topic_candidates(memories, {}, WikiConfig(), mock=True)
+    assert [candidate.proposed_topic_id for candidate in result.candidates] == ["Manchuria_Game"]
 
 
 def test_classifier_response_parser_ignores_extra_text_and_format_examples() -> None:
@@ -701,6 +767,64 @@ def test_run_pipeline_publishes_generated_vault_pages(tmp_path: Path) -> None:
     assert "Created: 2" in text
     assert (config.vault_root / "10_GENERATED_TOPICS" / "HASHI_Architecture.md").exists()
     assert (config.vault_root / "30_GENERATED_INDEXES" / "Wiki_Index.md").exists()
+
+
+def test_run_pipeline_discovers_topic_candidates(tmp_path: Path) -> None:
+    consolidated = tmp_path / "consolidated_memory.sqlite"
+    _make_consolidated_db(consolidated)
+    con = sqlite3.connect(consolidated)
+    con.execute(
+        """
+        INSERT INTO consolidated(
+            instance, agent_id, source_id, domain, memory_type, content, source_ts, consolidated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, '2026-05-04T03:20:00+10:00')
+        """,
+        (
+            "HASHI2",
+            "zhao_ling",
+            6,
+            "project",
+            "episodic",
+            "Manchuria AI MUD project uses 奉天城 and an angel REST API.",
+            "2026-05-04T03:15:00+10:00",
+        ),
+    )
+    con.commit()
+    con.close()
+    log = tmp_path / "consolidation_log.jsonl"
+    log.write_text(
+        '{"timestamp":"2026-05-03T18:08:00+00:00","phase":"embed","embedded":10,"errors":0}\n',
+        encoding="utf-8",
+    )
+    config = WikiConfig(
+        hashi_root=tmp_path,
+        consolidated_db=consolidated,
+        wiki_state_db=tmp_path / "wiki_state.sqlite",
+        consolidation_log=log,
+        report_latest=tmp_path / "wiki_latest.md",
+        dry_run_pages_dir=tmp_path / "wiki_pages_dry_run",
+    )
+    args = argparse.Namespace(
+        daily=True,
+        weekly_if_saturday=False,
+        dry_run=False,
+        classify=True,
+        classify_dry_run=False,
+        mock_classifier=True,
+        limit=10,
+        max_classify=None,
+        persist_classifications=True,
+        pages_dry_run=False,
+        publish_vault=False,
+        discover_topics=True,
+        skip_consolidation_check=False,
+    )
+    lines = run_stage0(config, args)
+    text = "\n".join(lines)
+    assert "Topic Discovery" in text
+    assert "Manchuria_Game" in text
+    assert (config.dry_run_pages_dir / "Topic_Candidates.md").exists()
 
 
 def _record(consolidated_id: int, content: str):
