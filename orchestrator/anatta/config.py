@@ -23,6 +23,51 @@ DEFAULT_RETRIEVAL_WEIGHTS = {
     "recency_decay": 0.05,
 }
 
+DEFAULT_RETRIEVAL_POLICY = {
+    "intensity_semantic_gate_floor": 0.25,
+    "minimum_memory_contribution_weight": 0.25,
+}
+
+DEFAULT_DRIVE_CONTEXT_POLICY = {
+    "LUST": {
+        "off_context_multiplier": 0.20,
+        "retrieval_score_floor": 0.50,
+        "cue_terms": [
+            "lust",
+            "desire",
+            "attraction",
+            "dirty talk",
+            "charged",
+            "closer",
+            "intimate",
+            "flirt",
+            "欲望",
+            "吸引",
+            "挑逗",
+            "靠近",
+            "亲密",
+            "暧昧",
+            "张力",
+            "分寸",
+            "克制",
+        ],
+        "suppression_terms": [
+            "not talk",
+            "not discuss",
+            "stop talking",
+            "back to work",
+            "research work",
+            "不谈",
+            "先不谈",
+            "不要谈",
+            "不聊",
+            "先不聊",
+            "回到研究",
+            "回到工作",
+        ],
+    },
+}
+
 DEFAULT_AGGREGATION_WEIGHTS = {
     "memory": 0.35,
     "live_cue": 0.35,
@@ -35,11 +80,7 @@ DEFAULT_RECORDING_POLICY = {
     "always_record_event_types": [
         "rupture_risk",
         "repair",
-        "validation",
         "betrayal",
-        "care_bonding",
-        "boundary_crossing",
-        "trust_shift",
     ],
 }
 
@@ -94,12 +135,12 @@ DEFAULT_BOOTSTRAP_PROFILES: dict[str, dict[str, Any]] = {
                 "intensity": 5,
                 "dominant_drives": ["PANIC_GRIEF", "CARE"],
                 "drive_delta": {"PANIC_GRIEF": 0.18, "CARE": 0.12, "FEAR": 0.08},
-                "tags": ["bootstrap", "rupture", "repair"],
+                "tags": ["bootstrap", "rupture", "fragility"],
                 "importance": 0.9,
             },
             {
                 "event_type": "validation",
-                "summary": "Recognition, repair, and validation increase safety and make exploration easier.",
+                "summary": "Recognition and validation increase safety and make exploration easier.",
                 "intensity": 4,
                 "dominant_drives": ["PLAY", "SEEKING"],
                 "drive_delta": {"PLAY": 0.12, "SEEKING": 0.14, "CARE": 0.08},
@@ -117,6 +158,12 @@ class AnattaConfig:
         self.path = workspace_dir / filename
         self._data = self._load()
 
+    def exists(self) -> bool:
+        return self.path.exists()
+
+    def reload(self) -> None:
+        self._data = self._load()
+
     def _load(self) -> dict[str, Any]:
         if self.path.exists():
             try:
@@ -132,6 +179,7 @@ class AnattaConfig:
         return [name for name, cfg in registry.items() if cfg.get("enabled", True)]
 
     def mode(self) -> str:
+        self.reload()
         raw = str(self._data.get("mode", "off")).strip().lower()
         return raw if raw in {"off", "shadow", "on"} else "off"
 
@@ -163,6 +211,36 @@ class AnattaConfig:
         merged.update({k: float(v) for k, v in raw.items() if isinstance(v, (int, float))})
         return merged
 
+    def retrieval_policy(self) -> dict[str, float]:
+        raw = self._data.get("retrieval_policy")
+        if not isinstance(raw, dict):
+            return dict(DEFAULT_RETRIEVAL_POLICY)
+        merged = dict(DEFAULT_RETRIEVAL_POLICY)
+        merged.update({k: float(v) for k, v in raw.items() if isinstance(v, (int, float))})
+        return merged
+
+    def drive_context_policy(self) -> dict[str, dict[str, Any]]:
+        raw = self._data.get("drive_context_policy")
+        merged = {
+            name: {**cfg, "cue_terms": list(cfg.get("cue_terms", []))}
+            for name, cfg in DEFAULT_DRIVE_CONTEXT_POLICY.items()
+        }
+        if not isinstance(raw, dict):
+            return merged
+        for name, cfg in raw.items():
+            if not isinstance(cfg, dict):
+                continue
+            base = merged.get(str(name), {})
+            cue_terms = cfg.get("cue_terms", base.get("cue_terms", []))
+            suppression_terms = cfg.get("suppression_terms", base.get("suppression_terms", []))
+            merged[str(name)] = {
+                **base,
+                **cfg,
+                "cue_terms": [str(term) for term in cue_terms if str(term).strip()],
+                "suppression_terms": [str(term) for term in suppression_terms if str(term).strip()],
+            }
+        return merged
+
     def aggregation_weights(self) -> dict[str, float]:
         raw = self._data.get("aggregation_weights")
         if not isinstance(raw, dict):
@@ -177,6 +255,16 @@ class AnattaConfig:
             return dict(DEFAULT_RECORDING_POLICY)
         merged = dict(DEFAULT_RECORDING_POLICY)
         merged.update(raw)
+        default_always = DEFAULT_RECORDING_POLICY.get("always_record_event_types", [])
+        user_always = raw.get("always_record_event_types")
+        if isinstance(user_always, list):
+            merged["always_record_event_types"] = list(
+                dict.fromkeys(
+                    str(item).strip().lower()
+                    for item in [*default_always, *user_always]
+                    if str(item).strip()
+                )
+            )
         return merged
 
     def model_profile(self, model_name: str) -> dict[str, Any]:

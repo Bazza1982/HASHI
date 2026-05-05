@@ -20,12 +20,14 @@ class DriveAggregator:
         active = [name for name, cfg in registry.items() if cfg.get("enabled", True)]
         raw: dict[str, float] = {name: 0.0 for name in active}
         rationales: list[str] = []
+        source_weights = self.config.aggregation_weights()
         for contribution in contributions:
             rationales.append(f"{contribution.source}: {contribution.rationale}")
+            source_weight = self._source_weight(contribution.source, source_weights)
             for drive_name, delta in contribution.drive_delta.items():
                 if drive_name not in raw:
                     continue
-                raw[drive_name] += float(delta) * float(contribution.weight)
+                raw[drive_name] += float(delta) * float(contribution.weight) * source_weight
         drive_values: dict[str, float] = {}
         for name, value in raw.items():
             cfg = registry[name]
@@ -44,3 +46,16 @@ class DriveAggregator:
             relationship_key=relationship_key,
             generated_at=datetime.now(timezone.utc),
         )
+
+    @staticmethod
+    def _source_weight(source: str, source_weights: dict[str, float]) -> float:
+        normalized = (source or "").strip().lower()
+        if normalized.startswith("memory:") or normalized.startswith("bootstrap_"):
+            return float(source_weights.get("memory", 1.0))
+        if normalized.startswith("relationship_"):
+            return float(source_weights.get("relationship", 1.0))
+        if normalized.startswith("llm_cue") or normalized.startswith("cue_"):
+            return float(source_weights.get("live_cue", 1.0))
+        if normalized.startswith("external_"):
+            return float(source_weights.get("external", 1.0))
+        return 1.0

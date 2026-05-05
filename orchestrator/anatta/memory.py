@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import datetime, timezone
 from typing import Any
@@ -187,20 +188,23 @@ class AnattaMemoryStore:
 
     def retrieve_relevant_annotations(self, turn_context: TurnContext, limit: int = 12) -> list[EmotionalAnnotation]:
         weights = self.config.retrieval_weights()
+        policy = self.config.retrieval_policy()
+        gate_floor = max(0.0, min(1.0, float(policy.get("intensity_semantic_gate_floor", 0.25))))
         candidates = self._fetch_candidate_rows(turn_context, limit=max(limit * 3, 24))
         real_annotation_count = self.count_real_annotations()
         scored: list[tuple[float, sqlite3.Row]] = []
         query_tokens = self._tokenize(turn_context.user_text)
         for row in candidates:
-            summary_tokens = self._tokenize(row["summary"])
+            summary_tokens = self._tokenize(self._row_search_text(row))
             semantic = self._overlap_score(query_tokens, summary_tokens)
             intensity = min(max(int(row["intensity"]), 0), 10) / 10.0
+            gated_intensity = intensity * (gate_floor + ((1.0 - gate_floor) * semantic))
             rel_match = 1.0 if turn_context.relationship_key and row["relationship_key"] == turn_context.relationship_key else 0.0
             importance = max(float(row["importance"]), 0.0)
             recency = self._recency_decay(row["event_ts"])
             score = (
                 weights["semantic_relevance"] * semantic
-                + weights["normalized_intensity"] * intensity
+                + weights["normalized_intensity"] * gated_intensity
                 + weights["relationship_match"] * rel_match
                 + weights["importance"] * min(importance, 2.0) / 2.0
                 + weights["recency_decay"] * recency
@@ -208,7 +212,15 @@ class AnattaMemoryStore:
             score *= self._bootstrap_decay_multiplier(row, real_annotation_count=real_annotation_count)
             scored.append((score, row))
         scored.sort(key=lambda item: item[0], reverse=True)
-        return [self._row_to_annotation(row) for _, row in scored[:limit]]
+        annotations: list[EmotionalAnnotation] = []
+        for score, row in scored[:limit]:
+            annotation = self._row_to_annotation(row)
+            annotation.metadata = {
+                **annotation.metadata,
+                "_retrieval_score": round(float(score), 6),
+            }
+            annotations.append(annotation)
+        return annotations
 
     def count_real_annotations(self) -> int:
         with self._connect() as conn:
@@ -245,24 +257,31 @@ class AnattaMemoryStore:
             return {}
         trust_shift = 0.0
         care_signal = 0.0
+        repair_signal = 0.0
         rupture_count = 0
         repair_count = 0
         for event in events:
             etype = (event.get("event_type") or "").strip().lower()
             intensity = min(max(int(event.get("intensity") or 0), 0), 10) / 10.0
-            if etype in {"validation", "care_bonding", "repair"}:
+            if etype == "care_bonding":
                 trust_shift += intensity
-            if etype in {"rupture_risk", "betrayal", "boundary_crossing"}:
+                care_signal += intensity
+            elif etype == "validation":
+                trust_shift += intensity * 0.8
+                care_signal += intensity * 0.45
+            elif etype == "repair":
+                trust_shift += intensity * 0.35
+                repair_signal += intensity
+            elif etype in {"rupture_risk", "betrayal", "boundary_crossing"}:
                 trust_shift -= intensity
                 rupture_count += 1
             if etype == "repair":
                 repair_count += 1
-            if etype in {"care_bonding", "repair", "validation"}:
-                care_signal += intensity
         return {
             "relationship_key": relationship_key,
             "net_trust_shift": round(trust_shift, 4),
             "care_signal": round(care_signal, 4),
+            "repair_signal": round(repair_signal, 4),
             "rupture_count": rupture_count,
             "repair_count": repair_count,
             "event_count": len(events),
@@ -305,7 +324,11 @@ class AnattaMemoryStore:
 
     @staticmethod
     def _tokenize(text: str) -> set[str]:
-        return {tok.lower() for tok in (text or "").replace("\n", " ").split() if tok.strip()}
+        return {
+            tok.lower()
+            for tok in re.findall(r"[A-Za-z0-9]+|[\u4e00-\u9fff]", text or "")
+            if tok.strip()
+        }
 
     @staticmethod
     def _overlap_score(a: set[str], b: set[str]) -> float:
@@ -369,6 +392,25 @@ class AnattaMemoryStore:
             metadata=dict(json.loads(row["metadata_json"] or "{}")),
             importance=float(row["importance"]),
         )
+
+    @staticmethod
+    def _row_search_text(row: sqlite3.Row) -> str:
+        parts = [
+            str(row["summary"] or ""),
+            str(row["event_type"] or ""),
+            str(row["dominant_drives_json"] or ""),
+            str(row["tags_json"] or ""),
+        ]
+        try:
+            metadata = json.loads(row["metadata_json"] or "{}")
+            if isinstance(metadata, dict):
+                for key in ("summary", "user_text", "assistant_response", "source"):
+                    value = metadata.get(key)
+                    if value:
+                        parts.append(str(value))
+        except Exception:
+            pass
+        return "\n".join(parts)
 
     def _bootstrap_decay_multiplier(self, row: sqlite3.Row, *, real_annotation_count: int) -> float:
         if row["source"] != "bootstrap":
