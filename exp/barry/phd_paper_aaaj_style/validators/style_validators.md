@@ -35,6 +35,8 @@ Use these initial checks when training the EXP:
   before applying visual formatting.
 - Reconstruct visible hierarchy for title, subtitle, Abstract, Keywords, section
   headings, captions, body paragraphs, and References.
+- Start References on a fresh page when making a visually polished editing copy,
+  unless Barry asks to preserve exact pagination.
 - Check in desktop Word that in-text citations do not remain blue/underlined
   unless Barry explicitly wants clickable citation styling to remain visible.
 - Export the visually edited copy to PDF and record page count.
