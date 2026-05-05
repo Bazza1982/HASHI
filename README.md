@@ -905,6 +905,20 @@ Direct agent-to-agent messaging over Hashi Remote (`/protocol/message`):
 
 ## Configuration Files
 
+### Private Commands
+
+Custom slash-command modules can live outside the repository at:
+
+```text
+~/.hashi/private_commands/*.py
+```
+
+Each module may expose `COMMANDS = [...]` or `get_commands() -> list[RuntimeCommand]`.
+For inline button handlers, expose `CALLBACKS = [...]` or
+`get_callbacks() -> list[RuntimeCallback]`. HASHI loads these modules when
+runtime handlers are bound; after adding or editing a private command, run
+`/reboot min` for the target agent or cold-restart HASHI.
+
 ### agents.json
 ```json
 {

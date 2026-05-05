@@ -56,6 +56,20 @@ Or from the repository root on any platform:
 python main.py
 ```
 
+### Optional: Private Commands
+
+Local-only custom slash commands can be placed in:
+
+```text
+~/.hashi/private_commands/*.py
+```
+
+Private command modules are not part of the HASHI repository. Each module should
+export either `COMMANDS = [...]` or `get_commands() -> list[RuntimeCommand]`.
+Inline callbacks can be exported as `CALLBACKS = [...]` or
+`get_callbacks() -> list[RuntimeCallback]`. After changing private command files,
+restart the target agent with `/reboot min` or cold-restart HASHI.
+
 ---
 
 ## Alternative: Download Release

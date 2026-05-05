@@ -129,3 +129,35 @@ def test_flexible_job_transfer_keyboard_uses_short_callbacks_for_long_targets():
     assert callbacks
     assert all(len(callback_data) <= 64 for callback_data in callbacks)
     assert any(callback_data.startswith("skilljob:cron:xferkey:") for callback_data in callbacks)
+
+
+def test_job_transfer_token_store_is_bounded_for_fixed_and_flexible_runtimes():
+    for runtime_cls in (BridgeAgentRuntime, FlexibleAgentRuntime):
+        runtime = object.__new__(runtime_cls)
+        runtime._job_transfer_selections = {
+            f"old{idx}": {"kind": "cron", "task_id": "old", "target_agent": "agent"}
+            for idx in range(256)
+        }
+
+        callback_data = runtime._job_transfer_callback("cron", "new-task", "zhaojun")
+
+        assert callback_data == "skilljob:cron:xferkey:jtx1:go"
+        assert list(runtime._job_transfer_selections) == ["jtx1"]
+
+
+def test_flexible_job_transfer_keyboard_logs_remote_instance_errors(tmp_path):
+    root = tmp_path / "hashi"
+    root.mkdir()
+    (root / "instances.json").write_text("{not json", encoding="utf-8")
+    warnings = []
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.name = "arale"
+    runtime.global_config = SimpleNamespace(project_root=root)
+    runtime.orchestrator = SimpleNamespace(runtimes=[])
+    runtime.logger = SimpleNamespace(warning=lambda message, *args: warnings.append(message % args))
+
+    markup = FlexibleAgentRuntime._build_job_transfer_keyboard(runtime, "cron", "task")
+
+    assert warnings
+    assert "Failed to build remote agent transfer buttons" in warnings[0]
+    assert markup.inline_keyboard[-1][0].text == "✖ Cancel"

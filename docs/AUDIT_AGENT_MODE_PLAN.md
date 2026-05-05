@@ -1,5 +1,8 @@
 # Audit Agent Mode Design Plan
 
+> Design document. See `orchestrator/audit_mode.py` and
+> `orchestrator/flexible_agent_runtime.py` for the current implementation.
+
 Status: design draft for review.
 
 Owner: HASHI1 implementation.

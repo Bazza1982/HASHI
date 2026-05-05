@@ -28,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added a default wrapper style slot with explicit override/suppression behavior.
 - **Job transfer callback size** — job transfer inline buttons now use short stored callback tokens instead of embedding long target/task payloads directly in Telegram callback data.
   - Covers both fixed and flexible runtimes.
+- **Job transfer diagnostics** — remote transfer button construction now logs malformed remote instance configuration instead of silently swallowing all errors.
+- **Job transfer token cleanup** — transfer callback token stores are bounded to avoid unbounded growth from repeatedly opening transfer pickers.
+- **Private command docs** — README and INSTALL now document the local-only `~/.hashi/private_commands` convention and `/reboot min` reload flow.
+- **Audit design note** — the audit plan now explicitly points readers to the implementation files as the current source of truth.
 
 ### 🧪 Tests
 

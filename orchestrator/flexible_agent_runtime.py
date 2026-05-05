@@ -70,6 +70,7 @@ from orchestrator.audit_mode import (
 )
 
 HABIT_BROWSER_PAGE_SIZE = 5
+MAX_JOB_TRANSFER_SELECTIONS = 256
 
 class FlexibleAgentRuntime:
 
@@ -3933,8 +3934,9 @@ class FlexibleAgentRuntime:
                             row = []
                     if row:
                         buttons.append(row)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger = getattr(self, "logger", logging.getLogger(__name__))
+            logger.warning("Failed to build remote agent transfer buttons: %s", exc)
 
         buttons.append([InlineKeyboardButton("✖ Cancel", callback_data="noop")])
         return InlineKeyboardMarkup(buttons)
@@ -3944,6 +3946,8 @@ class FlexibleAgentRuntime:
         if store is None:
             store = {}
             self._job_transfer_selections = store
+        if len(store) >= MAX_JOB_TRANSFER_SELECTIONS:
+            store.clear()
         token = f"jtx{len(store) + 1:x}"
         store[token] = {
             "kind": kind,
