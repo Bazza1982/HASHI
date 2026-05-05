@@ -26,6 +26,7 @@ from orchestrator.agent_runtime import QueuedRequest, _safe_excerpt, _md_to_html
 from orchestrator.agent_fyi import build_agent_fyi_primer
 from orchestrator.bridge_memory import BridgeMemoryStore, BridgeContextAssembler, SysPromptManager
 from orchestrator.command_registry import bind_runtime_commands, runtime_bot_commands
+from orchestrator.ephemeral_invoker import make_backend_sidecar_invoker
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
 from orchestrator.flexible_backend_registry import (
     CLAUDE_MODEL_ALIASES,
@@ -41,6 +42,13 @@ from orchestrator.handoff_builder import HandoffBuilder
 from orchestrator.habits import HabitStore
 from orchestrator.media_utils import is_image_file, normalize_image_file
 from orchestrator.parked_topics import ParkedTopicStore
+from orchestrator.post_turn_observer import (
+    PostTurnObserver,
+    PreTurnContextProvider,
+    TurnContextRequest,
+    TurnObservationRequest,
+)
+from orchestrator.post_turn_registry import build_post_turn_observers
 from orchestrator.usecomputer_mode import (
     build_usecomputer_task_prompt,
     get_usecomputer_examples_text,
@@ -208,6 +216,10 @@ class FlexibleAgentRuntime:
 
         # Initialize FlexibleBackendManager
         self.backend_manager = FlexibleBackendManager(config, global_config, secrets)
+        self._sidecar_invoker, self._sidecar_context_getter = make_backend_sidecar_invoker(self.backend_manager)
+        self._post_turn_observers: list[PostTurnObserver] = []
+        self._pre_turn_context_providers: list[PreTurnContextProvider] = []
+        self.reload_post_turn_observers()
 
     def _record_active_chat(self, update) -> None:
         """Track the chat_id for each authorized user who messages this bot."""
@@ -400,6 +412,7 @@ class FlexibleAgentRuntime:
     async def initialize(self) -> bool:
         self.logger.info(f"Initializing flex agent '{self.name}'...")
         result = await self.backend_manager.initialize_active_backend()
+        self.reload_post_turn_observers()
         # Apply session mode if agent is in fixed mode
         if result and self.backend_manager.agent_mode == "fixed":
             backend = self.backend_manager.current_backend
@@ -629,6 +642,106 @@ class FlexibleAgentRuntime:
             if backend.get("engine") == self.config.active_backend:
                 return backend.get("model", "unknown")
         return "unknown"
+
+    def reload_post_turn_observers(self) -> None:
+        try:
+            self._post_turn_observers = build_post_turn_observers(
+                workspace_dir=self.workspace_dir,
+                bridge_memory_store=self.memory_store,
+                backend_invoker=self._sidecar_invoker,
+                backend_context_getter=self._sidecar_context_getter,
+            )
+            self._pre_turn_context_providers = [
+                observer for observer in self._post_turn_observers
+                if isinstance(observer, PreTurnContextProvider)
+            ]
+            self.logger.info(
+                "Turn observers initialized: post_count=%s pre_count=%s",
+                len(self._post_turn_observers),
+                len(self._pre_turn_context_providers),
+            )
+        except Exception as exc:
+            self._post_turn_observers = []
+            self._pre_turn_context_providers = []
+            self.logger.warning("Failed to initialize post-turn observers: %s", exc)
+
+    async def _build_pre_turn_context_sections(
+        self,
+        item: QueuedRequest,
+        user_text: str,
+        *,
+        is_bridge_request: bool,
+    ) -> list[tuple[str, str]]:
+        if not self._pre_turn_context_providers:
+            return []
+        request = TurnContextRequest(
+            request_id=item.request_id,
+            source=item.source,
+            user_text=user_text,
+            model_name=self.get_current_model(),
+            chat_id=item.chat_id,
+            summary=item.summary,
+            metadata={},
+        )
+        sections: list[tuple[str, str]] = []
+        for provider in self._pre_turn_context_providers:
+            try:
+                if not provider.should_provide(item.source, is_bridge_request=is_bridge_request):
+                    continue
+                sections.extend(await provider.build_context_sections(request))
+            except Exception as exc:
+                self.logger.warning(
+                    "Pre-turn context provider failed for %s via %s: %s",
+                    item.request_id,
+                    type(provider).__name__,
+                    exc,
+                )
+        return sections
+
+    def _schedule_post_turn_observers(
+        self,
+        item: QueuedRequest,
+        user_text: str,
+        assistant_text: str,
+        *,
+        is_bridge_request: bool,
+    ) -> None:
+        if not self._post_turn_observers:
+            return
+        request = TurnObservationRequest(
+            request_id=item.request_id,
+            source=item.source,
+            user_text=user_text,
+            assistant_text=assistant_text,
+            model_name=self.get_current_model(),
+            chat_id=item.chat_id,
+            summary=item.summary,
+            metadata={},
+        )
+        for observer in self._post_turn_observers:
+            try:
+                if observer.should_observe(item.source, is_bridge_request=is_bridge_request):
+                    observer.schedule_observation(request, self._background_tasks)
+            except Exception as exc:
+                self.logger.warning(
+                    "Post-turn observer failed to schedule for %s via %s: %s",
+                    item.request_id,
+                    type(observer).__name__,
+                    exc,
+                )
+
+    def _observer_workspace_keep_names(self) -> set[str]:
+        keep_names: set[str] = set()
+        for observer in self._post_turn_observers:
+            try:
+                keep_names.update(str(name) for name in observer.workspace_files_to_preserve())
+            except Exception as exc:
+                self.logger.warning(
+                    "Post-turn observer failed to report preserved files via %s: %s",
+                    type(observer).__name__,
+                    exc,
+                )
+        return keep_names
 
     def _get_system_prompt_text(self) -> str:
         """Return combined system prompt text for token estimation (CLI backends)."""
@@ -6946,7 +7059,7 @@ class FlexibleAgentRuntime:
             )
             return
 
-        keep_names = {"agent.md", "AGENT.md"}
+        keep_names = {"agent.md", "AGENT.md", "post_turn_observers.json"} | self._observer_workspace_keep_names()
         removed_files = 0
         removed_dirs = 0
 
@@ -6995,6 +7108,7 @@ class FlexibleAgentRuntime:
             self.name,
             self._get_agent_class(),
         )
+        self.reload_post_turn_observers()
 
         # Reset any pending continuity
         self._pending_auto_recall_context = None
@@ -7039,7 +7153,7 @@ class FlexibleAgentRuntime:
             )
             return
 
-        keep_names = {"agent.md", "AGENT.md", "sys_prompts.json"}
+        keep_names = {"agent.md", "AGENT.md", "sys_prompts.json", "post_turn_observers.json"} | self._observer_workspace_keep_names()
         removed_files = 0
         removed_dirs = 0
         preserved_state: dict[str, Any] = {}
@@ -7095,6 +7209,7 @@ class FlexibleAgentRuntime:
             self.name,
             self._get_agent_class(),
         )
+        self.reload_post_turn_observers()
 
         # Reset any pending continuity
         self._pending_auto_recall_context = None
@@ -9116,11 +9231,18 @@ class FlexibleAgentRuntime:
                 memory_user_text = item.prompt
                 if item.source.lower() in {"document", "photo", "voice", "audio", "video", "sticker"}:
                     memory_user_text = f"[{item.source}] {item.summary}"
+                is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
                 if item.source not in {"startup", "system", SESSION_RESET_SOURCE}:
                     memory_assistant_text = self._core_memory_assistant_text(response.text, visible_text, wrapper_result)
                     self.memory_store.record_turn("user", item.source, memory_user_text)
                     self.memory_store.record_turn("assistant", self.config.active_backend, memory_assistant_text)
                     self.memory_store.record_exchange(memory_user_text, memory_assistant_text, item.source)
+                    self._schedule_post_turn_observers(
+                        item,
+                        memory_user_text,
+                        memory_assistant_text,
+                        is_bridge_request=is_bridge_request,
+                    )
                 self.handoff_builder.append_transcript("user", item.prompt, item.source)
                 self.handoff_builder.append_transcript("assistant", visible_text)
                 self.handoff_builder.refresh_recent_context()
@@ -9231,6 +9353,11 @@ class FlexibleAgentRuntime:
                 effective_prompt = self._consume_session_primer(item)
                 habit_sections, habit_ids = self._build_habit_sections(item, effective_prompt)
                 extra_sections = self._workzone_prompt_section() + habit_sections
+                extra_sections += await self._build_pre_turn_context_sections(
+                    item,
+                    effective_prompt,
+                    is_bridge_request=is_bridge_request,
+                )
                 self.current_request_meta["habit_ids"] = habit_ids
                 # In fixed mode with an active session, use incremental prompts
                 _incremental = (
@@ -9593,6 +9720,12 @@ class FlexibleAgentRuntime:
                             self.memory_store.record_turn("user", item.source, memory_user_text)
                             self.memory_store.record_turn("assistant", self.config.active_backend, memory_assistant_text)
                             self.memory_store.record_exchange(memory_user_text, memory_assistant_text, item.source)
+                            self._schedule_post_turn_observers(
+                                item,
+                                memory_user_text,
+                                memory_assistant_text,
+                                is_bridge_request=is_bridge_request,
+                            )
                         if not is_bridge_request:
                             self.handoff_builder.append_transcript("user", item.prompt, item.source)
                             self.handoff_builder.append_transcript("assistant", visible_text)
