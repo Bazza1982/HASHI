@@ -115,8 +115,17 @@ Actions:
 1. Record current line counts and runtime selection behavior.
 2. Confirm all active agents are `flex`.
 3. Confirm no external scripts instantiate `BridgeAgentRuntime` directly.
-4. Add or update tests that protect current flex behavior before refactoring.
-5. Keep existing dirty/unrelated work out of this migration.
+4. Record all tests that still instantiate or import `BridgeAgentRuntime`,
+   including:
+   - `tests/test_agent_runtime_job_transfer.py`
+   - `tests/test_usecomputer_mode.py`
+   - `tests/test_fresh_context.py`
+5. Document transcript filename divergence before retiring fixed runtime:
+   - legacy fixed runtime writes `conversation_log.jsonl`
+   - flexible runtime writes `transcript.jsonl`
+   - `ticket_manager.py` currently assumes `transcript.jsonl`
+6. Add or update tests that protect current flex behavior before refactoring.
+7. Keep existing dirty/unrelated work out of this migration.
 
 Suggested checks:
 
@@ -131,6 +140,8 @@ Exit criteria:
 
 - Current runtime selection is documented.
 - Shared imports from `agent_runtime.py` are known.
+- Bridge-runtime test dependencies are listed before shims are moved or removed.
+- Transcript filename assumptions are documented before retirement work begins.
 - No behavior changes have been made.
 
 ## Phase 1: Extract Shared Runtime Primitives
@@ -195,11 +206,15 @@ Actions:
    - include a clear deprecation comment
 3. Update `agent_lifecycle.py` to import the legacy runtime from the new path.
 4. Log a warning if a fixed runtime is instantiated.
+5. Add config validation that reports agents missing an explicit `type`.
+   This belongs with Phase 2 so there is no window where quarantined legacy code
+   and silent `"fixed"` fallback combine unexpectedly.
 
 Suggested commit:
 
 ```text
 Quarantine legacy fixed runtime
+Warn on implicit fixed agent type
 ```
 
 Exit criteria:
@@ -207,6 +222,7 @@ Exit criteria:
 - Flex runtime does not depend on legacy runtime.
 - Fixed runtime still works if explicitly configured.
 - Legacy usage is visible in logs.
+- Missing agent `type` fields are reported by validation or startup warnings.
 
 ## Phase 3: Make Flex the Explicit Default
 
@@ -218,19 +234,19 @@ Current risk:
 
 Recommended path:
 
-1. Add a config migration tool or validation mode that reports agents missing
-   `type`.
-2. Update docs to require explicit `type`.
-3. Change missing `type` behavior from silent `"fixed"` to warning-first.
-4. Later, change the default to `"flex"` only after compatibility review.
-5. Optionally require `HASHI_ENABLE_LEGACY_FIXED_RUNTIME=1` before fixed
-   runtime can start.
+1. Update docs to require explicit `type`.
+2. Change missing `type` behavior from silent `"fixed"` to warning-first if
+   this was not fully handled during Phase 2.
+3. Later, change the default to `"flex"` only after compatibility review.
+4. Defer any `HASHI_ENABLE_LEGACY_FIXED_RUNTIME=1` feature flag until Phase 7
+   retirement work. Adding a flag too early creates operational overhead before
+   there is an active fixed-runtime user to protect.
 
 Suggested commits:
 
 ```text
 Warn on implicit fixed agent type
-Require explicit legacy fixed runtime enablement
+Document explicit agent runtime types
 ```
 
 Exit criteria:
@@ -260,11 +276,17 @@ Recommended extraction order:
    - Move remote peer status, remote start/stop, move/transfer, and handoff
      helpers into `runtime_remote.py` and `runtime_transfer.py`.
 
-5. Wrapper and audit helpers
-   - Move wrapper polishing, audit evidence, audit telemetry, and audit
-     follow-up scheduling into `runtime_wrapper_audit.py`.
+5. Wrapper helpers
+   - Move wrapper polishing, wrapper context extraction, wrapper verbose trace,
+     and wrapper delivery placeholders into `runtime_wrapper.py`.
 
-6. Workzone, habit, skill, and status helpers
+6. Audit helpers
+   - Move audit telemetry, audit evidence writing, audit follow-up scheduling,
+     and audit model-selection helpers into `runtime_audit.py`.
+   - Keep audit separate from wrapper code because audit evidence is a higher
+     sensitivity boundary and should remain easy to review independently.
+
+7. Workzone, habit, skill, and status helpers
    - Move these into focused modules with narrow public functions.
 
 Implementation style:
@@ -302,6 +324,13 @@ Actions:
    practical.
 3. Keep `bind_handlers()` as a small registry binder rather than a long list of
    inline command registrations.
+4. Specify the reload contract for command modules:
+   - static Telegram handler binding may remain startup-only;
+   - command metadata and implementation modules should be reloadable where
+     safe;
+   - if `/reboot min` is expected to pick up a command change,
+     `bind_runtime_commands()` or its replacement must run during the reboot
+     path, not only during cold initialization.
 
 Exit criteria:
 
@@ -357,8 +386,8 @@ Retirement requirements:
 Possible final states:
 
 - preferred: remove `BridgeAgentRuntime` from active source;
-- conservative: move it to `orchestrator/legacy/` behind an explicit feature
-  flag;
+- conservative: keep it in `orchestrator/legacy/` behind an explicit feature
+  flag only if a real operator need appears during retirement;
 - archival: keep a historical copy outside runtime import paths.
 
 Exit criteria:
