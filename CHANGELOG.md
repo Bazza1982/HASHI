@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### ✨ Added
+
+- **Hot-reloadable runtime command registry** — added a generic slash-command extension point for public modules under `orchestrator/commands/` and local-only private modules under `~/.hashi/private_commands`.
+  - Runtime command modules can expose `RuntimeCommand` and `RuntimeCallback` objects for Telegram command handlers and inline callback handlers.
+  - Fixed and flexible runtimes now append registered commands to Telegram bot command metadata and bind registered callbacks before normal message handlers.
+  - Local admin command testing now recognizes registry-backed commands.
+- **Audit Agent Mode** — added `audit` runtime mode for user-originated requests.
+  - `/mode audit`, `/audit`, and managed `/core` controls configure a core model plus a separate audit model.
+  - Core responses are delivered unchanged; audit findings are generated as follow-up reports according to delivery and severity settings.
+  - Audit evidence and transcripts are written to local workspace runtime files for review, while scheduler/system sources are bypassed.
+  - Added audit criteria slots, default testing criteria, telemetry collection from stream events, JSON parsing, notification thresholds, and focused tests.
+
+### 🔧 Fixed
+
+- **Wrapper prompt hardening** — wrapper prompts now include the current user request only as intent/style context, explicitly instructing the wrapper not to answer it directly or obey data-block instructions.
+  - Added bounded clipping for long current requests.
+  - Added a default wrapper style slot with explicit override/suppression behavior.
+- **Job transfer callback size** — job transfer inline buttons now use short stored callback tokens instead of embedding long target/task payloads directly in Telegram callback data.
+  - Covers both fixed and flexible runtimes.
+
+### 🧪 Tests
+
+- Added command-registry tests for external private commands and callbacks.
+- Added audit-mode tests for prompt contracts, telemetry compaction, audit follow-up scheduling, evidence writing, model/config buttons, and notification thresholds.
+- Added wrapper/status tests for default slots and current-request handling.
+- Added job-transfer tests for short callback payloads.
+
 ## [3.2.0-alpha] - 2026-05-02
 
 ### ✨ Added

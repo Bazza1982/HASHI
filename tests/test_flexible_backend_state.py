@@ -8,6 +8,7 @@ import pytest
 
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
+from orchestrator.audit_mode import load_audit_config
 from orchestrator.wrapper_mode import load_wrapper_config
 
 
@@ -164,6 +165,42 @@ def test_update_wrapper_blocks_removes_stale_active_model_when_override_cleared(
     state = _read_state(workspace)
     assert "active_model" not in state
     assert state["wrapper_slots"] == {"1": "Keep facts exact."}
+
+
+def test_update_audit_blocks_preserves_managed_state_and_unknown_keys(tmp_path):
+    workspace = tmp_path / "agent"
+    workspace.mkdir()
+    (workspace / "state.json").write_text(
+        json.dumps(
+            {
+                "active_backend": "codex-cli",
+                "agent_mode": "audit",
+                "active_model": "gpt-5.5",
+                "unrelated": {"keep": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager = _make_manager(workspace)
+    manager.agent_mode = "audit"
+
+    manager.update_audit_blocks(
+        core={"backend": "codex-cli", "model": "gpt-5.5"},
+        audit={"backend": "claude-cli", "model": "claude-sonnet-4-6", "delivery": "issues_only"},
+        audit_criteria={"1": "Flag approval bypass."},
+    )
+
+    state = _read_state(workspace)
+    assert state["active_backend"] == "codex-cli"
+    assert state["agent_mode"] == "audit"
+    assert state["unrelated"] == {"keep": True}
+    assert state["core"] == {"backend": "codex-cli", "model": "gpt-5.5"}
+    assert state["audit"] == {"backend": "claude-cli", "model": "claude-sonnet-4-6", "delivery": "issues_only"}
+    assert state["audit_criteria"] == {"1": "Flag approval bypass."}
+
+    cfg = load_audit_config(state)
+    assert cfg.audit_backend == "claude-cli"
+    assert cfg.audit_model == "claude-sonnet-4-6"
 
 
 def test_create_ephemeral_backend_does_not_replace_current_backend(tmp_path, monkeypatch):

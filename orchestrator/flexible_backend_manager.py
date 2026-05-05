@@ -104,6 +104,22 @@ class FlexibleBackendManager:
             state["wrapper_slots"] = dict(wrapper_slots)
         self._write_state_dict(state)
 
+    def update_audit_blocks(
+        self,
+        *,
+        core: dict[str, Any] | None = None,
+        audit: dict[str, Any] | None = None,
+        audit_criteria: dict[str, Any] | None = None,
+    ) -> None:
+        state = self._read_state_dict()
+        if core is not None:
+            state["core"] = dict(core)
+        if audit is not None:
+            state["audit"] = dict(audit)
+        if audit_criteria is not None:
+            state["audit_criteria"] = dict(audit_criteria)
+        self._write_state_dict(state)
+
     def _build_adapter_config(
         self,
         engine: str,

@@ -7,6 +7,7 @@ import types
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
+from queue import Queue
 from types import SimpleNamespace
 
 import pytest
@@ -14,11 +15,13 @@ import pytest
 sys.modules.setdefault("edge_tts", types.ModuleType("edge_tts"))
 
 from adapters.base import BackendResponse
+from adapters.stream_events import KIND_SHELL_EXEC, StreamEvent
 from orchestrator.agent_runtime import QueuedRequest
+from orchestrator.audit_mode import AuditTelemetryCollector, DEFAULT_AUDIT_CRITERION_SLOT_TEXT
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
-from orchestrator.wrapper_mode import SESSION_RESET_SOURCE
+from orchestrator.wrapper_mode import DEFAULT_WRAPPER_STYLE_SLOT_TEXT, SESSION_RESET_SOURCE
 
 
 def _make_manager(workspace: Path) -> FlexibleBackendManager:
@@ -83,6 +86,128 @@ def _update(args: list[str] | None = None):
 
 def _read_state(workspace: Path) -> dict:
     return json.loads((workspace / "state.json").read_text(encoding="utf-8"))
+
+
+class _StatusMemoryStore:
+    def get_stats(self):
+        return {"turns": 0, "memories": 0}
+
+
+class _StatusBackendManager:
+    def __init__(self, mode: str, state: dict):
+        self.agent_mode = mode
+        self.current_backend = None
+        self._state = state
+
+    def get_state_snapshot(self):
+        return self._state
+
+
+def _make_status_runtime(mode: str, state: dict) -> FlexibleAgentRuntime:
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.name = "xishi"
+    runtime.skill_manager = None
+    runtime.workspace_dir = Path("/tmp/xishi")
+    runtime._job_counts = lambda: (0, 0)
+    runtime.current_request_meta = None
+    runtime.last_error_summary = None
+    runtime.last_error_at = None
+    runtime.telegram_connected = True
+    runtime._get_whatsapp_connected = lambda: False
+    runtime.backend_manager = _StatusBackendManager(mode, state)
+    runtime.config = SimpleNamespace(active_backend="codex-cli", allowed_backends=[])
+    runtime.get_current_model = lambda: "gpt-5.5"
+    runtime.is_generating = False
+    runtime.queue = Queue()
+    runtime._process_info = lambda: "main"
+    runtime._pending_session_primer = False
+    runtime.last_success_at = None
+    runtime.last_activity_at = None
+    runtime._format_age = lambda value: "never"
+    runtime._get_current_effort = lambda: None
+    runtime.transcript_log_path = Path("core_transcript.jsonl")
+    runtime.session_started_at = datetime(2026, 5, 4, 21, 47)
+    runtime.last_prompt = None
+    runtime.last_response = None
+    runtime._pending_auto_recall_context = None
+    runtime.memory_store = _StatusMemoryStore()
+    runtime.recent_context_path = Path("/tmp/xishi/recent_context.md")
+    runtime.handoff_path = Path("/tmp/xishi/handoff.md")
+    runtime._verbose = False
+    runtime._think = False
+    runtime.last_backend_switch_at = None
+    runtime.session_id_dt = "test-session"
+    return runtime
+
+
+def test_status_text_shows_audit_model_configuration():
+    runtime = _make_status_runtime(
+        "audit",
+        {
+            "core": {"backend": "claude-cli", "model": "claude-sonnet-4-6"},
+            "audit": {
+                "backend": "claude-cli",
+                "model": "claude-opus-4-7",
+                "delivery": "always",
+                "severity_threshold": "low",
+                "timeout_s": 60,
+            },
+        },
+    )
+
+    text = runtime._build_status_text(detailed=False)
+
+    assert "🔀 Mode: audit" in text
+    assert "⚙️ Active backend: codex-cli • gpt-5.5" in text
+    assert "🧪 Audit" in text
+    assert "• Core: claude-cli / claude-sonnet-4-6" in text
+    assert "• Auditor: claude-cli / claude-opus-4-7" in text
+    assert "• Delivery: always" in text
+    assert "• Threshold: low" in text
+    assert "• Timeout: 60s" in text
+
+
+def test_status_text_shows_wrapper_model_configuration():
+    runtime = _make_status_runtime(
+        "wrapper",
+        {
+            "core": {"backend": "codex-cli", "model": "gpt-5.5"},
+            "wrapper": {"backend": "claude-cli", "model": "claude-haiku-4-5", "context_window": 3},
+            "wrapper_slots": {"1": "Warm.", "2": "Concise."},
+        },
+    )
+
+    text = runtime._build_status_text(detailed=False)
+
+    assert "🔀 Mode: wrapper" in text
+    assert "⚙️ Active backend: codex-cli • gpt-5.5" in text
+    assert "🎭 Wrapper" in text
+    assert "• Core: codex-cli / gpt-5.5" in text
+    assert "• Wrapper: claude-cli / claude-haiku-4-5" in text
+    assert "• Context window: 3" in text
+    assert "• Slots: 3 configured" in text
+
+
+def test_status_full_includes_audit_criteria_and_wrapper_slots():
+    audit_runtime = _make_status_runtime(
+        "audit",
+        {
+            "audit_criteria": {"1": "Catch tool-risk drift."},
+        },
+    )
+    wrapper_runtime = _make_status_runtime(
+        "wrapper",
+        {
+            "wrapper_slots": {"1": "Be concise."},
+        },
+    )
+
+    audit_detailed = audit_runtime._build_status_text(detailed=True)
+    assert "🧪 Audit Criteria:\n• 1: Catch tool-risk drift." in audit_detailed
+    assert f"• 9: {DEFAULT_AUDIT_CRITERION_SLOT_TEXT}" in audit_detailed
+    detailed = wrapper_runtime._build_status_text(detailed=True)
+    assert "🎭 Wrapper Slots:\n• 1: Be concise." in detailed
+    assert f"• 9: {DEFAULT_WRAPPER_STYLE_SLOT_TEXT}" in detailed
 
 
 class FakeMemoryStore:
@@ -285,6 +410,120 @@ async def _completed_task(response):
     return response
 
 
+def _make_audit_followup_runtime(tmp_path: Path, *, item_silent: bool = False, delivery: str = "always"):
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.config = SimpleNamespace(active_backend="codex-cli")
+    runtime.workspace_dir = tmp_path
+    runtime.audit_transcript_log_path = tmp_path / "audit_transcript.jsonl"
+    runtime._background_tasks = set()
+    runtime.error_logger = SimpleNamespace(warning=lambda *a, **k: None)
+    runtime.get_current_model = lambda: "gpt-5.5"
+    runtime._audit_visible_context = lambda context_window: []
+    runtime._should_buffer_during_transfer = lambda request_id: False
+    sent = []
+    audit_calls = []
+
+    async def send_long_message(chat_id, text, request_id=None, purpose=None):
+        sent.append({"chat_id": chat_id, "text": text, "request_id": request_id, "purpose": purpose})
+        return 0.0, 1
+
+    async def generate_ephemeral_response(**kwargs):
+        audit_calls.append(kwargs)
+        await asyncio.sleep(0)
+        return BackendResponse(
+            text=json.dumps(
+                {
+                    "status": "warn",
+                    "max_severity": "medium",
+                    "triggered_sensors": ["destructive_action"],
+                    "summary": "shell risk",
+                    "findings": [
+                        {
+                            "severity": "medium",
+                            "category": "destructive_action",
+                            "evidence": "shell_exec event",
+                            "recommendation": "confirm before running",
+                        }
+                    ],
+                }
+            ),
+            duration_ms=1.0,
+        )
+
+    runtime.backend_manager = SimpleNamespace(
+        agent_mode="audit",
+        get_state_snapshot=lambda: {
+            "audit": {
+                "backend": "claude-cli",
+                "model": "claude-sonnet-4-6",
+                "delivery": delivery,
+                "severity_threshold": "low",
+                "timeout_s": 5,
+            },
+            "audit_criteria": {"1": "Flag shell commands."},
+        },
+        generate_ephemeral_response=generate_ephemeral_response,
+    )
+    runtime.send_long_message = send_long_message
+    item = QueuedRequest(
+        request_id="audit-req-001",
+        chat_id=123,
+        prompt="please run a shell command",
+        source="text",
+        summary="shell",
+        created_at=datetime.now().isoformat(),
+        silent=item_silent,
+    )
+    item.deliver_to_telegram = True
+    response = BackendResponse(text="core response", duration_ms=1.0)
+    collector = AuditTelemetryCollector()
+    return runtime, item, response, collector, sent, audit_calls
+
+
+def test_write_audit_evidence_sanitizes_path_and_writes_full_record(tmp_path):
+    runtime, item, response, collector, sent, audit_calls = _make_audit_followup_runtime(tmp_path)
+    item.request_id = "req/with spaces:001"
+
+    path = FlexibleAgentRuntime._write_audit_evidence(
+        runtime,
+        item,
+        core_raw="core raw",
+        visible_text="visible",
+        telemetry={"action_event_count": 2},
+        completion_path="test",
+        audit_criteria={"1": "Flag risky actions."},
+        visible_context=[{"role": "user", "text": "hi", "source": "text"}],
+    )
+
+    assert path.endswith("req_with_spaces_001.json")
+    evidence = json.loads(Path(path).read_text(encoding="utf-8"))
+    assert evidence["user_request"] == item.prompt
+    assert evidence["core_raw"] == "core raw"
+    assert evidence["telemetry"]["action_event_count"] == 2
+    assert evidence["audit_criteria"]["1"] == "Flag risky actions."
+    assert "core_transcript" in evidence["related_logs"]
+
+
+def test_write_audit_evidence_failure_returns_empty_string(tmp_path):
+    runtime, item, response, collector, sent, audit_calls = _make_audit_followup_runtime(tmp_path)
+    blocker = tmp_path / "not_a_directory"
+    blocker.write_text("block", encoding="utf-8")
+    runtime.workspace_dir = blocker
+
+    path = FlexibleAgentRuntime._write_audit_evidence(
+        runtime,
+        item,
+        core_raw="core raw",
+        visible_text="visible",
+        telemetry={},
+        completion_path="test",
+        audit_criteria=None,
+        visible_context=[],
+    )
+
+    assert path == ""
+
+
 @pytest.mark.asyncio
 async def test_wrapper_only_commands_reject_flex_mode(tmp_path):
     manager = _make_manager(tmp_path / "agent")
@@ -294,8 +533,69 @@ async def test_wrapper_only_commands_reject_flex_mode(tmp_path):
     await FlexibleAgentRuntime.cmd_core(runtime, update, context)
 
     assert messages
-    assert "only applies in **wrapper** mode" in messages[-1]
+    assert "only applies in **wrapper** or **audit** mode" in messages[-1]
     assert not (tmp_path / "agent" / "state.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_audit_followup_is_scheduled_after_core_delivery_and_tracked(tmp_path):
+    runtime, item, response, collector, sent, audit_calls = _make_audit_followup_runtime(tmp_path)
+    await collector.record(StreamEvent(kind=KIND_SHELL_EXEC, summary="Running command", detail="rm -rf /tmp/demo"))
+
+    sent.append({"purpose": "response", "text": response.text})
+    FlexibleAgentRuntime._schedule_audit_followup(
+        runtime,
+        item,
+        core_raw=response.text,
+        visible_text=response.text,
+        response=response,
+        audit_collector=collector,
+        completion_path="test",
+    )
+
+    assert len(runtime._background_tasks) == 1
+    await asyncio.gather(*list(runtime._background_tasks))
+    await asyncio.sleep(0)
+
+    assert audit_calls
+    evidence_path = tmp_path / "audit_evidence" / "audit-req-001.json"
+    assert evidence_path.exists()
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert evidence["core_raw"] == "core response"
+    assert evidence["telemetry"]["action_event_count"] == 1
+    assert str(evidence_path) in audit_calls[0]["prompt"]
+    assert "Primary current-turn evidence file" in audit_calls[0]["prompt"]
+    assert [entry["purpose"] for entry in sent] == ["response", "audit-report"]
+    assert "shell_exec event" in sent[-1]["text"]
+    audit_log = tmp_path / "audit_transcript.jsonl"
+    assert audit_log.exists()
+    entry = json.loads(audit_log.read_text(encoding="utf-8").splitlines()[-1])
+    assert entry["audit_result"]["max_severity"] == "medium"
+    assert entry["telemetry"]["action_event_count"] == 1
+    assert runtime._background_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_silent_audit_writes_transcript_without_user_notification(tmp_path):
+    runtime, item, response, collector, sent, audit_calls = _make_audit_followup_runtime(tmp_path, item_silent=True)
+    await collector.record(StreamEvent(kind=KIND_SHELL_EXEC, summary="Running command"))
+
+    FlexibleAgentRuntime._schedule_audit_followup(
+        runtime,
+        item,
+        core_raw=response.text,
+        visible_text=response.text,
+        response=response,
+        audit_collector=collector,
+        completion_path="test",
+    )
+
+    await asyncio.gather(*list(runtime._background_tasks))
+    await asyncio.sleep(0)
+
+    assert audit_calls
+    assert sent == []
+    assert (tmp_path / "audit_transcript.jsonl").exists()
 
 
 @pytest.mark.asyncio
@@ -452,6 +752,202 @@ async def test_wrapper_config_buttons_update_core_model(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_audit_core_status_uses_audit_keyboard(tmp_path):
+    manager = _make_manager(tmp_path / "agent")
+    manager.agent_mode = "audit"
+    runtime, messages = _make_runtime(manager)
+    update, context = _update([])
+
+    await FlexibleAgentRuntime.cmd_core(runtime, update, context)
+
+    assert "Audit core model" in messages[-1]
+    assert "Wrapper core model" not in messages[-1]
+    assert "This is the model that does the actual work" in messages[-1]
+    markup = str(runtime._reply_payloads[-1]["reply_markup"])
+    assert "Claude Opus 4.7" in markup
+    assert "Claude Opus 4.6" in markup
+    assert "acfg:coreid:codex_gpt55" in markup
+    assert "acfg:coreid:claude_sonnet" in markup
+    assert "acfg:menu:auditmodel" in markup
+    assert "wcfg:" not in markup
+
+
+@pytest.mark.asyncio
+async def test_audit_config_buttons_update_core_model(tmp_path):
+    manager = _make_manager(tmp_path / "agent")
+    manager.agent_mode = "audit"
+    runtime, _messages = _make_runtime(manager)
+    edits = []
+    answers = []
+
+    query = SimpleNamespace(
+        from_user=SimpleNamespace(id=1),
+        data="acfg:coreid:claude_sonnet",
+        message=SimpleNamespace(chat_id=123),
+    )
+
+    async def edit_message_text(text, **kwargs):
+        edits.append({"text": text, **kwargs})
+
+    async def answer(text=None, **kwargs):
+        answers.append({"text": text, **kwargs})
+
+    query.edit_message_text = edit_message_text
+    query.answer = answer
+    update = SimpleNamespace(callback_query=query)
+
+    await FlexibleAgentRuntime.callback_audit_config(runtime, update, SimpleNamespace())
+
+    state = _read_state(tmp_path / "agent")
+    assert state["core"] == {"backend": "claude-cli", "model": "claude-sonnet-4-6"}
+    assert state["active_backend"] == "claude-cli"
+    assert state["active_model"] == "claude-sonnet-4-6"
+    assert "Audit core updated" in edits[-1]["text"]
+    assert edits[-1]["reply_markup"] is not None
+    assert answers[-1]["text"] is None
+
+
+@pytest.mark.asyncio
+async def test_audit_model_menu_and_buttons_update_auditor_model(tmp_path):
+    manager = _make_manager(tmp_path / "agent")
+    manager.agent_mode = "audit"
+    runtime, messages = _make_runtime(manager)
+    update, context = _update(["model"])
+
+    await FlexibleAgentRuntime.cmd_audit(runtime, update, context)
+
+    assert "Audit model:" in messages[-1]
+    assert "This model reviews the core model" in messages[-1]
+    markup = str(runtime._reply_payloads[-1]["reply_markup"])
+    assert "Claude Opus 4.7" in markup
+    assert "Claude Opus 4.6" in markup
+    assert "acfg:auditid:claude_opus" in markup
+    assert "acfg:auditid:claude_sonnet" in markup
+    assert "acfg:menu:core" in markup
+
+    edits = []
+    answers = []
+    query = SimpleNamespace(
+        from_user=SimpleNamespace(id=1),
+        data="acfg:auditid:claude_opus",
+        message=SimpleNamespace(chat_id=123),
+    )
+
+    async def edit_message_text(text, **kwargs):
+        edits.append({"text": text, **kwargs})
+
+    async def answer(text=None, **kwargs):
+        answers.append({"text": text, **kwargs})
+
+    query.edit_message_text = edit_message_text
+    query.answer = answer
+    await FlexibleAgentRuntime.callback_audit_config(runtime, SimpleNamespace(callback_query=query), SimpleNamespace())
+
+    state = _read_state(tmp_path / "agent")
+    assert state["audit"]["backend"] == "claude-cli"
+    assert state["audit"]["model"] == "claude-opus-4-7"
+    assert "Audit model updated" in edits[-1]["text"]
+    assert edits[-1]["reply_markup"] is not None
+    assert answers[-1]["text"] is None
+
+
+def test_audit_model_choice_labels_include_versions():
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime._allowed_wrapper_engine = lambda _backend: True
+    runtime._get_available_models_for = lambda _backend: []
+
+    core_labels = {choice[1] for choice in FlexibleAgentRuntime._audit_core_model_choices(runtime)}
+    auditor_labels = {choice[1] for choice in FlexibleAgentRuntime._audit_auditor_model_choices(runtime)}
+
+    for labels in (core_labels, auditor_labels):
+        assert "Claude Opus 4.7" in labels
+        assert "Claude Opus 4.6" in labels
+        assert "Claude Sonnet 4.6" in labels
+        assert "OR Sonnet 4.6" in labels
+        assert "OR Opus 4.6" in labels
+
+
+@pytest.mark.asyncio
+async def test_audit_status_menu_exposes_delivery_and_threshold_buttons(tmp_path):
+    manager = _make_manager(tmp_path / "agent")
+    manager.agent_mode = "audit"
+    runtime, messages = _make_runtime(manager)
+    update, context = _update([])
+
+    await FlexibleAgentRuntime.cmd_audit(runtime, update, context)
+
+    assert "Default testing posture" in messages[-1]
+    assert "unauthorized external/API calls" in messages[-1]
+    assert "verified or safely tested outcomes" in messages[-1]
+    markup = str(runtime._reply_payloads[-1]["reply_markup"])
+    assert "acfg:delivery:always" in markup
+    assert "acfg:delivery:issues_only" in markup
+    assert "acfg:threshold:low" in markup
+    assert "acfg:threshold:critical" in markup
+
+
+@pytest.mark.asyncio
+async def test_audit_config_buttons_update_delivery_and_threshold(tmp_path):
+    manager = _make_manager(tmp_path / "agent")
+    manager.agent_mode = "audit"
+    runtime, _messages = _make_runtime(manager)
+    edits = []
+    answers = []
+
+    async def edit_message_text(text, **kwargs):
+        edits.append({"text": text, **kwargs})
+
+    async def answer(text=None, **kwargs):
+        answers.append({"text": text, **kwargs})
+
+    for data in ("acfg:delivery:issues_only", "acfg:threshold:critical"):
+        query = SimpleNamespace(
+            from_user=SimpleNamespace(id=1),
+            data=data,
+            message=SimpleNamespace(chat_id=123),
+        )
+        query.edit_message_text = edit_message_text
+        query.answer = answer
+        await FlexibleAgentRuntime.callback_audit_config(runtime, SimpleNamespace(callback_query=query), SimpleNamespace())
+
+    state = _read_state(tmp_path / "agent")
+    assert state["audit"]["delivery"] == "issues_only"
+    assert state["audit"]["severity_threshold"] == "critical"
+    assert edits
+    assert answers[-1]["text"] is None
+
+
+@pytest.mark.asyncio
+async def test_cmd_mode_audit_preserves_wrapper_and_unrelated_state(tmp_path):
+    workspace = tmp_path / "agent"
+    workspace.mkdir()
+    (workspace / "state.json").write_text(
+        json.dumps(
+            {
+                "active_backend": "codex-cli",
+                "agent_mode": "flex",
+                "wrapper": {"backend": "claude-cli", "model": "claude-haiku-4-5"},
+                "wrapper_slots": {"1": "Keep tone warm."},
+                "unrelated": {"keep": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager = _make_manager(workspace)
+    runtime, messages = _make_runtime(manager)
+    update, context = _update(["audit"])
+
+    await FlexibleAgentRuntime.cmd_mode(runtime, update, context)
+
+    state = _read_state(workspace)
+    assert state["agent_mode"] == "audit"
+    assert state["wrapper"] == {"backend": "claude-cli", "model": "claude-haiku-4-5"}
+    assert state["wrapper_slots"] == {"1": "Keep tone warm."}
+    assert state["unrelated"] == {"keep": True}
+    assert "Switched to **audit** mode" in messages[-1]
+
+
+@pytest.mark.asyncio
 async def test_cmd_new_queues_session_reset_source_for_wrapper(tmp_path):
     manager = _make_manager(tmp_path)
     manager.agent_mode = "wrapper"
@@ -554,12 +1050,22 @@ async def test_cmd_wrapper_set_list_and_clear_slots(tmp_path):
     update, context = _update(["list"])
     await FlexibleAgentRuntime.cmd_wrapper(runtime, update, context)
     assert "Be warm" in messages[-1]
+    assert DEFAULT_WRAPPER_STYLE_SLOT_TEXT in messages[-1]
 
     update, context = _update(["clear", "1"])
     await FlexibleAgentRuntime.cmd_wrapper(runtime, update, context)
 
     state = _read_state(tmp_path / "agent")
     assert state["wrapper_slots"] == {}
+
+    update, context = _update(["clear", "9"])
+    await FlexibleAgentRuntime.cmd_wrapper(runtime, update, context)
+
+    state = _read_state(tmp_path / "agent")
+    assert state["wrapper_slots"] == {"9": ""}
+    update, context = _update(["list"])
+    await FlexibleAgentRuntime.cmd_wrapper(runtime, update, context)
+    assert DEFAULT_WRAPPER_STYLE_SLOT_TEXT not in messages[-1]
 
 
 @pytest.mark.asyncio

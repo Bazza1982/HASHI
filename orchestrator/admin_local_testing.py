@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
+from orchestrator.command_registry import runtime_command_map
+
 
 def _json_safe(value: Any):
     if value is None or isinstance(value, (str, int, float, bool)):
@@ -113,6 +115,7 @@ def supported_commands(runtime) -> list[str]:
     for name in names:
         if hasattr(runtime, f"cmd_{name}"):
             supported.append(name)
+    supported.extend(runtime_command_map())
     return sorted(set(supported))
 
 
@@ -123,12 +126,15 @@ async def execute_local_command(runtime, command_line: str, chat_id: int | None 
 
     method_name = f"cmd_{command_name}"
     method = getattr(runtime, method_name, None)
+    registry_command = None
     if method is None:
-        return {
-            "ok": False,
-            "error": f"unknown command: {command_name}",
-            "supported_commands": supported_commands(runtime),
-        }
+        registry_command = runtime_command_map().get(command_name)
+        if registry_command is None:
+            return {
+                "ok": False,
+                "error": f"unknown command: {command_name}",
+                "supported_commands": supported_commands(runtime),
+            }
 
     store = _CaptureStore(messages=[])
     local_chat_id = chat_id or runtime.global_config.authorized_id
@@ -145,7 +151,10 @@ async def execute_local_command(runtime, command_line: str, chat_id: int | None 
         if original_send_text is not None:
             runtime._send_text = store.capture_send
         try:
-            await method(update, context)
+            if registry_command is not None:
+                await registry_command.callback(runtime, update, context)
+            else:
+                await method(update, context)
         except Exception as e:
             return {
                 "ok": False,

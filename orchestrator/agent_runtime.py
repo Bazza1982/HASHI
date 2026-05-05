@@ -19,6 +19,7 @@ from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandle
 from adapters.base import BaseBackend
 from orchestrator.agent_fyi import build_agent_fyi_primer
 from orchestrator.bridge_memory import BridgeMemoryStore, BridgeContextAssembler, SysPromptManager
+from orchestrator.command_registry import bind_runtime_commands, runtime_bot_commands
 from orchestrator.handoff_builder import HandoffBuilder
 from orchestrator.habits import HabitStore
 from orchestrator.media_utils import is_image_file, normalize_image_file
@@ -4129,6 +4130,85 @@ class BridgeAgentRuntime:
                 await query.answer("Running job now")
                 await self._run_job_now(job)
                 return
+            if action == "transfer":
+                markup = self._build_job_transfer_keyboard(kind, task_id)
+                job = self.skill_manager.get_job(kind, task_id)
+                job_label = (job.get("note") or task_id) if job else task_id
+                await query.edit_message_text(
+                    f"📤 <b>Transfer job</b>\n<code>{job_label[:60]}</code>\n\nSelect target agent:",
+                    parse_mode="HTML",
+                    reply_markup=markup,
+                )
+                await query.answer()
+                return
+            if action == "xfer_to":
+                target_agent = value
+                job = self.skill_manager.get_job(kind, task_id)
+                if not job:
+                    await query.answer("Job not found", show_alert=True)
+                    return
+                ok, message, _ = self.skill_manager.transfer_job(kind, task_id, target_agent)
+                await query.answer(message, show_alert=not ok)
+                if ok:
+                    await query.edit_message_text(
+                        f"✅ Job transferred to <b>{target_agent}</b> (disabled — review before enabling).",
+                        parse_mode="HTML",
+                    )
+                return
+            if action == "xfer_remote":
+                parts = value.split(":", 1)
+                if len(parts) != 2:
+                    await query.answer("Invalid target", show_alert=True)
+                    return
+                target_agent, instance_id = parts
+                job = self.skill_manager.get_job(kind, task_id)
+                if not job:
+                    await query.answer("Job not found", show_alert=True)
+                    return
+                await query.answer("Sending to remote instance…")
+                ok, msg = await self._transfer_job_remote(kind, job, target_agent, instance_id)
+                if ok:
+                    self.skill_manager.set_job_enabled(kind, task_id, enabled=False)
+                    await query.edit_message_text(
+                        f"✅ Job transferred to <b>{target_agent}@{instance_id}</b> (original disabled).",
+                        parse_mode="HTML",
+                    )
+                else:
+                    await query.edit_message_text(f"❌ Transfer failed: {msg}")
+                return
+            if action == "xferkey":
+                selection = getattr(self, "_job_transfer_selections", {}).get(task_id)
+                if not selection:
+                    await query.answer("Transfer selection expired. Open /jobs and try again.", show_alert=True)
+                    return
+                target_kind = selection["kind"]
+                target_task_id = selection["task_id"]
+                target_agent = selection["target_agent"]
+                job = self.skill_manager.get_job(target_kind, target_task_id)
+                if not job:
+                    await query.answer("Job not found", show_alert=True)
+                    return
+                if selection.get("remote"):
+                    instance_id = selection["instance_id"]
+                    await query.answer("Sending to remote instance…")
+                    ok, msg = await self._transfer_job_remote(target_kind, job, target_agent, instance_id)
+                    if ok:
+                        self.skill_manager.set_job_enabled(target_kind, target_task_id, enabled=False)
+                        await query.edit_message_text(
+                            f"✅ Job transferred to <b>{target_agent}@{instance_id}</b> (original disabled).",
+                            parse_mode="HTML",
+                        )
+                    else:
+                        await query.edit_message_text(f"❌ Transfer failed: {msg}")
+                    return
+                ok, message, _ = self.skill_manager.transfer_job(target_kind, target_task_id, target_agent)
+                await query.answer(message, show_alert=not ok)
+                if ok:
+                    await query.edit_message_text(
+                        f"✅ Job transferred to <b>{target_agent}</b> (disabled — review before enabling).",
+                        parse_mode="HTML",
+                    )
+                return
         if data.startswith("skill:"):
             _, action, skill_id, *rest = data.split(":")
             skill = self.skill_manager.get_skill(skill_id)
@@ -4179,6 +4259,145 @@ class BridgeAgentRuntime:
                 await query.answer()
                 return
         await query.answer()
+
+    def _build_job_transfer_keyboard(self, kind: str, task_id: str):
+        """Build inline keyboard for job transfer: same-instance agents + remote instances."""
+        buttons = []
+
+        orchestrator = getattr(self, "orchestrator", None)
+        local_agents = []
+        if orchestrator:
+            for rt in getattr(orchestrator, "runtimes", []):
+                name = getattr(rt, "name", "")
+                if name and name != self.name:
+                    local_agents.append(name)
+
+        if local_agents:
+            buttons.append([InlineKeyboardButton("── This instance ──", callback_data="noop")])
+            row = []
+            for agent in sorted(local_agents):
+                row.append(InlineKeyboardButton(agent, callback_data=self._job_transfer_callback(kind, task_id, agent)))
+                if len(row) == 3:
+                    buttons.append(row)
+                    row = []
+            if row:
+                buttons.append(row)
+
+        try:
+            from pathlib import Path as _P
+
+            instances_path = self.global_config.project_root / "instances.json"
+            if instances_path.exists():
+                data = json.loads(instances_path.read_text(encoding="utf-8"))
+                for inst_id, inst_info in data.get("instances", {}).items():
+                    if not inst_info.get("active", False):
+                        continue
+                    display = inst_info.get("display_name", inst_id)
+                    platform = inst_info.get("platform", "")
+                    if platform == "portable":
+                        continue
+                    if platform == "windows":
+                        wsl_root = inst_info.get("wsl_root")
+                        agents_path = _P(wsl_root) / "agents.json" if wsl_root else None
+                    else:
+                        root = inst_info.get("root")
+                        agents_path = _P(root) / "agents.json" if root else None
+
+                    if not agents_path or not agents_path.exists():
+                        continue
+                    try:
+                        adata = json.loads(agents_path.read_text(encoding="utf-8-sig"))
+                        remote_agents = [a["name"] for a in adata.get("agents", []) if a.get("is_active", True)]
+                    except Exception:
+                        continue
+
+                    if not remote_agents:
+                        continue
+
+                    buttons.append([InlineKeyboardButton(f"── {display} ──", callback_data="noop")])
+                    row = []
+                    for agent in sorted(remote_agents):
+                        cb = self._job_transfer_callback(kind, task_id, agent, instance_id=inst_id)
+                        row.append(InlineKeyboardButton(agent, callback_data=cb))
+                        if len(row) == 3:
+                            buttons.append(row)
+                            row = []
+                    if row:
+                        buttons.append(row)
+        except Exception:
+            pass
+
+        buttons.append([InlineKeyboardButton("✖ Cancel", callback_data="noop")])
+        return InlineKeyboardMarkup(buttons)
+
+    def _job_transfer_callback(self, kind: str, task_id: str, target_agent: str, *, instance_id: str | None = None) -> str:
+        store = getattr(self, "_job_transfer_selections", None)
+        if store is None:
+            store = {}
+            self._job_transfer_selections = store
+        token = f"jtx{len(store) + 1:x}"
+        store[token] = {
+            "kind": kind,
+            "task_id": task_id,
+            "target_agent": target_agent,
+            "instance_id": instance_id,
+            "remote": instance_id is not None,
+        }
+        return f"skilljob:{kind}:xferkey:{token}:go"
+
+    async def _transfer_job_remote(self, kind: str, job: dict, target_agent: str, instance_id: str) -> tuple[bool, str]:
+        """POST job to remote instance /api/jobs/import via Workbench API."""
+        from urllib import request as _req
+        from urllib.error import URLError
+        import copy
+        from uuid import uuid4
+
+        try:
+            instances_path = self.global_config.project_root / "instances.json"
+            data = json.loads(instances_path.read_text(encoding="utf-8"))
+            inst = data.get("instances", {}).get(instance_id, {})
+        except Exception as e:
+            return False, f"Could not read instances.json: {e}"
+
+        host = inst.get("lan_ip") or inst.get("api_host", "127.0.0.1")
+        wb_port = inst.get("workbench_port")
+        if not wb_port:
+            return False, f"No workbench_port for {instance_id}"
+
+        new_job = copy.deepcopy(job)
+        new_job["agent"] = target_agent
+        new_job["enabled"] = False
+        new_job["id"] = f"{target_agent}-{uuid4().hex[:8]}"
+        new_job["note"] = (job.get("note") or job["id"]) + f" [transferred from {self.name}@{self.global_config.project_root.name}]"
+
+        payload = json.dumps({
+            "kind": kind,
+            "job": new_job,
+            "from_instance": str(self.global_config.project_root.name),
+            "from_agent": self.name,
+        }).encode("utf-8")
+
+        url = f"http://{host}:{wb_port}/api/jobs/import"
+        rq = _req.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with _req.urlopen(rq, timeout=10) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+                if result.get("ok"):
+                    try:
+                        from tools.hchat_send import send_hchat
+
+                        send_hchat(
+                            target_agent,
+                            self.name,
+                            f"You have a new job transferred from {self.name}: [{new_job['id']}] {new_job.get('note', '')} — review with /jobs and enable when ready.",
+                            target_instance=instance_id,
+                        )
+                    except Exception:
+                        pass
+                    return True, result.get("message", "ok")
+                return False, result.get("message", "remote error")
+        except URLError as e:
+            return False, f"Connection failed ({host}:{wb_port}): {e}"
 
     async def _run_job_now(self, job: dict[str, Any]) -> tuple[bool, str]:
         action = job.get("action", "enqueue_prompt")
@@ -5095,7 +5314,7 @@ class BridgeAgentRuntime:
             commands.append(BotCommand("credit", "Show OpenRouter balance"))
         if self.config.engine in {"claude-cli", "codex-cli"}:
             commands.append(BotCommand("effort", "View or change effort"))
-        return commands
+        return commands + runtime_bot_commands()
 
     def bind_handlers(self):
         self.app.add_error_handler(self.handle_telegram_error)
@@ -5147,6 +5366,7 @@ class BridgeAgentRuntime:
         self.app.add_handler(CommandHandler("wol", self.cmd_wol))
         self.app.add_handler(CommandHandler("usecomputer", self.cmd_usecomputer))
         self.app.add_handler(CommandHandler("usercomputer", self.cmd_usercomputer))
+        bind_runtime_commands(self)
         self.app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), self.handle_message))
         self.app.add_handler(MessageHandler(filters.PHOTO, self.handle_photo))
         self.app.add_handler(MessageHandler(filters.VOICE, self.handle_voice))

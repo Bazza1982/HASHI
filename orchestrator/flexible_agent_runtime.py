@@ -12,7 +12,7 @@ from uuid import uuid4
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Any
+from typing import Optional, Any, Mapping
 import json
 
 import aiohttp
@@ -25,6 +25,7 @@ from orchestrator.config import FlexibleAgentConfig, GlobalConfig
 from orchestrator.agent_runtime import QueuedRequest, _safe_excerpt, _md_to_html, _print_user_message, _print_final_response, _print_thinking, resolve_authorized_telegram_ids
 from orchestrator.agent_fyi import build_agent_fyi_primer
 from orchestrator.bridge_memory import BridgeMemoryStore, BridgeContextAssembler, SysPromptManager
+from orchestrator.command_registry import bind_runtime_commands, runtime_bot_commands
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
 from orchestrator.flexible_backend_registry import (
     CLAUDE_MODEL_ALIASES,
@@ -56,6 +57,16 @@ from orchestrator.wrapper_mode import (
     load_wrapper_config,
     passthrough_result,
     should_wrap_source,
+    visible_wrapper_slots,
+)
+from orchestrator.audit_mode import (
+    AuditProcessor,
+    AuditTelemetryCollector,
+    visible_audit_criteria,
+    format_audit_report,
+    load_audit_config,
+    should_audit_source,
+    should_notify_audit_result,
 )
 
 HABIT_BROWSER_PAGE_SIZE = 5
@@ -340,7 +351,7 @@ class FlexibleAgentRuntime:
                     self._enabled_commands.add(name.strip().lstrip("/").lower())
 
         # help/status/new/fresh/wipe/clear/model/effort/mode should always be available
-        self._enabled_commands.update({"help", "status", "new", "fresh", "wipe", "reset", "clear", "memory", "model", "effort", "mode", "wrapper", "core", "wrap", "jobs", "verbose", "think", "voice", "whisper", "transfer", "fork", "cos", "long", "end", "oll"})
+        self._enabled_commands.update({"help", "status", "new", "fresh", "wipe", "reset", "clear", "memory", "model", "effort", "mode", "wrapper", "audit", "core", "wrap", "jobs", "verbose", "think", "voice", "whisper", "transfer", "fork", "cos", "long", "end", "oll"})
 
     def _is_command_allowed(self, cmd: str) -> bool:
         cmd = (cmd or "").lstrip("/").lower()
@@ -1171,6 +1182,57 @@ class FlexibleAgentRuntime:
             self._mark_error(f"Voice reply failed: {e}")
             return False
 
+    def _format_status_mode_block(self, mode: str, state: Mapping[str, Any], detailed: bool) -> list[str]:
+        if mode == "audit":
+            cfg = load_audit_config(state)
+            lines = [
+                "",
+                "🧪 Audit",
+                f"• Core: {cfg.core_backend} / {cfg.core_model}",
+                f"• Auditor: {cfg.audit_backend} / {cfg.audit_model}",
+                f"• Delivery: {cfg.delivery}",
+                f"• Threshold: {cfg.severity_threshold}",
+                f"• Timeout: {cfg.timeout_s:g}s",
+                "",
+            ]
+            if detailed:
+                lines.pop()
+                criteria = visible_audit_criteria(state.get("audit_criteria"))
+                lines.extend(["", "🧪 Audit Criteria:"])
+                if criteria:
+                    for key in sorted(criteria, key=lambda value: (not str(value).isdigit(), int(value) if str(value).isdigit() else str(value))):
+                        lines.append(f"• {key}: {criteria[key]}")
+                else:
+                    lines.append("• default risk sensors")
+                lines.append("")
+            return lines
+
+        if mode == "wrapper":
+            cfg = load_wrapper_config(state)
+            slots = visible_wrapper_slots(state.get("wrapper_slots"))
+            slot_count = len(slots)
+            lines = [
+                "",
+                "🎭 Wrapper",
+                f"• Core: {cfg.core_backend} / {cfg.core_model}",
+                f"• Wrapper: {cfg.wrapper_backend} / {cfg.wrapper_model}",
+                f"• Context window: {cfg.context_window}",
+                f"• Slots: {slot_count} configured",
+                "",
+            ]
+            if detailed:
+                lines.pop()
+                lines.extend(["", "🎭 Wrapper Slots:"])
+                if slots:
+                    for key in sorted(slots, key=lambda value: (not str(value).isdigit(), int(value) if str(value).isdigit() else str(value))):
+                        lines.append(f"• {key}: {slots[key]}")
+                else:
+                    lines.append("• none")
+                lines.append("")
+            return lines
+
+        return []
+
     def _build_status_text(self, detailed: bool = False) -> str:
         active_skills = sorted(self.skill_manager.get_active_toggle_ids(self.workspace_dir)) if self.skill_manager else []
         recall_on = "recall" in active_skills
@@ -1197,13 +1259,23 @@ class FlexibleAgentRuntime:
         wa_status = "✓" if self._get_whatsapp_connected() else "✗"
         channel_line = f"Telegram {tg_status} • WhatsApp {wa_status} • Workbench ✓"
         mode_str = getattr(self.backend_manager, "agent_mode", "flex")
+        try:
+            state_snapshot = self.backend_manager.get_state_snapshot()
+        except Exception:
+            state_snapshot = {}
         session_id_short = "none"
         if mode_str == "fixed" and getattr(self.backend_manager, "current_backend", None):
             sid = getattr(self.backend_manager.current_backend, "_session_id", None) or "none"
             session_id_short = sid[:8] + "…" if sid != "none" and len(sid) > 8 else sid
         lines = [
             f"🧠 {self.name}",
-            f"🔀 Backend: {self.config.active_backend} • {self.get_current_model()} • mode: {mode_str} • sid: {session_id_short}",
+            f"🔀 Mode: {mode_str}",
+            f"⚙️ Active backend: {self.config.active_backend} • {self.get_current_model()}",
+        ]
+        if mode_str == "fixed":
+            lines.append(f"🧷 Session: {session_id_short}")
+        lines.extend(self._format_status_mode_block(mode_str, state_snapshot, detailed))
+        lines.extend([
             f"📶 Channels: {channel_line}",
             f"📡 Runtime: {'busy' if self.is_generating else 'idle'} • queue {self.queue.qsize()} • process {self._process_info()}",
             f"🧾 Current: {current_line}",
@@ -1211,7 +1283,7 @@ class FlexibleAgentRuntime:
             f"🔔 Proactive: {active_mode} • every {active_interval} • hb {heartbeat_count} • cron {cron_count}",
             f"🩺 Health: {health_line}",
             f"🕒 Activity: last success {self._format_age(self.last_success_at)} • last activity {self._format_age(self.last_activity_at)}",
-        ]
+        ])
         if detailed:
             allowed = ", ".join(b["engine"] for b in self.config.allowed_backends)
             current_effort = self._get_current_effort() or "n/a"
@@ -1804,6 +1876,7 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CommandHandler("effort", self._wrap_cmd("effort", self.cmd_effort)))
         self.app.add_handler(CallbackQueryHandler(self.callback_model, pattern=r"^(model|backend|bmodel|effort|backend_menu)"))
         self.app.add_handler(CallbackQueryHandler(self.callback_wrapper_config, pattern=r"^wcfg:"))
+        self.app.add_handler(CallbackQueryHandler(self.callback_audit_config, pattern=r"^acfg:"))
         self.app.add_handler(CallbackQueryHandler(self.callback_voice, pattern=r"^voice:"))
         self.app.add_handler(CallbackQueryHandler(self.callback_safevoice, pattern=r"^safevoice:"))
         self.app.add_handler(CallbackQueryHandler(self.callback_start_agent, pattern=r"^startagent:"))
@@ -1813,6 +1886,7 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CallbackQueryHandler(self.callback_toggle, pattern=r"^tgl:"))
         self.app.add_handler(CommandHandler("mode", self._wrap_cmd("mode", self.cmd_mode)))
         self.app.add_handler(CommandHandler("wrapper", self._wrap_cmd("wrapper", self.cmd_wrapper)))
+        self.app.add_handler(CommandHandler("audit", self._wrap_cmd("audit", self.cmd_audit)))
         self.app.add_handler(CommandHandler("core", self._wrap_cmd("core", self.cmd_core)))
         self.app.add_handler(CommandHandler("wrap", self._wrap_cmd("wrap", self.cmd_wrap)))
         self.app.add_handler(CommandHandler("workzone", self._wrap_cmd("workzone", self.cmd_workzone)))
@@ -1851,6 +1925,7 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CommandHandler("remote", self._wrap_cmd("remote", self.cmd_remote)))
         self.app.add_handler(CommandHandler("oll", self._wrap_cmd("oll", self.cmd_oll)))
         self.app.add_handler(CommandHandler("wol", self._wrap_cmd("wol", self.cmd_wol)))
+        bind_runtime_commands(self, wrap=True)
         self.app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), self.handle_message))
         self.app.add_handler(MessageHandler(filters.PHOTO, self.handle_photo))
         self.app.add_handler(MessageHandler(filters.VOICE, self.handle_voice))
@@ -2226,19 +2301,29 @@ class FlexibleAgentRuntime:
                 if hasattr(backend, "set_session_mode"):
                     backend.set_session_mode(True)
                 detail = "CLI session persists · /backend disabled"
-            elif value == "wrapper":
+            elif value in {"wrapper", "audit"}:
                 if hasattr(backend, "set_session_mode"):
                     backend.set_session_mode(False)
-                cfg = load_wrapper_config(self.backend_manager.get_state_snapshot())
+                cfg = (
+                    load_wrapper_config(self.backend_manager.get_state_snapshot())
+                    if value == "wrapper"
+                    else load_audit_config(self.backend_manager.get_state_snapshot())
+                )
                 switch_ok, switch_message = await self._activate_wrapper_core_backend(
                     query.message.chat_id,
                     backend=cfg.core_backend,
                     model=cfg.core_model,
                 )
-                detail = (
-                    "Core/wrapper mode · use /core and /wrap · "
-                    f"{'core ready' if switch_ok else 'core unchanged'} ({switch_message})"
-                )
+                if value == "wrapper":
+                    detail = (
+                        "Core/wrapper mode · use /core and /wrap · "
+                        f"{'core ready' if switch_ok else 'core unchanged'} ({switch_message})"
+                    )
+                else:
+                    detail = (
+                        "Core/audit mode · use /core and /audit · "
+                        f"{'core ready' if switch_ok else 'core unchanged'} ({switch_message})"
+                    )
             else:
                 if hasattr(backend, "set_session_mode"):
                     backend.set_session_mode(False)
@@ -2247,6 +2332,7 @@ class FlexibleAgentRuntime:
                 InlineKeyboardButton("✅ Fixed" if value == "fixed" else "Fixed", callback_data="tgl:mode:fixed"),
                 InlineKeyboardButton("✅ Flex" if value == "flex" else "Flex", callback_data="tgl:mode:flex"),
                 InlineKeyboardButton("✅ Wrapper" if value == "wrapper" else "Wrapper", callback_data="tgl:mode:wrapper"),
+                InlineKeyboardButton("✅ Audit" if value == "audit" else "Audit", callback_data="tgl:mode:audit"),
             ]])
             await query.edit_message_text(f"Mode: <b>{value}</b>\n{detail}", parse_mode="HTML", reply_markup=markup)
             await query.answer(f"Switched to {value}")
@@ -3696,6 +3782,39 @@ class FlexibleAgentRuntime:
                 else:
                     await query.edit_message_text(f"❌ Transfer failed: {msg}")
                 return
+            if action == "xferkey":
+                selection = getattr(self, "_job_transfer_selections", {}).get(task_id)
+                if not selection:
+                    await query.answer("Transfer selection expired. Open /jobs and try again.", show_alert=True)
+                    return
+                target_kind = selection["kind"]
+                target_task_id = selection["task_id"]
+                target_agent = selection["target_agent"]
+                job = self.skill_manager.get_job(target_kind, target_task_id)
+                if not job:
+                    await query.answer("Job not found", show_alert=True)
+                    return
+                if selection.get("remote"):
+                    instance_id = selection["instance_id"]
+                    await query.answer("Sending to remote instance…")
+                    ok, msg = await self._transfer_job_remote(target_kind, job, target_agent, instance_id)
+                    if ok:
+                        self.skill_manager.set_job_enabled(target_kind, target_task_id, enabled=False)
+                        await query.edit_message_text(
+                            f"✅ Job transferred to <b>{target_agent}@{instance_id}</b> (original disabled).",
+                            parse_mode="HTML",
+                        )
+                    else:
+                        await query.edit_message_text(f"❌ Transfer failed: {msg}")
+                    return
+                ok, message, _ = self.skill_manager.transfer_job(target_kind, target_task_id, target_agent)
+                await query.answer(message, show_alert=not ok)
+                if ok:
+                    await query.edit_message_text(
+                        f"✅ Job transferred to <b>{target_agent}</b> (disabled — review before enabling).",
+                        parse_mode="HTML",
+                    )
+                return
         if data.startswith("skill:"):
             _, action, skill_id, *rest = data.split(":")
             skill = self.skill_manager.get_skill(skill_id)
@@ -3762,7 +3881,7 @@ class FlexibleAgentRuntime:
             buttons.append([InlineKeyboardButton("── This instance ──", callback_data="noop")])
             row = []
             for agent in sorted(local_agents):
-                row.append(InlineKeyboardButton(agent, callback_data=f"skilljob:{kind}:xfer_to:{task_id}:{agent}"))
+                row.append(InlineKeyboardButton(agent, callback_data=self._job_transfer_callback(kind, task_id, agent)))
                 if len(row) == 3:
                     buttons.append(row)
                     row = []
@@ -3807,7 +3926,7 @@ class FlexibleAgentRuntime:
                     buttons.append([InlineKeyboardButton(f"── {display} ──", callback_data="noop")])
                     row = []
                     for agent in sorted(remote_agents):
-                        cb = f"skilljob:{kind}:xfer_remote:{task_id}:{agent}:{inst_id}"
+                        cb = self._job_transfer_callback(kind, task_id, agent, instance_id=inst_id)
                         row.append(InlineKeyboardButton(f"{agent}", callback_data=cb))
                         if len(row) == 3:
                             buttons.append(row)
@@ -3819,6 +3938,21 @@ class FlexibleAgentRuntime:
 
         buttons.append([InlineKeyboardButton("✖ Cancel", callback_data="noop")])
         return InlineKeyboardMarkup(buttons)
+
+    def _job_transfer_callback(self, kind: str, task_id: str, target_agent: str, *, instance_id: str | None = None) -> str:
+        store = getattr(self, "_job_transfer_selections", None)
+        if store is None:
+            store = {}
+            self._job_transfer_selections = store
+        token = f"jtx{len(store) + 1:x}"
+        store[token] = {
+            "kind": kind,
+            "task_id": task_id,
+            "target_agent": target_agent,
+            "instance_id": instance_id,
+            "remote": instance_id is not None,
+        }
+        return f"skilljob:{kind}:xferkey:{token}:go"
 
     async def _transfer_job_remote(self, kind: str, job: dict, target_agent: str,
                                    instance_id: str) -> tuple[bool, str]:
@@ -4724,6 +4858,13 @@ class FlexibleAgentRuntime:
                 parse_mode="Markdown",
             )
             return
+        if self.backend_manager.agent_mode == "audit":
+            await self._reply_text(
+                update,
+                "Backend switching is managed by `/core` and `/audit` in **audit** mode.\nUse `/mode flex` for normal `/backend` switching.",
+                parse_mode="Markdown",
+            )
+            return
 
         args = context.args
         allowed_engines = [b["engine"] for b in self.config.allowed_backends]
@@ -5236,6 +5377,13 @@ class FlexibleAgentRuntime:
                 parse_mode="Markdown",
             )
             return
+        if self.backend_manager.agent_mode == "audit":
+            await self._reply_text(
+                update,
+                "Model switching is managed by `/core` and `/audit` in **audit** mode.\nUse `/mode flex` for normal `/model` switching.",
+                parse_mode="Markdown",
+            )
+            return
 
         current_model = self.backend_manager.current_backend.config.model
         args = context.args
@@ -5297,12 +5445,28 @@ class FlexibleAgentRuntime:
     def _is_wrapper_mode(self) -> bool:
         return getattr(self.backend_manager, "agent_mode", "flex") == "wrapper"
 
+    def _is_audit_mode(self) -> bool:
+        return getattr(self.backend_manager, "agent_mode", "flex") == "audit"
+
+    def _is_managed_core_mode(self) -> bool:
+        return getattr(self.backend_manager, "agent_mode", "flex") in {"wrapper", "audit"}
+
     async def _require_wrapper_mode(self, update: Update, command_name: str) -> bool:
         if self._is_wrapper_mode():
             return True
         await self._reply_text(
             update,
             f"`/{command_name}` only applies in **wrapper** mode.\nUse `/mode wrapper` first.",
+            parse_mode="Markdown",
+        )
+        return False
+
+    async def _require_managed_core_mode(self, update: Update, command_name: str) -> bool:
+        if self._is_managed_core_mode():
+            return True
+        await self._reply_text(
+            update,
+            f"`/{command_name}` only applies in **wrapper** or **audit** mode.\nUse `/mode wrapper` or `/mode audit` first.",
             parse_mode="Markdown",
         )
         return False
@@ -5419,6 +5583,177 @@ class FlexibleAgentRuntime:
             "`/core backend=codex-cli model=gpt-5.5`"
         )
 
+    def _audit_core_model_choices(self) -> list[tuple[str, str, str, str]]:
+        return self._filter_allowed_model_choices(
+            [
+                ("codex_gpt55", "Codex GPT-5.5", "codex-cli", "gpt-5.5"),
+                ("codex_gpt54", "Codex GPT-5.4", "codex-cli", "gpt-5.4"),
+                ("codex_gpt53", "Codex GPT-5.3", "codex-cli", "gpt-5.3-codex"),
+                ("claude_opus", "Claude Opus 4.7", "claude-cli", "claude-opus-4-7"),
+                ("claude_opus_46", "Claude Opus 4.6", "claude-cli", "claude-opus-4-6"),
+                ("claude_sonnet", "Claude Sonnet 4.6", "claude-cli", "claude-sonnet-4-6"),
+                ("gemini_pro", "Gemini Pro", "gemini-cli", "gemini-2.5-pro"),
+                ("gemini_flash", "Gemini Flash", "gemini-cli", "gemini-2.5-flash"),
+                ("deepseek_pro", "DeepSeek Pro", "deepseek-api", "deepseek-v4-pro"),
+                ("deepseek_reasoner", "DeepSeek Reasoner", "deepseek-api", "deepseek-reasoner"),
+                ("or_sonnet", "OR Sonnet 4.6", "openrouter-api", "anthropic/claude-sonnet-4.6"),
+                ("or_opus", "OR Opus 4.6", "openrouter-api", "anthropic/claude-opus-4.6"),
+                ("or_deepseek", "OR DeepSeek", "openrouter-api", "deepseek/deepseek-v3.2-exp"),
+                ("ollama_gemma", "Ollama Gemma", "ollama-api", "gemma4:26b"),
+                ("ollama_qwen", "Ollama Qwen", "ollama-api", "qwen3:32b"),
+            ]
+        )
+
+    def _audit_auditor_model_choices(self) -> list[tuple[str, str, str, str]]:
+        return self._filter_allowed_model_choices(
+            [
+                ("claude_opus", "Claude Opus 4.7", "claude-cli", "claude-opus-4-7"),
+                ("claude_opus_46", "Claude Opus 4.6", "claude-cli", "claude-opus-4-6"),
+                ("claude_sonnet", "Claude Sonnet 4.6", "claude-cli", "claude-sonnet-4-6"),
+                ("or_sonnet", "OR Sonnet 4.6", "openrouter-api", "anthropic/claude-sonnet-4.6"),
+                ("or_opus", "OR Opus 4.6", "openrouter-api", "anthropic/claude-opus-4.6"),
+                ("codex_gpt55", "Codex GPT-5.5", "codex-cli", "gpt-5.5"),
+                ("codex_gpt54", "Codex GPT-5.4", "codex-cli", "gpt-5.4"),
+                ("deepseek_pro", "DeepSeek Pro", "deepseek-api", "deepseek-v4-pro"),
+                ("deepseek_reasoner", "DeepSeek Reasoner", "deepseek-api", "deepseek-reasoner"),
+                ("gemini_pro", "Gemini Pro", "gemini-cli", "gemini-2.5-pro"),
+                ("gemini_flash", "Gemini Flash", "gemini-cli", "gemini-2.5-flash"),
+            ]
+        )
+
+    def _filter_allowed_model_choices(
+        self,
+        choices: list[tuple[str, str, str, str]],
+    ) -> list[tuple[str, str, str, str]]:
+        filtered: list[tuple[str, str, str, str]] = []
+        for choice_id, label, backend, model in choices:
+            if not self._allowed_wrapper_engine(backend):
+                continue
+            available = self._get_available_models_for(backend)
+            if available and model not in available:
+                continue
+            filtered.append((choice_id, label, backend, model))
+        return filtered
+
+    def _audit_choice_by_id(self, target: str, choice_id: str) -> tuple[str, str, str, str] | None:
+        choices = self._audit_core_model_choices() if target == "core" else self._audit_auditor_model_choices()
+        return next((choice for choice in choices if choice[0] == choice_id), None)
+
+    def _audit_model_keyboard(self, cfg, *, target: str) -> InlineKeyboardMarkup:
+        choices = self._audit_core_model_choices() if target == "core" else self._audit_auditor_model_choices()
+        current_backend = cfg.core_backend if target == "core" else cfg.audit_backend
+        current_model = cfg.core_model if target == "core" else cfg.audit_model
+        rows: list[list[InlineKeyboardButton]] = []
+        row: list[InlineKeyboardButton] = []
+        for choice_id, label, backend, model in choices:
+            active = current_backend == backend and current_model == model
+            row.append(
+                InlineKeyboardButton(
+                    f"✅ {label}" if active else label,
+                    callback_data=f"acfg:{target}id:{choice_id}",
+                )
+            )
+            if len(row) == 2:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+        rows.append(
+            [
+                InlineKeyboardButton("Core model", callback_data="acfg:menu:core"),
+                InlineKeyboardButton("Audit model", callback_data="acfg:menu:auditmodel"),
+            ]
+        )
+        rows.append([InlineKeyboardButton("Audit config", callback_data="acfg:menu:audit")])
+        return InlineKeyboardMarkup(rows)
+
+    def _audit_core_keyboard(self, cfg) -> InlineKeyboardMarkup:
+        return self._audit_model_keyboard(cfg, target="core")
+
+    def _audit_core_text(self, cfg) -> str:
+        return (
+            "Audit core model:\n"
+            f"• Backend: `{cfg.core_backend}`\n"
+            f"• Model: `{cfg.core_model}`\n\n"
+            "This is the model that does the actual work. Tap a provider/model button below, or type:\n"
+            "`/core backend=claude-cli model=claude-sonnet-4-6`\n"
+            "`/core backend=codex-cli model=gpt-5.5`\n"
+            "`/core backend=deepseek-api model=deepseek-v4-pro`"
+        )
+
+    def _audit_auditor_text(self, cfg) -> str:
+        return (
+            "Audit model:\n"
+            f"• Backend: `{cfg.audit_backend}`\n"
+            f"• Model: `{cfg.audit_model}`\n"
+            f"• Delivery: `{cfg.delivery}`\n"
+            f"• Severity threshold: `{cfg.severity_threshold}`\n\n"
+            "This model reviews the core model's observable thinking/actions/output. "
+            "Use a strong reviewer model here. Tap a button below, or type:\n"
+            "`/audit model backend=claude-cli model=claude-opus-4-7`\n"
+            "`/audit model backend=claude-cli model=claude-sonnet-4-6`\n"
+            "`/audit model backend=openrouter-api model=anthropic/claude-sonnet-4.6`"
+        )
+
+    def _audit_auditor_keyboard(self, cfg) -> InlineKeyboardMarkup:
+        return self._audit_model_keyboard(cfg, target="audit")
+
+    def _audit_config_keyboard(self, cfg) -> InlineKeyboardMarkup:
+        delivery_row = [
+            InlineKeyboardButton(
+                f"{'✅ ' if cfg.delivery == value else ''}{label}",
+                callback_data=f"acfg:delivery:{value}",
+            )
+            for value, label in (
+                ("always", "Always report"),
+                ("issues_only", "Issues only"),
+                ("silent", "Silent log"),
+            )
+        ]
+        threshold_row = [
+            InlineKeyboardButton(
+                f"{'✅ ' if cfg.severity_threshold == value else ''}{label}",
+                callback_data=f"acfg:threshold:{value}",
+            )
+            for value, label in (
+                ("low", "Low+"),
+                ("medium", "Medium+"),
+                ("high", "High+"),
+                ("critical", "Critical"),
+            )
+        ]
+        return InlineKeyboardMarkup(
+            [
+                delivery_row,
+                threshold_row,
+                [
+                    InlineKeyboardButton("Core model", callback_data="acfg:menu:core"),
+                    InlineKeyboardButton("Audit model", callback_data="acfg:menu:auditmodel"),
+                ],
+                [InlineKeyboardButton("Refresh", callback_data="acfg:menu:audit")],
+            ]
+        )
+
+    def _audit_block_with(
+        self,
+        cfg,
+        *,
+        delivery: str | None = None,
+        severity_threshold: str | None = None,
+        timeout_s: float | None = None,
+        backend: str | None = None,
+        model: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "backend": backend or cfg.audit_backend,
+            "model": model or cfg.audit_model,
+            "context_window": cfg.context_window,
+            "delivery": delivery or cfg.delivery,
+            "severity_threshold": severity_threshold or cfg.severity_threshold,
+            "fail_policy": cfg.fail_policy,
+            "timeout_s": cfg.timeout_s if timeout_s is None else timeout_s,
+        }
+
     def _wrapper_wrap_text(self, cfg) -> str:
         return (
             "Wrapper translator model:\n"
@@ -5439,6 +5774,7 @@ class FlexibleAgentRuntime:
 
     def _wrapper_status_text(self, state: dict, slots: dict) -> str:
         cfg = load_wrapper_config(state)
+        visible_slots = visible_wrapper_slots(slots)
         lines = [
             "Wrapper mode configuration:",
             f"• Core: <code>{html.escape(cfg.core_backend)} / {html.escape(cfg.core_model)}</code>",
@@ -5450,9 +5786,9 @@ class FlexibleAgentRuntime:
             "",
             "Persona/style slots:",
         ]
-        if slots:
-            for key in sorted(slots, key=lambda value: (not str(value).isdigit(), int(value) if str(value).isdigit() else str(value))):
-                lines.append(f"• <code>{html.escape(str(key))}</code>: {html.escape(str(slots[key]))}")
+        if visible_slots:
+            for key in sorted(visible_slots, key=lambda value: (not str(value).isdigit(), int(value) if str(value).isdigit() else str(value))):
+                lines.append(f"• <code>{html.escape(str(key))}</code>: {html.escape(str(visible_slots[key]))}")
         else:
             lines.append("• none")
         return "\n".join(lines)
@@ -5477,18 +5813,21 @@ class FlexibleAgentRuntime:
     async def cmd_core(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
-        if not await self._require_wrapper_mode(update, "core"):
+        if not await self._require_managed_core_mode(update, "core"):
             return
 
         state = self.backend_manager.get_state_snapshot()
-        cfg = load_wrapper_config(state)
+        mode = getattr(self.backend_manager, "agent_mode", "flex")
+        cfg = load_wrapper_config(state) if mode == "wrapper" else load_audit_config(state)
         args = context.args or []
         if not args:
+            text = self._wrapper_core_text(cfg) if mode == "wrapper" else self._audit_core_text(cfg)
+            keyboard = self._wrapper_core_keyboard(cfg) if mode == "wrapper" else self._audit_core_keyboard(cfg)
             await self._reply_text(
                 update,
-                self._wrapper_core_text(cfg),
+                text,
                 parse_mode="Markdown",
-                reply_markup=self._wrapper_core_keyboard(cfg),
+                reply_markup=keyboard,
             )
             return
 
@@ -5503,7 +5842,10 @@ class FlexibleAgentRuntime:
             await self._reply_text(update, error)
             return
 
-        self.backend_manager.update_wrapper_blocks(core={"backend": backend, "model": model})
+        if mode == "wrapper":
+            self.backend_manager.update_wrapper_blocks(core={"backend": backend, "model": model})
+        else:
+            self.backend_manager.update_audit_blocks(core={"backend": backend, "model": model})
         switch_ok, switch_message = await self._activate_wrapper_core_backend(
             update.effective_chat.id,
             backend=backend,
@@ -5511,7 +5853,7 @@ class FlexibleAgentRuntime:
         )
         await self._reply_text(
             update,
-            "Wrapper core updated:\n"
+            f"{mode.capitalize()} core updated:\n"
             f"• Backend: `{backend}`\n"
             f"• Model: `{model}`\n"
             f"• Active core: {'updated' if switch_ok else 'not changed'}\n"
@@ -5618,16 +5960,319 @@ class FlexibleAgentRuntime:
                 return
             target = args[1].strip()
             if target.lower() == "all":
-                slots = {}
+                slots = {"9": ""}
                 message = "All wrapper slots cleared."
             else:
-                slots.pop(target, None)
+                if target == "9":
+                    slots[target] = ""
+                else:
+                    slots.pop(target, None)
                 message = f"Wrapper slot `{target}` cleared."
             self.backend_manager.update_wrapper_blocks(wrapper_slots=slots)
             await self._reply_text(update, message, parse_mode="Markdown")
             return
 
         await self._reply_text(update, "Usage: /wrapper [list|set <slot> <text>|clear <slot|all>]")
+
+    def _audit_status_text(self, state: dict, criteria: dict) -> str:
+        cfg = load_audit_config(state)
+        visible_criteria = visible_audit_criteria(criteria)
+        lines = [
+            "Audit mode configuration:",
+            f"• Core: <code>{html.escape(cfg.core_backend)} / {html.escape(cfg.core_model)}</code>",
+            f"• Audit: <code>{html.escape(cfg.audit_backend)} / {html.escape(cfg.audit_model)}</code>",
+            f"• Delivery: <code>{cfg.delivery}</code>",
+            f"• Severity threshold: <code>{cfg.severity_threshold}</code>",
+            f"• Timeout: <code>{cfg.timeout_s:g}s</code>",
+            "",
+            "Default testing posture is <code>always</code> delivery and <code>low</code> threshold.",
+            "Tap buttons below to change audit visibility/sensitivity, core model, or audit model.",
+            "Use <code>/audit model backend=&lt;backend&gt; model=&lt;model&gt;</code> to set the audit model.",
+            "Use <code>/audit delivery &lt;always|issues_only|silent&gt;</code> and <code>/audit threshold &lt;low|medium|high|critical&gt;</code> for text control.",
+            "Use <code>/audit set &lt;slot&gt; &lt;text&gt;</code> to edit audit criteria.",
+            "",
+            "Audit criteria:",
+        ]
+        if visible_criteria:
+            for key in sorted(visible_criteria, key=lambda value: (not str(value).isdigit(), int(value) if str(value).isdigit() else str(value))):
+                lines.append(f"• <code>{html.escape(str(key))}</code>: {html.escape(str(visible_criteria[key]))}")
+        else:
+            lines.append("• default risk sensors")
+        return "\n".join(lines)
+
+    def _audit_status_keyboard(self, cfg) -> InlineKeyboardMarkup:
+        return self._audit_config_keyboard(cfg)
+
+    async def cmd_audit(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        if not self._is_audit_mode():
+            await self._reply_text(
+                update,
+                "`/audit` only applies in **audit** mode.\nUse `/mode audit` first.",
+                parse_mode="Markdown",
+            )
+            return
+
+        args = context.args or []
+        action = (args[0].lower() if args else "list").strip()
+        state = self.backend_manager.get_state_snapshot()
+        criteria = state.get("audit_criteria")
+        if not isinstance(criteria, dict):
+            criteria = {}
+        cfg = load_audit_config(state)
+
+        if action in {"list", "status"}:
+            await self._reply_text(
+                update,
+                self._audit_status_text(state, criteria),
+                parse_mode="HTML",
+                reply_markup=self._audit_status_keyboard(cfg),
+            )
+            return
+
+        if action == "model":
+            if len(args) == 1:
+                await self._reply_text(
+                    update,
+                    self._audit_auditor_text(cfg),
+                    parse_mode="Markdown",
+                    reply_markup=self._audit_auditor_keyboard(cfg),
+                )
+                return
+            values, positional = self._parse_backend_model_args(args[1:])
+            backend = values.get("backend") or (positional[0] if positional else cfg.audit_backend)
+            model = values.get("model") or (positional[1] if len(positional) > 1 else cfg.audit_model)
+            backend = backend.strip().lower()
+            model = self._normalize_wrapper_model(backend, model.strip())
+            error = self._validate_wrapper_backend_model(backend, model)
+            if error:
+                await self._reply_text(update, error)
+                return
+            self.backend_manager.update_audit_blocks(
+                audit={
+                    "backend": backend,
+                    "model": model,
+                    "context_window": cfg.context_window,
+                    "delivery": cfg.delivery,
+                    "severity_threshold": cfg.severity_threshold,
+                    "fail_policy": cfg.fail_policy,
+                    "timeout_s": cfg.timeout_s,
+                }
+            )
+            await self._reply_text(
+                update,
+                "Audit model updated:\n"
+                f"• Backend: `{backend}`\n"
+                f"• Model: `{model}`",
+                parse_mode="Markdown",
+            )
+            return
+
+        if action in {"delivery", "threshold", "timeout"}:
+            if len(args) < 2:
+                await self._reply_text(update, f"Usage: /audit {action} <value>")
+                return
+            value = args[1].strip().lower()
+            audit_block = self._audit_block_with(cfg)
+            if action == "delivery":
+                if value not in {"silent", "issues_only", "always"}:
+                    await self._reply_text(update, "Delivery must be one of: silent, issues_only, always")
+                    return
+                audit_block["delivery"] = value
+            elif action == "threshold":
+                if value not in {"low", "medium", "high", "critical"}:
+                    await self._reply_text(update, "Threshold must be one of: low, medium, high, critical")
+                    return
+                audit_block["severity_threshold"] = value
+            else:
+                try:
+                    audit_block["timeout_s"] = max(1.0, float(value))
+                except ValueError:
+                    await self._reply_text(update, "Timeout must be a number of seconds.")
+                    return
+            self.backend_manager.update_audit_blocks(audit=audit_block)
+            result_key = {"delivery": "delivery", "threshold": "severity_threshold", "timeout": "timeout_s"}[action]
+            await self._reply_text(update, f"Audit {action} updated to `{audit_block[result_key]}`.", parse_mode="Markdown")
+            return
+
+        if action == "set":
+            if len(args) < 3:
+                await self._reply_text(update, "Usage: /audit set <slot> <text>")
+                return
+            slot = args[1].strip()
+            text = " ".join(args[2:]).strip()
+            if not slot or not text:
+                await self._reply_text(update, "Usage: /audit set <slot> <text>")
+                return
+            criteria[slot] = text
+            self.backend_manager.update_audit_blocks(audit_criteria=criteria)
+            await self._reply_text(update, f"Audit criterion `{slot}` updated.", parse_mode="Markdown")
+            return
+
+        if action == "clear":
+            if len(args) < 2:
+                await self._reply_text(update, "Usage: /audit clear <slot|all>")
+                return
+            target = args[1].strip()
+            if target.lower() == "all":
+                criteria = {"9": ""}
+                message = "All audit criteria cleared."
+            else:
+                if target == "9":
+                    criteria[target] = ""
+                else:
+                    criteria.pop(target, None)
+                message = f"Audit criterion `{target}` cleared."
+            self.backend_manager.update_audit_blocks(audit_criteria=criteria)
+            await self._reply_text(update, message, parse_mode="Markdown")
+            return
+
+        await self._reply_text(
+            update,
+            "Usage: /audit [list|model backend=<backend> model=<model>|delivery <silent|issues_only|always>|threshold <low|medium|high|critical>|timeout <seconds>|set <slot> <text>|clear <slot|all>]",
+        )
+
+    async def callback_audit_config(self, update: Update, context: Any):
+        query = update.callback_query
+        if not self._is_authorized_user(query.from_user.id):
+            return
+        if not self._is_audit_mode():
+            await query.answer("Audit controls require /mode audit.", show_alert=True)
+            return
+
+        data = query.data or ""
+        try:
+            state = self.backend_manager.get_state_snapshot()
+            criteria = state.get("audit_criteria")
+            if not isinstance(criteria, dict):
+                criteria = {}
+            cfg = load_audit_config(state)
+
+            if data == "acfg:menu:core":
+                await query.edit_message_text(
+                    self._audit_core_text(cfg),
+                    parse_mode="Markdown",
+                    reply_markup=self._audit_core_keyboard(cfg),
+                )
+            elif data == "acfg:menu:auditmodel":
+                await query.edit_message_text(
+                    self._audit_auditor_text(cfg),
+                    parse_mode="Markdown",
+                    reply_markup=self._audit_auditor_keyboard(cfg),
+                )
+            elif data == "acfg:menu:audit":
+                await query.edit_message_text(
+                    self._audit_status_text(state, criteria),
+                    parse_mode="HTML",
+                    reply_markup=self._audit_status_keyboard(cfg),
+                )
+            elif data.startswith("acfg:coreid:") or data.startswith("acfg:auditid:"):
+                parts = data.split(":", 2)
+                if len(parts) != 3:
+                    await query.answer("Invalid model selection.", show_alert=True)
+                    return
+                _, target_raw, choice_id = parts
+                target = "core" if target_raw == "coreid" else "audit"
+                choice = self._audit_choice_by_id(target, choice_id)
+                if choice is None:
+                    await query.answer("Unknown model choice.", show_alert=True)
+                    return
+                _, _label, backend, model = choice
+                error = self._validate_wrapper_backend_model(backend, model)
+                if error:
+                    await query.answer(error, show_alert=True)
+                    return
+                if target == "core":
+                    self.backend_manager.update_audit_blocks(core={"backend": backend, "model": model})
+                    switch_ok, switch_message = await self._activate_wrapper_core_backend(
+                        query.message.chat_id,
+                        backend=backend,
+                        model=model,
+                    )
+                    refreshed = load_audit_config(self.backend_manager.get_state_snapshot())
+                    await query.edit_message_text(
+                        "Audit core updated:\n"
+                        f"• Backend: `{backend}`\n"
+                        f"• Model: `{model}`\n"
+                        f"• Active core: {'updated' if switch_ok else 'not changed'}\n"
+                        f"{switch_message}",
+                        parse_mode="Markdown",
+                        reply_markup=self._audit_core_keyboard(refreshed),
+                    )
+                else:
+                    self.backend_manager.update_audit_blocks(audit=self._audit_block_with(cfg, backend=backend, model=model))
+                    refreshed = load_audit_config(self.backend_manager.get_state_snapshot())
+                    await query.edit_message_text(
+                        "Audit model updated:\n"
+                        f"• Backend: `{backend}`\n"
+                        f"• Model: `{model}`",
+                        parse_mode="Markdown",
+                        reply_markup=self._audit_auditor_keyboard(refreshed),
+                    )
+            elif data.startswith("acfg:delivery:") or data.startswith("acfg:threshold:"):
+                parts = data.split(":", 2)
+                if len(parts) != 3:
+                    await query.answer("Invalid audit setting.", show_alert=True)
+                    return
+                _, setting, value = parts
+                value = value.strip().lower()
+                if setting == "delivery":
+                    if value not in {"silent", "issues_only", "always"}:
+                        await query.answer("Invalid delivery.", show_alert=True)
+                        return
+                    self.backend_manager.update_audit_blocks(audit=self._audit_block_with(cfg, delivery=value))
+                else:
+                    if value not in {"low", "medium", "high", "critical"}:
+                        await query.answer("Invalid threshold.", show_alert=True)
+                        return
+                    self.backend_manager.update_audit_blocks(audit=self._audit_block_with(cfg, severity_threshold=value))
+                refreshed_state = self.backend_manager.get_state_snapshot()
+                refreshed = load_audit_config(refreshed_state)
+                refreshed_criteria = refreshed_state.get("audit_criteria")
+                if not isinstance(refreshed_criteria, dict):
+                    refreshed_criteria = {}
+                await query.edit_message_text(
+                    self._audit_status_text(refreshed_state, refreshed_criteria),
+                    parse_mode="HTML",
+                    reply_markup=self._audit_status_keyboard(refreshed),
+                )
+            elif data.startswith("acfg:core:"):
+                parts = data.split(":", 3)
+                if len(parts) != 4:
+                    await query.answer("Invalid core selection.", show_alert=True)
+                    return
+                _, _, backend, model = parts
+                backend = backend.strip().lower()
+                model = self._normalize_wrapper_model(backend, model.strip())
+                error = self._validate_wrapper_backend_model(backend, model)
+                if error:
+                    await query.answer(error, show_alert=True)
+                    return
+                self.backend_manager.update_audit_blocks(core={"backend": backend, "model": model})
+                switch_ok, switch_message = await self._activate_wrapper_core_backend(
+                    query.message.chat_id,
+                    backend=backend,
+                    model=model,
+                )
+                refreshed = load_audit_config(self.backend_manager.get_state_snapshot())
+                await query.edit_message_text(
+                    "Audit core updated:\n"
+                    f"• Backend: `{backend}`\n"
+                    f"• Model: `{model}`\n"
+                    f"• Active core: {'updated' if switch_ok else 'not changed'}\n"
+                    f"{switch_message}",
+                    parse_mode="Markdown",
+                    reply_markup=self._audit_core_keyboard(refreshed),
+                )
+            else:
+                await query.answer("Unknown audit control.", show_alert=True)
+                return
+        except Exception as e:
+            self.error_logger.error(f"callback_audit_config error: {e}", exc_info=True)
+            await query.answer(f"Error: {e}", show_alert=True)
+            return
+        await query.answer()
 
     async def callback_wrapper_config(self, update: Update, context: Any):
         query = update.callback_query
@@ -5867,27 +6512,35 @@ class FlexibleAgentRuntime:
         await query.answer()
 
     async def cmd_mode(self, update: Update, context: Any):
-        """Switch between fixed, flex, and wrapper configuration modes.
+        """Switch between fixed, flex, wrapper, and audit configuration modes.
 
-        Usage: /mode [fixed|flex|wrapper]
+        Usage: /mode [fixed|flex|wrapper|audit]
         """
         if not self._is_authorized_user(update.effective_user.id):
             return
         args = (context.args[0].lower() if context.args else "").strip()
         current = self.backend_manager.agent_mode
 
-        if not args or args not in ("fixed", "flex", "wrapper"):
-            markup = InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ Fixed" if current == "fixed" else "Fixed", callback_data="tgl:mode:fixed"),
-                InlineKeyboardButton("✅ Flex" if current == "flex" else "Flex", callback_data="tgl:mode:flex"),
-                InlineKeyboardButton("✅ Wrapper" if current == "wrapper" else "Wrapper", callback_data="tgl:mode:wrapper"),
-            ]])
+        if not args or args not in ("fixed", "flex", "wrapper", "audit"):
+            markup = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton("✅ Fixed" if current == "fixed" else "Fixed", callback_data="tgl:mode:fixed"),
+                        InlineKeyboardButton("✅ Flex" if current == "flex" else "Flex", callback_data="tgl:mode:flex"),
+                    ],
+                    [
+                        InlineKeyboardButton("✅ Wrapper" if current == "wrapper" else "Wrapper", callback_data="tgl:mode:wrapper"),
+                        InlineKeyboardButton("✅ Audit" if current == "audit" else "Audit", callback_data="tgl:mode:audit"),
+                    ],
+                ]
+            )
             await self._reply_text(
                 update,
                 f"Current mode: <b>{current}</b>\n\n"
                 f"• <b>fixed</b> — continuous CLI session, incremental prompts\n"
                 f"• <b>flex</b> — multi-backend switching, full context injection\n"
-                f"• <b>wrapper</b> — configure core/wrapper model pair with /core and /wrap",
+                f"• <b>wrapper</b> — configure core/wrapper model pair with /core and /wrap\n"
+                f"• <b>audit</b> — configure core/audit model pair with /core and /audit",
                 parse_mode="HTML",
                 reply_markup=markup,
             )
@@ -5926,7 +6579,7 @@ class FlexibleAgentRuntime:
                 "• `/backend` switching re-enabled",
                 parse_mode="Markdown",
             )
-        else:
+        elif args == "wrapper":
             if hasattr(backend, "set_session_mode"):
                 backend.set_session_mode(False)
             cfg = load_wrapper_config(self.backend_manager.get_state_snapshot())
@@ -5955,6 +6608,38 @@ class FlexibleAgentRuntime:
                 f"{switch_message}\n"
                 "• Use `/core`, `/wrap`, and `/wrapper` to configure\n"
                 "• User-visible responses are rewritten through the wrapper model",
+                parse_mode="Markdown",
+            )
+        else:
+            if hasattr(backend, "set_session_mode"):
+                backend.set_session_mode(False)
+            cfg = load_audit_config(self.backend_manager.get_state_snapshot())
+            switch_ok, switch_message = await self._activate_wrapper_core_backend(
+                update.effective_chat.id,
+                backend=cfg.core_backend,
+                model=cfg.core_model,
+            )
+            if not switch_ok:
+                await self._reply_text(
+                    update,
+                    "Audit mode was not activated.\n"
+                    f"• Core: `{cfg.core_backend}` / `{cfg.core_model}`\n"
+                    f"• Reason: {switch_message}",
+                    parse_mode="Markdown",
+                )
+                return
+            self.backend_manager.agent_mode = args
+            self.backend_manager._save_state()
+            await self._reply_text(
+                update,
+                "Switched to **audit** mode.\n"
+                f"• Core: `{cfg.core_backend}` / `{cfg.core_model}`\n"
+                f"• Audit: `{cfg.audit_backend}` / `{cfg.audit_model}`\n"
+                f"• Delivery: `{cfg.delivery}`\n"
+                f"• Threshold: `{cfg.severity_threshold}`\n"
+                f"{switch_message}\n"
+                "• Use `/core` and `/audit` to configure\n"
+                "• Core responses are delivered unchanged; audit findings follow separately",
                 parse_mode="Markdown",
             )
 
@@ -6356,7 +7041,7 @@ class FlexibleAgentRuntime:
         preserved_state: dict[str, Any] = {}
         try:
             state_snapshot = self.backend_manager.get_state_snapshot()
-            for key in ("active_backend", "active_model", "agent_mode", "core", "wrapper", "wrapper_slots"):
+            for key in ("active_backend", "active_model", "agent_mode", "core", "wrapper", "wrapper_slots", "audit", "audit_criteria"):
                 if key in state_snapshot:
                     preserved_state[key] = state_snapshot[key]
         except Exception as exc:
@@ -7690,7 +8375,8 @@ class FlexibleAgentRuntime:
             await _edit_placeholder()
 
     def _make_stream_callback(self, event_queue: asyncio.Queue | None = None,
-                              think_buffer: list | None = None):
+                              think_buffer: list | None = None,
+                              audit_collector: AuditTelemetryCollector | None = None):
         """Create an async callback that puts StreamEvents into the queue
         and/or appends all events to the think buffer."""
         from adapters.stream_events import KIND_THINKING
@@ -7699,6 +8385,10 @@ class FlexibleAgentRuntime:
         _chunk_hard_limit = 150
         _chunk_endings = ("。", "！", "？", "\n")
         async def _callback(event):
+            if audit_collector is not None:
+                # Best-effort hot path: audit telemetry must not disrupt stream delivery.
+                with suppress(Exception):
+                    await audit_collector.record(event)
             if event_queue is not None:
                 try:
                     event_queue.put_nowait(event)
@@ -7943,6 +8633,7 @@ class FlexibleAgentRuntime:
                 request_id=item.request_id,
                 source=item.source,
                 core_raw=visible_text,
+                user_request=item.prompt,
                 visible_context=self._wrapper_visible_context(cfg.context_window),
                 wrapper_slots=slots,
                 config=cfg,
@@ -8007,6 +8698,232 @@ class FlexibleAgentRuntime:
             request_id=item.request_id,
             purpose="wrapper-verbose",
         )
+
+    def _audit_enabled(self) -> bool:
+        return getattr(self.backend_manager, "agent_mode", "flex") == "audit"
+
+    def _audit_timeout_s(self) -> float:
+        state = self.backend_manager.get_state_snapshot()
+        cfg = load_audit_config(state)
+        return cfg.timeout_s
+
+    def _audit_visible_context(self, context_window: int) -> list[dict[str, str]]:
+        return self._wrapper_visible_context(context_window)
+
+    def _build_audit_telemetry(self, item: QueuedRequest, response, collector: AuditTelemetryCollector | None) -> dict[str, Any]:
+        stream = collector.to_dict() if collector is not None else {}
+        tool_call_count = int(getattr(response, "tool_call_count", 0) or 0)
+        if tool_call_count <= 0:
+            tool_call_count = int(stream.get("action_event_count", 0) or 0)
+        return {
+            **stream,
+            "request_id": item.request_id,
+            "source": item.source,
+            "summary": item.summary,
+            "silent": item.silent,
+            "backend": self.config.active_backend,
+            "model": self.get_current_model(),
+            "tool_call_count": tool_call_count,
+            "tool_loop_count": int(getattr(response, "tool_loop_count", 0) or 0),
+            "usage": {
+                "input_tokens": int(getattr(getattr(response, "usage", None), "input_tokens", 0) or 0),
+                "output_tokens": int(getattr(getattr(response, "usage", None), "output_tokens", 0) or 0),
+                "thinking_tokens": int(getattr(getattr(response, "usage", None), "thinking_tokens", 0) or 0),
+            },
+            "risk_flags": {
+                "codex_cli_backend": self.config.active_backend == "codex-cli",
+                "thinking_trace_is_observable_only": True,
+            },
+        }
+
+    def _append_audit_transcript(
+        self,
+        item: QueuedRequest,
+        *,
+        core_raw: str,
+        visible_text: str,
+        telemetry: Mapping[str, Any],
+        audit_result,
+        completion_path: str,
+    ) -> None:
+        path = getattr(self, "audit_transcript_log_path", None) or (self.workspace_dir / "audit_transcript.jsonl")
+        entry = {
+            "role": "audit",
+            "request_id": item.request_id,
+            "source": item.source,
+            "summary": item.summary,
+            "completion_path": completion_path,
+            "backend": self.config.active_backend,
+            "model": self.get_current_model(),
+            "core_raw": core_raw or "",
+            "visible_text": visible_text or "",
+            "telemetry": telemetry,
+            "audit_result": {
+                "status": getattr(audit_result, "status", "pass"),
+                "max_severity": getattr(audit_result, "max_severity", "none"),
+                "findings": [finding.__dict__ for finding in getattr(audit_result, "findings", ())],
+                "triggered_sensors": list(getattr(audit_result, "triggered_sensors", ())),
+                "summary": getattr(audit_result, "summary", ""),
+                "reasoning": getattr(audit_result, "reasoning", ""),
+                "audit_used": bool(getattr(audit_result, "audit_used", False)),
+                "audit_failed": bool(getattr(audit_result, "audit_failed", False)),
+                "fallback_reason": getattr(audit_result, "fallback_reason", None),
+                "latency_ms": round(float(getattr(audit_result, "latency_ms", 0.0) or 0.0), 3),
+                "raw_text": getattr(audit_result, "raw_text", ""),
+            },
+            "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
+        }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry) + "\n")
+        except Exception as exc:
+            self.error_logger.warning(f"Failed to append audit transcript: {exc}")
+
+    def _write_audit_evidence(
+        self,
+        item: QueuedRequest,
+        *,
+        core_raw: str,
+        visible_text: str,
+        telemetry: Mapping[str, Any],
+        completion_path: str,
+        audit_criteria: Mapping[str, Any] | None,
+        visible_context: list[dict[str, str]],
+    ) -> str:
+        safe_request_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", item.request_id or "request")
+        path = self.workspace_dir / "audit_evidence" / f"{safe_request_id}.json"
+        entry = {
+            "role": "audit_evidence",
+            "request_id": item.request_id,
+            "source": item.source,
+            "summary": item.summary,
+            "user_request": item.prompt,
+            "completion_path": completion_path,
+            "backend": self.config.active_backend,
+            "model": self.get_current_model(),
+            "core_raw": core_raw or "",
+            "visible_text": visible_text or "",
+            "telemetry": telemetry,
+            "audit_criteria": dict(audit_criteria or {}),
+            "recent_visible_context": visible_context,
+            "related_logs": {
+                "core_transcript": str(self.workspace_dir / "core_transcript.jsonl"),
+                "audit_transcript": str(self.workspace_dir / "audit_transcript.jsonl"),
+                "token_audit": str(self.workspace_dir / "token_audit.jsonl"),
+            },
+            "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
+        }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(entry, ensure_ascii=False, indent=2), encoding="utf-8")
+            return str(path)
+        except Exception as exc:
+            self.error_logger.warning(f"Failed to write audit evidence for {item.request_id}: {exc}")
+            return ""
+
+    def _schedule_audit_followup(
+        self,
+        item: QueuedRequest,
+        *,
+        core_raw: str,
+        visible_text: str,
+        response,
+        audit_collector: AuditTelemetryCollector | None,
+        completion_path: str,
+    ) -> None:
+        if not self._audit_enabled() or not should_audit_source(item.source):
+            return
+        task = asyncio.create_task(
+            self._run_audit_followup(
+                item,
+                core_raw=core_raw,
+                visible_text=visible_text,
+                response=response,
+                audit_collector=audit_collector,
+                completion_path=completion_path,
+            )
+        )
+        background_tasks = getattr(self, "_background_tasks", None)
+        if background_tasks is not None:
+            background_tasks.add(task)
+
+        def _on_done(done: asyncio.Task) -> None:
+            if background_tasks is not None:
+                background_tasks.discard(done)
+            try:
+                done.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                with suppress(Exception):
+                    self.error_logger.warning(f"Audit followup failed for {item.request_id}: {exc}")
+
+        task.add_done_callback(_on_done)
+
+    async def _run_audit_followup(
+        self,
+        item: QueuedRequest,
+        *,
+        core_raw: str,
+        visible_text: str,
+        response,
+        audit_collector: AuditTelemetryCollector | None,
+        completion_path: str,
+    ) -> None:
+        state = self.backend_manager.get_state_snapshot()
+        cfg = load_audit_config(state)
+        criteria = state.get("audit_criteria")
+        if not isinstance(criteria, dict):
+            criteria = None
+        telemetry = self._build_audit_telemetry(item, response, audit_collector)
+        visible_context = self._audit_visible_context(cfg.context_window)
+        evidence_path = self._write_audit_evidence(
+            item,
+            core_raw=core_raw,
+            visible_text=visible_text,
+            telemetry=telemetry,
+            completion_path=completion_path,
+            audit_criteria=criteria,
+            visible_context=visible_context,
+        )
+        processor = AuditProcessor(
+            cfg,
+            backend_invoker=self.backend_manager.generate_ephemeral_response,
+            timeout_s=self._audit_timeout_s(),
+        )
+        audit_result = await processor.process(
+            request_id=item.request_id,
+            source=item.source,
+            user_request=item.prompt,
+            core_raw=core_raw,
+            telemetry=telemetry,
+            audit_criteria=criteria,
+            visible_context=visible_context,
+            config=cfg,
+            evidence_path=evidence_path,
+            silent=True,
+        )
+        self._append_audit_transcript(
+            item,
+            core_raw=core_raw,
+            visible_text=visible_text,
+            telemetry=telemetry,
+            audit_result=audit_result,
+            completion_path=completion_path,
+        )
+        if (
+            should_notify_audit_result(audit_result, cfg)
+            and not item.silent
+            and item.deliver_to_telegram
+            and not self._should_buffer_during_transfer(item.request_id)
+        ):
+            await self.send_long_message(
+                chat_id=item.chat_id,
+                text=format_audit_report(audit_result),
+                request_id=item.request_id,
+                purpose="audit-report",
+            )
 
     # ------------------------------------------------------------------
     # Stage 4: Background-mode helpers
@@ -8214,6 +9131,14 @@ class FlexibleAgentRuntime:
                     purpose="bg-response",
                 )
                 await self._send_voice_reply(item.chat_id, visible_text, item.request_id)
+                self._schedule_audit_followup(
+                    item,
+                    core_raw=response.text,
+                    visible_text=visible_text,
+                    response=response,
+                    audit_collector=getattr(item, "_audit_collector", None),
+                    completion_path="background",
+                )
                 self.logger.info(
                     f"Background task {item.request_id} delivered "
                     f"(total_s={total_s:.2f}, chunks={chunk_count}, send_s={send_elapsed_s:.2f})"
@@ -8326,6 +9251,8 @@ class FlexibleAgentRuntime:
                 escalation_task = None
                 placeholder = None
                 _stream_callback = None
+                _audit_active_for_item = self._audit_enabled() and should_audit_source(item.source)
+                _audit_collector = AuditTelemetryCollector() if _audit_active_for_item else None
                 _think_flush_task = None
                 if not item.silent and item.deliver_to_telegram:
                     placeholder_text, placeholder_parse_mode = self.get_typing_placeholder()
@@ -8350,13 +9277,14 @@ class FlexibleAgentRuntime:
                     # Think ON → start thinking flush loop (independent of verbose).
                     _stream_queue = None
                     _think_flush_task = None
-                    _use_stream = self._verbose or self._think
+                    _use_stream = self._verbose or self._think or _audit_active_for_item
                     if _use_stream:
                         if self._verbose:
                             _stream_queue = asyncio.Queue(maxsize=200)
                         _stream_callback = self._make_stream_callback(
                             event_queue=_stream_queue,
                             think_buffer=self._think_buffer if self._think else None,
+                            audit_collector=_audit_collector,
                         )
                     if self._verbose:
                         escalation_task = asyncio.create_task(
@@ -8387,8 +9315,12 @@ class FlexibleAgentRuntime:
                             self._thinking_flush_loop(item.chat_id, stop_typing)
                         )
 
-                # Resolve stream callback (may be None if silent or stream not needed)
-                _on_stream = _stream_callback if not item.silent else None
+                if _stream_callback is None and _audit_active_for_item:
+                    _stream_callback = self._make_stream_callback(audit_collector=_audit_collector)
+
+                # Resolve stream callback. Audit mode intentionally receives stream
+                # telemetry even when verbose/think display is off.
+                _on_stream = _stream_callback if (not item.silent or _audit_active_for_item) else None
 
                 # --- Stage 4: background-mode detach ---
                 _extra = (self.config.extra or {})
@@ -8401,7 +9333,7 @@ class FlexibleAgentRuntime:
                 backend_started = datetime.now()
                 current_backend = getattr(self.backend_manager, "current_backend", None)
                 if self.config.active_backend == "openrouter-api" and hasattr(current_backend, "set_reasoning_enabled"):
-                    current_backend.set_reasoning_enabled(self._think)
+                    current_backend.set_reasoning_enabled(self._think or _audit_active_for_item)
                 detached = False
                 if _bg_mode:
                     _gen_task = asyncio.create_task(
@@ -8448,6 +9380,7 @@ class FlexibleAgentRuntime:
                                 message_id=placeholder.message_id,
                                 text="⏳ Still running in the background — I'll notify you here when done! 📬",
                             )
+                    setattr(item, "_audit_collector", _audit_collector)
                     self._register_background_task(_gen_task, item)
                     self.logger.info(
                         f"Detached {item.request_id} to background "
@@ -8689,6 +9622,14 @@ class FlexibleAgentRuntime:
                             purpose="response",
                         )
                         await self._send_voice_reply(item.chat_id, _response_text, item.request_id)
+                        self._schedule_audit_followup(
+                            item,
+                            core_raw=response.text,
+                            visible_text=visible_text,
+                            response=response,
+                            audit_collector=_audit_collector,
+                            completion_path="foreground",
+                        )
                         total_elapsed_s = (datetime.now() - queued_at).total_seconds()
                         self.logger.info(
                             f"Completed {item.request_id} delivery via {self.config.active_backend} "
@@ -8779,9 +9720,10 @@ class FlexibleAgentRuntime:
             BotCommand("cos", "Chief of Staff decision routing (on/off)"),
             BotCommand("long", "Start multi-message input (end with /end)"),
             BotCommand("end", "Submit collected /long input"),
-            BotCommand("mode", "Switch fixed/flex/wrapper mode"),
+            BotCommand("mode", "Switch fixed/flex/wrapper/audit mode"),
             BotCommand("wrapper", "Configure wrapper persona slots"),
-            BotCommand("core", "Configure wrapper core model"),
+            BotCommand("audit", "Configure audit model and criteria"),
+            BotCommand("core", "Configure managed core model"),
             BotCommand("wrap", "Configure wrapper translator model"),
             BotCommand("workzone", "Set temporary working directory [path|off]"),
             BotCommand("model", "View or change model"),
@@ -8814,7 +9756,7 @@ class FlexibleAgentRuntime:
         ]
         if private_wol_available(self.global_config.project_root):
             commands.append(BotCommand("wol", "Send Wake-on-LAN magic packet [pc_name]"))
-        return commands
+        return commands + runtime_bot_commands()
 
     async def shutdown(self):
         self.logger.info(f"Shutting down flex agent '{self.name}'...")
