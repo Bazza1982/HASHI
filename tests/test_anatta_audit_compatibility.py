@@ -142,6 +142,32 @@ async def test_anatta_shadow_and_audit_mode_schedule_observation_without_injecti
 
 
 @pytest.mark.asyncio
+async def test_anatta_off_is_full_noop_even_when_audit_mode_is_active():
+    layer = _Layer("off")
+    observer = AnattaPostTurnObserver(layer)
+    runtime = _runtime_with_anatta(observer)
+    item = _item("api")
+
+    assert should_audit_source(item.source) is True
+
+    sections = await runtime._build_pre_turn_context_sections(
+        item,
+        item.prompt,
+        is_bridge_request=False,
+    )
+    runtime._schedule_post_turn_observers(
+        item,
+        item.prompt,
+        "Audited response.",
+        is_bridge_request=False,
+    )
+
+    assert sections == []
+    assert runtime._background_tasks == set()
+    assert layer.recorded == []
+
+
+@pytest.mark.asyncio
 async def test_anatta_and_audit_skip_the_same_internal_sources():
     observer = AnattaPostTurnObserver(_Layer("on"))
     runtime = _runtime_with_anatta(observer)
