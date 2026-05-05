@@ -242,3 +242,42 @@ class FlexibleBackendManager:
             silent=silent,
             on_stream_event=on_stream_event,
         )
+
+    async def generate_ephemeral_response(
+        self,
+        *,
+        engine: str,
+        model: str,
+        prompt: str,
+        request_id: str,
+        silent: bool = True,
+    ):
+        """Run a backend-native sidecar prompt without changing agent state.
+
+        Feature layers may need a narrow LLM hook for classification prompts.
+        The runtime supplies the current active backend context, so this method
+        intentionally refuses cross-backend execution instead of switching the
+        user's active backend behind their back.
+        """
+        if not self.current_backend:
+            raise RuntimeError("No active backend initialized.")
+
+        current_config = getattr(self.current_backend, "config", None)
+        current_engine = str(getattr(current_config, "engine", "") or "")
+        current_model = str(getattr(current_config, "model", "") or "")
+        if engine and current_engine and engine != current_engine:
+            raise RuntimeError(f"Ephemeral backend mismatch: requested {engine}, active {current_engine}")
+        if model and current_model and model != current_model:
+            self.logger.info(
+                "Ephemeral model request differs from active model: requested=%s active=%s",
+                model,
+                current_model,
+            )
+
+        return await self.current_backend.generate_response(
+            prompt,
+            request_id,
+            is_retry=False,
+            silent=silent,
+            on_stream_event=None,
+        )

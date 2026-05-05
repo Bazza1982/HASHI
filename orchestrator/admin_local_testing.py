@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
+from orchestrator.extension_command_registry import available_workspace_commands, execute_workspace_command
+
 
 def _json_safe(value: Any):
     if value is None or isinstance(value, (str, int, float, bool)):
@@ -110,6 +112,8 @@ def supported_commands(runtime) -> list[str]:
     for name in names:
         if hasattr(runtime, f"cmd_{name}"):
             supported.append(name)
+    for spec in available_workspace_commands(runtime.workspace_dir):
+        supported.append(spec.name)
     return sorted(set(supported))
 
 
@@ -121,10 +125,39 @@ async def execute_local_command(runtime, command_line: str, chat_id: int | None 
     method_name = f"cmd_{command_name}"
     method = getattr(runtime, method_name, None)
     if method is None:
+        store = _CaptureStore(messages=[])
+        local_chat_id = chat_id or runtime.global_config.authorized_id
+        update = _FakeUpdate(runtime.global_config.authorized_id, local_chat_id, store)
+        context = SimpleNamespace(args=args)
+        try:
+            text = await execute_workspace_command(runtime, command_name, args, update=update, context=context)
+        except KeyError:
+            return {
+                "ok": False,
+                "error": f"unknown command: {command_name}",
+                "supported_commands": supported_commands(runtime),
+            }
+        except Exception as e:
+            return {
+                "ok": False,
+                "command": command_name,
+                "args": args,
+                "messages": store.messages,
+                "error": f"{type(e).__name__}: {e}",
+            }
+        store.messages.append(
+            {
+                "channel": "reply",
+                "chat_id": None,
+                "text": text,
+                "meta": {},
+            }
+        )
         return {
-            "ok": False,
-            "error": f"unknown command: {command_name}",
-            "supported_commands": supported_commands(runtime),
+            "ok": True,
+            "command": command_name,
+            "args": args,
+            "messages": store.messages,
         }
 
     store = _CaptureStore(messages=[])

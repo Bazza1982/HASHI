@@ -6,6 +6,7 @@ import time
 import asyncio
 import inspect
 import logging
+import shlex
 import shutil
 import sqlite3
 from uuid import uuid4
@@ -26,6 +27,7 @@ from orchestrator.agent_runtime import QueuedRequest, _safe_excerpt, _md_to_html
 from orchestrator.agent_fyi import build_agent_fyi_primer
 from orchestrator.bridge_memory import BridgeMemoryStore, BridgeContextAssembler, SysPromptManager
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
+from orchestrator.extension_command_registry import available_workspace_commands, execute_workspace_command
 from orchestrator.flexible_backend_registry import (
     CLAUDE_MODEL_ALIASES,
     get_available_efforts,
@@ -39,6 +41,7 @@ from orchestrator.handoff_builder import HandoffBuilder
 from orchestrator.habits import HabitStore
 from orchestrator.media_utils import is_image_file, normalize_image_file
 from orchestrator.parked_topics import ParkedTopicStore
+from orchestrator.post_turn_observer import PostTurnObserver, PreTurnContextProvider, TurnContextRequest, TurnObservationRequest
 from orchestrator.usecomputer_mode import (
     build_usecomputer_task_prompt,
     get_usecomputer_examples_text,
@@ -183,8 +186,8 @@ class FlexibleAgentRuntime:
 
         # Initialize FlexibleBackendManager
         self.backend_manager = FlexibleBackendManager(config, global_config, secrets)
-        self.anatta = None
-        self._init_anatta_layer()
+        self._post_turn_observers: list[PostTurnObserver] = []
+        self._pre_turn_context_providers: list[PreTurnContextProvider] = []
 
     def _record_active_chat(self, update) -> None:
         """Track the chat_id for each authorized user who messages this bot."""
@@ -354,6 +357,39 @@ class FlexibleAgentRuntime:
                 return
             return await handler(update, context)
         return _wrapped
+
+    async def handle_workspace_command(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        self._record_active_chat(update)
+        raw = (getattr(update.message, "text", "") or "").strip()
+        if not raw.startswith("/"):
+            return
+        try:
+            parts = shlex.split(raw[1:])
+        except Exception:
+            parts = raw[1:].split()
+        if not parts:
+            return
+        command_name = parts[0].split("@", 1)[0].lower()
+        args = parts[1:]
+        if not self._is_command_allowed(command_name):
+            await self._reply_text(update, f"/{command_name} is disabled for this agent.")
+            return
+        try:
+            text = await execute_workspace_command(self, command_name, args, update=update, context=context)
+        except KeyError:
+            return
+        except Exception as exc:
+            self.error_logger.exception("Workspace command failed: %s", command_name)
+            await self._reply_text(update, f"/{command_name} failed: {type(exc).__name__}: {exc}")
+            return
+        await self.send_long_message(
+            update.effective_chat.id,
+            text or f"/{command_name} returned no output.",
+            request_id=f"workspace-command-{command_name}",
+            purpose="command",
+        )
 
     def _setup_logging(self):
         formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
@@ -567,77 +603,119 @@ class FlexibleAgentRuntime:
                 return backend.get("model", "unknown")
         return "unknown"
 
-    def _init_anatta_layer(self) -> None:
-        try:
-            from orchestrator.anatta import build_anatta_layer
+    def reload_post_turn_observers(self) -> None:
+        from orchestrator.post_turn_registry import build_post_turn_observers
 
-            self.anatta = build_anatta_layer(
+        try:
+            self._post_turn_observers = build_post_turn_observers(
                 workspace_dir=self.workspace_dir,
                 bridge_memory_store=self.memory_store,
-                backend_manager=self.backend_manager,
+                backend_invoker=getattr(self.backend_manager, "generate_ephemeral_response", None),
+                backend_context_getter=self._current_backend_context,
             )
-            self.logger.info("Anatta layer initialized (mode=%s)", self.anatta.mode())
+            self._pre_turn_context_providers = [
+                observer for observer in self._post_turn_observers
+                if isinstance(observer, PreTurnContextProvider)
+            ]
+            self.logger.info(
+                "Turn observers initialized: post_count=%s pre_count=%s",
+                len(self._post_turn_observers),
+                len(self._pre_turn_context_providers),
+            )
         except Exception as exc:
-            self.anatta = None
-            self.logger.warning("Failed to initialize Anatta layer: %s", exc)
+            self._post_turn_observers = []
+            self._pre_turn_context_providers = []
+            self.logger.warning("Failed to initialize post-turn observers: %s", exc)
 
-    def _anatta_mode(self) -> str:
-        if self.anatta is None:
-            return "off"
-        try:
-            return str(self.anatta.mode())
-        except Exception:
-            return "off"
-
-    def _build_anatta_turn_context(self, item: QueuedRequest, user_text: str):
-        from orchestrator.anatta import TurnContext
-
-        metadata = {
-            "request_id": item.request_id,
-            "summary": item.summary,
-            "source": item.source,
-        }
-        relationship_key = None
-        if self.anatta is not None:
-            relationship_key = self.anatta.resolve_relationship_key(
-                source=item.source,
-                chat_id=item.chat_id,
-                metadata=metadata,
-            )
-        return TurnContext(
-            user_text=user_text,
-            source=item.source,
+    async def _build_pre_turn_context_sections(
+        self,
+        item: QueuedRequest,
+        user_text: str,
+        *,
+        is_bridge_request: bool,
+    ) -> list[tuple[str, str]]:
+        if not self._pre_turn_context_providers:
+            return []
+        request = TurnContextRequest(
             request_id=item.request_id,
-            relationship_key=relationship_key,
-            bridge_recent_turns=self.memory_store.get_recent_turns(limit=8),
-            bridge_memories=self.memory_store.retrieve_memories(user_text, limit=6),
-            metadata=metadata,
+            source=item.source,
+            user_text=user_text,
+            model_name=self.get_current_model(),
+            chat_id=item.chat_id,
+            summary=item.summary,
+            metadata={},
         )
+        sections: list[tuple[str, str]] = []
+        for provider in self._pre_turn_context_providers:
+            try:
+                if not provider.should_provide(item.source, is_bridge_request=is_bridge_request):
+                    continue
+                provider_sections = await provider.build_context_sections(request)
+                sections.extend(provider_sections)
+            except Exception as exc:
+                self.logger.warning(
+                    "Pre-turn context provider failed for %s via %s: %s",
+                    item.request_id,
+                    type(provider).__name__,
+                    exc,
+                )
+        return sections
 
-    async def _run_anatta_shadow(self, item: QueuedRequest, user_text: str, assistant_text: str) -> None:
-        if self.anatta is None or self._anatta_mode() != "shadow":
+    def _schedule_post_turn_observers(
+        self,
+        item: QueuedRequest,
+        user_text: str,
+        assistant_text: str,
+        *,
+        is_bridge_request: bool,
+    ) -> None:
+        if not self._post_turn_observers:
             return
-        turn_context = self._build_anatta_turn_context(item, user_text)
-        state, _ = await self.anatta.build_turn_state(turn_context, self.get_current_model())
-        await self.anatta.record_async(turn_context, assistant_text, state)
-        self.logger.info(
-            "Anatta shadow recorded for %s (dominant_drives=%s)",
-            item.request_id,
-            ",".join(state.dominant_drives),
+        request = TurnObservationRequest(
+            request_id=item.request_id,
+            source=item.source,
+            user_text=user_text,
+            assistant_text=assistant_text,
+            model_name=self.get_current_model(),
+            chat_id=item.chat_id,
+            summary=item.summary,
+            metadata={},
         )
+        for observer in self._post_turn_observers:
+            try:
+                if observer.should_observe(item.source, is_bridge_request=is_bridge_request):
+                    observer.schedule_observation(request, self._background_tasks)
+            except Exception as exc:
+                self.logger.warning(
+                    "Post-turn observer failed to schedule for %s via %s: %s",
+                    item.request_id,
+                    type(observer).__name__,
+                    exc,
+                )
 
-    def _schedule_anatta_shadow(self, item: QueuedRequest, user_text: str, assistant_text: str) -> None:
-        if self.anatta is None or self._anatta_mode() != "shadow":
-            return
-        task = asyncio.create_task(self._run_anatta_shadow(item, user_text, assistant_text))
+    def _observer_workspace_keep_names(self) -> set[str]:
+        keep_names: set[str] = set()
+        for observer in self._post_turn_observers:
+            try:
+                keep_names.update(str(name) for name in observer.workspace_files_to_preserve())
+            except Exception as exc:
+                self.logger.warning(
+                    "Post-turn observer failed to report preserved files via %s: %s",
+                    type(observer).__name__,
+                    exc,
+                )
+        return keep_names
 
-        def _done_callback(completed: asyncio.Task) -> None:
-            with suppress(asyncio.CancelledError):
-                exc = completed.exception()
-                if exc:
-                    self.logger.warning("Anatta shadow task failed for %s: %s", item.request_id, exc)
-
-        task.add_done_callback(_done_callback)
+    def _current_backend_context(self) -> dict[str, str] | None:
+        current_backend = getattr(self.backend_manager, "current_backend", None)
+        if current_backend is None:
+            return None
+        config = getattr(current_backend, "config", None)
+        engine = str(getattr(config, "engine", "") or "").strip()
+        model = str(getattr(config, "model", "") or "").strip()
+        if not engine or not model:
+            return None
+        return {"engine": engine, "model": model}
 
     def _get_system_prompt_text(self) -> str:
         """Return combined system prompt text for token estimation (CLI backends)."""
@@ -1851,6 +1929,7 @@ class FlexibleAgentRuntime:
         self.app.add_handler(CommandHandler("long", self._wrap_cmd("long", self.cmd_long)))
         self.app.add_handler(CommandHandler("end", self._wrap_cmd("end", self.cmd_end)))
         self.app.add_handler(CommandHandler("remote", self._wrap_cmd("remote", self.cmd_remote)))
+        self.app.add_handler(MessageHandler(filters.COMMAND, self.handle_workspace_command))
         self.app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), self.handle_message))
         self.app.add_handler(MessageHandler(filters.PHOTO, self.handle_photo))
         self.app.add_handler(MessageHandler(filters.VOICE, self.handle_voice))
@@ -5560,7 +5639,7 @@ class FlexibleAgentRuntime:
             active_skill_provider=self._get_active_skill_sections,
             sys_prompt_manager=self.sys_prompt_manager,
         )
-        self._init_anatta_layer()
+        self.reload_post_turn_observers()
 
         # Re-init habit store (wipe/reset deletes habits.sqlite)
         self.habit_store = HabitStore(
@@ -5583,7 +5662,7 @@ class FlexibleAgentRuntime:
         await self._reply_text(
             update,
             f"✅ Wiped workspace for {self.name}. Removed {removed_dirs} dirs and {removed_files} files.\n"
-            "Only agent.md instructions remain. Start fresh with /new.",
+            "Only agent instructions remain. Start fresh with /new.",
         )
 
     async def cmd_reset(self, update: Update, context: Any):
@@ -5613,7 +5692,8 @@ class FlexibleAgentRuntime:
             )
             return
 
-        keep_names = {"agent.md", "AGENT.md", "sys_prompts.json"}
+        keep_names = {"agent.md", "AGENT.md", "sys_prompts.json", "post_turn_observers.json", "workspace_commands.json"}
+        keep_names.update(self._observer_workspace_keep_names())
         removed_files = 0
         removed_dirs = 0
 
@@ -5653,7 +5733,7 @@ class FlexibleAgentRuntime:
             active_skill_provider=self._get_active_skill_sections,
             sys_prompt_manager=self.sys_prompt_manager,
         )
-        self._init_anatta_layer()
+        self.reload_post_turn_observers()
 
         # Re-init habit store (wipe/reset deletes habits.sqlite)
         self.habit_store = HabitStore(
@@ -7099,7 +7179,12 @@ class FlexibleAgentRuntime:
                     self.memory_store.record_turn("user", item.source, memory_user_text)
                     self.memory_store.record_turn("assistant", self.config.active_backend, display_text or response.text)
                     self.memory_store.record_exchange(memory_user_text, display_text or response.text, item.source)
-                    self._schedule_anatta_shadow(item, memory_user_text, display_text or response.text)
+                    self._schedule_post_turn_observers(
+                        item,
+                        memory_user_text,
+                        display_text or response.text,
+                        is_bridge_request=False,
+                    )
                 self.handoff_builder.append_transcript("user", item.prompt, item.source)
                 self.handoff_builder.append_transcript("assistant", display_text or response.text)
                 self.handoff_builder.refresh_recent_context()
@@ -7190,6 +7275,11 @@ class FlexibleAgentRuntime:
                 effective_prompt = self._consume_session_primer(item)
                 habit_sections, habit_ids = self._build_habit_sections(item, effective_prompt)
                 self.current_request_meta["habit_ids"] = habit_ids
+                pre_turn_sections = await self._build_pre_turn_context_sections(
+                    item,
+                    effective_prompt,
+                    is_bridge_request=is_bridge_request,
+                )
                 # In fixed mode with an active session, use incremental prompts
                 _incremental = (
                     self.backend_manager.agent_mode == "fixed"
@@ -7199,7 +7289,7 @@ class FlexibleAgentRuntime:
                 _prompt_payload = self.context_assembler.build_prompt_payload(
                     effective_prompt,
                     self.config.active_backend,
-                    extra_sections=habit_sections,
+                    extra_sections=[*habit_sections, *pre_turn_sections],
                     inject_memory=not item.skip_memory_injection,
                     incremental=_incremental,
                 )
@@ -7530,7 +7620,12 @@ class FlexibleAgentRuntime:
                             self.memory_store.record_turn("user", item.source, memory_user_text)
                             self.memory_store.record_turn("assistant", self.config.active_backend, display_text or response.text)
                             self.memory_store.record_exchange(memory_user_text, display_text or response.text, item.source)
-                            self._schedule_anatta_shadow(item, memory_user_text, display_text or response.text)
+                            self._schedule_post_turn_observers(
+                                item,
+                                memory_user_text,
+                                display_text or response.text,
+                                is_bridge_request=is_bridge_request,
+                            )
                         if not is_bridge_request:
                             self.handoff_builder.append_transcript("user", item.prompt, item.source)
                             self.handoff_builder.append_transcript("assistant", display_text or response.text)
@@ -7631,7 +7726,7 @@ class FlexibleAgentRuntime:
                     self.queue.task_done()
 
     def get_bot_commands(self) -> list[BotCommand]:
-        return [
+        commands = [
             BotCommand("help", "Show help menu"),
             BotCommand("start", "Start another stopped agent"),
             BotCommand("agents", "List all agents with controls; add <id> <name> [token]"),
@@ -7677,6 +7772,13 @@ class FlexibleAgentRuntime:
             BotCommand("sys", "Manage system prompt slots"),
             BotCommand("credit", "Check API credit/usage"),
         ]
+        registered = {command.command for command in commands}
+        for spec in available_workspace_commands(self.workspace_dir):
+            if spec.name in registered or not self._is_command_allowed(spec.name):
+                continue
+            commands.append(BotCommand(spec.name, spec.description or "Workspace command"))
+            registered.add(spec.name)
+        return commands
 
     async def shutdown(self):
         self.logger.info(f"Shutting down flex agent '{self.name}'...")

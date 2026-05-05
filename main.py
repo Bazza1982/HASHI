@@ -798,6 +798,8 @@ class UniversalOrchestrator:
                         await rt.shutdown()
                         bridge_logger.error(f"{rt.name}: flex initialize() returned False")
                         return False, f"Flex initialization for '{rt.name}' failed."
+                    if hasattr(rt, "reload_post_turn_observers"):
+                        rt.reload_post_turn_observers()
                 rt.backend_ready = True
                 bridge_logger.info(f"{rt.name}: backend ready (attempt {attempt}/3)")
                 break
