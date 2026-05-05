@@ -26,7 +26,7 @@ from typing import Any
 from aiohttp import web
 
 from adapters.registry import get_backend_class
-from orchestrator.agent_runtime import (
+from orchestrator.model_catalog import (
     AVAILABLE_CLAUDE_MODELS,
     AVAILABLE_CODEX_MODELS,
     AVAILABLE_GEMINI_MODELS,

@@ -22,7 +22,15 @@ from telegram.error import TimedOut as TelegramTimedOut
 from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
-from orchestrator.agent_runtime import QueuedRequest, _safe_excerpt, _md_to_html, _print_user_message, _print_final_response, _print_thinking, resolve_authorized_telegram_ids
+from orchestrator.runtime_common import (
+    QueuedRequest,
+    _md_to_html,
+    _print_final_response,
+    _print_thinking,
+    _print_user_message,
+    _safe_excerpt,
+    resolve_authorized_telegram_ids,
+)
 from orchestrator.agent_fyi import build_agent_fyi_primer
 from orchestrator.bridge_memory import BridgeMemoryStore, BridgeContextAssembler, SysPromptManager
 from orchestrator.command_registry import bind_runtime_commands, runtime_bot_commands
@@ -1670,7 +1678,7 @@ class FlexibleAgentRuntime:
         return "\n".join(lines)
 
     async def _render_skill_jobs(self, update_or_query, kind: str):
-        from orchestrator.agent_runtime import _build_jobs_with_buttons
+        from orchestrator.runtime_jobs import _build_jobs_with_buttons
         text, markup = _build_jobs_with_buttons(self.name, self.skill_manager, filter_agent=self.name)
         if hasattr(update_or_query, "edit_message_text"):
             await update_or_query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
@@ -4168,7 +4176,7 @@ class FlexibleAgentRuntime:
             await self._reply_text(update, "No task scheduler configured.")
             return
         if not args or args[0].strip().lower() in {"list", "show"}:
-            from orchestrator.agent_runtime import _build_jobs_with_buttons
+            from orchestrator.runtime_jobs import _build_jobs_with_buttons
             text, markup = _build_jobs_with_buttons(self.name, self.skill_manager, filter_agent=self.name)
             await self._reply_text(update, text, parse_mode="HTML", reply_markup=markup)
             return
@@ -4254,7 +4262,7 @@ class FlexibleAgentRuntime:
     async def cmd_jobs(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
-        from orchestrator.agent_runtime import _build_jobs_with_buttons
+        from orchestrator.runtime_jobs import _build_jobs_with_buttons
         arg = (context.args[0].strip().lower() if context.args else "")
         if arg == "all":
             filter_agent = None
@@ -4953,7 +4961,7 @@ class FlexibleAgentRuntime:
         if not self._is_authorized_user(update.effective_user.id):
             return
         import asyncio
-        from orchestrator.agent_runtime import _show_logo_animation
+        from orchestrator.runtime_display import _show_logo_animation
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, _show_logo_animation)
         await self._reply_text(update, "Logo displayed in console.")

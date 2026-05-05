@@ -12,7 +12,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.modules.setdefault("edge_tts", SimpleNamespace())
 
-from orchestrator.agent_runtime import QueuedRequest
+from orchestrator.runtime_common import QueuedRequest
 from orchestrator import flexible_agent_runtime as flex_module
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.habits import HabitStore
