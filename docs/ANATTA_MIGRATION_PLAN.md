@@ -12,8 +12,18 @@ Anatta should not be merged directly from HASHI2 into HASHI1.
 HASHI2 contains useful Anatta work, but the branch also contains unrelated
 launch-script changes, old lifecycle edits, a separate workspace command
 registry, and a backend-manager change that conflicts with HASHI1's audit and
-wrapper sidecar requirements. The migration should cherry-pick Anatta concepts
-and modules, then reconnect them to HASHI1's current runtime APIs.
+wrapper sidecar requirements. The migration should use the HASHI2 Anatta
+commits as reviewable source checkpoints, copy or adapt files manually, and
+then reconnect them to HASHI1's current runtime APIs.
+
+Current HASHI2 source checkpoints:
+
+- `2d5a090` `Refine Anatta emotional state calibration`
+- `41519d1` `Add Anatta turn observer integration`
+- `8fc85fd` `Add Anatta diagnostics and calibration tests`
+
+These commits are source material only. They should not be merged wholesale
+into HASHI1.
 
 ## Goals
 
@@ -37,6 +47,13 @@ and modules, then reconnect them to HASHI1's current runtime APIs.
 - Do not introduce a second command registry. Any Anatta commands should use
   HASHI1's existing `orchestrator.command_registry` path.
 - Do not make wrapper mode a dependency for Anatta. Wrapper can remain off.
+- Do not port `tools/deploy_soul.py` as part of this migration. It can write
+  `secrets.json` and Telegram tokens and belongs to a separate Soul Repository
+  review.
+- Do not port `docs/SOUL_REPOSITORY.md` as part of this migration unless the
+  Soul Repository feature is reviewed separately.
+- Do not copy HASHI2's `main.py`, runtime lifecycle, or admin testing edits
+  directly. Add equivalent hooks manually in HASHI1's current lifecycle.
 
 ## Desired Architecture
 
@@ -110,6 +127,31 @@ The audit follow-up should keep receiving:
 It should not require the full private Anatta injection text. If audit needs
 extra context later, add a small telemetry field such as `anatta_mode` and
 `anatta_injected=true`, not the full internal Anatta prompt body by default.
+The evidence writer must not persist the full Anatta injection body unless a
+separate explicit debugging mode is enabled.
+
+## Sidecar Invoker Requirement
+
+Anatta needs an LLM sidecar invoker for emotional interpretation and event
+consolidation. HASHI1 does not currently expose a generic Anatta-ready invoker.
+
+Before wiring Anatta into the runtime, add a HASHI1-owned sidecar invocation
+adapter. It may live in `orchestrator/ephemeral_invoker.py` or behind a private
+runtime method such as `_make_sidecar_invoker()`.
+
+Required properties:
+
+- use the active core backend by default, not the audit backend
+- do not mutate core conversation state
+- expose a small async API suitable for Anatta, such as prompt plus model
+  context and request id
+- log start, completion, latency, model/backend identity, and failures
+- fail closed: Anatta sidecar failures should disable the observation for that
+  turn, not block the user response
+- remain separate from audit mode's sidecar backend selection
+
+This adapter replaces the need to port HASHI2's
+`flexible_backend_manager.generate_ephemeral_response` implementation.
 
 ## Source Policy
 
@@ -127,13 +169,25 @@ Recommended default:
 This keeps Anatta focused on personality and relationship effects in real
 conversation while avoiding hidden changes to operational messages.
 
+Where practical, reuse HASHI1's existing audit bypass/source naming instead of
+creating a second divergent source list.
+
 ## Migration Phases
 
 ### Phase 0: Baseline and Rollback Point
 
 1. Confirm HASHI1 worktree is clean.
 2. Record current HEAD as the rollback point.
-3. Run targeted baseline tests:
+3. Confirm the HASHI2 source checkpoint commits are present:
+
+```bash
+git -C /home/lily/projects/hashi2 show --stat 2d5a090 41519d1 8fc85fd
+```
+
+4. Treat HASHI2 commits as source material only. Do not use `git cherry-pick`
+   into HASHI1 unless a commit has been reviewed and proven to contain only a
+   compatible, self-contained change.
+5. Run targeted baseline tests:
 
 ```bash
 pytest -q tests/test_command_registry.py tests/test_audit_mode.py tests/test_agent_runtime_job_transfer.py
@@ -145,8 +199,10 @@ the repo.
 
 ### Phase 1: Port Anatta Core Modules Without Runtime Integration
 
-Cherry-pick the Anatta domain modules from HASHI2:
+Copy and review the Anatta domain modules from HASHI2 source checkpoint
+`2d5a090`, plus existing committed Anatta base files as needed:
 
+- `orchestrator/anatta/__init__.py`
 - `orchestrator/anatta/models.py`
 - `orchestrator/anatta/config.py`
 - `orchestrator/anatta/memory.py`
@@ -159,6 +215,14 @@ Cherry-pick the Anatta domain modules from HASHI2:
 - `orchestrator/anatta/layer.py`
 
 Do not integrate these modules into runtime flow yet.
+
+Before committing Phase 1, decide whether hard-coded relationship/personality
+cue dictionaries in `llm_interpreter.py` and `config.py` are acceptable in repo
+history or should be externalized into workspace configuration.
+
+Confirm whether `bridge_adapter.py` still contains unresolved placeholders. If
+`resolve_bridge_row()` or similar integration is deferred, document the
+deferred behavior clearly and ensure tests do not silently depend on it.
 
 Bring over focused tests first:
 
@@ -195,12 +259,37 @@ Add tests for:
 - disabled observers are ignored
 - valid factory loads successfully
 
+Before proceeding to runtime wiring, run:
+
+```bash
+pytest -q tests/test_post_turn_registry.py
+python -m py_compile orchestrator/post_turn_observer.py orchestrator/post_turn_registry.py
+```
+
 Expected outcome: the core runtime can load optional observers without knowing
 about Anatta.
 
-### Phase 3: Integrate Generic Hooks Into HASHI1 Runtime
+### Phase 3: Add HASHI1 Sidecar Invoker
+
+Implement the sidecar invoker described above before Anatta runtime integration.
+
+Tests should cover:
+
+- successful sidecar response using a fake backend
+- backend failure logs warning and returns a controlled failure
+- sidecar call does not mutate the core conversation transcript
+- audit backend configuration does not affect Anatta sidecar backend selection
+
+Expected outcome: Anatta can call a sidecar interpreter through a HASHI1-owned
+abstraction without porting HASHI2's backend-manager implementation.
+
+### Phase 4: Integrate Generic Hooks Into HASHI1 Runtime
 
 Modify HASHI1's current runtime manually. Do not copy HASHI2's old runtime file.
+Use HASHI2 commit `41519d1` only as a diff reference. Review each hunk in
+`orchestrator/flexible_agent_runtime.py` and port only observer reload,
+pre-turn context, post-turn scheduling, and preservation logic that matches
+HASHI1's current runtime.
 
 Add runtime state:
 
@@ -240,7 +329,7 @@ Preserve workspace files during reset/wipe:
 Expected outcome: generic observer infrastructure exists, but Anatta remains
 optional and config-gated.
 
-### Phase 4: Add Anatta Observer Adapter
+### Phase 5: Add Anatta Observer Adapter
 
 Port:
 
@@ -255,30 +344,9 @@ Required behavior:
 - `off`: does nothing
 - failed Anatta background task logs a warning and does not affect user delivery
 - state cache has a TTL and max size
+- audit evidence does not persist the full Anatta injection body by default
 
 Expected outcome: Anatta can be enabled per workspace through config.
-
-### Phase 5: Reconcile Commands and Diagnostics
-
-Do not port HASHI2's `extension_command_registry.py` as-is.
-
-Instead, adapt Anatta command support to HASHI1's existing command registry:
-
-- add a public or private `/anatta` runtime command only if needed
-- keep diagnostics in `tools/anatta_diagnostics.py`
-- ensure diagnostics do not expose sensitive memory content by default
-
-Optional command behavior:
-
-```text
-/anatta status
-/anatta shadow
-/anatta on
-/anatta off
-```
-
-Expected outcome: Anatta can be operated without adding a parallel command
-system.
 
 ### Phase 6: Audit Plus Anatta Acceptance Tests
 
@@ -318,7 +386,31 @@ pytest -q \
 
 Expected outcome: Anatta and audit mode are explicitly compatible.
 
-### Phase 7: Controlled Workspace Trial
+### Phase 7: Reconcile Commands and Diagnostics
+
+Do not port HASHI2's `extension_command_registry.py` as-is.
+
+Instead, adapt Anatta command support to HASHI1's existing command registry:
+
+- add a public or private `/anatta` runtime command only if needed
+- keep diagnostics in `tools/anatta_diagnostics.py`
+- ensure diagnostics do not expose sensitive memory content by default
+- include safe example config files for `anatta_config.json` and
+  `post_turn_observers.json`
+
+Optional command behavior:
+
+```text
+/anatta status
+/anatta shadow
+/anatta on
+/anatta off
+```
+
+Expected outcome: Anatta can be operated without adding a parallel command
+system.
+
+### Phase 8: Controlled Workspace Trial
 
 Use one isolated test workspace before enabling live agents.
 
@@ -367,6 +459,7 @@ Anatta personality impact and audit compatibility.
 | Import safety | `python -m py_compile orchestrator/anatta/*.py` |
 | Anatta semantics | `pytest -q tests/test_anatta_semantic_calibration.py` |
 | Observer loading | `pytest -q tests/test_post_turn_registry.py` |
+| Sidecar invoker | `pytest -q tests/test_ephemeral_invoker.py` |
 | Runtime integration | `pytest -q tests/test_flexible_runtime_anatta_audit.py` |
 | Existing audit | `pytest -q tests/test_audit_mode.py` |
 | Commands | `pytest -q tests/test_command_registry.py` |
@@ -395,18 +488,20 @@ The default behavior must remain no-op when no Anatta config exists.
 1. `docs: plan Anatta migration`
 2. `Add inactive Anatta core modules`
 3. `Add post-turn observer registry`
-4. `Wire observer hooks into flexible runtime`
-5. `Add Anatta observer adapter`
-6. `Add Anatta diagnostics and command`
+4. `Add sidecar invoker for Anatta`
+5. `Wire observer hooks into flexible runtime`
+6. `Add Anatta observer adapter`
 7. `Validate Anatta with audit mode`
+8. `Add Anatta diagnostics and command`
 
 ## Open Decisions
 
 - Whether Anatta should observe HChat conversations. Recommendation: keep it
   disabled for HChat initially unless a specific agent workflow needs it.
 - Whether Anatta sidecar interpretation should use the active core model or a
-  configured sidecar model. Recommendation: use HASHI1's existing ephemeral
-  backend invoker first, then add config later if needed.
+  configured sidecar model. Recommendation: use a new HASHI1-owned sidecar
+  invoker against the active core backend first, then add config later if
+  needed.
 - Whether audit reports should include Anatta internals. Recommendation: audit
   output behavior first; expose only small Anatta telemetry fields unless a
   debugging mode is explicitly enabled.
