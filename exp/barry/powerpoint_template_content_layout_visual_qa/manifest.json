@@ -1,0 +1,38 @@
+{
+  "id": "barry/powerpoint_template_content_layout_visual_qa",
+  "type": "exp",
+  "version": 1,
+  "owner": "barry",
+  "domain": "powerpoint_template_content_layout_visual_qa",
+  "status": "candidate",
+  "summary": "Candidate EXP for filling user-selected PowerPoint templates with compressed outline content and validating the deck through real PowerPoint visual QA.",
+  "context": {
+    "user": "Barry",
+    "task_family": "Generic PowerPoint template filling, layout, and visual QA",
+    "primary_training_run": "training_runs/ai_truths_template_fill_001/RUN.md",
+    "output_focus": [
+      "template-first PowerPoint deck creation",
+      "outline compression for low-density presentation slides",
+      "placeholder and layout selection",
+      "fallback text boxes when placeholders are absent",
+      "versioned output generation",
+      "desktop PowerPoint screenshot verification"
+    ]
+  },
+  "training_runs": {
+    "ai_truths_template_fill_001": "training_runs/ai_truths_template_fill_001/RUN.md"
+  },
+  "playbooks": {
+    "template_content_layout_visual_qa": "playbooks/template_content_layout_visual_qa.exp.md"
+  },
+  "validators": [
+    "validators/powerpoint_visual_qa_validators.md"
+  ],
+  "failure_memory": "failures/failure_memory.jsonl",
+  "scope_limits": [
+    "This is a generic candidate workflow, not a stable PowerPoint skill yet.",
+    "Do not accept structure-only validation for PowerPoint deliverables.",
+    "Do not overwrite an output deck currently open in PowerPoint; create a new version.",
+    "Do not assume python-pptx placeholders map cleanly to every template layout."
+  ]
+}
