@@ -51,6 +51,8 @@ def _make_runtime(manager: FlexibleBackendManager) -> tuple[FlexibleAgentRuntime
     runtime = object.__new__(FlexibleAgentRuntime)
     runtime.backend_manager = manager
     runtime.config = manager.config
+    runtime._post_turn_observers = []
+    runtime._pre_turn_context_providers = []
     runtime._is_authorized_user = lambda user_id: user_id == 1
     runtime._backend_busy = lambda: False
     runtime._workzone_dir = None
@@ -263,10 +265,12 @@ def _make_background_runtime(tmp_path: Path, wrapper_response: BackendResponse |
     runtime._verbose = False
     runtime.last_response = None
     runtime.logger = SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None)
-    runtime.error_logger = SimpleNamespace(error=lambda *a, **k: None)
+    runtime.error_logger = SimpleNamespace(error=lambda *a, **k: None, exception=lambda *a, **k: None)
     runtime._request_listeners = {}
     runtime._pending_request_results = {}
     runtime._suppressed_transfer_results = []
+    runtime._post_turn_observers = []
+    runtime._pre_turn_context_providers = []
 
     async def fake_wrapper_response(**kwargs):
         return wrapper_response or BackendResponse(text="wrapped visible", duration_ms=1.0)
@@ -1279,7 +1283,7 @@ async def test_background_voice_source_wraps(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_background_hchat_source_bypasses_wrapper(tmp_path):
+async def test_background_hchat_source_wraps(tmp_path):
     runtime, sent, voices = _make_background_runtime(tmp_path)
     item = _queued_request_from("bridge:hchat")
     task = asyncio.create_task(_completed_task(BackendResponse(text="core raw hchat", duration_ms=1.0)))
@@ -1287,8 +1291,8 @@ async def test_background_hchat_source_bypasses_wrapper(tmp_path):
 
     await FlexibleAgentRuntime._on_background_complete(runtime, task, item)
 
-    assert sent[0]["text"] == "core raw hchat"
-    assert voices[0]["text"] == "core raw hchat"
+    assert sent[0]["text"] == "wrapped visible"
+    assert voices[0]["text"] == "wrapped visible"
 
 
 @pytest.mark.asyncio

@@ -26,6 +26,7 @@ from orchestrator.wrapper_mode import (
 def test_should_wrap_user_sources():
     for source in [
         "api",
+        "bridge:hchat",
         "text",
         "voice",
         "voice_transcript",
@@ -40,12 +41,17 @@ def test_should_wrap_user_sources():
 
 
 def test_should_bypass_automation_sources():
-    for source in ["startup", "system", "scheduler", "scheduler-skill", "loop_skill", "bridge:hchat", "retry"]:
+    for source in ["startup", "system", "scheduler", "scheduler-skill", "loop_skill", "retry"]:
         assert not should_wrap_source(source)
 
 
+def test_should_wrap_hchat_reply_sources():
+    assert should_wrap_source("hchat-reply:akane")
+    assert should_wrap_source(" HCHAT-REPLY:AKANE ")
+
+
 def test_should_bypass_prefix_sources():
-    for source in ["bridge:mailbox", "bridge-transfer:handoff", "hchat-reply:akane", "ticket:123", "cos-query:status"]:
+    for source in ["bridge:mailbox", "bridge-transfer:handoff", "ticket:123", "cos-query:status"]:
         assert not should_wrap_source(source)
 
 
@@ -57,7 +63,7 @@ def test_unknown_sources_default_to_bypass():
 
 def test_source_normalization_is_case_and_space_insensitive():
     assert should_wrap_source(" TEXT ")
-    assert not should_wrap_source(" BRIDGE:HCHAT ")
+    assert should_wrap_source(" BRIDGE:HCHAT ")
 
 
 def test_load_wrapper_config_uses_hashi1_defaults():

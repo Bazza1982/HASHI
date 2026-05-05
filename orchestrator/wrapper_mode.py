@@ -27,6 +27,7 @@ BackendInvoker = Callable[..., Awaitable[Any]]
 USER_WRAPPABLE_SOURCES = frozenset(
     {
         "api",
+        "bridge:hchat",
         "text",
         "voice",
         "voice_transcript",
@@ -46,18 +47,24 @@ WRAPPER_BYPASS_SOURCES = frozenset(
         "scheduler",
         "scheduler-skill",
         "loop_skill",
-        "bridge:hchat",
         "retry",
     }
+)
+
+WRAPPER_WRAPPABLE_PREFIXES = (
+    "hchat-reply:",
 )
 
 WRAPPER_BYPASS_PREFIXES = (
     "bridge:",
     "bridge-transfer:",
-    "hchat-reply:",
     "ticket:",
     "cos-query:",
 )
+
+# Known user-visible raw-core gaps: scheduler, scheduler-skill, loop_skill,
+# retry, and cos-query paths may need richer output-audience metadata before
+# they can be wrapped without risking internal protocol/control rewrites.
 
 
 @dataclass(frozen=True)
@@ -87,9 +94,13 @@ def should_wrap_source(source: str | None) -> bool:
     normalized = normalize_source(source)
     if normalized in WRAPPER_BYPASS_SOURCES:
         return False
+    if normalized in USER_WRAPPABLE_SOURCES:
+        return True
     if normalized.startswith(WRAPPER_BYPASS_PREFIXES):
         return False
-    return normalized in USER_WRAPPABLE_SOURCES
+    if normalized.startswith(WRAPPER_WRAPPABLE_PREFIXES):
+        return True
+    return False
 
 
 def load_wrapper_config(state: Mapping[str, Any] | None) -> WrapperConfig:
@@ -439,6 +450,7 @@ __all__ = [
     "USER_WRAPPABLE_SOURCES",
     "WRAPPER_BYPASS_PREFIXES",
     "WRAPPER_BYPASS_SOURCES",
+    "WRAPPER_WRAPPABLE_PREFIXES",
     "WrapperConfig",
     "WrapperProcessor",
     "WrapperResult",
