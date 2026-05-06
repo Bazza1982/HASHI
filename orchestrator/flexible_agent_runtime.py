@@ -25,6 +25,7 @@ from orchestrator.config import FlexibleAgentConfig, GlobalConfig
 from orchestrator import runtime_audit
 from orchestrator import runtime_delivery
 from orchestrator import runtime_media
+from orchestrator import runtime_remote
 from orchestrator import runtime_transfer
 from orchestrator import runtime_wrapper
 from orchestrator.runtime_common import (
@@ -2446,18 +2447,7 @@ class FlexibleAgentRuntime:
 
     # ── /move command ────────────────────────────────────────────────────────
     def _load_instances(self) -> dict:
-        """Load instances.json from the project root or ~/.hashi/instances.json."""
-        candidates = [
-            Path(__file__).parent.parent / "instances.json",
-            Path.home() / ".hashi" / "instances.json",
-        ]
-        for p in candidates:
-            if p.exists():
-                import json as _json
-                with open(p) as f:
-                    data = _json.load(f)
-                return data.get("instances", {})
-        return {}
+        return runtime_remote.load_instances()
 
     async def cmd_move(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -2499,58 +2489,13 @@ class FlexibleAgentRuntime:
         await self._move_show_agent_picker(update, instances)
 
     async def _move_show_agent_picker(self, update: Update, instances: dict):
-        """Step 1: pick which agent to move (from current instance)."""
-        import json as _json
-        root = Path(__file__).parent.parent
-        try:
-            with open(root / "agents.json") as f:
-                data = _json.load(f)
-            agents = data if isinstance(data, list) else data.get("agents", [])
-            agent_names = [ag.get("name") or ag.get("id", "?") for ag in agents if ag.get("name")]
-        except Exception:
-            agent_names = []
-
-        if not agent_names:
-            await self._reply_text(update, "No agents found in this instance.")
-            return
-
-        rows = [[InlineKeyboardButton(f"🤖 {name}", callback_data=f"move:agent:{name}")]
-                for name in agent_names]
-        markup = InlineKeyboardMarkup(rows)
-        await self._reply_text(update, "<b>Move Agent</b> — select agent to move:", parse_mode="HTML", reply_markup=markup)
+        await runtime_remote.move_show_agent_picker(self, update, instances)
 
     async def _move_show_target_picker(self, update: Update, agent_id: str, instances: dict):
-        """Step 2: pick target instance."""
-        rows = []
-        for name, inst in instances.items():
-            label = inst.get("display_name", name)
-            rows.append([InlineKeyboardButton(f"📦 {label}", callback_data=f"move:target:{agent_id}:{name}")])
-        markup = InlineKeyboardMarkup(rows)
-        await self._reply_text(
-            update,
-            f"<b>Move <code>{agent_id}</code></b> — select target instance:",
-            parse_mode="HTML",
-            reply_markup=markup,
-        )
+        await runtime_remote.move_show_target_picker(self, update, agent_id, instances)
 
     async def _move_show_options(self, update, agent_id: str, target: str):
-        """Step 3: show move options (keep source / sync / encrypt)."""
-        markup = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("🔒 Move + Encrypt", callback_data=f"move:exec:{agent_id}:{target}:enc"),
-                InlineKeyboardButton("📋 Move Plain", callback_data=f"move:exec:{agent_id}:{target}:plain"),
-            ],
-            [
-                InlineKeyboardButton("📂 Copy (keep source)", callback_data=f"move:exec:{agent_id}:{target}:keep"),
-                InlineKeyboardButton("🔄 Sync memories", callback_data=f"move:exec:{agent_id}:{target}:sync"),
-            ],
-            [InlineKeyboardButton("❌ Cancel", callback_data="move:cancel")],
-        ])
-        await update.callback_query.edit_message_text(
-            f"<b>Move <code>{agent_id}</code> → {target}</b>\n\nChoose move mode:",
-            parse_mode="HTML",
-            reply_markup=markup,
-        )
+        await runtime_remote.move_show_options(self, update, agent_id, target)
 
     async def _do_move(self, update, agent_id: str, target: str, instances: dict,
                        keep_source: bool = False, sync: bool = False, dry_run: bool = False):
