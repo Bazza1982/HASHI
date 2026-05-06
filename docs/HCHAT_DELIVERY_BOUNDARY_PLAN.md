@@ -1,6 +1,6 @@
 # HChat Delivery Boundary Plan
 
-Status: planned after the 2026-05-07 `bridge:hchat` wrapper-bypass quick fix.
+Status: Phase A/B foundation started after the 2026-05-07 `bridge:hchat` wrapper-bypass quick fix.
 
 Owner: HASHI1 runtime.
 
@@ -9,6 +9,17 @@ Related docs:
 - `docs/WRAPPER_AGENT_MODE_PLAN.md`
 - `docs/ROADMAP.md`
 - `README.md`
+
+Current implementation record:
+
+- `orchestrator/hchat_delivery.py` defines `HChatDraft`, malformed-draft parsing,
+  format-only target validation, `HChatDeliveryResult`, attempt ids, and structured
+  log-field helpers.
+- `tests/test_hchat_delivery.py` covers valid drafts, fenced JSON, malformed
+  fixtures, command-shaped drafts, local/remote-shaped targets, delegated routing,
+  attempt ids, and structured failure results.
+- The helper is not yet connected to the live `/hchat` command path. Current live
+  behavior remains the legacy `bridge:hchat` prompt with wrapper bypass.
 
 ## 1. Problem
 
