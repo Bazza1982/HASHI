@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 import sys
@@ -90,6 +91,15 @@ class _ProjectChatLogger:
         self.exchanges.append((prompt, visible_text, source))
 
 
+class _Bot:
+    def __init__(self):
+        self.sent = []
+
+    async def send_message(self, **kwargs):
+        self.sent.append(kwargs)
+        return SimpleNamespace(message_id=77)
+
+
 def _item(**overrides):
     payload = {
         "request_id": "req-1",
@@ -152,6 +162,40 @@ def _runtime():
     runtime.memory_store = _MemoryStore()
     runtime.handoff_builder = _HandoffBuilder()
     runtime.project_chat_logger = _ProjectChatLogger()
+    runtime.app = SimpleNamespace(bot=_Bot())
+    runtime.get_typing_placeholder = lambda: ("typing", None)
+    runtime._verbose = False
+    runtime._think = False
+    runtime._think_buffer = []
+    runtime._openrouter_think_chunk = ""
+    runtime._last_openrouter_think_snippet = None
+    runtime.stream_callbacks = []
+
+    async def _typing_loop(chat_id, stop_typing):
+        await stop_typing.wait()
+
+    runtime.typing_loop = _typing_loop
+
+    async def _escalating_placeholder_loop(chat_id, placeholder, request_id, stop_typing, *, backend):
+        await stop_typing.wait()
+
+    runtime._escalating_placeholder_loop = _escalating_placeholder_loop
+
+    async def _streaming_display_loop(chat_id, placeholder, request_id, stop_typing, stream_queue, *, backend):
+        await stop_typing.wait()
+
+    runtime._streaming_display_loop = _streaming_display_loop
+
+    async def _thinking_flush_loop(chat_id, stop_typing):
+        await stop_typing.wait()
+
+    runtime._thinking_flush_loop = _thinking_flush_loop
+
+    def _make_stream_callback(**kwargs):
+        runtime.stream_callbacks.append(kwargs)
+        return ("stream", kwargs)
+
+    runtime._make_stream_callback = _make_stream_callback
     runtime.post_turn_calls = []
     runtime._core_memory_assistant_text = lambda core_raw, visible_text, wrapper_result: f"memory:{visible_text}"
     runtime._schedule_post_turn_observers = (
@@ -324,8 +368,8 @@ async def test_cleanup_interactive_feedback_stops_typing_and_deletes_placeholder
     async def _typing_task():
         await stop_typing.wait()
 
-    stop_typing = __import__("asyncio").Event()
-    typing_task = __import__("asyncio").create_task(_typing_task())
+    stop_typing = asyncio.Event()
+    typing_task = asyncio.create_task(_typing_task())
     runtime._flush_thinking = lambda chat_id: flushed.append(chat_id)
 
     async def _delete_message(**kwargs):
@@ -347,6 +391,43 @@ async def test_cleanup_interactive_feedback_stops_typing_and_deletes_placeholder
     assert typing_task.done()
     assert deleted == [{"chat_id": 123, "message_id": 99}]
     assert flushed == []
+
+
+@pytest.mark.asyncio
+async def test_setup_interactive_feedback_creates_placeholder_and_cleanup_tasks():
+    runtime = _runtime()
+
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(),
+        audit_active=False,
+        audit_collector=None,
+    )
+
+    assert runtime.app.bot.sent == [{"chat_id": 123, "text": "typing", "parse_mode": None}]
+    assert feedback.placeholder.message_id == 77
+    assert feedback.typing_task is not None
+    assert feedback.escalation_task is not None
+    assert feedback.on_stream_event is None
+    feedback.stop_typing.set()
+    await feedback.typing_task
+    await feedback.escalation_task
+
+
+@pytest.mark.asyncio
+async def test_setup_interactive_feedback_creates_audit_stream_for_silent_item():
+    runtime = _runtime()
+
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(silent=True),
+        audit_active=True,
+        audit_collector="audit",
+    )
+
+    assert feedback.placeholder is None
+    assert feedback.on_stream_event[0] == "stream"
+    assert runtime.stream_callbacks == [{"audit_collector": "audit"}]
 
 
 @pytest.mark.asyncio

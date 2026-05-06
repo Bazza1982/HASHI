@@ -7525,104 +7525,37 @@ class FlexibleAgentRuntime:
                 final_prompt = turn_prompt.final_prompt
                 _incremental = turn_prompt.incremental
                 
-                stop_typing = None
-                typing_task = None
-                escalation_task = None
-                placeholder = None
-                _stream_callback = None
                 _audit_active_for_item = self._audit_enabled() and should_audit_source(item.source)
                 _audit_collector = AuditTelemetryCollector() if _audit_active_for_item else None
-                _think_flush_task = None
-                if not item.silent and item.deliver_to_telegram:
-                    placeholder_text, placeholder_parse_mode = self.get_typing_placeholder()
-                    stop_typing = asyncio.Event()
-                    typing_task = asyncio.create_task(self.typing_loop(item.chat_id, stop_typing))
-                    try:
-                        placeholder_started = datetime.now()
-                        placeholder = await self.app.bot.send_message(
-                            chat_id=item.chat_id,
-                            text=placeholder_text,
-                            parse_mode=placeholder_parse_mode,
-                        )
-                        placeholder_elapsed_s = (datetime.now() - placeholder_started).total_seconds()
-                        self.telegram_logger.info(
-                            f"Sent placeholder for {item.request_id} "
-                            f"(elapsed_s={placeholder_elapsed_s:.2f})"
-                        )
-                    except Exception as e:
-                        self.telegram_logger.warning(f"Failed to send placeholder: {e}")
-
-                    # Verbose ON → streaming display loop; OFF → escalating placeholder.
-                    # Think ON → start thinking flush loop (independent of verbose).
-                    _stream_queue = None
-                    _think_flush_task = None
-                    _use_stream = self._verbose or self._think or _audit_active_for_item
-                    if _use_stream:
-                        if self._verbose:
-                            _stream_queue = asyncio.Queue(maxsize=200)
-                        _stream_callback = self._make_stream_callback(
-                            event_queue=_stream_queue,
-                            think_buffer=self._think_buffer if self._think else None,
-                            audit_collector=_audit_collector,
-                        )
-                    if self._verbose:
-                        escalation_task = asyncio.create_task(
-                            self._streaming_display_loop(
-                                item.chat_id,
-                                placeholder,
-                                item.request_id,
-                                stop_typing,
-                                _stream_queue,
-                                backend=self.backend_manager.current_backend,
-                            )
-                        )
-                    else:
-                        escalation_task = asyncio.create_task(
-                            self._escalating_placeholder_loop(
-                                item.chat_id,
-                                placeholder,
-                                item.request_id,
-                                stop_typing,
-                                backend=self.backend_manager.current_backend,
-                            )
-                        )
-                    if self._think:
-                        self._think_buffer.clear()
-                        self._openrouter_think_chunk = ""
-                        self._last_openrouter_think_snippet = None
-                        _think_flush_task = asyncio.create_task(
-                            self._thinking_flush_loop(item.chat_id, stop_typing)
-                        )
-
-                if _stream_callback is None and _audit_active_for_item:
-                    _stream_callback = self._make_stream_callback(audit_collector=_audit_collector)
-
-                # Resolve stream callback. Audit mode intentionally receives stream
-                # telemetry even when verbose/think display is off.
-                _on_stream = _stream_callback if (not item.silent or _audit_active_for_item) else None
+                feedback = await runtime_pipeline.setup_interactive_feedback(
+                    self,
+                    item,
+                    audit_active=_audit_active_for_item,
+                    audit_collector=_audit_collector,
+                )
 
                 generation = await runtime_pipeline.run_backend_generation(
                     self,
                     item,
                     final_prompt,
-                    on_stream_event=_on_stream,
+                    on_stream_event=feedback.on_stream_event,
                     audit_active=_audit_active_for_item,
                 )
                 response = generation.response
                 backend_started = generation.backend_started
 
                 if generation.detached:
-                    if stop_typing and typing_task:
-                        stop_typing.set()
-                        await typing_task
-                        if escalation_task is not None:
+                    if feedback.stop_typing and feedback.typing_task:
+                        feedback.stop_typing.set()
+                        await feedback.typing_task
+                        if feedback.escalation_task is not None:
                             with suppress(asyncio.CancelledError):
-                                await escalation_task
-                    if placeholder:
+                                await feedback.escalation_task
+                    if feedback.placeholder:
                         with suppress(Exception):
                             await self.app.bot.edit_message_text(
                                 chat_id=item.chat_id,
-                                message_id=placeholder.message_id,
+                                message_id=feedback.placeholder.message_id,
                                 text="⏳ Still running in the background — I'll notify you here when done! 📬",
                             )
                     setattr(item, "_audit_collector", _audit_collector)
@@ -7646,11 +7579,11 @@ class FlexibleAgentRuntime:
                 await runtime_pipeline.cleanup_interactive_feedback(
                     self,
                     item,
-                    stop_typing=stop_typing,
-                    typing_task=typing_task,
-                    escalation_task=escalation_task,
-                    think_flush_task=_think_flush_task,
-                    placeholder=placeholder,
+                    stop_typing=feedback.stop_typing,
+                    typing_task=feedback.typing_task,
+                    escalation_task=feedback.escalation_task,
+                    think_flush_task=feedback.think_flush_task,
+                    placeholder=feedback.placeholder,
                 )
 
                 # 3. Update transcript and refresh context

@@ -47,6 +47,17 @@ class SuccessfulResponse:
     wrapper_result: Any
 
 
+@dataclass(frozen=True)
+class InteractiveFeedback:
+    stop_typing: asyncio.Event | None
+    typing_task: asyncio.Task | None
+    escalation_task: asyncio.Task | None
+    placeholder: Any | None
+    stream_callback: Any | None
+    think_flush_task: asyncio.Task | None
+    on_stream_event: Any | None
+
+
 def begin_queue_item(runtime, item) -> QueueItemStart:
     if not item.silent:
         runtime.last_prompt = item
@@ -261,6 +272,92 @@ async def cleanup_interactive_feedback(
             )
         except Exception:
             pass
+
+
+async def setup_interactive_feedback(
+    runtime,
+    item,
+    *,
+    audit_active: bool,
+    audit_collector,
+) -> InteractiveFeedback:
+    stop_typing = None
+    typing_task = None
+    escalation_task = None
+    placeholder = None
+    stream_callback = None
+    think_flush_task = None
+    if not item.silent and item.deliver_to_telegram:
+        placeholder_text, placeholder_parse_mode = runtime.get_typing_placeholder()
+        stop_typing = asyncio.Event()
+        typing_task = asyncio.create_task(runtime.typing_loop(item.chat_id, stop_typing))
+        try:
+            placeholder_started = datetime.now()
+            placeholder = await runtime.app.bot.send_message(
+                chat_id=item.chat_id,
+                text=placeholder_text,
+                parse_mode=placeholder_parse_mode,
+            )
+            placeholder_elapsed_s = (datetime.now() - placeholder_started).total_seconds()
+            runtime.telegram_logger.info(
+                f"Sent placeholder for {item.request_id} "
+                f"(elapsed_s={placeholder_elapsed_s:.2f})"
+            )
+        except Exception as e:
+            runtime.telegram_logger.warning(f"Failed to send placeholder: {e}")
+
+        stream_queue = None
+        use_stream = runtime._verbose or runtime._think or audit_active
+        if use_stream:
+            if runtime._verbose:
+                stream_queue = asyncio.Queue(maxsize=200)
+            stream_callback = runtime._make_stream_callback(
+                event_queue=stream_queue,
+                think_buffer=runtime._think_buffer if runtime._think else None,
+                audit_collector=audit_collector,
+            )
+        if runtime._verbose:
+            escalation_task = asyncio.create_task(
+                runtime._streaming_display_loop(
+                    item.chat_id,
+                    placeholder,
+                    item.request_id,
+                    stop_typing,
+                    stream_queue,
+                    backend=runtime.backend_manager.current_backend,
+                )
+            )
+        else:
+            escalation_task = asyncio.create_task(
+                runtime._escalating_placeholder_loop(
+                    item.chat_id,
+                    placeholder,
+                    item.request_id,
+                    stop_typing,
+                    backend=runtime.backend_manager.current_backend,
+                )
+            )
+        if runtime._think:
+            runtime._think_buffer.clear()
+            runtime._openrouter_think_chunk = ""
+            runtime._last_openrouter_think_snippet = None
+            think_flush_task = asyncio.create_task(
+                runtime._thinking_flush_loop(item.chat_id, stop_typing)
+            )
+
+    if stream_callback is None and audit_active:
+        stream_callback = runtime._make_stream_callback(audit_collector=audit_collector)
+
+    on_stream_event = stream_callback if (not item.silent or audit_active) else None
+    return InteractiveFeedback(
+        stop_typing=stop_typing,
+        typing_task=typing_task,
+        escalation_task=escalation_task,
+        placeholder=placeholder,
+        stream_callback=stream_callback,
+        think_flush_task=think_flush_task,
+        on_stream_event=on_stream_event,
+    )
 
 
 async def handle_empty_success_response(runtime, item) -> None:
