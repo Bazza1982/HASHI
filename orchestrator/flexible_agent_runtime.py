@@ -28,6 +28,7 @@ from orchestrator import runtime_media
 from orchestrator import runtime_remote
 from orchestrator import runtime_transfer
 from orchestrator import runtime_wrapper
+from orchestrator import runtime_workzone
 from orchestrator.runtime_common import (
     QueuedRequest,
     _print_final_response,
@@ -69,7 +70,7 @@ from orchestrator.usecomputer_mode import (
 from orchestrator.skill_manager import SkillDefinition, SkillManager
 from orchestrator.voice_manager import VoiceManager
 from orchestrator.private_wol import describe_wol_targets, private_wol_available, run_private_wol
-from orchestrator.workzone import access_root_for_workzone, build_workzone_prompt, clear_workzone, load_workzone, resolve_workzone_input, save_workzone
+from orchestrator.workzone import load_workzone
 from orchestrator.wrapper_mode import SESSION_RESET_SOURCE, load_wrapper_config, visible_wrapper_slots
 from orchestrator.audit_mode import (
     AuditTelemetryCollector,
@@ -568,42 +569,10 @@ class FlexibleAgentRuntime:
         return self.is_generating or (not self.queue.empty())
 
     def _sync_workzone_to_backend_config(self) -> None:
-        if self.config.extra is None:
-            self.config.extra = {}
-        if self._workzone_dir is not None:
-            self.config.extra["workzone_dir"] = str(self._workzone_dir)
-        else:
-            self.config.extra.pop("workzone_dir", None)
-        backend = getattr(getattr(self, "backend_manager", None), "current_backend", None)
-        if backend is not None and getattr(backend, "config", None) is not None:
-            if backend.config.extra is None:
-                backend.config.extra = {}
-            if self._workzone_dir is not None:
-                backend.config.extra["workzone_dir"] = str(self._workzone_dir)
-            else:
-                backend.config.extra.pop("workzone_dir", None)
-            registry = getattr(backend, "tool_registry", None)
-            if registry is not None:
-                if self._workzone_dir is not None:
-                    registry.workspace_dir = self._workzone_dir
-                    registry.access_root = access_root_for_workzone(backend.config.resolve_access_root(), self._workzone_dir)
-                else:
-                    registry.workspace_dir = self.workspace_dir
-                    registry.access_root = backend.config.resolve_access_root()
+        runtime_workzone.sync_workzone_to_backend_config(self)
 
     def _workzone_prompt_section(self) -> list[tuple[str, str]]:
-        self._workzone_dir = load_workzone(self.workspace_dir)
-        self._sync_workzone_to_backend_config()
-        backend = getattr(self.backend_manager, "current_backend", None)
-        can_access_files = bool(
-            backend
-            and (
-                getattr(getattr(backend, "capabilities", None), "supports_files", False)
-                or getattr(backend, "tool_registry", None) is not None
-            )
-        )
-        section = build_workzone_prompt(self._workzone_dir, self.workspace_dir, can_access_files=can_access_files)
-        return [section] if section else []
+        return runtime_workzone.workzone_prompt_section(self)
 
     def _extract_task_id(self, summary: str) -> Optional[str]:
         if not summary:
@@ -6055,59 +6024,7 @@ class FlexibleAgentRuntime:
             )
 
     async def cmd_workzone(self, update: Update, context: Any):
-        if not self._is_authorized_user(update.effective_user.id):
-            return
-        args = context.args or []
-        current = load_workzone(self.workspace_dir)
-        if not args:
-            if current:
-                await self._reply_text(
-                    update,
-                    f"Workzone is ON:\n<code>{html.escape(str(current))}</code>\n\n"
-                    "Use <code>/workzone off</code> to return to the agent home workspace.",
-                    parse_mode="HTML",
-                )
-            else:
-                await self._reply_text(
-                    update,
-                    f"Workzone is OFF. Agent home workspace:\n<code>{html.escape(str(self.workspace_dir))}</code>",
-                    parse_mode="HTML",
-                )
-            return
-        arg_text = " ".join(args).strip()
-        if self._backend_busy():
-            await self._reply_text(update, "Workzone change is blocked while a request is running or queued.")
-            return
-        if arg_text.lower() == "off":
-            clear_workzone(self.workspace_dir)
-            self._workzone_dir = None
-            self._sync_workzone_to_backend_config()
-            backend = self.backend_manager.current_backend
-            if backend and getattr(backend.capabilities, "supports_sessions", False):
-                await backend.handle_new_session()
-            await self._reply_text(
-                update,
-                f"Workzone OFF. Working directory reset to agent home workspace:\n<code>{html.escape(str(self.workspace_dir))}</code>",
-                parse_mode="HTML",
-            )
-            return
-        try:
-            zone = resolve_workzone_input(arg_text, self.global_config.project_root, self.workspace_dir)
-        except ValueError as exc:
-            await self._reply_text(update, f"Workzone not changed: {html.escape(str(exc))}", parse_mode="HTML")
-            return
-        save_workzone(self.workspace_dir, zone)
-        self._workzone_dir = zone
-        self._sync_workzone_to_backend_config()
-        backend = self.backend_manager.current_backend
-        if backend and getattr(backend.capabilities, "supports_sessions", False):
-            await backend.handle_new_session()
-        await self._reply_text(
-            update,
-            f"Workzone ON:\n<code>{html.escape(str(zone))}</code>\n\n"
-            "Next request will run from this directory and include a workzone prompt.",
-            parse_mode="HTML",
-        )
+        await runtime_workzone.cmd_workzone(self, update, context)
 
     async def cmd_new(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
