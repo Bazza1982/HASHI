@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import asyncio
+import html
 import subprocess
+from contextlib import suppress
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -201,3 +204,200 @@ async def handle_move_callback(runtime: Any, update: Any, context: Any) -> None:
         dry = mode == "dry"
         instances = runtime._load_instances()
         await runtime._do_move(update, agent_id, target, instances, keep_source=keep, sync=sync, dry_run=dry)
+
+
+async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
+    if not runtime._is_authorized_user(update.effective_user.id):
+        return
+    arg = (context.args[0].lower() if context.args else "").strip()
+    cfg = runtime._remote_config_snapshot()
+    alive = runtime._remote_process is not None and runtime._remote_process.returncode is None
+
+    if arg == "status" or not arg:
+        health, health_url = await runtime._fetch_remote_json("/health")
+        status, _status_url = await runtime._fetch_remote_json("/protocol/status")
+        if not health:
+            if alive:
+                await runtime._reply_text(
+                    update,
+                    "🟡 Hashi Remote process is running, but the API did not respond.\n"
+                    f"PID: {runtime._remote_process.pid}\n"
+                    f"Expected port: {cfg['port']}  ·  TLS: {'on' if cfg['use_tls'] else 'off'}",
+                )
+            else:
+                await runtime._reply_text(update, "⚪ Hashi Remote is not running. Use /remote on to start.")
+            return
+        instance = health.get("instance") or {}
+        peers = list((health.get("peers") or []))
+        lines = [
+            "🟢 <b>Hashi Remote Status</b>",
+            f"Instance: <code>{instance.get('instance_id') or runtime.global_config.project_root.name.upper()}</code>",
+            f"API: <code>{health_url}</code>",
+            f"Port: <code>{cfg['port']}</code>  ·  TLS: <code>{'on' if cfg['use_tls'] else 'off'}</code>",
+            f"Discovery: <code>{cfg['backend']}</code>",
+            f"Process: <code>{'running' if alive else 'external/unknown'}</code>" + (f" (PID {runtime._remote_process.pid})" if alive else ""),
+            f"Peers: <code>{len(peers)}</code>",
+        ]
+        if status:
+            inflight = int(status.get("inflight_count") or 0)
+            lines.append(f"Inflight: <code>{inflight}</code>")
+        await runtime._reply_text(update, "\n".join(lines), parse_mode="HTML")
+        return
+
+    if arg == "list":
+        data, _url = await runtime._fetch_remote_json("/peers")
+        peers = list((data or {}).get("peers") or [])
+        if not peers:
+            await runtime._reply_text(update, "⚪ No remote peers are currently visible.")
+            return
+        peers = sorted(
+            peers,
+            key=lambda peer: (
+                runtime._remote_peer_presence(peer)[0],
+                str(peer.get("instance_id") or ""),
+            ),
+        )
+        counts = {"online": 0, "attention": 0, "offline": 0}
+        for peer in peers:
+            rank, _presence, _state = runtime._remote_peer_presence(peer)
+            if rank == 0:
+                counts["online"] += 1
+            elif rank in {1, 2}:
+                counts["attention"] += 1
+            else:
+                counts["offline"] += 1
+        lines = [
+            "📡 <b>Remote Instances</b>",
+            f"online: <code>{counts['online']}</code>  ·  attention: <code>{counts['attention']}</code>  ·  offline: <code>{counts['offline']}</code>",
+            f"refreshed: <code>{datetime.now().strftime('%H:%M:%S')}</code>",
+            "",
+        ]
+        for idx, peer in enumerate(peers):
+            lines.extend(runtime._render_remote_peer_block(peer))
+            if idx != len(peers) - 1:
+                lines.append("")
+        await runtime._reply_text(update, "\n".join(lines), parse_mode="HTML")
+        return
+
+    if arg == "off":
+        if runtime._remote_process is None or runtime._remote_process.returncode is not None:
+            await runtime._reply_text(update, "⚪ Hashi Remote is not running.")
+            return
+        runtime._remote_process.terminate()
+        try:
+            await asyncio.wait_for(runtime._remote_process.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            runtime._remote_process.kill()
+        runtime._remote_process = None
+        await runtime._reply_text(update, "🔴 Hashi Remote stopped.")
+        return
+
+    if arg == "on":
+        if alive:
+            await runtime._reply_text(update, "🟢 Already running (PID %d)." % runtime._remote_process.pid)
+            return
+
+        root = cfg["root"]
+        venv_python = root / ".venv" / "bin" / "python3"
+        if not venv_python.exists():
+            venv_python = root / ".venv" / "Scripts" / "python.exe"
+        if not venv_python.exists():
+            await runtime._reply_text(
+                update,
+                f"🔴 Hashi Remote could not start.\nMissing interpreter: <code>{html.escape(str(venv_python))}</code>",
+                parse_mode="HTML",
+            )
+            return
+
+        cmd = [str(venv_python), "-m", "remote"]
+        cmd.extend(["--port", str(cfg["port"])])
+        if not cfg["use_tls"]:
+            cmd.append("--no-tls")
+        if cfg["backend"] in {"lan", "tailscale", "both"}:
+            cmd.extend(["--discovery", cfg["backend"]])
+        log_path = runtime._remote_start_log_path()
+        with suppress(Exception):
+            log_path.unlink()
+        log_handle = log_path.open("ab")
+        try:
+            runtime._remote_process = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=str(root),
+                stdout=log_handle,
+                stderr=log_handle,
+            )
+        finally:
+            log_handle.close()
+
+        ok, detail = await runtime._await_remote_start_health(
+            process=runtime._remote_process,
+            cfg=cfg,
+            cmd=cmd,
+            log_path=log_path,
+        )
+        if not ok:
+            runtime._remote_process = None
+            await runtime._reply_text(update, detail, parse_mode="HTML")
+            return
+        await runtime._reply_text(
+            update,
+            f"🟢 Hashi Remote started (PID {runtime._remote_process.pid})\n"
+            f"   Port {cfg['port']} · TLS {'on' if cfg['use_tls'] else 'off'} · discovery {cfg['backend']}\n"
+            f"   API <code>{html.escape(detail)}</code>\n"
+            "   Use /remote off to stop.",
+            parse_mode="HTML",
+        )
+        return
+
+    await runtime._reply_text(update, "Usage: /remote [on|off|status|list]")
+
+
+async def cmd_oll(runtime: Any, update: Any, context: Any) -> None:
+    if not runtime._is_authorized_user(update.effective_user.id):
+        return
+    from browser_gateway.service_control import start as start_oll_service, status as oll_status, stop as stop_oll_service
+
+    arg = (context.args[0].lower() if context.args else "").strip()
+    root = runtime.global_config.project_root
+
+    if arg == "on":
+        state = start_oll_service(root)
+        await runtime._reply_text(
+            update,
+            "🟢 OLL Browser Gateway started.\n"
+            f"PID: {state.get('pid') or 'unknown'}\n"
+            f"Base URL: {state.get('base_url')}\n"
+            f"Log: {state.get('log_file')}",
+        )
+        return
+
+    if arg == "off":
+        was_running = oll_status(root)
+        state = stop_oll_service(root)
+        if was_running.get("running"):
+            await runtime._reply_text(update, "🔴 OLL Browser Gateway stopped.")
+        else:
+            await runtime._reply_text(update, "⚪ OLL Browser Gateway is not running.")
+        return
+
+    if arg == "status" or not arg:
+        state = oll_status(root)
+        if state.get("running"):
+            await runtime._reply_text(
+                update,
+                "🟢 OLL Browser Gateway is running.\n"
+                f"PID: {state.get('pid')}\n"
+                f"Base URL: {state.get('base_url')}\n"
+                f"Log: {state.get('log_file')}\n"
+                f"State DB: {state.get('state_db')}",
+            )
+        else:
+            await runtime._reply_text(
+                update,
+                "⚪ OLL Browser Gateway is not running.\n"
+                f"Base URL: {state.get('base_url')}\n"
+                "Use /oll on to start.",
+            )
+        return
+
+    await runtime._reply_text(update, "Usage: /oll [on|off|status]")
