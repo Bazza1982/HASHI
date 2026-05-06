@@ -79,6 +79,10 @@ def _runtime():
     runtime._mark_activity = lambda: setattr(runtime, "activity_marked", True)
     runtime._log_maintenance = lambda item, event, **fields: runtime.maintenance_events.append((event, fields))
     runtime._safe_excerpt = lambda text, limit: text[:limit]
+    runtime.success_marked = False
+    runtime.habit_outcomes = []
+    runtime.transcripts = []
+    runtime.listener_payloads = []
     runtime._consume_session_primer = lambda item: f"primer\n{item.prompt}"
     runtime._build_habit_sections = lambda item, prompt: ([("Habit", "Be precise.")], ["precision"])
     runtime._workzone_prompt_section = lambda: [("Workzone", "/tmp/work")]
@@ -92,6 +96,21 @@ def _runtime():
     runtime._last_prompt_audit = {}
     runtime._thinking_chars_this_req = 99
     runtime._last_full_prompt_tokens = 0
+    runtime._strip_transfer_accept_prefix = lambda item, text: text.removeprefix("ACCEPTED:")
+    runtime._mark_success = lambda: setattr(runtime, "success_marked", True)
+    runtime._record_habit_outcome = lambda item, **fields: runtime.habit_outcomes.append(fields)
+
+    async def _apply_wrapper_to_visible_text(item, text):
+        return f"wrapped:{text}", {"mode": "wrapper"}
+
+    runtime._apply_wrapper_to_visible_text = _apply_wrapper_to_visible_text
+    runtime._append_core_transcript = lambda item, **fields: runtime.transcripts.append(fields)
+    runtime._wrapper_listener_fields = lambda core_raw, visible_text, wrapper_result: {"wrapped": True}
+
+    async def _notify_request_listeners(request_id, payload):
+        runtime.listener_payloads.append(payload)
+
+    runtime._notify_request_listeners = _notify_request_listeners
     return runtime
 
 
@@ -226,3 +245,32 @@ async def test_cleanup_interactive_feedback_stops_typing_and_deletes_placeholder
     assert typing_task.done()
     assert deleted == [{"chat_id": 123, "message_id": 99}]
     assert flushed == []
+
+
+@pytest.mark.asyncio
+async def test_prepare_successful_response_applies_wrapper_and_notifies_listeners():
+    runtime = _runtime()
+    item = _item()
+    response = SimpleNamespace(text="ACCEPTED:core text")
+
+    result = await runtime_pipeline.prepare_successful_response(
+        runtime,
+        item,
+        response,
+        completion_path="foreground",
+    )
+
+    assert result.display_text == "core text"
+    assert result.visible_text == "wrapped:core text"
+    assert runtime.success_marked is True
+    assert runtime.habit_outcomes == [{"success": True, "response_text": "ACCEPTED:core text"}]
+    assert runtime.transcripts == [
+        {
+            "core_raw": "ACCEPTED:core text",
+            "visible_text": "wrapped:core text",
+            "completion_path": "foreground",
+            "wrapper_result": {"mode": "wrapper"},
+        }
+    ]
+    assert runtime.listener_payloads[0]["text"] == "wrapped:core text"
+    assert runtime.listener_payloads[0]["wrapped"] is True

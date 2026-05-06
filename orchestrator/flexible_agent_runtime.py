@@ -7687,29 +7687,14 @@ class FlexibleAgentRuntime:
                         },
                     )
                 elif response.is_success and response.text:
-                    display_text = self._strip_transfer_accept_prefix(item, response.text)
-                    self._mark_success()
-                    self._record_habit_outcome(item, success=True, response_text=response.text)
-                    visible_text, wrapper_result = await self._apply_wrapper_to_visible_text(item, display_text or response.text)
-                    self._append_core_transcript(
+                    success_result = await runtime_pipeline.prepare_successful_response(
+                        self,
                         item,
-                        core_raw=response.text,
-                        visible_text=visible_text,
                         completion_path="foreground",
-                        wrapper_result=wrapper_result,
+                        response=response,
                     )
-                    await self._notify_request_listeners(
-                        item.request_id,
-                        {
-                            "request_id": item.request_id,
-                            "success": True,
-                            "text": visible_text,
-                            "error": None,
-                            "source": item.source,
-                            "summary": item.summary,
-                            **self._wrapper_listener_fields(response.text, visible_text, wrapper_result),
-                        },
-                    )
+                    visible_text = success_result.visible_text
+                    wrapper_result = success_result.wrapper_result
                     try:
                         from tools.token_tracker import estimate_tokens, record_audit_event, record_usage
                         import hashlib as _hashlib

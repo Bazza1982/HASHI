@@ -34,6 +34,13 @@ class BackendGeneration:
     generation_task: asyncio.Task | None = None
 
 
+@dataclass(frozen=True)
+class SuccessfulResponse:
+    display_text: str
+    visible_text: str
+    wrapper_result: Any
+
+
 def begin_queue_item(runtime, item) -> QueueItemStart:
     if not item.silent:
         runtime.last_prompt = item
@@ -248,3 +255,37 @@ async def cleanup_interactive_feedback(
             )
         except Exception:
             pass
+
+
+async def prepare_successful_response(runtime, item, response, *, completion_path: str) -> SuccessfulResponse:
+    display_text = runtime._strip_transfer_accept_prefix(item, response.text)
+    runtime._mark_success()
+    runtime._record_habit_outcome(item, success=True, response_text=response.text)
+    visible_text, wrapper_result = await runtime._apply_wrapper_to_visible_text(
+        item,
+        display_text or response.text,
+    )
+    runtime._append_core_transcript(
+        item,
+        core_raw=response.text,
+        visible_text=visible_text,
+        completion_path=completion_path,
+        wrapper_result=wrapper_result,
+    )
+    await runtime._notify_request_listeners(
+        item.request_id,
+        {
+            "request_id": item.request_id,
+            "success": True,
+            "text": visible_text,
+            "error": None,
+            "source": item.source,
+            "summary": item.summary,
+            **runtime._wrapper_listener_fields(response.text, visible_text, wrapper_result),
+        },
+    )
+    return SuccessfulResponse(
+        display_text=display_text,
+        visible_text=visible_text,
+        wrapper_result=wrapper_result,
+    )
