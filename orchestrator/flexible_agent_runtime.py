@@ -2673,42 +2673,10 @@ class FlexibleAgentRuntime:
                                 keep_source=keep, sync=sync, dry_run=dry)
 
     def _resolve_bridge_handoff_endpoint(self, target_instance: str, mode: str) -> tuple[str, str]:
-        action = "fork" if str(mode or "").strip().lower() == "fork" else "transfer"
-        normalized_target = self._normalize_instance_name(target_instance)
-        current_instance = self._normalize_instance_name(self._detect_instance_name())
-        if normalized_target == current_instance:
-            return current_instance, f"http://127.0.0.1:{self.global_config.workbench_port}/api/bridge/{action}"
-
-        instances = self._load_instances()
-        for name, inst in instances.items():
-            if self._normalize_instance_name(name) != normalized_target:
-                continue
-            host = str(inst.get("api_host") or "127.0.0.1").strip() or "127.0.0.1"
-            port = inst.get("workbench_port")
-            if not port:
-                raise ValueError(f"instance {normalized_target} has no workbench_port configured")
-            return normalized_target, f"http://{host}:{int(port)}/api/bridge/{action}"
-        raise ValueError(f"unknown instance: {target_instance}")
+        return runtime_transfer.resolve_bridge_handoff_endpoint(self, target_instance, mode)
 
     def _build_handoff_payload(self, target_agent: str, target_instance: str, mode: str) -> dict[str, Any]:
-        action = "fork" if str(mode or "").strip().lower() == "fork" else "transfer"
-        transfer_id = f"{'frk' if action == 'fork' else 'trf'}-{uuid4().hex}"
-        source_instance = self._normalize_instance_name(self._detect_instance_name())
-        package = self.handoff_builder.build_transfer_package(
-            transfer_id=transfer_id,
-            source_agent=self.name,
-            source_instance=source_instance,
-            target_agent=target_agent,
-            target_instance=target_instance,
-            created_at=datetime.now().isoformat(),
-            max_rounds=30,
-            max_words=18000,
-        )
-        package["mode"] = action
-        package["source_runtime"] = self.get_runtime_metadata()
-        package["source_workspace_dir"] = str(self.workspace_dir)
-        package["source_transcript_path"] = str(self.transcript_log_path)
-        return package
+        return runtime_transfer.build_handoff_payload(self, target_agent, target_instance, mode)
 
     async def _cmd_bridge_handoff(self, update: Update, context: Any, *, mode: str) -> None:
         action = "fork" if str(mode or "").strip().lower() == "fork" else "transfer"

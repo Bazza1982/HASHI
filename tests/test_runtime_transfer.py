@@ -14,7 +14,16 @@ def _runtime(tmp_path):
         transfer_state_path=tmp_path / "active_transfer.json",
         config=SimpleNamespace(active_backend="codex-cli"),
         _parse_request_seq=lambda request_id: int(request_id.split("-", 1)[1]) if request_id and request_id.startswith("req-") else None,
+        _detect_instance_name=lambda: "HASHI1",
+        _normalize_instance_name=lambda value: str(value or "").upper(),
+        _load_instances=lambda: {},
         _persist_transfer_state=None,
+        global_config=SimpleNamespace(workbench_port=8765),
+        handoff_builder=None,
+        name="zelda",
+        workspace_dir=tmp_path / "workspace",
+        transcript_log_path=tmp_path / "workspace" / "transcript.jsonl",
+        get_runtime_metadata=lambda: {"name": "zelda"},
         send_long_message=lambda **kwargs: _send(sent, kwargs),
         sent_messages=sent,
     )
@@ -100,3 +109,41 @@ def test_strip_transfer_accept_prefix_only_for_matching_transfer_source():
     assert runtime_transfer.strip_transfer_accept_prefix(_item(source="text"), "TRANSFER_ACCEPTED trf-1\nContinue") == (
         "TRANSFER_ACCEPTED trf-1\nContinue"
     )
+
+
+def test_resolve_bridge_handoff_endpoint_handles_local_and_remote(tmp_path):
+    runtime = _runtime(tmp_path)
+
+    assert runtime_transfer.resolve_bridge_handoff_endpoint(runtime, "hashi1", "transfer") == (
+        "HASHI1",
+        "http://127.0.0.1:8765/api/bridge/transfer",
+    )
+
+    runtime._load_instances = lambda: {
+        "hashi2": {"api_host": "10.0.0.2", "workbench_port": 9000},
+    }
+    assert runtime_transfer.resolve_bridge_handoff_endpoint(runtime, "HASHI2", "fork") == (
+        "HASHI2",
+        "http://10.0.0.2:9000/api/bridge/fork",
+    )
+
+
+def test_build_handoff_payload_adds_runtime_metadata(tmp_path):
+    runtime = _runtime(tmp_path)
+
+    class _HandoffBuilder:
+        def build_transfer_package(self, **kwargs):
+            return {**kwargs, "exchange_count": 2}
+
+    runtime.handoff_builder = _HandoffBuilder()
+
+    package = runtime_transfer.build_handoff_payload(runtime, "akane", "HASHI2", "transfer")
+
+    assert package["transfer_id"].startswith("trf-")
+    assert package["source_agent"] == "zelda"
+    assert package["source_instance"] == "HASHI1"
+    assert package["target_agent"] == "akane"
+    assert package["mode"] == "transfer"
+    assert package["source_runtime"] == {"name": "zelda"}
+    assert package["source_workspace_dir"].endswith("workspace")
+    assert package["source_transcript_path"].endswith("transcript.jsonl")

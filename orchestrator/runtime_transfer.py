@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any
+from uuid import uuid4
 
 from orchestrator.runtime_common import QueuedRequest
 
@@ -102,3 +104,43 @@ def strip_transfer_accept_prefix(item: QueuedRequest, text: str) -> str:
     if stripped.startswith("\n"):
         stripped = stripped.lstrip()
     return stripped
+
+
+def resolve_bridge_handoff_endpoint(runtime: Any, target_instance: str, mode: str) -> tuple[str, str]:
+    action = "fork" if str(mode or "").strip().lower() == "fork" else "transfer"
+    normalized_target = runtime._normalize_instance_name(target_instance)
+    current_instance = runtime._normalize_instance_name(runtime._detect_instance_name())
+    if normalized_target == current_instance:
+        return current_instance, f"http://127.0.0.1:{runtime.global_config.workbench_port}/api/bridge/{action}"
+
+    instances = runtime._load_instances()
+    for name, inst in instances.items():
+        if runtime._normalize_instance_name(name) != normalized_target:
+            continue
+        host = str(inst.get("api_host") or "127.0.0.1").strip() or "127.0.0.1"
+        port = inst.get("workbench_port")
+        if not port:
+            raise ValueError(f"instance {normalized_target} has no workbench_port configured")
+        return normalized_target, f"http://{host}:{int(port)}/api/bridge/{action}"
+    raise ValueError(f"unknown instance: {target_instance}")
+
+
+def build_handoff_payload(runtime: Any, target_agent: str, target_instance: str, mode: str) -> dict[str, Any]:
+    action = "fork" if str(mode or "").strip().lower() == "fork" else "transfer"
+    transfer_id = f"{'frk' if action == 'fork' else 'trf'}-{uuid4().hex}"
+    source_instance = runtime._normalize_instance_name(runtime._detect_instance_name())
+    package = runtime.handoff_builder.build_transfer_package(
+        transfer_id=transfer_id,
+        source_agent=runtime.name,
+        source_instance=source_instance,
+        target_agent=target_agent,
+        target_instance=target_instance,
+        created_at=datetime.now().isoformat(),
+        max_rounds=30,
+        max_words=18000,
+    )
+    package["mode"] = action
+    package["source_runtime"] = runtime.get_runtime_metadata()
+    package["source_workspace_dir"] = str(runtime.workspace_dir)
+    package["source_transcript_path"] = str(runtime.transcript_log_path)
+    return package
