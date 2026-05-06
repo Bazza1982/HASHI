@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -163,3 +165,104 @@ def _build_jobs_text(agent_name: str, skill_manager) -> str:
         lines.append("No jobs configured for this agent.")
 
     return "\n".join(lines)
+
+
+def build_job_transfer_keyboard(runtime, kind: str, task_id: str) -> InlineKeyboardMarkup:
+    """Build inline keyboard for job transfer: same-instance agents + remote instances."""
+    buttons = []
+
+    orchestrator = getattr(runtime, "orchestrator", None)
+    local_agents = []
+    if orchestrator:
+        for rt in getattr(orchestrator, "runtimes", []):
+            name = getattr(rt, "name", "")
+            if name and name != runtime.name:
+                local_agents.append(name)
+
+    if local_agents:
+        buttons.append([InlineKeyboardButton("── This instance ──", callback_data="noop")])
+        row = []
+        for agent in sorted(local_agents):
+            row.append(
+                InlineKeyboardButton(
+                    agent,
+                    callback_data=runtime._job_transfer_callback(kind, task_id, agent),
+                )
+            )
+            if len(row) == 3:
+                buttons.append(row)
+                row = []
+        if row:
+            buttons.append(row)
+
+    try:
+        instances_path = runtime.global_config.project_root / "instances.json"
+        if instances_path.exists():
+            data = json.loads(instances_path.read_text(encoding="utf-8"))
+            for inst_id, inst_info in data.get("instances", {}).items():
+                if not inst_info.get("active", False):
+                    continue
+                display = inst_info.get("display_name", inst_id)
+                platform = inst_info.get("platform", "")
+                if platform == "portable":
+                    continue
+                if platform == "windows":
+                    wsl_root = inst_info.get("wsl_root")
+                    agents_path = Path(wsl_root) / "agents.json" if wsl_root else None
+                else:
+                    root = inst_info.get("root")
+                    agents_path = Path(root) / "agents.json" if root else None
+
+                if not agents_path or not agents_path.exists():
+                    continue
+                try:
+                    adata = json.loads(agents_path.read_text(encoding="utf-8-sig"))
+                    remote_agents = [a["name"] for a in adata.get("agents", []) if a.get("is_active", True)]
+                except Exception:
+                    continue
+
+                if not remote_agents:
+                    continue
+
+                buttons.append([InlineKeyboardButton(f"── {display} ──", callback_data="noop")])
+                row = []
+                for agent in sorted(remote_agents):
+                    cb = runtime._job_transfer_callback(kind, task_id, agent, instance_id=inst_id)
+                    row.append(InlineKeyboardButton(f"{agent}", callback_data=cb))
+                    if len(row) == 3:
+                        buttons.append(row)
+                        row = []
+                if row:
+                    buttons.append(row)
+    except Exception as exc:
+        logger = getattr(runtime, "logger", logging.getLogger(__name__))
+        logger.warning("Failed to build remote agent transfer buttons: %s", exc)
+
+    buttons.append([InlineKeyboardButton("✖ Cancel", callback_data="noop")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def job_transfer_callback(
+    runtime,
+    kind: str,
+    task_id: str,
+    target_agent: str,
+    *,
+    instance_id: str | None = None,
+    max_selections: int = 256,
+) -> str:
+    store = getattr(runtime, "_job_transfer_selections", None)
+    if store is None:
+        store = {}
+        runtime._job_transfer_selections = store
+    if len(store) >= max_selections:
+        store.clear()
+    token = f"jtx{len(store) + 1:x}"
+    store[token] = {
+        "kind": kind,
+        "task_id": task_id,
+        "target_agent": target_agent,
+        "instance_id": instance_id,
+        "remote": instance_id is not None,
+    }
+    return f"skilljob:{kind}:xferkey:{token}:go"

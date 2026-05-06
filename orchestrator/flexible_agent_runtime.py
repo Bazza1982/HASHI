@@ -3861,98 +3861,19 @@ class FlexibleAgentRuntime:
         await query.answer()
 
     def _build_job_transfer_keyboard(self, kind: str, task_id: str):
-        """Build inline keyboard for job transfer: same-instance agents + remote instances."""
-        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-        buttons = []
-
-        # Same-instance active agents (excluding self)
-        orchestrator = getattr(self, "orchestrator", None)
-        local_agents = []
-        if orchestrator:
-            for rt in getattr(orchestrator, "runtimes", []):
-                name = getattr(rt, "name", "")
-                if name and name != self.name:
-                    local_agents.append(name)
-
-        if local_agents:
-            buttons.append([InlineKeyboardButton("── This instance ──", callback_data="noop")])
-            row = []
-            for agent in sorted(local_agents):
-                row.append(InlineKeyboardButton(agent, callback_data=self._job_transfer_callback(kind, task_id, agent)))
-                if len(row) == 3:
-                    buttons.append(row)
-                    row = []
-            if row:
-                buttons.append(row)
-
-        # Remote instances from instances.json
-        try:
-            import json as _j
-            from pathlib import Path as _P
-            instances_path = self.global_config.project_root / "instances.json"
-            if instances_path.exists():
-                data = _j.loads(instances_path.read_text(encoding="utf-8"))
-                local_id = self.global_config.project_root.name.upper()  # rough heuristic
-                for inst_id, inst_info in data.get("instances", {}).items():
-                    if not inst_info.get("active", False):
-                        continue
-                    # Skip self-instance
-                    display = inst_info.get("display_name", inst_id)
-                    platform = inst_info.get("platform", "")
-                    if platform == "portable":
-                        continue
-                    # Load agents from remote agents.json
-                    if platform == "windows":
-                        wsl_root = inst_info.get("wsl_root")
-                        agents_path = _P(wsl_root) / "agents.json" if wsl_root else None
-                    else:
-                        root = inst_info.get("root")
-                        agents_path = _P(root) / "agents.json" if root else None
-
-                    if not agents_path or not agents_path.exists():
-                        continue
-                    try:
-                        adata = _j.loads(agents_path.read_text(encoding="utf-8-sig"))
-                        remote_agents = [a["name"] for a in adata.get("agents", []) if a.get("is_active", True)]
-                    except Exception:
-                        continue
-
-                    if not remote_agents:
-                        continue
-
-                    buttons.append([InlineKeyboardButton(f"── {display} ──", callback_data="noop")])
-                    row = []
-                    for agent in sorted(remote_agents):
-                        cb = self._job_transfer_callback(kind, task_id, agent, instance_id=inst_id)
-                        row.append(InlineKeyboardButton(f"{agent}", callback_data=cb))
-                        if len(row) == 3:
-                            buttons.append(row)
-                            row = []
-                    if row:
-                        buttons.append(row)
-        except Exception as exc:
-            logger = getattr(self, "logger", logging.getLogger(__name__))
-            logger.warning("Failed to build remote agent transfer buttons: %s", exc)
-
-        buttons.append([InlineKeyboardButton("✖ Cancel", callback_data="noop")])
-        return InlineKeyboardMarkup(buttons)
+        from orchestrator import runtime_jobs
+        return runtime_jobs.build_job_transfer_keyboard(self, kind, task_id)
 
     def _job_transfer_callback(self, kind: str, task_id: str, target_agent: str, *, instance_id: str | None = None) -> str:
-        store = getattr(self, "_job_transfer_selections", None)
-        if store is None:
-            store = {}
-            self._job_transfer_selections = store
-        if len(store) >= MAX_JOB_TRANSFER_SELECTIONS:
-            store.clear()
-        token = f"jtx{len(store) + 1:x}"
-        store[token] = {
-            "kind": kind,
-            "task_id": task_id,
-            "target_agent": target_agent,
-            "instance_id": instance_id,
-            "remote": instance_id is not None,
-        }
-        return f"skilljob:{kind}:xferkey:{token}:go"
+        from orchestrator import runtime_jobs
+        return runtime_jobs.job_transfer_callback(
+            self,
+            kind,
+            task_id,
+            target_agent,
+            instance_id=instance_id,
+            max_selections=MAX_JOB_TRANSFER_SELECTIONS,
+        )
 
     async def _transfer_job_remote(self, kind: str, job: dict, target_agent: str,
                                    instance_id: str) -> tuple[bool, str]:
