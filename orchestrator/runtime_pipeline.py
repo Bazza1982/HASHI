@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+import hashlib as _hashlib
 
 from orchestrator.runtime_common import _safe_excerpt
 
@@ -289,3 +290,101 @@ async def prepare_successful_response(runtime, item, response, *, completion_pat
         visible_text=visible_text,
         wrapper_result=wrapper_result,
     )
+
+
+def record_foreground_usage_audit(
+    runtime,
+    item,
+    response,
+    *,
+    visible_text: str,
+    wrapper_result,
+    final_prompt: str,
+    effective_prompt: str,
+    incremental: bool,
+) -> None:
+    try:
+        from tools.token_tracker import estimate_tokens, record_audit_event, record_usage
+
+        if response.usage:
+            input_tokens = response.usage.input_tokens
+            output_tokens = response.usage.output_tokens
+            thinking_tokens = response.usage.thinking_tokens
+            token_source = "api"
+            record_usage(
+                runtime.workspace_dir,
+                model=runtime.get_current_model(),
+                backend=runtime.config.active_backend,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                thinking_tokens=thinking_tokens,
+                session_id=runtime.session_id_dt,
+                cost_usd=getattr(response, "cost_usd", None),
+            )
+        else:
+            input_tokens = estimate_tokens(final_prompt)
+            output_tokens = estimate_tokens(visible_text)
+            thinking_tokens = runtime._thinking_chars_this_req // 4
+            token_source = "estimated"
+            record_usage(
+                runtime.workspace_dir,
+                model=runtime.get_current_model(),
+                backend=runtime.config.active_backend,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                thinking_tokens=thinking_tokens,
+                session_id=runtime.session_id_dt,
+            )
+        prompt_audit = runtime._last_prompt_audit
+        section_chars = {s["key"]: s["chars"] for s in prompt_audit.get("sections", [])}
+        section_tokens = {
+            s["key"]: s.get("tokens_est") or max(1, s["chars"] // 4)
+            for s in prompt_audit.get("sections", [])
+        }
+        section_counts = {s["key"]: s.get("item_count", 0) for s in prompt_audit.get("sections", [])}
+        record_audit_event(
+            runtime.workspace_dir,
+            {
+                "request_id": item.request_id,
+                "agent": runtime.name,
+                "runtime": "flex",
+                "completion_path": "foreground",
+                "backend": runtime.config.active_backend,
+                "model": runtime.get_current_model(),
+                "source": item.source,
+                "summary": item.summary,
+                "silent": item.silent,
+                "is_retry": item.is_retry,
+                "success": response.is_success,
+                "incremental_mode": incremental,
+                "token_source": token_source,
+                "raw_prompt_chars": len(item.prompt),
+                "effective_prompt_chars": len(effective_prompt),
+                "final_prompt_chars": len(final_prompt),
+                "response_chars": len(visible_text or ""),
+                "core_raw_chars": len(response.text or ""),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "thinking_tokens": thinking_tokens,
+                "tool_call_count": int(getattr(response, "tool_call_count", 0) or 0),
+                "tool_loop_count": int(getattr(response, "tool_loop_count", 0) or 0),
+                "tool_catalog_count": 0,
+                "tool_schema_chars": 0,
+                "tool_schema_tokens_est": 0,
+                "tool_schema_fingerprint": "",
+                "tool_max_loops": 0,
+                "budget_applied": bool(prompt_audit.get("budget_applied")),
+                "budget_limit_chars": prompt_audit.get("budget_limit_chars"),
+                "context_chars_before_budget": prompt_audit.get("context_chars_before_budget", 0),
+                "time_fyi_chars": prompt_audit.get("time_fyi_chars", 0),
+                "context_expansion_ratio": round(len(final_prompt) / max(len(item.prompt), 1), 3),
+                "context_fingerprint": prompt_audit.get("context_fingerprint", ""),
+                "request_fingerprint": _hashlib.sha1((item.prompt or "").encode("utf-8")).hexdigest()[:16],
+                "section_chars": section_chars,
+                "section_tokens_est": section_tokens,
+                "section_counts": section_counts,
+                **runtime._wrapper_audit_fields(wrapper_result),
+            },
+        )
+    except Exception:
+        pass

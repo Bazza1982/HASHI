@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+import sys
+import types
 
 import pytest
 
@@ -70,6 +72,9 @@ def _item(**overrides):
 def _runtime():
     runtime = SimpleNamespace()
     runtime.config = SimpleNamespace(active_backend="codex-cli", extra={})
+    runtime.name = "zelda"
+    runtime.workspace_dir = "/tmp/hashi-test"
+    runtime.session_id_dt = "session-1"
     runtime.logger = _Logger()
     runtime.telegram_logger = _Logger()
     runtime.last_prompt = None
@@ -96,6 +101,14 @@ def _runtime():
     runtime._last_prompt_audit = {}
     runtime._thinking_chars_this_req = 99
     runtime._last_full_prompt_tokens = 0
+    runtime._last_prompt_audit = {
+        "sections": [{"key": "Workzone", "chars": 8, "tokens_est": 2, "item_count": 1}],
+        "budget_applied": False,
+        "context_fingerprint": "fp",
+    }
+    runtime._thinking_chars_this_req = 12
+    runtime.get_current_model = lambda: "gpt-test"
+    runtime._wrapper_audit_fields = lambda wrapper_result: {"wrapper_applied": bool(wrapper_result)}
     runtime._strip_transfer_accept_prefix = lambda item, text: text.removeprefix("ACCEPTED:")
     runtime._mark_success = lambda: setattr(runtime, "success_marked", True)
     runtime._record_habit_outcome = lambda item, **fields: runtime.habit_outcomes.append(fields)
@@ -274,3 +287,42 @@ async def test_prepare_successful_response_applies_wrapper_and_notifies_listener
     ]
     assert runtime.listener_payloads[0]["text"] == "wrapped:core text"
     assert runtime.listener_payloads[0]["wrapped"] is True
+
+
+def test_record_foreground_usage_audit_records_estimated_usage(monkeypatch):
+    runtime = _runtime()
+    item = _item()
+    usage_records = []
+    audit_records = []
+    fake_module = types.SimpleNamespace(
+        estimate_tokens=lambda text: len(text) // 2,
+        record_usage=lambda *args, **kwargs: usage_records.append((args, kwargs)),
+        record_audit_event=lambda *args, **kwargs: audit_records.append((args, kwargs)),
+    )
+    monkeypatch.setitem(sys.modules, "tools.token_tracker", fake_module)
+    response = SimpleNamespace(
+        is_success=True,
+        text="core text",
+        usage=None,
+        tool_call_count=2,
+        tool_loop_count=1,
+    )
+
+    runtime_pipeline.record_foreground_usage_audit(
+        runtime,
+        item,
+        response,
+        visible_text="visible text",
+        wrapper_result={"mode": "wrapper"},
+        final_prompt="final prompt",
+        effective_prompt="effective prompt",
+        incremental=False,
+    )
+
+    assert usage_records[0][1]["input_tokens"] == len("final prompt") // 2
+    assert usage_records[0][1]["output_tokens"] == len("visible text") // 2
+    event = audit_records[0][0][1]
+    assert event["request_id"] == "req-1"
+    assert event["token_source"] == "estimated"
+    assert event["section_chars"] == {"Workzone": 8}
+    assert event["wrapper_applied"] is True

@@ -7695,86 +7695,16 @@ class FlexibleAgentRuntime:
                     )
                     visible_text = success_result.visible_text
                     wrapper_result = success_result.wrapper_result
-                    try:
-                        from tools.token_tracker import estimate_tokens, record_audit_event, record_usage
-                        import hashlib as _hashlib
-                        if response.usage:
-                            _input_tok = response.usage.input_tokens
-                            _output_tok = response.usage.output_tokens
-                            _thinking_tok = response.usage.thinking_tokens
-                            _tok_source = "api"
-                            record_usage(
-                                self.workspace_dir,
-                                model=self.get_current_model(),
-                                backend=self.config.active_backend,
-                                input_tokens=_input_tok,
-                                output_tokens=_output_tok,
-                                thinking_tokens=_thinking_tok,
-                                session_id=self.session_id_dt,
-                                cost_usd=getattr(response, "cost_usd", None),
-                            )
-                        else:
-                            # CLI backend: estimate from final assembled prompt
-                            _input_tok = estimate_tokens(final_prompt)
-                            _output_tok = estimate_tokens(visible_text)
-                            _thinking_tok = self._thinking_chars_this_req // 4
-                            _tok_source = "estimated"
-                            record_usage(
-                                self.workspace_dir,
-                                model=self.get_current_model(),
-                                backend=self.config.active_backend,
-                                input_tokens=_input_tok,
-                                output_tokens=_output_tok,
-                                thinking_tokens=_thinking_tok,
-                                session_id=self.session_id_dt,
-                            )
-                        _pa = self._last_prompt_audit
-                        _sec_chars = {s["key"]: s["chars"] for s in _pa.get("sections", [])}
-                        _sec_tokens = {s["key"]: s.get("tokens_est") or max(1, s["chars"] // 4) for s in _pa.get("sections", [])}
-                        _sec_counts = {s["key"]: s.get("item_count", 0) for s in _pa.get("sections", [])}
-                        record_audit_event(self.workspace_dir, {
-                            "request_id": item.request_id,
-                            "agent": self.name,
-                            "runtime": "flex",
-                            "completion_path": "foreground",
-                            "backend": self.config.active_backend,
-                            "model": self.get_current_model(),
-                            "source": item.source,
-                            "summary": item.summary,
-                            "silent": item.silent,
-                            "is_retry": item.is_retry,
-                            "success": response.is_success,
-                            "incremental_mode": _incremental,
-                            "token_source": _tok_source,
-                            "raw_prompt_chars": len(item.prompt),
-                            "effective_prompt_chars": len(effective_prompt),
-                            "final_prompt_chars": len(final_prompt),
-                            "response_chars": len(visible_text or ""),
-                            "core_raw_chars": len(response.text or ""),
-                            "input_tokens": _input_tok,
-                            "output_tokens": _output_tok,
-                            "thinking_tokens": _thinking_tok,
-                            "tool_call_count": int(getattr(response, "tool_call_count", 0) or 0),
-                            "tool_loop_count": int(getattr(response, "tool_loop_count", 0) or 0),
-                            "tool_catalog_count": 0,
-                            "tool_schema_chars": 0,
-                            "tool_schema_tokens_est": 0,
-                            "tool_schema_fingerprint": "",
-                            "tool_max_loops": 0,
-                            "budget_applied": bool(_pa.get("budget_applied")),
-                            "budget_limit_chars": _pa.get("budget_limit_chars"),
-                            "context_chars_before_budget": _pa.get("context_chars_before_budget", 0),
-                            "time_fyi_chars": _pa.get("time_fyi_chars", 0),
-                            "context_expansion_ratio": round(len(final_prompt) / max(len(item.prompt), 1), 3),
-                            "context_fingerprint": _pa.get("context_fingerprint", ""),
-                            "request_fingerprint": _hashlib.sha1((item.prompt or "").encode("utf-8")).hexdigest()[:16],
-                            "section_chars": _sec_chars,
-                            "section_tokens_est": _sec_tokens,
-                            "section_counts": _sec_counts,
-                            **self._wrapper_audit_fields(wrapper_result),
-                        })
-                    except Exception:
-                        pass
+                    runtime_pipeline.record_foreground_usage_audit(
+                        self,
+                        item,
+                        response,
+                        visible_text=visible_text,
+                        wrapper_result=wrapper_result,
+                        final_prompt=final_prompt,
+                        effective_prompt=effective_prompt,
+                        incremental=_incremental,
+                    )
                     if not item.silent:
                         if self._should_buffer_during_transfer(item.request_id):
                             self._record_suppressed_transfer_result(item, success=True, text=visible_text)
