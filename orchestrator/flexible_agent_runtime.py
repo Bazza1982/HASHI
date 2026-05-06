@@ -7601,51 +7601,17 @@ class FlexibleAgentRuntime:
                 # telemetry even when verbose/think display is off.
                 _on_stream = _stream_callback if (not item.silent or _audit_active_for_item) else None
 
-                # --- Stage 4: background-mode detach ---
-                _extra = (self.config.extra or {})
-                _bg_mode = _extra.get("background_mode", False) and not item.silent and item.deliver_to_telegram
-                _detach_after: float = float(
-                    _extra.get("background_detach_after")
-                    or (_extra.get("escalation_thresholds") or [30, 60, 90, 150])[-1]
+                generation = await runtime_pipeline.run_backend_generation(
+                    self,
+                    item,
+                    final_prompt,
+                    on_stream_event=_on_stream,
+                    audit_active=_audit_active_for_item,
                 )
+                response = generation.response
+                backend_started = generation.backend_started
 
-                backend_started = datetime.now()
-                current_backend = getattr(self.backend_manager, "current_backend", None)
-                if self.config.active_backend == "openrouter-api" and hasattr(current_backend, "set_reasoning_enabled"):
-                    current_backend.set_reasoning_enabled(self._think or _audit_active_for_item)
-                detached = False
-                if _bg_mode:
-                    _gen_task = asyncio.create_task(
-                        self.backend_manager.generate_response(
-                            final_prompt, item.request_id,
-                            is_retry=item.is_retry, silent=item.silent,
-                            on_stream_event=_on_stream,
-                        )
-                    )
-                    try:
-                        response = await asyncio.wait_for(
-                            asyncio.shield(_gen_task), timeout=_detach_after
-                        )
-                    except asyncio.TimeoutError:
-                        detached = True
-                    except asyncio.CancelledError:
-                        _gen_task.cancel()
-                        with suppress(asyncio.CancelledError):
-                            await _gen_task
-                        raise
-                    finally:
-                        self.is_generating = False
-                else:
-                    try:
-                        response = await self.backend_manager.generate_response(
-                            final_prompt, item.request_id,
-                            is_retry=item.is_retry, silent=item.silent,
-                            on_stream_event=_on_stream,
-                        )
-                    finally:
-                        self.is_generating = False
-
-                if detached:
+                if generation.detached:
                     if stop_typing and typing_task:
                         stop_typing.set()
                         await typing_task
@@ -7660,12 +7626,12 @@ class FlexibleAgentRuntime:
                                 text="⏳ Still running in the background — I'll notify you here when done! 📬",
                             )
                     setattr(item, "_audit_collector", _audit_collector)
-                    self._register_background_task(_gen_task, item)
+                    self._register_background_task(generation.generation_task, item)
                     self.logger.info(
                         f"Detached {item.request_id} to background "
-                        f"(threshold={_detach_after}s, backend={self.config.active_backend})"
+                        f"(threshold={generation.detach_after_s}s, backend={self.config.active_backend})"
                     )
-                    self._log_maintenance(item, "bg_detached", detach_after_s=_detach_after)
+                    self._log_maintenance(item, "bg_detached", detach_after_s=generation.detach_after_s)
                     continue  # release queue slot; task runs in background
 
                 backend_elapsed = (datetime.now() - backend_started).total_seconds()

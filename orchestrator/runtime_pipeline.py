@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -20,6 +21,15 @@ class TurnPrompt:
     habit_ids: list[str]
     incremental: bool
     prompt_audit: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class BackendGeneration:
+    response: Any | None
+    detached: bool
+    backend_started: datetime
+    detach_after_s: float
+    generation_task: asyncio.Task | None = None
 
 
 def begin_queue_item(runtime, item) -> QueueItemStart:
@@ -90,4 +100,82 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         habit_ids=habit_ids,
         incremental=incremental,
         prompt_audit=prompt_audit,
+    )
+
+
+async def run_backend_generation(
+    runtime,
+    item,
+    final_prompt: str,
+    *,
+    on_stream_event,
+    audit_active: bool,
+) -> BackendGeneration:
+    extra = runtime.config.extra or {}
+    background_mode = (
+        extra.get("background_mode", False)
+        and not item.silent
+        and item.deliver_to_telegram
+    )
+    detach_after_s = float(
+        extra.get("background_detach_after")
+        or (extra.get("escalation_thresholds") or [30, 60, 90, 150])[-1]
+    )
+
+    backend_started = datetime.now()
+    current_backend = getattr(runtime.backend_manager, "current_backend", None)
+    if runtime.config.active_backend == "openrouter-api" and hasattr(current_backend, "set_reasoning_enabled"):
+        current_backend.set_reasoning_enabled(runtime._think or audit_active)
+
+    if background_mode:
+        generation_task = asyncio.create_task(
+            runtime.backend_manager.generate_response(
+                final_prompt,
+                item.request_id,
+                is_retry=item.is_retry,
+                silent=item.silent,
+                on_stream_event=on_stream_event,
+            )
+        )
+        try:
+            response = await asyncio.wait_for(
+                asyncio.shield(generation_task),
+                timeout=detach_after_s,
+            )
+            detached = False
+        except asyncio.TimeoutError:
+            response = None
+            detached = True
+        except asyncio.CancelledError:
+            generation_task.cancel()
+            try:
+                await generation_task
+            except asyncio.CancelledError:
+                pass
+            raise
+        finally:
+            runtime.is_generating = False
+        return BackendGeneration(
+            response=response,
+            detached=detached,
+            backend_started=backend_started,
+            detach_after_s=detach_after_s,
+            generation_task=generation_task,
+        )
+
+    try:
+        response = await runtime.backend_manager.generate_response(
+            final_prompt,
+            item.request_id,
+            is_retry=item.is_retry,
+            silent=item.silent,
+            on_stream_event=on_stream_event,
+        )
+    finally:
+        runtime.is_generating = False
+    return BackendGeneration(
+        response=response,
+        detached=False,
+        backend_started=backend_started,
+        detach_after_s=detach_after_s,
     )

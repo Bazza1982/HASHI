@@ -25,6 +25,31 @@ class _ContextAssembler:
         }
 
 
+class _BackendManager:
+    def __init__(self, response=None, delay_s: float = 0.0):
+        self.agent_mode = "flex"
+        self.current_backend = SimpleNamespace(_session_id=None)
+        self.response = response or SimpleNamespace(is_success=True, text="ok")
+        self.delay_s = delay_s
+        self.calls = []
+
+    async def generate_response(self, final_prompt, request_id, *, is_retry, silent, on_stream_event):
+        import asyncio
+
+        self.calls.append(
+            {
+                "final_prompt": final_prompt,
+                "request_id": request_id,
+                "is_retry": is_retry,
+                "silent": silent,
+                "on_stream_event": on_stream_event,
+            }
+        )
+        if self.delay_s:
+            await asyncio.sleep(self.delay_s)
+        return self.response
+
+
 def _item(**overrides):
     payload = {
         "request_id": "req-1",
@@ -34,6 +59,8 @@ def _item(**overrides):
         "silent": False,
         "created_at": (datetime.now() - timedelta(seconds=3)).isoformat(),
         "skip_memory_injection": False,
+        "deliver_to_telegram": True,
+        "is_retry": False,
     }
     payload.update(overrides)
     return SimpleNamespace(**payload)
@@ -41,7 +68,7 @@ def _item(**overrides):
 
 def _runtime():
     runtime = SimpleNamespace()
-    runtime.config = SimpleNamespace(active_backend="codex-cli")
+    runtime.config = SimpleNamespace(active_backend="codex-cli", extra={})
     runtime.logger = _Logger()
     runtime.last_prompt = None
     runtime.current_request_meta = None
@@ -57,10 +84,7 @@ def _runtime():
         return [("Anatta", "Observe only" if is_bridge_request else "Guide")]
 
     runtime._build_pre_turn_context_sections = _build_pre_turn_context_sections
-    runtime.backend_manager = SimpleNamespace(
-        agent_mode="flex",
-        current_backend=SimpleNamespace(_session_id=None),
-    )
+    runtime.backend_manager = _BackendManager()
     runtime.context_assembler = _ContextAssembler()
     runtime._last_prompt_audit = {}
     runtime._thinking_chars_this_req = 99
@@ -102,3 +126,44 @@ async def test_build_turn_prompt_collects_context_sections_and_updates_audit_sta
     assert runtime.current_request_meta["habit_ids"] == ["precision"]
     assert runtime._thinking_chars_this_req == 0
     assert runtime._last_full_prompt_tokens == len(prompt.final_prompt) // 4
+
+
+@pytest.mark.asyncio
+async def test_run_backend_generation_returns_foreground_response():
+    runtime = _runtime()
+    item = _item()
+
+    generation = await runtime_pipeline.run_backend_generation(
+        runtime,
+        item,
+        "final",
+        on_stream_event=None,
+        audit_active=False,
+    )
+
+    assert generation.detached is False
+    assert generation.response.text == "ok"
+    assert runtime.backend_manager.calls[0]["final_prompt"] == "final"
+    assert runtime.is_generating is False
+
+
+@pytest.mark.asyncio
+async def test_run_backend_generation_detaches_background_task():
+    runtime = _runtime()
+    runtime.config.extra = {"background_mode": True, "background_detach_after": 0.01}
+    runtime.backend_manager = _BackendManager(response=SimpleNamespace(is_success=True, text="late"), delay_s=0.05)
+    item = _item()
+
+    generation = await runtime_pipeline.run_backend_generation(
+        runtime,
+        item,
+        "final",
+        on_stream_event=None,
+        audit_active=False,
+    )
+
+    assert generation.detached is True
+    assert generation.response is None
+    assert generation.generation_task is not None
+    assert runtime.is_generating is False
+    assert (await generation.generation_task).text == "late"
