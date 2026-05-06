@@ -25,6 +25,7 @@ from orchestrator.config import FlexibleAgentConfig, GlobalConfig
 from orchestrator import runtime_audit
 from orchestrator import runtime_delivery
 from orchestrator import runtime_media
+from orchestrator import runtime_transfer
 from orchestrator import runtime_wrapper
 from orchestrator.runtime_common import (
     QueuedRequest,
@@ -778,44 +779,22 @@ class FlexibleAgentRuntime:
         return int(match.group(1))
 
     def _persist_transfer_state(self) -> None:
-        if self._transfer_state is None:
-            self.transfer_state_path.unlink(missing_ok=True)
-            return
-        self.transfer_state_path.write_text(
-            json.dumps(self._transfer_state, indent=2, ensure_ascii=True) + "\n",
-            encoding="utf-8",
-        )
+        runtime_transfer.persist_transfer_state(self)
 
     def _clear_transfer_state(self) -> None:
-        self._transfer_state = None
-        self._suppressed_transfer_results.clear()
-        self._persist_transfer_state()
+        runtime_transfer.clear_transfer_state(self)
 
     def has_active_transfer(self) -> bool:
-        return bool(self._transfer_state and self._transfer_state.get("status") in {"pending", "accepted"})
+        return runtime_transfer.has_active_transfer(self)
 
     def _transfer_redirect_text(self) -> str:
-        state = self._transfer_state or {}
-        target_agent = state.get("target_agent") or "target"
-        target_instance = state.get("target_instance") or "unknown"
-        transfer_id = state.get("transfer_id") or "unknown"
-        return (
-            f"This session has been transferred to {target_agent}@{target_instance}.\n"
-            f"Continue there. Transfer ID: {transfer_id}"
-        )
+        return runtime_transfer.transfer_redirect_text(self)
 
     def _should_redirect_after_transfer(self) -> bool:
-        return bool(self._transfer_state and self._transfer_state.get("status") == "accepted")
+        return runtime_transfer.should_redirect_after_transfer(self)
 
     def _should_buffer_during_transfer(self, request_id: str | None) -> bool:
-        if not self._transfer_state:
-            return False
-        status = self._transfer_state.get("status")
-        if status not in {"pending", "accepted"}:
-            return False
-        cutoff_seq = self._transfer_state.get("cutoff_seq")
-        req_seq = self._parse_request_seq(request_id)
-        return cutoff_seq is not None and req_seq is not None and req_seq <= cutoff_seq
+        return runtime_transfer.should_buffer_during_transfer(self, request_id)
 
     def _record_suppressed_transfer_result(
         self,
@@ -825,42 +804,19 @@ class FlexibleAgentRuntime:
         text: str | None = None,
         error: str | None = None,
     ) -> None:
-        self._suppressed_transfer_results.append(
-            {
-                "request_id": item.request_id,
-                "chat_id": item.chat_id,
-                "success": success,
-                "text": text,
-                "error": error,
-                "summary": item.summary,
-                "source": item.source,
-            }
+        runtime_transfer.record_suppressed_transfer_result(
+            self,
+            item,
+            success=success,
+            text=text,
+            error=error,
         )
 
     async def _flush_suppressed_transfer_results(self) -> None:
-        buffered = list(self._suppressed_transfer_results)
-        self._suppressed_transfer_results.clear()
-        for entry in buffered:
-            text = entry.get("text") if entry.get("success") else f"Flex Backend Error ({self.config.active_backend}): {entry.get('error')}"
-            if not text:
-                continue
-            await self.send_long_message(
-                chat_id=entry["chat_id"],
-                text=text,
-                request_id=entry.get("request_id"),
-                purpose="transfer-release",
-            )
+        await runtime_transfer.flush_suppressed_transfer_results(self)
 
     def _strip_transfer_accept_prefix(self, item: QueuedRequest, text: str) -> str:
-        if not item.source.startswith("bridge-transfer:"):
-            return text
-        prefix = f"TRANSFER_ACCEPTED {item.source.split(':', 1)[1]}"
-        if not text.startswith(prefix):
-            return text
-        stripped = text[len(prefix):].lstrip()
-        if stripped.startswith("\n"):
-            stripped = stripped.lstrip()
-        return stripped
+        return runtime_transfer.strip_transfer_accept_prefix(item, text)
 
     def _mark_runtime_started(self):
         state = self._load_runtime_session_state()
