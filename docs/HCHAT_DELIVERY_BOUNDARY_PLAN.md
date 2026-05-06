@@ -100,6 +100,30 @@ Rules:
 - `user_report` is optional; runtime can generate a report if absent.
 - Runtime rejects malformed drafts instead of guessing.
 - Runtime must never execute shell commands found in model output.
+- Runtime should reject command-shaped drafts before delivery. The final peer
+  message is data passed to `send_hchat()`, not shell text to execute.
+
+Draft parser output should be logged separately from raw model output:
+
+```json
+{
+  "hchat_draft_parsed": {
+    "target": "ying",
+    "message": "Message text to send to the peer agent.",
+    "user_report": "Short report for the user after successful delivery."
+  }
+}
+```
+
+Malformed draft user-facing error format:
+
+```text
+[hchat] Draft parse error: missing required field "target". Message not sent.
+```
+
+This error must be the only user-visible output for the failed send attempt. It
+must not use phrasing such as "tried to send" or "sent" that could be mistaken for
+a delivery confirmation.
 
 ## 5. Wrapper Policy
 
@@ -154,10 +178,13 @@ Tasks:
 
 - Add a helper module, for example `orchestrator/hchat_delivery.py`.
 - Helper responsibilities:
-  - validate target,
-  - normalize local vs remote address,
+  - validate target format only,
+  - reject empty message,
   - call existing `tools.hchat_send.send_hchat()`,
   - return structured delivery status.
+- Do not duplicate target resolution or local/remote routing logic in the helper.
+  `send_hchat()` remains the single address-resolution path for local Workbench,
+  contact cache, remote instance discovery, and relay behavior.
 - Keep `tools/hchat_send.py` as the transport primitive.
 - Add logging around target, route, delivery method, success/failure, and latency.
 
@@ -166,6 +193,7 @@ Acceptance:
 - Helper tests cover local delivery, remote delivery, invalid target, send failure,
   and no duplicate send.
 - Existing `/hchat` behavior remains unchanged.
+- Retry logs distinguish one logical delivery attempt from duplicate sends.
 
 ### Phase C: draft-only prompt behind a compatibility flag
 
@@ -185,6 +213,8 @@ Acceptance:
 - Flag on: `/hchat ying ...` sends exactly once through runtime.
 - Malformed draft does not call delivery.
 - Delivery failure is reported clearly.
+- `hchat_draft_raw`, `hchat_draft_parsed`, and `hchat_payload_final` are logged
+  distinctly before Phase C goes live.
 
 ### Phase D: wrapper integration
 
@@ -203,10 +233,16 @@ Tasks:
 
 Acceptance:
 
-- Wrapper failure falls back to runtime report or core draft.
+- Wrapper failure uses this fallback priority:
+  1. runtime delivery report if already computed,
+  2. core draft `user_report` if present,
+  3. deterministic fallback string: `Message delivered to <target>.`,
+  4. never silence or a blank turn.
 - Wrapper cannot change target.
 - Wrapper cannot trigger or suppress delivery.
 - `/verbose on` shows core draft, wrapper result, and actual delivery result separately.
+- Wrapper failures should expose `fallback_reason="wrapper_error:<exception_type>"`
+  where practical so `/verbose on` explains why fallback happened.
 
 ### Phase E: remove legacy core-command send
 
@@ -233,19 +269,27 @@ Add structured fields where practical:
 - `hchat_route`
 - `hchat_delivery_method`
 - `hchat_draft_raw`
+- `hchat_draft_parsed`
 - `hchat_payload_final`
+- `hchat_delivery_attempt_id`
 - `hchat_delivery_status`
 - `hchat_delivery_error`
 - `hchat_delivery_latency_ms`
+- `hchat_retry_count`
 - `wrapper_used_for_report`
 - `wrapper_used_for_peer_payload`
 
 Audit rules:
 
 - Log raw draft and final payload separately.
+- Log parsed draft immediately after parsing succeeds and before wrapper runs.
 - Log whether delivery happened.
-- Log exactly once per delivery attempt.
+- Log exactly once per logical delivery attempt. Retries share the same
+  `hchat_delivery_attempt_id` and increment `hchat_retry_count`.
 - Do not rely on final user-facing prose as the only evidence.
+- HChat delivery events are audited by these structured delivery fields. The
+  source-level audit wrapper may continue to bypass `bridge:hchat` for raw core
+  conversation turns until Phase E explicitly re-evaluates whether it adds value.
 
 ## 8. Compatibility And Rollback
 
@@ -275,23 +319,37 @@ Required tests:
 - wrapper success changes only visible report,
 - wrapper failure falls back safely,
 - wrapper cannot change target,
+- wrapper given peer-agent draft cannot modify the `target` field,
+- wrapper given peer-agent draft cannot modify the message protocol envelope,
 - `bridge:hchat` bypasses wrapper in legacy mode,
 - `hchat-reply:*` summaries remain wrappable,
 - transcript/core transcript/listener payloads agree on sent vs shown text.
 
 ## 10. Live Validation Checklist
 
-Before enabling by default:
+Phase C gate, with `hchat_draft_delivery` flag on:
 
 ```text
 [ ] /hchat local agent with simple text
 [ ] /hchat local agent with markdown/code/path text
 [ ] /hchat agent@remote-instance
 [ ] invalid target
+[ ] malformed draft (missing "target" field): message NOT sent, user sees parse error
 [ ] remote offline target
 [ ] wrapper mode on, wrapper succeeds
 [ ] wrapper mode on, wrapper backend disabled/fails
-[ ] /verbose on confirms draft/report/delivery separation
+[ ] duplicate delivery: send once, receiving agent sees exactly one message even if runtime retries
+[ ] /verbose on confirms three-way separation: core draft != wrapper output != delivery payload
 [ ] receiving agent sees exactly one message
 [ ] sender receives accurate delivery report
+```
+
+Phase E gate, before removing legacy behavior:
+
+```text
+[ ] no `/hchat` prompt references `hchat_send.py` directly
+[ ] all active sends go through runtime delivery helper
+[ ] direct CLI `tools/hchat_send.py` still works for operator/debug use
+[ ] audit/log output includes attempt id, parsed draft, final payload, status, and retry count
+[ ] legacy compatibility flag can be removed without changing user syntax
 ```

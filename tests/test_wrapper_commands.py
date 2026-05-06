@@ -90,6 +90,53 @@ def _read_state(workspace: Path) -> dict:
     return json.loads((workspace / "state.json").read_text(encoding="utf-8"))
 
 
+@pytest.mark.asyncio
+async def test_cmd_hchat_legacy_path_enqueues_bridge_hchat_source(tmp_path):
+    manager = _make_manager(tmp_path)
+    runtime, messages = _make_runtime(manager)
+    runtime.name = "zelda"
+    enqueued = []
+
+    async def enqueue_api_text(prompt, **kwargs):
+        enqueued.append({"prompt": prompt, **kwargs})
+
+    runtime.enqueue_api_text = enqueue_api_text
+
+    update, context = _update(["akane", "review", "the", "delivery", "plan"])
+
+    await FlexibleAgentRuntime.cmd_hchat(runtime, update, context)
+
+    assert messages == ["💬 Composing Hchat message to <b>akane</b>..."]
+    assert len(enqueued) == 1
+    assert enqueued[0]["source"] == "bridge:hchat"
+    assert enqueued[0]["deliver_to_telegram"] is True
+    assert "[HCHAT TASK]" in enqueued[0]["prompt"]
+    assert "--to akane --from zelda" in enqueued[0]["prompt"]
+    assert "tools/hchat_send.py" in enqueued[0]["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_cmd_hchat_legacy_path_preserves_remote_target_in_prompt(tmp_path):
+    manager = _make_manager(tmp_path)
+    runtime, _messages = _make_runtime(manager)
+    runtime.name = "zelda"
+    enqueued = []
+
+    async def enqueue_api_text(prompt, **kwargs):
+        enqueued.append({"prompt": prompt, **kwargs})
+
+    runtime.enqueue_api_text = enqueue_api_text
+
+    update, context = _update(["rika@HASHI2", "check", "the", "remote", "route"])
+
+    await FlexibleAgentRuntime.cmd_hchat(runtime, update, context)
+
+    assert len(enqueued) == 1
+    assert enqueued[0]["source"] == "bridge:hchat"
+    assert 'agent "rika@hashi2"' in enqueued[0]["prompt"]
+    assert "--to rika@hashi2 --from zelda" in enqueued[0]["prompt"]
+
+
 class _StatusMemoryStore:
     def get_stats(self):
         return {"turns": 0, "memories": 0}
