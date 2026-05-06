@@ -25,6 +25,7 @@ from orchestrator import runtime_audit
 from orchestrator import runtime_control
 from orchestrator import runtime_delivery
 from orchestrator import runtime_habits
+from orchestrator import runtime_lifecycle
 from orchestrator import runtime_media
 from orchestrator import runtime_command_binding
 from orchestrator import runtime_mode
@@ -372,16 +373,7 @@ class FlexibleAgentRuntime:
             cur_logger.addHandler(fh)
 
     async def initialize(self) -> bool:
-        self.logger.info(f"Initializing flex agent '{self.name}'...")
-        result = await self.backend_manager.initialize_active_backend()
-        self.reload_post_turn_observers()
-        # Apply session mode if agent is in fixed mode
-        if result and self.backend_manager.agent_mode == "fixed":
-            backend = self.backend_manager.current_backend
-            if hasattr(backend, "set_session_mode"):
-                backend.set_session_mode(True)
-                self.logger.info(f"Fixed mode active — session persistence enabled on {self.config.active_backend}")
-        return result
+        return await runtime_lifecycle.initialize(self)
 
     def _format_retry_summary(self, summary: str) -> str:
         if not summary:
@@ -6759,31 +6751,4 @@ class FlexibleAgentRuntime:
         return runtime_command_binding.get_flexible_bot_commands(self)
 
     async def shutdown(self):
-        self.logger.info(f"Shutting down flex agent '{self.name}'...")
-        self.is_shutting_down = True
-        for task in list(self._scheduled_retry_tasks):
-            task.cancel()
-        for task in list(self._scheduled_retry_tasks):
-            with suppress(asyncio.CancelledError):
-                await task
-        # Cancel in-flight background tasks (is_shutting_down suppresses notifications)
-        for task in list(self._background_tasks):
-            task.cancel()
-        for task in list(self._background_tasks):
-            with suppress(asyncio.CancelledError):
-                await task
-        if self.process_task:
-            self.process_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self.process_task
-            self.process_task = None
-        await self.backend_manager.shutdown()
-        self._mark_runtime_shutdown(clean=True)
-        
-        if self.startup_success:
-            for action in (self.app.updater.stop, self.app.stop, self.app.shutdown):
-                try:
-                    await action()
-                except Exception as e:
-                    self.error_logger.warning(f"Shutdown warning: {e}")
-            self.logger.info("Telegram app shut down cleanly.")
+        await runtime_lifecycle.shutdown(self)
