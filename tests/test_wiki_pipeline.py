@@ -5,6 +5,7 @@ import subprocess
 import sqlite3
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -68,6 +69,14 @@ def _make_consolidated_db(path: Path) -> None:
     )
     con.commit()
     con.close()
+
+
+def _write_today_embed_log(path: Path, timezone: str = "Australia/Sydney") -> None:
+    timestamp = datetime.now(ZoneInfo(timezone)).isoformat()
+    path.write_text(
+        f'{{"timestamp":"{timestamp}","phase":"embed","embedded":10,"errors":0}}\n',
+        encoding="utf-8",
+    )
 
 
 def test_wiki_state_schema_initializes(tmp_path: Path) -> None:
@@ -355,10 +364,7 @@ def test_run_pipeline_mock_classifier_dry_run(tmp_path: Path) -> None:
     consolidated = tmp_path / "consolidated_memory.sqlite"
     _make_consolidated_db(consolidated)
     log = tmp_path / "consolidation_log.jsonl"
-    log.write_text(
-        '{"timestamp":"2026-05-03T18:08:00+00:00","phase":"embed","embedded":10,"errors":0}\n',
-        encoding="utf-8",
-    )
+    _write_today_embed_log(log)
     config = WikiConfig(
         hashi_root=tmp_path,
         consolidated_db=consolidated,
@@ -514,10 +520,7 @@ def test_run_pipeline_persists_mock_classifier_assignments(tmp_path: Path) -> No
     consolidated = tmp_path / "consolidated_memory.sqlite"
     _make_consolidated_db(consolidated)
     log = tmp_path / "consolidation_log.jsonl"
-    log.write_text(
-        '{"timestamp":"2026-05-03T18:08:00+00:00","phase":"embed","embedded":10,"errors":0}\n',
-        encoding="utf-8",
-    )
+    _write_today_embed_log(log)
     state_path = tmp_path / "wiki_state.sqlite"
     config = WikiConfig(
         hashi_root=tmp_path,
@@ -703,10 +706,7 @@ def test_run_pipeline_generates_page_drafts_from_persisted_state(tmp_path: Path)
     consolidated = tmp_path / "consolidated_memory.sqlite"
     _make_consolidated_db(consolidated)
     log = tmp_path / "consolidation_log.jsonl"
-    log.write_text(
-        '{"timestamp":"2026-05-03T18:08:00+00:00","phase":"embed","embedded":10,"errors":0}\n',
-        encoding="utf-8",
-    )
+    _write_today_embed_log(log)
     config = WikiConfig(
         hashi_root=tmp_path,
         consolidated_db=consolidated,
@@ -739,10 +739,7 @@ def test_run_pipeline_publishes_generated_vault_pages(tmp_path: Path) -> None:
     consolidated = tmp_path / "consolidated_memory.sqlite"
     _make_consolidated_db(consolidated)
     log = tmp_path / "consolidation_log.jsonl"
-    log.write_text(
-        '{"timestamp":"2026-05-03T18:08:00+00:00","phase":"embed","embedded":10,"errors":0}\n',
-        encoding="utf-8",
-    )
+    _write_today_embed_log(log)
     config = WikiConfig(
         hashi_root=tmp_path,
         consolidated_db=consolidated,
@@ -798,10 +795,7 @@ def test_run_pipeline_discovers_topic_candidates(tmp_path: Path) -> None:
     con.commit()
     con.close()
     log = tmp_path / "consolidation_log.jsonl"
-    log.write_text(
-        '{"timestamp":"2026-05-03T18:08:00+00:00","phase":"embed","embedded":10,"errors":0}\n',
-        encoding="utf-8",
-    )
+    _write_today_embed_log(log)
     config = WikiConfig(
         hashi_root=tmp_path,
         consolidated_db=consolidated,

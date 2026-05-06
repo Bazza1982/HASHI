@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import ctypes
 import sys
 import types
 from pathlib import Path
 
 import pytest
+
+if not hasattr(ctypes, "WinDLL"):
+    pytest.skip("Windows helper native backend tests require ctypes.WinDLL", allow_module_level=True)
 
 
 async def _unused_windows_mcp(payload: dict) -> dict:
