@@ -5129,42 +5129,10 @@ class FlexibleAgentRuntime:
         )
 
     def _audit_core_model_choices(self) -> list[tuple[str, str, str, str]]:
-        return self._filter_allowed_model_choices(
-            [
-                ("codex_gpt55", "Codex GPT-5.5", "codex-cli", "gpt-5.5"),
-                ("codex_gpt54", "Codex GPT-5.4", "codex-cli", "gpt-5.4"),
-                ("codex_gpt53", "Codex GPT-5.3", "codex-cli", "gpt-5.3-codex"),
-                ("claude_opus", "Claude Opus 4.7", "claude-cli", "claude-opus-4-7"),
-                ("claude_opus_46", "Claude Opus 4.6", "claude-cli", "claude-opus-4-6"),
-                ("claude_sonnet", "Claude Sonnet 4.6", "claude-cli", "claude-sonnet-4-6"),
-                ("gemini_pro", "Gemini Pro", "gemini-cli", "gemini-2.5-pro"),
-                ("gemini_flash", "Gemini Flash", "gemini-cli", "gemini-2.5-flash"),
-                ("deepseek_pro", "DeepSeek Pro", "deepseek-api", "deepseek-v4-pro"),
-                ("deepseek_reasoner", "DeepSeek Reasoner", "deepseek-api", "deepseek-reasoner"),
-                ("or_sonnet", "OR Sonnet 4.6", "openrouter-api", "anthropic/claude-sonnet-4.6"),
-                ("or_opus", "OR Opus 4.6", "openrouter-api", "anthropic/claude-opus-4.6"),
-                ("or_deepseek", "OR DeepSeek", "openrouter-api", "deepseek/deepseek-v3.2-exp"),
-                ("ollama_gemma", "Ollama Gemma", "ollama-api", "gemma4:26b"),
-                ("ollama_qwen", "Ollama Qwen", "ollama-api", "qwen3:32b"),
-            ]
-        )
+        return runtime_audit.audit_core_model_choices(self)
 
     def _audit_auditor_model_choices(self) -> list[tuple[str, str, str, str]]:
-        return self._filter_allowed_model_choices(
-            [
-                ("claude_opus", "Claude Opus 4.7", "claude-cli", "claude-opus-4-7"),
-                ("claude_opus_46", "Claude Opus 4.6", "claude-cli", "claude-opus-4-6"),
-                ("claude_sonnet", "Claude Sonnet 4.6", "claude-cli", "claude-sonnet-4-6"),
-                ("or_sonnet", "OR Sonnet 4.6", "openrouter-api", "anthropic/claude-sonnet-4.6"),
-                ("or_opus", "OR Opus 4.6", "openrouter-api", "anthropic/claude-opus-4.6"),
-                ("codex_gpt55", "Codex GPT-5.5", "codex-cli", "gpt-5.5"),
-                ("codex_gpt54", "Codex GPT-5.4", "codex-cli", "gpt-5.4"),
-                ("deepseek_pro", "DeepSeek Pro", "deepseek-api", "deepseek-v4-pro"),
-                ("deepseek_reasoner", "DeepSeek Reasoner", "deepseek-api", "deepseek-reasoner"),
-                ("gemini_pro", "Gemini Pro", "gemini-cli", "gemini-2.5-pro"),
-                ("gemini_flash", "Gemini Flash", "gemini-cli", "gemini-2.5-flash"),
-            ]
-        )
+        return runtime_audit.audit_auditor_model_choices(self)
 
     def _filter_allowed_model_choices(
         self,
@@ -5181,103 +5149,25 @@ class FlexibleAgentRuntime:
         return filtered
 
     def _audit_choice_by_id(self, target: str, choice_id: str) -> tuple[str, str, str, str] | None:
-        choices = self._audit_core_model_choices() if target == "core" else self._audit_auditor_model_choices()
-        return next((choice for choice in choices if choice[0] == choice_id), None)
+        return runtime_audit.audit_choice_by_id(self, target, choice_id)
 
     def _audit_model_keyboard(self, cfg, *, target: str) -> InlineKeyboardMarkup:
-        choices = self._audit_core_model_choices() if target == "core" else self._audit_auditor_model_choices()
-        current_backend = cfg.core_backend if target == "core" else cfg.audit_backend
-        current_model = cfg.core_model if target == "core" else cfg.audit_model
-        rows: list[list[InlineKeyboardButton]] = []
-        row: list[InlineKeyboardButton] = []
-        for choice_id, label, backend, model in choices:
-            active = current_backend == backend and current_model == model
-            row.append(
-                InlineKeyboardButton(
-                    f"✅ {label}" if active else label,
-                    callback_data=f"acfg:{target}id:{choice_id}",
-                )
-            )
-            if len(row) == 2:
-                rows.append(row)
-                row = []
-        if row:
-            rows.append(row)
-        rows.append(
-            [
-                InlineKeyboardButton("Core model", callback_data="acfg:menu:core"),
-                InlineKeyboardButton("Audit model", callback_data="acfg:menu:auditmodel"),
-            ]
-        )
-        rows.append([InlineKeyboardButton("Audit config", callback_data="acfg:menu:audit")])
-        return InlineKeyboardMarkup(rows)
+        return runtime_audit.audit_model_keyboard(self, cfg, target=target)
 
     def _audit_core_keyboard(self, cfg) -> InlineKeyboardMarkup:
         return self._audit_model_keyboard(cfg, target="core")
 
     def _audit_core_text(self, cfg) -> str:
-        return (
-            "Audit core model:\n"
-            f"• Backend: `{cfg.core_backend}`\n"
-            f"• Model: `{cfg.core_model}`\n\n"
-            "This is the model that does the actual work. Tap a provider/model button below, or type:\n"
-            "`/core backend=claude-cli model=claude-sonnet-4-6`\n"
-            "`/core backend=codex-cli model=gpt-5.5`\n"
-            "`/core backend=deepseek-api model=deepseek-v4-pro`"
-        )
+        return runtime_audit.audit_core_text(cfg)
 
     def _audit_auditor_text(self, cfg) -> str:
-        return (
-            "Audit model:\n"
-            f"• Backend: `{cfg.audit_backend}`\n"
-            f"• Model: `{cfg.audit_model}`\n"
-            f"• Delivery: `{cfg.delivery}`\n"
-            f"• Severity threshold: `{cfg.severity_threshold}`\n\n"
-            "This model reviews the core model's observable thinking/actions/output. "
-            "Use a strong reviewer model here. Tap a button below, or type:\n"
-            "`/audit model backend=claude-cli model=claude-opus-4-7`\n"
-            "`/audit model backend=claude-cli model=claude-sonnet-4-6`\n"
-            "`/audit model backend=openrouter-api model=anthropic/claude-sonnet-4.6`"
-        )
+        return runtime_audit.audit_auditor_text(cfg)
 
     def _audit_auditor_keyboard(self, cfg) -> InlineKeyboardMarkup:
         return self._audit_model_keyboard(cfg, target="audit")
 
     def _audit_config_keyboard(self, cfg) -> InlineKeyboardMarkup:
-        delivery_row = [
-            InlineKeyboardButton(
-                f"{'✅ ' if cfg.delivery == value else ''}{label}",
-                callback_data=f"acfg:delivery:{value}",
-            )
-            for value, label in (
-                ("always", "Always report"),
-                ("issues_only", "Issues only"),
-                ("silent", "Silent log"),
-            )
-        ]
-        threshold_row = [
-            InlineKeyboardButton(
-                f"{'✅ ' if cfg.severity_threshold == value else ''}{label}",
-                callback_data=f"acfg:threshold:{value}",
-            )
-            for value, label in (
-                ("low", "Low+"),
-                ("medium", "Medium+"),
-                ("high", "High+"),
-                ("critical", "Critical"),
-            )
-        ]
-        return InlineKeyboardMarkup(
-            [
-                delivery_row,
-                threshold_row,
-                [
-                    InlineKeyboardButton("Core model", callback_data="acfg:menu:core"),
-                    InlineKeyboardButton("Audit model", callback_data="acfg:menu:auditmodel"),
-                ],
-                [InlineKeyboardButton("Refresh", callback_data="acfg:menu:audit")],
-            ]
-        )
+        return runtime_audit.audit_config_keyboard(cfg)
 
     def _audit_block_with(
         self,
@@ -5289,15 +5179,14 @@ class FlexibleAgentRuntime:
         backend: str | None = None,
         model: str | None = None,
     ) -> dict[str, Any]:
-        return {
-            "backend": backend or cfg.audit_backend,
-            "model": model or cfg.audit_model,
-            "context_window": cfg.context_window,
-            "delivery": delivery or cfg.delivery,
-            "severity_threshold": severity_threshold or cfg.severity_threshold,
-            "fail_policy": cfg.fail_policy,
-            "timeout_s": cfg.timeout_s if timeout_s is None else timeout_s,
-        }
+        return runtime_audit.audit_block_with(
+            cfg,
+            delivery=delivery,
+            severity_threshold=severity_threshold,
+            timeout_s=timeout_s,
+            backend=backend,
+            model=model,
+        )
 
     def _wrapper_wrap_text(self, cfg) -> str:
         return (
@@ -5520,30 +5409,7 @@ class FlexibleAgentRuntime:
         await self._reply_text(update, "Usage: /wrapper [list|set <slot> <text>|clear <slot|all>]")
 
     def _audit_status_text(self, state: dict, criteria: dict) -> str:
-        cfg = load_audit_config(state)
-        visible_criteria = visible_audit_criteria(criteria)
-        lines = [
-            "Audit mode configuration:",
-            f"• Core: <code>{html.escape(cfg.core_backend)} / {html.escape(cfg.core_model)}</code>",
-            f"• Audit: <code>{html.escape(cfg.audit_backend)} / {html.escape(cfg.audit_model)}</code>",
-            f"• Delivery: <code>{cfg.delivery}</code>",
-            f"• Severity threshold: <code>{cfg.severity_threshold}</code>",
-            f"• Timeout: <code>{cfg.timeout_s:g}s</code>",
-            "",
-            "Default testing posture is <code>always</code> delivery and <code>low</code> threshold.",
-            "Tap buttons below to change audit visibility/sensitivity, core model, or audit model.",
-            "Use <code>/audit model backend=&lt;backend&gt; model=&lt;model&gt;</code> to set the audit model.",
-            "Use <code>/audit delivery &lt;always|issues_only|silent&gt;</code> and <code>/audit threshold &lt;low|medium|high|critical&gt;</code> for text control.",
-            "Use <code>/audit set &lt;slot&gt; &lt;text&gt;</code> to edit audit criteria.",
-            "",
-            "Audit criteria:",
-        ]
-        if visible_criteria:
-            for key in sorted(visible_criteria, key=lambda value: (not str(value).isdigit(), int(value) if str(value).isdigit() else str(value))):
-                lines.append(f"• <code>{html.escape(str(key))}</code>: {html.escape(str(visible_criteria[key]))}")
-        else:
-            lines.append("• default risk sensors")
-        return "\n".join(lines)
+        return runtime_audit.audit_status_text(state, criteria)
 
     def _audit_status_keyboard(self, cfg) -> InlineKeyboardMarkup:
         return self._audit_config_keyboard(cfg)
