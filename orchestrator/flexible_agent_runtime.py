@@ -24,6 +24,7 @@ from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandle
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
 from orchestrator import runtime_delivery
 from orchestrator import runtime_media
+from orchestrator import runtime_wrapper
 from orchestrator.runtime_common import (
     QueuedRequest,
     _print_final_response,
@@ -66,14 +67,7 @@ from orchestrator.skill_manager import SkillDefinition, SkillManager
 from orchestrator.voice_manager import VoiceManager
 from orchestrator.private_wol import describe_wol_targets, private_wol_available, run_private_wol
 from orchestrator.workzone import access_root_for_workzone, build_workzone_prompt, clear_workzone, load_workzone, resolve_workzone_input, save_workzone
-from orchestrator.wrapper_mode import (
-    SESSION_RESET_SOURCE,
-    WrapperProcessor,
-    load_wrapper_config,
-    passthrough_result,
-    should_wrap_source,
-    visible_wrapper_slots,
-)
+from orchestrator.wrapper_mode import SESSION_RESET_SOURCE, load_wrapper_config, visible_wrapper_slots
 from orchestrator.audit_mode import (
     AuditProcessor,
     AuditTelemetryCollector,
@@ -8232,66 +8226,22 @@ class FlexibleAgentRuntime:
             await self._flush_thinking(chat_id)
 
     def _wrapper_enabled(self) -> bool:
-        return getattr(self.backend_manager, "agent_mode", "flex") == "wrapper"
+        return runtime_wrapper.wrapper_enabled(self)
 
     def _wrapper_timeout_s(self) -> float:
-        try:
-            value = float((self.config.extra or {}).get("wrapper_timeout_s", 30.0))
-        except (TypeError, ValueError):
-            value = 30.0
-        return value if value > 0 else 30.0
+        return runtime_wrapper.wrapper_timeout_s(self)
 
     def _wrapper_visible_context(self, context_window: int) -> list[dict[str, str]]:
-        if context_window <= 0:
-            return []
-        try:
-            rounds = self.handoff_builder.get_recent_rounds(max_rounds=context_window)
-        except Exception as exc:
-            self.logger.warning(f"_wrapper_visible_context: get_recent_rounds failed: {exc}")
-            return []
-        context: list[dict[str, str]] = []
-        for round_entries in rounds:
-            for entry in round_entries:
-                if not isinstance(entry, dict):
-                    continue
-                text = str(entry.get("text") or "").strip()
-                if not text:
-                    continue
-                context.append(
-                    {
-                        "role": str(entry.get("role") or "unknown"),
-                        "text": text,
-                        "source": str(entry.get("source") or ""),
-                    }
-                )
-        return context
+        return runtime_wrapper.wrapper_visible_context(self, context_window)
 
     def _wrapper_audit_fields(self, wrapper_result) -> dict[str, Any]:
-        return {
-            "wrapper_mode": self._wrapper_enabled(),
-            "wrapper_used": bool(getattr(wrapper_result, "wrapper_used", False)),
-            "wrapper_failed": bool(getattr(wrapper_result, "wrapper_failed", False)),
-            "wrapper_latency_ms": round(float(getattr(wrapper_result, "latency_ms", 0.0) or 0.0), 3),
-            "wrapper_fallback_reason": getattr(wrapper_result, "fallback_reason", None),
-            "wrapper_final_chars": len(getattr(wrapper_result, "final_text", "") or ""),
-        }
+        return runtime_wrapper.wrapper_audit_fields(self, wrapper_result)
 
     def _wrapper_listener_fields(self, core_raw: str, visible_text: str, wrapper_result) -> dict[str, Any]:
-        return {
-            "core_raw": core_raw,
-            "visible_text": visible_text,
-            "wrapper_used": bool(getattr(wrapper_result, "wrapper_used", False)),
-            "wrapper_failed": bool(getattr(wrapper_result, "wrapper_failed", False)),
-            "wrapper_fallback_reason": getattr(wrapper_result, "fallback_reason", None),
-        }
+        return runtime_wrapper.wrapper_listener_fields(core_raw, visible_text, wrapper_result)
 
     def _core_memory_assistant_text(self, core_raw: str, visible_text: str, wrapper_result) -> str:
-        if self._wrapper_enabled() and (
-            bool(getattr(wrapper_result, "wrapper_used", False))
-            or bool(getattr(wrapper_result, "wrapper_failed", False))
-        ):
-            return core_raw or visible_text
-        return visible_text
+        return runtime_wrapper.core_memory_assistant_text(self, core_raw, visible_text, wrapper_result)
 
     def _append_core_transcript(
         self,
@@ -8302,148 +8252,33 @@ class FlexibleAgentRuntime:
         completion_path: str,
         wrapper_result,
     ) -> None:
-        path = getattr(self, "core_transcript_log_path", None) or (self.workspace_dir / "core_transcript.jsonl")
-        entry = {
-            "role": "assistant_core",
-            "text": core_raw or "",
-            "visible_text": visible_text or "",
-            "source": item.source,
-            "request_id": item.request_id,
-            "summary": item.summary,
-            "completion_path": completion_path,
-            "backend": self.config.active_backend,
-            "wrapper_used": bool(getattr(wrapper_result, "wrapper_used", False)),
-            "wrapper_failed": bool(getattr(wrapper_result, "wrapper_failed", False)),
-            "wrapper_fallback_reason": getattr(wrapper_result, "fallback_reason", None),
-            "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
-        }
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry) + "\n")
-        except Exception as exc:
-            self.error_logger.warning(f"Failed to append core transcript: {exc}")
-
-    async def _send_wrapper_polishing_placeholder(self, item: QueuedRequest):
-        if item.silent or not item.deliver_to_telegram or not self.telegram_connected:
-            return None
-        if not should_wrap_source(item.source):
-            return None
-        bot = getattr(getattr(self, "app", None), "bot", None)
-        if bot is None or not hasattr(bot, "send_message"):
-            return None
-        try:
-            return await bot.send_message(
-                chat_id=item.chat_id,
-                text="✨ Polishing the final voice...",
-            )
-        except Exception as exc:
-            self.telegram_logger.warning(f"Failed to send wrapper polishing placeholder: {exc}")
-            return None
-
-    async def _delete_wrapper_polishing_placeholder(self, item: QueuedRequest, placeholder) -> None:
-        if placeholder is None:
-            return
-        bot = getattr(getattr(self, "app", None), "bot", None)
-        message_id = getattr(placeholder, "message_id", None)
-        if bot is None or message_id is None or not hasattr(bot, "delete_message"):
-            return
-        try:
-            await bot.delete_message(chat_id=item.chat_id, message_id=message_id)
-        except Exception:
-            pass
-
-    async def _apply_wrapper_to_visible_text(self, item: QueuedRequest, visible_text: str):
-        if not self._wrapper_enabled():
-            return visible_text, passthrough_result(visible_text, fallback_reason="wrapper_mode_disabled")
-
-        state = self.backend_manager.get_state_snapshot()
-        cfg = load_wrapper_config(state)
-        slots = state.get("wrapper_slots")
-        if not isinstance(slots, dict):
-            slots = None
-        processor = WrapperProcessor(
-            cfg,
-            backend_invoker=self.backend_manager.generate_ephemeral_response,
-            timeout_s=self._wrapper_timeout_s(),
+        runtime_wrapper.append_core_transcript(
+            self,
+            item,
+            core_raw=core_raw,
+            visible_text=visible_text,
+            completion_path=completion_path,
+            wrapper_result=wrapper_result,
         )
 
-        stop_wrapper_typing = None
-        wrapper_typing_task = None
-        wrapper_placeholder = await self._send_wrapper_polishing_placeholder(item)
-        if not item.silent and item.deliver_to_telegram and self.telegram_connected:
-            stop_wrapper_typing = asyncio.Event()
-            wrapper_typing_task = asyncio.create_task(self.typing_loop(item.chat_id, stop_wrapper_typing))
-        try:
-            wrapper_result = await processor.process(
-                request_id=item.request_id,
-                source=item.source,
-                core_raw=visible_text,
-                user_request=item.prompt,
-                visible_context=self._wrapper_visible_context(cfg.context_window),
-                wrapper_slots=slots,
-                config=cfg,
-                silent=True,
-            )
-        finally:
-            if stop_wrapper_typing and wrapper_typing_task:
-                stop_wrapper_typing.set()
-                await wrapper_typing_task
-            await self._delete_wrapper_polishing_placeholder(item, wrapper_placeholder)
+    async def _send_wrapper_polishing_placeholder(self, item: QueuedRequest):
+        return await runtime_wrapper.send_wrapper_polishing_placeholder(self, item)
 
-        return wrapper_result.final_text, wrapper_result
+    async def _delete_wrapper_polishing_placeholder(self, item: QueuedRequest, placeholder) -> None:
+        await runtime_wrapper.delete_wrapper_polishing_placeholder(self, item, placeholder)
+
+    async def _apply_wrapper_to_visible_text(self, item: QueuedRequest, visible_text: str):
+        return await runtime_wrapper.apply_wrapper_to_visible_text(self, item, visible_text)
 
     @staticmethod
     def _wrapper_verbose_excerpt(text: str, *, limit: int = 1800) -> str:
-        value = text or ""
-        if len(value) <= limit:
-            return value
-        head = value[: limit - 180].rstrip()
-        tail = value[-140:].lstrip()
-        return f"{head}\n\n... [truncated for verbose display] ...\n\n{tail}"
+        return runtime_wrapper.wrapper_verbose_excerpt(text, limit=limit)
 
     def _format_wrapper_verbose_trace(self, core_raw: str, visible_text: str, wrapper_result) -> str:
-        status = "used" if bool(getattr(wrapper_result, "wrapper_used", False)) else "bypassed"
-        if bool(getattr(wrapper_result, "wrapper_failed", False)):
-            status = "failed"
-        fallback_reason = getattr(wrapper_result, "fallback_reason", None)
-        latency_ms = round(float(getattr(wrapper_result, "latency_ms", 0.0) or 0.0), 1)
-        lines = [
-            "🔍 Wrapper verbose trace",
-            f"- Status: `{status}`",
-            f"- Latency: `{latency_ms}ms`",
-        ]
-        if fallback_reason:
-            lines.append(f"- Fallback: `{fallback_reason}`")
-        lines.extend(
-            [
-                "",
-                "**Core output**",
-                "```text",
-                self._wrapper_verbose_excerpt(core_raw),
-                "```",
-                "",
-                "**Wrapper final output**",
-                "```text",
-                self._wrapper_verbose_excerpt(visible_text),
-                "```",
-            ]
-        )
-        return "\n".join(lines)
+        return runtime_wrapper.format_wrapper_verbose_trace(self, core_raw, visible_text, wrapper_result)
 
     async def _send_wrapper_verbose_trace(self, item: QueuedRequest, core_raw: str, visible_text: str, wrapper_result) -> None:
-        if not self._verbose:
-            return
-        if item.silent or not item.deliver_to_telegram:
-            return
-        if not bool(getattr(wrapper_result, "wrapper_used", False)) and not bool(getattr(wrapper_result, "wrapper_failed", False)):
-            return
-        await self.send_long_message(
-            chat_id=item.chat_id,
-            text=self._format_wrapper_verbose_trace(core_raw, visible_text, wrapper_result),
-            request_id=item.request_id,
-            purpose="wrapper-verbose",
-        )
+        await runtime_wrapper.send_wrapper_verbose_trace(self, item, core_raw, visible_text, wrapper_result)
 
     def _audit_enabled(self) -> bool:
         return getattr(self.backend_manager, "agent_mode", "flex") == "audit"
