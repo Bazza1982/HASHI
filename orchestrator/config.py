@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import logging
+import os
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Union
@@ -12,6 +13,7 @@ from orchestrator.pathing import resolve_command_value, resolve_path_value
 #   "project"   - the project root / repo root (sensible default)
 #   "drive"     - full drive root e.g. C:\ (least restrictive)
 VALID_ACCESS_SCOPES = {"workspace", "project", "drive"}
+LEGACY_FIXED_RUNTIME_ENV = "HASHI_ENABLE_LEGACY_FIXED_RUNTIME"
 config_logger = logging.getLogger("BridgeU.Config")
 
 
@@ -152,12 +154,28 @@ class ConfigManager:
             a_raw = dict(agent_raw)
             agent_type = a_raw.pop("type", None)
             if agent_type is None:
-                config_logger.warning(
-                    "Agent '%s' has no explicit type; defaulting to legacy fixed runtime. "
-                    "Set type explicitly before fixed runtime retirement.",
-                    a_raw.get("name", "<unnamed>"),
+                raise ValueError(
+                    "Agent '%s' has no explicit type. Set type='flex' for active agents; "
+                    "legacy fixed runtime no longer accepts accidental fallback."
+                    % a_raw.get("name", "<unnamed>")
                 )
-                agent_type = "fixed"
+            if agent_type not in {"flex", "limited", "fixed"}:
+                raise ValueError(
+                    "Agent '%s' has unsupported type '%s'. Expected 'flex', 'limited', or 'fixed'."
+                    % (a_raw.get("name", "<unnamed>"), agent_type)
+                )
+            if agent_type == "fixed" and os.environ.get(LEGACY_FIXED_RUNTIME_ENV) != "1":
+                raise ValueError(
+                    "Agent '%s' requests retired legacy fixed runtime. Convert it to type='flex' "
+                    "or set %s=1 for an explicit emergency legacy start."
+                    % (a_raw.get("name", "<unnamed>"), LEGACY_FIXED_RUNTIME_ENV)
+                )
+            if agent_type == "fixed":
+                config_logger.warning(
+                    "Agent '%s' is using retired legacy fixed runtime because %s=1.",
+                    a_raw.get("name", "<unnamed>"),
+                    LEGACY_FIXED_RUNTIME_ENV,
+                )
 
             if agent_type in {"flex", "limited"}:
                 name = a_raw.pop("name")

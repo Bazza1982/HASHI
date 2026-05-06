@@ -410,6 +410,16 @@ Exit criteria:
 - `orchestrator/agent_runtime.py` is under 200 lines as a shim or removed.
 - No active code imports shared primitives from legacy runtime.
 
+Implementation note:
+
+- HASHI uses the conservative final state first: `BridgeAgentRuntime` remains in
+  `orchestrator/legacy/` and `orchestrator/agent_runtime.py` remains a short
+  compatibility shim.
+- Config loading rejects omitted `type` values and blocks explicit
+  `type: "fixed"` unless `HASHI_ENABLE_LEGACY_FIXED_RUNTIME=1` is set.
+- Offline Workbench and agent-directory metadata must not infer fixed runtime
+  from a missing `type`; missing type is invalid configuration.
+
 ## Phase 8: Acceptance Metrics
 
 Target outcomes:

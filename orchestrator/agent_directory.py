@@ -68,7 +68,7 @@ class AgentDirectory:
             config_dir=self.config_path.parent,
             bridge_home=bridge_home,
         ) or (self.config_path.parent / row["workspace_dir"])
-        transcript_name = "transcript.jsonl" if row.get("type") == "flex" else "conversation_log.jsonl"
+        transcript_name = "conversation_log.jsonl" if row.get("type") == "fixed" else "transcript.jsonl"
         engine = row.get("engine") or row.get("active_backend", "unknown")
         model = row.get("model", "unknown")
         if row.get("type") == "flex":
@@ -88,7 +88,7 @@ class AgentDirectory:
             "transcript_path": str(workspace_dir / transcript_name),
             "online": False,
             "status": "offline",
-            "type": row.get("type", "fixed"),
+            "type": row.get("type", "unknown"),
         }
 
     def capability_view(self, name: str) -> dict[str, Any] | None:

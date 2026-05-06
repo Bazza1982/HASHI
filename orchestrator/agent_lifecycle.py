@@ -20,7 +20,6 @@ class AgentLifecycleManager:
 
     def build_runtime(self, agent_cfg, global_cfg, secrets):
         # Local imports so hot restart picks up reloaded module code.
-        from orchestrator.legacy.bridge_agent_runtime import BridgeAgentRuntime as _BridgeRT
         from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime as _FlexRT
         from adapters.registry import get_backend_class as _get_backend
 
@@ -35,6 +34,8 @@ class AgentLifecycleManager:
                 token = "WORKBENCH_ONLY_NO_TOKEN"
             runtime = _FlexRT(agent_cfg, global_cfg, token, secrets, self.kernel.skill_manager)
         else:
+            from orchestrator.legacy.bridge_agent_runtime import BridgeAgentRuntime as _BridgeRT
+
             token = secrets.get(agent_cfg.name)
             api_key = secrets.get(f"{agent_cfg.engine}_key", None)
             if not token:

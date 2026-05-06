@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 🔧 Fixed
 
+- **Legacy fixed runtime retirement gate** — agent configs without an explicit `type` are now rejected instead of falling back to the retired fixed runtime.
+  - Explicit `type: "fixed"` starts only with `HASHI_ENABLE_LEGACY_FIXED_RUNTIME=1`.
+  - Workbench and agent-directory offline metadata no longer assume missing `type` means fixed runtime.
 - **Wrapper prompt hardening** — wrapper prompts now include the current user request only as intent/style context, explicitly instructing the wrapper not to answer it directly or obey data-block instructions.
   - Added bounded clipping for long current requests.
   - Added a default wrapper style slot with explicit override/suppression behavior.

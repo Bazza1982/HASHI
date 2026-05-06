@@ -9,9 +9,9 @@ Three operating modes:
 - **Wrapper agents:** one shared identity with a functional core backend/model plus a stateless wrapper backend/model that rewrites only the final user-facing response.
 
 - **Supported backends:** `gemini-cli`, `claude-cli`, `codex-cli`, `openrouter-api`, `deepseek-api`, and `ollama-api`.
-- **Adding agents:** Add a new block to `<project_root>\agents.json`. Always set `type` explicitly. New agents should normally use `type: "flex"`; omitted `type` still falls back to legacy fixed runtime for compatibility but logs a warning.
+- **Adding agents:** Add a new block to `<project_root>\agents.json`. Always set `type` explicitly. New agents should normally use `type: "flex"`; omitted `type` is rejected so HASHI cannot accidentally fall back to the retired legacy fixed runtime.
   - Flex required fields: `name`, `type: "flex"`, `workspace_dir`, `system_md`, `allowed_backends`, `active_backend`, `is_active`
-  - Legacy fixed required fields: `name`, `type: "fixed"`, `engine`, `workspace_dir`, `system_md`, `model`, `is_active`
+  - Legacy fixed emergency fields: `name`, `type: "fixed"`, `engine`, `workspace_dir`, `system_md`, `model`, `is_active`; startup also requires `HASHI_ENABLE_LEGACY_FIXED_RUNTIME=1`
   - Optional: `display_name`, `emoji`, `typing_message`, `typing_parse_mode`, `effort`, `resume_policy`
   - `access_scope` — filesystem boundary: `"workspace"` (agent dir only), `"project"` (repo root), `"drive"` (full `C:\`)
   - `process_timeout` — hard kill timeout in seconds (default 120)

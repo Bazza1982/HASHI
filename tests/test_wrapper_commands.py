@@ -16,11 +16,11 @@ sys.modules.setdefault("edge_tts", types.ModuleType("edge_tts"))
 
 from adapters.base import BackendResponse
 from adapters.stream_events import KIND_SHELL_EXEC, StreamEvent
-from orchestrator.agent_runtime import QueuedRequest
 from orchestrator.audit_mode import AuditTelemetryCollector, DEFAULT_AUDIT_CRITERION_SLOT_TEXT
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
+from orchestrator.runtime_common import QueuedRequest
 from orchestrator.wrapper_mode import DEFAULT_WRAPPER_STYLE_SLOT_TEXT, SESSION_RESET_SOURCE
 
 

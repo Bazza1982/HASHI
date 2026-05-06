@@ -218,9 +218,9 @@ class WorkbenchApiServer:
             config_dir=self.config_path.parent,
             bridge_home=self.global_config.bridge_home,
         ) or (self.config_path.parent / agent_row["workspace_dir"])
-        if agent_row.get("type") == "flex":
-            return workspace_dir / "transcript.jsonl"
-        return workspace_dir / "conversation_log.jsonl"
+        if agent_row.get("type") == "fixed":
+            return workspace_dir / "conversation_log.jsonl"
+        return workspace_dir / "transcript.jsonl"
 
     def _metadata_for_agent(self, agent_row: dict, runtime) -> dict:
         if runtime is not None:
@@ -252,7 +252,7 @@ class WorkbenchApiServer:
                 "transcript_path": str(transcript_path),
                 "online": False,
                 "status": "offline",
-                "type": agent_row.get("type", "fixed"),
+                "type": agent_row.get("type", "unknown"),
                 "telegram_connected": False,
                 "channels": {
                     "telegram": False,

@@ -320,7 +320,8 @@ hashi/
 │   ├── startup_manager.py     # Cold-start orchestration
 │   ├── shutdown_manager.py    # Final shutdown orchestration
 │   ├── whatsapp_manager.py    # WhatsApp control manager
-│   ├── agent_runtime.py       # Fixed-backend agent runtime
+│   ├── agent_runtime.py       # Legacy fixed-runtime compatibility shim
+│   ├── legacy/                # Retired fixed runtime, emergency flag only
 │   ├── flexible_agent_runtime.py  # Flex agent (switchable backend)
 │   ├── scheduler.py           # Heartbeat + cron job runner
 │   ├── skill_manager.py       # Skills system
@@ -944,10 +945,10 @@ runtime handlers are bound; after adding or editing a private command, run
 }
 ```
 
-Every agent should set `type` explicitly. New agents should normally use
-`"type": "flex"`. Omitted `type` is still interpreted as legacy `"fixed"` for
-backward compatibility, but HASHI logs a warning because fixed runtime support
-is being retired.
+Every agent must set `type` explicitly. New agents should normally use
+`"type": "flex"`. Omitted `type` is rejected so HASHI cannot accidentally fall
+back to the retired legacy fixed runtime. Explicit `"type": "fixed"` is reserved
+for emergency rollback only and requires `HASHI_ENABLE_LEGACY_FIXED_RUNTIME=1`.
 
 ### secrets.json
 ```json

@@ -9,9 +9,9 @@ import pytest
 
 sys.modules.setdefault("edge_tts", types.ModuleType("edge_tts"))
 
-from orchestrator.agent_runtime import BridgeAgentRuntime
 from orchestrator import runtime_jobs
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+from orchestrator.legacy.bridge_agent_runtime import BridgeAgentRuntime
 
 
 class _FakeSkillManager:

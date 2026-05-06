@@ -9,8 +9,8 @@ import sys
 sys.modules.setdefault("edge_tts", SimpleNamespace())
 
 from orchestrator.admin_local_testing import supported_commands
-from orchestrator.agent_runtime import BridgeAgentRuntime
 from orchestrator.bridge_memory import SysPromptManager
+from orchestrator.legacy.bridge_agent_runtime import BridgeAgentRuntime
 from orchestrator.usecomputer_mode import (
     USECOMPUTER_SLOT,
     USECOMPUTER_SYSTEM_PROMPT,
