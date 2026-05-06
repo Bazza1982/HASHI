@@ -266,3 +266,109 @@ def job_transfer_callback(
         "remote": instance_id is not None,
     }
     return f"skilljob:{kind}:xferkey:{token}:go"
+
+
+async def handle_skill_job_callback(runtime, query, data: str) -> bool:
+    if not data.startswith("skilljob:"):
+        return False
+
+    _, kind, action, task_id, value = data.split(":", 4)
+    if action == "toggle":
+        ok, message = runtime.skill_manager.set_job_enabled(kind, task_id, enabled=(value == "on"))
+        await query.answer(message, show_alert=not ok)
+        await runtime._render_skill_jobs(query, kind)
+        return True
+    if action == "delete":
+        ok, message = runtime.skill_manager.delete_job(kind, task_id)
+        await query.answer(message, show_alert=not ok)
+        await runtime._render_skill_jobs(query, kind)
+        return True
+    if action == "run":
+        job = runtime.skill_manager.get_job(kind, task_id)
+        if not job:
+            await query.answer("Unknown job", show_alert=True)
+            return True
+        await query.answer("Running job now")
+        await runtime._run_job_now(job)
+        return True
+    if action == "transfer":
+        markup = runtime._build_job_transfer_keyboard(kind, task_id)
+        job = runtime.skill_manager.get_job(kind, task_id)
+        job_label = (job.get("note") or task_id) if job else task_id
+        await query.edit_message_text(
+            f"📤 <b>Transfer job</b>\n<code>{job_label[:60]}</code>\n\nSelect target agent:",
+            parse_mode="HTML",
+            reply_markup=markup,
+        )
+        await query.answer()
+        return True
+    if action == "xfer_to":
+        target_agent = value
+        job = runtime.skill_manager.get_job(kind, task_id)
+        if not job:
+            await query.answer("Job not found", show_alert=True)
+            return True
+        ok, message, _ = runtime.skill_manager.transfer_job(kind, task_id, target_agent)
+        await query.answer(message, show_alert=not ok)
+        if ok:
+            await query.edit_message_text(
+                f"✅ Job transferred to <b>{target_agent}</b> (disabled — review before enabling).",
+                parse_mode="HTML",
+            )
+        return True
+    if action == "xfer_remote":
+        parts = value.split(":", 1)
+        if len(parts) != 2:
+            await query.answer("Invalid target", show_alert=True)
+            return True
+        target_agent, instance_id = parts
+        job = runtime.skill_manager.get_job(kind, task_id)
+        if not job:
+            await query.answer("Job not found", show_alert=True)
+            return True
+        await query.answer("Sending to remote instance…")
+        ok, msg = await runtime._transfer_job_remote(kind, job, target_agent, instance_id)
+        if ok:
+            runtime.skill_manager.set_job_enabled(kind, task_id, enabled=False)
+            await query.edit_message_text(
+                f"✅ Job transferred to <b>{target_agent}@{instance_id}</b> (original disabled).",
+                parse_mode="HTML",
+            )
+        else:
+            await query.edit_message_text(f"❌ Transfer failed: {msg}")
+        return True
+    if action == "xferkey":
+        selection = getattr(runtime, "_job_transfer_selections", {}).get(task_id)
+        if not selection:
+            await query.answer("Transfer selection expired. Open /jobs and try again.", show_alert=True)
+            return True
+        target_kind = selection["kind"]
+        target_task_id = selection["task_id"]
+        target_agent = selection["target_agent"]
+        job = runtime.skill_manager.get_job(target_kind, target_task_id)
+        if not job:
+            await query.answer("Job not found", show_alert=True)
+            return True
+        if selection.get("remote"):
+            instance_id = selection["instance_id"]
+            await query.answer("Sending to remote instance…")
+            ok, msg = await runtime._transfer_job_remote(target_kind, job, target_agent, instance_id)
+            if ok:
+                runtime.skill_manager.set_job_enabled(target_kind, target_task_id, enabled=False)
+                await query.edit_message_text(
+                    f"✅ Job transferred to <b>{target_agent}@{instance_id}</b> (original disabled).",
+                    parse_mode="HTML",
+                )
+            else:
+                await query.edit_message_text(f"❌ Transfer failed: {msg}")
+            return True
+        ok, message, _ = runtime.skill_manager.transfer_job(target_kind, target_task_id, target_agent)
+        await query.answer(message, show_alert=not ok)
+        if ok:
+            await query.edit_message_text(
+                f"✅ Job transferred to <b>{target_agent}</b> (disabled — review before enabling).",
+                parse_mode="HTML",
+            )
+        return True
+
+    return False

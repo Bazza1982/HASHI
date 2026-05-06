@@ -10,6 +10,7 @@ import pytest
 sys.modules.setdefault("edge_tts", types.ModuleType("edge_tts"))
 
 from orchestrator.agent_runtime import BridgeAgentRuntime
+from orchestrator import runtime_jobs
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 
 
@@ -161,3 +162,26 @@ def test_flexible_job_transfer_keyboard_logs_remote_instance_errors(tmp_path):
     assert warnings
     assert "Failed to build remote agent transfer buttons" in warnings[0]
     assert markup.inline_keyboard[-1][0].text == "✖ Cancel"
+
+
+@pytest.mark.asyncio
+async def test_runtime_jobs_handle_flexible_xferkey_transfer():
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.skill_manager = _FakeSkillManager()
+    runtime._job_transfer_selections = {
+        "jtx1": {
+            "kind": "cron",
+            "task_id": "arale-daily-security-scan",
+            "target_agent": "zhaojun",
+            "instance_id": None,
+            "remote": False,
+        }
+    }
+    query = _FakeQuery("skilljob:cron:xferkey:jtx1:go")
+
+    handled = await runtime_jobs.handle_skill_job_callback(runtime, query, query.data)
+
+    assert handled is True
+    assert runtime.skill_manager.transfers == [("cron", "arale-daily-security-scan", "zhaojun")]
+    assert query.answers[-1]["text"].startswith("Transferred to zhaojun")
+    assert "Job transferred to <b>zhaojun</b>" in query.edits[-1]["text"]
