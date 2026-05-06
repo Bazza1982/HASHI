@@ -27,6 +27,7 @@ from orchestrator import runtime_delivery
 from orchestrator import runtime_habits
 from orchestrator import runtime_media
 from orchestrator import runtime_command_binding
+from orchestrator import runtime_pipeline
 from orchestrator import runtime_remote
 from orchestrator import runtime_status
 from orchestrator import runtime_transfer
@@ -7500,22 +7501,10 @@ class FlexibleAgentRuntime:
                 if not item.prompt or not item.prompt.strip():
                     self.logger.debug(f"Skipping empty prompt in queue (source={item.source}, id={item.request_id})")
                     continue
-                if not item.silent:
-                    self.last_prompt = item
-                is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
-                queued_at = datetime.fromisoformat(item.created_at)
-                queue_wait_s = (datetime.now() - queued_at).total_seconds()
-                self.logger.info(
-                    f"Processing {item.request_id} via {self.config.active_backend} "
-                    f"(source={item.source}, silent={item.silent}, prompt_len={len(item.prompt)}, "
-                    f"queue_wait_s={queue_wait_s:.2f})"
-                )
-                self.current_request_meta = {
-                    "request_id": item.request_id,
-                    "source": item.source,
-                    "summary": item.summary,
-                    "started_at": datetime.now().isoformat(),
-                }
+                queue_start = runtime_pipeline.begin_queue_item(self, item)
+                is_bridge_request = queue_start.is_bridge_request
+                queued_at = queue_start.queued_at
+                queue_wait_s = queue_start.queue_wait_s
                 remote_backend_block = self._remote_backend_block_reason(item.source)
                 if remote_backend_block:
                     self.error_logger.warning(remote_backend_block)
@@ -7527,43 +7516,14 @@ class FlexibleAgentRuntime:
                             purpose="remote-backend-policy",
                         )
                     continue
-                self._mark_activity()
-                self._log_maintenance(
+                turn_prompt = await runtime_pipeline.build_turn_prompt(
+                    self,
                     item,
-                    "processing",
-                    engine=self.config.active_backend,
-                    silent=item.silent,
-                    prompt_len=len(item.prompt),
-                    queue_wait_s=f"{queue_wait_s:.2f}",
-                )
-                self.is_generating = True
-
-                effective_prompt = self._consume_session_primer(item)
-                habit_sections, habit_ids = self._build_habit_sections(item, effective_prompt)
-                extra_sections = self._workzone_prompt_section() + habit_sections
-                extra_sections += await self._build_pre_turn_context_sections(
-                    item,
-                    effective_prompt,
                     is_bridge_request=is_bridge_request,
                 )
-                self.current_request_meta["habit_ids"] = habit_ids
-                # In fixed mode with an active session, use incremental prompts
-                _incremental = (
-                    self.backend_manager.agent_mode == "fixed"
-                    and hasattr(self.backend_manager.current_backend, "_session_id")
-                    and self.backend_manager.current_backend._session_id is not None
-                )
-                _prompt_payload = self.context_assembler.build_prompt_payload(
-                    effective_prompt,
-                    self.config.active_backend,
-                    extra_sections=extra_sections,
-                    inject_memory=not item.skip_memory_injection,
-                    incremental=_incremental,
-                )
-                final_prompt = _prompt_payload["final_prompt"]
-                self._last_prompt_audit = _prompt_payload.get("audit", {})
-                self._thinking_chars_this_req = 0
-                self._last_full_prompt_tokens = len(final_prompt) // 4
+                effective_prompt = turn_prompt.effective_prompt
+                final_prompt = turn_prompt.final_prompt
+                _incremental = turn_prompt.incremental
                 
                 stop_typing = None
                 typing_task = None
