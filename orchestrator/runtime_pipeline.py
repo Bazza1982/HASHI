@@ -388,3 +388,38 @@ def record_foreground_usage_audit(
         )
     except Exception:
         pass
+
+
+def persist_success_memory(
+    runtime,
+    item,
+    response,
+    *,
+    visible_text: str,
+    wrapper_result,
+    is_bridge_request: bool,
+    session_reset_source: str,
+) -> None:
+    memory_user_text = item.prompt
+    if item.source.lower() in {"document", "photo", "voice", "audio", "video", "sticker"}:
+        memory_user_text = f"[{item.source}] {item.summary}"
+    if item.source not in {"startup", "system", session_reset_source} and not is_bridge_request:
+        memory_assistant_text = runtime._core_memory_assistant_text(
+            response.text,
+            visible_text,
+            wrapper_result,
+        )
+        runtime.memory_store.record_turn("user", item.source, memory_user_text)
+        runtime.memory_store.record_turn("assistant", runtime.config.active_backend, memory_assistant_text)
+        runtime.memory_store.record_exchange(memory_user_text, memory_assistant_text, item.source)
+        runtime._schedule_post_turn_observers(
+            item,
+            memory_user_text,
+            memory_assistant_text,
+            is_bridge_request=is_bridge_request,
+        )
+    if not is_bridge_request:
+        runtime.handoff_builder.append_transcript("user", item.prompt, item.source)
+        runtime.handoff_builder.append_transcript("assistant", visible_text)
+        runtime.handoff_builder.refresh_recent_context()
+        runtime.project_chat_logger.log_exchange(item.prompt, visible_text, item.source)

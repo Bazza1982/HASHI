@@ -52,6 +52,38 @@ class _BackendManager:
         return self.response
 
 
+class _MemoryStore:
+    def __init__(self):
+        self.turns = []
+        self.exchanges = []
+
+    def record_turn(self, role, source, text):
+        self.turns.append((role, source, text))
+
+    def record_exchange(self, user_text, assistant_text, source):
+        self.exchanges.append((user_text, assistant_text, source))
+
+
+class _HandoffBuilder:
+    def __init__(self):
+        self.transcript = []
+        self.refreshed = False
+
+    def append_transcript(self, role, text, source=None):
+        self.transcript.append((role, text, source))
+
+    def refresh_recent_context(self):
+        self.refreshed = True
+
+
+class _ProjectChatLogger:
+    def __init__(self):
+        self.exchanges = []
+
+    def log_exchange(self, prompt, visible_text, source):
+        self.exchanges.append((prompt, visible_text, source))
+
+
 def _item(**overrides):
     payload = {
         "request_id": "req-1",
@@ -109,6 +141,16 @@ def _runtime():
     runtime._thinking_chars_this_req = 12
     runtime.get_current_model = lambda: "gpt-test"
     runtime._wrapper_audit_fields = lambda wrapper_result: {"wrapper_applied": bool(wrapper_result)}
+    runtime.memory_store = _MemoryStore()
+    runtime.handoff_builder = _HandoffBuilder()
+    runtime.project_chat_logger = _ProjectChatLogger()
+    runtime.post_turn_calls = []
+    runtime._core_memory_assistant_text = lambda core_raw, visible_text, wrapper_result: f"memory:{visible_text}"
+    runtime._schedule_post_turn_observers = (
+        lambda item, user_text, assistant_text, is_bridge_request: runtime.post_turn_calls.append(
+            (user_text, assistant_text, is_bridge_request)
+        )
+    )
     runtime._strip_transfer_accept_prefix = lambda item, text: text.removeprefix("ACCEPTED:")
     runtime._mark_success = lambda: setattr(runtime, "success_marked", True)
     runtime._record_habit_outcome = lambda item, **fields: runtime.habit_outcomes.append(fields)
@@ -326,3 +368,51 @@ def test_record_foreground_usage_audit_records_estimated_usage(monkeypatch):
     assert event["token_source"] == "estimated"
     assert event["section_chars"] == {"Workzone": 8}
     assert event["wrapper_applied"] is True
+
+
+def test_persist_success_memory_records_human_exchange_and_handoff():
+    runtime = _runtime()
+    item = _item(prompt="user text", source="text")
+    response = SimpleNamespace(text="core text")
+
+    runtime_pipeline.persist_success_memory(
+        runtime,
+        item,
+        response,
+        visible_text="visible text",
+        wrapper_result={"mode": "wrapper"},
+        is_bridge_request=False,
+        session_reset_source="session_reset",
+    )
+
+    assert runtime.memory_store.turns == [
+        ("user", "text", "user text"),
+        ("assistant", "codex-cli", "memory:visible text"),
+    ]
+    assert runtime.memory_store.exchanges == [("user text", "memory:visible text", "text")]
+    assert runtime.post_turn_calls == [("user text", "memory:visible text", False)]
+    assert runtime.handoff_builder.transcript == [
+        ("user", "user text", "text"),
+        ("assistant", "visible text", None),
+    ]
+    assert runtime.handoff_builder.refreshed is True
+    assert runtime.project_chat_logger.exchanges == [("user text", "visible text", "text")]
+
+
+def test_persist_success_memory_skips_bridge_memory_and_handoff():
+    runtime = _runtime()
+    item = _item(source="bridge:api")
+
+    runtime_pipeline.persist_success_memory(
+        runtime,
+        item,
+        SimpleNamespace(text="core"),
+        visible_text="visible",
+        wrapper_result=None,
+        is_bridge_request=True,
+        session_reset_source="session_reset",
+    )
+
+    assert runtime.memory_store.turns == []
+    assert runtime.handoff_builder.transcript == []
+    assert runtime.project_chat_logger.exchanges == []

@@ -7715,25 +7715,15 @@ class FlexibleAgentRuntime:
                             "request_id": item.request_id,
                             "responded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
                         }
-                        memory_user_text = item.prompt
-                        if item.source.lower() in {"document", "photo", "voice", "audio", "video", "sticker"}:
-                            memory_user_text = f"[{item.source}] {item.summary}"
-                        if item.source not in {"startup", "system", SESSION_RESET_SOURCE} and not is_bridge_request:
-                            memory_assistant_text = self._core_memory_assistant_text(response.text, visible_text, wrapper_result)
-                            self.memory_store.record_turn("user", item.source, memory_user_text)
-                            self.memory_store.record_turn("assistant", self.config.active_backend, memory_assistant_text)
-                            self.memory_store.record_exchange(memory_user_text, memory_assistant_text, item.source)
-                            self._schedule_post_turn_observers(
-                                item,
-                                memory_user_text,
-                                memory_assistant_text,
-                                is_bridge_request=is_bridge_request,
-                            )
-                        if not is_bridge_request:
-                            self.handoff_builder.append_transcript("user", item.prompt, item.source)
-                            self.handoff_builder.append_transcript("assistant", visible_text)
-                            self.handoff_builder.refresh_recent_context()
-                            self.project_chat_logger.log_exchange(item.prompt, visible_text, item.source)
+                        runtime_pipeline.persist_success_memory(
+                            self,
+                            item,
+                            response,
+                            visible_text=visible_text,
+                            wrapper_result=wrapper_result,
+                            is_bridge_request=is_bridge_request,
+                            session_reset_source=SESSION_RESET_SOURCE,
+                        )
                         if not item.deliver_to_telegram:
                             continue
                         # CoS intercept: if /cos on and response ends with ?, route to Lily first
