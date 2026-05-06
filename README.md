@@ -931,17 +931,23 @@ runtime handlers are bound; after adding or editing a private command, run
   "agents": [
     {
       "name": "hashiko",
+      "type": "flex",
       "display_name": "Hashiko",
-      "engine": "gemini-cli",
-      "model": "gemini-3-flash",
       "system_md": "workspaces/hashiko/agent.md",
       "workspace_dir": "workspaces/hashiko",
       "is_active": true,
-      "allowed_backends": ["gemini-cli", "claude-cli", "openrouter-api", "deepseek-api", "ollama-api"]
+      "telegram_token_key": "hashiko",
+      "allowed_backends": ["gemini-cli", "claude-cli", "openrouter-api", "deepseek-api", "ollama-api"],
+      "active_backend": "gemini-cli"
     }
   ]
 }
 ```
+
+Every agent should set `type` explicitly. New agents should normally use
+`"type": "flex"`. Omitted `type` is still interpreted as legacy `"fixed"` for
+backward compatibility, but HASHI logs a warning because fixed runtime support
+is being retired.
 
 ### secrets.json
 ```json

@@ -209,8 +209,7 @@ class ConfigManager:
                 resume_policy = a_raw.pop("resume_policy", "latest")
                 access_scope = a_raw.pop("access_scope", "project")
                 if access_scope not in VALID_ACCESS_SCOPES:
-                    import logging
-                    logging.getLogger("BridgeU.Config").warning(
+                    config_logger.warning(
                         f"Agent '{name}': invalid access_scope '{access_scope}', defaulting to 'workspace'"
                     )
                     access_scope = "workspace"
