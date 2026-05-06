@@ -19,13 +19,14 @@ import aiohttp
 import yaml
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update, constants
 from telegram.error import TimedOut as TelegramTimedOut
-from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler, MessageHandler, filters
+from telegram.ext import ApplicationBuilder
 
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
 from orchestrator import runtime_audit
 from orchestrator import runtime_delivery
 from orchestrator import runtime_habits
 from orchestrator import runtime_media
+from orchestrator import runtime_command_binding
 from orchestrator import runtime_remote
 from orchestrator import runtime_status
 from orchestrator import runtime_transfer
@@ -41,7 +42,7 @@ from orchestrator.runtime_common import (
 )
 from orchestrator.agent_fyi import build_agent_fyi_primer
 from orchestrator.bridge_memory import BridgeMemoryStore, BridgeContextAssembler, SysPromptManager
-from orchestrator.command_registry import bind_runtime_commands, runtime_bot_commands
+from orchestrator.command_registry import runtime_bot_commands
 from orchestrator.ephemeral_invoker import make_backend_sidecar_invoker
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
 from orchestrator.flexible_backend_registry import (
@@ -1420,90 +1421,7 @@ class FlexibleAgentRuntime:
         )
 
     def bind_handlers(self):
-        self.app.add_error_handler(self.handle_telegram_error)
-        self.app.add_handler(CommandHandler("help", self._wrap_cmd("help", self.cmd_help)))
-        self.app.add_handler(CommandHandler("start", self._wrap_cmd("start", self.cmd_start)))
-        self.app.add_handler(CommandHandler("status", self._wrap_cmd("status", self.cmd_status)))
-        self.app.add_handler(CommandHandler("sys", self._wrap_cmd("sys", self.cmd_sys)))
-        self.app.add_handler(CommandHandler("credit", self._wrap_cmd("credit", self.cmd_credit)))
-        self.app.add_handler(CommandHandler("voice", self._wrap_cmd("voice", self.cmd_voice)))
-        self.app.add_handler(CommandHandler("safevoice", self._wrap_cmd("safevoice", self.cmd_safevoice)))
-        self.app.add_handler(CommandHandler("say", self._wrap_cmd("say", self.cmd_say)))
-        self.app.add_handler(CommandHandler("loop", self._wrap_cmd("loop", self.cmd_loop)))
-        self.app.add_handler(CommandHandler("whisper", self._wrap_cmd("whisper", self.cmd_whisper)))
-        self.app.add_handler(CommandHandler("active", self._wrap_cmd("active", self.cmd_active)))
-        self.app.add_handler(CommandHandler("fyi", self._wrap_cmd("fyi", self.cmd_fyi)))
-        self.app.add_handler(CommandHandler("debug", self._wrap_cmd("debug", self.cmd_debug)))
-        self.app.add_handler(CommandHandler("skill", self._wrap_cmd("skill", self.cmd_skill)))
-        self.app.add_handler(CommandHandler("backend", self._wrap_cmd("backend", self.cmd_backend)))
-        self.app.add_handler(CommandHandler("handoff", self._wrap_cmd("handoff", self.cmd_handoff)))
-        self.app.add_handler(CommandHandler("ticket", self._wrap_cmd("ticket", self.cmd_ticket)))
-        self.app.add_handler(CommandHandler("park", self._wrap_cmd("park", self.cmd_park)))
-        self.app.add_handler(CommandHandler("load", self._wrap_cmd("load", self.cmd_load)))
-        self.app.add_handler(CommandHandler("transfer", self._wrap_cmd("transfer", self.cmd_transfer)))
-        self.app.add_handler(CommandHandler("fork", self._wrap_cmd("fork", self.cmd_fork)))
-        self.app.add_handler(CommandHandler("cos", self._wrap_cmd("cos", self.cmd_cos)))
-        self.app.add_handler(CommandHandler("model", self._wrap_cmd("model", self.cmd_model)))
-        self.app.add_handler(CommandHandler("effort", self._wrap_cmd("effort", self.cmd_effort)))
-        self.app.add_handler(CallbackQueryHandler(self.callback_model, pattern=r"^(model|backend|bmodel|effort|backend_menu)"))
-        self.app.add_handler(CallbackQueryHandler(self.callback_wrapper_config, pattern=r"^wcfg:"))
-        self.app.add_handler(CallbackQueryHandler(self.callback_audit_config, pattern=r"^acfg:"))
-        self.app.add_handler(CallbackQueryHandler(self.callback_voice, pattern=r"^voice:"))
-        self.app.add_handler(CallbackQueryHandler(self.callback_safevoice, pattern=r"^safevoice:"))
-        self.app.add_handler(CallbackQueryHandler(self.callback_start_agent, pattern=r"^startagent:"))
-        self.app.add_handler(CommandHandler("agents", self._wrap_cmd("agents", self.cmd_agents)))
-        self.app.add_handler(CallbackQueryHandler(self.callback_agents, pattern=r"^agents:"))
-        self.app.add_handler(CallbackQueryHandler(self.callback_skill, pattern=r"^(skill|skilljob):"))
-        self.app.add_handler(CallbackQueryHandler(self.callback_toggle, pattern=r"^tgl:"))
-        self.app.add_handler(CommandHandler("mode", self._wrap_cmd("mode", self.cmd_mode)))
-        self.app.add_handler(CommandHandler("wrapper", self._wrap_cmd("wrapper", self.cmd_wrapper)))
-        self.app.add_handler(CommandHandler("audit", self._wrap_cmd("audit", self.cmd_audit)))
-        self.app.add_handler(CommandHandler("core", self._wrap_cmd("core", self.cmd_core)))
-        self.app.add_handler(CommandHandler("wrap", self._wrap_cmd("wrap", self.cmd_wrap)))
-        self.app.add_handler(CommandHandler("workzone", self._wrap_cmd("workzone", self.cmd_workzone)))
-        self.app.add_handler(CommandHandler("worzone", self._wrap_cmd("worzone", self.cmd_workzone)))
-        self.app.add_handler(CommandHandler("new", self._wrap_cmd("new", self.cmd_new)))
-        self.app.add_handler(CommandHandler("fresh", self._wrap_cmd("fresh", self.cmd_fresh)))
-        self.app.add_handler(CommandHandler("memory", self._wrap_cmd("memory", self.cmd_memory)))
-        self.app.add_handler(CommandHandler("wipe", self._wrap_cmd("wipe", self.cmd_wipe)))
-        self.app.add_handler(CommandHandler("reset", self._wrap_cmd("reset", self.cmd_reset)))
-        self.app.add_handler(CommandHandler("clear", self._wrap_cmd("clear", self.cmd_clear)))
-        self.app.add_handler(CommandHandler("stop", self._wrap_cmd("stop", self.cmd_stop)))
-        self.app.add_handler(CommandHandler("terminate", self._wrap_cmd("terminate", self.cmd_terminate)))
-        self.app.add_handler(CommandHandler("reboot", self._wrap_cmd("reboot", self.cmd_reboot)))
-        self.app.add_handler(CommandHandler("retry", self._wrap_cmd("retry", self.cmd_retry)))
-        self.app.add_handler(CommandHandler("verbose", self._wrap_cmd("verbose", self.cmd_verbose)))
-        self.app.add_handler(CommandHandler("think", self._wrap_cmd("think", self.cmd_think)))
-        self.app.add_handler(CommandHandler("jobs", self._wrap_cmd("jobs", self.cmd_jobs)))
-        self.app.add_handler(CommandHandler("cron", self._wrap_cmd("cron", self.cmd_cron)))
-        self.app.add_handler(CommandHandler("heartbeat", self._wrap_cmd("heartbeat", self.cmd_heartbeat)))
-        self.app.add_handler(CommandHandler("timeout", self._wrap_cmd("timeout", self.cmd_timeout)))
-        self.app.add_handler(CommandHandler("hchat", self._wrap_cmd("hchat", self.cmd_hchat)))
-        self.app.add_handler(CommandHandler("group", self._wrap_cmd("group", self.cmd_group)))
-        self.app.add_handler(CallbackQueryHandler(self.callback_group, pattern=r"^group:"))
-        self.app.add_handler(CommandHandler("token", self._wrap_cmd("token", self.cmd_token)))
-        self.app.add_handler(CommandHandler("usage", self._wrap_cmd("usage", self.cmd_usage)))
-        self.app.add_handler(CommandHandler("logo", self._wrap_cmd("logo", self.cmd_logo)))
-        self.app.add_handler(CommandHandler("move", self._wrap_cmd("move", self.cmd_move)))
-        self.app.add_handler(CallbackQueryHandler(self.callback_move, pattern=r"^move:"))
-        self.app.add_handler(CommandHandler("wa_on", self._wrap_cmd("wa_on", self.cmd_wa_on)))
-        self.app.add_handler(CommandHandler("wa_off", self._wrap_cmd("wa_off", self.cmd_wa_off)))
-        self.app.add_handler(CommandHandler("wa_send", self._wrap_cmd("wa_send", self.cmd_wa_send)))
-        self.app.add_handler(CommandHandler("usecomputer", self._wrap_cmd("usecomputer", self.cmd_usecomputer)))
-        self.app.add_handler(CommandHandler("usercomputer", self._wrap_cmd("usercomputer", self.cmd_usercomputer)))
-        self.app.add_handler(CommandHandler("long", self._wrap_cmd("long", self.cmd_long)))
-        self.app.add_handler(CommandHandler("end", self._wrap_cmd("end", self.cmd_end)))
-        self.app.add_handler(CommandHandler("remote", self._wrap_cmd("remote", self.cmd_remote)))
-        self.app.add_handler(CommandHandler("oll", self._wrap_cmd("oll", self.cmd_oll)))
-        self.app.add_handler(CommandHandler("wol", self._wrap_cmd("wol", self.cmd_wol)))
-        bind_runtime_commands(self, wrap=True)
-        self.app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), self.handle_message))
-        self.app.add_handler(MessageHandler(filters.PHOTO, self.handle_photo))
-        self.app.add_handler(MessageHandler(filters.VOICE, self.handle_voice))
-        self.app.add_handler(MessageHandler(filters.AUDIO, self.handle_audio))
-        self.app.add_handler(MessageHandler(filters.Document.ALL, self.handle_document))
-        self.app.add_handler(MessageHandler(filters.VIDEO, self.handle_video))
-        self.app.add_handler(MessageHandler(filters.Sticker.ALL, self.handle_sticker))
+        runtime_command_binding.bind_flexible_runtime_handlers(self)
 
     async def handle_telegram_error(self, update: object, context):
         update_summary = "<no update>"
