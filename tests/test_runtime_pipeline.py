@@ -17,6 +17,9 @@ class _Logger:
     def info(self, message):
         self.messages.append(message)
 
+    def warning(self, message):
+        self.messages.append(message)
+
     def error(self, message):
         self.messages.append(message)
 
@@ -344,6 +347,35 @@ async def test_cleanup_interactive_feedback_stops_typing_and_deletes_placeholder
     assert typing_task.done()
     assert deleted == [{"chat_id": 123, "message_id": 99}]
     assert flushed == []
+
+
+@pytest.mark.asyncio
+async def test_handle_empty_success_response_uses_tool_failure_message():
+    runtime = _runtime()
+    item = _item()
+
+    await runtime_pipeline.handle_empty_success_response(runtime, item)
+
+    assert runtime.last_error == runtime_pipeline.EMPTY_SUCCESS_TOOL_FAILURE_MESSAGE
+    assert runtime.habit_outcomes == [
+        {"success": False, "error_text": runtime_pipeline.EMPTY_SUCCESS_TOOL_FAILURE_MESSAGE}
+    ]
+    assert runtime.sent_message["purpose"] == "error"
+    assert "tool I tried to use" in runtime.listener_payloads[0]["error"]
+
+
+@pytest.mark.asyncio
+async def test_handle_empty_success_response_buffers_transfer():
+    runtime = _runtime()
+    runtime._should_buffer_during_transfer = lambda request_id: True
+
+    await runtime_pipeline.handle_empty_success_response(runtime, _item())
+
+    assert runtime.suppressed == {
+        "success": False,
+        "error": runtime_pipeline.EMPTY_SUCCESS_TOOL_FAILURE_MESSAGE,
+    }
+    assert not hasattr(runtime, "sent_message")
 
 
 @pytest.mark.asyncio

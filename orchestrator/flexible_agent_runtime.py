@@ -7655,37 +7655,7 @@ class FlexibleAgentRuntime:
 
                 # 3. Update transcript and refresh context
                 if response.is_success and not response.text:
-                    # Backend succeeded but returned empty text (e.g. tool call returned
-                    # an error and the model gave up without producing a reply).
-                    # Surface a clear message rather than falling through to "Unknown error".
-                    err_msg = "I wasn't able to complete that — a tool I tried to use didn't return a result. Please check that all required API keys (e.g. brave_api_key for web search) are configured in secrets.json."
-                    self.logger.warning(
-                        f"Backend {self.config.active_backend} returned success with empty text for "
-                        f"{item.request_id} — treating as recoverable tool failure"
-                    )
-                    self._mark_error(err_msg)
-                    self._record_habit_outcome(item, success=False, error_text=err_msg)
-                    if self._should_buffer_during_transfer(item.request_id):
-                        self._record_suppressed_transfer_result(item, success=False, error=err_msg)
-                    if not item.silent:
-                        if not self._should_buffer_during_transfer(item.request_id):
-                            await self.send_long_message(
-                                chat_id=item.chat_id,
-                                text=err_msg,
-                                request_id=item.request_id,
-                                purpose="error",
-                            )
-                    await self._notify_request_listeners(
-                        item.request_id,
-                        {
-                            "request_id": item.request_id,
-                            "success": False,
-                            "text": None,
-                            "error": err_msg,
-                            "source": item.source,
-                            "summary": item.summary,
-                        },
-                    )
+                    await runtime_pipeline.handle_empty_success_response(self, item)
                 elif response.is_success and response.text:
                     success_result = await runtime_pipeline.prepare_successful_response(
                         self,
