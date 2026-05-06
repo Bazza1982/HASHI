@@ -7772,47 +7772,14 @@ class FlexibleAgentRuntime:
                         if not _cos_handled:
                             await self._hchat_route_reply(item, _response_text)
                 else:
-                    err_msg = response.error or "Unknown error"
-                    self._mark_error(err_msg)
-                    self._record_habit_outcome(item, success=False, error_text=err_msg)
-                    if self._should_buffer_during_transfer(item.request_id):
-                        self._record_suppressed_transfer_result(item, success=False, error=err_msg)
-                    await self._notify_request_listeners(
-                        item.request_id,
-                        {
-                            "request_id": item.request_id,
-                            "success": False,
-                            "text": None,
-                            "error": err_msg,
-                            "source": item.source,
-                            "summary": item.summary,
-                        },
+                    await runtime_pipeline.handle_backend_error(
+                        self,
+                        item,
+                        response,
+                        queued_at=queued_at,
+                        queue_wait_s=queue_wait_s,
+                        backend_elapsed_s=backend_elapsed,
                     )
-                    if not item.silent:
-                        self.error_logger.error(
-                            f"Flex Backend error for {item.request_id} "
-                            f"({self.config.active_backend}, source={item.source}): {err_msg}"
-                        )
-                        if self._should_retry_codex_scheduler_failure(item, err_msg):
-                            self._schedule_codex_scheduler_retry(item)
-                        if not item.deliver_to_telegram:
-                            continue
-                        if self._should_buffer_during_transfer(item.request_id):
-                            continue
-                        send_elapsed_s, chunk_count = await self.send_long_message(
-                            chat_id=item.chat_id,
-                            text=f"Flex Backend Error ({self.config.active_backend}): {err_msg}",
-                            request_id=item.request_id,
-                            purpose="error",
-                        )
-                        total_elapsed_s = (datetime.now() - queued_at).total_seconds()
-                        self.logger.info(
-                            f"Completed {item.request_id} error delivery via {self.config.active_backend} "
-                            f"(queue_wait_s={queue_wait_s:.2f}, backend_s={backend_elapsed:.2f}, "
-                            f"telegram_send_s={send_elapsed_s:.2f}, total_s={total_elapsed_s:.2f}, "
-                            f"chunks={chunk_count})"
-                        )
-                        self._log_maintenance(item, "send_error", error_excerpt=_safe_excerpt(err_msg, 200))
 
             except asyncio.CancelledError:
                 break

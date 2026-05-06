@@ -423,3 +423,56 @@ def persist_success_memory(
         runtime.handoff_builder.append_transcript("assistant", visible_text)
         runtime.handoff_builder.refresh_recent_context()
         runtime.project_chat_logger.log_exchange(item.prompt, visible_text, item.source)
+
+
+async def handle_backend_error(
+    runtime,
+    item,
+    response,
+    *,
+    queued_at: datetime,
+    queue_wait_s: float,
+    backend_elapsed_s: float,
+) -> None:
+    err_msg = response.error or "Unknown error"
+    runtime._mark_error(err_msg)
+    runtime._record_habit_outcome(item, success=False, error_text=err_msg)
+    if runtime._should_buffer_during_transfer(item.request_id):
+        runtime._record_suppressed_transfer_result(item, success=False, error=err_msg)
+    await runtime._notify_request_listeners(
+        item.request_id,
+        {
+            "request_id": item.request_id,
+            "success": False,
+            "text": None,
+            "error": err_msg,
+            "source": item.source,
+            "summary": item.summary,
+        },
+    )
+    if item.silent:
+        return
+    runtime.error_logger.error(
+        f"Flex Backend error for {item.request_id} "
+        f"({runtime.config.active_backend}, source={item.source}): {err_msg}"
+    )
+    if runtime._should_retry_codex_scheduler_failure(item, err_msg):
+        runtime._schedule_codex_scheduler_retry(item)
+    if not item.deliver_to_telegram:
+        return
+    if runtime._should_buffer_during_transfer(item.request_id):
+        return
+    send_elapsed_s, chunk_count = await runtime.send_long_message(
+        chat_id=item.chat_id,
+        text=f"Flex Backend Error ({runtime.config.active_backend}): {err_msg}",
+        request_id=item.request_id,
+        purpose="error",
+    )
+    total_elapsed_s = (datetime.now() - queued_at).total_seconds()
+    runtime.logger.info(
+        f"Completed {item.request_id} error delivery via {runtime.config.active_backend} "
+        f"(queue_wait_s={queue_wait_s:.2f}, backend_s={backend_elapsed_s:.2f}, "
+        f"telegram_send_s={send_elapsed_s:.2f}, total_s={total_elapsed_s:.2f}, "
+        f"chunks={chunk_count})"
+    )
+    runtime._log_maintenance(item, "send_error", error_excerpt=_safe_excerpt(err_msg, 200))

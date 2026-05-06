@@ -17,6 +17,9 @@ class _Logger:
     def info(self, message):
         self.messages.append(message)
 
+    def error(self, message):
+        self.messages.append(message)
+
 
 class _ContextAssembler:
     def build_prompt_payload(self, prompt, backend, *, extra_sections, inject_memory, incremental):
@@ -109,11 +112,13 @@ def _runtime():
     runtime.session_id_dt = "session-1"
     runtime.logger = _Logger()
     runtime.telegram_logger = _Logger()
+    runtime.error_logger = _Logger()
     runtime.last_prompt = None
     runtime.current_request_meta = None
     runtime.is_generating = False
     runtime.maintenance_events = []
     runtime._mark_activity = lambda: setattr(runtime, "activity_marked", True)
+    runtime._mark_error = lambda error: setattr(runtime, "last_error", error)
     runtime._log_maintenance = lambda item, event, **fields: runtime.maintenance_events.append((event, fields))
     runtime._safe_excerpt = lambda text, limit: text[:limit]
     runtime.success_marked = False
@@ -154,6 +159,16 @@ def _runtime():
     runtime._strip_transfer_accept_prefix = lambda item, text: text.removeprefix("ACCEPTED:")
     runtime._mark_success = lambda: setattr(runtime, "success_marked", True)
     runtime._record_habit_outcome = lambda item, **fields: runtime.habit_outcomes.append(fields)
+    runtime._should_buffer_during_transfer = lambda request_id: False
+    runtime._record_suppressed_transfer_result = lambda item, **fields: setattr(runtime, "suppressed", fields)
+    runtime._should_retry_codex_scheduler_failure = lambda item, error: False
+    runtime._schedule_codex_scheduler_retry = lambda item: setattr(runtime, "retry_scheduled", True)
+
+    async def _send_long_message(**kwargs):
+        runtime.sent_message = kwargs
+        return 0.25, 1
+
+    runtime.send_long_message = _send_long_message
 
     async def _apply_wrapper_to_visible_text(item, text):
         return f"wrapped:{text}", {"mode": "wrapper"}
@@ -416,3 +431,46 @@ def test_persist_success_memory_skips_bridge_memory_and_handoff():
     assert runtime.memory_store.turns == []
     assert runtime.handoff_builder.transcript == []
     assert runtime.project_chat_logger.exchanges == []
+
+
+@pytest.mark.asyncio
+async def test_handle_backend_error_notifies_and_delivers_error():
+    runtime = _runtime()
+    item = _item()
+    response = SimpleNamespace(error="backend failed")
+
+    await runtime_pipeline.handle_backend_error(
+        runtime,
+        item,
+        response,
+        queued_at=datetime.now() - timedelta(seconds=1),
+        queue_wait_s=0.5,
+        backend_elapsed_s=0.25,
+    )
+
+    assert runtime.last_error == "backend failed"
+    assert runtime.habit_outcomes == [{"success": False, "error_text": "backend failed"}]
+    assert runtime.listener_payloads[0]["success"] is False
+    assert runtime.listener_payloads[0]["error"] == "backend failed"
+    assert runtime.sent_message["purpose"] == "error"
+    assert "Flex Backend Error" in runtime.sent_message["text"]
+    assert runtime.maintenance_events[0][0] == "send_error"
+
+
+@pytest.mark.asyncio
+async def test_handle_backend_error_buffers_transfer_without_delivery():
+    runtime = _runtime()
+    runtime._should_buffer_during_transfer = lambda request_id: True
+    item = _item()
+
+    await runtime_pipeline.handle_backend_error(
+        runtime,
+        item,
+        SimpleNamespace(error="buffer me"),
+        queued_at=datetime.now(),
+        queue_wait_s=0,
+        backend_elapsed_s=0,
+    )
+
+    assert runtime.suppressed == {"success": False, "error": "buffer me"}
+    assert not hasattr(runtime, "sent_message")
