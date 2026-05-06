@@ -846,6 +846,8 @@ pytest tests/contract/test_release_readiness_contract.py -q
 
 Status: planned after the 2026-05-07 quick fix.
 
+Detailed implementation plan: `docs/HCHAT_DELIVERY_BOUNDARY_PLAN.md`.
+
 ### 16.1 Quick fix now
 
 `bridge:hchat` must remain wrapper-bypassed for the current runtime shape.

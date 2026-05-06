@@ -88,6 +88,7 @@ Implemented scope:
 Design and acceptance record:
 
 - `docs/WRAPPER_AGENT_MODE_PLAN.md`
+- `docs/HCHAT_DELIVERY_BOUNDARY_PLAN.md`
 
 ---
 
