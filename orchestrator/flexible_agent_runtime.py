@@ -2499,123 +2499,19 @@ class FlexibleAgentRuntime:
 
     async def _do_move(self, update, agent_id: str, target: str, instances: dict,
                        keep_source: bool = False, sync: bool = False, dry_run: bool = False):
-        """Execute the actual migration."""
-        import asyncio as _asyncio
-        import subprocess as _subprocess
-
-        # Called from callback query — update.message is None, use chat_id + _send_text
-        chat_id = update.effective_chat.id
-
-        await self._send_text(chat_id, f"⏳ Moving <code>{agent_id}</code> → <b>{target}</b>…", parse_mode="HTML")
-
-        script = Path(__file__).parent.parent / "scripts" / "move_agent.py"
-        if not script.exists():
-            await self._send_text(chat_id, "Error: move_agent.py not found.")
-            return
-
-        cmd = [
-            "python", str(script),
-            agent_id, target,
-            "--source-instance", "hashi2",
-        ]
-        if keep_source:
-            cmd.append("--keep-source")
-        if sync:
-            cmd.append("--sync")
-        if dry_run:
-            cmd.append("--dry-run")
-
-        try:
-            result = await _asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: _subprocess.run(cmd, capture_output=True, text=True,
-                                        cwd=str(Path(__file__).parent.parent))
-            )
-            output = (result.stdout + result.stderr).strip()
-            # Trim for Telegram
-            if len(output) > 3000:
-                output = output[:3000] + "\n…[truncated]"
-            status = "✅" if result.returncode == 0 else "❌"
-            await self._send_text(
-                chat_id,
-                f"{status} <b>Migration result:</b>\n<pre>{output}</pre>",
-                parse_mode="HTML",
-            )
-        except Exception as e:
-            await self._send_text(chat_id, f"Error running migration: {e}")
+        await runtime_remote.do_move(
+            self,
+            update,
+            agent_id,
+            target,
+            instances,
+            keep_source=keep_source,
+            sync=sync,
+            dry_run=dry_run,
+        )
 
     async def callback_move(self, update: Update, context: Any):
-        """Handle move: callback queries (multi-step picker)."""
-        query = update.callback_query
-        if not self._is_authorized_user(query.from_user.id):
-            await query.answer()
-            return
-        await query.answer()
-
-        data = query.data or ""
-        parts = data.split(":", 3)
-
-        if len(parts) < 2:
-            return
-
-        action = parts[1] if len(parts) > 1 else ""
-
-        if action == "cancel":
-            await query.edit_message_text("Move cancelled.")
-            return
-
-        if action == "agent" and len(parts) >= 3:
-            agent_id = parts[2]
-            instances = self._load_instances()
-            rows = []
-            for name, inst in instances.items():
-                label = inst.get("display_name", name)
-                rows.append([InlineKeyboardButton(f"📦 {label}", callback_data=f"move:target:{agent_id}:{name}")])
-            rows.append([InlineKeyboardButton("❌ Cancel", callback_data="move:cancel")])
-            markup = InlineKeyboardMarkup(rows)
-            await query.edit_message_text(
-                f"<b>Move <code>{agent_id}</code></b> — select target:",
-                parse_mode="HTML",
-                reply_markup=markup,
-            )
-            return
-
-        if action == "target" and len(parts) >= 4:
-            agent_id = parts[2]
-            target = parts[3]
-            markup = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("📋 Move (plain)", callback_data=f"move:exec:{agent_id}:{target}:plain"),
-                    InlineKeyboardButton("📂 Copy (keep source)", callback_data=f"move:exec:{agent_id}:{target}:keep"),
-                ],
-                [
-                    InlineKeyboardButton("🔄 Sync memories back", callback_data=f"move:exec:{agent_id}:{target}:sync"),
-                    InlineKeyboardButton("🔍 Dry run preview", callback_data=f"move:exec:{agent_id}:{target}:dry"),
-                ],
-                [InlineKeyboardButton("❌ Cancel", callback_data="move:cancel")],
-            ])
-            await query.edit_message_text(
-                f"<b>Move <code>{agent_id}</code> → {target}</b>\n\nChoose mode:",
-                parse_mode="HTML",
-                reply_markup=markup,
-            )
-            return
-
-        if action == "exec" and len(parts) >= 4:
-            # parts: move:exec:<agent>:<target>:<mode>
-            sub = parts[3].split(":", 1)
-            agent_id = sub[0]
-            rest = sub[1] if len(sub) > 1 else "plain"
-            target_mode = rest.split(":", 1)
-            target = target_mode[0]
-            mode = target_mode[1] if len(target_mode) > 1 else "plain"
-
-            keep = mode == "keep"
-            sync = mode == "sync"
-            dry = mode == "dry"
-            instances = self._load_instances()
-            await self._do_move(update, agent_id, target, instances,
-                                keep_source=keep, sync=sync, dry_run=dry)
+        await runtime_remote.handle_move_callback(self, update, context)
 
     def _resolve_bridge_handoff_endpoint(self, target_instance: str, mode: str) -> tuple[str, str]:
         return runtime_transfer.resolve_bridge_handoff_endpoint(self, target_instance, mode)
