@@ -305,6 +305,21 @@ Exit criteria:
 
 Purpose: make commands plug-and-play and hot-reboot friendly.
 
+Implementation note:
+
+- Static flexible-runtime Telegram handler binding now lives in
+  `orchestrator/runtime_command_binding.py`.
+- Built-in command menu metadata also lives in
+  `orchestrator/runtime_command_binding.py`.
+- `FlexibleAgentRuntime.bind_handlers()` and `get_bot_commands()` remain as
+  compatibility shims.
+- Public/private runtime command modules are still loaded through
+  `orchestrator.command_registry`.
+- `/reboot min` stops and starts the target runtime after reloading project
+  modules, so static handlers and command menu metadata are refreshed on the
+  rebuilt runtime. Already-bound handlers on a still-running Telegram
+  `Application` are not mutated in place.
+
 HASHI already has `orchestrator.command_registry` and private command loading.
 Built-in commands should gradually use the same pattern.
 
