@@ -10,14 +10,23 @@ HASHI includes a built-in OpenAI-compatible API gateway. Any tool or library tha
 python main.py --api-gateway
 ```
 
-The gateway will listen on `http://127.0.0.1:18801`.
+The gateway listens on `global.api_gateway_port`. If that value is not set in
+`agents.json`, HASHI derives it as `global.workbench_port + 1`.
+
+Common local ports:
+
+| Instance | HASHI API / Workbench | API Gateway |
+|---|---:|---:|
+| HASHI1 | `18800` | `18801` |
+| HASHI2 | `18802` | `18803` |
+| HASHI9 | `18819` | `18820` |
 
 ### 2. Connection Parameters
 
 | Parameter | Value |
 |-----------|-------|
-| **Base URL** | `http://127.0.0.1:18801/v1` |
-| **Port** | `18801` (configurable in `agents.json` → `"api_gateway_port"`) |
+| **Base URL** | `http://127.0.0.1:<api_gateway_port>/v1` |
+| **Port** | `global.api_gateway_port`, defaulting to `global.workbench_port + 1` |
 | **API Key** | Any non-empty string (no auth enforced, e.g. `"EMPTY"`) |
 
 ---
@@ -29,6 +38,10 @@ The gateway will listen on `http://127.0.0.1:18801`.
 | GET | `/health` | Health check — returns `{"status": "ok", "engines": [...]}` |
 | GET | `/v1/models` | List all available models |
 | POST | `/v1/chat/completions` | Chat completion (sync & streaming) |
+
+The HASHI API itself is separate from the API Gateway and listens on
+`global.workbench_port`. Use `GET /api/health` on the HASHI API port to confirm
+instance ownership, online agents, and the configured API Gateway port.
 
 ---
 
@@ -143,10 +156,14 @@ In `agents.json`, the port is set under the `global` section:
 ```json
 {
   "global": {
+    "workbench_port": 18800,
     "api_gateway_port": 18801
   }
 }
 ```
+
+If `api_gateway_port` is omitted, HASHI uses `workbench_port + 1`. For example,
+HASHI2 with `"workbench_port": 18802` will use API Gateway port `18803`.
 
 ---
 

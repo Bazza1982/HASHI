@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### ✨ Added
 
+- **Anatta live self-assembly mode switch** — `/anatta off`, `/anatta shadow`, and `/anatta on` can now change the current agent workspace's Anatta mode without hand-editing JSON.
+  - `shadow` and `on` automatically ensure the Anatta post-turn observer is registered in `post_turn_observers.json`.
+  - The command writes `anatta_config.json`, reloads post-turn observers, and returns current status.
+  - `off` preserves existing Anatta configuration while disabling injection and observation behavior.
+- **Runtime modularization continued** — runtime session, workspace, control, remote command, lifecycle, queue processor, and pipeline responsibilities were split out of `flexible_agent_runtime.py`.
+  - This keeps the active runtime smaller and moves command/lifecycle code toward hot-reloadable, testable modules.
+  - Queue processing now lives in runtime lifecycle helpers while preserving existing request behavior.
 - **Hot-reloadable runtime command registry** — added a generic slash-command extension point for public modules under `orchestrator/commands/` and local-only private modules under `~/.hashi/private_commands`.
   - Runtime command modules can expose `RuntimeCommand` and `RuntimeCallback` objects for Telegram command handlers and inline callback handlers.
   - Fixed and flexible runtimes now append registered commands to Telegram bot command metadata and bind registered callbacks before normal message handlers.
@@ -23,6 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 🔧 Fixed
 
+- **Per-instance API Gateway ports** — API Gateway no longer assumes every HASHI instance owns `18801`.
+  - If `global.api_gateway_port` is omitted, it now defaults to `workbench_port + 1`.
+  - Launcher display and startup summaries read the configured Workbench/API Gateway ports from `agents.json`.
+  - HASHI API `/api/health` reports `instance_id`, `workbench_port`, `api_gateway_port`, and `api_gateway_enabled` for easier multi-instance validation.
+  - Live validation: HASHI2 runs Workbench API on `18802` and API Gateway on `18803`; HASHI1 can bind `18801` after restart, and HASHI9 config resolves to `18820`.
 - **Legacy fixed runtime retirement gate** — agent configs without an explicit `type` are now rejected instead of falling back to the retired fixed runtime.
   - Explicit `type: "fixed"` starts only with `HASHI_ENABLE_LEGACY_FIXED_RUNTIME=1`.
   - Workbench and agent-directory offline metadata no longer assume missing `type` means fixed runtime.
@@ -38,6 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 🧪 Tests
 
+- Added/ran coverage for config loading, API Gateway, runtime remote behavior, remote peer status, and agent lifecycle after per-instance gateway changes.
+- Added Anatta command and post-turn registry tests for `/anatta off|shadow|on`.
 - Added command-registry tests for external private commands and callbacks.
 - Added audit-mode tests for prompt contracts, telemetry compaction, audit follow-up scheduling, evidence writing, model/config buttons, and notification thresholds.
 - Added wrapper/status tests for default slots and current-request handling.

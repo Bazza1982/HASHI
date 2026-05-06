@@ -16,7 +16,14 @@
 - [ ] Bridge Workbench API port is listening (default: `workbench_port`, e.g. 18819)
 - [ ] Workbench Node API is listening (`:3001`)
 - [ ] Workbench UI is reachable (`:5173`)
-- [ ] API Gateway (optional) is listening (`:18801`)
+- [ ] API Gateway (optional) is listening on `api_gateway_port`; default is `workbench_port + 1`
+- [ ] Multi-instance ports do not collide: HASHI1 `18800/18801`, HASHI2 `18802/18803`, HASHI9 `18819/18820`
+
+### HASHI API / API Gateway ownership
+- [ ] `curl http://127.0.0.1:<workbench_port>/api/health` returns the expected `instance_id`
+- [ ] `api_gateway_port` in `/api/health` matches the instance's expected gateway port
+- [ ] If `api_gateway_enabled` is true, `curl http://127.0.0.1:<api_gateway_port>/health` returns `{"status":"ok", ...}`
+- [ ] No other HASHI instance is listening on the same API Gateway port
 
 ### Workbench UI "no reaction" symptom
 - [ ] `http://127.0.0.1:3001/api/config` returns JSON
@@ -34,6 +41,12 @@
 - [ ] Workbench API stays healthy after reboot
 - [ ] Scheduler is recreated and started after reboot
 - [ ] No post-reboot `ERROR`, `CRITICAL`, `Traceback`, `failed`, or unexpected `LOCAL MODE` entries appear in `logs/bridge.log`
+
+### Anatta mode
+- [ ] `/anatta status` reports the current workspace mode
+- [ ] `/anatta shadow` records observation config without prompt injection
+- [ ] `/anatta on` enables pre-turn live self-assembly and post-turn observation
+- [ ] `/anatta off` disables Anatta while preserving the workspace config
 
 ---
 
