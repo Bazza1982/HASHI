@@ -23,13 +23,13 @@ def main():
         sys.exit(1)
     
     # Load configs
-    with open(agents_path) as f:
+    with open(agents_path, encoding='utf-8-sig') as f:
         cfg = json.load(f)
     
     secrets = {}
     if os.path.exists(secrets_path):
         try:
-            with open(secrets_path) as f:
+            with open(secrets_path, encoding='utf-8-sig') as f:
                 secrets = json.load(f)
         except:
             pass
@@ -39,11 +39,13 @@ def main():
     wa = global_cfg.get('whatsapp', {})
     wa_enabled = wa.get('enabled', False)
     wa_default = wa.get('default_agent', '')
-    wb_port = global_cfg.get('workbench_port', 18800)
+    wb_port = int(global_cfg.get('workbench_port', 18800))
+    api_gateway_port = int(global_cfg.get('api_gateway_port', wb_port + 1))
     
     print(f'WHATSAPP_ENABLED="{("yes" if wa_enabled else "no")}"')
     print(f'WHATSAPP_DEFAULT_AGENT="{wa_default}"')
     print(f'WORKBENCH_PORT="{wb_port}"')
+    print(f'API_GATEWAY_PORT="{api_gateway_port}"')
     
     # Process agents
     active_idx = 0
