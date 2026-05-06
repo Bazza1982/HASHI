@@ -53,6 +53,7 @@ class _BackendManager:
 def _item(**overrides):
     payload = {
         "request_id": "req-1",
+        "chat_id": 123,
         "source": "text",
         "summary": "Test",
         "prompt": "Hello",
@@ -70,12 +71,14 @@ def _runtime():
     runtime = SimpleNamespace()
     runtime.config = SimpleNamespace(active_backend="codex-cli", extra={})
     runtime.logger = _Logger()
+    runtime.telegram_logger = _Logger()
     runtime.last_prompt = None
     runtime.current_request_meta = None
     runtime.is_generating = False
     runtime.maintenance_events = []
     runtime._mark_activity = lambda: setattr(runtime, "activity_marked", True)
     runtime._log_maintenance = lambda item, event, **fields: runtime.maintenance_events.append((event, fields))
+    runtime._safe_excerpt = lambda text, limit: text[:limit]
     runtime._consume_session_primer = lambda item: f"primer\n{item.prompt}"
     runtime._build_habit_sections = lambda item, prompt: ([("Habit", "Be precise.")], ["precision"])
     runtime._workzone_prompt_section = lambda: [("Workzone", "/tmp/work")]
@@ -167,3 +170,59 @@ async def test_run_backend_generation_detaches_background_task():
     assert generation.generation_task is not None
     assert runtime.is_generating is False
     assert (await generation.generation_task).text == "late"
+
+
+def test_log_backend_finished_records_structured_maintenance():
+    runtime = _runtime()
+    item = _item()
+    response = SimpleNamespace(is_success=True, text="hello", error=None)
+
+    runtime_pipeline.log_backend_finished(
+        runtime,
+        item,
+        response,
+        backend_elapsed_s=1.234,
+        final_prompt="final prompt",
+    )
+
+    assert "Backend finished req-1" in runtime.logger.messages[0]
+    event, fields = runtime.maintenance_events[0]
+    assert event == "backend_finished"
+    assert fields["elapsed_s"] == "1.23"
+    assert fields["text_len"] == 5
+    assert fields["final_prompt_len"] == len("final prompt")
+
+
+@pytest.mark.asyncio
+async def test_cleanup_interactive_feedback_stops_typing_and_deletes_placeholder():
+    runtime = _runtime()
+    deleted = []
+    flushed = []
+    stop_typing = None
+
+    async def _typing_task():
+        await stop_typing.wait()
+
+    stop_typing = __import__("asyncio").Event()
+    typing_task = __import__("asyncio").create_task(_typing_task())
+    runtime._flush_thinking = lambda chat_id: flushed.append(chat_id)
+
+    async def _delete_message(**kwargs):
+        deleted.append(kwargs)
+
+    runtime.app = SimpleNamespace(bot=SimpleNamespace(delete_message=_delete_message))
+    placeholder = SimpleNamespace(message_id=99)
+
+    await runtime_pipeline.cleanup_interactive_feedback(
+        runtime,
+        _item(),
+        stop_typing=stop_typing,
+        typing_task=typing_task,
+        escalation_task=None,
+        think_flush_task=None,
+        placeholder=placeholder,
+    )
+
+    assert typing_task.done()
+    assert deleted == [{"chat_id": 123, "message_id": 99}]
+    assert flushed == []

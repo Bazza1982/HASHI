@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from orchestrator.runtime_common import _safe_excerpt
+
 
 @dataclass(frozen=True)
 class QueueItemStart:
@@ -179,3 +181,70 @@ async def run_backend_generation(
         backend_started=backend_started,
         detach_after_s=detach_after_s,
     )
+
+
+def log_backend_finished(
+    runtime,
+    item,
+    response,
+    *,
+    backend_elapsed_s: float,
+    final_prompt: str,
+) -> None:
+    runtime.logger.info(
+        f"Backend finished {item.request_id} via {runtime.config.active_backend} "
+        f"(success={response.is_success}, elapsed_s={backend_elapsed_s:.2f}, "
+        f"text_len={len(response.text or '')}, error_len={len(response.error or '')}, "
+        f"final_prompt_len={len(final_prompt)})"
+    )
+    runtime._log_maintenance(
+        item,
+        "backend_finished",
+        engine=runtime.config.active_backend,
+        success=response.is_success,
+        elapsed_s=f"{backend_elapsed_s:.2f}",
+        text_len=len(response.text or ""),
+        error_len=len(response.error or ""),
+        final_prompt_len=len(final_prompt),
+        result_excerpt=_safe_excerpt(response.text or response.error or "", 200),
+    )
+
+
+async def cleanup_interactive_feedback(
+    runtime,
+    item,
+    *,
+    stop_typing,
+    typing_task,
+    escalation_task,
+    think_flush_task,
+    placeholder,
+) -> None:
+    if stop_typing and typing_task:
+        stop_typing.set()
+        await typing_task
+        if escalation_task is not None:
+            try:
+                await escalation_task
+            except asyncio.CancelledError:
+                pass
+
+    if think_flush_task is not None:
+        think_flush_task.cancel()
+        try:
+            await think_flush_task
+        except asyncio.CancelledError:
+            pass
+        await runtime._flush_thinking(item.chat_id)
+
+    if placeholder:
+        try:
+            delete_started = datetime.now()
+            await runtime.app.bot.delete_message(chat_id=item.chat_id, message_id=placeholder.message_id)
+            delete_elapsed_s = (datetime.now() - delete_started).total_seconds()
+            runtime.telegram_logger.info(
+                f"Deleted placeholder for {item.request_id} "
+                f"(elapsed_s={delete_elapsed_s:.2f})"
+            )
+        except Exception:
+            pass

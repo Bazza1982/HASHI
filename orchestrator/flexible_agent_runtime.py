@@ -7635,49 +7635,23 @@ class FlexibleAgentRuntime:
                     continue  # release queue slot; task runs in background
 
                 backend_elapsed = (datetime.now() - backend_started).total_seconds()
-                self.logger.info(
-                    f"Backend finished {item.request_id} via {self.config.active_backend} "
-                    f"(success={response.is_success}, elapsed_s={backend_elapsed:.2f}, "
-                    f"text_len={len(response.text or '')}, error_len={len(response.error or '')}, "
-                    f"final_prompt_len={len(final_prompt)})"
-                )
-                self._log_maintenance(
+                runtime_pipeline.log_backend_finished(
+                    self,
                     item,
-                    "backend_finished",
-                    engine=self.config.active_backend,
-                    success=response.is_success,
-                    elapsed_s=f"{backend_elapsed:.2f}",
-                    text_len=len(response.text or ""),
-                    error_len=len(response.error or ""),
-                    final_prompt_len=len(final_prompt),
-                    result_excerpt=_safe_excerpt(response.text or response.error or "", 200),
+                    response,
+                    backend_elapsed_s=backend_elapsed,
+                    final_prompt=final_prompt,
                 )
 
-                if stop_typing and typing_task:
-                    stop_typing.set()
-                    await typing_task
-                    if escalation_task is not None:
-                        with suppress(asyncio.CancelledError):
-                            await escalation_task
-
-                # Flush remaining thinking traces and cancel the flush loop
-                if _think_flush_task is not None:
-                    _think_flush_task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await _think_flush_task
-                    await self._flush_thinking(item.chat_id)
-
-                if placeholder:
-                    try:
-                        delete_started = datetime.now()
-                        await self.app.bot.delete_message(chat_id=item.chat_id, message_id=placeholder.message_id)
-                        delete_elapsed_s = (datetime.now() - delete_started).total_seconds()
-                        self.telegram_logger.info(
-                            f"Deleted placeholder for {item.request_id} "
-                            f"(elapsed_s={delete_elapsed_s:.2f})"
-                        )
-                    except Exception:
-                        pass
+                await runtime_pipeline.cleanup_interactive_feedback(
+                    self,
+                    item,
+                    stop_typing=stop_typing,
+                    typing_task=typing_task,
+                    escalation_task=escalation_task,
+                    think_flush_task=_think_flush_task,
+                    placeholder=placeholder,
+                )
 
                 # 3. Update transcript and refresh context
                 if response.is_success and not response.text:
