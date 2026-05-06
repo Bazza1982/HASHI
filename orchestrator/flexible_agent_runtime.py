@@ -7706,16 +7706,7 @@ class FlexibleAgentRuntime:
                         incremental=_incremental,
                     )
                     if not item.silent:
-                        if self._should_buffer_during_transfer(item.request_id):
-                            self._record_suppressed_transfer_result(item, success=True, text=visible_text)
-                            continue
-                        self.last_response = {
-                            "chat_id": item.chat_id,
-                            "text": visible_text,
-                            "request_id": item.request_id,
-                            "responded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-                        }
-                        runtime_pipeline.persist_success_memory(
+                        await runtime_pipeline.handle_success_delivery(
                             self,
                             item,
                             response,
@@ -7723,54 +7714,11 @@ class FlexibleAgentRuntime:
                             wrapper_result=wrapper_result,
                             is_bridge_request=is_bridge_request,
                             session_reset_source=SESSION_RESET_SOURCE,
-                        )
-                        if not item.deliver_to_telegram:
-                            continue
-                        # CoS intercept: if /cos on and response ends with ?, route to Lily first
-                        _response_text = visible_text
-                        _cos_handled = False
-                        await self._send_wrapper_verbose_trace(item, response.text, visible_text, wrapper_result)
-                        if (
-                            self._cos_enabled
-                            and self.name != "lily"
-                            and not item.source.startswith("cos-query:")
-                            and _response_text
-                            and _response_text.rstrip().endswith(("?", "？"))
-                        ):
-                            cos_result = await self.cos_query(_response_text)
-                            if cos_result.get("answered") and cos_result.get("response"):
-                                # Lily answered — deliver Lily's response instead
-                                _response_text = cos_result["response"]
-                            else:
-                                # Declined/timeout: deliver original to user, skip hchat re-routing
-                                _cos_handled = True
-                        _print_final_response(self.name, _response_text)
-                        send_elapsed_s, chunk_count = await self.send_long_message(
-                            chat_id=item.chat_id,
-                            text=_response_text,
-                            request_id=item.request_id,
-                            purpose="response",
-                        )
-                        await self._send_voice_reply(item.chat_id, _response_text, item.request_id)
-                        self._schedule_audit_followup(
-                            item,
-                            core_raw=response.text,
-                            visible_text=visible_text,
-                            response=response,
+                            queued_at=queued_at,
+                            queue_wait_s=queue_wait_s,
+                            backend_elapsed_s=backend_elapsed,
                             audit_collector=_audit_collector,
-                            completion_path="foreground",
                         )
-                        total_elapsed_s = (datetime.now() - queued_at).total_seconds()
-                        self.logger.info(
-                            f"Completed {item.request_id} delivery via {self.config.active_backend} "
-                            f"(queue_wait_s={queue_wait_s:.2f}, backend_s={backend_elapsed:.2f}, "
-                            f"telegram_send_s={send_elapsed_s:.2f}, total_s={total_elapsed_s:.2f}, "
-                            f"chunks={chunk_count})"
-                        )
-                        self._log_maintenance(item, "send_success", text_len=len(_response_text or ""))
-                        # Route hchat reply back to sender if applicable (skip if CoS already delivered direct)
-                        if not _cos_handled:
-                            await self._hchat_route_reply(item, _response_text)
                 else:
                     await runtime_pipeline.handle_backend_error(
                         self,

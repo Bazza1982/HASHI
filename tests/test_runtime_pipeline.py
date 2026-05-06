@@ -169,6 +169,35 @@ def _runtime():
         return 0.25, 1
 
     runtime.send_long_message = _send_long_message
+    runtime._cos_enabled = False
+    runtime.cos_queries = []
+
+    async def _cos_query(text):
+        runtime.cos_queries.append(text)
+        return {"answered": False}
+
+    runtime.cos_query = _cos_query
+    runtime.wrapper_traces = []
+
+    async def _send_wrapper_verbose_trace(item, core_raw, visible_text, wrapper_result):
+        runtime.wrapper_traces.append((core_raw, visible_text, wrapper_result))
+
+    runtime._send_wrapper_verbose_trace = _send_wrapper_verbose_trace
+    runtime.voice_replies = []
+
+    async def _send_voice_reply(chat_id, text, request_id):
+        runtime.voice_replies.append((chat_id, text, request_id))
+        return True
+
+    runtime._send_voice_reply = _send_voice_reply
+    runtime.audit_followups = []
+    runtime._schedule_audit_followup = lambda item, **fields: runtime.audit_followups.append(fields)
+    runtime.hchat_routes = []
+
+    async def _hchat_route_reply(item, text):
+        runtime.hchat_routes.append((item.request_id, text))
+
+    runtime._hchat_route_reply = _hchat_route_reply
 
     async def _apply_wrapper_to_visible_text(item, text):
         return f"wrapped:{text}", {"mode": "wrapper"}
@@ -474,3 +503,59 @@ async def test_handle_backend_error_buffers_transfer_without_delivery():
 
     assert runtime.suppressed == {"success": False, "error": "buffer me"}
     assert not hasattr(runtime, "sent_message")
+
+
+@pytest.mark.asyncio
+async def test_handle_success_delivery_sends_response_and_routes_hchat():
+    runtime = _runtime()
+    item = _item(prompt="user text")
+    response = SimpleNamespace(text="core text")
+
+    await runtime_pipeline.handle_success_delivery(
+        runtime,
+        item,
+        response,
+        visible_text="visible text",
+        wrapper_result={"mode": "wrapper"},
+        is_bridge_request=False,
+        session_reset_source="session_reset",
+        queued_at=datetime.now() - timedelta(seconds=1),
+        queue_wait_s=0.2,
+        backend_elapsed_s=0.3,
+        audit_collector="audit",
+    )
+
+    assert runtime.last_response["text"] == "visible text"
+    assert runtime.sent_message["text"] == "visible text"
+    assert runtime.voice_replies == [(123, "visible text", "req-1")]
+    assert runtime.audit_followups[0]["audit_collector"] == "audit"
+    assert runtime.hchat_routes == [("req-1", "visible text")]
+    assert runtime.maintenance_events[-1][0] == "send_success"
+
+
+@pytest.mark.asyncio
+async def test_handle_success_delivery_uses_cos_answer_without_hchat_route():
+    runtime = _runtime()
+    runtime._cos_enabled = True
+
+    async def _cos_query(text):
+        return {"answered": True, "response": "cos answer"}
+
+    runtime.cos_query = _cos_query
+
+    await runtime_pipeline.handle_success_delivery(
+        runtime,
+        _item(),
+        SimpleNamespace(text="core?"),
+        visible_text="visible?",
+        wrapper_result=None,
+        is_bridge_request=False,
+        session_reset_source="session_reset",
+        queued_at=datetime.now(),
+        queue_wait_s=0,
+        backend_elapsed_s=0,
+        audit_collector=None,
+    )
+
+    assert runtime.sent_message["text"] == "cos answer"
+    assert runtime.hchat_routes == [("req-1", "cos answer")]

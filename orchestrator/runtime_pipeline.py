@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any
 import hashlib as _hashlib
 
-from orchestrator.runtime_common import _safe_excerpt
+from orchestrator.runtime_common import _print_final_response, _safe_excerpt
 
 
 @dataclass(frozen=True)
@@ -476,3 +476,81 @@ async def handle_backend_error(
         f"chunks={chunk_count})"
     )
     runtime._log_maintenance(item, "send_error", error_excerpt=_safe_excerpt(err_msg, 200))
+
+
+async def handle_success_delivery(
+    runtime,
+    item,
+    response,
+    *,
+    visible_text: str,
+    wrapper_result,
+    is_bridge_request: bool,
+    session_reset_source: str,
+    queued_at: datetime,
+    queue_wait_s: float,
+    backend_elapsed_s: float,
+    audit_collector,
+) -> None:
+    if runtime._should_buffer_during_transfer(item.request_id):
+        runtime._record_suppressed_transfer_result(item, success=True, text=visible_text)
+        return
+    runtime.last_response = {
+        "chat_id": item.chat_id,
+        "text": visible_text,
+        "request_id": item.request_id,
+        "responded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+    persist_success_memory(
+        runtime,
+        item,
+        response,
+        visible_text=visible_text,
+        wrapper_result=wrapper_result,
+        is_bridge_request=is_bridge_request,
+        session_reset_source=session_reset_source,
+    )
+    if not item.deliver_to_telegram:
+        return
+
+    response_text = visible_text
+    cos_handled = False
+    await runtime._send_wrapper_verbose_trace(item, response.text, visible_text, wrapper_result)
+    if (
+        runtime._cos_enabled
+        and runtime.name != "lily"
+        and not item.source.startswith("cos-query:")
+        and response_text
+        and response_text.rstrip().endswith(("?", "？"))
+    ):
+        cos_result = await runtime.cos_query(response_text)
+        if cos_result.get("answered") and cos_result.get("response"):
+            response_text = cos_result["response"]
+        else:
+            cos_handled = True
+    _print_final_response(runtime.name, response_text)
+    send_elapsed_s, chunk_count = await runtime.send_long_message(
+        chat_id=item.chat_id,
+        text=response_text,
+        request_id=item.request_id,
+        purpose="response",
+    )
+    await runtime._send_voice_reply(item.chat_id, response_text, item.request_id)
+    runtime._schedule_audit_followup(
+        item,
+        core_raw=response.text,
+        visible_text=visible_text,
+        response=response,
+        audit_collector=audit_collector,
+        completion_path="foreground",
+    )
+    total_elapsed_s = (datetime.now() - queued_at).total_seconds()
+    runtime.logger.info(
+        f"Completed {item.request_id} delivery via {runtime.config.active_backend} "
+        f"(queue_wait_s={queue_wait_s:.2f}, backend_s={backend_elapsed_s:.2f}, "
+        f"telegram_send_s={send_elapsed_s:.2f}, total_s={total_elapsed_s:.2f}, "
+        f"chunks={chunk_count})"
+    )
+    runtime._log_maintenance(item, "send_success", text_len=len(response_text or ""))
+    if not cos_handled:
+        await runtime._hchat_route_reply(item, response_text)
