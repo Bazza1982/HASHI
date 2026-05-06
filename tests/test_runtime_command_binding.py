@@ -16,6 +16,13 @@ def test_command_binding_names_are_unique_except_declared_aliases():
     assert "worzone" in names
 
 
+def test_bot_command_metadata_is_unique_and_covers_static_commands():
+    metadata_names = [binding.name for binding in runtime_command_binding.BOT_COMMAND_BINDINGS]
+    assert len(metadata_names) == len(set(metadata_names))
+    for command in ("help", "status", "reboot", "audit", "wrapper", "remote"):
+        assert command in metadata_names
+
+
 def test_command_binding_method_names_exist_on_flexible_runtime():
     from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 
@@ -69,3 +76,20 @@ def test_bind_flexible_runtime_handlers_preserves_static_binding_count(monkeypat
     )
     assert added_errors == [runtime.handle_telegram_error]
     assert len(added_handlers) == expected
+
+
+def test_get_flexible_bot_commands_appends_runtime_commands(monkeypatch):
+    runtime = SimpleNamespace(global_config=SimpleNamespace(project_root="/tmp/hashi-test"))
+    monkeypatch.setattr(runtime_command_binding, "private_wol_available", lambda project_root: True)
+    monkeypatch.setattr(
+        runtime_command_binding,
+        "runtime_bot_commands",
+        lambda: [runtime_command_binding.BotCommand("private_sample", "Private sample")],
+    )
+
+    commands = runtime_command_binding.get_flexible_bot_commands(runtime)
+    names = [command.command for command in commands]
+
+    assert "status" in names
+    assert "wol" in names
+    assert names[-1] == "private_sample"

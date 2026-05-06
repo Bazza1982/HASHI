@@ -17,7 +17,7 @@ import json
 
 import aiohttp
 import yaml
-from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update, constants
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, constants
 from telegram.error import TimedOut as TelegramTimedOut
 from telegram.ext import ApplicationBuilder
 
@@ -42,7 +42,6 @@ from orchestrator.runtime_common import (
 )
 from orchestrator.agent_fyi import build_agent_fyi_primer
 from orchestrator.bridge_memory import BridgeMemoryStore, BridgeContextAssembler, SysPromptManager
-from orchestrator.command_registry import runtime_bot_commands
 from orchestrator.ephemeral_invoker import make_backend_sidecar_invoker
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
 from orchestrator.flexible_backend_registry import (
@@ -8023,66 +8022,8 @@ class FlexibleAgentRuntime:
                 if item is not None:
                     self.queue.task_done()
 
-    def get_bot_commands(self) -> list[BotCommand]:
-        commands = [
-            BotCommand("help", "Show help menu"),
-            BotCommand("start", "Start another stopped agent"),
-            BotCommand("agents", "List all agents with controls; add <id> <name> [token]"),
-            BotCommand("status", "View agent status"),
-            BotCommand("voice", "Toggle native voice replies"),
-            BotCommand("safevoice", "Toggle voice confirmation safety layer"),
-            BotCommand("whisper", "Set Whisper model size [small|medium|large]"),
-            BotCommand("active", "Toggle proactive heartbeat"),
-            BotCommand("fyi", "Refresh bridge environment awareness"),
-            BotCommand("debug", "Run in strict debug mode"),
-            BotCommand("skill", "Browse and run skills"),
-            BotCommand("backend", "Show backend buttons (+ means context)"),
-            BotCommand("handoff", "Fresh session with recent continuity"),
-            BotCommand("ticket", "Submit IT support ticket to Arale"),
-            BotCommand("park", "List or save parked topics"),
-            BotCommand("load", "Restore a parked topic"),
-            BotCommand("transfer", "Transfer this session to another agent"),
-            BotCommand("fork", "Fork this session to another agent"),
-            BotCommand("cos", "Chief of Staff decision routing (on/off)"),
-            BotCommand("long", "Start multi-message input (end with /end)"),
-            BotCommand("end", "Submit collected /long input"),
-            BotCommand("mode", "Switch fixed/flex/wrapper/audit mode"),
-            BotCommand("wrapper", "Configure wrapper persona slots"),
-            BotCommand("audit", "Configure audit model and criteria"),
-            BotCommand("core", "Configure managed core model"),
-            BotCommand("wrap", "Configure wrapper translator model"),
-            BotCommand("workzone", "Set temporary working directory [path|off]"),
-            BotCommand("model", "View or change model"),
-            BotCommand("effort", "View or change effort"),
-            BotCommand("new", "Start a fresh CLI session"),
-            BotCommand("fresh", "Start a clean API context"),
-            BotCommand("memory", "Control memory injection"),
-            BotCommand("clear", "Clear media/history"),
-            BotCommand("stop", "Stop execution"),
-            BotCommand("reboot", "Hot restart agents"),
-            BotCommand("terminate", "Shut down this agent"),
-            BotCommand("retry", "Resend response or rerun prompt"),
-            BotCommand("verbose", "Toggle verbose long-task status [on|off]"),
-            BotCommand("think", "Toggle thinking trace display [on|off]"),
-            BotCommand("loop", "Create/manage recurring loop tasks"),
-            BotCommand("jobs", "Show cron and heartbeat jobs"),
-            BotCommand("cron", "Run or list cron jobs"),
-            BotCommand("heartbeat", "Run or list heartbeat jobs"),
-            BotCommand("timeout", "View or set request timeout [minutes]"),
-            BotCommand("hchat", "Send a message to another agent [agent] [message]"),
-            BotCommand("logo", "Play startup animation"),
-            BotCommand("remote", "Start/stop Hashi Remote [on|off|status]"),
-            BotCommand("oll", "Start/stop OLL Browser Gateway [on|off|status]"),
-            BotCommand("wa_on", "Start WhatsApp transport"),
-            BotCommand("wa_off", "Stop WhatsApp transport"),
-            BotCommand("wa_send", "Send a WhatsApp message"),
-            BotCommand("usecomputer", "Enable or run GUI-aware computer-use mode"),
-            BotCommand("sys", "Manage system prompt slots"),
-            BotCommand("credit", "Check API credit/usage"),
-        ]
-        if private_wol_available(self.global_config.project_root):
-            commands.append(BotCommand("wol", "Send Wake-on-LAN magic packet [pc_name]"))
-        return commands + runtime_bot_commands()
+    def get_bot_commands(self):
+        return runtime_command_binding.get_flexible_bot_commands(self)
 
     async def shutdown(self):
         self.logger.info(f"Shutting down flex agent '{self.name}'...")

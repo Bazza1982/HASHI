@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from telegram import BotCommand
 from telegram.ext import CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
-from orchestrator.command_registry import bind_runtime_commands
+from orchestrator.command_registry import bind_runtime_commands, runtime_bot_commands
+from orchestrator.private_wol import private_wol_available
 
 
 @dataclass(frozen=True)
@@ -17,6 +19,12 @@ class CommandBinding:
 class CallbackBinding:
     pattern: str
     method_name: str
+
+
+@dataclass(frozen=True)
+class BotCommandBinding:
+    name: str
+    description: str
 
 
 COMMAND_BINDINGS: tuple[CommandBinding, ...] = (
@@ -87,6 +95,64 @@ COMMAND_BINDINGS: tuple[CommandBinding, ...] = (
 )
 
 
+BOT_COMMAND_BINDINGS: tuple[BotCommandBinding, ...] = (
+    BotCommandBinding("help", "Show help menu"),
+    BotCommandBinding("start", "Start another stopped agent"),
+    BotCommandBinding("agents", "List all agents with controls; add <id> <name> [token]"),
+    BotCommandBinding("status", "View agent status"),
+    BotCommandBinding("voice", "Toggle native voice replies"),
+    BotCommandBinding("safevoice", "Toggle voice confirmation safety layer"),
+    BotCommandBinding("whisper", "Set Whisper model size [small|medium|large]"),
+    BotCommandBinding("active", "Toggle proactive heartbeat"),
+    BotCommandBinding("fyi", "Refresh bridge environment awareness"),
+    BotCommandBinding("debug", "Run in strict debug mode"),
+    BotCommandBinding("skill", "Browse and run skills"),
+    BotCommandBinding("backend", "Show backend buttons (+ means context)"),
+    BotCommandBinding("handoff", "Fresh session with recent continuity"),
+    BotCommandBinding("ticket", "Submit IT support ticket to Arale"),
+    BotCommandBinding("park", "List or save parked topics"),
+    BotCommandBinding("load", "Restore a parked topic"),
+    BotCommandBinding("transfer", "Transfer this session to another agent"),
+    BotCommandBinding("fork", "Fork this session to another agent"),
+    BotCommandBinding("cos", "Chief of Staff decision routing (on/off)"),
+    BotCommandBinding("long", "Start multi-message input (end with /end)"),
+    BotCommandBinding("end", "Submit collected /long input"),
+    BotCommandBinding("mode", "Switch fixed/flex/wrapper/audit mode"),
+    BotCommandBinding("wrapper", "Configure wrapper persona slots"),
+    BotCommandBinding("audit", "Configure audit model and criteria"),
+    BotCommandBinding("core", "Configure managed core model"),
+    BotCommandBinding("wrap", "Configure wrapper translator model"),
+    BotCommandBinding("workzone", "Set temporary working directory [path|off]"),
+    BotCommandBinding("model", "View or change model"),
+    BotCommandBinding("effort", "View or change effort"),
+    BotCommandBinding("new", "Start a fresh CLI session"),
+    BotCommandBinding("fresh", "Start a clean API context"),
+    BotCommandBinding("memory", "Control memory injection"),
+    BotCommandBinding("clear", "Clear media/history"),
+    BotCommandBinding("stop", "Stop execution"),
+    BotCommandBinding("reboot", "Hot restart agents"),
+    BotCommandBinding("terminate", "Shut down this agent"),
+    BotCommandBinding("retry", "Resend response or rerun prompt"),
+    BotCommandBinding("verbose", "Toggle verbose long-task status [on|off]"),
+    BotCommandBinding("think", "Toggle thinking trace display [on|off]"),
+    BotCommandBinding("loop", "Create/manage recurring loop tasks"),
+    BotCommandBinding("jobs", "Show cron and heartbeat jobs"),
+    BotCommandBinding("cron", "Run or list cron jobs"),
+    BotCommandBinding("heartbeat", "Run or list heartbeat jobs"),
+    BotCommandBinding("timeout", "View or set request timeout [minutes]"),
+    BotCommandBinding("hchat", "Send a message to another agent [agent] [message]"),
+    BotCommandBinding("logo", "Play startup animation"),
+    BotCommandBinding("remote", "Start/stop Hashi Remote [on|off|status]"),
+    BotCommandBinding("oll", "Start/stop OLL Browser Gateway [on|off|status]"),
+    BotCommandBinding("wa_on", "Start WhatsApp transport"),
+    BotCommandBinding("wa_off", "Stop WhatsApp transport"),
+    BotCommandBinding("wa_send", "Send a WhatsApp message"),
+    BotCommandBinding("usecomputer", "Enable or run GUI-aware computer-use mode"),
+    BotCommandBinding("sys", "Manage system prompt slots"),
+    BotCommandBinding("credit", "Check API credit/usage"),
+)
+
+
 CALLBACK_BINDINGS: tuple[CallbackBinding, ...] = (
     CallbackBinding(r"^(model|backend|bmodel|effort|backend_menu)", "callback_model"),
     CallbackBinding(r"^wcfg:", "callback_wrapper_config"),
@@ -119,3 +185,10 @@ def bind_flexible_runtime_handlers(runtime) -> None:
     runtime.app.add_handler(MessageHandler(filters.Document.ALL, runtime.handle_document))
     runtime.app.add_handler(MessageHandler(filters.VIDEO, runtime.handle_video))
     runtime.app.add_handler(MessageHandler(filters.Sticker.ALL, runtime.handle_sticker))
+
+
+def get_flexible_bot_commands(runtime) -> list[BotCommand]:
+    commands = [BotCommand(binding.name, binding.description) for binding in BOT_COMMAND_BINDINGS]
+    if private_wol_available(runtime.global_config.project_root):
+        commands.append(BotCommand("wol", "Send Wake-on-LAN magic packet [pc_name]"))
+    return commands + runtime_bot_commands()
