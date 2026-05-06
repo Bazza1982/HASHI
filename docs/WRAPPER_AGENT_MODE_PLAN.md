@@ -841,3 +841,94 @@ pytest tests/test_wrapper_mode.py tests/test_wrapper_commands.py tests/test_flex
 pytest tests/contract/test_release_readiness_contract.py -q
 4 passed
 ```
+
+## 16. HChat Delivery Boundary Follow-up
+
+Status: planned after the 2026-05-07 quick fix.
+
+### 16.1 Quick fix now
+
+`bridge:hchat` must remain wrapper-bypassed for the current runtime shape.
+
+Reason: the current `/hchat` path asks the core model to compose and send by invoking
+`tools/hchat_send.py` during core execution. The HChat side effect happens before
+wrapper post-processing. If the wrapper sees that task context afterward, it can
+misread command text as an unexecuted task and replace the correct "sent" report
+with a false approval prompt.
+
+Keep these current rules:
+
+- `bridge:hchat` bypasses wrapper.
+- `hchat-reply:*` may be wrapped because it is a user-visible summary of an incoming reply.
+- raw bridge/protocol envelopes stay unwrapped.
+
+### 16.2 Target architecture
+
+Move `/hchat` from "core executes send command" to a delivery-boundary pipeline:
+
+```text
+user /hchat
+ -> core model drafts message content only
+ -> runtime parses and validates target/message
+ -> optional wrapper pass polishes only the draft text
+ -> runtime calls send_hchat()
+ -> runtime writes delivery audit
+ -> runtime returns a user-facing delivery report
+```
+
+Responsibilities:
+
+- Core model decides message content, but does not perform delivery side effects.
+- Wrapper rewrites only explicit plain-text drafts or user-facing reports.
+- Runtime owns target validation, route selection, delivery, retry behavior, and audit.
+- Tests own the contract for raw draft, final payload, delivery status, and fallback.
+
+### 16.3 Phased approach
+
+Phase A: evidence and contract
+
+- Capture current `/hchat` foreground and background behavior in tests.
+- Add regression coverage proving `bridge:hchat` bypasses wrapper.
+- Define a structured HChat draft shape such as `{target, text, report}` or a fenced draft block.
+
+Phase B: runtime sender abstraction
+
+- Add a runtime-level helper that validates target, resolves local/remote route, and calls `send_hchat()`.
+- Keep the old core-command path available behind a compatibility flag until tests cover parity.
+- Add tests for local delivery, remote delivery, invalid target, and delivery failure.
+
+Phase C: draft-only core prompt
+
+- Change `/hchat` prompt so the core returns a draft instead of running `hchat_send.py`.
+- Parse the draft deterministically.
+- Reject malformed drafts with a clear user-visible error instead of attempting delivery.
+
+Phase D: optional wrapper pass
+
+- Introduce an explicit audience/kind gate, not source-only routing:
+
+```text
+should_wrap =
+  agent_mode == wrapper
+  and audience == human_user or peer_agent_draft
+  and kind == final_plain_text
+  and not control_payload
+```
+
+- Initially wrap only the final user-facing delivery report.
+- Enable peer-agent draft wrapping only after tests prove no target/message metadata can be mutated.
+
+Phase E: cleanup and docs
+
+- Remove compatibility prompt text that tells the core to run `hchat_send.py`.
+- Update README command docs and debugging notes.
+- Add transcript/audit fields for `hchat_draft_raw`, `hchat_payload_final`, and `hchat_delivery_status`.
+
+### 16.4 Acceptance checks
+
+- `/hchat ying ...` sends exactly once.
+- Wrapper failure falls back to the core draft or runtime report without blocking delivery.
+- Invalid targets do not call `send_hchat()`.
+- `hchat-reply:*` summaries remain user-friendly without rewriting raw protocol envelopes.
+- `/verbose on` shows enough evidence to distinguish core draft, wrapper final, and actual delivery result.
+- Transcript, core transcript, and request-listener payloads agree on what was sent and what was shown.

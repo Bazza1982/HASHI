@@ -27,7 +27,6 @@ BackendInvoker = Callable[..., Awaitable[Any]]
 USER_WRAPPABLE_SOURCES = frozenset(
     {
         "api",
-        "bridge:hchat",
         "text",
         "voice",
         "voice_transcript",
@@ -47,6 +46,7 @@ WRAPPER_BYPASS_SOURCES = frozenset(
         "scheduler",
         "scheduler-skill",
         "loop_skill",
+        "bridge:hchat",
         "retry",
     }
 )

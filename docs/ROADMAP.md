@@ -81,7 +81,7 @@ Implemented scope:
 
 - Merge-safe `state.json` writes preserve `core`, `wrapper`, and `wrapper_slots`.
 - `/mode wrapper`, `/core`, `/wrap`, and `/wrapper` configure wrapper agents.
-- Foreground/background responses, listeners, transfer suppression, handoff, project chat, voice replies, and HChat routing use wrapper-visible output where appropriate; core prompt memory stores core raw assistant output to prevent wrapper persona drift.
+- Foreground/background responses, listeners, transfer suppression, handoff, project chat, voice replies, and HChat reply summaries use wrapper-visible output where appropriate; active `bridge:hchat` sends remain bypassed until the delivery-boundary HChat pipeline is implemented.
 - `/verbose on` shows labeled core raw and wrapper final output for debugging.
 - `/reset CONFIRM` preserves wrapper configuration and prompt slots, matching `/sys` preservation behavior.
 

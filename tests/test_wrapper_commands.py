@@ -1283,7 +1283,7 @@ async def test_background_voice_source_wraps(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_background_hchat_source_wraps(tmp_path):
+async def test_background_hchat_source_bypasses_wrapper(tmp_path):
     runtime, sent, voices = _make_background_runtime(tmp_path)
     item = _queued_request_from("bridge:hchat")
     task = asyncio.create_task(_completed_task(BackendResponse(text="core raw hchat", duration_ms=1.0)))
@@ -1291,8 +1291,8 @@ async def test_background_hchat_source_wraps(tmp_path):
 
     await FlexibleAgentRuntime._on_background_complete(runtime, task, item)
 
-    assert sent[0]["text"] == "wrapped visible"
-    assert voices[0]["text"] == "wrapped visible"
+    assert sent[0]["text"] == "core raw hchat"
+    assert voices[0]["text"] == "core raw hchat"
 
 
 @pytest.mark.asyncio

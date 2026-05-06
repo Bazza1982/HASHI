@@ -26,7 +26,6 @@ from orchestrator.wrapper_mode import (
 def test_should_wrap_user_sources():
     for source in [
         "api",
-        "bridge:hchat",
         "text",
         "voice",
         "voice_transcript",
@@ -41,7 +40,7 @@ def test_should_wrap_user_sources():
 
 
 def test_should_bypass_automation_sources():
-    for source in ["startup", "system", "scheduler", "scheduler-skill", "loop_skill", "retry"]:
+    for source in ["startup", "system", "scheduler", "scheduler-skill", "loop_skill", "bridge:hchat", "retry"]:
         assert not should_wrap_source(source)
 
 
@@ -63,7 +62,7 @@ def test_unknown_sources_default_to_bypass():
 
 def test_source_normalization_is_case_and_space_insensitive():
     assert should_wrap_source(" TEXT ")
-    assert should_wrap_source(" BRIDGE:HCHAT ")
+    assert not should_wrap_source(" BRIDGE:HCHAT ")
 
 
 def test_load_wrapper_config_uses_hashi1_defaults():
