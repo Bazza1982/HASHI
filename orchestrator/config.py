@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import logging
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Union
@@ -11,6 +12,7 @@ from orchestrator.pathing import resolve_command_value, resolve_path_value
 #   "project"   - the project root / repo root (sensible default)
 #   "drive"     - full drive root e.g. C:\ (least restrictive)
 VALID_ACCESS_SCOPES = {"workspace", "project", "drive"}
+config_logger = logging.getLogger("BridgeU.Config")
 
 
 def resolve_access_root(scope: str, workspace_dir: Path, project_root: Path) -> Path:
@@ -148,7 +150,14 @@ class ConfigManager:
                 continue
 
             a_raw = dict(agent_raw)
-            agent_type = a_raw.pop("type", "fixed")
+            agent_type = a_raw.pop("type", None)
+            if agent_type is None:
+                config_logger.warning(
+                    "Agent '%s' has no explicit type; defaulting to legacy fixed runtime. "
+                    "Set type explicitly before fixed runtime retirement.",
+                    a_raw.get("name", "<unnamed>"),
+                )
+                agent_type = "fixed"
 
             if agent_type in {"flex", "limited"}:
                 name = a_raw.pop("name")
@@ -168,8 +177,7 @@ class ConfigManager:
                 is_active = a_raw.pop("is_active", True)
                 access_scope = a_raw.pop("access_scope", "project")
                 if access_scope not in VALID_ACCESS_SCOPES:
-                    import logging
-                    logging.getLogger("BridgeU.Config").warning(
+                    config_logger.warning(
                         f"Agent '{name}': invalid access_scope '{access_scope}', defaulting to 'workspace'"
                     )
                     access_scope = "workspace"
