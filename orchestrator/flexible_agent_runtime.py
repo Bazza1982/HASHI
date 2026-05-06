@@ -3714,50 +3714,8 @@ class FlexibleAgentRuntime:
             if await runtime_jobs.handle_skill_job_callback(self, query, data):
                 return
         if data.startswith("skill:"):
-            _, action, skill_id, *rest = data.split(":")
-            skill = self.skill_manager.get_skill(skill_id)
-            if skill is None:
-                await query.answer("Unknown skill", show_alert=True)
-                return
-            if action == "show":
-                if skill.id in {"cron", "heartbeat"}:
-                    await self._render_skill_jobs(query, skill.id)
-                elif skill.id == "habits":
-                    text, markup = self._build_habit_browser_view()
-                    await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
-                else:
-                    await query.edit_message_text(
-                        self.skill_manager.describe_skill(skill, self.workspace_dir),
-                        reply_markup=self._skill_action_keyboard(skill),
-                    )
-                await query.answer()
-                return
-            if action == "toggle" and rest:
-                enabled = rest[0] == "on"
-                _, message = self.skill_manager.set_toggle_state(self.workspace_dir, skill.id, enabled=enabled)
-                await query.edit_message_text(message, reply_markup=self._skill_action_keyboard(skill))
-                await query.answer()
-                return
-            if action == "run":
-                ok, message = await self.skill_manager.run_action_skill(
-                    skill,
-                    self.workspace_dir,
-                    extra_env={
-                        "BRIDGE_ACTIVE_BACKEND": self.config.active_backend,
-                        "BRIDGE_ACTIVE_MODEL": self.get_current_model(),
-                    },
-                )
-                await query.answer("Skill executed" if ok else "Skill failed", show_alert=not ok)
-                await self.send_long_message(
-                    chat_id=query.message.chat_id,
-                    text=message,
-                    request_id=f"skill-{skill.id}",
-                    purpose="skill-action",
-                )
-                return
-            if action == "jobs":
-                await self._render_skill_jobs(query, skill.id)
-                await query.answer()
+            from orchestrator import runtime_skill_callbacks
+            if await runtime_skill_callbacks.handle_skill_callback(self, query, data):
                 return
         await query.answer()
 
