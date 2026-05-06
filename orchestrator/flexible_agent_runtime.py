@@ -22,6 +22,7 @@ from telegram.ext import ApplicationBuilder
 
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
 from orchestrator import runtime_audit
+from orchestrator import runtime_control
 from orchestrator import runtime_delivery
 from orchestrator import runtime_habits
 from orchestrator import runtime_media
@@ -1783,29 +1784,7 @@ class FlexibleAgentRuntime:
             await runtime_mode.callback_mode_toggle(self, query, value)
 
         elif target == "retry":
-            chat_id = query.message.chat_id
-            await query.answer(f"Retrying {value}...")
-            if value == "response":
-                if self.last_response:
-                    await self.send_long_message(chat_id=self.last_response["chat_id"], text=self.last_response["text"],
-                                                  request_id=self.last_response.get("request_id"), purpose="retry-response")
-                else:
-                    transcript_text = self._load_last_text_from_transcript("assistant")
-                    if transcript_text:
-                        await self.send_long_message(chat_id=chat_id, text=transcript_text, purpose="retry-response")
-                    elif self.last_prompt:
-                        await self.enqueue_request(self.last_prompt.chat_id, self.last_prompt.prompt, "retry", "Retry request")
-                    else:
-                        await query.answer("Nothing to retry.", show_alert=True)
-            else:  # prompt
-                if self.last_prompt:
-                    await self.enqueue_request(self.last_prompt.chat_id, self.last_prompt.prompt, "retry", "Retry request")
-                else:
-                    transcript_text = self._load_last_text_from_transcript("user")
-                    if transcript_text:
-                        await self.enqueue_request(chat_id, transcript_text, "retry", "Retry request")
-                    else:
-                        await query.answer("No previous prompt.", show_alert=True)
+            await runtime_control.callback_retry_toggle(self, query, value)
 
         elif target == "whisper":
             from orchestrator.voice_transcriber import get_transcriber
@@ -5418,112 +5397,10 @@ class FlexibleAgentRuntime:
         await runtime_workspace.cmd_clear(self, update, context)
 
     async def cmd_stop(self, update: Update, context: Any):
-        if not self._is_authorized_user(update.effective_user.id):
-            return
-
-        self.logger.warning(
-            f"Manual stop requested for flex agent {self.name} "
-            f"(queue_size={self.queue.qsize()}, backend={self.config.active_backend})"
-        )
-        if self.backend_manager.current_backend:
-            await self.backend_manager.current_backend.shutdown()
-
-        dropped = 0
-        while not self.queue.empty():
-            try:
-                self.queue.get_nowait()
-                self.queue.task_done()
-                dropped += 1
-            except asyncio.QueueEmpty:
-                break
-
-        await self._reply_text(
-            update,
-            f"Stopped execution. Cleared {dropped} queued messages and killed active backend process tree.",
-        )
-
-    def _load_last_text_from_transcript(self, role: str) -> str | None:
-        """Read the last message of the given role from transcript.jsonl."""
-        try:
-            if not self.transcript_log_path.exists():
-                return None
-            last_text = None
-            with open(self.transcript_log_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                        if entry.get("role") == role and entry.get("text"):
-                            last_text = entry["text"]
-                    except Exception:
-                        pass
-            return last_text
-        except Exception:
-            return None
+        await runtime_control.cmd_stop(self, update, context)
 
     async def cmd_retry(self, update: Update, context: Any):
-        if not self._is_authorized_user(update.effective_user.id):
-            return
-        args = [a.strip().lower() for a in (context.args or []) if a.strip()]
-        mode = args[0] if args else "response"
-        chat_id = update.effective_chat.id
-        if mode in {"response", "resp"}:
-            if not self.last_response:
-                # Try to restore last response from transcript (survives reboot)
-                transcript_text = self._load_last_text_from_transcript("assistant")
-                if transcript_text:
-                    await self._reply_text(update, "Restoring last response from transcript...")
-                    await self.send_long_message(
-                        chat_id=chat_id,
-                        text=transcript_text,
-                        purpose="retry-response",
-                    )
-                    return
-                # Fallback: re-run the last prompt
-                if self.last_prompt:
-                    await self._reply_text(update, "No cached response — retrying last prompt...")
-                    await self.enqueue_request(
-                        self.last_prompt.chat_id,
-                        self.last_prompt.prompt,
-                        "retry",
-                        "Retry request",
-                    )
-                else:
-                    await self._reply_text(update, "Nothing to retry — no previous response or prompt.")
-                return
-            await self._reply_text(update, "Resending last response...")
-            await self.send_long_message(
-                chat_id=self.last_response["chat_id"],
-                text=self.last_response["text"],
-                request_id=self.last_response.get("request_id"),
-                purpose="retry-response",
-            )
-            return
-        if mode in {"prompt", "req", "request"}:
-            if not self.last_prompt:
-                # Try to restore last user prompt from transcript
-                transcript_text = self._load_last_text_from_transcript("user")
-                if transcript_text:
-                    await self._reply_text(update, "Restoring last prompt from transcript...")
-                    await self.enqueue_request(chat_id, transcript_text, "retry", "Retry request")
-                else:
-                    await self._reply_text(update, "No previous prompt to rerun.")
-                return
-            await self._reply_text(update, "Retrying last prompt...")
-            await self.enqueue_request(
-                self.last_prompt.chat_id,
-                self.last_prompt.prompt,
-                "retry",
-                "Retry request",
-            )
-            return
-        markup = InlineKeyboardMarkup([[
-            InlineKeyboardButton("重发回复", callback_data="tgl:retry:response"),
-            InlineKeyboardButton("重跑 Prompt", callback_data="tgl:retry:prompt"),
-        ]])
-        await self._reply_text(update, "Retry — choose action:", reply_markup=markup)
+        await runtime_control.cmd_retry(self, update, context)
 
     # ------------------------------------------------------------------
     # /remote — one-click Hashi Remote start/stop
