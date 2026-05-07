@@ -110,6 +110,8 @@ def deliver_hchat_draft(
     except Exception as exc:
         success = False
         error = f"{type(exc).__name__}: {exc}"
+    if not success and error is None:
+        error = "send_hchat returned false"
     latency_ms = (time.perf_counter() - start) * 1000
     status = "delivered" if success else "failed"
 

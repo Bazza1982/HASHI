@@ -1,6 +1,6 @@
 # HChat Delivery Boundary Plan
 
-Status: Phase A/B foundation started after the 2026-05-07 `bridge:hchat` wrapper-bypass quick fix.
+Status: Phase C feature-flag path started after the 2026-05-07 `bridge:hchat` wrapper-bypass quick fix.
 
 Owner: HASHI1 runtime.
 
@@ -18,8 +18,11 @@ Current implementation record:
 - `tests/test_hchat_delivery.py` covers valid drafts, fenced JSON, malformed
   fixtures, command-shaped drafts, local/remote-shaped targets, delegated routing,
   attempt ids, and structured failure results.
-- The helper is not yet connected to the live `/hchat` command path. Current live
-  behavior remains the legacy `bridge:hchat` prompt with wrapper bypass.
+- `/hchat` now has an opt-in `extra.hchat_draft_delivery` flag. With the flag off,
+  current live behavior remains the legacy `bridge:hchat` prompt with wrapper
+  bypass. With the flag on for an agent, single-target `/hchat` requests enqueue
+  `bridge:hchat-draft`, ask the core for JSON only, parse the draft, and deliver
+  through the runtime helper.
 
 ## 1. Problem
 

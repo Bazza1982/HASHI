@@ -3280,6 +3280,16 @@ class FlexibleAgentRuntime:
                 f"just report the reply content to the user. Do NOT send another hchat message back."
             )
             await self._reply_text(update, f"📢 Broadcasting Hchat to <b>{len(broadcast_targets)}</b> agents ({broadcast_label})...", parse_mode="HTML")
+        elif self._hchat_draft_delivery_enabled():
+            self_prompt = self._build_hchat_draft_prompt(target_name, intent)
+            await self._reply_text(update, f"💬 Drafting Hchat message to <b>{target_name}</b>...", parse_mode="HTML")
+            await self.enqueue_api_text(
+                self_prompt,
+                source="bridge:hchat-draft",
+                deliver_to_telegram=True,
+            )
+            return
+
         else:
             # Single agent target
             self_prompt = (
@@ -3303,6 +3313,122 @@ class FlexibleAgentRuntime:
             self_prompt,
             source="bridge:hchat",
             deliver_to_telegram=True,
+        )
+
+    def _hchat_draft_delivery_enabled(self) -> bool:
+        extra = self.config.extra if isinstance(getattr(self.config, "extra", None), dict) else {}
+        value = extra.get("hchat_draft_delivery")
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    def _build_hchat_draft_prompt(self, target_name: str, intent: str) -> str:
+        return (
+            f"[HCHAT DRAFT TASK] The user wants you to draft a Hchat message to agent \"{target_name}\".\n\n"
+            f"Intent: {intent}\n\n"
+            f"Return ONLY a JSON object with this exact shape:\n"
+            f'{{"target": "{target_name}", "message": "<complete message to send>", '
+            f'"user_report": "<short report for the user after delivery>"}}\n\n'
+            f"Rules:\n"
+            f"- Do not run shell commands.\n"
+            f"- Do not mention delivery tools or implementation details.\n"
+            f"- Do not wrap the JSON in prose.\n"
+            f"- Compose the message FROM you ({self.name}) TO {target_name}.\n"
+            f"- Do not relay the user's words literally; include relevant context and be concise.\n"
+            f"- The runtime will validate the JSON and send the message."
+        )
+
+    async def _prepare_hchat_draft_success(self, item: QueuedRequest, *, core_raw: str, completion_path: str):
+        from orchestrator.hchat_delivery import (
+            HChatDraftParseError,
+            deliver_hchat_draft,
+            draft_parse_error_text,
+            hchat_delivery_log_fields,
+            hchat_draft_parsed_log_fields,
+            parse_hchat_draft,
+        )
+        from orchestrator.wrapper_mode import passthrough_result
+
+        wrapper_result = passthrough_result(core_raw or "", fallback_reason="hchat_draft_delivery")
+        try:
+            draft = parse_hchat_draft(core_raw or "")
+        except HChatDraftParseError as exc:
+            visible_text = draft_parse_error_text(exc)
+            self._mark_error(visible_text)
+            self._record_habit_outcome(item, success=False, error_text=visible_text)
+            self._append_core_transcript(
+                item,
+                core_raw=core_raw,
+                visible_text=visible_text,
+                completion_path=completion_path,
+                wrapper_result=wrapper_result,
+            )
+            await self._notify_request_listeners(
+                item.request_id,
+                {
+                    "request_id": item.request_id,
+                    "success": False,
+                    "text": visible_text,
+                    "error": visible_text,
+                    "source": item.source,
+                    "summary": item.summary,
+                },
+            )
+            self.logger.warning("HChat draft parse failed for %s: %s", item.request_id, visible_text)
+            return runtime_pipeline.SuccessfulResponse(
+                display_text=core_raw or "",
+                visible_text=visible_text,
+                wrapper_result=wrapper_result,
+            )
+
+        sender = getattr(self, "_hchat_draft_sender", None)
+        result = deliver_hchat_draft(draft, from_agent=self.name, sender=sender)
+        visible_text = (
+            draft.user_report
+            if result.success and draft.user_report
+            else f"Message delivered to {result.target}."
+            if result.success
+            else f"[hchat] Delivery failed to {result.target}: {result.error or 'unknown error'}"
+        )
+        if result.success:
+            self._mark_success()
+            self._record_habit_outcome(item, success=True, response_text=visible_text)
+        else:
+            self._mark_error(visible_text)
+            self._record_habit_outcome(item, success=False, error_text=visible_text)
+        parsed_fields = hchat_draft_parsed_log_fields(draft)
+        delivery_fields = hchat_delivery_log_fields(result)
+        self._append_core_transcript(
+            item,
+            core_raw=core_raw,
+            visible_text=visible_text,
+            completion_path=completion_path,
+            wrapper_result=wrapper_result,
+        )
+        await self._notify_request_listeners(
+            item.request_id,
+            {
+                "request_id": item.request_id,
+                "success": result.success,
+                "text": visible_text,
+                "error": None if result.success else visible_text,
+                "source": item.source,
+                "summary": item.summary,
+                **parsed_fields,
+                **delivery_fields,
+            },
+        )
+        self.logger.info(
+            "HChat draft delivery %s for %s target=%s attempt_id=%s",
+            result.delivery_status,
+            item.request_id,
+            result.target,
+            result.attempt_id,
+        )
+        return runtime_pipeline.SuccessfulResponse(
+            display_text=core_raw or "",
+            visible_text=visible_text,
+            wrapper_result=wrapper_result,
         )
 
     # ── /group ────────────────────────────────────────────────────────────────

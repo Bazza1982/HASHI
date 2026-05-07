@@ -391,6 +391,12 @@ async def handle_empty_success_response(runtime, item) -> None:
 
 
 async def prepare_successful_response(runtime, item, response, *, completion_path: str) -> SuccessfulResponse:
+    if item.source == "bridge:hchat-draft" and hasattr(runtime, "_prepare_hchat_draft_success"):
+        return await runtime._prepare_hchat_draft_success(
+            item,
+            core_raw=response.text,
+            completion_path=completion_path,
+        )
     display_text = runtime._strip_transfer_accept_prefix(item, response.text)
     runtime._mark_success()
     runtime._record_habit_outcome(item, success=True, response_text=response.text)

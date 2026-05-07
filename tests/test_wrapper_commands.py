@@ -137,6 +137,87 @@ async def test_cmd_hchat_legacy_path_preserves_remote_target_in_prompt(tmp_path)
     assert "--to rika@hashi2 --from zelda" in enqueued[0]["prompt"]
 
 
+@pytest.mark.asyncio
+async def test_cmd_hchat_draft_delivery_flag_enqueues_draft_source(tmp_path):
+    manager = _make_manager(tmp_path)
+    manager.config.extra = {"hchat_draft_delivery": True}
+    runtime, messages = _make_runtime(manager)
+    runtime.name = "zelda"
+    enqueued = []
+
+    async def enqueue_api_text(prompt, **kwargs):
+        enqueued.append({"prompt": prompt, **kwargs})
+
+    runtime.enqueue_api_text = enqueue_api_text
+
+    update, context = _update(["akane", "review", "the", "delivery", "plan"])
+
+    await FlexibleAgentRuntime.cmd_hchat(runtime, update, context)
+
+    assert messages == ["💬 Drafting Hchat message to <b>akane</b>..."]
+    assert len(enqueued) == 1
+    assert enqueued[0]["source"] == "bridge:hchat-draft"
+    assert enqueued[0]["deliver_to_telegram"] is True
+    assert '"target": "akane"' in enqueued[0]["prompt"]
+    assert "tools/hchat_send.py" not in enqueued[0]["prompt"]
+    assert "Do not run shell commands." in enqueued[0]["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_hchat_draft_success_prepares_delivery_report(tmp_path):
+    runtime, _sent, _voices = _make_background_runtime(tmp_path)
+    listener_payloads = []
+    runtime.register_request_listener = FlexibleAgentRuntime.register_request_listener.__get__(runtime, FlexibleAgentRuntime)
+    runtime.register_request_listener("req-001", lambda payload: listener_payloads.append(payload))
+    sender_calls = []
+
+    def fake_sender(to_agent, from_agent, text, **kwargs):
+        sender_calls.append((to_agent, from_agent, text, kwargs))
+        return True
+
+    runtime._hchat_draft_sender = fake_sender
+    item = _queued_request_from("bridge:hchat-draft")
+    core_raw = '{"target": "akane", "message": "Please review the plan.", "user_report": "I sent Akane the plan."}'
+
+    result = await FlexibleAgentRuntime._prepare_hchat_draft_success(
+        runtime,
+        item,
+        core_raw=core_raw,
+        completion_path="foreground",
+    )
+
+    assert result.visible_text == "I sent Akane the plan."
+    assert sender_calls == [("akane", "zelda", "Please review the plan.", {})]
+    assert listener_payloads[0]["success"] is True
+    assert listener_payloads[0]["text"] == "I sent Akane the plan."
+    assert listener_payloads[0]["hchat_draft_parsed"]["target"] == "akane"
+    assert listener_payloads[0]["hchat_payload_final"] == "Please review the plan."
+    assert listener_payloads[0]["hchat_delivery_status"] == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_hchat_draft_parse_error_does_not_send(tmp_path):
+    runtime, _sent, _voices = _make_background_runtime(tmp_path)
+    listener_payloads = []
+    runtime.register_request_listener = FlexibleAgentRuntime.register_request_listener.__get__(runtime, FlexibleAgentRuntime)
+    runtime.register_request_listener("req-001", lambda payload: listener_payloads.append(payload))
+    sender_calls = []
+    runtime._hchat_draft_sender = lambda *args, **kwargs: sender_calls.append((args, kwargs)) or True
+    item = _queued_request_from("bridge:hchat-draft")
+
+    result = await FlexibleAgentRuntime._prepare_hchat_draft_success(
+        runtime,
+        item,
+        core_raw='{"message": "missing target"}',
+        completion_path="foreground",
+    )
+
+    assert result.visible_text == '[hchat] Draft parse error: missing required field "target". Message not sent.'
+    assert sender_calls == []
+    assert listener_payloads[0]["success"] is False
+    assert listener_payloads[0]["error"] == result.visible_text
+
+
 class _StatusMemoryStore:
     def get_stats(self):
         return {"turns": 0, "memories": 0}
