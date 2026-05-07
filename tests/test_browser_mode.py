@@ -1,0 +1,122 @@
+from __future__ import annotations
+
+import unittest
+from types import SimpleNamespace
+import sys
+
+sys.modules.setdefault("edge_tts", SimpleNamespace())
+
+from orchestrator.admin_local_testing import supported_commands
+from orchestrator.browser_mode import (
+    build_browser_task_prompt,
+    get_browser_examples_text,
+    get_browser_menu_text,
+    get_browser_status_text,
+)
+from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+
+class _FakeMessage:
+    def __init__(self):
+        self.replies: list[str] = []
+
+    async def reply_text(self, text: str, **kwargs):
+        self.replies.append(text)
+        return SimpleNamespace(ok=True)
+
+
+class _FakeUpdate:
+    def __init__(self, user_id: int = 123, chat_id: int = 456):
+        self.effective_user = SimpleNamespace(id=user_id)
+        self.effective_chat = SimpleNamespace(id=chat_id)
+        self.message = _FakeMessage()
+
+
+class _BrowserRuntime:
+    def __init__(self):
+        self.config = SimpleNamespace(active_backend="codex-cli")
+        self.backend_manager = SimpleNamespace(secrets={"brave_api_key": "test-key"})
+        self.enqueued: list[dict] = []
+
+    def _is_authorized_user(self, user_id: int | None) -> bool:
+        return user_id == 123
+
+    async def _reply_text(self, update, text: str, **kwargs):
+        return await update.message.reply_text(text, **kwargs)
+
+    async def enqueue_request(self, chat_id, prompt, source, summary):
+        self.enqueued.append(
+            {
+                "chat_id": chat_id,
+                "prompt": prompt,
+                "source": source,
+                "summary": summary,
+            }
+        )
+
+    async def cmd_browser(self, update, context):
+        return await FlexibleAgentRuntime.cmd_browser(self, update, context)
+
+
+class BrowserModeTests(unittest.IsolatedAsyncioTestCase):
+    def test_menu_and_examples_text(self):
+        menu = get_browser_menu_text()
+        self.assertIn("/browser <1-4> <task>", menu)
+        self.assertIn("HASHI browser extension", menu)
+
+        examples = get_browser_examples_text()
+        self.assertIn("/browser 3", examples)
+        self.assertNotIn("/broswer", examples)
+
+    def test_status_text_labels_backend_and_keys(self):
+        text = get_browser_status_text(
+            active_backend="codex-cli",
+            brave_configured=True,
+            extension_bridge_configured=False,
+        )
+        self.assertIn("available", text)
+        self.assertIn("configured", text)
+        self.assertIn("bridge socket not detected", text)
+
+    def test_build_browser_task_prompt(self):
+        prompt, source, summary = build_browser_task_prompt("4", "Open the logged-in library page")
+        self.assertEqual(source, "browser:extension")
+        self.assertIn("logged-in Windows browser", prompt)
+        self.assertIn("Open the logged-in library page", prompt)
+        self.assertIn("Browser task", summary)
+
+    def test_invalid_route_or_missing_task_is_rejected(self):
+        with self.assertRaises(ValueError):
+            build_browser_task_prompt("5", "Do web research")
+        with self.assertRaises(ValueError):
+            build_browser_task_prompt("1", "")
+
+    async def test_command_status_and_task_enqueue(self):
+        runtime = _BrowserRuntime()
+        update = _FakeUpdate()
+
+        await runtime.cmd_browser(update, SimpleNamespace(args=["status"]))
+        self.assertIn("/browser route status", update.message.replies[-1])
+
+        await runtime.cmd_browser(
+            update,
+            SimpleNamespace(args=["3", "Find", "recent", "CSR", "sources"]),
+        )
+        self.assertIn("Running in /browser route 3", update.message.replies[-1])
+        self.assertEqual(len(runtime.enqueued), 1)
+        self.assertEqual(runtime.enqueued[0]["source"], "browser:brave")
+        self.assertIn("Find recent CSR sources", runtime.enqueued[0]["prompt"])
+
+    async def test_command_without_args_shows_menu(self):
+        runtime = _BrowserRuntime()
+        update = _FakeUpdate()
+        await runtime.cmd_browser(update, SimpleNamespace(args=[]))
+        self.assertIn("Routes:", update.message.replies[-1])
+
+    def test_supported_commands_include_browser(self):
+        commands = supported_commands(_BrowserRuntime())
+        self.assertIn("browser", commands)
+
+
+if __name__ == "__main__":
+    unittest.main()

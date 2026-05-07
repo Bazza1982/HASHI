@@ -462,6 +462,7 @@ HASHI agents respond to both natural language and structured commands:
 | `/effort` | View/change effort level (Claude/Codex only) |
 | `/fyi [prompt]` | Refresh bridge environment awareness |
 | `/usecomputer [on\|off\|status\|examples\|task]` | Load managed GUI-aware computer-use guidance; prefers non-GUI methods first |
+| `/browser [status\|examples\|1-4 task]` | Direct an internet task through a selected browser/search route |
 | `/retry` | Resend last response or re-run last prompt |
 | `/long` ... `/end` | Buffer long text across multiple messages, submit as one |
 | `/loop <interval> <task>` | Create recurring automated tasks via skill injection |
@@ -686,6 +687,29 @@ Examples:
 /usecomputer status
 /usecomputer Please do some qualitative coding for me in NVivo here, using mouse and keyboard if needed.
 /usecomputer Please verify this Chrome extension on the real Windows desktop.
+```
+
+#### `/browser` Internet Route Command
+
+`/browser` is a lightweight operator shortcut for internet-facing tasks. It does not execute browser actions directly; it sends the current agent a clear route-specific instruction so the agent chooses the intended tool family.
+
+Routes:
+
+| Route | Use |
+|---:|---|
+| `1` | HASHI standalone/headless browser tools for public or JavaScript-heavy pages |
+| `2` | CLI backend native browsing/search where supported by Codex CLI, Claude CLI, or Gemini CLI |
+| `3` | HASHI Brave Search (`web_search`) plus public page fetching (`web_fetch`) |
+| `4` | HASHI browser extension bridge for the logged-in Windows browser when authentication is required |
+
+Examples:
+
+```text
+/browser
+/browser status
+/browser 1 Inspect this public dashboard and summarize the visible table.
+/browser 3 Find recent sources about mandatory CSR assurance.
+/browser 4 Open the logged-in library page and download the PDF I am entitled to access.
 ```
 
 #### Windows Live Browser Bridge — Known Good Workflow

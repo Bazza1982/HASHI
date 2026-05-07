@@ -22,6 +22,12 @@ from telegram.ext import ApplicationBuilder
 
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
 from orchestrator import runtime_audit
+from orchestrator.browser_mode import (
+    build_browser_task_prompt,
+    get_browser_examples_text,
+    get_browser_menu_text,
+    get_browser_status_text,
+)
 from orchestrator import runtime_control
 from orchestrator import runtime_delivery
 from orchestrator import runtime_habits
@@ -327,7 +333,7 @@ class FlexibleAgentRuntime:
                     self._enabled_commands.add(name.strip().lstrip("/").lower())
 
         # help/status/new/fresh/wipe/clear/model/effort/mode should always be available
-        self._enabled_commands.update({"help", "status", "new", "fresh", "wipe", "reset", "clear", "memory", "model", "effort", "mode", "wrapper", "audit", "core", "wrap", "jobs", "verbose", "think", "voice", "whisper", "transfer", "fork", "cos", "long", "end", "oll"})
+        self._enabled_commands.update({"help", "status", "new", "fresh", "wipe", "reset", "clear", "memory", "model", "effort", "mode", "wrapper", "audit", "core", "wrap", "jobs", "verbose", "think", "voice", "whisper", "transfer", "fork", "cos", "long", "end", "oll", "browser"})
 
     def _is_command_allowed(self, cmd: str) -> bool:
         cmd = (cmd or "").lstrip("/").lower()
@@ -2329,6 +2335,42 @@ class FlexibleAgentRuntime:
 
     async def cmd_usercomputer(self, update, context):
         await self.cmd_usecomputer(update, context)
+
+    async def cmd_browser(self, update, context):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        args = [a.strip() for a in (context.args or []) if a.strip()]
+        if not args:
+            await self._reply_text(update, get_browser_menu_text())
+            return
+
+        sub = args[0].lower()
+        if sub == "status":
+            secrets = getattr(self.backend_manager, "secrets", {}) or {}
+            active_backend = getattr(self.config, "active_backend", None)
+            extension_bridge_configured = Path("/tmp/hashi-browser-bridge.sock").exists()
+            await self._reply_text(
+                update,
+                get_browser_status_text(
+                    active_backend=active_backend,
+                    brave_configured=bool(secrets.get("brave_api_key")),
+                    extension_bridge_configured=extension_bridge_configured,
+                ),
+            )
+            return
+        if sub == "examples":
+            await self._reply_text(update, get_browser_examples_text())
+            return
+
+        task = " ".join(args[1:]).strip()
+        try:
+            prompt, source, summary = build_browser_task_prompt(sub, task)
+        except ValueError:
+            await self._reply_text(update, get_browser_menu_text())
+            return
+
+        await self._reply_text(update, f"Running in /browser route {sub}...")
+        await self.enqueue_request(update.effective_chat.id, prompt, source, summary)
 
     async def cmd_credit(self, update, context):
         if not self._is_authorized_user(update.effective_user.id):

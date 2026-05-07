@@ -107,6 +107,7 @@ def supported_commands(runtime) -> list[str]:
         "cos",
         "usecomputer",
         "usercomputer",
+        "browser",
         "wol",
     ]
     if hasattr(runtime, "cmd_backend"):

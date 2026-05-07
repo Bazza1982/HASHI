@@ -87,6 +87,7 @@ COMMAND_BINDINGS: tuple[CommandBinding, ...] = (
     CommandBinding("wa_send", "cmd_wa_send"),
     CommandBinding("usecomputer", "cmd_usecomputer"),
     CommandBinding("usercomputer", "cmd_usercomputer"),
+    CommandBinding("browser", "cmd_browser"),
     CommandBinding("long", "cmd_long"),
     CommandBinding("end", "cmd_end"),
     CommandBinding("remote", "cmd_remote"),
@@ -148,6 +149,7 @@ BOT_COMMAND_BINDINGS: tuple[BotCommandBinding, ...] = (
     BotCommandBinding("wa_off", "Stop WhatsApp transport"),
     BotCommandBinding("wa_send", "Send a WhatsApp message"),
     BotCommandBinding("usecomputer", "Enable or run GUI-aware computer-use mode"),
+    BotCommandBinding("browser", "Run an internet task with a selected browser/search route"),
     BotCommandBinding("sys", "Manage system prompt slots"),
     BotCommandBinding("credit", "Check API credit/usage"),
 )

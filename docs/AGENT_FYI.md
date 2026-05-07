@@ -29,6 +29,7 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - `/retry`: resend last response or rerun last prompt.
 - `/debug <prompt>`: strict debug mode with verification-first behavior.
 - `/usecomputer [on|off|status|examples|task]`: load managed GUI-aware operating guidance. This is a unified shortcut for desktop/browser/Windows computer use, but it does not force GUI when a better non-GUI path exists.
+- `/browser [status|examples|1-4 task]`: run an internet task with a selected route: HASHI headless browser, CLI-native browsing, Brave search, or the logged-in HASHI browser extension.
 - `/skill`: browse built-in and custom skills.
 - `/model`: inspect or switch model where supported.
 - `/verbose [on|off]`: toggle richer long-task status display.
@@ -105,6 +106,19 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 ## Browser Tool
 
 Agents can control a real web browser (headless or headed) using Playwright.
+
+Operator shortcut:
+
+```text
+/browser
+/browser status
+/browser 1 <task>  # HASHI standalone/headless browser tools
+/browser 2 <task>  # CLI backend native browsing/search where supported
+/browser 3 <task>  # Brave Search plus public web fetching
+/browser 4 <task>  # logged-in HASHI browser extension bridge
+```
+
+Route 4 acts on the user's real logged-in browser. For destructive actions, submissions, purchases, account changes, or bulk edits, confirm before committing the action.
 
 **Two modes:**
 - *Standalone* — launches a clean headless Chromium (no login state)

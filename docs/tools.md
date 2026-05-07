@@ -37,6 +37,7 @@ Three operating modes:
 - `/handoff` — restore recent continuity from bridge transcript into a fresh session
 - `/fyi [prompt]` — refresh bridge environment awareness; optionally append a follow-up prompt
 - `/usecomputer [on|off|status|examples|task]` — load managed GUI-aware computer-use guidance; unified shortcut for desktop/browser/Windows interaction when needed
+- `/browser [status|examples|1-4 task]` — route an internet task through HASHI headless browser, CLI-native browsing, Brave search, or the logged-in browser extension
 - `/status` — agent state, workspace, last activity
 - `/debug` — detailed debug info (backend, PID, process state)
 - `/start` — inline keyboard to start a stopped agent
@@ -83,6 +84,19 @@ Wrapper model picker buttons currently group recommended choices by provider: Cl
 ## Browser Tool
 
 All agents can control a real web browser through Playwright, regardless of their backend type.
+
+### `/browser` Route Command
+
+Use `/browser` when the operator wants to choose the internet route explicitly:
+
+| Route | Command | Intended path |
+|---:|---|---|
+| `1` | `/browser 1 <task>` | HASHI standalone/headless browser tools for public or JavaScript-heavy pages |
+| `2` | `/browser 2 <task>` | CLI backend native browsing/search where supported by Codex CLI, Claude CLI, or Gemini CLI |
+| `3` | `/browser 3 <task>` | Brave Search (`web_search`) plus public page fetches (`web_fetch`) |
+| `4` | `/browser 4 <task>` | HASHI browser extension bridge for the logged-in Windows browser |
+
+Route 2 is instruction-only from HASHI's perspective because the browsing capability lives inside the selected CLI backend. Route 4 uses the real logged-in browser and should confirm before destructive actions, submissions, purchases, account changes, or bulk edits.
 
 ### Actions
 
