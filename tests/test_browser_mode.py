@@ -71,6 +71,7 @@ class BrowserModeTests(unittest.IsolatedAsyncioTestCase):
         menu = get_browser_menu_text()
         self.assertIn("/browser <1-4> <task>", menu)
         self.assertIn("Routes", menu)
+        self.assertIn("🟢 *1 HEADLESS* - available", menu)
         self.assertIn("🟡 *3 SEARCH*", menu)
         self.assertIn("🟡 *4 LOGGED-IN*", menu)
         self.assertIn("confirmed online", menu)
@@ -97,7 +98,7 @@ class BrowserModeTests(unittest.IsolatedAsyncioTestCase):
 
     def test_status_text_uses_yellow_for_unknowns(self):
         text = get_browser_status_text()
-        self.assertIn("🟡 *1 HEADLESS* - not checked", text)
+        self.assertIn("🟢 *1 HEADLESS* - available", text)
         self.assertIn("🟡 *2 NATIVE*", text)
         self.assertIn("🟡 *3 SEARCH* - not checked", text)
         self.assertIn("🟡 *4 LOGGED-IN* - not checked", text)

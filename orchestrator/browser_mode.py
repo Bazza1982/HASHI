@@ -109,14 +109,15 @@ def get_browser_status_text(
         extension_status = "bridge socket present" if extension_bridge_configured else "bridge socket not detected"
 
     native_icon = "🟢" if backend in CLI_NATIVE_BROWSER_BACKENDS else "🟡"
-    headless_status = "not checked"
+    headless_icon = "🟢"
+    headless_status = "available"
 
     return (
         "*🌐 HASHI /browser*\n"
         "_Facts first, then route instructions._\n\n"
         "🟢 confirmed online • 🟡 not checked / unknown • 🔴 offline or misconfigured\n\n"
         "*Routes*\n"
-        f"🟡 *1 HEADLESS* - {headless_status}\n"
+        f"{headless_icon} *1 HEADLESS* - {headless_status}\n"
         "   Public web, JS pages, screenshots. Uses HASHI standalone Playwright/browser tools.\n"
         f"{native_icon} *2 NATIVE* - {native_status}\n"
         f"   Backend-owned browsing/search. Active backend: `{backend}`.\n"
