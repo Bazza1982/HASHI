@@ -64,11 +64,11 @@ class BrowserModeTests(unittest.IsolatedAsyncioTestCase):
     def test_menu_and_examples_text(self):
         menu = get_browser_menu_text()
         self.assertIn("/browser <1-4> <task>", menu)
-        self.assertIn("Route picker", menu)
+        self.assertIn("Routes", menu)
         self.assertIn("🟡 *3 SEARCH*", menu)
         self.assertIn("🟡 *4 LOGGED-IN*", menu)
         self.assertIn("confirmed online", menu)
-        self.assertIn("HASHI browser extension", menu)
+        self.assertIn("HASHI extension", menu)
 
         examples = get_browser_examples_text()
         self.assertIn("HASHI /browser examples", examples)
@@ -91,10 +91,10 @@ class BrowserModeTests(unittest.IsolatedAsyncioTestCase):
 
     def test_status_text_uses_yellow_for_unknowns(self):
         text = get_browser_status_text()
-        self.assertIn("🟡 *1 HEADLESS*  not checked", text)
+        self.assertIn("🟡 *1 HEADLESS* - not checked", text)
         self.assertIn("🟡 *2 NATIVE*", text)
-        self.assertIn("🟡 *3 SEARCH*    not checked", text)
-        self.assertIn("🟡 *4 LOGGED-IN* not checked", text)
+        self.assertIn("🟡 *3 SEARCH* - not checked", text)
+        self.assertIn("🟡 *4 LOGGED-IN* - not checked", text)
 
     def test_build_browser_task_prompt(self):
         prompt, source, summary = build_browser_task_prompt("4", "Open the logged-in library page")
@@ -114,7 +114,8 @@ class BrowserModeTests(unittest.IsolatedAsyncioTestCase):
         update = _FakeUpdate()
 
         await runtime.cmd_browser(update, SimpleNamespace(args=["status"]))
-        self.assertIn("HASHI /browser status", update.message.replies[-1])
+        self.assertIn("HASHI /browser", update.message.replies[-1])
+        self.assertIn("🟢 *3 SEARCH* - configured", update.message.replies[-1])
         self.assertEqual(update.message.reply_kwargs[-1].get("parse_mode"), "Markdown")
 
         await runtime.cmd_browser(
@@ -130,7 +131,9 @@ class BrowserModeTests(unittest.IsolatedAsyncioTestCase):
         runtime = _BrowserRuntime()
         update = _FakeUpdate()
         await runtime.cmd_browser(update, SimpleNamespace(args=[]))
-        self.assertIn("Route picker", update.message.replies[-1])
+        self.assertIn("HASHI /browser", update.message.replies[-1])
+        self.assertIn("Routes", update.message.replies[-1])
+        self.assertIn("🟢 *3 SEARCH* - configured", update.message.replies[-1])
         self.assertEqual(update.message.reply_kwargs[-1].get("parse_mode"), "Markdown")
 
     def test_supported_commands_include_browser(self):

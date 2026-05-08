@@ -68,25 +68,7 @@ BROWSER_ROUTES: dict[str, BrowserRoute] = {
 
 
 def get_browser_menu_text() -> str:
-    return (
-        "*🌐 HASHI /browser*\n"
-        "_Choose the internet route before sending the task._\n\n"
-        "*Traffic lights*\n"
-        "🟢 confirmed online • 🟡 not checked / unknown • 🔴 offline or misconfigured\n\n"
-        "*Quick commands*\n"
-        "• `/browser status` - check route availability\n"
-        "• `/browser examples` - show ready-to-copy examples\n"
-        "• `/browser <1-4> <task>` - send task through a route\n\n"
-        "*Route picker*\n"
-        "🟡 *1 HEADLESS* - public web, JS pages, screenshots\n"
-        "   HASHI standalone Playwright/browser tools.\n\n"
-        "🟡 *2 NATIVE* - backend-owned browsing/search\n"
-        "   Codex CLI, Claude CLI, or Gemini CLI when supported.\n\n"
-        "🟡 *3 SEARCH* - public research with citations\n"
-        "   Brave `web_search` first, then `web_fetch`/source pages.\n\n"
-        "🟡 *4 LOGGED-IN* - real Windows browser session\n"
-        "   HASHI browser extension for authenticated pages."
-    )
+    return get_browser_status_text()
 
 
 def get_browser_examples_text() -> str:
@@ -110,7 +92,7 @@ def get_browser_status_text(
     extension_bridge_configured: bool | None = None,
 ) -> str:
     backend = (active_backend or "unknown").strip() or "unknown"
-    native_status = "available" if backend in CLI_NATIVE_BROWSER_BACKENDS else "instruction-only / not native for this backend"
+    native_status = "available for this backend" if backend in CLI_NATIVE_BROWSER_BACKENDS else "not confirmed for this backend"
 
     if brave_configured is None:
         brave_icon = "🟡"
@@ -130,12 +112,21 @@ def get_browser_status_text(
     headless_status = "not checked"
 
     return (
-        "*🌐 HASHI /browser status*\n\n"
+        "*🌐 HASHI /browser*\n"
+        "_Facts first, then route instructions._\n\n"
         "🟢 confirmed online • 🟡 not checked / unknown • 🔴 offline or misconfigured\n\n"
-        f"🟡 *1 HEADLESS*  {headless_status}\n"
-        f"{native_icon} *2 NATIVE*    {native_status} `(active backend: {backend})`\n"
-        f"{brave_icon} *3 SEARCH*    {brave_status}\n"
-        f"{extension_icon} *4 LOGGED-IN* {extension_status}"
+        "*Routes*\n"
+        f"🟡 *1 HEADLESS* - {headless_status}\n"
+        "   Public web, JS pages, screenshots. Uses HASHI standalone Playwright/browser tools.\n"
+        f"{native_icon} *2 NATIVE* - {native_status}\n"
+        f"   Backend-owned browsing/search. Active backend: `{backend}`.\n"
+        f"{brave_icon} *3 SEARCH* - {brave_status}\n"
+        "   Public research with citations. Uses Brave `web_search`, then `web_fetch`/source pages.\n"
+        f"{extension_icon} *4 LOGGED-IN* - {extension_status}\n"
+        "   Real Windows browser session via HASHI extension for authenticated pages.\n\n"
+        "*Use*\n"
+        "• `/browser <1-4> <task>`\n"
+        "• `/browser examples`"
     )
 
 

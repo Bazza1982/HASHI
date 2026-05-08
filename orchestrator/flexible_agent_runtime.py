@@ -25,7 +25,6 @@ from orchestrator import runtime_audit
 from orchestrator.browser_mode import (
     build_browser_task_prompt,
     get_browser_examples_text,
-    get_browser_menu_text,
     get_browser_status_text,
 )
 from orchestrator import runtime_control
@@ -2339,13 +2338,7 @@ class FlexibleAgentRuntime:
     async def cmd_browser(self, update, context):
         if not self._is_authorized_user(update.effective_user.id):
             return
-        args = [a.strip() for a in (context.args or []) if a.strip()]
-        if not args:
-            await self._reply_text(update, get_browser_menu_text(), parse_mode="Markdown")
-            return
-
-        sub = args[0].lower()
-        if sub == "status":
+        async def reply_browser_status():
             secrets = getattr(self.backend_manager, "secrets", {}) or {}
             active_backend = getattr(self.config, "active_backend", None)
             extension_bridge_configured = Path("/tmp/hashi-browser-bridge.sock").exists()
@@ -2358,6 +2351,11 @@ class FlexibleAgentRuntime:
                 ),
                 parse_mode="Markdown",
             )
+
+        args = [a.strip() for a in (context.args or []) if a.strip()]
+        sub = args[0].lower() if args else "status"
+        if sub == "status":
+            await reply_browser_status()
             return
         if sub == "examples":
             await self._reply_text(update, get_browser_examples_text(), parse_mode="Markdown")
@@ -2367,7 +2365,7 @@ class FlexibleAgentRuntime:
         try:
             prompt, source, summary = build_browser_task_prompt(sub, task)
         except ValueError:
-            await self._reply_text(update, get_browser_menu_text(), parse_mode="Markdown")
+            await reply_browser_status()
             return
 
         await self._reply_text(update, f"Running in /browser route {sub}...")
