@@ -98,6 +98,12 @@ Use `/browser` when the operator wants to choose the internet route explicitly:
 
 Route 2 is instruction-only from HASHI's perspective because the browsing capability lives inside the selected CLI backend. Route 4 uses the real logged-in browser and should confirm before destructive actions, submissions, purchases, account changes, or bulk edits.
 
+`/browser` and `/browser status` show the same route dashboard. Traffic lights
+are status indicators: green means confirmed online and usable, yellow means
+unknown/not checked, and red means offline or misconfigured. The built-in
+HEADLESS route is available with Hashi itself; Brave and extension routes are
+reported from their live configuration checks.
+
 ### Actions
 
 | Action | Description |

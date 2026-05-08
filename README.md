@@ -712,6 +712,12 @@ Examples:
 /browser 4 Open the logged-in library page and download the PDF I am entitled to access.
 ```
 
+`/browser` and `/browser status` render the same status dashboard. Traffic
+lights mean: green = confirmed online and usable, yellow = unknown/not checked,
+red = offline or misconfigured. The HASHI standalone/headless route is built in
+and should be shown as available when Hashi is running; Brave and extension
+routes report their live configuration status.
+
 #### Windows Live Browser Bridge — Known Good Workflow
 
 The Windows desktop-control tier is now good enough to drive a real Windows Chrome extension recovery / verification loop.

@@ -118,6 +118,11 @@ Operator shortcut:
 /browser 4 <task>  # logged-in HASHI browser extension bridge
 ```
 
+`/browser` and `/browser status` show one factual dashboard. Status lights mean
+green = confirmed online and usable, yellow = unknown/not checked, red = offline
+or misconfigured. HEADLESS is Hashi's built-in route and should be available
+when Hashi is running; Brave and extension routes depend on live configuration.
+
 Route 4 acts on the user's real logged-in browser. For destructive actions, submissions, purchases, account changes, or bulk edits, confirm before committing the action.
 
 **Two modes:**
