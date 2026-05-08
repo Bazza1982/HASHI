@@ -30,6 +30,7 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - `/debug <prompt>`: strict debug mode with verification-first behavior.
 - `/usecomputer [on|off|status|examples|task]`: load managed GUI-aware operating guidance. This is a unified shortcut for desktop/browser/Windows computer use, but it does not force GUI when a better non-GUI path exists.
 - `/browser [status|examples|1-4 task]`: run an internet task with a selected route: HASHI headless browser, CLI-native browsing, Brave search, or the logged-in HASHI browser extension.
+- `/exp <task>`: consult the context-specific EXP guidebooks under `exp/` before running a task.
 - `/skill`: browse built-in and custom skills.
 - `/model`: inspect or switch model where supported.
 - `/verbose [on|off]`: toggle richer long-task status display.

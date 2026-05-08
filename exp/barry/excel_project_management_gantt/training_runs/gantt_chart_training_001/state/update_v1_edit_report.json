@@ -1,0 +1,30 @@
+{
+  "status": "updated",
+  "source": "exp\\barry\\excel_project_management_gantt\\training_runs\\gantt_chart_training_001\\training_materials\\Gantt Chart training.xlsx",
+  "output": "exp\\barry\\excel_project_management_gantt\\training_runs\\gantt_chart_training_001\\output\\gantt_chart_training_update_v1.xlsx",
+  "edits": [
+    {
+      "type": "phase_date_change",
+      "cell": "C51",
+      "value": "August 2025 to March 2026"
+    },
+    {
+      "type": "bar_move",
+      "row": 51,
+      "from": "J:R",
+      "to": "K:S"
+    },
+    {
+      "type": "bar_move",
+      "row": 52,
+      "from": "L:N",
+      "to": "M:O"
+    },
+    {
+      "type": "new_task",
+      "row": 203,
+      "label": "6. Added checkpoint task for EXP update training",
+      "bar": "AF:AG"
+    }
+  ]
+}

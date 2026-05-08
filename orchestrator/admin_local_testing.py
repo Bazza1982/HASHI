@@ -95,6 +95,7 @@ def supported_commands(runtime) -> list[str]:
         "credit",
         "effort",
         "skill",
+        "exp",
         "debug",
         "cron",
         "heartbeat",

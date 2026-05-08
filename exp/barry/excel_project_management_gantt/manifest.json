@@ -1,0 +1,38 @@
+{
+  "id": "barry/excel_project_management_gantt",
+  "type": "exp",
+  "version": 1,
+  "owner": "barry",
+  "domain": "excel_project_management_gantt",
+  "status": "training",
+  "summary": "Training EXP for creating, editing, updating, and visually validating Excel project management Gantt charts.",
+  "context": {
+    "user": "Barry",
+    "task_family": "Excel project management and Gantt chart work",
+    "primary_training_material": "training_runs/gantt_chart_training_001/training_materials/Gantt Chart training.xlsx",
+    "output_focus": [
+      "Excel workbook layout",
+      "Gantt chart task bars built from cells",
+      "project phases and task rows",
+      "timeline scale and print layout",
+      "visual duplication and update workflows"
+    ]
+  },
+  "training_runs": {
+    "gantt_chart_training_001": "training_runs/gantt_chart_training_001/RUN.md"
+  },
+  "playbooks": {
+    "gantt_chart_duplicate": "playbooks/gantt_chart_duplicate.exp.md",
+    "gantt_chart_update": "playbooks/gantt_chart_update.exp.md"
+  },
+  "validators": [
+    "validators/gantt_chart_validators.md"
+  ],
+  "failure_memory": "failures/failure_memory.jsonl",
+  "scope_limits": [
+    "This EXP is not stable yet.",
+    "The first run proves exact duplication by file copy and PDF visual parity.",
+    "The current run also proves controlled manual update, semantic date-driven bar update, and from-blank workbook reconstruction with PDF visual parity.",
+    "Do not mark stable until Barry reviews at least one edited project chart or asks to stabilise it."
+  ]
+}

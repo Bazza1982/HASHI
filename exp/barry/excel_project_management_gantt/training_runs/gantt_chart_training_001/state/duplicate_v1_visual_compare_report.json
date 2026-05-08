@@ -1,0 +1,20 @@
+{
+  "status": "pass",
+  "source_pages": 1,
+  "duplicate_pages": 1,
+  "pages": [
+    {
+      "page": 1,
+      "same_size": true,
+      "size": [
+        1263,
+        893
+      ],
+      "mean_abs_diff": 0.0,
+      "max_abs_diff": 0,
+      "diff_image": "exp\\barry\\excel_project_management_gantt\\training_runs\\gantt_chart_training_001\\artifacts\\visual_compare_duplicate_v1\\diff_page_001.png"
+    }
+  ],
+  "max_mean_abs_diff": 0.0,
+  "max_abs_diff": 0
+}

@@ -1,0 +1,699 @@
+{
+  "status": "failed_visual_exactness",
+  "source_page_count": 66,
+  "rebuilt_page_count": 66,
+  "worst_pages_by_mean_abs_diff": [
+    {
+      "page": 32,
+      "size_match": true,
+      "mean_abs_diff": 22.78538836267063,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.26866833531496404,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_032.png"
+    },
+    {
+      "page": 39,
+      "size_match": true,
+      "mean_abs_diff": 19.983143282981295,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.14719215788498385,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_039.png"
+    },
+    {
+      "page": 35,
+      "size_match": true,
+      "mean_abs_diff": 19.325295981146578,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.14421306209375462,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_035.png"
+    },
+    {
+      "page": 22,
+      "size_match": true,
+      "mean_abs_diff": 18.29086171232397,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.18962122038304433,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_022.png"
+    },
+    {
+      "page": 37,
+      "size_match": true,
+      "mean_abs_diff": 17.403299525915916,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.13015545382889174,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_037.png"
+    },
+    {
+      "page": 17,
+      "size_match": true,
+      "mean_abs_diff": 15.875590831832703,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.11240412143716547,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_017.png"
+    },
+    {
+      "page": 23,
+      "size_match": true,
+      "mean_abs_diff": 15.76279422634685,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.14123839948078618,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_023.png"
+    },
+    {
+      "page": 40,
+      "size_match": true,
+      "mean_abs_diff": 14.54826534167835,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.11587352674403449,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_040.png"
+    },
+    {
+      "page": 41,
+      "size_match": true,
+      "mean_abs_diff": 13.901977108840732,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.11492925977449309,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_041.png"
+    },
+    {
+      "page": 30,
+      "size_match": true,
+      "mean_abs_diff": 13.75920423859129,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.11803514446397999,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_030.png"
+    }
+  ],
+  "worst_pages_by_changed_pixel_ratio": [
+    {
+      "page": 32,
+      "size_match": true,
+      "mean_abs_diff": 22.78538836267063,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.26866833531496404,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_032.png"
+    },
+    {
+      "page": 21,
+      "size_match": true,
+      "mean_abs_diff": 7.829911363033855,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.2122100368929095,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_021.png"
+    },
+    {
+      "page": 22,
+      "size_match": true,
+      "mean_abs_diff": 18.29086171232397,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.18962122038304433,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_022.png"
+    },
+    {
+      "page": 39,
+      "size_match": true,
+      "mean_abs_diff": 19.983143282981295,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.14719215788498385,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_039.png"
+    },
+    {
+      "page": 35,
+      "size_match": true,
+      "mean_abs_diff": 19.325295981146578,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.14421306209375462,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_035.png"
+    },
+    {
+      "page": 23,
+      "size_match": true,
+      "mean_abs_diff": 15.76279422634685,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.14123839948078618,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_023.png"
+    },
+    {
+      "page": 37,
+      "size_match": true,
+      "mean_abs_diff": 17.403299525915916,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.13015545382889174,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_037.png"
+    },
+    {
+      "page": 30,
+      "size_match": true,
+      "mean_abs_diff": 13.75920423859129,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.11803514446397999,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_030.png"
+    },
+    {
+      "page": 40,
+      "size_match": true,
+      "mean_abs_diff": 14.54826534167835,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.11587352674403449,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_040.png"
+    },
+    {
+      "page": 41,
+      "size_match": true,
+      "mean_abs_diff": 13.901977108840732,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.11492925977449309,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_041.png"
+    }
+  ],
+  "pages": [
+    {
+      "page": 1,
+      "size_match": true,
+      "mean_abs_diff": 0.015171222643965247,
+      "max_abs_diff": 131,
+      "changed_pixel_ratio_gt8": 0.00021545246347282773,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_001.png"
+    },
+    {
+      "page": 2,
+      "size_match": true,
+      "mean_abs_diff": 0.5134063743783576,
+      "max_abs_diff": 130,
+      "changed_pixel_ratio_gt8": 0.011865844932744252,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_002.png"
+    },
+    {
+      "page": 3,
+      "size_match": true,
+      "mean_abs_diff": 0.2092814793338529,
+      "max_abs_diff": 131,
+      "changed_pixel_ratio_gt8": 0.004880042629442156,
+      "diff_image": null
+    },
+    {
+      "page": 4,
+      "size_match": true,
+      "mean_abs_diff": 0.27490315722089376,
+      "max_abs_diff": 131,
+      "changed_pixel_ratio_gt8": 0.006310185936362613,
+      "diff_image": null
+    },
+    {
+      "page": 5,
+      "size_match": true,
+      "mean_abs_diff": 0.31917198869716873,
+      "max_abs_diff": 130,
+      "changed_pixel_ratio_gt8": 0.007658758763285127,
+      "diff_image": null
+    },
+    {
+      "page": 6,
+      "size_match": true,
+      "mean_abs_diff": 0.23770347179922313,
+      "max_abs_diff": 131,
+      "changed_pixel_ratio_gt8": 0.005545906004207973,
+      "diff_image": null
+    },
+    {
+      "page": 7,
+      "size_match": true,
+      "mean_abs_diff": 0.23875236177571843,
+      "max_abs_diff": 130,
+      "changed_pixel_ratio_gt8": 0.004904868427702399,
+      "diff_image": null
+    },
+    {
+      "page": 8,
+      "size_match": true,
+      "mean_abs_diff": 0.13253607055491864,
+      "max_abs_diff": 131,
+      "changed_pixel_ratio_gt8": 0.0023389448503758005,
+      "diff_image": null
+    },
+    {
+      "page": 9,
+      "size_match": true,
+      "mean_abs_diff": 0.0,
+      "max_abs_diff": 0,
+      "changed_pixel_ratio_gt8": 0.0,
+      "diff_image": null
+    },
+    {
+      "page": 10,
+      "size_match": true,
+      "mean_abs_diff": 0.13722016670523532,
+      "max_abs_diff": 130,
+      "changed_pixel_ratio_gt8": 0.0027929023042773966,
+      "diff_image": null
+    },
+    {
+      "page": 11,
+      "size_match": true,
+      "mean_abs_diff": 0.0,
+      "max_abs_diff": 0,
+      "changed_pixel_ratio_gt8": 0.0,
+      "diff_image": null
+    },
+    {
+      "page": 12,
+      "size_match": true,
+      "mean_abs_diff": 0.0,
+      "max_abs_diff": 0,
+      "changed_pixel_ratio_gt8": 0.0,
+      "diff_image": null
+    },
+    {
+      "page": 13,
+      "size_match": true,
+      "mean_abs_diff": 0.1256850368707436,
+      "max_abs_diff": 130,
+      "changed_pixel_ratio_gt8": 0.0024648471129813214,
+      "diff_image": null
+    },
+    {
+      "page": 14,
+      "size_match": true,
+      "mean_abs_diff": 0.12384881443513772,
+      "max_abs_diff": 130,
+      "changed_pixel_ratio_gt8": 0.0026829594834106036,
+      "diff_image": null
+    },
+    {
+      "page": 15,
+      "size_match": true,
+      "mean_abs_diff": 12.257135865387431,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.09763986455753777,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_015.png"
+    },
+    {
+      "page": 16,
+      "size_match": true,
+      "mean_abs_diff": 8.97352328615545,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.06209375462712981,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_016.png"
+    },
+    {
+      "page": 17,
+      "size_match": true,
+      "mean_abs_diff": 15.875590831832703,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.11240412143716547,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_017.png"
+    },
+    {
+      "page": 18,
+      "size_match": true,
+      "mean_abs_diff": 0.4567530161128297,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.0055725050737725195,
+      "diff_image": null
+    },
+    {
+      "page": 19,
+      "size_match": true,
+      "mean_abs_diff": 0.9296046757617752,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.00866420359282499,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_019.png"
+    },
+    {
+      "page": 20,
+      "size_match": true,
+      "mean_abs_diff": 4.445119174175732,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.05655937488639981,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_020.png"
+    },
+    {
+      "page": 21,
+      "size_match": true,
+      "mean_abs_diff": 7.829911363033855,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.2122100368929095,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_021.png"
+    },
+    {
+      "page": 22,
+      "size_match": true,
+      "mean_abs_diff": 18.29086171232397,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.18962122038304433,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_022.png"
+    },
+    {
+      "page": 23,
+      "size_match": true,
+      "mean_abs_diff": 15.76279422634685,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.14123839948078618,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_023.png"
+    },
+    {
+      "page": 24,
+      "size_match": true,
+      "mean_abs_diff": 0.06495581451227503,
+      "max_abs_diff": 66,
+      "changed_pixel_ratio_gt8": 0.0015214667790920673,
+      "diff_image": null
+    },
+    {
+      "page": 25,
+      "size_match": true,
+      "mean_abs_diff": 0.6280244250389455,
+      "max_abs_diff": 194,
+      "changed_pixel_ratio_gt8": 0.013229490565753343,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_025.png"
+    },
+    {
+      "page": 26,
+      "size_match": true,
+      "mean_abs_diff": 0.0,
+      "max_abs_diff": 0,
+      "changed_pixel_ratio_gt8": 0.0,
+      "diff_image": null
+    },
+    {
+      "page": 27,
+      "size_match": true,
+      "mean_abs_diff": 5.695568329019852,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.04366325932585545,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_027.png"
+    },
+    {
+      "page": 28,
+      "size_match": true,
+      "mean_abs_diff": 9.361802317488268,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.06962129131389651,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_028.png"
+    },
+    {
+      "page": 29,
+      "size_match": true,
+      "mean_abs_diff": 3.8106465435839056,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.031151943638344864,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_029.png"
+    },
+    {
+      "page": 30,
+      "size_match": true,
+      "mean_abs_diff": 13.75920423859129,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.11803514446397999,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_030.png"
+    },
+    {
+      "page": 31,
+      "size_match": true,
+      "mean_abs_diff": 0.017053550133482996,
+      "max_abs_diff": 66,
+      "changed_pixel_ratio_gt8": 0.00042115193477198836,
+      "diff_image": null
+    },
+    {
+      "page": 32,
+      "size_match": true,
+      "mean_abs_diff": 22.78538836267063,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.26866833531496404,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_032.png"
+    },
+    {
+      "page": 33,
+      "size_match": true,
+      "mean_abs_diff": 10.233971622339316,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.07786434297194951,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_033.png"
+    },
+    {
+      "page": 34,
+      "size_match": true,
+      "mean_abs_diff": 13.183579685049283,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.10078210130876289,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_034.png"
+    },
+    {
+      "page": 35,
+      "size_match": true,
+      "mean_abs_diff": 19.325295981146578,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.14421306209375462,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_035.png"
+    },
+    {
+      "page": 36,
+      "size_match": true,
+      "mean_abs_diff": 13.698220256255434,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.11266567895455017,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_036.png"
+    },
+    {
+      "page": 37,
+      "size_match": true,
+      "mean_abs_diff": 17.403299525915916,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.13015545382889174,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_037.png"
+    },
+    {
+      "page": 38,
+      "size_match": true,
+      "mean_abs_diff": 12.331934222274237,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.10125556474701182,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_038.png"
+    },
+    {
+      "page": 39,
+      "size_match": true,
+      "mean_abs_diff": 19.983143282981295,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.14719215788498385,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_039.png"
+    },
+    {
+      "page": 40,
+      "size_match": true,
+      "mean_abs_diff": 14.54826534167835,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.11587352674403449,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_040.png"
+    },
+    {
+      "page": 41,
+      "size_match": true,
+      "mean_abs_diff": 13.901977108840732,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.11492925977449309,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_041.png"
+    },
+    {
+      "page": 42,
+      "size_match": true,
+      "mean_abs_diff": 8.484721051124298,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.06953972083389856,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_042.png"
+    },
+    {
+      "page": 43,
+      "size_match": true,
+      "mean_abs_diff": 0.061576846041925454,
+      "max_abs_diff": 130,
+      "changed_pixel_ratio_gt8": 0.0014177304077903354,
+      "diff_image": null
+    },
+    {
+      "page": 44,
+      "size_match": true,
+      "mean_abs_diff": 0.11571659223360369,
+      "max_abs_diff": 130,
+      "changed_pixel_ratio_gt8": 0.002413422245156531,
+      "diff_image": null
+    },
+    {
+      "page": 45,
+      "size_match": true,
+      "mean_abs_diff": 0.07377340607292224,
+      "max_abs_diff": 130,
+      "changed_pixel_ratio_gt8": 0.0015214667790920673,
+      "diff_image": null
+    },
+    {
+      "page": 46,
+      "size_match": true,
+      "mean_abs_diff": 0.05416811853254707,
+      "max_abs_diff": 130,
+      "changed_pixel_ratio_gt8": 0.0011047480225808367,
+      "diff_image": null
+    },
+    {
+      "page": 47,
+      "size_match": true,
+      "mean_abs_diff": 0.03773521335557015,
+      "max_abs_diff": 130,
+      "changed_pixel_ratio_gt8": 0.0007039887078083342,
+      "diff_image": null
+    },
+    {
+      "page": 48,
+      "size_match": true,
+      "mean_abs_diff": 0.056444112251620104,
+      "max_abs_diff": 130,
+      "changed_pixel_ratio_gt8": 0.0011348936347539897,
+      "diff_image": null
+    },
+    {
+      "page": 49,
+      "size_match": true,
+      "mean_abs_diff": 0.19825971154195696,
+      "max_abs_diff": 130,
+      "changed_pixel_ratio_gt8": 0.004576813236406324,
+      "diff_image": null
+    },
+    {
+      "page": 50,
+      "size_match": true,
+      "mean_abs_diff": 0.7825703390228743,
+      "max_abs_diff": 255,
+      "changed_pixel_ratio_gt8": 0.010534118183212617,
+      "diff_image": "C:\\Users\\Print\\HASHI\\exp\\barry\\phd_paper_aaaj_style\\training_runs\\blank_rebuild_001\\artifacts\\visual_compare_v5\\diff_pages\\diff_050.png"
+    },
+    {
+      "page": 51,
+      "size_match": true,
+      "mean_abs_diff": 0.06091807575237685,
+      "max_abs_diff": 66,
+      "changed_pixel_ratio_gt8": 0.0014620621903979132,
+      "diff_image": null
+    },
+    {
+      "page": 52,
+      "size_match": true,
+      "mean_abs_diff": 0.005326020362474387,
+      "max_abs_diff": 66,
+      "changed_pixel_ratio_gt8": 0.00012767553390982382,
+      "diff_image": null
+    },
+    {
+      "page": 53,
+      "size_match": true,
+      "mean_abs_diff": 0.0,
+      "max_abs_diff": 0,
+      "changed_pixel_ratio_gt8": 0.0,
+      "diff_image": null
+    },
+    {
+      "page": 54,
+      "size_match": true,
+      "mean_abs_diff": 0.0,
+      "max_abs_diff": 0,
+      "changed_pixel_ratio_gt8": 0.0,
+      "diff_image": null
+    },
+    {
+      "page": 55,
+      "size_match": true,
+      "mean_abs_diff": 0.0,
+      "max_abs_diff": 0,
+      "changed_pixel_ratio_gt8": 0.0,
+      "diff_image": null
+    },
+    {
+      "page": 56,
+      "size_match": true,
+      "mean_abs_diff": 0.0,
+      "max_abs_diff": 0,
+      "changed_pixel_ratio_gt8": 0.0,
+      "diff_image": null
+    },
+    {
+      "page": 57,
+      "size_match": true,
+      "mean_abs_diff": 0.0,
+      "max_abs_diff": 0,
+      "changed_pixel_ratio_gt8": 0.0,
+      "diff_image": null
+    },
+    {
+      "page": 58,
+      "size_match": true,
+      "mean_abs_diff": 0.04693671815359899,
+      "max_abs_diff": 130,
+      "changed_pixel_ratio_gt8": 0.000839643962587522,
+      "diff_image": null
+    },
+    {
+      "page": 59,
+      "size_match": true,
+      "mean_abs_diff": 0.036241232281694784,
+      "max_abs_diff": 66,
+      "changed_pixel_ratio_gt8": 0.0008963886443252215,
+      "diff_image": null
+    },
+    {
+      "page": 60,
+      "size_match": true,
+      "mean_abs_diff": 0.0,
+      "max_abs_diff": 0,
+      "changed_pixel_ratio_gt8": 0.0,
+      "diff_image": null
+    },
+    {
+      "page": 61,
+      "size_match": true,
+      "mean_abs_diff": 0.0,
+      "max_abs_diff": 0,
+      "changed_pixel_ratio_gt8": 0.0,
+      "diff_image": null
+    },
+    {
+      "page": 62,
+      "size_match": true,
+      "mean_abs_diff": 0.0,
+      "max_abs_diff": 0,
+      "changed_pixel_ratio_gt8": 0.0,
+      "diff_image": null
+    },
+    {
+      "page": 63,
+      "size_match": true,
+      "mean_abs_diff": 0.0017058869947395906,
+      "max_abs_diff": 66,
+      "changed_pixel_ratio_gt8": 3.9011968694668394e-05,
+      "diff_image": null
+    },
+    {
+      "page": 64,
+      "size_match": true,
+      "mean_abs_diff": 0.0012421765486643277,
+      "max_abs_diff": 66,
+      "changed_pixel_ratio_gt8": 3.2805519129607515e-05,
+      "diff_image": null
+    },
+    {
+      "page": 65,
+      "size_match": true,
+      "mean_abs_diff": 0.0,
+      "max_abs_diff": 0,
+      "changed_pixel_ratio_gt8": 0.0,
+      "diff_image": null
+    },
+    {
+      "page": 66,
+      "size_match": true,
+      "mean_abs_diff": 0.03738499227297029,
+      "max_abs_diff": 194,
+      "changed_pixel_ratio_gt8": 0.0005018357791177798,
+      "diff_image": null
+    }
+  ]
+}

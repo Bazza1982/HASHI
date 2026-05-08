@@ -19,6 +19,7 @@ from adapters.base import BaseBackend
 from orchestrator.agent_fyi import build_agent_fyi_primer
 from orchestrator.bridge_memory import BridgeMemoryStore, BridgeContextAssembler, SysPromptManager
 from orchestrator.command_registry import bind_runtime_commands, runtime_bot_commands
+from orchestrator.exp_mode import build_exp_task_prompt, get_exp_usage_text
 from orchestrator.handoff_builder import HandoffBuilder
 from orchestrator.habits import HabitStore
 from orchestrator.media_utils import is_image_file, normalize_image_file
@@ -3744,6 +3745,22 @@ class BridgeAgentRuntime:
             f"Skill {skill.id}",
         )
 
+    async def cmd_exp(self, update, context):
+        if update.effective_user.id != self.global_config.authorized_id:
+            return
+        task = " ".join(context.args or []).strip()
+        if not task:
+            await update.message.reply_text(get_exp_usage_text())
+            return
+        prompt = build_exp_task_prompt(task)
+        await update.message.reply_text("Running with EXP guidebook...")
+        await self.enqueue_request(
+            update.effective_chat.id,
+            prompt,
+            "exp",
+            "EXP-guided task",
+        )
+
     async def callback_skill(self, update, context):
         query = update.callback_query
         if query.from_user.id != self.global_config.authorized_id:
@@ -4167,6 +4184,7 @@ class BridgeAgentRuntime:
             "/retry [response|prompt] - Resend last response (default) or rerun last prompt",
             "/debug <prompt> - Run the task in strict debug mode",
             "/skill - Browse and run skills",
+            "/exp <task> - Run a task after consulting the EXP guidebook",
             "/cron [list] | /cron run <job_id> - Run one cron job now",
             "/heartbeat [list] | /heartbeat run <job_id> - Run one heartbeat now",
             "/think - Toggle thinking trace display [on|off]",
@@ -4973,6 +4991,7 @@ class BridgeAgentRuntime:
             BotCommand("retry", "Resend response or rerun prompt"),
             BotCommand("debug", "Run in strict debug mode"),
             BotCommand("skill", "Browse and run skills"),
+            BotCommand("exp", "Run a task with the EXP guidebook"),
             BotCommand("think", "Toggle thinking trace display [on|off]"),
             BotCommand("verbose", "Toggle verbose long-task status [on|off]"),
             BotCommand("jobs", "Show cron and heartbeat jobs"),
@@ -5012,6 +5031,7 @@ class BridgeAgentRuntime:
         self.app.add_handler(CommandHandler("fyi", self.cmd_fyi))
         self.app.add_handler(CommandHandler("debug", self.cmd_debug))
         self.app.add_handler(CommandHandler("skill", self.cmd_skill))
+        self.app.add_handler(CommandHandler("exp", self.cmd_exp))
         self.app.add_handler(CommandHandler("model", self.cmd_model))
         self.app.add_handler(CommandHandler("workzone", self.cmd_workzone))
         self.app.add_handler(CommandHandler("worzone", self.cmd_workzone))

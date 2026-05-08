@@ -446,6 +446,7 @@ HASHI agents respond to both natural language and structured commands:
 | `/status [full]` | Show agent status, backend info |
 | `/handoff` | Restore continuity from recent transcript |
 | `/skill` | Browse and run skills (inline keyboard) |
+| `/exp <task>` | Run a task after consulting context-specific EXP guidebooks |
 | `/help` | Show available commands |
 
 #### Session & Mode Commands

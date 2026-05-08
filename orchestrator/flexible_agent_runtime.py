@@ -27,6 +27,7 @@ from orchestrator.browser_mode import (
     get_browser_examples_text,
     get_browser_status_text,
 )
+from orchestrator.exp_mode import build_exp_task_prompt, get_exp_usage_text
 from orchestrator import runtime_control
 from orchestrator import runtime_delivery
 from orchestrator import runtime_habits
@@ -332,7 +333,7 @@ class FlexibleAgentRuntime:
                     self._enabled_commands.add(name.strip().lstrip("/").lower())
 
         # help/status/new/fresh/wipe/clear/model/effort/mode should always be available
-        self._enabled_commands.update({"help", "status", "new", "fresh", "wipe", "reset", "clear", "memory", "model", "effort", "mode", "wrapper", "audit", "core", "wrap", "jobs", "verbose", "think", "voice", "whisper", "transfer", "fork", "cos", "long", "end", "oll", "browser"})
+        self._enabled_commands.update({"help", "status", "new", "fresh", "wipe", "reset", "clear", "memory", "model", "effort", "mode", "wrapper", "audit", "core", "wrap", "jobs", "verbose", "think", "voice", "whisper", "transfer", "fork", "cos", "long", "end", "oll", "browser", "exp"})
 
     def _is_command_allowed(self, cmd: str) -> bool:
         cmd = (cmd or "").lstrip("/").lower()
@@ -2946,6 +2947,22 @@ class FlexibleAgentRuntime:
             prompt,
             f"skill:{skill.id}",
             f"Skill {skill.id}",
+        )
+
+    async def cmd_exp(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        task = " ".join(context.args or []).strip()
+        if not task:
+            await self._reply_text(update, get_exp_usage_text())
+            return
+        prompt = build_exp_task_prompt(task)
+        await self._reply_text(update, "Running with EXP guidebook...")
+        await self.enqueue_request(
+            update.effective_chat.id,
+            prompt,
+            "exp",
+            "EXP-guided task",
         )
 
     async def callback_skill(self, update: Update, context: Any):

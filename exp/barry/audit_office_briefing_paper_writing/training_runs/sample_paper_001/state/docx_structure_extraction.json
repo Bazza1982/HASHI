@@ -1,0 +1,2061 @@
+{
+  "source_file": "C:\\Users\\Print\\HASHI\\exp\\barry\\audit_office_briefing_paper_writing\\training_runs\\sample_paper_001\\training_materials\\sample_paper.docx",
+  "paragraph_count": 52,
+  "table_count": 3,
+  "media_count": 2,
+  "style_usage": {
+    "SingleLineText-Half": 1,
+    "Heading2Red": 1,
+    "Heading3": 9,
+    "Bullet1stlevel": 17,
+    "Bullet2ndlevel": 7,
+    "BodyText": 1,
+    "ListParagraph": 10
+  },
+  "top_run_formats": [
+    {
+      "format": {
+        "bold": true,
+        "color": "D64B46",
+        "font_ascii": "Arial",
+        "font_eastAsia": null,
+        "font_hAnsi": "Arial",
+        "italic": false,
+        "size_half_points": null,
+        "underline": null
+      },
+      "count": 9
+    },
+    {
+      "format": {
+        "bold": true,
+        "color": null,
+        "font_ascii": null,
+        "font_eastAsia": null,
+        "font_hAnsi": null,
+        "italic": false,
+        "size_half_points": null,
+        "underline": null
+      },
+      "count": 9
+    },
+    {
+      "format": {
+        "bold": false,
+        "color": null,
+        "font_ascii": "Cambria Math",
+        "font_eastAsia": null,
+        "font_hAnsi": "Cambria Math",
+        "italic": false,
+        "size_half_points": null,
+        "underline": null
+      },
+      "count": 7
+    },
+    {
+      "format": {
+        "bold": false,
+        "color": "auto",
+        "font_ascii": "Arial",
+        "font_eastAsia": "Calibri",
+        "font_hAnsi": "Arial",
+        "italic": false,
+        "size_half_points": "20",
+        "underline": null
+      },
+      "count": 4
+    },
+    {
+      "format": {
+        "bold": false,
+        "color": "auto",
+        "font_ascii": "Cambria Math",
+        "font_eastAsia": "Calibri",
+        "font_hAnsi": "Cambria Math",
+        "italic": false,
+        "size_half_points": "20",
+        "underline": null
+      },
+      "count": 3
+    },
+    {
+      "format": {
+        "bold": false,
+        "color": null,
+        "font_ascii": "Segoe UI",
+        "font_eastAsia": "Times New Roman",
+        "font_hAnsi": "Segoe UI",
+        "italic": false,
+        "size_half_points": "21",
+        "underline": null
+      },
+      "count": 1
+    }
+  ],
+  "paragraphs": [
+    {
+      "index": 1,
+      "style": "SingleLineText-Half",
+      "text_preview": "",
+      "text_length": 0,
+      "run_formats": []
+    },
+    {
+      "index": 2,
+      "style": "Heading2Red",
+      "text_preview": "Purpose",
+      "text_length": 7,
+      "run_formats": []
+    },
+    {
+      "index": 3,
+      "style": "Heading3",
+      "text_preview": "To propose an updated version of the Digital Audit Benchmark Platform project following the initial Financial Audit Executive discussion on 16 April 2026, incorporating FAE feedback to refine scope, governance and delivery approach, and to progress the develop",
+      "text_length": 400,
+      "run_formats": [
+        {
+          "font_ascii": "Arial",
+          "font_hAnsi": "Arial",
+          "font_eastAsia": "Calibri",
+          "size_half_points": "20",
+          "color": "auto",
+          "bold": false,
+          "italic": false,
+          "underline": null
+        },
+        {
+          "font_ascii": "Cambria Math",
+          "font_hAnsi": "Cambria Math",
+          "font_eastAsia": "Calibri",
+          "size_half_points": "20",
+          "color": "auto",
+          "bold": false,
+          "italic": false,
+          "underline": null
+        },
+        {
+          "font_ascii": "Arial",
+          "font_hAnsi": "Arial",
+          "font_eastAsia": "Calibri",
+          "size_half_points": "20",
+          "color": "auto",
+          "bold": false,
+          "italic": false,
+          "underline": null
+        },
+        {
+          "font_ascii": "Cambria Math",
+          "font_hAnsi": "Cambria Math",
+          "font_eastAsia": "Calibri",
+          "size_half_points": "20",
+          "color": "auto",
+          "bold": false,
+          "italic": false,
+          "underline": null
+        },
+        {
+          "font_ascii": "Arial",
+          "font_hAnsi": "Arial",
+          "font_eastAsia": "Calibri",
+          "size_half_points": "20",
+          "color": "auto",
+          "bold": false,
+          "italic": false,
+          "underline": null
+        },
+        {
+          "font_ascii": "Cambria Math",
+          "font_hAnsi": "Cambria Math",
+          "font_eastAsia": "Calibri",
+          "size_half_points": "20",
+          "color": "auto",
+          "bold": false,
+          "italic": false,
+          "underline": null
+        }
+      ]
+    },
+    {
+      "index": 5,
+      "style": "Heading3",
+      "text_preview": "What we have proposed and why it matters",
+      "text_length": 40,
+      "run_formats": [
+        {
+          "font_ascii": "Arial",
+          "font_hAnsi": "Arial",
+          "font_eastAsia": null,
+          "size_half_points": null,
+          "color": "D64B46",
+          "bold": true,
+          "italic": false,
+          "underline": null
+        },
+        {
+          "font_ascii": "Arial",
+          "font_hAnsi": "Arial",
+          "font_eastAsia": null,
+          "size_half_points": null,
+          "color": "D64B46",
+          "bold": true,
+          "italic": false,
+          "underline": null
+        },
+        {
+          "font_ascii": "Arial",
+          "font_hAnsi": "Arial",
+          "font_eastAsia": null,
+          "size_half_points": null,
+          "color": "D64B46",
+          "bold": true,
+          "italic": false,
+          "underline": null
+        }
+      ]
+    },
+    {
+      "index": 7,
+      "style": null,
+      "text_preview": "In the previous version, we proposed an Audit Officeled pilot to simulate an AIpowered, datadriven financial audit workflow, using NSW local government audits as the initial test case. The proposal focused on experimenting across the full financial audit cycle",
+      "text_length": 681,
+      "run_formats": []
+    },
+    {
+      "index": 9,
+      "style": null,
+      "text_preview": "This matters because financial audits, particularly in the local government sector, remain labourintensive and constrained by manual processes and poor data access, creating risks to timeliness and efficiency. Without a structured way to test emerging technolo",
+      "text_length": 878,
+      "run_formats": []
+    },
+    {
+      "index": 11,
+      "style": "Heading3",
+      "text_preview": "Key Feedback from the FAE",
+      "text_length": 25,
+      "run_formats": [
+        {
+          "font_ascii": "Arial",
+          "font_hAnsi": "Arial",
+          "font_eastAsia": null,
+          "size_half_points": null,
+          "color": "D64B46",
+          "bold": true,
+          "italic": false,
+          "underline": null
+        }
+      ]
+    },
+    {
+      "index": 13,
+      "style": "Bullet1stlevel",
+      "text_preview": "The Data61 paper was seen as a useful exploratory discussion paper illustrating what is technically possible, but not as a decision paper or a signal of imminent implementation or organisational change.",
+      "text_length": 202,
+      "run_formats": []
+    },
+    {
+      "index": 14,
+      "style": "Bullet1stlevel",
+      "text_preview": "FAE supported positioning CSIRO Data61 as strategic advisors with strong market and research insight, rather than committing early to a heavy internal build or a single technical solution.",
+      "text_length": 188,
+      "run_formats": []
+    },
+    {
+      "index": 15,
+      "style": "Bullet1stlevel",
+      "text_preview": "Ethical considerations were acknowledged as necessary constraints under NSW Government settings, but should be reframed so they inform go / no‑go decisions on AI use without dominating the narrative or being interpreted as workforce replacement.",
+      "text_length": 245,
+      "run_formats": [
+        {
+          "font_ascii": "Cambria Math",
+          "font_hAnsi": "Cambria Math",
+          "font_eastAsia": null,
+          "size_half_points": null,
+          "color": null,
+          "bold": false,
+          "italic": false,
+          "underline": null
+        }
+      ]
+    },
+    {
+      "index": 16,
+      "style": "Bullet1stlevel",
+      "text_preview": "FAE advised clearly separating the technical simulation work from broader organisational and workforce considerations, noting that organisational redesign is not an expected output of this project.",
+      "text_length": 197,
+      "run_formats": []
+    },
+    {
+      "index": 17,
+      "style": "Bullet1stlevel",
+      "text_preview": "There was strong concern about workforce messaging risk, with clear feedback that the narrative must focus on productivity enabled by efficiency, upskilling and reskilling, and not workforce reduction.",
+      "text_length": 201,
+      "run_formats": []
+    },
+    {
+      "index": 18,
+      "style": "Bullet1stlevel",
+      "text_preview": "The paper should be explicitly anchored to existing Office and Auditor‑General strategies, including workforce, digital audit and IT strategies, noting that the strategic direction is already endorsed in principle.",
+      "text_length": 214,
+      "run_formats": [
+        {
+          "font_ascii": "Cambria Math",
+          "font_hAnsi": "Cambria Math",
+          "font_eastAsia": null,
+          "size_half_points": null,
+          "color": null,
+          "bold": false,
+          "italic": false,
+          "underline": null
+        }
+      ]
+    },
+    {
+      "index": 19,
+      "style": "Bullet1stlevel",
+      "text_preview": "Overall, FAE expressed near‑unanimous support for the direction, with remaining focus on practical matters such as cost, outputs, governance and design, and agreed the proposal should be refined and brought back.",
+      "text_length": 212,
+      "run_formats": [
+        {
+          "font_ascii": "Cambria Math",
+          "font_hAnsi": "Cambria Math",
+          "font_eastAsia": null,
+          "size_half_points": null,
+          "color": null,
+          "bold": false,
+          "italic": false,
+          "underline": null
+        }
+      ]
+    },
+    {
+      "index": 21,
+      "style": "Heading3",
+      "text_preview": "What is in scope",
+      "text_length": 16,
+      "run_formats": [
+        {
+          "font_ascii": "Arial",
+          "font_hAnsi": "Arial",
+          "font_eastAsia": null,
+          "size_half_points": null,
+          "color": "D64B46",
+          "bold": true,
+          "italic": false,
+          "underline": null
+        },
+        {
+          "font_ascii": "Arial",
+          "font_hAnsi": "Arial",
+          "font_eastAsia": null,
+          "size_half_points": null,
+          "color": "D64B46",
+          "bold": true,
+          "italic": false,
+          "underline": null
+        }
+      ]
+    },
+    {
+      "index": 22,
+      "style": "Bullet1stlevel",
+      "text_preview": "Establishing a financial audit workflow to inform identification of opportunities where data and AI solutions will be relevant, specifically:",
+      "text_length": 141,
+      "run_formats": []
+    },
+    {
+      "index": 23,
+      "style": "Bullet2ndlevel",
+      "text_preview": "simulation of selected financial audit activities using historical or sandboxed data",
+      "text_length": 84,
+      "run_formats": []
+    },
+    {
+      "index": 24,
+      "style": "Bullet2ndlevel",
+      "text_preview": "local government audits as the initial test case",
+      "text_length": 48,
+      "run_formats": []
+    },
+    {
+      "index": 25,
+      "style": "Bullet1stlevel",
+      "text_preview": "AI‑assisted capabilities such as:",
+      "text_length": 33,
+      "run_formats": [
+        {
+          "font_ascii": "Cambria Math",
+          "font_hAnsi": "Cambria Math",
+          "font_eastAsia": null,
+          "size_half_points": null,
+          "color": null,
+          "bold": false,
+          "italic": false,
+          "underline": null
+        }
+      ]
+    },
+    {
+      "index": 26,
+      "style": "Bullet2ndlevel",
+      "text_preview": "transaction analytics and anomaly detection",
+      "text_length": 43,
+      "run_formats": []
+    },
+    {
+      "index": 27,
+      "style": "Bullet2ndlevel",
+      "text_preview": "document review and evidence classification",
+      "text_length": 43,
+      "run_formats": []
+    },
+    {
+      "index": 28,
+      "style": "Bullet2ndlevel",
+      "text_preview": "AI‑supported sampling and compliance checks",
+      "text_length": 43,
+      "run_formats": [
+        {
+          "font_ascii": "Cambria Math",
+          "font_hAnsi": "Cambria Math",
+          "font_eastAsia": null,
+          "size_half_points": null,
+          "color": null,
+          "bold": false,
+          "italic": false,
+          "underline": null
+        }
+      ]
+    },
+    {
+      "index": 29,
+      "style": "Bullet1stlevel",
+      "text_preview": "Human–AI collaboration models where:",
+      "text_length": 36,
+      "run_formats": []
+    },
+    {
+      "index": 30,
+      "style": "Bullet2ndlevel",
+      "text_preview": "auditors retain all judgement, sign‑off and accountability",
+      "text_length": 58,
+      "run_formats": [
+        {
+          "font_ascii": "Cambria Math",
+          "font_hAnsi": "Cambria Math",
+          "font_eastAsia": null,
+          "size_half_points": null,
+          "color": null,
+          "bold": false,
+          "italic": false,
+          "underline": null
+        }
+      ]
+    },
+    {
+      "index": 31,
+      "style": "Bullet2ndlevel",
+      "text_preview": "AI outputs are auditable, explainable and reviewable",
+      "text_length": 52,
+      "run_formats": []
+    },
+    {
+      "index": 32,
+      "style": "Bullet1stlevel",
+      "text_preview": "Development of an internally led minimum viable platform concept, built within the Audit Office environment, with CSIRO Data61 providing technical and advisory support to inform learning and benchmarking.",
+      "text_length": 204,
+      "run_formats": [
+        {
+          "font_ascii": "Segoe UI",
+          "font_hAnsi": "Segoe UI",
+          "font_eastAsia": "Times New Roman",
+          "size_half_points": "21",
+          "color": null,
+          "bold": false,
+          "italic": false,
+          "underline": null
+        }
+      ]
+    },
+    {
+      "index": 33,
+      "style": "Heading3",
+      "text_preview": "",
+      "text_length": 0,
+      "run_formats": []
+    },
+    {
+      "index": 34,
+      "style": "Heading3",
+      "text_preview": "What is out of scope",
+      "text_length": 20,
+      "run_formats": [
+        {
+          "font_ascii": "Arial",
+          "font_hAnsi": "Arial",
+          "font_eastAsia": null,
+          "size_half_points": null,
+          "color": "D64B46",
+          "bold": true,
+          "italic": false,
+          "underline": null
+        }
+      ]
+    },
+    {
+      "index": 35,
+      "style": "Bullet1stlevel",
+      "text_preview": "Live deployment on active financial audits",
+      "text_length": 42,
+      "run_formats": []
+    },
+    {
+      "index": 36,
+      "style": "Bullet1stlevel",
+      "text_preview": "Replacement of auditors or audit sign‑off",
+      "text_length": 41,
+      "run_formats": [
+        {
+          "font_ascii": "Cambria Math",
+          "font_hAnsi": "Cambria Math",
+          "font_eastAsia": null,
+          "size_half_points": null,
+          "color": null,
+          "bold": false,
+          "italic": false,
+          "underline": null
+        }
+      ]
+    },
+    {
+      "index": 37,
+      "style": "Bullet1stlevel",
+      "text_preview": "Mandating AI use across audits",
+      "text_length": 30,
+      "run_formats": []
+    },
+    {
+      "index": 38,
+      "style": "Bullet1stlevel",
+      "text_preview": "Procurement of a commercial audit platform at this stage",
+      "text_length": 56,
+      "run_formats": []
+    },
+    {
+      "index": 39,
+      "style": "Bullet1stlevel",
+      "text_preview": "Public release of tools or findings without executive approval",
+      "text_length": 62,
+      "run_formats": []
+    },
+    {
+      "index": 40,
+      "style": "Bullet1stlevel",
+      "text_preview": "",
+      "text_length": 0,
+      "run_formats": []
+    },
+    {
+      "index": 41,
+      "style": "Heading3",
+      "text_preview": "Strategic Alignment",
+      "text_length": 19,
+      "run_formats": [
+        {
+          "font_ascii": "Arial",
+          "font_hAnsi": "Arial",
+          "font_eastAsia": null,
+          "size_half_points": null,
+          "color": "D64B46",
+          "bold": true,
+          "italic": false,
+          "underline": null
+        }
+      ]
+    },
+    {
+      "index": 42,
+      "style": "Heading3",
+      "text_preview": "",
+      "text_length": 0,
+      "run_formats": []
+    },
+    {
+      "index": 43,
+      "style": "BodyText",
+      "text_preview": "",
+      "text_length": 0,
+      "run_formats": []
+    },
+    {
+      "index": 44,
+      "style": "Heading3",
+      "text_preview": "Governance and project team (proposed)",
+      "text_length": 38,
+      "run_formats": [
+        {
+          "font_ascii": "Arial",
+          "font_hAnsi": "Arial",
+          "font_eastAsia": null,
+          "size_half_points": null,
+          "color": "D64B46",
+          "bold": true,
+          "italic": false,
+          "underline": null
+        }
+      ]
+    },
+    {
+      "index": 46,
+      "style": null,
+      "text_preview": "Office Executive sponsor group",
+      "text_length": 30,
+      "run_formats": [
+        {
+          "font_ascii": null,
+          "font_hAnsi": null,
+          "font_eastAsia": null,
+          "size_half_points": null,
+          "color": null,
+          "bold": true,
+          "italic": false,
+          "underline": null
+        },
+        {
+          "font_ascii": null,
+          "font_hAnsi": null,
+          "font_eastAsia": null,
+          "size_half_points": null,
+          "color": null,
+          "bold": true,
+          "italic": false,
+          "underline": null
+        },
+        {
+          "font_ascii": null,
+          "font_hAnsi": null,
+          "font_eastAsia": null,
+          "size_half_points": null,
+          "color": null,
+          "bold": true,
+          "italic": false,
+          "underline": null
+        }
+      ]
+    },
+    {
+      "index": 47,
+      "style": "ListParagraph",
+      "text_preview": "Brad Medina (Assistant Auditor-General – Local Government, Financial Audit Branch)",
+      "text_length": 82,
+      "run_formats": []
+    },
+    {
+      "index": 48,
+      "style": "ListParagraph",
+      "text_preview": "Scott Stanton (Assistant Auditor-General, Systems Assurance, Cyber and Data Branch)",
+      "text_length": 83,
+      "run_formats": []
+    },
+    {
+      "index": 49,
+      "style": "ListParagraph",
+      "text_preview": "Xiaoyan Lu (Executive Director, Corporate, Experience and Strategy Branch)",
+      "text_length": 74,
+      "run_formats": []
+    },
+    {
+      "index": 50,
+      "style": null,
+      "text_preview": "Internal team",
+      "text_length": 13,
+      "run_formats": [
+        {
+          "font_ascii": null,
+          "font_hAnsi": null,
+          "font_eastAsia": null,
+          "size_half_points": null,
+          "color": null,
+          "bold": true,
+          "italic": false,
+          "underline": null
+        },
+        {
+          "font_ascii": null,
+          "font_hAnsi": null,
+          "font_eastAsia": null,
+          "size_half_points": null,
+          "color": null,
+          "bold": true,
+          "italic": false,
+          "underline": null
+        },
+        {
+          "font_ascii": null,
+          "font_hAnsi": null,
+          "font_eastAsia": null,
+          "size_half_points": null,
+          "color": null,
+          "bold": true,
+          "italic": false,
+          "underline": null
+        }
+      ]
+    },
+    {
+      "index": 51,
+      "style": "ListParagraph",
+      "text_preview": "Nathan Carter (Project lead)",
+      "text_length": 28,
+      "run_formats": []
+    },
+    {
+      "index": 52,
+      "style": "ListParagraph",
+      "text_preview": "Barry Li (Deputy project lead)",
+      "text_length": 30,
+      "run_formats": []
+    },
+    {
+      "index": 53,
+      "style": null,
+      "text_preview": "Internal contributors",
+      "text_length": 21,
+      "run_formats": [
+        {
+          "font_ascii": null,
+          "font_hAnsi": null,
+          "font_eastAsia": null,
+          "size_half_points": null,
+          "color": null,
+          "bold": true,
+          "italic": false,
+          "underline": null
+        },
+        {
+          "font_ascii": null,
+          "font_hAnsi": null,
+          "font_eastAsia": null,
+          "size_half_points": null,
+          "color": null,
+          "bold": true,
+          "italic": false,
+          "underline": null
+        }
+      ]
+    },
+    {
+      "index": 54,
+      "style": "ListParagraph",
+      "text_preview": "Data and AI team",
+      "text_length": 16,
+      "run_formats": []
+    },
+    {
+      "index": 55,
+      "style": "ListParagraph",
+      "text_preview": "Digital Audit Working Group (FAB)",
+      "text_length": 33,
+      "run_formats": []
+    },
+    {
+      "index": 56,
+      "style": "ListParagraph",
+      "text_preview": "IT (platform, security, architecture)",
+      "text_length": 37,
+      "run_formats": []
+    },
+    {
+      "index": 57,
+      "style": null,
+      "text_preview": "External partners and advisors",
+      "text_length": 30,
+      "run_formats": [
+        {
+          "font_ascii": null,
+          "font_hAnsi": null,
+          "font_eastAsia": null,
+          "size_half_points": null,
+          "color": null,
+          "bold": true,
+          "italic": false,
+          "underline": null
+        }
+      ]
+    },
+    {
+      "index": 58,
+      "style": "ListParagraph",
+      "text_preview": "CSIRO Data61 (research and benchmarking partner)",
+      "text_length": 48,
+      "run_formats": []
+    },
+    {
+      "index": 59,
+      "style": "ListParagraph",
+      "text_preview": "Other audit firms or vendors (knowledge sharing, tooling insights as appropriate)",
+      "text_length": 81,
+      "run_formats": []
+    }
+  ],
+  "tables": [
+    {
+      "index": 1,
+      "rows": 6,
+      "cols": 4,
+      "preview_rows": [
+        [
+          "To:",
+          "Financial Audit Executive"
+        ],
+        [
+          "Date:",
+          "1 May 2026",
+          "Ref:",
+          ""
+        ],
+        [
+          "Subject:",
+          "Digital Audit Workflow Initiative - Explore, Design, and Test"
+        ],
+        [
+          "Prepared by",
+          "Scott Stanton (Assistant Auditor-General, Systems Assurance, Cyber and Data Branch) Xiaoyan Lu (Executive Director, Corporate, Experience and Strategy Branch) Brad Medina (Assistant Auditor-General, Financial Audit Branc"
+        ],
+        [
+          "Presented by",
+          "Scott Stanton (Assistant Auditor-General, Systems Assurance, Cyber and Data Branch)"
+        ]
+      ]
+    },
+    {
+      "index": 2,
+      "rows": 10,
+      "cols": 3,
+      "preview_rows": [
+        [
+          "Strategy",
+          "Alignment",
+          "Notes"
+        ],
+        [
+          "Audit Office Corporate Plan – Strategic Objectives 2025–2028",
+          "✔",
+          "The initiative supports the Corporate Plan objectives to transform public sector auditing, build futureready capability, and amplify public value by strengthening audit quality, insight and productivity through responsib"
+        ],
+        [
+          "Digital Audit Strategy 2025–32",
+          "✔",
+          "The proposal aligns with the Strategy’s focus on humanintheloop AI, safe experimentation, centralised data platforms and progressive digital uplift, while deliberately positioning the work as exploratory rather than oper"
+        ],
+        [
+          "Technology Strategy (under development)",
+          "✔",
+          "The pilot simulation is consistent with the intended direction of the Technology Strategy by using nonproduction environments to test and inform futurestate technology decisions without committing to premature solutions."
+        ],
+        [
+          "Workforce Strategy (under development)",
+          "✔",
+          "The initiative supports the emerging Workforce Strategy by providing a controlled environment for auditors to build digital, data and analytical capability, reinforcing upskilling and professional growth rather than work"
+        ]
+      ]
+    },
+    {
+      "index": 3,
+      "rows": 10,
+      "cols": 3,
+      "preview_rows": [
+        [
+          "Strategy",
+          "Alignment",
+          "Notes"
+        ],
+        [
+          "Audit Office Corporate Plan – Strategic Objectives 2025–2028",
+          "✔",
+          "The initiative supports the Corporate Plan objectives to transform public sector auditing, build futureready capability, and amplify public value by strengthening audit quality, insight and productivity through responsib"
+        ],
+        [
+          "Digital Audit Strategy 2025–32",
+          "✔",
+          "The proposal aligns with the Strategy’s focus on humanintheloop AI, safe experimentation, centralised data platforms and progressive digital uplift, while deliberately positioning the work as exploratory rather than oper"
+        ],
+        [
+          "Technology Strategy (under development)",
+          "✔",
+          "The pilot simulation is consistent with the intended direction of the Technology Strategy by using nonproduction environments to test and inform futurestate technology decisions without committing to premature solutions."
+        ],
+        [
+          "Workforce Strategy (under development)",
+          "✔",
+          "The initiative supports the emerging Workforce Strategy by providing a controlled environment for auditors to build digital, data and analytical capability, reinforcing upskilling and professional growth rather than work"
+        ]
+      ]
+    }
+  ],
+  "styles": [
+    {
+      "style_id": "Normal",
+      "name": "Normal",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": "Arial",
+      "font_size_half_points": "20",
+      "color": null,
+      "bold": false,
+      "spacing_after": "0",
+      "spacing_before": null
+    },
+    {
+      "style_id": "Heading1",
+      "name": "heading 1",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": "28",
+      "color": null,
+      "bold": true,
+      "spacing_after": "170",
+      "spacing_before": "114"
+    },
+    {
+      "style_id": "Heading2",
+      "name": "heading 2",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": "24",
+      "color": null,
+      "bold": true,
+      "spacing_after": "114",
+      "spacing_before": "58"
+    },
+    {
+      "style_id": "Heading3",
+      "name": "heading 3",
+      "type": "paragraph",
+      "used_count": 9,
+      "font_ascii": null,
+      "font_size_half_points": "24",
+      "color": "6D1C1A",
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": "40"
+    },
+    {
+      "style_id": "DefaultParagraphFont",
+      "name": "Default Paragraph Font",
+      "type": "character",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "BodyText",
+      "name": "Body Text",
+      "type": "paragraph",
+      "used_count": 1,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": "170",
+      "spacing_before": null
+    },
+    {
+      "style_id": "BodyTextChar",
+      "name": "Body Text Char",
+      "type": "character",
+      "used_count": 0,
+      "font_ascii": "Arial",
+      "font_size_half_points": "20",
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "Bodytextrightaligned",
+      "name": "Body text right aligned",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "Bold",
+      "name": "Bold",
+      "type": "character",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": true,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "BoldItalic",
+      "name": "Bold + Italic",
+      "type": "character",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": true,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "Bullet1stlevel",
+      "name": "Bullet 1st level",
+      "type": "paragraph",
+      "used_count": 17,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": "60",
+      "spacing_before": "60"
+    },
+    {
+      "style_id": "Bullet1stlevelChar",
+      "name": "Bullet 1st level Char",
+      "type": "character",
+      "used_count": 0,
+      "font_ascii": "Arial",
+      "font_size_half_points": "20",
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "Bullet2ndlevel",
+      "name": "Bullet 2nd level",
+      "type": "paragraph",
+      "used_count": 7,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "Contentspageheading",
+      "name": "Contents page heading",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": "80",
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "CoverHeading1",
+      "name": "Cover Heading 1",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": "Arial Narrow",
+      "font_size_half_points": "120",
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "CoverHeading2",
+      "name": "Cover Heading 2",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": "36",
+      "color": null,
+      "bold": false,
+      "spacing_after": "170",
+      "spacing_before": "114"
+    },
+    {
+      "style_id": "HeadingCentred",
+      "name": "Heading – Centred",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": "24",
+      "color": null,
+      "bold": true,
+      "spacing_after": "170",
+      "spacing_before": "114"
+    },
+    {
+      "style_id": "HeadingCentredsmall",
+      "name": "Heading – Centred (small)",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": true,
+      "spacing_after": "170",
+      "spacing_before": "114"
+    },
+    {
+      "style_id": "FootnoteText",
+      "name": "footnote text",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": "18",
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "FootnoteTextChar",
+      "name": "Footnote Text Char",
+      "type": "character",
+      "used_count": 0,
+      "font_ascii": "Arial",
+      "font_size_half_points": "18",
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "FootnoteReference",
+      "name": "footnote reference",
+      "type": "character",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "Heading-LeftSmall",
+      "name": "Heading - Left (Small)",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": "Arial",
+      "font_size_half_points": "20",
+      "color": null,
+      "bold": true,
+      "spacing_after": "170",
+      "spacing_before": null
+    },
+    {
+      "style_id": "FollowedHyperlink",
+      "name": "FollowedHyperlink",
+      "type": "character",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": "808080",
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "Hyperlink",
+      "name": "Hyperlink",
+      "type": "character",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": "808080",
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "Heading1Char",
+      "name": "Heading 1 Char",
+      "type": "character",
+      "used_count": 0,
+      "font_ascii": "Arial",
+      "font_size_half_points": "28",
+      "color": null,
+      "bold": true,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "Heading1-NumberedRED",
+      "name": "Heading 1 - Numbered RED",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": "Arial",
+      "font_size_half_points": "28",
+      "color": "D64B46",
+      "bold": true,
+      "spacing_after": "170",
+      "spacing_before": "114"
+    },
+    {
+      "style_id": "Heading1Red",
+      "name": "Heading 1 Red",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": "D64B46",
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "Heading1-Numbered",
+      "name": "Heading 1 - Numbered",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": "auto",
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "Heading2-Numbered",
+      "name": "Heading 2 - Numbered",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "Heading2Char",
+      "name": "Heading 2 Char",
+      "type": "character",
+      "used_count": 0,
+      "font_ascii": "Arial",
+      "font_size_half_points": "24",
+      "color": null,
+      "bold": true,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "Heading2-Rightaligned",
+      "name": "Heading 2 - Right aligned",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "Numbered",
+      "name": "Numbered",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": "60",
+      "spacing_before": "60"
+    },
+    {
+      "style_id": "Numberered-alpha",
+      "name": "Numberered - alpha",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "Numbered-iRoman",
+      "name": "Numbered - i) Roman",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "Italic",
+      "name": "Italic",
+      "type": "character",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "Referencebox",
+      "name": "Reference box",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": "16",
+      "color": null,
+      "bold": false,
+      "spacing_after": "60",
+      "spacing_before": "60"
+    },
+    {
+      "style_id": "Quote",
+      "name": "Quote",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "QuoteChar",
+      "name": "Quote Char",
+      "type": "character",
+      "used_count": 0,
+      "font_ascii": "Arial",
+      "font_size_half_points": "20",
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "SingleLineText-Half",
+      "name": "Single Line Text - Half",
+      "type": "paragraph",
+      "used_count": 1,
+      "font_ascii": null,
+      "font_size_half_points": "12",
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "Source",
+      "name": "Source",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": "13",
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": "60"
+    },
+    {
+      "style_id": "TableNote-2",
+      "name": "TableNote - #",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": "13",
+      "color": null,
+      "bold": false,
+      "spacing_after": "28",
+      "spacing_before": "57"
+    },
+    {
+      "style_id": "TableNote-",
+      "name": "TableNote - ^",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": "13",
+      "color": null,
+      "bold": false,
+      "spacing_after": "28",
+      "spacing_before": "57"
+    },
+    {
+      "style_id": "TableNote-0",
+      "name": "TableNote - <",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": "13",
+      "color": null,
+      "bold": false,
+      "spacing_after": "28",
+      "spacing_before": "57"
+    },
+    {
+      "style_id": "TableNote-1",
+      "name": "TableNote - >",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": "13",
+      "color": null,
+      "bold": false,
+      "spacing_after": "28",
+      "spacing_before": "57"
+    },
+    {
+      "style_id": "TableNote-v",
+      "name": "TableNote - v",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": "13",
+      "color": null,
+      "bold": false,
+      "spacing_after": "28",
+      "spacing_before": "57"
+    },
+    {
+      "style_id": "Tablebullet",
+      "name": "Table bullet",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": "Arial",
+      "font_size_half_points": "18",
+      "color": null,
+      "bold": false,
+      "spacing_after": "60",
+      "spacing_before": "60"
+    },
+    {
+      "style_id": "Tabletext",
+      "name": "Table text",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": "18",
+      "color": null,
+      "bold": false,
+      "spacing_after": "60",
+      "spacing_before": "60"
+    },
+    {
+      "style_id": "Tableheading-centred",
+      "name": "Table heading - centred",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": "18",
+      "color": null,
+      "bold": true,
+      "spacing_after": "60",
+      "spacing_before": "60"
+    },
+    {
+      "style_id": "Tablebullet-2ndlevel",
+      "name": "Table bullet - 2nd level",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "Tableheading-leftaligned",
+      "name": "Table heading - left aligned",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": "Arial",
+      "font_size_half_points": "18",
+      "color": null,
+      "bold": true,
+      "spacing_after": "60",
+      "spacing_before": "60"
+    },
+    {
+      "style_id": "TableNote2",
+      "name": "TableNote",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": "13",
+      "color": null,
+      "bold": false,
+      "spacing_after": "28",
+      "spacing_before": "57"
+    },
+    {
+      "style_id": "TableNote-Alpha",
+      "name": "TableNote - Alpha",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "TableNote-FTE",
+      "name": "TableNote - FTE:",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "TableNote-High",
+      "name": "TableNote - High",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "TableNote-Key",
+      "name": "TableNote - Key:",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "TableNote-Low",
+      "name": "TableNote - Low",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "TableNote-NA",
+      "name": "TableNote - N/A",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "TableNote-na0",
+      "name": "TableNote - na",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "TableNote-Num",
+      "name": "TableNote - Num",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "TableNote",
+      "name": "TableNote *",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "TableNote0",
+      "name": "TableNote **",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "TableNote1",
+      "name": "TableNote ***",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "TOC2",
+      "name": "toc 2",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": "120",
+      "spacing_before": "120"
+    },
+    {
+      "style_id": "TOC1",
+      "name": "toc 1",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": true,
+      "spacing_after": "120",
+      "spacing_before": "120"
+    },
+    {
+      "style_id": "TOC3",
+      "name": "toc 3",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": "120",
+      "spacing_before": "120"
+    },
+    {
+      "style_id": "Header",
+      "name": "header",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "HeaderChar",
+      "name": "Header Char",
+      "type": "character",
+      "used_count": 0,
+      "font_ascii": "Arial",
+      "font_size_half_points": "20",
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "Footer",
+      "name": "footer",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "FooterChar",
+      "name": "Footer Char",
+      "type": "character",
+      "used_count": 0,
+      "font_ascii": "Arial",
+      "font_size_half_points": "20",
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "Tabletext-rightaligned",
+      "name": "Table text - right aligned",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "Tabletext-centred",
+      "name": "Table text - centred",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "CommentReference",
+      "name": "annotation reference",
+      "type": "character",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": "16",
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "CommentText",
+      "name": "annotation text",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "CommentTextChar",
+      "name": "Comment Text Char",
+      "type": "character",
+      "used_count": 0,
+      "font_ascii": "Arial",
+      "font_size_half_points": "20",
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "CommentSubject",
+      "name": "annotation subject",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": true,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "CommentSubjectChar",
+      "name": "Comment Subject Char",
+      "type": "character",
+      "used_count": 0,
+      "font_ascii": "Arial",
+      "font_size_half_points": "20",
+      "color": null,
+      "bold": true,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "BalloonText",
+      "name": "Balloon Text",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": "Segoe UI",
+      "font_size_half_points": "18",
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "BalloonTextChar",
+      "name": "Balloon Text Char",
+      "type": "character",
+      "used_count": 0,
+      "font_ascii": "Segoe UI",
+      "font_size_half_points": "18",
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "Tabletext-red",
+      "name": "Table text - red",
+      "type": "character",
+      "used_count": 0,
+      "font_ascii": "Arial",
+      "font_size_half_points": "18",
+      "color": "D64B46",
+      "bold": true,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "Tableheading-rightaligned",
+      "name": "Table heading - right aligned",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": "18",
+      "color": null,
+      "bold": true,
+      "spacing_after": "60",
+      "spacing_before": "60"
+    },
+    {
+      "style_id": "Numberedbullet1stlevel",
+      "name": "Numbered bullet 1st level",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": "60",
+      "spacing_before": "60"
+    },
+    {
+      "style_id": "Numberedbullet2ndlevel",
+      "name": "Numbered bullet 2nd level",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": "60",
+      "spacing_before": "60"
+    },
+    {
+      "style_id": "Tablenumbered",
+      "name": "Table numbered",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "Tablenumberedbullet1stlevel",
+      "name": "Table numbered bullet 1st level",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "Tablenumberedbullet2ndlevel",
+      "name": "Table numbered bullet 2nd level",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "Tablenumberedalpha",
+      "name": "Table numbered alpha",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "Tablenumberedroman",
+      "name": "Table numbered roman",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "Heading2Red",
+      "name": "Heading 2 Red",
+      "type": "paragraph",
+      "used_count": 1,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": "D64B46",
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "Heading2RedChar",
+      "name": "Heading 2 Red Char",
+      "type": "character",
+      "used_count": 0,
+      "font_ascii": "Arial",
+      "font_size_half_points": "24",
+      "color": "D64B46",
+      "bold": true,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "UnresolvedMention",
+      "name": "Unresolved Mention",
+      "type": "character",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": "605E5C",
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "Revision",
+      "name": "Revision",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": "Arial",
+      "font_size_half_points": "20",
+      "color": null,
+      "bold": false,
+      "spacing_after": "0",
+      "spacing_before": null
+    },
+    {
+      "style_id": "Mention",
+      "name": "Mention",
+      "type": "character",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": "2B579A",
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "ListParagraph",
+      "name": "List Paragraph",
+      "type": "paragraph",
+      "used_count": 10,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "NormalWeb",
+      "name": "Normal (Web)",
+      "type": "paragraph",
+      "used_count": 0,
+      "font_ascii": "Times New Roman",
+      "font_size_half_points": "24",
+      "color": null,
+      "bold": false,
+      "spacing_after": "100",
+      "spacing_before": "100"
+    },
+    {
+      "style_id": "Strong",
+      "name": "Strong",
+      "type": "character",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": true,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "Emphasis",
+      "name": "Emphasis",
+      "type": "character",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": null,
+      "color": null,
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    },
+    {
+      "style_id": "Heading3Char",
+      "name": "Heading 3 Char",
+      "type": "character",
+      "used_count": 0,
+      "font_ascii": null,
+      "font_size_half_points": "24",
+      "color": "6D1C1A",
+      "bold": false,
+      "spacing_after": null,
+      "spacing_before": null
+    }
+  ]
+}
