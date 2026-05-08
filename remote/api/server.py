@@ -7,6 +7,8 @@ FastAPI application exposing endpoints for inter-HASHI communication:
   GET  /peers           — discovered LAN peers
   POST /hchat           — receive hchat from remote, relay to local workbench
   POST /terminal/exec   — execute shell command (auth-gated)
+  POST /files/push      — receive a file and atomically write it to a path
+  GET  /files/stat      — inspect a remote file path and checksum
   POST /pair/request    — initiate pairing
   GET  /pair/status     — check pairing request status
   POST /pair/approve    — approve a pending pairing request
@@ -16,6 +18,8 @@ Adapted from Lily Remote (agent/api/server.py) — screen/input endpoints
 replaced with hchat relay and terminal execution.
 """
 
+import base64
+import hashlib
 import json
 import logging
 import platform
@@ -23,6 +27,7 @@ import re
 import socket
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Optional
 from urllib import request as urllib_request
 from urllib.error import URLError
@@ -68,6 +73,14 @@ class TerminalExecPayload(BaseModel):
     cwd: Optional[str] = None
 
 
+class FilePushPayload(BaseModel):
+    dest_path: str
+    content_b64: str
+    sha256: Optional[str] = None
+    overwrite: bool = False
+    create_dirs: bool = True
+
+
 class PairRequestPayload(BaseModel):
     client_id: str
     client_name: str
@@ -108,6 +121,45 @@ class ProtocolMessagePayload(BaseModel):
 # ─────────────────────────────────────────────────────────────
 # App factory
 # ─────────────────────────────────────────────────────────────
+
+MAX_FILE_PUSH_BYTES = 256 * 1024 * 1024
+
+
+def _resolve_file_push_destination(dest_path: str) -> Path:
+    raw = str(dest_path or "").strip()
+    if not raw:
+        raise ValueError("dest_path is required")
+    if "\x00" in raw:
+        raise ValueError("dest_path contains an invalid NUL byte")
+
+    expanded = Path(raw).expanduser()
+    if expanded.is_absolute():
+        return expanded
+
+    if _hashi_root:
+        root = Path(_hashi_root).resolve()
+        resolved = (root / expanded).resolve()
+        if not resolved.is_relative_to(root):
+            raise ValueError("relative dest_path must stay inside the Hashi root")
+        return resolved
+
+    raise ValueError("relative dest_path is not allowed because Hashi root is unavailable")
+
+
+def _decode_file_push_content(payload: FilePushPayload) -> tuple[bytes, str]:
+    try:
+        data = base64.b64decode(payload.content_b64.encode("ascii"), validate=True)
+    except Exception as exc:
+        raise ValueError(f"content_b64 is not valid base64: {exc}") from exc
+
+    if len(data) > MAX_FILE_PUSH_BYTES:
+        raise ValueError(f"file exceeds max size of {MAX_FILE_PUSH_BYTES} bytes")
+
+    digest = hashlib.sha256(data).hexdigest()
+    expected = str(payload.sha256 or "").strip().lower()
+    if expected and expected != digest:
+        raise ValueError("sha256 mismatch")
+    return data, digest
 
 def create_app(
     instance_info: dict,
@@ -326,6 +378,73 @@ def create_app(
 
         result = await _terminal_executor.execute(payload.command, cwd=payload.cwd)
         return result.to_dict()
+
+    # ── File push ────────────────────────────────────────────
+
+    @app.post("/files/push")
+    async def file_push(payload: FilePushPayload, client_id: str = Depends(verify_token)):
+        """
+        Receive a file from another HASHI instance and atomically write it to
+        the requested destination path.
+        """
+        try:
+            dest = _resolve_file_push_destination(payload.dest_path)
+            data, digest = _decode_file_push_content(payload)
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+
+        if dest.exists() and not payload.overwrite:
+            return JSONResponse(
+                status_code=409,
+                content={"ok": False, "error": "destination exists; pass overwrite=true to replace it"},
+            )
+        if dest.exists() and dest.is_dir():
+            return JSONResponse(status_code=409, content={"ok": False, "error": "destination is a directory"})
+        if not dest.parent.exists():
+            if not payload.create_dirs:
+                return JSONResponse(status_code=409, content={"ok": False, "error": "destination parent does not exist"})
+            dest.parent.mkdir(parents=True, exist_ok=True)
+
+        tmp_path = dest.with_name(f".{dest.name}.hashi-upload-{int(time.time() * 1000)}")
+        try:
+            tmp_path.write_bytes(data)
+            tmp_path.replace(dest)
+        except Exception as exc:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
+
+        logger.info("File push from %s wrote %s (%d bytes)", client_id, dest, len(data))
+        return {
+            "ok": True,
+            "dest_path": str(dest),
+            "bytes_written": len(data),
+            "sha256": digest,
+            "overwritten": bool(payload.overwrite),
+        }
+
+    @app.get("/files/stat")
+    async def file_stat(path: str, client_id: str = Depends(verify_token)):
+        """Return existence, size, and sha256 for a remote path."""
+        try:
+            target = _resolve_file_push_destination(path)
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+        if not target.exists():
+            return {"ok": True, "exists": False, "path": str(target)}
+        if target.is_dir():
+            return {"ok": True, "exists": True, "path": str(target), "type": "directory"}
+        data = target.read_bytes()
+        return {
+            "ok": True,
+            "exists": True,
+            "path": str(target),
+            "type": "file",
+            "size": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
 
     # ── Pairing ──────────────────────────────────────────────
 
