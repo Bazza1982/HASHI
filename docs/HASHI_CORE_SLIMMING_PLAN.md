@@ -1,6 +1,6 @@
-# HASHI v3.2-alpha Core Slimming Plan
+# HASHI v3.2 Core Slimming Plan
 
-Status: accepted for `v3.2-alpha` on 2026-05-02. See the implementation status and validation record at the end of this document.
+Status: accepted for `v3.2.0` on 2026-05-02. See the implementation status and validation record at the end of this document.
 
 ## Goal
 
@@ -49,7 +49,7 @@ Original target size:
 main.py <= 200 lines
 ```
 
-Accepted `v3.2-alpha` outcome: `main.py` is 337 lines. The final shape is a slim kernel wrapper rather than a pure bootstrap-only file.
+Accepted `v3.2.0` outcome: `main.py` is 337 lines. The final shape is a slim kernel wrapper rather than a pure bootstrap-only file.
 
 Most behavior should live in hot-reloadable modules:
 
@@ -511,7 +511,7 @@ curl http://127.0.0.1:18801/health
 
 ## Success Criteria
 
-- `main.py` is slim enough to act as a stable process bootstrap/kernel wrapper. Original target was less than or equal to 200 lines; accepted `v3.2-alpha` outcome is 337 lines.
+- `main.py` is slim enough to act as a stable process bootstrap/kernel wrapper. Original target was less than or equal to 200 lines; accepted `v3.2.0` outcome is 337 lines.
 - Full test suite passes.
 - `/reboot min` picks up agent lifecycle changes.
 - `/reboot max` picks up scheduler/runtime/backend changes.
@@ -537,11 +537,11 @@ Slim orchestrator run loop into high-level flow
 Slim main.py to process bootstrap only
 ```
 
-## v3.2-alpha Implementation Status
+## v3.2.0 Implementation Status
 
 Updated: 2026-05-02.
 
-Accepted on branch `v3.2-alpha`.
+Accepted for release line `v3.2.0`.
 
 Completed structural commits:
 
@@ -572,8 +572,6 @@ Validation completed:
 python3 -m py_compile main.py orchestrator/*.py
 pytest
 203 passed, 2 warnings
-git status --short --branch
-## v3.2-alpha
 ```
 
 Live validation completed on 2026-05-02:

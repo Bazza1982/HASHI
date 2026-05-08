@@ -357,7 +357,7 @@ Minato-specific CLI commands (project creation, phase management, log querying f
 ## File Structure
 
 ```
-hashi2/                                  (WSL dev repo — release/v3.0-alpha branch)
+hashi2/                                  (WSL dev repo — release/v3 branch)
 ├── workbench/
 │   ├── server/
 │   │   ├── index.js                     ✅ Express API server — chat, transcript, project log

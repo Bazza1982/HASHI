@@ -1,6 +1,6 @@
 # HASHI Voice Bridge Plan
 
-Status: **deferred research note** for `v3.2-alpha` and later.
+Status: **deferred research note** for `v3.2.0` and later.
 
 This document records the research and paused plan for adding a real voice-call interface to HASHI.
 

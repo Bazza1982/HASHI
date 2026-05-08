@@ -1,6 +1,6 @@
 # HASHI
 
-> **Status (v3.2-alpha):** Active alpha branch with the slim core architecture accepted, Wrapper Agent Mode implemented, Anatta live self-assembly controls, per-instance API Gateway ports, browser gateway work, OLL HASHI Chrome extension integration, private wake-on-LAN tooling, Workzone support, and runtime/remote hardening. This branch builds on the full-featured v3.1 agentic AI orchestration platform with **6 LLM backends** (Claude, Gemini, Codex, OpenRouter, DeepSeek, Ollama), **habit-based self-improvement**, **SafeVoice**, **cross-instance agent messaging**, **token audit & cost tracking**, and **Minato MCP workflow choreography**.
+> **Status (v3.2.0 official release):** HASHI 3.2 is the first release where the modern architecture, cross-instance runtime, browser routing, and learned EXP guidebook layer are documented as one coherent platform. It includes the slim core architecture, Wrapper Agent Mode, Anatta live self-assembly controls, Audit Agent Mode, per-instance API Gateway ports, the `/browser` route dashboard, Hashi Remote file transfer, OLL HASHI Chrome extension integration, Workzone support, and the imported `/exp` guidebook corpus. It builds on the full-featured v3 platform with **6 LLM backends** (Claude, Gemini, Codex, OpenRouter, DeepSeek, Ollama), **habit-based self-improvement**, **SafeVoice**, **cross-instance agent messaging**, **token audit & cost tracking**, and **Minato MCP workflow choreography**.
 >
 > **Changelog:** see [`CHANGELOG.md`](CHANGELOG.md) · **Roadmap:** see [`docs/ROADMAP.md`](docs/ROADMAP.md) · **Nagare Docs:** see [`docs/NAGARE_FLOW_SYSTEM.md`](docs/NAGARE_FLOW_SYSTEM.md).
 
@@ -79,19 +79,37 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
 10. **Wrapper Agent Mode** — Pair a strong core model with a stateless persona wrapper so GPT/Codex can do the work while another model controls the final visible voice
 11. **Anatta Live Self-Assembly** — Optional per-agent mode (`off`, `shadow`, `on`) that can observe or inject transient self-state guidance while keeping `agent.md` as the stable identity
 12. **Cross-Instance Messaging** — Agents across different HASHI instances can communicate via HChat and Hashi Remote
-13. **Pack & Go** — Build a self-contained USB for Windows or macOS; recipients just plug in and double-click
-14. **Vibe-Coded** — Every line written by AI, reviewed by AI, directed by human vision
+13. **EXP Guidebooks** — `/exp` lets agents consult context-specific operational playbooks, failure memory, validators, and training evidence before acting
+14. **Browser Route Dashboard** — `/browser` selects the right internet path: HASHI headless browser, CLI-native browsing, Brave Search, or the logged-in Chrome extension bridge
+15. **Hashi Remote File Transfer** — move release artifacts, EXP packs, and other files directly between HASHI instances
+16. **Audit Agent Mode** — run a core model plus a separate auditor that emits follow-up findings without rewriting the core answer
+17. **Pack & Go** — Build a self-contained USB for Windows or macOS; recipients just plug in and double-click
+18. **Vibe-Coded** — Every line written by AI, reviewed by AI, directed by human vision
 
 ---
 
 ## Project Status
 
-- **v3.2-alpha** *(current)* — Slim core architecture, Wrapper Agent Mode, Anatta controls, per-instance API Gateway ports, live hot-reboot validation, browser gateway, OLL HASHI Chrome extension integration, private wake-on-LAN tooling, Workzone support, runtime/backend hardening
+- **v3.2.0** *(current official release)* — Slim core architecture, Wrapper Agent Mode, Audit Agent Mode, Anatta controls, EXP guidebooks, `/browser` route dashboard, Hashi Remote file transfer, per-instance API Gateway ports, OLL HASHI Chrome extension integration, Workzone support, runtime/backend hardening
 - **v3.1** — Claude Opus 4.7, GPT-5.5, Codex CLI 0.125.0, `xhigh`/`max` effort levels, HASHI Remote remediation
 - **v3.0-beta** — **Self-improving agents**, 6 LLM backends, SafeVoice, cross-instance messaging, token audit, agent behavior audit, remote backend policy, Minato MCP, Obsidian wiki integration
 - **v3.0-alpha** — Ollama local LLM, habit system (Phase 4-5), TUI onboarding, Minato MCP (8-tier), token audit system, dream improvements
 - **v2.1.0** — **Nagare Flow System** — multi-agent workflow orchestration
 - **v2.0.0** — Tool execution layer, browser automation, Pack & Go USB deployment, TUI, vector memory, `/dream` skill
+
+---
+
+## What's New Since v2
+
+HASHI 2.x proved that local agents could execute tools, browse, switch backends, run from a TUI, and orchestrate Nagare workflows. HASHI 3.2 turns that foundation into a much broader local agent platform:
+
+- **From tools to agentic operations:** the v2 tool layer is now surrounded by habit learning, nightly dream reflection, SafeVoice confirmation, token/cost audit, and behavior audit trails.
+- **From one machine to a HASHI network:** HChat and Hashi Remote let agents address peers across instances, with peer health, protocol handshakes, and direct file transfer for moving artifacts and EXP packs.
+- **From backend switching to runtime composition:** agents can run fixed, flex, wrapper, or audit modes, including a strong core model paired with a separate persona wrapper or auditor.
+- **From generic skills to learned expertise:** `/exp` adds context-specific guidebooks with playbooks, validators, failure memory, templates, evidence, and training runs for repeatable high-skill work.
+- **From browser automation to browser routing:** `/browser` exposes a route dashboard that chooses between headless browser tools, CLI-native browsing, Brave Search, and the real logged-in Chrome extension bridge.
+- **From a monolith to a hot-reloadable core:** v3.2's slim core moves frequently changed behavior into managers and runtime modules so `/reboot min` can adopt most code changes without a full process restart.
+- **From scripts to a local work platform:** Workbench, API Gateway, Workzone helpers, Nagare, Minato, and the EXP corpus now give HASHI a stronger operating surface for research, writing, office automation, and cross-device work.
 
 ---
 
@@ -1065,9 +1083,9 @@ python tui.py
 
 ## Warnings
 
-### This is Version v3.2-alpha
+### This is Version v3.2.0
 
-HASHI v3.2-alpha is an **active alpha development branch** built entirely through AI-assisted development ("Vibe-Coding"). While functional and field-tested by the author, it is **not production-ready** and may include incomplete or experimental browser, Workzone, wake-on-LAN, and remote-runtime changes.
+HASHI v3.2.0 is an **official local-first release** built entirely through AI-assisted development ("Vibe-Coding"). It is functional and field-tested by the author, but it is still a personal/research orchestration platform rather than a hardened hosted SaaS product.
 
 **Known Limitations:**
 - **Stability** — Expect edge cases and unexpected behavior
@@ -1092,7 +1110,7 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
 
 ## Release History
 
-### v3.2-alpha *(current)* — Slim Core, Wrapper Mode, Browser Gateway & Runtime Hardening (May 2026)
+### v3.2.0 *(current official release)* — Slim Core, EXP, Browser Routing & Runtime Hardening (May 2026)
 
 - **Slim core architecture accepted** — `main.py` reduced from a large feature host into a slim process bootstrap/kernel wrapper; hot-reloadable managers now own agent lifecycle, service management, reboot, startup, shutdown, config, backend preflight, skills, and WhatsApp control
 - **Wrapper Agent Mode implemented** — agents can run a functional core model and a separate stateless wrapper model for final visible persona/style rewriting
@@ -1103,9 +1121,13 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
   - `/reset CONFIRM` preserves wrapper mode configuration and prompt slots, matching `/sys` preservation behavior; `/wipe CONFIRM` remains a hard workspace clear
   - Final hardening commit `677212b` prevents wrapper persona from drifting back into the core model through prompt memory
 - **Anatta controls added** — `/anatta off`, `/anatta shadow`, and `/anatta on` switch per-agent live self-assembly mode by updating workspace config and reloading post-turn observers
+- **Audit Agent Mode implemented** — `/mode audit` and `/audit` configure a core model plus a separate audit model that emits follow-up findings while leaving the core answer unchanged
+- **EXP guidebook corpus imported** — `/exp <task>` consults context-specific guidebooks under `exp/`, including playbooks, validators, failure memory, templates, evidence, and training records
 - **Runtime slimming continued** — runtime session, workspace, control, remote command, lifecycle, queue processor, and pipeline responsibilities moved out of the main flex runtime file into focused modules
 - **Per-instance API Gateway ports** — API Gateway defaults to `workbench_port + 1`, launcher status uses configured ports, and HASHI API health reports gateway ownership/status
 - **Live reboot validation passed** — cold restart, `/reboot min`, `/reboot max`, Workbench health, API Gateway health, and `pytest` all passed on 2026-05-02
+- **Browser routing dashboard** — `/browser` and `/browser status` show route availability for headless browser tools, CLI-native browsing, Brave Search, and the logged-in Chrome extension bridge
+- **Hashi Remote file transfer** — direct cross-PC file push support for moving artifacts and EXP packages between HASHI instances
 - **Browser gateway work** — local gateway package and tests for browser-facing bridge capabilities
 - **OLL HASHI Chrome extension integration** — extension scaffold and planning for browser bridge workflows
 - **Private wake-on-LAN tooling** — local private WOL helper and tests

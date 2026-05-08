@@ -1,6 +1,6 @@
 # Wrapper Agent Mode Development Plan
 
-Status: implemented for HASHI1 `v3.2-alpha` on 2026-05-03.
+Status: implemented for HASHI1 `v3.2.0` on 2026-05-03.
 
 Owner: HASHI1 implementation.
 
@@ -36,7 +36,7 @@ This is a runtime feature, not an Anatta feature. It must not depend on Anatta b
 
 ## 2. Current HASHI1 Facts
 
-These facts were verified against HASHI1 `v3.2-alpha` before this plan was written.
+These facts were verified against HASHI1 `v3.2.0` before this plan was written.
 
 ### 2.1 Backend naming
 

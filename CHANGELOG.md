@@ -9,8 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+No unreleased changes yet.
+
+## [3.2.0] - 2026-05-09
+
 ### ✨ Added
 
+- **Slim core architecture** — `main.py` is now a slim process bootstrap/kernel wrapper, with frequently changed bridge behavior moved into hot-reloadable managers under `orchestrator/`.
+  - Added manager boundaries for skill management, config administration, backend preflight, agent lifecycle, runtime services, hot reboot, startup, shutdown, and WhatsApp control.
+  - Hot reboot now rebuilds managers transaction-style after module reload: replacement managers are built first, then committed only if the full set initializes successfully.
+  - Long-lived live handles remain on the kernel, including Workbench API, API Gateway, scheduler, WhatsApp transport, agent directory, and runtime list state.
+  - Accepted with cold restart, `/reboot min`, `/reboot max`, Workbench/API health checks, and full `pytest` validation.
+- **Wrapper Agent Mode** — new `wrapper` runtime mode pairs a functional core backend/model with a stateless wrapper backend/model for final user-facing persona/style rewriting.
+  - Added `/mode wrapper`, `/core`, `/wrap`, and `/wrapper` configuration commands, with Telegram inline controls for core model, wrapper model, context window, and persona/style slots.
+  - Foreground and background delivery paths now use wrapper final text for user-visible replies, while core prompt memory stores core raw assistant output so wrapper persona does not drift back into the core model.
+  - `/verbose on` shows a labeled wrapper trace containing core raw output, wrapper final output, wrapper status, latency, and fallback reason.
+- **Audit Agent Mode** — added `audit` runtime mode for user-originated requests.
+  - `/mode audit`, `/audit`, and managed `/core` controls configure a core model plus a separate audit model.
+  - Core responses are delivered unchanged; audit findings are generated as follow-up reports according to delivery and severity settings.
+  - Audit evidence and transcripts are written to local workspace runtime files for review, while scheduler/system sources are bypassed.
+- **EXP guidebook corpus** — imported the context-specific `/exp` knowledge layer from INTEL into HASHI proper.
+  - Added the `exp/` corpus, `exp/loader.py`, `/exp <task>` runtime hook, admin local testing support, documentation, and focused tests.
+  - EXP guidebooks capture user/tool/workflow-specific playbooks, validators, failure memory, templates, evidence, and training runs without changing HASHI core behavior.
+  - This release keeps the EXP schema backward-compatible with the existing INTEL corpus so future EXPs can be transferred across machines.
+- **Hashi Remote file transfer** — added direct cross-PC file push/stat support for moving artifacts, EXP packages, and release bundles between HASHI instances.
+- **Browser route dashboard** — `/browser` and `/browser status` now expose a route dashboard for headless browser tools, CLI-native browsing, Brave Search, and the logged-in Chrome extension bridge.
+- **Browser gateway alpha** — local browser gateway package and test coverage for browser-facing bridge capabilities.
+- **OLL HASHI Chrome extension scaffold** — extension files and implementation plan for browser bridge workflows.
+- **Private wake-on-LAN tooling** — local helper and tests for private wake-on-LAN flows.
+- **Workzone support** — project/workspace zone helper module and tests.
 - **Anatta live self-assembly mode switch** — `/anatta off`, `/anatta shadow`, and `/anatta on` can now change the current agent workspace's Anatta mode without hand-editing JSON.
   - `shadow` and `on` automatically ensure the Anatta post-turn observer is registered in `post_turn_observers.json`.
   - The command writes `anatta_config.json`, reloads post-turn observers, and returns current status.
@@ -22,11 +49,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Runtime command modules can expose `RuntimeCommand` and `RuntimeCallback` objects for Telegram command handlers and inline callback handlers.
   - Fixed and flexible runtimes now append registered commands to Telegram bot command metadata and bind registered callbacks before normal message handlers.
   - Local admin command testing now recognizes registry-backed commands.
-- **Audit Agent Mode** — added `audit` runtime mode for user-originated requests.
-  - `/mode audit`, `/audit`, and managed `/core` controls configure a core model plus a separate audit model.
-  - Core responses are delivered unchanged; audit findings are generated as follow-up reports according to delivery and severity settings.
-  - Audit evidence and transcripts are written to local workspace runtime files for review, while scheduler/system sources are bypassed.
-  - Added audit criteria slots, default testing criteria, telemetry collection from stream events, JSON parsing, notification thresholds, and focused tests.
 
 ### 🔧 Fixed
 
@@ -47,40 +69,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Job transfer token cleanup** — transfer callback token stores are bounded to avoid unbounded growth from repeatedly opening transfer pickers.
 - **Private command docs** — README and INSTALL now document the local-only `~/.hashi/private_commands` convention and `/reboot min` reload flow.
 - **Audit design note** — the audit plan now explicitly points readers to the implementation files as the current source of truth.
-
-### 🧪 Tests
-
-- Added/ran coverage for config loading, API Gateway, runtime remote behavior, remote peer status, and agent lifecycle after per-instance gateway changes.
-- Added Anatta command and post-turn registry tests for `/anatta off|shadow|on`.
-- Added command-registry tests for external private commands and callbacks.
-- Added audit-mode tests for prompt contracts, telemetry compaction, audit follow-up scheduling, evidence writing, model/config buttons, and notification thresholds.
-- Added wrapper/status tests for default slots and current-request handling.
-- Added job-transfer tests for short callback payloads.
-
-## [3.2.0-alpha] - 2026-05-02
-
-### ✨ Added
-
-- **Slim core architecture** — `main.py` is now a slim process bootstrap/kernel wrapper, with frequently changed bridge behavior moved into hot-reloadable managers under `orchestrator/`.
-  - Added manager boundaries for skill management, config administration, backend preflight, agent lifecycle, runtime services, hot reboot, startup, shutdown, and WhatsApp control.
-  - Hot reboot now rebuilds managers transaction-style after module reload: replacement managers are built first, then committed only if the full set initializes successfully.
-  - Long-lived live handles remain on the kernel, including Workbench API, API Gateway, scheduler, WhatsApp transport, agent directory, and runtime list state.
-  - Accepted with cold restart, `/reboot min`, `/reboot max`, Workbench/API health checks, and full `pytest` validation.
-- **Wrapper Agent Mode** — new `wrapper` runtime mode pairs a functional core backend/model with a stateless wrapper backend/model for final user-facing persona/style rewriting.
-  - Added `/mode wrapper`, `/core`, `/wrap`, and `/wrapper` configuration commands, with Telegram inline controls for core model, wrapper model, context window, and persona/style slots.
-  - Default wrapper configuration remains `claude-cli / claude-haiku-4-5`; the wrapper picker also exposes Gemini, DeepSeek, and OpenRouter choices while avoiding expensive Claude Opus as a recommended wrapper option.
-  - Foreground and background delivery paths now use wrapper final text for user-visible replies, request listeners, transfer suppression, handoff, project chat, voice replies, and HChat routing where appropriate.
-  - Core prompt memory stores core raw assistant output, while `core_transcript.jsonl`, visible transcript writes, and audit payloads remain separated so wrapper persona does not drift back into the core model.
-  - `/verbose on` now shows a labeled wrapper trace containing core raw output, wrapper final output, wrapper status, latency, and fallback reason; `/verbose off` shows only the final reply.
-  - `/reset CONFIRM` preserves wrapper config and wrapper prompt slots, matching `/sys` preservation behavior; `/wipe CONFIRM` remains a hard workspace clear.
-  - Final wrapper hardening record: `677212b` prevents wrapper persona from being written back into core prompt memory.
-- **Browser gateway alpha** — local browser gateway package and test coverage for browser-facing bridge capabilities.
-- **OLL HASHI Chrome extension scaffold** — extension files and implementation plan for browser bridge workflows.
-- **Private wake-on-LAN tooling** — local helper and tests for private wake-on-LAN flows.
-- **Workzone support** — project/workspace zone helper module and tests.
-
-### 🔧 Fixed
-
 - **Runtime list identity during reboot** — stopping an agent now mutates `kernel.runtimes` in place, preserving references held by Workbench API and AgentDirectory after `/reboot min` or `/reboot max`.
 - **Startup task result logging** — unexpected exceptions while reading startup task results are now logged instead of being silently swallowed.
 - **Codex CLI completion hang** — `adapters/codex_cli.py` now accepts a completed Codex turn as a valid finish signal even if the outer CLI process does not exit immediately.
@@ -95,6 +83,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Flex agents now tag cross-instance auto-replies as `[hchat reply from ...]` before routing through `send_hchat`, matching the legacy runtime behavior.
   - Prevents cross-instance reply traffic from being rewrapped as a fresh hchat and bounced back indefinitely.
   - Keeps first-hop hchat behavior unchanged while adding a hard stop for reply-on-reply ping-pong.
+
+### 🧪 Tests
+
+- Added/ran coverage for config loading, API Gateway, runtime remote behavior, remote peer status, and agent lifecycle after per-instance gateway changes.
+- Added Anatta command and post-turn registry tests for `/anatta off|shadow|on`.
+- Added command-registry tests for external private commands and callbacks.
+- Added audit-mode tests for prompt contracts, telemetry compaction, audit follow-up scheduling, evidence writing, model/config buttons, and notification thresholds.
+- Added wrapper/status tests for default slots and current-request handling.
+- Added job-transfer tests for short callback payloads.
 
 ## [3.1.0] - 2026-04-29
 

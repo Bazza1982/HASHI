@@ -1,6 +1,6 @@
 # HASHI Slim Core Architecture
 
-Status: accepted for `v3.2-alpha` on 2026-05-02.
+Status: accepted for the `v3.2.0` release line on 2026-05-02.
 
 This document records the major structural change that moved HASHI from a large `main.py`-centered bridge into a slim process core with hot-reloadable orchestration managers.
 
@@ -8,9 +8,9 @@ This document records the major structural change that moved HASHI from a large 
 
 `main.py` is now a process bootstrap and kernel wrapper rather than the primary home for feature behavior.
 
-Before `v3.2-alpha`, `main.py` contained process startup, configuration administration, backend preflight, agent lifecycle, service management, hot reboot orchestration, startup, shutdown, WhatsApp control, and several logging boundaries in one large file. That made many code changes impossible to adopt through `/reboot`, because code that stayed inside the already-running `main.py` process was not reloaded.
+Before the v3.2 release line, `main.py` contained process startup, configuration administration, backend preflight, agent lifecycle, service management, hot reboot orchestration, startup, shutdown, WhatsApp control, and several logging boundaries in one large file. That made many code changes impossible to adopt through `/reboot`, because code that stayed inside the already-running `main.py` process was not reloaded.
 
-In `v3.2-alpha`, frequently changed behavior was moved into modules under `orchestrator/`, and the long-lived kernel rebuilds those managers during hot reboot after project modules are reloaded.
+In `v3.2.0`, frequently changed behavior was moved into modules under `orchestrator/`, and the long-lived kernel rebuilds those managers during hot reboot after project modules are reloaded.
 
 ## Current Shape
 
@@ -128,7 +128,7 @@ Manager rebuild does not warm-restart the WhatsApp transport implementation. Cha
 
 ## Validation Record
 
-Accepted validation on branch `v3.2-alpha`:
+Accepted validation for the `v3.2.0` release line:
 
 ```text
 python3 -m py_compile main.py orchestrator/*.py
@@ -166,8 +166,7 @@ This warning was followed by successful scheduler recreation and startup, so it 
 
 ## Residual Notes
 
-- `main.py` is intentionally still above the original aspirational 200-line target. The accepted `v3.2-alpha` shape is a slim kernel wrapper rather than a pure bootstrap-only file.
+- `main.py` is intentionally still above the original aspirational 200-line target. The accepted `v3.2.0` shape is a slim kernel wrapper rather than a pure bootstrap-only file.
 - `StartupManager` is rebuilt during hot reboot but only used during cold start. This is harmless and keeps the manager set complete.
 - Transport implementation hot reload for WhatsApp remains explicit-restart-only.
 - Future manager additions must be included in the hot manager rebuild transaction and documented here.
-

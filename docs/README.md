@@ -2,7 +2,7 @@
 
 This directory contains developer documentation and operational notes for HASHI.
 
-> **Status:** v3.2-alpha — slim core architecture accepted, Wrapper Agent Mode implemented, Anatta controls added, per-instance API Gateway ports fixed, browser gateway and runtime hardening active.
+> **Status:** v3.2.0 official release — slim core architecture accepted, Wrapper Agent Mode and Audit Agent Mode implemented, Anatta controls added, EXP guidebooks imported, per-instance API Gateway ports fixed, browser routing and Hashi Remote file transfer documented.
 >
 > **Changelog:** see [`../CHANGELOG.md`](../CHANGELOG.md) · **Roadmap:** see [ROADMAP.md](ROADMAP.md).
 
@@ -17,9 +17,10 @@ This directory contains developer documentation and operational notes for HASHI.
 - [WORKBENCH_NOTES.md](WORKBENCH_NOTES.md) — Workbench/runtime semantics
 - [HASHI_SLIM_CORE_ARCHITECTURE.md](HASHI_SLIM_CORE_ARCHITECTURE.md) — v3.2 slim core architecture and hot manager rebuild contract
 - [HASHI_CORE_SLIMMING_PLAN.md](HASHI_CORE_SLIMMING_PLAN.md) — implementation plan and acceptance record for the slim core migration
-- [WRAPPER_AGENT_MODE_PLAN.md](WRAPPER_AGENT_MODE_PLAN.md) — implemented v3.2-alpha wrapper agent mode design, command model, state contract, and acceptance record
+- [WRAPPER_AGENT_MODE_PLAN.md](WRAPPER_AGENT_MODE_PLAN.md) — implemented v3.2 wrapper agent mode design, command model, state contract, and acceptance record
 - [API_GUIDE.md](API_GUIDE.md) — OpenAI-compatible API Gateway guide, including per-instance gateway port rules
 - [ANATTA_MIGRATION_PLAN.md](ANATTA_MIGRATION_PLAN.md) — Anatta live self-assembly architecture and validation plan
+- [HASHI_REMOTE_FILE_TRANSFER.md](HASHI_REMOTE_FILE_TRANSFER.md) — direct cross-PC file push support for release artifacts and EXP transfer
 - [HASHI_VOICE_BRIDGE_PLAN.md](HASHI_VOICE_BRIDGE_PLAN.md) — local-first voice runtime plan for the WhatsApp Desktop call bridge and future provider transports
 
 ### Nagare Flow System (v2.1)

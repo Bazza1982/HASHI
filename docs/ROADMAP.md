@@ -73,7 +73,7 @@
 
 ### Wrapper Agent Mode
 
-Status: **implemented in v3.2-alpha**.
+Status: **implemented in v3.2.0**.
 
 Wrapper Agent Mode is a third runtime mode beside fixed and flex. It lets a strong core model do the actual work while a separate stateless wrapper model rewrites only the final user-facing tone/persona.
 
