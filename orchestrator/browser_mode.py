@@ -71,18 +71,20 @@ def get_browser_menu_text() -> str:
     return (
         "*🌐 HASHI /browser*\n"
         "_Choose the internet route before sending the task._\n\n"
+        "*Traffic lights*\n"
+        "🟢 confirmed online • 🟡 not checked / unknown • 🔴 offline or misconfigured\n\n"
         "*Quick commands*\n"
         "• `/browser status` - check route availability\n"
         "• `/browser examples` - show ready-to-copy examples\n"
         "• `/browser <1-4> <task>` - send task through a route\n\n"
         "*Route picker*\n"
-        "🟢 *1 HEADLESS* - public web, JS pages, screenshots\n"
+        "🟡 *1 HEADLESS* - public web, JS pages, screenshots\n"
         "   HASHI standalone Playwright/browser tools.\n\n"
         "🟡 *2 NATIVE* - backend-owned browsing/search\n"
         "   Codex CLI, Claude CLI, or Gemini CLI when supported.\n\n"
-        "🟢 *3 SEARCH* - public research with citations\n"
+        "🟡 *3 SEARCH* - public research with citations\n"
         "   Brave `web_search` first, then `web_fetch`/source pages.\n\n"
-        "🔴 *4 LOGGED-IN* - real Windows browser session\n"
+        "🟡 *4 LOGGED-IN* - real Windows browser session\n"
         "   HASHI browser extension for authenticated pages."
     )
 
@@ -90,13 +92,13 @@ def get_browser_menu_text() -> str:
 def get_browser_examples_text() -> str:
     return (
         "*🌐 HASHI /browser examples*\n\n"
-        "🟢 *1 Headless page work*\n"
+        "🌐 *1 Headless page work*\n"
         "`/browser 1 Inspect this public dashboard and summarize the visible table.`\n\n"
-        "🟡 *2 CLI-native browsing*\n"
+        "🧭 *2 CLI-native browsing*\n"
         "`/browser 2 Research this topic using the CLI backend's own browsing tools.`\n\n"
-        "🟢 *3 Brave search research*\n"
+        "🔎 *3 Brave search research*\n"
         "`/browser 3 Find recent sources about mandatory CSR assurance and cite the strongest ones.`\n\n"
-        "🔴 *4 Logged-in browser work*\n"
+        "🔐 *4 Logged-in browser work*\n"
         "`/browser 4 Open the logged-in library page and download the PDF I am entitled to access.`"
     )
 
@@ -111,23 +113,29 @@ def get_browser_status_text(
     native_status = "available" if backend in CLI_NATIVE_BROWSER_BACKENDS else "instruction-only / not native for this backend"
 
     if brave_configured is None:
+        brave_icon = "🟡"
         brave_status = "not checked"
     else:
+        brave_icon = "🟢" if brave_configured else "🔴"
         brave_status = "configured" if brave_configured else "missing `brave_api_key`"
 
     if extension_bridge_configured is None:
+        extension_icon = "🟡"
         extension_status = "not checked"
     else:
+        extension_icon = "🟢" if extension_bridge_configured else "🔴"
         extension_status = "bridge socket present" if extension_bridge_configured else "bridge socket not detected"
 
-    headless_status = "available when browser tools/dependencies are installed"
+    native_icon = "🟢" if backend in CLI_NATIVE_BROWSER_BACKENDS else "🟡"
+    headless_status = "not checked"
 
     return (
         "*🌐 HASHI /browser status*\n\n"
-        f"🟢 *1 HEADLESS*  {headless_status}\n"
-        f"🟡 *2 NATIVE*    {native_status} `(active backend: {backend})`\n"
-        f"🟢 *3 SEARCH*    {brave_status}\n"
-        f"🔴 *4 LOGGED-IN* {extension_status}"
+        "🟢 confirmed online • 🟡 not checked / unknown • 🔴 offline or misconfigured\n\n"
+        f"🟡 *1 HEADLESS*  {headless_status}\n"
+        f"{native_icon} *2 NATIVE*    {native_status} `(active backend: {backend})`\n"
+        f"{brave_icon} *3 SEARCH*    {brave_status}\n"
+        f"{extension_icon} *4 LOGGED-IN* {extension_status}"
     )
 
 

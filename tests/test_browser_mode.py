@@ -65,12 +65,15 @@ class BrowserModeTests(unittest.IsolatedAsyncioTestCase):
         menu = get_browser_menu_text()
         self.assertIn("/browser <1-4> <task>", menu)
         self.assertIn("Route picker", menu)
-        self.assertIn("🟢 *3 SEARCH*", menu)
+        self.assertIn("🟡 *3 SEARCH*", menu)
+        self.assertIn("🟡 *4 LOGGED-IN*", menu)
+        self.assertIn("confirmed online", menu)
         self.assertIn("HASHI browser extension", menu)
 
         examples = get_browser_examples_text()
         self.assertIn("HASHI /browser examples", examples)
         self.assertIn("/browser 3", examples)
+        self.assertIn("🔐 *4 Logged-in browser work*", examples)
         self.assertNotIn("/broswer", examples)
 
     def test_status_text_labels_backend_and_keys(self):
@@ -80,9 +83,18 @@ class BrowserModeTests(unittest.IsolatedAsyncioTestCase):
             extension_bridge_configured=False,
         )
         self.assertIn("available", text)
+        self.assertIn("🟢 *2 NATIVE*", text)
+        self.assertIn("🟢 *3 SEARCH*", text)
         self.assertIn("🔴 *4 LOGGED-IN*", text)
         self.assertIn("configured", text)
         self.assertIn("bridge socket not detected", text)
+
+    def test_status_text_uses_yellow_for_unknowns(self):
+        text = get_browser_status_text()
+        self.assertIn("🟡 *1 HEADLESS*  not checked", text)
+        self.assertIn("🟡 *2 NATIVE*", text)
+        self.assertIn("🟡 *3 SEARCH*    not checked", text)
+        self.assertIn("🟡 *4 LOGGED-IN* not checked", text)
 
     def test_build_browser_task_prompt(self):
         prompt, source, summary = build_browser_task_prompt("4", "Open the logged-in library page")
