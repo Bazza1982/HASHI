@@ -69,35 +69,35 @@ BROWSER_ROUTES: dict[str, BrowserRoute] = {
 
 def get_browser_menu_text() -> str:
     return (
-        "HASHI /browser\n"
-        "Choose the internet route before sending the task.\n\n"
-        "Quick commands\n"
-        "  /browser status       check route availability\n"
-        "  /browser examples     show ready-to-copy examples\n"
-        "  /browser <1-4> <task> send task through a route\n\n"
-        "Route picker\n"
-        "[1] HEADLESS  public web + JS pages + screenshots\n"
-        "    HASHI standalone Playwright/browser tools.\n\n"
-        "[2] NATIVE    backend-owned browsing/search\n"
-        "    Codex CLI, Claude CLI, or Gemini CLI when supported.\n\n"
-        "[3] SEARCH    public research with citations\n"
-        "    Brave web_search first, then web_fetch/source pages.\n\n"
-        "[4] LOGGED-IN real Windows browser session\n"
-        "    HASHI browser extension for authenticated pages."
+        "*🌐 HASHI /browser*\n"
+        "_Choose the internet route before sending the task._\n\n"
+        "*Quick commands*\n"
+        "• `/browser status` - check route availability\n"
+        "• `/browser examples` - show ready-to-copy examples\n"
+        "• `/browser <1-4> <task>` - send task through a route\n\n"
+        "*Route picker*\n"
+        "🟢 *1 HEADLESS* - public web, JS pages, screenshots\n"
+        "   HASHI standalone Playwright/browser tools.\n\n"
+        "🟡 *2 NATIVE* - backend-owned browsing/search\n"
+        "   Codex CLI, Claude CLI, or Gemini CLI when supported.\n\n"
+        "🟢 *3 SEARCH* - public research with citations\n"
+        "   Brave `web_search` first, then `web_fetch`/source pages.\n\n"
+        "🔴 *4 LOGGED-IN* - real Windows browser session\n"
+        "   HASHI browser extension for authenticated pages."
     )
 
 
 def get_browser_examples_text() -> str:
     return (
-        "HASHI /browser examples\n\n"
-        "[1] Headless page work\n"
-        "/browser 1 Inspect this public dashboard and summarize the visible table.\n\n"
-        "[2] CLI-native browsing\n"
-        "/browser 2 Research this topic using the CLI backend's own browsing tools.\n\n"
-        "[3] Brave search research\n"
-        "/browser 3 Find recent sources about mandatory CSR assurance and cite the strongest ones.\n\n"
-        "[4] Logged-in browser work\n"
-        "/browser 4 Open the logged-in library page and download the PDF I am entitled to access."
+        "*🌐 HASHI /browser examples*\n\n"
+        "🟢 *1 Headless page work*\n"
+        "`/browser 1 Inspect this public dashboard and summarize the visible table.`\n\n"
+        "🟡 *2 CLI-native browsing*\n"
+        "`/browser 2 Research this topic using the CLI backend's own browsing tools.`\n\n"
+        "🟢 *3 Brave search research*\n"
+        "`/browser 3 Find recent sources about mandatory CSR assurance and cite the strongest ones.`\n\n"
+        "🔴 *4 Logged-in browser work*\n"
+        "`/browser 4 Open the logged-in library page and download the PDF I am entitled to access.`"
     )
 
 
@@ -113,7 +113,7 @@ def get_browser_status_text(
     if brave_configured is None:
         brave_status = "not checked"
     else:
-        brave_status = "configured" if brave_configured else "missing brave_api_key"
+        brave_status = "configured" if brave_configured else "missing `brave_api_key`"
 
     if extension_bridge_configured is None:
         extension_status = "not checked"
@@ -123,11 +123,11 @@ def get_browser_status_text(
     headless_status = "available when browser tools/dependencies are installed"
 
     return (
-        "HASHI /browser status\n\n"
-        f"[1] HEADLESS  {headless_status}\n"
-        f"[2] NATIVE    {native_status} (active backend: {backend})\n"
-        f"[3] SEARCH    {brave_status}\n"
-        f"[4] LOGGED-IN {extension_status}"
+        "*🌐 HASHI /browser status*\n\n"
+        f"🟢 *1 HEADLESS*  {headless_status}\n"
+        f"🟡 *2 NATIVE*    {native_status} `(active backend: {backend})`\n"
+        f"🟢 *3 SEARCH*    {brave_status}\n"
+        f"🔴 *4 LOGGED-IN* {extension_status}"
     )
 
 

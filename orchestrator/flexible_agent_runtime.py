@@ -2341,7 +2341,7 @@ class FlexibleAgentRuntime:
             return
         args = [a.strip() for a in (context.args or []) if a.strip()]
         if not args:
-            await self._reply_text(update, get_browser_menu_text())
+            await self._reply_text(update, get_browser_menu_text(), parse_mode="Markdown")
             return
 
         sub = args[0].lower()
@@ -2356,17 +2356,18 @@ class FlexibleAgentRuntime:
                     brave_configured=bool(secrets.get("brave_api_key")),
                     extension_bridge_configured=extension_bridge_configured,
                 ),
+                parse_mode="Markdown",
             )
             return
         if sub == "examples":
-            await self._reply_text(update, get_browser_examples_text())
+            await self._reply_text(update, get_browser_examples_text(), parse_mode="Markdown")
             return
 
         task = " ".join(args[1:]).strip()
         try:
             prompt, source, summary = build_browser_task_prompt(sub, task)
         except ValueError:
-            await self._reply_text(update, get_browser_menu_text())
+            await self._reply_text(update, get_browser_menu_text(), parse_mode="Markdown")
             return
 
         await self._reply_text(update, f"Running in /browser route {sub}...")

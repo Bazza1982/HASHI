@@ -19,9 +19,11 @@ from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 class _FakeMessage:
     def __init__(self):
         self.replies: list[str] = []
+        self.reply_kwargs: list[dict] = []
 
     async def reply_text(self, text: str, **kwargs):
         self.replies.append(text)
+        self.reply_kwargs.append(kwargs)
         return SimpleNamespace(ok=True)
 
 
@@ -63,7 +65,7 @@ class BrowserModeTests(unittest.IsolatedAsyncioTestCase):
         menu = get_browser_menu_text()
         self.assertIn("/browser <1-4> <task>", menu)
         self.assertIn("Route picker", menu)
-        self.assertIn("[3] SEARCH", menu)
+        self.assertIn("🟢 *3 SEARCH*", menu)
         self.assertIn("HASHI browser extension", menu)
 
         examples = get_browser_examples_text()
@@ -78,7 +80,7 @@ class BrowserModeTests(unittest.IsolatedAsyncioTestCase):
             extension_bridge_configured=False,
         )
         self.assertIn("available", text)
-        self.assertIn("[4] LOGGED-IN", text)
+        self.assertIn("🔴 *4 LOGGED-IN*", text)
         self.assertIn("configured", text)
         self.assertIn("bridge socket not detected", text)
 
@@ -101,6 +103,7 @@ class BrowserModeTests(unittest.IsolatedAsyncioTestCase):
 
         await runtime.cmd_browser(update, SimpleNamespace(args=["status"]))
         self.assertIn("HASHI /browser status", update.message.replies[-1])
+        self.assertEqual(update.message.reply_kwargs[-1].get("parse_mode"), "Markdown")
 
         await runtime.cmd_browser(
             update,
@@ -116,6 +119,7 @@ class BrowserModeTests(unittest.IsolatedAsyncioTestCase):
         update = _FakeUpdate()
         await runtime.cmd_browser(update, SimpleNamespace(args=[]))
         self.assertIn("Route picker", update.message.replies[-1])
+        self.assertEqual(update.message.reply_kwargs[-1].get("parse_mode"), "Markdown")
 
     def test_supported_commands_include_browser(self):
         commands = supported_commands(_BrowserRuntime())
