@@ -126,6 +126,14 @@ def _prefer_extension_bridge(args: dict) -> bool:
     return mode == "auto" or mode in _EXTENSION_BACKENDS
 
 
+def _normalize_extension_bridge_output(action: str, output: str) -> str:
+    if action == "screenshot" and output.startswith("data:image/"):
+        _, _, payload = output.partition(",")
+        if payload:
+            return f"screenshot:{payload}"
+    return output
+
+
 async def _maybe_execute_extension_bridge(action: str, args: dict) -> Optional[str]:
     if args.get("cdp_url"):
         return None
@@ -189,7 +197,8 @@ async def _maybe_execute_extension_bridge(action: str, args: dict) -> Optional[s
         return f"Error: extension bridge failure: {exc}"
 
     if response.get("ok"):
-        return str(response.get("output", ""))
+        output = str(response.get("output", ""))
+        return _normalize_extension_bridge_output(action, output)
     return f"Error: {response.get('error', 'unknown extension bridge error')}"
 
 
