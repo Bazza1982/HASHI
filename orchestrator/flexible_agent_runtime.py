@@ -2340,6 +2340,18 @@ class FlexibleAgentRuntime:
             return
         async def reply_browser_status():
             secrets = getattr(self.backend_manager, "secrets", {}) or {}
+            secrets_path = getattr(getattr(self, "global_config", None), "secrets_path", None)
+            if secrets_path:
+                try:
+                    with open(secrets_path, "r", encoding="utf-8-sig") as f:
+                        latest_secrets = json.load(f)
+                    if isinstance(latest_secrets, dict):
+                        secrets = latest_secrets
+                        self.secrets = latest_secrets
+                        if hasattr(self.backend_manager, "secrets"):
+                            self.backend_manager.secrets = latest_secrets
+                except Exception as e:
+                    self.logger.warning("Failed to refresh secrets for /browser status: %s", e)
             active_backend = getattr(self.config, "active_backend", None)
             extension_bridge_configured = Path("/tmp/hashi-browser-bridge.sock").exists()
             await self._reply_text(

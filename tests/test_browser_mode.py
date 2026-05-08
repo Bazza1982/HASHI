@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+import tempfile
 import unittest
 from types import SimpleNamespace
 import sys
@@ -37,7 +40,10 @@ class _FakeUpdate:
 class _BrowserRuntime:
     def __init__(self):
         self.config = SimpleNamespace(active_backend="codex-cli")
+        self.global_config = SimpleNamespace(secrets_path=None)
         self.backend_manager = SimpleNamespace(secrets={"brave_api_key": "test-key"})
+        self.secrets = self.backend_manager.secrets
+        self.logger = SimpleNamespace(warning=lambda *args, **kwargs: None)
         self.enqueued: list[dict] = []
 
     def _is_authorized_user(self, user_id: int | None) -> bool:
@@ -135,6 +141,21 @@ class BrowserModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Routes", update.message.replies[-1])
         self.assertIn("🟢 *3 SEARCH* - configured", update.message.replies[-1])
         self.assertEqual(update.message.reply_kwargs[-1].get("parse_mode"), "Markdown")
+
+    async def test_command_status_refreshes_secrets_from_disk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            secrets_path = Path(tmp) / "secrets.json"
+            secrets_path.write_text(json.dumps({"brave_api_key": "new-key"}), encoding="utf-8")
+            runtime = _BrowserRuntime()
+            runtime.global_config.secrets_path = secrets_path
+            runtime.backend_manager.secrets = {}
+            runtime.secrets = {}
+            update = _FakeUpdate()
+
+            await runtime.cmd_browser(update, SimpleNamespace(args=["status"]))
+
+        self.assertIn("🟢 *3 SEARCH* - configured", update.message.replies[-1])
+        self.assertEqual(runtime.backend_manager.secrets.get("brave_api_key"), "new-key")
 
     def test_supported_commands_include_browser(self):
         commands = supported_commands(_BrowserRuntime())
