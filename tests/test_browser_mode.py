@@ -62,9 +62,12 @@ class BrowserModeTests(unittest.IsolatedAsyncioTestCase):
     def test_menu_and_examples_text(self):
         menu = get_browser_menu_text()
         self.assertIn("/browser <1-4> <task>", menu)
+        self.assertIn("Route picker", menu)
+        self.assertIn("[3] SEARCH", menu)
         self.assertIn("HASHI browser extension", menu)
 
         examples = get_browser_examples_text()
+        self.assertIn("HASHI /browser examples", examples)
         self.assertIn("/browser 3", examples)
         self.assertNotIn("/broswer", examples)
 
@@ -75,6 +78,7 @@ class BrowserModeTests(unittest.IsolatedAsyncioTestCase):
             extension_bridge_configured=False,
         )
         self.assertIn("available", text)
+        self.assertIn("[4] LOGGED-IN", text)
         self.assertIn("configured", text)
         self.assertIn("bridge socket not detected", text)
 
@@ -96,7 +100,7 @@ class BrowserModeTests(unittest.IsolatedAsyncioTestCase):
         update = _FakeUpdate()
 
         await runtime.cmd_browser(update, SimpleNamespace(args=["status"]))
-        self.assertIn("/browser route status", update.message.replies[-1])
+        self.assertIn("HASHI /browser status", update.message.replies[-1])
 
         await runtime.cmd_browser(
             update,
@@ -111,7 +115,7 @@ class BrowserModeTests(unittest.IsolatedAsyncioTestCase):
         runtime = _BrowserRuntime()
         update = _FakeUpdate()
         await runtime.cmd_browser(update, SimpleNamespace(args=[]))
-        self.assertIn("Routes:", update.message.replies[-1])
+        self.assertIn("Route picker", update.message.replies[-1])
 
     def test_supported_commands_include_browser(self):
         commands = supported_commands(_BrowserRuntime())

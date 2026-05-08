@@ -69,26 +69,34 @@ BROWSER_ROUTES: dict[str, BrowserRoute] = {
 
 def get_browser_menu_text() -> str:
     return (
-        "Usage:\n"
-        "/browser - show these options\n"
-        "/browser status - show route availability notes\n"
-        "/browser examples - show example prompts\n"
-        "/browser <1-4> <task> - run an internet task with a specific route\n\n"
-        "Routes:\n"
-        "1. HASHI headless browser - standalone Playwright/browser tools for public or JS-heavy pages\n"
-        "2. CLI backend native browsing - backend-native browsing/search for Codex, Claude, Gemini CLI\n"
-        "3. Brave search - HASHI web_search plus web_fetch for public web research\n"
-        "4. HASHI browser extension - logged-in Windows browser for authenticated work"
+        "HASHI /browser\n"
+        "Choose the internet route before sending the task.\n\n"
+        "Quick commands\n"
+        "  /browser status       check route availability\n"
+        "  /browser examples     show ready-to-copy examples\n"
+        "  /browser <1-4> <task> send task through a route\n\n"
+        "Route picker\n"
+        "[1] HEADLESS  public web + JS pages + screenshots\n"
+        "    HASHI standalone Playwright/browser tools.\n\n"
+        "[2] NATIVE    backend-owned browsing/search\n"
+        "    Codex CLI, Claude CLI, or Gemini CLI when supported.\n\n"
+        "[3] SEARCH    public research with citations\n"
+        "    Brave web_search first, then web_fetch/source pages.\n\n"
+        "[4] LOGGED-IN real Windows browser session\n"
+        "    HASHI browser extension for authenticated pages."
     )
 
 
 def get_browser_examples_text() -> str:
     return (
-        "Examples:\n"
-        "/browser status\n"
-        "/browser 1 Inspect this public dashboard and summarize the visible table.\n"
-        "/browser 2 Research this topic using the CLI backend's own browsing tools.\n"
-        "/browser 3 Find recent sources about mandatory CSR assurance and cite the strongest ones.\n"
+        "HASHI /browser examples\n\n"
+        "[1] Headless page work\n"
+        "/browser 1 Inspect this public dashboard and summarize the visible table.\n\n"
+        "[2] CLI-native browsing\n"
+        "/browser 2 Research this topic using the CLI backend's own browsing tools.\n\n"
+        "[3] Brave search research\n"
+        "/browser 3 Find recent sources about mandatory CSR assurance and cite the strongest ones.\n\n"
+        "[4] Logged-in browser work\n"
         "/browser 4 Open the logged-in library page and download the PDF I am entitled to access."
     )
 
@@ -112,12 +120,14 @@ def get_browser_status_text(
     else:
         extension_status = "bridge socket present" if extension_bridge_configured else "bridge socket not detected"
 
+    headless_status = "available when browser tools/dependencies are installed"
+
     return (
-        "/browser route status:\n"
-        f"1. HASHI headless browser: available when browser tools/dependencies are installed\n"
-        f"2. CLI backend native browsing: {native_status} (active backend: {backend})\n"
-        f"3. Brave search: {brave_status}\n"
-        f"4. HASHI browser extension: {extension_status}"
+        "HASHI /browser status\n\n"
+        f"[1] HEADLESS  {headless_status}\n"
+        f"[2] NATIVE    {native_status} (active backend: {backend})\n"
+        f"[3] SEARCH    {brave_status}\n"
+        f"[4] LOGGED-IN {extension_status}"
     )
 
 
