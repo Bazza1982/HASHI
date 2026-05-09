@@ -53,6 +53,7 @@ from orchestrator.runtime_common import (
     _safe_excerpt,
     resolve_authorized_telegram_ids,
 )
+from orchestrator import runtime_nudge
 from orchestrator.runtime_display import _show_logo_animation
 from orchestrator.runtime_jobs import _build_jobs_text, _build_jobs_with_buttons
 
@@ -3465,6 +3466,14 @@ class BridgeAgentRuntime:
             summary="Loop setup",
         )
         await self._reply_text(update, "🔄 收到！正在理解任务并设置循环…")
+
+    async def cmd_nudge(self, update, context):
+        if update.effective_user.id != self.global_config.authorized_id:
+            return
+        raw = (update.message.text or "").strip()
+        parts = raw.split(None, 1)
+        args_text = parts[1].strip() if len(parts) > 1 else ""
+        await runtime_nudge.handle_nudge_command(self, update, args_text)
 
     # ── /safevoice command ─────────────────────────────────────────────────
     def _load_safevoice_state(self) -> bool:

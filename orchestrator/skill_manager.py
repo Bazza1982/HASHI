@@ -3,6 +3,7 @@ import asyncio
 import json
 import os
 import sys
+from uuid import uuid4
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
@@ -280,10 +281,21 @@ class SkillManager:
         return success, text
 
     def _load_tasks(self) -> dict[str, Any]:
-        return self._load_json(self.tasks_path, {"version": 1, "heartbeats": [], "crons": []})
+        tasks = self._load_json(self.tasks_path, {"version": 1, "heartbeats": [], "crons": [], "nudges": []})
+        tasks.setdefault("heartbeats", [])
+        tasks.setdefault("crons", [])
+        tasks.setdefault("nudges", [])
+        return tasks
 
     def _save_tasks(self, payload: dict[str, Any]):
         self._save_json(self.tasks_path, payload)
+
+    def _task_key_for_kind(self, kind: str) -> str:
+        if kind == "cron":
+            return "crons"
+        if kind == "nudge":
+            return "nudges"
+        return "heartbeats"
 
     def _is_managed_active_heartbeat(self, job: dict[str, Any]) -> bool:
         if not isinstance(job, dict):
@@ -323,7 +335,7 @@ class SkillManager:
     def list_jobs(self, kind: str, agent_name: str | None = None) -> list[dict[str, Any]]:
         self._ensure_active_heartbeats_migrated()
         tasks = self._load_tasks()
-        key = "crons" if kind == "cron" else "heartbeats"
+        key = self._task_key_for_kind(kind)
         jobs = list(tasks.get(key, []))
         if kind == "heartbeat":
             jobs.extend(self._load_active_heartbeats())
@@ -339,7 +351,7 @@ class SkillManager:
 
     def describe_jobs(self, kind: str, agent_name: str | None = None) -> str:
         jobs = self.list_jobs(kind, agent_name=agent_name)
-        title = "Cron Jobs" if kind == "cron" else "Heartbeat Jobs"
+        title = "Cron Jobs" if kind == "cron" else "Nudge Jobs" if kind == "nudge" else "Heartbeat Jobs"
         if not jobs:
             suffix = f" for {agent_name}" if agent_name else ""
             return f"{title}{suffix}\n\nNo jobs configured."
@@ -368,7 +380,7 @@ class SkillManager:
                 self._save_active_heartbeats(jobs)
                 return True, f"{task_id} is now {'ON' if enabled else 'OFF'}."
         tasks = self._load_tasks()
-        key = "crons" if kind == "cron" else "heartbeats"
+        key = self._task_key_for_kind(kind)
         for job in tasks.get(key, []):
             if job.get("id") != task_id:
                 continue
@@ -387,7 +399,7 @@ class SkillManager:
                     self._save_active_heartbeats(jobs)
                     return True, f"Deleted {task_id}."
         tasks = self._load_tasks()
-        key = "crons" if kind == "cron" else "heartbeats"
+        key = self._task_key_for_kind(kind)
         jobs = tasks.get(key, [])
         for i, job in enumerate(jobs):
             if job.get("id") == task_id:
@@ -422,7 +434,7 @@ class SkillManager:
         new_job["note"] = (job.get("note") or job["id"]) + f" [transferred from {job.get('agent', '?')}]"
 
         tasks = self._load_tasks()
-        key = "crons" if kind == "cron" else "heartbeats"
+        key = self._task_key_for_kind(kind)
         tasks.setdefault(key, []).append(new_job)
         self._save_tasks(tasks)
         return True, f"Transferred to {new_agent} (disabled, review before enabling).", new_job
@@ -430,7 +442,7 @@ class SkillManager:
     def import_job(self, kind: str, job: dict) -> tuple[bool, str]:
         """Import a job dict into local tasks.json (used for cross-instance transfer)."""
         tasks = self._load_tasks()
-        key = "crons" if kind == "cron" else "heartbeats"
+        key = self._task_key_for_kind(kind)
         # Avoid duplicate IDs
         existing_ids = {j.get("id") for j in tasks.get(key, [])}
         if job.get("id") in existing_ids:
@@ -440,6 +452,51 @@ class SkillManager:
         tasks.setdefault(key, []).append(job)
         self._save_tasks(tasks)
         return True, f"Imported job {job['id']} for {job.get('agent', '?')}."
+
+    def _nudge_prompt(self, task_id: str, exit_condition: str) -> str:
+        return (
+            "SYSTEM: Idle nudge continuation.\n"
+            "You are being nudged because the agent is idle and this nudge job is still enabled.\n\n"
+            f"Nudge job id: {task_id}\n"
+            f"Exit condition: {exit_condition}\n\n"
+            "Instructions:\n"
+            "1. Review the current task state and recent work.\n"
+            "2. If the exit condition is NOT satisfied, continue the work with a concrete next step.\n"
+            "3. If the exit condition IS satisfied, say so clearly and include this exact marker on its own line:\n"
+            f"NUDGE_COMPLETE:{task_id}\n"
+            "4. Do not emit the completion marker unless the exit condition is genuinely satisfied.\n"
+        )
+
+    def create_nudge_job(
+        self,
+        *,
+        agent_name: str,
+        interval_minutes: int,
+        exit_condition: str,
+        max_nudges: int = 100,
+    ) -> dict[str, Any]:
+        tasks = self._load_tasks()
+        task_id = f"{agent_name}-nudge-{uuid4().hex[:6]}"
+        interval_minutes = max(1, int(interval_minutes))
+        exit_condition = str(exit_condition or "").strip()
+        job = {
+            "id": task_id,
+            "agent": agent_name,
+            "enabled": True,
+            "interval_seconds": interval_minutes * 60,
+            "action": "enqueue_prompt",
+            "prompt": self._nudge_prompt(task_id, exit_condition),
+            "note": f"Nudge: {exit_condition[:80]}",
+            "exit_condition": exit_condition,
+            "nudge_meta": {
+                "count": 0,
+                "max": max(1, int(max_nudges)),
+                "created_at": self._now(),
+            },
+        }
+        tasks.setdefault("nudges", []).append(job)
+        self._save_tasks(tasks)
+        return job
 
     def get_active_heartbeat_job_id(self, agent_name: str) -> str:
         return f"{agent_name}-active-heartbeat"
