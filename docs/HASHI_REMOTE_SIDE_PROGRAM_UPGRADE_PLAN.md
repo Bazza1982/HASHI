@@ -148,7 +148,8 @@ Use existing `AuthLevel`:
 
 - `L0_READ_ONLY`: health, peer status, rescue status.
 - `L1_READ_FILES`: diagnostics.
-- `L2_WRITE`: file push and normal write-level operations.
+- `L2_WRITE`: file push and normal write-level operations that do not start or
+  restart long-lived HASHI processes.
 - `L3_RESTART`: HASHI start/restart/rescue.
 - `L4_SYSTEM`: OS reboot/shutdown, always disabled.
 
@@ -212,8 +213,10 @@ POST /control/hashi/start
 Status response should include:
 
 - `hashi_running`
+- `state`: one of `running`, `offline`, `stale_pid`, `starting_or_stuck`
 - `workbench_url`
 - `workbench_health`
+- `pid_file_exists`
 - `pid`
 - `pid_alive`
 - timestamp
@@ -259,6 +262,16 @@ Use `/health`, `/protocol/status`, and handshake capabilities:
 
 If a probe returns 404, mark capability false. Do not treat 404 as a peer
 failure.
+
+Capability data must have an explicit freshness rule:
+
+- Direct endpoint probes are authoritative for the current request.
+- Cached peer capabilities from handshake/registry are advisory.
+- `tools/remote_rescue.py` should probe rescue endpoints live before showing a
+  start option.
+- Future `/protocol/message` preference should use cached capabilities only
+  within a short TTL, then re-probe or force a fresh handshake before assuming
+  structured protocol support.
 
 ### Compatibility Matrix
 
@@ -326,6 +339,24 @@ with optional:
 ```
 
 only when rescue is intentionally enabled.
+
+Supervised Remote processes must advertise that they are supervisor-owned by
+passing either:
+
+```text
+--supervised
+```
+
+or:
+
+```text
+HASHI_REMOTE_SUPERVISED=1
+```
+
+Remote should surface this through `/health` or `/protocol/status` as
+`remote_supervisor.mode=supervised`. A Remote started by `/remote on` should
+report `remote_supervisor.mode=child`; a reachable process without metadata
+should report `external_unknown`.
 
 ### 3. Client Helper
 
@@ -408,6 +439,8 @@ Deliverables:
 - Windows `hashi_remote_ctl.ps1`
 - install/uninstall/start/stop/status/logs
 - service/task templates
+- `--supervised` flag or `HASHI_REMOTE_SUPERVISED=1`
+- Remote health/status metadata that reports supervisor ownership
 
 Acceptance:
 
@@ -422,6 +455,8 @@ Deliverables:
 
 - `tools/remote_rescue.py`
 - capability probing
+- live endpoint probing for `rescue_control` and `rescue_start`
+- capability cache TTL / refresh policy
 - status/start UX
 - auth/token handling
 - JSON output mode for automation.
@@ -432,6 +467,8 @@ Acceptance:
 - a healthy peer can request start when the target allows L3;
 - missing rescue endpoints degrade to a clear "peer does not support rescue"
   message.
+- stale cached capabilities cannot make the tool attempt `/protocol/message` or
+  rescue start against a peer that no longer advertises support.
 
 ### Phase 4: Runtime UI Integration
 
@@ -456,6 +493,7 @@ Coordinate with `HASHI_REMOTE_P2P_UPGRADE_PLAN.md`:
 - keep `/hchat` as legacy ingress;
 - persist in-flight state under `~/.hashi-remote`;
 - resume or abandon in-flight messages safely after sidecar restart;
+- define capability cache TTL and first-use fresh-probe behavior;
 - never depend on prompt text for protocol safety.
 
 Acceptance:
@@ -501,8 +539,10 @@ Then resume normal workflows after Workbench health is back.
 
 - Remote is down: cannot rescue; use OS/physical access.
 - Remote is alive but L3 disabled: can diagnose, cannot start core.
-- Workbench health is down but PID alive: report "possibly starting/stuck".
-- PID file stale: ignore stale PID and allow start.
+- Workbench health is down but PID alive: report `state=starting_or_stuck`.
+- PID file exists but process is not alive: report `state=stale_pid`, ignore the
+  stale PID, and allow start.
+- PID file missing and Workbench health is down: report `state=offline`.
 - Launcher missing: return clear 500 with supported launcher paths.
 - Port collision: start log should show launcher failure.
 - Older peer returns 404: mark rescue unsupported, not failed.
