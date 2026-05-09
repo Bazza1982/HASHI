@@ -1,5 +1,9 @@
 # Hashi Remote Rescue Protocol
 
+For the full side-program rollout plan, see
+`HASHI_REMOTE_SIDE_PROGRAM_UPGRADE_PLAN.md`. This document defines the concrete
+start/status rescue endpoint contract.
+
 Hashi Remote must be able to survive HASHI core failures. It should be treated
 as a small sidecar service, not as a child process whose lifecycle depends on a
 running Telegram agent.
