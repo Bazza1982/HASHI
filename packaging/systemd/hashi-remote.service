@@ -1,0 +1,18 @@
+[Unit]
+Description=Hashi Remote side program
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%HASHI_ROOT%
+Environment=HASHI_REMOTE_SUPERVISED=1
+Environment=PYTHONUTF8=1
+Environment=PYTHONIOENCODING=utf-8
+ExecStart=%PYTHON% -m remote --hashi-root %HASHI_ROOT% --supervised
+Restart=always
+RestartSec=5
+StandardOutput=append:%HASHI_ROOT%/logs/hashi-remote-supervisor.log
+StandardError=append:%HASHI_ROOT%/logs/hashi-remote-supervisor.log
+
+[Install]
+WantedBy=default.target

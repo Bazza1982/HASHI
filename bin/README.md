@@ -76,6 +76,22 @@ bin\restart_workbench.bat            # Windows
 bin\restart_bridge_u_f.bat           # Windows
 ```
 
+### Manage Hashi Remote as a Side Program
+```bash
+./bin/hashi-remote-ctl.sh install    # Linux/WSL systemd --user
+./bin/hashi-remote-ctl.sh start
+./bin/hashi-remote-ctl.sh status
+```
+
+```powershell
+.\bin\hashi_remote_ctl.ps1 install   # Windows Task Scheduler
+.\bin\hashi_remote_ctl.ps1 start
+.\bin\hashi_remote_ctl.ps1 status
+```
+
+These helpers start Remote with `--supervised` so it can outlive the HASHI core
+process and support remote rescue workflows.
+
 ### Kill All Sessions
 ```bash
 ./bin/kill-sessions.sh               # Linux
