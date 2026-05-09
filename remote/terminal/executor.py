@@ -112,6 +112,10 @@ class TerminalExecutor:
     def set_max_level(self, level: AuthLevel) -> None:
         self._max_allowed = level
 
+    def allows_level(self, level: AuthLevel) -> bool:
+        """Return whether this executor is configured to allow a risk level."""
+        return level != AuthLevel.L4_SYSTEM and level <= self._max_allowed
+
     def is_allowed(self, command: str) -> tuple[bool, AuthLevel]:
         """Check if a command is allowed. Returns (allowed, required_level)."""
         level = _classify_command(command)

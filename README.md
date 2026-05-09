@@ -955,6 +955,14 @@ Direct agent-to-agent messaging over Hashi Remote (`/protocol/message`):
 - Auth-gated terminal execution delegation (`/terminal/exec`)
 - Full audit logging for all inbound hchat and remote operations
 
+#### Rescue Control
+
+For crash recovery, Hashi Remote should be run under an OS-level supervisor
+rather than only through `/remote on`. The fixed rescue protocol exposes
+`GET /control/hashi/status` and `POST /control/hashi/start`; start is blocked
+unless Remote is launched with `max_terminal_level=L3_RESTART`. See
+[`docs/HASHI_REMOTE_RESCUE_PROTOCOL.md`](docs/HASHI_REMOTE_RESCUE_PROTOCOL.md).
+
 #### Diagnostics
 
 - `GET /peers` — live peer list with liveness status, route kind, and agent directory
