@@ -20,11 +20,14 @@ replaced with hchat relay and terminal execution.
 
 import base64
 import hashlib
+import asyncio
 import json
 import logging
+import os
 import platform
 import re
 import socket
+import subprocess
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -79,6 +82,10 @@ class FilePushPayload(BaseModel):
     sha256: Optional[str] = None
     overwrite: bool = False
     create_dirs: bool = True
+
+
+class HashiStartPayload(BaseModel):
+    reason: Optional[str] = None
 
 
 class PairRequestPayload(BaseModel):
@@ -160,6 +167,113 @@ def _decode_file_push_content(payload: FilePushPayload) -> tuple[bytes, str]:
     if expected and expected != digest:
         raise ValueError("sha256 mismatch")
     return data, digest
+
+
+def _process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _read_hashi_pid() -> int | None:
+    if not _hashi_root:
+        return None
+    pid_path = Path(_hashi_root) / ".bridge_u_f.pid"
+    try:
+        raw = pid_path.read_text(encoding="utf-8").strip()
+        if not raw.isdigit():
+            return None
+        pid = int(raw)
+    except Exception:
+        return None
+    return pid if _process_exists(pid) else None
+
+
+def _hashi_start_command() -> list[str]:
+    if not _hashi_root:
+        raise ValueError("Hashi root is unavailable")
+    root = Path(_hashi_root)
+    system = platform.system().lower()
+    if system == "windows":
+        ctl = root / "bin" / "bridge_ctl.ps1"
+        if ctl.exists():
+            return [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(ctl),
+                "-Action",
+                "start",
+                "-Resume",
+            ]
+        bat = root / "bin" / "bridge-u.bat"
+        if bat.exists():
+            return ["cmd.exe", "/c", str(bat), "--resume-last", "--no-pause"]
+    launcher = root / "bin" / "bridge-u.sh"
+    if launcher.exists():
+        return [str(launcher), "--resume-last"]
+    raise FileNotFoundError("No supported HASHI launcher found under bin/")
+
+
+def _start_hashi_process() -> dict[str, Any]:
+    if not _hashi_root:
+        raise ValueError("Hashi root is unavailable")
+    root = Path(_hashi_root)
+    cmd = _hashi_start_command()
+    log_dir = root / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "remote_rescue_hashi_start.log"
+    log_handle = log_path.open("ab")
+    kwargs: dict[str, Any] = {
+        "cwd": str(root),
+        "stdout": log_handle,
+        "stderr": subprocess.STDOUT,
+    }
+    if platform.system().lower() == "windows":
+        flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+        if flags:
+            kwargs["creationflags"] = flags
+    else:
+        kwargs["start_new_session"] = True
+    try:
+        proc = subprocess.Popen(cmd, **kwargs)
+    finally:
+        log_handle.close()
+    return {
+        "pid": proc.pid,
+        "command": cmd,
+        "log_path": str(log_path),
+    }
+
+
+def _workbench_health_url() -> str:
+    return f"http://127.0.0.1:{_workbench_port}/api/health"
+
+
+def _fetch_workbench_health(timeout: float = 1.0) -> dict[str, Any] | None:
+    req = urllib_request.Request(_workbench_health_url(), method="GET")
+    try:
+        with urllib_request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+
+
+def _hashi_control_status() -> dict[str, Any]:
+    health = _fetch_workbench_health(timeout=1.0)
+    pid = _read_hashi_pid()
+    return {
+        "ok": True,
+        "hashi_running": bool(health),
+        "workbench_url": _workbench_health_url(),
+        "workbench_health": health,
+        "pid": pid,
+        "pid_alive": bool(pid),
+    }
 
 def create_app(
     instance_info: dict,
@@ -378,6 +492,62 @@ def create_app(
 
         result = await _terminal_executor.execute(payload.command, cwd=payload.cwd)
         return result.to_dict()
+
+    # ── HASHI process rescue control ─────────────────────────
+
+    @app.get("/control/hashi/status")
+    async def hashi_control_status(client_id: str = Depends(verify_token)):
+        """Report whether the local HASHI core appears reachable."""
+        return _hashi_control_status()
+
+    @app.post("/control/hashi/start")
+    async def hashi_control_start(payload: HashiStartPayload, client_id: str = Depends(verify_token)):
+        """
+        Start the local HASHI core through a fixed launcher command.
+
+        This is intentionally not a generic shell endpoint. It is gated by
+        L3_RESTART because it is a rescue operation that creates a long-lived
+        local process.
+        """
+        if not _terminal_executor or not _terminal_executor.allows_level(AuthLevel.L3_RESTART):
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "ok": False,
+                    "error": "HASHI start requires max_terminal_level=L3_RESTART",
+                },
+            )
+
+        current = _hashi_control_status()
+        if current["hashi_running"] or current["pid_alive"]:
+            return {
+                "ok": True,
+                "started": False,
+                "already_running": True,
+                "status": current,
+            }
+
+        try:
+            started = _start_hashi_process()
+        except Exception as exc:
+            logger.exception("HASHI rescue start failed")
+            return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
+
+        deadline = time.monotonic() + 8.0
+        status = _hashi_control_status()
+        while not status["hashi_running"] and time.monotonic() < deadline:
+            await asyncio.sleep(0.5)
+            status = _hashi_control_status()
+
+        logger.info("HASHI rescue start requested by %s reason=%s pid=%s", client_id, payload.reason, started["pid"])
+        return {
+            "ok": True,
+            "started": True,
+            "pid": started["pid"],
+            "command": started["command"],
+            "log_path": started["log_path"],
+            "status": status,
+        }
 
     # ── File push ────────────────────────────────────────────
 

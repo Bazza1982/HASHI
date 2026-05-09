@@ -359,7 +359,7 @@ def parse_args() -> argparse.Namespace:
                         help="Require token auth even on LAN (for internet deployments)")
     parser.add_argument("--discovery", choices=["lan", "tailscale", "both"], default=None,
                         help="Peer discovery backend")
-    parser.add_argument("--max-terminal-level", default="L2_WRITE",
+    parser.add_argument("--max-terminal-level", default=None,
                         choices=["L0_READ_ONLY", "L1_READ_FILES", "L2_WRITE", "L3_RESTART"],
                         help="Maximum allowed terminal auth level")
     parser.add_argument("--hashi-root", type=Path, default=None,
@@ -384,6 +384,7 @@ def main() -> int:
     use_tls = not args.no_tls if args.no_tls else server_cfg.get("use_tls", True)
     lan_mode = not args.no_lan_mode if args.no_lan_mode else security_cfg.get("lan_mode", True)
     discovery_backend = args.discovery or os.getenv("HASHI_REMOTE_DISCOVERY") or discovery_cfg.get("backend", "lan")
+    max_terminal_level = args.max_terminal_level or security_cfg.get("max_terminal_level", "L2_WRITE")
 
     app = HashiRemoteApplication(
         hashi_root=hashi_root,
@@ -391,7 +392,7 @@ def main() -> int:
         port=port,
         use_tls=use_tls,
         lan_mode=lan_mode,
-        max_terminal_level=args.max_terminal_level,
+        max_terminal_level=max_terminal_level,
         discovery_backend=discovery_backend,
         verbose=args.verbose,
     )
