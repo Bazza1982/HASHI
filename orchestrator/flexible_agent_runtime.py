@@ -35,6 +35,7 @@ from orchestrator import runtime_lifecycle
 from orchestrator import runtime_media
 from orchestrator import runtime_command_binding
 from orchestrator import runtime_mode
+from orchestrator import runtime_nudge
 from orchestrator import runtime_pipeline
 from orchestrator import runtime_remote
 from orchestrator import runtime_session
@@ -2709,6 +2710,15 @@ class FlexibleAgentRuntime:
             update,
             "🔄 收到！正在理解任务并设置循环…",
         )
+
+    async def cmd_nudge(self, update: Update, context: Any):
+        """Create/manage idle-bound nudge tasks."""
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        raw = (update.message.text or "").strip()
+        parts = raw.split(None, 1)
+        args_text = parts[1].strip() if len(parts) > 1 else ""
+        await runtime_nudge.handle_nudge_command(self, update, args_text)
 
     async def cmd_whisper(self, update: Update, context: Any):
         """Set the local voice transcription model size.
