@@ -43,6 +43,13 @@ POST /control/hashi/start
 the Workbench health endpoint and whether the `.bridge_u_f.pid` process appears
 alive.
 
+The status response should distinguish:
+
+- `state=running`: Workbench health is reachable.
+- `state=starting_or_stuck`: PID is alive but Workbench health is not reachable.
+- `state=stale_pid`: PID file exists but the process is gone.
+- `state=offline`: no live PID and no Workbench health.
+
 `/control/hashi/start` starts HASHI through a fixed launcher command:
 
 - Windows native: `bin/bridge_ctl.ps1 -Action start -Resume`, falling back to
