@@ -48,7 +48,15 @@ DEFAULT_CAPABILITIES = [
     "agent_directory_v1",
     "protocol_message_v1",
     "agent_reply_v1",
+    "rescue_control",
 ]
+
+
+def build_default_capabilities(*, rescue_start_enabled: bool = False) -> list[str]:
+    capabilities = list(DEFAULT_CAPABILITIES)
+    if rescue_start_enabled:
+        capabilities.append("rescue_start")
+    return capabilities
 
 
 class ProtocolManager:
@@ -59,6 +67,7 @@ class ProtocolManager:
         instance_info: dict,
         peer_registry,
         workbench_port: int,
+        local_capabilities: list[str] | None = None,
         max_allowed_ttl: int = 8,
         handshake_timeout_seconds: int = 8,
         poll_interval_seconds: float = 0.5,
@@ -70,6 +79,7 @@ class ProtocolManager:
         self._instance_info = instance_info
         self._peer_registry = peer_registry
         self._workbench_port = workbench_port
+        self._capabilities = list(local_capabilities or DEFAULT_CAPABILITIES)
         self._max_allowed_ttl = max(1, int(max_allowed_ttl))
         self._handshake_timeout_seconds = max(2, int(handshake_timeout_seconds))
         self._poll_interval_seconds = max(0.2, float(poll_interval_seconds))
@@ -97,7 +107,8 @@ class ProtocolManager:
         return {
             "protocol_version": PROTOCOL_VERSION,
             "display_handle": self.display_handle,
-            "capabilities": list(DEFAULT_CAPABILITIES),
+            "capabilities": list(self._capabilities),
+            "remote_supervisor": dict(self._instance_info.get("remote_supervisor") or {}),
             "local_agents": self.get_local_agents_snapshot(),
             "local_network_profile": local_profile,
             "peers": peers,
@@ -125,7 +136,7 @@ class ProtocolManager:
             hashi_version=str(self._instance_info.get("hashi_version") or "unknown"),
             display_handle=self.display_handle,
             protocol_version=PROTOCOL_VERSION,
-            capabilities=list(DEFAULT_CAPABILITIES),
+            capabilities=list(self._capabilities),
         )
         return build_local_network_profile(info)
 
@@ -403,7 +414,7 @@ class ProtocolManager:
                 "from_instance": self._instance_info.get("instance_id"),
                 "display_handle": self.display_handle,
                 "protocol_version": PROTOCOL_VERSION,
-                "capabilities": list(DEFAULT_CAPABILITIES),
+                "capabilities": list(self._capabilities),
                 "hashi_version": self._instance_info.get("hashi_version", "unknown"),
                 "agents": self.get_local_agents_snapshot(),
                 "remote_port": self._instance_info.get("remote_port") or 0,
@@ -525,7 +536,7 @@ class ProtocolManager:
             "instance_id": self._instance_info.get("instance_id"),
             "display_handle": self.display_handle,
             "protocol_version": PROTOCOL_VERSION,
-            "capabilities": list(DEFAULT_CAPABILITIES),
+            "capabilities": list(self._capabilities),
             "hashi_version": self._instance_info.get("hashi_version", "unknown"),
             "agents": self.get_local_agents_snapshot(),
             "remote_port": self._instance_info.get("remote_port") or 0,

@@ -6,8 +6,8 @@ Authorization levels mirror Lily Remote's design:
 
   L0 — health check, read-only queries       → auto-allowed
   L1 — read files, list processes            → auto-allowed
-  L2 — write files, start processes          → requires auth token
-  L3 — restart HASHI processes              → requires human approval
+  L2 — write files, short-lived commands     → requires auth token
+  L3 — start/restart HASHI processes         → requires human approval
   L4 — shutdown / reboot machine            → strictly disabled (safety)
 
 In LAN mode, L0-L2 are auto-allowed; L3 requires explicit approval.
@@ -28,8 +28,8 @@ logger = logging.getLogger(__name__)
 class AuthLevel(IntEnum):
     L0_READ_ONLY = 0      # health, status, list
     L1_READ_FILES = 1     # cat, grep, ls, ps
-    L2_WRITE = 2          # touch, mkdir, start process
-    L3_RESTART = 3        # kill, systemctl restart, python main.py
+    L2_WRITE = 2          # touch, mkdir, file push, short-lived commands
+    L3_RESTART = 3        # kill, systemctl restart, HASHI start/restart
     L4_SYSTEM = 4         # shutdown, reboot (DISABLED)
 
 
