@@ -454,7 +454,7 @@ Acceptance:
 Deliverables:
 
 - `tools/remote_rescue.py`
-- capability probing
+- capability probing with HTTPS then HTTP route attempts
 - live endpoint probing for `rescue_control` and `rescue_start`
 - capability cache TTL / refresh policy
 - status/start UX

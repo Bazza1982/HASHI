@@ -158,7 +158,28 @@ Set `HASHI_REMOTE_MAX_TERMINAL_LEVEL=L3_RESTART` only on trusted LAN/Tailscale
 machines where remote HASHI rescue is intentionally enabled. Default supervised
 Remote remains `L2_WRITE`.
 
+## Client Helper
+
+Phase 3 adds:
+
+```text
+tools/remote_rescue.py
+```
+
+Commands:
+
+```bash
+python tools/remote_rescue.py capabilities HASHI1
+python tools/remote_rescue.py status HASHI1
+python tools/remote_rescue.py start HASHI1 --reason "core down"
+python tools/remote_rescue.py status HASHI1 --json
+```
+
+The helper resolves peers from `instances.json`, tries HTTPS then HTTP, probes
+live endpoints, and treats `404` from rescue endpoints as "unsupported" rather
+than as a peer outage. Use `--token` or `HASHI_REMOTE_TOKEN` when the target
+Remote is not in LAN auto-auth mode.
+
 ## Remaining Work
 
-- Add an authenticated client helper, for example
-  `tools/remote_rescue.py status|start HASHI1`.
+- Add end-to-end acceptance on a real Windows peer and a real WSL/Linux peer.
