@@ -435,10 +435,10 @@ Acceptance:
 
 Deliverables:
 
-- Linux/WSL `hashi-remote-ctl.sh`
-- Windows `hashi_remote_ctl.ps1`
+- Linux/WSL `bin/hashi-remote-ctl.sh`
+- Windows `bin/hashi_remote_ctl.ps1`
 - install/uninstall/start/stop/status/logs
-- service/task templates
+- service/task templates under `packaging/`
 - `--supervised` flag or `HASHI_REMOTE_SUPERVISED=1`
 - Remote health/status metadata that reports supervisor ownership
 

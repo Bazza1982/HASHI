@@ -121,11 +121,44 @@ Then poll `/control/hashi/status` until `hashi_running` is true. After HASHI is
 back, normal `/hchat`, Workbench API, Telegram, and `/reboot` workflows can
 resume.
 
+## Supervisor Control Scripts
+
+Phase 2 adds optional OS supervisor helpers:
+
+```text
+bin/hashi-remote-ctl.sh
+bin/hashi_remote_ctl.ps1
+packaging/systemd/hashi-remote.service
+packaging/windows/hashi-remote-task.xml
+```
+
+Linux/WSL:
+
+```bash
+bin/hashi-remote-ctl.sh install
+bin/hashi-remote-ctl.sh start
+bin/hashi-remote-ctl.sh status
+bin/hashi-remote-ctl.sh logs
+```
+
+Windows PowerShell:
+
+```powershell
+.\bin\hashi_remote_ctl.ps1 install
+.\bin\hashi_remote_ctl.ps1 start
+.\bin\hashi_remote_ctl.ps1 status
+.\bin\hashi_remote_ctl.ps1 logs
+```
+
+The supervisor starts Remote with `--supervised`, so `/protocol/status` can
+report `remote_supervisor.mode=supervised`. Legacy `/remote on` still works and
+should report `remote_supervisor.mode=child`.
+
+Set `HASHI_REMOTE_MAX_TERMINAL_LEVEL=L3_RESTART` only on trusted LAN/Tailscale
+machines where remote HASHI rescue is intentionally enabled. Default supervised
+Remote remains `L2_WRITE`.
+
 ## Remaining Work
 
-- Add `bin/hashi-remote-ctl.*` scripts for install/start/stop/status under the
-  OS supervisor.
 - Add an authenticated client helper, for example
   `tools/remote_rescue.py status|start HASHI1`.
-- Add service templates for WSL/Linux `systemd --user` and Windows Task
-  Scheduler.
