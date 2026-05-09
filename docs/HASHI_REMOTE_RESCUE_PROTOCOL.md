@@ -62,6 +62,27 @@ The endpoint writes stdout/stderr to:
 logs/remote_rescue_hashi_start.log
 ```
 
+Each start attempt also appends a structured audit record to:
+
+```text
+logs/remote_rescue_audit.jsonl
+```
+
+The audit record includes requester, reason, launcher command, PID, log path,
+outcome, status state, and error text when available.
+
+## Capability Advertisement
+
+Upgraded Remotes advertise rescue support through protocol capabilities:
+
+- `rescue_control`: status endpoint exists.
+- `rescue_start`: start endpoint exists and this Remote is configured with
+  `L3_RESTART`.
+
+Older Remotes will not advertise these capabilities and may return `404` for
+the rescue endpoints. Client tools must treat that as "unsupported", not as a
+peer outage.
+
 ## Safety Gate
 
 Remote start is a restart-class operation. It is blocked unless Hashi Remote is

@@ -37,7 +37,7 @@ from remote.peer.base import PeerInfo
 from remote.peer.lan import LanDiscovery
 from remote.peer.registry import PeerRegistry
 from remote.peer.tailscale import TailscaleDiscovery
-from remote.protocol_manager import ProtocolManager, PROTOCOL_VERSION, DEFAULT_CAPABILITIES
+from remote.protocol_manager import ProtocolManager, PROTOCOL_VERSION, build_default_capabilities
 from remote.security.pairing import PairingManager
 from remote.security.tls import load_or_generate_cert
 from remote.terminal.executor import TerminalExecutor, AuthLevel
@@ -165,6 +165,7 @@ class HashiRemoteApplication:
         lan_mode: bool = True,
         max_terminal_level: str = "L2_WRITE",
         discovery_backend: str = "lan",
+        supervised: bool = False,
         verbose: bool = False,
     ):
         self._hashi_root = hashi_root or Path(__file__).resolve().parent.parent
@@ -174,6 +175,7 @@ class HashiRemoteApplication:
         self._lan_mode = lan_mode
         self._max_terminal_level = AuthLevel[max_terminal_level]
         self._discovery_backend = discovery_backend
+        self._supervised = supervised
         self._verbose = verbose
 
         self._shutdown_event = threading.Event()
@@ -217,6 +219,13 @@ class HashiRemoteApplication:
             lan_mode=self._lan_mode,
             max_allowed_level=self._max_terminal_level,
         )
+        local_capabilities = build_default_capabilities(
+            rescue_start_enabled=terminal_executor.allows_level(AuthLevel.L3_RESTART)
+        )
+        instance_info["remote_supervisor"] = {
+            "mode": "supervised" if self._supervised else "child",
+            "source": "flag_or_env" if self._supervised else "hashi_child_or_manual",
+        }
 
         # Peer registry + discovery
         self._registry = PeerRegistry(self._hashi_root, instance_id)
@@ -247,7 +256,7 @@ class HashiRemoteApplication:
             hashi_version=instance_info["hashi_version"],
             display_handle=f"@{instance_id.lower()}",
             protocol_version=PROTOCOL_VERSION,
-            capabilities=list(DEFAULT_CAPABILITIES),
+            capabilities=list(local_capabilities),
         )
 
         # Start discovery/advertising
@@ -264,6 +273,7 @@ class HashiRemoteApplication:
             instance_info=instance_info,
             peer_registry=self._registry,
             workbench_port=workbench_port,
+            local_capabilities=local_capabilities,
         )
         await self._protocol_manager.start()
 
@@ -364,6 +374,8 @@ def parse_args() -> argparse.Namespace:
                         help="Maximum allowed terminal auth level")
     parser.add_argument("--hashi-root", type=Path, default=None,
                         help="HASHI root directory (auto-detected if omitted)")
+    parser.add_argument("--supervised", action="store_true",
+                        help="Mark this Remote as OS-supervised side-program")
     parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging")
     return parser.parse_args()
 
@@ -385,6 +397,7 @@ def main() -> int:
     lan_mode = not args.no_lan_mode if args.no_lan_mode else security_cfg.get("lan_mode", True)
     discovery_backend = args.discovery or os.getenv("HASHI_REMOTE_DISCOVERY") or discovery_cfg.get("backend", "lan")
     max_terminal_level = args.max_terminal_level or security_cfg.get("max_terminal_level", "L2_WRITE")
+    supervised = args.supervised or os.getenv("HASHI_REMOTE_SUPERVISED", "").strip().lower() in {"1", "true", "yes", "on"}
 
     app = HashiRemoteApplication(
         hashi_root=hashi_root,
@@ -394,6 +407,7 @@ def main() -> int:
         lan_mode=lan_mode,
         max_terminal_level=max_terminal_level,
         discovery_backend=discovery_backend,
+        supervised=supervised,
         verbose=args.verbose,
     )
     return app.run()

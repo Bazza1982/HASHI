@@ -177,18 +177,26 @@ def _process_exists(pid: int) -> bool:
         return False
 
 
-def _read_hashi_pid() -> int | None:
+def _read_hashi_pid_state() -> dict[str, Any]:
+    state: dict[str, Any] = {
+        "pid_file_exists": False,
+        "pid": None,
+        "pid_alive": False,
+    }
     if not _hashi_root:
-        return None
+        return state
     pid_path = Path(_hashi_root) / ".bridge_u_f.pid"
+    state["pid_file_exists"] = pid_path.exists()
     try:
         raw = pid_path.read_text(encoding="utf-8").strip()
         if not raw.isdigit():
-            return None
+            return state
         pid = int(raw)
     except Exception:
-        return None
-    return pid if _process_exists(pid) else None
+        return state
+    state["pid"] = pid
+    state["pid_alive"] = _process_exists(pid)
+    return state
 
 
 def _hashi_start_command() -> list[str]:
@@ -250,6 +258,36 @@ def _start_hashi_process() -> dict[str, Any]:
     }
 
 
+def _append_rescue_audit(
+    *,
+    requester: str,
+    reason: str | None,
+    outcome: str,
+    command: list[str] | None = None,
+    pid: int | None = None,
+    log_path: str | None = None,
+    status: dict[str, Any] | None = None,
+    error: str | None = None,
+) -> None:
+    if not _hashi_root:
+        return
+    audit_path = Path(_hashi_root) / "logs" / "remote_rescue_audit.jsonl"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "requester": requester,
+        "reason": reason,
+        "command": command,
+        "pid": pid,
+        "log_path": log_path,
+        "outcome": outcome,
+        "status_state": (status or {}).get("state"),
+        "error": error,
+    }
+    with audit_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, sort_keys=True) + "\n")
+
+
 def _workbench_health_url() -> str:
     return f"http://127.0.0.1:{_workbench_port}/api/health"
 
@@ -265,14 +303,22 @@ def _fetch_workbench_health(timeout: float = 1.0) -> dict[str, Any] | None:
 
 def _hashi_control_status() -> dict[str, Any]:
     health = _fetch_workbench_health(timeout=1.0)
-    pid = _read_hashi_pid()
+    pid_state = _read_hashi_pid_state()
+    if health:
+        state = "running"
+    elif pid_state["pid_alive"]:
+        state = "starting_or_stuck"
+    elif pid_state["pid_file_exists"]:
+        state = "stale_pid"
+    else:
+        state = "offline"
     return {
         "ok": True,
+        "state": state,
         "hashi_running": bool(health),
         "workbench_url": _workbench_health_url(),
         "workbench_health": health,
-        "pid": pid,
-        "pid_alive": bool(pid),
+        **pid_state,
     }
 
 def create_app(
@@ -520,6 +566,13 @@ def create_app(
 
         current = _hashi_control_status()
         if current["hashi_running"] or current["pid_alive"]:
+            _append_rescue_audit(
+                requester=client_id,
+                reason=payload.reason,
+                outcome="already_running",
+                pid=current.get("pid"),
+                status=current,
+            )
             return {
                 "ok": True,
                 "started": False,
@@ -531,6 +584,13 @@ def create_app(
             started = _start_hashi_process()
         except Exception as exc:
             logger.exception("HASHI rescue start failed")
+            _append_rescue_audit(
+                requester=client_id,
+                reason=payload.reason,
+                outcome="failed",
+                status=current,
+                error=str(exc),
+            )
             return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
 
         deadline = time.monotonic() + 8.0
@@ -540,6 +600,15 @@ def create_app(
             status = _hashi_control_status()
 
         logger.info("HASHI rescue start requested by %s reason=%s pid=%s", client_id, payload.reason, started["pid"])
+        _append_rescue_audit(
+            requester=client_id,
+            reason=payload.reason,
+            outcome="started",
+            command=started["command"],
+            pid=started["pid"],
+            log_path=started["log_path"],
+            status=status,
+        )
         return {
             "ok": True,
             "started": True,
