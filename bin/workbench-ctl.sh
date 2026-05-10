@@ -7,8 +7,12 @@ WORKBENCH_DIR="$SCRIPT_DIR/workbench"
 ECOSYSTEM="$WORKBENCH_DIR/ecosystem.config.cjs"
 ACTION="${1:-start}"
 
-SERVER_PORT=${HASHI_SERVER_PORT:-3001}
-CLIENT_PORT=${HASHI_CLIENT_PORT:-5173}
+BRIDGE_PORT=${HASHI_BRIDGE_PORT:-${HASHI_BRIDGE_API_PORT:-18800}}
+SERVER_PORT=${HASHI_SERVER_PORT:-$((3001 + BRIDGE_PORT - 18800))}
+CLIENT_PORT=${HASHI_CLIENT_PORT:-$((5173 + BRIDGE_PORT - 18800))}
+export HASHI_BRIDGE_API_PORT=${HASHI_BRIDGE_API_PORT:-$BRIDGE_PORT}
+export HASHI_SERVER_PORT=$SERVER_PORT
+export HASHI_CLIENT_PORT=$CLIENT_PORT
 
 health(){ curl -sf --max-time 3 "$1" >/dev/null 2>&1; }
 
@@ -22,7 +26,7 @@ fi
 case "$ACTION" in
   start)
     cd "$WORKBENCH_DIR"
-    npx pm2 start "$ECOSYSTEM"
+    npx pm2 start "$ECOSYSTEM" --update-env
     echo "Waiting for services..."
     for _ in {1..30}; do
       sleep 1
@@ -54,7 +58,7 @@ case "$ACTION" in
     ;;
   restart)
     cd "$WORKBENCH_DIR"
-    npx pm2 restart "$ECOSYSTEM"
+    npx pm2 restart "$ECOSYSTEM" --update-env
     echo "Workbench restarted."
     npx pm2 list
     ;;

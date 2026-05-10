@@ -71,6 +71,7 @@ WHATSAPP_ENABLED="no"
 WHATSAPP_DEFAULT_AGENT=""
 BRIDGE_PORT=${HASHI_BRIDGE_PORT:-18800}
 WORKBENCH_PORT=$BRIDGE_PORT
+API_GATEWAY_PORT=$((WORKBENCH_PORT + 1))
 CLIENT_PORT=$((5173 + BRIDGE_PORT - 18800))
 SERVER_PORT=$((3001 + BRIDGE_PORT - 18800))
 CLI_GEMINI="missing"
@@ -93,7 +94,7 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --resume-last       Automatically resume last selected agents"
             echo "  --workbench, -w     Start workbench UI"
-            echo "  --api-gateway, -a   Enable API gateway (port 18801)"
+            echo "  --api-gateway, -a   Enable API gateway (default: workbench port + 1)"
             echo "  --agents NAME       Start specific agent(s)"
             echo "  --dry-run           Show what would be done"
             echo "  --help, -h          Show this help"
@@ -148,6 +149,10 @@ load_agents() {
     fi
     
     eval "$output"
+    BRIDGE_PORT=$WORKBENCH_PORT
+    API_GATEWAY_PORT=${API_GATEWAY_PORT:-$((WORKBENCH_PORT + 1))}
+    CLIENT_PORT=$((5173 + BRIDGE_PORT - 18800))
+    SERVER_PORT=$((3001 + BRIDGE_PORT - 18800))
     
     if [[ ${#ACTIVE_AGENTS[@]} -eq 0 ]]; then
         echo -e "${C_WARN}No active agents found in agents.json.${C_RESET}"
@@ -184,7 +189,7 @@ is_in_last() {
 }
 
 render_menu() {
-    clear
+    clear || true
     
     local wb_label="OFF"
     [[ "$WORKBENCH_LAUNCH" == "1" ]] && wb_label="ON"
@@ -234,9 +239,9 @@ render_menu() {
     fi
     
     if [[ "$api_label" == "ON" ]]; then
-        echo -e "${C_RAIL}│${C_RESET}   API Gateway     ${C_OK}ON${C_RESET} (:18801)"
+        echo -e "${C_RAIL}│${C_RESET}   API Gateway     ${C_OK}ON${C_RESET} (:${API_GATEWAY_PORT})"
     else
-        echo -e "${C_RAIL}│${C_RESET}   API Gateway     ${C_MUTED}OFF${C_RESET} (:18801)"
+        echo -e "${C_RAIL}│${C_RESET}   API Gateway     ${C_MUTED}OFF${C_RESET} (:${API_GATEWAY_PORT})"
     fi
     
     if [[ "$WHATSAPP_ENABLED" == "yes" ]]; then
@@ -334,7 +339,7 @@ log_launcher_event() {
 }
 
 choose_agents() {
-    clear
+    clear || true
     print_banner "AGENT SELECTION" "Choose one or more active agents"
     
     for i in "${!ACTIVE_AGENTS[@]}"; do
@@ -519,7 +524,7 @@ launch() {
         exit 1
     fi
     
-    clear
+    clear || true
     print_banner "HASHI BOOT" "Multi-agent orchestrator launch"
     
     echo -e "${C_RAIL}│${C_RESET} ${C_LABEL}Agents           ${C_RESET} ${C_TEXT}${start_label}${C_RESET}"
@@ -537,7 +542,7 @@ launch() {
     fi
     
     if [[ "$API_GATEWAY_LAUNCH" == "1" ]]; then
-        echo -e "${C_RAIL}│${C_RESET} ${C_LABEL}API Gateway      ${C_RESET} ${C_OK}enabled${C_RESET} (:18801)"
+        echo -e "${C_RAIL}│${C_RESET} ${C_LABEL}API Gateway      ${C_RESET} ${C_OK}enabled${C_RESET} (:${API_GATEWAY_PORT})"
         py_args="$py_args --api-gateway"
     else
         echo -e "${C_RAIL}│${C_RESET} ${C_LABEL}API Gateway      ${C_RESET} ${C_MUTED}disabled${C_RESET}"

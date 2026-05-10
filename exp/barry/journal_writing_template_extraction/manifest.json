@@ -1,0 +1,40 @@
+{
+  "id": "barry/journal_writing_template_extraction",
+  "type": "exp",
+  "version": 1,
+  "owner": "barry",
+  "domain": "journal_writing_template_extraction",
+  "status": "candidate_handover",
+  "summary": "candidate-handover EXP for extracting a reusable paragraph-level writing template from a published journal article after a deep-reading gate, without copying its content.",
+  "context": {
+    "user": "Barry",
+    "task_family": "turn a real journal-style article into a structural writing template",
+    "primary_training_style": "AAAJ-style systematic literature review",
+    "output_focus": [
+      "section structure",
+      "paragraph functions",
+      "language moves",
+      "rough paragraph counts",
+      "style and pacing",
+      "not source content"
+    ]
+  },
+  "training_runs": {
+    "aaaj_slr_template_001": "training_runs/aaaj_slr_template_001/RUN.md",
+    "published_pdf_aaaj_template_001": "training_runs/published_pdf_aaaj_template_001/RUN.md"
+  },
+  "playbooks": {
+    "deep_reading_gate": "playbooks/deep_reading_gate.exp.md",
+    "extract_writing_template": "playbooks/extract_writing_template.exp.md"
+  },
+  "validators": [
+    "validators/template_validators.md"
+  ],
+  "failure_memory": "failures/failure_memory.jsonl",
+  "scope_limits": [
+    "This EXP extracts writing structure from published sample PDFs, not visual formatting.",
+    "Do not copy article content into the generated template.",
+    "Treat each journal, supervisor preference, and article genre as context-specific.",
+    "Current handover confidence applies to AAAJ-style systematic literature review articles; Barry review is still required before marking stable."
+  ]
+}

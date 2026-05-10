@@ -473,6 +473,15 @@ curl -s -X POST http://127.0.0.1:18819/api/chat \
   -d '{"agent": "hashiko", "text": "你好！"}'
 ```
 
+Important:
+
+- Workbench `/api/chat` is a plain conversation surface
+- it injects user text into the agent queue
+- it does **not** execute slash commands such as `/reset`, `/wipe`, or `/model`
+- for slash commands, use the local command endpoints instead:
+  - `POST /api/agents/{name}/command`
+  - or `POST /api/admin/command`
+
 ### Communication Protocol Summary
 
 | Method | Priority | Use Case |

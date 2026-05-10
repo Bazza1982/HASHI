@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
+from orchestrator.command_registry import runtime_command_map
 from orchestrator.extension_command_registry import available_workspace_commands, execute_workspace_command
 
 
@@ -75,6 +76,13 @@ def _split_command(command_line: str) -> tuple[str, list[str]]:
     return parts[0].lower(), parts[1:]
 
 
+def _workspace_command_specs(runtime) -> list[Any]:
+    workspace_dir = getattr(runtime, "workspace_dir", None)
+    if workspace_dir is None:
+        return []
+    return available_workspace_commands(workspace_dir)
+
+
 def supported_commands(runtime) -> list[str]:
     names = [
         "help",
@@ -112,7 +120,8 @@ def supported_commands(runtime) -> list[str]:
     for name in names:
         if hasattr(runtime, f"cmd_{name}"):
             supported.append(name)
-    for spec in available_workspace_commands(runtime.workspace_dir):
+    supported.extend(runtime_command_map())
+    for spec in _workspace_command_specs(runtime):
         supported.append(spec.name)
     return sorted(set(supported))
 
@@ -124,41 +133,44 @@ async def execute_local_command(runtime, command_line: str, chat_id: int | None 
 
     method_name = f"cmd_{command_name}"
     method = getattr(runtime, method_name, None)
+    registry_command = None
     if method is None:
-        store = _CaptureStore(messages=[])
-        local_chat_id = chat_id or runtime.global_config.authorized_id
-        update = _FakeUpdate(runtime.global_config.authorized_id, local_chat_id, store)
-        context = SimpleNamespace(args=args)
-        try:
-            text = await execute_workspace_command(runtime, command_name, args, update=update, context=context)
-        except KeyError:
+        registry_command = runtime_command_map().get(command_name)
+        if registry_command is None:
+            store = _CaptureStore(messages=[])
+            local_chat_id = chat_id or runtime.global_config.authorized_id
+            update = _FakeUpdate(runtime.global_config.authorized_id, local_chat_id, store)
+            context = SimpleNamespace(args=args)
+            try:
+                text = await execute_workspace_command(runtime, command_name, args, update=update, context=context)
+            except KeyError:
+                return {
+                    "ok": False,
+                    "error": f"unknown command: {command_name}",
+                    "supported_commands": supported_commands(runtime),
+                }
+            except Exception as e:
+                return {
+                    "ok": False,
+                    "command": command_name,
+                    "args": args,
+                    "messages": store.messages,
+                    "error": f"{type(e).__name__}: {e}",
+                }
+            store.messages.append(
+                {
+                    "channel": "reply",
+                    "chat_id": None,
+                    "text": text,
+                    "meta": {},
+                }
+            )
             return {
-                "ok": False,
-                "error": f"unknown command: {command_name}",
-                "supported_commands": supported_commands(runtime),
-            }
-        except Exception as e:
-            return {
-                "ok": False,
+                "ok": True,
                 "command": command_name,
                 "args": args,
                 "messages": store.messages,
-                "error": f"{type(e).__name__}: {e}",
             }
-        store.messages.append(
-            {
-                "channel": "reply",
-                "chat_id": None,
-                "text": text,
-                "meta": {},
-            }
-        )
-        return {
-            "ok": True,
-            "command": command_name,
-            "args": args,
-            "messages": store.messages,
-        }
 
     store = _CaptureStore(messages=[])
     local_chat_id = chat_id or runtime.global_config.authorized_id
@@ -175,7 +187,10 @@ async def execute_local_command(runtime, command_line: str, chat_id: int | None 
         if original_send_text is not None:
             runtime._send_text = store.capture_send
         try:
-            await method(update, context)
+            if registry_command is not None:
+                await registry_command.callback(runtime, update, context)
+            else:
+                await method(update, context)
         except Exception as e:
             return {
                 "ok": False,

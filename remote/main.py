@@ -47,6 +47,24 @@ logger = logging.getLogger(__name__)
 DEFAULT_PORT = 8766
 
 
+def _create_bound_server_socket(host: str, port: int) -> socket.socket:
+    """Create the API listener socket before uvicorn so WSL port reuse is explicit."""
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if hasattr(socket, "SO_REUSEPORT"):
+        try:
+            server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except OSError:
+            pass
+    try:
+        server_socket.bind((host, port))
+        server_socket.listen(2048)
+    except Exception:
+        server_socket.close()
+        raise
+    return server_socket
+
+
 def _load_remote_config(hashi_root: Path) -> dict:
     config_path = hashi_root / "remote" / "config.yaml"
     if not config_path.exists():
@@ -289,6 +307,8 @@ class HashiRemoteApplication:
             except Exception as e:
                 logger.warning("TLS: cert generation failed (%s), running without TLS", e)
 
+        server_socket = _create_bound_server_socket(self._host, self._port)
+
         config = uvicorn.Config(
             app=app,
             host=self._host,
@@ -303,7 +323,7 @@ class HashiRemoteApplication:
         logger.info("Server starting on %s:%d %s",
                     self._host, self._port, "(TLS)" if ssl_certfile else "(plain HTTP)")
 
-        await self._uvicorn_server.serve()
+        await self._uvicorn_server.serve(sockets=[server_socket])
 
     def run(self) -> int:
         self._setup_logging()

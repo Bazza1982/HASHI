@@ -23,6 +23,7 @@ sys.modules.setdefault(
 )
 
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+from orchestrator import runtime_remote
 from remote.peer.base import PeerInfo
 from remote.peer.registry import PeerRegistry
 from remote.protocol_manager import ProtocolManager
@@ -30,21 +31,21 @@ from tools.hchat_send import parse_hchat_message
 
 
 class _PresenceDummy:
-    _format_remote_age = FlexibleAgentRuntime._format_remote_age
+    _format_remote_age = staticmethod(runtime_remote.format_remote_age)
 
 
 class _RemoteStartDummy:
-    _read_remote_start_log_excerpt = FlexibleAgentRuntime._read_remote_start_log_excerpt
+    _read_remote_start_log_excerpt = staticmethod(runtime_remote.read_remote_start_log_excerpt)
 
 
 class _RemoteRenderDummy:
-    _render_remote_peer_endpoints = FlexibleAgentRuntime._render_remote_peer_endpoints
-    _load_remote_instances = FlexibleAgentRuntime._load_remote_instances
-    _peer_network_hosts = FlexibleAgentRuntime._peer_network_hosts
+    _render_remote_peer_endpoints = staticmethod(runtime_remote.render_remote_peer_endpoints)
+    _load_remote_instances = staticmethod(runtime_remote.load_remote_instances)
+    _peer_network_hosts = staticmethod(runtime_remote.peer_network_hosts)
 
 
 class _RemoteConfigDummy:
-    _remote_config_snapshot = FlexibleAgentRuntime._remote_config_snapshot
+    _remote_config_snapshot = staticmethod(runtime_remote.remote_config_snapshot)
 
 
 def test_registry_derives_offline_for_timed_out_peer_without_live_fields(tmp_path):
@@ -74,7 +75,7 @@ def test_remote_peer_presence_shows_offline_for_timed_out_peer_without_live_stat
         }
     }
 
-    rank, presence, state = FlexibleAgentRuntime._remote_peer_presence(dummy, peer)
+    rank, presence, state = runtime_remote.remote_peer_presence(dummy, peer)
 
     assert rank == 3
     assert presence == "🔴 offline"
@@ -91,7 +92,7 @@ def test_remote_peer_presence_shows_offline_for_legacy_in_progress_peer_with_las
         }
     }
 
-    rank, presence, state = FlexibleAgentRuntime._remote_peer_presence(dummy, peer)
+    rank, presence, state = runtime_remote.remote_peer_presence(dummy, peer)
 
     assert rank == 3
     assert presence == "🔴 offline"
@@ -325,7 +326,7 @@ def test_remote_start_failure_message_includes_exit_code_and_log_excerpt(tmp_pat
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text("Traceback\nModuleNotFoundError: No module named 'uvicorn'\n", encoding="utf-8")
 
-    message = FlexibleAgentRuntime._build_remote_start_failure_message(
+    message = runtime_remote.build_remote_start_failure_message(
         dummy,
         cfg={"port": 8766, "use_tls": False, "backend": "lan"},
         cmd=["/tmp/python", "-m", "remote", "--no-tls"],
@@ -346,7 +347,7 @@ def test_remote_start_failure_message_falls_back_to_log_path(tmp_path):
     log_path = tmp_path / "tmp" / "lin_yueru_remote_startup.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    message = FlexibleAgentRuntime._build_remote_start_failure_message(
+    message = runtime_remote.build_remote_start_failure_message(
         dummy,
         cfg={"port": 8767, "use_tls": True, "backend": "tailscale"},
         cmd=["/tmp/python", "-m", "remote"],
@@ -376,7 +377,7 @@ def test_remote_config_snapshot_prefers_instances_remote_port_over_agents_and_ya
     dummy = _RemoteConfigDummy()
     dummy.global_config = SimpleNamespace(project_root=tmp_path)
 
-    cfg = FlexibleAgentRuntime._remote_config_snapshot(dummy)
+    cfg = runtime_remote.remote_config_snapshot(dummy)
 
     assert cfg["port"] == 8766
 
@@ -407,7 +408,7 @@ def test_render_remote_peer_endpoints_explains_same_host_loopback(tmp_path):
         "properties": {},
     }
 
-    lines = FlexibleAgentRuntime._render_remote_peer_endpoints(dummy, peer)
+    lines = runtime_remote.render_remote_peer_endpoints(dummy, peer)
 
     assert lines == [
         "route: <code>127.0.0.1:8768</code>  ·  <code>same host</code>  ·  network: <code>192.168.0.211:8768</code>"
@@ -439,7 +440,7 @@ def test_render_remote_peer_endpoints_shows_route_and_network_when_they_differ(t
         "properties": {},
     }
 
-    lines = FlexibleAgentRuntime._render_remote_peer_endpoints(dummy, peer)
+    lines = runtime_remote.render_remote_peer_endpoints(dummy, peer)
 
     assert lines == [
         "route: <code>desktopvn0amd7:8767</code>",

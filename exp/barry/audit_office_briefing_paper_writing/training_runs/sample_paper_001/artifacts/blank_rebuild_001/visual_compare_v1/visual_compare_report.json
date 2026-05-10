@@ -1,0 +1,54 @@
+{
+  "status": "needs_revision",
+  "source_pages": 9,
+  "rebuilt_pages": 9,
+  "max_mean_abs_diff": 30.472737,
+  "max_changed_pixel_ratio_gt8": 0.21849628,
+  "pages": [
+    {
+      "page": 1,
+      "mean_abs_diff": 30.472737,
+      "changed_pixel_ratio_gt8": 0.21849628
+    },
+    {
+      "page": 2,
+      "mean_abs_diff": 9.415201,
+      "changed_pixel_ratio_gt8": 0.07337974
+    },
+    {
+      "page": 3,
+      "mean_abs_diff": 3.339879,
+      "changed_pixel_ratio_gt8": 0.02330876
+    },
+    {
+      "page": 4,
+      "mean_abs_diff": 12.383609,
+      "changed_pixel_ratio_gt8": 0.08461519
+    },
+    {
+      "page": 5,
+      "mean_abs_diff": 25.496469,
+      "changed_pixel_ratio_gt8": 0.19270583
+    },
+    {
+      "page": 6,
+      "mean_abs_diff": 28.594131,
+      "changed_pixel_ratio_gt8": 0.20493519
+    },
+    {
+      "page": 7,
+      "mean_abs_diff": 26.558367,
+      "changed_pixel_ratio_gt8": 0.19541272
+    },
+    {
+      "page": 8,
+      "mean_abs_diff": 26.232697,
+      "changed_pixel_ratio_gt8": 0.18700299
+    },
+    {
+      "page": 9,
+      "mean_abs_diff": 8.759576,
+      "changed_pixel_ratio_gt8": 0.063922
+    }
+  ]
+}

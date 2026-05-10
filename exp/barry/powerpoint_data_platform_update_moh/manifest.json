@@ -1,0 +1,37 @@
+{
+  "id": "barry/powerpoint_data_platform_update_moh",
+  "type": "exp",
+  "version": 1,
+  "owner": "barry",
+  "domain": "powerpoint_data_platform_update_moh",
+  "status": "candidate_handover",
+  "summary": "Candidate-handover EXP for creating and updating Ministry of Health data platform project update PowerPoint decks using a template-context rebuild workflow.",
+  "context": {
+    "user": "Barry",
+    "task_family": "PowerPoint project update decks for MoH / NSW Health style stakeholders",
+    "primary_training_material": "training_runs/moh_data_platform_april_2025_001/training_materials/MoH Data Platform Project - April 2025.pptx",
+    "output_focus": [
+      "monthly project update deck structure",
+      "clean government stakeholder presentation style",
+      "timeline and project status communication",
+      "risk and forward-plan table",
+      "related business and meeting schedule slides",
+      "PowerPoint formatting and layout reuse"
+    ]
+  },
+  "training_runs": {
+    "moh_data_platform_april_2025_001": "training_runs/moh_data_platform_april_2025_001/RUN.md"
+  },
+  "playbooks": {
+    "deck_update": "playbooks/deck_update.exp.md"
+  },
+  "validators": [
+    "validators/powerpoint_validators.md"
+  ],
+  "failure_memory": "failures/failure_memory.jsonl",
+  "scope_limits": [
+    "This EXP is context-specific to Barry's MoH data platform update deck style.",
+    "Do not treat it as a generic corporate PowerPoint skill.",
+    "Do not publish private project decks or derived materials to GitHub main."
+  ]
+}

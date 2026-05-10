@@ -98,6 +98,18 @@ def _should_fire(schedule: str, last_run_ts: float, now_dt: datetime) -> bool:
         return False
 
 
+def _runtime_busy(runtime) -> bool:
+    checker = getattr(runtime, "_backend_busy", None)
+    if callable(checker):
+        try:
+            return bool(checker())
+        except Exception:
+            pass
+    queue = getattr(runtime, "queue", None)
+    queue_busy = bool(queue is not None and hasattr(queue, "empty") and not queue.empty())
+    return bool(getattr(runtime, "is_generating", False) or queue_busy)
+
+
 class TaskScheduler:
     def __init__(self, tasks_path: Path, state_path: Path, runtimes: list | None, authorized_id: int, skill_manager=None, orchestrator=None):
         self.tasks_path = tasks_path
@@ -121,7 +133,7 @@ class TaskScheduler:
                     return json.load(f)
             except Exception as e:
                 scheduler_logger.error(f"Failed to load state: {e}")
-        return {"heartbeats": {}, "crons": {}}
+        return {"heartbeats": {}, "crons": {}, "nudges": {}}
 
     def _save_state(self):
         try:
@@ -146,14 +158,17 @@ class TaskScheduler:
             )
 
         if not self.tasks_path.exists():
-            tasks = {"heartbeats": [], "crons": []}
+            tasks = {"heartbeats": [], "crons": [], "nudges": []}
         else:
             try:
                 with open(self.tasks_path, "r", encoding="utf-8") as f:
                     tasks = json.load(f)
             except Exception as e:
                 scheduler_logger.error(f"Failed to load tasks: {e}")
-                tasks = {"heartbeats": [], "crons": []}
+                tasks = {"heartbeats": [], "crons": [], "nudges": []}
+        tasks.setdefault("heartbeats", [])
+        tasks.setdefault("crons", [])
+        tasks.setdefault("nudges", [])
 
         valid_crons = []
         for job in tasks.get("crons", []):
@@ -214,6 +229,39 @@ class TaskScheduler:
             except ValueError:
                 return 0.0
         return 0.0
+
+    def _disable_nudge(self, task_id: str, *, reason: str) -> bool:
+        tasks = self._load_tasks()
+        changed = False
+        for job in tasks.get("nudges", []):
+            if job.get("id") != task_id:
+                continue
+            job["enabled"] = False
+            meta = job.setdefault("nudge_meta", {})
+            meta["stopped_reason"] = reason
+            changed = True
+            break
+        if changed:
+            self._save_tasks(tasks)
+        return changed
+
+    def _register_nudge_completion_listener(self, runtime, task_id: str, request_id: str | None) -> None:
+        if not request_id:
+            return
+        register = getattr(runtime, "register_request_listener", None)
+        if not callable(register):
+            return
+
+        marker = f"NUDGE_COMPLETE:{task_id}"
+
+        def _on_result(payload: dict) -> None:
+            text = str((payload or {}).get("text") or "")
+            if marker not in text:
+                return
+            if self._disable_nudge(task_id, reason="exit_condition_met"):
+                scheduler_logger.info("Nudge %s completed by response marker.", task_id)
+
+        register(request_id, _on_result)
 
     async def _run_scheduler_action(self, action_coro, *, task_kind: str, task_id: str, agent_name: str, timeout_s: int = SCHEDULER_JOB_TIMEOUT_S) -> bool:
         try:
@@ -295,6 +343,60 @@ class TaskScheduler:
                         if ok:
                             self.state["heartbeats"][task_id] = now
                             state_changed = True
+
+                # Process nudges (idle-bound continuation prompts)
+                for nudge in tasks.get("nudges", []):
+                    if not nudge.get("enabled", False):
+                        continue
+                    task_id = nudge["id"]
+                    agent_name = nudge["agent"]
+                    interval = int(nudge.get("interval_seconds") or 60)
+                    prompt = nudge.get("prompt", "")
+
+                    if agent_name not in runtime_map:
+                        continue
+                    if not prompt or not prompt.strip():
+                        scheduler_logger.error(
+                            f"Nudge {task_id} for {agent_name} has an empty prompt. Skipping."
+                        )
+                        continue
+
+                    last_run = self.state.setdefault("nudges", {}).get(task_id, 0)
+                    if now - last_run < interval:
+                        continue
+
+                    rt = runtime_map[agent_name]
+                    if _runtime_busy(rt):
+                        scheduler_logger.info(f"Skipping nudge {task_id} for {agent_name}: runtime busy.")
+                        self.state["nudges"][task_id] = now
+                        state_changed = True
+                        continue
+
+                    meta = nudge.setdefault("nudge_meta", {})
+                    count = int(meta.get("count", 0)) + 1
+                    max_count = int(meta.get("max", 100))
+                    if count > max_count:
+                        scheduler_logger.info("Nudge %s reached max (%s). Auto-disabling.", task_id, max_count)
+                        nudge["enabled"] = False
+                        meta["count"] = count - 1
+                        meta["stopped_reason"] = "max_reached"
+                        self._save_tasks(tasks)
+                        self.state["nudges"][task_id] = now
+                        state_changed = True
+                        continue
+
+                    scheduler_logger.info(f"Triggering nudge {task_id} for {agent_name}")
+                    request_id = await rt.enqueue_request(
+                        chat_id=self.authorized_id,
+                        prompt=prompt,
+                        source="scheduler",
+                        summary=f"Nudge Task [{task_id}]"
+                    )
+                    self._register_nudge_completion_listener(rt, task_id, request_id)
+                    meta["count"] = count
+                    self._save_tasks(tasks)
+                    self.state["nudges"][task_id] = now
+                    state_changed = True
 
                 # Process crons (upgraded — cron expression support)
                 for cron in tasks.get("crons", []):

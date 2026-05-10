@@ -30,6 +30,10 @@ class GlobalConfig:
     authorized_id: int
     base_logs_dir: Path
     base_media_dir: Path
+    instance_id: str = "HASHI"
+    display_name: str = "HASHI Instance"
+    api_host: str = "127.0.0.1"
+    remote_port: int = 8766
     project_root: Path = None
     bridge_home: Path = None
     config_path: Path = None
@@ -101,6 +105,9 @@ class ConfigManager:
         # Value of 0 means Telegram not yet configured (workbench-only mode).
         _auth_id = int(secrets.get("authorized_telegram_id", 0)) or int(g_raw.get("authorized_id", 0))
 
+        workbench_port = int(g_raw.get("workbench_port", 18800))
+        api_gateway_port = int(g_raw.get("api_gateway_port", workbench_port + 1))
+
         global_cfg = GlobalConfig(
             authorized_id=_auth_id,
             base_logs_dir=resolve_path_value(
@@ -113,12 +120,16 @@ class ConfigManager:
                 config_dir=config_dir,
                 bridge_home=bridge_home,
             ) or (bridge_home / "media"),
+            instance_id=g_raw.get("instance_id", "HASHI"),
+            display_name=g_raw.get("display_name", "HASHI Instance"),
+            api_host=g_raw.get("api_host", "127.0.0.1"),
+            remote_port=int(g_raw.get("remote_port", 8766)),
             project_root=code_root,
             bridge_home=bridge_home,
             config_path=self.config_path,
             secrets_path=self.secrets_path,
-            workbench_port=g_raw.get("workbench_port", 18800),
-            api_gateway_port=g_raw.get("api_gateway_port", 18801),
+            workbench_port=workbench_port,
+            api_gateway_port=api_gateway_port,
             gemini_cmd=resolve_command_value(
                 g_raw.get("gemini_cmd", "gemini"),
                 config_dir=config_dir,

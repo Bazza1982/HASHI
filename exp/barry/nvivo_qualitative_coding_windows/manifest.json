@@ -1,0 +1,43 @@
+{
+  "id": "barry/nvivo_qualitative_coding_windows",
+  "type": "exp",
+  "version": 1,
+  "owner": "barry",
+  "domain": "nvivo_qualitative_coding_windows",
+  "status": "candidate",
+  "summary": "Candidate EXP for using NVivo 14 on Barry's Windows desktop for local-only qualitative coding, sample-project practice, and EXP-driven desktop validation.",
+  "context": {
+    "user": "Barry",
+    "machine": "HASHI Windows desktop",
+    "application": "NVivo 14 for Windows",
+    "primary_training_run": "training_runs/nvivo14_guide_familiarisation_001/RUN.md",
+    "output_focus": [
+      "local-only NVivo project setup",
+      "qualitative coding and memo workflow",
+      "sample-project familiarisation",
+      "queries and framework matrices",
+      "desktop interaction notes and automation limits"
+    ]
+  },
+  "training_runs": {
+    "nvivo14_guide_familiarisation_001": "training_runs/nvivo14_guide_familiarisation_001/RUN.md",
+    "nvivo14_shortcuts_navigation_002": "training_runs/nvivo14_shortcuts_navigation_002/RUN.md",
+    "nvivo14_round3_quick_coding_risks_003": "training_runs/nvivo14_round3_quick_coding_risks_003/RUN.md",
+    "nvivo14_round4_codes_panel_selection_006": "training_runs/nvivo14_round4_codes_panel_selection_006/RUN.md",
+    "nvivo14_save_reminder_safety_007": "training_runs/nvivo14_save_reminder_safety_007/RUN.md"
+  },
+  "playbooks": {
+    "qualitative_coding": "playbooks/qualitative_coding.exp.md"
+  },
+  "validators": [
+    "validators/nvivo_desktop_validators.md"
+  ],
+  "failure_memory": "failures/failure_memory.jsonl",
+  "evidence": "evidence",
+  "scope_limits": [
+    "This is a candidate EXP learned on Barry's HASHI Windows desktop with NVivo 14 only.",
+    "Do not assume the same UI automation exposure on other machines or NVivo versions.",
+    "Do not require Lumivero login or cloud identity when the task is local-only.",
+    "Prefer local-drive projects and disposable practice runs before editing important research data."
+  ]
+}

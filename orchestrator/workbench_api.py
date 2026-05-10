@@ -947,7 +947,19 @@ class WorkbenchApiServer:
 
     async def handle_health(self, request):
         running_agents = [runtime.name for runtime in self._runtime_list() if runtime.startup_success]
-        return web.json_response({"ok": True, "agents": running_agents})
+        orchestrator = self.orchestrator
+        return web.json_response(
+            {
+                "ok": True,
+                "instance_id": getattr(self.global_config, "instance_id", None)
+                or getattr(orchestrator, "instance_id", None)
+                or "HASHI",
+                "workbench_port": getattr(self.global_config, "workbench_port", None),
+                "api_gateway_port": getattr(self.global_config, "api_gateway_port", None),
+                "api_gateway_enabled": bool(getattr(orchestrator, "api_gateway", None)),
+                "agents": running_agents,
+            }
+        )
 
     async def handle_jobs_import(self, request):
         """Import a job from a remote instance (cross-instance job transfer).

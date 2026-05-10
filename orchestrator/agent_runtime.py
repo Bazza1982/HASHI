@@ -223,7 +223,7 @@ def _build_jobs_with_buttons(agent_name: str, skill_manager, filter_agent: str |
         return "No task scheduler configured.", None
     try:
         if not skill_manager.tasks_path.exists():
-            data = {"heartbeats": [], "crons": []}
+            data = {"heartbeats": [], "crons": [], "nudges": []}
         else:
             data = _json.loads(skill_manager.tasks_path.read_text(encoding="utf-8"))
     except Exception:
@@ -295,13 +295,31 @@ def _build_jobs_with_buttons(agent_name: str, skill_manager, filter_agent: str |
             lines.append(f"   {note}")
         all_jobs.append(("cron", c))
 
+    for n in data.get("nudges", []):
+        if filter_agent and n.get("agent") != filter_agent:
+            continue
+        interval = int(n.get("interval_seconds", 0) or 0)
+        if interval >= 3600:
+            interval_s = f"every {interval // 3600}h"
+        elif interval >= 60:
+            interval_s = f"every {interval // 60}m"
+        else:
+            interval_s = f"every {interval}s"
+        status = "✅" if n.get("enabled", False) else "❌"
+        owner = n.get("agent", "?")
+        lines.append(f"\n{status} 🫧 <code>{n['id']}</code> — {interval_s} when idle [{owner}]")
+        note = n.get("note", "")
+        if note and note != n["id"]:
+            lines.append(f"   {note}")
+        all_jobs.append(("nudge", n))
+
     # Single-column layout: label row + action row per job
     for kind, job in all_jobs:
         jid = job["id"]
         enabled = job.get("enabled", False)
         toggle_mode = "off" if enabled else "on"
         toggle_label = "ON" if enabled else "OFF"
-        icon = "⏱" if kind == "heartbeat" else "📅"
+        icon = "⏱" if kind == "heartbeat" else "📅" if kind == "cron" else "🫧"
         short_id = jid[:22]
         buttons.append([InlineKeyboardButton(f"{icon} {short_id}", callback_data="noop")])
         buttons.append([
@@ -325,7 +343,7 @@ def _build_jobs_text(agent_name: str, skill_manager) -> str:
         return "No task scheduler configured."
     try:
         if not skill_manager.tasks_path.exists():
-            data = {"heartbeats": [], "crons": []}
+            data = {"heartbeats": [], "crons": [], "nudges": []}
         else:
             data = _json.loads(skill_manager.tasks_path.read_text(encoding="utf-8"))
     except Exception:
@@ -368,6 +386,28 @@ def _build_jobs_text(agent_name: str, skill_manager) -> str:
             if action != "enqueue_prompt":
                 lines.append(f"      action: {action}")
             if note and note != c["id"]:
+                lines.append(f"      {note}")
+        lines.append("")
+        found = True
+
+    nudges = [n for n in data.get("nudges", []) if n.get("agent") == agent_name]
+    if nudges:
+        lines.append("<b>Nudges</b>")
+        for n in nudges:
+            enabled = "✓" if n.get("enabled") else "✗"
+            interval = int(n.get("interval_seconds", 0) or 0)
+            if interval >= 3600:
+                interval_s = f"{interval // 3600}h"
+            elif interval >= 60:
+                interval_s = f"{interval // 60}m"
+            else:
+                interval_s = f"{interval}s"
+            action = n.get("action", "enqueue_prompt")
+            note = n.get("note", n.get("id", ""))
+            lines.append(f"  {enabled} <code>{n['id']}</code>  every {interval_s} when idle")
+            if action != "enqueue_prompt":
+                lines.append(f"      action: {action}")
+            if note and note != n["id"]:
                 lines.append(f"      {note}")
         lines.append("")
         found = True
@@ -1105,12 +1145,13 @@ class BridgeAgentRuntime:
         pid = getattr(proc, "pid", None)
         return f"alive (pid={pid})" if pid else "alive"
 
-    def _job_counts(self) -> tuple[int, int]:
+    def _job_counts(self) -> tuple[int, int, int]:
         if not self.skill_manager:
-            return 0, 0
+            return 0, 0, 0
         heartbeat_count = sum(1 for job in self.skill_manager.list_jobs("heartbeat", agent_name=self.name) if job.get("enabled"))
         cron_count = sum(1 for job in self.skill_manager.list_jobs("cron", agent_name=self.name) if job.get("enabled"))
-        return heartbeat_count, cron_count
+        nudge_count = sum(1 for job in self.skill_manager.list_jobs("nudge", agent_name=self.name) if job.get("enabled"))
+        return heartbeat_count, cron_count, nudge_count
 
     async def _send_voice_reply(self, chat_id: int, text: str, request_id: str, force: bool = False) -> bool:
         # Guard: skip if Telegram not connected
