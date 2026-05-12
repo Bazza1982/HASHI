@@ -241,6 +241,16 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
         if status:
             inflight = int(status.get("inflight_count") or 0)
             lines.append(f"Inflight: <code>{inflight}</code>")
+            lines.append(
+                "Auth: <code>%s</code>  ·  shared token: <code>%s</code>  ·  lan mode: <code>%s</code>"
+                % (
+                    html.escape(str(status.get("protocol_auth_mode") or health.get("protocol_auth_mode") or "unknown")),
+                    "yes" if (status.get("shared_token_configured") or health.get("shared_token_configured")) else "no",
+                    "on" if (status.get("lan_mode") if "lan_mode" in status else health.get("lan_mode")) else "off",
+                )
+            )
+            if not (status.get("shared_token_configured") or health.get("shared_token_configured")):
+                lines.append("Mode: <code>discovery-only</code> — trusted protocol messaging is unavailable.")
         await runtime._reply_text(update, "\n".join(lines), parse_mode="HTML")
         return
 
@@ -248,7 +258,10 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
         data, _url = await runtime._fetch_remote_json("/peers")
         peers = list((data or {}).get("peers") or [])
         if not peers:
-            await runtime._reply_text(update, "⚪ No remote peers are currently visible.")
+            if data and data.get("trusted_view") is False:
+                await runtime._reply_text(update, "⚪ Peer detail is not available from this view. Use local loopback or trusted auth.")
+            else:
+                await runtime._reply_text(update, "⚪ No remote peers are currently visible.")
             return
         peers = sorted(
             peers,

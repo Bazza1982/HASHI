@@ -39,6 +39,7 @@ from remote.peer.registry import PeerRegistry
 from remote.peer.tailscale import TailscaleDiscovery
 from remote.protocol_manager import ProtocolManager, PROTOCOL_VERSION, build_default_capabilities
 from remote.security.pairing import PairingManager
+from remote.security.shared_token import load_shared_token
 from remote.security.tls import load_or_generate_cert
 from remote.terminal.executor import TerminalExecutor, AuthLevel
 
@@ -162,7 +163,7 @@ class HashiRemoteApplication:
         host: str = "0.0.0.0",
         port: int = DEFAULT_PORT,
         use_tls: bool = True,
-        lan_mode: bool = True,
+        lan_mode: bool = False,
         max_terminal_level: str = "L2_WRITE",
         discovery_backend: str = "lan",
         supervised: bool = False,
@@ -211,7 +212,13 @@ class HashiRemoteApplication:
         logger.info("  Peer port: %d  |  Workbench: %d", self._port, workbench_port)
         logger.info("  LAN mode : %s", "on" if self._lan_mode else "off")
         logger.info("  Discovery: %s", self._discovery_backend)
+        shared_token = load_shared_token(self._hashi_root)
+        logger.info("  Auth     : %s", "shared-token" if shared_token else "discovery-only")
         logger.info("═" * 55)
+        if not shared_token:
+            logger.warning("Shared token is not configured; protocol trust is disabled and Remote is running in discovery-only mode")
+        if self._lan_mode:
+            logger.warning("Legacy LAN mode is enabled; pairing-auth endpoints remain permissive on trusted LANs")
 
         # Components
         pairing_manager = PairingManager(lan_mode=self._lan_mode)
@@ -394,7 +401,7 @@ def main() -> int:
     host = args.host or server_cfg.get("host", "0.0.0.0")
     port = args.port if args.port != DEFAULT_PORT else configured_port
     use_tls = not args.no_tls if args.no_tls else server_cfg.get("use_tls", True)
-    lan_mode = not args.no_lan_mode if args.no_lan_mode else security_cfg.get("lan_mode", True)
+    lan_mode = not args.no_lan_mode if args.no_lan_mode else security_cfg.get("lan_mode", False)
     discovery_backend = args.discovery or os.getenv("HASHI_REMOTE_DISCOVERY") or discovery_cfg.get("backend", "lan")
     max_terminal_level = args.max_terminal_level or security_cfg.get("max_terminal_level", "L2_WRITE")
     supervised = args.supervised or os.getenv("HASHI_REMOTE_SUPERVISED", "").strip().lower() in {"1", "true", "yes", "on"}

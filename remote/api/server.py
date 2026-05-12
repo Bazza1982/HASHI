@@ -42,6 +42,8 @@ from pydantic import BaseModel
 
 from ..security.auth import (
     has_shared_token,
+    is_lan_mode,
+    protocol_auth_mode,
     set_lan_mode,
     set_pairing_manager,
     set_shared_token,
@@ -65,6 +67,25 @@ _protocol_manager = None
 _hashi_root: Optional[str] = None
 _workbench_port: int = 18800
 _HCHAT_HEADER_RE = re.compile(r"^\[hchat from (?P<agent>\w+)(?:@(?P<instance>[\w-]+))?\]\s*(?P<body>.*)$", re.DOTALL)
+
+
+def _redacted_protocol_status() -> dict[str, Any]:
+    status = _protocol_manager.get_protocol_status() if _protocol_manager is not None else {}
+    capabilities = []
+    remote_supervisor = {}
+    if status:
+        capabilities = list(status.get("capabilities") or [])
+        remote_supervisor = dict(status.get("remote_supervisor") or {})
+    return {
+        "protocol_version": status.get("protocol_version", "2.0"),
+        "display_handle": getattr(_protocol_manager, "display_handle", f"@{str(_instance_info.get('instance_id') or 'hashi').lower()}"),
+        "capabilities": capabilities,
+        "remote_supervisor": remote_supervisor,
+        "protocol_auth_mode": protocol_auth_mode(),
+        "shared_token_configured": has_shared_token(),
+        "lan_mode": is_lan_mode(),
+        "trusted_view": False,
+    }
 
 
 # ─────────────────────────────────────────────────────────────
@@ -400,6 +421,8 @@ def create_app(
                 "platform": platform.system().lower(),
                 "ts": time.time(),
                 "peer_count": len(peers),
+                "protocol_auth_mode": protocol_auth_mode(),
+                "lan_mode": is_lan_mode(),
                 "trusted_view": False,
                 "shared_token_configured": has_shared_token(),
             }
@@ -411,6 +434,8 @@ def create_app(
             "ts": time.time(),
             "local_network_profile": local_network_profile,
             "peers": peers,
+            "protocol_auth_mode": protocol_auth_mode(),
+            "lan_mode": is_lan_mode(),
             "trusted_view": True,
         }
 
@@ -430,10 +455,20 @@ def create_app(
         return {"ok": True, "peers": peers, "count": len(peers)}
 
     @app.get("/protocol/status")
-    async def protocol_status():
+    async def protocol_status(request: Request):
         if _protocol_manager is None:
             return {"ok": False, "error": "protocol manager unavailable"}
-        return {"ok": True, **_protocol_manager.get_protocol_status()}
+        authenticated = try_authenticate_request(request, allow_loopback=True)
+        if not authenticated:
+            return {"ok": True, **_redacted_protocol_status()}
+        return {
+            "ok": True,
+            **_protocol_manager.get_protocol_status(),
+            "protocol_auth_mode": protocol_auth_mode(),
+            "shared_token_configured": has_shared_token(),
+            "lan_mode": is_lan_mode(),
+            "trusted_view": True,
+        }
 
     @app.post("/protocol/handshake")
     async def protocol_handshake(request: Request, payload: ProtocolHandshakePayload):
