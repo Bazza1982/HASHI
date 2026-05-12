@@ -32,6 +32,7 @@ import uvicorn
 # Add parent to path if running as script
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from orchestrator.remote_lifecycle import read_disabled_state
 from remote.api.server import create_app
 from remote.peer.base import PeerInfo
 from remote.peer.lan import LanDiscovery
@@ -392,6 +393,15 @@ def main() -> int:
     hashi_root = args.hashi_root
     if hashi_root is None:
         hashi_root = Path(__file__).resolve().parent.parent
+    disabled_state = read_disabled_state(hashi_root)
+    if disabled_state:
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s %(message)s")
+        logger.info(
+            "Hashi Remote is explicitly disabled; exiting without start (state=%s reason=%s)",
+            disabled_state.get("path"),
+            disabled_state.get("reason"),
+        )
+        return 0
     config = _load_remote_config(hashi_root)
     server_cfg = config.get("server", {})
     security_cfg = config.get("security", {})

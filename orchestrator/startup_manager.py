@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from orchestrator import remote_lifecycle
 from orchestrator.bootstrap_logging import AnimMute
 
 main_logger = logging.getLogger("BridgeU.Orchestrator")
@@ -52,6 +53,8 @@ class StartupManager:
         except Exception:
             wa_cfg = {}
 
+        await self._ensure_remote_lifecycle()
+
         if not initial_agent_names:
             print("\n" + "=" * 64)
             print("  CRITICAL ERROR: No agents can start.")
@@ -82,6 +85,24 @@ class StartupManager:
             return False, wa_cfg
 
         return True, wa_cfg
+
+    async def _ensure_remote_lifecycle(self) -> None:
+        root = getattr(getattr(self.kernel, "global_config", None), "project_root", None)
+        try:
+            result = await remote_lifecycle.ensure_remote_started(root)
+        except Exception as exc:
+            bridge_logger.warning("Hashi Remote lifecycle check failed: %s: %s", type(exc).__name__, exc)
+            return
+        action = result.get("action")
+        settings = result.get("settings")
+        port = getattr(settings, "port", "?")
+        if result.get("ok"):
+            bridge_logger.info("Hashi Remote lifecycle: %s on port %s", action, port)
+            process = result.get("process")
+            if process is not None:
+                setattr(self.kernel, "_remote_lifecycle_process", process)
+            return
+        bridge_logger.info("Hashi Remote lifecycle: %s (%s)", action, result.get("reason") or "no detail")
 
     async def _run_startup_banner(self, initial_agent_names, global_cfg, wa_cfg, skipped, inactive_agent_names):
         boot_state = {name: "pending" for name in initial_agent_names}
