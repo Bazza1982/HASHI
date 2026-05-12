@@ -178,10 +178,15 @@ for an always-on service.
 
 ### Explicit Disable State
 
-`/remote off` should persist an operator disable state, for example:
+`/remote off` should persist an operator disable state under the resolved
+HASHI root, not under the current working directory. Supervisor processes may
+start with a different CWD from HASHI core, so all lifecycle code must resolve
+this path once from an absolute `HASHI_ROOT`.
+
+Effective path:
 
 ```text
-state/remote_disabled.json
+<HASHI_ROOT>/state/remote_disabled.json
 ```
 
 Suggested payload:
@@ -195,9 +200,16 @@ Suggested payload:
 }
 ```
 
+The Remote entrypoint should resolve:
+
+```python
+HASHI_ROOT = Path(os.getenv("HASHI_ROOT", configured_hashi_root)).expanduser().resolve()
+DISABLED_STATE_PATH = HASHI_ROOT / "state" / "remote_disabled.json"
+```
+
 The supervisor helper, HASHI startup integration, and `/remote status` must all
-respect this state. Otherwise a supervisor will restart Remote immediately after
-the user turns it off.
+use the same absolute path. Otherwise a supervisor can miss the disabled state
+and restart Remote immediately after the user turns it off.
 
 ## Security Model
 
@@ -239,22 +251,52 @@ Recommended payload fields:
 }
 ```
 
-Digest input should include stable, replay-resistant fields:
+Digest input must include stable, replay-resistant fields:
 
 ```text
 method + path + from_instance + timestamp + nonce + canonical_payload_hash
 ```
+
+`canonical_payload_hash` is defined as the SHA256 hex digest of the exact HTTP
+request body bytes received on the wire:
+
+```python
+canonical_payload_hash = hashlib.sha256(request_body_bytes).hexdigest()
+hmac_input = "\n".join([
+    method.upper(),
+    path,
+    from_instance.upper(),
+    str(timestamp),
+    nonce,
+    canonical_payload_hash,
+])
+```
+
+Do not compute this hash from an ad hoc `json.dumps()` of a Python dictionary.
+The request body bytes are the transport-level canonical form and avoid
+cross-version JSON serialization drift. This same definition must be mirrored in
+`HASHI_REMOTE_PROTOCOL_SPEC.md` before Phase 1 code starts.
 
 Use HMAC-SHA256 with the shared token. Do not send the token itself.
 
 The receiver validates:
 
 - token configured locally,
-- timestamp inside a short window,
+- timestamp inside the fixed `±300s` protocol window,
 - nonce not recently used,
 - digest matches,
 - `from_instance` is not self,
 - optional allowlist policy if configured.
+
+Nonce replay protection:
+
+- Store nonces in an in-memory per-Remote-instance TTL set.
+- TTL is `2 * timestamp_window`, which is `600s` when the window is `±300s`.
+- HASHI1 and HASHI2 on the same host use separate nonce stores because each
+  Remote process has a separate instance id and port.
+- On Remote restart, the nonce store is lost. This is acceptable for Phase 1
+  because the fixed timestamp window limits replay exposure, but it must be
+  logged as an intentional tradeoff and covered by tests.
 
 If validation fails, the peer receives:
 
@@ -275,7 +317,9 @@ Pragmatic phase-1 implementation:
 
 - require HMAC on every `/protocol/handshake`;
 - require HMAC on every `/protocol/message`;
-- keep `/health` and `/peers` public but sanitized;
+- keep unauthenticated `/health` public but sanitized;
+- make unauthenticated `/peers` return only `{"count": N}` and no peer entries;
+- require valid shared-token auth for the full `/peers` list;
 - keep file, terminal, rescue, and hchat endpoints behind existing token auth,
   then migrate them to the same shared auth helper.
 
@@ -425,11 +469,18 @@ INTEL  Remote 8766, Workbench 18802
 MSI    Remote 8767, Workbench 8779
 ```
 
+The repeated INTEL/MSI ports are safe only because they are on different hosts.
+Across a LAN, `host:port` is not a peer identity; `instance_id` is the canonical
+key. Route code and registry merge code must never collapse peers solely because
+they share the same port. Same-host validation should catch collisions only
+among instances with the same host identity.
+
 The startup path should validate that:
 
 - configured port is free;
 - local `agents.json` agrees with local `instances.json`;
 - the instance's own port does not collide with another same-host instance;
+- cross-host peers can reuse ports safely because the host differs;
 - port mismatch is logged as a clear actionable error.
 
 ### Windows Firewall and Binding
@@ -528,7 +579,13 @@ Expected behavior:
 Expected behavior:
 
 1. clear persistent disabled state;
-2. validate token mode;
+2. validate token mode:
+   - if a shared token is configured, start in trusted-auth capable mode;
+   - if no shared token is configured, start in discovery-only mode;
+   - `/remote status` must display
+     `token_mode: discovery_only (no token configured)` and warn that trusted
+     protocol messaging, full peers, file transfer, and rescue controls are not
+     available;
 3. install/start supervisor if configured;
 4. fall back to child only when supervisor unavailable;
 5. run health check;
@@ -592,9 +649,14 @@ Work:
 - Add `remote/security/shared_token.py`.
 - Load shared token from environment or `secrets.json`.
 - Implement HMAC signing and verification helpers.
+- Define `canonical_payload_hash` as SHA256 over exact request body bytes in
+  both implementation and `HASHI_REMOTE_PROTOCOL_SPEC.md`.
+- Define the fixed timestamp window as `±300s`.
+- Add a per-instance in-memory nonce TTL store with `600s` retention.
 - Require authenticated handshake for trusted state.
 - Require authenticated `/protocol/message`.
-- Sanitize unauthenticated `/health` and `/peers`.
+- Sanitize unauthenticated `/health`.
+- Make unauthenticated `/peers` count-only; full peer entries require auth.
 - Add explicit legacy LAN mode warnings.
 
 Validation:
@@ -602,9 +664,12 @@ Validation:
 - Good token accepts handshake.
 - Missing token rejects handshake.
 - Wrong token rejects handshake.
+- HMAC verification fails if request body bytes change after signing.
 - Replay nonce rejects handshake.
+- Timestamp outside `±300s` rejects handshake.
 - Old peer is marked `auth_required` instead of online.
 - `/health` unauthenticated returns public metadata only.
+- `/peers` unauthenticated returns count only.
 
 ### Phase 2: Default-On Lifecycle
 
@@ -624,8 +689,13 @@ Validation:
 - Fresh HASHI startup starts Remote by default.
 - `/remote off` stops Remote and survives restart.
 - `/remote on` clears disabled state.
+- Missing shared token starts Remote in discovery-only mode with an explicit
+  status warning.
 - `/reboot min` does not kill supervised Remote.
 - If supervisor is unavailable, status explains fallback.
+- Peer agent directories are marked
+  `directory_state: snapshot_may_be_stale` until Phase 3 continuous refresh is
+  implemented.
 
 ### Phase 3: Continuous Advertisement
 
@@ -645,6 +715,8 @@ Validation:
 - Agent activation change appears in peer directory without Remote restart.
 - Core down leaves Remote online with stale directory state.
 - Peer registry updates `instances.json` only with fresh liveness.
+- Phase 2's `snapshot_may_be_stale` marker is replaced by fresh/stale/core
+  offline states.
 
 ### Phase 4: WSL/Windows Route Unification
 
@@ -685,6 +757,10 @@ Validation:
 - `GET /control/hashi/status` reports core offline.
 - Authenticated `POST /control/hashi/start` starts core when L3 is enabled.
 - L2 default blocks start.
+- `/remote status` reports `rescue_start_enabled: false (requires L3)` when
+  the default L2 level is active.
+- Supervisor install/onboarding clearly asks the operator whether rescue start
+  should be enabled with `L3_RESTART` before a core outage occurs.
 
 ### Phase 6: Documentation and Migration
 
@@ -727,6 +803,9 @@ Validation:
 - two local Remote instances with different ports handshake successfully;
 - wrong-token peer is visible but untrusted;
 - `/protocol/message` rejects missing auth;
+- upgraded HASHI1 sees an old peer without HMAC as untrusted/auth_required;
+- legacy hchat compatibility still works for an old peer when explicitly
+  enabled during rolling deployment;
 - `/remote off` prevents supervisor restart;
 - HASHI core down while Remote stays alive;
 - rescue status works without Workbench.
@@ -756,9 +835,13 @@ For each pair:
 2. Deploy to HASHI1 only in compatibility mode.
 3. Deploy to HASHI2 and HASHI9 with shared token.
 4. Enable default-on supervisor on one peer at a time.
-5. Turn off legacy LAN auto-auth.
-6. Validate INTEL and MSI cross-host discovery.
-7. Update docs and make default-on the normal path.
+5. Complete Phase 3 continuous advertisement within 7 days of any Phase 2
+   production rollout, or roll Phase 2 back to manual start. Phase 2 without
+   Phase 3 is acceptable only as a short transition because agent directories
+   are marked `snapshot_may_be_stale`.
+6. Turn off legacy LAN auto-auth.
+7. Validate INTEL and MSI cross-host discovery.
+8. Update docs and make default-on the normal path.
 
 ## Rollback Strategy
 
@@ -828,18 +911,19 @@ Mitigation:
    - `secrets.json` only,
    - environment only,
    - or both with environment priority.
-2. Whether `/peers` should be public-redacted or fully auth-gated.
-3. Whether a missing token should prevent Remote startup or start in
+2. Whether a missing token should prevent Remote startup or start in
    discovery-only mode.
-4. Whether supervisor install should happen automatically on first startup or
+3. Whether supervisor install should happen automatically on first startup or
    only after an explicit command.
-5. Whether Windows firewall rule creation should be automatic or diagnostic
+4. Whether Windows firewall rule creation should be automatic or diagnostic
    only.
 
 Recommended defaults:
 
 - support both `HASHI_REMOTE_SHARED_TOKEN` and `secrets.json`;
-- public-redacted `/health`, auth-gated full `/peers`;
+- public-redacted `/health`;
+- unauthenticated `/peers` returns only `{"count": N}`;
+- authenticated `/peers` returns full peer entries;
 - missing token starts discovery-only with warning;
 - supervisor install requires explicit first-time operator approval, but once
   installed it starts by default;
@@ -859,4 +943,3 @@ The upgrade is complete when:
 - WSL/Windows same-host routes are deterministic and logged.
 - Remote rescue status works when Workbench is down.
 - Tests cover auth, lifecycle, discovery, routing, and rescue behavior.
-
