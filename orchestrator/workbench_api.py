@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio
 import json
 import mimetypes
+import socket
 import time
 from pathlib import Path
 from uuid import uuid4
@@ -108,6 +109,7 @@ class WorkbenchApiServer:
         self.app.router.add_post("/api/jobs/import", self.handle_jobs_import)
         self.runner = None
         self.site = None
+        self.bind_host = None
 
     def _learn_reply_route(self, text: str, reply_route: dict) -> None:
         """Auto-learn sender's routing info from reply_route metadata in hchat messages."""
@@ -271,8 +273,30 @@ class WorkbenchApiServer:
     async def start(self):
         self.runner = web.AppRunner(self.app)
         await self.runner.setup()
-        self.site = web.TCPSite(self.runner, "127.0.0.1", self.global_config.workbench_port)
+        bind_host = self._select_bind_host()
+        self.bind_host = bind_host
+        self.site = web.TCPSite(self.runner, bind_host, self.global_config.workbench_port)
         await self.site.start()
+
+    def _select_bind_host(self) -> str:
+        configured = str(getattr(self.global_config, "api_host", "") or "127.0.0.1").strip()
+        if configured not in {"127.0.0.1", "localhost"}:
+            return configured
+        for candidate in ("10.255.255.254",):
+            if self._host_can_bind(candidate):
+                return candidate
+        return "127.0.0.1"
+
+    @staticmethod
+    def _host_can_bind(host: str) -> bool:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.bind((host, 0))
+            return True
+        except OSError:
+            return False
+        finally:
+            sock.close()
 
     async def shutdown(self):
         if self.runner:

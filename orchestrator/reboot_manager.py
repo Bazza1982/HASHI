@@ -55,10 +55,12 @@ class RebootManager:
 
     def reload_project_modules(self):
         """Reload project Python modules so hot restart picks up code changes."""
-        prefixes = ("adapters.", "orchestrator.")
+        prefixes = ("adapters.", "tools.", "orchestrator.")
 
         def _reload_key(name: str):
             if name.startswith("adapters."):
+                return (0, name)
+            if name.startswith("tools."):
                 return (0, name)
             if "_runtime" in name:
                 return (2, name)
