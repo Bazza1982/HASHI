@@ -341,6 +341,17 @@ def _probe_workbench(host: str, port: int) -> bool:
     return _probe_http(f"http://{host}:{port}/api/chat")
 
 
+def _probe_workbench_health(host: str, port: int) -> bool:
+    return _probe_http(f"http://{host}:{port}/api/health") or _probe_workbench(host, port)
+
+
+def _first_reachable_workbench(hosts: list[str], port: int) -> str | None:
+    for host in hosts:
+        if _probe_workbench_health(host, port):
+            return host
+    return None
+
+
 def _unique_hosts(*values: str | None) -> list[str]:
     hosts = []
     for value in values:
@@ -761,13 +772,170 @@ def send_hchat(
     return False
 
 
+def check_hchat_route(
+    to_agent: str,
+    from_agent: str,
+    target_instance: str | None = None,
+    *,
+    source_instance: str | None = None,
+) -> dict:
+    cfg = _load_config()
+    local_port = _get_workbench_port(cfg)
+    instance_id = _get_instance_id(cfg)
+    source_instance = _normalize_instance_id(source_instance) or instance_id
+    to_agent, inline_instance = _split_target_address(to_agent)
+    target_instance = _normalize_instance_id(target_instance) or inline_instance
+
+    result = {
+        "ok": False,
+        "delivery_attempted": False,
+        "from_agent": from_agent.lower(),
+        "to_agent": to_agent,
+        "source_instance": source_instance,
+        "local_instance": instance_id,
+        "target_instance": target_instance,
+        "route_type": None,
+        "host": None,
+        "port": None,
+        "remote_port": None,
+        "members": None,
+        "error": None,
+    }
+
+    if to_agent.startswith("@"):
+        if target_instance:
+            result["error"] = "group delivery does not support cross-instance routing"
+            return result
+        group_name = to_agent[1:]
+        members = _resolve_group_members(cfg, group_name, exclude_self=from_agent)
+        result["members"] = members
+        if not members:
+            result["error"] = f"group '{group_name}' not found or empty"
+            return result
+        host = _first_reachable_workbench(_local_workbench_hosts(cfg), local_port)
+        result.update(
+            ok=bool(host),
+            route_type="local_group_workbench",
+            host=host,
+            port=local_port,
+            error=None if host else "local workbench unreachable",
+        )
+        return result
+
+    if not target_instance or target_instance == instance_id.upper():
+        result["target_instance"] = target_instance or instance_id.upper()
+        if not _is_local_agent(cfg, to_agent):
+            result["error"] = f"{to_agent}@{result['target_instance']} is not a local active agent"
+            return result
+        host = _first_reachable_workbench(_local_workbench_hosts(cfg), local_port)
+        result.update(
+            ok=bool(host),
+            route_type="local_workbench",
+            host=host,
+            port=local_port,
+            error=None if host else "local workbench unreachable",
+        )
+        return result
+
+    if instance_id.upper() != DEFAULT_EXCHANGE_INSTANCE:
+        exchange_route = _find_exchange_instance(instance_id)
+        if exchange_route:
+            host = exchange_route.get("host")
+            workbench_port = exchange_route.get("workbench_port")
+            remote_port = exchange_route.get("remote_port")
+            if host and workbench_port and _probe_workbench_health(host, workbench_port):
+                result.update(
+                    ok=True,
+                    route_type="hashi1_exchange_workbench",
+                    host=host,
+                    port=workbench_port,
+                    remote_port=remote_port,
+                )
+                return result
+            if host and remote_port and _probe_remote(host, remote_port):
+                result.update(
+                    ok=True,
+                    route_type="hashi1_exchange_remote",
+                    host=host,
+                    remote_port=remote_port,
+                )
+                return result
+
+    cached = _get_cached_route(to_agent)
+    if cached and cached.get("instance_id", "").upper() == target_instance.upper():
+        cached_route = {
+            "instance_id": cached["instance_id"],
+            "host": cached["host"],
+            "wb_port": cached.get("wb_port"),
+            "remote_host": cached.get("host"),
+            "remote_port": cached.get("port"),
+        }
+        wb_port = cached_route.get("wb_port")
+        if wb_port:
+            host = _first_reachable_workbench(_workbench_hosts_for_route(cached_route), wb_port)
+            if host:
+                result.update(ok=True, route_type="cached_workbench", host=host, port=wb_port)
+                return result
+        remote_host = cached_route.get("remote_host")
+        remote_port = cached_route.get("remote_port")
+        if remote_host and remote_port and _probe_remote(remote_host, remote_port):
+            result.update(ok=True, route_type="cached_remote", host=remote_host, remote_port=remote_port)
+            return result
+
+    remote = _find_remote_instance(to_agent, instance_id, target_instance=target_instance)
+    if not remote:
+        result["error"] = f"no active route found for {to_agent}@{target_instance}"
+        return result
+
+    wb_port = remote.get("wb_port")
+    if wb_port:
+        host = _first_reachable_workbench(_workbench_hosts_for_route(remote), wb_port)
+        if host:
+            result.update(
+                ok=True,
+                route_type="remote_workbench",
+                host=host,
+                port=wb_port,
+                remote_port=remote.get("remote_port"),
+            )
+            return result
+
+    remote_host = remote.get("remote_host", remote.get("host"))
+    remote_port = remote.get("remote_port")
+    if remote_host and remote_port and _probe_remote(remote_host, remote_port):
+        result.update(
+            ok=True,
+            route_type="remote_hchat",
+            host=remote_host,
+            remote_port=remote_port,
+        )
+        return result
+
+    result.update(
+        route_type="route_found_unreachable",
+        host=remote.get("host"),
+        port=wb_port,
+        remote_port=remote_port,
+        error=f"route found for {to_agent}@{target_instance}, but workbench/remote probes failed",
+    )
+    return result
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Send a Hchat message to another agent")
     parser.add_argument("--to", help="Target agent name or @group_name (e.g. lily or @staff)")
     parser.add_argument("--from", dest="from_agent", help="Sender agent name (e.g. rain)")
     parser.add_argument("--text", help="Message text to send")
     parser.add_argument("--instance", default=None, help="Target instance (e.g. HASHI9) - forces routing to specific instance")
+    parser.add_argument("--check", "--dry-run", action="store_true", help="Validate route availability without sending a message")
     args = parser.parse_args()
+
+    if args.check:
+        if not args.to or not args.from_agent:
+            parser.error("--to and --from are required for --check")
+        result = check_hchat_route(args.to, args.from_agent, target_instance=args.instance)
+        print(json.dumps(result, indent=2, sort_keys=True))
+        sys.exit(0 if result.get("ok") else 1)
 
     if not args.to or not args.from_agent or not args.text:
         parser.error("--to, --from, and --text are required for sending messages")
