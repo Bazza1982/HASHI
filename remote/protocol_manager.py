@@ -414,7 +414,7 @@ class ProtocolManager:
                 "from_instance": self._instance_info.get("instance_id"),
                 "display_handle": self.display_handle,
                 "protocol_version": PROTOCOL_VERSION,
-                "capabilities": list(self._capabilities),
+                "capabilities": list(getattr(self, "_capabilities", DEFAULT_CAPABILITIES)),
                 "hashi_version": self._instance_info.get("hashi_version", "unknown"),
                 "agents": self.get_local_agents_snapshot(),
                 "remote_port": self._instance_info.get("remote_port") or 0,
