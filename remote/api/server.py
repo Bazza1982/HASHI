@@ -40,7 +40,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from ..security.auth import verify_token, set_pairing_manager, set_lan_mode
+from ..security.auth import (
+    has_shared_token,
+    set_lan_mode,
+    set_pairing_manager,
+    set_shared_token,
+    try_authenticate_request,
+    verify_protocol_request,
+    verify_token,
+)
+from ..security.shared_token import load_shared_token
 from ..security.pairing import PairingManager
 from ..terminal.executor import TerminalExecutor, AuthLevel
 from ..audit.logger import get_audit_logger
@@ -345,6 +354,7 @@ def create_app(
 
     set_pairing_manager(pairing_manager)
     set_lan_mode(pairing_manager.lan_mode)
+    set_shared_token(load_shared_token(Path(hashi_root) if hashi_root else None))
 
     app = FastAPI(
         title="Hashi Remote",
@@ -363,14 +373,36 @@ def create_app(
     # ── Health ──────────────────────────────────────────────
 
     @app.get("/health")
-    async def health():
+    async def health(request: Request):
         peers = []
+        authenticated = try_authenticate_request(request, allow_loopback=True)
         if _peer_registry:
             if _protocol_manager:
                 peers = [_protocol_manager.get_peer_view(p) for p in _peer_registry.get_peers()]
             else:
                 peers = [p.to_dict() for p in _peer_registry.get_peers()]
         local_network_profile = _protocol_manager._local_network_profile() if _protocol_manager else None
+        if not authenticated:
+            instance_view = {
+                "instance_id": _instance_info.get("instance_id"),
+                "display_name": _instance_info.get("display_name"),
+                "workbench_port": _instance_info.get("workbench_port"),
+                "platform": _instance_info.get("platform"),
+                "hashi_version": _instance_info.get("hashi_version"),
+                "remote_port": _instance_info.get("remote_port"),
+            }
+            if _protocol_manager:
+                instance_view["capabilities"] = list(_protocol_manager.get_protocol_status().get("capabilities") or [])
+            return {
+                "ok": True,
+                "instance": instance_view,
+                "hostname": socket.gethostname(),
+                "platform": platform.system().lower(),
+                "ts": time.time(),
+                "peer_count": len(peers),
+                "trusted_view": False,
+                "shared_token_configured": has_shared_token(),
+            }
         return {
             "ok": True,
             "instance": _instance_info,
@@ -379,18 +411,22 @@ def create_app(
             "ts": time.time(),
             "local_network_profile": local_network_profile,
             "peers": peers,
+            "trusted_view": True,
         }
 
     # ── Peers ────────────────────────────────────────────────
 
     @app.get("/peers")
-    async def list_peers():
+    async def list_peers(request: Request):
         peers = []
         if _peer_registry:
             if _protocol_manager:
                 peers = [_protocol_manager.get_peer_view(p) for p in _peer_registry.get_peers()]
             else:
                 peers = [p.to_dict() for p in _peer_registry.get_peers()]
+        authenticated = try_authenticate_request(request, allow_loopback=True)
+        if not authenticated:
+            return {"ok": True, "peers": [], "count": len(peers), "trusted_view": False}
         return {"ok": True, "peers": peers, "count": len(peers)}
 
     @app.get("/protocol/status")
@@ -403,6 +439,15 @@ def create_app(
     async def protocol_handshake(request: Request, payload: ProtocolHandshakePayload):
         if _protocol_manager is None:
             return JSONResponse(status_code=503, content={"status": "handshake_reject", "reason": "protocol unavailable"})
+        body_bytes = await request.body()
+        ok, reason, _auth_identity = verify_protocol_request(
+            request,
+            body_bytes=body_bytes,
+            from_instance=payload.from_instance,
+        )
+        if not ok:
+            logger.warning("Protocol handshake rejected: reason=%s from=%s", reason, payload.from_instance)
+            return JSONResponse(status_code=401, content={"status": "handshake_reject", "reason": reason})
         # Pass the sender's IP so we can register them as a peer (reverse registration)
         client_ip = request.client.host if request.client else None
         data = payload.model_dump()
@@ -418,9 +463,32 @@ def create_app(
         return {"ok": True, "agents": _protocol_manager.get_local_agents_snapshot()}
 
     @app.post("/protocol/message")
-    async def protocol_message(payload: ProtocolMessagePayload):
+    async def protocol_message(request: Request, payload: ProtocolMessagePayload):
         if _protocol_manager is None:
             return JSONResponse(status_code=503, content={"ok": False, "error": "protocol manager unavailable"})
+        body_bytes = await request.body()
+        ok, reason, _auth_identity = verify_protocol_request(
+            request,
+            body_bytes=body_bytes,
+            from_instance=payload.from_instance,
+        )
+        if not ok:
+            logger.warning("Protocol message rejected: reason=%s from=%s", reason, payload.from_instance)
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "ok": False,
+                    "message_type": "error",
+                    "body": {
+                        "code": reason,
+                        "message": "Protocol authentication failed",
+                        "retryable": reason == "auth_required",
+                        "from_instance": payload.from_instance,
+                        "to_instance": payload.to_instance,
+                        "to_agent": payload.to_agent,
+                    },
+                },
+            )
         status, result = await _protocol_manager.handle_protocol_message(payload.model_dump())
         return JSONResponse(status_code=status, content=result)
 
