@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import json
 import re
 import time
@@ -91,9 +92,7 @@ def deliver_hchat_draft(
     sender: SendHChatCallable | None = None,
     attempt_id: str | None = None,
 ) -> HChatDeliveryResult:
-    from tools.hchat_send import send_hchat
-
-    sender_fn = sender or send_hchat
+    sender_fn = sender or _load_send_hchat()
     clean_from = (from_agent or "").strip()
     if not clean_from:
         raise ValueError("from_agent is required")
@@ -127,6 +126,12 @@ def deliver_hchat_draft(
         latency_ms=latency_ms,
         user_report=draft.user_report,
     )
+
+
+def _load_send_hchat() -> SendHChatCallable:
+    module = importlib.import_module("tools.hchat_send")
+    module = importlib.reload(module)
+    return module.send_hchat
 
 
 def draft_parse_error_text(exc: HChatDraftParseError) -> str:
