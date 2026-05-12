@@ -341,6 +341,53 @@ def _probe_workbench(host: str, port: int) -> bool:
     return _probe_http(f"http://{host}:{port}/api/chat")
 
 
+def _unique_hosts(*values: str | None) -> list[str]:
+    hosts = []
+    for value in values:
+        host = str(value or "").strip()
+        if not host or host in hosts:
+            continue
+        hosts.append(host)
+    return hosts
+
+
+def _local_workbench_hosts(cfg: dict) -> list[str]:
+    configured = str(cfg.get("global", {}).get("api_host") or "").strip()
+    return _unique_hosts(
+        "10.255.255.254",
+        "10.0.0.2",
+        configured,
+        "127.0.0.1",
+    )
+
+
+def _send_via_local_workbench(
+    cfg: dict,
+    port: int,
+    to_agent: str,
+    from_agent: str,
+    text: str,
+    source_instance: str,
+    reply_route: dict | None = None,
+) -> bool:
+    for host in _local_workbench_hosts(cfg):
+        if _send_via_workbench(host, port, to_agent, from_agent, text, source_instance, reply_route):
+            return True
+    return False
+
+
+def _workbench_hosts_for_route(route: dict) -> list[str]:
+    return _unique_hosts(
+        route.get("host"),
+        route.get("same_host_loopback"),
+        "10.255.255.254",
+        route.get("api_host"),
+        route.get("lan_ip"),
+        route.get("tailscale_ip"),
+        route.get("internet_host"),
+    )
+
+
 def _remote_urls(host: str, port: int) -> list[str]:
     return [
         f"https://{host}:{port}/hchat",
@@ -389,6 +436,11 @@ def _find_remote_instance(
             {
                 "instance_id": inst_info.get("instance_id", inst_id).upper(),
                 "host": _preferred_host(inst_info),
+                "same_host_loopback": inst_info.get("same_host_loopback"),
+                "api_host": inst_info.get("api_host"),
+                "lan_ip": inst_info.get("lan_ip"),
+                "tailscale_ip": inst_info.get("tailscale_ip"),
+                "internet_host": inst_info.get("internet_host"),
                 "wb_port": wb_port,
                 "remote_host": _preferred_host(inst_info, for_remote=True),
                 "remote_port": inst_info.get("remote_port", DEFAULT_REMOTE_PORT),
@@ -548,20 +600,23 @@ def _deliver_remote_route(
     remote_host = route.get("remote_host", host)
     remote_port = route.get("remote_port") or route.get("port")
 
-    if host and wb_port and _probe_workbench(host, wb_port):
-        if _send_via_workbench(host, wb_port, to_agent, from_agent, text, source_instance, reply_route, label=cache_label):
-            update_contact(to_agent, route["instance_id"], host, remote_port or DEFAULT_REMOTE_PORT, wb_port=wb_port)
-            return True
+    if wb_port:
+        for candidate_host in _workbench_hosts_for_route(route):
+            if _probe_workbench(candidate_host, wb_port):
+                if _send_via_workbench(candidate_host, wb_port, to_agent, from_agent, text, source_instance, reply_route, label=cache_label):
+                    update_contact(to_agent, route["instance_id"], candidate_host, remote_port or DEFAULT_REMOTE_PORT, wb_port=wb_port)
+                    return True
 
     if remote_host and remote_port and _probe_remote(remote_host, remote_port):
         if _send_via_remote(remote_host, remote_port, to_agent, from_agent, text, source_instance, reply_route, to_instance=route["instance_id"]):
             update_contact(to_agent, route["instance_id"], remote_host, remote_port, wb_port=wb_port or remote_port)
             return True
 
-    if host and wb_port:
-        if _send_via_workbench(host, wb_port, to_agent, from_agent, text, source_instance, reply_route, label=cache_label):
-            update_contact(to_agent, route["instance_id"], host, remote_port or DEFAULT_REMOTE_PORT, wb_port=wb_port)
-            return True
+    if wb_port:
+        for candidate_host in _workbench_hosts_for_route(route):
+            if _send_via_workbench(candidate_host, wb_port, to_agent, from_agent, text, source_instance, reply_route, label=cache_label):
+                update_contact(to_agent, route["instance_id"], candidate_host, remote_port or DEFAULT_REMOTE_PORT, wb_port=wb_port)
+                return True
 
     if remote_host and remote_port:
         if _send_via_remote(remote_host, remote_port, to_agent, from_agent, text, source_instance, reply_route, to_instance=route["instance_id"]):
