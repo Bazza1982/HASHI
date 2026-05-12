@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from types import SimpleNamespace
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -180,6 +181,27 @@ def test_peers_redacts_without_auth_and_allows_signed_get(tmp_path):
     assert trusted.status_code == 200
     assert trusted.json()["count"] == 2
     assert len(trusted.json()["peers"]) == 2
+
+
+def test_protocol_status_is_redacted_without_auth(tmp_path):
+    _write_shared_token(tmp_path)
+    client, _protocol = _client(tmp_path)
+
+    response = client.get("/protocol/status")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["trusted_view"] is False
+    assert body["protocol_auth_mode"] == "shared-token"
+    assert "local_agents" not in body
+    assert "peers" not in body
+
+
+def test_remote_config_defaults_lan_mode_off():
+    config_path = Path(__file__).resolve().parent.parent / "remote" / "config.yaml"
+    text = config_path.read_text(encoding="utf-8")
+
+    assert "lan_mode: false" in text
 
 
 def test_protocol_manager_post_json_signs_protocol_requests(tmp_path, monkeypatch):

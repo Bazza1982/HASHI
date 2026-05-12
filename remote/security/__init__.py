@@ -2,6 +2,7 @@
 
 from .auth import (
     has_shared_token,
+    protocol_auth_mode,
     set_lan_mode,
     set_pairing_manager,
     set_shared_token,
@@ -38,6 +39,7 @@ __all__ = [
     "has_shared_token",
     "load_or_generate_cert",
     "load_shared_token",
+    "protocol_auth_mode",
     "set_lan_mode",
     "set_pairing_manager",
     "set_shared_token",

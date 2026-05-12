@@ -10,9 +10,9 @@ server:
   use_tls: false
 
 security:
-  # LAN mode: skip token authentication for local network peers
-  # Set to false for internet-exposed deployments (e.g. Tailscale)
-  lan_mode: true
+  # LAN mode: keeps pairing-auth endpoints permissive for trusted local use.
+  # Protocol trust still requires a shared token; leave this false by default.
+  lan_mode: false
 
   # Maximum auth level allowed for terminal commands
   # L0=read-only, L1=read-files, L2=write, L3=restart (never L4=system)

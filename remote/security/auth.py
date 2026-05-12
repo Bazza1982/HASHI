@@ -38,6 +38,10 @@ def has_shared_token() -> bool:
     return bool(_shared_token)
 
 
+def protocol_auth_mode() -> str:
+    return "shared-token" if _shared_token else "discovery-only"
+
+
 def _extract_bearer_token(request: Request) -> Optional[str]:
     auth_header = str(request.headers.get("Authorization") or "").strip()
     if not auth_header.lower().startswith("bearer "):
