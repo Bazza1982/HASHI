@@ -11,6 +11,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 No unreleased changes yet.
 
+## [3.2.1] - 2026-05-12
+
+### 🔧 Fixed
+
+- **Workbench API hot-reboot recovery** — `/reboot` now health-checks the live Workbench API and rebuilds it when the socket exists but `/api/health` is unresponsive.
+  - Covers the failure mode where HChat and Workbench routes fail after a port/proxy or aiohttp listener stall while the HASHI core process remains alive.
+  - Logs the repaired bind host and startup failures through `BridgeU.Bridge` for easier diagnosis.
+- **WSL Workbench bind fallback** — Workbench API can bind to a reachable WSL host address when `127.0.0.1` is unusable in the current environment.
+  - HChat local delivery tries known local Workbench host candidates instead of assuming one loopback address.
+- **HChat hotfix reloadability** — hot reboot now reloads imported `tools.*` modules, and HChat draft delivery refreshes `tools.hchat_send` before sending.
+  - Tool-layer HChat fixes can be adopted through `/reboot` instead of requiring a full HASHI process restart.
+- **Cross-instance HChat route hardening** — remote Workbench delivery now tries multiple host candidates, including same-host loopback, WSL fallback, configured API host, LAN, Tailscale, and internet host values.
+  - Prevents stale discovery data or loopback aliases from making `agent@INSTANCE` appear offline when another reachable route exists.
+- **Remote handshake compatibility guard** — peer handshake payloads tolerate older/test-created protocol manager objects that do not yet have a `_capabilities` attribute.
+  - Keeps alias-response validation intact while avoiding AttributeError during remote status checks.
+
+### 🧪 Tests
+
+- Added `tests/test_reboot_manager.py` coverage proving hot restart reloads `tools.hchat_send`.
+- Validated focused HChat/Remote checks:
+  - `tests/test_hchat_delivery.py`
+  - `tests/test_reboot_manager.py`
+  - `tests/test_remote_peer_status.py`
+
 ## [3.2.0] - 2026-05-09
 
 ### ✨ Added
