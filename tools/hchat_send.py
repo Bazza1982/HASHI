@@ -710,7 +710,7 @@ def send_hchat(
 
     if not target_instance:
         if _is_local_agent(cfg, to_agent):
-            if _send_via_workbench("127.0.0.1", local_port, to_agent, from_agent, text, source_instance, reply_route):
+            if _send_via_local_workbench(cfg, local_port, to_agent, from_agent, text, source_instance, reply_route):
                 return True
             print(f"❌ Local API failed for {to_agent}.", file=sys.stderr)
             return False
@@ -719,7 +719,7 @@ def send_hchat(
 
     if target_instance == instance_id.upper():
         if _is_local_agent(cfg, to_agent):
-            if _send_via_workbench("127.0.0.1", local_port, to_agent, from_agent, text, source_instance, reply_route):
+            if _send_via_local_workbench(cfg, local_port, to_agent, from_agent, text, source_instance, reply_route):
                 return True
             print(f"❌ Local API failed for {to_agent}@{target_instance}.", file=sys.stderr)
             return False
