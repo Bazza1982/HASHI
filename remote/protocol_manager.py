@@ -15,13 +15,17 @@ import asyncio
 import dataclasses
 import json
 import logging
+import socket
 import ssl
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
+
+from remote.security.shared_token import build_auth_headers, load_shared_token
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +96,7 @@ class ProtocolManager:
         instance_key = str(instance_info.get("instance_id") or "hashi").lower()
         self._inflight_path = self._state_dir / f"protocol_inflight_{instance_key}.json"
         self._inflight: dict[str, dict[str, Any]] = self._load_json(self._inflight_path).get("messages", {})
+        self._shared_token = load_shared_token(self._hashi_root)
         self._task: asyncio.Task | None = None
         self._running = False
         self._last_bootstrap_run = 0.0
@@ -124,7 +129,6 @@ class ProtocolManager:
 
     def _local_network_profile(self) -> dict:
         from remote.peer.base import PeerInfo
-        from remote.peer.lan import build_local_network_profile
 
         info = PeerInfo(
             instance_id=str(self._instance_info.get("instance_id") or "HASHI"),
@@ -138,6 +142,16 @@ class ProtocolManager:
             protocol_version=PROTOCOL_VERSION,
             capabilities=list(self._capabilities),
         )
+        try:
+            from remote.peer.lan import build_local_network_profile
+        except ModuleNotFoundError:
+            host_identity = _normalize_identity(socket.gethostname())
+            return {
+                "host_identity": host_identity,
+                "environment_kind": str(info.platform or "unknown").lower(),
+                "address_candidates": [{"host": "127.0.0.1", "scope": "same_host", "source": "fallback"}],
+                "observed_candidates": [{"host": "127.0.0.1", "scope": "same_host", "source": "fallback"}],
+            }
         return build_local_network_profile(info)
 
     def get_local_agents_snapshot(self) -> list[dict]:
@@ -615,6 +629,8 @@ class ProtocolManager:
                             None,
                             lambda u=fwd_url: self._post_json(u, forward_payload, timeout=4),
                         )
+                        if self._response_is_error(result):
+                            raise RuntimeError(result)
                         return 202, result
                     except Exception as exc:
                         fwd_exc = exc
@@ -835,6 +851,8 @@ class ProtocolManager:
                     None,
                     lambda u=url: self._post_json(u, payload, timeout=10),
                 )
+                if self._response_is_error(result):
+                    raise RuntimeError(result)
                 return bool(result.get("ok", True))
             except Exception as exc:
                 last_exc = exc
@@ -867,15 +885,48 @@ class ProtocolManager:
             return json.loads(resp.read().decode("utf-8"))
 
     def _post_json(self, url: str, payload: dict, timeout: int = 10) -> dict:
+        body_bytes = json.dumps(payload).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        path = urlsplit(url).path
+        if self._shared_token and path in {"/protocol/handshake", "/protocol/message"}:
+            headers.update(
+                build_auth_headers(
+                    shared_token=self._shared_token,
+                    method="POST",
+                    path=path,
+                    from_instance=str(self._instance_info.get("instance_id") or ""),
+                    body_bytes=body_bytes,
+                )
+            )
         req = urllib_request.Request(
             url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            data=body_bytes,
+            headers=headers,
             method="POST",
         )
         context = ssl._create_unverified_context() if str(url).startswith("https://") else None
-        with urllib_request.urlopen(req, timeout=timeout, context=context) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+        try:
+            with urllib_request.urlopen(req, timeout=timeout, context=context) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except HTTPError as exc:
+            body = exc.read().decode("utf-8")
+            try:
+                result = json.loads(body) if body else {}
+            except Exception:
+                raise
+            if isinstance(result, dict):
+                result["__http_status"] = exc.code
+            return result
+
+    def _response_is_error(self, result: dict) -> bool:
+        if not isinstance(result, dict):
+            return True
+        status = int(result.get("__http_status") or 200)
+        if status >= 400:
+            return True
+        if result.get("message_type") == "error":
+            return True
+        return result.get("ok", True) is False
 
     def _candidate_urls(self, host: str, port: int, path: str) -> list[str]:
         try:

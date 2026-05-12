@@ -1,16 +1,16 @@
-"""
-Token authentication for Hashi Remote.
-Adapted from Lily Remote — simplified, LAN mode enabled by default.
-"""
+"""Token authentication helpers for Hashi Remote."""
 
 from typing import Optional
 from fastapi import Request, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from .pairing import PairingManager
+from .shared_token import NonceStore, verify_auth_headers
 
 _pairing_manager: Optional[PairingManager] = None
 _lan_mode: bool = True
+_shared_token: Optional[str] = None
+_nonce_store = NonceStore()
 
 
 def set_pairing_manager(manager: PairingManager) -> None:
@@ -25,6 +25,76 @@ def set_lan_mode(enabled: bool) -> None:
 
 def is_lan_mode() -> bool:
     return _lan_mode
+
+
+def set_shared_token(token: str | None) -> None:
+    global _shared_token, _nonce_store
+    value = str(token or "").strip()
+    _shared_token = value or None
+    _nonce_store = NonceStore()
+
+
+def has_shared_token() -> bool:
+    return bool(_shared_token)
+
+
+def _extract_bearer_token(request: Request) -> Optional[str]:
+    auth_header = str(request.headers.get("Authorization") or "").strip()
+    if not auth_header.lower().startswith("bearer "):
+        return None
+    token = auth_header[7:].strip()
+    return token or None
+
+
+def _verify_bearer_token_strict(token: str | None) -> Optional[str]:
+    if not token or _pairing_manager is None:
+        return None
+    return _pairing_manager.verify_token(token)
+
+
+def is_loopback_request(request: Request) -> bool:
+    if request.client is None:
+        return False
+    host = str(request.client.host or "").strip().lower()
+    return host in {"127.0.0.1", "::1", "localhost"}
+
+
+def try_authenticate_request(
+    request: Request,
+    *,
+    body_bytes: bytes = b"",
+    from_instance: str | None = None,
+    allow_loopback: bool = False,
+) -> Optional[str]:
+    if allow_loopback and is_loopback_request(request):
+        return "loopback"
+
+    ok, _reason, authenticated_instance = verify_protocol_request(
+        request,
+        body_bytes=body_bytes,
+        from_instance=from_instance,
+    )
+    if ok:
+        return authenticated_instance or "shared-token"
+
+    return _verify_bearer_token_strict(_extract_bearer_token(request))
+
+
+def verify_protocol_request(
+    request: Request,
+    *,
+    body_bytes: bytes,
+    from_instance: str | None = None,
+) -> tuple[bool, str, str | None]:
+    return verify_auth_headers(
+        headers=request.headers,
+        shared_token=_shared_token,
+        method=request.method,
+        path=request.url.path,
+        body_bytes=body_bytes,
+        nonce_store=_nonce_store,
+        expected_from_instance=from_instance,
+    )
 
 
 class _TokenBearer(HTTPBearer):
@@ -46,8 +116,7 @@ async def verify_token(token: str = Depends(_token_bearer)) -> str:
         return token or "lan-client"
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
-    if _pairing_manager:
-        client_id = _pairing_manager.verify_token(token)
-        if client_id:
-            return client_id
+    client_id = _verify_bearer_token_strict(token)
+    if client_id:
+        return client_id
     raise HTTPException(status_code=401, detail="Invalid or expired token")
