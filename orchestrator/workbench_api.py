@@ -473,7 +473,8 @@ class WorkbenchApiServer:
             runtime = runtime_map.get(to_agent)
             if runtime is None:
                 return web.json_response({"ok": False, "error": f"agent '{to_agent}' not found on {local_instance}"}, status=404)
-            message_text = f"[hchat from {from_agent}@{from_instance}] {text}"
+            from tools.hchat_send import format_hchat_message
+            message_text = format_hchat_message(from_agent, from_instance, text)
             if reply_route and isinstance(reply_route, dict):
                 self._learn_reply_route(message_text, reply_route)
             await runtime.enqueue_api_text(message_text)

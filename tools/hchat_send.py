@@ -37,6 +37,12 @@ DEFAULT_TTL = 3600
 DEFAULT_REMOTE_PORT = 8766
 DEFAULT_EXCHANGE_INSTANCE = "HASHI1"
 HCHAT_HEADER_RE = re.compile(r"^\[hchat from (?P<agent>\w+)(?:@(?P<instance>[\w-]+))?\]\s*(?P<body>.*)$", re.DOTALL)
+HCHAT_AUTOREPLY_INSTRUCTION = (
+    "HChat protocol note: answer this request directly in your normal assistant "
+    "response. Do not run hchat_send.py or send a separate HChat back to the "
+    "sender; the runtime will route your response automatically. Use explicit "
+    "HChat only when the user asks you to contact a third party or broadcast."
+)
 
 
 def _infer_instance_id_from_root() -> str:
@@ -279,6 +285,23 @@ def parse_hchat_message(text: str, default_instance: str | None = None) -> dict 
     }
 
 
+def _is_hchat_reply_body(text: str) -> bool:
+    return (text or "").lstrip().lower().startswith("[hchat reply from ")
+
+
+def format_hchat_message(
+    from_agent: str,
+    source_instance: str,
+    text: str,
+    *,
+    include_autoreply_instruction: bool = True,
+) -> str:
+    body = text
+    if include_autoreply_instruction and not _is_hchat_reply_body(text):
+        body = f"{HCHAT_AUTOREPLY_INSTRUCTION}\n\n{text}"
+    return f"[hchat from {from_agent}@{source_instance}] {body}"
+
+
 def _load_remote_agents(instance_id: str, instance_info: dict) -> list[str]:
     platform = instance_info.get("platform", "")
     if platform == "windows":
@@ -511,7 +534,7 @@ def _send_via_workbench(
     label: str = "local",
 ) -> bool:
     url = f"http://{host}:{port}/api/chat"
-    full_text = f"[hchat from {from_agent}@{source_instance}] {text}"
+    full_text = format_hchat_message(from_agent, source_instance, text)
     payload = {"agent": to_agent.lower(), "text": full_text}
     if reply_route:
         payload["reply_route"] = reply_route
@@ -546,7 +569,7 @@ def _send_via_remote(
     reply_route: dict | None = None,
     to_instance: str | None = None,
 ) -> bool:
-    full_text = f"[hchat from {from_agent}@{source_instance}] {text}"
+    full_text = format_hchat_message(from_agent, source_instance, text)
     payload = {
         "from_instance": source_instance,
         "to_agent": to_agent.lower(),

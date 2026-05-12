@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from tools import hchat_send
 
 
@@ -49,6 +51,53 @@ def test_send_hchat_explicit_local_instance_uses_local_workbench_fallback(monkey
     assert hchat_send.send_hchat("akane@HASHI1", "zelda", "hello") is True
 
     assert calls == [(cfg, 18800, "akane", "zelda", "hello", "HASHI1", {"instance_id": "HASHI1"})]
+
+
+def test_format_hchat_message_adds_autoreply_instruction():
+    message = hchat_send.format_hchat_message("zelda", "HASHI1", "Please review the queue fix.")
+
+    assert message.startswith("[hchat from zelda@HASHI1] HChat protocol note:")
+    assert "Do not run hchat_send.py" in message
+    assert "Please review the queue fix." in message
+
+
+def test_format_hchat_message_preserves_reply_body_for_loop_guard():
+    message = hchat_send.format_hchat_message("akane", "HASHI1", "[hchat reply from akane] done")
+
+    assert message == "[hchat from akane@HASHI1] [hchat reply from akane] done"
+
+
+def test_send_via_workbench_uses_autoreply_envelope(monkeypatch):
+    payloads = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"ok": true}'
+
+    def fake_urlopen(req, timeout):
+        payloads.append(json.loads(req.data.decode("utf-8")))
+        return FakeResponse()
+
+    monkeypatch.setattr(hchat_send.urllib_request, "urlopen", fake_urlopen)
+
+    assert hchat_send._send_via_workbench(
+        "127.0.0.1",
+        18800,
+        "akane",
+        "zelda",
+        "Please review the queue fix.",
+        "HASHI1",
+    )
+
+    assert payloads[0]["agent"] == "akane"
+    assert payloads[0]["text"].startswith("[hchat from zelda@HASHI1] HChat protocol note:")
+    assert "Do not run hchat_send.py" in payloads[0]["text"]
 
 
 def test_check_hchat_route_local_agent_probes_without_delivery(monkeypatch):
