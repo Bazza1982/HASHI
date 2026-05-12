@@ -9,6 +9,12 @@ server:
   port: 8767                # Hashi Remote peer port (8767 — 8766 reserved for HASHI1 legacy remote)
   use_tls: false
 
+lifecycle:
+  # Remote starts by default unless explicitly disabled with /remote off.
+  remote_enabled: true
+  # OS supervisor integration is configured separately; child process is the fallback.
+  remote_supervised: false
+
 security:
   # LAN mode: keeps pairing-auth endpoints permissive for trusted local use.
   # Protocol trust still requires a shared token; leave this false by default.

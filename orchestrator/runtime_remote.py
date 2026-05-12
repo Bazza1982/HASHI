@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from orchestrator import remote_lifecycle
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 
@@ -211,6 +212,8 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
         return
     arg = (context.args[0].lower() if context.args else "").strip()
     cfg = runtime._remote_config_snapshot()
+    lifecycle = remote_lifecycle.load_settings(cfg["root"])
+    disabled = remote_lifecycle.read_disabled_state(cfg["root"])
     alive = runtime._remote_process is not None and runtime._remote_process.returncode is None
 
     if arg == "status" or not arg:
@@ -225,7 +228,17 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
                     f"Expected port: {cfg['port']}  ·  TLS: {'on' if cfg['use_tls'] else 'off'}",
                 )
             else:
-                await runtime._reply_text(update, "⚪ Hashi Remote is not running. Use /remote on to start.")
+                lines = [
+                    "⚪ Hashi Remote is not running.",
+                    f"Lifecycle: <code>{'enabled' if lifecycle.enabled else 'disabled_by_config'}</code>",
+                    f"Supervisor: <code>{'requested' if lifecycle.supervised else 'child_fallback'}</code>",
+                    f"Disabled state: <code>{'yes' if disabled else 'no'}</code>",
+                ]
+                if disabled:
+                    lines.append(f"Reason: <code>{html.escape(str(disabled.get('reason') or 'unknown'))}</code>")
+                    lines.append(f"State file: <code>{html.escape(str(lifecycle.disabled_path))}</code>")
+                lines.append("Use /remote on to start.")
+                await runtime._reply_text(update, "\n".join(lines), parse_mode="HTML")
             return
         instance = health.get("instance") or {}
         peers = list((health.get("peers") or []))
@@ -235,9 +248,13 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
             f"API: <code>{health_url}</code>",
             f"Port: <code>{cfg['port']}</code>  ·  TLS: <code>{'on' if cfg['use_tls'] else 'off'}</code>",
             f"Discovery: <code>{cfg['backend']}</code>",
+            f"Lifecycle: <code>{'enabled' if lifecycle.enabled else 'disabled_by_config'}</code>  ·  Disabled state: <code>{'yes' if disabled else 'no'}</code>",
+            f"Supervisor: <code>{'requested' if lifecycle.supervised else 'child_fallback'}</code>",
             f"Process: <code>{'running' if alive else 'external/unknown'}</code>" + (f" (PID {runtime._remote_process.pid})" if alive else ""),
             f"Peers: <code>{len(peers)}</code>",
         ]
+        if disabled:
+            lines.append(f"Disabled reason: <code>{html.escape(str(disabled.get('reason') or 'unknown'))}</code>")
         if status:
             inflight = int(status.get("inflight_count") or 0)
             lines.append(f"Inflight: <code>{inflight}</code>")
@@ -293,8 +310,15 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
         return
 
     if arg == "off":
+        state_path = remote_lifecycle.write_disabled_state(cfg["root"])
         if runtime._remote_process is None or runtime._remote_process.returncode is not None:
-            await runtime._reply_text(update, "⚪ Hashi Remote is not running.")
+            await runtime._reply_text(
+                update,
+                "🔴 Hashi Remote disabled.\n"
+                "Process: <code>not running</code>\n"
+                f"State: <code>{html.escape(str(state_path))}</code>",
+                parse_mode="HTML",
+            )
             return
         runtime._remote_process.terminate()
         try:
@@ -302,10 +326,16 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
         except asyncio.TimeoutError:
             runtime._remote_process.kill()
         runtime._remote_process = None
-        await runtime._reply_text(update, "🔴 Hashi Remote stopped.")
+        await runtime._reply_text(
+            update,
+            "🔴 Hashi Remote stopped and disabled.\n"
+            f"State: <code>{html.escape(str(state_path))}</code>",
+            parse_mode="HTML",
+        )
         return
 
     if arg == "on":
+        remote_lifecycle.clear_disabled_state(cfg["root"])
         if alive:
             await runtime._reply_text(update, "🟢 Already running (PID %d)." % runtime._remote_process.pid)
             return

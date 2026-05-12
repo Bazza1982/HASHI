@@ -156,6 +156,7 @@ class ProtocolManager:
 
     def get_local_agents_snapshot(self) -> list[dict]:
         agents_path = self._hashi_root / "agents.json"
+        directory_state = "snapshot_may_be_stale"
         if not agents_path.exists():
             return []
         try:
@@ -172,6 +173,7 @@ class ProtocolManager:
                     "agent_address": f"{agent['name']}@{str(self._instance_info.get('instance_id', 'HASHI')).lower()}",
                     "display_name": agent.get("display_name", agent["name"]),
                     "is_active": True,
+                    "directory_state": directory_state,
                     "updated_at": int(time.time()),
                 }
             )

@@ -818,6 +818,29 @@ def test_control_loop_retries_bootstrap_after_startup_window():
     assert calls == [0.0]
 
 
+def test_local_agents_snapshot_marks_phase2_directory_state(tmp_path):
+    (tmp_path / "agents.json").write_text(
+        json.dumps({"agents": [{"name": "zelda", "display_name": "Zelda", "is_active": True}]}),
+        encoding="utf-8",
+    )
+    manager = object.__new__(ProtocolManager)
+    manager._hashi_root = tmp_path
+    manager._instance_info = {"instance_id": "HASHI1"}
+
+    snapshot = ProtocolManager.get_local_agents_snapshot(manager)
+
+    assert snapshot == [
+        {
+            "agent_name": "zelda",
+            "agent_address": "zelda@hashi1",
+            "display_name": "Zelda",
+            "is_active": True,
+            "directory_state": "snapshot_may_be_stale",
+            "updated_at": snapshot[0]["updated_at"],
+        }
+    ]
+
+
 def test_registry_prunes_legacy_alias_with_same_host_and_workbench(tmp_path):
     hashi_root = tmp_path / "hashi"
     hashi_root.mkdir()
