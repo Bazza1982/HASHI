@@ -37,6 +37,7 @@ from remote.api.server import create_app
 from remote.peer.base import PeerInfo
 from remote.peer.lan import LanDiscovery
 from remote.peer.registry import PeerRegistry
+from remote.port_selection import DEFAULT_PORT, select_available_port
 from remote.peer.tailscale import TailscaleDiscovery
 from remote.protocol_manager import ProtocolManager, PROTOCOL_VERSION, build_default_capabilities
 from remote.security.pairing import PairingManager
@@ -45,9 +46,6 @@ from remote.security.tls import load_or_generate_cert
 from remote.terminal.executor import TerminalExecutor, AuthLevel
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_PORT = 8766
-
 
 def _load_remote_config(hashi_root: Path) -> dict:
     config_path = hashi_root / "remote" / "config.yaml"
@@ -440,7 +438,7 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--host", default=None, help="Bind address")
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Peer API port")
+    parser.add_argument("--port", type=int, default=None, help="Peer API port")
     parser.add_argument("--no-tls", action="store_true", help="Disable TLS (dev/debug only)")
     parser.add_argument("--no-lan-mode", action="store_true",
                         help="Require token auth even on LAN (for internet deployments)")
@@ -478,7 +476,17 @@ def main() -> int:
     configured_port = _resolve_configured_remote_port(hashi_root, config)
 
     host = args.host or server_cfg.get("host", "0.0.0.0")
-    port = args.port if args.port != DEFAULT_PORT else configured_port
+    requested_port = args.port or configured_port
+    port, attempted_ports = select_available_port(host, requested_port, configured_port)
+    if port != requested_port:
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s %(message)s")
+        logger.warning(
+            "Configured Remote port %s is unavailable on %s; using %s instead (attempted=%s)",
+            requested_port,
+            host,
+            port,
+            attempted_ports,
+        )
     use_tls = not args.no_tls if args.no_tls else server_cfg.get("use_tls", True)
     lan_mode = not args.no_lan_mode if args.no_lan_mode else security_cfg.get("lan_mode", False)
     discovery_backend = args.discovery or os.getenv("HASHI_REMOTE_DISCOVERY") or discovery_cfg.get("backend", "lan")

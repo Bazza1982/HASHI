@@ -65,6 +65,46 @@ def _as_bool(value: Any, default: bool) -> bool:
     return default
 
 
+def _load_agents_config(root: Path) -> dict[str, Any]:
+    path = root / "agents.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _resolve_remote_port(root: Path, data: dict[str, Any]) -> int:
+    agents = _load_agents_config(root)
+    global_cfg = agents.get("global") or {}
+    instance_id = str(global_cfg.get("instance_id") or "").strip().lower()
+    instances_path = root / "instances.json"
+    if instance_id and instances_path.exists():
+        try:
+            instances = json.loads(instances_path.read_text(encoding="utf-8")).get("instances", {}) or {}
+        except Exception:
+            instances = {}
+        value = (instances.get(instance_id) or {}).get("remote_port")
+        if value:
+            try:
+                return int(value)
+            except Exception:
+                pass
+    value = global_cfg.get("remote_port")
+    if value:
+        try:
+            return int(value)
+        except Exception:
+            pass
+    server = data.get("server") or {}
+    try:
+        return int(server.get("port") or 8766)
+    except Exception:
+        return 8766
+
+
 def load_settings(root: Path | str | None = None) -> RemoteLifecycleSettings:
     hashi_root = resolve_hashi_root(root)
     data = _load_remote_config(hashi_root)
@@ -76,7 +116,7 @@ def load_settings(root: Path | str | None = None) -> RemoteLifecycleSettings:
         enabled=_as_bool(lifecycle.get("remote_enabled", data.get("remote_enabled")), True),
         supervised=_as_bool(lifecycle.get("remote_supervised", data.get("remote_supervised")), False),
         disabled_path=disabled_state_path(hashi_root),
-        port=int(server.get("port") or 8766),
+        port=_resolve_remote_port(hashi_root, data),
         use_tls=_as_bool(server.get("use_tls"), True),
         backend=str(discovery.get("backend") or "lan"),
     )
