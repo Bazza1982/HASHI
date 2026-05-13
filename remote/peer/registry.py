@@ -248,6 +248,7 @@ class PeerRegistry:
         capabilities: list[str] | None = None,
         last_error: str | None = None,
         remote_agents: list[dict] | None = None,
+        remote_agent_directory: dict | None = None,
     ) -> None:
         iid = instance_id.upper()
         peer = self._peers.get(iid)
@@ -274,6 +275,12 @@ class PeerRegistry:
             props["live_status"] = self._derive_live_status(props, now=now_ts)
         if remote_agents is not None:
             props["remote_agents"] = remote_agents
+        if remote_agent_directory is not None:
+            props["remote_agent_directory"] = dict(remote_agent_directory)
+            if remote_agent_directory.get("version"):
+                props["agent_snapshot_version"] = str(remote_agent_directory.get("version"))
+            if remote_agent_directory.get("directory_state"):
+                props["directory_state"] = str(remote_agent_directory.get("directory_state"))
         if protocol_version:
             peer.protocol_version = protocol_version
         if capabilities is not None:

@@ -130,6 +130,7 @@ class ProtocolHandshakePayload(BaseModel):
     capabilities: list[str] = []
     hashi_version: Optional[str] = None
     agents: list[dict] = []
+    agent_directory: dict = {}
     remote_port: Optional[int] = None          # Sender's own Hashi Remote port
     workbench_port: Optional[int] = None       # Sender's workbench port
     platform: Optional[str] = None             # Sender's platform

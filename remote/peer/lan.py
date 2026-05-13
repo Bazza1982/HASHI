@@ -255,6 +255,8 @@ def _service_info_to_peer(info: ServiceInfo, self_instance_id: str) -> Optional[
                 "discovery": "lan",
                 "host_identity": _normalize_host_identity(props.get("host_identity", "")),
                 "environment_kind": props.get("environment_kind", "").strip().lower(),
+                "agent_snapshot_version": props.get("agent_snapshot_version", ""),
+                "directory_state": props.get("directory_state", ""),
                 "address_candidates": address_candidates,
                 "observed_candidates": observed_candidates,
             },
@@ -337,10 +339,23 @@ class LanDiscovery(PeerDiscovery):
             logger.error("LanDiscovery: advertise failed: %s", e)
             return False
 
-    def _start_advertising(self, info: PeerInfo) -> None:
+    async def update_advertisement(self, info: PeerInfo) -> bool:
+        """Refresh mDNS properties without restarting Remote."""
+        if not self._advertising or not self._zeroconf or not self._service_info:
+            return await self.advertise(info)
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, self._update_service_info, info)
+            return True
+        except Exception as e:
+            logger.warning("LanDiscovery: advertisement update failed: %s", e)
+            return False
+
+    def _service_info_for_peer(self, info: PeerInfo) -> ServiceInfo:
         hostname = socket.gethostname()
         local_ip = _get_local_ip()
         network_profile = build_local_network_profile(info)
+        extra = dict(info.properties or {})
 
         props = {
             "instance_id": info.instance_id,
@@ -354,14 +369,14 @@ class LanDiscovery(PeerDiscovery):
             "capabilities": ",".join(info.capabilities or []),
             "host_identity": str(network_profile.get("host_identity") or ""),
             "environment_kind": str(network_profile.get("environment_kind") or ""),
+            "agent_snapshot_version": str(extra.get("agent_snapshot_version") or ""),
+            "directory_state": str(extra.get("directory_state") or ""),
             "address_candidates_json": _encode_candidate_records(network_profile.get("address_candidates") or []),
             "observed_candidates_json": _encode_candidate_records(network_profile.get("observed_candidates") or []),
         }
         props_bytes = {k: v.encode() for k, v in props.items()}
-
         service_name = f"{info.instance_id} - Hashi Remote.{HASHI_SERVICE_TYPE}"
-
-        self._service_info = ServiceInfo(
+        return ServiceInfo(
             type_=HASHI_SERVICE_TYPE,
             name=service_name,
             port=info.port,
@@ -369,6 +384,9 @@ class LanDiscovery(PeerDiscovery):
             server=f"{hostname}.local.",
             addresses=[socket.inet_aton(local_ip)],
         )
+
+    def _start_advertising(self, info: PeerInfo) -> None:
+        self._service_info = self._service_info_for_peer(info)
 
         # Bind to all interfaces so mDNS multicast reaches LAN even when
         # Tailscale is the default route (which would otherwise shadow the LAN NIC).
@@ -383,8 +401,15 @@ class LanDiscovery(PeerDiscovery):
         self._advertising = True
         logger.info(
             "LanDiscovery: advertising as %s @ %s:%d",
-            info.instance_id, local_ip, info.port,
+            info.instance_id, _get_local_ip(), info.port,
         )
+
+    def _update_service_info(self, info: PeerInfo) -> None:
+        if not self._zeroconf:
+            return
+        self._service_info = self._service_info_for_peer(info)
+        self._zeroconf.update_service(self._service_info)
+        logger.info("LanDiscovery: refreshed advertisement for %s", info.instance_id)
 
     async def discover(self) -> list[PeerInfo]:
         """Return currently known peers."""

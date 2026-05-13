@@ -185,6 +185,35 @@ class HashiRemoteApplication:
         self._discoveries: list = []
         self._registry: Optional[PeerRegistry] = None
         self._protocol_manager: Optional[ProtocolManager] = None
+        self._advertisement_task: Optional[asyncio.Task] = None
+        self._last_advertised_agent_snapshot = ""
+
+    def _build_self_peer(
+        self,
+        *,
+        instance_info: dict,
+        instance_id: str,
+        workbench_port: int,
+        local_capabilities: list[str],
+        agent_directory: dict | None = None,
+    ) -> PeerInfo:
+        directory = dict(agent_directory or {})
+        return PeerInfo(
+            instance_id=instance_id,
+            display_name=instance_info["display_name"],
+            host=socket.gethostname(),
+            port=self._port,
+            workbench_port=workbench_port,
+            platform=instance_info["platform"],
+            hashi_version=instance_info["hashi_version"],
+            display_handle=f"@{instance_id.lower()}",
+            protocol_version=PROTOCOL_VERSION,
+            capabilities=list(local_capabilities),
+            properties={
+                "agent_snapshot_version": str(directory.get("version") or ""),
+                "directory_state": str(directory.get("directory_state") or ""),
+            },
+        )
 
     def _setup_logging(self) -> None:
         level = logging.DEBUG if self._verbose else logging.INFO
@@ -254,17 +283,11 @@ class HashiRemoteApplication:
                 )
             )
 
-        peer_self = PeerInfo(
+        peer_self = self._build_self_peer(
+            instance_info=instance_info,
             instance_id=instance_id,
-            display_name=instance_info["display_name"],
-            host=socket.gethostname(),
-            port=self._port,
             workbench_port=workbench_port,
-            platform=instance_info["platform"],
-            hashi_version=instance_info["hashi_version"],
-            display_handle=f"@{instance_id.lower()}",
-            protocol_version=PROTOCOL_VERSION,
-            capabilities=list(local_capabilities),
+            local_capabilities=local_capabilities,
         )
 
         # Start discovery/advertising
@@ -284,6 +307,14 @@ class HashiRemoteApplication:
             local_capabilities=local_capabilities,
         )
         await self._protocol_manager.start()
+        self._advertisement_task = asyncio.create_task(
+            self._continuous_advertisement_loop(
+                instance_info=instance_info,
+                instance_id=instance_id,
+                workbench_port=workbench_port,
+                local_capabilities=local_capabilities,
+            )
+        )
 
         # Create FastAPI app
         app = create_app(
@@ -323,6 +354,42 @@ class HashiRemoteApplication:
 
         await self._uvicorn_server.serve()
 
+    async def _continuous_advertisement_loop(
+        self,
+        *,
+        instance_info: dict,
+        instance_id: str,
+        workbench_port: int,
+        local_capabilities: list[str],
+    ) -> None:
+        while not self._shutdown_event.is_set():
+            try:
+                if not self._protocol_manager:
+                    await asyncio.sleep(30)
+                    continue
+                directory = self._protocol_manager.get_local_agent_directory_state()
+                version = str(directory.get("version") or "")
+                directory_state = str(directory.get("directory_state") or "")
+                advertisement_key = f"{version}:{directory_state}"
+                should_refresh = advertisement_key != self._last_advertised_agent_snapshot
+                if should_refresh:
+                    peer_self = self._build_self_peer(
+                        instance_info=instance_info,
+                        instance_id=instance_id,
+                        workbench_port=workbench_port,
+                        local_capabilities=local_capabilities,
+                        agent_directory=directory,
+                    )
+                    for discovery in self._discoveries:
+                        update = getattr(discovery, "update_advertisement", None)
+                        if update is not None:
+                            await update(peer_self)
+                    self._last_advertised_agent_snapshot = advertisement_key
+                    logger.info("Advertisement refreshed with agent snapshot %s", version or "none")
+            except Exception as exc:
+                logger.warning("Advertisement refresh failed: %s", exc)
+            await asyncio.sleep(30)
+
     def run(self) -> int:
         self._setup_logging()
         self._setup_signals()
@@ -361,6 +428,8 @@ class HashiRemoteApplication:
 
         for discovery in self._discoveries:
             _stop(discovery.stop())
+        if self._advertisement_task:
+            self._advertisement_task.cancel()
         if self._protocol_manager:
             _stop(self._protocol_manager.stop())
 
