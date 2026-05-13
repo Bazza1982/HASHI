@@ -1,7 +1,6 @@
 """Peer discovery exports with lazy backend imports."""
 
-from .base import PeerDiscovery, PeerInfo
-from .registry import PeerRegistry
+from .base import PeerDiscovery, PeerInfo, is_valid_instance_id, normalize_instance_id
 
 __all__ = [
     "LanDiscovery",
@@ -10,6 +9,8 @@ __all__ = [
     "PeerRegistry",
     "TailscaleDiscovery",
     "create_lan_discovery",
+    "is_valid_instance_id",
+    "normalize_instance_id",
 ]
 
 
@@ -26,4 +27,8 @@ def __getattr__(name: str):
         from .tailscale import TailscaleDiscovery
 
         return TailscaleDiscovery
+    if name == "PeerRegistry":
+        from .registry import PeerRegistry
+
+        return PeerRegistry
     raise AttributeError(name)
