@@ -332,6 +332,7 @@ class ProtocolManager:
             live_entry = live_endpoints.get(instance_id.lower(), {})
             probe_ports = self._bootstrap_probe_ports(entry, live_entry)
             if not probe_ports:
+                logger.debug("Bootstrap: %s has no live or fallback probe ports, skipping", instance_id)
                 continue
             seen_hosts = self._candidate_hosts_for_entry(entry)
 

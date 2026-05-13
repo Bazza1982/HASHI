@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import asyncio
+import stat
 import sys
 import time
 import json
@@ -27,7 +28,7 @@ from remote.peer.base import PeerInfo
 from remote.peer.registry import PeerRegistry
 from remote.peer.tailscale import TailscaleDiscovery
 from remote.protocol_manager import ProtocolManager
-from remote.live_endpoints import write_live_endpoints
+from remote.live_endpoints import read_live_endpoints, remove_live_endpoint, write_live_endpoints
 from tools.hchat_send import parse_hchat_message
 
 
@@ -953,6 +954,74 @@ def test_bootstrap_probe_ports_prefers_live_endpoint(tmp_path):
     ports = manager._bootstrap_probe_ports({"remote_port": 8767}, {"port": 30264})
 
     assert ports == [30264, 8767]
+
+
+def test_bootstrap_known_peers_logs_when_no_probe_ports(caplog, tmp_path):
+    manager = object.__new__(ProtocolManager)
+    manager._hashi_root = tmp_path
+    manager._instance_info = {"instance_id": "HASHI1"}
+    manager._peer_registry = None
+    manager._load_instances = lambda: {"hashi2": {"instance_id": "HASHI2"}}
+    manager._dedupe_bootstrap_instances = lambda instances: instances
+    manager._bootstrap_probe_ports = lambda entry, live_entry=None: []
+
+    caplog.set_level("DEBUG", logger="remote.protocol_manager")
+
+    asyncio.run(manager._bootstrap_known_peers())
+
+    assert "Bootstrap: HASHI2 has no live or fallback probe ports, skipping" in caplog.text
+
+
+def test_live_endpoints_file_is_private(tmp_path):
+    write_live_endpoints(
+        tmp_path,
+        [
+            PeerInfo(
+                instance_id="HASHI2",
+                display_name="HASHI2",
+                host="192.168.0.211",
+                port=30264,
+                workbench_port=18802,
+                platform="wsl",
+            )
+        ],
+    )
+
+    mode = (tmp_path / "state" / "remote_live_endpoints.json").stat().st_mode
+
+    assert stat.S_IMODE(mode) == 0o600
+
+
+def test_remove_live_endpoint_removes_only_matching_instance(tmp_path):
+    write_live_endpoints(
+        tmp_path,
+        [
+            PeerInfo(
+                instance_id="HASHI2",
+                display_name="HASHI2",
+                host="192.168.0.211",
+                port=30264,
+                workbench_port=18802,
+                platform="wsl",
+            ),
+            PeerInfo(
+                instance_id="HASHI3",
+                display_name="HASHI3",
+                host="192.168.0.212",
+                port=30265,
+                workbench_port=18803,
+                platform="linux",
+            ),
+        ],
+    )
+
+    assert remove_live_endpoint(tmp_path, "hashi2") is True
+
+    endpoints = read_live_endpoints(tmp_path)
+    assert "hashi2" not in endpoints
+    assert endpoints["hashi3"]["port"] == 30265
+    mode = (tmp_path / "state" / "remote_live_endpoints.json").stat().st_mode
+    assert stat.S_IMODE(mode) == 0o600
 
 
 def test_tailscale_discovery_uses_live_endpoint_port(monkeypatch, tmp_path):
