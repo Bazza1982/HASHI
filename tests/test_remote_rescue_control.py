@@ -61,6 +61,31 @@ def test_hashi_rescue_start_requires_l3_restart(tmp_path):
     assert "L3_RESTART" in response.json()["error"]
 
 
+def test_hashi_rescue_logs_returns_bounded_fixed_log_tail(tmp_path):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "remote_rescue_hashi_start.log").write_text("one\ntwo\nthree\n", encoding="utf-8")
+    client = _client(tmp_path)
+
+    response = client.get("/control/hashi/logs?name=start&tail=2")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["name"] == "start"
+    assert body["exists"] is True
+    assert body["lines"] == ["two", "three"]
+
+
+def test_hashi_rescue_logs_rejects_unknown_log_name(tmp_path):
+    client = _client(tmp_path)
+
+    response = client.get("/control/hashi/logs?name=../../secrets")
+
+    assert response.status_code == 400
+    assert response.json()["ok"] is False
+
+
 def test_hashi_rescue_start_writes_audit_when_already_running(tmp_path):
     (tmp_path / ".bridge_u_f.pid").write_text(str(os.getpid()), encoding="utf-8")
     client = _client(tmp_path, max_level=AuthLevel.L3_RESTART)
@@ -125,4 +150,32 @@ def test_protocol_status_reports_dynamic_rescue_capabilities(tmp_path):
     body = response.json()
     assert "rescue_control" in body["capabilities"]
     assert "rescue_start" in body["capabilities"]
+    assert body["rescue_start_enabled"] is True
     assert body["remote_supervisor"]["mode"] == "supervised"
+
+
+def test_protocol_status_reports_rescue_start_disabled_at_l2(tmp_path):
+    protocol = ProtocolManager(
+        hashi_root=tmp_path,
+        instance_info={"instance_id": "HASHI_TEST"},
+        peer_registry=None,
+        workbench_port=1,
+        local_capabilities=build_default_capabilities(rescue_start_enabled=False),
+    )
+    app = create_app(
+        {"instance_id": "HASHI_TEST"},
+        PairingManager(storage_dir=tmp_path / "pairing", lan_mode=True),
+        TerminalExecutor(max_allowed_level=AuthLevel.L2_WRITE),
+        protocol_manager=protocol,
+        hashi_root=str(tmp_path),
+        workbench_port=1,
+    )
+    client = TestClient(app)
+
+    response = client.get("/protocol/status")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["rescue_start_enabled"] is False
+    assert body["rescue_start_requirement"] == "L3_RESTART"
+    assert "rescue_start" not in body["capabilities"]
