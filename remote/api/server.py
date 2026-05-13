@@ -55,6 +55,7 @@ from ..security.shared_token import load_shared_token
 from ..security.pairing import PairingManager
 from ..terminal.executor import TerminalExecutor, AuthLevel
 from ..audit.logger import get_audit_logger
+from ..local_http import local_http_hosts, local_http_url
 
 logger = logging.getLogger(__name__)
 
@@ -340,16 +341,18 @@ def _read_rescue_log(name: str, tail: int = 120) -> dict[str, Any]:
 
 
 def _workbench_health_url() -> str:
-    return f"http://127.0.0.1:{_workbench_port}/api/health"
+    return local_http_url(_workbench_port, "/api/health")
 
 
 def _fetch_workbench_health(timeout: float = 1.0) -> dict[str, Any] | None:
-    req = urllib_request.Request(_workbench_health_url(), method="GET")
-    try:
-        with urllib_request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except Exception:
-        return None
+    for host in local_http_hosts():
+        req = urllib_request.Request(local_http_url(_workbench_port, "/api/health", host=host), method="GET")
+        try:
+            with urllib_request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            continue
+    return None
 
 
 def _hashi_control_status() -> dict[str, Any]:
@@ -621,7 +624,7 @@ def create_app(
             message_text = f"[hchat from {payload.from_instance.lower()}] {payload.text}"
 
         # POST to local Workbench API
-        workbench_url = f"http://127.0.0.1:{_workbench_port}/api/chat"
+        workbench_url = local_http_url(_workbench_port, "/api/chat")
         wb_payload = {
             "agent": payload.to_agent.lower(),
             "text": message_text,
