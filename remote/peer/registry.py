@@ -77,6 +77,33 @@ class PeerRegistry:
         self._peers: dict[str, PeerInfo] = {}
         self._load_state()
 
+    def _peer_state_is_expired(self, instance_id: str, item: dict, *, now: int | None = None) -> bool:
+        iid = str(instance_id or "").strip().upper()
+        if not iid or iid == self._self_id:
+            return False
+        now_ts = int(now or time.time())
+        canonical = item.get("canonical") if isinstance(item, dict) else {}
+        observations = item.get("observations") if isinstance(item, dict) else {}
+        prop_sets: list[dict] = []
+        if isinstance(canonical, dict):
+            prop_sets.append(canonical.get("properties") or {})
+        if isinstance(observations, dict):
+            for obs in observations.values():
+                if isinstance(obs, dict):
+                    prop_sets.append(obs.get("properties") or {})
+        timestamp = 0
+        for props in prop_sets:
+            if not isinstance(props, dict):
+                continue
+            for field in ("last_seen_ok", "last_seen", "last_handshake_at", "last_seen_error"):
+                try:
+                    timestamp = max(timestamp, int(props.get(field) or 0))
+                except Exception:
+                    continue
+        if timestamp:
+            return now_ts - timestamp > LEGACY_INSTANCE_TTL_SECONDS
+        return any(str((props or {}).get("live_status") or "").strip().lower() == "offline" for props in prop_sets)
+
     def on_peers_changed(self, peers: list[PeerInfo]) -> None:
         """Callback for LanDiscovery — called whenever peers list changes."""
         backend = None
@@ -299,7 +326,12 @@ class PeerRegistry:
             return
         try:
             data = json.loads(self._state_path.read_text(encoding="utf-8"))
+            changed = False
             for iid, item in (data.get("peers") or {}).items():
+                if self._peer_state_is_expired(iid, item):
+                    logger.info("Registry: pruning expired peer state for %s", str(iid).upper())
+                    changed = True
+                    continue
                 canonical = item.get("canonical")
                 observations = item.get("observations") or {}
                 if canonical:
@@ -308,6 +340,8 @@ class PeerRegistry:
                     name: PeerInfo(**obs)
                     for name, obs in observations.items()
                 }
+            if changed:
+                self._save_state()
             if self._observations:
                 self._rebuild_canonical_peers()
             elif self._prune_duplicate_peer_aliases():
