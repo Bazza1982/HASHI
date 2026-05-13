@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import json
 
 import pytest
 
@@ -44,6 +45,34 @@ def test_load_settings_reads_default_on_lifecycle(tmp_path):
     assert settings.use_tls is False
     assert settings.backend == "tailscale"
     assert settings.disabled_path == tmp_path / "state" / "remote_disabled.json"
+
+
+def test_load_settings_prefers_instance_registry_port(tmp_path):
+    (tmp_path / "remote").mkdir()
+    (tmp_path / "remote" / "config.yaml").write_text(
+        "\n".join(
+            [
+                "server:",
+                "  port: 8767",
+                "  use_tls: false",
+                "lifecycle:",
+                "  remote_enabled: true",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "agents.json").write_text(
+        json.dumps({"global": {"instance_id": "HASHI1", "remote_port": 9999}}),
+        encoding="utf-8",
+    )
+    (tmp_path / "instances.json").write_text(
+        json.dumps({"instances": {"hashi1": {"instance_id": "HASHI1", "remote_port": 8766}}}),
+        encoding="utf-8",
+    )
+
+    settings = remote_lifecycle.load_settings(tmp_path)
+
+    assert settings.port == 8766
 
 
 @pytest.mark.asyncio
