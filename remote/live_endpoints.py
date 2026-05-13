@@ -36,7 +36,32 @@ def write_live_endpoints(root: Path | str, peers: Iterable[Any]) -> dict[str, An
     path = live_endpoints_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    path.chmod(0o600)
     return data
+
+
+def remove_live_endpoint(root: Path | str, instance_id: str) -> bool:
+    normalized_id = str(instance_id or "").strip().lower()
+    if not normalized_id:
+        return False
+    path = live_endpoints_path(root)
+    if not path.exists():
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    endpoints = data.get("endpoints") if isinstance(data, dict) else {}
+    if not isinstance(endpoints, dict):
+        return False
+    removed = endpoints.pop(normalized_id, None) is not None
+    if not removed:
+        return False
+    data["endpoints"] = endpoints
+    data["updated_at"] = time.time()
+    path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    path.chmod(0o600)
+    return True
 
 
 def read_live_endpoints(root: Path | str, *, max_age_seconds: int = 24 * 3600) -> dict[str, dict[str, Any]]:

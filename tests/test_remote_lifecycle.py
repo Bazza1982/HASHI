@@ -1,10 +1,26 @@
 from types import SimpleNamespace
 import json
+import sys
 
 import pytest
 
+sys.modules.setdefault(
+    "zeroconf",
+    SimpleNamespace(
+        IPVersion=object,
+        InterfaceChoice=object,
+        ServiceBrowser=object,
+        ServiceInfo=object,
+        ServiceListener=object,
+        Zeroconf=object,
+    ),
+)
+
 from orchestrator import remote_lifecycle
 from orchestrator.startup_manager import StartupManager
+from remote.live_endpoints import read_live_endpoints, write_live_endpoints
+from remote.main import HashiRemoteApplication
+from remote.peer.base import PeerInfo
 from remote.runtime_identity import (
     read_runtime_claim,
     runtime_claim_path,
@@ -113,6 +129,47 @@ def test_runtime_claim_round_trip(tmp_path):
     assert runtime_claim_path(tmp_path).exists()
     assert claim["instance_id"] == "HASHI1"
     assert read_runtime_claim(tmp_path)["port"] == 8766
+
+
+def test_remote_shutdown_removes_own_live_endpoint(tmp_path):
+    app = HashiRemoteApplication(hashi_root=tmp_path, use_tls=False)
+    app._instance_id = "HASHI1"
+    write_runtime_claim(
+        root=tmp_path,
+        instance_id="HASHI1",
+        port=8766,
+        bind_host="0.0.0.0",
+        code_root=tmp_path,
+        supervised=False,
+    )
+    write_live_endpoints(
+        tmp_path,
+        [
+            PeerInfo(
+                instance_id="HASHI1",
+                display_name="HASHI1",
+                host="127.0.0.1",
+                port=8766,
+                workbench_port=18800,
+                platform="linux",
+            ),
+            PeerInfo(
+                instance_id="HASHI2",
+                display_name="HASHI2",
+                host="127.0.0.2",
+                port=30264,
+                workbench_port=18802,
+                platform="linux",
+            ),
+        ],
+    )
+
+    app.shutdown()
+
+    assert read_runtime_claim(tmp_path) is None
+    endpoints = read_live_endpoints(tmp_path)
+    assert "hashi1" not in endpoints
+    assert "hashi2" in endpoints
 
 
 def test_build_child_command_pins_hashi_root(monkeypatch, tmp_path):

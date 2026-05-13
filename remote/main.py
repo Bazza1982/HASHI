@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from orchestrator.remote_lifecycle import read_disabled_state
 from remote.api.server import create_app
+from remote.live_endpoints import remove_live_endpoint
 from remote.peer.base import PeerInfo
 from remote.peer.lan import LanDiscovery
 from remote.peer.registry import PeerRegistry
@@ -186,6 +187,7 @@ class HashiRemoteApplication:
         self._protocol_manager: Optional[ProtocolManager] = None
         self._advertisement_task: Optional[asyncio.Task] = None
         self._last_advertised_agent_snapshot = ""
+        self._instance_id = ""
 
     def _build_self_peer(
         self,
@@ -232,6 +234,7 @@ class HashiRemoteApplication:
     async def _run_async(self) -> None:
         instance_info = _load_instance_info(self._hashi_root)
         instance_id = instance_info["instance_id"]
+        self._instance_id = str(instance_id or "").strip().upper()
         workbench_port = instance_info["workbench_port"]
         claim = write_runtime_claim(
             root=self._hashi_root,
@@ -441,6 +444,8 @@ class HashiRemoteApplication:
             self._advertisement_task.cancel()
         if self._protocol_manager:
             _stop(self._protocol_manager.stop())
+        if self._instance_id:
+            remove_live_endpoint(self._hashi_root, self._instance_id)
         remove_runtime_claim(self._hashi_root, pid=os.getpid())
 
 
