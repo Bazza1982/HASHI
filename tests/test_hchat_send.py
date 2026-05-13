@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from urllib.error import URLError
 
 from tools import hchat_send
 
@@ -98,6 +99,24 @@ def test_send_via_workbench_uses_autoreply_envelope(monkeypatch):
     assert payloads[0]["agent"] == "akane"
     assert payloads[0]["text"].startswith("[hchat from zelda@HASHI1] HChat protocol note:")
     assert "Do not run hchat_send.py" in payloads[0]["text"]
+
+
+def test_probe_http_returns_false_on_unexpected_exception(monkeypatch):
+    def fake_urlopen(_req, **_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(hchat_send.urllib_request, "urlopen", fake_urlopen)
+
+    assert hchat_send._probe_http("http://127.0.0.1:18800/api/health") is False
+
+
+def test_probe_http_returns_false_on_url_error(monkeypatch):
+    def fake_urlopen(_req, **_kwargs):
+        raise URLError("down")
+
+    monkeypatch.setattr(hchat_send.urllib_request, "urlopen", fake_urlopen)
+
+    assert hchat_send._probe_http("http://127.0.0.1:18800/api/health") is False
 
 
 def test_check_hchat_route_local_agent_probes_without_delivery(monkeypatch):
