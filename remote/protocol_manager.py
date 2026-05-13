@@ -27,6 +27,7 @@ from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
 
 from remote.routing import build_route_candidates, same_machine_hint, validate_same_host_port_conflicts
+from remote.local_http import local_http_hosts, local_http_url
 from remote.security.shared_token import build_auth_headers, load_shared_token
 
 logger = logging.getLogger(__name__)
@@ -174,11 +175,14 @@ class ProtocolManager:
         if now - cached_at <= 5:
             return cached_value
         port = int((getattr(self, "_instance_info", {}) or {}).get("workbench_port") or getattr(self, "_workbench_port", 18800) or 18800)
-        try:
-            with urllib_request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=0.4) as resp:
-                ok = 200 <= int(getattr(resp, "status", 200)) < 300
-        except Exception:
-            ok = False
+        ok = False
+        for host in local_http_hosts():
+            try:
+                with urllib_request.urlopen(local_http_url(port, "/api/health", host=host), timeout=0.4) as resp:
+                    ok = 200 <= int(getattr(resp, "status", 200)) < 300
+                    break
+            except Exception:
+                continue
         self._core_health_cache = (now, ok)
         return ok
 
@@ -820,36 +824,48 @@ class ProtocolManager:
         return f"System exchange reply from {from_agent}@{from_instance}:\n{text}"
 
     async def _enqueue_local_prompt(self, agent_name: str, text: str) -> str | None:
-        url = f"http://127.0.0.1:{self._workbench_port}/api/chat"
         payload = {"agent": agent_name, "text": text}
-        try:
-            result = await asyncio.get_running_loop().run_in_executor(
-                None,
-                lambda: self._post_json(url, payload, timeout=10),
-            )
-            if result.get("ok"):
-                return str(result.get("request_id") or "")
-        except Exception as exc:
-            logger.warning("Protocol local enqueue failed: %s", exc)
+        last_exc = None
+        for host in local_http_hosts():
+            url = local_http_url(self._workbench_port, "/api/chat", host=host)
+            try:
+                result = await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    lambda u=url: self._post_json(u, payload, timeout=10),
+                )
+                if result.get("ok"):
+                    return str(result.get("request_id") or "")
+            except Exception as exc:
+                last_exc = exc
+        if last_exc:
+            logger.warning("Protocol local enqueue failed: %s", last_exc)
         return None
 
     async def _get_transcript_offset(self, agent_name: str) -> int:
-        url = f"http://127.0.0.1:{self._workbench_port}/api/transcript/{agent_name}?limit=1"
-        try:
-            result = await asyncio.get_running_loop().run_in_executor(
-                None,
-                lambda: self._get_json(url, timeout=10),
-            )
-            return int(result.get("offset") or 0)
-        except Exception:
-            return 0
+        for host in local_http_hosts():
+            url = local_http_url(self._workbench_port, f"/api/transcript/{agent_name}?limit=1", host=host)
+            try:
+                result = await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    lambda u=url: self._get_json(u, timeout=10),
+                )
+                return int(result.get("offset") or 0)
+            except Exception:
+                continue
+        return 0
 
     async def _poll_transcript(self, agent_name: str, offset: int) -> dict:
-        url = f"http://127.0.0.1:{self._workbench_port}/api/transcript/{agent_name}/poll?offset={offset}"
-        return await asyncio.get_running_loop().run_in_executor(
-            None,
-            lambda: self._get_json(url, timeout=10),
-        )
+        last_exc = None
+        for host in local_http_hosts():
+            url = local_http_url(self._workbench_port, f"/api/transcript/{agent_name}/poll?offset={offset}", host=host)
+            try:
+                return await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    lambda u=url: self._get_json(u, timeout=10),
+                )
+            except Exception as exc:
+                last_exc = exc
+        raise last_exc or RuntimeError("local transcript poll failed")
 
     async def _process_inflight_once(self) -> None:
         if not self._inflight:

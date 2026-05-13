@@ -6,6 +6,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from .pairing import PairingManager
 from .shared_token import NonceStore, verify_auth_headers
+from ..local_http import is_local_http_host
 
 _pairing_manager: Optional[PairingManager] = None
 _lan_mode: bool = True
@@ -60,7 +61,7 @@ def is_loopback_request(request: Request) -> bool:
     if request.client is None:
         return False
     host = str(request.client.host or "").strip().lower()
-    return host in {"127.0.0.1", "::1", "localhost"}
+    return is_local_http_host(host)
 
 
 def try_authenticate_request(
