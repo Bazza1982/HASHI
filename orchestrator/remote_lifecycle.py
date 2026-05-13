@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import sys
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,6 +14,14 @@ try:
     import yaml
 except Exception:  # pragma: no cover - optional dependency fallback
     yaml = None
+
+from remote.local_http import local_http_hosts
+from remote.runtime_identity import (
+    configured_instance_id,
+    pid_is_alive,
+    read_runtime_claim,
+    remove_runtime_claim,
+)
 
 
 @dataclass(frozen=True)
@@ -184,7 +193,7 @@ def build_child_command(settings: RemoteLifecycleSettings) -> list[str]:
     python = find_python(settings.root)
     if python is None:
         raise FileNotFoundError("No Python interpreter found for Hashi Remote")
-    cmd = [str(python), "-m", "remote", "--port", str(settings.port)]
+    cmd = [str(python), "-m", "remote", "--hashi-root", str(settings.root), "--port", str(settings.port)]
     if not settings.use_tls:
         cmd.append("--no-tls")
     if settings.backend in {"lan", "tailscale", "both"}:
@@ -199,8 +208,9 @@ async def ensure_remote_started(root: Path | str | None = None) -> dict[str, Any
         return {"ok": False, "action": "skipped", "reason": "remote_enabled=false", "settings": settings}
     if disabled:
         return {"ok": False, "action": "skipped", "reason": "remote explicitly disabled", "disabled": disabled, "settings": settings}
-    if await _is_port_open("127.0.0.1", settings.port):
-        return {"ok": True, "action": "already_running", "settings": settings}
+    owned = await _find_owned_remote(settings)
+    if owned:
+        return {"ok": True, "action": "already_running", "settings": settings, **owned}
     if settings.supervised:
         return {
             "ok": False,
@@ -229,6 +239,49 @@ async def ensure_remote_started(root: Path | str | None = None) -> dict[str, Any
         "log_path": log_path,
         "settings": settings,
     }
+
+
+async def _find_owned_remote(settings: RemoteLifecycleSettings) -> dict[str, Any] | None:
+    expected_id = configured_instance_id(settings.root).upper()
+    claim = read_runtime_claim(settings.root)
+    ports: list[int] = []
+    if claim:
+        try:
+            ports.append(int(claim.get("port") or 0))
+        except Exception:
+            pass
+    ports.append(settings.port)
+    ports = [port for index, port in enumerate(ports) if port > 0 and port not in ports[:index]]
+
+    for port in ports:
+        for host in local_http_hosts():
+            health = await _fetch_remote_health(host, port)
+            if not health:
+                continue
+            instance = health.get("instance") or {}
+            actual_id = str(instance.get("instance_id") or "").strip().upper()
+            runtime_claim = instance.get("runtime_claim") or {}
+            claim_root = str(runtime_claim.get("root") or "").strip()
+            root_matches = not claim_root or Path(claim_root).expanduser().resolve() == settings.root
+            if actual_id == expected_id and root_matches:
+                return {"port": port, "health": health, "health_host": host}
+    if claim and not pid_is_alive(claim.get("pid")):
+        remove_runtime_claim(settings.root)
+    return None
+
+
+async def _fetch_remote_health(host: str, port: int) -> dict[str, Any] | None:
+    url = f"http://{host}:{int(port)}/health"
+    try:
+        return await asyncio.get_running_loop().run_in_executor(None, lambda: _fetch_json(url))
+    except Exception:
+        return None
+
+
+def _fetch_json(url: str) -> dict[str, Any] | None:
+    with urllib.request.urlopen(url, timeout=0.8) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    return data if isinstance(data, dict) else None
 
 
 async def _is_port_open(host: str, port: int) -> bool:

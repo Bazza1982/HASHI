@@ -361,7 +361,7 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
             )
             return
 
-        cmd = [str(venv_python), "-m", "remote"]
+        cmd = [str(venv_python), "-m", "remote", "--hashi-root", str(root)]
         cmd.extend(["--port", str(cfg["port"])])
         if not cfg["use_tls"]:
             cmd.append("--no-tls")
