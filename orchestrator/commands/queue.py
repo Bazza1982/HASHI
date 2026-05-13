@@ -5,9 +5,7 @@ from collections import deque
 from datetime import datetime
 from typing import Any
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-
-from orchestrator.command_registry import RuntimeCallback, RuntimeCommand
+from orchestrator.command_registry import RuntimeCommand
 
 
 USAGE = (
@@ -27,16 +25,16 @@ def _is_authorized(runtime: Any, update: Any) -> bool:
     return authorized_id is None or user_id == authorized_id
 
 
-async def _send(runtime: Any, update: Any, text: str, *, reply_markup: Any = None) -> None:
+async def _send(runtime: Any, update: Any, text: str) -> None:
     chat = getattr(update, "effective_chat", None)
     chat_id = getattr(chat, "id", None)
     send_text = getattr(runtime, "_send_text", None)
     if chat_id is not None and callable(send_text):
-        await send_text(chat_id, text, parse_mode="HTML", reply_markup=reply_markup)
+        await send_text(chat_id, text, parse_mode="HTML")
         return
     message = getattr(update, "message", None)
     if message is not None and hasattr(message, "reply_text"):
-        await message.reply_text(text, parse_mode="HTML", reply_markup=reply_markup)
+        await message.reply_text(text, parse_mode="HTML")
         return
     if chat_id is not None and hasattr(runtime, "send_long_message"):
         await runtime.send_long_message(
@@ -44,7 +42,6 @@ async def _send(runtime: Any, update: Any, text: str, *, reply_markup: Any = Non
             text,
             request_id="queue-command",
             purpose="command",
-            reply_markup=reply_markup,
         )
 
 
@@ -101,18 +98,6 @@ def _matches(item: Any, request_id: str) -> bool:
     return rid == wanted or rid.endswith(wanted)
 
 
-def _resolve_item_id(runtime: Any, token: str) -> str:
-    value = str(token or "").strip()
-    if not value:
-        return ""
-    if value.isdigit():
-        index = int(value)
-        items = _queue_items(runtime)
-        if 1 <= index <= len(items):
-            return _item_id(items[index - 1])
-    return value
-
-
 def _item_line(index: int, item: Any) -> str:
     rid = html.escape(_item_id(item) or f"#{index}")
     source = html.escape(str(getattr(item, "source", "?") or "?"))
@@ -150,50 +135,8 @@ def _build_list(runtime: Any) -> str:
         lines.append("")
         lines.append("Queue is empty.")
     lines.append("")
-    lines.append("<i>Use the buttons below, or commands: /queue show &lt;id&gt;, /queue cancel &lt;id&gt;, /queue clear, /queue history</i>")
+    lines.append("<i>Commands: /queue show &lt;id&gt;, /queue cancel &lt;id&gt;, /queue clear, /queue history</i>")
     return "\n".join(lines)
-
-
-def _queue_keyboard(runtime: Any) -> InlineKeyboardMarkup | None:
-    rows: list[list[InlineKeyboardButton]] = []
-    for index, item in enumerate(_queue_items(runtime)[:10], 1):
-        rid = _item_id(item)
-        if not rid:
-            continue
-        short_id = rid if len(rid) <= 12 else f"...{rid[-9:]}"
-        rows.append(
-            [
-                InlineKeyboardButton(f"👁 {index}. {short_id}", callback_data=f"queue:show:{rid}"),
-                InlineKeyboardButton("❌ Cancel", callback_data=f"queue:cancel:{rid}"),
-            ]
-        )
-    nav = [InlineKeyboardButton("🔄 Refresh", callback_data="queue:list")]
-    if _queue_items(runtime):
-        nav.append(InlineKeyboardButton("🧹 Clear", callback_data="queue:clear:ask"))
-    rows.append(nav)
-    rows.append([InlineKeyboardButton("📜 History", callback_data="queue:history")])
-    return InlineKeyboardMarkup(rows) if rows else None
-
-
-def _detail_keyboard(item: Any) -> InlineKeyboardMarkup | None:
-    rid = _item_id(item)
-    if not rid:
-        return None
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("❌ Cancel this item", callback_data=f"queue:cancel:{rid}")],
-            [InlineKeyboardButton("↩ Queue list", callback_data="queue:list")],
-        ]
-    )
-
-
-def _clear_confirm_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("⚠️ Clear pending queue", callback_data="queue:clear:yes")],
-            [InlineKeyboardButton("↩ Keep queue", callback_data="queue:list")],
-        ]
-    )
 
 
 def _find_item(runtime: Any, request_id: str) -> Any | None:
@@ -242,27 +185,16 @@ def _remove_items(runtime: Any, predicate) -> list[Any]:
 
 
 async def _cancel(runtime: Any, update: Any, request_id: str) -> None:
-    resolved_id = _resolve_item_id(runtime, request_id)
-    removed = _remove_items(runtime, lambda item: _matches(item, resolved_id))
+    removed = _remove_items(runtime, lambda item: _matches(item, request_id))
     if not removed:
-        await _send(runtime, update, f"Item <code>{html.escape(request_id)}</code> not found in pending queue.", reply_markup=_queue_keyboard(runtime))
+        await _send(runtime, update, f"Item <code>{html.escape(request_id)}</code> not found in pending queue.")
         return
-    await _send(
-        runtime,
-        update,
-        f"Cancelled {len(removed)} pending item(s): <code>{html.escape(_item_id(removed[0]))}</code>\n\n{_build_list(runtime)}",
-        reply_markup=_queue_keyboard(runtime),
-    )
+    await _send(runtime, update, f"Cancelled {len(removed)} pending item(s): <code>{html.escape(_item_id(removed[0]))}</code>")
 
 
 async def _clear(runtime: Any, update: Any) -> None:
     removed = _remove_items(runtime, lambda _item: True)
-    await _send(
-        runtime,
-        update,
-        f"Cleared {len(removed)} pending item(s). Running request was not interrupted.\n\n{_build_list(runtime)}",
-        reply_markup=_queue_keyboard(runtime),
-    )
+    await _send(runtime, update, f"Cleared {len(removed)} pending item(s). Running request was not interrupted.")
 
 
 def _history(runtime: Any) -> str:
@@ -294,17 +226,11 @@ async def queue_command(runtime: Any, update: Any, context: Any) -> None:
         await _send(runtime, update, html.escape(USAGE))
         return
     if sub in {"list", "ls", "status"}:
-        await _send(runtime, update, _build_list(runtime), reply_markup=_queue_keyboard(runtime))
+        await _send(runtime, update, _build_list(runtime))
         return
     if sub == "show" and len(args) >= 2:
-        resolved_id = _resolve_item_id(runtime, args[1])
-        item = _find_item(runtime, resolved_id)
-        await _send(
-            runtime,
-            update,
-            _format_detail(item) if item else f"Item <code>{html.escape(args[1])}</code> not found.",
-            reply_markup=_detail_keyboard(item) if item else _queue_keyboard(runtime),
-        )
+        item = _find_item(runtime, args[1])
+        await _send(runtime, update, _format_detail(item) if item else f"Item <code>{html.escape(args[1])}</code> not found.")
         return
     if sub == "cancel" and len(args) >= 2:
         await _cancel(runtime, update, args[1])
@@ -318,74 +244,10 @@ async def queue_command(runtime: Any, update: Any, context: Any) -> None:
     await _send(runtime, update, html.escape(USAGE))
 
 
-async def queue_callback(runtime: Any, update: Any, context: Any) -> None:
-    query = getattr(update, "callback_query", None)
-    if query is None:
-        return
-    user_id = getattr(getattr(query, "from_user", None), "id", None)
-    checker = getattr(runtime, "_is_authorized_user", None)
-    if callable(checker) and not checker(user_id):
-        await query.answer("Not authorized.", show_alert=True)
-        return
-    if not callable(checker):
-        authorized_id = getattr(getattr(runtime, "global_config", None), "authorized_id", None)
-        if authorized_id is not None and user_id != authorized_id:
-            await query.answer("Not authorized.", show_alert=True)
-            return
-    data = str(getattr(query, "data", "") or "")
-    parts = data.split(":", 2)
-    if len(parts) < 2 or parts[0] != "queue":
-        await query.answer()
-        return
-    action = parts[1]
-    arg = parts[2] if len(parts) > 2 else ""
-    await query.answer()
-
-    async def edit(text: str, markup: Any = None) -> None:
-        if hasattr(query, "edit_message_text"):
-            await query.edit_message_text(text=text, parse_mode="HTML", reply_markup=markup)
-
-    if action == "list":
-        await edit(_build_list(runtime), _queue_keyboard(runtime))
-        return
-    if action == "history":
-        await edit(_history(runtime), InlineKeyboardMarkup([[InlineKeyboardButton("↩ Queue list", callback_data="queue:list")]]))
-        return
-    if action == "show":
-        item = _find_item(runtime, arg)
-        await edit(_format_detail(item) if item else f"Item <code>{html.escape(arg)}</code> not found.", _detail_keyboard(item) if item else _queue_keyboard(runtime))
-        return
-    if action == "cancel":
-        removed = _remove_items(runtime, lambda item: _matches(item, arg))
-        if not removed:
-            await edit(f"Item <code>{html.escape(arg)}</code> not found in pending queue.\n\n{_build_list(runtime)}", _queue_keyboard(runtime))
-            return
-        await edit(
-            f"Cancelled pending item: <code>{html.escape(_item_id(removed[0]))}</code>\n\n{_build_list(runtime)}",
-            _queue_keyboard(runtime),
-        )
-        return
-    if action == "clear" and arg == "ask":
-        await edit(f"Clear all {_queue_size(runtime)} pending item(s)? Running request will not be interrupted.", _clear_confirm_keyboard())
-        return
-    if action == "clear" and arg == "yes":
-        removed = _remove_items(runtime, lambda _item: True)
-        await edit(f"Cleared {len(removed)} pending item(s). Running request was not interrupted.\n\n{_build_list(runtime)}", _queue_keyboard(runtime))
-        return
-    await edit(_build_list(runtime), _queue_keyboard(runtime))
-
-
 COMMANDS = [
     RuntimeCommand(
         name="queue",
         description="View and manage this agent's pending queue",
         callback=queue_command,
-    )
-]
-
-CALLBACKS = [
-    RuntimeCallback(
-        pattern=r"^queue:",
-        callback=queue_callback,
     )
 ]
