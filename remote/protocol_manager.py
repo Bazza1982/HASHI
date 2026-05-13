@@ -28,6 +28,7 @@ from urllib.error import HTTPError, URLError
 
 from remote.routing import build_route_candidates, same_machine_hint, validate_same_host_port_conflicts
 from remote.local_http import local_http_hosts, local_http_url
+from remote.live_endpoints import read_live_endpoints
 from remote.security.shared_token import build_auth_headers, load_shared_token
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,7 @@ class ProtocolManager:
         settle_window_seconds: float = 2.0,
         reply_soft_timeout_seconds: int = 45,
         reply_hard_timeout_seconds: int = 180,
+        use_tls: bool = True,
     ):
         self._hashi_root = hashi_root
         self._instance_info = instance_info
@@ -93,6 +95,7 @@ class ProtocolManager:
         self._settle_window_seconds = max(0.5, float(settle_window_seconds))
         self._reply_soft_timeout_seconds = max(5, int(reply_soft_timeout_seconds))
         self._reply_hard_timeout_seconds = max(self._reply_soft_timeout_seconds, int(reply_hard_timeout_seconds))
+        self._use_tls = bool(use_tls)
         self._bootstrap_retry_seconds = 60.0
         self._state_dir = Path.home() / ".hashi-remote"
         self._state_dir.mkdir(parents=True, exist_ok=True)
@@ -317,6 +320,7 @@ class ProtocolManager:
         self._last_bootstrap_run = time.time()
         local_id = str(self._instance_info.get("instance_id") or "").upper()
         instances = self._dedupe_bootstrap_instances(self._load_instances())
+        live_endpoints = read_live_endpoints(self._hashi_root)
         for key, entry in instances.items():
             if not isinstance(entry, dict):
                 continue
@@ -325,39 +329,63 @@ class ProtocolManager:
                 continue
             if self._peer_registry and self._peer_registry.get_peer(instance_id):
                 continue  # Already known via mDNS
-            remote_port = entry.get("remote_port")
-            if not remote_port:
+            live_entry = live_endpoints.get(instance_id.lower(), {})
+            probe_ports = self._bootstrap_probe_ports(entry, live_entry)
+            if not probe_ports:
                 continue
             seen_hosts = self._candidate_hosts_for_entry(entry)
 
             for host in seen_hosts:
-                if self._probe_route(host, int(remote_port), timeout=2):
+                selected_port = None
+                for remote_port in probe_ports:
+                    if self._probe_route(host, int(remote_port), timeout=2):
+                        selected_port = int(remote_port)
+                        break
+                if selected_port:
                     from remote.peer.base import PeerInfo
                     peer = PeerInfo(
                         instance_id=instance_id,
-                        display_name=str(entry.get("display_name") or instance_id),
+                        display_name=str(live_entry.get("display_name") or entry.get("display_name") or instance_id),
                         host=host,
-                        port=int(remote_port),
-                        workbench_port=int(entry.get("workbench_port") or 18800),
-                        platform=str(entry.get("platform") or "unknown"),
+                        port=selected_port,
+                        workbench_port=int(live_entry.get("workbench_port") or entry.get("workbench_port") or 18800),
+                        platform=str(live_entry.get("platform") or entry.get("platform") or "unknown"),
                         hashi_version=str(entry.get("hashi_version") or "unknown"),
                         display_handle=f"@{instance_id.lower()}",
-                        protocol_version=str(entry.get("protocol_version") or "1.0"),
-                        capabilities=list(entry.get("capabilities") or []),
+                        protocol_version=str(live_entry.get("protocol_version") or entry.get("protocol_version") or "1.0"),
+                        capabilities=list(live_entry.get("capabilities") or entry.get("capabilities") or []),
                         properties={
                             "discovery": "bootstrap",
+                            "live_endpoint_source": "cache" if live_entry else "seed",
                             "address_candidates": list(entry.get("address_candidates") or []),
                             "observed_candidates": list(entry.get("observed_candidates") or []),
-                            "host_identity": _normalize_identity(entry.get("host_identity") or ""),
-                            "environment_kind": str(entry.get("environment_kind") or "").strip().lower(),
+                            "host_identity": _normalize_identity(live_entry.get("host_identity") or entry.get("host_identity") or ""),
+                            "environment_kind": str(live_entry.get("environment_kind") or entry.get("environment_kind") or "").strip().lower(),
                         },
                     )
                     if self._peer_registry:
                         self._peer_registry.on_peers_changed([peer])
-                        logger.info("Bootstrap: registered %s @ %s:%d", instance_id, host, remote_port)
+                        logger.info("Bootstrap: registered %s @ %s:%d", instance_id, host, selected_port)
                     break
                 else:
-                    logger.debug("Bootstrap: %s @ %s:%d not reachable", instance_id, host, remote_port)
+                    logger.debug("Bootstrap: %s @ %s ports=%s not reachable", instance_id, host, probe_ports)
+
+    def _bootstrap_probe_ports(self, entry: dict, live_entry: dict | None = None) -> list[int]:
+        ports: list[int] = []
+
+        def add(value: Any) -> None:
+            try:
+                port = int(value or 0)
+            except Exception:
+                return
+            if port > 0 and port not in ports:
+                ports.append(port)
+
+        live = live_entry or {}
+        add(live.get("port"))
+        add(entry.get("announced_port"))
+        add(entry.get("remote_port"))
+        return ports
 
     def _bootstrap_entry_score(self, entry: dict) -> tuple[int, int, str]:
         caps = list(entry.get("capabilities") or [])
@@ -1052,7 +1080,7 @@ class ProtocolManager:
             port_num = int(port)
         except Exception:
             port_num = 0
-        schemes = ("https", "http") if port_num == 8766 else ("http", "https")
+        schemes = ("https", "http") if self._use_tls else ("http", "https")
         return [f"{scheme}://{host}:{port_num}{path}" for scheme in schemes]
 
     def _load_json(self, path: Path) -> dict:

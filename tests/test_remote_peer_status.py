@@ -25,7 +25,9 @@ sys.modules.setdefault(
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from remote.peer.base import PeerInfo
 from remote.peer.registry import PeerRegistry
+from remote.peer.tailscale import TailscaleDiscovery
 from remote.protocol_manager import ProtocolManager
+from remote.live_endpoints import write_live_endpoints
 from tools.hchat_send import parse_hchat_message
 
 
@@ -910,6 +912,89 @@ def test_control_loop_retries_bootstrap_after_startup_window():
     asyncio.run(ProtocolManager._control_loop(manager))
 
     assert calls == [0.0]
+
+
+def test_candidate_urls_follow_protocol_tls_setting(tmp_path):
+    manager = ProtocolManager(
+        hashi_root=tmp_path,
+        instance_info={"instance_id": "HASHI1", "remote_port": 30264, "workbench_port": 18800},
+        peer_registry=None,
+        workbench_port=18800,
+        use_tls=True,
+    )
+
+    urls = manager._candidate_urls("10.0.0.1", 30264, "/health")
+
+    assert urls[0] == "https://10.0.0.1:30264/health"
+
+
+def test_candidate_urls_follow_protocol_plain_http_setting(tmp_path):
+    manager = ProtocolManager(
+        hashi_root=tmp_path,
+        instance_info={"instance_id": "HASHI1", "remote_port": 30264, "workbench_port": 18800},
+        peer_registry=None,
+        workbench_port=18800,
+        use_tls=False,
+    )
+
+    urls = manager._candidate_urls("10.0.0.1", 30264, "/health")
+
+    assert urls[0] == "http://10.0.0.1:30264/health"
+
+
+def test_bootstrap_probe_ports_prefers_live_endpoint(tmp_path):
+    manager = ProtocolManager(
+        hashi_root=tmp_path,
+        instance_info={"instance_id": "HASHI1", "remote_port": 8766, "workbench_port": 18800},
+        peer_registry=None,
+        workbench_port=18800,
+    )
+
+    ports = manager._bootstrap_probe_ports({"remote_port": 8767}, {"port": 30264})
+
+    assert ports == [30264, 8767]
+
+
+def test_tailscale_discovery_uses_live_endpoint_port(monkeypatch, tmp_path):
+    status_path = tmp_path / "tailscale.json"
+    status_path.write_text(
+        json.dumps(
+            {
+                "Peer": {
+                    "node1": {
+                        "Online": True,
+                        "HostName": "hashi2",
+                        "TailscaleIPs": ["100.64.0.2"],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HASHI_TAILSCALE_STATUS_JSON", str(status_path))
+    (tmp_path / "instances.json").write_text(
+        json.dumps({"instances": {"hashi2": {"instance_id": "HASHI2", "remote_port": 8767}}}),
+        encoding="utf-8",
+    )
+    write_live_endpoints(
+        tmp_path,
+        [
+            PeerInfo(
+                instance_id="HASHI2",
+                display_name="HASHI2",
+                host="192.168.0.211",
+                port=30264,
+                workbench_port=18802,
+                platform="wsl",
+            )
+        ],
+    )
+    discovery = TailscaleDiscovery("HASHI1", tmp_path)
+
+    peers = discovery._load_peers()
+
+    assert peers[0].port == 30264
+    assert peers[0].properties["live_endpoint_source"] == "cache"
 
 
 def test_local_agents_snapshot_marks_fresh_directory_state(tmp_path):

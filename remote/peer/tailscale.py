@@ -15,6 +15,8 @@ import subprocess
 from pathlib import Path
 from typing import Callable, Optional
 
+from remote.live_endpoints import read_live_endpoints
+
 from .base import PeerDiscovery, PeerInfo
 
 logger = logging.getLogger(__name__)
@@ -117,6 +119,7 @@ class TailscaleDiscovery(PeerDiscovery):
         status = self._load_status_json()
         peers = []
         instances = self._load_instances()
+        live_endpoints = read_live_endpoints(self._hashi_root)
         for node in status.get("Peer", {}).values():
             if not node.get("Online"):
                 continue
@@ -125,23 +128,30 @@ class TailscaleDiscovery(PeerDiscovery):
                 continue
 
             instance_info = instances.get(instance_id.lower(), {})
+            live_info = live_endpoints.get(instance_id.lower(), {})
             host = self._pick_host(node)
             if not host:
                 continue
+            port = int(live_info.get("port") or instance_info.get("announced_port") or instance_info.get("remote_port") or 8766)
 
             peers.append(
                 PeerInfo(
                     instance_id=instance_id,
-                    display_name=node.get("HostName") or instance_info.get("display_name") or instance_id,
+                    display_name=live_info.get("display_name") or node.get("HostName") or instance_info.get("display_name") or instance_id,
                     host=host,
-                    port=int(instance_info.get("remote_port", 8766)),
-                    workbench_port=int(instance_info.get("workbench_port", 18800)),
-                    platform=instance_info.get("platform", "unknown"),
+                    port=port,
+                    workbench_port=int(live_info.get("workbench_port") or instance_info.get("workbench_port") or 18800),
+                    platform=live_info.get("platform") or instance_info.get("platform", "unknown"),
                     hashi_version=node.get("OS", "unknown"),
                     display_handle=f"@{instance_id.lower()}",
-                    protocol_version=str(instance_info.get("protocol_version", "1.0")),
-                    capabilities=list(instance_info.get("capabilities", [])) if isinstance(instance_info.get("capabilities"), list) else [],
-                    properties={"discovery": "tailscale"},
+                    protocol_version=str(live_info.get("protocol_version") or instance_info.get("protocol_version") or "1.0"),
+                    capabilities=list(live_info.get("capabilities") or instance_info.get("capabilities") or []),
+                    properties={
+                        "discovery": "tailscale",
+                        "live_endpoint_source": "cache" if live_info else "seed",
+                        "host_identity": str(live_info.get("host_identity") or instance_info.get("host_identity") or ""),
+                        "environment_kind": str(live_info.get("environment_kind") or instance_info.get("environment_kind") or ""),
+                    },
                 )
             )
         return peers

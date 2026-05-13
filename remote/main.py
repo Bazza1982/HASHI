@@ -313,6 +313,7 @@ class HashiRemoteApplication:
             peer_registry=self._registry,
             workbench_port=workbench_port,
             local_capabilities=local_capabilities,
+            use_tls=self._use_tls,
         )
         await self._protocol_manager.start()
         self._advertisement_task = asyncio.create_task(

@@ -16,6 +16,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
 
+from remote.live_endpoints import write_live_endpoints
+
 from .base import PeerInfo
 
 logger = logging.getLogger(__name__)
@@ -818,6 +820,10 @@ class PeerRegistry:
 
     def _sync_to_instances_json(self) -> None:
         """Write discovered peer IPs into instances.json for hchat routing."""
+        try:
+            write_live_endpoints(self._root, self._peers.values())
+        except Exception as exc:
+            logger.warning("Registry: failed to write live endpoint cache: %s", exc)
         if not self._instances_path.exists():
             logger.warning("instances.json not found at %s", self._instances_path)
             return
