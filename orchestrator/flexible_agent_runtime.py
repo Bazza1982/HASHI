@@ -38,6 +38,7 @@ from orchestrator import runtime_mode
 from orchestrator import runtime_nudge
 from orchestrator import runtime_pipeline
 from orchestrator import runtime_remote
+from remote.local_http import local_http_hosts
 from orchestrator import runtime_session
 from orchestrator import runtime_status
 from orchestrator import runtime_transfer
@@ -5642,7 +5643,12 @@ class FlexibleAgentRuntime:
         cfg = self._remote_config_snapshot()
         port = int(cfg["port"])
         schemes = ("https", "http") if cfg["use_tls"] else ("http", "https")
-        return [f"{scheme}://127.0.0.1:{port}{path}" for scheme in schemes]
+        normalized_path = path if str(path).startswith("/") else f"/{path}"
+        urls: list[str] = []
+        for host in local_http_hosts():
+            for scheme in schemes:
+                urls.append(f"{scheme}://{host}:{port}{normalized_path}")
+        return urls
 
     async def _fetch_remote_json(self, path: str) -> tuple[dict[str, Any] | None, str | None]:
         timeout = aiohttp.ClientTimeout(total=4)

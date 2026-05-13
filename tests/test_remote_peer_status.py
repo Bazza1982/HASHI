@@ -45,6 +45,7 @@ class _RemoteRenderDummy:
 
 class _RemoteConfigDummy:
     _remote_config_snapshot = FlexibleAgentRuntime._remote_config_snapshot
+    _remote_urls = FlexibleAgentRuntime._remote_urls
 
 
 def test_registry_derives_offline_for_timed_out_peer_without_live_fields(tmp_path):
@@ -700,6 +701,28 @@ def test_remote_config_snapshot_prefers_instances_remote_port_over_agents_and_ya
     cfg = FlexibleAgentRuntime._remote_config_snapshot(dummy)
 
     assert cfg["port"] == 8766
+
+
+def test_remote_urls_use_local_http_hosts_for_wsl_alias(monkeypatch, tmp_path):
+    dummy = _RemoteConfigDummy()
+    dummy.global_config = SimpleNamespace(project_root=tmp_path)
+    monkeypatch.setattr(
+        "orchestrator.flexible_agent_runtime.local_http_hosts",
+        lambda: ("10.255.255.254", "127.0.0.1"),
+    )
+    (tmp_path / "remote").mkdir()
+    (tmp_path / "remote" / "config.yaml").write_text(
+        "server:\n  port: 8766\n  use_tls: false\n",
+        encoding="utf-8",
+    )
+
+    urls = FlexibleAgentRuntime._remote_urls(dummy, "peers")
+
+    assert urls[:2] == [
+        "http://10.255.255.254:8766/peers",
+        "https://10.255.255.254:8766/peers",
+    ]
+    assert "http://127.0.0.1:8766/peers" in urls
 
 
 def test_render_remote_peer_endpoints_explains_same_host_loopback(tmp_path):
