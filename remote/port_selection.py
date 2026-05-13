@@ -19,8 +19,14 @@ def is_port_available(host: str, port: int) -> bool:
     return True
 
 
-def candidate_ports(requested_port: int, configured_port: int) -> list[int]:
+def candidate_ports(
+    requested_port: int,
+    configured_port: int,
+    *,
+    reserved_ports: set[int] | None = None,
+) -> list[int]:
     candidates: list[int] = []
+    reserved = set(reserved_ports or set())
 
     def add(value: int | None) -> None:
         if not value:
@@ -28,6 +34,8 @@ def candidate_ports(requested_port: int, configured_port: int) -> list[int]:
         try:
             port = int(value)
         except Exception:
+            return
+        if port in reserved:
             return
         if port > 0 and port not in candidates:
             candidates.append(port)
@@ -40,9 +48,15 @@ def candidate_ports(requested_port: int, configured_port: int) -> list[int]:
     return candidates
 
 
-def select_available_port(host: str, requested_port: int, configured_port: int) -> tuple[int, list[int]]:
+def select_available_port(
+    host: str,
+    requested_port: int,
+    configured_port: int,
+    *,
+    reserved_ports: set[int] | None = None,
+) -> tuple[int, list[int]]:
     attempted: list[int] = []
-    for port in candidate_ports(requested_port, configured_port):
+    for port in candidate_ports(requested_port, configured_port, reserved_ports=reserved_ports):
         attempted.append(port)
         if is_port_available(host, port):
             return port, attempted
