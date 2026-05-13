@@ -494,6 +494,48 @@ def test_registry_load_state_rebuilds_stale_canonical_from_fresher_observation(t
         Path.home = original_home
 
 
+def test_registry_load_state_prunes_expired_peer_state(tmp_path, monkeypatch):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    (hashi_root / "instances.json").write_text('{"instances": {}}', encoding="utf-8")
+    state_home = tmp_path / "state-home-expired"
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: state_home))
+    state_path = state_home / ".hashi-remote" / "peers_state_hashi1.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    old_seen = int(time.time()) - (25 * 3600)
+    state_path.write_text(
+        json.dumps(
+            {
+                "peers": {
+                    "MSI": {
+                        "canonical": {
+                            "instance_id": "MSI",
+                            "display_name": "MSI",
+                            "host": "192.168.0.41",
+                            "port": 8767,
+                            "workbench_port": 8779,
+                            "platform": "windows",
+                            "properties": {
+                                "discovery": "lan",
+                                "live_status": "offline",
+                                "last_seen_ok": old_seen,
+                            },
+                        },
+                        "observations": {},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    registry = PeerRegistry(hashi_root, "HASHI1")
+
+    assert registry.get_peer("MSI") is None
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    assert saved["peers"] == {}
+
+
 def test_bootstrap_dedupes_legacy_aliases_on_same_endpoint():
     manager = object.__new__(ProtocolManager)
     manager._instance_info = {"instance_id": "HASHI2", "platform": "wsl"}
