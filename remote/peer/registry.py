@@ -810,7 +810,6 @@ class PeerRegistry:
                 if "same_host_loopback" in prev_props:
                     merged.properties["same_host_loopback"] = prev_props["same_host_loopback"]
             if self._same_machine_hint(iid, by_backend, chosen):
-                merged.host = "127.0.0.1"
                 merged.properties["same_host_loopback"] = "127.0.0.1"
             merged.properties = self._normalize_live_props(merged.properties)
             merged.properties["live_status"] = self._derive_live_status(merged.properties)
