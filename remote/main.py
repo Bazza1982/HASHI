@@ -116,32 +116,6 @@ def _resolve_configured_remote_port(hashi_root: Path, config: dict | None = None
         return DEFAULT_PORT
 
 
-def _reserved_remote_ports(hashi_root: Path) -> set[int]:
-    cfg = _load_agents_config(hashi_root)
-    global_cfg = cfg.get("global", {}) if isinstance(cfg, dict) else {}
-    current_instance_id = str(global_cfg.get("instance_id") or "").strip().lower()
-    instances_path = hashi_root / "instances.json"
-    if not instances_path.exists():
-        return set()
-    try:
-        instances = json.loads(instances_path.read_text(encoding="utf-8")).get("instances", {}) or {}
-    except Exception:
-        return set()
-
-    reserved: set[int] = set()
-    for key, entry in instances.items():
-        instance_id = str((entry or {}).get("instance_id") or key or "").strip().lower()
-        if instance_id == current_instance_id:
-            continue
-        try:
-            port = int((entry or {}).get("remote_port") or 0)
-        except Exception:
-            continue
-        if port > 0:
-            reserved.add(port)
-    return reserved
-
-
 def _load_instance_info(hashi_root: Path) -> dict:
     """Extract this instance's info from agents.json global section."""
     cfg = _load_agents_config(hashi_root)
@@ -507,7 +481,6 @@ def main() -> int:
         host,
         requested_port,
         configured_port,
-        reserved_ports=_reserved_remote_ports(hashi_root),
     )
     if port != requested_port:
         logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s %(message)s")
