@@ -1,6 +1,6 @@
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("install", "uninstall", "start", "stop", "restart", "status", "logs", "command")]
+    [ValidateSet("install", "uninstall", "start", "stop", "restart", "status", "logs", "command", "doctor")]
     [string]$Action = "status",
 
     [string]$HashiRoot,
@@ -63,6 +63,41 @@ function Install-HashiRemoteTask {
     Write-Host $CommandPreview
 }
 
+function Get-RemotePort {
+    if ($Port) {
+        return [int]$Port
+    }
+    $ConfigPath = Join-Path $HashiRoot "remote\config.yaml"
+    if (Test-Path $ConfigPath) {
+        $Match = Select-String -Path $ConfigPath -Pattern '^\s*port:\s*(\d+)' | Select-Object -First 1
+        if ($Match -and $Match.Matches.Count -gt 0) {
+            return [int]$Match.Matches[0].Groups[1].Value
+        }
+    }
+    return 8766
+}
+
+function Show-RemoteDoctor {
+    $EffectivePort = Get-RemotePort
+    $FirewallRules = Get-NetFirewallRule -Direction Inbound -Enabled True -ErrorAction SilentlyContinue |
+        Where-Object { $_.DisplayName -match "Hashi|Remote|Python" }
+    $Listening = Get-NetTCPConnection -LocalPort $EffectivePort -State Listen -ErrorAction SilentlyContinue
+    $WslStatus = $null
+    if (Get-Command wsl.exe -ErrorAction SilentlyContinue) {
+        $WslStatus = (& wsl.exe --status 2>$null) -join "`n"
+    }
+    [PSCustomObject]@{
+        HashiRoot = $HashiRoot
+        RemotePort = $EffectivePort
+        Listening = [bool]$Listening
+        FirewallRuleCount = @($FirewallRules).Count
+        FirewallRules = @($FirewallRules | Select-Object -ExpandProperty DisplayName)
+        WslAvailable = [bool](Get-Command wsl.exe -ErrorAction SilentlyContinue)
+        WslStatus = $WslStatus
+        Command = $CommandPreview
+    } | Format-List
+}
+
 switch ($Action) {
     "install" {
         Install-HashiRemoteTask
@@ -106,5 +141,8 @@ switch ($Action) {
     }
     "command" {
         Write-Host $CommandPreview
+    }
+    "doctor" {
+        Show-RemoteDoctor
     }
 }

@@ -268,6 +268,10 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
             )
             if not (status.get("shared_token_configured") or health.get("shared_token_configured")):
                 lines.append("Mode: <code>discovery-only</code> — trusted protocol messaging is unavailable.")
+            route_diagnostics = status.get("route_diagnostics") or {}
+            conflicts = list(route_diagnostics.get("port_conflicts") or [])
+            if conflicts:
+                lines.append(f"Route warnings: <code>{len(conflicts)}</code> same-host port conflict(s)")
         await runtime._reply_text(update, "\n".join(lines), parse_mode="HTML")
         return
 
