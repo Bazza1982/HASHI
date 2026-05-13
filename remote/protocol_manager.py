@@ -29,6 +29,7 @@ from urllib.error import HTTPError, URLError
 from remote.routing import build_route_candidates, same_machine_hint, validate_same_host_port_conflicts
 from remote.local_http import local_http_hosts, local_http_url
 from remote.live_endpoints import read_live_endpoints
+from remote.peer.base import is_valid_instance_id
 from remote.security.shared_token import build_auth_headers, load_shared_token
 
 logger = logging.getLogger(__name__)
@@ -325,6 +326,9 @@ class ProtocolManager:
             if not isinstance(entry, dict):
                 continue
             instance_id = str(entry.get("instance_id") or key).upper()
+            if not is_valid_instance_id(instance_id):
+                logger.debug("Bootstrap: skipping invalid instance identity from seed: %s", instance_id or key)
+                continue
             if instance_id == local_id:
                 continue
             if self._peer_registry and self._peer_registry.get_peer(instance_id):
