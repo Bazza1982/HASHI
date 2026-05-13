@@ -36,6 +36,7 @@ Hashi Remote exposes a fixed control protocol:
 
 ```text
 GET  /control/hashi/status
+GET  /control/hashi/logs?name=start|audit|supervisor&tail=120
 POST /control/hashi/start
 ```
 
@@ -67,6 +68,9 @@ Each start attempt also appends a structured audit record to:
 ```text
 logs/remote_rescue_audit.jsonl
 ```
+
+`/control/hashi/logs` returns bounded tails from fixed log names only. It does
+not accept arbitrary paths.
 
 The audit record includes requester, reason, launcher command, PID, log path,
 outcome, status state, and error text when available.
@@ -171,6 +175,7 @@ Commands:
 ```bash
 python tools/remote_rescue.py capabilities HASHI1
 python tools/remote_rescue.py status HASHI1
+python tools/remote_rescue.py logs HASHI1 --name start --tail 120
 python tools/remote_rescue.py start HASHI1 --reason "core down"
 python tools/remote_rescue.py status HASHI1 --json
 ```

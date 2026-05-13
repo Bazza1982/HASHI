@@ -100,3 +100,21 @@ def test_start_success_passes_reason(monkeypatch):
     assert code == 0
     assert payload["started"] is True
     assert seen_payloads == [{"reason": "core down"}]
+
+
+def test_logs_returns_remote_tail(monkeypatch):
+    monkeypatch.setattr(remote_rescue, "_load_instances", _instances)
+
+    def fake_request(url, **kwargs):
+        if url.endswith("/health"):
+            return remote_rescue.HttpResult(200, {"ok": True}, url)
+        if "/control/hashi/logs" in url:
+            return remote_rescue.HttpResult(200, {"ok": True, "lines": ["a", "b"]}, url)
+        raise AssertionError(url)
+
+    monkeypatch.setattr(remote_rescue, "_request_json_status", fake_request)
+
+    code, payload = remote_rescue.rescue_logs("HASHI9", name="start", tail=2)
+
+    assert code == 0
+    assert payload["lines"] == ["a", "b"]

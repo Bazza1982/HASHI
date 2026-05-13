@@ -319,6 +319,26 @@ def _append_rescue_audit(
         handle.write(json.dumps(record, sort_keys=True) + "\n")
 
 
+def _read_rescue_log(name: str, tail: int = 120) -> dict[str, Any]:
+    if not _hashi_root:
+        raise ValueError("Hashi root is unavailable")
+    root = Path(_hashi_root)
+    files = {
+        "start": root / "logs" / "remote_rescue_hashi_start.log",
+        "audit": root / "logs" / "remote_rescue_audit.jsonl",
+        "supervisor": root / "logs" / "hashi-remote-supervisor.log",
+    }
+    key = str(name or "start").strip().lower()
+    if key not in files:
+        raise ValueError("log name must be one of: start, audit, supervisor")
+    path = files[key]
+    max_lines = max(1, min(int(tail or 120), 500))
+    if not path.exists():
+        return {"ok": True, "name": key, "path": str(path), "exists": False, "lines": []}
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-max_lines:]
+    return {"ok": True, "name": key, "path": str(path), "exists": True, "lines": lines}
+
+
 def _workbench_health_url() -> str:
     return f"http://127.0.0.1:{_workbench_port}/api/health"
 
@@ -460,14 +480,22 @@ def create_app(
         if _protocol_manager is None:
             return {"ok": False, "error": "protocol manager unavailable"}
         authenticated = try_authenticate_request(request, allow_loopback=True)
+        rescue_start_enabled = bool(_terminal_executor and _terminal_executor.allows_level(AuthLevel.L3_RESTART))
         if not authenticated:
-            return {"ok": True, **_redacted_protocol_status()}
+            return {
+                "ok": True,
+                **_redacted_protocol_status(),
+                "rescue_start_enabled": rescue_start_enabled,
+                "rescue_start_requirement": "L3_RESTART",
+            }
         return {
             "ok": True,
             **_protocol_manager.get_protocol_status(),
             "protocol_auth_mode": protocol_auth_mode(),
             "shared_token_configured": has_shared_token(),
             "lan_mode": is_lan_mode(),
+            "rescue_start_enabled": rescue_start_enabled,
+            "rescue_start_requirement": "L3_RESTART",
             "trusted_view": True,
         }
 
@@ -649,6 +677,18 @@ def create_app(
     async def hashi_control_status(client_id: str = Depends(verify_token)):
         """Report whether the local HASHI core appears reachable."""
         return _hashi_control_status()
+
+    @app.get("/control/hashi/logs")
+    async def hashi_control_logs(
+        name: str = "start",
+        tail: int = 120,
+        client_id: str = Depends(verify_token),
+    ):
+        """Return a bounded tail of fixed HASHI Remote rescue logs."""
+        try:
+            return _read_rescue_log(name, tail=tail)
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
 
     @app.post("/control/hashi/start")
     async def hashi_control_start(payload: HashiStartPayload, client_id: str = Depends(verify_token)):

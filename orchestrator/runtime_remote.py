@@ -268,6 +268,11 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
             )
             if not (status.get("shared_token_configured") or health.get("shared_token_configured")):
                 lines.append("Mode: <code>discovery-only</code> — trusted protocol messaging is unavailable.")
+            rescue_enabled = bool(status.get("rescue_start_enabled"))
+            if rescue_enabled:
+                lines.append("Rescue start: <code>enabled</code>")
+            else:
+                lines.append("Rescue start: <code>false</code> (<code>requires L3_RESTART</code>)")
             route_diagnostics = status.get("route_diagnostics") or {}
             conflicts = list(route_diagnostics.get("port_conflicts") or [])
             if conflicts:

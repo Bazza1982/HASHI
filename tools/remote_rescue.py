@@ -159,6 +159,30 @@ def rescue_status(instance_id: str, *, token: str | None = None, timeout: int = 
     return (0 if result.ok else EXIT_REMOTE_ERROR), payload
 
 
+def rescue_logs(
+    instance_id: str,
+    *,
+    name: str = "start",
+    tail: int = 120,
+    token: str | None = None,
+    timeout: int = 5,
+) -> tuple[int, dict]:
+    base_url = _reachable_base_url(instance_id, token=token, timeout=timeout)
+    result = _request_json_status(
+        f"{base_url}/control/hashi/logs?name={name}&tail={int(tail)}",
+        token=token,
+        timeout=timeout,
+    )
+    if result.status == 404:
+        return EXIT_UNSUPPORTED, _unsupported_payload(instance_id, "/control/hashi/logs", base_url)
+    payload = dict(result.body)
+    payload.setdefault("instance", _normalize_instance_id(instance_id))
+    payload.setdefault("base_url", base_url)
+    if result.status in {401, 403}:
+        return EXIT_FORBIDDEN, payload
+    return (0 if result.ok else EXIT_REMOTE_ERROR), payload
+
+
 def rescue_start(
     instance_id: str,
     *,
@@ -215,6 +239,11 @@ def main(argv: list[str] | None = None) -> int:
     start.add_argument("instance", help="Target instance, e.g. HASHI1")
     start.add_argument("--reason", default="remote rescue", help="Audit reason recorded by target Remote")
 
+    logs = sub.add_parser("logs")
+    logs.add_argument("instance", help="Target instance, e.g. HASHI1")
+    logs.add_argument("--name", choices=["start", "audit", "supervisor"], default="start")
+    logs.add_argument("--tail", type=int, default=120)
+
     args = parser.parse_args(argv)
     try:
         if args.cmd == "capabilities":
@@ -227,6 +256,10 @@ def main(argv: list[str] | None = None) -> int:
             return code
         if args.cmd == "start":
             code, payload = rescue_start(args.instance, reason=args.reason, token=args.token, timeout=max(args.timeout, 10))
+            _print_result(payload, as_json=args.json)
+            return code
+        if args.cmd == "logs":
+            code, payload = rescue_logs(args.instance, name=args.name, tail=args.tail, token=args.token, timeout=args.timeout)
             _print_result(payload, as_json=args.json)
             return code
     except (RuntimeError, ValueError, URLError, TimeoutError, OSError, ssl.SSLError) as exc:
