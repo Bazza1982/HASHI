@@ -40,6 +40,7 @@ from remote.peer.registry import PeerRegistry
 from remote.port_selection import DEFAULT_PORT, select_available_port
 from remote.peer.tailscale import TailscaleDiscovery
 from remote.protocol_manager import ProtocolManager, PROTOCOL_VERSION, build_default_capabilities
+from remote.runtime_identity import remove_runtime_claim, validate_launch_context, write_runtime_claim
 from remote.security.pairing import PairingManager
 from remote.security.shared_token import load_shared_token
 from remote.security.tls import load_or_generate_cert
@@ -232,6 +233,15 @@ class HashiRemoteApplication:
         instance_info = _load_instance_info(self._hashi_root)
         instance_id = instance_info["instance_id"]
         workbench_port = instance_info["workbench_port"]
+        claim = write_runtime_claim(
+            root=self._hashi_root,
+            instance_id=instance_id,
+            port=self._port,
+            bind_host=self._host,
+            code_root=Path(__file__).resolve().parent.parent,
+            supervised=self._supervised,
+        )
+        instance_info["runtime_claim"] = claim
 
         logger.info("═" * 55)
         logger.info("  Hashi Remote v1.0.0  🌸")
@@ -430,6 +440,7 @@ class HashiRemoteApplication:
             self._advertisement_task.cancel()
         if self._protocol_manager:
             _stop(self._protocol_manager.stop())
+        remove_runtime_claim(self._hashi_root, pid=os.getpid())
 
 
 def parse_args() -> argparse.Namespace:
@@ -460,6 +471,13 @@ def main() -> int:
     hashi_root = args.hashi_root
     if hashi_root is None:
         hashi_root = Path(__file__).resolve().parent.parent
+    hashi_root = hashi_root.expanduser().resolve()
+    try:
+        validate_launch_context(hashi_root=hashi_root)
+    except RuntimeError as exc:
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s %(message)s")
+        logger.error("%s", exc)
+        return 1
     disabled_state = read_disabled_state(hashi_root)
     if disabled_state:
         logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s %(message)s")

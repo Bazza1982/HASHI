@@ -39,6 +39,7 @@ from orchestrator import runtime_nudge
 from orchestrator import runtime_pipeline
 from orchestrator import runtime_remote
 from remote.local_http import local_http_hosts
+from remote.runtime_identity import read_runtime_claim
 from orchestrator import runtime_session
 from orchestrator import runtime_status
 from orchestrator import runtime_transfer
@@ -5632,22 +5633,35 @@ class FlexibleAgentRuntime:
                 configured_port = (instances.get(instance_id) or {}).get("remote_port") or configured_port
             except Exception:
                 pass
+        ports: list[int] = []
+        claim = read_runtime_claim(root)
+        if claim:
+            try:
+                ports.append(int(claim.get("port") or 0))
+            except Exception:
+                pass
+        try:
+            ports.append(int(configured_port or 8766))
+        except Exception:
+            ports.append(8766)
+        ports = [port for index, port in enumerate(ports) if port > 0 and port not in ports[:index]]
         return {
             "root": root,
-            "port": int(configured_port or 8766),
+            "port": ports[0],
+            "ports": ports,
             "use_tls": bool(server.get("use_tls", True)),
             "backend": str(discovery.get("backend") or "lan"),
         }
 
     def _remote_urls(self, path: str) -> list[str]:
         cfg = self._remote_config_snapshot()
-        port = int(cfg["port"])
         schemes = ("https", "http") if cfg["use_tls"] else ("http", "https")
         normalized_path = path if str(path).startswith("/") else f"/{path}"
         urls: list[str] = []
-        for host in local_http_hosts():
-            for scheme in schemes:
-                urls.append(f"{scheme}://{host}:{port}{normalized_path}")
+        for port in cfg.get("ports") or [cfg["port"]]:
+            for host in local_http_hosts():
+                for scheme in schemes:
+                    urls.append(f"{scheme}://{host}:{int(port)}{normalized_path}")
         return urls
 
     async def _fetch_remote_json(self, path: str) -> tuple[dict[str, Any] | None, str | None]:
