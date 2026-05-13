@@ -357,7 +357,7 @@ def _probe_http(url: str, timeout: int = 3) -> bool:
     except URLError:
         return False
     except Exception:
-        return True
+        return False
 
 
 def _probe_workbench(host: str, port: int) -> bool:
