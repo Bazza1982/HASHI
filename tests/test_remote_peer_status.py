@@ -1207,6 +1207,87 @@ def test_registry_prunes_legacy_alias_with_same_host_and_workbench(tmp_path):
     assert "hashi-desktop" not in pruned
 
 
+def test_registry_prunes_stale_legacy_instance_not_in_live_peers(tmp_path):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    old_seen = int(time.time()) - (25 * 3600)
+    (hashi_root / "instances.json").write_text(
+        json.dumps(
+            {
+                "instances": {
+                    "hashi1": {"instance_id": "HASHI1", "platform": "wsl"},
+                    "msi": {
+                        "instance_id": "MSI",
+                        "display_name": "MSI",
+                        "platform": "windows",
+                        "lan_ip": "192.168.0.41",
+                        "remote_port": 8767,
+                        "_discovery": "lan",
+                        "last_seen": old_seen,
+                        "last_seen_ok": old_seen,
+                        "live_status": "offline",
+                        "active": False,
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    registry = PeerRegistry(hashi_root, "HASHI1")
+
+    registry._sync_to_instances_json()
+
+    instances = json.loads((hashi_root / "instances.json").read_text(encoding="utf-8"))["instances"]
+    assert "hashi1" in instances
+    assert "msi" not in instances
+
+
+def test_registry_keeps_current_peer_even_when_legacy_timestamp_is_old(tmp_path):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    old_seen = int(time.time()) - (25 * 3600)
+    (hashi_root / "instances.json").write_text(
+        json.dumps(
+            {
+                "instances": {
+                    "hashi1": {"instance_id": "HASHI1", "platform": "wsl"},
+                    "intel": {
+                        "instance_id": "INTEL",
+                        "display_name": "INTEL",
+                        "platform": "windows",
+                        "lan_ip": "192.168.0.6",
+                        "remote_port": 8766,
+                        "_discovery": "lan",
+                        "last_seen": old_seen,
+                        "last_seen_ok": old_seen,
+                        "live_status": "offline",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    registry = PeerRegistry(hashi_root, "HASHI1")
+    registry._peers = {
+        "INTEL": PeerInfo(
+            instance_id="INTEL",
+            display_name="INTEL",
+            host="192.168.0.6",
+            port=8766,
+            workbench_port=18802,
+            platform="windows",
+            properties={"discovery": "lan", "live_status": "online", "last_seen_ok": int(time.time())},
+        )
+    }
+    registry._observations = {"INTEL": {"lan": registry._peers["INTEL"]}}
+
+    registry._sync_to_instances_json()
+
+    instances = json.loads((hashi_root / "instances.json").read_text(encoding="utf-8"))["instances"]
+    assert "intel" in instances
+    assert instances["intel"]["live_status"] == "online"
+
+
 def test_parse_hchat_message_exposes_reply_body_for_loop_guard():
     parsed = parse_hchat_message("[hchat from rain@HASHI2] [hchat reply from lily] hello")
 

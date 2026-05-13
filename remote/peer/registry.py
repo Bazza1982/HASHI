@@ -22,6 +22,8 @@ from .base import PeerInfo
 
 logger = logging.getLogger(__name__)
 
+LEGACY_INSTANCE_TTL_SECONDS = 24 * 3600
+
 
 def _normalize_identity(value: str) -> str:
     value = str(value or "").strip().lower()
@@ -478,6 +480,60 @@ class PeerRegistry:
             pruned[key] = entry
         return pruned, changed
 
+    def _prune_stale_legacy_instances(self, instances: dict, *, now: int | None = None) -> tuple[dict, bool]:
+        if not isinstance(instances, dict):
+            return {}, False
+        now_ts = int(now or time.time())
+        live_keys = {iid.lower() for iid in self._peers}
+        self_key = self._self_id.lower()
+        dynamic_fields = {
+            "_discovery",
+            "address_candidates",
+            "observed_candidates",
+            "capabilities",
+            "handshake_state",
+            "last_refresh_error",
+            "last_seen",
+            "last_seen_error",
+            "last_seen_ok",
+            "live_status",
+            "protocol_version",
+        }
+        pruned: dict[str, dict] = {}
+        changed = False
+        for key, entry in instances.items():
+            normalized_key = str(key or "").strip().lower()
+            if not isinstance(entry, dict):
+                continue
+            if normalized_key == self_key or normalized_key in live_keys:
+                pruned[key] = entry
+                continue
+            if not any(field in entry for field in dynamic_fields):
+                pruned[key] = entry
+                continue
+            timestamp = 0
+            for field in ("last_seen_ok", "last_seen", "last_handshake_at", "last_seen_error"):
+                try:
+                    timestamp = max(timestamp, int(entry.get(field) or 0))
+                except Exception:
+                    continue
+            live_status = str(entry.get("live_status") or "").strip().lower()
+            active = bool(entry.get("active", True))
+            if timestamp and now_ts - timestamp > LEGACY_INSTANCE_TTL_SECONDS:
+                logger.info(
+                    "Registry: pruning stale legacy instance %s after %ds without live refresh",
+                    str(entry.get("instance_id") or key).upper(),
+                    now_ts - timestamp,
+                )
+                changed = True
+                continue
+            if not timestamp and (live_status == "offline" or active is False):
+                logger.info("Registry: pruning stale legacy instance %s without live timestamp", str(entry.get("instance_id") or key).upper())
+                changed = True
+                continue
+            pruned[key] = entry
+        return pruned, changed
+
     def _prune_duplicate_peer_aliases(self) -> bool:
         if not self._peers:
             return False
@@ -831,7 +887,8 @@ class PeerRegistry:
             data = json.loads(self._instances_path.read_text(encoding="utf-8-sig"))
             instances = data.get("instances", {})
             instances, pruned_instances = self._prune_duplicate_instance_aliases(instances)
-            if pruned_instances:
+            instances, pruned_stale_instances = self._prune_stale_legacy_instances(instances)
+            if pruned_instances or pruned_stale_instances:
                 data["instances"] = instances
             local_entry = instances.get(self._self_id.lower(), {})
             local_platform = str(local_entry.get("platform") or "").lower()
@@ -843,7 +900,7 @@ class PeerRegistry:
             local_hosts.discard("")
             local_host_identity = _normalize_identity(local_entry.get("host_identity") or "")
 
-            changed = False
+            changed = bool(pruned_stale_instances)
             for iid, peer in self._peers.items():
                 key = iid.lower()
                 preferred = peer.properties.get("preferred_backend") or peer.properties.get("discovery", "lan")
