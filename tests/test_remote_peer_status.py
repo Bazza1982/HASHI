@@ -1268,6 +1268,7 @@ def test_registry_prunes_stale_legacy_instance_not_in_live_peers(tmp_path):
                         "last_seen": old_seen,
                         "last_seen_ok": old_seen,
                         "last_seen_error": int(time.time()),
+                        "last_handshake_at": int(time.time()),
                         "live_status": "offline",
                         "active": False,
                     },
