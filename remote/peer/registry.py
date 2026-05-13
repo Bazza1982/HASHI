@@ -18,7 +18,7 @@ from typing import Optional
 
 from remote.live_endpoints import write_live_endpoints
 
-from .base import PeerInfo
+from .base import PeerInfo, is_valid_instance_id, normalize_instance_id
 
 logger = logging.getLogger(__name__)
 
@@ -106,14 +106,21 @@ class PeerRegistry:
 
     def on_peers_changed(self, peers: list[PeerInfo]) -> None:
         """Callback for LanDiscovery — called whenever peers list changes."""
+        valid_peers = []
+        for peer in peers:
+            iid = normalize_instance_id(peer.instance_id)
+            if not is_valid_instance_id(iid):
+                logger.debug("Registry: ignoring peer with invalid instance identity: %s", peer.instance_id)
+                continue
+            valid_peers.append(dataclasses.replace(peer, instance_id=iid))
         backend = None
-        if peers:
-            backend = str(peers[0].properties.get("discovery", "") or "").lower() or None
+        if valid_peers:
+            backend = str(valid_peers[0].properties.get("discovery", "") or "").lower() or None
         if not backend:
             backend = "unknown"
         current_ids = set()
-        for peer in peers:
-            iid = peer.instance_id.upper()
+        for peer in valid_peers:
+            iid = peer.instance_id
             current_ids.add(iid)
             self._observations.setdefault(iid, {})[backend] = peer
         # Only discovery backends that report a full current snapshot should
@@ -328,6 +335,10 @@ class PeerRegistry:
             data = json.loads(self._state_path.read_text(encoding="utf-8"))
             changed = False
             for iid, item in (data.get("peers") or {}).items():
+                if not is_valid_instance_id(iid):
+                    logger.info("Registry: pruning invalid peer state for %s", str(iid).upper())
+                    changed = True
+                    continue
                 if self._peer_state_is_expired(iid, item):
                     logger.info("Registry: pruning expired peer state for %s", str(iid).upper())
                     changed = True
@@ -335,10 +346,15 @@ class PeerRegistry:
                 canonical = item.get("canonical")
                 observations = item.get("observations") or {}
                 if canonical:
-                    self._peers[iid.upper()] = PeerInfo(**canonical)
-                self._observations[iid.upper()] = {
+                    canonical_id = normalize_instance_id(canonical.get("instance_id") or iid)
+                    if is_valid_instance_id(canonical_id):
+                        canonical["instance_id"] = canonical_id
+                        self._peers[canonical_id] = PeerInfo(**canonical)
+                normalized_iid = normalize_instance_id(iid)
+                self._observations[normalized_iid] = {
                     name: PeerInfo(**obs)
                     for name, obs in observations.items()
+                    if isinstance(obs, dict) and is_valid_instance_id(obs.get("instance_id") or normalized_iid)
                 }
             if changed:
                 self._save_state()
@@ -509,6 +525,22 @@ class PeerRegistry:
                     str(entry.get("instance_id") or key).upper(),
                     str(winner.get("instance_id") or best_by_alias[alias_key][0]).upper(),
                 )
+                changed = True
+                continue
+            pruned[key] = entry
+        return pruned, changed
+
+    def _prune_invalid_instance_identities(self, instances: dict) -> tuple[dict, bool]:
+        if not isinstance(instances, dict):
+            return {}, False
+        pruned: dict[str, dict] = {}
+        changed = False
+        for key, entry in instances.items():
+            if not isinstance(entry, dict):
+                continue
+            instance_id = normalize_instance_id(entry.get("instance_id") or key)
+            if not is_valid_instance_id(instance_id):
+                logger.info("Registry: pruning invalid instance identity %s", str(entry.get("instance_id") or key).upper())
                 changed = True
                 continue
             pruned[key] = entry
@@ -920,9 +952,10 @@ class PeerRegistry:
         try:
             data = json.loads(self._instances_path.read_text(encoding="utf-8-sig"))
             instances = data.get("instances", {})
+            instances, pruned_invalid_instances = self._prune_invalid_instance_identities(instances)
             instances, pruned_instances = self._prune_duplicate_instance_aliases(instances)
             instances, pruned_stale_instances = self._prune_stale_legacy_instances(instances)
-            if pruned_instances or pruned_stale_instances:
+            if pruned_invalid_instances or pruned_instances or pruned_stale_instances:
                 data["instances"] = instances
             local_entry = instances.get(self._self_id.lower(), {})
             local_platform = str(local_entry.get("platform") or "").lower()
@@ -934,7 +967,7 @@ class PeerRegistry:
             local_hosts.discard("")
             local_host_identity = _normalize_identity(local_entry.get("host_identity") or "")
 
-            changed = bool(pruned_stale_instances)
+            changed = bool(pruned_invalid_instances or pruned_stale_instances)
             for iid, peer in self._peers.items():
                 key = iid.lower()
                 preferred = peer.properties.get("preferred_backend") or peer.properties.get("discovery", "lan")

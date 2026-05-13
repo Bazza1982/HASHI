@@ -16,7 +16,7 @@ from typing import Optional, Callable
 
 from zeroconf import IPVersion, InterfaceChoice, ServiceBrowser, ServiceInfo, ServiceListener, Zeroconf
 
-from .base import PeerDiscovery, PeerInfo
+from .base import PeerDiscovery, PeerInfo, is_valid_instance_id, normalize_instance_id
 
 logger = logging.getLogger(__name__)
 
@@ -232,7 +232,14 @@ def _service_info_to_peer(info: ServiceInfo, self_instance_id: str) -> Optional[
         address_candidates = _decode_candidate_records(props.get("address_candidates_json", "[]") or "[]")
         observed_candidates = _decode_candidate_records(props.get("observed_candidates_json", "[]") or "[]")
 
-        instance_id = props.get("instance_id", "unknown").upper()
+        instance_id = normalize_instance_id(props.get("instance_id"))
+        if not is_valid_instance_id(instance_id):
+            logger.debug(
+                "LanDiscovery: ignoring service without valid instance_id: server=%s port=%s",
+                getattr(info, "server", ""),
+                getattr(info, "port", ""),
+            )
+            return None
         if instance_id == self_instance_id.upper():
             return None  # Don't include ourselves
 

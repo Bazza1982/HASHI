@@ -5,6 +5,8 @@ import time
 from pathlib import Path
 from typing import Any, Iterable
 
+from remote.peer.base import is_valid_instance_id, normalize_instance_id
+
 
 def live_endpoints_path(root: Path | str) -> Path:
     return Path(root).expanduser().resolve() / "state" / "remote_live_endpoints.json"
@@ -14,8 +16,8 @@ def write_live_endpoints(root: Path | str, peers: Iterable[Any]) -> dict[str, An
     now = time.time()
     entries: dict[str, dict[str, Any]] = {}
     for peer in peers:
-        instance_id = str(getattr(peer, "instance_id", "") or "").strip().upper()
-        if not instance_id:
+        instance_id = normalize_instance_id(getattr(peer, "instance_id", ""))
+        if not is_valid_instance_id(instance_id):
             continue
         properties = dict(getattr(peer, "properties", {}) or {})
         entries[instance_id.lower()] = {
@@ -86,7 +88,7 @@ def read_live_endpoints(root: Path | str, *, max_age_seconds: int = 24 * 3600) -
             updated_at = 0
         if updated_at and now - updated_at > max_age_seconds:
             continue
-        instance_id = str(entry.get("instance_id") or key or "").strip().lower()
-        if instance_id:
-            fresh[instance_id] = entry
+        instance_id = normalize_instance_id(entry.get("instance_id") or key or "")
+        if is_valid_instance_id(instance_id):
+            fresh[instance_id.lower()] = entry
     return fresh

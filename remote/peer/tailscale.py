@@ -17,7 +17,7 @@ from typing import Callable, Optional
 
 from remote.live_endpoints import read_live_endpoints
 
-from .base import PeerDiscovery, PeerInfo
+from .base import PeerDiscovery, PeerInfo, is_valid_instance_id
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +124,7 @@ class TailscaleDiscovery(PeerDiscovery):
             if not node.get("Online"):
                 continue
             instance_id = self._infer_instance_id(node)
-            if not instance_id or instance_id == self._self_id:
+            if not is_valid_instance_id(instance_id) or instance_id == self._self_id:
                 continue
 
             instance_info = instances.get(instance_id.lower(), {})

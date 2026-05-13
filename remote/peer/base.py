@@ -16,6 +16,19 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
+INVALID_INSTANCE_IDS = {"UNKNOWN"}
+
+
+def normalize_instance_id(value: object) -> str:
+    """Return the canonical peer identity form used across Remote discovery."""
+    return str(value or "").strip().upper()
+
+
+def is_valid_instance_id(value: object) -> bool:
+    instance_id = normalize_instance_id(value)
+    return bool(instance_id) and instance_id not in INVALID_INSTANCE_IDS
+
+
 @dataclass
 class PeerInfo:
     """Represents a discovered HASHI peer instance."""

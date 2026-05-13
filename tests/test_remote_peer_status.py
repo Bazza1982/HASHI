@@ -25,6 +25,7 @@ sys.modules.setdefault(
 
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from remote.peer.base import PeerInfo
+from remote.peer.lan import _service_info_to_peer
 from remote.peer.registry import PeerRegistry
 from remote.peer.tailscale import TailscaleDiscovery
 from remote.protocol_manager import ProtocolManager
@@ -66,6 +67,94 @@ def test_registry_derives_offline_for_timed_out_peer_without_live_fields(tmp_pat
     )
 
     assert status == "offline"
+
+
+def test_lan_discovery_rejects_service_without_instance_id():
+    class FakeInfo:
+        properties = {}
+        port = 36069
+        server = "hashi-remote.local."
+
+        def parsed_addresses(self):
+            return ["10.0.0.1"]
+
+    assert _service_info_to_peer(FakeInfo(), "HASHI1") is None
+
+
+def test_lan_discovery_rejects_unknown_instance_id():
+    class FakeInfo:
+        properties = {b"instance_id": b"UNKNOWN"}
+        port = 36069
+        server = "hashi-remote.local."
+
+        def parsed_addresses(self):
+            return ["10.0.0.1"]
+
+    assert _service_info_to_peer(FakeInfo(), "HASHI1") is None
+
+
+def test_registry_rejects_unknown_peer_and_prunes_unknown_instance_seed(tmp_path):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    (hashi_root / "instances.json").write_text(
+        json.dumps(
+            {
+                "instances": {
+                    "unknown": {
+                        "instance_id": "UNKNOWN",
+                        "api_host": "10.0.0.1",
+                        "remote_port": 36069,
+                        "_discovery": "lan",
+                        "active": True,
+                    },
+                    "hashi2": {
+                        "instance_id": "HASHI2",
+                        "api_host": "192.168.0.211",
+                        "remote_port": 8767,
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    registry = PeerRegistry(hashi_root, "HASHI1")
+
+    registry.on_peers_changed(
+        [
+            PeerInfo(
+                instance_id="UNKNOWN",
+                display_name="UNKNOWN",
+                host="10.0.0.1",
+                port=36069,
+                workbench_port=18800,
+                platform="unknown",
+                properties={"discovery": "lan"},
+            )
+        ]
+    )
+
+    assert registry.get_peer("UNKNOWN") is None
+    data = json.loads((hashi_root / "instances.json").read_text(encoding="utf-8"))
+    assert "unknown" not in data["instances"]
+    assert "hashi2" in data["instances"]
+
+
+def test_live_endpoints_skip_unknown_instance_id(tmp_path):
+    write_live_endpoints(
+        tmp_path,
+        [
+            PeerInfo(
+                instance_id="UNKNOWN",
+                display_name="UNKNOWN",
+                host="10.0.0.1",
+                port=36069,
+                workbench_port=18800,
+                platform="unknown",
+            )
+        ],
+    )
+
+    assert read_live_endpoints(tmp_path) == {}
 
 
 def test_remote_peer_presence_shows_offline_for_timed_out_peer_without_live_status():
