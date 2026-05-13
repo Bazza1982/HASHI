@@ -606,6 +606,38 @@ def test_resolve_peer_route_uses_loopback_candidate_for_live_same_host_peer():
     assert route == {"host": "127.0.0.1", "port": 8766, "instance_id": "HASHI1"}
 
 
+def test_protocol_status_includes_route_diagnostics(tmp_path):
+    (tmp_path / "instances.json").write_text(
+        json.dumps(
+            {
+                "instances": {
+                    "hashi1": {
+                        "instance_id": "HASHI1",
+                        "platform": "wsl",
+                        "host_identity": "a9max",
+                        "remote_port": 8766,
+                    },
+                    "hashi2": {
+                        "instance_id": "HASHI2",
+                        "platform": "wsl",
+                        "host_identity": "a9max",
+                        "remote_port": 8766,
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager = object.__new__(ProtocolManager)
+    manager._hashi_root = tmp_path
+    manager._instance_info = {"instance_id": "HASHI1", "platform": "wsl"}
+
+    diagnostics = ProtocolManager.get_route_diagnostics(manager)
+
+    assert diagnostics["local_instance"] == "HASHI1"
+    assert diagnostics["port_conflicts"][0]["instances"] == ["HASHI1", "HASHI2"]
+
+
 def test_remote_start_failure_message_includes_exit_code_and_log_excerpt(tmp_path):
     dummy = _RemoteStartDummy()
     dummy.global_config = SimpleNamespace(project_root=tmp_path)

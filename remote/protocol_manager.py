@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
 
+from remote.routing import build_route_candidates, same_machine_hint, validate_same_host_port_conflicts
 from remote.security.shared_token import build_auth_headers, load_shared_token
 
 logger = logging.getLogger(__name__)
@@ -128,6 +129,7 @@ class ProtocolManager:
             "local_agents": self.get_local_agents_snapshot(),
             "local_agent_directory": self.get_local_agent_directory_state(),
             "local_network_profile": local_profile,
+            "route_diagnostics": self.get_route_diagnostics(),
             "peers": peers,
             "inflight_count": len(self._inflight),
             "max_allowed_ttl": self._max_allowed_ttl,
@@ -1053,103 +1055,60 @@ class ProtocolManager:
     def _same_machine_hint(self, entry: dict) -> bool:
         if not isinstance(entry, dict):
             return False
-        if str(entry.get("same_host_loopback") or "").strip():
-            return True
         instances = self._load_instances()
         local_entry = instances.get(str(self._instance_info.get("instance_id") or "").lower(), {})
         local_profile = self._local_network_profile()
-        local_platform = str(
-            self._instance_info.get("platform")
-            or local_entry.get("platform")
-            or local_profile.get("environment_kind")
-            or ""
-        ).lower()
-        target_platform = str(entry.get("platform") or "").lower()
-        local_identity = _normalize_identity(local_entry.get("host_identity") or local_profile.get("host_identity") or "")
-        target_identity = _normalize_identity(entry.get("host_identity") or "")
-        local_hosts = {
-            str(local_entry.get("api_host") or "").strip().lower(),
-            str(local_entry.get("lan_ip") or "").strip().lower(),
-            str(local_entry.get("tailscale_ip") or "").strip().lower(),
-        }
-        for item in local_profile.get("address_candidates") or []:
-            if isinstance(item, dict):
-                host = str(item.get("host") or "").strip().lower()
-                if host:
-                    local_hosts.add(host)
-        target_hosts = {
-            str(entry.get("api_host") or "").strip().lower(),
-            str(entry.get("lan_ip") or "").strip().lower(),
-            str(entry.get("tailscale_ip") or "").strip().lower(),
-        }
-        local_hosts.discard("")
-        target_hosts.discard("")
-        if {local_platform, target_platform} == {"windows", "wsl"}:
-            if local_platform == "windows" and entry.get("wsl_root_from_windows"):
-                return True
-            if local_platform == "wsl" and entry.get("wsl_root"):
-                return True
-            if local_identity and target_identity and local_identity == target_identity:
-                return True
-            return bool(local_hosts and target_hosts and local_hosts.intersection(target_hosts))
-        if local_platform == "wsl" and target_platform == "wsl":
-            if local_identity and target_identity and local_identity != target_identity:
-                return False
-            local_anchor = _wsl_unc_anchor(local_entry.get("wsl_root_from_windows") or "")
-            target_anchor = _wsl_unc_anchor(entry.get("wsl_root_from_windows") or "")
-            if local_anchor and target_anchor and local_anchor == target_anchor:
-                return True
-            if local_identity and target_identity and local_identity == target_identity:
-                return True
-        return False
+        local_entry = dict(local_entry)
+        local_entry.setdefault("platform", self._instance_info.get("platform") or local_profile.get("environment_kind"))
+        return same_machine_hint(
+            local_entry=local_entry,
+            target_entry=entry,
+            target_platform=str(entry.get("platform") or ""),
+            local_profile=local_profile,
+        )
 
     def _candidate_hosts_for_entry(self, entry: dict) -> list[str]:
-        hosts: list[str] = []
-        loopback = str(entry.get("same_host_loopback") or "").strip()
-        if loopback:
-            hosts.append(loopback)
-        elif self._same_machine_hint(entry):
-            hosts.append("127.0.0.1")
-        for item in entry.get("address_candidates") or []:
-            if not isinstance(item, dict):
-                continue
-            host = str(item.get("host") or "").strip()
-            scope = str(item.get("scope") or "").strip().lower()
-            if not host:
-                continue
-            if scope == "same_host" and host not in hosts and self._same_machine_hint(entry):
-                hosts.append(host)
-            elif scope in {"lan", "overlay", "routable"} and host not in hosts:
-                hosts.append(host)
-        for host in (entry.get("lan_ip"), entry.get("tailscale_ip"), entry.get("api_host")):
-            host = str(host or "").strip()
-            if host in {"127.0.0.1", "localhost"} and not (loopback or self._same_machine_hint(entry)):
-                continue
-            if host and host not in hosts and host not in {"0.0.0.0", "localhost"}:
-                hosts.append(host)
-        return hosts
+        return [candidate.host for candidate in self._route_candidates_for_entry(entry)]
 
     def _candidate_hosts_for_peer(self, peer) -> list[str]:
         entry = self._load_instances().get(str(peer.instance_id or "").lower(), {})
-        hosts = self._candidate_hosts_for_entry(entry) if isinstance(entry, dict) else []
-        same_host_hint = self._same_machine_hint(entry) if isinstance(entry, dict) else False
-        for item in (peer.properties or {}).get("address_candidates") or []:
-            if not isinstance(item, dict):
-                continue
-            host = str(item.get("host") or "").strip()
-            scope = str(item.get("scope") or "").strip().lower()
-            if not host or host in hosts:
-                continue
-            if scope == "same_host" and same_host_hint:
-                hosts.append(host)
-            elif scope in {"lan", "overlay", "routable", "peer"}:
-                hosts.append(host)
-        peer_host = str(peer.host or "").strip()
-        if peer_host and peer_host not in hosts:
-            hosts.append(peer_host)
-        if not hosts and peer_host:
-            hosts.append(peer_host)
-        return hosts
+        candidates = self._route_candidates_for_peer(peer) if peer is not None else []
+        return [candidate.host for candidate in candidates]
+
+    def _route_candidates_for_entry(self, entry: dict) -> list:
+        if not isinstance(entry, dict):
+            return []
+        port = int(entry.get("remote_port") or 0)
+        if port <= 0:
+            return []
+        return build_route_candidates(
+            target_entry=entry,
+            remote_port=port,
+            same_host=self._same_machine_hint(entry),
+            address_candidates=list(entry.get("address_candidates") or []),
+        )
+
+    def _route_candidates_for_peer(self, peer) -> list:
+        entry = self._load_instances().get(str(peer.instance_id or "").lower(), {})
+        if not isinstance(entry, dict):
+            entry = {}
+        remote_port = int(getattr(peer, "port", 0) or entry.get("remote_port") or 0)
+        if remote_port <= 0:
+            return []
+        return build_route_candidates(
+            target_entry=entry,
+            remote_port=remote_port,
+            same_host=self._same_machine_hint(entry) if entry else False,
+            address_candidates=list(entry.get("address_candidates") or []) + list((peer.properties or {}).get("address_candidates") or []),
+            peer_host=str(peer.host or ""),
+        )
+
+    def get_route_diagnostics(self) -> dict[str, Any]:
+        instances = self._load_instances()
+        return {
+            "port_conflicts": validate_same_host_port_conflicts(instances),
+            "local_instance": str(self._instance_info.get("instance_id") or "").upper(),
+        }
 
     def _probe_route(self, host: str, port: int, timeout: int = 2) -> bool:
         for url in self._candidate_urls(host, port, "/health"):
