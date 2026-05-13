@@ -161,7 +161,7 @@ def test_registry_refresh_success_derives_live_status_via_common_path(tmp_path):
     assert registry._peers["HASHI1"].properties["live_status"] == "online"
 
 
-def test_registry_rebuild_prefers_loopback_for_same_host_wsl_peer(tmp_path):
+def test_registry_rebuild_keeps_observed_host_for_same_host_wsl_peer(tmp_path):
     hashi_root = tmp_path / "hashi"
     hashi_root.mkdir()
     (hashi_root / "instances.json").write_text(
@@ -201,7 +201,7 @@ def test_registry_rebuild_prefers_loopback_for_same_host_wsl_peer(tmp_path):
 
     peer = registry.get_peer("HASHI1")
     assert peer is not None
-    assert peer.host == "127.0.0.1"
+    assert peer.host == "192.168.0.211"
     assert peer.properties["same_host_loopback"] == "127.0.0.1"
 
 
