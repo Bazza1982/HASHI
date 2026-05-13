@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import hashlib
 import json
 import logging
 import socket
@@ -102,6 +103,16 @@ class ProtocolManager:
         self._last_bootstrap_run = 0.0
         self._last_handshake_run = 0.0
         self._last_refresh_run = 0.0
+        self._last_agent_snapshot_version = ""
+        self._last_agent_directory_state = "core_offline"
+        self._force_handshake = False
+        self._agent_snapshot_cache: list[dict[str, Any]] = []
+        self._agent_snapshot_meta: dict[str, Any] = {
+            "version": "",
+            "directory_state": "core_offline",
+            "updated_at": 0,
+        }
+        self._core_health_cache: tuple[float, bool] = (0.0, False)
 
     def get_protocol_status(self) -> dict:
         peers = []
@@ -115,6 +126,7 @@ class ProtocolManager:
             "capabilities": list(self._capabilities),
             "remote_supervisor": dict(self._instance_info.get("remote_supervisor") or {}),
             "local_agents": self.get_local_agents_snapshot(),
+            "local_agent_directory": self.get_local_agent_directory_state(),
             "local_network_profile": local_profile,
             "peers": peers,
             "inflight_count": len(self._inflight),
@@ -154,15 +166,71 @@ class ProtocolManager:
             }
         return build_local_network_profile(info)
 
-    def get_local_agents_snapshot(self) -> list[dict]:
-        agents_path = self._hashi_root / "agents.json"
-        directory_state = "snapshot_may_be_stale"
-        if not agents_path.exists():
-            return []
+    def _core_online(self) -> bool:
+        now = time.time()
+        cached_at, cached_value = getattr(self, "_core_health_cache", (0.0, False))
+        if now - cached_at <= 5:
+            return cached_value
+        port = int((getattr(self, "_instance_info", {}) or {}).get("workbench_port") or getattr(self, "_workbench_port", 18800) or 18800)
         try:
-            data = json.loads(agents_path.read_text(encoding="utf-8-sig"))
+            with urllib_request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=0.4) as resp:
+                ok = 200 <= int(getattr(resp, "status", 200)) < 300
         except Exception:
+            ok = False
+        self._core_health_cache = (now, ok)
+        return ok
+
+    def _agent_snapshot_version(self, agents_path: Path, raw: bytes) -> str:
+        try:
+            stat = agents_path.stat()
+            basis = f"{stat.st_mtime_ns}:{stat.st_size}:".encode() + raw
+        except Exception:
+            basis = raw
+        return hashlib.sha256(basis).hexdigest()[:16]
+
+    def _agent_directory_state(self, *, agents_readable: bool, core_online: bool, has_cache: bool) -> str:
+        if core_online and agents_readable:
+            return "fresh"
+        if agents_readable or has_cache:
+            return "stale"
+        return "core_offline"
+
+    def get_local_agent_directory_state(self) -> dict[str, Any]:
+        if not hasattr(self, "_agent_snapshot_meta"):
+            self._agent_snapshot_meta = {"version": "", "directory_state": "core_offline", "updated_at": 0}
+        self.get_local_agents_snapshot()
+        return dict(self._agent_snapshot_meta)
+
+    def get_local_agents_snapshot(self) -> list[dict]:
+        if not getattr(self, "_hashi_root", None):
+            self._agent_snapshot_meta = {"version": "", "directory_state": "core_offline", "updated_at": int(time.time())}
             return []
+        agents_path = self._hashi_root / "agents.json"
+        core_online = self._core_online()
+        cache = list(getattr(self, "_agent_snapshot_cache", []) or [])
+        if not agents_path.exists():
+            directory_state = self._agent_directory_state(agents_readable=False, core_online=core_online, has_cache=bool(cache))
+            snapshot = [dict(item, directory_state=directory_state) for item in cache]
+            self._agent_snapshot_meta = {
+                "version": getattr(self, "_last_agent_snapshot_version", ""),
+                "directory_state": directory_state,
+                "updated_at": int(time.time()),
+            }
+            return snapshot
+        try:
+            raw = agents_path.read_bytes()
+            data = json.loads(raw.decode("utf-8-sig"))
+        except Exception:
+            directory_state = self._agent_directory_state(agents_readable=False, core_online=core_online, has_cache=bool(cache))
+            snapshot = [dict(item, directory_state=directory_state) for item in cache]
+            self._agent_snapshot_meta = {
+                "version": getattr(self, "_last_agent_snapshot_version", ""),
+                "directory_state": directory_state,
+                "updated_at": int(time.time()),
+            }
+            return snapshot
+        version = self._agent_snapshot_version(agents_path, raw)
+        directory_state = self._agent_directory_state(agents_readable=True, core_online=core_online, has_cache=bool(cache))
         snapshot = []
         for agent in data.get("agents", []):
             if not agent.get("is_active", True):
@@ -175,9 +243,32 @@ class ProtocolManager:
                     "is_active": True,
                     "directory_state": directory_state,
                     "updated_at": int(time.time()),
+                    "agent_snapshot_version": version,
                 }
             )
+        self._last_agent_snapshot_version = version
+        self._agent_snapshot_cache = [dict(item) for item in snapshot]
+        self._agent_snapshot_meta = {
+            "version": version,
+            "directory_state": directory_state,
+            "updated_at": int(time.time()),
+        }
         return snapshot
+
+    def _refresh_local_agent_snapshot_if_changed(self) -> bool:
+        if not getattr(self, "_hashi_root", None):
+            return False
+        previous = getattr(self, "_last_agent_snapshot_version", "")
+        previous_state = getattr(self, "_last_agent_directory_state", "")
+        self.get_local_agents_snapshot()
+        current = getattr(self, "_last_agent_snapshot_version", "")
+        current_state = str((getattr(self, "_agent_snapshot_meta", {}) or {}).get("directory_state") or "")
+        changed = bool(previous and current and (previous != current or previous_state != current_state))
+        self._last_agent_directory_state = current_state
+        if changed:
+            self._force_handshake = True
+            logger.info("Agent directory snapshot changed: %s/%s -> %s/%s", previous, previous_state, current, current_state)
+        return changed
 
     async def start(self) -> None:
         if self._running:
@@ -350,6 +441,7 @@ class ProtocolManager:
                 if now - self._last_refresh_run >= 30:
                     await self._refresh_peer_liveness_once()
                     self._last_refresh_run = now
+                self._refresh_local_agent_snapshot_if_changed()
                 if now - self._last_handshake_run >= 5:
                     await self._handshake_once()
                     self._last_handshake_run = now
@@ -420,6 +512,7 @@ class ProtocolManager:
             state = str((peer.properties or {}).get("handshake_state") or "handshake_pending")
             last_handshake_at = float((peer.properties or {}).get("last_handshake_at") or 0)
             should_revalidate = state == "handshake_accepted" and (time.time() - last_handshake_at) >= 30
+            should_revalidate = should_revalidate or bool(getattr(self, "_force_handshake", False))
             if state == "handshake_in_progress":
                 continue
             if state == "handshake_accepted" and not should_revalidate:
@@ -433,6 +526,7 @@ class ProtocolManager:
                 "capabilities": list(getattr(self, "_capabilities", DEFAULT_CAPABILITIES)),
                 "hashi_version": self._instance_info.get("hashi_version", "unknown"),
                 "agents": self.get_local_agents_snapshot(),
+                "agent_directory": self.get_local_agent_directory_state(),
                 "remote_port": self._instance_info.get("remote_port") or 0,
                 "workbench_port": self._instance_info.get("workbench_port") or 18800,
                 "platform": self._instance_info.get("platform") or "unknown",
@@ -493,6 +587,7 @@ class ProtocolManager:
                             protocol_version=str(result.get("protocol_version") or PROTOCOL_VERSION),
                             capabilities=list(result.get("capabilities") or []),
                             remote_agents=list(result.get("agents") or []),
+                            remote_agent_directory=dict(result.get("agent_directory") or {}),
                         )
                         succeeded = True
                         break
@@ -507,6 +602,7 @@ class ProtocolManager:
                     state="handshake_timed_out",
                     last_error=f"all hosts unreachable: {candidate_hosts}",
                 )
+        self._force_handshake = False
 
     def handle_handshake(self, payload: dict) -> dict:
         from_instance = str(payload.get("from_instance") or "").strip().upper()
@@ -538,6 +634,8 @@ class ProtocolManager:
                     "observed_candidates": list(payload.get("observed_candidates") or []),
                     "host_identity": _normalize_identity(payload.get("host_identity") or ""),
                     "environment_kind": str(payload.get("environment_kind") or "").strip().lower(),
+                    "agent_snapshot_version": str((payload.get("agent_directory") or {}).get("version") or ""),
+                    "directory_state": str((payload.get("agent_directory") or {}).get("directory_state") or ""),
                 },
             )
             self._peer_registry.on_peers_changed([peer])
@@ -555,6 +653,7 @@ class ProtocolManager:
             "capabilities": list(self._capabilities),
             "hashi_version": self._instance_info.get("hashi_version", "unknown"),
             "agents": self.get_local_agents_snapshot(),
+            "agent_directory": self.get_local_agent_directory_state(),
             "remote_port": self._instance_info.get("remote_port") or 0,
             "workbench_port": self._instance_info.get("workbench_port") or 18800,
             "platform": self._instance_info.get("platform") or "unknown",

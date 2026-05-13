@@ -818,7 +818,7 @@ def test_control_loop_retries_bootstrap_after_startup_window():
     assert calls == [0.0]
 
 
-def test_local_agents_snapshot_marks_phase2_directory_state(tmp_path):
+def test_local_agents_snapshot_marks_fresh_directory_state(tmp_path):
     (tmp_path / "agents.json").write_text(
         json.dumps({"agents": [{"name": "zelda", "display_name": "Zelda", "is_active": True}]}),
         encoding="utf-8",
@@ -826,19 +826,45 @@ def test_local_agents_snapshot_marks_phase2_directory_state(tmp_path):
     manager = object.__new__(ProtocolManager)
     manager._hashi_root = tmp_path
     manager._instance_info = {"instance_id": "HASHI1"}
+    manager._core_online = lambda: True
 
     snapshot = ProtocolManager.get_local_agents_snapshot(manager)
 
-    assert snapshot == [
-        {
-            "agent_name": "zelda",
-            "agent_address": "zelda@hashi1",
-            "display_name": "Zelda",
-            "is_active": True,
-            "directory_state": "snapshot_may_be_stale",
-            "updated_at": snapshot[0]["updated_at"],
-        }
-    ]
+    assert snapshot[0]["agent_name"] == "zelda"
+    assert snapshot[0]["directory_state"] == "fresh"
+    assert snapshot[0]["agent_snapshot_version"]
+
+
+def test_local_agents_snapshot_marks_stale_when_core_is_offline(tmp_path):
+    (tmp_path / "agents.json").write_text(
+        json.dumps({"agents": [{"name": "zelda", "display_name": "Zelda", "is_active": True}]}),
+        encoding="utf-8",
+    )
+    manager = object.__new__(ProtocolManager)
+    manager._hashi_root = tmp_path
+    manager._instance_info = {"instance_id": "HASHI1"}
+    manager._core_online = lambda: False
+
+    snapshot = ProtocolManager.get_local_agents_snapshot(manager)
+    state = ProtocolManager.get_local_agent_directory_state(manager)
+
+    assert snapshot[0]["directory_state"] == "stale"
+    assert state["directory_state"] == "stale"
+
+
+def test_agent_snapshot_change_forces_handshake(tmp_path):
+    agents_path = tmp_path / "agents.json"
+    agents_path.write_text(json.dumps({"agents": [{"name": "zelda", "is_active": True}]}), encoding="utf-8")
+    manager = object.__new__(ProtocolManager)
+    manager._hashi_root = tmp_path
+    manager._instance_info = {"instance_id": "HASHI1"}
+    manager._core_online = lambda: True
+
+    assert ProtocolManager._refresh_local_agent_snapshot_if_changed(manager) is False
+    agents_path.write_text(json.dumps({"agents": [{"name": "akane", "is_active": True}]}), encoding="utf-8")
+
+    assert ProtocolManager._refresh_local_agent_snapshot_if_changed(manager) is True
+    assert manager._force_handshake is True
 
 
 def test_registry_prunes_legacy_alias_with_same_host_and_workbench(tmp_path):

@@ -52,6 +52,10 @@ class TailscaleDiscovery(PeerDiscovery):
         logger.info("TailscaleDiscovery: polling every %ss", self._poll_seconds)
         return True
 
+    async def update_advertisement(self, info: PeerInfo) -> bool:
+        self._self_info = info
+        return self._running
+
     async def discover(self) -> list[PeerInfo]:
         return list(self._peers.values())
 
