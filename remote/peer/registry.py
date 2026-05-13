@@ -95,7 +95,7 @@ class PeerRegistry:
         for props in prop_sets:
             if not isinstance(props, dict):
                 continue
-            for field in ("last_seen_ok", "last_seen", "last_handshake_at", "last_seen_error"):
+            for field in ("last_seen_ok", "last_seen", "last_handshake_at"):
                 try:
                     timestamp = max(timestamp, int(props.get(field) or 0))
                 except Exception:
@@ -546,7 +546,7 @@ class PeerRegistry:
                 pruned[key] = entry
                 continue
             timestamp = 0
-            for field in ("last_seen_ok", "last_seen", "last_handshake_at", "last_seen_error"):
+            for field in ("last_seen_ok", "last_seen", "last_handshake_at"):
                 try:
                     timestamp = max(timestamp, int(entry.get(field) or 0))
                 except Exception:
