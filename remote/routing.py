@@ -13,7 +13,7 @@ def wsl_unc_anchor(value: Any) -> str:
     text = str(value or "").strip().lower().replace("/", "\\")
     while text.startswith("\\\\\\"):
         text = text[1:]
-    if not text.startswith("\\\\wsl$\\"):
+    if not (text.startswith("\\\\wsl$\\") or text.startswith("\\\\wsl.localhost\\")):
         return ""
     parts = [part for part in text.split("\\") if part]
     if len(parts) < 2:

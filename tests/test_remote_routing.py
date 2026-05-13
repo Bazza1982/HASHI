@@ -1,4 +1,4 @@
-from remote.routing import build_route_candidates, same_machine_hint, validate_same_host_port_conflicts
+from remote.routing import build_route_candidates, same_machine_hint, validate_same_host_port_conflicts, wsl_unc_anchor
 
 
 def test_same_host_wsl_siblings_prefer_loopback_route():
@@ -38,6 +38,13 @@ def test_cross_host_windows_routes_over_lan_not_loopback():
     candidates = build_route_candidates(target_entry=target, remote_port=8766, same_host=False)
 
     assert [candidate.host for candidate in candidates] == ["192.168.0.50"]
+
+
+def test_wsl_unc_anchor_supports_wsl_localhost_form():
+    assert (
+        wsl_unc_anchor(r"\\wsl.localhost\\Ubuntu-22.04\\home\\lily\\projects\\hashi")
+        == "\\\\wsl.localhost\\ubuntu-22.04\\"
+    )
 
 
 def test_same_host_port_conflict_is_actionable():

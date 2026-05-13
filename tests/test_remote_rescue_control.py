@@ -22,6 +22,21 @@ def _client(tmp_path, *, max_level=AuthLevel.L2_WRITE):
     return TestClient(app)
 
 
+def test_hashi_rescue_status_requires_auth_when_lan_mode_off(tmp_path):
+    app = create_app(
+        {"instance_id": "HASHI_TEST"},
+        PairingManager(storage_dir=tmp_path / "pairing", lan_mode=False),
+        TerminalExecutor(),
+        hashi_root=str(tmp_path),
+        workbench_port=1,
+    )
+    client = TestClient(app, raise_server_exceptions=False)
+
+    response = client.get("/control/hashi/status")
+
+    assert response.status_code == 401
+
+
 def test_hashi_rescue_status_reports_offline_when_workbench_missing(tmp_path):
     client = _client(tmp_path)
 

@@ -4,6 +4,7 @@ Adapted from Lily Remote — storage path changed to ~/.hashi-remote/
 """
 
 import hashlib
+import hmac
 import json
 import secrets
 import time
@@ -82,6 +83,10 @@ class PairingManager:
             for c in self._paired.values()
         ]}
         self._paired_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        try:
+            self._paired_file.chmod(0o600)
+        except OSError:
+            pass
 
     def create_pairing_request(self, client_id: str, client_name: str) -> PairingRequest:
         now = time.time()
@@ -133,7 +138,7 @@ class PairingManager:
     def verify_token(self, token: str) -> Optional[str]:
         token_hash = hashlib.sha256(token.encode()).hexdigest()
         for client in self._paired.values():
-            if client.token_hash == token_hash:
+            if hmac.compare_digest(client.token_hash, token_hash):
                 return client.client_id
         return None
 

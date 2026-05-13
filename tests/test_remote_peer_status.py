@@ -815,6 +815,45 @@ def test_handshake_ignores_successful_response_from_wrong_instance():
     assert recorded[-1][1]["state"] == "handshake_timed_out"
 
 
+def test_old_peer_without_hmac_is_marked_rejected_auth_required():
+    manager = object.__new__(ProtocolManager)
+    peer = PeerInfo(
+        instance_id="HASHI2",
+        display_name="HASHI2",
+        host="10.0.0.2",
+        port=8767,
+        workbench_port=18802,
+        platform="wsl",
+        properties={"handshake_state": "handshake_pending"},
+    )
+    recorded: list[tuple[str, dict]] = []
+
+    class _Registry:
+        def get_peers(self):
+            return [peer]
+
+        def mark_handshake_result(self, instance_id, **kwargs):
+            recorded.append((instance_id, kwargs))
+
+    manager._peer_registry = _Registry()
+    manager._instance_info = {"instance_id": "HASHI1", "remote_port": 8766, "workbench_port": 18800, "platform": "wsl"}
+    manager._handshake_timeout_seconds = 1
+    manager._candidate_hosts_for_peer = lambda _peer: ["10.0.0.2"]
+    manager._candidate_urls = lambda host, port, path: [f"http://{host}:{port}{path}"]
+    manager._local_network_profile = lambda: {"host_identity": "a9max", "environment_kind": "wsl", "address_candidates": [], "observed_candidates": []}
+    manager.get_local_agents_snapshot = lambda: []
+    manager.get_local_agent_directory_state = lambda: {"version": "", "directory_state": "fresh"}
+    manager._post_json = lambda _url, _payload, timeout=0: {
+        "status": "handshake_reject",
+        "reason": "auth_required",
+    }
+
+    asyncio.run(ProtocolManager._handshake_once(manager))
+
+    assert recorded[0] == ("HASHI2", {"state": "handshake_in_progress"})
+    assert recorded[-1] == ("HASHI2", {"state": "handshake_rejected", "last_error": "auth_required"})
+
+
 def test_control_loop_retries_bootstrap_after_startup_window():
     manager = object.__new__(ProtocolManager)
     manager._running = True
