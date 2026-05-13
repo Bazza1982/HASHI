@@ -94,6 +94,42 @@ Design and acceptance record:
 
 ## Deferred Research Items
 
+### Complete Structured Audit Log For Slash Commands
+
+Status: **deferred / revisit later**.
+
+Current state:
+
+- HASHI can audit many queued model-backed requests through existing sources such as `token_audit.jsonl`, transcript files, and runtime logs.
+- Telegram slash commands are registered through command handlers, so command usage is not yet captured as one complete, durable, command-level audit stream.
+- This means some command-derived activity can be inferred later, but exact usage statistics for all slash commands are not guaranteed today.
+
+Deferred target:
+
+- Add a structured audit event for every slash command invocation with at least:
+  - `timestamp`
+  - `agent`
+  - `command`
+  - `args`
+  - `user`
+  - `outcome`
+- Make this audit path apply to both flex and fixed runtimes.
+- Keep the log durable and machine-readable so command-frequency reports, unused-command reports, and per-agent command analysis can be generated exactly rather than inferred.
+
+Why deferred:
+
+- This is observability and audit hardening work, not an immediate functional blocker.
+- It should be designed once at the command-binding/runtime boundary rather than added piecemeal to individual commands.
+- It should land together with a clear reporting contract so future statistics are exact and stable.
+
+Revisit when:
+
+- We want exact slash-command usage statistics across the system.
+- We are ready to standardize a command audit schema and retention location.
+- We want product-grade reporting for command adoption, dead commands, and operator behavior.
+
+---
+
 ### WhatsApp Real-Time Voice Calls For HASHI
 
 Status: **deferred / revisit later**.
