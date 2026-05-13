@@ -926,6 +926,8 @@ When a peer is discovered, Hashi Remote performs a mutual handshake before any m
 - Transfers a live snapshot of the local agent directory (so each side knows what agents the other hosts, e.g., `rika@hashi2`)
 - Reverse-registers the caller as a peer from the receiver's perspective (bi-directional registration from a single handshake)
 - Revalidates every 30 seconds to confirm continued liveness; state transitions: `handshake_pending → handshake_in_progress → handshake_accepted`
+- Authenticates `/protocol/handshake` and `/protocol/message` with `hashi-shared-hmac-v1` when a shared token is configured
+- Missing shared token starts Remote in `discovery-only` mode: peers can be seen, but trusted protocol messaging, full peer details, file transfer, and rescue controls are unavailable
 
 #### Peer Liveness
 
@@ -935,9 +937,10 @@ When a peer is discovered, Hashi Remote performs a mutual handshake before any m
 
 #### Same-Host Routing
 
-- Instances on the same machine (including WSL co-location) are detected via host-identity fingerprinting
-- Same-host peers are routed through `127.0.0.1` loopback, bypassing LAN addressing
-- Bootstrap fallback: if the registered address is unreachable, alternative candidate hosts (including loopback) are tried automatically
+- Instances on the same machine, including WSL/Windows co-location, are detected via host identity, WSL root hints, and address candidates
+- Same-host peers are routed through `127.0.0.1` loopback with unique Remote ports
+- Cross-host peers avoid loopback and prefer LAN/Tailscale/configured hosts
+- `/protocol/status` reports same-host Remote port conflicts through `route_diagnostics`
 
 #### P2P Message Protocol
 
@@ -952,7 +955,9 @@ Direct agent-to-agent messaging over Hashi Remote (`/protocol/message`):
 #### Security
 
 - TLS encryption on all remote connections
-- Pairing-based client authentication; LAN peers can be set to auto-approve
+- Shared-token HMAC for trusted protocol traffic; configure `HASHI_REMOTE_SHARED_TOKEN` or `secrets.json` key `hashi_remote_shared_token`
+- Public `/health`, `/peers`, and `/protocol/status` responses are redacted unless the caller is loopback or authenticated
+- Pairing-based client authentication remains available for non-protocol endpoints; LAN mode is off by default for protocol trust
 - Auth-gated terminal execution delegation (`/terminal/exec`)
 - Full audit logging for all inbound hchat and remote operations
 
@@ -960,9 +965,13 @@ Direct agent-to-agent messaging over Hashi Remote (`/protocol/message`):
 
 For crash recovery, Hashi Remote should be run under an OS-level supervisor
 rather than only through `/remote on`. The fixed rescue protocol exposes
-`GET /control/hashi/status` and `POST /control/hashi/start`; start is blocked
-unless Remote is launched with `max_terminal_level=L3_RESTART`. See
+`GET /control/hashi/status`, `GET /control/hashi/logs`, and
+`POST /control/hashi/start`; start is blocked unless Remote is launched with
+`max_terminal_level=L3_RESTART`. See
 [`docs/HASHI_REMOTE_RESCUE_PROTOCOL.md`](docs/HASHI_REMOTE_RESCUE_PROTOCOL.md).
+
+For rollout and rollback notes, see
+[`docs/HASHI_REMOTE_MIGRATION.md`](docs/HASHI_REMOTE_MIGRATION.md).
 
 #### Diagnostics
 
