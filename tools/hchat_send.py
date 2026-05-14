@@ -26,11 +26,20 @@ import re
 import ssl
 import sys
 import time
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
 
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+if __name__ == "__main__":
+    sys.modules.setdefault("tools.hchat_send", sys.modules[__name__])
+
+from remote.security.client_auth import build_client_auth_headers
+
 CONTACTS_FILE = ROOT / "contacts.json"
 INSTANCES_FILE = ROOT / "instances.json"
 DEFAULT_TTL = 3600
@@ -368,6 +377,10 @@ def _probe_workbench_health(host: str, port: int) -> bool:
     return _probe_http(f"http://{host}:{port}/api/health") or _probe_workbench(host, port)
 
 
+def _probe_remote_http(host: str, port: int) -> bool:
+    return _probe_http(f"http://{host}:{port}/health")
+
+
 def _first_reachable_workbench(hosts: list[str], port: int) -> str | None:
     for host in hosts:
         if _probe_workbench_health(host, port):
@@ -521,6 +534,88 @@ def _find_exchange_instance(local_instance_id: str) -> dict | None:
             "remote_port": inst_info.get("remote_port", DEFAULT_REMOTE_PORT),
         }
     return None
+
+
+def _shared_token_for_protocol() -> str | None:
+    try:
+        from remote.security.shared_token import load_shared_token
+
+        return load_shared_token(ROOT)
+    except Exception:
+        return None
+
+
+def _send_via_protocol_transport(
+    to_agent: str,
+    target_instance: str,
+    from_agent: str,
+    text: str,
+) -> bool:
+    shared_token = _shared_token_for_protocol()
+    if not shared_token:
+        return False
+    cfg = _load_config()
+    source_instance = _normalize_instance_id(_get_instance_id(cfg))
+    remote = _find_remote_instance(to_agent, source_instance, target_instance=target_instance)
+    if not remote:
+        return False
+    remote_port = remote.get("remote_port") or remote.get("port")
+    remote_host = remote.get("remote_host", remote.get("host"))
+    if not remote_host or not remote_port:
+        return False
+    if not _probe_remote_http(remote_host, int(remote_port)):
+        return False
+
+    message_id = f"msg-{uuid.uuid4().hex[:16]}"
+    payload = {
+        "message_type": "agent_message",
+        "message_id": message_id,
+        "conversation_id": f"conv-{uuid.uuid4().hex[:16]}",
+        "from_instance": source_instance,
+        "from_agent": from_agent.lower(),
+        "to_instance": _normalize_instance_id(target_instance),
+        "to_agent": to_agent.lower(),
+        "body": {"text": text},
+        "hop_count": 0,
+        "ttl": 8,
+        "route_trace": [source_instance],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    url = f"http://{remote_host}:{int(remote_port)}/protocol/message"
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib_request.Request(
+        url,
+        data=data,
+        headers=build_client_auth_headers(
+            url=url,
+            method="POST",
+            data=data,
+            token=None,
+            shared_token=shared_token,
+            from_instance=source_instance,
+            normalize_instance=_normalize_instance_id,
+        ),
+        method="POST",
+    )
+    try:
+        with urllib_request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+        if result.get("ok"):
+            print(f"✅ Hchat delivered (protocol transport, {remote_host}:{int(remote_port)}): {from_agent} → {to_agent}@{target_instance}")
+            print(f"   Message: {text[:80]}{'...' if len(text) > 80 else ''}")
+            return True
+        print(f"⚠️ Protocol transport error: {json.dumps(result, ensure_ascii=False)}", file=sys.stderr)
+        return False
+    except HTTPError as exc:
+        try:
+            body = exc.read().decode("utf-8")
+        except Exception:
+            body = str(exc)
+        print(f"⚠️ Protocol transport HTTP error: {body}", file=sys.stderr)
+        return False
+    except Exception as exc:
+        print(f"⚠️ Protocol transport handoff failed: {exc}", file=sys.stderr)
+        return False
 
 
 def _send_via_workbench(
@@ -760,6 +855,9 @@ def send_hchat(
         print(f"❌ {to_agent}@{target_instance} is not a local active agent.", file=sys.stderr)
         return False
 
+    if _send_via_protocol_transport(to_agent, target_instance, from_agent, text):
+        return True
+
     if instance_id.upper() != DEFAULT_EXCHANGE_INSTANCE:
         exchange_route = _find_exchange_instance(instance_id)
         if exchange_route and _send_via_exchange(exchange_route, to_agent, target_instance, from_agent, text, source_instance, reply_route):
@@ -859,6 +957,20 @@ def check_hchat_route(
             error=None if host else "local workbench unreachable",
         )
         return result
+
+    protocol_route = _find_remote_instance(to_agent, instance_id, target_instance=target_instance)
+    shared_token = _shared_token_for_protocol()
+    if shared_token and protocol_route:
+        remote_port = protocol_route.get("remote_port") or protocol_route.get("port")
+        remote_host = protocol_route.get("remote_host", protocol_route.get("host"))
+        if remote_host and remote_port and _probe_remote_http(remote_host, int(remote_port)):
+            result.update(
+                ok=True,
+                route_type="remote_protocol",
+                host=remote_host,
+                remote_port=remote_port,
+            )
+            return result
 
     if instance_id.upper() != DEFAULT_EXCHANGE_INSTANCE:
         exchange_route = _find_exchange_instance(instance_id)
