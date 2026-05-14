@@ -5,7 +5,7 @@ from fastapi import Request, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from .pairing import PairingManager
-from .shared_token import NonceStore, verify_auth_headers
+from .shared_token import HEADER_AUTH_SCHEME, NonceStore, verify_auth_headers
 from ..local_http import is_local_http_host
 
 _pairing_manager: Optional[PairingManager] = None
@@ -64,25 +64,57 @@ def is_loopback_request(request: Request) -> bool:
     return is_local_http_host(host)
 
 
+def _has_protocol_auth_headers(request: Request) -> bool:
+    return bool(str(request.headers.get(HEADER_AUTH_SCHEME) or "").strip())
+
+
+def authenticate_request_detailed(
+    request: Request,
+    *,
+    body_bytes: bytes = b"",
+    from_instance: str | None = None,
+    allow_loopback: bool = False,
+    allow_lan: bool = False,
+) -> tuple[Optional[str], str]:
+    if allow_loopback and is_loopback_request(request):
+        return "loopback", "ok"
+
+    if _has_protocol_auth_headers(request):
+        ok, reason, authenticated_instance = verify_protocol_request(
+            request,
+            body_bytes=body_bytes,
+            from_instance=from_instance,
+        )
+        if ok:
+            return authenticated_instance or "shared-token", "ok"
+        return None, reason
+
+    bearer = _verify_bearer_token_strict(_extract_bearer_token(request))
+    if bearer:
+        return bearer, "ok"
+
+    if allow_lan and _lan_mode:
+        return "lan-client", "ok"
+
+    return None, "auth_required"
+
+
 def try_authenticate_request(
     request: Request,
     *,
     body_bytes: bytes = b"",
     from_instance: str | None = None,
     allow_loopback: bool = False,
+    allow_lan: bool = False,
 ) -> Optional[str]:
-    if allow_loopback and is_loopback_request(request):
-        return "loopback"
-
-    ok, _reason, authenticated_instance = verify_protocol_request(
+    authenticated, _reason = authenticate_request_detailed(
         request,
         body_bytes=body_bytes,
         from_instance=from_instance,
+        allow_loopback=allow_loopback,
+        allow_lan=allow_lan,
     )
-    if ok:
-        return authenticated_instance or "shared-token"
-
-    return _verify_bearer_token_strict(_extract_bearer_token(request))
+    return authenticated
 
 
 def verify_protocol_request(

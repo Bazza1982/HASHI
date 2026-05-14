@@ -41,6 +41,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from ..security.auth import (
+    authenticate_request_detailed,
     has_shared_token,
     is_lan_mode,
     protocol_auth_mode,
@@ -768,11 +769,18 @@ def create_app(
     # ── File push ────────────────────────────────────────────
 
     @app.post("/files/push")
-    async def file_push(payload: FilePushPayload, client_id: str = Depends(verify_token)):
+    async def file_push(request: Request, payload: FilePushPayload):
         """
         Receive a file from another HASHI instance and atomically write it to
         the requested destination path.
         """
+        body_bytes = await request.body()
+        client_id, auth_reason = authenticate_request_detailed(request, body_bytes=body_bytes, allow_lan=True)
+        if not client_id:
+            return JSONResponse(
+                status_code=401,
+                content={"ok": False, "error": "File transfer authentication failed", "code": auth_reason},
+            )
         try:
             dest = _resolve_file_push_destination(payload.dest_path)
             data, digest = _decode_file_push_content(payload)
@@ -812,8 +820,14 @@ def create_app(
         }
 
     @app.get("/files/stat")
-    async def file_stat(path: str, client_id: str = Depends(verify_token)):
+    async def file_stat(request: Request, path: str):
         """Return existence, size, and sha256 for a remote path."""
+        client_id, auth_reason = authenticate_request_detailed(request, body_bytes=b"", allow_lan=True)
+        if not client_id:
+            return JSONResponse(
+                status_code=401,
+                content={"ok": False, "error": "File transfer authentication failed", "code": auth_reason},
+            )
         try:
             target = _resolve_file_push_destination(path)
         except ValueError as exc:

@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 
 from fastapi.testclient import TestClient
 
 from remote.api.server import create_app
 from remote.security.pairing import PairingManager
+from remote.security.shared_token import HEADER_AUTH_SCHEME
 from remote.terminal.executor import TerminalExecutor
-from tools.remote_file_transfer import _split_remote_path
+from tools.remote_file_transfer import _build_request_headers, _split_remote_path
 
 
 def _client(tmp_path):
@@ -99,3 +101,52 @@ def test_split_remote_path_preserves_windows_drive_colon():
 
     assert instance == "HASHI9"
     assert path == r"C:\Users\me\Desktop\report.txt"
+
+
+def test_build_request_headers_prefers_bearer_over_shared_token():
+    headers = _build_request_headers(
+        url="http://127.0.0.1:8766/files/push",
+        method="POST",
+        data=json.dumps({"hello": "world"}).encode("utf-8"),
+        token="legacy-token",
+        shared_token="shared-secret",
+        from_instance="HASHI1",
+    )
+
+    assert headers["Authorization"] == "Bearer legacy-token"
+    assert HEADER_AUTH_SCHEME not in headers
+
+
+def test_build_request_headers_adds_hmac_when_shared_token_selected():
+    body = json.dumps({"hello": "world"}).encode("utf-8")
+
+    headers = _build_request_headers(
+        url="http://127.0.0.1:8766/files/push",
+        method="POST",
+        data=body,
+        token=None,
+        shared_token="shared-secret",
+        from_instance="hashi1",
+    )
+
+    assert headers[HEADER_AUTH_SCHEME] == "hashi-shared-hmac-v1"
+    assert headers["X-Hashi-From-Instance"] == "HASHI1"
+
+
+def test_build_request_headers_requires_sender_identity_for_shared_token(monkeypatch):
+    monkeypatch.delenv("HASHI_INSTANCE_ID", raising=False)
+    monkeypatch.setattr("tools.remote_file_transfer._load_local_instance_id", lambda: None)
+
+    try:
+        _build_request_headers(
+            url="http://127.0.0.1:8766/files/stat",
+            method="GET",
+            data=None,
+            token=None,
+            shared_token="shared-secret",
+            from_instance=None,
+        )
+    except ValueError as exc:
+        assert "shared-token mode requires --from-instance" in str(exc)
+    else:
+        raise AssertionError("expected ValueError when shared-token sender identity is unavailable")
