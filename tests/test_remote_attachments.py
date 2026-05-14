@@ -209,7 +209,6 @@ def test_attachment_upload_cancel_removes_pending_upload(tmp_path):
         "from_instance": "HASHI2",
         "pending_upload_ids": [pending_upload_id],
         "reason": "test cleanup",
-        "cancel_token": "cancel-1",
     }
     cancel_body = json.dumps(cancel_payload).encode("utf-8")
     cancel_response = client.post(
