@@ -20,13 +20,12 @@ from pathlib import Path
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from remote.security.shared_token import build_auth_headers
+from remote.security.client_auth import build_client_auth_headers
 from tools.hchat_send import DEFAULT_REMOTE_PORT, _load_instances, _normalize_instance_id
 
 
@@ -86,27 +85,24 @@ def _build_request_headers(
     shared_token: str | None,
     from_instance: str | None,
 ) -> dict[str, str]:
-    headers = {"Content-Type": "application/json"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-        return headers
-    if shared_token:
-        sender = _normalize_instance_id(from_instance) or _load_local_instance_id()
-        if not sender:
+    try:
+        return build_client_auth_headers(
+            url=url,
+            method=method,
+            data=data,
+            token=token,
+            shared_token=shared_token,
+            from_instance=from_instance,
+            normalize_instance=_normalize_instance_id,
+            load_default_instance=_load_local_instance_id,
+        )
+    except ValueError as exc:
+        if str(exc) == "shared-token mode requires a sender instance id":
             raise ValueError(
                 "shared-token mode requires --from-instance or HASHI_INSTANCE_ID, "
                 "or a local global.instance_id in agents.json"
-            )
-        headers.update(
-            build_auth_headers(
-                shared_token=shared_token,
-                method=method,
-                path=urlsplit(url).path,
-                from_instance=sender,
-                body_bytes=data or b"",
-            )
-        )
-    return headers
+            ) from exc
+        raise
 
 
 def _request_json(

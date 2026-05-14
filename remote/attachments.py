@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import re
+import secrets
 import shutil
 import time
 from contextlib import suppress
@@ -19,6 +20,7 @@ logger = logging.getLogger(__name__)
 MAX_ATTACHMENT_BYTES = 16 * 1024 * 1024
 MAX_ATTACHMENTS_PER_MESSAGE = 4
 MAX_TOTAL_ATTACHMENT_BYTES = 32 * 1024 * 1024
+PENDING_ATTACHMENT_TTL_SECONDS = 24 * 60 * 60
 _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -60,6 +62,7 @@ class AttachmentStore:
         self._quarantine_dir = self._base_dir / "quarantine"
         for path in (self._pending_dir, self._messages_dir, self._quarantine_dir):
             path.mkdir(parents=True, exist_ok=True)
+        self.sweep_expired_pending()
 
     def _safe_filename(self, value: str, *, fallback: str) -> str:
         name = Path(str(value or "").strip()).name
@@ -89,6 +92,37 @@ class AttachmentStore:
             return PendingAttachment(**data)
         except Exception:
             return None
+
+    def _generate_pending_upload_id(self) -> str:
+        return f"pu-{int(time.time() * 1000)}-{secrets.token_hex(8)}"
+
+    def _cleanup_pending_record(self, pending: PendingAttachment) -> None:
+        meta_path = self._message_pending_dir(pending.message_id) / f"{pending.pending_upload_id}.json"
+        try:
+            Path(pending.spool_path).unlink(missing_ok=True)
+            meta_path.unlink(missing_ok=True)
+        except Exception:
+            logger.warning("Failed cleaning pending attachment %s", pending.pending_upload_id)
+        with suppress(Exception):
+            self._message_pending_dir(pending.message_id).rmdir()
+
+    def sweep_expired_pending(self, *, max_age_seconds: int = PENDING_ATTACHMENT_TTL_SECONDS) -> int:
+        cutoff = time.time() - max(1, int(max_age_seconds))
+        removed = 0
+        for meta_path in self._pending_dir.glob("*/*.json"):
+            try:
+                data = json.loads(meta_path.read_text(encoding="utf-8"))
+                created_at = datetime.fromisoformat(str(data.get("created_at") or ""))
+                if created_at.replace(tzinfo=created_at.tzinfo or timezone.utc).timestamp() > cutoff:
+                    continue
+                pending = PendingAttachment(**data)
+            except Exception:
+                continue
+            self._cleanup_pending_record(pending)
+            removed += 1
+        if removed:
+            logger.info("Attachment pending sweep removed %d expired upload(s)", removed)
+        return removed
 
     def _decode_upload_content(self, content_b64: str, expected_sha256: str | None) -> tuple[bytes, str]:
         try:
@@ -124,12 +158,17 @@ class AttachmentStore:
             raise ValueError("attachment_id is required")
 
         data, digest = self._decode_upload_content(content_b64, sha256)
-        pending_upload_id = f"pu-{clean_message_id}-{clean_attachment_id}"
         pending_dir = self._message_pending_dir(clean_message_id)
         pending_dir.mkdir(parents=True, exist_ok=True)
         safe_name = self._safe_filename(filename, fallback=f"{clean_attachment_id}.bin")
-        spool_path = pending_dir / f"{clean_attachment_id}__{safe_name}"
-        meta_path = pending_dir / f"{pending_upload_id}.json"
+        for _attempt in range(8):
+            pending_upload_id = self._generate_pending_upload_id()
+            spool_path = pending_dir / f"{pending_upload_id}__{safe_name}"
+            meta_path = pending_dir / f"{pending_upload_id}.json"
+            if not spool_path.exists() and not meta_path.exists():
+                break
+        else:
+            raise ValueError("failed to allocate unique pending upload id")
 
         tmp_path = spool_path.with_name(f".{spool_path.name}.tmp-{int(time.time() * 1000)}")
         tmp_path.write_bytes(data)
@@ -200,6 +239,7 @@ class AttachmentStore:
         temp_dir.mkdir(parents=True, exist_ok=True)
 
         normalized: list[dict[str, Any]] = []
+        committed_at = datetime.now(timezone.utc).isoformat()
         try:
             for pending, requested in pending_records:
                 src = Path(pending.spool_path)
@@ -218,45 +258,32 @@ class AttachmentStore:
                         "mime_type": pending.mime_type,
                         "size_bytes": pending.size_bytes,
                         "sha256": pending.sha256,
-                        "stored_path": str(dest),
                         "received_at": datetime.now(timezone.utc).isoformat(),
                         "caption": str(requested.get("caption") or "").strip() or None,
                     }
                 )
-            self._json_write_atomic(
-                temp_dir / "manifest.json",
-                {
-                    "message_id": clean_message_id,
-                    "from_instance": clean_from,
-                    "attachments": normalized,
-                    "committed_at": datetime.now(timezone.utc).isoformat(),
-                },
-            )
             temp_dir.replace(final_dir)
+            finalized_attachments: list[dict[str, Any]] = []
             for item in normalized:
-                item["stored_path"] = str(final_dir / str(item.get("filename") or "attachment"))
+                finalized = dict(item)
+                finalized["stored_path"] = str(final_dir / str(item.get("filename") or "attachment"))
+                finalized_attachments.append(finalized)
             self._json_write_atomic(
                 final_dir / "manifest.json",
                 {
                     "message_id": clean_message_id,
                     "from_instance": clean_from,
-                    "attachments": normalized,
-                    "committed_at": datetime.now(timezone.utc).isoformat(),
+                    "attachments": finalized_attachments,
+                    "committed_at": committed_at,
                 },
             )
+            normalized = finalized_attachments
         except Exception:
             shutil.rmtree(temp_dir, ignore_errors=True)
             raise
 
         for pending, _requested in pending_records:
-            meta_path = self._message_pending_dir(clean_message_id) / f"{pending.pending_upload_id}.json"
-            try:
-                Path(pending.spool_path).unlink(missing_ok=True)
-                meta_path.unlink(missing_ok=True)
-            except Exception:
-                logger.warning("Failed cleaning pending attachment %s", pending.pending_upload_id)
-        with suppress(Exception):
-            self._message_pending_dir(clean_message_id).rmdir()
+            self._cleanup_pending_record(pending)
         logger.info("Attachment message committed: message_id=%s attachments=%d", clean_message_id, len(normalized))
         return normalized
 
@@ -268,3 +295,25 @@ class AttachmentStore:
             return json.loads(manifest_path.read_text(encoding="utf-8"))
         except Exception:
             return None
+
+    def cancel_pending_uploads(
+        self,
+        *,
+        message_id: str,
+        from_instance: str,
+        pending_upload_ids: list[str],
+    ) -> int:
+        clean_message_id = str(message_id or "").strip()
+        clean_from = str(from_instance or "").strip().upper()
+        if not clean_message_id or not clean_from:
+            raise ValueError("message_id and from_instance are required")
+        removed = 0
+        for pending_upload_id in pending_upload_ids:
+            pending = self._load_pending(str(pending_upload_id or "").strip())
+            if pending is None:
+                continue
+            if pending.message_id != clean_message_id or pending.from_instance != clean_from:
+                raise ValueError(f"pending upload belongs to a different message or sender: {pending.pending_upload_id}")
+            self._cleanup_pending_record(pending)
+            removed += 1
+        return removed

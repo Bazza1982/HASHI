@@ -182,3 +182,108 @@ def test_attachment_commit_rejects_missing_pending_upload(tmp_path):
     assert response.status_code == 400
     assert "pending upload not found" in response.json()["error"]
     assert protocol.messages == []
+
+
+def test_attachment_upload_cancel_removes_pending_upload(tmp_path):
+    token = _write_shared_token(tmp_path)
+    client, _protocol = _client(tmp_path, lan_mode=False)
+    upload_payload = {
+        "message_id": "msg-cancel",
+        "from_instance": "HASHI2",
+        "attachment_id": "att-1",
+        "filename": "report.txt",
+        "mime_type": "text/plain",
+        "content_b64": "aGVsbG8=",
+        "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+    }
+    upload_body = json.dumps(upload_payload).encode("utf-8")
+    upload_response = client.post(
+        "/attachments/upload",
+        content=upload_body,
+        headers=_signed_headers(token, method="POST", path="/attachments/upload", from_instance="HASHI2", body=upload_body),
+    )
+    pending_upload_id = upload_response.json()["attachment"]["pending_upload_id"]
+
+    cancel_payload = {
+        "message_id": "msg-cancel",
+        "from_instance": "HASHI2",
+        "pending_upload_ids": [pending_upload_id],
+        "reason": "test cleanup",
+        "cancel_token": "cancel-1",
+    }
+    cancel_body = json.dumps(cancel_payload).encode("utf-8")
+    cancel_response = client.post(
+        "/attachments/upload/cancel",
+        content=cancel_body,
+        headers=_signed_headers(token, method="POST", path="/attachments/upload/cancel", from_instance="HASHI2", body=cancel_body),
+    )
+
+    assert cancel_response.status_code == 200
+    assert cancel_response.json()["removed"] == 1
+
+    commit_payload = {
+        "message_id": "msg-cancel",
+        "conversation_id": "conv-cancel",
+        "from_instance": "HASHI2",
+        "from_agent": "zhaojun",
+        "to_instance": "HASHI_LOCAL",
+        "to_agent": "lily",
+        "body": {"text": "missing upload"},
+        "attachments": [{"attachment_id": "att-1", "pending_upload_id": pending_upload_id}],
+    }
+    commit_body = json.dumps(commit_payload).encode("utf-8")
+    response = client.post(
+        "/protocol/message-with-attachments",
+        content=commit_body,
+        headers=_signed_headers(
+            token,
+            method="POST",
+            path="/protocol/message-with-attachments",
+            from_instance="HASHI2",
+            body=commit_body,
+        ),
+    )
+
+    assert response.status_code == 400
+    assert "pending upload not found" in response.json()["error"]
+
+
+def test_attachment_upload_uses_random_pending_ids_without_overwrite(tmp_path):
+    token = _write_shared_token(tmp_path)
+    client, _protocol = _client(tmp_path, lan_mode=False)
+    payload = {
+        "message_id": "msg-random",
+        "from_instance": "HASHI2",
+        "attachment_id": "att-1",
+        "filename": "report.txt",
+        "mime_type": "text/plain",
+        "content_b64": "aGVsbG8=",
+        "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+    }
+    body = json.dumps(payload).encode("utf-8")
+    first = client.post(
+        "/attachments/upload",
+        content=body,
+        headers=_signed_headers(token, method="POST", path="/attachments/upload", from_instance="HASHI2", body=body),
+    )
+    second_headers = build_auth_headers(
+        shared_token=token,
+        method="POST",
+        path="/attachments/upload",
+        from_instance="HASHI2",
+        body_bytes=body,
+        timestamp=int(time.time()),
+        nonce="nonce-post-/attachments/upload-second",
+    )
+    second_headers["Content-Type"] = "application/json"
+    second = client.post(
+        "/attachments/upload",
+        content=body,
+        headers=second_headers,
+    )
+
+    first_pending = first.json()["attachment"]["pending_upload_id"]
+    second_pending = second.json()["attachment"]["pending_upload_id"]
+    assert first_pending != second_pending
+    assert Path(first.json()["attachment"]["spool_path"]).exists()
+    assert Path(second.json()["attachment"]["spool_path"]).exists()

@@ -1174,6 +1174,12 @@ class ProtocolManager:
                 continue
         return False
 
+    def resolve_forward_urls(self, instance_id: str, path: str) -> list[str]:
+        route = self._resolve_peer_route(instance_id)
+        if route is None:
+            return []
+        return self._candidate_urls(route["host"], route["port"], path)
+
     def _resolve_peer_route(self, instance_id: str):
         peer = self._peer_registry.get_peer(str(instance_id or "")) if self._peer_registry else None
         entry = self._load_instances().get(str(instance_id or "").lower())

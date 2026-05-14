@@ -45,6 +45,12 @@ def canonical_payload_hash(body_bytes: bytes) -> str:
     return hashlib.sha256(body_bytes).hexdigest()
 
 
+def canonical_request_target(path: str, query: str | None = None) -> str:
+    clean_path = str(path or "")
+    clean_query = str(query or "")
+    return f"{clean_path}?{clean_query}" if clean_query else clean_path
+
+
 def build_hmac_input(
     *,
     method: str,
@@ -56,7 +62,7 @@ def build_hmac_input(
 ) -> bytes:
     parts = [
         str(method or "").upper(),
-        str(path or ""),
+        canonical_request_target(path),
         str(from_instance or "").upper(),
         str(int(timestamp)),
         str(nonce or ""),
@@ -174,4 +180,3 @@ def verify_auth_headers(
         return False, "auth_failed", from_instance
 
     return True, "ok", from_instance
-

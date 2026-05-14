@@ -5,7 +5,7 @@ from fastapi import Request, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from .pairing import PairingManager
-from .shared_token import HEADER_AUTH_SCHEME, NonceStore, verify_auth_headers
+from .shared_token import HEADER_AUTH_SCHEME, NonceStore, canonical_request_target, verify_auth_headers
 from ..local_http import is_local_http_host
 
 _pairing_manager: Optional[PairingManager] = None
@@ -127,7 +127,7 @@ def verify_protocol_request(
         headers=request.headers,
         shared_token=_shared_token,
         method=request.method,
-        path=request.url.path,
+        path=canonical_request_target(request.url.path, request.url.query),
         body_bytes=body_bytes,
         nonce_store=_nonce_store,
         expected_from_instance=from_instance,

@@ -124,3 +124,48 @@ def test_send_protocol_message_uploads_attachments_then_commits(monkeypatch, tmp
     assert commit_body["attachments"][0]["filename"] == "report.txt"
     assert commit_body["body"]["text"] == "please review"
     assert "attachments: 1" in capsys.readouterr().out
+
+
+def test_send_protocol_message_cancels_staged_uploads_after_partial_failure(monkeypatch, tmp_path):
+    first = tmp_path / "one.txt"
+    second = tmp_path / "two.txt"
+    first.write_text("one", encoding="utf-8")
+    second.write_text("two", encoding="utf-8")
+    captured: list[dict] = []
+
+    def fake_urlopen(req, timeout=0):
+        body = json.loads((req.data or b"{}").decode("utf-8"))
+        captured.append({"url": req.full_url, "body": body})
+        if req.full_url.endswith("/attachments/upload"):
+            if body["filename"] == "one.txt":
+                return _FakeResponse({"ok": True, "attachment": {"pending_upload_id": "pu-1", "size_bytes": 3}})
+            return _FakeResponse({"ok": False, "error": "boom"})
+        if req.full_url.endswith("/attachments/upload/cancel"):
+            return _FakeResponse({"ok": True, "removed": 1})
+        raise AssertionError(f"unexpected request url: {req.full_url}")
+
+    monkeypatch.setattr(protocol_send.urllib_request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(protocol_send, "_load_config", lambda: {"global": {"instance_id": "HASHI1"}})
+    monkeypatch.setattr(protocol_send, "_load_instances", lambda: {})
+    monkeypatch.setattr(
+        protocol_send,
+        "_find_remote_instance",
+        lambda *args, **kwargs: {"remote_host": "10.0.0.9", "remote_port": 8766},
+    )
+    monkeypatch.setattr(protocol_send, "_probe_remote_http", lambda host, port: True)
+
+    ok = protocol_send.send_protocol_message(
+        "lily@HASHI9",
+        "zelda",
+        "please review",
+        attachments=[first, second],
+        shared_token="shared-secret",
+    )
+
+    assert ok is False
+    assert [item["url"] for item in captured] == [
+        "http://10.0.0.9:8766/attachments/upload",
+        "http://10.0.0.9:8766/attachments/upload",
+        "http://10.0.0.9:8766/attachments/upload/cancel",
+    ]
+    assert captured[-1]["body"]["pending_upload_ids"] == ["pu-1"]

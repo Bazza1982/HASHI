@@ -121,7 +121,7 @@ def test_build_request_headers_adds_hmac_when_shared_token_selected():
     body = json.dumps({"hello": "world"}).encode("utf-8")
 
     headers = _build_request_headers(
-        url="http://127.0.0.1:8766/files/push",
+        url="http://127.0.0.1:8766/files/stat?path=incoming%2Freport.txt",
         method="POST",
         data=body,
         token=None,
@@ -131,6 +131,28 @@ def test_build_request_headers_adds_hmac_when_shared_token_selected():
 
     assert headers[HEADER_AUTH_SCHEME] == "hashi-shared-hmac-v1"
     assert headers["X-Hashi-From-Instance"] == "HASHI1"
+    assert headers["X-Hashi-Digest"]
+
+
+def test_build_request_headers_changes_digest_when_query_changes():
+    first = _build_request_headers(
+        url="http://127.0.0.1:8766/files/stat?path=one.txt",
+        method="GET",
+        data=None,
+        token=None,
+        shared_token="shared-secret",
+        from_instance="HASHI1",
+    )
+    second = _build_request_headers(
+        url="http://127.0.0.1:8766/files/stat?path=two.txt",
+        method="GET",
+        data=None,
+        token=None,
+        shared_token="shared-secret",
+        from_instance="HASHI1",
+    )
+
+    assert first["X-Hashi-Digest"] != second["X-Hashi-Digest"]
 
 
 def test_build_request_headers_requires_sender_identity_for_shared_token(monkeypatch):
