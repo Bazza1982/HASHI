@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from remote.api.server import create_app
 from remote.security.pairing import PairingManager
 from remote.security.shared_token import HEADER_AUTH_SCHEME
+from remote.security.shared_token import canonical_request_target
 from remote.terminal.executor import TerminalExecutor
 from tools.remote_file_transfer import _build_request_headers, _split_remote_path
 
@@ -153,6 +154,13 @@ def test_build_request_headers_changes_digest_when_query_changes():
     )
 
     assert first["X-Hashi-Digest"] != second["X-Hashi-Digest"]
+
+
+def test_build_request_headers_normalizes_equivalent_query_encodings():
+    assert canonical_request_target("/files/stat", "path=incoming%2Freport.txt") == canonical_request_target(
+        "/files/stat",
+        "path=incoming/report.txt",
+    )
 
 
 def test_build_request_headers_requires_sender_identity_for_shared_token(monkeypatch):
