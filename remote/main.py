@@ -270,6 +270,9 @@ class HashiRemoteApplication:
         local_capabilities = build_default_capabilities(
             rescue_start_enabled=terminal_executor.allows_level(AuthLevel.L3_RESTART)
         )
+        for capability in ("file_transfer_hmac_v1", "message_attachments_v1"):
+            if capability not in local_capabilities:
+                local_capabilities.append(capability)
         instance_info["remote_supervisor"] = {
             "mode": "supervised" if self._supervised else "child",
             "source": "flag_or_env" if self._supervised else "hashi_child_or_manual",

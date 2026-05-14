@@ -61,6 +61,20 @@ def _client(tmp_path):
     return TestClient(app), protocol
 
 
+def _client_lan_mode(tmp_path, *, lan_mode: bool):
+    protocol = _ProtocolStub()
+    app = create_app(
+        {"instance_id": "HASHI_LOCAL", "display_name": "Local", "remote_port": 8766},
+        PairingManager(storage_dir=tmp_path / "pairing", lan_mode=lan_mode),
+        TerminalExecutor(),
+        peer_registry=_PeerRegistryStub(),
+        protocol_manager=protocol,
+        hashi_root=str(tmp_path),
+        workbench_port=18800,
+    )
+    return TestClient(app), protocol
+
+
 def test_protocol_handshake_requires_auth_when_token_configured(tmp_path):
     _write_shared_token(tmp_path)
     client, protocol = _client(tmp_path)
@@ -157,6 +171,126 @@ def test_protocol_message_requires_auth_when_token_configured(tmp_path):
     assert response.status_code == 401
     assert response.json()["body"]["code"] == "auth_required"
     assert protocol.messages == []
+
+
+def test_file_push_requires_auth_when_token_configured_and_lan_off(tmp_path):
+    _write_shared_token(tmp_path)
+    client, _protocol = _client_lan_mode(tmp_path, lan_mode=False)
+    payload = {
+        "dest_path": "incoming/report.txt",
+        "content_b64": "aGVsbG8=",
+        "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+    }
+
+    response = client.post("/files/push", json=payload)
+
+    assert response.status_code == 401
+    body = response.json()
+    assert body["ok"] is False
+    assert body["code"] == "auth_required"
+
+
+def test_file_push_accepts_valid_shared_token(tmp_path):
+    token = _write_shared_token(tmp_path)
+    client, _protocol = _client_lan_mode(tmp_path, lan_mode=False)
+    payload = {
+        "dest_path": "incoming/report.txt",
+        "content_b64": "aGVsbG8=",
+        "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+    }
+    body = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    headers.update(
+        build_auth_headers(
+            shared_token=token,
+            method="POST",
+            path="/files/push",
+            from_instance="HASHI2",
+            body_bytes=body,
+            timestamp=int(time.time()),
+            nonce="file-push-1",
+        )
+    )
+
+    response = client.post("/files/push", content=body, headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+
+
+def test_file_stat_accepts_valid_shared_token(tmp_path):
+    token = _write_shared_token(tmp_path)
+    client, _protocol = _client_lan_mode(tmp_path, lan_mode=False)
+    target = tmp_path / "incoming" / "report.txt"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("hello", encoding="utf-8")
+    signed_path = "/files/stat?path=incoming%2Freport.txt"
+    headers = build_auth_headers(
+        shared_token=token,
+        method="GET",
+        path=signed_path,
+        from_instance="HASHI2",
+        body_bytes=b"",
+        timestamp=int(time.time()),
+        nonce="file-stat-1",
+    )
+
+    response = client.get("/files/stat", params={"path": "incoming/report.txt"}, headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert response.json()["sha256"] == "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+
+
+def test_file_stat_rejects_tampered_query_with_shared_token(tmp_path):
+    token = _write_shared_token(tmp_path)
+    client, _protocol = _client_lan_mode(tmp_path, lan_mode=False)
+    target = tmp_path / "incoming" / "report.txt"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("hello", encoding="utf-8")
+    headers = build_auth_headers(
+        shared_token=token,
+        method="GET",
+        path="/files/stat?path=incoming%2Freport.txt",
+        from_instance="HASHI2",
+        body_bytes=b"",
+        timestamp=int(time.time()),
+        nonce="file-stat-tamper",
+    )
+
+    response = client.get("/files/stat", params={"path": "incoming/other.txt"}, headers=headers)
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "auth_failed"
+
+
+def test_file_push_invalid_hmac_does_not_fall_back_to_lan(tmp_path):
+    token = _write_shared_token(tmp_path)
+    client, _protocol = _client_lan_mode(tmp_path, lan_mode=True)
+    payload = {
+        "dest_path": "incoming/report.txt",
+        "content_b64": "aGVsbG8=",
+        "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+    }
+    body = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    headers.update(
+        build_auth_headers(
+            shared_token=token,
+            method="POST",
+            path="/files/push",
+            from_instance="HASHI2",
+            body_bytes=body,
+            timestamp=int(time.time()),
+            nonce="file-push-invalid",
+        )
+    )
+    headers["X-Hashi-Digest"] = "0" * 64
+
+    response = client.post("/files/push", content=body, headers=headers)
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "auth_failed"
 
 
 def test_peers_redacts_without_auth_and_allows_signed_get(tmp_path):
