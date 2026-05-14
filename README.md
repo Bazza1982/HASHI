@@ -979,6 +979,28 @@ For rollout and rollback notes, see
 - `GET /protocol/status` — full protocol state: handshake states, in-flight count, local network profile, agent snapshot
 - `GET /health` — instance info and peer summary
 
+#### Cross-Instance Messages, Attachments, And File Push
+
+For trusted cross-instance operations on LAN or Tailscale peers:
+
+- plain message:
+  `python tools/protocol_send.py --to agent@INSTANCE --from <agent> --text "<msg>" --shared-token "$HASHI_REMOTE_SHARED_TOKEN"`
+- message with attachment:
+  add `--attach <file>` and require peer capability `message_attachments_v1`
+- file push:
+  `python tools/remote_file_transfer.py --shared-token "$HASHI_REMOTE_SHARED_TOKEN" --from-instance HASHI1 push ./file.txt INSTANCE:incoming/remote_smoke/file.txt`
+- file stat:
+  `python tools/remote_file_transfer.py --shared-token "$HASHI_REMOTE_SHARED_TOKEN" --from-instance HASHI1 stat INSTANCE:incoming/remote_smoke/file.txt`
+
+The Remote tools now probe live `/protocol/status` before shared-token file
+transfer and attachment sends so stale peer metadata produces a clear
+capability error instead of ambiguous `401` or `404` failures.
+
+Windows/LAN peers may bind the local Workbench API to a LAN IP rather than
+`127.0.0.1`. Hashi Remote now widens local Workbench host fallback to include
+real interface IPv4 addresses, which fixes the case where protocol transport
+reaches the peer but local enqueue fails on an otherwise healthy LAN PC.
+
 ---
 
 ## Configuration Files
