@@ -21,11 +21,11 @@ from pathlib import Path
 from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
 
-from remote.security.client_auth import build_client_auth_headers
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from remote.security.client_auth import build_client_auth_headers
 from tools.hchat_send import (
     _find_remote_instance,
     _get_instance_id,
