@@ -8,6 +8,7 @@ import secrets
 import time
 from pathlib import Path
 from typing import Mapping
+from urllib.parse import parse_qsl, urlencode
 
 
 AUTH_SCHEME = "hashi-shared-hmac-v1"
@@ -48,7 +49,12 @@ def canonical_payload_hash(body_bytes: bytes) -> str:
 def canonical_request_target(path: str, query: str | None = None) -> str:
     clean_path = str(path or "")
     clean_query = str(query or "")
-    return f"{clean_path}?{clean_query}" if clean_query else clean_path
+    if not clean_query:
+        return clean_path
+    canonical_items = parse_qsl(clean_query, keep_blank_values=True)
+    canonical_items.sort()
+    canonical_query = urlencode(canonical_items, doseq=True)
+    return f"{clean_path}?{canonical_query}" if canonical_query else clean_path
 
 
 def build_hmac_input(
