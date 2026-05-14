@@ -32,14 +32,16 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlsplit
 from urllib import request as urllib_request
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from ..attachments import AttachmentStore
 from ..security.auth import (
     authenticate_request_detailed,
     has_shared_token,
@@ -52,6 +54,7 @@ from ..security.auth import (
     verify_protocol_request,
     verify_token,
 )
+from ..security.shared_token import build_auth_headers
 from ..security.shared_token import load_shared_token
 from ..security.pairing import PairingManager
 from ..terminal.executor import TerminalExecutor, AuthLevel
@@ -68,6 +71,7 @@ _terminal_executor: Optional[TerminalExecutor] = None
 _protocol_manager = None
 _hashi_root: Optional[str] = None
 _workbench_port: int = 18800
+_attachment_store: Optional[AttachmentStore] = None
 _HCHAT_HEADER_RE = re.compile(r"^\[hchat from (?P<agent>\w+)(?:@(?P<instance>[\w-]+))?\]\s*(?P<body>.*)$", re.DOTALL)
 
 
@@ -158,6 +162,43 @@ class ProtocolMessagePayload(BaseModel):
     created_at: Optional[str] = None
 
 
+class AttachmentUploadPayload(BaseModel):
+    message_id: str
+    from_instance: str
+    attachment_id: str
+    filename: str
+    mime_type: Optional[str] = None
+    content_b64: str
+    sha256: Optional[str] = None
+
+
+class AttachmentCommitItem(BaseModel):
+    attachment_id: str
+    pending_upload_id: str
+    filename: Optional[str] = None
+    mime_type: Optional[str] = None
+    size_bytes: Optional[int] = None
+    sha256: Optional[str] = None
+    caption: Optional[str] = None
+
+
+class ProtocolMessageWithAttachmentsPayload(BaseModel):
+    message_id: str
+    conversation_id: str
+    in_reply_to: Optional[str] = None
+    from_instance: str
+    from_agent: str
+    to_instance: str
+    to_agent: str
+    body: dict
+    attachments: list[AttachmentCommitItem]
+    hop_count: int = 0
+    ttl: int = 8
+    route_trace: list[str] = []
+    message_type: str = "agent_message"
+    created_at: Optional[str] = None
+
+
 # ─────────────────────────────────────────────────────────────
 # App factory
 # ─────────────────────────────────────────────────────────────
@@ -200,6 +241,54 @@ def _decode_file_push_content(payload: FilePushPayload) -> tuple[bytes, str]:
     if expected and expected != digest:
         raise ValueError("sha256 mismatch")
     return data, digest
+
+
+def _attachment_summary_lines(attachments: list[dict[str, Any]]) -> list[str]:
+    lines = ["", "[Remote attachments]"]
+    for item in attachments:
+        filename = str(item.get("filename") or "attachment")
+        size_bytes = int(item.get("size_bytes") or 0)
+        mime_type = str(item.get("mime_type") or "application/octet-stream")
+        lines.append(f"- {filename} ({mime_type}, {size_bytes} bytes)")
+    return lines
+
+
+def _merge_attachment_text(body: dict[str, Any], attachments: list[dict[str, Any]]) -> dict[str, Any]:
+    merged = dict(body or {})
+    base_text = str((body or {}).get("text") or "").strip()
+    attachment_block = "\n".join(_attachment_summary_lines(attachments))
+    merged["text"] = f"{base_text}{attachment_block}" if base_text else attachment_block.strip()
+    merged["attachments"] = attachments
+    return merged
+
+
+def _post_json_with_optional_hmac(url: str, payload: dict[str, Any], *, timeout: int = 15) -> dict[str, Any]:
+    body_bytes = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    shared_token = load_shared_token(Path(_hashi_root) if _hashi_root else None)
+    if shared_token:
+        headers.update(
+            build_auth_headers(
+                shared_token=shared_token,
+                method="POST",
+                path=urlsplit(url).path,
+                from_instance=str(_instance_info.get("instance_id") or ""),
+                body_bytes=body_bytes,
+            )
+        )
+    req = urllib_request.Request(url, data=body_bytes, headers=headers, method="POST")
+    try:
+        with urllib_request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except HTTPError as exc:
+        body = exc.read().decode("utf-8")
+        try:
+            result = json.loads(body) if body else {}
+        except Exception:
+            raise
+        if isinstance(result, dict):
+            result["__http_status"] = exc.code
+        return result
 
 
 def _process_exists(pid: int) -> bool:
@@ -388,7 +477,7 @@ def create_app(
     """Create the FastAPI application with all context injected."""
 
     global _instance_info, _peer_registry, _pairing_manager, _terminal_executor
-    global _workbench_port, _hashi_root, _protocol_manager
+    global _workbench_port, _hashi_root, _protocol_manager, _attachment_store
 
     _instance_info = instance_info
     _peer_registry = peer_registry
@@ -397,6 +486,10 @@ def create_app(
     _protocol_manager = protocol_manager
     _workbench_port = workbench_port
     _hashi_root = hashi_root
+    _attachment_store = AttachmentStore(
+        root=Path(hashi_root) if hashi_root else Path.cwd(),
+        instance_id=str(instance_info.get("instance_id") or "hashi"),
+    )
 
     set_pairing_manager(pairing_manager)
     set_lan_mode(pairing_manager.lan_mode)
@@ -559,6 +652,138 @@ def create_app(
             )
         status, result = await _protocol_manager.handle_protocol_message(payload.model_dump())
         return JSONResponse(status_code=status, content=result)
+
+    @app.post("/attachments/upload")
+    async def attachment_upload(request: Request, payload: AttachmentUploadPayload):
+        if _attachment_store is None:
+            return JSONResponse(status_code=503, content={"ok": False, "error": "attachment store unavailable"})
+        body_bytes = await request.body()
+        client_id, auth_reason = authenticate_request_detailed(
+            request,
+            body_bytes=body_bytes,
+            from_instance=payload.from_instance,
+            allow_lan=True,
+        )
+        if not client_id:
+            return JSONResponse(
+                status_code=401,
+                content={"ok": False, "error": "Attachment upload authentication failed", "code": auth_reason},
+            )
+        try:
+            staged = _attachment_store.upload_pending(
+                message_id=payload.message_id,
+                from_instance=payload.from_instance,
+                attachment_id=payload.attachment_id,
+                filename=payload.filename,
+                mime_type=payload.mime_type,
+                content_b64=payload.content_b64,
+                sha256=payload.sha256,
+            )
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+        logger.info(
+            "Attachment staged by %s: message_id=%s attachment_id=%s",
+            client_id,
+            payload.message_id,
+            payload.attachment_id,
+        )
+        return {"ok": True, "attachment": staged}
+
+    @app.post("/protocol/message-with-attachments")
+    async def protocol_message_with_attachments(request: Request, payload: ProtocolMessageWithAttachmentsPayload):
+        if _protocol_manager is None:
+            return JSONResponse(status_code=503, content={"ok": False, "error": "protocol manager unavailable"})
+        if _attachment_store is None:
+            return JSONResponse(status_code=503, content={"ok": False, "error": "attachment store unavailable"})
+        body_bytes = await request.body()
+        ok, reason, _auth_identity = verify_protocol_request(
+            request,
+            body_bytes=body_bytes,
+            from_instance=payload.from_instance,
+        )
+        if not ok:
+            logger.warning(
+                "Protocol attachment message rejected: reason=%s from=%s",
+                reason,
+                payload.from_instance,
+            )
+            return JSONResponse(
+                status_code=401,
+                content={"ok": False, "error": "Protocol authentication failed", "code": reason},
+            )
+        try:
+            normalized_attachments = _attachment_store.commit_message(
+                message_id=payload.message_id,
+                from_instance=payload.from_instance,
+                attachments=[item.model_dump() for item in payload.attachments],
+            )
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+
+        local_instance = str(_instance_info.get("instance_id") or "").strip().upper()
+        if str(payload.to_instance or "").strip().upper() != local_instance:
+            route = _protocol_manager._resolve_peer_route(str(payload.to_instance or "").strip().upper())
+            if route is None:
+                return JSONResponse(
+                    status_code=404,
+                    content={"ok": False, "error": f"Target instance '{payload.to_instance}' not in peer registry"},
+                )
+            forward_payload = payload.model_dump()
+            forward_payload["body"] = _merge_attachment_text(payload.body, normalized_attachments)
+            forward_payload["attachments"] = normalized_attachments
+            last_exc = None
+            for url in _protocol_manager._candidate_urls(route["host"], route["port"], "/protocol/message-with-attachments"):
+                try:
+                    result = await asyncio.get_running_loop().run_in_executor(
+                        None,
+                        lambda u=url: _post_json_with_optional_hmac(u, forward_payload, timeout=15),
+                    )
+                    if _protocol_manager._response_is_error(result):
+                        raise RuntimeError(result)
+                    return JSONResponse(status_code=202, content=result)
+                except Exception as exc:
+                    last_exc = exc
+                    logger.warning("Attachment forward via %s failed: %s", url, exc)
+            return JSONResponse(
+                status_code=502,
+                content={"ok": False, "error": f"Failed to forward attachment message: {last_exc}"},
+            )
+
+        local_payload = ProtocolMessagePayload(
+            message_id=payload.message_id,
+            conversation_id=payload.conversation_id,
+            in_reply_to=payload.in_reply_to,
+            from_instance=payload.from_instance,
+            from_agent=payload.from_agent,
+            to_instance=payload.to_instance,
+            to_agent=payload.to_agent,
+            body=_merge_attachment_text(payload.body, normalized_attachments),
+            hop_count=payload.hop_count,
+            ttl=payload.ttl,
+            route_trace=payload.route_trace,
+            message_type=payload.message_type,
+            created_at=payload.created_at,
+        )
+        status, result = await _protocol_manager.handle_protocol_message(local_payload.model_dump())
+        if isinstance(result, dict):
+            result = dict(result)
+            result["attachments"] = normalized_attachments
+        return JSONResponse(status_code=status, content=result)
+
+    @app.get("/attachments/message/{message_id}")
+    async def attachment_message_manifest(request: Request, message_id: str):
+        if _attachment_store is None:
+            return JSONResponse(status_code=503, content={"ok": False, "error": "attachment store unavailable"})
+        client_id, auth_reason = authenticate_request_detailed(request, body_bytes=b"", allow_lan=True)
+        if not client_id:
+            return JSONResponse(
+                status_code=401,
+                content={"ok": False, "error": "Attachment manifest authentication failed", "code": auth_reason},
+            )
+        manifest = _attachment_store.get_message_manifest(message_id)
+        if manifest is None:
+            return JSONResponse(status_code=404, content={"ok": False, "error": "attachment message not found"})
+        return {"ok": True, "manifest": manifest}
 
     # ── HChat relay ─────────────────────────────────────────
 
