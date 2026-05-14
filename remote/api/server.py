@@ -187,7 +187,6 @@ class AttachmentCancelPayload(BaseModel):
     from_instance: str
     pending_upload_ids: list[str]
     reason: Optional[str] = None
-    cancel_token: Optional[str] = None
 
 
 class ProtocolMessageWithAttachmentsPayload(BaseModel):

@@ -13,7 +13,6 @@ import hashlib
 import json
 import mimetypes
 import os
-import secrets
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -21,11 +20,11 @@ from pathlib import Path
 from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
 
-from remote.security.client_auth import build_client_auth_headers
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from remote.security.client_auth import build_client_auth_headers
 from tools.hchat_send import (
     _find_remote_instance,
     _get_instance_id,
@@ -189,7 +188,7 @@ def _send_with_attachments(
 
     commit_payload = dict(payload)
     commit_payload["attachments"] = staged
-    return _request_json(
+    commit_result = _request_json(
         f"{base_url}/protocol/message-with-attachments",
         payload=commit_payload,
         token=token,
@@ -197,6 +196,18 @@ def _send_with_attachments(
         from_instance=payload["from_instance"],
         timeout=timeout,
     )
+    if not commit_result.get("ok"):
+        _cancel_staged_attachments(
+            base_url=base_url,
+            message_id=payload["message_id"],
+            from_instance=payload["from_instance"],
+            staged=staged,
+            token=token,
+            shared_token=shared_token,
+            timeout=timeout,
+            reason="sender_commit_failed",
+        )
+    return commit_result
 
 
 def _cancel_staged_attachments(
@@ -208,6 +219,7 @@ def _cancel_staged_attachments(
     token: str | None,
     shared_token: str | None,
     timeout: int,
+    reason: str = "sender_upload_failed",
 ) -> None:
     pending_upload_ids = [str(item.get("pending_upload_id") or "").strip() for item in staged if str(item.get("pending_upload_id") or "").strip()]
     if not pending_upload_ids:
@@ -216,11 +228,10 @@ def _cancel_staged_attachments(
         "message_id": message_id,
         "from_instance": from_instance,
         "pending_upload_ids": pending_upload_ids,
-        "reason": "sender_upload_failed",
-        "cancel_token": secrets.token_hex(8),
+        "reason": reason,
     }
     try:
-        _request_json(
+        result = _request_json(
             f"{base_url}/attachments/upload/cancel",
             payload=payload,
             token=token,
@@ -228,8 +239,13 @@ def _cancel_staged_attachments(
             from_instance=from_instance,
             timeout=timeout,
         )
-    except Exception:
-        pass
+        if not result.get("ok"):
+            print(
+                f"⚠️  Failed to cancel staged uploads on server: {json.dumps(result, ensure_ascii=False)}",
+                file=sys.stderr,
+            )
+    except Exception as exc:
+        print(f"⚠️  Failed to cancel staged uploads on server: {exc}", file=sys.stderr)
 
 
 def send_protocol_message(
