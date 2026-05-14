@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from remote.security.client_auth import build_client_auth_headers
 from tools.hchat_send import DEFAULT_REMOTE_PORT, _load_instances, _normalize_instance_id
 
 
@@ -61,11 +62,68 @@ def _candidate_hosts(entry: dict) -> list[str]:
     return hosts
 
 
-def _request_json(url: str, *, method: str = "GET", payload: dict | None = None, token: str | None = None, timeout: int = 60) -> dict:
+def _load_local_instance_id() -> str | None:
+    env_value = _normalize_instance_id(os.getenv("HASHI_INSTANCE_ID"))
+    if env_value:
+        return env_value
+    config_path = ROOT / "agents.json"
+    if not config_path.exists():
+        return None
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return None
+    return _normalize_instance_id((data.get("global") or {}).get("instance_id"))
+
+
+def _build_request_headers(
+    *,
+    url: str,
+    method: str,
+    data: bytes | None,
+    token: str | None,
+    shared_token: str | None,
+    from_instance: str | None,
+) -> dict[str, str]:
+    try:
+        return build_client_auth_headers(
+            url=url,
+            method=method,
+            data=data,
+            token=token,
+            shared_token=shared_token,
+            from_instance=from_instance,
+            normalize_instance=_normalize_instance_id,
+            load_default_instance=_load_local_instance_id,
+        )
+    except ValueError as exc:
+        if str(exc) == "shared-token mode requires a sender instance id":
+            raise ValueError(
+                "shared-token mode requires --from-instance or HASHI_INSTANCE_ID, "
+                "or a local global.instance_id in agents.json"
+            ) from exc
+        raise
+
+
+def _request_json(
+    url: str,
+    *,
+    method: str = "GET",
+    payload: dict | None = None,
+    token: str | None = None,
+    shared_token: str | None = None,
+    from_instance: str | None = None,
+    timeout: int = 60,
+) -> dict:
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
-    headers = {"Content-Type": "application/json"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    headers = _build_request_headers(
+        url=url,
+        method=method,
+        data=data,
+        token=token,
+        shared_token=shared_token,
+        from_instance=from_instance,
+    )
     req = urllib_request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib_request.urlopen(req, timeout=timeout) as resp:
@@ -103,6 +161,8 @@ def push_file(
     overwrite: bool = False,
     create_dirs: bool = True,
     token: str | None = None,
+    shared_token: str | None = None,
+    from_instance: str | None = None,
     timeout: int = 120,
 ) -> bool:
     instance_id, dest_path = _split_remote_path(remote_spec, instance)
@@ -116,7 +176,15 @@ def push_file(
         "create_dirs": create_dirs,
     }
     base_url = _remote_base_url(instance_id)
-    result = _request_json(f"{base_url}/files/push", method="POST", payload=payload, token=token, timeout=timeout)
+    result = _request_json(
+        f"{base_url}/files/push",
+        method="POST",
+        payload=payload,
+        token=token,
+        shared_token=shared_token,
+        from_instance=from_instance,
+        timeout=timeout,
+    )
     if result.get("ok"):
         print(f"OK: pushed {local_path} -> {instance_id}:{result['dest_path']}")
         print(f"    bytes={result['bytes_written']} sha256={result['sha256']}")
@@ -125,11 +193,23 @@ def push_file(
     return False
 
 
-def stat_file(remote_spec: str, *, instance: str | None = None, token: str | None = None) -> bool:
+def stat_file(
+    remote_spec: str,
+    *,
+    instance: str | None = None,
+    token: str | None = None,
+    shared_token: str | None = None,
+    from_instance: str | None = None,
+) -> bool:
     instance_id, dest_path = _split_remote_path(remote_spec, instance)
     base_url = _remote_base_url(instance_id)
     query = urllib_parse.urlencode({"path": dest_path})
-    result = _request_json(f"{base_url}/files/stat?{query}", token=token)
+    result = _request_json(
+        f"{base_url}/files/stat?{query}",
+        token=token,
+        shared_token=shared_token,
+        from_instance=from_instance,
+    )
     if result.get("ok"):
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return True
@@ -140,6 +220,16 @@ def stat_file(remote_spec: str, *, instance: str | None = None, token: str | Non
 def main() -> int:
     parser = argparse.ArgumentParser(description="Push files through Hashi Remote")
     parser.add_argument("--token", default=os.getenv("HASHI_REMOTE_TOKEN"), help="Bearer token when remote LAN mode is off")
+    parser.add_argument(
+        "--shared-token",
+        default=os.getenv("HASHI_REMOTE_SHARED_TOKEN"),
+        help="Shared-token secret for Hashi Remote HMAC auth",
+    )
+    parser.add_argument(
+        "--from-instance",
+        default=os.getenv("HASHI_INSTANCE_ID"),
+        help="Sender instance id for shared-token HMAC auth",
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     push = sub.add_parser("push", help="Push a local file to INSTANCE:path")
@@ -166,10 +256,18 @@ def main() -> int:
             overwrite=args.overwrite,
             create_dirs=not args.no_create_dirs,
             token=args.token,
+            shared_token=None if args.token else args.shared_token,
+            from_instance=args.from_instance,
             timeout=args.timeout,
         ) else 1
     if args.cmd == "stat":
-        return 0 if stat_file(args.remote_path, instance=args.instance, token=args.token) else 1
+        return 0 if stat_file(
+            args.remote_path,
+            instance=args.instance,
+            token=args.token,
+            shared_token=None if args.token else args.shared_token,
+            from_instance=args.from_instance,
+        ) else 1
     return 2
 
 
