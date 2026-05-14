@@ -182,6 +182,14 @@ class AttachmentCommitItem(BaseModel):
     caption: Optional[str] = None
 
 
+class AttachmentCancelPayload(BaseModel):
+    message_id: str
+    from_instance: str
+    pending_upload_ids: list[str]
+    reason: Optional[str] = None
+    cancel_token: Optional[str] = None
+
+
 class ProtocolMessageWithAttachmentsPayload(BaseModel):
     message_id: str
     conversation_id: str
@@ -689,6 +697,39 @@ def create_app(
         )
         return {"ok": True, "attachment": staged}
 
+    @app.post("/attachments/upload/cancel")
+    async def attachment_upload_cancel(request: Request, payload: AttachmentCancelPayload):
+        if _attachment_store is None:
+            return JSONResponse(status_code=503, content={"ok": False, "error": "attachment store unavailable"})
+        body_bytes = await request.body()
+        client_id, auth_reason = authenticate_request_detailed(
+            request,
+            body_bytes=body_bytes,
+            from_instance=payload.from_instance,
+            allow_lan=True,
+        )
+        if not client_id:
+            return JSONResponse(
+                status_code=401,
+                content={"ok": False, "error": "Attachment cancel authentication failed", "code": auth_reason},
+            )
+        try:
+            removed = _attachment_store.cancel_pending_uploads(
+                message_id=payload.message_id,
+                from_instance=payload.from_instance,
+                pending_upload_ids=list(payload.pending_upload_ids or []),
+            )
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+        logger.info(
+            "Attachment pending uploads canceled by %s: message_id=%s removed=%d reason=%s",
+            client_id,
+            payload.message_id,
+            removed,
+            str(payload.reason or "").strip() or "unspecified",
+        )
+        return {"ok": True, "removed": removed}
+
     @app.post("/protocol/message-with-attachments")
     async def protocol_message_with_attachments(request: Request, payload: ProtocolMessageWithAttachmentsPayload):
         if _protocol_manager is None:
@@ -722,8 +763,11 @@ def create_app(
 
         local_instance = str(_instance_info.get("instance_id") or "").strip().upper()
         if str(payload.to_instance or "").strip().upper() != local_instance:
-            route = _protocol_manager._resolve_peer_route(str(payload.to_instance or "").strip().upper())
-            if route is None:
+            candidate_urls = _protocol_manager.resolve_forward_urls(
+                str(payload.to_instance or "").strip().upper(),
+                "/protocol/message-with-attachments",
+            )
+            if not candidate_urls:
                 return JSONResponse(
                     status_code=404,
                     content={"ok": False, "error": f"Target instance '{payload.to_instance}' not in peer registry"},
@@ -732,7 +776,7 @@ def create_app(
             forward_payload["body"] = _merge_attachment_text(payload.body, normalized_attachments)
             forward_payload["attachments"] = normalized_attachments
             last_exc = None
-            for url in _protocol_manager._candidate_urls(route["host"], route["port"], "/protocol/message-with-attachments"):
+            for url in candidate_urls:
                 try:
                     result = await asyncio.get_running_loop().run_in_executor(
                         None,

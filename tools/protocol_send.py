@@ -13,15 +13,15 @@ import hashlib
 import json
 import mimetypes
 import os
+import secrets
 import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
 
-from remote.security.shared_token import build_auth_headers
+from remote.security.client_auth import build_client_auth_headers
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -45,24 +45,15 @@ def _build_request_headers(
     shared_token: str | None,
     from_instance: str | None,
 ) -> dict[str, str]:
-    headers = {"Content-Type": "application/json"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-        return headers
-    if shared_token:
-        sender = _normalize_instance_id(from_instance)
-        if not sender:
-            raise ValueError("shared-token mode requires a sender instance id")
-        headers.update(
-            build_auth_headers(
-                shared_token=shared_token,
-                method=method,
-                path=urlsplit(url).path,
-                from_instance=sender,
-                body_bytes=data or b"",
-            )
-        )
-    return headers
+    return build_client_auth_headers(
+        url=url,
+        method=method,
+        data=data,
+        token=token,
+        shared_token=shared_token,
+        from_instance=from_instance,
+        normalize_instance=_normalize_instance_id,
+    )
 
 
 def _request_json(
@@ -174,6 +165,15 @@ def _send_with_attachments(
             timeout=timeout,
         )
         if not upload_result.get("ok"):
+            _cancel_staged_attachments(
+                base_url=base_url,
+                message_id=payload["message_id"],
+                from_instance=payload["from_instance"],
+                staged=staged,
+                token=token,
+                shared_token=shared_token,
+                timeout=timeout,
+            )
             return upload_result
         attachment = dict(upload_result.get("attachment") or {})
         staged.append(
@@ -197,6 +197,39 @@ def _send_with_attachments(
         from_instance=payload["from_instance"],
         timeout=timeout,
     )
+
+
+def _cancel_staged_attachments(
+    *,
+    base_url: str,
+    message_id: str,
+    from_instance: str,
+    staged: list[dict],
+    token: str | None,
+    shared_token: str | None,
+    timeout: int,
+) -> None:
+    pending_upload_ids = [str(item.get("pending_upload_id") or "").strip() for item in staged if str(item.get("pending_upload_id") or "").strip()]
+    if not pending_upload_ids:
+        return
+    payload = {
+        "message_id": message_id,
+        "from_instance": from_instance,
+        "pending_upload_ids": pending_upload_ids,
+        "reason": "sender_upload_failed",
+        "cancel_token": secrets.token_hex(8),
+    }
+    try:
+        _request_json(
+            f"{base_url}/attachments/upload/cancel",
+            payload=payload,
+            token=token,
+            shared_token=shared_token,
+            from_instance=from_instance,
+            timeout=timeout,
+        )
+    except Exception:
+        pass
 
 
 def send_protocol_message(
