@@ -26,6 +26,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from remote.security.client_auth import build_client_auth_headers
+from tools.remote_capabilities import fetch_remote_protocol_capabilities
 from tools.hchat_send import DEFAULT_REMOTE_PORT, _load_instances, _normalize_instance_id
 
 
@@ -176,6 +177,17 @@ def push_file(
         "create_dirs": create_dirs,
     }
     base_url = _remote_base_url(instance_id)
+    if shared_token and not token:
+        capabilities, probe_error = fetch_remote_protocol_capabilities(base_url, timeout=min(timeout, 5))
+        if capabilities and "file_transfer_hmac_v1" not in capabilities:
+            print(
+                "ERROR: remote peer does not advertise file_transfer_hmac_v1 on live /protocol/status; "
+                "restart/update that peer or use bearer mode if legacy auth is intended.",
+                file=sys.stderr,
+            )
+            return False
+        if probe_error:
+            print(f"WARNING: could not confirm remote file-transfer capability via /protocol/status: {probe_error}", file=sys.stderr)
     result = _request_json(
         f"{base_url}/files/push",
         method="POST",
@@ -203,6 +215,17 @@ def stat_file(
 ) -> bool:
     instance_id, dest_path = _split_remote_path(remote_spec, instance)
     base_url = _remote_base_url(instance_id)
+    if shared_token and not token:
+        capabilities, probe_error = fetch_remote_protocol_capabilities(base_url)
+        if capabilities and "file_transfer_hmac_v1" not in capabilities:
+            print(
+                "ERROR: remote peer does not advertise file_transfer_hmac_v1 on live /protocol/status; "
+                "restart/update that peer or use bearer mode if legacy auth is intended.",
+                file=sys.stderr,
+            )
+            return False
+        if probe_error:
+            print(f"WARNING: could not confirm remote file-transfer capability via /protocol/status: {probe_error}", file=sys.stderr)
     query = urllib_parse.urlencode({"path": dest_path})
     result = _request_json(
         f"{base_url}/files/stat?{query}",

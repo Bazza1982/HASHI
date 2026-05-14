@@ -12,6 +12,7 @@ from remote.security.shared_token import HEADER_AUTH_SCHEME
 from remote.security.shared_token import canonical_request_target
 from remote.terminal.executor import TerminalExecutor
 from tools.remote_file_transfer import _build_request_headers, _split_remote_path
+from tools import remote_file_transfer
 
 
 def _client(tmp_path):
@@ -180,3 +181,21 @@ def test_build_request_headers_requires_sender_identity_for_shared_token(monkeyp
         assert "shared-token mode requires --from-instance" in str(exc)
     else:
         raise AssertionError("expected ValueError when shared-token sender identity is unavailable")
+
+
+def test_stat_file_fails_cleanly_when_live_peer_lacks_hmac_capability(monkeypatch, capsys):
+    monkeypatch.setattr(remote_file_transfer, "_remote_base_url", lambda instance_id, timeout=3: "http://127.0.0.1:8766")
+    monkeypatch.setattr(
+        remote_file_transfer,
+        "fetch_remote_protocol_capabilities",
+        lambda base_url, timeout=5: ({"protocol_message_v1"}, None),
+    )
+
+    ok = remote_file_transfer.stat_file(
+        "HASHI9:tmp/report.txt",
+        shared_token="shared-secret",
+        from_instance="HASHI1",
+    )
+
+    assert ok is False
+    assert "does not advertise file_transfer_hmac_v1" in capsys.readouterr().err

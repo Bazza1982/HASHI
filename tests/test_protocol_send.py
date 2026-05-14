@@ -44,6 +44,11 @@ def test_send_protocol_message_uses_shared_token_for_plain_protocol_send(monkeyp
         lambda *args, **kwargs: {"remote_host": "10.0.0.9", "remote_port": 8766},
     )
     monkeypatch.setattr(protocol_send, "_probe_remote_http", lambda host, port: True)
+    monkeypatch.setattr(
+        protocol_send,
+        "fetch_remote_protocol_capabilities",
+        lambda base_url, timeout=5: ({"message_attachments_v1"}, None),
+    )
 
     ok = protocol_send.send_protocol_message(
         "lily@HASHI9",
@@ -102,6 +107,11 @@ def test_send_protocol_message_uploads_attachments_then_commits(monkeypatch, tmp
         lambda *args, **kwargs: {"remote_host": "10.0.0.9", "remote_port": 8766},
     )
     monkeypatch.setattr(protocol_send, "_probe_remote_http", lambda host, port: True)
+    monkeypatch.setattr(
+        protocol_send,
+        "fetch_remote_protocol_capabilities",
+        lambda base_url, timeout=5: ({"message_attachments_v1"}, None),
+    )
 
     ok = protocol_send.send_protocol_message(
         "lily@HASHI9",
@@ -153,6 +163,11 @@ def test_send_protocol_message_cancels_staged_uploads_after_partial_failure(monk
         lambda *args, **kwargs: {"remote_host": "10.0.0.9", "remote_port": 8766},
     )
     monkeypatch.setattr(protocol_send, "_probe_remote_http", lambda host, port: True)
+    monkeypatch.setattr(
+        protocol_send,
+        "fetch_remote_protocol_capabilities",
+        lambda base_url, timeout=5: ({"message_attachments_v1"}, None),
+    )
 
     ok = protocol_send.send_protocol_message(
         "lily@HASHI9",
@@ -196,6 +211,11 @@ def test_send_protocol_message_cancels_staged_uploads_after_commit_failure(monke
         lambda *args, **kwargs: {"remote_host": "10.0.0.9", "remote_port": 8766},
     )
     monkeypatch.setattr(protocol_send, "_probe_remote_http", lambda host, port: True)
+    monkeypatch.setattr(
+        protocol_send,
+        "fetch_remote_protocol_capabilities",
+        lambda base_url, timeout=5: ({"message_attachments_v1"}, None),
+    )
 
     ok = protocol_send.send_protocol_message(
         "lily@HASHI9",
@@ -212,3 +232,33 @@ def test_send_protocol_message_cancels_staged_uploads_after_commit_failure(monke
         "http://10.0.0.9:8766/attachments/upload/cancel",
     ]
     assert "Failed to cancel staged uploads on server" in capsys.readouterr().err
+
+
+def test_send_protocol_message_rejects_attachment_send_when_live_peer_lacks_capability(monkeypatch, tmp_path, capsys):
+    attachment = tmp_path / "report.txt"
+    attachment.write_text("hello", encoding="utf-8")
+
+    monkeypatch.setattr(protocol_send, "_load_config", lambda: {"global": {"instance_id": "HASHI1"}})
+    monkeypatch.setattr(protocol_send, "_load_instances", lambda: {})
+    monkeypatch.setattr(
+        protocol_send,
+        "_find_remote_instance",
+        lambda *args, **kwargs: {"remote_host": "10.0.0.9", "remote_port": 8766},
+    )
+    monkeypatch.setattr(protocol_send, "_probe_remote_http", lambda host, port: True)
+    monkeypatch.setattr(
+        protocol_send,
+        "fetch_remote_protocol_capabilities",
+        lambda base_url, timeout=5: ({"protocol_message_v1"}, None),
+    )
+
+    ok = protocol_send.send_protocol_message(
+        "lily@HASHI9",
+        "zelda",
+        "please review",
+        attachments=[attachment],
+        shared_token="shared-secret",
+    )
+
+    assert ok is False
+    assert "message_attachments_v1" in capsys.readouterr().err
