@@ -25,6 +25,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from remote.security.client_auth import build_client_auth_headers
+from tools.remote_capabilities import fetch_remote_protocol_capabilities
 from tools.hchat_send import (
     _find_remote_instance,
     _get_instance_id,
@@ -151,6 +152,19 @@ def _send_with_attachments(
     shared_token: str | None,
     timeout: int,
 ) -> dict:
+    capabilities, probe_error = fetch_remote_protocol_capabilities(base_url, timeout=min(timeout, 5))
+    if capabilities and "message_attachments_v1" not in capabilities:
+        return {
+            "ok": False,
+            "error": (
+                "remote peer does not advertise message_attachments_v1 on live /protocol/status; "
+                "restart/update that peer before sending attachments"
+            ),
+            "code": "attachment_capability_missing",
+        }
+    if probe_error:
+        print(f"⚠️  Could not confirm remote attachment capability via /protocol/status: {probe_error}", file=sys.stderr)
+
     staged: list[dict] = []
     for index, path in enumerate(attachments):
         upload_payload = _encode_attachment(path, message_id=payload["message_id"], index=index)
@@ -330,6 +344,12 @@ def send_protocol_message(
         if attachments:
             print(f"   attachments: {len(attachments)}")
         return True
+    body = result.get("body") if isinstance(result.get("body"), dict) else {}
+    if str(body.get("code") or "") == "local_enqueue_failed":
+        print(
+            "⚠️  Remote protocol reached the peer, but that peer failed to enqueue into its local Workbench/runtime.",
+            file=sys.stderr,
+        )
     print(f"❌ Protocol message failed: {json.dumps(result, ensure_ascii=False)}", file=sys.stderr)
     return False
 
