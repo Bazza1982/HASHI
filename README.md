@@ -983,6 +983,8 @@ For rollout and rollback notes, see
 
 For trusted cross-instance operations on LAN or Tailscale peers:
 
+- Hchat tool:
+  `python tools/hchat_send.py --to agent@INSTANCE --from <agent> --text "<msg>"`
 - plain message:
   `python tools/protocol_send.py --to agent@INSTANCE --from <agent> --text "<msg>" --shared-token "$HASHI_REMOTE_SHARED_TOKEN"`
 - message with attachment:
@@ -995,6 +997,12 @@ For trusted cross-instance operations on LAN or Tailscale peers:
 The Remote tools now probe live `/protocol/status` before shared-token file
 transfer and attachment sends so stale peer metadata produces a clear
 capability error instead of ambiguous `401` or `404` failures.
+
+`tools/hchat_send.py` now prefers the newer shared-token protocol transport for
+cross-instance `agent@INSTANCE` delivery and only falls back to legacy
+`/hchat` relay when protocol transport is unavailable. This fixes the legacy
+transport mismatch where `/protocol/message` worked but `/hchat` could still
+fail with bearer-only authorization behavior.
 
 Windows/LAN peers may bind the local Workbench API to a LAN IP rather than
 `127.0.0.1`. Hashi Remote now widens local Workbench host fallback to include
@@ -1154,6 +1162,7 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
 
 - **Workbench API self-repair** — `/reboot` health-checks the live Workbench API and rebuilds it when the listener exists but `/api/health` is unresponsive
 - **HChat reloadability** — hot reboot reloads `tools.*`, and HChat draft delivery refreshes `tools.hchat_send` before sending so delivery fixes do not require a full HASHI process restart
+- **Cross-instance Hchat protocol transport** — `tools/hchat_send.py` now prefers shared-token `/protocol/message` delivery for `agent@INSTANCE` and only keeps legacy `/hchat` as fallback, removing the old bearer-only transport mismatch
 - **Cross-instance route fallback** — `agent@INSTANCE` delivery tries multiple Workbench host candidates instead of relying on one stale loopback or discovery value
 - **Remote handshake guard** — handshake payloads tolerate older/test-created protocol manager objects while still rejecting alias responses from the wrong instance
 
