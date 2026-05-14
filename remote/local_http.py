@@ -13,6 +13,51 @@ def _is_wsl() -> bool:
     return "microsoft" in release or "wsl" in release
 
 
+def _interface_ipv4_hosts() -> tuple[str, ...]:
+    hosts: list[str] = []
+
+    def _add(host: str) -> None:
+        value = str(host or "").strip()
+        if not value or value in hosts:
+            return
+        try:
+            socket.inet_aton(value)
+        except Exception:
+            return
+        if value.startswith("127."):
+            return
+        hosts.append(value)
+
+    try:
+        import ifaddr
+
+        for adapter in ifaddr.get_adapters():
+            for addr in adapter.ips:
+                if isinstance(addr.ip, str):
+                    _add(addr.ip)
+    except Exception:
+        pass
+
+    try:
+        result = subprocess.run(
+            ["ip", "-4", "addr", "show"],
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+        )
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("inet "):
+                _add(line.split()[1].split("/", 1)[0])
+    except Exception:
+        pass
+
+    for value in (socket.gethostbyname_ex(socket.gethostname())[2] if socket.gethostname() else []):
+        _add(value)
+
+    return tuple(hosts)
+
+
 @lru_cache(maxsize=1)
 def local_http_hosts() -> tuple[str, ...]:
     """Return local HTTP hosts in the order most likely to work.
@@ -20,6 +65,11 @@ def local_http_hosts() -> tuple[str, ...]:
     WSL mirrored networking can leave 127.0.0.1 TCP connections hanging while
     the loopback alias continues to reach Linux listeners. Prefer that alias on
     WSL, and keep 127.0.0.1 as the fallback for older NAT installs.
+
+    On native Windows installs the local Workbench may be bound to the machine's
+    LAN interface instead of loopback. Include real interface IPv4 addresses as
+    fallbacks so local Remote enqueue does not fail just because 127.0.0.1 is
+    not listening.
     """
     hosts: list[str] = []
     if _is_wsl():
@@ -38,7 +88,11 @@ def local_http_hosts() -> tuple[str, ...]:
                     hosts.append(host)
         except Exception:
             pass
-    hosts.append("127.0.0.1")
+    if not _is_wsl():
+        hosts.append("127.0.0.1")
+    hosts.extend(_interface_ipv4_hosts())
+    if _is_wsl():
+        hosts.append("127.0.0.1")
     deduped: list[str] = []
     for host in hosts:
         if host not in deduped:
