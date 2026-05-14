@@ -6,6 +6,7 @@ import os
 from fastapi.testclient import TestClient
 
 from remote.api.server import create_app
+from remote.local_http import local_http_url
 from remote.protocol_manager import ProtocolManager, build_default_capabilities
 from remote.security.pairing import PairingManager
 from remote.terminal.executor import AuthLevel, TerminalExecutor
@@ -49,7 +50,7 @@ def test_hashi_rescue_status_reports_offline_when_workbench_missing(tmp_path):
     assert body["pid_alive"] is False
     assert body["pid_file_exists"] is False
     assert body["state"] == "offline"
-    assert body["workbench_url"] == "http://127.0.0.1:1/api/health"
+    assert body["workbench_url"] == local_http_url(1, "/api/health")
 
 
 def test_hashi_rescue_status_distinguishes_stale_pid(tmp_path):
