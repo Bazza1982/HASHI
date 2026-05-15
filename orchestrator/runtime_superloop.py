@@ -52,7 +52,7 @@ def _help_text() -> str:
         "/superloop next <loop_id>\n"
         "/superloop task add <loop_id> <title>\n"
         "/superloop issue add <loop_id> <title>\n"
-        "/superloop wait add <loop_id> <kind>"
+        "/superloop wait add <loop_id> <kind> [deadline-iso]"
     )
 
 
@@ -343,13 +343,15 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
 
     if lowered[:2] == ["wait", "add"]:
         if len(parts) < 4:
-            await runtime._reply_text(update, "Usage: /superloop wait add <loop_id> <kind>")
+            await runtime._reply_text(update, "Usage: /superloop wait add <loop_id> <kind> [deadline-iso]")
             return
         loop_id = parts[2]
         kind = parts[3]
+        deadline = parts[4] if len(parts) >= 5 else None
+        details = {"until": deadline} if kind == "sleep_until" and deadline else None
         service = SuperloopWaitsService(store)
         try:
-            wait = service.add_wait(loop_id, kind=kind)
+            wait = service.add_wait(loop_id, kind=kind, details=details, deadline=deadline)
         except FileNotFoundError:
             await runtime._reply_text(update, f"Loop not found: {loop_id}")
             return

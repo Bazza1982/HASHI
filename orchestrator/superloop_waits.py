@@ -86,6 +86,9 @@ class SuperloopWaitsService:
         waits = _load_json_list(self._waits_path(loop_id))
         return [str(wait.get("wait_id")) for wait in waits if wait.get("status") == "pending"]
 
+    def list_waits(self, loop_id: str) -> list[dict[str, Any]]:
+        return _load_json_list(self._waits_path(loop_id))
+
     def _waits_path(self, loop_id: str) -> Path:
         state = self.store.load_loop_state(loop_id)
         waits_rel = state.get("waits_path")

@@ -5,6 +5,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from orchestrator.superloop_scheduler import advance_superloops_once
+
 scheduler_logger = logging.getLogger("BridgeU.Scheduler")
 
 SCHEDULER_JOB_TIMEOUT_S = 30
@@ -511,6 +513,19 @@ class TaskScheduler:
                             f"Parked-topic follow-up for {rt.name} failed: {e}",
                             exc_info=True,
                         )
+
+                # Advance long-running superloops from persisted loop state.
+                try:
+                    superloop_stats = advance_superloops_once(self.tasks_path.parent / "superloops")
+                    if superloop_stats.get("waits_satisfied") or superloop_stats.get("loops_advanced"):
+                        scheduler_logger.info(
+                            "Superloop tick: checked=%s waits_satisfied=%s loops_advanced=%s",
+                            superloop_stats.get("loops_checked", 0),
+                            superloop_stats.get("waits_satisfied", 0),
+                            superloop_stats.get("loops_advanced", 0),
+                        )
+                except Exception as e:
+                    scheduler_logger.error(f"Superloop scheduler tick failed: {e}", exc_info=True)
 
                 if state_changed:
                     self._save_state()
