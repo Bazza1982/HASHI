@@ -37,6 +37,21 @@ class SuperloopRunner:
                 }
 
             tasks = self.taskboard.list_tasks(loop_id)
+            in_progress = [task for task in tasks if task.get("status") == "in_progress"]
+            if in_progress:
+                task_id = str(in_progress[0].get("task_id") or "")
+                if state.get("current_step") != task_id or state.get("next_action", {}).get("task_id") != task_id:
+                    state["current_step"] = task_id
+                    state["next_action"] = {"kind": "run_task", "task_id": task_id}
+                    self._save_loop_state(loop_id, state)
+                return {
+                    "ok": True,
+                    "loop_id": loop_id,
+                    "advanced": False,
+                    "reason": "task_in_progress",
+                    "task_id": task_id,
+                }
+
             completed = {task["task_id"] for task in tasks if task.get("status") == "completed"}
             next_task = None
             for task in tasks:
