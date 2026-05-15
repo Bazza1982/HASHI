@@ -1,0 +1,303 @@
+[
+  {
+    "issue_id": "sli-112310876927-2153",
+    "title": "Worker/target mismatch: lulu is reachable on HASHI1 but no active lulu@HASHI9 route",
+    "status": "resolved",
+    "severity": "medium",
+    "opened_by": {
+      "agent": "zelda",
+      "instance": "HASHI1"
+    },
+    "opened_at": "2026-05-15T11:23:10.876945+00:00",
+    "assigned_to": {
+      "agent": "zelda",
+      "instance": "HASHI1"
+    },
+    "related_task_ids": [
+      "intake-002"
+    ],
+    "resolution": "Resolved by setting lulu workzone to /mnt/c/Users/thene/projects/HASHI, the WSL path for HASHI9 Windows repo C:\\Users\\thene\\projects\\HASHI. Lulu remains reachable via HASHI1 but will work in the Windows-side repo folder; HASHI9 Windows tests remain required before exit.",
+    "resolved_at": "2026-05-15T11:32:16.375891+00:00"
+  },
+  {
+    "issue_id": "sli-115341641427-213b",
+    "title": "Akane plan review B1: HASHI9 WSL vs Windows-native topology unspecified",
+    "status": "resolved",
+    "severity": "high",
+    "opened_by": {
+      "agent": "akane",
+      "instance": "HASHI1"
+    },
+    "opened_at": "2026-05-15T11:53:41.641448+00:00",
+    "assigned_to": {
+      "agent": "akane",
+      "instance": "HASHI1"
+    },
+    "related_task_ids": [
+      "review-plan-003"
+    ],
+    "resolution": "Resolved: v1 selects Topology A, Windows-native Remote + Windows-native HASHI core on HASHI9; WSL core topology documented future/advanced.",
+    "resolved_at": "2026-05-15T11:53:41.642383+00:00"
+  },
+  {
+    "issue_id": "sli-115341643289-b50f",
+    "title": "Akane plan review B2: logs endpoint v1 scope ambiguous",
+    "status": "resolved",
+    "severity": "high",
+    "opened_by": {
+      "agent": "akane",
+      "instance": "HASHI1"
+    },
+    "opened_at": "2026-05-15T11:53:41.643301+00:00",
+    "assigned_to": {
+      "agent": "akane",
+      "instance": "HASHI1"
+    },
+    "related_task_ids": [
+      "review-plan-003"
+    ],
+    "resolution": "Resolved: v1 explicitly includes GET /control/hashi/logs.",
+    "resolved_at": "2026-05-15T11:53:41.644212+00:00"
+  },
+  {
+    "issue_id": "sli-115341645096-1d61",
+    "title": "Akane plan review M1: logs tail parameter has no maximum",
+    "status": "resolved",
+    "severity": "medium",
+    "opened_by": {
+      "agent": "akane",
+      "instance": "HASHI1"
+    },
+    "opened_at": "2026-05-15T11:53:41.645107+00:00",
+    "assigned_to": {
+      "agent": "akane",
+      "instance": "HASHI1"
+    },
+    "related_task_ids": [
+      "review-plan-003"
+    ],
+    "resolution": "Resolved: plan sets default 120 and max 1000 with effective_tail/truncation metadata.",
+    "resolved_at": "2026-05-15T11:53:41.646040+00:00"
+  },
+  {
+    "issue_id": "sli-115341647004-501b",
+    "title": "Akane plan review M2: start reason has no length/single-line sanitization bound",
+    "status": "resolved",
+    "severity": "medium",
+    "opened_by": {
+      "agent": "akane",
+      "instance": "HASHI1"
+    },
+    "opened_at": "2026-05-15T11:53:41.647015+00:00",
+    "assigned_to": {
+      "agent": "akane",
+      "instance": "HASHI1"
+    },
+    "related_task_ids": [
+      "review-plan-003"
+    ],
+    "resolution": "Resolved: plan sets 500 char persisted max, truncation, and CR/LF/control separator sanitization.",
+    "resolved_at": "2026-05-15T11:53:41.647962+00:00"
+  },
+  {
+    "issue_id": "sli-115341648946-719f",
+    "title": "Akane plan review L1: acceptance criterion allowed already-present escape hatch",
+    "status": "resolved",
+    "severity": "low",
+    "opened_by": {
+      "agent": "akane",
+      "instance": "HASHI1"
+    },
+    "opened_at": "2026-05-15T11:53:41.648958+00:00",
+    "assigned_to": {
+      "agent": "akane",
+      "instance": "HASHI1"
+    },
+    "related_task_ids": [
+      "review-plan-003"
+    ],
+    "resolution": "Resolved: existing code requires focused test coverage and smoke evidence.",
+    "resolved_at": "2026-05-15T11:53:41.649827+00:00"
+  },
+  {
+    "issue_id": "sli-115341650860-2d91",
+    "title": "Akane plan review L2: HASHI9 Windows smoke checklist unspecified",
+    "status": "resolved",
+    "severity": "low",
+    "opened_by": {
+      "agent": "akane",
+      "instance": "HASHI1"
+    },
+    "opened_at": "2026-05-15T11:53:41.650871+00:00",
+    "assigned_to": {
+      "agent": "akane",
+      "instance": "HASHI1"
+    },
+    "related_task_ids": [
+      "review-plan-003"
+    ],
+    "resolution": "Resolved: plan now has seven minimum smoke checklist items.",
+    "resolved_at": "2026-05-15T11:53:41.651761+00:00"
+  },
+  {
+    "issue_id": "sli-115341652683-9cb1",
+    "title": "Akane plan review L3: operator docs Windows/WSL handling depends on topology decision",
+    "status": "resolved",
+    "severity": "low",
+    "opened_by": {
+      "agent": "akane",
+      "instance": "HASHI1"
+    },
+    "opened_at": "2026-05-15T11:53:41.652694+00:00",
+    "assigned_to": {
+      "agent": "akane",
+      "instance": "HASHI1"
+    },
+    "related_task_ids": [
+      "review-plan-003"
+    ],
+    "resolution": "Resolved: docs must describe Topology A as v1 and label Windows->WSL core as future/advanced unless separately implemented/tested.",
+    "resolved_at": "2026-05-15T11:53:41.653580+00:00"
+  },
+  {
+    "issue_id": "sli-120517689306-92e3",
+    "title": "Lulu implementation report omitted extra HASHI9 worktree changes: bin/bridge-u.bat and orchestrator/banner.py",
+    "status": "resolved",
+    "severity": "medium",
+    "opened_by": {
+      "agent": "zelda",
+      "instance": "HASHI1"
+    },
+    "opened_at": "2026-05-15T12:05:17.689316+00:00",
+    "assigned_to": {
+      "agent": "zelda",
+      "instance": "HASHI1"
+    },
+    "related_task_ids": [
+      "step-007"
+    ],
+    "resolution": "Resolved: lulu confirmed bin/bridge-u.bat and orchestrator/banner.py are pre-existing/parallel dirty files, not Watchtower v1 intentional changes; scoped commit excludes them.",
+    "resolved_at": "2026-05-15T12:08:56.589768+00:00"
+  },
+  {
+    "issue_id": "sli-121306758699-b1a1",
+    "title": "Akane final review L1: _fetch_workbench_health silently swallows probe exceptions",
+    "status": "resolved",
+    "severity": "low",
+    "opened_by": {
+      "agent": "akane",
+      "instance": "HASHI1"
+    },
+    "opened_at": "2026-05-15T12:13:06.758709+00:00",
+    "assigned_to": {
+      "agent": "akane",
+      "instance": "HASHI1"
+    },
+    "related_task_ids": [
+      "review-final-003"
+    ],
+    "resolution": "Future iteration: add DEBUG logging for failed workbench health probes. Nonblocking per Akane final review.",
+    "resolved_at": "2026-05-15T12:13:06.759592+00:00"
+  },
+  {
+    "issue_id": "sli-121306760588-ae56",
+    "title": "Akane final review L2: _append_rescue_audit silently returns when hashi_root is unset",
+    "status": "resolved",
+    "severity": "low",
+    "opened_by": {
+      "agent": "akane",
+      "instance": "HASHI1"
+    },
+    "opened_at": "2026-05-15T12:13:06.760595+00:00",
+    "assigned_to": {
+      "agent": "akane",
+      "instance": "HASHI1"
+    },
+    "related_task_ids": [
+      "review-final-003"
+    ],
+    "resolution": "Future iteration: add WARNING when rescue audit is skipped because hashi_root is unset. Nonblocking per Akane final review.",
+    "resolved_at": "2026-05-15T12:13:06.761647+00:00"
+  },
+  {
+    "issue_id": "sli-121306762653-6a0a",
+    "title": "Akane final review L3: _hashi_control_status uses sync urlopen inside async start path",
+    "status": "resolved",
+    "severity": "low",
+    "opened_by": {
+      "agent": "akane",
+      "instance": "HASHI1"
+    },
+    "opened_at": "2026-05-15T12:13:06.762664+00:00",
+    "assigned_to": {
+      "agent": "akane",
+      "instance": "HASHI1"
+    },
+    "related_task_ids": [
+      "review-final-003"
+    ],
+    "resolution": "Future iteration: consider run_in_executor or async HTTP client if Remote rescue receives concurrent load. Nonblocking per Akane final review.",
+    "resolved_at": "2026-05-15T12:13:06.763676+00:00"
+  },
+  {
+    "issue_id": "sli-121306764699-aa0d",
+    "title": "Akane final review L4: started=True audit path lacks direct field-completeness test",
+    "status": "resolved",
+    "severity": "low",
+    "opened_by": {
+      "agent": "akane",
+      "instance": "HASHI1"
+    },
+    "opened_at": "2026-05-15T12:13:06.764710+00:00",
+    "assigned_to": {
+      "agent": "akane",
+      "instance": "HASHI1"
+    },
+    "related_task_ids": [
+      "review-final-003"
+    ],
+    "resolution": "Future iteration: add a started=True audit record test. Nonblocking per Akane final review.",
+    "resolved_at": "2026-05-15T12:13:06.765677+00:00"
+  },
+  {
+    "issue_id": "sli-121728730437-abde",
+    "title": "Orchestrator-side live Watchtower start verification missing before exit",
+    "status": "resolved",
+    "severity": "high",
+    "opened_by": {
+      "agent": "zelda",
+      "instance": "HASHI1"
+    },
+    "opened_at": "2026-05-15T12:17:28.730457+00:00",
+    "assigned_to": {
+      "agent": "zelda",
+      "instance": "HASHI1"
+    },
+    "related_task_ids": [
+      "step-008",
+      "step-009"
+    ],
+    "resolution": "Resolved: Zelda ran live Windows-native Remote smoke tests against isolated HASHI9 roots. L3 /control/hashi/start returned started=true with powershell.exe bridge_ctl.ps1 command and audit record; logs tail bounds and invalid name behavior passed; L2 start gate returned 403 and did not advertise rescue_start. Evidence recorded in LIVE_WATCHTOWER_SMOKE_EVIDENCE.md.",
+    "resolved_at": "2026-05-15T12:29:31.013763+00:00"
+  },
+  {
+    "issue_id": "sli-123201061893-dcd2",
+    "title": "Akane addendum LOW: Windows CP1252 console cannot encode decorative Remote banner glyphs",
+    "status": "resolved",
+    "severity": "low",
+    "opened_by": {
+      "agent": "akane",
+      "instance": "HASHI1"
+    },
+    "opened_at": "2026-05-15T12:32:01.061910+00:00",
+    "assigned_to": {
+      "agent": "akane",
+      "instance": "HASHI1"
+    },
+    "related_task_ids": [
+      "review-final-003"
+    ],
+    "resolution": "Future iteration: make Remote banner/logging Windows console encoding-safe by detecting sys.stdout.encoding or replacing/skipping decorative glyphs under non-UTF-8 consoles. Nonblocking per Akane addendum review.",
+    "resolved_at": "2026-05-15T12:32:01.063052+00:00"
+  }
+]

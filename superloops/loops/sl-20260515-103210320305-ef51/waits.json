@@ -1,0 +1,100 @@
+[
+  {
+    "wait_id": "wait-115031930857-acfb",
+    "kind": "await_hchat_reply",
+    "status": "satisfied",
+    "created_at": "2026-05-15T11:50:31.930871+00:00",
+    "resume_policy": {
+      "on_satisfied": "advance",
+      "on_timeout": "raise_issue"
+    },
+    "details": {
+      "reviewer": "akane",
+      "gate": "plan_review",
+      "sent_by": "zelda",
+      "plan_package": "superloops/loops/sl-20260515-103210320305-ef51/PLAN_PACKAGE.md",
+      "expected": "Akane plan review findings and approve/no-blocker status"
+    },
+    "timeout": {},
+    "satisfied_at": "2026-05-15T11:53:41.654689+00:00",
+    "satisfied_source": "akane.plan_review_received"
+  },
+  {
+    "wait_id": "wait-115341658603-959b",
+    "kind": "await_hchat_reply",
+    "status": "satisfied",
+    "created_at": "2026-05-15T11:53:41.658615+00:00",
+    "resume_policy": {
+      "on_satisfied": "advance",
+      "on_timeout": "raise_issue"
+    },
+    "details": {
+      "reviewer": "akane",
+      "gate": "plan_review_clearance",
+      "sent_by": "zelda",
+      "plan_package": "superloops/loops/sl-20260515-103210320305-ef51/PLAN_PACKAGE.md",
+      "expected": "Akane confirms B1/B2 resolved and no plan blockers remain"
+    },
+    "timeout": {},
+    "satisfied_at": "2026-05-15T11:55:10.720514+00:00",
+    "satisfied_source": "akane.plan_clearance_received"
+  },
+  {
+    "wait_id": "wait-115532900989-3a0e",
+    "kind": "await_hchat_reply",
+    "status": "satisfied",
+    "created_at": "2026-05-15T11:55:32.901012+00:00",
+    "resume_policy": {
+      "on_satisfied": "advance",
+      "on_timeout": "raise_issue"
+    },
+    "details": {
+      "worker": "lulu",
+      "gate": "implementation_report",
+      "artifact": "superloops/loops/sl-20260515-103210320305-ef51/LULU_IMPLEMENTATION_PACKAGE.md",
+      "expected": "Implementation summary, changed files, tests run, HASHI9 Windows smoke evidence, blockers/known limitations"
+    },
+    "timeout": {},
+    "satisfied_at": "2026-05-15T12:05:17.686598+00:00",
+    "satisfied_source": "lulu.implementation_report_received"
+  },
+  {
+    "wait_id": "wait-120517689970-773b",
+    "kind": "await_hchat_reply",
+    "status": "satisfied",
+    "created_at": "2026-05-15T12:05:17.689977+00:00",
+    "resume_policy": {
+      "on_satisfied": "advance",
+      "on_timeout": "raise_issue"
+    },
+    "details": {
+      "worker": "lulu",
+      "gate": "implementation_clarification",
+      "issue_id": "sli-120517689306-92e3",
+      "expected": "Explain whether bin/bridge-u.bat and orchestrator/banner.py changes are intentional, related to Windows smoke, and what tests cover them."
+    },
+    "timeout": {},
+    "satisfied_at": "2026-05-15T12:08:56.588813+00:00",
+    "satisfied_source": "lulu.clarification_received"
+  },
+  {
+    "wait_id": "wait-120856605854-ee2b",
+    "kind": "await_hchat_reply",
+    "status": "satisfied",
+    "created_at": "2026-05-15T12:08:56.605866+00:00",
+    "resume_policy": {
+      "on_satisfied": "advance",
+      "on_timeout": "raise_issue"
+    },
+    "details": {
+      "reviewer": "akane",
+      "gate": "final_product_review",
+      "artifact": "superloops/loops/sl-20260515-103210320305-ef51/FINAL_REVIEW_PACKAGE.md",
+      "commit": "a56d3ff",
+      "expected": "Final product review findings and no-blocker/approval status"
+    },
+    "timeout": {},
+    "satisfied_at": "2026-05-15T12:13:06.757441+00:00",
+    "satisfied_source": "akane.final_review_approved"
+  }
+]

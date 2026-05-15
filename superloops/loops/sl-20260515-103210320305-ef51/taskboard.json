@@ -221,8 +221,10 @@
     ],
     "priority": "high",
     "created_at": "2026-05-15T14:09:51.088505+00:00",
-    "updated_at": "2026-05-15T14:09:51.088505+00:00",
-    "artifact_refs": [],
+    "updated_at": "2026-05-15T14:13:05.674660+00:00",
+    "artifact_refs": [
+      "superloops/loops/sl-20260515-103210320305-ef51/LIVE_ACCEPTANCE_RETROFIT_EVIDENCE.md"
+    ],
     "notes": [
       "Added after live Watchtower rescue testing showed this must be a standard auto vibe coding gate."
     ]
@@ -239,8 +241,10 @@
     ],
     "priority": "high",
     "created_at": "2026-05-15T14:09:51.088505+00:00",
-    "updated_at": "2026-05-15T14:09:51.088505+00:00",
-    "artifact_refs": [],
+    "updated_at": "2026-05-15T14:13:05.674660+00:00",
+    "artifact_refs": [
+      "superloops/loops/sl-20260515-103210320305-ef51/LIVE_ACCEPTANCE_RETROFIT_EVIDENCE.md"
+    ],
     "notes": [
       "Added after live Watchtower rescue testing showed this must be a standard auto vibe coding gate."
     ]
@@ -257,8 +261,10 @@
     ],
     "priority": "high",
     "created_at": "2026-05-15T14:09:51.088505+00:00",
-    "updated_at": "2026-05-15T14:09:51.088505+00:00",
-    "artifact_refs": [],
+    "updated_at": "2026-05-15T14:13:05.674660+00:00",
+    "artifact_refs": [
+      "superloops/loops/sl-20260515-103210320305-ef51/LIVE_ACCEPTANCE_RETROFIT_EVIDENCE.md"
+    ],
     "notes": [
       "Added after live Watchtower rescue testing showed this must be a standard auto vibe coding gate."
     ]
@@ -275,8 +281,10 @@
     ],
     "priority": "high",
     "created_at": "2026-05-15T14:09:51.088505+00:00",
-    "updated_at": "2026-05-15T14:09:51.088505+00:00",
-    "artifact_refs": [],
+    "updated_at": "2026-05-15T14:13:05.674660+00:00",
+    "artifact_refs": [
+      "superloops/loops/sl-20260515-103210320305-ef51/LIVE_ACCEPTANCE_RETROFIT_EVIDENCE.md"
+    ],
     "notes": [
       "Added after live Watchtower rescue testing showed this must be a standard auto vibe coding gate."
     ]
@@ -361,8 +369,10 @@
     "depends_on": [],
     "priority": "normal",
     "created_at": "2026-05-15T10:32:10.320315+00:00",
-    "updated_at": "2026-05-15T12:32:01.080253+00:00",
-    "artifact_refs": [],
+    "updated_at": "2026-05-15T14:13:05.674660+00:00",
+    "artifact_refs": [
+      "superloops/loops/sl-20260515-103210320305-ef51/LIVE_ACCEPTANCE_RETROFIT_EVIDENCE.md"
+    ],
     "notes": []
   }
 ]
