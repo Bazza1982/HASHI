@@ -9,6 +9,7 @@ from remote.api.server import create_app
 from remote.local_http import local_http_url
 from remote.protocol_manager import ProtocolManager, build_default_capabilities
 from remote.security.pairing import PairingManager
+from remote.security.shared_token import build_auth_headers
 from remote.terminal.executor import AuthLevel, TerminalExecutor
 
 
@@ -36,6 +37,60 @@ def test_hashi_rescue_status_requires_auth_when_lan_mode_off(tmp_path):
     response = client.get("/control/hashi/status")
 
     assert response.status_code == 401
+
+
+def test_hashi_rescue_status_accepts_shared_token_hmac_when_lan_mode_off(tmp_path):
+    (tmp_path / "secrets.json").write_text('{"hashi_remote_shared_token":"test-secret"}', encoding="utf-8")
+    app = create_app(
+        {"instance_id": "HASHI_TEST"},
+        PairingManager(storage_dir=tmp_path / "pairing", lan_mode=False),
+        TerminalExecutor(),
+        hashi_root=str(tmp_path),
+        workbench_port=1,
+    )
+    client = TestClient(app, raise_server_exceptions=False)
+    headers = build_auth_headers(
+        shared_token="test-secret",
+        method="GET",
+        path="/control/hashi/status",
+        from_instance="HASHI1",
+        body_bytes=b"",
+    )
+
+    response = client.get("/control/hashi/status", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+
+
+def test_hashi_rescue_start_accepts_shared_token_hmac_when_lan_mode_off(tmp_path):
+    (tmp_path / "secrets.json").write_text('{"hashi_remote_shared_token":"test-secret"}', encoding="utf-8")
+    (tmp_path / ".bridge_u_f.pid").write_text(str(os.getpid()), encoding="utf-8")
+    app = create_app(
+        {"instance_id": "HASHI_TEST"},
+        PairingManager(storage_dir=tmp_path / "pairing", lan_mode=False),
+        TerminalExecutor(max_allowed_level=AuthLevel.L3_RESTART),
+        hashi_root=str(tmp_path),
+        workbench_port=1,
+    )
+    client = TestClient(app, raise_server_exceptions=False)
+    body = b'{"reason":"shared token"}'
+    headers = build_auth_headers(
+        shared_token="test-secret",
+        method="POST",
+        path="/control/hashi/start",
+        from_instance="HASHI1",
+        body_bytes=body,
+    )
+    headers["Content-Type"] = "application/json"
+
+    response = client.post("/control/hashi/start", content=body, headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["already_running"] is True
+    audit_path = tmp_path / "logs" / "remote_rescue_audit.jsonl"
+    record = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert record["requester"] == "HASHI1"
 
 
 def test_hashi_rescue_status_reports_offline_when_workbench_missing(tmp_path):

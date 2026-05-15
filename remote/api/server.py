@@ -299,6 +299,19 @@ def _post_json_with_optional_hmac(url: str, payload: dict[str, Any], *, timeout:
 
 
 def _process_exists(pid: int) -> bool:
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            kernel32 = ctypes.windll.kernel32
+            process_query_limited_information = 0x1000
+            handle = kernel32.OpenProcess(process_query_limited_information, False, int(pid))
+            if handle:
+                kernel32.CloseHandle(handle)
+                return True
+            return False
+        except Exception:
+            return False
     try:
         os.kill(pid, 0)
         return True
@@ -478,6 +491,18 @@ def _read_rescue_log(name: str, tail: int = 120) -> dict[str, Any]:
         "tail_truncated": truncated,
         "lines": lines,
     }
+
+
+def _authenticate_rescue_control(request: Request, *, body_bytes: bytes = b"") -> str:
+    client_id, auth_reason = authenticate_request_detailed(
+        request,
+        body_bytes=body_bytes,
+        allow_lan=True,
+    )
+    if client_id:
+        return client_id
+    detail = "Not authenticated" if auth_reason == "auth_required" else "Invalid or expired token"
+    raise HTTPException(status_code=401, detail=detail)
 
 
 def _workbench_health_url() -> str:
@@ -989,24 +1014,26 @@ def create_app(
     # ── HASHI process rescue control ─────────────────────────
 
     @app.get("/control/hashi/status")
-    async def hashi_control_status(client_id: str = Depends(verify_token)):
+    async def hashi_control_status(request: Request):
         """Report whether the local HASHI core appears reachable."""
+        _authenticate_rescue_control(request)
         return _hashi_control_status()
 
     @app.get("/control/hashi/logs")
     async def hashi_control_logs(
+        request: Request,
         name: str = "start",
         tail: int = 120,
-        client_id: str = Depends(verify_token),
     ):
         """Return a bounded tail of fixed HASHI Remote rescue logs."""
+        _authenticate_rescue_control(request)
         try:
             return _read_rescue_log(name, tail=tail)
         except ValueError as exc:
             return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
 
     @app.post("/control/hashi/start")
-    async def hashi_control_start(payload: HashiStartPayload, client_id: str = Depends(verify_token)):
+    async def hashi_control_start(request: Request, payload: HashiStartPayload):
         """
         Start the local HASHI core through a fixed launcher command.
 
@@ -1014,6 +1041,8 @@ def create_app(
         L3_RESTART because it is a rescue operation that creates a long-lived
         local process.
         """
+        body_bytes = await request.body()
+        client_id = _authenticate_rescue_control(request, body_bytes=body_bytes)
         if not _terminal_executor or not _terminal_executor.allows_level(AuthLevel.L3_RESTART):
             return JSONResponse(
                 status_code=403,
