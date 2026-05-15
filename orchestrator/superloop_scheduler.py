@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from orchestrator.superloop_issues import SuperloopIssuesService
 from orchestrator.superloop_runner import SuperloopRunner
 from orchestrator.superloop_store import SuperloopStore
 from orchestrator.superloop_waits import SuperloopWaitsService
@@ -42,6 +43,7 @@ def advance_superloops_once(superloops_root: Path, now: datetime | None = None) 
     now_utc = now or datetime.now(timezone.utc)
     store = SuperloopStore(superloops_root)
     waits = SuperloopWaitsService(store)
+    issues = SuperloopIssuesService(store)
     runner = SuperloopRunner(store, waits_service=waits)
 
     loops_checked = 0
@@ -70,6 +72,16 @@ def advance_superloops_once(superloops_root: Path, now: datetime | None = None) 
             deadline = _wait_deadline(wait_obj)
             if deadline is None or now_utc < deadline:
                 continue
+            resume_policy = wait_obj.get("resume_policy") if isinstance(wait_obj.get("resume_policy"), dict) else {}
+            if resume_policy.get("on_timeout") == "raise_issue":
+                issues.open_issue(
+                    loop_id,
+                    title=f"wait timeout: {wait_id}",
+                    severity="medium",
+                    opened_by_agent="scheduler",
+                    opened_by_instance="local",
+                    related_task_ids=[str(state.get("current_step") or "")] if state.get("current_step") else [],
+                )
             if waits.satisfy_wait(loop_id, wait_id, source="scheduler.deadline"):
                 waits_satisfied += 1
 

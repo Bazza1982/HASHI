@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from orchestrator.superloop_scheduler import advance_superloops_once
+from orchestrator.superloop_issues import SuperloopIssuesService
 from orchestrator.superloop_store import SuperloopStore
 from orchestrator.superloop_taskboard import SuperloopTaskboardService
 from orchestrator.superloop_waits import SuperloopWaitsService
@@ -45,6 +46,9 @@ def test_superloop_scheduler_satisfies_deadline_wait_and_advances(tmp_path: Path
 
     after_waits = waits.list_waits("sl-test-001")
     assert after_waits[0]["status"] == "satisfied"
+    issues = SuperloopIssuesService(store).list_issues("sl-test-001")
+    assert len(issues) == 1
+    assert issues[0]["title"] == "wait timeout: wait-001"
 
 
 def test_superloop_scheduler_keeps_future_deadline_pending(tmp_path: Path) -> None:
