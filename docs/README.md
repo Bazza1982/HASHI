@@ -24,6 +24,7 @@ This directory contains developer documentation and operational notes for HASHI.
 - [HASHI_REMOTE_FILE_TRANSFER_AND_ATTACHMENTS_PLAN.md](HASHI_REMOTE_FILE_TRANSFER_AND_ATTACHMENTS_PLAN.md) — planned shared-token file transfer upgrade and message attachment design
 - [HASHI_REMOTE_SIDE_PROGRAM_UPGRADE_PLAN.md](HASHI_REMOTE_SIDE_PROGRAM_UPGRADE_PLAN.md) — comprehensive plan to make Hashi Remote a supervised side program with backward-compatible rescue
 - [HASHI_REMOTE_RESCUE_PROTOCOL.md](HASHI_REMOTE_RESCUE_PROTOCOL.md) — Remote sidecar survival model and fixed HASHI start/status rescue endpoints
+- [AUDIT_VIBE_CODING_SUPERLOOP.md](AUDIT_VIBE_CODING_SUPERLOOP.md) — end-to-end vibe-coded product superloop with mandatory independent reviews and live runtime exit gates
 - [HASHI_VOICE_BRIDGE_PLAN.md](HASHI_VOICE_BRIDGE_PLAN.md) — local-first voice runtime plan for the WhatsApp Desktop call bridge and future provider transports
 
 ### Nagare Flow System (v2.1)
