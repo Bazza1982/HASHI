@@ -65,6 +65,7 @@ def advance_superloops_once(superloops_root: Path, now: datetime | None = None) 
 
         wait_ids = waits.pending_wait_ids(loop_id)
         waits_by_id = {str(wait.get("wait_id")): wait for wait in waits.list_waits(loop_id)}
+        wait_satisfied_this_loop = False
         for wait_id in wait_ids:
             wait_obj = waits_by_id.get(wait_id)
             if not isinstance(wait_obj, dict):
@@ -72,22 +73,25 @@ def advance_superloops_once(superloops_root: Path, now: datetime | None = None) 
             deadline = _wait_deadline(wait_obj)
             if deadline is None or now_utc < deadline:
                 continue
+            kind = str(wait_obj.get("kind") or "wait")
             resume_policy = wait_obj.get("resume_policy") if isinstance(wait_obj.get("resume_policy"), dict) else {}
-            if resume_policy.get("on_timeout") == "raise_issue":
-                issues.open_issue(
-                    loop_id,
-                    title=f"wait timeout: {wait_id}",
-                    severity="medium",
-                    opened_by_agent="scheduler",
-                    opened_by_instance="local",
-                    related_task_ids=[str(state.get("current_step") or "")] if state.get("current_step") else [],
-                )
             if waits.satisfy_wait(loop_id, wait_id, source="scheduler.deadline"):
                 waits_satisfied += 1
+                wait_satisfied_this_loop = True
+                if resume_policy.get("on_timeout") == "raise_issue":
+                    issues.open_issue(
+                        loop_id,
+                        title=f"{kind} timeout in {loop_id} ({wait_id})",
+                        severity="medium",
+                        opened_by_agent="scheduler",
+                        opened_by_instance="local",
+                        related_task_ids=[str(state.get("current_step") or "")] if state.get("current_step") else [],
+                    )
 
-        result = runner.next_action(loop_id)
-        if result.get("advanced"):
-            loops_advanced += 1
+        if wait_satisfied_this_loop or not wait_ids:
+            result = runner.next_action(loop_id)
+            if result.get("advanced"):
+                loops_advanced += 1
 
     return {
         "loops_checked": loops_checked,

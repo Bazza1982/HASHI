@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -9,9 +10,11 @@ from orchestrator.superloop_compiler import SuperloopCompiler
 from orchestrator.superloop_issues import SuperloopIssuesService
 from orchestrator.superloop_recording import SuperloopRecordingService
 from orchestrator.superloop_runner import SuperloopRunner
-from orchestrator.superloop_store import SuperloopStore, _json_dump
+from orchestrator.superloop_store import SuperloopStore
 from orchestrator.superloop_taskboard import SuperloopTaskboardService
 from orchestrator.superloop_waits import SuperloopWaitsService
+
+logger = logging.getLogger("BridgeU.Superloop")
 
 
 def _local_instance_id() -> str:
@@ -19,7 +22,8 @@ def _local_instance_id() -> str:
         from tools.hchat_send import _get_instance_id, _load_config
 
         return str(_get_instance_id(_load_config()) or "HASHI").upper()
-    except Exception:
+    except Exception as exc:
+        logger.warning("Falling back to default local instance id HASHI: %s", exc)
         return "HASHI"
 
 
@@ -52,7 +56,8 @@ def _help_text() -> str:
         "/superloop next <loop_id>\n"
         "/superloop task add <loop_id> <title>\n"
         "/superloop issue add <loop_id> <title>\n"
-        "/superloop wait add <loop_id> <kind> [deadline-iso]"
+        "/superloop wait add <loop_id> <kind> [deadline-iso]\n"
+        "note: default wait timeout policy is on_timeout=advance (no auto-issue)"
     )
 
 
@@ -255,7 +260,7 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
             await runtime._reply_text(update, f"Loop not found: {loop_id}")
             return
         state["status"] = "paused"
-        _json_dump(store.loop_dir(loop_id) / "state.json", state)
+        store.save_loop_state(loop_id, state)
         store.append_loop_event(loop_id, event_type="loop.paused", data={"source": "command"})
         await runtime._reply_text(update, f"⏸ Paused `{loop_id}`", parse_mode="Markdown")
         return
@@ -271,7 +276,7 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
             await runtime._reply_text(update, f"Loop not found: {loop_id}")
             return
         state["status"] = "running"
-        _json_dump(store.loop_dir(loop_id) / "state.json", state)
+        store.save_loop_state(loop_id, state)
         store.append_loop_event(loop_id, event_type="loop.resumed", data={"source": "command"})
         await runtime._reply_text(update, f"▶ Resumed `{loop_id}`", parse_mode="Markdown")
         return

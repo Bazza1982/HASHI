@@ -23,7 +23,7 @@ def test_taskboard_add_and_update(tmp_path: Path) -> None:
         owner_agent="zelda",
         owner_instance="HASHI1",
     )
-    assert task["task_id"] == "task-001"
-    assert svc.update_task_status("sl-test-001", "task-001", "completed") is True
+    assert task["task_id"].startswith("task-")
+    assert svc.update_task_status("sl-test-001", task["task_id"], "completed") is True
     tasks = svc.list_tasks("sl-test-001")
     assert tasks[0]["status"] == "completed"

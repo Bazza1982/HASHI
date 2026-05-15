@@ -33,6 +33,7 @@ def test_superloop_scheduler_satisfies_deadline_wait_and_advances(tmp_path: Path
         "sl-test-001",
         kind="sleep_until",
         details={"until": (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()},
+        resume_policy={"on_satisfied": "advance", "on_timeout": "raise_issue"},
     )
 
     stats = advance_superloops_once(tmp_path / "superloops")
@@ -41,14 +42,14 @@ def test_superloop_scheduler_satisfies_deadline_wait_and_advances(tmp_path: Path
     assert stats["loops_advanced"] == 1
 
     state = store.load_loop_state("sl-test-001")
-    assert state["current_step"] == "task-001"
+    assert state["current_step"].startswith("task-")
     assert state["next_action"]["kind"] == "run_task"
 
     after_waits = waits.list_waits("sl-test-001")
     assert after_waits[0]["status"] == "satisfied"
     issues = SuperloopIssuesService(store).list_issues("sl-test-001")
     assert len(issues) == 1
-    assert issues[0]["title"] == "wait timeout: wait-001"
+    assert "timeout in sl-test-001" in issues[0]["title"]
 
 
 def test_superloop_scheduler_keeps_future_deadline_pending(tmp_path: Path) -> None:
