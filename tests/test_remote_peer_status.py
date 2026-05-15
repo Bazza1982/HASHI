@@ -29,7 +29,7 @@ from remote.peer.lan import _service_info_to_peer
 from remote.peer.registry import PeerRegistry
 from remote.peer.tailscale import TailscaleDiscovery
 from remote.protocol_manager import ProtocolManager
-from remote.live_endpoints import read_live_endpoints, remove_live_endpoint, write_live_endpoints
+from remote.live_endpoints import read_live_endpoints, remove_live_endpoint, write_live_endpoint, write_live_endpoints
 from tools.hchat_send import parse_hchat_message
 
 
@@ -1287,6 +1287,38 @@ def test_remove_live_endpoint_removes_only_matching_instance(tmp_path):
     assert endpoints["hashi3"]["port"] == 30265
     mode = (tmp_path / "state" / "remote_live_endpoints.json").stat().st_mode
     assert stat.S_IMODE(mode) == 0o600
+
+
+def test_write_live_endpoints_can_preserve_self_endpoint(tmp_path):
+    write_live_endpoint(
+        tmp_path,
+        PeerInfo(
+            instance_id="HASHI9",
+            display_name="HASHI9",
+            host="192.168.0.211",
+            port=35821,
+            workbench_port=18819,
+            platform="windows",
+        ),
+    )
+    write_live_endpoints(
+        tmp_path,
+        [
+            PeerInfo(
+                instance_id="HASHI2",
+                display_name="HASHI2",
+                host="192.168.0.211",
+                port=8767,
+                workbench_port=18802,
+                platform="wsl",
+            )
+        ],
+        preserve_existing=True,
+    )
+
+    endpoints = read_live_endpoints(tmp_path)
+    assert endpoints["hashi9"]["port"] == 35821
+    assert endpoints["hashi2"]["port"] == 8767
 
 
 def test_tailscale_discovery_uses_live_endpoint_port(monkeypatch, tmp_path):
