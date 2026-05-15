@@ -2722,6 +2722,17 @@ class FlexibleAgentRuntime:
         args_text = parts[1].strip() if len(parts) > 1 else ""
         await runtime_nudge.handle_nudge_command(self, update, args_text)
 
+    async def cmd_superloop(self, update: Update, context: Any):
+        """Create/manage recording-first superloops."""
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        from orchestrator import runtime_superloop
+
+        raw = (update.message.text or "").strip()
+        parts = raw.split(None, 1)
+        args_text = parts[1].strip() if len(parts) > 1 else ""
+        await runtime_superloop.handle_superloop_command(self, update, args_text)
+
     async def cmd_whisper(self, update: Update, context: Any):
         """Set the local voice transcription model size.
 
@@ -2991,6 +3002,10 @@ class FlexibleAgentRuntime:
         if data.startswith("skilljob:"):
             from orchestrator import runtime_jobs
             if await runtime_jobs.handle_skill_job_callback(self, query, data):
+                return
+        if data.startswith("nudgejob:"):
+            from orchestrator import runtime_nudge
+            if await runtime_nudge.handle_nudge_callback(self, query, data):
                 return
         if data.startswith("skill:"):
             from orchestrator import runtime_skill_callbacks
