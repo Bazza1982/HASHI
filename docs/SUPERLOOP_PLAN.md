@@ -282,6 +282,86 @@ Suggested fields:
 - `finish_ready`
 - `compiled_loop_id`
 
+Reference shape:
+
+```json
+{
+  "recording_id": "slrec-20260515-001",
+  "status": "recording",
+  "goal": "Coordinate a long-running paper revision loop across HASHI1 and INTEL until reviewer issues are closed.",
+  "source_mode": "one_shot_prompt",
+  "owner_agent": "zelda",
+  "owner_instance": "HASHI1",
+  "created_at": "2026-05-15T00:15:00Z",
+  "updated_at": "2026-05-15T00:22:00Z",
+  "intent_summary": "Track revision tasks, request peer reviews, wait for replies, and re-run bounded subflows until exit condition is met.",
+  "exit_condition_draft": {
+    "kind": "all_tasks_completed",
+    "details": {
+      "task_ids": ["revise-main", "peer-review", "final-check"]
+    }
+  },
+  "candidate_steps": [
+    {
+      "step_id": "draft-plan",
+      "kind": "human_or_agent_action",
+      "title": "Draft revision plan",
+      "status": "accepted",
+      "owner_agent": "zelda",
+      "depends_on": []
+    },
+    {
+      "step_id": "peer-review",
+      "kind": "remote_hchat",
+      "title": "Request INTEL review",
+      "status": "accepted",
+      "owner_agent": "agent1",
+      "owner_instance": "INTEL",
+      "depends_on": ["draft-plan"]
+    }
+  ],
+  "candidate_waits": [
+    {
+      "wait_id": "wait-peer-review",
+      "kind": "await_hchat_reply",
+      "status": "pending",
+      "details": {
+        "from_agent": "agent1",
+        "from_instance": "INTEL"
+      }
+    }
+  ],
+  "candidate_agents": [
+    {"agent": "zelda", "instance": "HASHI1", "role": "controller"},
+    {"agent": "agent1", "instance": "INTEL", "role": "reviewer"}
+  ],
+  "candidate_artifacts": [
+    {
+      "artifact_id": "plan-md",
+      "kind": "file",
+      "path": "docs/revision_plan.md",
+      "status": "linked"
+    }
+  ],
+  "candidate_nagare_runs": [
+    {
+      "candidate_id": "nagare-revision-check",
+      "status": "draft",
+      "workflow_path": "flow/workflows/library/revision_check.yaml"
+    }
+  ],
+  "open_questions": [
+    {
+      "question_id": "q1",
+      "text": "Should final peer approval be required before exit?",
+      "status": "open"
+    }
+  ],
+  "finish_ready": false,
+  "compiled_loop_id": null
+}
+```
+
 ### 6.3 `events.jsonl`
 
 Purpose:
@@ -309,6 +389,32 @@ Suggested event types:
 - `attachment.sent`
 - `loop.aborted`
 - `loop.completed`
+
+Reference shape:
+
+```json
+{
+  "event_id": "slevent-000042",
+  "ts": "2026-05-15T00:21:12Z",
+  "loop_id": "sl-20260515-001",
+  "kind": "wait.entered",
+  "actor": {
+    "agent": "zelda",
+    "instance": "HASHI1"
+  },
+  "refs": {
+    "task_id": "peer-review",
+    "wait_id": "wait-peer-review",
+    "child_run_id": null,
+    "issue_id": null
+  },
+  "data": {
+    "wait_kind": "await_hchat_reply",
+    "target_agent": "agent1",
+    "target_instance": "INTEL"
+  }
+}
+```
 
 Recording sessions should also have their own event stream with entries such as:
 
@@ -345,6 +451,27 @@ Suggested task fields:
 - `artifact_refs`
 - `notes`
 
+Reference shape:
+
+```json
+[
+  {
+    "task_id": "peer-review",
+    "title": "Request and track INTEL peer review",
+    "description": "Send review request, wait for reply, and incorporate findings.",
+    "status": "waiting",
+    "owner_agent": "agent1",
+    "owner_instance": "INTEL",
+    "depends_on": ["draft-plan"],
+    "priority": "high",
+    "created_at": "2026-05-15T00:18:00Z",
+    "updated_at": "2026-05-15T00:21:00Z",
+    "artifact_refs": ["plan-md"],
+    "notes": ["Waiting for ACK and review contents."]
+  }
+]
+```
+
 ### 6.5 `issues.json`
 
 Purpose:
@@ -363,6 +490,30 @@ Suggested fields:
 - `related_task_ids`
 - `resolution`
 
+Reference shape:
+
+```json
+[
+  {
+    "issue_id": "sli-001",
+    "title": "Peer reviewer unavailable",
+    "status": "open",
+    "severity": "medium",
+    "opened_by": {
+      "agent": "zelda",
+      "instance": "HASHI1"
+    },
+    "opened_at": "2026-05-15T00:25:00Z",
+    "assigned_to": {
+      "agent": "zelda",
+      "instance": "HASHI1"
+    },
+    "related_task_ids": ["peer-review"],
+    "resolution": null
+  }
+]
+```
+
 ### 6.6 `waits.json`
 
 Purpose:
@@ -379,6 +530,127 @@ Suggested wait types:
 - `await_remote_online`
 - `await_issue_resolution`
 - `await_child_run`
+
+Reference shape:
+
+```json
+[
+  {
+    "wait_id": "wait-peer-review",
+    "kind": "await_hchat_reply",
+    "status": "pending",
+    "created_at": "2026-05-15T00:21:00Z",
+    "resume_policy": {
+      "on_satisfied": "advance",
+      "on_timeout": "raise_issue"
+    },
+    "details": {
+      "from_agent": "agent1",
+      "from_instance": "INTEL",
+      "conversation_hint": "peer review request"
+    },
+    "timeout": {
+      "deadline": "2026-05-16T00:21:00Z"
+    }
+  }
+]
+```
+
+### 6.7 Compiled loop `state.json`
+
+Purpose:
+
+- formal runtime truth for a compiled and runnable superloop
+
+Required fields:
+
+- `loop_id`
+- `recording_id`
+- `title`
+- `status`
+- `owner_agent`
+- `owner_instance`
+- `controller`
+- `participants`
+- `created_at`
+- `updated_at`
+- `started_at`
+- `ended_at`
+- `current_phase`
+- `current_step`
+- `next_action`
+- `exit_condition`
+- `taskboard_path`
+- `issues_path`
+- `waits_path`
+- `child_runs`
+- `artifacts`
+- `stats`
+- `operator_summary_path`
+
+Reference shape:
+
+```json
+{
+  "loop_id": "sl-20260515-001",
+  "recording_id": "slrec-20260515-001",
+  "title": "Paper revision coordination loop",
+  "status": "paused",
+  "owner_agent": "zelda",
+  "owner_instance": "HASHI1",
+  "controller": {
+    "agent": "zelda",
+    "instance": "HASHI1",
+    "mode": "superloop_controller"
+  },
+  "participants": [
+    {"agent": "zelda", "instance": "HASHI1", "role": "controller"},
+    {"agent": "agent1", "instance": "INTEL", "role": "reviewer"}
+  ],
+  "created_at": "2026-05-15T00:30:00Z",
+  "updated_at": "2026-05-15T00:45:00Z",
+  "started_at": null,
+  "ended_at": null,
+  "current_phase": "peer_review",
+  "current_step": "peer-review",
+  "next_action": {
+    "kind": "wait",
+    "ref": "wait-peer-review"
+  },
+  "exit_condition": {
+    "kind": "all_tasks_completed",
+    "details": {
+      "task_ids": ["draft-plan", "peer-review", "final-check"]
+    }
+  },
+  "taskboard_path": "superloops/loops/sl-20260515-001/taskboard.json",
+  "issues_path": "superloops/loops/sl-20260515-001/issues.json",
+  "waits_path": "superloops/loops/sl-20260515-001/waits.json",
+  "child_runs": [
+    {
+      "child_id": "child-001",
+      "kind": "nagare",
+      "workflow_path": "flow/workflows/library/revision_check.yaml",
+      "run_id": null,
+      "status": "planned"
+    }
+  ],
+  "artifacts": [
+    {
+      "artifact_id": "plan-md",
+      "kind": "file",
+      "path": "docs/revision_plan.md"
+    }
+  ],
+  "stats": {
+    "task_total": 3,
+    "task_completed": 1,
+    "issue_open": 0,
+    "wait_open": 1
+  },
+  "operator_summary_path": "superloops/loops/sl-20260515-001/README.md"
+}
+```
 
 ## 7. Recording Mode Proposal
 
@@ -426,6 +698,22 @@ should compile the recording session into:
 - `/superloop record resume`
 - `/superloop record finish`
 - `/superloop record abort`
+
+### 7.5 Recording-to-loop contract
+
+`/superloop record finish` should only compile if all of the following are true:
+
+- `goal` is non-empty
+- `intent_summary` is non-empty
+- `exit_condition_draft` is present
+- at least one accepted candidate step exists
+- every accepted step has a stable `step_id`
+- every referenced dependency points to a known accepted step
+- every pending wait has a `kind` and `resume_policy`
+- every child Nagare candidate has either `workflow_path` or enough data to generate one
+
+If any of those fail, finish should return a structured compile-blocked result,
+not a partial loop.
 
 ### 7.3 Recorder responsibilities
 
@@ -554,6 +842,165 @@ Suggested initial operator commands:
 The command surface should be a thin operator layer over structured state, not a
 place where the main orchestration logic lives.
 
+### 10.1 Command contract
+
+#### `/superloop record start <goal>`
+
+Purpose:
+
+- create a recording session and activate recorder mode
+
+Required inputs:
+
+- freeform goal text
+
+Optional flags:
+
+- `--id <recording_id>`
+- `--owner <agent>`
+- `--instance <instance_id>`
+- `--mode one-shot|incremental`
+
+Expected result:
+
+```json
+{
+  "ok": true,
+  "recording_id": "slrec-20260515-001",
+  "status": "recording",
+  "message": "Recording session created."
+}
+```
+
+#### `/superloop record status [recording_id]`
+
+Purpose:
+
+- inspect current recording session materialized state
+
+Expected result:
+
+- human-readable summary
+- optional JSON dump for API/workbench consumers
+
+#### `/superloop record try <action>`
+
+Purpose:
+
+- record and optionally execute or simulate a candidate step
+
+Accepted action classes:
+
+- HChat send
+- protocol send
+- file transfer
+- attachment send
+- local command or tool action
+- Nagare child-run trial
+- explicit wait insertion
+
+Expected result:
+
+```json
+{
+  "ok": true,
+  "recording_id": "slrec-20260515-001",
+  "trial_id": "trial-003",
+  "recorded_as_step_id": "peer-review",
+  "execution": {
+    "mode": "executed",
+    "success": true
+  }
+}
+```
+
+#### `/superloop record finish`
+
+Purpose:
+
+- compile a recording session into a formal loop
+
+Expected success result:
+
+```json
+{
+  "ok": true,
+  "recording_id": "slrec-20260515-001",
+  "loop_id": "sl-20260515-001",
+  "compiled_paths": {
+    "state": "superloops/loops/sl-20260515-001/state.json",
+    "taskboard": "superloops/loops/sl-20260515-001/taskboard.json",
+    "issues": "superloops/loops/sl-20260515-001/issues.json",
+    "waits": "superloops/loops/sl-20260515-001/waits.json"
+  }
+}
+```
+
+Expected blocked result:
+
+```json
+{
+  "ok": false,
+  "recording_id": "slrec-20260515-001",
+  "code": "compile_blocked",
+  "missing": [
+    "exit_condition_draft",
+    "accepted_step_ids"
+  ]
+}
+```
+
+#### `/superloop start <spec|loop_id>`
+
+Purpose:
+
+- start a compiled loop, not a recording session
+
+Rules:
+
+- if given a `loop_id`, load existing compiled loop
+- if given a one-shot spec directly, the preferred route is:
+  - create recording session
+  - infer and review
+  - compile
+  - then start
+
+#### `/superloop next <loop_id>`
+
+Purpose:
+
+- force the controller to evaluate current state and choose the next action
+
+Expected behavior:
+
+- no-op if paused
+- no-op if active wait not satisfied
+- advance if a wait resolved or next actionable step is ready
+
+#### `/superloop pause <loop_id>` and `/superloop resume <loop_id>`
+
+Purpose:
+
+- explicit operator control over long-running loops
+
+Required side effects:
+
+- update `state.json`
+- append event
+- preserve current wait and taskboard state
+
+### 10.2 API/workbench alignment
+
+When exposed through workbench or API later, command results should preserve the
+same machine-readable core fields:
+
+- `ok`
+- `recording_id` or `loop_id`
+- `status`
+- `code`
+- `message`
+- `compiled_paths` or `changed_refs`
+
 ## 11. Boundaries: What Not to Touch
 
 ### 10.1 Do not overload `/loop`
@@ -634,6 +1081,63 @@ Build:
 Exit gate:
 
 - a human can design a real loop through recording, trial steps, and final compilation
+
+### 13.1 `record finish -> compile` flow
+
+```text
+user issues /superloop record finish
+  ->
+controller loads recordings/<recording_id>/state.json
+  ->
+validate compile preconditions
+  ->
+if invalid:
+     write recording event "recording.finish_blocked"
+     return compile_blocked report
+  ->
+normalize accepted candidate steps
+  ->
+normalize waits / issues / taskboard candidates
+  ->
+materialize loop_id
+  ->
+write loops/<loop_id>/state.json
+  ->
+write loops/<loop_id>/taskboard.json
+  ->
+write loops/<loop_id>/issues.json
+  ->
+write loops/<loop_id>/waits.json
+  ->
+generate operator summary README.md
+  ->
+generate or finalize child Nagare workflow files when needed
+  ->
+update recording state:
+     status = compiled
+     compiled_loop_id = <loop_id>
+  ->
+append events:
+     recording.finished
+     loop.created
+  ->
+return success result with compiled paths
+```
+
+### 13.2 Compile transaction requirements
+
+Compilation should behave like a transaction boundary:
+
+- never leave a half-written compiled loop as the normal success path
+- either:
+  - all required compiled files exist and the recording is marked compiled
+  - or the finish operation reports failure and leaves the recording as uncompiled
+
+At minimum, the compiler should:
+
+- write compiled files atomically where practical
+- mark compile status only after all required outputs are present
+- emit a failure event with reason if compilation aborts mid-way
 
 ### Phase B: formal loop state and orchestration
 
