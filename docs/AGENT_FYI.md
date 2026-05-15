@@ -460,7 +460,10 @@ The formal protocol is:
 - Workbench `/api/chat` is the final delivery surface.
 - `instances.json + agents.json + live health` are authoritative.
 - `contacts.json` is only a short-lived cache.
-- `Remote /hchat` is a restricted-network fallback for LAN / internet relay.
+- cross-instance `tools/hchat_send.py` now prefers shared-token Remote protocol
+  transport (`/protocol/message`) when available.
+- `Remote /hchat` remains a restricted-network legacy fallback for LAN /
+  internet relay when protocol transport is unavailable.
 - Mailbox is retired and banned from the formal protocol.
 - `name` means local delivery only. Do not guess cross-instance targets.
 - `name@INSTANCE` means cross-instance delivery and must go through the `HASHI1` exchange.
@@ -505,3 +508,69 @@ curl -s -X POST http://127.0.0.1:18819/api/chat \
 | **Remote `/hchat`** | Transport | Carry exchange traffic or restricted-network relay |
 
 Do not fall back to mailbox.
+
+### Cross-Instance Remote Tools (Messages, Attachments, Files)
+
+For trusted cross-instance delivery on a LAN PC, prefer the dedicated Remote
+tools instead of inventing ad-hoc curl flows.
+
+Plain message:
+
+```bash
+python tools/protocol_send.py \
+  --to agent1@INTEL \
+  --from zelda \
+  --text "hello from HASHI1" \
+  --shared-token "$HASHI_REMOTE_SHARED_TOKEN"
+```
+
+Message with attachment:
+
+```bash
+python tools/protocol_send.py \
+  --to agent1@INTEL \
+  --from zelda \
+  --text "see attached" \
+  --attach ./report.txt \
+  --shared-token "$HASHI_REMOTE_SHARED_TOKEN"
+```
+
+File push + stat:
+
+```bash
+python tools/remote_file_transfer.py \
+  --shared-token "$HASHI_REMOTE_SHARED_TOKEN" \
+  --from-instance HASHI1 \
+  push ./report.txt INTEL:incoming/remote_smoke/report.txt
+
+python tools/remote_file_transfer.py \
+  --shared-token "$HASHI_REMOTE_SHARED_TOKEN" \
+  --from-instance HASHI1 \
+  stat INTEL:incoming/remote_smoke/report.txt
+```
+
+Operational rules:
+
+- Cross-instance message targets must use `agent@INSTANCE`.
+- Cross-instance file targets must use `INSTANCE:path`.
+- `tools/hchat_send.py --to agent@INSTANCE ...` is the correct operator tool for
+  real-time cross-instance Hchat delivery.
+- `protocol_send.py` requires `--from`.
+- Shared-token file transfer requires `--from-instance` unless
+  `HASHI_INSTANCE_ID` or `global.instance_id` already defines it.
+- On Windows peers, relative paths resolve under that peer's Hashi root.
+- Attachment send depends on peer capability `message_attachments_v1`.
+- Shared-token file transfer depends on peer capability `file_transfer_hmac_v1`.
+
+Permanent fix note:
+
+- Remote now probes live `/protocol/status` before shared-token file transfer
+  and attachment sends, so stale peer metadata fails clearly instead of
+  degenerating into ambiguous `401` or `404` errors.
+- `hchat_send.py` cross-instance delivery now prefers protocol transport over
+  legacy `/hchat`, fixing the case where legacy `/hchat` was bearer-gated while
+  trusted protocol traffic already worked via shared-token HMAC.
+- Remote also widens local Workbench host fallback beyond `127.0.0.1`.
+  This fixes the Windows/LAN case where a peer can receive protocol traffic but
+  cannot inject it into its own Workbench because the Workbench is bound to a
+  LAN IP instead of loopback.

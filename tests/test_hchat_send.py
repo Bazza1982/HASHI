@@ -186,3 +186,42 @@ def test_check_hchat_route_remote_workbench(monkeypatch):
     assert result["route_type"] == "remote_workbench"
     assert result["host"] == "10.0.0.3"
     assert result["port"] == 18802
+
+
+def test_send_hchat_remote_prefers_protocol_transport_when_shared_token_available(monkeypatch):
+    cfg = _local_cfg()
+    calls = []
+
+    monkeypatch.setattr(hchat_send, "_load_config", lambda: cfg)
+    monkeypatch.setattr(hchat_send, "_shared_token_for_protocol", lambda: "shared-secret")
+    monkeypatch.setattr(
+        hchat_send,
+        "_send_via_protocol_transport",
+        lambda to_agent, target_instance, from_agent, text: calls.append((to_agent, target_instance, from_agent, text)) or True,
+    )
+
+    assert hchat_send.send_hchat("agent1@INTEL", "zelda", "hello over protocol") is True
+    assert calls == [("agent1", "INTEL", "zelda", "hello over protocol")]
+
+
+def test_check_hchat_route_reports_protocol_transport_when_available(monkeypatch):
+    cfg = _local_cfg()
+    remote = {
+        "instance_id": "INTEL",
+        "host": "192.168.0.6",
+        "wb_port": 18802,
+        "remote_host": "192.168.0.6",
+        "remote_port": 8766,
+    }
+
+    monkeypatch.setattr(hchat_send, "_load_config", lambda: cfg)
+    monkeypatch.setattr(hchat_send, "_shared_token_for_protocol", lambda: "shared-secret")
+    monkeypatch.setattr(hchat_send, "_find_remote_instance", lambda *args, **kwargs: remote)
+    monkeypatch.setattr(hchat_send, "_probe_remote_http", lambda host, port, timeout=3: True)
+
+    result = hchat_send.check_hchat_route("agent1@INTEL", "zelda")
+
+    assert result["ok"] is True
+    assert result["route_type"] == "remote_protocol"
+    assert result["host"] == "192.168.0.6"
+    assert result["remote_port"] == 8766
