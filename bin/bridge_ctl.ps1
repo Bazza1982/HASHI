@@ -189,8 +189,17 @@ function Get-BridgeProcesses {
                 if ($child -ne $selfPid -and $child -ne $parentPid -and -not $targets.ContainsKey($child)) {
                     $p = $allProcs | Where-Object { $_.ProcessId -eq $child } | Select-Object -First 1
                     if ($p) {
-                        $targets[$child] = @{ Name = $p.Name; Cmd = $p.CommandLine; Type = "child" }
-                        $queue.Enqueue($child)
+                        $childName = [string]$p.Name
+                        $childCmd = [string]$p.CommandLine
+                        $isBridgeChild =
+                            ($childName -ieq 'python.exe' -or $childName -ieq 'py.exe') -and (Test-BridgeCommandLine $childCmd)
+                        $isLauncherChild =
+                            ($childName -ieq 'cmd.exe') -and (Test-LauncherCommandLine $childCmd)
+                        $isConsoleChild = $childName -ieq 'conhost.exe'
+                        if ($isBridgeChild -or $isLauncherChild -or $isConsoleChild) {
+                            $targets[$child] = @{ Name = $p.Name; Cmd = $p.CommandLine; Type = "child" }
+                            $queue.Enqueue($child)
+                        }
                     }
                 }
             }
