@@ -11,6 +11,7 @@ This is the bridge between mDNS discovery and HASHI's existing routing.
 import dataclasses
 import json
 import logging
+import os
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -23,6 +24,26 @@ from .base import PeerInfo, is_valid_instance_id, normalize_instance_id
 logger = logging.getLogger(__name__)
 
 LEGACY_INSTANCE_TTL_SECONDS = 24 * 3600
+
+
+def _load_json_object(path: Path) -> dict:
+    text = path.read_text(encoding="utf-8-sig")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        data, end = json.JSONDecoder().raw_decode(text)
+        if text[end:].strip():
+            logger.warning("Registry: ignored trailing corrupted data in %s", path)
+    return data if isinstance(data, dict) else {}
+
+
+def _atomic_write_json(path: Path, data: dict) -> None:
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp_path.write_text(
+        json.dumps(data, indent=4, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    tmp_path.replace(path)
 
 
 def _normalize_identity(value: str) -> str:
@@ -797,7 +818,7 @@ class PeerRegistry:
 
     def _same_machine_hint(self, instance_id: str, observations: dict[str, PeerInfo], chosen: PeerInfo) -> bool:
         try:
-            data = json.loads(self._instances_path.read_text(encoding="utf-8-sig"))
+            data = _load_json_object(self._instances_path)
         except Exception:
             data = {}
         instances = data.get("instances", {}) if isinstance(data, dict) else {}
@@ -1151,10 +1172,7 @@ class PeerRegistry:
 
             if changed or pruned_instances:
                 data["instances"] = instances
-                self._instances_path.write_text(
-                    json.dumps(data, indent=4, ensure_ascii=False),
-                    encoding="utf-8",
-                )
+                _atomic_write_json(self._instances_path, data)
                 logger.info("Registry: instances.json updated (%d peers)", len(self._peers))
 
         except Exception as e:

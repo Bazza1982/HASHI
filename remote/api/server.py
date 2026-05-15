@@ -70,6 +70,7 @@ _pairing_manager: Optional[PairingManager] = None
 _terminal_executor: Optional[TerminalExecutor] = None
 _protocol_manager = None
 _hashi_root: Optional[str] = None
+_control_hashi_root: Optional[str] = None
 _workbench_port: int = 18800
 _attachment_store: Optional[AttachmentStore] = None
 _HCHAT_HEADER_RE = re.compile(r"^\[hchat from (?P<agent>\w+)(?:@(?P<instance>[\w-]+))?\]\s*(?P<body>.*)$", re.DOTALL)
@@ -312,9 +313,9 @@ def _read_hashi_pid_state() -> dict[str, Any]:
         "pid": None,
         "pid_alive": False,
     }
-    if not _hashi_root:
+    if not _control_hashi_root:
         return state
-    pid_path = Path(_hashi_root) / ".bridge_u_f.pid"
+    pid_path = Path(_control_hashi_root) / ".bridge_u_f.pid"
     state["pid_file_exists"] = pid_path.exists()
     try:
         raw = pid_path.read_text(encoding="utf-8").strip()
@@ -329,9 +330,9 @@ def _read_hashi_pid_state() -> dict[str, Any]:
 
 
 def _hashi_start_command() -> list[str]:
-    if not _hashi_root:
+    if not _control_hashi_root:
         raise ValueError("Hashi root is unavailable")
-    root = Path(_hashi_root)
+    root = Path(_control_hashi_root)
     system = platform.system().lower()
     if system == "windows":
         ctl = root / "bin" / "bridge_ctl.ps1"
@@ -357,9 +358,9 @@ def _hashi_start_command() -> list[str]:
 
 
 def _start_hashi_process() -> dict[str, Any]:
-    if not _hashi_root:
+    if not _control_hashi_root:
         raise ValueError("Hashi root is unavailable")
-    root = Path(_hashi_root)
+    root = Path(_control_hashi_root)
     cmd = _hashi_start_command()
     log_dir = root / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -398,9 +399,9 @@ def _append_rescue_audit(
     status: dict[str, Any] | None = None,
     error: str | None = None,
 ) -> None:
-    if not _hashi_root:
+    if not _control_hashi_root:
         return
-    audit_path = Path(_hashi_root) / "logs" / "remote_rescue_audit.jsonl"
+    audit_path = Path(_control_hashi_root) / "logs" / "remote_rescue_audit.jsonl"
     audit_path.parent.mkdir(parents=True, exist_ok=True)
     record = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -418,9 +419,9 @@ def _append_rescue_audit(
 
 
 def _read_rescue_log(name: str, tail: int = 120) -> dict[str, Any]:
-    if not _hashi_root:
+    if not _control_hashi_root:
         raise ValueError("Hashi root is unavailable")
-    root = Path(_hashi_root)
+    root = Path(_control_hashi_root)
     files = {
         "start": root / "logs" / "remote_rescue_hashi_start.log",
         "audit": root / "logs" / "remote_rescue_audit.jsonl",
@@ -480,11 +481,12 @@ def create_app(
     protocol_manager=None,
     workbench_port: int = 18800,
     hashi_root: str = None,
+    control_hashi_root: str = None,
 ) -> FastAPI:
     """Create the FastAPI application with all context injected."""
 
     global _instance_info, _peer_registry, _pairing_manager, _terminal_executor
-    global _workbench_port, _hashi_root, _protocol_manager, _attachment_store
+    global _workbench_port, _hashi_root, _control_hashi_root, _protocol_manager, _attachment_store
 
     _instance_info = instance_info
     _peer_registry = peer_registry
@@ -493,6 +495,7 @@ def create_app(
     _protocol_manager = protocol_manager
     _workbench_port = workbench_port
     _hashi_root = hashi_root
+    _control_hashi_root = control_hashi_root or hashi_root
     _attachment_store = AttachmentStore(
         root=Path(hashi_root) if hashi_root else Path.cwd(),
         instance_id=str(instance_info.get("instance_id") or "hashi"),

@@ -118,14 +118,20 @@ def _resolve_configured_remote_port(hashi_root: Path, config: dict | None = None
         return DEFAULT_PORT
 
 
-def _load_instance_info(hashi_root: Path) -> dict:
+def _load_instance_info(
+    hashi_root: Path,
+    *,
+    instance_id: str | None = None,
+    display_name: str | None = None,
+    workbench_port: int | None = None,
+) -> dict:
     """Extract this instance's info from agents.json global section."""
     cfg = _load_agents_config(hashi_root)
     global_cfg = cfg.get("global", {})
     return {
-        "instance_id": global_cfg.get("instance_id", "HASHI"),
-        "display_name": global_cfg.get("display_name", "HASHI Instance"),
-        "workbench_port": global_cfg.get("workbench_port", 18800),
+        "instance_id": instance_id or global_cfg.get("instance_id", "HASHI"),
+        "display_name": display_name or global_cfg.get("display_name", "HASHI Instance"),
+        "workbench_port": workbench_port or global_cfg.get("workbench_port", 18800),
         "platform": _detect_platform(),
         "hashi_version": cfg.get("version", "unknown"),
     }
@@ -168,9 +174,14 @@ class HashiRemoteApplication:
         max_terminal_level: str = "L2_WRITE",
         discovery_backend: str = "lan",
         supervised: bool = False,
+        instance_id: str | None = None,
+        display_name: str | None = None,
+        workbench_port: int | None = None,
+        control_hashi_root: Optional[Path] = None,
         verbose: bool = False,
     ):
         self._hashi_root = hashi_root or Path(__file__).resolve().parent.parent
+        self._control_hashi_root = control_hashi_root or self._hashi_root
         self._host = host
         self._port = port
         self._use_tls = use_tls
@@ -178,6 +189,9 @@ class HashiRemoteApplication:
         self._max_terminal_level = AuthLevel[max_terminal_level]
         self._discovery_backend = discovery_backend
         self._supervised = supervised
+        self._instance_id_override = instance_id
+        self._display_name_override = display_name
+        self._workbench_port_override = workbench_port
         self._verbose = verbose
 
         self._shutdown_event = threading.Event()
@@ -232,7 +246,12 @@ class HashiRemoteApplication:
         signal.signal(signal.SIGTERM, handler)
 
     async def _run_async(self) -> None:
-        instance_info = _load_instance_info(self._hashi_root)
+        instance_info = _load_instance_info(
+            self._hashi_root,
+            instance_id=self._instance_id_override,
+            display_name=self._display_name_override,
+            workbench_port=self._workbench_port_override,
+        )
         instance_id = instance_info["instance_id"]
         self._instance_id = str(instance_id or "").strip().upper()
         workbench_port = instance_info["workbench_port"]
@@ -340,6 +359,7 @@ class HashiRemoteApplication:
             protocol_manager=self._protocol_manager,
             workbench_port=workbench_port,
             hashi_root=str(self._hashi_root),
+            control_hashi_root=str(self._control_hashi_root),
         )
 
         # TLS
@@ -469,6 +489,14 @@ def parse_args() -> argparse.Namespace:
                         help="Maximum allowed terminal auth level")
     parser.add_argument("--hashi-root", type=Path, default=None,
                         help="HASHI root directory (auto-detected if omitted)")
+    parser.add_argument("--control-hashi-root", type=Path, default=None,
+                        help="HASHI root controlled by rescue endpoints; defaults to --hashi-root")
+    parser.add_argument("--instance-id", default=None,
+                        help="Advertised Remote instance id, for standalone sidecars such as WATCHTOWER")
+    parser.add_argument("--display-name", default=None,
+                        help="Advertised Remote display name")
+    parser.add_argument("--workbench-port", type=int, default=None,
+                        help="Workbench port monitored by rescue status")
     parser.add_argument("--supervised", action="store_true",
                         help="Mark this Remote as OS-supervised side-program")
     parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging")
@@ -533,6 +561,10 @@ def main() -> int:
         max_terminal_level=max_terminal_level,
         discovery_backend=discovery_backend,
         supervised=supervised,
+        instance_id=args.instance_id,
+        display_name=args.display_name,
+        workbench_port=args.workbench_port,
+        control_hashi_root=args.control_hashi_root.expanduser().resolve() if args.control_hashi_root else None,
         verbose=args.verbose,
     )
     return app.run()
