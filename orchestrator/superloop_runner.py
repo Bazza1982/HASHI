@@ -20,51 +20,47 @@ class SuperloopRunner:
         self.waits = waits_service or SuperloopWaitsService(store)
 
     def next_action(self, loop_id: str) -> dict[str, Any]:
-        state = self.store.load_loop_state(loop_id)
-        status = str(state.get("status") or "")
+        with self.store._lock:
+            state = self.store.load_loop_state(loop_id)
+            status = str(state.get("status") or "")
 
-        if status == "paused":
-            return {"ok": True, "loop_id": loop_id, "advanced": False, "reason": "paused"}
+            if status == "paused":
+                return {"ok": True, "loop_id": loop_id, "advanced": False, "reason": "paused"}
 
-        if self.waits.has_open_waits(loop_id):
-            return {
-                "ok": True,
-                "loop_id": loop_id,
-                "advanced": False,
-                "reason": "open_waits",
-                "pending_wait_ids": self.waits.pending_wait_ids(loop_id),
-            }
+            if self.waits.has_open_waits(loop_id):
+                return {
+                    "ok": True,
+                    "loop_id": loop_id,
+                    "advanced": False,
+                    "reason": "open_waits",
+                    "pending_wait_ids": self.waits.pending_wait_ids(loop_id),
+                }
 
-        tasks = self.taskboard.list_tasks(loop_id)
-        completed = {task["task_id"] for task in tasks if task.get("status") == "completed"}
-        next_task = None
-        for task in tasks:
-            if task.get("status") != "pending":
-                continue
-            deps = list(task.get("depends_on") or [])
-            if all(dep in completed for dep in deps):
-                next_task = task
-                break
+            tasks = self.taskboard.list_tasks(loop_id)
+            completed = {task["task_id"] for task in tasks if task.get("status") == "completed"}
+            next_task = None
+            for task in tasks:
+                if task.get("status") != "pending":
+                    continue
+                deps = list(task.get("depends_on") or [])
+                if all(dep in completed for dep in deps):
+                    next_task = task
+                    break
 
-        if next_task is None:
-            state["status"] = "completed"
-            state["next_action"] = {"kind": "none", "reason": "all_tasks_completed"}
+            if next_task is None:
+                state["status"] = "completed"
+                state["next_action"] = {"kind": "none", "reason": "all_tasks_completed"}
+                self._save_loop_state(loop_id, state)
+                self.store.append_loop_event(loop_id, event_type="loop.completed", data={"reason": "all_tasks_completed"})
+                return {"ok": True, "loop_id": loop_id, "advanced": False, "reason": "completed"}
+
+            task_id = str(next_task["task_id"])
+            self.taskboard.update_task_status(loop_id, task_id, "in_progress")
+            state["current_step"] = task_id
+            state["next_action"] = {"kind": "run_task", "task_id": task_id}
             self._save_loop_state(loop_id, state)
-            self.store.append_loop_event(loop_id, event_type="loop.completed", data={"reason": "all_tasks_completed"})
-            return {"ok": True, "loop_id": loop_id, "advanced": False, "reason": "completed"}
-
-        task_id = str(next_task["task_id"])
-        self.taskboard.update_task_status(loop_id, task_id, "in_progress")
-        state["current_step"] = task_id
-        state["next_action"] = {"kind": "run_task", "task_id": task_id}
-        self._save_loop_state(loop_id, state)
-        self.store.append_loop_event(loop_id, event_type="task.started", data={"task_id": task_id})
-        return {"ok": True, "loop_id": loop_id, "advanced": True, "task_id": task_id}
+            self.store.append_loop_event(loop_id, event_type="task.started", data={"task_id": task_id})
+            return {"ok": True, "loop_id": loop_id, "advanced": True, "task_id": task_id}
 
     def _save_loop_state(self, loop_id: str, state: dict[str, Any]) -> None:
-        # Persist only state.json while leaving taskboard/issues/waits untouched.
-        loop_dir = self.store.loop_dir(loop_id)
-        state_path = loop_dir / "state.json"
-        from orchestrator.superloop_store import _json_dump  # local import to avoid exporting utility in public API
-
-        _json_dump(state_path, state)
+        self.store.save_loop_state(loop_id, state)

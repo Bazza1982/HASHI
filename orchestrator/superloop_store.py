@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,7 +33,7 @@ class SuperloopStore:
         self.root_dir = root_dir
         self.recordings_dir = self.root_dir / "recordings"
         self.loops_dir = self.root_dir / "loops"
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self.recordings_dir.mkdir(parents=True, exist_ok=True)
         self.loops_dir.mkdir(parents=True, exist_ok=True)
 
@@ -41,6 +42,9 @@ class SuperloopStore:
 
     def generate_loop_id(self) -> str:
         return f"sl-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+
+    def generate_record_id(self, prefix: str) -> str:
+        return f"{prefix}-{datetime.now(timezone.utc).strftime('%H%M%S%f')}-{secrets.token_hex(2)}"
 
     def recording_dir(self, recording_id: str) -> Path:
         return self.recordings_dir / recording_id
@@ -150,6 +154,7 @@ class SuperloopStore:
             _json_dump(loop_dir / "waits.json", waits)
             with open(loop_dir / "README.md", "w", encoding="utf-8") as handle:
                 handle.write(operator_summary)
+        self.append_loop_event(loop_id, event_type="loop.created", data={"status": loop_state.get("status", "draft")})
         return {
             "state": str(loop_dir / "state.json"),
             "taskboard": str(loop_dir / "taskboard.json"),
@@ -163,6 +168,37 @@ class SuperloopStore:
         if not state_path.exists():
             raise FileNotFoundError(f"Loop state not found: {loop_id}")
         return _json_load(state_path)
+
+    def save_loop_state(self, loop_id: str, state: dict[str, Any]) -> None:
+        payload = dict(state)
+        payload["updated_at"] = _utc_now()
+        state_path = self.loop_dir(loop_id) / "state.json"
+        with self._lock:
+            _json_dump(state_path, payload)
+
+    def resolve_loop_path(self, loop_id: str, maybe_rel: str | None, fallback_name: str) -> Path:
+        if isinstance(maybe_rel, str) and maybe_rel.strip():
+            candidate = (self.root_dir.parent / maybe_rel).resolve()
+        else:
+            candidate = (self.loop_dir(loop_id) / fallback_name).resolve()
+        root = self.root_dir.resolve()
+        if root not in candidate.parents and candidate != root:
+            raise ValueError(f"Path escapes superloops root: {candidate}")
+        return candidate
+
+    def load_loop_json_list(self, path: Path) -> list[dict[str, Any]]:
+        if not path.exists():
+            return []
+        with self._lock:
+            with open(path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        if not isinstance(payload, list):
+            raise ValueError(f"Expected list JSON in {path}")
+        return [item for item in payload if isinstance(item, dict)]
+
+    def save_loop_json_list(self, path: Path, payload: list[dict[str, Any]]) -> None:
+        with self._lock:
+            _json_dump(path, payload)
 
     def append_loop_event(
         self,

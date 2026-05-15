@@ -43,3 +43,8 @@ def test_store_create_compiled_loop(tmp_path: Path) -> None:
     assert Path(paths["state"]).exists()
     loaded = store.load_loop_state("sl-test-001")
     assert loaded["loop_id"] == "sl-test-001"
+    events_path = tmp_path / "superloops" / "loops" / "sl-test-001" / "events.jsonl"
+    lines = events_path.read_text(encoding="utf-8").strip().splitlines()
+    assert lines
+    payload = json.loads(lines[-1])
+    assert payload["kind"] == "loop.created"
