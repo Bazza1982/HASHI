@@ -985,7 +985,7 @@ class PeerRegistry:
     def _sync_to_instances_json(self) -> None:
         """Write discovered peer IPs into instances.json for hchat routing."""
         try:
-            write_live_endpoints(self._root, self._peers.values())
+            write_live_endpoints(self._root, self._peers.values(), preserve_existing=True)
         except Exception as exc:
             logger.warning("Registry: failed to write live endpoint cache: %s", exc)
         if not self._instances_path.exists():

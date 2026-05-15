@@ -12,30 +12,73 @@ def live_endpoints_path(root: Path | str) -> Path:
     return Path(root).expanduser().resolve() / "state" / "remote_live_endpoints.json"
 
 
-def write_live_endpoints(root: Path | str, peers: Iterable[Any]) -> dict[str, Any]:
+def _entry_from_peer(peer: Any, *, now: float) -> tuple[str, dict[str, Any]] | None:
+    instance_id = normalize_instance_id(getattr(peer, "instance_id", ""))
+    if not is_valid_instance_id(instance_id):
+        return None
+    properties = dict(getattr(peer, "properties", {}) or {})
+    port = int(getattr(peer, "port", 0) or 0)
+    return instance_id.lower(), {
+        "instance_id": instance_id,
+        "display_name": str(getattr(peer, "display_name", "") or instance_id),
+        "host": str(getattr(peer, "host", "") or ""),
+        "port": port,
+        "remote_port": port,
+        "workbench_port": int(getattr(peer, "workbench_port", 0) or 0),
+        "platform": str(getattr(peer, "platform", "") or "unknown"),
+        "protocol_version": str(getattr(peer, "protocol_version", "") or "1.0"),
+        "capabilities": list(getattr(peer, "capabilities", []) or []),
+        "discovery": str(properties.get("preferred_backend") or properties.get("discovery") or "unknown"),
+        "host_identity": str(properties.get("host_identity") or ""),
+        "environment_kind": str(properties.get("environment_kind") or ""),
+        "updated_at": now,
+    }
+
+
+def write_live_endpoints(root: Path | str, peers: Iterable[Any], *, preserve_existing: bool = False) -> dict[str, Any]:
     now = time.time()
     entries: dict[str, dict[str, Any]] = {}
-    for peer in peers:
-        instance_id = normalize_instance_id(getattr(peer, "instance_id", ""))
-        if not is_valid_instance_id(instance_id):
-            continue
-        properties = dict(getattr(peer, "properties", {}) or {})
-        entries[instance_id.lower()] = {
-            "instance_id": instance_id,
-            "display_name": str(getattr(peer, "display_name", "") or instance_id),
-            "host": str(getattr(peer, "host", "") or ""),
-            "port": int(getattr(peer, "port", 0) or 0),
-            "workbench_port": int(getattr(peer, "workbench_port", 0) or 0),
-            "platform": str(getattr(peer, "platform", "") or "unknown"),
-            "protocol_version": str(getattr(peer, "protocol_version", "") or "1.0"),
-            "capabilities": list(getattr(peer, "capabilities", []) or []),
-            "discovery": str(properties.get("preferred_backend") or properties.get("discovery") or "unknown"),
-            "host_identity": str(properties.get("host_identity") or ""),
-            "environment_kind": str(properties.get("environment_kind") or ""),
-            "updated_at": now,
-        }
-    data = {"version": 1, "updated_at": now, "endpoints": entries}
     path = live_endpoints_path(root)
+    if preserve_existing and path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+            current = existing.get("endpoints") if isinstance(existing, dict) else {}
+            if isinstance(current, dict):
+                entries.update({str(key): value for key, value in current.items() if isinstance(value, dict)})
+        except Exception:
+            entries = {}
+    for peer in peers:
+        item = _entry_from_peer(peer, now=now)
+        if item is None:
+            continue
+        key, entry = item
+        entries[key] = entry
+    data = {"version": 1, "updated_at": now, "endpoints": entries}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    path.chmod(0o600)
+    return data
+
+
+def write_live_endpoint(root: Path | str, peer: Any) -> dict[str, Any]:
+    now = time.time()
+    item = _entry_from_peer(peer, now=now)
+    if item is None:
+        return read_live_endpoints(root)
+    key, entry = item
+    path = live_endpoints_path(root)
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+    else:
+        data = {}
+    endpoints = data.get("endpoints") if isinstance(data, dict) else {}
+    if not isinstance(endpoints, dict):
+        endpoints = {}
+    endpoints[key] = entry
+    data = {"version": 1, "updated_at": now, "endpoints": endpoints}
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
     path.chmod(0o600)
