@@ -6,9 +6,12 @@ from types import SimpleNamespace
 from typing import Any
 
 from orchestrator.superloop_compiler import SuperloopCompiler
+from orchestrator.superloop_issues import SuperloopIssuesService
 from orchestrator.superloop_recording import SuperloopRecordingService
 from orchestrator.superloop_runner import SuperloopRunner
 from orchestrator.superloop_store import SuperloopStore, _json_dump
+from orchestrator.superloop_taskboard import SuperloopTaskboardService
+from orchestrator.superloop_waits import SuperloopWaitsService
 
 
 def _local_instance_id() -> str:
@@ -46,7 +49,10 @@ def _help_text() -> str:
         "/superloop status <loop_id>\n"
         "/superloop pause <loop_id>\n"
         "/superloop resume <loop_id>\n"
-        "/superloop next <loop_id>"
+        "/superloop next <loop_id>\n"
+        "/superloop task add <loop_id> <title>\n"
+        "/superloop issue add <loop_id> <title>\n"
+        "/superloop wait add <loop_id> <kind>"
     )
 
 
@@ -292,6 +298,62 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
             ),
             parse_mode="Markdown",
         )
+        return
+
+    if lowered[:2] == ["task", "add"]:
+        if len(parts) < 4:
+            await runtime._reply_text(update, "Usage: /superloop task add <loop_id> <title>")
+            return
+        loop_id = parts[2]
+        title = raw.split(None, 3)[3].strip()
+        service = SuperloopTaskboardService(store)
+        try:
+            task = service.add_task(
+                loop_id,
+                title=title,
+                owner_agent=runtime.name,
+                owner_instance=local_instance,
+            )
+        except FileNotFoundError:
+            await runtime._reply_text(update, f"Loop not found: {loop_id}")
+            return
+        await runtime._reply_text(update, f"✅ task added: `{task['task_id']}`", parse_mode="Markdown")
+        return
+
+    if lowered[:2] == ["issue", "add"]:
+        if len(parts) < 4:
+            await runtime._reply_text(update, "Usage: /superloop issue add <loop_id> <title>")
+            return
+        loop_id = parts[2]
+        title = raw.split(None, 3)[3].strip()
+        service = SuperloopIssuesService(store)
+        try:
+            issue = service.open_issue(
+                loop_id,
+                title=title,
+                severity="medium",
+                opened_by_agent=runtime.name,
+                opened_by_instance=local_instance,
+            )
+        except FileNotFoundError:
+            await runtime._reply_text(update, f"Loop not found: {loop_id}")
+            return
+        await runtime._reply_text(update, f"✅ issue opened: `{issue['issue_id']}`", parse_mode="Markdown")
+        return
+
+    if lowered[:2] == ["wait", "add"]:
+        if len(parts) < 4:
+            await runtime._reply_text(update, "Usage: /superloop wait add <loop_id> <kind>")
+            return
+        loop_id = parts[2]
+        kind = parts[3]
+        service = SuperloopWaitsService(store)
+        try:
+            wait = service.add_wait(loop_id, kind=kind)
+        except FileNotFoundError:
+            await runtime._reply_text(update, f"Loop not found: {loop_id}")
+            return
+        await runtime._reply_text(update, f"✅ wait added: `{wait['wait_id']}`", parse_mode="Markdown")
         return
 
     await runtime._reply_text(update, _help_text())
