@@ -39,6 +39,8 @@ def _help_text() -> str:
         "/superloop record start <goal>\n"
         "/superloop record status [recording_id]\n"
         "/superloop record try <recording_id> <step title>\n"
+        "/superloop record intent <recording_id> <summary>\n"
+        "/superloop record exit <recording_id> <kind> <details-json>\n"
         "/superloop record finish [recording_id]\n"
         "/superloop status <loop_id>"
     )
@@ -66,6 +68,18 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
             owner_instance=local_instance,
             source_mode="incremental",
         )
+        recording_service.set_intent_summary(
+            result["recording_id"],
+            intent_summary=goal,
+            actor_agent=runtime.name,
+            actor_instance=local_instance,
+        )
+        recording_service.set_exit_condition(
+            result["recording_id"],
+            exit_condition={"kind": "all_tasks_completed", "details": {"task_ids": []}},
+            actor_agent=runtime.name,
+            actor_instance=local_instance,
+        )
         await runtime._reply_text(
             update,
             (
@@ -75,6 +89,47 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
             ),
             parse_mode="Markdown",
         )
+        return
+
+    if lowered[:2] == ["record", "intent"]:
+        if len(parts) < 4:
+            await runtime._reply_text(update, "Usage: /superloop record intent <recording_id> <summary>")
+            return
+        recording_id = parts[2]
+        summary = raw.split(None, 3)[3].strip()
+        recording_service.set_intent_summary(
+            recording_id,
+            intent_summary=summary,
+            actor_agent=runtime.name,
+            actor_instance=local_instance,
+        )
+        await runtime._reply_text(update, f"✅ intent summary updated for `{recording_id}`", parse_mode="Markdown")
+        return
+
+    if lowered[:2] == ["record", "exit"]:
+        if len(parts) < 5:
+            await runtime._reply_text(
+                update,
+                "Usage: /superloop record exit <recording_id> <kind> <details-json>",
+            )
+            return
+        recording_id = parts[2]
+        kind = parts[3]
+        json_text = raw.split(None, 4)[4].strip()
+        try:
+            details = json.loads(json_text)
+            if not isinstance(details, dict):
+                raise ValueError("details must be a JSON object")
+        except Exception as exc:
+            await runtime._reply_text(update, f"Invalid details JSON: {exc}")
+            return
+        recording_service.set_exit_condition(
+            recording_id,
+            exit_condition={"kind": kind, "details": details},
+            actor_agent=runtime.name,
+            actor_instance=local_instance,
+        )
+        await runtime._reply_text(update, f"✅ exit condition updated for `{recording_id}`", parse_mode="Markdown")
         return
 
     if lowered[:2] == ["record", "status"]:

@@ -35,11 +35,13 @@ async def test_superloop_record_start_try_finish_status(tmp_path: Path) -> None:
     await handle_superloop_command(runtime, _FakeUpdate(f"/superloop record try {recording_id} first step"), f"record try {recording_id} first step")
     assert any("Recorded trial step" in text for text in runtime.messages)
 
-    # Finish should block first because intent/exit condition missing.
     await handle_superloop_command(runtime, _FakeUpdate(f"/superloop record finish {recording_id}"), f"record finish {recording_id}")
-    assert any("compile_blocked" in text for text in runtime.messages)
+    compiled_text = next(text for text in runtime.messages if "Superloop compiled" in text)
+    loop_id = compiled_text.split("`")[3]
+    assert loop_id.startswith("sl-")
 
-    # Patch recording through direct command helper path by setting status summary unsupported here.
-    # Use status command and ensure it still returns a valid panel.
     await handle_superloop_command(runtime, _FakeUpdate(f"/superloop record status {recording_id}"), f"record status {recording_id}")
     assert any("recording status" in text.lower() for text in runtime.messages)
+
+    await handle_superloop_command(runtime, _FakeUpdate(f"/superloop status {loop_id}"), f"status {loop_id}")
+    assert any("Superloop status" in text for text in runtime.messages)
