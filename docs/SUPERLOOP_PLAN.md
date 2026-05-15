@@ -1,6 +1,35 @@
 # HASHI Superloop Plan
 
-Status: draft architecture plan based on repo survey on 2026-05-15.
+Status: architecture + v1 implementation baseline landed on 2026-05-15.
+
+## 0. Implementation Status (Current)
+
+Implemented:
+
+- `orchestrator/superloop_store.py`
+- `orchestrator/superloop_recording.py`
+- `orchestrator/superloop_compiler.py`
+- `orchestrator/superloop_runner.py`
+- `orchestrator/superloop_waits.py`
+- `orchestrator/superloop_taskboard.py`
+- `orchestrator/superloop_issues.py`
+- `orchestrator/superloop_nagare_adapter.py`
+- `orchestrator/runtime_superloop.py`
+- command wiring in `orchestrator/runtime_command_binding.py` and `orchestrator/flexible_agent_runtime.py`
+- scheduler tick integration via `orchestrator/superloop_scheduler.py` and `orchestrator/scheduler.py`
+
+Working behavior:
+
+- recording-first flow: `record start -> record try -> record finish -> compile`
+- loop state persistence with taskboard/issues/waits/event log
+- pause/resume/next operations
+- scheduler can auto-satisfy `sleep_until` waits on deadline and advance loop
+- timeout waits can auto-open issues when policy is `on_timeout=raise_issue`
+
+Test coverage:
+
+- `tests/test_superloop_*.py` validates core state, command flow, runner, waits,
+  scheduler advancement, and timeout issue behavior.
 
 ## 1. Purpose
 
