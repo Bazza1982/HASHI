@@ -90,7 +90,38 @@ def test_hashi_rescue_logs_returns_bounded_fixed_log_tail(tmp_path):
     assert body["ok"] is True
     assert body["name"] == "start"
     assert body["exists"] is True
+    assert body["requested_tail"] == 2
+    assert body["effective_tail"] == 2
+    assert body["tail_truncated"] is False
     assert body["lines"] == ["two", "three"]
+
+
+def test_hashi_rescue_logs_caps_tail_at_1000(tmp_path):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    payload = "".join(f"line-{idx}\n" for idx in range(1205))
+    (log_dir / "remote_rescue_hashi_start.log").write_text(payload, encoding="utf-8")
+    client = _client(tmp_path)
+
+    response = client.get("/control/hashi/logs?name=start&tail=5000")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["requested_tail"] == 5000
+    assert body["effective_tail"] == 1000
+    assert body["tail_truncated"] is True
+    assert len(body["lines"]) == 1000
+    assert body["lines"][0] == "line-205"
+    assert body["lines"][-1] == "line-1204"
+
+
+def test_hashi_rescue_logs_rejects_non_positive_tail(tmp_path):
+    client = _client(tmp_path)
+
+    response = client.get("/control/hashi/logs?name=start&tail=0")
+
+    assert response.status_code == 400
+    assert "positive integer" in response.json()["error"]
 
 
 def test_hashi_rescue_logs_rejects_unknown_log_name(tmp_path):
@@ -115,6 +146,7 @@ def test_hashi_rescue_start_writes_audit_when_already_running(tmp_path):
     record = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[-1])
     assert record["requester"] == "lan-client"
     assert record["reason"] == "already alive"
+    assert record["reason_truncated"] is False
     assert record["outcome"] == "already_running"
     assert record["pid"] == os.getpid()
 
@@ -130,7 +162,88 @@ def test_hashi_rescue_start_failure_writes_structured_audit(tmp_path):
     assert record["requester"] == "lan-client"
     assert record["reason"] == "missing launcher"
     assert record["outcome"] == "failed"
+    assert record["status_state"] == "offline"
     assert "launcher" in record["error"]
+
+
+def test_hashi_rescue_start_sanitizes_and_truncates_reason_in_audit(tmp_path):
+    (tmp_path / ".bridge_u_f.pid").write_text(str(os.getpid()), encoding="utf-8")
+    client = _client(tmp_path, max_level=AuthLevel.L3_RESTART)
+    reason = ("first line\nsecond line\r\n" + ("x" * 600))
+
+    response = client.post("/control/hashi/start", json={"reason": reason})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["started"] is False
+    assert body["reason_truncated"] is True
+    assert "\n" not in body["reason"]
+    assert len(body["reason"]) == 500
+    audit_path = tmp_path / "logs" / "remote_rescue_audit.jsonl"
+    record = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert record["requester"] == "lan-client"
+    assert record["reason_truncated"] is True
+    assert record["reason_original_length"] > 500
+    assert "\n" not in record["reason"]
+    assert "\r" not in record["reason"]
+    assert len(record["reason"]) == 500
+
+
+def test_hashi_rescue_start_returns_structured_windows_launcher_fields(tmp_path, monkeypatch):
+    client = _client(tmp_path, max_level=AuthLevel.L3_RESTART)
+    sleep_calls = {"count": 0}
+
+    monkeypatch.setattr("remote.api.server.platform.system", lambda: "Windows")
+    monkeypatch.setattr(
+        "remote.api.server._start_hashi_process",
+        lambda: {
+            "pid": 4242,
+            "command": [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(tmp_path / "bin" / "bridge_ctl.ps1"),
+                "-Action",
+                "start",
+                "-Resume",
+            ],
+            "log_path": str(tmp_path / "logs" / "remote_rescue_hashi_start.log"),
+            "launcher_kind": "powershell.exe",
+            "platform": "windows",
+        },
+    )
+    monkeypatch.setattr(
+        "remote.api.server._hashi_control_status",
+        lambda: {
+            "ok": True,
+            "state": "offline",
+            "hashi_running": False,
+            "pid_file_exists": False,
+            "pid": None,
+            "pid_alive": False,
+            "workbench_url": "http://127.0.0.1:1/api/health",
+            "workbench_health": None,
+        },
+    )
+    async def fake_sleep(*_args, **_kwargs):
+        sleep_calls["count"] += 1
+        return None
+
+    monkeypatch.setattr("remote.api.server.asyncio.sleep", fake_sleep)
+
+    response = client.post("/control/hashi/start", json={"reason": "windows start"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["started"] is True
+    assert body["pid"] == 4242
+    assert body["launcher_kind"] == "powershell.exe"
+    assert body["platform"] == "windows"
+    assert body["command"][0] == "powershell.exe"
+    assert "bridge_ctl.ps1" in " ".join(body["command"])
+    assert sleep_calls["count"] >= 1
 
 
 def test_rescue_capabilities_advertise_start_only_when_l3_enabled():

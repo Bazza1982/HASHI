@@ -30,6 +30,21 @@ Run Hashi Remote under an OS-level supervisor:
 HASHI core may still start/stop Remote for convenience, but production rescue
 should not rely on `/remote on`.
 
+## v1 Topology
+
+v1 implements **Topology A only**:
+
+- Remote: Windows native
+- HASHI core: Windows native
+- launcher: `bin/bridge_ctl.ps1 -Action start -Resume`
+- fallback: `bin/bridge-u.bat --resume-last --no-pause`
+- PID checks: Windows PID semantics
+- Workbench health: HASHI Windows Workbench port
+
+**Topology C** (Windows Remote -> WSL2 HASHI core) stays out of scope for v1.
+Treat it as a future advanced mode after separate launcher, PID, and log
+contracts exist for cross-boundary operation.
+
 ## Rescue Endpoints
 
 Hashi Remote exposes a fixed control protocol:
@@ -72,8 +87,22 @@ logs/remote_rescue_audit.jsonl
 `/control/hashi/logs` returns bounded tails from fixed log names only. It does
 not accept arbitrary paths.
 
+`tail` contract for v1:
+
+- default `120`
+- maximum `1000`
+- values above `1000` are truncated to `1000`
+- non-positive or invalid values return `400`
+- responses include `requested_tail`, `effective_tail`, and `tail_truncated`
+
 The audit record includes requester, reason, launcher command, PID, log path,
 outcome, status state, and error text when available.
+
+`reason` contract for v1:
+
+- stored as a single sanitized line
+- truncated to at most `500` characters
+- truncation is recorded in audit metadata when applicable
 
 ## Capability Advertisement
 
@@ -161,6 +190,16 @@ should report `remote_supervisor.mode=child`.
 Set `HASHI_REMOTE_MAX_TERMINAL_LEVEL=L3_RESTART` only on trusted LAN/Tailscale
 machines where remote HASHI rescue is intentionally enabled. Default supervised
 Remote remains `L2_WRITE`.
+
+## Operator Notes
+
+- Treat `/control/hashi/start` as a fixed rescue lever, not a generic remote
+  shell.
+- Prefer `bridge_ctl.ps1` on HASHI9 Windows because it follows the native
+  bridge lifecycle more reliably than ad-hoc process creation.
+- Use `/control/hashi/logs?name=audit` first when checking who initiated a
+  rescue and why; use `name=start` for launcher output and `name=supervisor`
+  for the always-on Remote wrapper.
 
 ## Client Helper
 
