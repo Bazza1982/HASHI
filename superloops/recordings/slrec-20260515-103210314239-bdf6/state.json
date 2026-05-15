@@ -1,0 +1,234 @@
+{
+  "recording_id": "slrec-20260515-103210314239-bdf6",
+  "status": "compiled",
+  "goal": "audit_vibe_coding: start from a software idea such as build a HASHI Watchtower, record and drive the work all the way to a finished and tested product, including end-to-end flow and internal loops such as testing -> bug -> debug -> fix -> testing, and exit only when the whole idea is built and tested to be fully functional.",
+  "source_mode": "incremental",
+  "owner_agent": "zelda",
+  "owner_instance": "HASHI1",
+  "created_at": "2026-05-15T10:32:10.314280+00:00",
+  "updated_at": "2026-05-15T10:32:10.320987+00:00",
+  "intent_summary": "audit_vibe_coding is a recording-first product delivery superloop. It begins with an idea, captures product boundaries and non-goals, turns the idea into an implementation plan, tracks nested build/test/debug/fix loops, requires end-to-end validation evidence, and exits only when the product is implemented, documented, and proven fully functional in real use. The loop now treats safe live testing as a mandatory acceptance gate: after smoke/debug loops, the orchestrator must prove the product works in the real deployed environment via controlled live actions, external/user-path invocation, visibility checks, and repeat fix loops until green.",
+  "exit_condition_draft": {
+    "kind": "product_fully_functional",
+    "details": {
+      "criteria": [
+        "idea captured with product boundaries and non-goals",
+        "architecture keeps core minimal and features modular",
+        "Watchtower/rescue sidecar API is narrow, explicit, and auditable",
+        "Windows and WSL target handling is explicit and tested",
+        "implementation passes focused automated tests",
+        "internal testing-bug-debug-fix-retesting loops are recorded in events/issues/tasks",
+        "real end-to-end smoke test proves the product works in the intended environment",
+        "operator documentation and acceptance evidence exist",
+        "no known blocker remains for normal operation",
+        "safe live-test preflight identifies protected systems, allowed failure targets, rollback/restore path, and required external view before any destructive action",
+        "real live testing exercises the deployed product through the intended external/user path, not a local bypass or mock-only path",
+        "live tests include off/on or failure/recovery behavior when the product is supposed to supervise, rescue, restart, or persist",
+        "if live testing fails, the loop must restore service, record the failure, fix the root cause, rerun automated tests, and repeat live testing until green",
+        "exit requires live evidence from all required directions/views, including status/listing visibility and post-action health checks for affected systems"
+      ]
+    }
+  },
+  "candidate_steps": [
+    {
+      "step_id": "step-001",
+      "kind": "human_or_agent_action",
+      "title": "Capture original idea, intended users, product boundaries, and explicit non-goals",
+      "status": "accepted",
+      "owner_agent": "zelda",
+      "owner_instance": "HASHI1",
+      "depends_on": [],
+      "trial": {
+        "mode": "simulated",
+        "success": true
+      }
+    },
+    {
+      "step_id": "step-002",
+      "kind": "human_or_agent_action",
+      "title": "Extract requirements and architecture constraints from Watchtower discussion records",
+      "status": "accepted",
+      "owner_agent": "zelda",
+      "owner_instance": "HASHI1",
+      "depends_on": [],
+      "trial": {
+        "mode": "simulated",
+        "success": true
+      }
+    },
+    {
+      "step_id": "step-003",
+      "kind": "human_or_agent_action",
+      "title": "Design minimal core with modular sidecar boundaries, narrow rescue API, and structured audit logging",
+      "status": "accepted",
+      "owner_agent": "zelda",
+      "owner_instance": "HASHI1",
+      "depends_on": [],
+      "trial": {
+        "mode": "simulated",
+        "success": true
+      }
+    },
+    {
+      "step_id": "step-004",
+      "kind": "human_or_agent_action",
+      "title": "Model explicit Windows, WSL, and remote target handling without guessing paths or runtime context",
+      "status": "accepted",
+      "owner_agent": "zelda",
+      "owner_instance": "HASHI1",
+      "depends_on": [],
+      "trial": {
+        "mode": "simulated",
+        "success": true
+      }
+    },
+    {
+      "step_id": "step-005",
+      "kind": "human_or_agent_action",
+      "title": "Break implementation into product phases, taskboard items, waits, issues, artifacts, and evidence checkpoints",
+      "status": "accepted",
+      "owner_agent": "zelda",
+      "owner_instance": "HASHI1",
+      "depends_on": [],
+      "trial": {
+        "mode": "simulated",
+        "success": true
+      }
+    },
+    {
+      "step_id": "step-006",
+      "kind": "human_or_agent_action",
+      "title": "Implement the smallest vertical slice that proves the end-to-end Watchtower flow",
+      "status": "accepted",
+      "owner_agent": "zelda",
+      "owner_instance": "HASHI1",
+      "depends_on": [],
+      "trial": {
+        "mode": "simulated",
+        "success": true
+      }
+    },
+    {
+      "step_id": "step-007",
+      "kind": "human_or_agent_action",
+      "title": "Run internal test loop: test -> bug found -> debug -> fix -> retest until green",
+      "status": "accepted",
+      "owner_agent": "zelda",
+      "owner_instance": "HASHI1",
+      "depends_on": [],
+      "trial": {
+        "mode": "simulated",
+        "success": true
+      }
+    },
+    {
+      "step_id": "step-008",
+      "kind": "human_or_agent_action",
+      "title": "Run real end-to-end smoke test and prepare for safe live acceptance in the intended target environment",
+      "status": "accepted",
+      "owner_agent": "zelda",
+      "owner_instance": "HASHI1",
+      "depends_on": [],
+      "trial": {
+        "mode": "simulated",
+        "success": true
+      }
+    },
+    {
+      "step_id": "step-008a",
+      "kind": "human_or_agent_action",
+      "title": "Run safe live-test preflight: identify protected systems, exact target components, independent control channel, auth, dynamic port/view expectations, and rollback plan",
+      "status": "accepted",
+      "owner_agent": "zelda",
+      "owner_instance": "HASHI1",
+      "depends_on": [
+        "step-008"
+      ],
+      "trial": {
+        "mode": "simulated",
+        "success": true
+      }
+    },
+    {
+      "step_id": "step-008b",
+      "kind": "human_or_agent_action",
+      "title": "Run real live acceptance test through the intended external/user path, including controlled failure or off/on behavior when relevant",
+      "status": "accepted",
+      "owner_agent": "zelda",
+      "owner_instance": "HASHI1",
+      "depends_on": [
+        "step-008a"
+      ],
+      "trial": {
+        "mode": "simulated",
+        "success": true
+      }
+    },
+    {
+      "step_id": "step-008c",
+      "kind": "human_or_agent_action",
+      "title": "Verify live visibility from all required directions: status endpoints, list views, LAN/WSL/Windows perspectives, health checks, and audit logs",
+      "status": "accepted",
+      "owner_agent": "zelda",
+      "owner_instance": "HASHI1",
+      "depends_on": [
+        "step-008b"
+      ],
+      "trial": {
+        "mode": "simulated",
+        "success": true
+      }
+    },
+    {
+      "step_id": "step-008d",
+      "kind": "human_or_agent_action",
+      "title": "If live acceptance fails, restore service first, record failure evidence, debug root cause, patch, rerun automated tests, then repeat live acceptance until green",
+      "status": "accepted",
+      "owner_agent": "zelda",
+      "owner_instance": "HASHI1",
+      "depends_on": [
+        "step-008c"
+      ],
+      "trial": {
+        "mode": "simulated",
+        "success": true
+      }
+    },
+    {
+      "step_id": "step-009",
+      "kind": "human_or_agent_action",
+      "title": "Collect acceptance evidence: logs, test results, operator docs, and known limitations",
+      "status": "accepted",
+      "owner_agent": "zelda",
+      "owner_instance": "HASHI1",
+      "depends_on": [],
+      "trial": {
+        "mode": "simulated",
+        "success": true
+      }
+    },
+    {
+      "step_id": "step-010",
+      "kind": "human_or_agent_action",
+      "title": "Exit only after the whole idea is built, documented, and proven functional by automated tests plus safe live acceptance evidence",
+      "status": "accepted",
+      "owner_agent": "zelda",
+      "owner_instance": "HASHI1",
+      "depends_on": [],
+      "trial": {
+        "mode": "simulated",
+        "success": true
+      }
+    }
+  ],
+  "candidate_waits": [],
+  "candidate_agents": [],
+  "candidate_artifacts": [],
+  "candidate_nagare_runs": [],
+  "open_questions": [],
+  "finish_ready": true,
+  "compiled_loop_id": "sl-20260515-103210320305-ef51",
+  "notes": [
+    "2026-05-16: Added mandatory safe live acceptance gate after Watchtower HASHI2/HASHI9 rescue testing showed smoke/final review alone was insufficient."
+  ]
+}
