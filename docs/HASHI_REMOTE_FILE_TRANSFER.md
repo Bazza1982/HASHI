@@ -5,6 +5,8 @@ Planned upgrade: see
 for the shared-token HMAC file transfer upgrade and message attachment design.
 
 Hashi Remote supports direct cross-PC file push through the remote API.
+When both peers advertise attachment capability, the same trusted Remote layer
+also supports combined cross-instance message + attachment delivery.
 
 ## API
 
@@ -34,6 +36,8 @@ python tools/remote_file_transfer.py push ./report.md HASHI9:/tmp/report.md
 python tools/remote_file_transfer.py push ./report.md HASHI9:C:\\Users\\me\\Desktop\\report.md --overwrite
 python tools/remote_file_transfer.py stat HASHI9:/tmp/report.md
 python tools/remote_file_transfer.py --shared-token "$HASHI_REMOTE_SHARED_TOKEN" --from-instance HASHI1 push ./report.md HASHI9:/tmp/report.md
+python tools/protocol_send.py --to agent1@INTEL --from zelda --text "hello from HASHI1" --shared-token "$HASHI_REMOTE_SHARED_TOKEN"
+python tools/protocol_send.py --to agent1@INTEL --from zelda --text "see attached" --attach ./report.txt --shared-token "$HASHI_REMOTE_SHARED_TOKEN"
 ```
 
 Auth selection rules:
@@ -48,6 +52,25 @@ Shared-token mode requires a sender identity:
 - pass `--from-instance HASHI1`, or
 - set `HASHI_INSTANCE_ID`, or
 - keep `global.instance_id` in local `agents.json`
+
+Capability rules:
+
+- plain `/protocol/message` chat does not require attachment support
+- attachment send requires the target peer to advertise `message_attachments_v1`
+- direct shared-token file transfer requires the target peer to advertise
+  `file_transfer_hmac_v1`
+- the CLIs now probe live `/protocol/status` before HMAC file-transfer and
+  attachment operations so stale peer metadata fails clearly
+
+Windows/LAN stability note:
+
+- Some LAN PCs bind the local Workbench API to the machine's LAN IP instead of
+  `127.0.0.1`.
+- Hashi Remote now widens its local Workbench host fallback to include real
+  interface IPv4 addresses, preventing `local_enqueue_failed` on otherwise
+  healthy Windows peers.
+- If a peer can handshake but cannot receive plain protocol replies, verify the
+  peer has pulled a version that includes this fallback widening.
 
 ## Path Rules
 
