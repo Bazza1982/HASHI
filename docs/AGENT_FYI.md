@@ -33,6 +33,7 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - `/exp <task>`: consult the context-specific EXP guidebooks under `exp/` before running a task.
 - `/skill`: browse built-in and custom skills.
 - `/model`: inspect or switch model where supported.
+- `/superloop`: recording-first long-running workflow orchestration.
 - `/verbose [on|off]`: toggle richer long-task status display.
 - `/think [on|off]`: toggle thinking trace display — periodic italic messages showing model reasoning (~60s intervals). Independent from `/verbose`.
 - `/stop`: cancel current processing.
@@ -103,6 +104,39 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - Cron and heartbeat jobs can enqueue prompts or invoke skills.
 - Built-in skill views can inspect and toggle cron/heartbeat jobs.
 - `/active on` creates or enables a managed heartbeat job for this agent.
+
+## Superloop (Recording-First Long Workflow)
+
+Use `/superloop` for long-running, stateful, multi-step orchestration that must
+survive chat/session boundaries and can coordinate across agents.
+
+Core commands:
+
+- `/superloop record start <goal>`
+- `/superloop record status [recording_id]`
+- `/superloop record try <recording_id> <step title>`
+- `/superloop record intent <recording_id> <summary>`
+- `/superloop record exit <recording_id> <kind> <details-json>`
+- `/superloop record finish [recording_id]`
+- `/superloop status <loop_id>`
+- `/superloop pause <loop_id>`
+- `/superloop resume <loop_id>`
+- `/superloop next <loop_id>`
+- `/superloop task add <loop_id> <title>`
+- `/superloop issue add <loop_id> <title>`
+- `/superloop wait add <loop_id> <kind> [deadline-iso]`
+
+Persistence:
+
+- recording state/events: `superloops/recordings/<recording_id>/`
+- compiled loop state/taskboard/issues/waits: `superloops/loops/<loop_id>/`
+
+Scheduler integration:
+
+- the scheduler ticks `superloops/` each loop and can auto-satisfy
+  `sleep_until` waits by deadline.
+- when `resume_policy.on_timeout == "raise_issue"`, timeout waits create an
+  issue entry automatically for auditability.
 
 ## Browser Tool
 

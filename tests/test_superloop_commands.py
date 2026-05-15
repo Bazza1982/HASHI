@@ -6,6 +6,8 @@ from types import SimpleNamespace
 import pytest
 
 from orchestrator.runtime_superloop import handle_superloop_command
+from orchestrator.superloop_scheduler import advance_superloops_once
+from orchestrator.superloop_store import SuperloopStore
 
 
 class _FakeRuntime:
@@ -67,3 +69,35 @@ async def test_superloop_record_start_try_finish_status(tmp_path: Path) -> None:
         f"wait add {loop_id} sleep_until 2099-01-01T00:00:00+00:00",
     )
     assert sum(1 for text in runtime.messages if "wait added" in text) >= 2
+
+
+@pytest.mark.asyncio
+async def test_superloop_scheduler_advances_after_past_sleep_until(tmp_path: Path) -> None:
+    runtime = _FakeRuntime(tmp_path)
+    await handle_superloop_command(runtime, _FakeUpdate("/superloop record start scheduler e2e"), "record start scheduler e2e")
+    rec_line = next(text for text in runtime.messages if "recording_id:" in text)
+    recording_id = rec_line.split("`")[1]
+    await handle_superloop_command(
+        runtime,
+        _FakeUpdate(f"/superloop record try {recording_id} scheduler first step"),
+        f"record try {recording_id} scheduler first step",
+    )
+    await handle_superloop_command(runtime, _FakeUpdate(f"/superloop record finish {recording_id}"), f"record finish {recording_id}")
+    compiled_text = next(text for text in runtime.messages if "Superloop compiled" in text)
+    loop_id = compiled_text.split("`")[3]
+    await handle_superloop_command(runtime, _FakeUpdate(f"/superloop resume {loop_id}"), f"resume {loop_id}")
+
+    await handle_superloop_command(runtime, _FakeUpdate(f"/superloop task add {loop_id} first actionable"), f"task add {loop_id} first actionable")
+    await handle_superloop_command(
+        runtime,
+        _FakeUpdate(f"/superloop wait add {loop_id} sleep_until 2000-01-01T00:00:00+00:00"),
+        f"wait add {loop_id} sleep_until 2000-01-01T00:00:00+00:00",
+    )
+
+    stats = advance_superloops_once(tmp_path / "superloops")
+    assert stats["loops_checked"] >= 1
+    assert stats["waits_satisfied"] >= 1
+
+    state = SuperloopStore(tmp_path / "superloops").load_loop_state(loop_id)
+    assert state.get("current_step")
+    assert state.get("next_action", {}).get("kind") == "run_task"
