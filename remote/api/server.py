@@ -378,7 +378,7 @@ def _hashi_start_command() -> list[str]:
             ]
     launcher = root / "bin" / "bridge-u.sh"
     if launcher.exists():
-        return [str(launcher), "--resume-last"]
+        return [str(launcher), "--resume-last", "--api-gateway"]
     raise FileNotFoundError("No supported HASHI launcher found under bin/")
 
 
