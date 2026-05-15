@@ -338,6 +338,29 @@ def _load_remote_agents(instance_id: str, instance_info: dict) -> list[str]:
         return []
 
 
+def _load_remote_agents_live(instance_info: dict) -> list[str]:
+    remote_port = instance_info.get("remote_port")
+    if not remote_port:
+        return []
+    host = _preferred_host(instance_info, for_remote=True)
+    url = f"http://{host}:{int(remote_port)}/protocol/agents"
+    try:
+        req = urllib_request.Request(url, method="GET")
+        with urllib_request.urlopen(req, timeout=3) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return []
+    return [
+        str(agent.get("agent_name") or "").strip().lower()
+        for agent in body.get("agents", [])
+        if agent.get("is_active", True) and str(agent.get("agent_name") or "").strip()
+    ]
+
+
+def _remote_agent_names(instance_id: str, instance_info: dict) -> list[str]:
+    return _load_remote_agents_live(instance_info) or _load_remote_agents(instance_id, instance_info)
+
+
 def _preferred_host(instance_info: dict, *, for_remote: bool = False) -> str:
     loopback = instance_info.get("same_host_loopback")
     if loopback:
@@ -470,11 +493,8 @@ def _find_remote_instance(
         if not wb_port:
             continue
 
-        if target_instance:
-            matches = True
-        else:
-            agents = _load_remote_agents(inst_id, inst_info)
-            matches = target_agent.lower() in agents
+        agents = _remote_agent_names(inst_id, inst_info)
+        matches = target_agent.lower() in agents
 
         if not matches:
             continue

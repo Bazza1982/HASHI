@@ -225,3 +225,41 @@ def test_check_hchat_route_reports_protocol_transport_when_available(monkeypatch
     assert result["route_type"] == "remote_protocol"
     assert result["host"] == "192.168.0.6"
     assert result["remote_port"] == 8766
+
+
+def test_find_remote_instance_requires_agent_on_explicit_target(monkeypatch):
+    instances = {
+        "hashi9": {
+            "instance_id": "HASHI9",
+            "active": True,
+            "workbench_port": 18819,
+            "api_host": "127.0.0.1",
+            "remote_port": 60862,
+        }
+    }
+
+    monkeypatch.setattr(hchat_send, "_load_instances", lambda: instances)
+    monkeypatch.setattr(hchat_send, "_remote_agent_names", lambda _inst_id, _inst_info: ["hashiko"])
+
+    assert hchat_send._find_remote_instance("rain", "HASHI1", target_instance="HASHI9") is None
+
+
+def test_find_remote_instance_accepts_agent_on_explicit_target(monkeypatch):
+    instances = {
+        "hashi9": {
+            "instance_id": "HASHI9",
+            "active": True,
+            "workbench_port": 18819,
+            "api_host": "127.0.0.1",
+            "remote_port": 60862,
+        }
+    }
+
+    monkeypatch.setattr(hchat_send, "_load_instances", lambda: instances)
+    monkeypatch.setattr(hchat_send, "_remote_agent_names", lambda _inst_id, _inst_info: ["hashiko"])
+    monkeypatch.setattr(hchat_send, "_probe_workbench", lambda _host, _port: False)
+
+    route = hchat_send._find_remote_instance("hashiko", "HASHI1", target_instance="HASHI9")
+
+    assert route is not None
+    assert route["instance_id"] == "HASHI9"
