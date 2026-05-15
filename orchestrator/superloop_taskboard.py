@@ -49,6 +49,7 @@ class SuperloopTaskboardService:
             }
             tasks.append(task)
             self.store.save_loop_json_list(path, tasks)
+            self.store.refresh_loop_stats(loop_id)
         self.store.append_loop_event(loop_id, event_type="task.added", data={"task_id": assigned_task_id})
         return task
 
@@ -67,6 +68,7 @@ class SuperloopTaskboardService:
             if not updated:
                 return False
             self.store.save_loop_json_list(path, tasks)
+            self.store.refresh_loop_stats(loop_id)
         self.store.append_loop_event(loop_id, event_type="task.status_updated", data={"task_id": task_id, "status": status})
         return True
 

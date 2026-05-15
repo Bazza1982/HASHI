@@ -45,6 +45,7 @@ class SuperloopIssuesService:
             }
             issues.append(issue)
             self.store.save_loop_json_list(path, issues)
+            self.store.refresh_loop_stats(loop_id)
         self.store.append_loop_event(loop_id, event_type="issue.opened", data={"issue_id": issue_id, "title": title})
         return issue
 
@@ -64,6 +65,7 @@ class SuperloopIssuesService:
             if not updated:
                 return False
             self.store.save_loop_json_list(path, issues)
+            self.store.refresh_loop_stats(loop_id)
         self.store.append_loop_event(loop_id, event_type="issue.resolved", data={"issue_id": issue_id})
         return True
 

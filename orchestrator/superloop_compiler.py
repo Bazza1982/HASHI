@@ -51,11 +51,7 @@ class SuperloopCompiler:
             issues=issues,
             waits=waits,
             operator_summary=summary,
-        )
-        self.store.append_loop_event(
-            compiled_loop_id,
-            event_type="loop.created",
-            data={"recording_id": recording_id},
+            event_data={"recording_id": recording_id},
             actor={"agent": actor_agent, "instance": actor_instance},
         )
 

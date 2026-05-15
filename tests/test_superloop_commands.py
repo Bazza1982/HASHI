@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+import json
 
 import pytest
 
@@ -63,6 +64,11 @@ async def test_superloop_record_start_try_finish_status(tmp_path: Path) -> None:
     await handle_superloop_command(runtime, _FakeUpdate(f"/superloop wait add {loop_id} await_hchat_reply"), f"wait add {loop_id} await_hchat_reply")
     assert any("wait added" in text for text in runtime.messages)
 
+    state = SuperloopStore(tmp_path / "superloops").load_loop_state(loop_id)
+    assert state["stats"]["task_total"] == 2
+    assert state["stats"]["issue_open"] == 1
+    assert state["stats"]["wait_open"] == 1
+
     await handle_superloop_command(
         runtime,
         _FakeUpdate(f"/superloop wait add {loop_id} sleep_until 2099-01-01T00:00:00+00:00"),
@@ -113,6 +119,11 @@ async def test_superloop_quickstart_and_wizard(tmp_path: Path) -> None:
     loop_id = quick_text.split("`")[3]
     state = SuperloopStore(tmp_path / "superloops").load_loop_state(loop_id)
     assert state.get("status") == "running"
+    events_path = tmp_path / "superloops" / "loops" / loop_id / "events.jsonl"
+    events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines()]
+    created_events = [event for event in events if event.get("kind") == "loop.created"]
+    assert len(created_events) == 1
+    assert created_events[0]["data"]["recording_id"].startswith("slrec-")
 
     await handle_superloop_command(runtime, _FakeUpdate("/superloop wizard wizard goal"), "wizard wizard goal")
     assert any("Wizard" in text for text in runtime.messages)

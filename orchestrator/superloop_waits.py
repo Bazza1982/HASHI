@@ -39,6 +39,7 @@ class SuperloopWaitsService:
             }
             waits.append(wait)
             self.store.save_loop_json_list(waits_path, waits)
+            self.store.refresh_loop_stats(loop_id)
         self.store.append_loop_event(loop_id, event_type="wait.entered", data={"wait_id": wait_id, "kind": kind})
         return wait
 
@@ -58,6 +59,7 @@ class SuperloopWaitsService:
             if not updated:
                 return False
             self.store.save_loop_json_list(waits_path, waits)
+            self.store.refresh_loop_stats(loop_id)
         self.store.append_loop_event(loop_id, event_type="wait.satisfied", data={"wait_id": wait_id, "source": source})
         return True
 
