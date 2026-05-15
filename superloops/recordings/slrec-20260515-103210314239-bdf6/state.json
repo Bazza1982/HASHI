@@ -6,7 +6,7 @@
   "owner_agent": "zelda",
   "owner_instance": "HASHI1",
   "created_at": "2026-05-15T10:32:10.314280+00:00",
-  "updated_at": "2026-05-15T10:32:10.320987+00:00",
+  "updated_at": "2026-05-15T14:13:05.674660+00:00",
   "intent_summary": "audit_vibe_coding is a recording-first product delivery superloop. It begins with an idea, captures product boundaries and non-goals, turns the idea into an implementation plan, tracks nested build/test/debug/fix loops, requires end-to-end validation evidence, and exits only when the product is implemented, documented, and proven fully functional in real use. The loop now treats safe live testing as a mandatory acceptance gate: after smoke/debug loops, the orchestrator must prove the product works in the real deployed environment via controlled live actions, external/user-path invocation, visibility checks, and repeat fix loops until green.",
   "exit_condition_draft": {
     "kind": "product_fully_functional",
@@ -223,7 +223,13 @@
   ],
   "candidate_waits": [],
   "candidate_agents": [],
-  "candidate_artifacts": [],
+  "candidate_artifacts": [
+    {
+      "kind": "live_acceptance_gate_retrofit",
+      "path": "superloops/loops/sl-20260515-103210320305-ef51/LIVE_ACCEPTANCE_RETROFIT_EVIDENCE.md",
+      "created_at": "2026-05-15T14:13:05.674660+00:00"
+    }
+  ],
   "candidate_nagare_runs": [],
   "open_questions": [],
   "finish_ready": true,
