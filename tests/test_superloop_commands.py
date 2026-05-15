@@ -60,3 +60,10 @@ async def test_superloop_record_start_try_finish_status(tmp_path: Path) -> None:
 
     await handle_superloop_command(runtime, _FakeUpdate(f"/superloop wait add {loop_id} await_hchat_reply"), f"wait add {loop_id} await_hchat_reply")
     assert any("wait added" in text for text in runtime.messages)
+
+    await handle_superloop_command(
+        runtime,
+        _FakeUpdate(f"/superloop wait add {loop_id} sleep_until 2099-01-01T00:00:00+00:00"),
+        f"wait add {loop_id} sleep_until 2099-01-01T00:00:00+00:00",
+    )
+    assert sum(1 for text in runtime.messages if "wait added" in text) >= 2

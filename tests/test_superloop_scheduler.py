@@ -1,0 +1,76 @@
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from orchestrator.superloop_scheduler import advance_superloops_once
+from orchestrator.superloop_store import SuperloopStore
+from orchestrator.superloop_taskboard import SuperloopTaskboardService
+from orchestrator.superloop_waits import SuperloopWaitsService
+
+
+def test_superloop_scheduler_satisfies_deadline_wait_and_advances(tmp_path: Path) -> None:
+    store = SuperloopStore(tmp_path / "superloops")
+    store.create_compiled_loop(
+        loop_id="sl-test-001",
+        loop_state={
+            "loop_id": "sl-test-001",
+            "status": "running",
+            "current_step": None,
+            "taskboard_path": "superloops/loops/sl-test-001/taskboard.json",
+            "waits_path": "superloops/loops/sl-test-001/waits.json",
+        },
+        taskboard=[],
+        issues=[],
+        waits=[],
+        operator_summary="# summary\n",
+    )
+    taskboard = SuperloopTaskboardService(store)
+    waits = SuperloopWaitsService(store)
+    taskboard.add_task("sl-test-001", title="run smoke", owner_agent="zelda", owner_instance="HASHI1")
+    waits.add_wait(
+        "sl-test-001",
+        kind="sleep_until",
+        details={"until": (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()},
+    )
+
+    stats = advance_superloops_once(tmp_path / "superloops")
+    assert stats["loops_checked"] == 1
+    assert stats["waits_satisfied"] == 1
+    assert stats["loops_advanced"] == 1
+
+    state = store.load_loop_state("sl-test-001")
+    assert state["current_step"] == "task-001"
+    assert state["next_action"]["kind"] == "run_task"
+
+    after_waits = waits.list_waits("sl-test-001")
+    assert after_waits[0]["status"] == "satisfied"
+
+
+def test_superloop_scheduler_keeps_future_deadline_pending(tmp_path: Path) -> None:
+    store = SuperloopStore(tmp_path / "superloops")
+    store.create_compiled_loop(
+        loop_id="sl-test-002",
+        loop_state={
+            "loop_id": "sl-test-002",
+            "status": "running",
+            "taskboard_path": "superloops/loops/sl-test-002/taskboard.json",
+            "waits_path": "superloops/loops/sl-test-002/waits.json",
+        },
+        taskboard=[],
+        issues=[],
+        waits=[],
+        operator_summary="# summary\n",
+    )
+    waits = SuperloopWaitsService(store)
+    waits.add_wait(
+        "sl-test-002",
+        kind="sleep_until",
+        details={"until": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()},
+    )
+
+    stats = advance_superloops_once(tmp_path / "superloops")
+    assert stats["loops_checked"] == 1
+    assert stats["waits_satisfied"] == 0
+    assert stats["loops_advanced"] == 0
+    assert waits.has_open_waits("sl-test-002") is True
