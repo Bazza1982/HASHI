@@ -254,18 +254,14 @@ def test_hashi_rescue_start_returns_structured_windows_launcher_fields(tmp_path,
         lambda: {
             "pid": 4242,
             "command": [
-                "powershell.exe",
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(tmp_path / "bin" / "bridge_ctl.ps1"),
-                "-Action",
-                "start",
-                "-Resume",
+                "cmd.exe",
+                "/c",
+                str(tmp_path / "bin" / "bridge-u.bat"),
+                "--resume-last",
+                "--no-pause",
             ],
             "log_path": str(tmp_path / "logs" / "remote_rescue_hashi_start.log"),
-            "launcher_kind": "powershell.exe",
+            "launcher_kind": "cmd.exe",
             "platform": "windows",
         },
     )
@@ -294,10 +290,10 @@ def test_hashi_rescue_start_returns_structured_windows_launcher_fields(tmp_path,
     body = response.json()
     assert body["started"] is True
     assert body["pid"] == 4242
-    assert body["launcher_kind"] == "powershell.exe"
+    assert body["launcher_kind"] == "cmd.exe"
     assert body["platform"] == "windows"
-    assert body["command"][0] == "powershell.exe"
-    assert "bridge_ctl.ps1" in " ".join(body["command"])
+    assert body["command"][:2] == ["cmd.exe", "/c"]
+    assert "bridge-u.bat" in " ".join(body["command"])
     assert sleep_calls["count"] >= 1
 
 

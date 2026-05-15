@@ -5827,6 +5827,13 @@ class FlexibleAgentRuntime:
             f"directory: <code>{directory_state}</code>" + (f"  ·  snapshot: <code>{snapshot_version}</code>" if snapshot_version else ""),
             f"state: <code>{state_safe}</code>  ·  last handshake: <code>{last_handshake}</code>  ·  last seen: <code>{last_seen_ok}</code>",
         ]
+        capabilities = {str(item) for item in (peer.get("capabilities") or [])}
+        supervisor = peer.get("remote_supervisor") or props.get("remote_supervisor") or {}
+        supervisor_mode = str((supervisor or {}).get("mode") or props.get("remote_supervisor_mode") or "").strip()
+        if "rescue_control" in capabilities or "rescue_start" in capabilities or supervisor_mode:
+            watchtower_state = "rescue_start enabled" if "rescue_start" in capabilities else "rescue control only"
+            supervisor_text = supervisor_mode or "unknown"
+            lines.append(f"watchtower: <code>{watchtower_state}</code>  ·  supervisor: <code>{html.escape(supervisor_text)}</code>")
         last_error = html.escape(str(props.get("last_error") or "").strip())
         if last_error:
             lines.append(f"error: <code>{last_error}</code>")

@@ -142,6 +142,7 @@ class ProtocolHandshakePayload(BaseModel):
     platform: Optional[str] = None             # Sender's platform
     host_identity: Optional[str] = None
     environment_kind: Optional[str] = None
+    remote_supervisor: dict = {}
     address_candidates: list[dict] = []
     observed_candidates: list[dict] = []
 
@@ -359,6 +360,9 @@ def _hashi_start_command() -> list[str]:
     root = Path(_hashi_root)
     system = platform.system().lower()
     if system == "windows":
+        bat = root / "bin" / "bridge-u.bat"
+        if bat.exists():
+            return ["cmd.exe", "/c", str(bat), "--resume-last", "--no-pause"]
         ctl = root / "bin" / "bridge_ctl.ps1"
         if ctl.exists():
             return [
@@ -372,9 +376,6 @@ def _hashi_start_command() -> list[str]:
                 "start",
                 "-Resume",
             ]
-        bat = root / "bin" / "bridge-u.bat"
-        if bat.exists():
-            return ["cmd.exe", "/c", str(bat), "--resume-last", "--no-pause"]
     launcher = root / "bin" / "bridge-u.sh"
     if launcher.exists():
         return [str(launcher), "--resume-last"]
@@ -396,6 +397,9 @@ def _start_hashi_process() -> dict[str, Any]:
         "stderr": subprocess.STDOUT,
     }
     if platform.system().lower() == "windows":
+        env = os.environ.copy()
+        env.setdefault("HASHI_ENABLE_LEGACY_FIXED_RUNTIME", "1")
+        kwargs["env"] = env
         flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
         if flags:
             kwargs["creationflags"] = flags
@@ -632,6 +636,7 @@ def create_app(
                 "observed_candidates": list(local_profile.get("observed_candidates") or []),
                 "host_identity": str(local_profile.get("host_identity") or ""),
                 "environment_kind": str(local_profile.get("environment_kind") or ""),
+                "remote_supervisor": dict(_instance_info.get("remote_supervisor") or {}),
             },
             "resolved_route_host": "127.0.0.1",
             "resolved_route_port": port,
