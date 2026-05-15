@@ -328,6 +328,18 @@ def _read_hashi_pid_state() -> dict[str, Any]:
     return state
 
 
+def _sanitize_rescue_reason(reason: str | None, *, limit: int = 500) -> dict[str, Any]:
+    raw = "" if reason is None else str(reason)
+    collapsed = " ".join(raw.replace("\r", " ").replace("\n", " ").split())
+    trimmed = collapsed[:limit]
+    return {
+        "reason": trimmed,
+        "provided": bool(raw.strip()),
+        "truncated": len(collapsed) > limit,
+        "original_length": len(collapsed),
+    }
+
+
 def _hashi_start_command() -> list[str]:
     if not _hashi_root:
         raise ValueError("Hashi root is unavailable")
@@ -384,6 +396,8 @@ def _start_hashi_process() -> dict[str, Any]:
         "pid": proc.pid,
         "command": cmd,
         "log_path": str(log_path),
+        "launcher_kind": Path(cmd[0]).name.lower(),
+        "platform": platform.system().lower(),
     }
 
 
@@ -391,6 +405,8 @@ def _append_rescue_audit(
     *,
     requester: str,
     reason: str | None,
+    reason_truncated: bool = False,
+    reason_original_length: int | None = None,
     outcome: str,
     command: list[str] | None = None,
     pid: int | None = None,
@@ -406,6 +422,8 @@ def _append_rescue_audit(
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "requester": requester,
         "reason": reason,
+        "reason_truncated": bool(reason_truncated),
+        "reason_original_length": reason_original_length,
         "command": command,
         "pid": pid,
         "log_path": log_path,
@@ -430,11 +448,36 @@ def _read_rescue_log(name: str, tail: int = 120) -> dict[str, Any]:
     if key not in files:
         raise ValueError("log name must be one of: start, audit, supervisor")
     path = files[key]
-    max_lines = max(1, min(int(tail or 120), 500))
+    try:
+        requested_tail = int(tail)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("tail must be a positive integer") from exc
+    if requested_tail <= 0:
+        raise ValueError("tail must be a positive integer")
+    effective_tail = min(requested_tail, 1000)
+    truncated = requested_tail != effective_tail
     if not path.exists():
-        return {"ok": True, "name": key, "path": str(path), "exists": False, "lines": []}
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-max_lines:]
-    return {"ok": True, "name": key, "path": str(path), "exists": True, "lines": lines}
+        return {
+            "ok": True,
+            "name": key,
+            "path": str(path),
+            "exists": False,
+            "requested_tail": requested_tail,
+            "effective_tail": effective_tail,
+            "tail_truncated": truncated,
+            "lines": [],
+        }
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-effective_tail:]
+    return {
+        "ok": True,
+        "name": key,
+        "path": str(path),
+        "exists": True,
+        "requested_tail": requested_tail,
+        "effective_tail": effective_tail,
+        "tail_truncated": truncated,
+        "lines": lines,
+    }
 
 
 def _workbench_health_url() -> str:
@@ -980,11 +1023,14 @@ def create_app(
                 },
             )
 
+        reason_meta = _sanitize_rescue_reason(payload.reason)
         current = _hashi_control_status()
         if current["hashi_running"] or current["pid_alive"]:
             _append_rescue_audit(
                 requester=client_id,
-                reason=payload.reason,
+                reason=reason_meta["reason"],
+                reason_truncated=reason_meta["truncated"],
+                reason_original_length=reason_meta["original_length"],
                 outcome="already_running",
                 pid=current.get("pid"),
                 status=current,
@@ -993,6 +1039,8 @@ def create_app(
                 "ok": True,
                 "started": False,
                 "already_running": True,
+                "reason": reason_meta["reason"],
+                "reason_truncated": reason_meta["truncated"],
                 "status": current,
             }
 
@@ -1002,7 +1050,9 @@ def create_app(
             logger.exception("HASHI rescue start failed")
             _append_rescue_audit(
                 requester=client_id,
-                reason=payload.reason,
+                reason=reason_meta["reason"],
+                reason_truncated=reason_meta["truncated"],
+                reason_original_length=reason_meta["original_length"],
                 outcome="failed",
                 status=current,
                 error=str(exc),
@@ -1015,10 +1065,12 @@ def create_app(
             await asyncio.sleep(0.5)
             status = _hashi_control_status()
 
-        logger.info("HASHI rescue start requested by %s reason=%s pid=%s", client_id, payload.reason, started["pid"])
+        logger.info("HASHI rescue start requested by %s reason=%s pid=%s", client_id, reason_meta["reason"], started["pid"])
         _append_rescue_audit(
             requester=client_id,
-            reason=payload.reason,
+            reason=reason_meta["reason"],
+            reason_truncated=reason_meta["truncated"],
+            reason_original_length=reason_meta["original_length"],
             outcome="started",
             command=started["command"],
             pid=started["pid"],
@@ -1031,6 +1083,10 @@ def create_app(
             "pid": started["pid"],
             "command": started["command"],
             "log_path": started["log_path"],
+            "launcher_kind": started.get("launcher_kind"),
+            "platform": started.get("platform"),
+            "reason": reason_meta["reason"],
+            "reason_truncated": reason_meta["truncated"],
             "status": status,
         }
 
