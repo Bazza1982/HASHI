@@ -142,6 +142,8 @@ class SuperloopStore:
         issues: list[dict[str, Any]],
         waits: list[dict[str, Any]],
         operator_summary: str,
+        event_data: dict[str, Any] | None = None,
+        actor: dict[str, Any] | None = None,
     ) -> dict[str, str]:
         loop_dir = self.loop_dir(loop_id)
         with self._lock:
@@ -154,7 +156,10 @@ class SuperloopStore:
             _json_dump(loop_dir / "waits.json", waits)
             with open(loop_dir / "README.md", "w", encoding="utf-8") as handle:
                 handle.write(operator_summary)
-        self.append_loop_event(loop_id, event_type="loop.created", data={"status": loop_state.get("status", "draft")})
+        created_data = {"status": loop_state.get("status", "draft")}
+        if event_data:
+            created_data.update(event_data)
+        self.append_loop_event(loop_id, event_type="loop.created", data=created_data, actor=actor)
         return {
             "state": str(loop_dir / "state.json"),
             "taskboard": str(loop_dir / "taskboard.json"),
@@ -199,6 +204,24 @@ class SuperloopStore:
     def save_loop_json_list(self, path: Path, payload: list[dict[str, Any]]) -> None:
         with self._lock:
             _json_dump(path, payload)
+
+    def refresh_loop_stats(self, loop_id: str) -> dict[str, Any]:
+        with self._lock:
+            state = self.load_loop_state(loop_id)
+            taskboard_path = self.resolve_loop_path(loop_id, state.get("taskboard_path"), "taskboard.json")
+            issues_path = self.resolve_loop_path(loop_id, state.get("issues_path"), "issues.json")
+            waits_path = self.resolve_loop_path(loop_id, state.get("waits_path"), "waits.json")
+            tasks = self.load_loop_json_list(taskboard_path)
+            issues = self.load_loop_json_list(issues_path)
+            waits = self.load_loop_json_list(waits_path)
+            state["stats"] = {
+                "task_total": len(tasks),
+                "task_completed": sum(1 for task in tasks if task.get("status") == "completed"),
+                "issue_open": sum(1 for issue in issues if issue.get("status") == "open"),
+                "wait_open": sum(1 for wait in waits if wait.get("status") == "pending"),
+            }
+            self.save_loop_state(loop_id, state)
+            return state["stats"]
 
     def append_loop_event(
         self,
