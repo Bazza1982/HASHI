@@ -109,7 +109,17 @@ def test_logs_returns_remote_tail(monkeypatch):
         if url.endswith("/health"):
             return remote_rescue.HttpResult(200, {"ok": True}, url)
         if "/control/hashi/logs" in url:
-            return remote_rescue.HttpResult(200, {"ok": True, "lines": ["a", "b"]}, url)
+            return remote_rescue.HttpResult(
+                200,
+                {
+                    "ok": True,
+                    "lines": ["a", "b"],
+                    "requested_tail": 2,
+                    "effective_tail": 2,
+                    "tail_truncated": False,
+                },
+                url,
+            )
         raise AssertionError(url)
 
     monkeypatch.setattr(remote_rescue, "_request_json_status", fake_request)
@@ -118,3 +128,24 @@ def test_logs_returns_remote_tail(monkeypatch):
 
     assert code == 0
     assert payload["lines"] == ["a", "b"]
+    assert payload["effective_tail"] == 2
+    assert payload["tail_truncated"] is False
+
+
+def test_logs_returns_unsupported_for_old_remote(monkeypatch):
+    monkeypatch.setattr(remote_rescue, "_load_instances", _instances)
+
+    def fake_request(url, **kwargs):
+        if url.endswith("/health"):
+            return remote_rescue.HttpResult(200, {"ok": True}, url)
+        if "/control/hashi/logs" in url:
+            return remote_rescue.HttpResult(404, {"ok": False}, url)
+        raise AssertionError(url)
+
+    monkeypatch.setattr(remote_rescue, "_request_json_status", fake_request)
+
+    code, payload = remote_rescue.rescue_logs("HASHI9", name="start", tail=2)
+
+    assert code == remote_rescue.EXIT_UNSUPPORTED
+    assert payload["supported"] is False
+    assert payload["endpoint"] == "/control/hashi/logs"
