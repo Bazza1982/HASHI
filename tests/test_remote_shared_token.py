@@ -23,7 +23,13 @@ class _ProtocolStub:
         return {"instance_id": peer.instance_id}
 
     def get_protocol_status(self):
-        return {"capabilities": ["handshake_v2"]}
+        return {"protocol_version": "2.0", "capabilities": ["handshake_v2"]}
+
+    def get_local_agents_snapshot(self):
+        return [{"id": "local-agent"}]
+
+    def get_local_agent_directory_state(self):
+        return {"directory_state": "fresh", "version": "local-snapshot"}
 
     def handle_handshake(self, payload: dict) -> dict:
         self.handshakes.append(payload)
@@ -299,7 +305,7 @@ def test_peers_redacts_without_auth_and_allows_signed_get(tmp_path):
 
     response = client.get("/peers")
     assert response.status_code == 200
-    assert response.json() == {"ok": True, "peers": [], "count": 2, "trusted_view": False}
+    assert response.json() == {"ok": True, "peers": [], "count": 3, "trusted_view": False}
 
     headers = build_auth_headers(
         shared_token=token,
@@ -313,8 +319,12 @@ def test_peers_redacts_without_auth_and_allows_signed_get(tmp_path):
     trusted = client.get("/peers", headers=headers)
 
     assert trusted.status_code == 200
-    assert trusted.json()["count"] == 2
-    assert len(trusted.json()["peers"]) == 2
+    assert trusted.json()["count"] == 3
+    peers = trusted.json()["peers"]
+    assert len(peers) == 3
+    assert peers[0]["instance_id"] == "HASHI_LOCAL"
+    assert peers[0]["resolved_route_host"] == "127.0.0.1"
+    assert peers[0]["properties"]["live_status"] == "online"
 
 
 def test_protocol_status_is_redacted_without_auth(tmp_path):

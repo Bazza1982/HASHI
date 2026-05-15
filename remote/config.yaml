@@ -12,8 +12,10 @@ server:
 lifecycle:
   # Remote starts by default unless explicitly disabled with /remote off.
   remote_enabled: true
-  # OS supervisor integration is configured separately; child process is the fallback.
-  remote_supervised: false
+  # HASHI9 runs Hashi Remote as the standalone Watchtower sidecar. Do not
+  # spawn a duplicate child Remote from the HASHI core when the supervisor is
+  # responsible for the sidecar lifecycle.
+  remote_supervised: true
 
 security:
   # LAN mode: keeps pairing-auth endpoints permissive for trusted local use.
