@@ -164,6 +164,8 @@ Conclusion:
 6. Make pause, wait, resume, and abort explicit first-class concepts.
 7. Preserve backward compatibility for `/loop`, Nagare, HChat, and remote tools.
 8. Add comprehensive logging and audit fields at every orchestration boundary.
+9. Release 1 must be usable for real long-running work, not a placeholder shell.
+10. Prefer recording-first usability over conservative under-scoping.
 
 ## 5. Recommended Architecture
 
@@ -203,14 +205,27 @@ Create a new top-level directory:
 
 ```text
 superloops/
-  <loop_id>/
-    state.json
-    events.jsonl
-    taskboard.json
-    issues.json
-    waits.json
-    artifacts/
-    children/
+  recordings/
+    <recording_id>/
+      state.json
+      transcript.jsonl
+      events.jsonl
+      inferred_loop.json
+      candidate_taskboard.json
+      candidate_issues.json
+      candidate_waits.json
+      candidate_nagare/
+      artifacts/
+      notes.md
+  loops/
+    <loop_id>/
+      state.json
+      events.jsonl
+      taskboard.json
+      issues.json
+      waits.json
+      artifacts/
+      children/
 ```
 
 ### 6.1 `state.json`
@@ -240,7 +255,34 @@ Suggested fields:
 - `child_runs`
 - `stats`
 
-### 6.2 `events.jsonl`
+### 6.2 Recording session state
+
+Purpose:
+
+- design-time truth while a human and recorder agent are building a superloop
+
+Suggested fields:
+
+- `recording_id`
+- `status`
+- `goal`
+- `source_mode`
+- `owner_agent`
+- `owner_instance`
+- `created_at`
+- `updated_at`
+- `intent_summary`
+- `exit_condition_draft`
+- `candidate_steps`
+- `candidate_waits`
+- `candidate_agents`
+- `candidate_artifacts`
+- `candidate_nagare_runs`
+- `open_questions`
+- `finish_ready`
+- `compiled_loop_id`
+
+### 6.3 `events.jsonl`
 
 Purpose:
 
@@ -268,7 +310,21 @@ Suggested event types:
 - `loop.aborted`
 - `loop.completed`
 
-### 6.3 `taskboard.json`
+Recording sessions should also have their own event stream with entries such as:
+
+- `recording.started`
+- `intent.reframed`
+- `step.tried`
+- `step.accepted`
+- `step.rejected`
+- `wait.discovered`
+- `agent.involved`
+- `nagare.generated`
+- `artifact.linked`
+- `issue.opened`
+- `recording.finished`
+
+### 6.4 `taskboard.json`
 
 Purpose:
 
@@ -289,7 +345,7 @@ Suggested task fields:
 - `artifact_refs`
 - `notes`
 
-### 6.4 `issues.json`
+### 6.5 `issues.json`
 
 Purpose:
 
@@ -307,7 +363,7 @@ Suggested fields:
 - `related_task_ids`
 - `resolution`
 
-### 6.5 `waits.json`
+### 6.6 `waits.json`
 
 Purpose:
 
@@ -324,7 +380,77 @@ Suggested wait types:
 - `await_issue_resolution`
 - `await_child_run`
 
-## 7. Exact Reuse Plan
+## 7. Recording Mode Proposal
+
+`/superloop` should support two creation paths:
+
+- manual structured authoring
+- recording-assisted authoring
+
+The recording path is a first-class product feature, not a later enhancement.
+
+### 7.1 Core model
+
+Recording mode is design-time, not run-time.
+
+It should allow:
+
+- a human to describe the intended loop incrementally or in one shot
+- a recorder agent to infer intent and exit conditions
+- trial actions such as HChat, protocol send, file transfer, or bounded Nagare runs
+- iterative refinement of steps, waits, task ownership, and artifacts
+- final compilation into a formal superloop definition
+
+The final user action:
+
+```text
+/superloop record finish
+```
+
+should compile the recording session into:
+
+- a formal superloop under `superloops/loops/<loop_id>/`
+- any child Nagare workflow files that were discovered during recording
+- a human-readable loop summary for operators
+
+### 7.2 Suggested command surface
+
+- `/superloop record start <goal>`
+- `/superloop record status`
+- `/superloop record note <text>`
+- `/superloop record try <action>`
+- `/superloop record add-wait <condition>`
+- `/superloop record add-issue <text>`
+- `/superloop record show`
+- `/superloop record pause`
+- `/superloop record resume`
+- `/superloop record finish`
+- `/superloop record abort`
+
+### 7.3 Recorder responsibilities
+
+The recorder agent should:
+
+- comprehend human intent
+- infer candidate steps
+- infer wait points
+- detect where bounded Nagare subflows are needed
+- try or simulate steps when useful
+- capture failed and rejected approaches in the recording audit trail
+- keep candidate taskboard, issues, waits, and child-flow definitions up to date
+
+### 7.4 Compilation output
+
+`/superloop record finish` should generate:
+
+- formal loop state files
+- taskboard
+- issue register
+- wait registry
+- child Nagare workflow definitions where applicable
+- a concise operator-facing summary of what the loop is supposed to do
+
+## 8. Exact Reuse Plan
 
 ### 7.1 Reuse directly
 
@@ -371,12 +497,14 @@ Suggested wait types:
 These still document useful patterns, but `nagare/engine/*` should be treated as
 the canonical execution stack for new work.
 
-## 8. New Modules to Add
+## 9. New Modules to Add
 
 Recommended new modules:
 
 - `orchestrator/superloop_manager.py`
   - top-level lifecycle API
+- `orchestrator/superloop_recording.py`
+  - recording-session lifecycle and compilation entrypoints
 - `orchestrator/superloop_store.py`
   - atomic read/write and indexing for superloop files
 - `orchestrator/superloop_runner.py`
@@ -391,17 +519,21 @@ Recommended new modules:
   - starts and tracks Nagare child runs
 - `orchestrator/superloop_commands.py`
   - command parsing helpers if command logic should stay out of the large runtime file
+- `orchestrator/superloop_compiler.py`
+  - turns recording sessions into finalized loop definitions
 
 Recommended new docs and tests:
 
 - `docs/SUPERLOOP_PLAN.md`
+- `tests/test_superloop_recording.py`
+- `tests/test_superloop_compiler.py`
 - `tests/test_superloop_store.py`
 - `tests/test_superloop_waits.py`
 - `tests/test_superloop_taskboard.py`
 - `tests/test_superloop_nagare_adapter.py`
 - `tests/test_superloop_commands.py`
 
-## 9. Command Surface Proposal
+## 10. Command Surface Proposal
 
 Suggested initial operator commands:
 
@@ -416,11 +548,13 @@ Suggested initial operator commands:
 - `/superloop issue add <id> <text>`
 - `/superloop wait <id> <condition>`
 - `/superloop log <id>`
+- `/superloop record start <goal>`
+- `/superloop record finish`
 
 The command surface should be a thin operator layer over structured state, not a
 place where the main orchestration logic lives.
 
-## 10. Boundaries: What Not to Touch
+## 11. Boundaries: What Not to Touch
 
 ### 10.1 Do not overload `/loop`
 
@@ -450,14 +584,14 @@ Reason:
 - transport is lossy as an orchestration truth source
 - state must remain in structured, replayable files
 
-### 10.5 Do not require Remote core changes for v1
+### 11.5 Do not require Remote core changes for release 1
 
 Reason:
 
 - current protocol/HChat/file/attachment tools are already sufficient
 - `/superloop` should compose existing transport rather than widening protocol scope first
 
-## 11. Logging Requirements
+## 12. Logging Requirements
 
 Superloop should log at least:
 
@@ -480,90 +614,119 @@ This logging should exist both in:
 - `events.jsonl`
 - runtime logs where relevant
 
-## 12. Phased Implementation Draft
+Release 1 should also log recording-session events with the same audit discipline.
 
-### Phase 0: state layer only
+## 13. Release-1 Implementation Plan
+
+Release 1 should be a complete, operator-usable system for real long-running
+work. It should not be scoped as a placeholder or a thin shell.
+
+### Phase A: recording-first authoring
 
 Build:
 
-- `superloops/<loop_id>/state.json`
-- `events.jsonl`
-- list/status helpers
-
-Do not build yet:
-
-- Nagare child-run integration
-- taskboard
-- issue register
-- waits beyond a minimal pause/resume model
+- recording session store
+- recording commands
+- trial action capture
+- recording event log
+- compile path via `/superloop record finish`
 
 Exit gate:
 
-- create, inspect, pause, resume, abort one superloop with atomic state updates
+- a human can design a real loop through recording, trial steps, and final compilation
 
-### Phase 1: wait engine + scheduler wakeup
+### Phase B: formal loop state and orchestration
+
+Build:
+
+- `superloops/loops/<loop_id>/state.json`
+- `events.jsonl`
+- list/status/pause/resume/abort
+- next-action computation
+- real exit-condition tracking
+
+Exit gate:
+
+- a compiled loop can be started, paused, resumed, inspected, and completed with full audit trail
+
+### Phase C: explicit wait engine and scheduler wakeup
 
 Build:
 
 - `waits.json`
-- explicit wait types
-- scheduler-based wake/check cycle
+- scheduler-based wakeups
+- wait satisfaction logging
+- retry/wake watchdog behavior
 
 Exit gate:
 
-- loop can sleep and resume on time without manual intervention
+- loops can sleep and resume reliably without manual babysitting
 
-### Phase 2: taskboard + issue register
+### Phase D: shared taskboard and issue register
 
 Build:
 
 - `taskboard.json`
 - `issues.json`
-- owner/claim/dependency model
+- owner/claim/dependency logic
+- cross-agent coordination records
 
 Exit gate:
 
-- multiple agents can coordinate one loop through shared files and event logs
+- a real multi-agent loop can coordinate work through shared records instead of chat memory
 
-### Phase 3: Nagare child-run integration
+### Phase E: Nagare child-run integration
 
 Build:
 
-- adapter from superloop steps to Nagare child runs
+- adapter from superloop to Nagare child runs
 - child run tracking under `children/`
+- artifact linking between loop state and child run outputs
 
 Exit gate:
 
-- one superloop can run a bounded Nagare workflow and continue after it completes
+- one superloop can call bounded Nagare flows as native subroutines
 
-### Phase 4: remote-first multi-agent loops
+### Phase F: remote-first multi-agent actions
 
 Build:
 
-- HChat/protocol/file/attachment orchestration helpers
-- stronger wait conditions for peer replies and remote artifacts
+- HChat/protocol/file/attachment orchestration actions
+- wait conditions for peer replies and remote artifacts
+- operator summaries and cross-instance run audit
 
 Exit gate:
 
-- one loop can coordinate local and remote agents across instances
+- release 1 is usable for cross-instance, long-running, real-world coordination work
 
-## 13. Recommended v1 Scope
+## 14. Release-1 Quality Bar
 
-The smallest good `/superloop` is:
+Release 1 should include all of the following together:
 
-- create/list/status/pause/resume/abort
-- file-based shared state
-- append-only event log
-- explicit wait model
-- optional HChat/protocol action steps
+- recording-assisted authoring
+- formal compiled loop definitions
+- explicit waits
+- taskboard
+- issue register
+- Nagare child-flow integration
+- cross-instance actions
+- comprehensive audit trail
+- operator-readable summaries
 
-The smallest good `/superloop` is not:
+Release 1 should not depend on:
 
-- a fully visual workflow editor
-- a general BPMN system
-- a replacement for Nagare DAG execution
+- hidden chat memory inside one agent
+- manual file surgery as the normal workflow
+- “minimal shell first, complete later” product assumptions
 
-## 14. Final Recommendation
+It also does not need:
+
+- a fancy visual editor in release 1
+
+Usability in release 1 should come from strong command surface, robust recording,
+clear state files, and reliable orchestration semantics.
+
+## 15. Final Recommendation
 
 Build `/superloop` as a new orchestration layer that reuses:
 
@@ -578,6 +741,8 @@ Do not fork execution semantics away from Nagare.
 
 Do not mix agent-local runtime state with shared superloop state.
 
+Make recording mode first-class from the start.
+
 If implemented with those boundaries, `/superloop` can become the long-running,
-multi-agent control plane for HASHI without bloating the runtime core or
-creating a third workflow engine.
+recording-first, multi-agent control plane for HASHI without bloating the runtime
+core or creating a third workflow engine.
