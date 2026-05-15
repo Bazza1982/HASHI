@@ -38,10 +38,10 @@ class SuperloopStore:
         self.loops_dir.mkdir(parents=True, exist_ok=True)
 
     def generate_recording_id(self) -> str:
-        return f"slrec-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+        return f"slrec-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S%f')}-{secrets.token_hex(2)}"
 
     def generate_loop_id(self) -> str:
-        return f"sl-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+        return f"sl-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S%f')}-{secrets.token_hex(2)}"
 
     def generate_record_id(self, prefix: str) -> str:
         return f"{prefix}-{datetime.now(timezone.utc).strftime('%H%M%S%f')}-{secrets.token_hex(2)}"

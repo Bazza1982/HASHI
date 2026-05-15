@@ -101,3 +101,27 @@ async def test_superloop_scheduler_advances_after_past_sleep_until(tmp_path: Pat
     state = SuperloopStore(tmp_path / "superloops").load_loop_state(loop_id)
     assert state.get("current_step")
     assert state.get("next_action", {}).get("kind") == "run_task"
+
+
+@pytest.mark.asyncio
+async def test_superloop_quickstart_and_wizard(tmp_path: Path) -> None:
+    runtime = _FakeRuntime(tmp_path)
+
+    await handle_superloop_command(runtime, _FakeUpdate("/superloop quickstart demo goal"), "quickstart demo goal")
+    assert any("Quickstart" in text for text in runtime.messages)
+    quick_text = next(text for text in runtime.messages if "loop_id:" in text and "Quickstart" in text)
+    loop_id = quick_text.split("`")[3]
+    state = SuperloopStore(tmp_path / "superloops").load_loop_state(loop_id)
+    assert state.get("status") == "running"
+
+    await handle_superloop_command(runtime, _FakeUpdate("/superloop wizard wizard goal"), "wizard wizard goal")
+    assert any("Wizard" in text for text in runtime.messages)
+
+
+@pytest.mark.asyncio
+async def test_superloop_help_is_visual(tmp_path: Path) -> None:
+    runtime = _FakeRuntime(tmp_path)
+    await handle_superloop_command(runtime, _FakeUpdate("/superloop"), "")
+    help_text = runtime.messages[-1]
+    assert "快速开始" in help_text
+    assert "/superloop quickstart <goal>" in help_text

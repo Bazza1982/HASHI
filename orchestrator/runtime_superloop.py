@@ -43,21 +43,27 @@ def _latest_recording_id(store: SuperloopStore) -> str | None:
 
 def _help_text() -> str:
     return (
-        "🧭 Superloop\n\n"
+        "🧭 Superloop 控制台\n\n"
+        "🚀 快速开始\n"
+        "/superloop quickstart <goal>\n"
+        "/superloop wizard <goal>\n\n"
+        "🎬 Recording\n"
         "/superloop record start <goal>\n"
         "/superloop record status [recording_id]\n"
         "/superloop record try <recording_id> <step title>\n"
         "/superloop record intent <recording_id> <summary>\n"
         "/superloop record exit <recording_id> <kind> <details-json>\n"
-        "/superloop record finish [recording_id]\n"
+        "/superloop record finish [recording_id]\n\n"
+        "🛠 Loop 运行\n"
         "/superloop status <loop_id>\n"
         "/superloop pause <loop_id>\n"
         "/superloop resume <loop_id>\n"
-        "/superloop next <loop_id>\n"
+        "/superloop next <loop_id>\n\n"
+        "📋 协作条目\n"
         "/superloop task add <loop_id> <title>\n"
         "/superloop issue add <loop_id> <title>\n"
-        "/superloop wait add <loop_id> <kind> [deadline-iso]\n"
-        "note: default wait timeout policy is on_timeout=advance (no auto-issue)"
+        "/superloop wait add <loop_id> <kind> [deadline-iso]\n\n"
+        "ℹ️ wait 默认超时策略: on_timeout=advance（不自动开 issue）"
     )
 
 
@@ -71,6 +77,101 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
     parts = raw.split()
     lowered = [part.lower() for part in parts]
     local_instance = _local_instance_id()
+
+    if lowered[:1] == ["quickstart"]:
+        goal = raw[len("quickstart") :].strip()
+        if not goal:
+            await runtime._reply_text(update, "Usage: /superloop quickstart <goal>")
+            return
+        start_result = recording_service.start_recording(
+            goal=goal,
+            owner_agent=runtime.name,
+            owner_instance=local_instance,
+            source_mode="one_shot_prompt",
+        )
+        recording_id = start_result["recording_id"]
+        recording_service.set_intent_summary(
+            recording_id,
+            intent_summary=goal,
+            actor_agent=runtime.name,
+            actor_instance=local_instance,
+        )
+        recording_service.record_trial_step(
+            recording_id,
+            title=f"Bootstrap loop for: {goal}",
+            step_kind="human_or_agent_action",
+            owner_agent=runtime.name,
+            owner_instance=local_instance,
+            execution_mode="simulated",
+            success=True,
+        )
+        recording_service.set_exit_condition(
+            recording_id,
+            exit_condition={"kind": "all_tasks_completed", "details": {"task_ids": []}},
+            actor_agent=runtime.name,
+            actor_instance=local_instance,
+        )
+        result = compiler.compile_recording(
+            recording_id,
+            actor_agent=runtime.name,
+            actor_instance=local_instance,
+        )
+        if not result.get("ok"):
+            await runtime._reply_text(update, f"⚠️ quickstart compile failed: {result}")
+            return
+        loop_id = str(result["loop_id"])
+        store.save_loop_state(loop_id, {**store.load_loop_state(loop_id), "status": "running"})
+        store.append_loop_event(loop_id, event_type="loop.resumed", data={"source": "quickstart"})
+        task = SuperloopTaskboardService(store).add_task(
+            loop_id,
+            title=f"First actionable task for: {goal}",
+            owner_agent=runtime.name,
+            owner_instance=local_instance,
+        )
+        await runtime._reply_text(
+            update,
+            (
+                "🚀 Superloop Quickstart 完成\n"
+                f"goal: {goal}\n"
+                f"recording_id: `{recording_id}`\n"
+                f"loop_id: `{loop_id}`\n"
+                f"seed_task: `{task['task_id']}`\n\n"
+                "下一步建议：\n"
+                f"1) `/superloop status {loop_id}`\n"
+                f"2) `/superloop next {loop_id}`\n"
+                f"3) `/superloop wait add {loop_id} sleep_until <ISO时间>`"
+            ),
+            parse_mode="Markdown",
+        )
+        return
+
+    if lowered[:1] == ["wizard"]:
+        goal = raw[len("wizard") :].strip()
+        if not goal:
+            await runtime._reply_text(
+                update,
+                (
+                    "Usage: /superloop wizard <goal>\n\n"
+                    "示例：\n"
+                    "/superloop wizard 每天追踪远端实例健康并异常通知"
+                ),
+            )
+            return
+        await handle_superloop_command(runtime, update, f"quickstart {goal}")
+        latest_rec = _latest_recording_id(store) or "N/A"
+        await runtime._reply_text(
+            update,
+            (
+                "🪄 Superloop Wizard 引导\n"
+                "已为您自动完成基础建模（quickstart）。\n\n"
+                "建议完善（可选）：\n"
+                f"1) `/superloop record intent {latest_rec} <更精确意图>`\n"
+                f"2) `/superloop record exit {latest_rec} all_tasks_completed {{\"task_ids\":[]}}`\n"
+                "3) 给 loop 增加 task / wait / issue 以形成长期闭环"
+            ),
+            parse_mode="Markdown",
+        )
+        return
 
     if lowered[:2] == ["record", "start"]:
         goal = raw[len("record start") :].strip()
