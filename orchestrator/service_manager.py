@@ -75,8 +75,15 @@ class ServiceManager:
                 workspace_root=self.kernel.paths.workspaces_root,
             )
             await self.kernel.api_gateway.start()
+            bind_host = getattr(self.kernel.api_gateway, "bind_host", None) or "127.0.0.1"
             main_logger.info(
-                "API Gateway listening on http://127.0.0.1:%s",
+                "API Gateway listening on http://%s:%s",
+                bind_host,
+                global_cfg.api_gateway_port,
+            )
+            bridge_logger.info(
+                "API Gateway listening on http://%s:%s",
+                bind_host,
                 global_cfg.api_gateway_port,
             )
         except Exception as e:
