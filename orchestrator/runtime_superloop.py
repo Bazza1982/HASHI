@@ -7,7 +7,8 @@ from typing import Any
 
 from orchestrator.superloop_compiler import SuperloopCompiler
 from orchestrator.superloop_recording import SuperloopRecordingService
-from orchestrator.superloop_store import SuperloopStore
+from orchestrator.superloop_runner import SuperloopRunner
+from orchestrator.superloop_store import SuperloopStore, _json_dump
 
 
 def _local_instance_id() -> str:
@@ -42,7 +43,10 @@ def _help_text() -> str:
         "/superloop record intent <recording_id> <summary>\n"
         "/superloop record exit <recording_id> <kind> <details-json>\n"
         "/superloop record finish [recording_id]\n"
-        "/superloop status <loop_id>"
+        "/superloop status <loop_id>\n"
+        "/superloop pause <loop_id>\n"
+        "/superloop resume <loop_id>\n"
+        "/superloop next <loop_id>"
     )
 
 
@@ -229,6 +233,62 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
                 f"status: `{state.get('status')}`\n"
                 f"current_step: `{state.get('current_step')}`\n"
                 f"next_action: `{json.dumps(state.get('next_action'), ensure_ascii=False)}`"
+            ),
+            parse_mode="Markdown",
+        )
+        return
+
+    if lowered[:1] == ["pause"]:
+        if len(parts) < 2:
+            await runtime._reply_text(update, "Usage: /superloop pause <loop_id>")
+            return
+        loop_id = parts[1]
+        try:
+            state = store.load_loop_state(loop_id)
+        except FileNotFoundError:
+            await runtime._reply_text(update, f"Loop not found: {loop_id}")
+            return
+        state["status"] = "paused"
+        _json_dump(store.loop_dir(loop_id) / "state.json", state)
+        store.append_loop_event(loop_id, event_type="loop.paused", data={"source": "command"})
+        await runtime._reply_text(update, f"⏸ Paused `{loop_id}`", parse_mode="Markdown")
+        return
+
+    if lowered[:1] == ["resume"]:
+        if len(parts) < 2:
+            await runtime._reply_text(update, "Usage: /superloop resume <loop_id>")
+            return
+        loop_id = parts[1]
+        try:
+            state = store.load_loop_state(loop_id)
+        except FileNotFoundError:
+            await runtime._reply_text(update, f"Loop not found: {loop_id}")
+            return
+        state["status"] = "running"
+        _json_dump(store.loop_dir(loop_id) / "state.json", state)
+        store.append_loop_event(loop_id, event_type="loop.resumed", data={"source": "command"})
+        await runtime._reply_text(update, f"▶ Resumed `{loop_id}`", parse_mode="Markdown")
+        return
+
+    if lowered[:1] == ["next"]:
+        if len(parts) < 2:
+            await runtime._reply_text(update, "Usage: /superloop next <loop_id>")
+            return
+        loop_id = parts[1]
+        runner = SuperloopRunner(store)
+        try:
+            result = runner.next_action(loop_id)
+        except FileNotFoundError:
+            await runtime._reply_text(update, f"Loop not found: {loop_id}")
+            return
+        await runtime._reply_text(
+            update,
+            (
+                "⏭ Next action evaluated\n"
+                f"loop_id: `{loop_id}`\n"
+                f"advanced: `{result.get('advanced')}`\n"
+                f"reason: `{result.get('reason', '')}`\n"
+                f"task_id: `{result.get('task_id', '')}`"
             ),
             parse_mode="Markdown",
         )

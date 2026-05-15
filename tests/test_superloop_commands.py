@@ -45,3 +45,9 @@ async def test_superloop_record_start_try_finish_status(tmp_path: Path) -> None:
 
     await handle_superloop_command(runtime, _FakeUpdate(f"/superloop status {loop_id}"), f"status {loop_id}")
     assert any("Superloop status" in text for text in runtime.messages)
+
+    await handle_superloop_command(runtime, _FakeUpdate(f"/superloop resume {loop_id}"), f"resume {loop_id}")
+    assert any("Resumed" in text for text in runtime.messages)
+
+    await handle_superloop_command(runtime, _FakeUpdate(f"/superloop next {loop_id}"), f"next {loop_id}")
+    assert any("Next action evaluated" in text for text in runtime.messages)
