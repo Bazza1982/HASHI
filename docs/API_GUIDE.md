@@ -25,9 +25,16 @@ Common local ports:
 
 | Parameter | Value |
 |-----------|-------|
-| **Base URL** | `http://127.0.0.1:<api_gateway_port>/v1` |
+| **Base URL** | `http://<api_host>:<api_gateway_port>/v1` |
 | **Port** | `global.api_gateway_port`, defaulting to `global.workbench_port + 1` |
 | **API Key** | Any non-empty string (no auth enforced, e.g. `"EMPTY"`) |
+
+By default, HASHI binds the Workbench API and API Gateway to the configured
+`global.api_host`. If that value is `127.0.0.1` or `localhost` and the WSL host
+alias `10.255.255.254` is available, HASHI uses `10.255.255.254` instead. This
+avoids WSL loopback environments where `127.0.0.1` accepts a socket but does not
+serve aiohttp traffic reliably. Confirm the live address with Workbench
+`GET /api/health` or the startup log line.
 
 ---
 
