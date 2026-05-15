@@ -1139,6 +1139,266 @@ At minimum, the compiler should:
 - mark compile status only after all required outputs are present
 - emit a failure event with reason if compilation aborts mid-way
 
+### 13.3 Module-by-module implementation checklist
+
+This checklist is the recommended coding order for release 1.
+
+#### Checklist A — core persistence layer
+
+Files to add:
+
+- `orchestrator/superloop_store.py`
+- `tests/test_superloop_store.py`
+
+Must implement:
+
+- create/load/save recording sessions
+- create/load/save compiled loops
+- atomic writes for:
+  - `state.json`
+  - `taskboard.json`
+  - `issues.json`
+  - `waits.json`
+- helper methods for append-only `events.jsonl`
+- directory bootstrap for:
+  - `superloops/recordings/<id>/`
+  - `superloops/loops/<id>/`
+
+Exit criteria:
+
+- store can create and reload both recording and compiled loop state
+- writes are atomic
+- event appends preserve valid JSONL
+- tests cover missing files, invalid JSON, overwrite protection, and id generation
+
+#### Checklist B — recording session layer
+
+Files to add:
+
+- `orchestrator/superloop_recording.py`
+- `tests/test_superloop_recording.py`
+
+Must implement:
+
+- `record start`
+- `record status`
+- `record note`
+- `record try`
+- `record pause`
+- `record resume`
+- `record abort`
+- recording event emission
+- validation of candidate step ids, wait refs, and open questions
+
+Exit criteria:
+
+- recording session can be created from one-shot prompt
+- recording session can be updated incrementally
+- `record try` can record trial actions without requiring compilation
+- recording status can be rendered both as machine-readable state and human summary
+
+#### Checklist C — compiler layer
+
+Files to add:
+
+- `orchestrator/superloop_compiler.py`
+- `tests/test_superloop_compiler.py`
+
+Must implement:
+
+- compile-precondition validation
+- compile-blocked error reporting
+- normalization of accepted steps
+- normalization of waits/issues/taskboard
+- loop id creation
+- compiled loop file creation
+- operator summary generation
+- recording -> compiled status transition
+
+Exit criteria:
+
+- `record finish` succeeds only when preconditions are met
+- failed compile leaves recording intact and uncompiled
+- successful compile writes all required loop files
+- compile emits both recording and loop events
+
+#### Checklist D — runtime loop progression layer
+
+Files to add:
+
+- `orchestrator/superloop_runner.py`
+- `tests/test_superloop_runner.py`
+
+Must implement:
+
+- `next-action` evaluation
+- paused-state no-op behavior
+- exit-condition evaluation
+- task dependency readiness checks
+- wait blocking behavior
+- loop completion transition
+- loop abort transition
+
+Exit criteria:
+
+- compiled loop can be advanced deterministically
+- loop cannot advance through unresolved waits
+- loop status transitions are logged and persisted correctly
+
+#### Checklist E — wait engine
+
+Files to add:
+
+- `orchestrator/superloop_waits.py`
+- `tests/test_superloop_waits.py`
+
+Must implement:
+
+- creation and update of wait entries
+- support for:
+  - `sleep_until`
+  - `await_hchat_reply`
+  - `await_protocol_reply`
+  - `await_file`
+  - `await_child_run`
+  - `await_human`
+- timeout evaluation
+- resume policy evaluation
+- scheduler-facing wake check hooks
+
+Exit criteria:
+
+- waits can be satisfied and resumed
+- timeouts open the correct next action or issue path
+- wait state stays separate from chat transcript state
+
+#### Checklist F — taskboard and issue register
+
+Files to add:
+
+- `orchestrator/superloop_taskboard.py`
+- `orchestrator/superloop_issues.py`
+- `tests/test_superloop_taskboard.py`
+- `tests/test_superloop_issues.py`
+
+Must implement:
+
+- add/update/delete task
+- assign/reassign owner
+- dependency linking
+- issue open/resolve/escalate
+- linking between tasks, issues, and artifacts
+
+Exit criteria:
+
+- multi-agent coordination can be represented in files without ad hoc notes
+- task/issue refs remain stable across reloads
+
+#### Checklist G — Nagare adapter
+
+Files to add:
+
+- `orchestrator/superloop_nagare_adapter.py`
+- `tests/test_superloop_nagare_adapter.py`
+
+Must implement:
+
+- spawn Nagare child workflow from a compiled loop step
+- track `workflow_path`, `run_id`, and child status
+- map child completion/failure back to loop events and taskboard state
+- attach child artifacts to loop artifact refs
+
+Exit criteria:
+
+- a compiled superloop can call a bounded Nagare child flow and continue afterward
+- child run failures become structured loop-level failures or issues
+
+#### Checklist H — command surface
+
+Files to touch:
+
+- `orchestrator/runtime_command_binding.py`
+- `orchestrator/flexible_agent_runtime.py`
+- optionally `orchestrator/superloop_commands.py`
+- `tests/test_superloop_commands.py`
+
+Must implement:
+
+- `/superloop status`
+- `/superloop list`
+- `/superloop pause`
+- `/superloop resume`
+- `/superloop abort`
+- `/superloop next`
+- `/superloop record start`
+- `/superloop record status`
+- `/superloop record try`
+- `/superloop record finish`
+
+Exit criteria:
+
+- command surface is usable from the runtime without manual file editing
+- operator output is clear, stateful, and auditable
+
+#### Checklist I — transport action integration
+
+Files to touch:
+
+- `orchestrator/superloop_runner.py`
+- `tools/hchat_send.py` (reuse only if helper extraction is needed)
+- `tools/protocol_send.py` (reuse only if helper extraction is needed)
+- `tools/remote_file_transfer.py` (reuse only if helper extraction is needed)
+- `tests/test_superloop_transport_actions.py`
+
+Must implement:
+
+- loop step types that send HChat/protocol messages
+- loop step types that send attachments or files
+- event logging around target, method, success/failure, and returned refs
+
+Exit criteria:
+
+- a compiled loop can drive real cross-instance actions using existing transport
+- failures become structured loop events, not silent transport logs
+
+#### Checklist J — scheduler wake integration
+
+Files to touch:
+
+- `orchestrator/scheduler.py`
+- `orchestrator/runtime_jobs.py` if needed
+- `tests/test_superloop_scheduler_wake.py`
+
+Must implement:
+
+- wake/check hook for waiting superloops
+- resume from satisfied wait
+- watchdog handling for stale loops
+
+Exit criteria:
+
+- long waits survive process restarts
+- loops resume when wake conditions are met
+
+#### Checklist K — operator summaries and docs parity
+
+Files to touch:
+
+- `docs/SUPERLOOP_PLAN.md`
+- `docs/AGENT_FYI.md` when commands become real
+- `README.md` if user-facing command documentation is added
+- tests or golden fixtures for summary rendering
+
+Must implement:
+
+- operator-readable `README.md` per compiled loop
+- stable summary rendering for recording and runtime state
+- docs updated when commands are shipped
+
+Exit criteria:
+
+- an operator can understand a loop from its files without reading raw JSON only
+
 ### Phase B: formal loop state and orchestration
 
 Build:
