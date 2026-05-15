@@ -107,12 +107,15 @@ class PeerRegistry:
     def on_peers_changed(self, peers: list[PeerInfo]) -> None:
         """Callback for LanDiscovery — called whenever peers list changes."""
         valid_peers = []
+        now_ts = int(time.time())
         for peer in peers:
             iid = normalize_instance_id(peer.instance_id)
             if not is_valid_instance_id(iid):
                 logger.debug("Registry: ignoring peer with invalid instance identity: %s", peer.instance_id)
                 continue
-            valid_peers.append(dataclasses.replace(peer, instance_id=iid))
+            props = dict(peer.properties or {})
+            props["route_observed_at"] = now_ts
+            valid_peers.append(dataclasses.replace(peer, instance_id=iid, properties=props))
         backend = None
         if valid_peers:
             backend = str(valid_peers[0].properties.get("discovery", "") or "").lower() or None
@@ -292,8 +295,15 @@ class PeerRegistry:
         peer = self._peers.get(iid)
         if peer is None:
             return
-        fallback = (self._observations.get(iid) or {}).get("bootstrap_fallback")
-        if state == "handshake_accepted" and fallback and str(fallback.host or "").strip() in {"127.0.0.1", "localhost"}:
+        observations = self._observations.get(iid) or {}
+        fallback = observations.get("bootstrap_fallback")
+        has_live_discovery = any(name in observations for name in ("lan", "tailscale"))
+        if (
+            state == "handshake_accepted"
+            and fallback
+            and not has_live_discovery
+            and str(fallback.host or "").strip() in {"127.0.0.1", "localhost"}
+        ):
             peer = dataclasses.replace(fallback)
         props = self._normalize_live_props(peer.properties or {})
         props["handshake_state"] = state
@@ -629,6 +639,8 @@ class PeerRegistry:
         for backend in ("lan", "tailscale"):
             if backend in observations:
                 return backend
+        if self._prefer_inbound_over_loopback_fallback(observations):
+            return "handshake_inbound"
         fallback = observations.get("bootstrap_fallback")
         if fallback and str(fallback.host or "").strip() in {"127.0.0.1", "localhost"}:
             if "bootstrap" in observations:
@@ -678,6 +690,37 @@ class PeerRegistry:
             _protocol_version_score(peer.protocol_version),
             len(str(peer.display_name or "")),
         )
+
+    def _observation_timestamp(self, peer: PeerInfo | None) -> int:
+        if peer is None:
+            return 0
+        props = dict(peer.properties or {})
+        for key in ("route_observed_at", "last_seen_ok", "last_handshake_at", "last_seen_error", "last_seen"):
+            try:
+                value = int(props.get(key) or 0)
+            except Exception:
+                value = 0
+            if value > 0:
+                return value
+        return 0
+
+    def _prefer_inbound_over_loopback_fallback(self, observations: dict[str, PeerInfo]) -> bool:
+        if any(name in observations for name in ("lan", "tailscale")):
+            return False
+        fallback = observations.get("bootstrap_fallback")
+        inbound = observations.get("handshake_inbound")
+        if fallback is None or inbound is None:
+            return False
+        if str(fallback.host or "").strip().lower() not in {"127.0.0.1", "localhost"}:
+            return False
+        same_route = (
+            str(fallback.host or "").strip().lower() == str(inbound.host or "").strip().lower()
+            and int(fallback.port or 0) == int(inbound.port or 0)
+            and int(fallback.workbench_port or 0) == int(inbound.workbench_port or 0)
+        )
+        if same_route:
+            return False
+        return self._observation_timestamp(inbound) >= self._observation_timestamp(fallback)
 
     def _should_drop_legacy_alias(
         self,
