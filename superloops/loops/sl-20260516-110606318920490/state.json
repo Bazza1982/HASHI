@@ -45,7 +45,7 @@
       "no open blockers"
     ]
   },
-  "current_step": "step-005",
+  "current_step": "step-006",
   "artifact": {
     "path": "superloops/loops/sl-20260516-110606318920490/artifacts/watchtower_standalone_msi_20260516.tar.gz",
     "size_bytes": 86649,
@@ -82,9 +82,20 @@
     "NSSM may need to be staged on MSI",
     "remote install must not shut down MSI HASHI during smoke"
   ],
+  "staging_result": {
+    "reported_by": "hashiko@MSI",
+    "command_id": "sl-20260516-110606318920490-hashiko-assist-001",
+    "artifact_sha256_match": true,
+    "compileall": "ok",
+    "venv_requirements": "ok",
+    "remote_help": "ok",
+    "go_no_go": "staging_green",
+    "recommended_interpreter": "py -3.12",
+    "install_root": "C:\\Projects\\WatchTower"
+  },
   "next_action": {
     "kind": "run_task",
-    "task_id": "step-005"
+    "task_id": "step-006"
   },
-  "updated_at": "2026-05-16T11:35:03.943457+00:00"
+  "updated_at": "2026-05-16T11:47:49.596789+00:00"
 }
