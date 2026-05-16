@@ -349,7 +349,7 @@
     "controller_probe": "short tick only: hchat route check; one MSI-WT health probe; focused file-transfer stat for logs/runtime claim",
     "follow_up_message": "Request agent3 exact service repair blocker: service_green, blocked with failing command, or not_started.",
     "escalation_if_no_reply": "do not switch execution ownership; continue short ticks and ask user before assigning another worker",
-    "status": "waiting",
+    "status": "superseded_by_direct_nssm_fix",
     "expected_fields": [
       "service_green_or_blocked_or_not_started",
       "failing_command",
@@ -361,6 +361,33 @@
       "local_health_json",
       "logs_summary",
       "next_recommended_action"
+    ]
+  },
+  {
+    "wait_id": "wait-20260516-123300-agent3-direct-nssm",
+    "kind": "await_hchat_reply",
+    "target": "agent3@MSI",
+    "command_id": "sl-20260516-110606318920490-agent3-direct-nssm-004",
+    "entered_at": "2026-05-16T12:33:00Z",
+    "follow_up_after_minutes": 1,
+    "deadline_at": "2026-05-16T12:35:00Z",
+    "controller_probe": "short tick only: hchat route check; one MSI-WT health probe; stat service logs/runtime claim",
+    "follow_up_message": "Request direct NSSM fix status from agent3: service_green, blocked with failing line, or not_started.",
+    "escalation_if_no_reply": "do not switch execution ownership; continue short ticks and ask user before reassigning worker",
+    "status": "waiting",
+    "expected_fields": [
+      "is_admin",
+      "nssm_exists",
+      "venv_python_exists",
+      "nssm_install_result",
+      "service_status",
+      "port_43766",
+      "local_health_json",
+      "protocol_status_json",
+      "firewall_rule",
+      "go_no_go",
+      "failing_line",
+      "stderr"
     ]
   }
 ]
