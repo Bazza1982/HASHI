@@ -75,3 +75,18 @@ staged sha file stat: exists, size 163, sha256 matched
 
 Follow-up was sent to `agent3@MSI` asking for both preflight and staging report
 status. No install, stop, restart, or shutdown was authorized.
+
+## Escalation To Same-Machine Reviewer
+
+`agent3@MSI` did not visibly reply after the follow-up and a short one-line
+status ping. The loop escalated to `agent4@MSI` for read-only, staging-only
+inspection.
+
+```text
+command_id: sl-20260516-110606318920490-agent4-inspect-001
+target: agent4@MSI
+mode: read-only / staging-only
+install_authorized: false
+service_change_authorized: false
+shutdown_authorized: false
+```
