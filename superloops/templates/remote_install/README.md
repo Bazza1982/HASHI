@@ -29,6 +29,15 @@ If a same-machine reviewer exists, do not skip it. The reviewer should verify pa
 
 ## Non-Negotiable Gates
 
+Before starting, read the shared balanced orchestration guidance:
+
+```text
+superloops/config/orchestration_guidance.json
+```
+
+Use it as a compass, not a rigid rule engine. Preserve agentic flexibility, but
+keep the hard stops for safety.
+
 ### G1 Route And Identity
 
 Verify both messaging and file transfer routes before transfer:
@@ -95,7 +104,7 @@ For every remote handoff:
 - run a controller-side probe when the deadline is reached
 - follow up when a report is incomplete
 - record stale replies as stale, not as new failures
-- use short non-blocking ticks instead of long blocking sleeps
+- prefer short, interruptible ticks over long blocking sleeps
 
 Required wait record fields:
 
@@ -112,18 +121,18 @@ escalation_if_no_reply:
 status:
 ```
 
-Short tick rule:
+Balanced short-tick guidance:
 
-- Keep each orchestrator wait tick to 30-60 seconds.
-- Each tick must run at most one quick message/route check, one endpoint probe,
-  and one focused file/stat probe when useful.
-- Do not run long `sleep` loops that prevent the orchestrator from processing
-  incoming reports or changing course.
-- If the worker owns the task, do not switch execution agents during a tick.
-  Use other agents only as read-only reviewers unless the operator explicitly
-  reassigns ownership.
-- If a tick finds no progress, record the observation and send a narrowly scoped
-  follow-up asking for the current command, exit code, and blocker.
+- Prefer 30-60 second wait ticks for remote work where replies may arrive
+  asynchronously.
+- A good tick usually checks incoming replies/status first, then one controller
+  probe, then one focused file/stat probe when useful.
+- Avoid long `sleep` loops that leave the orchestrator unable to process a
+  worker reply or a user correction.
+- Preserve the assigned worker as execution owner by default. Other agents may
+  provide read-only evidence unless ownership is explicitly reassigned.
+- If a tick finds no progress, record the observation and ask for the smallest
+  missing fact, such as current command, exit code, or blocker.
 
 Default deadlines:
 
