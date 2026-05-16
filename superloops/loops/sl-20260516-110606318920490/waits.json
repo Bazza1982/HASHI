@@ -10,7 +10,8 @@
     "controller_probe": "python3 tools/hchat_send.py --to agent3 --from zelda --instance MSI --check; python3 tools/remote_rescue.py --json capabilities MSI",
     "follow_up_message": "Request preflight status for sl-20260516-110606318920490-preflight-001; no install or shutdown.",
     "escalation_if_no_reply": "run controller-side MSI capability probes and ask operator whether another MSI-side agent is available",
-    "status": "waiting",
+    "status": "follow_up_sent_after_deadline",
+    "follow_up_sent_at": "2026-05-16T11:17:30Z",
     "expected_fields": [
       "report_type",
       "target_instance",
@@ -38,7 +39,8 @@
     "controller_probe": "python3 tools/remote_file_transfer.py stat MSI:C:\\Users\\Public\\hashi_watchtower_msi_staging\\watchtower_standalone_msi_20260516.tar.gz; python3 tools/hchat_send.py --to agent3 --from zelda --instance MSI --check",
     "follow_up_message": "Request staging status for sl-20260516-110606318920490-staging-001; no install or shutdown.",
     "escalation_if_no_reply": "use controller-side stat evidence and ask operator whether MSI agent needs attention",
-    "status": "waiting",
+    "status": "follow_up_sent_after_deadline",
+    "follow_up_sent_at": "2026-05-16T11:17:30Z",
     "expected_fields": [
       "report_type",
       "target_instance",
