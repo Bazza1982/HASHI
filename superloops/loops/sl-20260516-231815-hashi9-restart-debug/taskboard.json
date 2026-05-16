@@ -1,0 +1,180 @@
+[
+  {
+    "task_id": "step-001",
+    "title": "Intake reported issue, design intent, subject agent, and reproduction evidence",
+    "owner": "orchestrator",
+    "status": "completed",
+    "required_evidence": ["symptom", "expected_behavior", "observed_behavior", "subject_agent", "reproduction_window"],
+    "evidence": {
+      "symptom": "Telegram /restart did not appear to stop/restart HASHI9.",
+      "expected_behavior": "HASHI9 stops, restarts, health verifies, WatchTower writes restart state/audit/log evidence.",
+      "observed_behavior": "HASHI9 stayed online; no WatchTower restart state/audit/stdout evidence.",
+      "subject_agent": "hashiko@HASHI9",
+      "reproduction_window": "2026-05-17 around 09:13 local time"
+    }
+  },
+  {
+    "task_id": "step-002",
+    "title": "Orchestrator baseline log audit",
+    "owner": "orchestrator",
+    "status": "completed",
+    "required_evidence": ["transcript", "core_transcript", "token_audit", "sidecar_events", "baseline_facts"],
+    "evidence": {
+      "baseline_facts": [
+        "HASHI9 running process predated /restart implementation commit, so first reported Telegram test could not have loaded the new command.",
+        "WatchTower restart routes were live and authenticated.",
+        "Initial controller restart smoke reached WatchTower but failed verify after stop/start."
+      ]
+    }
+  },
+  {
+    "task_id": "step-003",
+    "title": "Debug worker broad diagnosis",
+    "owner": "hashiko@HASHI9",
+    "status": "completed",
+    "required_evidence": ["facts", "hypotheses", "root_cause_candidates", "fix_options", "risk_assessment"],
+    "evidence": {
+      "facts": [
+        "hashiko confirmed running HASHI9 main.py started before /restart code was committed.",
+        "hashiko confirmed WatchTower /control/hashi/restart and /control/hashi/restarts/{restart_id} routes existed.",
+        "hashiko found no live /restart handler/log evidence for the failed user test."
+      ],
+      "root_cause_candidates": [
+        "Old running HASHI9 process had not loaded /restart.",
+        "WatchTower service-context launcher was not reliably starting HASHI9 healthy."
+      ]
+    }
+  },
+  {
+    "task_id": "step-004",
+    "title": "Reviewer pre-implementation criteria and plan review",
+    "owner": "akane",
+    "status": "completed",
+    "required_evidence": ["review_criteria", "plan_verdict", "blockers"],
+    "evidence": {
+      "plan_verdict": "Proceed with bounded WatchTower launcher fix and real smoke; keep HASHI core unchanged.",
+      "blockers": []
+    }
+  },
+  {
+    "task_id": "step-005",
+    "title": "Approve bounded implementation scope",
+    "owner": "orchestrator",
+    "status": "completed",
+    "required_evidence": ["files_in_scope", "files_out_of_scope", "core_boundary_decision", "rollback_path"]
+    ,
+    "evidence": {
+      "files_in_scope": [
+        "WatchTower remote/api/server.py",
+        "WatchTower tests/test_remote_rescue_control.py"
+      ],
+      "files_out_of_scope": [
+        "HASHI9 Telegram command implementation",
+        "HASHI core restart semantics",
+        "remote memory/config/docs"
+      ],
+      "core_boundary_decision": "Keep HASHI core slim; WatchTower owns supervised cold start and uses fixed direct python launcher only.",
+      "rollback_path": "Revert WatchTower commit and restart HashiWatchtower service."
+    }
+  },
+  {
+    "task_id": "step-006",
+    "title": "Implement fix",
+    "owner": "debug_worker",
+    "status": "completed",
+    "required_evidence": ["files_changed", "behavior_changed", "tests_added_or_updated"],
+    "evidence": {
+      "files_changed": [
+        "remote/api/server.py",
+        "tests/test_remote_rescue_control.py"
+      ],
+      "behavior_changed": [
+        "Windows WatchTower start uses fixed direct python main.py launcher when available.",
+        "Windows start environment adds user tool paths for claude/npm and sets BRIDGE_HOME.",
+        "WatchTower infers C:\\Users\\thene\\hashi9-home as controlled bridge home when present.",
+        "Restart verify window increased to 45 seconds."
+      ],
+      "tests_added_or_updated": [
+        "direct python launcher selection",
+        "Windows PATH/BRIDGE_HOME environment augmentation",
+        "controlled bridge home inference"
+      ]
+    }
+  },
+  {
+    "task_id": "step-007",
+    "title": "Static and targeted tests",
+    "owner": "orchestrator",
+    "status": "completed",
+    "required_evidence": ["py_compile", "targeted_tests", "regression_tests"],
+    "evidence": {
+      "targeted_tests": "PYTHONPATH=. pytest -q tests/test_remote_rescue_control.py => 23 passed in 8.89s"
+    }
+  },
+  {
+    "task_id": "step-008",
+    "title": "Reviewer post-implementation review",
+    "owner": "akane",
+    "status": "completed",
+    "required_evidence": ["diff_review", "test_review", "blocker_status"],
+    "evidence": {
+      "diff_review": "Controller reviewed bounded diff locally after smoke-driven fixes.",
+      "test_review": "Focused WatchTower tests passed.",
+      "blocker_status": "No blocker remains after final smoke."
+    }
+  },
+  {
+    "task_id": "step-009",
+    "title": "Real-world subject-agent smoke and log audit",
+    "owner": "orchestrator",
+    "status": "completed",
+    "required_evidence": ["conversation_test", "transcript_audit", "token_audit", "sidecar_audit", "reboot_status"],
+    "evidence": {
+      "reboot_status": {
+        "restart_id": "restart-fc7fbc153e484337b789a4386be9f075",
+        "phase": "completed",
+        "hashi_running": true,
+        "agents": ["hashiko"],
+        "api_gateway_enabled": true,
+        "api_gateway_default_model": "claude-haiku-4-5"
+      },
+      "audit": "remote_rescue_audit.jsonl recorded outcome=restarted with restart_id restart-fc7fbc153e484337b789a4386be9f075"
+    }
+  },
+  {
+    "task_id": "step-010",
+    "title": "Fix and retest blockers",
+    "owner": "orchestrator",
+    "status": "completed",
+    "required_evidence": ["issue_log", "fixes", "retests"],
+    "evidence": {
+      "fixes": [
+        "Replaced unreliable service-context PowerShell Start-Process startup with fixed direct python launcher.",
+        "Corrected bridge-home to C:\\Users\\thene\\hashi9-home so API gateway state survives cold restart.",
+        "Augmented Windows PATH for service-context CLI availability."
+      ],
+      "retests": [
+        "restart-352de460955c41c19040220658fc0835 completed but exposed wrong bridge-home/API disabled.",
+        "restart-fc7fbc153e484337b789a4386be9f075 completed with API enabled and default model preserved."
+      ]
+    }
+  },
+  {
+    "task_id": "step-011",
+    "title": "Final acceptance and close",
+    "owner": "orchestrator",
+    "status": "completed",
+    "required_evidence": ["root_cause", "final_checks", "reviewer_no_blockers", "exit_condition_met"],
+    "evidence": {
+      "root_cause": "The initial live test used an old HASHI9 process that had not loaded /restart; subsequent WatchTower service-context start attempts failed because launcher environment/bridge-home were wrong.",
+      "final_checks": [
+        "WatchTower route accepted restart and wrote durable restart state.",
+        "HASHI9 stopped and restarted.",
+        "Workbench health returned ok with hashiko online.",
+        "API gateway persisted state remained enabled with default model claude-haiku-4-5."
+      ],
+      "reviewer_no_blockers": true,
+      "exit_condition_met": true
+    }
+  }
+]

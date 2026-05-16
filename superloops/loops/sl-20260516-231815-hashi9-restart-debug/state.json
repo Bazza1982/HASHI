@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "loop_id": "sl-20260516-231815-hashi9-restart-debug",
+  "title": "Debug HASHI9 WatchTower supervised hard restart",
+  "source_template": "superloops/templates/auto_debug",
+  "created_at": "2026-05-17T09:18:15+10:00",
+  "updated_at": "2026-05-16T23:39:19.636947+00:00",
+  "status": "completed",
+  "phase": "closed",
+  "controller": {
+    "agent": "zelda",
+    "instance": "HASHI1",
+    "mode": "superloop_controller"
+  },
+  "roles": {
+    "orchestrator": {
+      "agent": "zelda",
+      "responsibility": "scope, baseline probes, integration, live acceptance"
+    },
+    "debug_worker": {
+      "agent": "hashiko",
+      "instance": "HASHI9",
+      "responsibility": "live subject-agent diagnostics and bounded local evidence collection"
+    },
+    "reviewer": {
+      "agent": "akane",
+      "responsibility": "review diagnosis and fix plan before risky live retry"
+    }
+  },
+  "subject_agent": "hashiko@HASHI9",
+  "request": "Debug failed live hard restart test: /restart did not stop/restart HASHI9 and WatchTower recorded no restart state/audit/log evidence.",
+  "exit_condition": "Identify and fix or explicitly block the /restart -> WatchTower -> stop/start/verify chain, then prove with controlled live smoke or recorded blocker.",
+  "taskboard_path": "superloops/loops/sl-20260516-231815-hashi9-restart-debug/taskboard.json",
+  "issues_path": "superloops/loops/sl-20260516-231815-hashi9-restart-debug/issues.json",
+  "waits_path": "superloops/loops/sl-20260516-231815-hashi9-restart-debug/waits.json",
+  "operator_summary_path": "superloops/loops/sl-20260516-231815-hashi9-restart-debug/README.md",
+  "artifacts": [
+    {
+      "path": "superloops/loops/sl-20260516-231815-hashi9-restart-debug/README.md",
+      "kind": "issue_intake"
+    }
+  ],
+  "workzone_source": "superloop:auto_debug",
+  "current_step": "step-011",
+  "final_restart_id": "restart-fc7fbc153e484337b789a4386be9f075",
+  "final_result": {
+    "watchtower_restart_phase": "completed",
+    "hashi9_running": true,
+    "hashiko_online": true,
+    "api_gateway_enabled": true,
+    "api_gateway_default_model": "claude-haiku-4-5"
+  },
+  "next_action": {
+    "kind": "none",
+    "reason": "all_tasks_completed"
+  }
+}
