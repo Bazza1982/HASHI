@@ -13,3 +13,12 @@
 {"ts": "2026-05-16T22:24:35.126264+00:00", "event": "review_requested", "agent": "akane", "checkpoint": "/api"}
 {"ts": "2026-05-16T22:25:23.030110+00:00", "event": "api_checkpoint_updated", "details": "Added main.py startup persistence for /api on; focused tests still pass."}
 {"ts": "2026-05-16T22:29:19.928976+00:00", "event": "api_review_fixes_applied", "tests": "14 passed, 2 pytz warnings"}
+{"ts": "2026-05-17T08:31:53+10:00", "event": "api_checkpoint_committed", "repo": "/home/lily/projects/hashi", "commit": "0418270", "message": "Add runtime API gateway control"}
+{"ts": "2026-05-17T08:31:53+10:00", "event": "restart_watchtower_candidate_detected", "hashi_repo": "/mnt/c/Users/thene/projects/HASHI", "watchtower_repo": "/mnt/c/Users/thene/projects/WatchTower", "status": "review_gate"}
+{"ts": "2026-05-17T08:31:53+10:00", "event": "restart_watchtower_review_brief_recorded", "artifact": "RESTART_WATCHTOWER_REVIEW_BRIEF.md"}
+{"ts": "2026-05-17T08:34:50+10:00", "event": "restart_watchtower_candidate_patched", "fixes": ["callback unauthorized query.answer", "fail-closed WatchTower availability", "confirm-time WatchTower re-check", "duplicate confirm inflight guard"]}
+{"ts": "2026-05-17T08:34:50+10:00", "event": "restart_watchtower_focused_tests_passed", "hashi": "29 passed, 2 pytz warnings", "watchtower": "19 passed"}
+{"ts": "2026-05-17T08:37:20+10:00", "event": "watchtower_restart_supervision_state_added", "details": ["restart_id", "state/restarts JSON record", "phase updates", "GET /control/hashi/restarts/{restart_id}"]}
+{"ts": "2026-05-17T08:37:20+10:00", "event": "watchtower_restart_supervision_tests_passed", "watchtower": "20 passed"}
+{"ts": "2026-05-17T08:40:16+10:00", "event": "restart_watchtower_checkpoint_committed", "hashi_repo": "/mnt/c/Users/thene/projects/HASHI", "hashi_commit": "51e6e65", "watchtower_repo": "/mnt/c/Users/thene/projects/WatchTower", "watchtower_commit": "e8979e3"}
+{"ts": "2026-05-17T08:40:16+10:00", "event": "loop_completed", "status": "completed", "live_restart": "not executed"}
