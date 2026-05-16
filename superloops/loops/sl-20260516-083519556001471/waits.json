@@ -1,0 +1,49 @@
+[
+  {
+    "wait_id": "wait-20260516-083820-agent1-preflight",
+    "kind": "await_hchat_reply",
+    "target": "agent1@INTEL",
+    "command_id": "sl-20260516-083519556001471-preflight-001",
+    "entered_at": "2026-05-16T08:38:20Z",
+    "expected_fields": [
+      "report_type",
+      "target_instance",
+      "agent",
+      "command_id",
+      "paths_checked",
+      "service_status",
+      "port_43766",
+      "python_status",
+      "write_access",
+      "admin_rights",
+      "go_no_go",
+      "blockers",
+      "next_recommended_action"
+    ]
+  }
+  ,
+  {
+    "wait_id": "wait-20260516-084700-agent1-staging",
+    "kind": "await_hchat_reply",
+    "target": "agent1@INTEL",
+    "command_id": "sl-20260516-083519556001471-staging-001",
+    "entered_at": "2026-05-16T08:47:00Z",
+    "expected_fields": [
+      "report_type",
+      "target_instance",
+      "agent",
+      "command_id",
+      "artifact_sha256",
+      "extract_path",
+      "py_compile",
+      "remote_help",
+      "python_status",
+      "install_script_present",
+      "agents_json_summary",
+      "existing_watchtower_service_status",
+      "go_no_go",
+      "blockers",
+      "next_recommended_action"
+    ]
+  }
+]

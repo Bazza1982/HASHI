@@ -1,0 +1,45 @@
+{
+  "loop_id": "sl-20260516-083519556001471",
+  "source_template": "superloops/templates/remote_install",
+  "created_at": "2026-05-16T08:35:29Z",
+  "status": "awaiting_agent1_staging_report",
+  "goal": "Install standalone WatchTower repo on INTEL, verify service stability, broadcast presence, and non-destructive rescue smoke readiness from HASHI1.",
+  "orchestrator": {
+    "agent": "Zelda",
+    "instance": "HASHI1"
+  },
+  "remote_worker": {
+    "agent": "agent1",
+    "instance": "INTEL"
+  },
+  "target": {
+    "instance_id": "INTEL",
+    "install_root": "C:\\Users\\Print\\projects\\WatchTower",
+    "staging_root": "C:\\Users\\Print\\HASHI\\tmp\\watchtower_install_staging",
+    "controlled_hashi_root": "C:\\Users\\Print\\projects\\HASHI",
+    "service_name": "HashiWatchtower",
+    "proposed_instance_id": "WATCHTOWER_INTEL",
+    "proposed_port": 43766
+  },
+  "exit_condition": {
+    "requires": [
+      "route and file transfer preflight green",
+      "package manifest includes sha256 and byte sizes",
+      "staging dry-run/check passes before apply",
+      "existing Intel WatchTower removed or upgraded only with rollback",
+      "service running and stable",
+      "HASHI1 sees Intel WatchTower broadcast",
+      "non-destructive rescue smoke passes",
+      "no open blockers"
+    ]
+  },
+  "current_step": "step-005",
+  "blockers": [],
+  "risks": [
+    "Intel path or username may differ from assumed C:\\Users\\Print",
+    "port 43766 may conflict on Intel",
+    "Windows service install may require elevated rights",
+    "Intel HASHI root may differ from assumed path",
+    "hchat protocol transport times out but cached Workbench API delivery succeeds"
+  ]
+}
