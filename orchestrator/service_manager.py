@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import http.client
+import json
 import logging
 import sys
 import traceback
+from pathlib import Path
 
 from orchestrator.agent_directory import AgentDirectory
-from orchestrator.api_gateway import APIGatewayServer
+from orchestrator.api_gateway import APIGatewayServer, available_gateway_models, default_gateway_model
 from orchestrator.scheduler import TaskScheduler
 from orchestrator.workbench_api import WorkbenchApiServer
 
@@ -29,6 +31,65 @@ class ServiceManager:
             self.kernel.runtimes,
         )
         return self.kernel.agent_directory
+
+    def _api_gateway_state_path(self) -> Path:
+        return self.kernel.paths.bridge_home / "api_gateway_state.json"
+
+    def _load_api_gateway_state(self) -> dict:
+        path = self._api_gateway_state_path()
+        default_state = {
+            "enabled": bool(getattr(self.kernel, "enable_api_gateway", False)),
+            "default_model": default_gateway_model(),
+        }
+        if not path.exists():
+            return default_state
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return default_state
+        if not isinstance(loaded, dict):
+            return default_state
+        state = dict(default_state)
+        state.update(loaded)
+        if state.get("default_model") not in available_gateway_models():
+            state["default_model"] = default_gateway_model()
+        state["enabled"] = bool(state.get("enabled"))
+        return state
+
+    def _save_api_gateway_state(self, *, enabled: bool | None = None, default_model: str | None = None) -> dict:
+        state = self._load_api_gateway_state()
+        if enabled is not None:
+            state["enabled"] = bool(enabled)
+        if default_model is not None:
+            normalized = str(default_model or "").strip()
+            if normalized not in available_gateway_models():
+                raise ValueError(f"unknown API gateway model: {default_model}")
+            state["default_model"] = normalized
+        path = self._api_gateway_state_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return state
+
+    def api_gateway_base_url(self) -> str | None:
+        global_cfg = self.kernel.global_cfg
+        if global_cfg is None:
+            return None
+        running = self.kernel.api_gateway
+        host = getattr(running, "bind_host", None) or str(getattr(global_cfg, "api_host", "") or "127.0.0.1").strip()
+        if host in {"", "0.0.0.0", "localhost"}:
+            host = "127.0.0.1"
+        return f"http://{host}:{int(global_cfg.api_gateway_port)}"
+
+    def api_gateway_state_snapshot(self) -> dict:
+        state = self._load_api_gateway_state()
+        return {
+            "enabled": state["enabled"],
+            "running": self.kernel.api_gateway is not None,
+            "default_model": state["default_model"],
+            "available_models": available_gateway_models(),
+            "base_url": self.api_gateway_base_url(),
+            "port": getattr(self.kernel.global_cfg, "api_gateway_port", None) if self.kernel.global_cfg else None,
+        }
 
     async def start_workbench_api(self, global_cfg, secrets):
         try:
@@ -65,6 +126,9 @@ class ServiceManager:
             )
 
     async def start_api_gateway(self, global_cfg, secrets):
+        state = self._load_api_gateway_state()
+        if state["enabled"]:
+            self.kernel.enable_api_gateway = True
         if not self.kernel.enable_api_gateway:
             main_logger.info("API Gateway disabled (use --api-gateway to enable).")
             return
@@ -73,6 +137,7 @@ class ServiceManager:
                 global_cfg,
                 secrets,
                 workspace_root=self.kernel.paths.workspaces_root,
+                default_model=state["default_model"],
             )
             await self.kernel.api_gateway.start()
             bind_host = getattr(self.kernel.api_gateway, "bind_host", None) or "127.0.0.1"
@@ -90,6 +155,37 @@ class ServiceManager:
             self.kernel.api_gateway = None
             main_logger.warning("API Gateway failed to start; continuing without it: %s", e)
             main_logger.debug(traceback.format_exc())
+
+    async def start_api_gateway_runtime(self) -> tuple[bool, str]:
+        if self.kernel.global_cfg is None:
+            return False, "API Gateway cannot start before global config is loaded."
+        if self.kernel.api_gateway is not None:
+            self.kernel.enable_api_gateway = True
+            self._save_api_gateway_state(enabled=True)
+            return True, "API Gateway is already running."
+        self.kernel.enable_api_gateway = True
+        self._save_api_gateway_state(enabled=True)
+        await self.start_api_gateway(self.kernel.global_cfg, self.kernel.secrets)
+        if self.kernel.api_gateway is None:
+            return False, "API Gateway failed to start."
+        return True, f"API Gateway started on {self.api_gateway_base_url()}."
+
+    async def stop_api_gateway_runtime(self, timeout: float = 5.0) -> tuple[bool, str]:
+        self.kernel.enable_api_gateway = False
+        self._save_api_gateway_state(enabled=False)
+        if self.kernel.api_gateway is None:
+            return True, "API Gateway is already stopped."
+        await self.stop_api_gateway(timeout=timeout)
+        return True, "API Gateway stopped."
+
+    def set_api_gateway_default_model(self, model: str) -> tuple[bool, str]:
+        normalized = str(model or "").strip()
+        if normalized not in available_gateway_models():
+            return False, f"Unknown API gateway model: {model}"
+        self._save_api_gateway_state(default_model=normalized)
+        if self.kernel.api_gateway is not None:
+            self.kernel.api_gateway.set_default_model(normalized)
+        return True, f"API Gateway default model set to {normalized}."
 
     def start_scheduler(self, global_cfg):
         self.kernel.scheduler = TaskScheduler(

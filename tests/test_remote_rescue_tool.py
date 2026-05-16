@@ -156,6 +156,46 @@ def test_start_can_send_shared_token_headers(monkeypatch):
     assert seen_headers[0]["X-Hashi-Auth-Scheme"] == "hashi-shared-hmac-v1"
 
 
+def test_restart_success_passes_reason(monkeypatch):
+    monkeypatch.setattr(remote_rescue, "_load_instances", _instances)
+    seen_payloads = []
+
+    def fake_request(url, **kwargs):
+        if url.endswith("/health"):
+            return remote_rescue.HttpResult(200, {"ok": True}, url)
+        if url.endswith("/control/hashi/restart"):
+            seen_payloads.append(kwargs["payload"])
+            return remote_rescue.HttpResult(200, {"ok": True, "restarted": True}, url)
+        raise AssertionError(url)
+
+    monkeypatch.setattr(remote_rescue, "_request_json_status", fake_request)
+
+    code, payload = remote_rescue.rescue_restart("HASHI9", reason="operator restart")
+
+    assert code == 0
+    assert payload["restarted"] is True
+    assert seen_payloads == [{"reason": "operator restart"}]
+
+
+def test_restart_returns_unsupported_for_old_remote(monkeypatch):
+    monkeypatch.setattr(remote_rescue, "_load_instances", _instances)
+
+    def fake_request(url, **kwargs):
+        if url.endswith("/health"):
+            return remote_rescue.HttpResult(200, {"ok": True}, url)
+        if url.endswith("/control/hashi/restart"):
+            return remote_rescue.HttpResult(404, {"ok": False}, url)
+        raise AssertionError(url)
+
+    monkeypatch.setattr(remote_rescue, "_request_json_status", fake_request)
+
+    code, payload = remote_rescue.rescue_restart("HASHI9", reason="operator restart")
+
+    assert code == remote_rescue.EXIT_UNSUPPORTED
+    assert payload["supported"] is False
+    assert payload["endpoint"] == "/control/hashi/restart"
+
+
 def test_logs_returns_remote_tail(monkeypatch):
     monkeypatch.setattr(remote_rescue, "_load_instances", _instances)
 
