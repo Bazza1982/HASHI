@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "mode": "agentic_with_light_rails",
+  "purpose": "Shared superloop orchestration guidance. This is a compass, not a rigid rule engine.",
+  "principles": [
+    {
+      "id": "orchestrate_do_not_busy_wait",
+      "guidance": "Send the task, record the expected reply, then keep the orchestrator free to process incoming reports. Avoid long blocking waits."
+    },
+    {
+      "id": "check_incoming_before_probe",
+      "guidance": "Before declaring a worker silent or a service down, check incoming replies, protocol inflight state, status board entries, and recent events."
+    },
+    {
+      "id": "preserve_worker_ownership_by_default",
+      "guidance": "Keep the assigned worker as the execution owner. Use other agents as reviewers or evidence sources unless ownership is explicitly reassigned."
+    },
+    {
+      "id": "classify_stale_or_contradictory_reports",
+      "guidance": "Treat old command ids, superseded errors, or contradictory assist reports as classified evidence, not automatic blockers."
+    },
+    {
+      "id": "smallest_safe_next_action",
+      "guidance": "Convert each blocker into the smallest safe next action instead of rerunning the whole workflow."
+    },
+    {
+      "id": "record_resume_evidence",
+      "guidance": "Record enough state, events, and evidence for another agent to resume without relying on chat memory."
+    }
+  ],
+  "tick_checklist": [
+    "Did I check incoming replies/status before probing?",
+    "Am I preserving worker ownership by default?",
+    "Is this wait short, purposeful, and interruptible?",
+    "Is the next action the smallest safe action?",
+    "Did I record enough evidence for safe resume?"
+  ],
+  "hard_stops": [
+    {
+      "id": "no_shutdown_without_explicit_authorization",
+      "rule": "Do not shut down, reboot, kill, or stop a protected core instance unless the operator explicitly authorizes that exact target and scope."
+    },
+    {
+      "id": "no_secret_logging",
+      "rule": "Do not log secrets, bearer tokens, shared tokens, private keys, or credential bodies."
+    },
+    {
+      "id": "no_final_close_without_exit_evidence",
+      "rule": "Do not close a superloop until the concrete exit condition has evidence recorded."
+    },
+    {
+      "id": "no_unscoped_destructive_remote_action",
+      "rule": "Do not perform destructive remote actions without a scoped command, target, rollback or recovery path, and safety boundary."
+    }
+  ],
+  "non_goals": [
+    "Do not turn superloops into a rigid rule engine.",
+    "Do not block useful agentic judgment with excessive validation.",
+    "Do not require a helper script before every action."
+  ]
+}

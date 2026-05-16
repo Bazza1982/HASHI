@@ -38,6 +38,15 @@ implements; the reviewer verifies and tries to break the result.
 
 ## Non-Negotiable Gates
 
+Before starting, read the shared balanced orchestration guidance:
+
+```text
+superloops/config/orchestration_guidance.json
+```
+
+Use it as a compass, not a rigid rule engine. Preserve agentic flexibility, but
+keep the hard stops for safety.
+
 ### G1 Scope And Baseline
 
 Before editing:
@@ -98,6 +107,19 @@ For every blocker:
 - ask reviewer to confirm if the fix changes their review surface
 
 Do not close while blockers remain.
+
+### G5.5 Orchestration Hygiene
+
+The orchestrator should keep the loop moving without becoming a busy wait:
+
+- check worker/reviewer replies and state before running new probes
+- preserve worker ownership unless reassignment is intentional
+- classify stale or contradictory reports before acting on them
+- turn blockers into the smallest safe next action
+- record resume evidence in the loop state or evidence log
+
+Reviewer and consultant agents may challenge the plan, but they should not take
+over the worker's write scope unless the orchestrator explicitly reassigns it.
 
 ### G6 Runtime Or Live Verification
 
