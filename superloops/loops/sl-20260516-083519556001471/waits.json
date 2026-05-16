@@ -52,7 +52,7 @@
     "target": "agent1@INTEL",
     "command_id": "sl-20260516-083519556001471-staging-001",
     "entered_at": "2026-05-16T08:47:00Z",
-    "status": "superseded_by_staging_002_due_to_missing_python_3_11",
+    "status": "received_superseded_blocked_by_missing_python_3_11",
     "expected_fields": [
       "report_type",
       "target_instance",

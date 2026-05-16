@@ -222,6 +222,37 @@ mode: staging check only, do not install
 reason: Intel has Python 3.12 and 3.14, no Python 3.11
 ```
 
+### agent1 Staging-001 Reply
+
+Received after `staging-002` had already been issued.
+
+```text
+report_type: watchtower_intel_staging_check
+command_id: sl-20260516-083519556001471-staging-001
+artifact_sha256:
+  expected: e5e04c41a75f01cf5c4bc993a57e7b7f78cf9fb97a3ca2729c7c047552414e5c
+  actual:   e5e04c41a75f01cf5c4bc993a57e7b7f78cf9fb97a3ca2729c7c047552414e5c
+  result: match
+extract_path: C:\Users\Print\HASHI\tmp\watchtower_install_staging\extract
+py_compile: blocked, py -3.11 missing
+remote_help: blocked, py -3.11 missing
+install_script_present: true
+agents_json:
+  instance_id: WATCHTOWER
+  remote_port: 43766
+  agents: []
+existing_watchtower_service_status: not present
+go_no_go: blocked
+```
+
+Decision:
+
+```text
+This is not a package failure. It is the expected failure mode from the
+superseded staging-001 command that used py -3.11. Current valid check remains
+staging-002, which uses py -3.12.
+```
+
 ## Install Evidence
 
 Pending.
