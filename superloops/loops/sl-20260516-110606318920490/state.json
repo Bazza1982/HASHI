@@ -112,10 +112,10 @@
   "next_action": {
     "kind": "await_hchat_reply_with_deadline",
     "task_id": "step-007",
-    "command_id": "sl-20260516-110606318920490-service-repair-001",
-    "target": "agent4@MSI",
-    "deadline_at": "2026-05-16T12:12:00Z",
-    "fallback": "probe MSI-WT health directly and escalate service-only repair to another active MSI agent"
+    "command_id": "sl-20260516-110606318920490-service-repair-002",
+    "target": "agent5@MSI",
+    "deadline_at": "2026-05-16T12:17:00Z",
+    "fallback": "probe MSI-WT health directly and inspect/repair firewall or service config through another active MSI agent"
   },
-  "updated_at": "2026-05-16T12:09:00Z"
+  "updated_at": "2026-05-16T12:13:00Z"
 }
