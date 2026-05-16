@@ -266,3 +266,18 @@ secrets.json exists?
 HashiWatchtower service exists?
 nssm.exe exists?
 ```
+
+## Agent3 Install State Inspection Request
+
+`agent3@MSI` returned a staging execution summary after install had already been
+requested. Zelda asked `agent3@MSI` to perform read-only install state
+inspection:
+
+```text
+command_id: sl-20260516-110606318920490-install-inspect-001
+mode: read-only
+checks: C:\Projects\WatchTower, .venv, secrets.json, instances.json,
+        bin\nssm.exe, HashiWatchtower service, port 43766, logs
+service changes authorized: false
+shutdown authorized: false
+```
