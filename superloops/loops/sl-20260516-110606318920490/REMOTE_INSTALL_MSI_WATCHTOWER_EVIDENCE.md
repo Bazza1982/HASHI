@@ -75,6 +75,15 @@ service_change_authorized: false
 shutdown_authorized: false
 ```
 
+Staging v2 follow-up:
+
+```text
+agent3@MSI route check: ok
+active staging archive stat: exists, size 86649, sha256 matched
+follow-up sent: yes
+install_authorized: false
+```
+
 ## Active Follow-Up
 
 The preflight/staging wait deadline was reached without a visible reply in the

@@ -130,7 +130,8 @@
     "controller_probe": "stat C:\\Projects\\HASHI\\tmp\\watchtower_install_staging archive; hchat route check agent3@MSI",
     "follow_up_message": "Request staging-v2 status for sl-20260516-110606318920490-staging-002; no install or shutdown.",
     "escalation_if_no_reply": "ask operator to check agent3 because preflight replied but staging-v2 did not",
-    "status": "waiting",
+    "status": "follow_up_sent_after_controller_probe",
+    "follow_up_sent_at": "2026-05-16T11:41:00Z",
     "expected_fields": [
       "report_type",
       "command_id",
