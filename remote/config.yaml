@@ -12,9 +12,9 @@ server:
 lifecycle:
   # Remote starts by default unless explicitly disabled with /remote off.
   remote_enabled: true
-  # This instance runs Hashi Remote as the standalone Watchtower sidecar. Do not
-  # spawn a duplicate child Remote from the HASHI core when the supervisor is
-  # responsible for the sidecar lifecycle.
+  # HASHI9 runs its own Hashi Remote under the external supervisor/service.
+  # The separate WatchTower project has its own repo, service, instance id,
+  # and port; do not treat this HASHI repo as the WatchTower runtime.
   remote_supervised: true
 
 security:
