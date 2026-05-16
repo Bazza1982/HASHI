@@ -359,6 +359,87 @@ mode: read-only inspection
 reason: agent1 install report overdue and WatchTower health probe timed out
 ```
 
+### agent1 Follow-Up Reply
+
+```text
+report_type: watchtower_intel_install_followup
+command_id: sl-20260516-083519556001471-install-followup-001
+install_001_status: blocked
+service: HashiWatchtower does not exist
+port_43766: no listener
+final_root: C:\Users\Print\projects\WatchTower exists
+venv_python: exists
+bin\nssm.exe: missing
+health: unable to connect
+logs: no service/runtime logs because service was not created
+blocker: NSSM missing; install script failed before service creation
+```
+
+### NSSM Fix
+
+```text
+source: https://nssm.cc/release/nssm-2.24.zip
+selected: win64/nssm.exe
+target: C:\Users\Print\projects\WatchTower\bin\nssm.exe
+size: 331264
+sha256: f689ee9af94b00e9e3f0bb072b34caaf207f32dcb4f5782fc9ca351df9a06c97
+remote_stat: verified
+```
+
+Service retry sent:
+
+```text
+command_id: sl-20260516-083519556001471-service-retry-001
+delivery: cached API 192.168.0.6:18802
+action: rerun service-install portion only
+```
+
+### HASHI1 Health Probe After NSSM Fix
+
+```text
+url: http://192.168.0.6:43766/health
+ok: true
+instance_id: WATCHTOWER_INTEL
+display_name: HASHI WatchTower Intel
+remote_port: 43766
+capabilities:
+  - handshake_v2
+  - agent_directory_v1
+  - protocol_message_v1
+  - agent_reply_v1
+  - rescue_control
+  - rescue_start
+  - file_transfer_hmac_v1
+  - message_attachments_v1
+shared_token_configured: false
+```
+
+Rescue endpoint smoke before token fix:
+
+```text
+/control/hashi/status: 401
+/control/hashi/logs: 401
+/control/hashi/start: 401
+```
+
+### Token Fix
+
+Standalone WatchTower package intentionally excluded real `secrets.json`. After
+health confirmed the service was running, HASHI1 pushed a minimal
+`secrets.json` with only `hashi_remote_shared_token` to:
+
+```text
+C:\Users\Print\projects\WatchTower\secrets.json
+```
+
+The token value was not logged or committed. Restart requested:
+
+```text
+command_id: sl-20260516-083519556001471-token-restart-001
+delivery: cached API 192.168.0.6:18802
+action: Restart-Service HashiWatchtower; then report health/status/logs
+```
+
 ## Broadcast Evidence
 
 Pending.
