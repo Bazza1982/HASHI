@@ -26,6 +26,10 @@
     {
       "id": "record_resume_evidence",
       "guidance": "Record enough state, events, and evidence for another agent to resume without relying on chat memory."
+    },
+    {
+      "id": "drain_before_close",
+      "guidance": "Before final closeout, drain and classify pending worker/reviewer replies for the loop id. Stale or superseded replies should become recorded evidence, not user-facing replay, unless they introduce a new blocker or contradiction."
     }
   ],
   "tick_checklist": [
@@ -33,7 +37,8 @@
     "Am I preserving worker ownership by default?",
     "Is this wait short, purposeful, and interruptible?",
     "Is the next action the smallest safe action?",
-    "Did I record enough evidence for safe resume?"
+    "Did I record enough evidence for safe resume?",
+    "Before closeout, did I drain/classify same-loop worker/reviewer replies?"
   ],
   "hard_stops": [
     {
@@ -47,6 +52,10 @@
     {
       "id": "no_final_close_without_exit_evidence",
       "rule": "Do not close a superloop until the concrete exit condition has evidence recorded."
+    },
+    {
+      "id": "no_final_close_with_unclassified_same_loop_replies",
+      "rule": "Do not close a superloop while same-loop worker/reviewer replies are queued but unclassified. Drain or classify them as current, superseded, already-accounted-for, contradiction, or blocker evidence first."
     },
     {
       "id": "no_unscoped_destructive_remote_action",

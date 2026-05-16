@@ -134,6 +134,21 @@ If live verification cannot be performed, record the reason as residual risk.
 Commit when the change is coherent, scoped, and verified enough for its
 purpose. Stage only files that belong to the checkpoint.
 
+Before final closeout, the orchestrator must perform an inbox drain barrier:
+
+- check queued worker/reviewer replies for the loop id
+- check recent hchat replies, message logs, taskboard updates, and loop events
+- classify every pending reply as current evidence, superseded evidence,
+  already-accounted-for evidence, contradiction, or new blocker
+- record stale or superseded replies in the loop events/evidence log without
+  surfacing them as new user-facing status unless they change the outcome
+- reopen or pause the loop if a late reply contains a new blocker,
+  contradictory evidence, or a missing acceptance requirement
+
+Do not treat a loop as closed merely because commits exist. Close only after
+the exit evidence is recorded and pending same-loop replies have been drained
+or classified.
+
 The final closeout must include:
 
 - commit SHA, if committed
@@ -141,6 +156,7 @@ The final closeout must include:
 - checks run
 - live verification, if applicable
 - reviewer result
+- inbox drain/classification result
 - remaining risks
 - exit condition status
 
@@ -156,7 +172,9 @@ The final closeout must include:
 8. Fix blockers and rerun checks.
 9. Run live verification when required.
 10. Commit scoped checkpoint.
-11. Final acceptance: exit condition met, no blockers, evidence recorded.
+11. Drain and classify pending worker/reviewer replies for the loop id.
+12. Final acceptance: exit condition met, no blockers, evidence recorded, no
+    unclassified pending same-loop replies.
 
 ## Anti-Patterns
 
@@ -168,3 +186,7 @@ The final closeout must include:
 - Creating excessive harnesses while the critical path remains unverified.
 - Continuing to add infrastructure after a working state appears before
   freezing the working checkpoint.
+- Closing while worker/reviewer hchat replies for the same loop remain queued,
+  unclassified, or unsurfaced.
+- Responding one-by-one to stale post-close hchat replies instead of recording
+  them as superseded/late evidence unless they introduce a new blocker.

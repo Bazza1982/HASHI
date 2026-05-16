@@ -63,7 +63,9 @@ def _help_text() -> str:
         "/superloop task add <loop_id> <title>\n"
         "/superloop issue add <loop_id> <title>\n"
         "/superloop wait add <loop_id> <kind> [deadline-iso]\n\n"
-        "ℹ️ wait 默认超时策略: on_timeout=advance（不自动开 issue）"
+        "ℹ️ wait 默认超时策略: on_timeout=advance（不自动开 issue）\n"
+        "🔒 Closeout 提醒: final 前必须 drain/classify 同 loop 的 worker/reviewer replies；"
+        "close 后的 stale replies 只记录为 late/superseded evidence，除非带来新 blocker。"
     )
 
 
@@ -139,7 +141,9 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
                 "下一步建议：\n"
                 f"1) `/superloop status {loop_id}`\n"
                 f"2) `/superloop next {loop_id}`\n"
-                f"3) `/superloop wait add {loop_id} sleep_until <ISO时间>`"
+                f"3) `/superloop wait add {loop_id} sleep_until <ISO时间>`\n\n"
+                "Closeout guard: final 前请先 drain/classify 同 loop 的 worker/reviewer replies，"
+                "避免旧 hchat reply 在 close 后逐条回放。"
             ),
             parse_mode="Markdown",
         )
