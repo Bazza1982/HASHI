@@ -1,0 +1,43 @@
+[
+  {
+    "issue_id": "issue-001",
+    "title": "Live /restart did not reach WatchTower supervised restart",
+    "status": "closed",
+    "severity": "blocker",
+    "evidence": [
+      "No new HASHI9 main.py start time",
+      "No new HASHI9 remote start time",
+      "No WatchTower state/restarts entry",
+      "No WatchTower remote_rescue_audit entry",
+      "No WatchTower stdout stop/start/verify/restarted entry",
+      "hashiko processed req-0004 at 09:13:39"
+    ],
+    "resolution": "Initial report was explained by old HASHI9 runtime not loading /restart. WatchTower restart route later executed successfully after launcher fixes.",
+    "closed_by": "restart-fc7fbc153e484337b789a4386be9f075"
+  },
+  {
+    "issue_id": "issue-002",
+    "title": "WatchTower service-context startup did not restore HASHI9 healthy",
+    "status": "closed",
+    "severity": "blocker",
+    "evidence": [
+      "restart-25749a00e09548439410f92220755f88 failed_verify with bridge_ctl start",
+      "restart-4a0f6144c3bc4b9a9c4dfa4f7b9e6b99 showed direct bridge-u.bat lacked claude PATH and did not become healthy",
+      "restart-8a250dbe1abb4d29ba5e3bcbc2cf5141 failed_verify with PowerShell bridge_ctl in service context"
+    ],
+    "resolution": "WatchTower now starts HASHI9 via fixed direct python main.py launcher with service-safe PATH and BRIDGE_HOME.",
+    "closed_by": "restart-fc7fbc153e484337b789a4386be9f075"
+  },
+  {
+    "issue_id": "issue-003",
+    "title": "Direct launcher initially used repo root instead of hashi9-home",
+    "status": "closed",
+    "severity": "major",
+    "evidence": [
+      "restart-352de460955c41c19040220658fc0835 completed but api_gateway_enabled=false",
+      "C:\\Users\\thene\\hashi9-home\\api_gateway_state.json had enabled=true and default_model=claude-haiku-4-5"
+    ],
+    "resolution": "WatchTower now infers C:\\Users\\thene\\hashi9-home when present and passes it as --bridge-home.",
+    "closed_by": "restart-fc7fbc153e484337b789a4386be9f075"
+  }
+]
