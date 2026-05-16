@@ -5811,28 +5811,28 @@ class FlexibleAgentRuntime:
         props = peer.get("properties") or {}
         _rank, presence, state = self._remote_peer_presence(peer)
         instance_id = html.escape(str(peer.get("instance_id") or "unknown"))
-        port = html.escape(str(peer.get("port") or "?"))
-        backend = html.escape(str(props.get("preferred_backend") or props.get("discovery") or "unknown"))
         agents = len(props.get("remote_agents") or [])
-        directory_state = html.escape(str(props.get("directory_state") or (props.get("remote_agent_directory") or {}).get("directory_state") or "unknown"))
-        snapshot_version = html.escape(str(props.get("agent_snapshot_version") or (props.get("remote_agent_directory") or {}).get("version") or ""))
         last_handshake = html.escape(self._format_remote_age(props.get("last_handshake_at")))
         last_seen_ok = html.escape(self._format_remote_age(props.get("last_seen_ok")))
-        state_safe = html.escape(state)
-        endpoint_lines = self._render_remote_peer_endpoints(peer)
-        lines = [
-            f"{presence} <b>{instance_id}</b>",
-            *endpoint_lines,
-            f"backend: <code>{backend}</code>  ·  port: <code>{port}</code>  ·  agents: <code>{agents}</code>",
-            f"directory: <code>{directory_state}</code>" + (f"  ·  snapshot: <code>{snapshot_version}</code>" if snapshot_version else ""),
-            f"state: <code>{state_safe}</code>  ·  last handshake: <code>{last_handshake}</code>  ·  last seen: <code>{last_seen_ok}</code>",
-        ]
-        last_error = html.escape(str(props.get("last_error") or "").strip())
-        if last_error:
-            lines.append(f"error: <code>{last_error}</code>")
-        refresh_error = html.escape(str(props.get("last_refresh_error") or "").strip())
-        if refresh_error:
-            lines.append(f"refresh: <code>{refresh_error}</code>")
+        lines = [f"{presence} <b>{instance_id}</b>"]
+        if presence != "🔴 offline":
+            endpoint_lines = list(self._render_remote_peer_endpoints(peer))
+            if endpoint_lines:
+                endpoint_lines[0] += f"  ·  agents: <code>{agents}</code>"
+            else:
+                endpoint_lines = [f"agents: <code>{agents}</code>"]
+            lines.extend(endpoint_lines)
+        if last_seen_ok != "n/a":
+            lines.append(f"seen: <code>{last_seen_ok}</code>")
+        elif last_handshake != "n/a" and state not in {"unknown", "self"}:
+            lines.append(f"last handshake: <code>{last_handshake}</code>")
+        if presence != "🔴 offline":
+            last_error = html.escape(str(props.get("last_error") or "").strip())
+            if last_error:
+                lines.append(f"error: <code>{last_error}</code>")
+            refresh_error = html.escape(str(props.get("last_refresh_error") or "").strip())
+            if refresh_error:
+                lines.append(f"refresh: <code>{refresh_error}</code>")
         return lines
 
     def _load_remote_instances(self) -> dict[str, dict[str, Any]]:

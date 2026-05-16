@@ -142,6 +142,7 @@ class ProtocolHandshakePayload(BaseModel):
     platform: Optional[str] = None             # Sender's platform
     host_identity: Optional[str] = None
     environment_kind: Optional[str] = None
+    remote_supervisor: dict = {}
     address_candidates: list[dict] = []
     observed_candidates: list[dict] = []
 
@@ -299,6 +300,19 @@ def _post_json_with_optional_hmac(url: str, payload: dict[str, Any], *, timeout:
 
 
 def _process_exists(pid: int) -> bool:
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            kernel32 = ctypes.windll.kernel32
+            process_query_limited_information = 0x1000
+            handle = kernel32.OpenProcess(process_query_limited_information, False, int(pid))
+            if handle:
+                kernel32.CloseHandle(handle)
+                return True
+            return False
+        except Exception:
+            return False
     try:
         os.kill(pid, 0)
         return True
@@ -328,12 +342,27 @@ def _read_hashi_pid_state() -> dict[str, Any]:
     return state
 
 
+def _sanitize_rescue_reason(reason: str | None, *, limit: int = 500) -> dict[str, Any]:
+    raw = "" if reason is None else str(reason)
+    collapsed = " ".join(raw.replace("\r", " ").replace("\n", " ").split())
+    trimmed = collapsed[:limit]
+    return {
+        "reason": trimmed,
+        "provided": bool(raw.strip()),
+        "truncated": len(collapsed) > limit,
+        "original_length": len(collapsed),
+    }
+
+
 def _hashi_start_command() -> list[str]:
     if not _hashi_root:
         raise ValueError("Hashi root is unavailable")
     root = Path(_hashi_root)
     system = platform.system().lower()
     if system == "windows":
+        bat = root / "bin" / "bridge-u.bat"
+        if bat.exists():
+            return ["cmd.exe", "/c", str(bat), "--resume-last", "--no-pause"]
         ctl = root / "bin" / "bridge_ctl.ps1"
         if ctl.exists():
             return [
@@ -347,12 +376,9 @@ def _hashi_start_command() -> list[str]:
                 "start",
                 "-Resume",
             ]
-        bat = root / "bin" / "bridge-u.bat"
-        if bat.exists():
-            return ["cmd.exe", "/c", str(bat), "--resume-last", "--no-pause"]
     launcher = root / "bin" / "bridge-u.sh"
     if launcher.exists():
-        return [str(launcher), "--resume-last"]
+        return [str(launcher), "--resume-last", "--api-gateway"]
     raise FileNotFoundError("No supported HASHI launcher found under bin/")
 
 
@@ -371,6 +397,9 @@ def _start_hashi_process() -> dict[str, Any]:
         "stderr": subprocess.STDOUT,
     }
     if platform.system().lower() == "windows":
+        env = os.environ.copy()
+        env.setdefault("HASHI_ENABLE_LEGACY_FIXED_RUNTIME", "1")
+        kwargs["env"] = env
         flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
         if flags:
             kwargs["creationflags"] = flags
@@ -384,6 +413,8 @@ def _start_hashi_process() -> dict[str, Any]:
         "pid": proc.pid,
         "command": cmd,
         "log_path": str(log_path),
+        "launcher_kind": Path(cmd[0]).name.lower(),
+        "platform": platform.system().lower(),
     }
 
 
@@ -391,6 +422,8 @@ def _append_rescue_audit(
     *,
     requester: str,
     reason: str | None,
+    reason_truncated: bool = False,
+    reason_original_length: int | None = None,
     outcome: str,
     command: list[str] | None = None,
     pid: int | None = None,
@@ -406,6 +439,8 @@ def _append_rescue_audit(
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "requester": requester,
         "reason": reason,
+        "reason_truncated": bool(reason_truncated),
+        "reason_original_length": reason_original_length,
         "command": command,
         "pid": pid,
         "log_path": log_path,
@@ -430,11 +465,48 @@ def _read_rescue_log(name: str, tail: int = 120) -> dict[str, Any]:
     if key not in files:
         raise ValueError("log name must be one of: start, audit, supervisor")
     path = files[key]
-    max_lines = max(1, min(int(tail or 120), 500))
+    try:
+        requested_tail = int(tail)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("tail must be a positive integer") from exc
+    if requested_tail <= 0:
+        raise ValueError("tail must be a positive integer")
+    effective_tail = min(requested_tail, 1000)
+    truncated = requested_tail != effective_tail
     if not path.exists():
-        return {"ok": True, "name": key, "path": str(path), "exists": False, "lines": []}
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-max_lines:]
-    return {"ok": True, "name": key, "path": str(path), "exists": True, "lines": lines}
+        return {
+            "ok": True,
+            "name": key,
+            "path": str(path),
+            "exists": False,
+            "requested_tail": requested_tail,
+            "effective_tail": effective_tail,
+            "tail_truncated": truncated,
+            "lines": [],
+        }
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-effective_tail:]
+    return {
+        "ok": True,
+        "name": key,
+        "path": str(path),
+        "exists": True,
+        "requested_tail": requested_tail,
+        "effective_tail": effective_tail,
+        "tail_truncated": truncated,
+        "lines": lines,
+    }
+
+
+def _authenticate_rescue_control(request: Request, *, body_bytes: bytes = b"") -> str:
+    client_id, auth_reason = authenticate_request_detailed(
+        request,
+        body_bytes=body_bytes,
+        allow_lan=True,
+    )
+    if client_id:
+        return client_id
+    detail = "Not authenticated" if auth_reason == "auth_required" else "Invalid or expired token"
+    raise HTTPException(status_code=401, detail=detail)
 
 
 def _workbench_health_url() -> str:
@@ -946,24 +1018,26 @@ def create_app(
     # ── HASHI process rescue control ─────────────────────────
 
     @app.get("/control/hashi/status")
-    async def hashi_control_status(client_id: str = Depends(verify_token)):
+    async def hashi_control_status(request: Request):
         """Report whether the local HASHI core appears reachable."""
+        _authenticate_rescue_control(request)
         return _hashi_control_status()
 
     @app.get("/control/hashi/logs")
     async def hashi_control_logs(
+        request: Request,
         name: str = "start",
         tail: int = 120,
-        client_id: str = Depends(verify_token),
     ):
         """Return a bounded tail of fixed HASHI Remote rescue logs."""
+        _authenticate_rescue_control(request)
         try:
             return _read_rescue_log(name, tail=tail)
         except ValueError as exc:
             return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
 
     @app.post("/control/hashi/start")
-    async def hashi_control_start(payload: HashiStartPayload, client_id: str = Depends(verify_token)):
+    async def hashi_control_start(request: Request, payload: HashiStartPayload):
         """
         Start the local HASHI core through a fixed launcher command.
 
@@ -971,6 +1045,8 @@ def create_app(
         L3_RESTART because it is a rescue operation that creates a long-lived
         local process.
         """
+        body_bytes = await request.body()
+        client_id = _authenticate_rescue_control(request, body_bytes=body_bytes)
         if not _terminal_executor or not _terminal_executor.allows_level(AuthLevel.L3_RESTART):
             return JSONResponse(
                 status_code=403,
@@ -980,11 +1056,14 @@ def create_app(
                 },
             )
 
+        reason_meta = _sanitize_rescue_reason(payload.reason)
         current = _hashi_control_status()
         if current["hashi_running"] or current["pid_alive"]:
             _append_rescue_audit(
                 requester=client_id,
-                reason=payload.reason,
+                reason=reason_meta["reason"],
+                reason_truncated=reason_meta["truncated"],
+                reason_original_length=reason_meta["original_length"],
                 outcome="already_running",
                 pid=current.get("pid"),
                 status=current,
@@ -993,6 +1072,8 @@ def create_app(
                 "ok": True,
                 "started": False,
                 "already_running": True,
+                "reason": reason_meta["reason"],
+                "reason_truncated": reason_meta["truncated"],
                 "status": current,
             }
 
@@ -1002,7 +1083,9 @@ def create_app(
             logger.exception("HASHI rescue start failed")
             _append_rescue_audit(
                 requester=client_id,
-                reason=payload.reason,
+                reason=reason_meta["reason"],
+                reason_truncated=reason_meta["truncated"],
+                reason_original_length=reason_meta["original_length"],
                 outcome="failed",
                 status=current,
                 error=str(exc),
@@ -1015,10 +1098,12 @@ def create_app(
             await asyncio.sleep(0.5)
             status = _hashi_control_status()
 
-        logger.info("HASHI rescue start requested by %s reason=%s pid=%s", client_id, payload.reason, started["pid"])
+        logger.info("HASHI rescue start requested by %s reason=%s pid=%s", client_id, reason_meta["reason"], started["pid"])
         _append_rescue_audit(
             requester=client_id,
-            reason=payload.reason,
+            reason=reason_meta["reason"],
+            reason_truncated=reason_meta["truncated"],
+            reason_original_length=reason_meta["original_length"],
             outcome="started",
             command=started["command"],
             pid=started["pid"],
@@ -1031,6 +1116,10 @@ def create_app(
             "pid": started["pid"],
             "command": started["command"],
             "log_path": started["log_path"],
+            "launcher_kind": started.get("launcher_kind"),
+            "platform": started.get("platform"),
+            "reason": reason_meta["reason"],
+            "reason_truncated": reason_meta["truncated"],
             "status": status,
         }
 

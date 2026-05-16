@@ -45,7 +45,7 @@ $BridgeHome = if ($env:BRIDGE_HOME) { $env:BRIDGE_HOME } else { $ProjectDir }
 $BridgeHome = ([System.IO.Path]::GetFullPath($BridgeHome)).TrimEnd('\')
 $LockFile = Join-Path $BridgeHome ".bridge_u_f.lock"
 $PidFile = Join-Path $BridgeHome ".bridge_u_f.pid"
-$LauncherBat = Join-Path $ProjectDir "bridge-u.bat"
+$LauncherBat = Join-Path $ScriptDir "bridge-u.bat"
 $MainPyPath = Join-Path $ProjectDir "main.py"
 $AgentsJson = Join-Path $BridgeHome "agents.json"
 if (-not (Test-Path $AgentsJson)) { $AgentsJson = Join-Path $ProjectDir "agents.json" }
@@ -189,8 +189,17 @@ function Get-BridgeProcesses {
                 if ($child -ne $selfPid -and $child -ne $parentPid -and -not $targets.ContainsKey($child)) {
                     $p = $allProcs | Where-Object { $_.ProcessId -eq $child } | Select-Object -First 1
                     if ($p) {
-                        $targets[$child] = @{ Name = $p.Name; Cmd = $p.CommandLine; Type = "child" }
-                        $queue.Enqueue($child)
+                        $childName = [string]$p.Name
+                        $childCmd = [string]$p.CommandLine
+                        $isBridgeChild =
+                            ($childName -ieq 'python.exe' -or $childName -ieq 'py.exe') -and (Test-BridgeCommandLine $childCmd)
+                        $isLauncherChild =
+                            ($childName -ieq 'cmd.exe') -and (Test-LauncherCommandLine $childCmd)
+                        $isConsoleChild = $childName -ieq 'conhost.exe'
+                        if ($isBridgeChild -or $isLauncherChild -or $isConsoleChild) {
+                            $targets[$child] = @{ Name = $p.Name; Cmd = $p.CommandLine; Type = "child" }
+                            $queue.Enqueue($child)
+                        }
                     }
                 }
             }
@@ -386,7 +395,19 @@ function Start-Bridge {
         # Use a single cmd /c command string so bridge-u.bat receives args consistently.
         $argString = $args -join ' '
         $cmdLine = "`"$LauncherBat`" $argString"
-        Start-Process -FilePath "cmd.exe" -ArgumentList "/c $cmdLine" -WorkingDirectory $ProjectDir
+        $previousLegacyFlag = $env:HASHI_ENABLE_LEGACY_FIXED_RUNTIME
+        if (-not $previousLegacyFlag) {
+            $env:HASHI_ENABLE_LEGACY_FIXED_RUNTIME = "1"
+        }
+        try {
+            Start-Process -FilePath "cmd.exe" -ArgumentList "/c $cmdLine" -WorkingDirectory $ProjectDir
+        } finally {
+            if ($previousLegacyFlag) {
+                $env:HASHI_ENABLE_LEGACY_FIXED_RUNTIME = $previousLegacyFlag
+            } else {
+                Remove-Item Env:\HASHI_ENABLE_LEGACY_FIXED_RUNTIME -ErrorAction SilentlyContinue
+            }
+        }
         
         # Wait for startup
         for ($i = 0; $i -lt 30; $i++) {

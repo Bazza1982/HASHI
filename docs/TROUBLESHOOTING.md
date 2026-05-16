@@ -22,10 +22,11 @@
 - [ ] Same-host HASHI instances do not share the same `remote_port`
 
 ### HASHI API / API Gateway ownership
-- [ ] `curl http://127.0.0.1:<workbench_port>/api/health` returns the expected `instance_id`
+- [ ] `curl http://<api_host>:<workbench_port>/api/health` returns the expected `instance_id`
 - [ ] `api_gateway_port` in `/api/health` matches the instance's expected gateway port
-- [ ] If `api_gateway_enabled` is true, `curl http://127.0.0.1:<api_gateway_port>/health` returns `{"status":"ok", ...}`
+- [ ] If `api_gateway_enabled` is true, `curl http://<api_host>:<api_gateway_port>/health` returns `{"status":"ok", ...}`
 - [ ] No other HASHI instance is listening on the same API Gateway port
+- [ ] In WSL, if `127.0.0.1` hangs but `10.255.255.254` works, use the `10.255.255.254` address reported by `/api/health` or startup logs
 
 ### Workbench UI "no reaction" symptom
 - [ ] `http://127.0.0.1:3001/api/config` returns JSON

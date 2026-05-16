@@ -571,6 +571,7 @@ class ProtocolManager:
                 "platform": self._instance_info.get("platform") or "unknown",
                 "host_identity": local_profile.get("host_identity"),
                 "environment_kind": local_profile.get("environment_kind"),
+                "remote_supervisor": dict(self._instance_info.get("remote_supervisor") or {}),
                 "address_candidates": list(local_profile.get("address_candidates") or []),
                 "observed_candidates": list(local_profile.get("observed_candidates") or []),
             }
@@ -627,6 +628,7 @@ class ProtocolManager:
                             capabilities=list(result.get("capabilities") or []),
                             remote_agents=list(result.get("agents") or []),
                             remote_agent_directory=dict(result.get("agent_directory") or {}),
+                            remote_supervisor=dict(result.get("remote_supervisor") or {}),
                         )
                         succeeded = True
                         break
@@ -673,6 +675,7 @@ class ProtocolManager:
                     "observed_candidates": list(payload.get("observed_candidates") or []),
                     "host_identity": _normalize_identity(payload.get("host_identity") or ""),
                     "environment_kind": str(payload.get("environment_kind") or "").strip().lower(),
+                    "remote_supervisor": dict(payload.get("remote_supervisor") or {}),
                     "agent_snapshot_version": str((payload.get("agent_directory") or {}).get("version") or ""),
                     "directory_state": str((payload.get("agent_directory") or {}).get("directory_state") or ""),
                 },
@@ -698,6 +701,7 @@ class ProtocolManager:
             "platform": self._instance_info.get("platform") or "unknown",
             "host_identity": local_profile.get("host_identity"),
             "environment_kind": local_profile.get("environment_kind"),
+            "remote_supervisor": dict(self._instance_info.get("remote_supervisor") or {}),
             "address_candidates": list(local_profile.get("address_candidates") or []),
             "observed_candidates": list(local_profile.get("observed_candidates") or []),
         }

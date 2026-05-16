@@ -29,7 +29,7 @@ from remote.peer.lan import _service_info_to_peer
 from remote.peer.registry import PeerRegistry
 from remote.peer.tailscale import TailscaleDiscovery
 from remote.protocol_manager import ProtocolManager
-from remote.live_endpoints import read_live_endpoints, remove_live_endpoint, write_live_endpoints
+from remote.live_endpoints import read_live_endpoints, remove_live_endpoint, write_live_endpoint, write_live_endpoints
 from tools.hchat_send import parse_hchat_message
 
 
@@ -50,6 +50,18 @@ class _RemoteRenderDummy:
 class _RemoteConfigDummy:
     _remote_config_snapshot = FlexibleAgentRuntime._remote_config_snapshot
     _remote_urls = FlexibleAgentRuntime._remote_urls
+
+
+class _RemoteListDummy:
+    _format_remote_age = FlexibleAgentRuntime._format_remote_age
+    _remote_peer_presence = FlexibleAgentRuntime._remote_peer_presence
+    _render_remote_peer_block = FlexibleAgentRuntime._render_remote_peer_block
+
+    def __init__(self):
+        self._instances = {}
+
+    def _render_remote_peer_endpoints(self, peer):
+        return ["route: <code>127.0.0.1:8766</code>  ·  <code>same host</code>  ·  network: <code>100.64.100.6:8766</code>"]
 
 
 def test_registry_derives_offline_for_timed_out_peer_without_live_fields(tmp_path):
@@ -338,6 +350,52 @@ def test_registry_prefers_bootstrap_over_loopback_fallback_when_bootstrap_exists
     assert peer.properties["preferred_backend"] == "bootstrap"
 
 
+def test_handshake_success_does_not_clobber_lan_peer_with_loopback_fallback(tmp_path):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    (hashi_root / "instances.json").write_text(
+        json.dumps(
+            {
+                "instances": {
+                    "hashi2": {"instance_id": "HASHI2", "platform": "wsl"},
+                    "hashi9": {"instance_id": "HASHI9", "platform": "windows", "wsl_root": r"/mnt/c/Users/thene/projects/HASHI"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    registry = PeerRegistry(hashi_root, "HASHI2")
+    registry._observations["HASHI9"] = {
+        "lan": PeerInfo(
+            instance_id="HASHI9",
+            display_name="HASHI9",
+            host="192.168.0.211",
+            port=8767,
+            workbench_port=18819,
+            platform="windows",
+            properties={"discovery": "lan", "host_identity": "a9max", "environment_kind": "windows"},
+        ),
+        "bootstrap_fallback": PeerInfo(
+            instance_id="HASHI9",
+            display_name="HASHI9",
+            host="127.0.0.1",
+            port=60862,
+            workbench_port=18819,
+            platform="windows",
+            properties={"discovery": "bootstrap_fallback", "host_identity": "a9max", "environment_kind": "windows"},
+        ),
+    }
+
+    registry._rebuild_canonical_peers()
+    registry.mark_handshake_result("HASHI9", state="handshake_accepted")
+
+    peer = registry.get_peer("HASHI9")
+    assert peer is not None
+    assert peer.host == "192.168.0.211"
+    assert peer.port == 8767
+    assert peer.properties["preferred_backend"] == "lan"
+
+
 def test_registry_prunes_legacy_alias_when_new_identity_shares_same_endpoint(tmp_path):
     hashi_root = tmp_path / "hashi"
     hashi_root.mkdir()
@@ -579,6 +637,94 @@ def test_registry_load_state_rebuilds_stale_canonical_from_fresher_observation(t
         assert peer is not None
         assert peer.properties["live_status"] == "online"
         assert peer.properties["last_seen_ok"] == now
+    finally:
+        Path.home = original_home
+
+
+def test_registry_load_state_prefers_newer_inbound_route_over_stale_loopback_fallback(tmp_path):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    (hashi_root / "instances.json").write_text('{"instances": {}}', encoding="utf-8")
+    state_dir = tmp_path / "state-home-inbound"
+    state_dir.mkdir()
+    original_home = Path.home
+    Path.home = staticmethod(lambda: state_dir)
+    try:
+        state_path = state_dir / ".hashi-remote" / "peers_state_hashi2.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        now = int(time.time())
+        state_path.write_text(
+            json.dumps(
+                {
+                    "peers": {
+                        "HASHI9": {
+                            "canonical": {
+                                "instance_id": "HASHI9",
+                                "display_name": "HASHI9",
+                                "display_handle": "@hashi9",
+                                "host": "127.0.0.1",
+                                "port": 60862,
+                                "workbench_port": 18819,
+                                "platform": "windows",
+                                "protocol_version": "2.0",
+                                "capabilities": ["handshake_v2"],
+                                "properties": {
+                                    "discovery": "bootstrap_fallback",
+                                    "preferred_backend": "bootstrap_fallback",
+                                    "last_seen_ok": now - 300,
+                                    "route_observed_at": now - 300,
+                                    "live_status": "stale",
+                                },
+                            },
+                            "observations": {
+                                "bootstrap_fallback": {
+                                    "instance_id": "HASHI9",
+                                    "display_name": "HASHI9",
+                                    "display_handle": "@hashi9",
+                                    "host": "127.0.0.1",
+                                    "port": 60862,
+                                    "workbench_port": 18819,
+                                    "platform": "windows",
+                                    "protocol_version": "2.0",
+                                    "capabilities": ["handshake_v2"],
+                                    "properties": {
+                                        "discovery": "bootstrap_fallback",
+                                        "route_observed_at": now - 300,
+                                        "last_seen_ok": now - 300,
+                                        "live_status": "stale",
+                                    },
+                                },
+                                "handshake_inbound": {
+                                    "instance_id": "HASHI9",
+                                    "display_name": "@hashi9",
+                                    "display_handle": "@hashi9",
+                                    "host": "127.0.0.1",
+                                    "port": 35821,
+                                    "workbench_port": 18819,
+                                    "platform": "windows",
+                                    "protocol_version": "2.0",
+                                    "capabilities": ["handshake_v2"],
+                                    "properties": {
+                                        "discovery": "handshake_inbound",
+                                        "route_observed_at": now,
+                                        "host_identity": "a9max",
+                                        "environment_kind": "windows",
+                                    },
+                                },
+                            },
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        registry = PeerRegistry(hashi_root, "HASHI2")
+        peer = registry.get_peer("HASHI9")
+
+        assert peer is not None
+        assert peer.port == 35821
+        assert peer.properties["preferred_backend"] == "handshake_inbound"
     finally:
         Path.home = original_home
 
@@ -1155,6 +1301,38 @@ def test_remove_live_endpoint_removes_only_matching_instance(tmp_path):
     assert stat.S_IMODE(mode) == 0o600
 
 
+def test_write_live_endpoints_can_preserve_self_endpoint(tmp_path):
+    write_live_endpoint(
+        tmp_path,
+        PeerInfo(
+            instance_id="HASHI9",
+            display_name="HASHI9",
+            host="192.168.0.211",
+            port=35821,
+            workbench_port=18819,
+            platform="windows",
+        ),
+    )
+    write_live_endpoints(
+        tmp_path,
+        [
+            PeerInfo(
+                instance_id="HASHI2",
+                display_name="HASHI2",
+                host="192.168.0.211",
+                port=8767,
+                workbench_port=18802,
+                platform="wsl",
+            )
+        ],
+        preserve_existing=True,
+    )
+
+    endpoints = read_live_endpoints(tmp_path)
+    assert endpoints["hashi9"]["port"] == 35821
+    assert endpoints["hashi2"]["port"] == 8767
+
+
 def test_tailscale_discovery_uses_live_endpoint_port(monkeypatch, tmp_path):
     status_path = tmp_path / "tailscale.json"
     status_path.write_text(
@@ -1338,9 +1516,212 @@ def test_registry_prunes_legacy_alias_with_same_host_and_workbench(tmp_path):
     assert "hashi-desktop" not in pruned
 
 
+def test_registry_keeps_distinct_live_peers_with_same_host_and_workbench(tmp_path):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    (hashi_root / "instances.json").write_text(
+        json.dumps(
+            {
+                "instances": {
+                    "hashi2": {"instance_id": "HASHI2", "platform": "wsl"},
+                    "hashi1": {"instance_id": "HASHI1", "platform": "wsl"},
+                    "watchtower": {"instance_id": "WATCHTOWER", "platform": "wsl"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    registry = PeerRegistry(hashi_root, "HASHI2")
+    registry._observations = {
+        "HASHI1": {
+            "lan": PeerInfo(
+                instance_id="HASHI1",
+                display_name="HASHI1 (WSL)",
+                host="127.0.0.1",
+                port=8766,
+                workbench_port=18800,
+                platform="wsl",
+                protocol_version="2.0",
+                capabilities=["handshake_v2"],
+                properties={
+                    "discovery": "lan",
+                    "host_identity": "a9max",
+                    "environment_kind": "wsl",
+                    "last_seen_ok": int(time.time()),
+                    "handshake_state": "handshake_accepted",
+                    "live_status": "online",
+                    "address_candidates": [{"host": "192.168.0.211", "scope": "lan"}],
+                },
+            )
+        },
+        "WATCHTOWER": {
+            "lan": PeerInfo(
+                instance_id="WATCHTOWER",
+                display_name="HASHI Watchtower",
+                host="127.0.0.1",
+                port=35990,
+                workbench_port=18800,
+                platform="wsl",
+                protocol_version="2.0",
+                capabilities=["handshake_v2", "rescue_start"],
+                properties={
+                    "discovery": "lan",
+                    "host_identity": "a9max",
+                    "environment_kind": "wsl",
+                    "address_candidates": [{"host": "192.168.0.211", "scope": "lan"}],
+                },
+            )
+        },
+    }
+
+    registry._rebuild_canonical_peers()
+
+    assert set(registry._peers) == {"HASHI1", "WATCHTOWER"}
+    assert registry._prune_duplicate_peer_aliases() is False
+    assert set(registry._peers) == {"HASHI1", "WATCHTOWER"}
+
+
+def test_registry_keeps_distinct_live_instance_entries_with_same_host_and_workbench(tmp_path):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    (hashi_root / "instances.json").write_text('{"instances": {}}', encoding="utf-8")
+    registry = PeerRegistry(hashi_root, "HASHI2")
+
+    instances = {
+        "hashi1": {
+            "instance_id": "HASHI1",
+            "display_name": "HASHI1 (WSL)",
+            "platform": "wsl",
+            "api_host": "127.0.0.1",
+            "lan_ip": "192.168.0.211",
+            "remote_port": 8766,
+            "workbench_port": 18800,
+            "_discovery": "lan",
+            "protocol_version": "2.0",
+            "capabilities": ["handshake_v2"],
+            "host_identity": "a9max",
+            "environment_kind": "wsl",
+            "handshake_state": "handshake_accepted",
+            "live_status": "online",
+        },
+        "watchtower": {
+            "instance_id": "WATCHTOWER",
+            "display_name": "HASHI Watchtower",
+            "platform": "wsl",
+            "api_host": "127.0.0.1",
+            "lan_ip": "192.168.0.211",
+            "remote_port": 35990,
+            "workbench_port": 18800,
+            "_discovery": "lan",
+            "protocol_version": "2.0",
+            "capabilities": ["handshake_v2", "rescue_start"],
+            "host_identity": "a9max",
+            "environment_kind": "wsl",
+            "live_status": "online",
+        },
+    }
+
+    pruned, changed = registry._prune_duplicate_instance_aliases(instances)
+
+    assert changed is False
+    assert set(pruned) == {"hashi1", "watchtower"}
+
+
+def test_render_remote_peer_block_keeps_remote_list_compact():
+    dummy = _RemoteListDummy()
+    now = int(time.time())
+
+    lines = dummy._render_remote_peer_block(
+        {
+            "instance_id": "HASHI1",
+            "properties": {
+                "live_status": "online",
+                "handshake_state": "handshake_accepted",
+                "last_seen_ok": now - 11,
+                "last_handshake_at": now - 11,
+                "remote_agents": [{}] * 18,
+                "directory_state": "fresh",
+                "agent_snapshot_version": "8e7c4adabb8048e8",
+                "preferred_backend": "lan",
+            },
+            "capabilities": ["rescue_control"],
+        }
+    )
+
+    joined = "\n".join(lines)
+    assert "agents: <code>18</code>" in joined
+    assert "seen: <code>11s ago</code>" in joined
+    assert "backend:" not in joined
+    assert "directory:" not in joined
+    assert "snapshot:" not in joined
+    assert "state:" not in joined
+    assert "watchtower:" not in joined
+    assert "supervisor:" not in joined
+
+
+def test_render_remote_peer_block_shows_handshake_only_when_never_seen():
+    dummy = _RemoteListDummy()
+    now = int(time.time())
+
+    lines = dummy._render_remote_peer_block(
+        {
+            "instance_id": "INTEL",
+            "properties": {
+                "live_status": "offline",
+                "handshake_state": "handshake_timed_out",
+                "last_handshake_at": now - 20,
+                "remote_agents": [],
+            },
+            "capabilities": [],
+        }
+    )
+
+    joined = "\n".join(lines)
+    assert "last handshake: <code>20s ago</code>" in joined
+    assert "seen:" not in joined
+    assert "route:" not in joined
+    assert "addr:" not in joined
+    assert "agents:" not in joined
+
+
+def test_render_remote_peer_block_keeps_offline_rows_compact():
+    dummy = _RemoteListDummy()
+    now = int(time.time())
+
+    lines = dummy._render_remote_peer_block(
+        {
+            "instance_id": "MSI",
+            "host": "192.168.0.41",
+            "port": 8767,
+            "properties": {
+                "live_status": "offline",
+                "handshake_state": "handshake_timed_out",
+                "last_seen_ok": now - 300,
+                "last_handshake_at": now - 120,
+                "last_error": "connection refused",
+                "last_refresh_error": "refresh timed out",
+                "remote_agents": [{}] * 5,
+            },
+            "capabilities": [],
+        }
+    )
+
+    joined = "\n".join(lines)
+    assert "🔴 offline <b>MSI</b>" in joined
+    assert "seen: <code>5m ago</code>" in joined
+    assert "route:" not in joined
+    assert "addr:" not in joined
+    assert "network:" not in joined
+    assert "agents:" not in joined
+    assert "error:" not in joined
+    assert "refresh:" not in joined
+
+
 def test_registry_prunes_stale_legacy_instance_not_in_live_peers(tmp_path):
     hashi_root = tmp_path / "hashi"
     hashi_root.mkdir()
+    state_home = tmp_path / "state-home"
+    state_home.mkdir()
     old_seen = int(time.time()) - (25 * 3600)
     (hashi_root / "instances.json").write_text(
         json.dumps(
@@ -1366,9 +1747,14 @@ def test_registry_prunes_stale_legacy_instance_not_in_live_peers(tmp_path):
         ),
         encoding="utf-8",
     )
-    registry = PeerRegistry(hashi_root, "HASHI1")
+    original_home = Path.home
+    Path.home = staticmethod(lambda: state_home)
+    try:
+        registry = PeerRegistry(hashi_root, "HASHI1")
 
-    registry._sync_to_instances_json()
+        registry._sync_to_instances_json()
+    finally:
+        Path.home = original_home
 
     instances = json.loads((hashi_root / "instances.json").read_text(encoding="utf-8"))["instances"]
     assert "hashi1" in instances
