@@ -60,3 +60,18 @@ sha_file_size: 163
 sha_file_sha256: eb79e7002fd7cb1e000c01cfabe6ea2e336779c2d7153f4994cb16fe8dff9d36
 remote_stat: verified
 ```
+
+## Active Follow-Up
+
+The preflight/staging wait deadline was reached without a visible reply in the
+controller session. The loop did not idle. Controller-side probes were run:
+
+```text
+agent3@MSI route check: ok via 192.168.0.41:8767
+MSI capabilities: rescue_control, rescue_start, file_transfer_hmac_v1
+staged archive stat: exists, size 86649, sha256 matched
+staged sha file stat: exists, size 163, sha256 matched
+```
+
+Follow-up was sent to `agent3@MSI` asking for both preflight and staging report
+status. No install, stop, restart, or shutdown was authorized.
