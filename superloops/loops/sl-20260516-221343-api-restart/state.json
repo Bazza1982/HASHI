@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "loop_id": "sl-20260516-221343-api-restart",
+  "title": "Hashi API switch and WatchTower-backed hard restart",
+  "source_template": "superloops/templates/auto_vibe_coding",
+  "created_at": "2026-05-16T22:13:43.269025+00:00",
+  "updated_at": "2026-05-16T22:24:35.126264+00:00",
+  "status": "running",
+  "phase": "api_checkpoint_review",
+  "controller": {
+    "agent": "zelda",
+    "instance": "HASHI1",
+    "mode": "superloop_controller"
+  },
+  "roles": {
+    "worker": {
+      "agent": "lulu",
+      "responsibility": "implementation owner",
+      "write_scope": [
+        "Hashi /api command/service-manager/API gateway default model",
+        "WatchTower restart supervision endpoint/state/audit",
+        "Hashi /restart command integration"
+      ]
+    },
+    "reviewer": {
+      "agent": "akane",
+      "responsibility": "independent review",
+      "scope": [
+        "plan review",
+        "diff review",
+        "test/live evidence review",
+        "blocker classification"
+      ]
+    },
+    "orchestrator": {
+      "agent": "zelda",
+      "responsibility": "scope, dispatch, integration, checks, commits, closeout"
+    }
+  },
+  "request": "Implement Hashi /api runtime command with Telegram buttons/default API model, and /restart hard restart command backed by WatchTower restart supervision upgrade. Lulu is worker, Akane is reviewer, Zelda orchestrates using auto_vibe_coding.",
+  "exit_condition": "Hashi exposes /api on/off/model with buttons, status includes API address and default model; WatchTower exposes restart supervision endpoint/state/audit; Hashi /restart confirms via buttons, notifies WatchTower, and has focused tests plus recorded verification evidence.",
+  "taskboard_path": "superloops/loops/sl-20260516-221343-api-restart/taskboard.json",
+  "issues_path": "superloops/loops/sl-20260516-221343-api-restart/issues.json",
+  "waits_path": "superloops/loops/sl-20260516-221343-api-restart/waits.json",
+  "operator_summary_path": "superloops/loops/sl-20260516-221343-api-restart/README.md",
+  "artifacts": [
+    {
+      "path": "superloops/loops/sl-20260516-221343-api-restart/README.md",
+      "kind": "baseline_scope"
+    },
+    {
+      "path": "superloops/loops/sl-20260516-221343-api-restart/ORCHESTRATION_PLAN.md",
+      "kind": "controller_plan"
+    },
+    {
+      "path": "superloops/loops/sl-20260516-221343-api-restart/AKANE_PLAN_RISK_REVIEW.md",
+      "kind": "review_plan_risk"
+    },
+    {
+      "path": "superloops/loops/sl-20260516-221343-api-restart/API_CHECKPOINT_EVIDENCE.md",
+      "kind": "implementation_evidence"
+    }
+  ],
+  "events_count": 3,
+  "workzone_source": "superloop:auto_vibe_coding"
+}

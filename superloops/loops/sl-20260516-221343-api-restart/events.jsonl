@@ -1,0 +1,15 @@
+{"ts": "2026-05-16T22:13:43.269025+00:00", "event": "loop_created", "loop_id": "sl-20260516-221343-api-restart", "request": "Implement Hashi /api runtime command with Telegram buttons/default API model, and /restart hard restart command backed by WatchTower restart supervision upgrade. Lulu is worker, Akane is reviewer, Zelda orchestrates using auto_vibe_coding.", "exit_condition": "Hashi exposes /api on/off/model with buttons, status includes API address and default model; WatchTower exposes restart supervision endpoint/state/audit; Hashi /restart confirms via buttons, notifies WatchTower, and has focused tests plus recorded verification evidence."}
+{"ts": "2026-05-16T22:14:30.607884+00:00", "event": "worker_dispatched", "agent": "lulu", "delivery": "local API 10.255.255.254:18800"}
+{"ts": "2026-05-16T22:14:30.607884+00:00", "event": "reviewer_dispatched", "agent": "akane", "delivery": "local API 10.255.255.254:18800"}
+{"ts": "2026-05-16T22:14:30.607884+00:00", "event": "controller_baseline_started", "notes": "No long wait; inspecting relevant API/command/WatchTower code paths while agents work."}
+{"ts": "2026-05-16T22:15:20.768608+00:00", "event": "controller_plan_recorded", "artifact": "ORCHESTRATION_PLAN.md"}
+{"ts": "2026-05-16T22:15:47.859628+00:00", "event": "orchestrator_clarification", "details": "Clarified loop absolute path and modular command registry preference to worker and reviewer."}
+{"ts": "2026-05-16T22:17:23.968230+00:00", "event": "plan_risk_review_recorded", "artifact": "AKANE_PLAN_RISK_REVIEW.md"}
+{"ts": "2026-05-16T22:17:23.968230+00:00", "event": "blocker_decision_sent", "decisions": ["B1 refusal mode", "B2 authenticated endpoint mandatory", "modular callbacks acceptable"]}
+{"ts": "2026-05-16T22:19:15.460449+00:00", "event": "worker_status_requested", "reason": "No task-scope code diff after short ticks; requesting minimal progress package."}
+{"ts": "2026-05-16T22:20:32.636783+00:00", "event": "checkpoint_scope_adjusted", "checkpoint_1": "/api only", "checkpoint_2": "/restart + WatchTower restart supervision"}
+{"ts": "2026-05-16T22:24:35.126264+00:00", "event": "api_checkpoint_implemented", "files": ["orchestrator/api_gateway_config.py", "orchestrator/api_gateway.py", "orchestrator/service_manager.py", "orchestrator/commands/api.py", "tests/test_api_gateway_command.py"]}
+{"ts": "2026-05-16T22:24:35.126264+00:00", "event": "focused_tests_passed", "command": "pytest -q tests/test_api_gateway_command.py tests/test_command_registry.py tests/test_runtime_command_binding.py", "result": "12 passed, 2 warnings"}
+{"ts": "2026-05-16T22:24:35.126264+00:00", "event": "review_requested", "agent": "akane", "checkpoint": "/api"}
+{"ts": "2026-05-16T22:25:23.030110+00:00", "event": "api_checkpoint_updated", "details": "Added main.py startup persistence for /api on; focused tests still pass."}
+{"ts": "2026-05-16T22:29:19.928976+00:00", "event": "api_review_fixes_applied", "tests": "14 passed, 2 pytz warnings"}
