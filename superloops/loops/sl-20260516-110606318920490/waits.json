@@ -100,7 +100,8 @@
     "controller_probe": "curl http://192.168.0.41:8767/protocol/agents; stat staged archive",
     "follow_up_message": "Request hashiko assist status for sl-20260516-110606318920490-hashiko-assist-001.",
     "escalation_if_no_reply": "ask operator to check MSI agent consoles/runtimes; do not install",
-    "status": "waiting",
+    "status": "deadline_missed_follow_up_sent",
+    "follow_up_sent_at": "2026-05-16T11:58:00Z",
     "expected_fields": [
       "report_type",
       "target_instance",

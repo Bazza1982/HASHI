@@ -244,3 +244,25 @@ interpreter: py -3.12
 MSI HASHI shutdown authorized: false
 MSI HASHI stop/restart authorized: false
 ```
+
+## Install Deadline Follow-Up
+
+At the install wait deadline, HASHI1 controller probes showed:
+
+```text
+MSI core Remote health: ok at http://192.168.0.41:8767/health
+MSI-WT health: timeout at http://192.168.0.41:43766/health
+```
+
+Follow-up sent to `hashiko@MSI` asked for the exact install blocker:
+
+```text
+current step
+last command
+stdout/stderr summary
+C:\Projects\WatchTower exists?
+.venv exists?
+secrets.json exists?
+HashiWatchtower service exists?
+nssm.exe exists?
+```

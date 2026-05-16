@@ -1,1 +1,15 @@
-[]
+[
+  {
+    "issue_id": "issue-20260516-115800-msi-wt-install-timeout",
+    "status": "open",
+    "severity": "blocker",
+    "summary": "MSI-WT install command has not produced service health by the install deadline.",
+    "evidence": [
+      "MSI core Remote remains healthy at http://192.168.0.41:8767/health",
+      "MSI-WT health probe at http://192.168.0.41:43766/health times out",
+      "install-go was sent to hashiko@MSI with command_id sl-20260516-110606318920490-install-001",
+      "deadline follow-up requested exact install blocker and file/service state"
+    ],
+    "next_action": "Wait for hashiko install blocker report, then retry only the failed install portion."
+  }
+]

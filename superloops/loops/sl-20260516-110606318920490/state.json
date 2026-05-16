@@ -73,7 +73,9 @@
       "*.sqlite*"
     ]
   },
-  "blockers": [],
+  "blockers": [
+    "Install deadline reached: MSI core Remote is healthy on 8767, but MSI-WT health on 43766 times out and install report has not arrived yet."
+  ],
   "risks": [
     "MSI active HASHI root is not yet confirmed",
     "MSI install root and Windows user profile are not yet confirmed",
@@ -97,5 +99,5 @@
     "kind": "run_task",
     "task_id": "step-006"
   },
-  "updated_at": "2026-05-16T11:47:49.596789+00:00"
+  "updated_at": "2026-05-16T11:58:00Z"
 }
