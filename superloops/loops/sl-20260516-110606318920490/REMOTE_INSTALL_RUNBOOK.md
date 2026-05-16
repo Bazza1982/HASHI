@@ -89,3 +89,26 @@ POST /control/hashi/start while already running
 
 Never shut down MSI HASHI during this smoke.
 
+## Orchestration Correction: Short Tick Waits
+
+For the rest of this MSI-WT loop, `agent3@MSI` remains the sole execution
+worker. Other MSI agents are evidence-only reviewers unless the operator
+explicitly reassigns execution ownership.
+
+The orchestrator must not use long blocking waits. Use 30-60 second ticks:
+
+```text
+1. check agent3 route/message status
+2. probe MSI-WT health/protocol once
+3. stat focused service artifacts if useful
+4. record the result
+5. send one narrow follow-up only if the tick changes the decision state
+```
+
+If no useful reply arrives, ask `agent3@MSI` for exactly one of:
+
+```text
+service_green
+blocked with failing command/exit/stdout/stderr
+not_started with reason
+```
