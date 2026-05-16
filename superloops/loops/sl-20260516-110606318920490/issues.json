@@ -1,16 +1,1 @@
-[
-  {
-    "issue_id": "issue-20260516-112830-msi-agent-responsiveness",
-    "status": "open",
-    "severity": "blocker",
-    "summary": "MSI Remote API is online and staged files are verified, but MSI agents have not returned preflight/staging execution reports.",
-    "evidence": [
-      "agent3@MSI route check ok via 192.168.0.41:8767",
-      "agent4@MSI route check ok via 192.168.0.41:8767",
-      "MSI /protocol/agents lists agent3 and agent4 as active/fresh",
-      "staged archive exists and SHA matches",
-      "direct Workbench exchange API to 192.168.0.41:8779 timed out"
-    ],
-    "next_action": "Wait one short window for agent replies; if still silent, operator should check MSI agent consoles/runtimes before install can proceed."
-  }
-]
+[]

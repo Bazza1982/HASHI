@@ -3,14 +3,14 @@
     "task_id": "step-001",
     "title": "Collect target, remote worker, package source, staging root, install root, rollback policy",
     "owner": "orchestrator",
-    "status": "in_progress",
+    "status": "completed",
     "required_evidence": ["target_instance", "remote_worker", "artifact_source", "staging_root", "install_root", "rollback_policy"]
   },
   {
     "task_id": "step-002",
     "title": "Preflight HChat/protocol route, Hashi Remote capabilities, file transfer stat, and MSI paths",
     "owner": "orchestrator",
-    "status": "in_progress",
+    "status": "completed",
     "required_evidence": ["route_check", "capabilities", "file_stat", "repo_root_exists", "msi_path_report"]
   },
   {

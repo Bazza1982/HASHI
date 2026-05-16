@@ -61,6 +61,20 @@ sha_file_sha256: eb79e7002fd7cb1e000c01cfabe6ea2e336779c2d7153f4994cb16fe8dff9d3
 remote_stat: verified
 ```
 
+## Staging V2 Request
+
+Staging check v2 was sent to `agent3@MSI` using the active HASHI-root staging
+path:
+
+```text
+command_id: sl-20260516-110606318920490-staging-002
+archive: C:\Projects\HASHI\tmp\watchtower_install_staging\watchtower_standalone_msi_20260516.tar.gz
+mode: staging check only
+install_authorized: false
+service_change_authorized: false
+shutdown_authorized: false
+```
+
 ## Active Follow-Up
 
 The preflight/staging wait deadline was reached without a visible reply in the
@@ -114,6 +128,46 @@ returned preflight/staging execution reports yet.
 
 The install is intentionally not authorized until a remote agent confirms the
 staging checks from inside MSI.
+
+## Agent3 Preflight Received
+
+`agent3@MSI` returned the preflight report for
+`sl-20260516-110606318920490-preflight-001`.
+
+```text
+hostname: MSI
+pwd: C:\Projects\HASHI\workspaces\agent3
+active_hashi_root: C:\Projects\HASHI
+hashi_tmp: C:\Projects\HASHI\tmp, writable
+proposed_staging: C:\Projects\HASHI\tmp\watchtower_install_staging
+proposed_install_root: C:\Projects\WatchTower
+HashiWatchtower service: not found
+scheduled WatchTower tasks: none found
+port_43766: clear
+go_no_go: preflight_only_go
+blockers: none detected
+```
+
+Python/admin exact raw values were not fully included in the relayed structured
+report, so the staging check must still report precise `py -0p`, `py -3.12`,
+and admin status before install.
+
+## Active MSI Staging Transfer
+
+The artifact was pushed again into the active HASHI-root staging path selected
+from preflight:
+
+```text
+archive_path: C:\Projects\HASHI\tmp\watchtower_install_staging\watchtower_standalone_msi_20260516.tar.gz
+archive_size: 86649
+archive_sha256: 95ae798c92d1039b5815c619a5adeeeaf2889686db08c49aa776346827b2f460
+remote_stat: verified
+
+sha_path: C:\Projects\HASHI\tmp\watchtower_install_staging\watchtower_standalone_msi_20260516.sha256
+sha_file_size: 163
+sha_file_sha256: eb79e7002fd7cb1e000c01cfabe6ea2e336779c2d7153f4994cb16fe8dff9d36
+remote_stat: verified
+```
 
 ## Coordinator Assist Request
 
