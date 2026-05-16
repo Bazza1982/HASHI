@@ -78,7 +78,8 @@
     "Loop governance correction: worker ownership is reset to agent3@MSI only; other MSI agents are no longer execution owners for this install.",
     "agent3 service repair deadline reached at 12:24Z: HASHI1 LAN health still times out and no service/runtime logs are visible by file-transfer stat.",
     "Orchestration correction: replace long blocking waits with 30-60 second short ticks so incoming worker output can be processed promptly.",
-    "Protocol inflight evidence found the concrete blocker: install-watchtower-service.ps1 failed during NSSM bootstrap/service creation after nssm.exe was staged; HashiWatchtower service is still missing."
+    "Protocol inflight evidence found the concrete blocker: install-watchtower-service.ps1 failed during NSSM bootstrap/service creation after nssm.exe was staged; HashiWatchtower service is still missing.",
+    "Command transport correction: direct-nssm-004 may have been corrupted by local shell variable expansion; corrected command was resent as direct-nssm-005 through Python argv."
   ],
   "risks": [
     "MSI active HASHI root is not yet confirmed",
@@ -116,10 +117,10 @@
   "next_action": {
     "kind": "await_hchat_reply_with_deadline",
     "task_id": "step-007",
-    "command_id": "sl-20260516-110606318920490-agent3-direct-nssm-004",
+    "command_id": "sl-20260516-110606318920490-agent3-direct-nssm-005",
     "target": "agent3@MSI",
-    "deadline_at": "2026-05-16T12:35:00Z",
+    "deadline_at": "2026-05-16T12:39:00Z",
     "fallback": "short tick probes only; ask agent3 for exact failing NSSM line and admin status"
   },
-  "updated_at": "2026-05-16T12:33:00Z"
+  "updated_at": "2026-05-16T12:36:00Z"
 }
