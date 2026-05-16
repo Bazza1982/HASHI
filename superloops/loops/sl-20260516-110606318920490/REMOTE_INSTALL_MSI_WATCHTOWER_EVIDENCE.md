@@ -90,3 +90,27 @@ install_authorized: false
 service_change_authorized: false
 shutdown_authorized: false
 ```
+
+## MSI Agent Responsiveness Blocker
+
+At the reviewer deadline, controller-side probes still showed MSI Remote and
+the staged files healthy:
+
+```text
+agent4@MSI route check: ok via 192.168.0.41:8767
+MSI /protocol/agents: agent3 and agent4 active/fresh
+staged archive stat: exists, size 86649, sha256 matched
+```
+
+A direct Workbench exchange attempt to `192.168.0.41:8779` timed out. Another
+follow-up was sent to `agent4@MSI`.
+
+Current blocker:
+
+```text
+MSI Remote API is online and staged files are verified, but MSI agents have not
+returned preflight/staging execution reports yet.
+```
+
+The install is intentionally not authorized until a remote agent confirms the
+staging checks from inside MSI.
