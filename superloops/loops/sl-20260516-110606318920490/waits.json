@@ -57,5 +57,35 @@
       "blockers",
       "next_recommended_action"
     ]
+  },
+  {
+    "wait_id": "wait-20260516-112230-agent4-inspection",
+    "kind": "await_hchat_reply",
+    "target": "agent4@MSI",
+    "command_id": "sl-20260516-110606318920490-agent4-inspect-001",
+    "entered_at": "2026-05-16T11:22:30Z",
+    "follow_up_after_minutes": 5,
+    "deadline_at": "2026-05-16T11:27:30Z",
+    "controller_probe": "python3 tools/hchat_send.py --to agent4 --from zelda --instance MSI --check; python3 tools/remote_file_transfer.py stat MSI:C:\\Users\\Public\\hashi_watchtower_msi_staging\\watchtower_standalone_msi_20260516.tar.gz",
+    "follow_up_message": "Request agent4 read-only inspection status for sl-20260516-110606318920490-agent4-inspect-001.",
+    "escalation_if_no_reply": "mark MSI worker/reviewer unresponsive and ask operator to check MSI agents",
+    "status": "waiting",
+    "expected_fields": [
+      "report_type",
+      "target_instance",
+      "agent",
+      "command_id",
+      "paths_checked",
+      "service_status",
+      "port_43766",
+      "python_status",
+      "artifact_sha256",
+      "extract_path",
+      "py_compile",
+      "remote_help",
+      "go_no_go",
+      "blockers",
+      "next_recommended_action"
+    ]
   }
 ]
