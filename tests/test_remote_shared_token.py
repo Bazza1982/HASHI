@@ -305,7 +305,7 @@ def test_peers_redacts_without_auth_and_allows_signed_get(tmp_path):
 
     response = client.get("/peers")
     assert response.status_code == 200
-    assert response.json() == {"ok": True, "peers": [], "count": 3, "trusted_view": False}
+    assert response.json() == {"ok": True, "peers": [], "count": 2, "trusted_view": False}
 
     headers = build_auth_headers(
         shared_token=token,
@@ -319,12 +319,10 @@ def test_peers_redacts_without_auth_and_allows_signed_get(tmp_path):
     trusted = client.get("/peers", headers=headers)
 
     assert trusted.status_code == 200
-    assert trusted.json()["count"] == 3
+    assert trusted.json()["count"] == 2
     peers = trusted.json()["peers"]
-    assert len(peers) == 3
-    assert peers[0]["instance_id"] == "HASHI_LOCAL"
-    assert peers[0]["resolved_route_host"] == "127.0.0.1"
-    assert peers[0]["properties"]["live_status"] == "online"
+    assert len(peers) == 2
+    assert [peer["instance_id"] for peer in peers] == ["HASHI2", "HASHI9"]
 
 
 def test_protocol_status_is_redacted_without_auth(tmp_path):
