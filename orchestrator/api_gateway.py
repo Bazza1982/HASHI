@@ -18,6 +18,7 @@ import asyncio
 from datetime import datetime
 import json
 import logging
+import socket
 import time
 import uuid
 from pathlib import Path
@@ -212,6 +213,7 @@ class APIGatewayServer:
     def __init__(self, global_config, secrets: dict, workspace_root: Path):
         self.global_config = global_config
         self.port: int = getattr(global_config, "api_gateway_port", 18801)
+        self.bind_host: str | None = None
         self._pool = _AdapterPool(global_config, secrets, workspace_root)
         self._sessions = _SessionCache()
         self._runner = None
@@ -227,13 +229,34 @@ class APIGatewayServer:
     async def start(self):
         self._runner = web.AppRunner(self.app)
         await self._runner.setup()
-        self._site = web.TCPSite(self._runner, "127.0.0.1", self.port)
+        self.bind_host = self._select_bind_host()
+        self._site = web.TCPSite(self._runner, self.bind_host, self.port)
         await self._site.start()
 
     async def stop(self):
         await self._pool.shutdown()
         if self._runner:
             await self._runner.cleanup()
+
+    def _select_bind_host(self) -> str:
+        configured = str(getattr(self.global_config, "api_host", "") or "127.0.0.1").strip()
+        if configured not in {"127.0.0.1", "localhost"}:
+            return configured
+        for candidate in ("10.255.255.254",):
+            if self._host_can_bind(candidate):
+                return candidate
+        return "127.0.0.1"
+
+    @staticmethod
+    def _host_can_bind(host: str) -> bool:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.bind((host, 0))
+            return True
+        except OSError:
+            return False
+        finally:
+            sock.close()
 
     # ── Route: GET /v1/models ─────────────────────────────────────────────────
 

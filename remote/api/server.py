@@ -378,7 +378,7 @@ def _hashi_start_command() -> list[str]:
             ]
     launcher = root / "bin" / "bridge-u.sh"
     if launcher.exists():
-        return [str(launcher), "--resume-last"]
+        return [str(launcher), "--resume-last", "--api-gateway"]
     raise FileNotFoundError("No supported HASHI launcher found under bin/")
 
 
@@ -588,70 +588,6 @@ def create_app(
         allow_headers=["*"],
     )
 
-    def _local_remote_peer_view() -> dict[str, Any]:
-        now = time.time()
-        instance_id = str(_instance_info.get("instance_id") or "").strip().upper() or "HASHI"
-        protocol_status = _protocol_manager.get_protocol_status() if _protocol_manager else {}
-        profile_fn = getattr(_protocol_manager, "_local_network_profile", None) if _protocol_manager else None
-        local_profile = profile_fn() if callable(profile_fn) else {}
-        agents_fn = getattr(_protocol_manager, "get_local_agents_snapshot", None) if _protocol_manager else None
-        directory_fn = getattr(_protocol_manager, "get_local_agent_directory_state", None) if _protocol_manager else None
-        remote_agents = agents_fn() if callable(agents_fn) else []
-        directory = directory_fn() if callable(directory_fn) else {}
-        port = int(_instance_info.get("remote_port") or 0)
-
-        display_network_host = ""
-        for item in list(local_profile.get("address_candidates") or []):
-            if not isinstance(item, dict):
-                continue
-            host = str(item.get("host") or "").strip()
-            scope = str(item.get("scope") or "").strip().lower()
-            if host and host not in {"127.0.0.1", "localhost", "0.0.0.0"} and scope in {"lan", "overlay", "routable", "peer"}:
-                display_network_host = host
-                break
-
-        return {
-            "instance_id": instance_id,
-            "display_name": str(_instance_info.get("display_name") or instance_id),
-            "display_handle": f"@{instance_id.lower()}",
-            "host": "127.0.0.1",
-            "port": port,
-            "workbench_port": int(_instance_info.get("workbench_port") or _workbench_port or 0),
-            "platform": str(_instance_info.get("platform") or platform.system().lower()),
-            "version": "unknown",
-            "hashi_version": str(_instance_info.get("hashi_version") or "unknown"),
-            "protocol_version": str(protocol_status.get("protocol_version") or "2.0"),
-            "capabilities": list(protocol_status.get("capabilities") or []),
-            "properties": {
-                "preferred_backend": "self",
-                "discovery": "self",
-                "live_status": "online",
-                "handshake_state": "self",
-                "last_handshake_at": now,
-                "last_seen_ok": now,
-                "directory_state": str(directory.get("directory_state") or "unknown"),
-                "agent_snapshot_version": str(directory.get("version") or ""),
-                "remote_agents": list(remote_agents or []),
-                "address_candidates": list(local_profile.get("address_candidates") or []),
-                "observed_candidates": list(local_profile.get("observed_candidates") or []),
-                "host_identity": str(local_profile.get("host_identity") or ""),
-                "environment_kind": str(local_profile.get("environment_kind") or ""),
-                "remote_supervisor": dict(_instance_info.get("remote_supervisor") or {}),
-            },
-            "resolved_route_host": "127.0.0.1",
-            "resolved_route_port": port,
-            "display_network_host": display_network_host,
-            "same_host": True,
-            "route_kind": "self",
-        }
-
-    def _include_local_remote(peers: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        local_id = str(_instance_info.get("instance_id") or "").strip().upper()
-        if not local_id:
-            return peers
-        filtered = [peer for peer in peers if str(peer.get("instance_id") or "").strip().upper() != local_id]
-        return [_local_remote_peer_view(), *filtered]
-
     # ── Health ──────────────────────────────────────────────
 
     @app.get("/health")
@@ -710,7 +646,6 @@ def create_app(
                 peers = [_protocol_manager.get_peer_view(p) for p in _peer_registry.get_peers()]
             else:
                 peers = [p.to_dict() for p in _peer_registry.get_peers()]
-        peers = _include_local_remote(peers)
         authenticated = try_authenticate_request(request, allow_loopback=True)
         if not authenticated:
             return {"ok": True, "peers": [], "count": len(peers), "trusted_view": False}
