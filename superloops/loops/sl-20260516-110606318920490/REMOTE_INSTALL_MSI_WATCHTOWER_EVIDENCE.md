@@ -114,6 +114,9 @@ service_change_authorized: false
 shutdown_authorized: false
 ```
 
+`agent4@MSI` replied `received`. Zelda sent a follow-up requesting the actual
+staging verdict: `staging_green`, `running`, or `blocked`.
+
 ## MSI Agent Responsiveness Blocker
 
 At the reviewer deadline, controller-side probes still showed MSI Remote and
