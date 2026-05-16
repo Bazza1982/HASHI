@@ -1,1 +1,20 @@
-[]
+[
+  {
+    "issue_id": "cleanup-001",
+    "status": "mitigated",
+    "severity": "low",
+    "title": "WatchTower instances.json missing warning",
+    "evidence": "agent1 reported repeated instances.json not found warnings at C:\\Users\\Print\\projects\\WatchTower\\instances.json",
+    "fix": "HASHI1 pushed a minimal standalone registry file to the WatchTower root.",
+    "verification": "remote stat confirms instances.json exists, size 184, sha256 be7c61596d76688a4fd2e97fc33fe086341a51c4bae86832993146026f3b1d42"
+  },
+  {
+    "issue_id": "cleanup-002",
+    "status": "follow_up",
+    "severity": "low",
+    "title": "UnicodeEncodeError traces in Windows service stderr",
+    "evidence": "agent1 reported decorative Unicode/banner output triggers cp1252 logging errors in watchtower-svc-stderr.log while service still starts successfully.",
+    "fix": "Not fixed in this install loop; runtime behavior is healthy.",
+    "verification": "Health, protocol status, remote list, and rescue smoke all passed from HASHI1."
+  }
+]

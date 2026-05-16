@@ -517,3 +517,43 @@ Broadcast visible from HASHI1: yes
 Rescue smoke: passed
 Destructive stop test: not run
 ```
+
+## Late Agent Reports And Cleanup
+
+`agent1@INTEL` later returned the `service-retry-001` report:
+
+```text
+nssm_sha256: matched
+service: Running, Automatic
+service account: LocalSystem
+port_43766: 0.0.0.0:43766 LISTENING
+health: HTTP 200 WATCHTOWER_INTEL
+local unauthenticated /control/hashi/status: 401
+```
+
+The `401` was expected for unauthenticated local HTTP. HASHI1 authenticated
+HMAC rescue smoke had already passed after the token fix.
+
+Reported residual warnings:
+
+```text
+UnicodeEncodeError traces in service stderr under Windows cp1252
+instances.json missing warning
+discovery-only warning before token fix
+```
+
+Cleanup applied:
+
+```text
+created: C:\Users\Print\projects\WatchTower\instances.json
+size: 184
+sha256: be7c61596d76688a4fd2e97fc33fe086341a51c4bae86832993146026f3b1d42
+purpose: stop missing instances.json runtime warning
+```
+
+Remaining non-blocking follow-up:
+
+```text
+Clean up decorative Unicode/banner logging for Windows service mode to avoid
+cp1252 stderr noise. This does not block WatchTower operation.
+```
