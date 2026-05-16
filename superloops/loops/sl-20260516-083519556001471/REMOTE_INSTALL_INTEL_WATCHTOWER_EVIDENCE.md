@@ -307,6 +307,15 @@ python: py -3.12
 The first local send attempt failed before delivery because Bash expanded
 PowerShell `$variables`. The command was resent safely via subprocess argv.
 
+Partial progress from `agent1@INTEL`:
+
+```text
+venv: created
+dependencies: installed
+python -m remote --help: works from final WatchTower root
+next: explicit service install, then service state + HTTP endpoint validation
+```
+
 ## Broadcast Evidence
 
 Pending.
