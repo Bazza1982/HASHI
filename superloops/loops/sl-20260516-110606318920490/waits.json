@@ -217,5 +217,33 @@
       "blockers",
       "next_recommended_action"
     ]
+  },
+  {
+    "wait_id": "wait-20260516-120400-agent4-install-inspect",
+    "kind": "await_hchat_reply",
+    "target": "agent4@MSI",
+    "command_id": "sl-20260516-110606318920490-install-inspect-002",
+    "entered_at": "2026-05-16T12:04:00Z",
+    "follow_up_after_minutes": 5,
+    "deadline_at": "2026-05-16T12:09:00Z",
+    "controller_probe": "curl http://192.168.0.41:43766/health; hchat route check agent4@MSI",
+    "follow_up_message": "Request install state inspection status for sl-20260516-110606318920490-install-inspect-002.",
+    "escalation_if_no_reply": "wait for agent3/hashiko install state report; do not retry blindly",
+    "status": "waiting",
+    "expected_fields": [
+      "report_type",
+      "target_instance",
+      "agent",
+      "command_id",
+      "root_status",
+      "service_status",
+      "service_config",
+      "port_43766",
+      "remote_help",
+      "logs_summary",
+      "go_no_go",
+      "blockers",
+      "next_recommended_action"
+    ]
   }
 ]

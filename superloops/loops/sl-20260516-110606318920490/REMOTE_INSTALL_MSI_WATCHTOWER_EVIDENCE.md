@@ -281,3 +281,18 @@ checks: C:\Projects\WatchTower, .venv, secrets.json, instances.json,
 service changes authorized: false
 shutdown authorized: false
 ```
+
+## Agent4 Staging Green And Install Inspection
+
+`agent4@MSI` replied `staging_green`. Zelda recorded this as a second
+independent staging pass and redirected `agent4@MSI` to read-only install state
+inspection.
+
+```text
+command_id: sl-20260516-110606318920490-install-inspect-002
+mode: read-only
+checks: C:\Projects\WatchTower, .venv, secrets.json, instances.json,
+        bin\nssm.exe, HashiWatchtower service, port 43766, logs
+install/service changes authorized: false
+shutdown authorized: false
+```
