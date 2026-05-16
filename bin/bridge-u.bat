@@ -1,8 +1,9 @@
-﻿@echo off
+@echo off
 chcp 65001 >nul
 setlocal EnableDelayedExpansion
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
+set "BRIDGE_FORCE_ASCII_BANNER=1"
 title Bridge-U-F Launcher
 
 rem This script lives under <repo>\bin\. We want BRIDGE_CODE_ROOT to be the repo root,
@@ -38,6 +39,7 @@ set "WAKEUP_FILE="
 
 call :parse_args %*
 
+call :enable_ansi_console
 call :init_theme
 call :ensure_env || exit /b 1
 call :load_agents || exit /b 1
@@ -83,12 +85,12 @@ goto launch
 :run_last
 if /i "!LAST_MODE!"=="all" (
     set "PY_ARGS="
-    set "START_LABEL=all active agents ^(same as last time^)"
+    set "START_LABEL=all active agents (same as last time)"
     goto launch
 )
 if /i "!LAST_MODE!"=="selected" if defined LAST_AGENTS (
     set "PY_ARGS=--agents !LAST_AGENTS!"
-    set "START_LABEL=!LAST_AGENTS! ^(same as last time^)"
+    set "START_LABEL=!LAST_AGENTS! (same as last time)"
     goto launch
 )
 echo.
@@ -127,34 +129,34 @@ goto launch
 :launch
 cls
 call :print_banner "BRIDGE-U-F BOOT" "Multi-backend orchestrator launch"
-echo !C_RAIL!â”‚!C_RESET! !C_LABEL!Agents           !C_RESET! !C_TEXT!!START_LABEL!!C_RESET!
+echo !C_RAIL!^|!C_RESET! !C_LABEL!Agents           !C_RESET! !C_TEXT!!START_LABEL!!C_RESET!
 if "!WORKBENCH_LAUNCH!"=="1" (
-    echo !C_RAIL!â”‚!C_RESET! !C_LABEL!Workbench       !C_RESET! !C_OK!starting in background!C_RESET!
+    echo !C_RAIL!^|!C_RESET! !C_LABEL!Workbench       !C_RESET! !C_OK!starting in background!C_RESET!
     start /MIN "" powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0workbench_ctl.ps1" -Action start -OpenBrowser
     set "AUTO_STOP_WORKBENCH=1"
 ) else (
-    echo !C_RAIL!â”‚!C_RESET! !C_LABEL!Workbench       !C_RESET! !C_MUTED!disabled!C_RESET!
+    echo !C_RAIL!^|!C_RESET! !C_LABEL!Workbench       !C_RESET! !C_MUTED!disabled!C_RESET!
 )
 if "!API_GATEWAY_LAUNCH!"=="1" (
-    echo !C_RAIL!â”‚!C_RESET! !C_LABEL!API Gateway     !C_RESET! !C_OK!enabled ^(port 18801^)!C_RESET!
+    echo !C_RAIL!^|!C_RESET! !C_LABEL!API Gateway     !C_RESET! !C_OK!enabled ^(port 18801^)!C_RESET!
 ) else (
-    echo !C_RAIL!â”‚!C_RESET! !C_LABEL!API Gateway     !C_RESET! !C_MUTED!disabled!C_RESET!
+    echo !C_RAIL!^|!C_RESET! !C_LABEL!API Gateway     !C_RESET! !C_MUTED!disabled!C_RESET!
 )
 if "!DRY_RUN!"=="1" (
-    echo !C_RAIL!â”‚!C_RESET! !C_LABEL!Launch mode     !C_RESET! !C_WARN!dry run only!C_RESET!
-    echo !C_RAIL!â”‚!C_RESET!
+    echo !C_RAIL!^|!C_RESET! !C_LABEL!Launch mode     !C_RESET! !C_WARN!dry run only!C_RESET!
+    echo !C_RAIL!^|!C_RESET!
     echo.
     exit /b 0
 )
 call :preflight_check
 if errorlevel 1 (
     echo.
-    echo !C_WARN!Launch aborted â€” bridge-u-f is already running.!C_RESET!
+    echo !C_WARN!Launch aborted - bridge-u-f is already running.!C_RESET!
     if "!NO_PAUSE!"=="0" pause
     exit /b 1
 )
-echo !C_RAIL!â”‚!C_RESET! !C_LABEL!Bridge launch    !C_RESET! !C_OK!proceeding!C_RESET!
-echo !C_RAIL!â”‚!C_RESET!
+echo !C_RAIL!^|!C_RESET! !C_LABEL!Bridge launch    !C_RESET! !C_OK!proceeding!C_RESET!
+echo !C_RAIL!^|!C_RESET!
 if exist "%AGENTS_FILE%" del "%AGENTS_FILE%" >nul 2>&1
 set "GW_ARG="
 if "!API_GATEWAY_LAUNCH!"=="1" set "GW_ARG=--api-gateway"
@@ -162,15 +164,20 @@ if "!API_GATEWAY_LAUNCH!"=="1" set "GW_ARG=--api-gateway"
 set "PYTHONPATH=!BRIDGE_CODE_ROOT!"
 call :resolve_wakeup_file
 if defined WAKEUP_FILE call :start_wakeup_injector
-"!PYTHON_EXE!" main.py --bridge-home "%BRIDGE_HOME%" %PY_ARGS% !GW_ARG!
+"!PYTHON_EXE!" -c "import colorama, runpy, sys; colorama.just_fix_windows_console(); sys.argv=sys.argv[1:]; runpy.run_path(sys.argv[0], run_name='__main__')" main.py --bridge-home "%BRIDGE_HOME%" %PY_ARGS% !GW_ARG!
+set "PY_RC=!errorlevel!"
 if "!AUTO_STOP_WORKBENCH!"=="1" (
     echo.
     echo !C_MUTED!Stopping workbench services started by this launcher...!C_RESET!
     powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0workbench_ctl.ps1" -Action stop >nul 2>&1
 )
-if "!NO_PAUSE!"=="1" exit /b 0
+if not "!PY_RC!"=="0" (
+    echo.
+    echo !C_WARN!Bridge process exited with code !PY_RC!.!C_RESET!
+)
+if "!NO_PAUSE!"=="1" exit /b !PY_RC!
 pause
-exit /b 0
+exit /b !PY_RC!
 
 :resolve_wakeup_file
 set "WAKEUP_FILE="
@@ -217,19 +224,19 @@ if "!WORKBENCH_LAUNCH!"=="1" set "WORKBENCH_LABEL=ON"
 set "API_GATEWAY_LABEL=OFF"
 if "!API_GATEWAY_LAUNCH!"=="1" set "API_GATEWAY_LABEL=ON"
 call :print_banner "BRIDGE-U-F LAUNCHER" "Universal bridge + optional workbench"
-echo !C_RAIL!â”‚!C_RESET! !C_LABEL!Active agents    !C_RESET! !C_TEXT!!AGENT_COUNT!!C_RESET!
-echo !C_RAIL!â”‚!C_RESET! !C_LABEL!Inactive agents  !C_RESET! !C_TEXT!!INACTIVE_COUNT!!C_RESET!
+echo !C_RAIL!^|!C_RESET! !C_LABEL!Active agents    !C_RESET! !C_TEXT!!AGENT_COUNT!!C_RESET!
+echo !C_RAIL!^|!C_RESET! !C_LABEL!Inactive agents  !C_RESET! !C_TEXT!!INACTIVE_COUNT!!C_RESET!
 if "!WORKBENCH_LABEL!"=="ON" (
-    echo !C_RAIL!â”‚!C_RESET! !C_LABEL!Workbench       !C_RESET! !C_OK!ON!C_RESET!
+    echo !C_RAIL!^|!C_RESET! !C_LABEL!Workbench       !C_RESET! !C_OK!ON!C_RESET!
 ) else (
-    echo !C_RAIL!â”‚!C_RESET! !C_LABEL!Workbench       !C_RESET! !C_MUTED!OFF!C_RESET!
+    echo !C_RAIL!^|!C_RESET! !C_LABEL!Workbench       !C_RESET! !C_MUTED!OFF!C_RESET!
 )
 if "!API_GATEWAY_LABEL!"=="ON" (
-    echo !C_RAIL!â”‚!C_RESET! !C_LABEL!API Gateway     !C_RESET! !C_OK!ON!C_RESET!
+    echo !C_RAIL!^|!C_RESET! !C_LABEL!API Gateway     !C_RESET! !C_OK!ON!C_RESET!
 ) else (
-    echo !C_RAIL!â”‚!C_RESET! !C_LABEL!API Gateway     !C_RESET! !C_MUTED!OFF!C_RESET!
+    echo !C_RAIL!^|!C_RESET! !C_LABEL!API Gateway     !C_RESET! !C_MUTED!OFF!C_RESET!
 )
-echo !C_RAIL!â”‚!C_RESET!
+echo !C_RAIL!^|!C_RESET!
 echo.
 echo !C_ACCENT!Active Roster!C_RESET!
 for /l %%I in (1,1,!AGENT_COUNT!) do (
@@ -258,6 +265,18 @@ echo.
 exit /b 0
 
 :init_theme
+if /i "%OS%"=="Windows_NT" if not "%BRIDGE_ALLOW_BATCH_ANSI%"=="1" (
+    set "C_RESET="
+    set "C_ACCENT="
+    set "C_OK="
+    set "C_WARN="
+    set "C_LABEL="
+    set "C_TEXT="
+    set "C_MUTED="
+    set "C_RAIL="
+    set "C_TITLE="
+    exit /b 0
+)
 for /f %%E in ('echo prompt $E^| cmd') do set "ESC=%%E"
 set "C_RESET=!ESC![0m"
 set "C_ACCENT=!ESC![38;5;111m"
@@ -270,17 +289,24 @@ set "C_RAIL=!ESC![38;5;61m"
 set "C_TITLE=!ESC![1;38;5;153m"
 exit /b 0
 
+:enable_ansi_console
+if /i "%OS%"=="Windows_NT" (
+    "!PYTHON_EXE!" -c "import ctypes; k=ctypes.windll.kernel32; h=k.GetStdHandle(-11); m=ctypes.c_uint(); ok=k.GetConsoleMode(h, ctypes.byref(m)); k.SetConsoleMode(h, m.value | 4) if ok else None" >nul 2>&1
+    reg add HKCU\Console /v VirtualTerminalLevel /t REG_DWORD /d 1 /f >nul 2>&1
+)
+exit /b 0
+
 :print_banner
 set "B_TITLE=%~1"
 set "B_SUB=%~2"
 echo.
-echo !C_RAIL!â”‚!C_RESET! !C_TITLE!!B_TITLE!!C_RESET!  !C_MUTED!!B_SUB!!C_RESET!
-echo !C_RAIL!â”‚!C_RESET!
+echo !C_RAIL!^|!C_RESET! !C_TITLE!!B_TITLE!!C_RESET!  !C_MUTED!!B_SUB!!C_RESET!
+echo !C_RAIL!^|!C_RESET!
 exit /b 0
 
 :ensure_env
 if "!USING_EMBEDDED!"=="1" (
-    :: USB mode â€” embedded Python has all packages pre-installed, skip venv entirely
+    :: USB mode - embedded Python has all packages pre-installed, skip venv entirely
     "!PYTHON_EXE!" -c "import telegram, httpx, aiohttp, PIL" >nul 2>&1
     if errorlevel 1 (
         echo !C_WARN!Embedded Python is missing required packages.!C_RESET!
@@ -389,7 +415,7 @@ exit /b 0
 
 :preflight_check
 rem Check for an already-running bridge-u-f orchestrator.
-rem Uses .bridge_u_f.pid (always readable) â€” the .lock file is unreadable while held.
+rem Uses .bridge_u_f.pid (always readable) - the .lock file is unreadable while held.
 set "EXISTING_PID="
 if exist "%BRIDGE_HOME%\.bridge_u_f.pid" (
     for /f "usebackq delims=" %%P in ("%BRIDGE_HOME%\.bridge_u_f.pid") do set "EXISTING_PID=%%P"
@@ -408,16 +434,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "  try { $resolved = [System.IO.Path]::GetFullPath($candidate).TrimEnd('\') } catch { $resolved = $candidate.TrimEnd('\') }; " ^
   "  if($resolved -ieq $bridgeHome){ exit 0 } else { exit 1 } " ^
   "}; " ^
-  "if([regex]::IsMatch($cmd, '(?i)(^|[""\s])' + [regex]::Escape($mainPath) + '("|\s|$)')){ exit 0 } else { exit 1 }"
+  "if([regex]::IsMatch($cmd, '(?i)(^|[""\s])' + [regex]::Escape($mainPath) + '(""|\s|$)')){ exit 0 } else { exit 1 }"
 if errorlevel 1 (
-    rem PID file is stale â€” process is gone or not bridge-u-f
+    rem PID file is stale - process is gone or not bridge-u-f
     del /f /q "%BRIDGE_HOME%\.bridge_u_f.pid" >nul 2>&1
     exit /b 0
 )
 echo.
 echo   !C_WARN!Bridge-u-f is already running ^(PID !EXISTING_PID!^).!C_RESET!
 if "!AUTO_RESUME_LAST!"=="1" (
-    rem Called from restart script â€” don't prompt, just fail
+    rem Called from restart script - don't prompt, just fail
     exit /b 1
 )
 echo.
