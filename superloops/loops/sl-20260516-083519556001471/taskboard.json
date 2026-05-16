@@ -31,21 +31,21 @@
     "task_id": "step-005",
     "title": "agent1 runs staging check/dry-run and reports exact outputs",
     "owner": "agent1@INTEL",
-    "status": "in_progress",
+    "status": "completed",
     "required_evidence": ["py_compile", "help", "check", "dry_run", "go_no_go"]
   },
   {
     "task_id": "step-006",
     "title": "Remove or upgrade existing Intel WatchTower with rollback backup",
     "owner": "agent1@INTEL",
-    "status": "pending",
+    "status": "completed",
     "required_evidence": ["existing_service_state", "backup_path", "uninstall_or_stop_output", "rollback_plan"]
   },
   {
     "task_id": "step-007",
     "title": "Apply standalone WatchTower install on Intel",
     "owner": "agent1@INTEL",
-    "status": "pending",
+    "status": "in_progress",
     "required_evidence": ["install_mapping", "venv_result", "service_install_result", "installed_true"]
   },
   {

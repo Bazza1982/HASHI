@@ -203,7 +203,40 @@ remote stat:
 
 ## agent1 Staging Report
 
-Pending. Sent command:
+### staging-002 Reply
+
+```text
+report_type: watchtower_intel_staging_check
+command_id: sl-20260516-083519556001471-staging-002
+
+artifact_sha256:
+  expected: e5e04c41a75f01cf5c4bc993a57e7b7f78cf9fb97a3ca2729c7c047552414e5c
+  actual:   e5e04c41a75f01cf5c4bc993a57e7b7f78cf9fb97a3ca2729c7c047552414e5c
+  result: match
+
+extract_path: C:\Users\Print\HASHI\tmp\watchtower_install_staging\extract
+py_compile: passed with py -3.12
+python: 3.12.10
+pip: 25.0.1
+remote_help: blocked by missing uvicorn in bare extract
+install_script_present: true
+agents_json:
+  instance_id: WATCHTOWER
+  remote_port: 43766
+  agents: []
+go_no_go: blocked
+```
+
+Decision:
+
+```text
+This is green enough for install preparation. The bare extract is not expected
+to run without dependencies. Install phase must create .venv with py -3.12,
+install requirements.txt, then rerun python -m remote --help from the venv
+before service install.
+```
+
+Earlier sent command:
 
 ```text
 command_id: sl-20260516-083519556001471-staging-001
@@ -255,7 +288,24 @@ staging-002, which uses py -3.12.
 
 ## Install Evidence
 
-Pending.
+Install Go sent to `agent1@INTEL`.
+
+```text
+command_id: sl-20260516-083519556001471-install-001
+delivery: cached API 192.168.0.6:18802
+protocol transport: timed out
+
+install_root: C:\Users\Print\projects\WatchTower
+controlled_hashi_root: C:\Users\Print\HASHI
+instance_id: WATCHTOWER_INTEL
+display_name: HASHI WatchTower Intel
+service_name: HashiWatchtower
+port: 43766
+python: py -3.12
+```
+
+The first local send attempt failed before delivery because Bash expanded
+PowerShell `$variables`. The command was resent safely via subprocess argv.
 
 ## Broadcast Evidence
 
