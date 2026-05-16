@@ -73,7 +73,9 @@
       "*.sqlite*"
     ]
   },
-  "blockers": [],
+  "blockers": [
+    "MSI Remote API and agent directory are online, but agent3 and agent4 have not returned preflight/staging execution reports yet."
+  ],
   "risks": [
     "MSI active HASHI root is not yet confirmed",
     "MSI install root and Windows user profile are not yet confirmed",
@@ -86,5 +88,5 @@
     "kind": "run_task",
     "task_id": "step-001"
   },
-  "updated_at": "2026-05-16T11:11:41.891542+00:00"
+  "updated_at": "2026-05-16T11:28:30Z"
 }

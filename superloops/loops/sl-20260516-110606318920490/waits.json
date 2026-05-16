@@ -69,7 +69,8 @@
     "controller_probe": "python3 tools/hchat_send.py --to agent4 --from zelda --instance MSI --check; python3 tools/remote_file_transfer.py stat MSI:C:\\Users\\Public\\hashi_watchtower_msi_staging\\watchtower_standalone_msi_20260516.tar.gz",
     "follow_up_message": "Request agent4 read-only inspection status for sl-20260516-110606318920490-agent4-inspect-001.",
     "escalation_if_no_reply": "mark MSI worker/reviewer unresponsive and ask operator to check MSI agents",
-    "status": "waiting",
+    "status": "follow_up_sent_after_deadline",
+    "follow_up_sent_at": "2026-05-16T11:28:30Z",
     "expected_fields": [
       "report_type",
       "target_instance",
