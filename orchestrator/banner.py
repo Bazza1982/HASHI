@@ -61,6 +61,9 @@ def _stdout_looks_unicode_safe() -> bool:
     if os.environ.get("BRIDGE_FORCE_ASCII_BANNER") == "1":
         return False
 
+    if os.name == "nt" and os.environ.get("BRIDGE_ALLOW_UNICODE_BANNER") != "1":
+        return False
+
     encoding = (getattr(sys.stdout, "encoding", "") or "").lower()
     if "utf" not in encoding:
         return False
@@ -86,6 +89,7 @@ def _stdout_looks_unicode_safe() -> bool:
 def _show_ascii_startup_banner(
     agent_names: list,
     boot_state: dict | None = None,
+    boot_reason: dict | None = None,
     workbench_port: int | None = None,
     wa_enabled: bool = False,
     api_gateway_enabled: bool = False,
@@ -251,6 +255,7 @@ def show_startup_banner(
         _show_ascii_startup_banner(
             agent_names=agent_names,
             boot_state=boot_state,
+            boot_reason=boot_reason,
             workbench_port=workbench_port,
             wa_enabled=wa_enabled,
             api_gateway_enabled=api_gateway_enabled,

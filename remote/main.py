@@ -510,6 +510,7 @@ def main() -> int:
 
     host = args.host or server_cfg.get("host", "0.0.0.0")
     requested_port = args.port or configured_port
+    strict_port = args.port is not None or args.supervised
     port, attempted_ports = select_available_port(
         host,
         requested_port,
@@ -517,6 +518,15 @@ def main() -> int:
     )
     if port != requested_port:
         logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s %(message)s")
+        if strict_port:
+            logger.error(
+                "Port %s is unavailable on %s and strict-port mode is active (supervised or explicit --port); "
+                "exiting so the process manager can restart after the port is released (attempted=%s)",
+                requested_port,
+                host,
+                attempted_ports,
+            )
+            return 1
         logger.warning(
             "Configured Remote port %s is unavailable on %s; using %s instead (attempted=%s)",
             requested_port,
