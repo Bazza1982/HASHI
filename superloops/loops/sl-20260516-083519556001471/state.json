@@ -2,7 +2,7 @@
   "loop_id": "sl-20260516-083519556001471",
   "source_template": "superloops/templates/remote_install",
   "created_at": "2026-05-16T08:35:29Z",
-  "status": "awaiting_agent1_staging_report",
+  "status": "install_go_sent",
   "goal": "Install standalone WatchTower repo on INTEL, verify service stability, broadcast presence, and non-destructive rescue smoke readiness from HASHI1.",
   "orchestrator": {
     "agent": "Zelda",
@@ -33,13 +33,14 @@
       "no open blockers"
     ]
   },
-  "current_step": "step-005",
+  "current_step": "step-007",
   "blockers": [],
   "risks": [
     "C:\\Users\\Print\\projects does not exist yet and must be created for standalone WatchTower install",
     "port 43766 may conflict on Intel",
     "Windows service install may require elevated rights",
-    "staging-001 used py -3.11 but Intel has Python 3.12 and 3.14 only; staging-002 supersedes it",
+    "NSSM acquisition may require winget or outbound download on Intel",
+    "service install writes firewall rule and scheduled health task",
     "hchat protocol transport times out but cached Workbench API delivery succeeds"
   ]
 }

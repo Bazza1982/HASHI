@@ -1,10 +1,37 @@
 [
   {
+    "wait_id": "wait-20260516-085800-agent1-install",
+    "kind": "await_hchat_reply",
+    "target": "agent1@INTEL",
+    "command_id": "sl-20260516-083519556001471-install-001",
+    "entered_at": "2026-05-16T08:58:00Z",
+    "expected_fields": [
+      "report_type",
+      "target_instance",
+      "agent",
+      "command_id",
+      "backup_path",
+      "install_root",
+      "controlled_hashi_root",
+      "venv_python",
+      "pip_install",
+      "remote_help",
+      "service_status",
+      "health_json",
+      "hashi_status_json",
+      "logs_summary",
+      "go_no_go",
+      "blockers",
+      "next_recommended_action"
+    ]
+  },
+  {
     "wait_id": "wait-20260516-085200-agent1-staging-v2",
     "kind": "await_hchat_reply",
     "target": "agent1@INTEL",
     "command_id": "sl-20260516-083519556001471-staging-002",
     "entered_at": "2026-05-16T08:52:00Z",
+    "status": "received_green_for_install_prep",
     "expected_fields": [
       "report_type",
       "target_instance",
