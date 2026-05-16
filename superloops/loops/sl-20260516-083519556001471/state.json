@@ -18,7 +18,7 @@
     "staging_root": "C:\\Users\\Print\\HASHI\\tmp\\watchtower_install_staging",
     "controlled_hashi_root": "C:\\Users\\Print\\HASHI",
     "service_name": "HashiWatchtower",
-    "proposed_instance_id": "WATCHTOWER_INTEL",
+    "proposed_instance_id": "INTEL-WT",
     "proposed_port": 43766
   },
   "exit_condition": {
@@ -35,14 +35,25 @@
   },
   "current_step": "closed",
   "blockers": [],
-  "completed_at": "2026-05-16T09:52:00Z",
+  "completed_at": "2026-05-16T10:06:00Z",
   "final_result": {
     "watchtower_url": "http://192.168.0.6:43766",
-    "instance_id": "WATCHTOWER_INTEL",
-    "display_name": "HASHI WatchTower Intel",
+    "instance_id": "INTEL-WT",
+    "display_name": "Intel-WT",
     "broadcast_visible_from_hashi1": true,
+    "route_kind": "lan",
+    "distinguishable_from_local_watchtower": true,
     "rescue_smoke": "passed",
-    "non_destructive_start": "already_running"
+    "non_destructive_start": "already_running",
+    "intel_hashi_shutdown": false
+  },
+  "updated_exit_condition": {
+    "requires": [
+      "WatchTower appears from HASHI1 over LAN as Intel-WT",
+      "Intel-WT is distinguishable from local WATCHTOWER",
+      "authenticated non-destructive rescue smoke passes against Intel-WT",
+      "INTEL HASHI core is not shut down during smoke"
+    ]
   },
   "risks": [
     "C:\\Users\\Print\\projects does not exist yet and must be created for standalone WatchTower install",
