@@ -45,42 +45,42 @@
     "task_id": "step-007",
     "title": "Apply standalone WatchTower install on Intel",
     "owner": "agent1@INTEL",
-    "status": "in_progress",
+    "status": "completed",
     "required_evidence": ["install_mapping", "venv_result", "service_install_result", "installed_true"]
   },
   {
     "task_id": "step-008",
     "title": "Verify installed files and service health from final install path",
     "owner": "agent1@INTEL",
-    "status": "pending",
+    "status": "completed",
     "required_evidence": ["final_path_sha", "service_query", "health_json", "logs"]
   },
   {
     "task_id": "step-009",
     "title": "Verify HASHI1 sees Intel WatchTower broadcast and route is not aliased",
     "owner": "orchestrator",
-    "status": "pending",
+    "status": "completed",
     "required_evidence": ["remote_list", "health_route", "instance_id", "capabilities"]
   },
   {
     "task_id": "step-010",
     "title": "Run non-destructive remote rescue smoke from HASHI1",
     "owner": "orchestrator",
-    "status": "pending",
+    "status": "completed",
     "required_evidence": ["status_probe", "logs_probe", "start_already_running_probe", "no_destructive_stop"]
   },
   {
     "task_id": "step-011",
     "title": "Fix and retest all blockers until green",
     "owner": "orchestrator",
-    "status": "pending",
+    "status": "completed",
     "required_evidence": ["issue_log", "fixes", "retest_results"]
   },
   {
     "task_id": "step-012",
     "title": "Final acceptance and close",
     "owner": "orchestrator",
-    "status": "pending",
+    "status": "completed",
     "required_evidence": ["final_evidence_artifact", "no_open_blockers", "exit_condition_met"]
   }
 ]

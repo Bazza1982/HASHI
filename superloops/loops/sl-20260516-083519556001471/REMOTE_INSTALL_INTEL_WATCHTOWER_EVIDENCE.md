@@ -442,15 +442,78 @@ action: Restart-Service HashiWatchtower; then report health/status/logs
 
 ## Broadcast Evidence
 
-Pending.
+```text
+HASHI1 /health peers includes:
+  instance_id: WATCHTOWER_INTEL
+  display_name: HASHI WatchTower Intel
+  host: 192.168.0.6
+  port: 43766
+  live_status: online
+  resolved_route_host: 192.168.0.6
+  resolved_route_port: 43766
+  route_kind: lan
+```
+
+Stable health probes:
+
+```text
+probe_1 True WATCHTOWER_INTEL shared-token True
+probe_2 True WATCHTOWER_INTEL shared-token True
+probe_3 True WATCHTOWER_INTEL shared-token True
+```
+
+Protocol status:
+
+```text
+url: http://192.168.0.6:43766/protocol/status
+ok: true
+display_handle: @watchtower_intel
+protocol_auth_mode: shared-token
+shared_token_configured: true
+rescue_start_enabled: true
+rescue_start_requirement: L3_RESTART
+```
 
 ## Rescue Smoke Evidence
 
-Pending.
+Authenticated HMAC calls from HASHI1:
 
-## Open Risks
+```text
+GET /control/hashi/status
+  HTTP 200
+  ok: true
+  state: running
+  hashi_running: true
+  pid: 12920
+  workbench_url: http://127.0.0.1:18802/api/health
+  agents: agent2, agent1, lily
 
-- Intel username/path may not be `C:\Users\Print`.
-- Intel port `43766` may be occupied.
-- Service install may require elevation.
-- Current Intel HASHI root must be confirmed by `agent1@INTEL`.
+GET /control/hashi/logs?tail=40
+  HTTP 200
+  ok: true
+  exists: false
+  lines: []
+
+POST /control/hashi/start
+  HTTP 200
+  ok: true
+  started: false
+  already_running: true
+```
+
+No destructive stop test was run.
+
+## Final Result
+
+Exit condition met.
+
+```text
+WatchTower root: C:\Users\Print\projects\WatchTower
+Controlled HASHI root: C:\Users\Print\HASHI
+Instance id: WATCHTOWER_INTEL
+Display name: HASHI WatchTower Intel
+Port: 43766
+Broadcast visible from HASHI1: yes
+Rescue smoke: passed
+Destructive stop test: not run
+```

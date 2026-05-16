@@ -2,7 +2,7 @@
   "loop_id": "sl-20260516-083519556001471",
   "source_template": "superloops/templates/remote_install",
   "created_at": "2026-05-16T08:35:29Z",
-  "status": "install_go_sent",
+  "status": "completed",
   "goal": "Install standalone WatchTower repo on INTEL, verify service stability, broadcast presence, and non-destructive rescue smoke readiness from HASHI1.",
   "orchestrator": {
     "agent": "Zelda",
@@ -33,8 +33,17 @@
       "no open blockers"
     ]
   },
-  "current_step": "step-007",
+  "current_step": "closed",
   "blockers": [],
+  "completed_at": "2026-05-16T09:52:00Z",
+  "final_result": {
+    "watchtower_url": "http://192.168.0.6:43766",
+    "instance_id": "WATCHTOWER_INTEL",
+    "display_name": "HASHI WatchTower Intel",
+    "broadcast_visible_from_hashi1": true,
+    "rescue_smoke": "passed",
+    "non_destructive_start": "already_running"
+  },
   "risks": [
     "C:\\Users\\Print\\projects does not exist yet and must be created for standalone WatchTower install",
     "port 43766 may conflict on Intel",
