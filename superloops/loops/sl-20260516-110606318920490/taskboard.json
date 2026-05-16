@@ -24,14 +24,14 @@
     "task_id": "step-004",
     "title": "Transfer package to MSI staging and verify remote SHA",
     "owner": "orchestrator",
-    "status": "pending",
+    "status": "completed",
     "required_evidence": ["transfer_output", "remote_stat_sha"]
   },
   {
     "task_id": "step-005",
     "title": "agent3 runs staging check/dry-run and reports exact outputs",
     "owner": "agent3@MSI",
-    "status": "pending",
+    "status": "in_progress",
     "required_evidence": ["py_compile", "help", "check", "dry_run", "go_no_go"]
   },
   {

@@ -26,6 +26,34 @@
       "blockers",
       "next_recommended_action"
     ]
+  },
+  {
+    "wait_id": "wait-20260516-111200-agent3-staging",
+    "kind": "await_hchat_reply",
+    "target": "agent3@MSI",
+    "command_id": "sl-20260516-110606318920490-staging-001",
+    "entered_at": "2026-05-16T11:12:00Z",
+    "follow_up_after_minutes": 5,
+    "deadline_at": "2026-05-16T11:17:00Z",
+    "controller_probe": "python3 tools/remote_file_transfer.py stat MSI:C:\\Users\\Public\\hashi_watchtower_msi_staging\\watchtower_standalone_msi_20260516.tar.gz; python3 tools/hchat_send.py --to agent3 --from zelda --instance MSI --check",
+    "follow_up_message": "Request staging status for sl-20260516-110606318920490-staging-001; no install or shutdown.",
+    "escalation_if_no_reply": "use controller-side stat evidence and ask operator whether MSI agent needs attention",
+    "status": "waiting",
+    "expected_fields": [
+      "report_type",
+      "target_instance",
+      "agent",
+      "command_id",
+      "artifact_sha256",
+      "extract_path",
+      "py_compile",
+      "remote_help",
+      "python_status",
+      "install_script_present",
+      "agents_json_summary",
+      "go_no_go",
+      "blockers",
+      "next_recommended_action"
+    ]
   }
 ]
-

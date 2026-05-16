@@ -46,3 +46,17 @@ Privacy/runtime excludes:
 remote_runtime_claim.json, remote_live_endpoints.json, secrets.json,
 secrets.*, __pycache__, *.pyc, *.sqlite*
 ```
+
+## MSI Staging Transfer
+
+```text
+archive_path: C:\Users\Public\hashi_watchtower_msi_staging\watchtower_standalone_msi_20260516.tar.gz
+archive_size: 86649
+archive_sha256: 95ae798c92d1039b5815c619a5adeeeaf2889686db08c49aa776346827b2f460
+remote_stat: verified
+
+sha_path: C:\Users\Public\hashi_watchtower_msi_staging\watchtower_standalone_msi_20260516.sha256
+sha_file_size: 163
+sha_file_sha256: eb79e7002fd7cb1e000c01cfabe6ea2e336779c2d7153f4994cb16fe8dff9d36
+remote_stat: verified
+```

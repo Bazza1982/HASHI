@@ -51,6 +51,12 @@
     "size_bytes": 86649,
     "sha256": "95ae798c92d1039b5815c619a5adeeeaf2889686db08c49aa776346827b2f460",
     "archive_entries": 61,
+    "remote_staging": {
+      "archive_path": "C:\\Users\\Public\\hashi_watchtower_msi_staging\\watchtower_standalone_msi_20260516.tar.gz",
+      "sha_file_path": "C:\\Users\\Public\\hashi_watchtower_msi_staging\\watchtower_standalone_msi_20260516.sha256",
+      "archive_sha256_verified": true,
+      "sha_file_sha256": "eb79e7002fd7cb1e000c01cfabe6ea2e336779c2d7153f4994cb16fe8dff9d36"
+    },
     "privacy_excludes": [
       ".git",
       ".venv",
@@ -80,5 +86,5 @@
     "kind": "run_task",
     "task_id": "step-001"
   },
-  "updated_at": "2026-05-16T11:09:26.767666+00:00"
+  "updated_at": "2026-05-16T11:11:41.891542+00:00"
 }
