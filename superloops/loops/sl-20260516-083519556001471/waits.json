@@ -9,6 +9,7 @@
     "deadline_at": "2026-05-16T09:53:00Z",
     "controller_probe": "curl http://192.168.0.6:43766/health; authenticated rescue status/logs/start smoke",
     "escalation_if_no_reply": "run HASHI1 controller-side authenticated smoke; ask agent2 to restart/check service if still shared_token_configured=false",
+    "status": "satisfied_by_controller_side_smoke",
     "expected_fields": [
       "report_type",
       "command_id",
@@ -32,7 +33,7 @@
     "deadline_at": "2026-05-16T09:48:00Z",
     "controller_probe": "curl http://192.168.0.6:43766/health; python3 tools/hchat_send.py --to agent1 --from zelda --instance INTEL --check",
     "escalation_if_no_reply": "ask agent2@INTEL to inspect service after nssm push",
-    "status": "health_online_then_token_fix_required",
+    "status": "satisfied_by_controller_side_smoke",
     "expected_fields": [
       "report_type",
       "command_id",
@@ -59,6 +60,7 @@
     "deadline_at": "2026-05-16T09:43:00Z",
     "controller_probe": "curl http://192.168.0.6:43766/health; python3 tools/hchat_send.py --to agent2 --from zelda --instance INTEL --check",
     "escalation_if_no_reply": "mark install blocked and ask operator for Intel-side service console access",
+    "status": "superseded_by_controller_side_smoke",
     "expected_fields": [
       "report_type",
       "target_instance",
@@ -85,7 +87,7 @@
     "deadline_at": "2026-05-16T09:08:00Z",
     "controller_probe": "curl http://192.168.0.6:43766/health; python3 tools/remote_rescue.py --json status INTEL; python3 tools/hchat_send.py --to agent1 --from zelda --instance INTEL --check",
     "follow_up_sent_at": "2026-05-16T09:35:00Z",
-    "status": "deadline_missed_followup_sent",
+    "status": "satisfied_by_controller_side_smoke_after_followup",
     "expected_fields": [
       "report_type",
       "target_instance",
