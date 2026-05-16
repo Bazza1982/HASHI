@@ -1079,6 +1079,7 @@ class WorkbenchApiServer:
                 "workbench_port": getattr(self.global_config, "workbench_port", None),
                 "api_gateway_port": getattr(self.global_config, "api_gateway_port", None),
                 "api_gateway_enabled": bool(getattr(orchestrator, "api_gateway", None)),
+                "api_gateway_default_model": getattr(getattr(orchestrator, "api_gateway", None), "default_model", None),
                 "agents": running_agents,
             }
         )
