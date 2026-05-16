@@ -1,0 +1,86 @@
+[
+  {
+    "task_id": "step-001",
+    "title": "Collect target, remote worker, package source, staging root, install root, rollback policy",
+    "owner": "orchestrator",
+    "status": "in_progress",
+    "required_evidence": ["target_instance", "remote_worker", "artifact_source", "staging_root", "install_root", "rollback_policy"]
+  },
+  {
+    "task_id": "step-002",
+    "title": "Preflight HChat/protocol route, Hashi Remote capabilities, file transfer stat, and MSI paths",
+    "owner": "orchestrator",
+    "status": "in_progress",
+    "required_evidence": ["route_check", "capabilities", "file_stat", "repo_root_exists", "msi_path_report"]
+  },
+  {
+    "task_id": "step-003",
+    "title": "Build WatchTower package manifest with SHA256/byte sizes and privacy check",
+    "owner": "orchestrator",
+    "status": "completed",
+    "required_evidence": ["manifest", "sha256_list", "privacy_check", "excluded_runtime_files"]
+  },
+  {
+    "task_id": "step-004",
+    "title": "Transfer package to MSI staging and verify remote SHA",
+    "owner": "orchestrator",
+    "status": "pending",
+    "required_evidence": ["transfer_output", "remote_stat_sha"]
+  },
+  {
+    "task_id": "step-005",
+    "title": "agent3 runs staging check/dry-run and reports exact outputs",
+    "owner": "agent3@MSI",
+    "status": "pending",
+    "required_evidence": ["py_compile", "help", "check", "dry_run", "go_no_go"]
+  },
+  {
+    "task_id": "step-006",
+    "title": "Remove or upgrade existing MSI WatchTower with rollback backup",
+    "owner": "agent3@MSI",
+    "status": "pending",
+    "required_evidence": ["existing_service_state", "backup_path", "uninstall_or_stop_output", "rollback_plan"]
+  },
+  {
+    "task_id": "step-007",
+    "title": "Apply standalone WatchTower install on MSI",
+    "owner": "agent3@MSI",
+    "status": "pending",
+    "required_evidence": ["install_mapping", "venv_result", "service_install_result", "installed_true"]
+  },
+  {
+    "task_id": "step-008",
+    "title": "Verify installed files and service health from final install path",
+    "owner": "agent3@MSI",
+    "status": "pending",
+    "required_evidence": ["final_path_sha", "service_query", "health_json", "logs"]
+  },
+  {
+    "task_id": "step-009",
+    "title": "Verify HASHI1 sees MSI-WT broadcast and route is not aliased",
+    "owner": "orchestrator",
+    "status": "pending",
+    "required_evidence": ["remote_list", "health_route", "instance_id", "capabilities"]
+  },
+  {
+    "task_id": "step-010",
+    "title": "Run non-destructive remote rescue smoke from HASHI1",
+    "owner": "orchestrator",
+    "status": "pending",
+    "required_evidence": ["status_probe", "logs_probe", "start_already_running_probe", "no_destructive_stop"]
+  },
+  {
+    "task_id": "step-011",
+    "title": "Fix and retest all blockers until green",
+    "owner": "orchestrator",
+    "status": "pending",
+    "required_evidence": ["issue_log", "fixes", "retest_results"]
+  },
+  {
+    "task_id": "step-012",
+    "title": "Final acceptance and close",
+    "owner": "orchestrator",
+    "status": "pending",
+    "required_evidence": ["final_evidence_artifact", "no_open_blockers", "exit_condition_met"]
+  }
+]
