@@ -38,7 +38,7 @@
     "task_id": "step-006",
     "title": "Remove or upgrade existing MSI WatchTower with rollback backup",
     "owner": "agent3@MSI",
-    "status": "in_progress",
+    "status": "completed",
     "required_evidence": ["existing_service_state", "backup_path", "uninstall_or_stop_output", "rollback_plan"]
   },
   {
@@ -52,7 +52,7 @@
     "task_id": "step-008",
     "title": "Verify installed files and service health from final install path",
     "owner": "agent3@MSI",
-    "status": "pending",
+    "status": "in_progress",
     "required_evidence": ["final_path_sha", "service_query", "health_json", "logs"]
   },
   {
