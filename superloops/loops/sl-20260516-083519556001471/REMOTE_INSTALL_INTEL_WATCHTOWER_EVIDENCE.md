@@ -15,7 +15,7 @@ remote_worker: agent1@INTEL
 package_source: C:\Users\thene\projects\WatchTower on HASHI9/A9, or equivalent standalone WatchTower repo payload
 staging_root: C:\Users\Print\HASHI\tmp\watchtower_install_staging
 install_root: C:\Users\Print\projects\WatchTower
-controlled_hashi_root: C:\Users\Print\projects\HASHI
+controlled_hashi_root: C:\Users\Print\HASHI
 service_name: HashiWatchtower
 instance_id: WATCHTOWER_INTEL
 proposed_port: 43766
@@ -101,6 +101,48 @@ protocol transport: timed out
 command_id: sl-20260516-083519556001471-preflight-001
 ```
 
+### agent1 Preflight Reply
+
+```text
+report_type: watchtower_intel_preflight
+target_instance: INTEL
+agent: agent1
+command_id: sl-20260516-083519556001471-preflight-001
+
+hostname: INTEL
+whoami: intel\print
+pwd: C:\Users\Print\HASHI\workspaces\agent1
+
+paths:
+  C:\Users\Print\projects\HASHI: false
+  C:\Users\Print\HASHI: true
+  C:\Users\Print\.hashi-remote: true
+  C:\Users\Print\projects\WatchTower: false
+  C:\Users\Print\HASHI\tmp: true
+  C:\Users\Print\HASHI\tmp\watchtower_install_staging: true
+  C:\Users\Print\projects: false
+
+existing service: HashiWatchtower not present
+existing scheduled task: no *WatchTower* tasks
+port 43766: no local listener; only TIME_WAIT to 192.168.0.211:43766
+python:
+  py -0p: 3.14, 3.12
+  python: 3.14.2
+  py -3.11: missing
+PowerShell: 5.1.26100.8457
+admin_rights: true
+go_no_go: preflight_only_go
+```
+
+Decision:
+
+```text
+Use C:\Users\Print\HASHI as the controlled HASHI root.
+Create C:\Users\Print\projects\WatchTower as the standalone WatchTower root.
+Use Python 3.12 because WatchTower requires >=3.10, not specifically 3.11.
+Supersede staging-001 because it used py -3.11.
+```
+
 ## Package Manifest
 
 ```text
@@ -168,6 +210,16 @@ command_id: sl-20260516-083519556001471-staging-001
 delivery: cached API 192.168.0.6:18802
 protocol transport: timed out
 mode: staging check only, do not install
+```
+
+Superseded by corrected Python 3.12 command:
+
+```text
+command_id: sl-20260516-083519556001471-staging-002
+delivery: cached API 192.168.0.6:18802
+protocol transport: timed out
+mode: staging check only, do not install
+reason: Intel has Python 3.12 and 3.14, no Python 3.11
 ```
 
 ## Install Evidence

@@ -1,10 +1,34 @@
 [
   {
+    "wait_id": "wait-20260516-085200-agent1-staging-v2",
+    "kind": "await_hchat_reply",
+    "target": "agent1@INTEL",
+    "command_id": "sl-20260516-083519556001471-staging-002",
+    "entered_at": "2026-05-16T08:52:00Z",
+    "expected_fields": [
+      "report_type",
+      "target_instance",
+      "agent",
+      "command_id",
+      "artifact_sha256",
+      "extract_path",
+      "py_compile",
+      "remote_help",
+      "python_status",
+      "install_script_present",
+      "agents_json_summary",
+      "go_no_go",
+      "blockers",
+      "next_recommended_action"
+    ]
+  },
+  {
     "wait_id": "wait-20260516-083820-agent1-preflight",
     "kind": "await_hchat_reply",
     "target": "agent1@INTEL",
     "command_id": "sl-20260516-083519556001471-preflight-001",
     "entered_at": "2026-05-16T08:38:20Z",
+    "status": "received",
     "expected_fields": [
       "report_type",
       "target_instance",
@@ -28,6 +52,7 @@
     "target": "agent1@INTEL",
     "command_id": "sl-20260516-083519556001471-staging-001",
     "entered_at": "2026-05-16T08:47:00Z",
+    "status": "superseded_by_staging_002_due_to_missing_python_3_11",
     "expected_fields": [
       "report_type",
       "target_instance",

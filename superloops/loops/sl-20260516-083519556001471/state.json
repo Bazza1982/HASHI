@@ -16,7 +16,7 @@
     "instance_id": "INTEL",
     "install_root": "C:\\Users\\Print\\projects\\WatchTower",
     "staging_root": "C:\\Users\\Print\\HASHI\\tmp\\watchtower_install_staging",
-    "controlled_hashi_root": "C:\\Users\\Print\\projects\\HASHI",
+    "controlled_hashi_root": "C:\\Users\\Print\\HASHI",
     "service_name": "HashiWatchtower",
     "proposed_instance_id": "WATCHTOWER_INTEL",
     "proposed_port": 43766
@@ -36,10 +36,10 @@
   "current_step": "step-005",
   "blockers": [],
   "risks": [
-    "Intel path or username may differ from assumed C:\\Users\\Print",
+    "C:\\Users\\Print\\projects does not exist yet and must be created for standalone WatchTower install",
     "port 43766 may conflict on Intel",
     "Windows service install may require elevated rights",
-    "Intel HASHI root may differ from assumed path",
+    "staging-001 used py -3.11 but Intel has Python 3.12 and 3.14 only; staging-002 supersedes it",
     "hchat protocol transport times out but cached Workbench API delivery succeeds"
   ]
 }
