@@ -67,6 +67,13 @@
     "title": "Final acceptance and close",
     "owner": "orchestrator",
     "status": "pending",
-    "required_evidence": ["exit_condition_status", "final_evidence", "open_risks", "next_step"]
+    "required_evidence": [
+      "exit_condition_status",
+      "final_evidence",
+      "worker_reviewer_inbox_drain",
+      "late_reply_classification",
+      "open_risks",
+      "next_step"
+    ]
   }
 ]
