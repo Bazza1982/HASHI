@@ -107,12 +107,15 @@ class PeerRegistry:
     def on_peers_changed(self, peers: list[PeerInfo]) -> None:
         """Callback for LanDiscovery — called whenever peers list changes."""
         valid_peers = []
+        now_ts = int(time.time())
         for peer in peers:
             iid = normalize_instance_id(peer.instance_id)
             if not is_valid_instance_id(iid):
                 logger.debug("Registry: ignoring peer with invalid instance identity: %s", peer.instance_id)
                 continue
-            valid_peers.append(dataclasses.replace(peer, instance_id=iid))
+            props = dict(peer.properties or {})
+            props["route_observed_at"] = now_ts
+            valid_peers.append(dataclasses.replace(peer, instance_id=iid, properties=props))
         backend = None
         if valid_peers:
             backend = str(valid_peers[0].properties.get("discovery", "") or "").lower() or None
@@ -287,13 +290,21 @@ class PeerRegistry:
         last_error: str | None = None,
         remote_agents: list[dict] | None = None,
         remote_agent_directory: dict | None = None,
+        remote_supervisor: dict | None = None,
     ) -> None:
         iid = instance_id.upper()
         peer = self._peers.get(iid)
         if peer is None:
             return
-        fallback = (self._observations.get(iid) or {}).get("bootstrap_fallback")
-        if state == "handshake_accepted" and fallback and str(fallback.host or "").strip() in {"127.0.0.1", "localhost"}:
+        observations = self._observations.get(iid) or {}
+        fallback = observations.get("bootstrap_fallback")
+        has_live_discovery = any(name in observations for name in ("lan", "tailscale"))
+        if (
+            state == "handshake_accepted"
+            and fallback
+            and not has_live_discovery
+            and str(fallback.host or "").strip() in {"127.0.0.1", "localhost"}
+        ):
             peer = dataclasses.replace(fallback)
         props = self._normalize_live_props(peer.properties or {})
         props["handshake_state"] = state
@@ -319,6 +330,10 @@ class PeerRegistry:
                 props["agent_snapshot_version"] = str(remote_agent_directory.get("version"))
             if remote_agent_directory.get("directory_state"):
                 props["directory_state"] = str(remote_agent_directory.get("directory_state"))
+        if remote_supervisor is not None:
+            props["remote_supervisor"] = dict(remote_supervisor)
+            if remote_supervisor.get("mode"):
+                props["remote_supervisor_mode"] = str(remote_supervisor.get("mode"))
         if protocol_version:
             peer.protocol_version = protocol_version
         if capabilities is not None:
@@ -473,6 +488,36 @@ class PeerRegistry:
             score += 20
         return score, len(caps), str(entry.get("instance_id") or "").upper()
 
+    def _entry_alias_backend(self, entry: dict) -> str:
+        if not isinstance(entry, dict):
+            return ""
+        return str(
+            entry.get("_discovery")
+            or entry.get("preferred_backend")
+            or entry.get("discovery")
+            or ""
+        ).strip().lower()
+
+    def _peer_alias_backend(self, peer: PeerInfo) -> str:
+        props = peer.properties or {}
+        return str(
+            props.get("preferred_backend")
+            or props.get("discovery")
+            or ""
+        ).strip().lower()
+
+    def _entry_is_live_discovery_identity(self, entry: dict) -> bool:
+        if not isinstance(entry, dict):
+            return False
+        if not is_valid_instance_id(entry.get("instance_id")):
+            return False
+        return self._entry_alias_backend(entry) in {"lan", "tailscale"}
+
+    def _peer_is_live_discovery_identity(self, peer: PeerInfo) -> bool:
+        if not is_valid_instance_id(peer.instance_id):
+            return False
+        return self._peer_alias_backend(peer) in {"lan", "tailscale"}
+
     def _peer_alias_score(self, peer: PeerInfo) -> tuple[int, int, str]:
         props = peer.properties or {}
         caps = list(peer.capabilities or [])
@@ -499,7 +544,7 @@ class PeerRegistry:
         if not isinstance(instances, dict):
             return {}, False
         keep_keys: set[str] = set()
-        best_by_alias: dict[tuple[str, int], tuple[str, dict]] = {}
+        alias_groups: dict[tuple[str, int], list[tuple[str, dict]]] = {}
         for key, entry in instances.items():
             if not isinstance(entry, dict):
                 continue
@@ -507,9 +552,26 @@ class PeerRegistry:
             if alias_key is None:
                 keep_keys.add(key)
                 continue
-            chosen = best_by_alias.get(alias_key)
-            if chosen is None or self._entry_alias_score(entry) > self._entry_alias_score(chosen[1]):
-                best_by_alias[alias_key] = (key, entry)
+            alias_groups.setdefault(alias_key, []).append((key, entry))
+        best_by_alias: dict[tuple[str, int], tuple[str, dict]] = {}
+        for alias_key, grouped_entries in alias_groups.items():
+            live_entries = [
+                (key, entry)
+                for key, entry in grouped_entries
+                if self._entry_is_live_discovery_identity(entry)
+            ]
+            live_ids = {
+                normalize_instance_id(entry.get("instance_id") or key)
+                for key, entry in live_entries
+            }
+            if len(live_ids) >= 2:
+                keep_keys.update(key for key, _entry in live_entries)
+                continue
+            chosen = grouped_entries[0]
+            for candidate in grouped_entries[1:]:
+                if self._entry_alias_score(candidate[1]) > self._entry_alias_score(chosen[1]):
+                    chosen = candidate
+            best_by_alias[alias_key] = chosen
         keep_keys.update(key for key, _entry in best_by_alias.values())
 
         pruned: dict[str, dict] = {}
@@ -519,11 +581,11 @@ class PeerRegistry:
                 continue
             alias_key = self._instance_alias_key(entry)
             if alias_key is not None and key not in keep_keys:
-                winner = best_by_alias[alias_key][1]
+                winner = best_by_alias.get(alias_key, (None, entry))[1]
                 logger.info(
                     "Registry: pruning duplicate instance alias %s in favor of %s",
                     str(entry.get("instance_id") or key).upper(),
-                    str(winner.get("instance_id") or best_by_alias[alias_key][0]).upper(),
+                    str(winner.get("instance_id") or best_by_alias.get(alias_key, (key, entry))[0]).upper(),
                 )
                 changed = True
                 continue
@@ -604,21 +666,35 @@ class PeerRegistry:
         if not self._peers:
             return False
         best_by_alias: dict[tuple[str, int], str] = {}
+        keep_iids: set[str] = set()
+        alias_groups: dict[tuple[str, int], list[str]] = {}
         for iid, peer in self._peers.items():
             alias_key = self._peer_alias_key(peer, self._observations.get(iid, {}))
             if alias_key is None:
+                keep_iids.add(iid)
                 continue
-            chosen_iid = best_by_alias.get(alias_key)
-            if chosen_iid is None or self._peer_alias_score(peer) > self._peer_alias_score(self._peers[chosen_iid]):
-                best_by_alias[alias_key] = iid
-
-        keep_iids = set(best_by_alias.values())
+            alias_groups.setdefault(alias_key, []).append(iid)
+        for alias_key, grouped_iids in alias_groups.items():
+            live_iids = [
+                iid
+                for iid in grouped_iids
+                if self._peer_is_live_discovery_identity(self._peers[iid])
+            ]
+            if len({normalize_instance_id(iid) for iid in live_iids}) >= 2:
+                keep_iids.update(live_iids)
+                continue
+            chosen_iid = grouped_iids[0]
+            for candidate_iid in grouped_iids[1:]:
+                if self._peer_alias_score(self._peers[candidate_iid]) > self._peer_alias_score(self._peers[chosen_iid]):
+                    chosen_iid = candidate_iid
+            best_by_alias[alias_key] = chosen_iid
+        keep_iids.update(best_by_alias.values())
         removed = False
         for iid, peer in list(self._peers.items()):
             alias_key = self._peer_alias_key(peer, self._observations.get(iid, {}))
             if alias_key is None or iid in keep_iids:
                 continue
-            winner = best_by_alias[alias_key]
+            winner = best_by_alias.get(alias_key, iid)
             logger.info("Registry: pruning duplicate peer alias %s in favor of %s", iid, winner)
             self._peers.pop(iid, None)
             self._observations.pop(iid, None)
@@ -629,6 +705,8 @@ class PeerRegistry:
         for backend in ("lan", "tailscale"):
             if backend in observations:
                 return backend
+        if self._prefer_inbound_over_loopback_fallback(observations):
+            return "handshake_inbound"
         fallback = observations.get("bootstrap_fallback")
         if fallback and str(fallback.host or "").strip() in {"127.0.0.1", "localhost"}:
             if "bootstrap" in observations:
@@ -678,6 +756,37 @@ class PeerRegistry:
             _protocol_version_score(peer.protocol_version),
             len(str(peer.display_name or "")),
         )
+
+    def _observation_timestamp(self, peer: PeerInfo | None) -> int:
+        if peer is None:
+            return 0
+        props = dict(peer.properties or {})
+        for key in ("route_observed_at", "last_seen_ok", "last_handshake_at", "last_seen_error", "last_seen"):
+            try:
+                value = int(props.get(key) or 0)
+            except Exception:
+                value = 0
+            if value > 0:
+                return value
+        return 0
+
+    def _prefer_inbound_over_loopback_fallback(self, observations: dict[str, PeerInfo]) -> bool:
+        if any(name in observations for name in ("lan", "tailscale")):
+            return False
+        fallback = observations.get("bootstrap_fallback")
+        inbound = observations.get("handshake_inbound")
+        if fallback is None or inbound is None:
+            return False
+        if str(fallback.host or "").strip().lower() not in {"127.0.0.1", "localhost"}:
+            return False
+        same_route = (
+            str(fallback.host or "").strip().lower() == str(inbound.host or "").strip().lower()
+            and int(fallback.port or 0) == int(inbound.port or 0)
+            and int(fallback.workbench_port or 0) == int(inbound.workbench_port or 0)
+        )
+        if same_route:
+            return False
+        return self._observation_timestamp(inbound) >= self._observation_timestamp(fallback)
 
     def _should_drop_legacy_alias(
         self,
@@ -942,7 +1051,7 @@ class PeerRegistry:
     def _sync_to_instances_json(self) -> None:
         """Write discovered peer IPs into instances.json for hchat routing."""
         try:
-            write_live_endpoints(self._root, self._peers.values())
+            write_live_endpoints(self._root, self._peers.values(), preserve_existing=True)
         except Exception as exc:
             logger.warning("Registry: failed to write live endpoint cache: %s", exc)
         if not self._instances_path.exists():
