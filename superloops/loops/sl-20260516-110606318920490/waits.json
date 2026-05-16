@@ -318,7 +318,7 @@
     "controller_probe": "curl http://192.168.0.41:43766/health; curl http://192.168.0.41:43766/protocol/status; check HASHI1 peer view for MSI-WT",
     "follow_up_message": "Request agent3 service-only repair status for sl-20260516-110606318920490-agent3-service-repair-003.",
     "escalation_if_no_reply": "do not switch execution agents; ask agent3 for exact blocked command and use direct probes only",
-    "status": "waiting",
+    "status": "deadline_missed_followup_sent",
     "expected_fields": [
       "report_type",
       "target_instance",
@@ -335,6 +335,31 @@
       "logs_summary",
       "go_no_go",
       "blockers",
+      "next_recommended_action"
+    ]
+  },
+  {
+    "wait_id": "wait-20260516-122400-agent3-service-repair-followup",
+    "kind": "await_hchat_reply",
+    "target": "agent3@MSI",
+    "command_id": "sl-20260516-110606318920490-agent3-service-repair-003",
+    "entered_at": "2026-05-16T12:24:00Z",
+    "follow_up_after_minutes": 5,
+    "deadline_at": "2026-05-16T12:29:00Z",
+    "controller_probe": "curl http://192.168.0.41:43766/health; direct file-transfer stat logs/runtime claim",
+    "follow_up_message": "Request agent3 exact service repair blocker: service_green, blocked with failing command, or not_started.",
+    "escalation_if_no_reply": "do not switch execution ownership; ask user before assigning another worker",
+    "status": "waiting",
+    "expected_fields": [
+      "service_green_or_blocked_or_not_started",
+      "failing_command",
+      "exit_code",
+      "stdout",
+      "stderr",
+      "service_status",
+      "port_43766",
+      "local_health_json",
+      "logs_summary",
       "next_recommended_action"
     ]
   }

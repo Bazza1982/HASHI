@@ -75,7 +75,8 @@
   },
   "blockers": [
     "Service layer not yet green: HASHI1 direct file-transfer stat confirms C:\\Projects\\WatchTower, .venv python, secrets.json, instances.json, bin\\nssm.exe, and logs directory exist, but MSI-WT health on 43766 is not yet observable and service logs are absent.",
-    "Loop governance correction: worker ownership is reset to agent3@MSI only; other MSI agents are no longer execution owners for this install."
+    "Loop governance correction: worker ownership is reset to agent3@MSI only; other MSI agents are no longer execution owners for this install.",
+    "agent3 service repair deadline reached at 12:24Z: HASHI1 LAN health still times out and no service/runtime logs are visible by file-transfer stat."
   ],
   "risks": [
     "MSI active HASHI root is not yet confirmed",
@@ -115,8 +116,8 @@
     "task_id": "step-007",
     "command_id": "sl-20260516-110606318920490-agent3-service-repair-003",
     "target": "agent3@MSI",
-    "deadline_at": "2026-05-16T12:24:00Z",
-    "fallback": "probe MSI-WT health directly and ask agent3 for exact blocked command; do not move execution ownership to another agent without user approval"
+    "deadline_at": "2026-05-16T12:29:00Z",
+    "fallback": "if no exact agent3 response, use direct probes only and ask the user before changing execution ownership"
   },
-  "updated_at": "2026-05-16T12:18:00Z"
+  "updated_at": "2026-05-16T12:24:00Z"
 }
