@@ -189,7 +189,7 @@ is_in_last() {
 }
 
 render_menu() {
-    clear
+    clear || true
     
     local wb_label="OFF"
     [[ "$WORKBENCH_LAUNCH" == "1" ]] && wb_label="ON"
@@ -339,7 +339,7 @@ log_launcher_event() {
 }
 
 choose_agents() {
-    clear
+    clear || true
     print_banner "AGENT SELECTION" "Choose one or more active agents"
     
     for i in "${!ACTIVE_AGENTS[@]}"; do
@@ -524,7 +524,7 @@ launch() {
         exit 1
     fi
     
-    clear
+    clear || true
     print_banner "HASHI BOOT" "Multi-agent orchestrator launch"
     
     echo -e "${C_RAIL}│${C_RESET} ${C_LABEL}Agents           ${C_RESET} ${C_TEXT}${start_label}${C_RESET}"
