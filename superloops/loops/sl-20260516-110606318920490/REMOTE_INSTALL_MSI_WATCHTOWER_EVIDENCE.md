@@ -114,3 +114,16 @@ returned preflight/staging execution reports yet.
 
 The install is intentionally not authorized until a remote agent confirms the
 staging checks from inside MSI.
+
+## Coordinator Assist Request
+
+Because `agent3@MSI` and `agent4@MSI` did not visibly return reports, a
+read-only/staging-only assist request was sent to `hashiko@MSI`.
+
+```text
+command_id: sl-20260516-110606318920490-hashiko-assist-001
+target: hashiko@MSI
+mode: read-only / staging-only coordination
+install_authorized: false
+shutdown_authorized: false
+```
