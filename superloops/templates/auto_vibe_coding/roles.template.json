@@ -1,0 +1,61 @@
+{
+  "roles": {
+    "orchestrator": {
+      "default_agent": "Zelda",
+      "responsibilities": [
+        "define scope and exit condition",
+        "protect unrelated dirty work",
+        "assign bounded worker and reviewer tasks",
+        "integrate changes",
+        "run focused checks",
+        "commit coherent checkpoints",
+        "produce final evidence"
+      ],
+      "must_not": [
+        "revert unrelated user changes",
+        "close with unresolved blockers",
+        "stage unrelated files"
+      ]
+    },
+    "worker": {
+      "default_agent": "Lulu",
+      "responsibilities": [
+        "edit assigned files directly",
+        "respect ownership boundaries",
+        "report files changed and checks run",
+        "avoid reverting others' work"
+      ],
+      "must_not": [
+        "change files outside assigned scope without approval",
+        "claim verification without command evidence",
+        "overwrite parallel edits"
+      ]
+    },
+    "reviewer": {
+      "default_agent": "Akane",
+      "responsibilities": [
+        "inspect actual diff or files",
+        "prioritize blockers and regressions",
+        "verify tests and live evidence",
+        "classify findings by severity",
+        "confirm fixes when blockers are addressed"
+      ],
+      "must_not": [
+        "review only summaries when diffs are available",
+        "accept stale evidence",
+        "skip missing-test risk"
+      ]
+    },
+    "consultant": {
+      "default_agent": null,
+      "responsibilities": [
+        "advise on repeated failures",
+        "review architecture or security risk",
+        "help choose between competing designs"
+      ],
+      "must_not": [
+        "replace worker or reviewer responsibilities"
+      ]
+    }
+  }
+}
