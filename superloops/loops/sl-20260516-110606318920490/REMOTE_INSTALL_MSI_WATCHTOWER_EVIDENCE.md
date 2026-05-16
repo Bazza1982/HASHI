@@ -193,3 +193,54 @@ mode: read-only / staging-only coordination
 install_authorized: false
 shutdown_authorized: false
 ```
+
+## Hashiko Staging Green Report
+
+`hashiko@MSI` returned a staging assist report for
+`sl-20260516-110606318920490-hashiko-assist-001`.
+
+```text
+hostname: DESKTOP-VN0AMD7
+whoami: desktop-vn0amd7\barry li (uon)
+pwd: C:\Projects\HASHI
+active_hashi_root: C:\Projects\HASHI
+existing HashiWatchtower service: not found
+port_43766: not listening
+python default: Python 3.14.2
+python paths: Python314, Python311, Python312
+artifact sha256: matched
+compileall: ok
+staging venv + requirements: ok
+python -m remote --help: ok
+go_no_go: staging_green
+```
+
+Install decisions:
+
+```text
+final WatchTowerRoot: C:\Projects\WatchTower
+controlled HASHI root: C:\Projects\HASHI
+service name: HashiWatchtower
+instance_id: MSI-WT
+display_name: MSI-WT
+port: 43766
+interpreter: py -3.12 preferred for reproducibility
+```
+
+## Install Go
+
+Explicit WatchTower-only install was authorized and sent to `hashiko@MSI`.
+
+```text
+command_id: sl-20260516-110606318920490-install-001
+target: hashiko@MSI
+final WatchTowerRoot: C:\Projects\WatchTower
+controlled HASHI root: C:\Projects\HASHI
+service name: HashiWatchtower
+instance_id: MSI-WT
+display_name: MSI-WT
+port: 43766
+interpreter: py -3.12
+MSI HASHI shutdown authorized: false
+MSI HASHI stop/restart authorized: false
+```
