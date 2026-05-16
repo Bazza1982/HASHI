@@ -82,5 +82,12 @@
     "owner": "orchestrator",
     "status": "completed",
     "required_evidence": ["final_evidence_artifact", "no_open_blockers", "exit_condition_met"]
+  },
+  {
+    "task_id": "step-013",
+    "title": "Rename Intel WatchTower alias to Intel-WT and verify from HASHI1 over LAN",
+    "owner": "orchestrator",
+    "status": "completed",
+    "required_evidence": ["health_intel_wt", "hashi1_remote_list_intel_wt", "authenticated_non_destructive_rescue_smoke", "no_intel_hashi_shutdown"]
   }
 ]

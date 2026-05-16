@@ -557,3 +557,89 @@ Remaining non-blocking follow-up:
 Clean up decorative Unicode/banner logging for Windows service mode to avoid
 cp1252 stderr noise. This does not block WatchTower operation.
 ```
+
+## Reopened Exit Condition: Intel-WT Alias
+
+Operator requested the Intel WatchTower appear as `Intel-WT` in `/remote list`
+so it is clearly distinguishable from the local WatchTower.
+
+Updated exit condition:
+
+```text
+Intel-WT visible from HASHI1 over LAN
+Intel-WT distinguishable from local WATCHTOWER
+non-destructive rescue smoke passes against Intel-WT
+INTEL HASHI core is not shut down during smoke
+```
+
+Rename request sent to `agent1@INTEL`:
+
+```text
+command_id: sl-20260516-083519556001471-rename-001
+delivery: cached API 192.168.0.6:18802
+new instance_id: INTEL-WT
+new display_name: Intel-WT
+port: 43766
+```
+
+## Intel-WT Final Verification
+
+Controller-side verification from HASHI1 confirmed the alias change and final
+exit condition.
+
+Repeated health probes:
+
+```text
+GET http://192.168.0.6:43766/health
+ok: true
+instance_id: INTEL-WT
+display_name: Intel-WT
+shared_token_configured: true
+```
+
+HASHI1 peer view:
+
+```text
+local WATCHTOWER: 127.0.0.1:43766, online
+old WATCHTOWER_INTEL: stale/offline registry entry
+new INTEL-WT: 192.168.0.6:43766, route_kind lan, online
+```
+
+Authenticated non-destructive rescue smoke from HASHI1:
+
+```text
+GET /control/hashi/status
+  HTTP 200
+  ok: true
+  state: running
+  hashi_running: true
+  pid: 12920
+
+GET /control/hashi/logs?tail=20
+  HTTP 200
+  ok: true
+  exists: false
+
+POST /control/hashi/start
+  HTTP 200
+  ok: true
+  started: false
+  already_running: true
+```
+
+No destructive shutdown was run against INTEL HASHI core.
+
+Final result:
+
+```text
+WatchTower root: C:\Users\Print\projects\WatchTower
+Controlled HASHI root: C:\Users\Print\HASHI
+Instance id: INTEL-WT
+Display name: Intel-WT
+Port: 43766
+Broadcast visible from HASHI1 via LAN: yes
+Distinguishable from local WatchTower: yes
+Rescue smoke: passed
+Destructive stop test: not run
+Exit condition: met
+```

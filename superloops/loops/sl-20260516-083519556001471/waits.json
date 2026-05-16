@@ -1,5 +1,30 @@
 [
   {
+    "wait_id": "wait-20260516-100000-agent1-rename",
+    "kind": "await_hchat_reply",
+    "target": "agent1@INTEL",
+    "command_id": "sl-20260516-083519556001471-rename-001",
+    "entered_at": "2026-05-16T10:00:00Z",
+    "follow_up_after_minutes": 5,
+    "deadline_at": "2026-05-16T10:05:00Z",
+    "controller_probe": "curl http://192.168.0.6:43766/health; check HASHI1 /health peers for INTEL-WT; authenticated rescue status/logs/start smoke",
+    "escalation_if_no_reply": "use controller-side health/smoke evidence if alias is already visible; otherwise ask agent2@INTEL to inspect service parameters",
+    "status": "satisfied_by_controller_side_smoke",
+    "expected_fields": [
+      "report_type",
+      "command_id",
+      "service_status",
+      "health_json",
+      "protocol_status_json",
+      "instance_id",
+      "display_name",
+      "shared_token_configured",
+      "go_no_go",
+      "blockers",
+      "next_recommended_action"
+    ]
+  },
+  {
     "wait_id": "wait-20260516-094800-agent1-token-restart",
     "kind": "await_hchat_reply",
     "target": "agent1@INTEL",
