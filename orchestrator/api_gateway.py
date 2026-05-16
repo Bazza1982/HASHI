@@ -32,6 +32,7 @@ from orchestrator.model_catalog import (
     AVAILABLE_CODEX_MODELS,
     AVAILABLE_GEMINI_MODELS,
 )
+from orchestrator.api_gateway_config import load_api_gateway_config
 from adapters.stream_events import StreamEvent, KIND_TEXT_DELTA
 
 logger = logging.getLogger("BridgeU.APIGateway")
@@ -276,7 +277,17 @@ class APIGatewayServer:
     # ── Route: GET /health ────────────────────────────────────────────────────
 
     async def handle_health(self, request: web.Request) -> web.Response:
-        return web.json_response({"status": "ok", "engines": list(self._pool._adapters.keys())})
+        cfg = load_api_gateway_config(self.global_config)
+        return web.json_response(
+            {
+                "status": "ok",
+                "enabled": cfg["enabled"],
+                "default_model": cfg["default_model"],
+                "bind_host": self.bind_host,
+                "port": self.port,
+                "engines": list(self._pool._adapters.keys()),
+            }
+        )
 
     # ── Route: POST /v1/chat/completions ──────────────────────────────────────
 
@@ -288,7 +299,7 @@ class APIGatewayServer:
 
         model = str(body.get("model") or "").strip()
         if not model:
-            return web.json_response({"error": "model is required"}, status=400)
+            model = load_api_gateway_config(self.global_config)["default_model"]
 
         engine = _ENGINE_FOR_MODEL.get(model)
         if engine is None:

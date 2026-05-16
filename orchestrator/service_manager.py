@@ -8,6 +8,7 @@ import traceback
 
 from orchestrator.agent_directory import AgentDirectory
 from orchestrator.api_gateway import APIGatewayServer
+from orchestrator.api_gateway_config import load_api_gateway_config
 from orchestrator.scheduler import TaskScheduler
 from orchestrator.workbench_api import WorkbenchApiServer
 
@@ -65,8 +66,15 @@ class ServiceManager:
             )
 
     async def start_api_gateway(self, global_cfg, secrets):
+        persisted = load_api_gateway_config(global_cfg)
+        if persisted.get("enabled") and not self.kernel.enable_api_gateway:
+            self.kernel.enable_api_gateway = True
+            main_logger.info("API Gateway enabled via persisted config.")
+            bridge_logger.info("API Gateway enabled via persisted config")
         if not self.kernel.enable_api_gateway:
             main_logger.info("API Gateway disabled (use --api-gateway to enable).")
+            return
+        if self.kernel.api_gateway is not None:
             return
         try:
             self.kernel.api_gateway = APIGatewayServer(
@@ -90,6 +98,35 @@ class ServiceManager:
             self.kernel.api_gateway = None
             main_logger.warning("API Gateway failed to start; continuing without it: %s", e)
             main_logger.debug(traceback.format_exc())
+
+    async def ensure_api_gateway_started(self):
+        global_cfg = self.kernel.global_cfg
+        if global_cfg is None:
+            return False, "Global config is unavailable."
+        if self.kernel.api_gateway is not None:
+            return True, "API Gateway is already running."
+        self.kernel.enable_api_gateway = True
+        await self.start_api_gateway(global_cfg, self.kernel.secrets)
+        if self.kernel.api_gateway is None:
+            return False, "API Gateway failed to start."
+        return True, "API Gateway started."
+
+    async def set_api_gateway_enabled(self, enabled: bool):
+        if enabled:
+            return await self.ensure_api_gateway_started()
+        self.kernel.enable_api_gateway = False
+        await self.stop_api_gateway()
+        return True, "API Gateway stopped."
+
+    def api_gateway_status(self):
+        api_gateway = self.kernel.api_gateway
+        global_cfg = self.kernel.global_cfg
+        return {
+            "running": api_gateway is not None,
+            "enabled_flag": bool(self.kernel.enable_api_gateway),
+            "bind_host": getattr(api_gateway, "bind_host", None) if api_gateway is not None else None,
+            "port": getattr(global_cfg, "api_gateway_port", None) if global_cfg is not None else None,
+        }
 
     def start_scheduler(self, global_cfg):
         self.kernel.scheduler = TaskScheduler(

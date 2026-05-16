@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "loop_id": "sl-20260516-221343-api-restart",
+  "issues": [
+    {
+      "id": "B1",
+      "status": "resolved_by_design_decision",
+      "severity": "blocker",
+      "title": "/restart depends on WatchTower restart supervision",
+      "decision": "Refuse execution if WatchTower unreachable/unauthenticated/unsupported; no direct self-restart fallback."
+    },
+    {
+      "id": "B2",
+      "status": "open_until_diff_review",
+      "severity": "blocker",
+      "title": "WatchTower restart endpoint must be authenticated",
+      "decision": "Use existing rescue-control/shared-token/HMAC auth or equivalent; require test for unauthenticated rejection."
+    }
+  ]
+}

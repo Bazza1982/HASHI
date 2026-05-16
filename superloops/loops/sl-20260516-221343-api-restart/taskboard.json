@@ -1,0 +1,143 @@
+[
+  {
+    "task_id": "step-001",
+    "title": "Capture request, exit condition, repo status, dirty files, and scope boundaries",
+    "owner": "orchestrator",
+    "status": "completed",
+    "required_evidence": [
+      "user_request",
+      "exit_condition",
+      "git_status",
+      "in_scope",
+      "out_of_scope"
+    ],
+    "evidence": {
+      "user_request": "Captured in README and state.json",
+      "exit_condition": "Captured in README and state.json",
+      "git_status": "Dirty worktree captured before dispatch; unrelated dirty files protected",
+      "in_scope": "/api, API gateway default model, /restart, WatchTower restart supervision, tests/evidence",
+      "out_of_scope": "unrelated dirty files, machine reboot/shutdown, secret logging"
+    }
+  },
+  {
+    "task_id": "step-002",
+    "title": "Assign worker write scope and reviewer verification scope",
+    "owner": "orchestrator",
+    "status": "completed",
+    "required_evidence": [
+      "worker_assignment",
+      "reviewer_assignment",
+      "parallelism_plan"
+    ],
+    "evidence": {
+      "worker_assignment": "lulu via hchat delivered local API",
+      "reviewer_assignment": "akane via hchat delivered local API",
+      "parallelism_plan": "worker implements, reviewer plan/diff reviews, orchestrator baselines and integrates"
+    }
+  },
+  {
+    "task_id": "step-003",
+    "title": "Worker implements bounded change without touching unrelated files",
+    "owner": "lulu",
+    "status": "partial_completed",
+    "required_evidence": [
+      "changed_files",
+      "behavior_summary",
+      "local_checks",
+      "known_failures"
+    ],
+    "evidence": {
+      "checkpoint": "/api implemented by Zelda after worker stall",
+      "artifact": "API_CHECKPOINT_EVIDENCE.md"
+    }
+  },
+  {
+    "task_id": "step-004",
+    "title": "Orchestrator inspects and integrates worker output",
+    "owner": "orchestrator",
+    "status": "completed",
+    "required_evidence": [
+      "diff_review",
+      "integration_notes",
+      "conflict_resolution"
+    ],
+    "evidence": {
+      "integration_notes": "/api checkpoint integrated in shared worktree",
+      "conflict_resolution": "No task-scope worker diff existed before Zelda takeover"
+    }
+  },
+  {
+    "task_id": "step-005",
+    "title": "Run focused automated checks",
+    "owner": "orchestrator",
+    "status": "completed",
+    "required_evidence": [
+      "test_commands",
+      "test_results",
+      "lint_or_compile_results"
+    ],
+    "evidence": {
+      "test_commands": "pytest -q tests/test_api_gateway_command.py tests/test_command_registry.py tests/test_runtime_command_binding.py",
+      "test_results": "12 passed, 2 pytz warnings"
+    }
+  },
+  {
+    "task_id": "step-006",
+    "title": "Reviewer independently reviews diff, evidence, and acceptance risk",
+    "owner": "akane",
+    "status": "in_progress",
+    "required_evidence": [
+      "review_findings",
+      "blockers",
+      "non_blockers",
+      "test_gap_assessment"
+    ]
+  },
+  {
+    "task_id": "step-007",
+    "title": "Fix all reviewer blockers and retest",
+    "owner": "orchestrator",
+    "status": "pending",
+    "required_evidence": [
+      "blocker_log",
+      "fixes",
+      "retest_results",
+      "reviewer_confirmation"
+    ]
+  },
+  {
+    "task_id": "step-008",
+    "title": "Run live or integration verification when required by the change",
+    "owner": "orchestrator",
+    "status": "pending",
+    "required_evidence": [
+      "live_probe",
+      "runtime_state",
+      "manual_steps",
+      "residual_risk"
+    ]
+  },
+  {
+    "task_id": "step-009",
+    "title": "Commit scoped checkpoint",
+    "owner": "orchestrator",
+    "status": "pending",
+    "required_evidence": [
+      "staged_files",
+      "commit_sha",
+      "commit_message"
+    ]
+  },
+  {
+    "task_id": "step-010",
+    "title": "Final acceptance and close",
+    "owner": "orchestrator",
+    "status": "pending",
+    "required_evidence": [
+      "exit_condition_status",
+      "final_evidence",
+      "open_risks",
+      "next_step"
+    ]
+  }
+]
