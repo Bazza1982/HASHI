@@ -1807,6 +1807,36 @@ def test_registry_keeps_current_peer_even_when_legacy_timestamp_is_old(tmp_path)
     assert instances["intel"]["live_status"] == "online"
 
 
+def test_registry_sync_salvages_and_rewrites_malformed_instances_json(tmp_path):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    (hashi_root / "instances.json").write_text(
+        '{"instances":{"hashi1":{"instance_id":"HASHI1","platform":"wsl"}}} trailing-bytes',
+        encoding="utf-8",
+    )
+    registry = PeerRegistry(hashi_root, "HASHI1")
+    now = int(time.time())
+    registry._peers = {
+        "INTEL": PeerInfo(
+            instance_id="INTEL",
+            display_name="INTEL",
+            host="192.168.0.6",
+            port=8766,
+            workbench_port=18802,
+            platform="windows",
+            properties={"discovery": "lan", "live_status": "online", "last_seen_ok": now},
+        )
+    }
+    registry._observations = {"INTEL": {"lan": registry._peers["INTEL"]}}
+
+    registry._sync_to_instances_json()
+
+    instances_path = hashi_root / "instances.json"
+    data = json.loads(instances_path.read_text(encoding="utf-8"))
+    assert "trailing-bytes" not in instances_path.read_text(encoding="utf-8")
+    assert data["instances"]["intel"]["lan_ip"] == "192.168.0.6"
+
+
 def test_parse_hchat_message_exposes_reply_body_for_loop_guard():
     parsed = parse_hchat_message("[hchat from rain@HASHI2] [hchat reply from lily] hello")
 

@@ -11,6 +11,7 @@ This is the bridge between mDNS discovery and HASHI's existing routing.
 import dataclasses
 import json
 import logging
+import os
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -49,6 +50,32 @@ def _protocol_version_score(value: str) -> tuple[int, str]:
         return (int(major), rest if dot else "")
     except Exception:
         return (0, text)
+
+
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    tmp_path = path.with_name(f".{path.name}.tmp-{os.getpid()}-{int(time.time() * 1000)}")
+    tmp_path.write_text(json.dumps(payload, indent=4, ensure_ascii=False), encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _load_json_object_with_salvage(path: Path) -> dict | None:
+    try:
+        raw = path.read_text(encoding="utf-8-sig")
+    except Exception:
+        return None
+
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else None
+    except json.JSONDecodeError:
+        decoder = json.JSONDecoder()
+        try:
+            data, _end = decoder.raw_decode(raw.lstrip())
+        except Exception:
+            return None
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
 
 
 class PeerRegistry:
@@ -905,10 +932,7 @@ class PeerRegistry:
         return ""
 
     def _same_machine_hint(self, instance_id: str, observations: dict[str, PeerInfo], chosen: PeerInfo) -> bool:
-        try:
-            data = json.loads(self._instances_path.read_text(encoding="utf-8-sig"))
-        except Exception:
-            data = {}
+        data = _load_json_object_with_salvage(self._instances_path) or {}
         instances = data.get("instances", {}) if isinstance(data, dict) else {}
         local_entry = instances.get(self._self_id.lower(), {}) if isinstance(instances, dict) else {}
         target_entry = instances.get(str(instance_id or "").lower(), {}) if isinstance(instances, dict) else {}
@@ -1059,7 +1083,7 @@ class PeerRegistry:
             return
 
         try:
-            data = json.loads(self._instances_path.read_text(encoding="utf-8-sig"))
+            data = _load_json_object_with_salvage(self._instances_path) or {}
             instances = data.get("instances", {})
             instances, pruned_invalid_instances = self._prune_invalid_instance_identities(instances)
             instances, pruned_instances = self._prune_duplicate_instance_aliases(instances)
@@ -1260,10 +1284,7 @@ class PeerRegistry:
 
             if changed or pruned_instances:
                 data["instances"] = instances
-                self._instances_path.write_text(
-                    json.dumps(data, indent=4, ensure_ascii=False),
-                    encoding="utf-8",
-                )
+                _write_json_atomic(self._instances_path, data)
                 logger.info("Registry: instances.json updated (%d peers)", len(self._peers))
 
         except Exception as e:

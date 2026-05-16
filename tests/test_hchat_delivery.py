@@ -14,6 +14,7 @@ from orchestrator.hchat_delivery import (
     parse_hchat_draft,
     validate_hchat_target_format,
 )
+from tools.hchat_send import _load_json_object_with_salvage
 
 
 def test_parse_hchat_draft_valid_json_object():
@@ -134,3 +135,12 @@ def test_deliver_hchat_draft_generates_attempt_id_and_structured_failure():
     assert fields["hchat_delivery_status"] == "failed"
     assert fields["hchat_delivery_error"] == "RuntimeError: offline"
     assert fields["hchat_retry_count"] == 0
+
+
+def test_load_json_object_with_salvage_accepts_trailing_garbage(tmp_path):
+    path = tmp_path / "instances.json"
+    path.write_text('{"instances": {"hashi1": {"instance_id": "HASHI1"}}} trailing-bytes', encoding="utf-8")
+
+    data = _load_json_object_with_salvage(path)
+
+    assert data == {"instances": {"hashi1": {"instance_id": "HASHI1"}}}
