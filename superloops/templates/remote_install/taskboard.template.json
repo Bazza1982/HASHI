@@ -1,0 +1,93 @@
+[
+  {
+    "task_id": "step-001",
+    "title": "Collect target, remote worker, remote reviewer, package artifacts, staging root, install root, rollback policy",
+    "owner": "orchestrator",
+    "follow_up_after_minutes": 5,
+    "required_evidence": ["target_instance", "remote_worker", "remote_reviewer", "artifact_list", "rollback_policy"]
+  },
+  {
+    "task_id": "step-002",
+    "title": "Preflight HChat/protocol route, Hashi Remote capabilities, file transfer stat, and remote repo root",
+    "owner": "orchestrator",
+    "follow_up_after_minutes": 5,
+    "required_evidence": ["route_check", "capabilities", "file_stat", "repo_root_exists"]
+  },
+  {
+    "task_id": "step-003",
+    "title": "Build manifest with SHA256/byte sizes and run privacy check",
+    "owner": "orchestrator",
+    "follow_up_after_minutes": 3,
+    "required_evidence": ["manifest", "sha256_list", "privacy_check"]
+  },
+  {
+    "task_id": "step-004",
+    "title": "Transfer package to remote staging and verify remote SHA",
+    "owner": "orchestrator",
+    "follow_up_after_minutes": 3,
+    "required_evidence": ["transfer_output", "remote_stat_sha"]
+  },
+  {
+    "task_id": "step-005",
+    "title": "Remote worker runs staging check/dry-run and reports command outputs",
+    "owner": "remote_worker",
+    "follow_up_after_minutes": 5,
+    "required_evidence": ["py_compile", "help", "check", "dry_run", "go_no_go"]
+  },
+  {
+    "task_id": "step-006",
+    "title": "Apply install with rollback backup",
+    "owner": "remote_worker",
+    "follow_up_after_minutes": 10,
+    "required_evidence": ["backup_path", "install_mapping", "installed_true"]
+  },
+  {
+    "task_id": "step-007",
+    "title": "Verify installed files by final-path hash/stat",
+    "owner": "orchestrator",
+    "follow_up_after_minutes": 3,
+    "required_evidence": ["final_path_sha"]
+  },
+  {
+    "task_id": "step-008",
+    "title": "Run target-role smoke from final install path with configured private paths",
+    "owner": "remote_worker",
+    "follow_up_after_minutes": 5,
+    "required_evidence": ["configured_smoke_exit_codes", "stdout_summary", "stderr_summary"]
+  },
+  {
+    "task_id": "step-009",
+    "title": "Install and verify triggers/schedule when required",
+    "owner": "remote_worker",
+    "follow_up_after_minutes": 5,
+    "required_evidence": ["task_install_exit_code", "task_query", "manual_trigger_smoke", "logs"]
+  },
+  {
+    "task_id": "step-010",
+    "title": "Verify cross-machine delivery/import when relevant",
+    "owner": "orchestrator",
+    "follow_up_after_minutes": 5,
+    "required_evidence": ["delivered_batch", "central_import_result"]
+  },
+  {
+    "task_id": "step-011",
+    "title": "Remote reviewer independently verifies worker evidence",
+    "owner": "remote_reviewer",
+    "follow_up_after_minutes": 5,
+    "required_evidence": ["reviewer_hash_check", "reviewer_task_check", "reviewer_smoke_verdict"]
+  },
+  {
+    "task_id": "step-012",
+    "title": "Fix and retest all blockers until green",
+    "owner": "orchestrator",
+    "follow_up_after_minutes": 5,
+    "required_evidence": ["issue_log", "fixes", "retest_results"]
+  },
+  {
+    "task_id": "step-013",
+    "title": "Final acceptance and close",
+    "owner": "orchestrator",
+    "follow_up_after_minutes": 3,
+    "required_evidence": ["final_evidence_artifact", "no_open_blockers", "exit_condition_met"]
+  }
+]
