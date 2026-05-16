@@ -316,6 +316,49 @@ python -m remote --help: works from final WatchTower root
 next: explicit service install, then service state + HTTP endpoint validation
 ```
 
+### Missed Follow-Up Correction
+
+At 19:35 local time, the orchestrator reviewed the loop and found a workflow
+failure: after `agent1@INTEL` reported install progress, no follow-up deadline
+was scheduled.
+
+Controller-side probes:
+
+```text
+http://192.168.0.6:43766/health
+  result: timeout after 5 seconds
+
+python3 tools/remote_rescue.py --json status INTEL
+  ok: true
+  state: running
+  hashi_running: true
+  workbench_port: 18802
+  agents: agent2, agent1, lily
+
+hchat route check to agent1@INTEL
+  ok: true
+  route_type: cached_workbench
+  host: 192.168.0.6
+  port: 18802
+```
+
+Follow-up sent:
+
+```text
+command_id: sl-20260516-083519556001471-install-followup-001
+delivery: cached API 192.168.0.6:18802
+purpose: report current service/root/health/log status immediately
+```
+
+Independent inspection requested from `agent2@INTEL`:
+
+```text
+command_id: sl-20260516-083519556001471-agent2-inspect-001
+delivery: remote API 192.168.0.6:18802
+mode: read-only inspection
+reason: agent1 install report overdue and WatchTower health probe timed out
+```
+
 ## Broadcast Evidence
 
 Pending.
