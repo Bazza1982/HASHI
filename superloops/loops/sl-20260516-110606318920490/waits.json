@@ -1,0 +1,31 @@
+[
+  {
+    "wait_id": "wait-20260516-110700-agent3-preflight",
+    "kind": "await_hchat_reply",
+    "target": "agent3@MSI",
+    "command_id": "sl-20260516-110606318920490-preflight-001",
+    "entered_at": "2026-05-16T11:07:00Z",
+    "follow_up_after_minutes": 5,
+    "deadline_at": "2026-05-16T11:12:00Z",
+    "controller_probe": "python3 tools/hchat_send.py --to agent3 --from zelda --instance MSI --check; python3 tools/remote_rescue.py --json capabilities MSI",
+    "follow_up_message": "Request preflight status for sl-20260516-110606318920490-preflight-001; no install or shutdown.",
+    "escalation_if_no_reply": "run controller-side MSI capability probes and ask operator whether another MSI-side agent is available",
+    "status": "waiting",
+    "expected_fields": [
+      "report_type",
+      "target_instance",
+      "agent",
+      "command_id",
+      "paths_checked",
+      "service_status",
+      "port_43766",
+      "python_status",
+      "write_access",
+      "admin_rights",
+      "go_no_go",
+      "blockers",
+      "next_recommended_action"
+    ]
+  }
+]
+
