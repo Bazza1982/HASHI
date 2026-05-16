@@ -4,9 +4,9 @@
   "title": "Hashi API switch and WatchTower-backed hard restart",
   "source_template": "superloops/templates/auto_vibe_coding",
   "created_at": "2026-05-16T22:13:43.269025+00:00",
-  "updated_at": "2026-05-16T22:24:35.126264+00:00",
-  "status": "running",
-  "phase": "api_checkpoint_review",
+  "updated_at": "2026-05-17T08:40:16+10:00",
+  "status": "completed",
+  "phase": "checkpoint_committed",
   "controller": {
     "agent": "zelda",
     "instance": "HASHI1",
@@ -59,8 +59,40 @@
     {
       "path": "superloops/loops/sl-20260516-221343-api-restart/API_CHECKPOINT_EVIDENCE.md",
       "kind": "implementation_evidence"
+    },
+    {
+      "path": "superloops/loops/sl-20260516-221343-api-restart/RESTART_WATCHTOWER_REVIEW_BRIEF.md",
+      "kind": "checkpoint_2_review_brief"
     }
   ],
-  "events_count": 3,
+  "checkpoints": {
+    "api": {
+      "status": "committed",
+      "repo": "/home/lily/projects/hashi",
+      "commit": "0418270",
+      "tests": "pytest -q tests/test_api_gateway_command.py tests/test_command_registry.py tests/test_runtime_command_binding.py => 14 passed, 2 pytz warnings"
+    },
+    "restart_watchtower": {
+      "status": "committed",
+      "hashi_candidate_repo": "/mnt/c/Users/thene/projects/HASHI",
+      "watchtower_candidate_repo": "/mnt/c/Users/thene/projects/WatchTower",
+      "hashi_commit": "51e6e65",
+      "watchtower_commit": "e8979e3",
+      "reviewer": "akane",
+      "worker": "lulu",
+      "tests": [
+        "/mnt/c/Users/thene/projects/HASHI: pytest -q tests/test_api_gateway_runtime.py tests/test_api_restart_commands.py tests/test_remote_rescue_tool.py tests/test_command_registry.py tests/test_runtime_command_binding.py => 29 passed, 2 pytz warnings",
+        "/mnt/c/Users/thene/projects/WatchTower: PYTHONPATH=. pytest -q tests/test_remote_rescue_control.py => 20 passed"
+      ],
+      "orchestrator_fixes": [
+        "Unauthorized Telegram callbacks now answer with an alert",
+        "/restart fails closed when WatchTower status is unavailable or rejected",
+        "Confirm re-checks WatchTower availability before dispatch",
+        "Duplicate hardrestart confirm is rejected while a restart is in flight",
+        "WatchTower now writes durable restart_id state records under state/restarts and exposes a restart status endpoint"
+      ]
+    }
+  },
+  "events_count": 24,
   "workzone_source": "superloop:auto_vibe_coding"
 }

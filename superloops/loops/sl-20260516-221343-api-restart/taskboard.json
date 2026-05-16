@@ -39,7 +39,7 @@
     "task_id": "step-003",
     "title": "Worker implements bounded change without touching unrelated files",
     "owner": "lulu",
-    "status": "partial_completed",
+    "status": "completed",
     "required_evidence": [
       "changed_files",
       "behavior_summary",
@@ -48,7 +48,8 @@
     ],
     "evidence": {
       "checkpoint": "/api implemented by Zelda after worker stall",
-      "artifact": "API_CHECKPOINT_EVIDENCE.md"
+      "artifact": "API_CHECKPOINT_EVIDENCE.md",
+      "checkpoint_2": "Lulu candidate implementation reviewed, patched by Zelda, tested, and committed in Windows HASHI and WatchTower"
     }
   },
   {
@@ -78,66 +79,97 @@
     ],
     "evidence": {
       "test_commands": "pytest -q tests/test_api_gateway_command.py tests/test_command_registry.py tests/test_runtime_command_binding.py",
-      "test_results": "12 passed, 2 pytz warnings"
+      "test_results": "14 passed, 2 pytz warnings"
     }
   },
   {
     "task_id": "step-006",
     "title": "Reviewer independently reviews diff, evidence, and acceptance risk",
     "owner": "akane",
-    "status": "in_progress",
+    "status": "completed",
     "required_evidence": [
       "review_findings",
       "blockers",
       "non_blockers",
       "test_gap_assessment"
-    ]
+    ],
+    "evidence": {
+      "api_checkpoint": "Akane approved /api checkpoint after fixes; commit 0418270",
+      "restart_watchtower_checkpoint": "Akane approved checkpoint 2 after blocker fixes; Windows HASHI confirmed as correct target"
+    }
   },
   {
     "task_id": "step-007",
     "title": "Fix all reviewer blockers and retest",
     "owner": "orchestrator",
-    "status": "pending",
+    "status": "completed",
     "required_evidence": [
       "blocker_log",
       "fixes",
       "retest_results",
       "reviewer_confirmation"
-    ]
+    ],
+    "evidence": {
+      "api_checkpoint": "All Akane non-blockers fixed before commit 0418270",
+      "restart_watchtower_checkpoint": "Orchestrator fixed unauthorized callback answer, repeated confirm dispatch, fail-fast WatchTower availability, and added durable WatchTower restart_id state records/status endpoint."
+    }
   },
   {
     "task_id": "step-008",
     "title": "Run live or integration verification when required by the change",
     "owner": "orchestrator",
-    "status": "pending",
+    "status": "completed",
     "required_evidence": [
       "live_probe",
       "runtime_state",
       "manual_steps",
       "residual_risk"
-    ]
+    ],
+    "evidence": {
+      "hashi_focused_tests": "/mnt/c/Users/thene/projects/HASHI: 29 passed, 2 pytz warnings",
+      "watchtower_focused_tests": "/mnt/c/Users/thene/projects/WatchTower: 20 passed",
+      "live_restart": "not run yet; requires explicit acceptance of risk or dry-run endpoint"
+    }
   },
   {
     "task_id": "step-009",
     "title": "Commit scoped checkpoint",
     "owner": "orchestrator",
-    "status": "pending",
+    "status": "completed",
     "required_evidence": [
       "staged_files",
       "commit_sha",
       "commit_message"
-    ]
+    ],
+    "evidence": {
+      "api_checkpoint": {
+        "commit_sha": "0418270",
+        "commit_message": "Add runtime API gateway control"
+      },
+      "restart_watchtower_checkpoint": {
+        "hashi_commit": "51e6e65",
+        "hashi_message": "Add API controls and WatchTower restart command",
+        "watchtower_commit": "e8979e3",
+        "watchtower_message": "Add supervised HASHI restart endpoint"
+      }
+    }
   },
   {
     "task_id": "step-010",
     "title": "Final acceptance and close",
     "owner": "orchestrator",
-    "status": "pending",
+    "status": "completed",
     "required_evidence": [
       "exit_condition_status",
       "final_evidence",
       "open_risks",
       "next_step"
-    ]
+    ],
+    "evidence": {
+      "exit_condition_status": "met except live hard restart not executed",
+      "final_evidence": "All focused tests passed and scoped commits created",
+      "open_risks": "No live restart was performed; use /restart deliberately after WatchTower deployment is active",
+      "next_step": "Deploy/restart WatchTower service if needed, then use /restart from HASHI9"
+    }
   }
 ]
