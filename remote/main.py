@@ -34,9 +34,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from orchestrator.remote_lifecycle import read_disabled_state
 from remote.api.server import create_app
-from remote.live_endpoints import remove_live_endpoint
+from remote.live_endpoints import remove_live_endpoint, write_live_endpoint
 from remote.peer.base import PeerInfo
-from remote.peer.lan import LanDiscovery
+from remote.peer.lan import LanDiscovery, build_local_network_profile
 from remote.peer.registry import PeerRegistry
 from remote.port_selection import DEFAULT_PORT, select_available_port
 from remote.peer.tailscale import TailscaleDiscovery
@@ -213,7 +213,7 @@ class HashiRemoteApplication:
         agent_directory: dict | None = None,
     ) -> PeerInfo:
         directory = dict(agent_directory or {})
-        return PeerInfo(
+        peer = PeerInfo(
             instance_id=instance_id,
             display_name=instance_info["display_name"],
             host=socket.gethostname(),
@@ -229,6 +229,10 @@ class HashiRemoteApplication:
                 "directory_state": str(directory.get("directory_state") or ""),
             },
         )
+        profile = build_local_network_profile(peer)
+        peer.properties["host_identity"] = str(profile.get("host_identity") or "")
+        peer.properties["environment_kind"] = str(profile.get("environment_kind") or "")
+        return peer
 
     def _setup_logging(self) -> None:
         level = logging.DEBUG if self._verbose else logging.INFO
@@ -322,6 +326,7 @@ class HashiRemoteApplication:
             workbench_port=workbench_port,
             local_capabilities=local_capabilities,
         )
+        write_live_endpoint(self._hashi_root, peer_self)
 
         # Start discovery/advertising
         for discovery in self._discoveries:
@@ -415,6 +420,7 @@ class HashiRemoteApplication:
                         local_capabilities=local_capabilities,
                         agent_directory=directory,
                     )
+                    write_live_endpoint(self._hashi_root, peer_self)
                     for discovery in self._discoveries:
                         update = getattr(discovery, "update_advertisement", None)
                         if update is not None:
@@ -532,6 +538,7 @@ def main() -> int:
 
     host = args.host or server_cfg.get("host", "0.0.0.0")
     requested_port = args.port or configured_port
+    strict_port = args.port is not None or args.supervised
     port, attempted_ports = select_available_port(
         host,
         requested_port,
@@ -539,6 +546,15 @@ def main() -> int:
     )
     if port != requested_port:
         logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s %(message)s")
+        if strict_port:
+            logger.error(
+                "Port %s is unavailable on %s and strict-port mode is active (supervised or explicit --port); "
+                "exiting so the process manager can restart after the port is released (attempted=%s)",
+                requested_port,
+                host,
+                attempted_ports,
+            )
+            return 1
         logger.warning(
             "Configured Remote port %s is unavailable on %s; using %s instead (attempted=%s)",
             requested_port,
