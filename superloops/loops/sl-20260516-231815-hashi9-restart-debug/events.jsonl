@@ -8,4 +8,8 @@
 {"ts": "2026-05-17T09:35:01+10:00", "event": "direct_python_smoke_partial_success", "restart_id": "restart-352de460955c41c19040220658fc0835", "phase": "completed", "summary": "Direct python launcher restarted HASHI9 but used repo root bridge-home, leaving API gateway disabled."}
 {"ts": "2026-05-17T09:38:06+10:00", "event": "final_smoke_passed", "restart_id": "restart-fc7fbc153e484337b789a4386be9f075", "phase": "completed", "summary": "Direct python launcher with C:\\Users\\thene\\hashi9-home completed; hashiko online; API gateway enabled; default model claude-haiku-4-5."}
 {"ts": "2026-05-17T09:39:39+10:00", "event": "loop_closed", "exit_condition_met": true, "tests": "PYTHONPATH=. pytest -q tests/test_remote_rescue_control.py => 23 passed"}
+{"ts": "2026-05-17T10:00:59+10:00", "event": "post_close_backend_regression", "summary": "User reported hashiko backend error after /restart: codex-cli websocket 401 Unauthorized."}
+{"ts": "2026-05-17T10:00:59+10:00", "event": "temporary_recovery", "summary": "Switched hashiko to flex/openrouter-api; req-0003 returned OK successfully."}
+{"ts": "2026-05-17T10:02:56+10:00", "event": "environment_fix_applied", "summary": "WatchTower Windows restart env now sets USERPROFILE, HOME, APPDATA, LOCALAPPDATA, and CODEX_HOME when user home is inferred."}
+{"ts": "2026-05-17T10:03:36+10:00", "event": "codex_backend_smoke_passed", "summary": "After restart repair, hashiko switched to codex-cli gpt-5.4 and req-0001 completed successfully with no new errors."}
 {"event_id": "loop-event-20260516233919637169", "ts": "2026-05-16T23:39:19.637184+00:00", "loop_id": "sl-20260516-231815-hashi9-restart-debug", "kind": "loop.completed", "actor": {}, "refs": {}, "data": {"reason": "all_tasks_completed"}}

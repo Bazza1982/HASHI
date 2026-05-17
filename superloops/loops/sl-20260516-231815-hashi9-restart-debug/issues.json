@@ -39,5 +39,18 @@
     ],
     "resolution": "WatchTower now infers C:\\Users\\thene\\hashi9-home when present and passes it as --bridge-home.",
     "closed_by": "restart-fc7fbc153e484337b789a4386be9f075"
+  },
+  {
+    "issue_id": "issue-004",
+    "title": "WatchTower service restart launched HASHI9 without user Codex home environment",
+    "status": "closed",
+    "severity": "blocker",
+    "evidence": [
+      "User reported codex-cli websocket 401 Unauthorized after /restart",
+      "C:\\Users\\thene\\.codex\\auth.json existed, but service-launched HASHI did not expose the expected user profile context",
+      "req-0001/req-0002 failed via codex-cli after restart"
+    ],
+    "resolution": "WatchTower Windows start environment now sets USERPROFILE, HOME, APPDATA, LOCALAPPDATA, and CODEX_HOME from the inferred user home. After restart, codex-cli gpt-5.4 smoke completed successfully.",
+    "closed_by": "codex smoke req-0001 at 2026-05-17 10:03:36"
   }
 ]
