@@ -32,7 +32,6 @@ from orchestrator.model_catalog import (
     AVAILABLE_CODEX_MODELS,
     AVAILABLE_GEMINI_MODELS,
 )
-from orchestrator.api_gateway_config import load_api_gateway_config
 from adapters.stream_events import StreamEvent, KIND_TEXT_DELTA
 
 logger = logging.getLogger("BridgeU.APIGateway")
@@ -50,6 +49,15 @@ for _m in AVAILABLE_CODEX_MODELS:
     _ENGINE_FOR_MODEL[_m] = "codex-cli"
 
 _ALL_MODELS = list(_ENGINE_FOR_MODEL.keys())
+DEFAULT_API_MODEL = AVAILABLE_CODEX_MODELS[0] if AVAILABLE_CODEX_MODELS else (_ALL_MODELS[0] if _ALL_MODELS else "")
+
+
+def available_gateway_models() -> list[str]:
+    return list(_ALL_MODELS)
+
+
+def default_gateway_model() -> str:
+    return DEFAULT_API_MODEL
 
 # ── Terminal colours ──────────────────────────────────────────────────────────
 
@@ -211,10 +219,12 @@ class _AdapterPool:
 # ── Gateway server ────────────────────────────────────────────────────────────
 
 class APIGatewayServer:
-    def __init__(self, global_config, secrets: dict, workspace_root: Path):
+    def __init__(self, global_config, secrets: dict, workspace_root: Path, default_model: str | None = None):
         self.global_config = global_config
         self.port: int = getattr(global_config, "api_gateway_port", 18801)
         self.bind_host: str | None = None
+        selected_default = str(default_model or "").strip()
+        self.default_model = selected_default if selected_default in _ENGINE_FOR_MODEL else DEFAULT_API_MODEL
         self._pool = _AdapterPool(global_config, secrets, workspace_root)
         self._sessions = _SessionCache()
         self._runner = None
@@ -238,6 +248,12 @@ class APIGatewayServer:
         await self._pool.shutdown()
         if self._runner:
             await self._runner.cleanup()
+
+    def set_default_model(self, model: str) -> None:
+        normalized = str(model or "").strip()
+        if normalized not in _ENGINE_FOR_MODEL:
+            raise ValueError(f"unknown API gateway model: {model}")
+        self.default_model = normalized
 
     def _select_bind_host(self) -> str:
         configured = str(getattr(self.global_config, "api_host", "") or "127.0.0.1").strip()
@@ -277,15 +293,13 @@ class APIGatewayServer:
     # ── Route: GET /health ────────────────────────────────────────────────────
 
     async def handle_health(self, request: web.Request) -> web.Response:
-        cfg = load_api_gateway_config(self.global_config)
         return web.json_response(
             {
                 "status": "ok",
-                "enabled": cfg["enabled"],
-                "default_model": cfg["default_model"],
+                "engines": list(self._pool._adapters.keys()),
+                "default_model": self.default_model,
                 "bind_host": self.bind_host,
                 "port": self.port,
-                "engines": list(self._pool._adapters.keys()),
             }
         )
 
@@ -297,9 +311,7 @@ class APIGatewayServer:
         except Exception:
             return web.json_response({"error": "invalid JSON"}, status=400)
 
-        model = str(body.get("model") or "").strip()
-        if not model:
-            model = load_api_gateway_config(self.global_config)["default_model"]
+        model = str(body.get("model") or "").strip() or self.default_model
 
         engine = _ENGINE_FOR_MODEL.get(model)
         if engine is None:

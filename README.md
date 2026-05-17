@@ -435,9 +435,23 @@ HASHI supports multiple communication channels:
 #### HASHI API & API Gateway
 - HASHI API is the internal Workbench API and listens on each instance's `global.workbench_port`.
 - API Gateway is the optional OpenAI-compatible gateway enabled with `--api-gateway`.
+- `/api` controls the API Gateway from Telegram with inline buttons:
+  status, on, off, and default-model selection.
 - If `global.api_gateway_port` is omitted, HASHI derives it as `workbench_port + 1`.
 - Common local layout: HASHI1 `18800/18801`, HASHI2 `18802/18803`, HASHI9 `18819/18820`.
 - `GET /api/health` reports instance, Workbench port, API Gateway port, gateway enabled state, and online agents after restart.
+
+#### WatchTower Rescue & Cold Restart
+- HASHI WatchTower is an always-on side service used for LAN rescue and cold
+  restart of HASHI instances.
+- WatchTower can stay alive when the HASHI process, Telegram runtime, or
+  Workbench API is down.
+- `/restart` asks `WATCHTOWER` to perform a supervised hard restart: stop the
+  HASHI process, start it again through the configured launcher, and verify
+  Workbench health.
+- Rescue and restart actions use fixed control endpoints, shared-token/HMAC
+  authentication, audit logs, and restart state files. They are not generic
+  shell execution.
 
 #### HChat — Cross-Instance Agent Messaging
 - `name` means local-instance delivery only
@@ -462,6 +476,7 @@ HASHI agents respond to both natural language and structured commands:
 | `/fresh` | Start a clean API context without deleting saved memories |
 | `/stop` | Cancel current processing |
 | `/reboot [min\|max\|#]` | Hot restart agents |
+| `/restart` | Hard restart this HASHI instance through WatchTower supervision |
 | `/status [full]` | Show agent status, backend info |
 | `/handoff` | Restore continuity from recent transcript |
 | `/skill` | Browse and run skills (inline keyboard) |
@@ -497,6 +512,7 @@ HASHI agents respond to both natural language and structured commands:
 | `/active [on\|off\|minutes]` | Toggle proactive heartbeat |
 | `/whisper [small\|medium\|large]` | Set local voice transcription model |
 | `/voice [on\|off\|menu\|use <alias>]` | Control bridge voice replies |
+| `/api [status\|on\|off\|model <name>]` | Show API Gateway address, switch it on/off, or set its default model |
 
 #### Lifecycle Commands
 

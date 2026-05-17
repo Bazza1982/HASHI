@@ -4,7 +4,7 @@ HASHI includes a built-in OpenAI-compatible API gateway. Any tool or library tha
 
 ## Quick Start
 
-### 1. Start HASHI with API Gateway
+### 1. Start Or Enable HASHI API Gateway
 
 ```bash
 python main.py --api-gateway
@@ -12,6 +12,20 @@ python main.py --api-gateway
 
 The gateway listens on `global.api_gateway_port`. If that value is not set in
 `agents.json`, HASHI derives it as `global.workbench_port + 1`.
+
+You can also control the gateway at runtime from Telegram:
+
+```text
+/api                  # show status, address, endpoints, and buttons
+/api on               # start the gateway and persist enabled-on-restart
+/api off              # stop the gateway and persist disabled-on-restart
+/api model            # open default-model buttons
+/api model <model>    # set the default model for requests without model
+```
+
+`/api` only controls the OpenAI-compatible API Gateway. It does not change an
+agent's active `/backend` or `/model`; callers can still override the gateway
+default by supplying a request-level `model`.
 
 Common local ports:
 
@@ -49,6 +63,16 @@ serve aiohttp traffic reliably. Confirm the live address with Workbench
 The HASHI API itself is separate from the API Gateway and listens on
 `global.workbench_port`. Use `GET /api/health` on the HASHI API port to confirm
 instance ownership, online agents, and the configured API Gateway port.
+
+The Telegram `/api` status view shows the live gateway address every time,
+including:
+
+- `Address`
+- `/v1/chat/completions`
+- `/v1/models`
+- runtime state
+- enabled-on-restart state
+- default API model
 
 ---
 
@@ -171,6 +195,11 @@ In `agents.json`, the port is set under the `global` section:
 
 If `api_gateway_port` is omitted, HASHI uses `workbench_port + 1`. For example,
 HASHI2 with `"workbench_port": 18802` will use API Gateway port `18803`.
+
+Runtime `/api on|off|model` choices are persisted separately from `agents.json`
+so they survive a cold restart. This allows an operator to keep the core config
+stable while changing whether the gateway comes back on restart and which
+default model it uses for requests that omit `model`.
 
 ---
 

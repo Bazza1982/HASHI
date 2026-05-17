@@ -1,12 +1,30 @@
-# Hashi Remote Rescue Protocol
+# HASHI WatchTower And Remote Rescue Protocol
 
 For the full side-program rollout plan, see
 `HASHI_REMOTE_SIDE_PROGRAM_UPGRADE_PLAN.md`. This document defines the concrete
-start/status rescue endpoint contract.
+start/status/restart rescue endpoint contract.
 
 Hashi Remote must be able to survive HASHI core failures. It should be treated
 as a small sidecar service, not as a child process whose lifecycle depends on a
 running Telegram agent.
+
+## WatchTower Role
+
+HASHI WatchTower is the always-on rescue controller for a protected HASHI
+instance. It runs outside the HASHI process and exposes a narrow LAN rescue API
+for status, logs, start, and hard restart.
+
+WatchTower enables two operational capabilities:
+
+- **LAN rescue**: another trusted HASHI instance or operator tool can inspect
+  and start a down HASHI instance without relying on that instance's Telegram
+  bot or Workbench API.
+- **Cold restart**: a running HASHI instance can ask WatchTower to stop the
+  current process, restart it with the configured launcher, and verify that
+  Workbench health returns.
+
+The Telegram `/restart` command uses this mechanism. HASHI itself only asks
+WatchTower to restart; WatchTower owns the stop/start/verify supervision.
 
 ## Problem
 
@@ -53,6 +71,8 @@ Hashi Remote exposes a fixed control protocol:
 GET  /control/hashi/status
 GET  /control/hashi/logs?name=start|audit|supervisor&tail=120
 POST /control/hashi/start
+POST /control/hashi/restart
+GET  /control/hashi/restarts/{restart_id}
 ```
 
 `/control/hashi/status` reports whether local HASHI core is reachable through
@@ -98,6 +118,20 @@ not accept arbitrary paths.
 The audit record includes requester, reason, launcher command, PID, log path,
 outcome, status state, and error text when available.
 
+`/control/hashi/restart` performs a supervised hard restart:
+
+1. create a restart record under `state/restarts/`
+2. stop the controlled HASHI process with the fixed launcher/control script
+3. wait for the old process to stop
+4. start HASHI again with the fixed launcher
+5. verify Workbench health
+6. update the restart record to `completed` or a failed phase
+7. append a structured audit event to `logs/remote_rescue_audit.jsonl`
+
+`/control/hashi/restarts/{restart_id}` returns the durable restart record for a
+single restart id. Restart ids are validated before file lookup to avoid path
+traversal.
+
 `reason` contract for v1:
 
 - stored as a single sanitized line
@@ -110,6 +144,8 @@ Upgraded Remotes advertise rescue support through protocol capabilities:
 
 - `rescue_control`: status endpoint exists.
 - `rescue_start`: start endpoint exists and this Remote is configured with
+  `L3_RESTART`.
+- `rescue_restart`: restart endpoint exists and this Remote is configured with
   `L3_RESTART`.
 
 Older Remotes will not advertise these capabilities and may return `404` for
@@ -133,7 +169,7 @@ security:
 ```
 
 Default `L2_WRITE` Remote instances can push files and perform normal hchat
-relay, but cannot start HASHI core.
+relay, but cannot start or restart HASHI core.
 
 Do not expose an L3 Remote instance directly to the public internet. Use
 Tailscale or a trusted LAN, and disable LAN auto-auth before any wider network
@@ -148,11 +184,18 @@ curl http://<host>:<remote-port>/control/hashi/status
 curl -X POST http://<host>:<remote-port>/control/hashi/start \
   -H 'Content-Type: application/json' \
   -d '{"reason":"remote rescue"}'
+curl -X POST http://<host>:<remote-port>/control/hashi/restart \
+  -H 'Content-Type: application/json' \
+  -d '{"reason":"operator hard restart"}'
 ```
 
 Then poll `/control/hashi/status` until `hashi_running` is true. After HASHI is
 back, normal `/hchat`, Workbench API, Telegram, and `/reboot` workflows can
 resume.
+
+When invoked from Telegram, `/restart` first shows WatchTower status and the
+WatchTower API address. The operator must press the hard-restart confirmation
+button before HASHI sends the restart request.
 
 ## Supervisor Control Scripts
 
@@ -195,6 +238,8 @@ Remote remains `L2_WRITE`.
 
 - Treat `/control/hashi/start` as a fixed rescue lever, not a generic remote
   shell.
+- Treat `/control/hashi/restart` as a destructive cold-restart operation. It
+  must be scoped to the intended HASHI instance and audited.
 - Prefer `bridge_ctl.ps1` on HASHI9 Windows because it follows the native
   bridge lifecycle more reliably than ad-hoc process creation.
 - Use `/control/hashi/logs?name=audit` first when checking who initiated a
@@ -216,6 +261,7 @@ python tools/remote_rescue.py capabilities HASHI1
 python tools/remote_rescue.py status HASHI1
 python tools/remote_rescue.py logs HASHI1 --name start --tail 120
 python tools/remote_rescue.py start HASHI1 --reason "core down"
+python tools/remote_rescue.py restart WATCHTOWER --reason "operator hard restart"
 python tools/remote_rescue.py status HASHI1 --json
 ```
 

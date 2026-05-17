@@ -6,6 +6,7 @@ Usage:
     python tools/remote_rescue.py capabilities HASHI1
     python tools/remote_rescue.py status HASHI1
     python tools/remote_rescue.py start HASHI1 --reason "core down"
+    python tools/remote_rescue.py restart WATCHTOWER --reason "operator hard restart"
 """
 
 from __future__ import annotations
@@ -271,6 +272,35 @@ def rescue_start(
     return (0 if result.ok else EXIT_REMOTE_ERROR), payload
 
 
+def rescue_restart(
+    instance_id: str,
+    *,
+    reason: str | None = None,
+    token: str | None = None,
+    shared_token: str | None = None,
+    from_instance: str | None = None,
+    timeout: int = 15,
+) -> tuple[int, dict]:
+    base_url = _reachable_base_url(instance_id, token=token, shared_token=shared_token, from_instance=from_instance, timeout=timeout)
+    result = _request_json_status(
+        f"{base_url}/control/hashi/restart",
+        method="POST",
+        payload={"reason": reason},
+        token=token,
+        shared_token=shared_token,
+        from_instance=from_instance,
+        timeout=timeout,
+    )
+    if result.status == 404:
+        return EXIT_UNSUPPORTED, _unsupported_payload(instance_id, "/control/hashi/restart", base_url)
+    payload = dict(result.body)
+    payload.setdefault("instance", _normalize_instance_id(instance_id))
+    payload.setdefault("base_url", base_url)
+    if result.status in {401, 403}:
+        return EXIT_FORBIDDEN, payload
+    return (0 if result.ok else EXIT_REMOTE_ERROR), payload
+
+
 def _print_result(payload: dict, *, as_json: bool) -> None:
     if as_json:
         print(json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True))
@@ -304,6 +334,10 @@ def main(argv: list[str] | None = None) -> int:
     start.add_argument("instance", help="Target instance, e.g. HASHI1")
     start.add_argument("--reason", default="remote rescue", help="Audit reason recorded by target Remote")
 
+    restart = sub.add_parser("restart")
+    restart.add_argument("instance", help="Target instance, e.g. WATCHTOWER")
+    restart.add_argument("--reason", default="remote hard restart", help="Audit reason recorded by target Remote")
+
     logs = sub.add_parser("logs")
     logs.add_argument("instance", help="Target instance, e.g. HASHI1")
     logs.add_argument("--name", choices=["start", "audit", "supervisor"], default="start")
@@ -321,6 +355,10 @@ def main(argv: list[str] | None = None) -> int:
             return code
         if args.cmd == "start":
             code, payload = rescue_start(args.instance, reason=args.reason, token=args.token, shared_token=None if args.token else args.shared_token, from_instance=args.from_instance, timeout=max(args.timeout, 10))
+            _print_result(payload, as_json=args.json)
+            return code
+        if args.cmd == "restart":
+            code, payload = rescue_restart(args.instance, reason=args.reason, token=args.token, shared_token=None if args.token else args.shared_token, from_instance=args.from_instance, timeout=max(args.timeout, 15))
             _print_result(payload, as_json=args.json)
             return code
         if args.cmd == "logs":
