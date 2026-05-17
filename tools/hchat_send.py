@@ -54,6 +54,32 @@ HCHAT_AUTOREPLY_INSTRUCTION = (
 )
 
 
+def _load_json_object_with_salvage(path: Path) -> dict | None:
+    try:
+        raw = path.read_text(encoding="utf-8-sig")
+    except Exception:
+        return None
+
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else None
+    except json.JSONDecodeError as exc:
+        decoder = json.JSONDecoder()
+        try:
+            salvaged, end = decoder.raw_decode(raw.lstrip())
+        except Exception:
+            return None
+        trailing = raw.lstrip()[end:].strip()
+        if trailing:
+            print(
+                f"⚠️ Salvaged malformed JSON from {path.name}; ignoring trailing bytes after the first JSON object.",
+                file=sys.stderr,
+            )
+        return salvaged if isinstance(salvaged, dict) else None
+    except Exception:
+        return None
+
+
 def _infer_instance_id_from_root() -> str:
     root_str = str(ROOT).replace("\\", "/").lower()
     if root_str.endswith("/projects/hashi2"):
@@ -97,7 +123,9 @@ def _load_config() -> dict:
     config_path = ROOT / "agents.json"
     if config_path.exists():
         try:
-            return json.loads(config_path.read_text(encoding="utf-8-sig"))
+            data = _load_json_object_with_salvage(config_path)
+            if data is not None:
+                return data
         except Exception:
             pass
     return {}
@@ -149,14 +177,12 @@ def _load_instances() -> dict:
     cfg = _load_config()
     defaults = _temporary_default_instances(cfg)
     if INSTANCES_FILE.exists():
-        try:
-            data = json.loads(INSTANCES_FILE.read_text(encoding="utf-8-sig"))
+        data = _load_json_object_with_salvage(INSTANCES_FILE)
+        if data is not None:
             instances = data.get("instances", {})
             merged = defaults.copy()
             merged.update(instances)
             return merged
-        except Exception:
-            pass
     return defaults
 
 
