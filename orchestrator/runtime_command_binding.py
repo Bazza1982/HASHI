@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import logging
+import shlex
 from dataclasses import dataclass
 
 from telegram import BotCommand
 from telegram.ext import CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
-from orchestrator.command_registry import bind_runtime_commands, runtime_bot_commands
+from orchestrator.command_registry import bind_runtime_commands, runtime_bot_commands, runtime_command_map
 from orchestrator.private_wol import private_wol_available
+
+logger = logging.getLogger("BridgeU.RuntimeCommandBinding")
 
 
 @dataclass(frozen=True)
@@ -176,6 +180,42 @@ CALLBACK_BINDINGS: tuple[CallbackBinding, ...] = (
 )
 
 
+def _split_runtime_command_text(text: str) -> tuple[str, list[str]]:
+    raw = (text or "").strip()
+    if not raw.startswith("/"):
+        return "", []
+    try:
+        parts = shlex.split(raw[1:])
+    except Exception:
+        parts = raw[1:].split()
+    if not parts:
+        return "", []
+    command = parts[0].split("@", 1)[0].lower()
+    return command, parts[1:]
+
+
+async def _dispatch_dynamic_runtime_command(runtime, update, context) -> bool:
+    message = getattr(update, "effective_message", None) or getattr(update, "message", None)
+    command_name, args = _split_runtime_command_text(getattr(message, "text", "") or "")
+    if not command_name:
+        return False
+    command = runtime_command_map().get(command_name)
+    if command is None:
+        return False
+
+    logger.info("Dispatching runtime command via dynamic fallback: /%s", command_name)
+    setattr(context, "args", args)
+
+    async def callback(inner_update, inner_context):
+        await command.callback(runtime, inner_update, inner_context)
+
+    handler = callback
+    if hasattr(runtime, "_wrap_cmd"):
+        handler = runtime._wrap_cmd(command_name, callback)
+    await handler(update, context)
+    return True
+
+
 def bind_flexible_runtime_handlers(runtime) -> None:
     runtime.app.add_error_handler(runtime.handle_telegram_error)
     for binding in COMMAND_BINDINGS:
@@ -186,6 +226,10 @@ def bind_flexible_runtime_handlers(runtime) -> None:
 
     bind_runtime_commands(runtime, wrap=True)
 
+    async def dynamic_runtime_command_fallback(update, context):
+        await _dispatch_dynamic_runtime_command(runtime, update, context)
+
+    runtime.app.add_handler(MessageHandler(filters.COMMAND, dynamic_runtime_command_fallback))
     runtime.app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), runtime.handle_message))
     runtime.app.add_handler(MessageHandler(filters.PHOTO, runtime.handle_photo))
     runtime.app.add_handler(MessageHandler(filters.VOICE, runtime.handle_voice))
