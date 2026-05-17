@@ -950,6 +950,11 @@ When a peer is discovered, Hashi Remote performs a mutual handshake before any m
 - Each peer tracks `last_seen_ok`, `last_handshake_at`, `consecutive_failures`, and a derived `live_status`
 - Status thresholds: **online** (seen ≤ 75s, no failures) · **stale** (≤ 150s or 1 failure) · **offline** (otherwise)
 - Live status is recomputed on every rebuild; stale observations never overwrite runtime liveness
+- Bootstrap self-healing repairs stale non-WSL LAN peers when a persisted
+  `instances.json` or `remote_live_endpoints.json` route points at an obsolete
+  Remote port. Existing healthy peers are left untouched; existing
+  `offline`/`handshake_timed_out` peers may be re-probed and replaced with a
+  verified route.
 
 #### Same-Host Routing
 
@@ -957,6 +962,10 @@ When a peer is discovered, Hashi Remote performs a mutual handshake before any m
 - Same-host peers are routed through `127.0.0.1` loopback with unique Remote ports
 - Cross-host peers avoid loopback and prefer LAN/Tailscale/configured hosts
 - `/protocol/status` reports same-host Remote port conflicts through `route_diagnostics`
+- Remote does not blindly assume all peers use `8766`. The `8766` fallback is
+  only used for explicit non-WSL LAN peers such as Windows/Linux/macOS hosts.
+  WSL peers must keep their configured unique ports so same-host multi-instance
+  deployments like HASHI1/HASHI2 do not cross-wire.
 
 #### P2P Message Protocol
 
@@ -994,6 +1003,9 @@ For rollout and rollback notes, see
 - `GET /peers` — live peer list with liveness status, route kind, and agent directory
 - `GET /protocol/status` — full protocol state: handshake states, in-flight count, local network profile, agent snapshot
 - `GET /health` — instance info and peer summary
+- `/remote list` should agree with `/peers`: a peer that is reachable by hchat
+  but still shown offline in `/remote list` means the Remote registry is stale
+  and should be refreshed or restarted after pulling the latest code.
 
 #### Cross-Instance Messages, Attachments, And File Push
 
@@ -1024,6 +1036,18 @@ Windows/LAN peers may bind the local Workbench API to a LAN IP rather than
 `127.0.0.1`. Hashi Remote now widens local Workbench host fallback to include
 real interface IPv4 addresses, which fixes the case where protocol transport
 reaches the peer but local enqueue fails on an otherwise healthy LAN PC.
+
+For stale LAN routes, `tools/hchat_send.py` and Hashi Remote now use the same
+live route model. Hchat refreshes from `state/remote_live_endpoints.json`, while
+Remote bootstrap can repair an offline peer whose persisted port is obsolete
+once the peer is reachable on its verified Remote port. After upgrade, validate
+both surfaces:
+
+```bash
+/remote list
+python tools/hchat_send.py --to agent@INSTANCE --from <agent> --check
+curl http://127.0.0.1:<local-remote-port>/peers
+```
 
 ---
 
@@ -1180,6 +1204,9 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
 - **HChat reloadability** — hot reboot reloads `tools.*`, and HChat draft delivery refreshes `tools.hchat_send` before sending so delivery fixes do not require a full HASHI process restart
 - **Cross-instance Hchat protocol transport** — `tools/hchat_send.py` now prefers shared-token `/protocol/message` delivery for `agent@INSTANCE` and only keeps legacy `/hchat` as fallback, removing the old bearer-only transport mismatch
 - **Cross-instance route fallback** — `agent@INSTANCE` delivery tries multiple Workbench host candidates instead of relying on one stale loopback or discovery value
+- **Remote registry self-healing** — Hashi Remote repairs stale persisted LAN
+  peer routes when a non-WSL peer moves back to its verified default Remote
+  port, while preserving unique WSL ports for same-host multi-instance safety
 - **Remote handshake guard** — handshake payloads tolerate older/test-created protocol manager objects while still rejecting alias responses from the wrong instance
 
 ### v3.2.0 — Slim Core, EXP, Browser Routing & Runtime Hardening (May 2026)
