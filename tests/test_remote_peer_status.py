@@ -1233,6 +1233,159 @@ def test_bootstrap_probe_ports_prefers_live_endpoint(tmp_path):
     assert ports == [30264, 8767]
 
 
+def test_bootstrap_probe_ports_adds_default_for_windows_peer(tmp_path):
+    manager = ProtocolManager(
+        hashi_root=tmp_path,
+        instance_info={"instance_id": "HASHI1", "remote_port": 8766, "workbench_port": 18800},
+        peer_registry=None,
+        workbench_port=18800,
+    )
+
+    ports = manager._bootstrap_probe_ports({"remote_port": 40050, "platform": "windows"}, {})
+
+    assert ports == [40050, 8766]
+
+
+def test_bootstrap_probe_ports_does_not_default_wsl_peer(tmp_path):
+    manager = ProtocolManager(
+        hashi_root=tmp_path,
+        instance_info={"instance_id": "HASHI1", "remote_port": 8766, "workbench_port": 18800},
+        peer_registry=None,
+        workbench_port=18800,
+    )
+
+    ports = manager._bootstrap_probe_ports({"remote_port": 8767, "platform": "wsl"}, {})
+
+    assert ports == [8767]
+
+
+def test_bootstrap_known_peers_recovers_stale_windows_remote_port(tmp_path):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    captured = []
+
+    class RegistryStub:
+        def get_peer(self, instance_id):
+            return None
+
+        def on_peers_changed(self, peers):
+            captured.extend(peers)
+
+    manager = object.__new__(ProtocolManager)
+    manager._hashi_root = hashi_root
+    manager._instance_info = {"instance_id": "HASHI1"}
+    manager._peer_registry = RegistryStub()
+    manager._load_instances = lambda: {
+        "intel": {
+            "instance_id": "INTEL",
+            "display_name": "INTEL",
+            "platform": "windows",
+            "lan_ip": "192.168.0.6",
+            "remote_port": 40050,
+            "workbench_port": 18802,
+        }
+    }
+    manager._dedupe_bootstrap_instances = lambda instances: instances
+    manager._candidate_hosts_for_entry = lambda entry: ["192.168.0.6"]
+    manager._probe_route = lambda host, port, timeout=2: host == "192.168.0.6" and int(port) == 8766
+
+    asyncio.run(manager._bootstrap_known_peers())
+
+    assert len(captured) == 1
+    peer = captured[0]
+    assert peer.host == "192.168.0.6"
+    assert peer.port == 8766
+
+
+def test_bootstrap_known_peers_repairs_existing_offline_peer(tmp_path):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    stale_peer = PeerInfo(
+        instance_id="INTEL",
+        display_name="INTEL",
+        host="192.168.0.6",
+        port=40050,
+        workbench_port=18802,
+        platform="windows",
+        properties={"live_status": "offline", "handshake_state": "handshake_timed_out"},
+    )
+    captured = []
+
+    class RegistryStub:
+        def get_peer(self, instance_id):
+            return stale_peer
+
+        def on_peers_changed(self, peers):
+            captured.extend(peers)
+
+    manager = object.__new__(ProtocolManager)
+    manager._hashi_root = hashi_root
+    manager._instance_info = {"instance_id": "HASHI1"}
+    manager._peer_registry = RegistryStub()
+    manager._load_instances = lambda: {
+        "intel": {
+            "instance_id": "INTEL",
+            "display_name": "INTEL",
+            "platform": "windows",
+            "lan_ip": "192.168.0.6",
+            "remote_port": 40050,
+            "workbench_port": 18802,
+        }
+    }
+    manager._dedupe_bootstrap_instances = lambda instances: instances
+    manager._candidate_hosts_for_entry = lambda entry: ["192.168.0.6"]
+    manager._probe_route = lambda host, port, timeout=2: host == "192.168.0.6" and int(port) == 8766
+
+    asyncio.run(manager._bootstrap_known_peers())
+
+    assert len(captured) == 1
+    assert captured[0].port == 8766
+
+
+def test_bootstrap_known_peers_skips_existing_online_peer(tmp_path):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    online_peer = PeerInfo(
+        instance_id="INTEL",
+        display_name="INTEL",
+        host="192.168.0.6",
+        port=8766,
+        workbench_port=18802,
+        platform="windows",
+        properties={"live_status": "online", "handshake_state": "handshake_accepted"},
+    )
+    captured = []
+
+    class RegistryStub:
+        def get_peer(self, instance_id):
+            return online_peer
+
+        def on_peers_changed(self, peers):
+            captured.extend(peers)
+
+    manager = object.__new__(ProtocolManager)
+    manager._hashi_root = hashi_root
+    manager._instance_info = {"instance_id": "HASHI1"}
+    manager._peer_registry = RegistryStub()
+    manager._load_instances = lambda: {
+        "intel": {
+            "instance_id": "INTEL",
+            "display_name": "INTEL",
+            "platform": "windows",
+            "lan_ip": "192.168.0.6",
+            "remote_port": 40050,
+            "workbench_port": 18802,
+        }
+    }
+    manager._dedupe_bootstrap_instances = lambda instances: instances
+    manager._candidate_hosts_for_entry = lambda entry: ["192.168.0.6"]
+    manager._probe_route = lambda host, port, timeout=2: True
+
+    asyncio.run(manager._bootstrap_known_peers())
+
+    assert captured == []
+
+
 def test_bootstrap_known_peers_logs_when_no_probe_ports(caplog, tmp_path):
     manager = object.__new__(ProtocolManager)
     manager._hashi_root = tmp_path

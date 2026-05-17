@@ -52,6 +52,7 @@ def _wsl_unc_anchor(value: str) -> str:
     return f"\\\\{parts[0]}\\{parts[1]}\\"
 
 PROTOCOL_VERSION = "2.0"
+DEFAULT_REMOTE_PORT = 8766
 DEFAULT_CAPABILITIES = [
     "handshake_v2",
     "agent_directory_v1",
@@ -331,8 +332,9 @@ class ProtocolManager:
                 continue
             if instance_id == local_id:
                 continue
-            if self._peer_registry and self._peer_registry.get_peer(instance_id):
-                continue  # Already known via mDNS
+            existing_peer = self._peer_registry.get_peer(instance_id) if self._peer_registry else None
+            if existing_peer and self._bootstrap_existing_peer_is_healthy(existing_peer):
+                continue  # Already known via a healthy discovery path.
             live_entry = live_endpoints.get(instance_id.lower(), {})
             probe_ports = self._bootstrap_probe_ports(entry, live_entry)
             if not probe_ports:
@@ -388,9 +390,22 @@ class ProtocolManager:
 
         live = live_entry or {}
         add(live.get("port"))
+        add(live.get("remote_port"))
         add(entry.get("announced_port"))
         add(entry.get("remote_port"))
+        platform = str(live.get("platform") or entry.get("platform") or "").strip().lower()
+        environment = str(live.get("environment_kind") or entry.get("environment_kind") or "").strip().lower()
+        if platform in {"windows", "linux", "darwin", "macos"} or environment in {"windows", "linux", "darwin", "macos"}:
+            add(DEFAULT_REMOTE_PORT)
         return ports
+
+    def _bootstrap_existing_peer_is_healthy(self, peer) -> bool:
+        properties = dict(getattr(peer, "properties", None) or {})
+        live_status = str(properties.get("live_status") or "").strip().lower()
+        handshake_state = str(properties.get("handshake_state") or "").strip().lower()
+        if live_status == "online":
+            return True
+        return handshake_state == "handshake_accepted"
 
     def _bootstrap_entry_score(self, entry: dict) -> tuple[int, int, str]:
         caps = list(entry.get("capabilities") or [])
