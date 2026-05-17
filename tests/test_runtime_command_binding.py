@@ -4,9 +4,12 @@ import sys
 import types
 from types import SimpleNamespace
 
+import pytest
+
 sys.modules.setdefault("edge_tts", types.ModuleType("edge_tts"))
 
 from orchestrator import runtime_command_binding
+from orchestrator.command_registry import RuntimeCommand
 
 
 def test_command_binding_names_are_unique_except_declared_aliases():
@@ -72,6 +75,7 @@ def test_bind_flexible_runtime_handlers_preserves_static_binding_count(monkeypat
     expected = (
         len(runtime_command_binding.COMMAND_BINDINGS)
         + len(runtime_command_binding.CALLBACK_BINDINGS)
+        + 1
         + 7
     )
     assert added_errors == [runtime.handle_telegram_error]
@@ -93,3 +97,53 @@ def test_get_flexible_bot_commands_appends_runtime_commands(monkeypatch):
     assert "status" in names
     assert "wol" in names
     assert names[-1] == "private_sample"
+
+
+@pytest.mark.asyncio
+async def test_dynamic_runtime_command_fallback_dispatches_late_loaded_command(monkeypatch):
+    calls = []
+
+    async def sample_callback(runtime, update, context):
+        calls.append(
+            {
+                "runtime": runtime,
+                "text": update.effective_message.text,
+                "args": list(context.args),
+            }
+        )
+
+    command = RuntimeCommand("latecmd", "Late command", sample_callback)
+    monkeypatch.setattr(runtime_command_binding, "runtime_command_map", lambda: {"latecmd": command})
+
+    runtime = SimpleNamespace()
+
+    def wrap_cmd(name, callback):
+        async def wrapped(update, context):
+            calls.append({"wrapped": name})
+            await callback(update, context)
+
+        return wrapped
+
+    runtime._wrap_cmd = wrap_cmd
+    update = SimpleNamespace(effective_message=SimpleNamespace(text="/latecmd alpha beta"))
+    context = SimpleNamespace(args=[])
+
+    handled = await runtime_command_binding._dispatch_dynamic_runtime_command(runtime, update, context)
+
+    assert handled is True
+    assert calls[0] == {"wrapped": "latecmd"}
+    assert calls[1]["runtime"] is runtime
+    assert calls[1]["text"] == "/latecmd alpha beta"
+    assert calls[1]["args"] == ["alpha", "beta"]
+
+
+@pytest.mark.asyncio
+async def test_dynamic_runtime_command_fallback_ignores_unknown_command(monkeypatch):
+    monkeypatch.setattr(runtime_command_binding, "runtime_command_map", lambda: {})
+    update = SimpleNamespace(effective_message=SimpleNamespace(text="/unknown"))
+    context = SimpleNamespace(args=["old"])
+
+    handled = await runtime_command_binding._dispatch_dynamic_runtime_command(SimpleNamespace(), update, context)
+
+    assert handled is False
+    assert context.args == ["old"]
