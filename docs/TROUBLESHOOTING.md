@@ -27,6 +27,9 @@
 - [ ] If `api_gateway_enabled` is true, `curl http://<api_host>:<api_gateway_port>/health` returns `{"status":"ok", ...}`
 - [ ] No other HASHI instance is listening on the same API Gateway port
 - [ ] In WSL, if `127.0.0.1` hangs but `10.255.255.254` works, use the `10.255.255.254` address reported by `/api/health` or startup logs
+- [ ] From Telegram, `/api` shows the live gateway address, `/v1/chat/completions`, `/v1/models`, enabled-on-restart state, and default API model
+- [ ] `/api on` and `/api off` change only the OpenAI-compatible API Gateway, not the agent's active `/backend` or `/model`
+- [ ] `/api model <model>` sets the gateway default for external API requests that omit `model`; callers may still override per request
 
 ### Workbench UI "no reaction" symptom
 - [ ] `http://127.0.0.1:3001/api/config` returns JSON
@@ -58,7 +61,19 @@
 - [ ] `python tools/remote_rescue.py capabilities <INSTANCE>` shows `rescue_control: yes`
 - [ ] `python tools/remote_rescue.py status <INSTANCE>` reports `running`, `starting_or_stuck`, `stale_pid`, or `offline`
 - [ ] `rescue_start` is expected to be `no` unless `security.max_terminal_level` is `L3_RESTART`
+- [ ] `rescue_restart` is expected to be `no` unless `security.max_terminal_level` is `L3_RESTART`
 - [ ] `python tools/remote_rescue.py logs <INSTANCE> --name start` returns a bounded log tail
+- [ ] WatchTower-controlled restart writes `state/restarts/<restart_id>.json`
+- [ ] WatchTower-controlled restart appends to `logs/remote_rescue_audit.jsonl`
+- [ ] `/restart` in Telegram shows the WatchTower API address and fails closed if WatchTower is unreachable, unauthenticated, or does not support restart
+
+### WatchTower cold restart
+- [ ] WatchTower is running outside the HASHI process it controls
+- [ ] WatchTower can reach the controlled HASHI root and launcher script
+- [ ] Supervised launch preserves required runtime environment: `USERPROFILE`, `HOME`, `APPDATA`, `LOCALAPPDATA`, backend auth/cache homes such as `CODEX_HOME`, and expected `PATH`
+- [ ] After `/restart`, `GET /api/health` shows the expected `instance_id`, online agents, API Gateway state, and ports
+- [ ] After `/restart`, send a real message to the subject agent and confirm backend success; health alone is not sufficient
+- [ ] Review the subject agent's latest `errors.log` for new backend/auth/cache errors after restart
 
 ### Anatta mode
 - [ ] `/anatta status` reports the current workspace mode
