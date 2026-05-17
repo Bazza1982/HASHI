@@ -11,6 +11,8 @@ shared-token, rescue-capable Remote sidecar.
   non-loopback callers.
 - Agent directories refresh without restarting Remote.
 - Same-host WSL/Windows routes prefer loopback with unique Remote ports.
+- Stale persisted LAN routes self-heal when a non-WSL peer is reachable on its
+  verified Remote port.
 - Rescue status/logs remain available when HASHI core is down.
 
 ## Before You Start
@@ -62,7 +64,11 @@ control are unavailable.
 ```bash
 /remote list
 python tools/remote_rescue.py capabilities <INSTANCE>
+python tools/hchat_send.py --to agent@INSTANCE --from <agent> --check
 ```
+
+The first `git pull` updates code only. Restart or refresh the Remote sidecar on
+that instance before treating `/remote list` as evidence for the new behavior.
 
 ## Supervisor Install
 
@@ -103,6 +109,16 @@ Only use `L3_RESTART` on trusted LAN/Tailscale machines.
 - `python tools/remote_rescue.py status <INSTANCE>` returns the core state.
 - `python tools/remote_rescue.py logs <INSTANCE> --name start` returns a bounded
   log tail.
+- `python tools/hchat_send.py --to agent@INSTANCE --from <agent> --check`
+  resolves the same target instance as `/remote list`. A successful hchat route
+  alone is not enough to close a network fix; `/remote list`, `/peers`, and
+  `instances.json` must agree.
+
+For cross-host Windows/Linux/macOS peers, Remote bootstrap may probe the default
+Remote port `8766` when the persisted port is stale and the existing peer is
+offline. This is intentionally not applied to `platform=wsl` peers, because WSL
+same-host deployments often depend on unique ports such as HASHI1 `8766` and
+HASHI2 `8767`.
 
 ## Troubleshooting
 
@@ -112,6 +128,12 @@ Only use `L3_RESTART` on trusted LAN/Tailscale machines.
   is missing token support or the token differs.
 - same-host port conflict: give each same-host instance a unique `remote_port`.
 - stale directory: Remote is alive but HASHI core or Workbench health is down.
+- hchat works but `/remote list` still shows offline: restart/refresh the local
+  Remote sidecar so its peer registry reloads the latest bootstrap self-healing
+  code, then check `/peers` and `/remote list` again.
+- peer still offline after upgrade: test both the Remote port and Workbench port
+  from another machine. If both timeout, this is a host/firewall/service outage,
+  not a stale registry bug.
 - rescue start forbidden: `max_terminal_level` is not `L3_RESTART`.
 
 ## Rollback
