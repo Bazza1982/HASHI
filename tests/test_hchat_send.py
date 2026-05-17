@@ -227,6 +227,158 @@ def test_check_hchat_route_reports_protocol_transport_when_available(monkeypatch
     assert result["remote_port"] == 8766
 
 
+def test_load_instances_overlays_live_endpoint_over_stale_instance(monkeypatch, tmp_path):
+    instances_path = tmp_path / "instances.json"
+    live_path = tmp_path / "state" / "remote_live_endpoints.json"
+    live_path.parent.mkdir(parents=True)
+    instances_path.write_text(
+        json.dumps(
+            {
+                "instances": {
+                    "intel": {
+                        "instance_id": "INTEL",
+                        "active": False,
+                        "api_host": "192.168.0.6",
+                        "lan_ip": "192.168.0.6",
+                        "remote_port": 40050,
+                        "workbench_port": 18802,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    live_path.write_text(
+        json.dumps(
+            {
+                "endpoints": {
+                    "intel": {
+                        "instance_id": "INTEL",
+                        "display_name": "INTEL",
+                        "host": "192.168.0.6",
+                        "port": 8766,
+                        "remote_port": 8766,
+                        "workbench_port": 18802,
+                        "platform": "windows",
+                        "discovery": "lan",
+                        "capabilities": ["agent_directory_v1"],
+                        "updated_at": 123.0,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(hchat_send, "INSTANCES_FILE", instances_path)
+    monkeypatch.setattr(hchat_send, "LIVE_ENDPOINTS_FILE", live_path)
+    monkeypatch.setattr(hchat_send, "_load_config", lambda: _local_cfg())
+    monkeypatch.setattr(hchat_send.time, "time", lambda: 124.0)
+
+    instances = hchat_send._load_instances()
+
+    assert instances["intel"]["active"] is True
+    assert instances["intel"]["api_host"] == "192.168.0.6"
+    assert instances["intel"]["lan_ip"] == "192.168.0.6"
+    assert instances["intel"]["remote_port"] == 8766
+    assert instances["intel"]["workbench_port"] == 18802
+    assert instances["intel"]["_discovery"] == "lan"
+
+
+def test_load_instances_ignores_stale_live_endpoint(monkeypatch, tmp_path):
+    instances_path = tmp_path / "instances.json"
+    live_path = tmp_path / "state" / "remote_live_endpoints.json"
+    live_path.parent.mkdir(parents=True)
+    instances_path.write_text(
+        json.dumps(
+            {
+                "instances": {
+                    "intel": {
+                        "instance_id": "INTEL",
+                        "active": False,
+                        "api_host": "192.168.0.6",
+                        "remote_port": 40050,
+                        "workbench_port": 18802,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    live_path.write_text(
+        json.dumps(
+            {
+                "endpoints": {
+                    "intel": {
+                        "instance_id": "INTEL",
+                        "host": "192.168.0.6",
+                        "remote_port": 8766,
+                        "workbench_port": 18802,
+                        "updated_at": 100.0,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(hchat_send, "INSTANCES_FILE", instances_path)
+    monkeypatch.setattr(hchat_send, "LIVE_ENDPOINTS_FILE", live_path)
+    monkeypatch.setattr(hchat_send, "_load_config", lambda: _local_cfg())
+    monkeypatch.setattr(hchat_send.time, "time", lambda: 100.0 + hchat_send.LIVE_ENDPOINT_TTL_SECONDS + 1)
+
+    instances = hchat_send._load_instances()
+
+    assert instances["intel"]["active"] is False
+    assert instances["intel"]["remote_port"] == 40050
+
+
+def test_remote_agent_names_falls_back_to_workbench_agents(monkeypatch):
+    payloads = {
+        "http://192.168.0.6:40050/protocol/agents": URLError("remote stale"),
+        "http://192.168.0.6:18802/api/agents": {
+            "agents": [
+                {"id": "lily", "name": "lily", "online": True},
+                {"id": "agent1", "name": "agent1", "online": True},
+            ]
+        },
+    }
+
+    class FakeResponse:
+        def __init__(self, body):
+            self._body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(self._body).encode("utf-8")
+
+    def fake_urlopen(req, timeout):
+        body = payloads[req.full_url]
+        if isinstance(body, Exception):
+            raise body
+        return FakeResponse(body)
+
+    monkeypatch.setattr(hchat_send.urllib_request, "urlopen", fake_urlopen)
+
+    agents = hchat_send._remote_agent_names(
+        "intel",
+        {
+            "instance_id": "INTEL",
+            "api_host": "192.168.0.6",
+            "lan_ip": "192.168.0.6",
+            "remote_port": 40050,
+            "workbench_port": 18802,
+        },
+    )
+
+    assert agents == ["lily", "agent1"]
+
+
 def test_find_remote_instance_requires_agent_on_explicit_target(monkeypatch):
     instances = {
         "hashi9": {
