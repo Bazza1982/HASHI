@@ -42,9 +42,11 @@ from remote.security.client_auth import build_client_auth_headers
 
 CONTACTS_FILE = ROOT / "contacts.json"
 INSTANCES_FILE = ROOT / "instances.json"
+LIVE_ENDPOINTS_FILE = ROOT / "state" / "remote_live_endpoints.json"
 DEFAULT_TTL = 3600
 DEFAULT_REMOTE_PORT = 8766
 DEFAULT_EXCHANGE_INSTANCE = "HASHI1"
+LIVE_ENDPOINT_TTL_SECONDS = int(os.getenv("HASHI_HCHAT_LIVE_ENDPOINT_TTL", "7200"))
 HCHAT_HEADER_RE = re.compile(r"^\[hchat from (?P<agent>\w+)(?:@(?P<instance>[\w-]+))?\]\s*(?P<body>.*)$", re.DOTALL)
 HCHAT_AUTOREPLY_INSTRUCTION = (
     "HChat protocol note: answer this request directly in your normal assistant "
@@ -182,8 +184,65 @@ def _load_instances() -> dict:
             instances = data.get("instances", {})
             merged = defaults.copy()
             merged.update(instances)
-            return merged
-    return defaults
+            return _merge_live_endpoints(merged)
+    return _merge_live_endpoints(defaults)
+
+
+def _load_live_endpoints() -> dict:
+    if not LIVE_ENDPOINTS_FILE.exists():
+        return {}
+    data = _load_json_object_with_salvage(LIVE_ENDPOINTS_FILE)
+    if not isinstance(data, dict):
+        return {}
+    endpoints = data.get("endpoints", {})
+    return endpoints if isinstance(endpoints, dict) else {}
+
+
+def _merge_live_endpoints(instances: dict) -> dict:
+    """Overlay recently discovered live routes over possibly stale instances.json."""
+    merged = dict(instances or {})
+    now = time.time()
+    for key, endpoint in _load_live_endpoints().items():
+        if not isinstance(endpoint, dict):
+            continue
+        try:
+            updated_at = float(endpoint.get("updated_at") or 0)
+        except Exception:
+            updated_at = 0
+        if updated_at > 0 and LIVE_ENDPOINT_TTL_SECONDS > 0 and now - updated_at > LIVE_ENDPOINT_TTL_SECONDS:
+            continue
+        instance_id = _normalize_instance_id(endpoint.get("instance_id") or key)
+        if not instance_id:
+            continue
+        host = str(endpoint.get("host") or "").strip()
+        try:
+            remote_port = int(endpoint.get("remote_port") or endpoint.get("port") or 0)
+        except Exception:
+            remote_port = 0
+        if not host or remote_port <= 0:
+            continue
+        instance_key = instance_id.lower()
+        current = dict(merged.get(instance_key) or {})
+        current.update(
+            {
+                "instance_id": instance_id,
+                "display_name": endpoint.get("display_name") or current.get("display_name") or instance_id,
+                "platform": endpoint.get("platform") or current.get("platform"),
+                "api_host": host,
+                "lan_ip": host,
+                "remote_port": remote_port,
+                "workbench_port": endpoint.get("workbench_port") or current.get("workbench_port"),
+                "active": True,
+                "_discovery": endpoint.get("discovery") or current.get("_discovery") or "live_endpoint",
+                "protocol_version": endpoint.get("protocol_version") or current.get("protocol_version"),
+                "capabilities": endpoint.get("capabilities") or current.get("capabilities") or [],
+                "host_identity": endpoint.get("host_identity") or current.get("host_identity"),
+                "environment_kind": endpoint.get("environment_kind") or current.get("environment_kind"),
+                "_live_endpoint_updated_at": endpoint.get("updated_at"),
+            }
+        )
+        merged[instance_key] = current
+    return merged
 
 
 def _get_workbench_port(cfg: dict) -> int:
@@ -383,8 +442,40 @@ def _load_remote_agents_live(instance_info: dict) -> list[str]:
     ]
 
 
+def _load_remote_agents_workbench(instance_info: dict) -> list[str]:
+    wb_port = instance_info.get("workbench_port")
+    if not wb_port:
+        return []
+    host = _preferred_host(instance_info)
+    for path in ("/api/agents", "/api/health"):
+        url = f"http://{host}:{int(wb_port)}{path}"
+        try:
+            req = urllib_request.Request(url, method="GET")
+            with urllib_request.urlopen(req, timeout=3) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            continue
+        if path == "/api/agents":
+            return [
+                str(agent.get("name") or agent.get("id") or "").strip().lower()
+                for agent in body.get("agents") or []
+                if str(agent.get("name") or agent.get("id") or "").strip()
+                and agent.get("online", agent.get("is_active", True)) is not False
+            ]
+        return [
+            str(agent).strip().lower()
+            for agent in body.get("agents") or []
+            if str(agent).strip()
+        ]
+    return []
+
+
 def _remote_agent_names(instance_id: str, instance_info: dict) -> list[str]:
-    return _load_remote_agents_live(instance_info) or _load_remote_agents(instance_id, instance_info)
+    return (
+        _load_remote_agents_live(instance_info)
+        or _load_remote_agents_workbench(instance_info)
+        or _load_remote_agents(instance_id, instance_info)
+    )
 
 
 def _preferred_host(instance_info: dict, *, for_remote: bool = False) -> str:
