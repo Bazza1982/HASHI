@@ -30,6 +30,14 @@
     {
       "id": "drain_before_close",
       "guidance": "Before final closeout, drain and classify pending worker/reviewer replies for the loop id. Stale or superseded replies should become recorded evidence, not user-facing replay, unless they introduce a new blocker or contradiction."
+    },
+    {
+      "id": "health_is_not_capability",
+      "guidance": "Do not treat a running process, open port, or green health endpoint as proof that the user-visible capability works. Closeout needs an exact capability smoke for the reported path."
+    },
+    {
+      "id": "verify_supervised_environment_parity",
+      "guidance": "For service, watchdog, scheduler, or cold-restart work, compare the supervised runtime environment against the known-good interactive runtime, including home paths, config paths, auth/cache paths, active backend, model, and instance identity."
     }
   ],
   "tick_checklist": [
@@ -38,7 +46,9 @@
     "Is this wait short, purposeful, and interruptible?",
     "Is the next action the smallest safe action?",
     "Did I record enough evidence for safe resume?",
-    "Before closeout, did I drain/classify same-loop worker/reviewer replies?"
+    "Before closeout, did I drain/classify same-loop worker/reviewer replies?",
+    "Before closeout, did I prove the exact user-visible capability, not only health?",
+    "For supervised launches, did I verify environment, auth/cache, backend/model, and identity parity?"
   ],
   "hard_stops": [
     {
@@ -56,6 +66,10 @@
     {
       "id": "no_final_close_with_unclassified_same_loop_replies",
       "rule": "Do not close a superloop while same-loop worker/reviewer replies are queued but unclassified. Drain or classify them as current, superseded, already-accounted-for, contradiction, or blocker evidence first."
+    },
+    {
+      "id": "no_final_close_on_health_only",
+      "rule": "Do not close a debug superloop using only health, process, or port checks. The exact reported capability must pass a real smoke test with log evidence."
     },
     {
       "id": "no_unscoped_destructive_remote_action",

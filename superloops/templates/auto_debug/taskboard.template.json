@@ -1,0 +1,93 @@
+[
+  {
+    "task_id": "step-001",
+    "title": "Intake reported issue, design intent, subject agent, and reproduction evidence",
+    "owner": "orchestrator",
+    "status": "pending",
+    "required_evidence": ["symptom", "expected_behavior", "observed_behavior", "subject_agent", "reproduction_window", "capability_to_prove"]
+  },
+  {
+    "task_id": "step-002",
+    "title": "Orchestrator baseline log audit",
+    "owner": "orchestrator",
+    "status": "pending",
+    "required_evidence": ["transcript", "core_transcript", "token_audit", "sidecar_events", "baseline_facts"]
+  },
+  {
+    "task_id": "step-003",
+    "title": "Debug worker broad diagnosis",
+    "owner": "debug_worker",
+    "status": "pending",
+    "required_evidence": ["facts", "hypotheses", "root_cause_candidates", "fix_options", "risk_assessment", "environment_risks"]
+  },
+  {
+    "task_id": "step-004",
+    "title": "Reviewer pre-implementation criteria and plan review",
+    "owner": "reviewer",
+    "status": "pending",
+    "required_evidence": ["review_criteria", "plan_verdict", "blockers"]
+  },
+  {
+    "task_id": "step-005",
+    "title": "Approve bounded implementation scope",
+    "owner": "orchestrator",
+    "status": "pending",
+    "required_evidence": ["files_in_scope", "files_out_of_scope", "core_boundary_decision", "rollback_path", "environment_parity_plan", "capability_smoke_plan"]
+  },
+  {
+    "task_id": "step-006",
+    "title": "Implement fix",
+    "owner": "debug_worker",
+    "status": "pending",
+    "required_evidence": ["files_changed", "behavior_changed", "tests_added_or_updated"]
+  },
+  {
+    "task_id": "step-007",
+    "title": "Static and targeted tests",
+    "owner": "orchestrator",
+    "status": "pending",
+    "required_evidence": ["py_compile", "targeted_tests", "regression_tests", "health_check_limits"]
+  },
+  {
+    "task_id": "step-008",
+    "title": "Reviewer post-implementation review",
+    "owner": "reviewer",
+    "status": "pending",
+    "required_evidence": ["diff_review", "test_review", "blocker_status"]
+  },
+  {
+    "task_id": "step-009",
+    "title": "Supervised runtime environment parity audit when relevant",
+    "owner": "orchestrator",
+    "status": "pending",
+    "required_evidence": ["launch_owner", "launch_command", "config_paths", "home_and_cache_paths", "backend_auth_paths", "active_backend_model", "identity_config_audit"]
+  },
+  {
+    "task_id": "step-010",
+    "title": "Real-world subject-agent capability smoke and log audit",
+    "owner": "orchestrator",
+    "status": "pending",
+    "required_evidence": ["conversation_test", "capability_smoke", "backend_success_evidence", "visible_output", "transcript_audit", "token_audit", "sidecar_audit", "error_log_audit", "reboot_status"]
+  },
+  {
+    "task_id": "step-011",
+    "title": "Drain and classify same-loop worker, reviewer, and subject-agent replies",
+    "owner": "orchestrator",
+    "status": "pending",
+    "required_evidence": ["worker_reply_drain", "reviewer_reply_drain", "subject_agent_reply_drain", "late_message_classification", "reopen_decision"]
+  },
+  {
+    "task_id": "step-012",
+    "title": "Fix and retest blockers",
+    "owner": "orchestrator",
+    "status": "pending",
+    "required_evidence": ["issue_log", "fixes", "retests"]
+  },
+  {
+    "task_id": "step-013",
+    "title": "Final acceptance and close",
+    "owner": "orchestrator",
+    "status": "pending",
+    "required_evidence": ["root_cause", "final_checks", "environment_parity_passed", "capability_smoke_passed", "identity_config_preserved", "error_log_clean", "inbox_drain_complete", "reviewer_no_blockers", "exit_condition_met"]
+  }
+]
