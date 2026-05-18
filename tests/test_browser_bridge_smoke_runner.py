@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import socketserver
 import subprocess
 import threading
 import time
 from pathlib import Path
+
+import pytest
 
 from tools.browser_bridge_harness import (
     create_harness_layout,
@@ -22,6 +25,12 @@ from tools.browser_bridge_smoke_runner import (
     write_smoke_command_plan,
 )
 from tools.browser_bridge_stub_server import running_stub_bridge
+
+
+requires_unix_stream_server = pytest.mark.skipif(
+    not hasattr(socketserver, "UnixStreamServer"),
+    reason="Unix domain socket server is unavailable on this platform",
+)
 
 
 def _build_minimal_harness(root: Path, *, socket_path: str = "/tmp/harness.sock") -> None:
@@ -90,7 +99,7 @@ def test_build_smoke_steps(tmp_path: Path) -> None:
         "get_text",
         "screenshot",
     ]
-    assert steps[1]["argv"][1].endswith("tools/browser_bridge_smoke_runner.py")
+    assert steps[1]["argv"][1].replace("\\", "/").endswith("tools/browser_bridge_smoke_runner.py")
     assert "--wait-for-socket-s" in steps[1]["argv"]
     assert steps[-1]["argv"][-1].endswith("smoke_screenshot.png")
 
@@ -145,6 +154,7 @@ def test_execute_smoke_plan(tmp_path: Path) -> None:
     assert report["results"][1]["status"] == "passed"
 
 
+@requires_unix_stream_server
 def test_execute_smoke_plan_with_stub_bridge(tmp_path: Path) -> None:
     root = tmp_path / "harness"
     socket_path = tmp_path / "bridge.sock"
@@ -168,6 +178,7 @@ def test_execute_smoke_plan_with_stub_bridge(tmp_path: Path) -> None:
     assert trace_lines[-1]["event"] == "server_stopped"
 
 
+@requires_unix_stream_server
 def test_execute_smoke_plan_waits_for_delayed_stub_bridge(tmp_path: Path) -> None:
     root = tmp_path / "harness"
     socket_path = tmp_path / "delayed_bridge.sock"

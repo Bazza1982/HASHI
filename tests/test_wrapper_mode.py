@@ -34,13 +34,12 @@ def test_should_wrap_user_sources():
         "document",
         "video",
         "sticker",
-        "session_reset",
     ]:
         assert should_wrap_source(source)
 
 
 def test_should_bypass_automation_sources():
-    for source in ["startup", "system", "scheduler", "scheduler-skill", "loop_skill", "bridge:hchat", "retry"]:
+    for source in ["startup", "system", "scheduler", "scheduler-skill", "loop_skill", "bridge:hchat", "retry", "session_reset"]:
         assert not should_wrap_source(source)
 
 

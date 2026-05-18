@@ -60,7 +60,13 @@ class _StubHandler(socketserver.StreamRequestHandler):
         )
 
 
-class _StubServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+if hasattr(socketserver, "UnixStreamServer"):
+    _UnixStreamServer = socketserver.UnixStreamServer
+else:  # Windows native Python has no Unix domain socket server.
+    _UnixStreamServer = None
+
+
+class _StubServer(socketserver.ThreadingMixIn, _UnixStreamServer if _UnixStreamServer else socketserver.TCPServer):
     daemon_threads = True
 
 
@@ -71,6 +77,9 @@ def running_stub_bridge(
     responses: dict[str, dict[str, Any]] | None = None,
     trace_path: Path | None = None,
 ) -> Iterator[Path]:
+    if _UnixStreamServer is None:
+        raise RuntimeError("Unix domain sockets are not available on this platform")
+
     socket_path.parent.mkdir(parents=True, exist_ok=True)
     if socket_path.exists():
         socket_path.unlink()

@@ -240,7 +240,7 @@ class WhatsAppTransport:
                 if first_word in ("/agent", "/all"):
                     await self._handle_routing_command(chat_key, text.strip())
                     return
-                if first_word in ("/reboot", "/terminate", "/start", "/stop"):
+                if first_word in ("/reboot", "/restart", "/terminate", "/start", "/stop"):
                     await self._handle_lifecycle_command(chat_key, text.strip())
                     return
 
@@ -475,7 +475,7 @@ class WhatsAppTransport:
         return "\n".join(lines)
 
     async def _handle_lifecycle_command(self, chat_key: str, text: str):
-        """Handle /reboot, /terminate, /start, /stop lifecycle commands via WhatsApp."""
+        """Handle /reboot, /restart, /terminate, /start, /stop lifecycle commands via WhatsApp."""
         parts = text.split()
         cmd = parts[0].lower()
 
@@ -483,6 +483,40 @@ class WhatsAppTransport:
             # Request hot restart of all agents
             await self._send_text(chat_key, "🔄 Requesting hot restart...")
             self.orchestrator.request_restart(mode="same")
+            return
+
+        if cmd == "/restart":
+            from orchestrator.commands import api_restart
+
+            confirm = len(parts) > 1 and parts[1].lower() in {"confirm", "now"}
+            if not confirm:
+                await self._send_text(
+                    chat_key,
+                    "⚠️ Hard restart goes through WatchTower and can briefly stop HASHI.\n"
+                    "Reply `/restart confirm` to continue.",
+                )
+                return
+            targets = self._router.get_targets(chat_key)
+            if not targets:
+                running = [rt.name for rt in self.orchestrator.runtimes]
+                if len(running) == 1:
+                    targets = running
+            if len(targets) != 1:
+                await self._send_text(
+                    chat_key,
+                    "Human /restart needs exactly one routed agent.\nUse /agent <name> first.",
+                )
+                return
+            runtime = self._get_runtime(targets[0])
+            if runtime is None:
+                await self._send_text(chat_key, f"Agent '{targets[0]}' is not running.")
+                return
+            await self._send_text(chat_key, "🔁 Requesting hard restart via WatchTower...")
+            ok, message = await api_restart.request_whatsapp_restart(runtime)
+            if ok:
+                await self._send_text(chat_key, "✅ Hard restart requested. Telegram will report when the restarted agent is back.")
+            else:
+                await self._send_text(chat_key, f"❌ Hard restart failed: {message}")
             return
 
         if cmd == "/terminate":

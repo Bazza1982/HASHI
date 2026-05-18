@@ -14,11 +14,13 @@ async def initialize(runtime: Any) -> bool:
     runtime.logger.info(f"Initializing flex agent '{runtime.name}'...")
     result = await runtime.backend_manager.initialize_active_backend()
     runtime.reload_post_turn_observers()
-    if result and runtime.backend_manager.agent_mode == "fixed":
+    if result and runtime.backend_manager.agent_mode in {"fixed", "memory+"}:
         backend = runtime.backend_manager.current_backend
         if hasattr(backend, "set_session_mode"):
             backend.set_session_mode(True)
-            runtime.logger.info(f"Fixed mode active — session persistence enabled on {runtime.config.active_backend}")
+            runtime.logger.info(
+                f"{runtime.backend_manager.agent_mode} mode active — session persistence enabled on {runtime.config.active_backend}"
+            )
     return result
 
 
@@ -76,6 +78,12 @@ async def process_queue(runtime: Any) -> None:
             effective_prompt = turn_prompt.effective_prompt
             final_prompt = turn_prompt.final_prompt
             incremental = turn_prompt.incremental
+            runtime._notify_right_brain_started(
+                item,
+                effective_prompt,
+                final_prompt=final_prompt,
+                is_bridge_request=is_bridge_request,
+            )
 
             audit_active = runtime._audit_enabled() and should_audit_source(item.source)
             audit_collector = AuditTelemetryCollector() if audit_active else None
@@ -139,6 +147,13 @@ async def process_queue(runtime: Any) -> None:
             )
 
             if response.is_success and not response.text:
+                runtime._notify_right_brain_interrupted(
+                    item,
+                    effective_prompt,
+                    is_bridge_request=is_bridge_request,
+                    reason="empty_success",
+                    error="backend returned success with empty text",
+                )
                 await runtime_pipeline.handle_empty_success_response(runtime, item)
             elif response.is_success and response.text:
                 success_result = await runtime_pipeline.prepare_successful_response(
@@ -149,6 +164,13 @@ async def process_queue(runtime: Any) -> None:
                 )
                 visible_text = success_result.visible_text
                 wrapper_result = success_result.wrapper_result
+                runtime._notify_right_brain_completed(
+                    item,
+                    effective_prompt,
+                    visible_text,
+                    is_bridge_request=is_bridge_request,
+                    completion_path="foreground",
+                )
                 runtime_pipeline.record_foreground_usage_audit(
                     runtime,
                     item,
@@ -174,6 +196,13 @@ async def process_queue(runtime: Any) -> None:
                         audit_collector=audit_collector,
                     )
             else:
+                runtime._notify_right_brain_interrupted(
+                    item,
+                    effective_prompt,
+                    is_bridge_request=is_bridge_request,
+                    reason="backend_error",
+                    error=response.error or "Unknown error",
+                )
                 await runtime_pipeline.handle_backend_error(
                     runtime,
                     item,
@@ -189,6 +218,17 @@ async def process_queue(runtime: Any) -> None:
             runtime._mark_error(str(exc))
             if item is not None:
                 runtime._record_habit_outcome(item, success=False, error_text=str(exc))
+                try:
+                    is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
+                    runtime._notify_right_brain_interrupted(
+                        item,
+                        item.prompt,
+                        is_bridge_request=is_bridge_request,
+                        reason="runtime_exception",
+                        error=str(exc),
+                    )
+                except Exception:
+                    pass
             runtime.error_logger.exception(f"Error in flex queue processing: {exc}")
             runtime.is_generating = False
         finally:

@@ -76,6 +76,12 @@ from orchestrator.post_turn_observer import (
     PreTurnContextProvider,
 )
 from orchestrator import runtime_observers
+from orchestrator.memory_plus_mode import (
+    append_memory_plus_manual_note,
+    clear_memory_plus_notepad,
+    read_memory_plus_notepad,
+    replace_memory_plus_notepad,
+)
 from orchestrator.usecomputer_mode import (
     build_usecomputer_task_prompt,
     get_usecomputer_examples_text,
@@ -93,9 +99,26 @@ from orchestrator.audit_mode import (
     load_audit_config,
     should_audit_source,
 )
+from orchestrator.dual_brain_mode import (
+    DEFAULT_AFTER_ACTION_PROMPT,
+    DEFAULT_LEFT_PROMPT,
+    dual_brain_block_with,
+    ensure_dual_brain_observer,
+    load_dual_brain_config,
+)
 
 HABIT_BROWSER_PAGE_SIZE = 5
 MAX_JOB_TRANSFER_SELECTIONS = 256
+
+
+def _parse_key_values(args: list[str]) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for raw in args:
+        key, sep, value = raw.partition("=")
+        if sep and key.strip():
+            values[key.strip().lower()] = value.strip()
+    return values
+
 
 class FlexibleAgentRuntime:
 
@@ -233,7 +256,10 @@ class FlexibleAgentRuntime:
 
         # Initialize FlexibleBackendManager
         self.backend_manager = FlexibleBackendManager(config, global_config, secrets)
-        self._sidecar_invoker, self._sidecar_context_getter = make_backend_sidecar_invoker(self.backend_manager)
+        self._sidecar_invoker, self._sidecar_context_getter = make_backend_sidecar_invoker(
+            self.backend_manager,
+            session_id_getter=lambda: self.session_id_dt,
+        )
         self._post_turn_observers: list[PostTurnObserver] = []
         self._pre_turn_context_providers: list[PreTurnContextProvider] = []
         self.reload_post_turn_observers()
@@ -336,7 +362,7 @@ class FlexibleAgentRuntime:
                     self._enabled_commands.add(name.strip().lstrip("/").lower())
 
         # help/status/new/fresh/wipe/clear/model/effort/mode should always be available
-        self._enabled_commands.update({"help", "status", "new", "fresh", "wipe", "reset", "clear", "memory", "model", "effort", "mode", "wrapper", "audit", "core", "wrap", "jobs", "verbose", "think", "voice", "whisper", "transfer", "fork", "cos", "long", "end", "oll", "browser", "exp"})
+        self._enabled_commands.update({"help", "status", "new", "fresh", "wipe", "reset", "clear", "memory", "notepad", "model", "effort", "mode", "wrapper", "audit", "brain", "core", "wrap", "jobs", "verbose", "think", "voice", "whisper", "transfer", "fork", "cos", "long", "end", "oll", "browser", "exp"})
 
     def _is_command_allowed(self, cmd: str) -> bool:
         cmd = (cmd or "").lstrip("/").lower()
@@ -605,6 +631,58 @@ class FlexibleAgentRuntime:
             user_text,
             assistant_text,
             is_bridge_request=is_bridge_request,
+        )
+
+    def _notify_right_brain_started(
+        self,
+        item: QueuedRequest,
+        user_text: str,
+        *,
+        final_prompt: str,
+        is_bridge_request: bool,
+    ) -> None:
+        runtime_observers.notify_right_brain_started(
+            self,
+            item,
+            user_text,
+            final_prompt=final_prompt,
+            is_bridge_request=is_bridge_request,
+        )
+
+    def _notify_right_brain_completed(
+        self,
+        item: QueuedRequest,
+        user_text: str,
+        assistant_text: str,
+        *,
+        is_bridge_request: bool,
+        completion_path: str,
+    ) -> None:
+        runtime_observers.notify_right_brain_completed(
+            self,
+            item,
+            user_text,
+            assistant_text,
+            is_bridge_request=is_bridge_request,
+            completion_path=completion_path,
+        )
+
+    def _notify_right_brain_interrupted(
+        self,
+        item: QueuedRequest,
+        user_text: str,
+        *,
+        is_bridge_request: bool,
+        reason: str,
+        error: str | None = None,
+    ) -> None:
+        runtime_observers.notify_right_brain_interrupted(
+            self,
+            item,
+            user_text,
+            is_bridge_request=is_bridge_request,
+            reason=reason,
+            error=error,
         )
 
     def _observer_workspace_keep_names(self) -> set[str]:
@@ -3243,9 +3321,10 @@ class FlexibleAgentRuntime:
             def_idle_min = default_idle // 60
             def_hard_min = default_hard // 60
             text = (
-                f"<b>⏱ Timeout — {self.name}</b>\n\n"
+                f"<b>⏱ Right-brain/backend timeout — {self.name}</b>\n\n"
                 f"  Idle:  <b>{idle_min} min</b>  (default: {def_idle_min} min)\n"
                 f"  Hard:  <b>{hard_min} min</b>  (default: {def_hard_min} min)\n\n"
+                f"Dual-brain note: this controls the active right-brain execution backend, not left-brain sidecar memory passes.\n\n"
                 f"Usage:\n"
                 f"  <code>/timeout 30</code>        — set idle to 30 min\n"
                 f"  <code>/timeout 30 120</code>    — idle=30 min, hard=120 min\n"
@@ -3263,7 +3342,7 @@ class FlexibleAgentRuntime:
             def_hard_min = default_hard // 60
             await self._reply_text(
                 update,
-                f"⏱ Timeout reset to defaults: idle={def_idle_min} min, hard={def_hard_min} min",
+                f"⏱ Right-brain/backend timeout reset to defaults: idle={def_idle_min} min, hard={def_hard_min} min",
             )
             return
 
@@ -3294,7 +3373,7 @@ class FlexibleAgentRuntime:
                 backend.config.extra["hard_timeout_sec"] = hard_min * 60
 
         hard_str = f", hard={hard_min} min" if hard_min is not None else ""
-        await self._reply_text(update, f"⏱ Timeout updated: idle={idle_min} min{hard_str}")
+        await self._reply_text(update, f"⏱ Right-brain/backend timeout updated: idle={idle_min} min{hard_str}")
 
     async def cmd_hchat(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -4048,6 +4127,13 @@ class FlexibleAgentRuntime:
                 parse_mode="Markdown",
             )
             return
+        if self.backend_manager.agent_mode == "memory+":
+            await self._reply_text(
+                update,
+                "Backend switching is disabled in **memory+** mode because it behaves like fixed mode with a daily notepad.\nUse `/mode flex` for normal `/backend` switching.",
+                parse_mode="Markdown",
+            )
+            return
         if self.backend_manager.agent_mode == "wrapper":
             await self._reply_text(
                 update,
@@ -4059,6 +4145,13 @@ class FlexibleAgentRuntime:
             await self._reply_text(
                 update,
                 "Backend switching is managed by `/core` and `/audit` in **audit** mode.\nUse `/mode flex` for normal `/backend` switching.",
+                parse_mode="Markdown",
+            )
+            return
+        if self.backend_manager.agent_mode == "dual-brain":
+            await self._reply_text(
+                update,
+                "Backend switching is managed by `/brain` in **dual-brain** mode.\nUse `/mode flex` for normal `/backend` switching.",
                 parse_mode="Markdown",
             )
             return
@@ -4581,6 +4674,13 @@ class FlexibleAgentRuntime:
                 parse_mode="Markdown",
             )
             return
+        if self.backend_manager.agent_mode == "dual-brain":
+            await self._reply_text(
+                update,
+                "Model switching is managed by `/brain` in **dual-brain** mode.\nUse `/mode flex` for normal `/model` switching.",
+                parse_mode="Markdown",
+            )
+            return
 
         current_model = self.backend_manager.current_backend.config.model
         args = context.args
@@ -4644,6 +4744,9 @@ class FlexibleAgentRuntime:
 
     def _is_audit_mode(self) -> bool:
         return getattr(self.backend_manager, "agent_mode", "flex") == "audit"
+
+    def _is_dual_brain_mode(self) -> bool:
+        return getattr(self.backend_manager, "agent_mode", "flex") == "dual-brain"
 
     def _is_managed_core_mode(self) -> bool:
         return getattr(self.backend_manager, "agent_mode", "flex") in {"wrapper", "audit"}
@@ -5196,6 +5299,231 @@ class FlexibleAgentRuntime:
             "Usage: /audit [list|model backend=<backend> model=<model>|delivery <silent|issues_only|always>|threshold <low|medium|high|critical>|timeout <seconds>|set <slot> <text>|clear <slot|all>]",
         )
 
+    def _dual_brain_config(self):
+        return load_dual_brain_config(
+            self.backend_manager.get_state_snapshot(),
+            current_backend=getattr(self.config, "active_backend", ""),
+            current_model=self.get_current_model(),
+        )
+
+    def _dual_brain_status_keyboard(self, cfg) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("Left brain", callback_data="bcfg:menu:left"),
+                    InlineKeyboardButton("Right brain", callback_data="bcfg:menu:right"),
+                ],
+                [
+                    InlineKeyboardButton("Prompts", callback_data="bcfg:menu:prompts"),
+                    InlineKeyboardButton("Refresh", callback_data="bcfg:menu:status"),
+                ],
+            ]
+        )
+
+    def _dual_brain_allowed_backend_ids(self) -> list[str]:
+        return [
+            str(backend.get("engine"))
+            for backend in self.config.allowed_backends
+            if backend.get("engine")
+        ]
+
+    def _dual_brain_backend_keyboard(self, cfg, *, target: str) -> InlineKeyboardMarkup:
+        current_backend = cfg.left_backend if target == "left" else cfg.right_backend
+        rows: list[list[InlineKeyboardButton]] = []
+        engines = self._dual_brain_allowed_backend_ids()
+        for i in range(0, len(engines), 2):
+            row: list[InlineKeyboardButton] = []
+            for engine in engines[i : i + 2]:
+                label = get_backend_label(engine)
+                if engine == current_backend:
+                    label = f"✅ {label}"
+                row.append(InlineKeyboardButton(label, callback_data=f"bcfg:backend:{target}:{engine}"))
+            rows.append(row)
+        rows.append([InlineKeyboardButton("Back", callback_data="bcfg:menu:status")])
+        return InlineKeyboardMarkup(rows)
+
+    def _dual_brain_model_keyboard(self, cfg, *, target: str, backend: str | None = None) -> InlineKeyboardMarkup:
+        current_backend = cfg.left_backend if target == "left" else cfg.right_backend
+        current_model = cfg.left_model if target == "left" else cfg.right_model
+        selected_backend = backend or current_backend
+        models = self._get_available_models_for(selected_backend)
+        rows: list[list[InlineKeyboardButton]] = []
+        for index, model in enumerate(models):
+            active = selected_backend == current_backend and model == current_model
+            label = f"✅ {model}" if active else model
+            rows.append([InlineKeyboardButton(label, callback_data=f"bcfg:modelidx:{target}:{selected_backend}:{index}")])
+        rows.append([InlineKeyboardButton("Back to backends", callback_data=f"bcfg:menu:{target}")])
+        rows.append([InlineKeyboardButton("Main", callback_data="bcfg:menu:status")])
+        return InlineKeyboardMarkup(rows)
+
+    def _dual_brain_status_text(self, cfg) -> str:
+        memory_prompt = "default" if cfg.left_prompt == DEFAULT_LEFT_PROMPT else "custom"
+        notepad_prompt = "default" if cfg.after_action_prompt == DEFAULT_AFTER_ACTION_PROMPT else "custom"
+        return (
+            "Dual-brain configuration\n"
+            f"• Mode: `{self.backend_manager.agent_mode}`\n"
+            f"• Left brain: `{cfg.left_backend}` / `{cfg.left_model}`\n"
+            f"• Right brain: `{cfg.right_backend}` / `{cfg.right_model}`\n"
+            f"• Memory briefing prompt: `{memory_prompt}`\n"
+            f"• Notepad update prompt: `{notepad_prompt}`\n\n"
+            "Commands:\n"
+            "• `/mode dual-brain` enable\n"
+            "• `/brain left backend=<backend> model=<model>`\n"
+            "• `/brain right backend=<backend> model=<model>`\n"
+            "• `/brain prompt memory|notepad <text>`\n"
+            "• `/brain prompt memory|notepad clear|show`\n\n"
+            "`/sys` remains normal right-brain system prompt context."
+        )
+
+    def _dual_brain_model_text(self, cfg, *, target: str) -> str:
+        backend = cfg.left_backend if target == "left" else cfg.right_backend
+        model = cfg.left_model if target == "left" else cfg.right_model
+        label = "Left brain" if target == "left" else "Right brain"
+        return (
+            f"{label} backend\n"
+            f"• Backend: `{backend}`\n"
+            f"• Model: `{model}`\n"
+            "Choose a backend first. The next screen shows all HASHI models for that backend.\n\n"
+            f"`/brain {target} backend=<backend> model=<model>`"
+        )
+
+    def _dual_brain_backend_model_text(self, cfg, *, target: str, backend: str) -> str:
+        current_backend = cfg.left_backend if target == "left" else cfg.right_backend
+        current_model = cfg.left_model if target == "left" else cfg.right_model
+        label = "Left brain" if target == "left" else "Right brain"
+        active = "current" if backend == current_backend else "not current"
+        return (
+            f"{label} model\n"
+            f"• Selected backend: `{backend}` ({active})\n"
+            f"• Current: `{current_backend}` / `{current_model}`\n"
+            "Choose a model below."
+        )
+
+    def _dual_brain_prompts_text(self, cfg) -> str:
+        def section(title: str, value: str) -> str:
+            text = value or "(empty)"
+            max_chars = 1100
+            if len(text) > max_chars:
+                text = (
+                    text[:max_chars]
+                    + f"\n... [truncated here; use /brain prompt {title.lower().split()[0]} show for full text]"
+                )
+            return f"{title} ({len(value or '')} chars):\n{text}"
+
+        return (
+            "Dual-brain prompt controls\n"
+            "\n"
+            f"{section('Memory briefing prompt', cfg.left_prompt)}\n\n"
+            f"{section('Notepad update prompt', cfg.after_action_prompt)}\n\n"
+            "Meaning:\n"
+            "• memory controls the pre-turn FYI context generator\n"
+            "• notepad controls the post-turn continuity note updater\n\n"
+            "Use:\n"
+            "• /brain prompt memory <text>\n"
+            "• /brain prompt notepad <text>\n"
+            "• /brain prompt memory|notepad show\n"
+            "• /brain prompt memory|notepad clear\n\n"
+            "Aliases still work: left, after."
+        )
+
+    async def cmd_brain(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        ensure_dual_brain_observer(self.workspace_dir)
+        self.reload_post_turn_observers()
+        cfg = self._dual_brain_config()
+        args = [a.strip() for a in (context.args or []) if a.strip()]
+        if not args or args[0].lower() in {"status", "menu", "config"}:
+            await self._reply_text(
+                update,
+                self._dual_brain_status_text(cfg),
+                parse_mode="Markdown",
+                reply_markup=self._dual_brain_status_keyboard(cfg),
+            )
+            return
+
+        action = args[0].lower()
+        if action in {"prompts", "prompt"} and len(args) == 1:
+            await self._reply_text(
+                update,
+                self._dual_brain_prompts_text(cfg),
+                parse_mode=None,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="bcfg:menu:status")]]),
+            )
+            return
+
+        if action in {"left", "right"}:
+            values = _parse_key_values(args[1:])
+            backend = values.get("backend") or (args[1] if len(args) > 1 and "=" not in args[1] else "")
+            model = values.get("model") or (args[2] if len(args) > 2 and "=" not in args[2] else "")
+            if not backend or not model:
+                await self._reply_text(update, f"Usage: /brain {action} backend=<backend> model=<model>")
+                return
+            backend = backend.strip().lower()
+            model = self._normalize_wrapper_model(backend, model.strip())
+            error = self._validate_wrapper_backend_model(backend, model)
+            if error:
+                await self._reply_text(update, error)
+                return
+            block = (
+                dual_brain_block_with(cfg, left_backend=backend, left_model=model)
+                if action == "left"
+                else dual_brain_block_with(cfg, right_backend=backend, right_model=model)
+            )
+            self.backend_manager.update_dual_brain_block(block)
+            if action == "right" and self._is_dual_brain_mode():
+                switch_ok, switch_message = await self._activate_wrapper_core_backend(
+                    update.effective_chat.id,
+                    backend=backend,
+                    model=model,
+                )
+                if not switch_ok:
+                    await self._reply_text(update, f"Right brain saved but active backend switch failed: {switch_message}")
+                    return
+            await self._reply_text(update, f"{action.title()} brain model saved: `{backend}` / `{model}`", parse_mode="Markdown")
+            return
+
+        if action == "prompt":
+            if len(args) < 3:
+                await self._reply_text(update, "Usage: /brain prompt memory|notepad <text|show|clear>")
+                return
+            target = args[1].lower()
+            prompt_aliases = {
+                "left": "left",
+                "memory": "left",
+                "briefing": "left",
+                "after": "after_action",
+                "after_action": "after_action",
+                "notepad": "after_action",
+                "update": "after_action",
+            }
+            key = prompt_aliases.get(target)
+            if key is None:
+                await self._reply_text(update, "Prompt target must be memory or notepad. Use /sys for right-brain execution instructions.")
+                return
+            sub = args[2].lower()
+            current = {
+                "left": cfg.left_prompt,
+                "after_action": cfg.after_action_prompt,
+            }[key]
+            if sub == "show":
+                await self._reply_text(update, current or "(empty)", parse_mode=None)
+                return
+            new_prompt = "" if sub == "clear" else " ".join(args[2:]).strip()
+            block = dual_brain_block_with(
+                cfg,
+                left_prompt=new_prompt if key == "left" else None,
+                after_action_prompt=new_prompt if key == "after_action" else None,
+            )
+            self.backend_manager.update_dual_brain_block(block)
+            await self._reply_text(update, f"Dual-brain {key} prompt updated ({len(new_prompt)} chars).")
+            return
+
+        await self._reply_text(
+            update,
+            "Usage: /brain [status|left backend=<backend> model=<model>|right backend=<backend> model=<model>|prompt memory|notepad <text|show|clear>]",
+        )
+
     async def callback_audit_config(self, update: Update, context: Any):
         query = update.callback_query
         if not self._is_authorized_user(query.from_user.id):
@@ -5333,6 +5661,108 @@ class FlexibleAgentRuntime:
                 return
         except Exception as e:
             self.error_logger.error(f"callback_audit_config error: {e}", exc_info=True)
+            await query.answer(f"Error: {e}", show_alert=True)
+            return
+        await query.answer()
+
+    async def callback_brain_config(self, update: Update, context: Any):
+        query = update.callback_query
+        if not self._is_authorized_user(query.from_user.id):
+            return
+        data = query.data or ""
+        try:
+            ensure_dual_brain_observer(self.workspace_dir)
+            self.reload_post_turn_observers()
+            cfg = self._dual_brain_config()
+            if data == "bcfg:menu:status":
+                await query.edit_message_text(
+                    self._dual_brain_status_text(cfg),
+                    parse_mode="Markdown",
+                    reply_markup=self._dual_brain_status_keyboard(cfg),
+                )
+            elif data == "bcfg:menu:left":
+                await query.edit_message_text(
+                    self._dual_brain_model_text(cfg, target="left"),
+                    parse_mode="Markdown",
+                    reply_markup=self._dual_brain_backend_keyboard(cfg, target="left"),
+                )
+            elif data == "bcfg:menu:right":
+                await query.edit_message_text(
+                    self._dual_brain_model_text(cfg, target="right"),
+                    parse_mode="Markdown",
+                    reply_markup=self._dual_brain_backend_keyboard(cfg, target="right"),
+                )
+            elif data == "bcfg:menu:prompts":
+                await query.edit_message_text(
+                    self._dual_brain_prompts_text(cfg),
+                    parse_mode=None,
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="bcfg:menu:status")]]),
+                )
+            elif data.startswith("bcfg:backend:"):
+                parts = data.split(":", 3)
+                if len(parts) != 4:
+                    await query.answer("Invalid backend selection.", show_alert=True)
+                    return
+                _, _, target, backend = parts
+                if target not in {"left", "right"}:
+                    await query.answer("Invalid brain target.", show_alert=True)
+                    return
+                backend = backend.strip()
+                if not self._allowed_wrapper_engine(backend):
+                    await query.answer(f"Backend not allowed: {backend}", show_alert=True)
+                    return
+                if not self._get_available_models_for(backend):
+                    await query.answer(f"No registered models for {backend}.", show_alert=True)
+                    return
+                await query.edit_message_text(
+                    self._dual_brain_backend_model_text(cfg, target=target, backend=backend),
+                    parse_mode="Markdown",
+                    reply_markup=self._dual_brain_model_keyboard(cfg, target=target, backend=backend),
+                )
+            elif data.startswith("bcfg:modelidx:"):
+                parts = data.split(":", 4)
+                if len(parts) != 5:
+                    await query.answer("Invalid model selection.", show_alert=True)
+                    return
+                _, _, target, backend, raw_index = parts
+                if target not in {"left", "right"}:
+                    await query.answer("Invalid brain target.", show_alert=True)
+                    return
+                models = self._get_available_models_for(backend)
+                try:
+                    model = models[int(raw_index)]
+                except (ValueError, IndexError):
+                    await query.answer("Unknown model choice.", show_alert=True)
+                    return
+                error = self._validate_wrapper_backend_model(backend, model)
+                if error:
+                    await query.answer(error, show_alert=True)
+                    return
+                block = (
+                    dual_brain_block_with(cfg, left_backend=backend, left_model=model)
+                    if target == "left"
+                    else dual_brain_block_with(cfg, right_backend=backend, right_model=model)
+                )
+                self.backend_manager.update_dual_brain_block(block)
+                if target == "right" and self._is_dual_brain_mode():
+                    switch_ok, switch_message = await self._activate_wrapper_core_backend(
+                        query.message.chat_id,
+                        backend=backend,
+                        model=model,
+                    )
+                    if not switch_ok:
+                        await query.answer(f"Saved, but switch failed: {switch_message}", show_alert=True)
+                refreshed = self._dual_brain_config()
+                await query.edit_message_text(
+                    self._dual_brain_backend_model_text(refreshed, target=target, backend=backend),
+                    parse_mode="Markdown",
+                    reply_markup=self._dual_brain_model_keyboard(refreshed, target=target, backend=backend),
+                )
+            else:
+                await query.answer("Unknown dual-brain control.", show_alert=True)
+                return
+        except Exception as e:
+            self.error_logger.error(f"callback_brain_config error: {e}", exc_info=True)
             await query.answer(f"Error: {e}", show_alert=True)
             return
         await query.answer()
@@ -5601,6 +6031,193 @@ class FlexibleAgentRuntime:
 
     async def cmd_memory(self, update: Update, context: Any):
         await runtime_workspace.cmd_memory(self, update, context)
+
+    async def cmd_notepad(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        args = [str(arg) for arg in (context.args or [])]
+        action = (args[0].strip().lower() if args else "show")
+        if action in {"show", "status", "view"}:
+            text, markup = self._notepad_view_payload()
+            await self._reply_text(
+                update,
+                text,
+                parse_mode="HTML",
+                reply_markup=markup,
+            )
+            return
+
+        if action in {"edit", "add", "append"}:
+            text = self._notepad_command_tail(update, context, action)
+            if not text:
+                await self._reply_text(
+                    update,
+                    self._notepad_help_text("edit"),
+                    parse_mode="HTML",
+                    reply_markup=self._notepad_back_keyboard(),
+                )
+                return
+            path = append_memory_plus_manual_note(self.workspace_dir, text)
+            await self._reply_text(
+                update,
+                f"✅ Memory+ notepad updated.\nPath: <code>{html.escape(str(path))}</code>",
+                parse_mode="HTML",
+                reply_markup=self._notepad_keyboard(),
+            )
+            return
+
+        if action == "replace":
+            text = self._notepad_command_tail(update, context, action)
+            if not text:
+                await self._reply_text(
+                    update,
+                    self._notepad_help_text("replace"),
+                    parse_mode="HTML",
+                    reply_markup=self._notepad_back_keyboard(),
+                )
+                return
+            path = replace_memory_plus_notepad(self.workspace_dir, text)
+            await self._reply_text(
+                update,
+                f"✅ Memory+ notepad replaced.\nPath: <code>{html.escape(str(path))}</code>",
+                parse_mode="HTML",
+                reply_markup=self._notepad_keyboard(),
+            )
+            return
+
+        if action == "clear":
+            path = clear_memory_plus_notepad(self.workspace_dir)
+            await self._reply_text(
+                update,
+                f"🧹 Memory+ notepad cleared for today.\nPath: <code>{html.escape(str(path))}</code>",
+                parse_mode="HTML",
+                reply_markup=self._notepad_keyboard(),
+            )
+            return
+
+        await self._reply_text(
+            update,
+            self._notepad_help_text("menu"),
+            parse_mode="HTML",
+            reply_markup=self._notepad_keyboard(),
+        )
+
+    def _notepad_keyboard(self) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("🔄 Refresh", callback_data="npad:refresh"),
+                    InlineKeyboardButton("➕ Add note", callback_data="npad:help_edit"),
+                ],
+                [
+                    InlineKeyboardButton("✏️ Replace body", callback_data="npad:help_replace"),
+                    InlineKeyboardButton("🧹 Clear", callback_data="npad:clear_confirm"),
+                ],
+            ]
+        )
+
+    def _notepad_back_keyboard(self) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to notepad", callback_data="npad:refresh")]])
+
+    def _notepad_clear_confirm_keyboard(self) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("✅ Yes, clear", callback_data="npad:clear_now"),
+                    InlineKeyboardButton("Cancel", callback_data="npad:refresh"),
+                ]
+            ]
+        )
+
+    def _notepad_view_payload(self) -> tuple[str, InlineKeyboardMarkup]:
+        view = read_memory_plus_notepad(self.workspace_dir)
+        body = view.body.strip()
+        if not body:
+            body = "(empty)"
+        max_body_chars = 3000
+        truncated = len(body) > max_body_chars
+        if truncated:
+            body = body[-max_body_chars:]
+        header = [
+            f"<b>Memory+ Notepad — {html.escape(self.name)}</b>",
+            f"• Date: <code>{html.escape(view.date or 'unknown')}</code>",
+            f"• Empty: <code>{str(view.is_empty).lower()}</code>",
+            "",
+            "Use the buttons below to refresh, add a manual note, replace the body, or clear today's layer.",
+        ]
+        if truncated:
+            header.append(f"• Showing last <code>{max_body_chars}</code> chars")
+        return "\n".join(header) + "\n\n<pre>" + html.escape(body) + "</pre>", self._notepad_keyboard()
+
+    def _notepad_help_text(self, action: str) -> str:
+        if action == "edit":
+            return (
+                "<b>Add a manual notepad note</b>\n\n"
+                "Send a message like:\n"
+                "<code>/notepad edit Dad prefers short operational summaries.</code>\n\n"
+                "This appends to today's memory+ notepad without replacing automatic notes."
+            )
+        if action == "replace":
+            return (
+                "<b>Replace today's notepad body</b>\n\n"
+                "Send a message like:\n"
+                "<code>/notepad replace - Manual: Dad prefers jasmine rice and avoids eggplant.</code>\n\n"
+                "This replaces today's continuity body, so use it when the current notepad is wrong or noisy."
+            )
+        return (
+            "<b>Memory+ Notepad controls</b>\n\n"
+            "• <code>/notepad</code> — open this panel\n"
+            "• <code>/notepad edit &lt;text&gt;</code> — append a manual note\n"
+            "• <code>/notepad replace &lt;text&gt;</code> — replace today's body\n"
+            "• <code>/notepad clear</code> — clear today's body"
+        )
+
+    def _notepad_command_tail(self, update: Update, context: Any, action: str) -> str:
+        raw = getattr(getattr(update, "message", None), "text", "") or ""
+        if raw:
+            parts = raw.split(None, 2)
+            if len(parts) >= 3 and parts[1].strip().lower() == action:
+                return parts[2].strip()
+        args = [str(arg) for arg in (context.args or [])]
+        if args and args[0].strip().lower() == action:
+            return " ".join(args[1:]).strip()
+        return " ".join(args).strip()
+
+    async def callback_notepad(self, update: Update, context: Any):
+        query = update.callback_query
+        if not self._is_authorized_user(query.from_user.id):
+            return
+        data = query.data or ""
+        action = data.split(":", 1)[1] if ":" in data else ""
+        if action == "refresh":
+            text, markup = self._notepad_view_payload()
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+        elif action == "help_edit":
+            await query.edit_message_text(
+                self._notepad_help_text("edit"),
+                parse_mode="HTML",
+                reply_markup=self._notepad_back_keyboard(),
+            )
+        elif action == "help_replace":
+            await query.edit_message_text(
+                self._notepad_help_text("replace"),
+                parse_mode="HTML",
+                reply_markup=self._notepad_back_keyboard(),
+            )
+        elif action == "clear_confirm":
+            await query.edit_message_text(
+                "🧹 <b>Clear today's memory+ notepad?</b>\n\nThis removes only today's context layer for this agent.",
+                parse_mode="HTML",
+                reply_markup=self._notepad_clear_confirm_keyboard(),
+            )
+        elif action == "clear_now":
+            clear_memory_plus_notepad(self.workspace_dir)
+            text, markup = self._notepad_view_payload()
+            await query.edit_message_text("🧹 Cleared.\n\n" + text, parse_mode="HTML", reply_markup=markup)
+        else:
+            await query.answer("Unknown notepad action.", show_alert=True)
+            return
+        await query.answer()
 
     async def cmd_wipe(self, update: Update, context: Any):
         await runtime_workspace.cmd_wipe(self, update, context)
@@ -6607,6 +7224,14 @@ class FlexibleAgentRuntime:
                 self._mark_error(f"Background task cancelled: {item.summary}")
                 self._record_habit_outcome(item, success=False, error_text="background_task_cancelled")
                 self.logger.warning(f"Background task {item.request_id} was cancelled.")
+                is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
+                self._notify_right_brain_interrupted(
+                    item,
+                    item.prompt,
+                    is_bridge_request=is_bridge_request,
+                    reason="background_cancelled",
+                    error="background_task_cancelled",
+                )
                 await self._notify_request_listeners(
                     item.request_id,
                     {
@@ -6631,6 +7256,14 @@ class FlexibleAgentRuntime:
                 self._mark_error(str(exc))
                 self._record_habit_outcome(item, success=False, error_text=str(exc))
                 self.error_logger.error(f"Background task {item.request_id} raised: {exc}")
+                is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
+                self._notify_right_brain_interrupted(
+                    item,
+                    item.prompt,
+                    is_bridge_request=is_bridge_request,
+                    reason="background_error",
+                    error=str(exc),
+                )
                 await self._notify_request_listeners(
                     item.request_id,
                     {
@@ -6675,6 +7308,14 @@ class FlexibleAgentRuntime:
                         "summary": item.summary,
                         **self._wrapper_listener_fields(response.text, visible_text, wrapper_result),
                     },
+                )
+                is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
+                self._notify_right_brain_completed(
+                    item,
+                    item.prompt,
+                    visible_text,
+                    is_bridge_request=is_bridge_request,
+                    completion_path="background",
                 )
                 if self._should_buffer_during_transfer(item.request_id):
                     self._record_suppressed_transfer_result(item, success=True, text=visible_text)
@@ -6808,6 +7449,14 @@ class FlexibleAgentRuntime:
                 err_msg = response.error or "Unknown error"
                 self._mark_error(err_msg)
                 self._record_habit_outcome(item, success=False, error_text=err_msg)
+                is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
+                self._notify_right_brain_interrupted(
+                    item,
+                    item.prompt,
+                    is_bridge_request=is_bridge_request,
+                    reason="background_backend_error",
+                    error=err_msg,
+                )
                 await self._notify_request_listeners(
                     item.request_id,
                     {

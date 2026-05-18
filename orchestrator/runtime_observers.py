@@ -22,6 +22,10 @@ def reload_post_turn_observers(runtime: Any) -> None:
             observer for observer in runtime._post_turn_observers
             if isinstance(observer, PreTurnContextProvider)
         ]
+        for observer in runtime._post_turn_observers:
+            attach_runtime = getattr(observer, "attach_runtime", None)
+            if callable(attach_runtime):
+                attach_runtime(runtime)
         runtime.logger.info(
             "Turn observers initialized: post_count=%s pre_count=%s",
             len(runtime._post_turn_observers),
@@ -94,6 +98,106 @@ def schedule_post_turn_observers(
         except Exception as exc:
             runtime.logger.warning(
                 "Post-turn observer failed to schedule for %s via %s: %s",
+                item.request_id,
+                type(observer).__name__,
+                exc,
+            )
+
+
+def notify_right_brain_started(
+    runtime: Any,
+    item: Any,
+    user_text: str,
+    *,
+    final_prompt: str,
+    is_bridge_request: bool,
+) -> None:
+    _notify_observer_turn_event(
+        runtime,
+        item,
+        user_text,
+        is_bridge_request=is_bridge_request,
+        method_name="on_right_brain_started",
+        event_name="right-brain start",
+        final_prompt=final_prompt,
+    )
+
+
+def notify_right_brain_completed(
+    runtime: Any,
+    item: Any,
+    user_text: str,
+    assistant_text: str,
+    *,
+    is_bridge_request: bool,
+    completion_path: str,
+) -> None:
+    _notify_observer_turn_event(
+        runtime,
+        item,
+        user_text,
+        is_bridge_request=is_bridge_request,
+        method_name="on_right_brain_completed",
+        event_name="right-brain completion",
+        assistant_text=assistant_text,
+        completion_path=completion_path,
+    )
+
+
+def notify_right_brain_interrupted(
+    runtime: Any,
+    item: Any,
+    user_text: str,
+    *,
+    is_bridge_request: bool,
+    reason: str,
+    error: str | None = None,
+) -> None:
+    _notify_observer_turn_event(
+        runtime,
+        item,
+        user_text,
+        is_bridge_request=is_bridge_request,
+        method_name="on_right_brain_interrupted",
+        event_name="right-brain interruption",
+        reason=reason,
+        error=error or "",
+    )
+
+
+def _notify_observer_turn_event(
+    runtime: Any,
+    item: Any,
+    user_text: str,
+    *,
+    is_bridge_request: bool,
+    method_name: str,
+    event_name: str,
+    **metadata: Any,
+) -> None:
+    if not runtime._post_turn_observers:
+        return
+    request = TurnObservationRequest(
+        request_id=item.request_id,
+        source=item.source,
+        user_text=user_text,
+        assistant_text=str(metadata.pop("assistant_text", "") or ""),
+        model_name=runtime.get_current_model(),
+        chat_id=item.chat_id,
+        summary=item.summary,
+        metadata=metadata,
+    )
+    for observer in runtime._post_turn_observers:
+        try:
+            if not observer.should_observe(item.source, is_bridge_request=is_bridge_request):
+                continue
+            handler = getattr(observer, method_name, None)
+            if callable(handler):
+                handler(request)
+        except Exception as exc:
+            runtime.logger.warning(
+                "Post-turn observer failed during %s for %s via %s: %s",
+                event_name,
                 item.request_id,
                 type(observer).__name__,
                 exc,

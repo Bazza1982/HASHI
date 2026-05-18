@@ -71,6 +71,8 @@ def begin_queue_item(runtime, item) -> QueueItemStart:
     )
     runtime.current_request_meta = {
         "request_id": item.request_id,
+        "chat_id": item.chat_id,
+        "prompt": item.prompt,
         "source": item.source,
         "summary": item.summary,
         "started_at": datetime.now().isoformat(),

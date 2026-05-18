@@ -276,16 +276,20 @@ def rescue_restart(
     instance_id: str,
     *,
     reason: str | None = None,
+    extra_payload: dict | None = None,
     token: str | None = None,
     shared_token: str | None = None,
     from_instance: str | None = None,
     timeout: int = 15,
 ) -> tuple[int, dict]:
     base_url = _reachable_base_url(instance_id, token=token, shared_token=shared_token, from_instance=from_instance, timeout=timeout)
+    payload = {"reason": reason}
+    if isinstance(extra_payload, dict):
+        payload.update(extra_payload)
     result = _request_json_status(
         f"{base_url}/control/hashi/restart",
         method="POST",
-        payload={"reason": reason},
+        payload=payload,
         token=token,
         shared_token=shared_token,
         from_instance=from_instance,

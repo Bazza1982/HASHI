@@ -177,6 +177,33 @@ def test_restart_success_passes_reason(monkeypatch):
     assert seen_payloads == [{"reason": "operator restart"}]
 
 
+def test_restart_merges_extra_payload(monkeypatch):
+    monkeypatch.setattr(remote_rescue, "_load_instances", _instances)
+    seen_payloads = []
+
+    def fake_request(url, **kwargs):
+        if url.endswith("/health"):
+            return remote_rescue.HttpResult(200, {"ok": True}, url)
+        if url.endswith("/control/hashi/restart"):
+            seen_payloads.append(kwargs["payload"])
+            return remote_rescue.HttpResult(200, {"ok": True, "restarted": True}, url)
+        raise AssertionError(url)
+
+    monkeypatch.setattr(remote_rescue, "_request_json_status", fake_request)
+
+    code, payload = remote_rescue.rescue_restart(
+        "HASHI9",
+        reason="operator restart",
+        extra_payload={"human_source": "telegram", "notify_agent": "hashiko"},
+    )
+
+    assert code == 0
+    assert payload["restarted"] is True
+    assert seen_payloads == [
+        {"reason": "operator restart", "human_source": "telegram", "notify_agent": "hashiko"}
+    ]
+
+
 def test_restart_returns_unsupported_for_old_remote(monkeypatch):
     monkeypatch.setattr(remote_rescue, "_load_instances", _instances)
 

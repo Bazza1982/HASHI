@@ -11,10 +11,21 @@ from orchestrator.wrapper_mode import (
     passthrough_result,
     should_wrap_source,
 )
+from orchestrator.memory_plus_mode import (
+    extract_memory_plus_update_details,
+    memory_plus_should_write,
+    memory_plus_write_reason,
+    write_memory_plus_diagnostic,
+    write_memory_plus_update,
+)
 
 
 def wrapper_enabled(runtime: Any) -> bool:
     return getattr(runtime.backend_manager, "agent_mode", "flex") == "wrapper"
+
+
+def memory_plus_enabled(runtime: Any) -> bool:
+    return getattr(runtime.backend_manager, "agent_mode", "flex") == "memory+"
 
 
 def wrapper_timeout_s(runtime: Any) -> float:
@@ -145,6 +156,53 @@ async def delete_wrapper_polishing_placeholder(runtime: Any, item: Any, placehol
 
 
 async def apply_wrapper_to_visible_text(runtime: Any, item: Any, visible_text: str):
+    if memory_plus_enabled(runtime):
+        extracted = extract_memory_plus_update_details(visible_text)
+        stripped_text = extracted.visible_text
+        update = extracted.update
+        should_write = False
+        notes_count = 0
+        open_items_count = 0
+        if isinstance(update, dict):
+            should_write = memory_plus_should_write(update)
+            notes = update.get("notes")
+            open_items = update.get("open_items")
+            notes_count = len(notes) if isinstance(notes, list) else int(bool(notes))
+            open_items_count = len(open_items) if isinstance(open_items, list) else int(bool(open_items))
+        write_result = False
+        reason = "not_attempted"
+        try:
+            write_result = write_memory_plus_update(
+                runtime.workspace_dir,
+                request_id=item.request_id,
+                source=item.source,
+                prompt=item.prompt,
+                update=update,
+            )
+            reason = memory_plus_write_reason(update, write_result=write_result, block_present=extracted.block_present)
+        except Exception as exc:
+            reason = f"exception:{type(exc).__name__}"
+            runtime.logger.warning("Memory+ write-back failed for %s: %s", item.request_id, exc)
+        try:
+            write_memory_plus_diagnostic(
+                runtime.workspace_dir,
+                request_id=item.request_id,
+                source=item.source,
+                block_present=extracted.block_present,
+                parse_ok=extracted.parse_ok,
+                should_write=should_write,
+                notes_count=notes_count,
+                open_items_count=open_items_count,
+                write_result=write_result,
+                reason=reason,
+                response_chars=len(visible_text or ""),
+                visible_chars=len(stripped_text or ""),
+                raw_block_chars=extracted.raw_chars,
+            )
+        except Exception as exc:
+            runtime.logger.warning("Memory+ diagnostic write failed for %s: %s", item.request_id, exc)
+        return stripped_text, passthrough_result(stripped_text, fallback_reason="memory_plus")
+
     if not wrapper_enabled(runtime):
         return visible_text, passthrough_result(visible_text, fallback_reason="wrapper_mode_disabled")
 
