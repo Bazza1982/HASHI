@@ -110,18 +110,30 @@ async def test_api_callback_updates_default_model():
 
 
 @pytest.mark.asyncio
-async def test_restart_command_reports_watchtower_status(monkeypatch):
+async def test_restart_command_dispatches_background_request(monkeypatch):
     runtime = _FakeRuntime()
+    observed = {}
     monkeypatch.setattr(api_restart.remote_rescue, "rescue_status", lambda *args, **kwargs: (0, {"state": "running", "workbench_url": "http://127.0.0.1:18819/api/health"}))
     monkeypatch.setattr(api_restart.remote_rescue, "_candidate_base_urls", lambda instance: ["http://127.0.0.1:43766"])
+    monkeypatch.setattr(
+        api_restart,
+        "_build_watchtower_restart_payload",
+        lambda *args, **kwargs: {"reason": "telegram /restart hard restart", "human_restart_proof": {"digest": "ok"}},
+    )
+
+    async def fake_dispatch(runtime_arg, chat_id, request_payload):
+        observed["chat_id"] = chat_id
+        observed["payload"] = request_payload
+
+    monkeypatch.setattr(api_restart, "_dispatch_watchtower_restart", fake_dispatch)
 
     await api_restart.restart_command(runtime, _command_update(), SimpleNamespace(args=[]))
+    await asyncio.sleep(0)
 
     text, _kwargs = runtime.messages[-1]
-    assert "Controller: <code>WATCHTOWER</code>" in text
-    assert "Controlled state: <code>running</code>" in text
-    buttons = _kwargs["reply_markup"].inline_keyboard
-    assert buttons[0][0].text == "Hard Restart"
+    assert "WatchTower hard restart requested" in text
+    assert observed["chat_id"] == 777
+    assert observed["payload"]["human_restart_proof"]["digest"] == "ok"
 
 
 @pytest.mark.asyncio
@@ -134,9 +146,7 @@ async def test_restart_command_fails_closed_when_watchtower_unavailable(monkeypa
 
     text, kwargs = runtime.messages[-1]
     assert "forbidden" in text
-    buttons = kwargs["reply_markup"].inline_keyboard
-    assert len(buttons) == 1
-    assert buttons[0][0].text == "Refresh"
+    assert "reply_markup" not in kwargs
 
 
 @pytest.mark.asyncio

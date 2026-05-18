@@ -243,18 +243,38 @@ def _restart_status_keyboard(confirm: bool = False, *, available: bool = True) -
 async def restart_command(runtime: Any, update: Any, context: Any) -> None:
     if not _authorized(runtime, update):
         return
-    restart_available = False
-    try:
-        code, payload = await asyncio.to_thread(
-            remote_rescue.rescue_status,
-            WATCHTOWER_INSTANCE,
-            **_restart_auth_kwargs(),
+    if getattr(runtime, "_watchtower_restart_inflight", False):
+        await runtime._reply_text(update, "Restart is already in progress.")
+        return
+    available, error, _payload = await _watchtower_restart_available()
+    if not available:
+        await runtime._reply_text(
+            update,
+            _restart_status_text(error=error or "WatchTower unavailable"),
+            parse_mode="HTML",
         )
-        restart_available = code == 0
-        text = _restart_status_text(payload, error=None if restart_available else payload.get("error") or "remote error")
+        return
+    try:
+        request_payload = _build_watchtower_restart_payload(
+            runtime,
+            human_source="telegram",
+            reason="telegram /restart hard restart",
+        )
     except Exception as exc:
-        text = _restart_status_text(error=str(exc))
-    await runtime._reply_text(update, text, parse_mode="HTML", reply_markup=_restart_status_keyboard(confirm=False, available=restart_available))
+        logger.warning("Failed to build Telegram restart payload: %s", exc)
+        await runtime._reply_text(
+            update,
+            f"❌ WatchTower restart is not configured safely:\n<code>{html.escape(str(exc))}</code>",
+            parse_mode="HTML",
+        )
+        return
+    setattr(runtime, "_watchtower_restart_inflight", True)
+    chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
+    await runtime._reply_text(
+        update,
+        "🔁 WatchTower hard restart requested.\nThis bot may go quiet briefly while HASHI stops and comes back.",
+    )
+    asyncio.create_task(_dispatch_watchtower_restart(runtime, chat_id, request_payload))
 
 
 async def _watchtower_restart_available() -> tuple[bool, str | None, dict[str, Any] | None]:
