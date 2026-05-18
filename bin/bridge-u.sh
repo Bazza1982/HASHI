@@ -48,11 +48,9 @@ export LC_CTYPE="${LC_CTYPE:-C.UTF-8}"
 if [[ -n "${WSL_INTEROP:-}" || -n "${WSL_DISTRO_NAME:-}" ]]; then
     # Windows Terminal can render the full CJK HASHI banner when its WSL profile
     # uses a CJK-capable font. Classic conhost often lacks glyph fallback, so it
-    # keeps the Latin-safe profile. A stale BRIDGE_FORCE_ASCII_BANNER=1 from the
-    # previous HASHI1 launcher bug is treated as stale state and corrected here.
-    if [[ -n "${WT_SESSION:-}" || "${BRIDGE_FORCE_ASCII_BANNER:-0}" == "1" ]]; then
-        export BRIDGE_FORCE_ASCII_BANNER=0
-        export BRIDGE_BANNER_GLYPH_PROFILE="full"
+    # keeps the Latin-safe profile unless the operator opts into full glyphs.
+    if [[ -n "${WT_SESSION:-}" ]]; then
+        export BRIDGE_BANNER_GLYPH_PROFILE="${BRIDGE_BANNER_GLYPH_PROFILE:-full}"
     else
         export BRIDGE_BANNER_GLYPH_PROFILE="${BRIDGE_BANNER_GLYPH_PROFILE:-latin}"
     fi
