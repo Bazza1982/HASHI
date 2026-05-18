@@ -44,6 +44,15 @@ export BRIDGE_HOME="$SCRIPT_DIR"
 export PYTHONUTF8=1
 export PYTHONIOENCODING=utf-8
 
+# WSL can report UTF-8 correctly while the Windows-hosted console font still
+# lacks CJK/braille/block glyphs. Default to the ASCII startup banner on WSL
+# unless the operator explicitly opts into the rich Unicode animation.
+if [[ -n "${WSL_INTEROP:-}" || -n "${WSL_DISTRO_NAME:-}" ]]; then
+    if [[ "${BRIDGE_ALLOW_UNICODE_BANNER:-}" != "1" ]]; then
+        export BRIDGE_FORCE_ASCII_BANNER=1
+    fi
+fi
+
 # Options
 WORKBENCH_LAUNCH=0
 API_GATEWAY_LAUNCH=0
