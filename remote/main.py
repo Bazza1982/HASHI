@@ -33,12 +33,17 @@ import uvicorn
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from orchestrator.remote_lifecycle import read_disabled_state
+from orchestrator.stable_port_allocator import (
+    PortAllocationError,
+    SERVICE_HASHI_REMOTE,
+    StablePortAllocator,
+)
 from remote.api.server import create_app
 from remote.live_endpoints import remove_live_endpoint, write_live_endpoint
 from remote.peer.base import PeerInfo
 from remote.peer.lan import LanDiscovery, build_local_network_profile
 from remote.peer.registry import PeerRegistry
-from remote.port_selection import DEFAULT_PORT, select_available_port
+from remote.port_selection import DEFAULT_PORT
 from remote.peer.tailscale import TailscaleDiscovery
 from remote.protocol_manager import ProtocolManager, PROTOCOL_VERSION, build_default_capabilities
 from remote.runtime_identity import remove_runtime_claim, validate_launch_context, write_runtime_claim
@@ -116,6 +121,35 @@ def _resolve_configured_remote_port(hashi_root: Path, config: dict | None = None
         return int(server.get("port") or DEFAULT_PORT)
     except Exception:
         return DEFAULT_PORT
+
+
+def _build_port_allocator(hashi_root: Path, *, host: str) -> StablePortAllocator:
+    return StablePortAllocator(
+        bridge_home=hashi_root,
+        service=SERVICE_HASHI_REMOTE,
+        host=host,
+    )
+
+
+def _print_port_assignment_status(allocator: StablePortAllocator) -> int:
+    print(json.dumps(allocator.status(), indent=2, sort_keys=True))
+    return 0
+
+
+def _reset_port_assignment(allocator: StablePortAllocator) -> int:
+    removed = allocator.reset()
+    print(
+        json.dumps(
+            {
+                "service": SERVICE_HASHI_REMOTE,
+                "state_path": str(allocator.state_path),
+                "removed": removed,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0
 
 
 def _load_instance_info(
@@ -484,7 +518,12 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--host", default=None, help="Bind address")
-    parser.add_argument("--port", type=int, default=None, help="Peer API port")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Peer API port. Explicit ports are validated for this run but are not persisted.",
+    )
     parser.add_argument("--no-tls", action="store_true", help="Disable TLS (dev/debug only)")
     parser.add_argument("--no-lan-mode", action="store_true",
                         help="Require token auth even on LAN (for internet deployments)")
@@ -506,6 +545,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--supervised", action="store_true",
                         help="Mark this Remote as OS-supervised side-program")
     parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging")
+    parser.add_argument(
+        "--check-port-assignment",
+        action="store_true",
+        help="Print persisted Hashi Remote port-assignment status and exit",
+    )
+    parser.add_argument(
+        "--reset-port-assignment",
+        action="store_true",
+        help="Clear persisted Hashi Remote port assignment and exit",
+    )
     return parser.parse_args()
 
 
@@ -521,6 +570,12 @@ def main() -> int:
         logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s %(message)s")
         logger.error("%s", exc)
         return 1
+    host_for_tools = args.host or _load_remote_config(hashi_root).get("server", {}).get("host", "0.0.0.0")
+    allocator = _build_port_allocator(hashi_root, host=host_for_tools)
+    if args.check_port_assignment:
+        return _print_port_assignment_status(allocator)
+    if args.reset_port_assignment:
+        return _reset_port_assignment(allocator)
     disabled_state = read_disabled_state(hashi_root)
     if disabled_state:
         logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s %(message)s")
@@ -536,31 +591,27 @@ def main() -> int:
     discovery_cfg = config.get("discovery", {})
     configured_port = _resolve_configured_remote_port(hashi_root, config)
 
-    host = args.host or server_cfg.get("host", "0.0.0.0")
-    requested_port = args.port or configured_port
-    strict_port = args.port is not None or args.supervised
-    port, attempted_ports = select_available_port(
-        host,
-        requested_port,
-        configured_port,
-    )
-    if port != requested_port:
+    host = host_for_tools
+    try:
+        if args.port is not None:
+            assignment = allocator.validate_explicit_port(args.port)
+        else:
+            assignment = allocator.reserve_configured_port(configured_port)
+    except PortAllocationError as exc:
         logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s %(message)s")
-        if strict_port:
-            logger.error(
-                "Port %s is unavailable on %s and strict-port mode is active (supervised or explicit --port); "
-                "exiting so the process manager can restart after the port is released (attempted=%s)",
-                requested_port,
-                host,
-                attempted_ports,
-            )
-            return 1
+        logger.error("%s", exc)
+        return 1
+    port = assignment.port
+    attempted_ports = assignment.attempted_ports
+    if assignment.source == "allocated":
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s %(message)s")
         logger.warning(
-            "Configured Remote port %s is unavailable on %s; using %s instead (attempted=%s)",
-            requested_port,
+            "Configured Remote port %s is unavailable on %s; allocated stable fallback %s (attempted=%s state=%s)",
+            configured_port,
             host,
             port,
             attempted_ports,
+            assignment.state_path,
         )
     use_tls = not args.no_tls if args.no_tls else server_cfg.get("use_tls", True)
     lan_mode = not args.no_lan_mode if args.no_lan_mode else security_cfg.get("lan_mode", False)
