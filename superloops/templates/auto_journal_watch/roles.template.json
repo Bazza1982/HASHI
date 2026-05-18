@@ -1,0 +1,67 @@
+{
+  "roles": {
+    "orchestrator": {
+      "default_agent": "sakura",
+      "responsibilities": [
+        "Own the run charter, state machine, taskboard, events, waits, issues, and closeout decision.",
+        "Dispatch bounded work to the librarian and reviewer only when delivery can be verified.",
+        "Keep execution manifest-bounded and stop on boundary drift.",
+        "Escalate Okta, captcha, site-policy changes, role reassignment, and count mismatches to the human.",
+        "Maintain long-running heartbeat discipline and classify stale execution instead of silently waiting.",
+        "Separate selected-row coverage from unique paper/PDF processing coverage in every closeout."
+      ],
+      "must_not": [
+        "Must not claim agent contact without delivery or reply evidence.",
+        "Must not replace the approved librarian or reviewer without human approval.",
+        "Must not let the reviewer make continuation decisions.",
+        "Must not run unbounded all-library processing for a journal-watch batch.",
+        "Must not keep hitting fragile platforms after a policy or captcha signal."
+      ]
+    },
+    "librarian": {
+      "default_agent": "kurage",
+      "responsibilities": [
+        "Execute Journal Watch discovery, enrichment, acquisition planning, downloads, reconciliation, processing, Zotero linking, note generation, and search sync.",
+        "Produce preflight artifacts before every executable batch.",
+        "Use approved SOPs, route registries, manifests, and scoped scripts.",
+        "Record logs, status files, completed/failed/skipped counts, and output paths.",
+        "Report blockers with enough evidence for orchestrator escalation."
+      ],
+      "must_not": [
+        "Must not choose targets by sweeping the whole filesystem when a manifest exists.",
+        "Must not bypass platform route policy or retry fragile hosts indefinitely.",
+        "Must not broaden scope beyond the locked selected set.",
+        "Must not rename, relink, or delete unrelated library records."
+      ]
+    },
+    "reviewer": {
+      "default_agent": "momo",
+      "responsibilities": [
+        "Review each preflight, execution result, reconciliation, and final closeout pack against the SOP.",
+        "Check counts, manifest boundaries, duplicate audit results, platform policy, and evidence completeness.",
+        "Classify findings as blocker, non-blocker, or follow-up.",
+        "Challenge unsupported claims, stale heartbeats, and unverified agent dispatch."
+      ],
+      "must_not": [
+        "Must not execute librarian work.",
+        "Must not approve continuation on behalf of the orchestrator.",
+        "Must not accept narrative-only reports without artifacts.",
+        "Must not ignore selected-row versus unique-paper mismatches."
+      ]
+    },
+    "human": {
+      "default_agent": "human_approver",
+      "responsibilities": [
+        "Approve Okta/MFA and browser login prompts.",
+        "Complete captcha or manual site navigation when needed.",
+        "Make final selection decisions.",
+        "Approve SOP changes, host strategy exceptions, and role reassignment.",
+        "Supply manual PDFs when automated access is blocked."
+      ],
+      "must_not": [
+        "Should not be asked for routine automation decisions that the SOP already covers.",
+        "Should not be bypassed for access, policy, or role-substitution decisions."
+      ]
+    }
+  }
+}

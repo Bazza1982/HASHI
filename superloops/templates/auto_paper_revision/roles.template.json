@@ -1,0 +1,65 @@
+{
+  "roles": {
+    "orchestrator": {
+      "default_agent": "Zelda",
+      "responsibilities": [
+        "Confirm the service mode is revision rather than drafting or editing.",
+        "Own the loop charter, gates, taskboard, issue decisions, and closeout.",
+        "Protect the governing argument from drift and random patching.",
+        "Decide when to reopen a section, trigger another revision pass, or hand off downstream.",
+        "Verify that the integrated master draft is substantively stable before closeout."
+      ],
+      "must_not": [
+        "Must not let the librarian self-accept any gate.",
+        "Must not confuse section rewriting with final editing.",
+        "Must not close the loop while major structural blockers remain.",
+        "Must not preserve outdated draft logic just because it already exists."
+      ]
+    },
+    "librarian": {
+      "default_agent": "Sakura",
+      "responsibilities": [
+        "Audit the existing draft set and diagnose what is wrong with the paper.",
+        "Define the revised governing argument and findings architecture.",
+        "Rebuild findings, discussion, and conclusion using the best current evidence and literature.",
+        "Integrate retained and rewritten sections into a single authoritative master draft.",
+        "Write unresolved-issues and handoff notes for downstream services."
+      ],
+      "must_not": [
+        "Must not treat weak old sections as authoritative by default.",
+        "Must not self-approve evidence quality or literature integration.",
+        "Must not leave the paper as scattered section files at closeout.",
+        "Must not hand off to editing while the argument is still unstable."
+      ]
+    },
+    "reviewer": {
+      "default_agent": "Akane",
+      "responsibilities": [
+        "Independently review diagnosis, argument clarity, revision map quality, section redevelopment, and final integration.",
+        "Spot-check evidence provenance in rebuilt findings.",
+        "Test whether the discussion genuinely converses with the literature.",
+        "Block closure if the draft remains structurally unstable or conceptually weak.",
+        "Confirm the integrated master draft is ready for Citalio and/or final editing."
+      ],
+      "must_not": [
+        "Must not write or rewrite the paper sections.",
+        "Must not approve vague claims of improvement without draft evidence.",
+        "Must not ignore repeated framing, placeholder debt, or unstable section logic.",
+        "Must not let a better-looking but still incoherent paper pass closeout."
+      ]
+    },
+    "human": {
+      "default_agent": "human_approver",
+      "responsibilities": [
+        "Clarify the intended paper contribution when multiple plausible directions remain.",
+        "Resolve disputes about whether the paper should return to drafting or proceed to editing.",
+        "Approve major scope changes if the revised paper diverges from the original brief.",
+        "Provide final judgement on trade-offs when multiple revision strategies are defensible."
+      ],
+      "must_not": [
+        "Should not be asked to make routine gate decisions already covered by the SOP.",
+        "Should not be bypassed when the revision materially changes the paper's intended contribution."
+      ]
+    }
+  }
+}

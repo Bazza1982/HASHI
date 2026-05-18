@@ -1,0 +1,306 @@
+[
+  {
+    "task_id": "jw-001",
+    "title": "Capture run charter, SOP versions, time window, journal scope, agents, and exit condition",
+    "owner": "orchestrator",
+    "status": "pending",
+    "required_evidence": [
+      "run_charter.json",
+      "SOP source list with version or fingerprint",
+      "approved role mapping"
+    ]
+  },
+  {
+    "task_id": "jw-002",
+    "title": "Review run charter and SOP boundary",
+    "owner": "reviewer",
+    "status": "pending",
+    "required_evidence": [
+      "review report",
+      "blocker/non-blocker/follow-up classification"
+    ]
+  },
+  {
+    "task_id": "jw-003",
+    "title": "Auth and browser preflight with human wait setup",
+    "owner": "orchestrator",
+    "status": "pending",
+    "required_evidence": [
+      "auth preflight result",
+      "Okta/MFA wait record if needed",
+      "browser/session status"
+    ]
+  },
+  {
+    "task_id": "jw-004",
+    "title": "Build journal-period discovery manifest",
+    "owner": "librarian",
+    "status": "pending",
+    "required_evidence": [
+      "discovery manifest",
+      "journal-period job list",
+      "planned count"
+    ]
+  },
+  {
+    "task_id": "jw-005",
+    "title": "Review discovery manifest",
+    "owner": "reviewer",
+    "status": "pending",
+    "required_evidence": [
+      "manifest boundary review",
+      "date-window and journal-scope check"
+    ]
+  },
+  {
+    "task_id": "jw-006",
+    "title": "Run journal-period discovery",
+    "owner": "librarian",
+    "status": "pending",
+    "required_evidence": [
+      "raw discovery results",
+      "execution log",
+      "heartbeat/status file"
+    ]
+  },
+  {
+    "task_id": "jw-007",
+    "title": "Review discovery artifacts and counts",
+    "owner": "reviewer",
+    "status": "pending",
+    "required_evidence": [
+      "count reconciliation",
+      "scope review",
+      "duplicate and anomaly notes"
+    ]
+  },
+  {
+    "task_id": "jw-008",
+    "title": "Clean, rebuild, Crossref enrich, and AI triage reviewer bundle",
+    "owner": "librarian",
+    "status": "pending",
+    "required_evidence": [
+      "cleaned results",
+      "Crossref enrichment output",
+      "AI triage output",
+      "reviewer workbook or bundle"
+    ]
+  },
+  {
+    "task_id": "jw-009",
+    "title": "Review triage and reviewer bundle",
+    "owner": "reviewer",
+    "status": "pending",
+    "required_evidence": [
+      "triage completeness check",
+      "already-have precheck status",
+      "human review readiness decision"
+    ]
+  },
+  {
+    "task_id": "jw-010",
+    "title": "Human selection gate",
+    "owner": "human",
+    "status": "pending",
+    "required_evidence": [
+      "human-approved selected rows",
+      "selection workbook or CSV",
+      "selection timestamp"
+    ]
+  },
+  {
+    "task_id": "jw-011",
+    "title": "Run selected-set already-have check and final normalized duplicate audit",
+    "owner": "librarian",
+    "status": "pending",
+    "required_evidence": [
+      "locked selected manifest",
+      "already-have report",
+      "normalized-title duplicate audit",
+      "selected-row count and unique-paper count"
+    ]
+  },
+  {
+    "task_id": "jw-012",
+    "title": "Review selected-set lock and row-vs-unique counts",
+    "owner": "reviewer",
+    "status": "pending",
+    "required_evidence": [
+      "selection-lock review",
+      "duplicate-pair review",
+      "handoff approval or blockers"
+    ]
+  },
+  {
+    "task_id": "jw-013",
+    "title": "Prepare Ex-portario acquisition manifests and platform split",
+    "owner": "librarian",
+    "status": "pending",
+    "required_evidence": [
+      "acquisition manifests",
+      "platform distribution",
+      "route registry snapshot",
+      "manual/unsupported holdout list"
+    ]
+  },
+  {
+    "task_id": "jw-014",
+    "title": "Review acquisition plan and platform route policy",
+    "owner": "reviewer",
+    "status": "pending",
+    "required_evidence": [
+      "route-policy review",
+      "fragile-host risk classification",
+      "batch approval or blockers"
+    ]
+  },
+  {
+    "task_id": "jw-015",
+    "title": "Execute download batches under Ex-portario SOP",
+    "owner": "librarian",
+    "status": "pending",
+    "required_evidence": [
+      "batch preflight",
+      "download logs",
+      "file promotion log",
+      "status/heartbeat file"
+    ]
+  },
+  {
+    "task_id": "jw-016",
+    "title": "Supervise waits, escalations, and long-running heartbeat",
+    "owner": "orchestrator",
+    "status": "pending",
+    "required_evidence": [
+      "wait records",
+      "issue records",
+      "heartbeat checks under 300 seconds",
+      "human escalation records"
+    ]
+  },
+  {
+    "task_id": "jw-017",
+    "title": "Reconcile downloads, late arrivals, and manual PDFs",
+    "owner": "librarian",
+    "status": "pending",
+    "required_evidence": [
+      "download reconciliation JSON/CSV",
+      "pending list",
+      "manual PDF match report",
+      "valid PDF header checks"
+    ]
+  },
+  {
+    "task_id": "jw-018",
+    "title": "Review download reconciliation",
+    "owner": "reviewer",
+    "status": "pending",
+    "required_evidence": [
+      "download coverage review",
+      "pending/failed classification",
+      "manual PDF match verification"
+    ]
+  },
+  {
+    "task_id": "jw-019",
+    "title": "Build processing manifests for selected rows and unique PDFs",
+    "owner": "librarian",
+    "status": "pending",
+    "required_evidence": [
+      "processing row manifest",
+      "unique PDF manifest",
+      "duplicate row mapping"
+    ]
+  },
+  {
+    "task_id": "jw-020",
+    "title": "Review processing manifest and dedupe caveats",
+    "owner": "reviewer",
+    "status": "pending",
+    "required_evidence": [
+      "row coverage check",
+      "unique target check",
+      "fail-fast boundary check"
+    ]
+  },
+  {
+    "task_id": "jw-021",
+    "title": "Run Docling/raw markdown extraction",
+    "owner": "librarian",
+    "status": "pending",
+    "required_evidence": [
+      "Docling status file",
+      "raw markdown outputs",
+      "completed/failed/skipped counts",
+      "execution log"
+    ]
+  },
+  {
+    "task_id": "jw-022",
+    "title": "Run section cleanup",
+    "owner": "librarian",
+    "status": "pending",
+    "required_evidence": [
+      "sectioned markdown outputs",
+      "authorized section-label check",
+      "cleanup log"
+    ]
+  },
+  {
+    "task_id": "jw-023",
+    "title": "File PDFs, link Zotero attachments, and rebuild main library index",
+    "owner": "librarian",
+    "status": "pending",
+    "required_evidence": [
+      "file naming report",
+      "Zotero attachment/link report",
+      "main_library_index rebuild log"
+    ]
+  },
+  {
+    "task_id": "jw-024",
+    "title": "Generate Zotero notes",
+    "owner": "librarian",
+    "status": "pending",
+    "required_evidence": [
+      "note generation log",
+      "Zotero note count",
+      "failed note list"
+    ]
+  },
+  {
+    "task_id": "jw-025",
+    "title": "Sync scoped search DB",
+    "owner": "librarian",
+    "status": "pending",
+    "required_evidence": [
+      "query_index.sqlite path",
+      "batch-tag scoped sync command",
+      "docs/chunks/errors count"
+    ]
+  },
+  {
+    "task_id": "jw-026",
+    "title": "Final reconciliation and reviewer closeout QA",
+    "owner": "reviewer",
+    "status": "pending",
+    "required_evidence": [
+      "final reconciliation pack",
+      "selected rows covered",
+      "unique PDFs/markdowns/notes processed",
+      "blocker/non-blocker/follow-up classification"
+    ]
+  },
+  {
+    "task_id": "jw-027",
+    "title": "Orchestrator final decision and closeout",
+    "owner": "orchestrator",
+    "status": "pending",
+    "required_evidence": [
+      "final state",
+      "closed issues or open follow-ups",
+      "events.jsonl closeout entry",
+      "human-readable completion summary"
+    ]
+  }
+]

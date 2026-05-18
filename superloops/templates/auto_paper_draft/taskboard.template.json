@@ -1,0 +1,524 @@
+[
+  {
+    "task_id": "step-001",
+    "title": "Intake research idea: confirm all 6 fields and create paper folder structure",
+    "owner": "librarian",
+    "status": "pending",
+    "required_evidence": [
+      "problem_statement",
+      "research_question",
+      "theoretical_lens",
+      "empirical_context",
+      "significance",
+      "anticipated_contributions",
+      "paper_folder_path_created",
+      "sop_folder_structure_applied"
+    ]
+  },
+  {
+    "task_id": "step-002",
+    "title": "G1 — Orchestrator scope lock: confirm Research Idea, folder, anonymisation policy, writing template, exit condition",
+    "owner": "orchestrator",
+    "status": "pending",
+    "depends_on": ["step-001"],
+    "required_evidence": [
+      "research_idea_md_path",
+      "all_6_fields_confirmed",
+      "paper_folder_structure_verified",
+      "anonymisation_policy_established",
+      "writing_template_paper_identified",
+      "exit_condition_recorded"
+    ]
+  },
+  {
+    "task_id": "step-003",
+    "title": "Stage 2 — Librarian drafts LR1 (theoretical framework), iterates to v2+",
+    "owner": "librarian",
+    "status": "pending",
+    "depends_on": ["step-002"],
+    "required_evidence": [
+      "lr1_file_path",
+      "lr1_version",
+      "lr1_ends_with_gap_statement",
+      "lr1_word_count",
+      "iteration_count"
+    ]
+  },
+  {
+    "task_id": "step-004",
+    "title": "Stage 2 — Librarian drafts LR2 (empirical domain), iterates to v2+",
+    "owner": "librarian",
+    "status": "pending",
+    "depends_on": ["step-002"],
+    "required_evidence": [
+      "lr2_file_path",
+      "lr2_version",
+      "lr2_ends_with_gap_statement",
+      "lr2_word_count",
+      "iteration_count"
+    ]
+  },
+  {
+    "task_id": "step-005",
+    "title": "Stage 2 — Librarian produces deep reading notes for 3–5 anchor papers",
+    "owner": "librarian",
+    "status": "pending",
+    "depends_on": ["step-003", "step-004"],
+    "required_evidence": [
+      "anchor_paper_notes_paths",
+      "anchor_paper_count",
+      "paper_specific_literature_folder_path"
+    ]
+  },
+  {
+    "task_id": "step-006",
+    "title": "G2 — Reviewer LR quality gate: LR1, LR2, and anchor notes independently reviewed",
+    "owner": "reviewer",
+    "status": "pending",
+    "depends_on": ["step-005"],
+    "required_evidence": [
+      "lr1_verdict",
+      "lr2_verdict",
+      "anchor_notes_verdict",
+      "gap_statements_present",
+      "overall_verdict",
+      "blockers"
+    ]
+  },
+  {
+    "task_id": "step-007",
+    "title": "Stage 3 — Librarian deep reads writing template paper; produces DeepReading_Gate and Writing_Template files",
+    "owner": "librarian",
+    "status": "pending",
+    "depends_on": ["step-006"],
+    "required_evidence": [
+      "deep_reading_gate_path",
+      "writing_template_path",
+      "section_word_count_targets",
+      "rhetorical_moves_per_section",
+      "structural_constraints_documented"
+    ]
+  },
+  {
+    "task_id": "step-008",
+    "title": "G3 — Orchestrator confirms writing template files exist and are governing for all subsequent drafts",
+    "owner": "orchestrator",
+    "status": "pending",
+    "depends_on": ["step-007"],
+    "required_evidence": [
+      "deep_reading_gate_confirmed",
+      "writing_template_confirmed",
+      "word_count_targets_recorded",
+      "template_governance_declared"
+    ]
+  },
+  {
+    "task_id": "step-009",
+    "title": "Stage 4 — Librarian writes Method_Research_Notes, assigns participant anonymisation codes, drafts Method_v1",
+    "owner": "librarian",
+    "status": "pending",
+    "depends_on": ["step-008"],
+    "required_evidence": [
+      "method_research_notes_path",
+      "anonymisation_map_path",
+      "participant_codes_assigned",
+      "method_v1_path",
+      "method_v1_word_count",
+      "real_names_absent_confirmed"
+    ]
+  },
+  {
+    "task_id": "step-010",
+    "title": "G4 — Orchestrator method and anonymisation gate: design decisions documented, codes assigned, no real names",
+    "owner": "orchestrator",
+    "status": "pending",
+    "depends_on": ["step-009"],
+    "required_evidence": [
+      "method_research_notes_complete",
+      "anonymisation_map_complete",
+      "participant_count",
+      "method_v1_exists",
+      "no_real_names_in_any_file_confirmed"
+    ]
+  },
+  {
+    "task_id": "step-011",
+    "title": "Stage 5 — Librarian writes PreCoding_Reflection_Memo BEFORE any analytical transcript reading",
+    "owner": "librarian",
+    "status": "pending",
+    "depends_on": ["step-010"],
+    "required_evidence": [
+      "precoding_memo_path",
+      "memo_written_before_analytical_reading_confirmed",
+      "anticipated_findings_documented",
+      "surprising_findings_documented",
+      "institutional_position_documented",
+      "analytical_independence_risks_documented"
+    ]
+  },
+  {
+    "task_id": "step-012",
+    "title": "Stage 5 — Librarian writes LDA Coding Plan (or equivalent analytical coding plan)",
+    "owner": "librarian",
+    "status": "pending",
+    "depends_on": ["step-011"],
+    "required_evidence": [
+      "coding_plan_path",
+      "analytical_question_stated",
+      "coding_orientations_documented",
+      "memo_writing_guide_included",
+      "theme_development_process_documented"
+    ]
+  },
+  {
+    "task_id": "step-013",
+    "title": "G5 — Reviewer pre-coding independence gate: PreCoding Memo credibly pre-dates analytical reading; Coding Plan complete",
+    "owner": "reviewer",
+    "status": "pending",
+    "depends_on": ["step-012"],
+    "required_evidence": [
+      "precoding_memo_verdict",
+      "memo_credibility_assessed",
+      "coding_plan_verdict",
+      "independence_confirmed",
+      "overall_verdict",
+      "blockers"
+    ]
+  },
+  {
+    "task_id": "step-014",
+    "title": "Stage 6 — Librarian writes per-participant analytical memos for ALL participants",
+    "owner": "librarian",
+    "status": "pending",
+    "depends_on": ["step-013"],
+    "required_evidence": [
+      "memo_paths",
+      "participant_memo_count",
+      "memos_are_analytical_not_summaries_confirmed",
+      "lda_memo_structure_applied",
+      "all_participants_covered"
+    ]
+  },
+  {
+    "task_id": "step-015",
+    "title": "Stage 6 — Librarian writes cross-case synthesis memo",
+    "owner": "librarian",
+    "status": "pending",
+    "depends_on": ["step-014"],
+    "required_evidence": [
+      "cross_case_memo_path",
+      "themes_emergent_named",
+      "cross_participant_patterns_documented",
+      "disconfirming_cases_noted"
+    ]
+  },
+  {
+    "task_id": "step-016",
+    "title": "Stage 6b — Librarian prepares CODER_BRIEF; independent coder completes memos; librarian writes INTER_CODER_COMPARISON",
+    "owner": "librarian",
+    "status": "pending",
+    "depends_on": ["step-015"],
+    "required_evidence": [
+      "coder_brief_path",
+      "independent_coder_memos_path",
+      "independent_coder_had_no_access_to_primary_memos_confirmed",
+      "inter_coder_comparison_path",
+      "convergence_documented",
+      "disagreement_documented",
+      "resolution_notes_present"
+    ]
+  },
+  {
+    "task_id": "step-017",
+    "title": "Stage 6c — Librarian produces NVivo coding package: CODEBOOK, SOURCE_LIST, THEMES_OVERVIEW, INTERCODER_SUMMARY, coded excerpts",
+    "owner": "librarian",
+    "status": "pending",
+    "depends_on": ["step-016"],
+    "required_evidence": [
+      "codebook_path",
+      "source_list_path",
+      "themes_overview_path",
+      "intercoder_summary_path",
+      "coded_excerpts_count",
+      "all_participants_coded"
+    ]
+  },
+  {
+    "task_id": "step-018",
+    "title": "G6 — Reviewer coding quality gate: memos analytical, themes distinct, inter-coder independence confirmed, NVivo package complete",
+    "owner": "reviewer",
+    "status": "pending",
+    "depends_on": ["step-017"],
+    "required_evidence": [
+      "memos_spot_check_results",
+      "themes_analytically_distinct_confirmed",
+      "inter_coder_independence_verified",
+      "nvivo_package_completeness_check",
+      "overall_verdict",
+      "blockers"
+    ]
+  },
+  {
+    "task_id": "step-019",
+    "title": "Stage 7 — Librarian writes SYNTHESIS_MEMO and THEME[N]_EVIDENCE_PACKAGE_v2 for all themes",
+    "owner": "librarian",
+    "status": "pending",
+    "depends_on": ["step-018"],
+    "required_evidence": [
+      "synthesis_memo_path",
+      "evidence_package_paths",
+      "theme_count",
+      "tier1_tier2_evidence_ranked",
+      "quotes_verified_against_transcripts",
+      "counter_cases_included",
+      "framework_connections_documented"
+    ]
+  },
+  {
+    "task_id": "step-020",
+    "title": "G7 — Reviewer evidence package gate: quote spot-check (5 quotes), counter-cases present, no fabricated quotes",
+    "owner": "reviewer",
+    "status": "pending",
+    "depends_on": ["step-019"],
+    "required_evidence": [
+      "quote_spot_check_results",
+      "fabricated_quote_found",
+      "counter_cases_confirmed",
+      "evidence_packages_complete",
+      "overall_verdict",
+      "blockers"
+    ]
+  },
+  {
+    "task_id": "step-021",
+    "title": "Stage 8 — Librarian drafts Method section, iterates to v4+",
+    "owner": "librarian",
+    "status": "pending",
+    "depends_on": ["step-020"],
+    "required_evidence": [
+      "method_draft_path",
+      "method_version",
+      "method_word_count",
+      "participant_count_stated",
+      "anonymisation_statement_included",
+      "data_volume_table_present"
+    ]
+  },
+  {
+    "task_id": "step-022",
+    "title": "Stage 8 — Librarian drafts Findings Theme 1, Theme 2, Theme 3 sections (separately, then combined)",
+    "owner": "librarian",
+    "status": "pending",
+    "depends_on": ["step-021"],
+    "required_evidence": [
+      "findings_theme1_path",
+      "findings_theme2_path",
+      "findings_theme3_path",
+      "findings_combined_path",
+      "numbered_summaries_present_all_themes",
+      "all_quotes_have_participant_code_role_interview_type",
+      "quotes_verbatim",
+      "findings_word_count_total"
+    ]
+  },
+  {
+    "task_id": "step-023",
+    "title": "Stage 8 — Librarian drafts Discussion section (N sub-sections matching themes; each opens with conceptual claim)",
+    "owner": "librarian",
+    "status": "pending",
+    "depends_on": ["step-022"],
+    "required_evidence": [
+      "discussion_draft_path",
+      "sub_section_count",
+      "each_subsection_opens_with_conceptual_claim",
+      "discussion_word_count",
+      "literature_connections_per_subsection"
+    ]
+  },
+  {
+    "task_id": "step-024",
+    "title": "Stage 8 — Librarian drafts Conclusion section (concrete analogy opening; contribution named; limitations; future research)",
+    "owner": "librarian",
+    "status": "pending",
+    "depends_on": ["step-023"],
+    "required_evidence": [
+      "conclusion_draft_path",
+      "opens_with_concrete_analogy_or_image",
+      "central_theoretical_contribution_named",
+      "limitation_count",
+      "future_research_directions_count",
+      "conclusion_word_count"
+    ]
+  },
+  {
+    "task_id": "step-025",
+    "title": "Stage 8 — Librarian drafts Introduction section (phenomenon opens; empirical anchor Para 4; road map closes)",
+    "owner": "librarian",
+    "status": "pending",
+    "depends_on": ["step-024"],
+    "required_evidence": [
+      "introduction_draft_path",
+      "para1_opens_with_phenomenon_no_gap_language",
+      "para4_empirical_anchor_present",
+      "road_map_closing_paragraph_present",
+      "introduction_word_count"
+    ]
+  },
+  {
+    "task_id": "step-026",
+    "title": "Stage 8 — Librarian drafts Abstract (Purpose / Design / Findings / Originality four-field format; drafted last)",
+    "owner": "librarian",
+    "status": "pending",
+    "depends_on": ["step-025"],
+    "required_evidence": [
+      "abstract_draft_path",
+      "purpose_field_present",
+      "design_methodology_approach_field_present",
+      "findings_field_present",
+      "originality_value_field_present",
+      "abstract_word_count"
+    ]
+  },
+  {
+    "task_id": "step-027",
+    "title": "G8 — Reviewer section drafts quality gate: per-section compliance check against writing template",
+    "owner": "reviewer",
+    "status": "pending",
+    "depends_on": ["step-026"],
+    "required_evidence": [
+      "abstract_verdict",
+      "introduction_verdict",
+      "method_verdict",
+      "findings_verdicts",
+      "discussion_verdict",
+      "conclusion_verdict",
+      "quote_provenance_check",
+      "anonymisation_check",
+      "word_count_check_per_section",
+      "overall_verdict",
+      "section_blockers"
+    ]
+  },
+  {
+    "task_id": "step-028",
+    "title": "Fix all G8 section-level reviewer blockers and re-confirm passage",
+    "owner": "librarian",
+    "status": "pending",
+    "depends_on": ["step-027"],
+    "required_evidence": [
+      "blockers_addressed",
+      "sections_revised",
+      "reviewer_reconfirmation"
+    ]
+  },
+  {
+    "task_id": "step-029",
+    "title": "Stage 9 — Librarian assembles full paper draft in correct section order; records word count per section",
+    "owner": "librarian",
+    "status": "pending",
+    "depends_on": ["step-028"],
+    "required_evidence": [
+      "full_draft_path",
+      "full_draft_version",
+      "section_order_correct",
+      "word_count_per_section",
+      "word_count_total",
+      "references_placeholder_present"
+    ]
+  },
+  {
+    "task_id": "step-030",
+    "title": "G9 — Orchestrator template compliance final check: runs full 12-item Gaudy checklist against assembled draft",
+    "owner": "orchestrator",
+    "status": "pending",
+    "depends_on": ["step-029"],
+    "required_evidence": [
+      "abstract_4_field_format",
+      "introduction_para1_phenomenon_no_gap_language",
+      "introduction_para4_empirical_anchor",
+      "introduction_road_map_closing",
+      "findings_numbered_summaries_all_themes",
+      "discussion_subsections_conceptual_claims",
+      "conclusion_analogy_opening",
+      "conclusion_contribution_named",
+      "conclusion_limitations_count",
+      "conclusion_future_research_count",
+      "quotes_verified_participant_codes",
+      "all_participants_anonymised",
+      "compliance_pass_result"
+    ]
+  },
+  {
+    "task_id": "step-031",
+    "title": "Fix any G9 compliance gaps identified by orchestrator checklist",
+    "owner": "librarian",
+    "status": "pending",
+    "depends_on": ["step-030"],
+    "required_evidence": [
+      "compliance_gaps_list",
+      "fixes_applied",
+      "orchestrator_recheck_pass"
+    ]
+  },
+  {
+    "task_id": "step-032",
+    "title": "G10 — Reviewer full paper final review: flow, completeness, anonymisation, no placeholders, no-blocker verdict",
+    "owner": "reviewer",
+    "status": "pending",
+    "depends_on": ["step-031"],
+    "required_evidence": [
+      "sections_present_and_ordered",
+      "argument_flow_coherent",
+      "no_real_names_anywhere",
+      "no_placeholder_text_except_references",
+      "word_counts_within_targets",
+      "theoretical_contribution_supported",
+      "final_verdict",
+      "blockers"
+    ]
+  },
+  {
+    "task_id": "step-033",
+    "title": "Fix any G10 reviewer blockers; orchestrator confirms re-passage",
+    "owner": "librarian",
+    "status": "pending",
+    "depends_on": ["step-032"],
+    "required_evidence": [
+      "blockers_addressed",
+      "sections_revised",
+      "orchestrator_confirmation"
+    ]
+  },
+  {
+    "task_id": "step-034",
+    "title": "Librarian writes paper-specific SOP; orchestrator writes Citalio handoff note with export instruction and key citations list",
+    "owner": "librarian",
+    "status": "pending",
+    "depends_on": ["step-033"],
+    "required_evidence": [
+      "paper_sop_path",
+      "pipeline_stages_all_marked_complete",
+      "template_compliance_checklist_in_sop",
+      "citalio_handoff_path",
+      "handoff_docx_export_instruction_present",
+      "handoff_key_citations_list_present"
+    ]
+  },
+  {
+    "task_id": "step-035",
+    "title": "G11 — Closeout: all gates recorded, all artifacts present, no open blockers, loop closed",
+    "owner": "orchestrator",
+    "status": "pending",
+    "depends_on": ["step-034"],
+    "required_evidence": [
+      "all_9_stages_complete",
+      "gates_g1_through_g10_all_passed",
+      "full_draft_md_exists",
+      "paper_sop_exists",
+      "citalio_handoff_exists",
+      "no_open_reviewer_blockers",
+      "references_placeholder_acknowledged",
+      "loop_closed"
+    ]
+  }
+]
