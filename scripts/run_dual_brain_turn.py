@@ -104,7 +104,7 @@ def _run_preflight(
     inline_max_chars: int,
 ) -> None:
     argv = [
-        "python3",
+        sys.executable,
         str(script),
         "--hashi-root",
         str(hashi_root),
@@ -144,7 +144,7 @@ def _run_after_action(
     inline_max_chars: int,
 ) -> None:
     argv = [
-        "python3",
+        sys.executable,
         str(script),
         "--hashi-root",
         str(hashi_root),
@@ -190,6 +190,8 @@ def _pid_is_alive(pid: Any) -> bool:
         return False
     except PermissionError:
         return True
+    except OSError:
+        return False
     except (ValueError, TypeError):
         return False
     return True
@@ -268,7 +270,7 @@ def main() -> int:
     if args.check:
         diag = subprocess.run(
             [
-                "python3",
+                sys.executable,
                 str(dual_script),
                 "--hashi-root",
                 str(root),

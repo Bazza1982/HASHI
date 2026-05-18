@@ -9,9 +9,9 @@ import json
 import re
 import sys
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:
     import fcntl
@@ -28,6 +28,7 @@ NOTEBOOK_RELATIVE_PATH = Path("memory") / "left_brain_continuity.jsonl"
 ARCHIVE_DIR_NAME = "left_brain_archives"
 DEFAULT_LOG_RELATIVE_PATH = Path("workspaces") / "lily" / "logs" / "dual_brain_notepad_reset.jsonl"
 TIMEZONE = "Australia/Sydney"
+FALLBACK_TIMEZONE = timezone(timedelta(hours=10), name="AEST")
 
 
 def _lock_file(handle) -> None:
@@ -38,6 +39,13 @@ def _lock_file(handle) -> None:
 def _unlock_file(handle) -> None:
     if fcntl is not None:
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _local_timezone():
+    try:
+        return ZoneInfo(TIMEZONE)
+    except ZoneInfoNotFoundError:
+        return FALLBACK_TIMEZONE
 
 
 @dataclass(frozen=True)
@@ -170,7 +178,7 @@ def reset_notepads(
     publish_id: str = "",
     now: datetime | None = None,
 ) -> list[ResetResult]:
-    now = now or datetime.now(ZoneInfo(TIMEZONE))
+    now = now or datetime.now(_local_timezone())
     results: list[ResetResult] = []
     for root in _unique_existing_roots(roots):
         for workspace in _discover_agent_workspaces(root, agents):
@@ -245,7 +253,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     roots = args.root if args.root else list(DEFAULT_ROOTS)
-    now = datetime.now(ZoneInfo(TIMEZONE))
+    now = datetime.now(_local_timezone())
     log_paths = [path.expanduser().resolve() for path in args.log_file] if args.log_file else _default_log_paths(roots)
     print("[dual_brain_notepad_reset] mode=reset")
     print(f"[dual_brain_notepad_reset] dry_run={bool(args.dry_run)}")
