@@ -1013,7 +1013,8 @@ class PeerRegistry:
 
     def _rebuild_canonical_peers(self) -> None:
         canonical: dict[str, PeerInfo] = {}
-        for iid, by_backend in self._observations.items():
+        for iid, by_backend in list(self._observations.items()):
+            by_backend = dict(by_backend)
             selected = self._select_preferred_backend(by_backend)
             if not selected:
                 continue

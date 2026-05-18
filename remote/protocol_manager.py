@@ -345,7 +345,11 @@ class ProtocolManager:
             for host in seen_hosts:
                 selected_port = None
                 for remote_port in probe_ports:
-                    if self._probe_route(host, int(remote_port), timeout=2):
+                    reachable = await asyncio.get_running_loop().run_in_executor(
+                        None,
+                        lambda h=host, p=int(remote_port): self._probe_route(h, p, timeout=2),
+                    )
+                    if reachable:
                         selected_port = int(remote_port)
                         break
                 if selected_port:
