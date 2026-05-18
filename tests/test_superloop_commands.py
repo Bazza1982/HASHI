@@ -136,3 +136,34 @@ async def test_superloop_help_is_visual(tmp_path: Path) -> None:
     help_text = runtime.messages[-1]
     assert "快速开始" in help_text
     assert "/superloop quickstart <goal>" in help_text
+    assert "/superloop list" in help_text
+
+
+@pytest.mark.asyncio
+async def test_superloop_list_shows_templates(tmp_path: Path) -> None:
+    runtime = _FakeRuntime(tmp_path)
+    templates_root = tmp_path / "superloops" / "templates"
+    auto_debug = templates_root / "auto_debug"
+    auto_debug.mkdir(parents=True)
+    (auto_debug / "README.md").write_text(
+        "# Auto Debug Superloop Template\n\n## Purpose\n\nRun a bug investigation and repair loop.\n",
+        encoding="utf-8",
+    )
+    (auto_debug / "taskboard.template.json").write_text("[]", encoding="utf-8")
+
+    remote_install = templates_root / "remote_install"
+    remote_install.mkdir(parents=True)
+    (remote_install / "README.md").write_text(
+        "# Remote Install Superloop Template\n\n## Purpose\n\nInstall a prepared HASHI package onto a remote machine.\n",
+        encoding="utf-8",
+    )
+    (remote_install / "taskboard.template.json").write_text("[]", encoding="utf-8")
+    (remote_install / "roles.template.json").write_text("[]", encoding="utf-8")
+
+    await handle_superloop_command(runtime, _FakeUpdate("/superloop list"), "list")
+    list_text = runtime.messages[-1]
+    assert "模板列表" in list_text
+    assert "Auto Debug Superloop Template" in list_text
+    assert "Remote Install Superloop Template" in list_text
+    assert "slug: `auto_debug`" in list_text
+    assert "包含: `README · taskboard`" in list_text
