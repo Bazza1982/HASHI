@@ -45,6 +45,7 @@ class _FakeServiceManager:
 
 class _FakeRuntime:
     def __init__(self):
+        self.name = "hashiko"
         self.messages = []
         self.sent = []
         self.service_manager = _FakeServiceManager()
@@ -146,9 +147,15 @@ async def test_restart_confirm_dispatches_background_request(monkeypatch):
     observed = {}
 
     monkeypatch.setattr(api_restart.remote_rescue, "rescue_status", lambda *args, **kwargs: (0, {"state": "running"}))
+    monkeypatch.setattr(
+        api_restart,
+        "_build_watchtower_restart_payload",
+        lambda *args, **kwargs: {"reason": "telegram /restart hard restart", "human_restart_proof": {"digest": "ok"}},
+    )
 
-    async def fake_dispatch(runtime_arg, chat_id):
+    async def fake_dispatch(runtime_arg, chat_id, request_payload):
         observed["chat_id"] = chat_id
+        observed["payload"] = request_payload
 
     monkeypatch.setattr(api_restart, "_dispatch_watchtower_restart", fake_dispatch)
 
@@ -157,6 +164,26 @@ async def test_restart_confirm_dispatches_background_request(monkeypatch):
 
     assert observed["chat_id"] == 777
     assert "WatchTower hard restart requested" in query.edits[-1][0]
+
+
+@pytest.mark.asyncio
+async def test_restart_confirm_fails_closed_when_human_proof_missing(monkeypatch):
+    runtime = _FakeRuntime()
+    query = _FakeCallbackQuery("hardrestart:confirm")
+    update = SimpleNamespace(callback_query=query)
+
+    monkeypatch.setattr(api_restart.remote_rescue, "rescue_status", lambda *args, **kwargs: (0, {"state": "running"}))
+    monkeypatch.setattr(
+        api_restart,
+        "_build_watchtower_restart_payload",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("human restart secret is not configured")),
+    )
+
+    await api_restart.restart_callback(runtime, update, SimpleNamespace())
+
+    assert "not configured safely" in query.edits[-1][0]
+    assert query.answers[-1] == ("Restart setup incomplete.", True)
+    assert getattr(runtime, "_watchtower_restart_inflight", False) is False
 
 
 @pytest.mark.asyncio

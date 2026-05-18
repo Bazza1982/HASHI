@@ -138,6 +138,46 @@ traversal.
 - truncated to at most `500` characters
 - truncation is recorded in audit metadata when applicable
 
+Human-initiated restart requests must also include a signed proof block:
+
+```json
+{
+  "reason": "telegram /restart hard restart",
+  "human_source": "telegram",
+  "notify_agent": "hashiko",
+  "notify_via": "telegram",
+  "human_restart_proof": {
+    "timestamp": 1760000000,
+    "nonce": "hex nonce",
+    "digest": "hmac-sha256"
+  }
+}
+```
+
+The proof is built from a shared human-restart secret and binds together the
+requesting instance, reason, human source, notify agent, timestamp, and nonce.
+The secret can be provided through `HASHI_HUMAN_RESTART_SECRET`,
+`secrets/human_restart_secret.txt`, or `secrets.json` key
+`hashi_human_restart_secret`. The same value must be configured on the
+WatchTower side; HASHI does not silently create this secret during normal
+restart requests because a locally generated unmatched secret would make
+WatchTower reject the restart.
+
+After the controlled HASHI process comes back, WatchTower can call:
+
+```text
+POST /api/admin/notify
+```
+
+on the controlled Workbench API with an admin-authenticated payload such as:
+
+```json
+{"agent":"hashiko","text":"WatchTower restart completed."}
+```
+
+This endpoint sends a bounded operator notification through the target agent's
+primary chat. It is not a general command execution endpoint.
+
 ## Capability Advertisement
 
 Upgraded Remotes advertise rescue support through protocol capabilities:
@@ -196,6 +236,10 @@ resume.
 When invoked from Telegram, `/restart` first shows WatchTower status and the
 WatchTower API address. The operator must press the hard-restart confirmation
 button before HASHI sends the restart request.
+
+When invoked from WhatsApp, `/restart` is informational only. The operator must
+send `/restart confirm` before HASHI asks WatchTower to restart. The request
+still requires exactly one routed agent and the same human restart proof.
 
 ## Supervisor Control Scripts
 

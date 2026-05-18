@@ -105,6 +105,7 @@ class WorkbenchApiServer:
         self.app.router.add_post("/api/admin/start-agent", self.handle_admin_start_agent)
         self.app.router.add_post("/api/admin/stop-agent", self.handle_admin_stop_agent)
         self.app.router.add_post("/api/admin/shutdown", self.handle_admin_shutdown)
+        self.app.router.add_post("/api/admin/notify", self.handle_admin_notify)
         self.app.router.add_get("/api/health", self.handle_health)
         self.app.router.add_post("/api/jobs/import", self.handle_jobs_import)
         self.runner = None
@@ -1149,3 +1150,26 @@ class WorkbenchApiServer:
         reason = str((payload or {}).get("reason") or "admin-api")
         self.orchestrator.request_shutdown(reason=reason)
         return web.json_response({"ok": True, "message": f"Shutdown requested ({reason})."})
+
+    async def handle_admin_notify(self, request):
+        if not self._check_admin_auth(request):
+            return web.json_response({"ok": False, "error": "admin auth failed"}, status=403)
+        payload = await request.json() if request.can_read_body else {}
+        agent_name = str(payload.get("agent") or payload.get("agentId") or "").strip()
+        text = str(payload.get("text") or payload.get("message") or "").strip()
+        if not agent_name:
+            return web.json_response({"ok": False, "error": "agent is required"}, status=400)
+        if not text:
+            return web.json_response({"ok": False, "error": "text is required"}, status=400)
+        runtime = self._runtime_map().get(agent_name)
+        if runtime is None:
+            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+        chat_id = payload.get("chat_id")
+        if chat_id is None:
+            primary_chat_id = getattr(runtime, "_primary_chat_id", None)
+            if callable(primary_chat_id):
+                chat_id = primary_chat_id()
+        if chat_id is None:
+            return web.json_response({"ok": False, "error": "chat_id is required"}, status=400)
+        await runtime._send_text(int(chat_id), text)
+        return web.json_response({"ok": True, "agent": agent_name, "chat_id": int(chat_id)})
