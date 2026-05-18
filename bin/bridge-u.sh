@@ -46,13 +46,12 @@ export PYTHONIOENCODING=utf-8
 export LANG="${LANG:-C.UTF-8}"
 export LC_CTYPE="${LC_CTYPE:-C.UTF-8}"
 if [[ -n "${WSL_INTEROP:-}" || -n "${WSL_DISTRO_NAME:-}" ]]; then
-    # Windows Terminal can render the full CJK HASHI banner when its WSL profile
-    # uses a CJK-capable font. Classic conhost often lacks glyph fallback, so it
-    # keeps the Latin-safe profile unless the operator opts into full glyphs.
-    if [[ -n "${WT_SESSION:-}" ]]; then
-        export BRIDGE_BANNER_GLYPH_PROFILE="${BRIDGE_BANNER_GLYPH_PROFILE:-full}"
+    # HASHI WSL instances are expected to use the full CJK startup banner.
+    # Do not preserve a stale inherited latin profile from a previous launcher.
+    if [[ "${BRIDGE_FORCE_ASCII_BANNER:-0}" == "1" ]]; then
+        export BRIDGE_BANNER_GLYPH_PROFILE="latin"
     else
-        export BRIDGE_BANNER_GLYPH_PROFILE="${BRIDGE_BANNER_GLYPH_PROFILE:-latin}"
+        export BRIDGE_BANNER_GLYPH_PROFILE="full"
     fi
 fi
 
