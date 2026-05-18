@@ -61,6 +61,9 @@ def _stdout_looks_unicode_safe() -> bool:
     if os.environ.get("BRIDGE_FORCE_ASCII_BANNER") == "1":
         return False
 
+    if _running_under_wsl() and os.environ.get("BRIDGE_ALLOW_UNICODE_BANNER") != "1":
+        return False
+
     if os.name == "nt" and os.environ.get("BRIDGE_ALLOW_UNICODE_BANNER") != "1":
         return False
 
@@ -84,6 +87,16 @@ def _stdout_looks_unicode_safe() -> bool:
         pass
 
     return os.environ.get("LANG", "").lower().endswith("utf-8")
+
+
+def _running_under_wsl() -> bool:
+    if os.environ.get("WSL_INTEROP") or os.environ.get("WSL_DISTRO_NAME"):
+        return True
+    try:
+        with open("/proc/sys/kernel/osrelease", "r", encoding="utf-8") as fh:
+            return "microsoft" in fh.read().lower()
+    except OSError:
+        return False
 
 
 def _show_ascii_startup_banner(
