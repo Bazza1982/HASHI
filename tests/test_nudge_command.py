@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 
 from orchestrator.runtime_nudge import handle_nudge_callback, parse_nudge_create_args
-from orchestrator.scheduler import TaskScheduler
+from orchestrator import scheduler as scheduler_module
+from orchestrator.scheduler import TaskScheduler, _should_fire
 from orchestrator.skill_manager import SkillManager
 
 
@@ -36,6 +38,15 @@ def test_create_nudge_job_writes_prompt_and_metadata(tmp_path):
     assert saved["exit_condition"] == "until the scan is done"
     assert saved["nudge_meta"]["count"] == 0
     assert f"NUDGE_COMPLETE:{job['id']}" in saved["prompt"]
+
+
+def test_should_fire_returns_missed_seconds_for_due_cron():
+    now = datetime(2026, 5, 18, 12, 0)
+    last_run = (now - timedelta(days=1)).timestamp()
+
+    missed_by = _should_fire("0 12 * * *", last_run, now)
+
+    assert missed_by == 0.0
 
 
 class FakeRuntime:
@@ -94,6 +105,50 @@ async def test_scheduler_nudge_enqueues_only_when_runtime_idle(tmp_path):
     assert request_id in runtime.listeners
     data = json.loads((tmp_path / "tasks.json").read_text(encoding="utf-8"))
     assert data["nudges"][0]["nudge_meta"]["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_scheduler_skips_stale_missed_cron_and_notifies(tmp_path):
+    tasks_path = tmp_path / "tasks.json"
+    tasks_path.write_text(
+        json.dumps(
+            {
+                "heartbeats": [],
+                "nudges": [],
+                "crons": [
+                    {
+                        "id": "daily-old",
+                        "agent": "zelda",
+                        "enabled": True,
+                        "schedule": "0 12 * * *",
+                        "prompt": "run stale task",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime = FakeRuntime(busy=False)
+    scheduler = TaskScheduler(
+        tasks_path=tasks_path,
+        state_path=tmp_path / "scheduler_state.json",
+        runtimes=[runtime],
+        authorized_id=123,
+    )
+    scheduler.state["crons"]["daily-old"] = time.time() - 7200
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(scheduler_module, "_should_fire", lambda schedule, last_run_ts, now_dt: 7200.0)
+
+    try:
+        await _run_one_scheduler_pass(scheduler)
+    finally:
+        monkeypatch.undo()
+
+    assert len(runtime.enqueued) == 1
+    _request_id, payload = runtime.enqueued[0]
+    assert payload["summary"] == "Missed Cron [daily-old]"
+    assert "已跳过自动补发" in payload["prompt"]
+    assert scheduler.state["missed_crons"]["daily-old"]["agent"] == "zelda"
 
 
 @pytest.mark.asyncio

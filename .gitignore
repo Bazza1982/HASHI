@@ -1,5 +1,6 @@
 # Secrets and credentials
 secrets.json
+secrets/
 agents.json
 agent_capabilities.json
 tasks.json

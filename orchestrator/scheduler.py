@@ -12,6 +12,7 @@ scheduler_logger = logging.getLogger("BridgeU.Scheduler")
 SCHEDULER_JOB_TIMEOUT_S = 30
 SCHEDULER_SKILL_TIMEOUT_S = 1860  # Keep longer than the action-skill watchdog so the skill layer owns timeout/cleanup.
 PARKED_FOLLOWUP_TIMEOUT_S = 15
+CRON_CATCHUP_THRESHOLD_S = 3600
 
 try:
     from croniter import croniter
@@ -60,8 +61,11 @@ def _fallback_supports_schedule(schedule: str) -> bool:
         return False
 
 
-def _should_fire(schedule: str, last_run_ts: float, now_dt: datetime) -> bool:
+def _should_fire(schedule: str, last_run_ts: float, now_dt: datetime) -> float | None:
     """Check whether *schedule* has a fire time between *last_run_ts* (exclusive) and *now_dt* (inclusive).
+
+    Return the number of seconds the task is late when a fire time is due.
+    Return None when there is no due fire time.
 
     Uses croniter to iterate forward from last_run. If any scheduled time falls within
     (last_run, now], the task should fire.
@@ -77,15 +81,17 @@ def _should_fire(schedule: str, last_run_ts: float, now_dt: datetime) -> bool:
                 current_hm = now_dt.strftime("%H:%M")
                 target_hm = f"{hour:02d}:{minute:02d}"
                 if current_hm != target_hm:
-                    return False
+                    return None
                 # Ensure not already fired today.
                 # If never run (last_run_ts=0), use today's date so it does NOT
                 # fire immediately — it waits for the next scheduled occurrence.
                 last_dt = datetime.fromtimestamp(last_run_ts) if last_run_ts else now_dt
-                return last_dt.date() < now_dt.date()
+                if last_dt.date() < now_dt.date():
+                    return 0.0
+                return None
             except (ValueError, TypeError):
-                return False
-        return False
+                return None
+        return None
 
     try:
         # If last_run_ts is 0 (never run), use now_dt as the base so the next
@@ -94,10 +100,12 @@ def _should_fire(schedule: str, last_run_ts: float, now_dt: datetime) -> bool:
         last_dt = datetime.fromtimestamp(last_run_ts) if last_run_ts else now_dt
         cron = croniter(schedule, last_dt)
         next_fire = cron.get_next(datetime)
-        return next_fire <= now_dt
+        if next_fire <= now_dt:
+            return (now_dt - next_fire).total_seconds()
+        return None
     except (ValueError, KeyError) as e:
         scheduler_logger.error(f"Invalid cron expression '{schedule}': {e}")
-        return False
+        return None
 
 
 def _runtime_busy(runtime) -> bool:
@@ -122,6 +130,10 @@ class TaskScheduler:
         self.skill_manager = skill_manager
         self.orchestrator = orchestrator
         self.state = self._load_state()
+        self.state.setdefault("heartbeats", {})
+        self.state.setdefault("crons", {})
+        self.state.setdefault("nudges", {})
+        self.state.setdefault("missed_crons", {})
 
     def _runtime_map(self):
         if self.orchestrator is not None:
@@ -135,7 +147,7 @@ class TaskScheduler:
                     return json.load(f)
             except Exception as e:
                 scheduler_logger.error(f"Failed to load state: {e}")
-        return {"heartbeats": {}, "crons": {}, "nudges": {}}
+        return {"heartbeats": {}, "crons": {}, "nudges": {}, "missed_crons": {}}
 
     def _save_state(self):
         try:
@@ -429,7 +441,44 @@ class TaskScheduler:
                         state_changed = True
                         continue
 
-                    if _should_fire(schedule, last_run_ts, now_dt):
+                    missed_by = _should_fire(schedule, last_run_ts, now_dt)
+                    if missed_by is not None and missed_by > CRON_CATCHUP_THRESHOLD_S:
+                        missed_min = int(missed_by // 60)
+                        scheduler_logger.info(
+                            "Cron %s for %s missed by %sm; skipping stale catch-up.",
+                            task_id,
+                            agent_name,
+                            missed_min,
+                        )
+                        rt = runtime_map[agent_name]
+                        notify_prompt = (
+                            "[系统通知] 以下定时任务因 HASHI 离线或暂停而错过，超过 1 小时未执行，"
+                            "已跳过自动补发，避免过期任务误运行。\n"
+                            f"- `{task_id}`（错过约 {missed_min} 分钟）\n\n"
+                            "如仍需执行，请在控制面板或 `/jobs` 中手动运行对应任务。"
+                        )
+                        await self._run_scheduler_action(
+                            rt.enqueue_request(
+                                chat_id=self.authorized_id,
+                                prompt=notify_prompt,
+                                source="scheduler",
+                                summary=f"Missed Cron [{task_id}]",
+                            ),
+                            task_kind="Cron",
+                            task_id=task_id,
+                            agent_name=agent_name,
+                        )
+                        self.state.setdefault("missed_crons", {})[task_id] = {
+                            "agent": agent_name,
+                            "schedule": schedule,
+                            "missed_by_seconds": missed_by,
+                            "noticed_at": now,
+                        }
+                        self.state["crons"][task_id] = now
+                        state_changed = True
+                        continue
+
+                    if missed_by is not None:
                         # --- Loop safety net: count iterations, auto-disable at max ---
                         loop_meta = cron.get("loop_meta")
                         if loop_meta is not None:
