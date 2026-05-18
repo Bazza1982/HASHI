@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import hashlib
 import json
 import re
@@ -13,6 +12,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+try:
+    import fcntl
+except ModuleNotFoundError:  # Windows native runtime has no fcntl.
+    fcntl = None
 
 
 DEFAULT_ROOTS = (
@@ -24,6 +28,16 @@ NOTEBOOK_RELATIVE_PATH = Path("memory") / "left_brain_continuity.jsonl"
 ARCHIVE_DIR_NAME = "left_brain_archives"
 DEFAULT_LOG_RELATIVE_PATH = Path("workspaces") / "lily" / "logs" / "dual_brain_notepad_reset.jsonl"
 TIMEZONE = "Australia/Sydney"
+
+
+def _lock_file(handle) -> None:
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+
+def _unlock_file(handle) -> None:
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 @dataclass(frozen=True)
@@ -98,7 +112,7 @@ def _archive_and_clear_notebook(
         )
 
     with notebook.open("r+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        _lock_file(handle)
         try:
             content = handle.read()
             if not content:
@@ -134,7 +148,7 @@ def _archive_and_clear_notebook(
             handle.truncate(0)
             handle.flush()
         finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            _unlock_file(handle)
 
     return ResetResult(
         root=root,
@@ -203,11 +217,11 @@ def _append_jsonl_log(log_paths: list[Path], event: dict[str, object]) -> None:
     for log_path in log_paths:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("a", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            _lock_file(handle)
             try:
                 handle.write(json.dumps(event, ensure_ascii=False) + "\n")
             finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                _unlock_file(handle)
 
 
 def main(argv: list[str] | None = None) -> int:
