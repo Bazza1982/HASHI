@@ -51,6 +51,8 @@ def _make_runtime(manager: FlexibleBackendManager) -> tuple[FlexibleAgentRuntime
     runtime = object.__new__(FlexibleAgentRuntime)
     runtime.backend_manager = manager
     runtime.config = manager.config
+    runtime.workspace_dir = manager.config.workspace_dir
+    runtime.name = manager.config.name
     runtime._post_turn_observers = []
     runtime._pre_turn_context_providers = []
     runtime._is_authorized_user = lambda user_id: user_id == 1
@@ -79,9 +81,13 @@ def _make_runtime(manager: FlexibleBackendManager) -> tuple[FlexibleAgentRuntime
     return runtime, messages
 
 
-def _update(args: list[str] | None = None):
+def _update(args: list[str] | None = None, text: str | None = None):
     return (
-        SimpleNamespace(effective_user=SimpleNamespace(id=1), effective_chat=SimpleNamespace(id=123)),
+        SimpleNamespace(
+            effective_user=SimpleNamespace(id=1),
+            effective_chat=SimpleNamespace(id=123),
+            message=SimpleNamespace(text=text or ""),
+        ),
         SimpleNamespace(args=args or []),
     )
 
@@ -113,6 +119,82 @@ async def test_cmd_hchat_legacy_path_enqueues_bridge_hchat_source(tmp_path):
     assert "[HCHAT TASK]" in enqueued[0]["prompt"]
     assert "--to akane --from zelda" in enqueued[0]["prompt"]
     assert "tools/hchat_send.py" in enqueued[0]["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_cmd_notepad_show_edit_replace_clear(tmp_path):
+    manager = _make_manager(tmp_path)
+    manager.agent_mode = "memory+"
+    runtime, messages = _make_runtime(manager)
+
+    update, context = _update(["edit", "Dad likes jasmine rice"], "/notepad edit Dad likes jasmine rice")
+    await FlexibleAgentRuntime.cmd_notepad(runtime, update, context)
+    assert "updated" in messages[-1]
+
+    update, context = _update([])
+    await FlexibleAgentRuntime.cmd_notepad(runtime, update, context)
+    assert "Dad likes jasmine rice" in messages[-1]
+    assert runtime._reply_payloads[-1]["reply_markup"] is not None
+
+    update, context = _update(["replace", "- Manual: Dad avoids eggplant"], "/notepad replace - Manual: Dad avoids eggplant")
+    await FlexibleAgentRuntime.cmd_notepad(runtime, update, context)
+    assert "replaced" in messages[-1]
+
+    update, context = _update([])
+    await FlexibleAgentRuntime.cmd_notepad(runtime, update, context)
+    assert "Dad avoids eggplant" in messages[-1]
+    assert "Dad likes jasmine rice" not in messages[-1]
+
+    update, context = _update(["clear"], "/notepad clear")
+    await FlexibleAgentRuntime.cmd_notepad(runtime, update, context)
+    assert "cleared" in messages[-1]
+
+    update, context = _update([])
+    await FlexibleAgentRuntime.cmd_notepad(runtime, update, context)
+    assert "(empty)" in messages[-1]
+    labels = [
+        button.text
+        for row in runtime._reply_payloads[-1]["reply_markup"].inline_keyboard
+        for button in row
+    ]
+    assert labels == ["🔄 Refresh", "➕ Add note", "✏️ Replace body", "🧹 Clear"]
+
+
+@pytest.mark.asyncio
+async def test_callback_notepad_clear_uses_confirmation(tmp_path):
+    manager = _make_manager(tmp_path)
+    manager.agent_mode = "memory+"
+    runtime, _messages = _make_runtime(manager)
+    path = tmp_path / "memory" / "memory_plus_notepad.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# Memory+ Notepad\n\nDate: 2026-05-18\n\n## Continuity\n\n- keep this\n", encoding="utf-8")
+
+    edited: list[dict] = []
+    answered: list[dict] = []
+
+    async def edit_message_text(text, **kwargs):
+        edited.append({"text": text, **kwargs})
+
+    async def answer(*args, **kwargs):
+        answered.append({"args": args, **kwargs})
+
+    query = SimpleNamespace(
+        data="npad:clear_confirm",
+        from_user=SimpleNamespace(id=1),
+        edit_message_text=edit_message_text,
+        answer=answer,
+    )
+    await FlexibleAgentRuntime.callback_notepad(runtime, SimpleNamespace(callback_query=query), SimpleNamespace())
+
+    assert "Clear today's memory+ notepad" in edited[-1]["text"]
+    assert "keep this" in path.read_text(encoding="utf-8")
+
+    query.data = "npad:clear_now"
+    await FlexibleAgentRuntime.callback_notepad(runtime, SimpleNamespace(callback_query=query), SimpleNamespace())
+
+    assert "Cleared" in edited[-1]["text"]
+    assert "keep this" not in path.read_text(encoding="utf-8")
+    assert answered
 
 
 @pytest.mark.asyncio
