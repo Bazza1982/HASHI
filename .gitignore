@@ -82,6 +82,13 @@ phaseA_lily_stress.py
 phaseA1_lily_stress.py
 stress_test.py
 
+# Superloop runtime records are local execution artifacts.
+superloops/loops/
+superloops/recordings/
+
+# Accidental Windows absolute-path artifacts created under WSL/repo root.
+C:\\Users\\*
+
 # Node
 node_modules/
 
