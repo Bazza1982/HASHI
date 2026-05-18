@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from orchestrator.runtime_nudge import parse_nudge_create_args
+from orchestrator.runtime_nudge import handle_nudge_callback, parse_nudge_create_args
 from orchestrator.scheduler import TaskScheduler
 from orchestrator.skill_manager import SkillManager
 
@@ -90,6 +90,7 @@ async def test_scheduler_nudge_enqueues_only_when_runtime_idle(tmp_path):
     assert len(runtime.enqueued) == 1
     request_id, payload = runtime.enqueued[0]
     assert payload["summary"] == f"Nudge Task [{job['id']}]"
+    assert payload["source"] == "scheduler"
     assert request_id in runtime.listeners
     data = json.loads((tmp_path / "tasks.json").read_text(encoding="utf-8"))
     assert data["nudges"][0]["nudge_meta"]["count"] == 1
@@ -140,3 +141,52 @@ async def test_scheduler_nudge_completion_marker_disables_job(tmp_path):
     data = json.loads((tmp_path / "tasks.json").read_text(encoding="utf-8"))
     assert data["nudges"][0]["enabled"] is False
     assert data["nudges"][0]["nudge_meta"]["stopped_reason"] == "exit_condition_met"
+
+
+@pytest.mark.asyncio
+async def test_manual_nudge_trigger_enqueues_scheduler_source(tmp_path):
+    manager = SkillManager(project_root=tmp_path, tasks_path=tmp_path / "tasks.json")
+    job = manager.create_nudge_job(
+        agent_name="zelda",
+        interval_minutes=1,
+        exit_condition="until complete",
+    )
+
+    class Runtime:
+        name = "zelda"
+        skill_manager = manager
+
+        def __init__(self):
+            self.enqueued = []
+
+        async def enqueue_request(self, **kwargs):
+            self.enqueued.append(kwargs)
+            return "req-1"
+
+        def _primary_chat_id(self):
+            return 123
+
+    class Query:
+        message = SimpleNamespace(chat_id=456)
+
+        def __init__(self):
+            self.answers = []
+
+        async def answer(self, text=None, **kwargs):
+            self.answers.append((text, kwargs))
+
+    runtime = Runtime()
+    query = Query()
+
+    handled = await handle_nudge_callback(runtime, query, f"nudgejob:trigger:{job['id']}:now")
+
+    assert handled is True
+    assert query.answers[0][0] == "Triggering nudge now…"
+    assert runtime.enqueued == [
+        {
+            "chat_id": 456,
+            "prompt": job["prompt"],
+            "source": "scheduler",
+            "summary": f"Nudge Manual Trigger [{job['id']}]",
+        }
+    ]

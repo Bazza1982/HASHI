@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from typing import Any
+from types import SimpleNamespace
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -17,6 +18,26 @@ async def cmd_stop(runtime: Any, update: Any, context: Any) -> None:
     )
     if runtime.backend_manager.current_backend:
         await runtime.backend_manager.current_backend.shutdown()
+    meta = getattr(runtime, "current_request_meta", None)
+    if isinstance(meta, dict) and meta.get("request_id"):
+        try:
+            item = SimpleNamespace(
+                request_id=str(meta.get("request_id") or ""),
+                chat_id=meta.get("chat_id"),
+                prompt=str(meta.get("prompt") or ""),
+                source=str(meta.get("source") or "text"),
+                summary=str(meta.get("summary") or "Manual stop"),
+            )
+            is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
+            runtime._notify_right_brain_interrupted(
+                item,
+                item.prompt,
+                is_bridge_request=is_bridge_request,
+                reason="user_stop",
+                error="/stop received while right brain was running",
+            )
+        except Exception as exc:
+            runtime.logger.warning("Failed to notify interrupted turn for /stop: %s", exc)
 
     dropped = 0
     while not runtime.queue.empty():

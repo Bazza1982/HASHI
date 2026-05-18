@@ -58,6 +58,9 @@ class _Observer:
     def __init__(self):
         self.requests = []
         self.background_sets = []
+        self.started = []
+        self.completed = []
+        self.interrupted = []
 
     def should_observe(self, source: str, *, is_bridge_request: bool) -> bool:
         return source == "api" and not is_bridge_request
@@ -65,6 +68,15 @@ class _Observer:
     def schedule_observation(self, request, background_tasks: set[asyncio.Task]):
         self.requests.append(request)
         self.background_sets.append(background_tasks)
+
+    def on_right_brain_started(self, request):
+        self.started.append(request)
+
+    def on_right_brain_completed(self, request):
+        self.completed.append(request)
+
+    def on_right_brain_interrupted(self, request):
+        self.interrupted.append(request)
 
     def workspace_files_to_preserve(self):
         return frozenset({"observer.json"})
@@ -154,6 +166,39 @@ def test_post_turn_observer_failure_logs_and_continues(caplog):
 
     assert observer.requests
     assert "Post-turn observer failed to schedule" in caplog.text
+
+
+def test_right_brain_events_are_forwarded_to_observers():
+    runtime = _runtime()
+    observer = _Observer()
+    runtime._post_turn_observers = [observer]
+    item = _item()
+
+    runtime._notify_right_brain_started(
+        item,
+        "effective prompt",
+        final_prompt="assembled prompt",
+        is_bridge_request=False,
+    )
+    runtime._notify_right_brain_completed(
+        item,
+        "effective prompt",
+        "assistant result",
+        is_bridge_request=False,
+        completion_path="foreground",
+    )
+    runtime._notify_right_brain_interrupted(
+        item,
+        "effective prompt",
+        is_bridge_request=False,
+        reason="user_stop",
+        error="/stop",
+    )
+
+    assert observer.started[0].metadata["final_prompt"] == "assembled prompt"
+    assert observer.completed[0].assistant_text == "assistant result"
+    assert observer.completed[0].metadata["completion_path"] == "foreground"
+    assert observer.interrupted[0].metadata["reason"] == "user_stop"
 
 
 def test_observer_workspace_keep_names_collects_observer_files():
