@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import fcntl
 import json
 import re
 from dataclasses import dataclass
@@ -10,10 +9,25 @@ from typing import Any, Mapping
 
 from orchestrator.post_turn_observer import PreTurnContextProvider, TurnContextRequest
 
+try:
+    import fcntl
+except ModuleNotFoundError:  # Windows native runtime has no fcntl.
+    fcntl = None
+
 
 MEMORY_PLUS_OBSERVER_FACTORY = "orchestrator.memory_plus_mode:build_memory_plus_observer"
 MEMORY_PLUS_OPEN = "<memory_plus_update>"
 MEMORY_PLUS_CLOSE = "</memory_plus_update>"
+
+
+def _lock_file(handle) -> None:
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+
+def _unlock_file(handle) -> None:
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 @dataclass(frozen=True)
@@ -211,11 +225,11 @@ def append_memory_plus_manual_note(workspace_dir: Path, text: str, *, source: st
         f"- Manual: {note}",
     ]
     with path.open("a", encoding="utf-8") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
+        _lock_file(f)
         try:
             f.write("\n".join(lines) + "\n")
         finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
+            _unlock_file(f)
     return path
 
 
@@ -285,11 +299,11 @@ def write_memory_plus_update(
     lines.extend(f"- Note: {note}" for note in notes)
     lines.extend(f"- Open: {item}" for item in open_items)
     with path.open("a", encoding="utf-8") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
+        _lock_file(f)
         try:
             f.write("\n".join(lines) + "\n")
         finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
+            _unlock_file(f)
     return True
 
 
@@ -347,11 +361,11 @@ def write_memory_plus_diagnostic(
         "raw_block_chars": raw_block_chars,
     }
     with path.open("a", encoding="utf-8") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
+        _lock_file(f)
         try:
             f.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
         finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
+            _unlock_file(f)
     return path
 
 

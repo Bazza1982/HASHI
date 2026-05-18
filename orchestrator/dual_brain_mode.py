@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import heapq
 import json
 import logging
@@ -18,6 +17,11 @@ from orchestrator.post_turn_observer import (
     TurnContextRequest,
     TurnObservationRequest,
 )
+
+try:
+    import fcntl
+except ModuleNotFoundError:  # Windows native runtime has no fcntl.
+    fcntl = None
 
 
 DUAL_BRAIN_OBSERVER_FACTORY = "orchestrator.dual_brain_mode:build_dual_brain_observer"
@@ -44,6 +48,18 @@ LEGACY_DEFAULT_AFTER_ACTION_PROMPT_V2 = (
     "state, useful preferences, and unresolved follow-ups. Ignore routine chatter and do "
     "not summarize the whole answer."
 )
+
+
+def _lock_file(handle) -> None:
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+
+def _unlock_file(handle) -> None:
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 DEFAULT_LEFT_PROMPT = (
     "You are an LLM context and memory organiser for HASHI dual-brain mode. "
     "You maintain the continuity notebook at workspaces/<agent>/memory/left_brain_continuity.jsonl "
@@ -672,11 +688,11 @@ def _read_jsonl(path: Path, max_lines: int) -> list[dict[str, Any]]:
 def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
+        _lock_file(f)
         try:
             f.write(json.dumps(payload, ensure_ascii=False) + "\n")
         finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
+            _unlock_file(f)
 
 
 def _wiki_candidates(wiki_roots: list[Path], limit: int, *, query: str = "") -> list[dict[str, str]]:

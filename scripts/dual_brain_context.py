@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import heapq
 import json
 import re
@@ -14,6 +13,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+try:
+    import fcntl
+except ModuleNotFoundError:  # Windows native runtime has no fcntl.
+    fcntl = None
+
 from dual_brain_common import (
     BackendContext,
     git_check_ignored,
@@ -22,6 +26,16 @@ from dual_brain_common import (
     resolve_backend,
     write_json,
 )
+
+
+def _lock_file(handle) -> None:
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+
+def _unlock_file(handle) -> None:
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _now_iso() -> str:
@@ -50,11 +64,11 @@ def _read_jsonl(path: Path, max_lines: int) -> list[dict[str, Any]]:
 def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
+        _lock_file(f)
         try:
             f.write(json.dumps(payload, ensure_ascii=False) + "\n")
         finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
+            _unlock_file(f)
 
 
 def _read_bool(mapping: dict[str, Any], key: str, default: bool) -> bool:
