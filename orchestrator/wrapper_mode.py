@@ -35,7 +35,6 @@ USER_WRAPPABLE_SOURCES = frozenset(
         "document",
         "video",
         "sticker",
-        SESSION_RESET_SOURCE,
     }
 )
 
@@ -48,6 +47,7 @@ WRAPPER_BYPASS_SOURCES = frozenset(
         "loop_skill",
         "bridge:hchat",
         "retry",
+        SESSION_RESET_SOURCE,
     }
 )
 

@@ -1162,7 +1162,7 @@ async def test_cmd_mode_audit_preserves_wrapper_and_unrelated_state(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_cmd_new_queues_session_reset_source_for_wrapper(tmp_path):
+async def test_cmd_new_resets_without_visible_session_reset_llm_turn(tmp_path):
     manager = _make_manager(tmp_path)
     manager.agent_mode = "wrapper"
     runtime, messages = _make_runtime(manager)
@@ -1198,8 +1198,7 @@ async def test_cmd_new_queues_session_reset_source_for_wrapper(tmp_path):
 
     assert handled == [True]
     assert messages[-1] == "Starting a fresh session..."
-    assert queued[0]["source"] == SESSION_RESET_SOURCE
-    assert queued[0]["skip_memory_injection"] is True
+    assert queued == []
 
 
 @pytest.mark.asyncio

@@ -120,6 +120,11 @@ class FlexibleBackendManager:
             state["audit_criteria"] = dict(audit_criteria)
         self._write_state_dict(state)
 
+    def update_dual_brain_block(self, dual_brain: dict[str, Any]) -> None:
+        state = self._read_state_dict()
+        state["dual_brain"] = dict(dual_brain)
+        self._write_state_dict(state)
+
     def _build_adapter_config(
         self,
         engine: str,

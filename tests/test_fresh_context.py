@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import json
 import sys
 import types
 
@@ -7,6 +8,7 @@ import pytest
 sys.modules.setdefault("edge_tts", types.ModuleType("edge_tts"))
 
 from orchestrator.bridge_memory import BridgeContextAssembler
+from orchestrator.dual_brain_mode import DualBrainObserver
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.legacy.bridge_agent_runtime import BridgeAgentRuntime
 
@@ -142,7 +144,7 @@ async def test_flex_runtime_new_is_guarded_for_non_cli_backend():
 
 
 @pytest.mark.asyncio
-async def test_flex_runtime_fresh_clears_turns_and_skips_memory_on_prompt():
+async def test_flex_runtime_fresh_clears_turns_without_session_reset_llm_prompt():
     runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
     runtime._authorized_telegram_ids = {123}
     runtime.config = SimpleNamespace(active_backend="ollama-api")
@@ -169,4 +171,47 @@ async def test_flex_runtime_fresh_clears_turns_and_skips_memory_on_prompt():
     assert runtime.context_assembler.turns_injection_enabled is True
     assert runtime.context_assembler.saved_memory_injection_enabled is False
     assert runtime._pending_auto_recall_context is None
-    assert enqueued[0][1]["skip_memory_injection"] is True
+    assert enqueued == []
+
+
+@pytest.mark.asyncio
+async def test_flex_runtime_fresh_keeps_next_api_prompt_dual_brain_eligible(tmp_path):
+    runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
+    runtime._authorized_telegram_ids = {123}
+    runtime.config = SimpleNamespace(active_backend="openrouter-api")
+    runtime.backend_manager = SimpleNamespace(current_backend=object())
+    runtime._pending_auto_recall_context = "old"
+    runtime._clear_transfer_state = lambda: None
+    store = FakeMemoryStore()
+    runtime.context_assembler = BridgeContextAssembler(store, system_md=None)
+    replies = []
+    enqueued = []
+
+    async def reply(update, text, **kwargs):
+        replies.append(text)
+
+    async def enqueue_request(*args, **kwargs):
+        enqueued.append((args, kwargs))
+
+    runtime._reply_text = reply
+    runtime.enqueue_request = enqueue_request
+
+    await runtime.cmd_fresh(fake_update(), fake_context())
+
+    assert enqueued == []
+    assert runtime.context_assembler.turns_injection_enabled is True
+    assert runtime.context_assembler.saved_memory_injection_enabled is False
+
+    workspace = tmp_path / "sakura"
+    workspace.mkdir()
+    (workspace / "state.json").write_text(json.dumps({"agent_mode": "dual-brain"}), encoding="utf-8")
+    observer = DualBrainObserver(
+        workspace_dir=workspace,
+        backend_invoker=lambda *args, **kwargs: None,
+        backend_context_getter=lambda: {"engine": "openrouter-api", "model": "test-model"},
+    )
+
+    assert not observer.should_provide("session_reset", is_bridge_request=False)
+    assert not observer.should_observe("session_reset", is_bridge_request=False)
+    assert observer.should_provide("api", is_bridge_request=False)
+    assert observer.should_observe("api", is_bridge_request=False)
