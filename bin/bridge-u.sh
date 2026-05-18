@@ -414,9 +414,9 @@ ensure_env() {
     fi
     
     # Check dependencies
-    if ! python3 -c "import telegram, httpx, aiohttp, PIL" 2>/dev/null; then
+    if ! python3 -c "import telegram, httpx, aiohttp, PIL, croniter" 2>/dev/null; then
         echo -e "${C_WARN}Installing Python dependencies...${C_RESET}"
-        pip install --quiet python-telegram-bot httpx aiohttp pillow
+        pip install --quiet -r requirements.txt
     fi
 }
 
