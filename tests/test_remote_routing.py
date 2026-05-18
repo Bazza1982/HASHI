@@ -80,3 +80,27 @@ def test_same_host_port_conflict_is_actionable():
             "message": "same-host instances share Remote port 8766",
         }
     ]
+
+
+def test_same_host_port_conflict_ignores_inactive_offline_entries():
+    conflicts = validate_same_host_port_conflicts(
+        {
+            "hashi1": {
+                "instance_id": "HASHI1",
+                "platform": "wsl",
+                "host_identity": "a9max",
+                "remote_port": 8766,
+            },
+            "hashi9": {
+                "instance_id": "HASHI9",
+                "platform": "windows",
+                "host_identity": "a9max",
+                "remote_port": 8766,
+                "active": False,
+                "live_status": "offline",
+                "handshake_state": "handshake_timed_out",
+            },
+        }
+    )
+
+    assert conflicts == []

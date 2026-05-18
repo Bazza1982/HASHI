@@ -144,7 +144,11 @@ def validate_same_host_port_conflicts(instances: dict[str, Any]) -> list[dict[st
     if not isinstance(instances, dict):
         return []
     conflicts: list[dict[str, Any]] = []
-    items = [(key, entry) for key, entry in instances.items() if isinstance(entry, dict)]
+    items = [
+        (key, entry)
+        for key, entry in instances.items()
+        if isinstance(entry, dict) and _entry_participates_in_port_conflicts(entry)
+    ]
     for idx, (left_key, left) in enumerate(items):
         left_port = int(left.get("remote_port") or 0)
         if left_port <= 0:
@@ -168,3 +172,13 @@ def validate_same_host_port_conflicts(instances: dict[str, Any]) -> list[dict[st
                 }
             )
     return conflicts
+
+
+def _entry_participates_in_port_conflicts(entry: dict[str, Any]) -> bool:
+    if entry.get("active") is False:
+        return False
+    live_status = str(entry.get("live_status") or "").strip().lower()
+    handshake_state = str(entry.get("handshake_state") or "").strip().lower()
+    if live_status == "offline" and handshake_state in {"", "handshake_timed_out", "handshake_rejected", "unreachable"}:
+        return False
+    return True
