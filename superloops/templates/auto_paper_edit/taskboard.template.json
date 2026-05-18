@@ -1,0 +1,190 @@
+[
+  {
+    "task_id": "step-001",
+    "title": "Session start gate: verify SOP, EDIT_PLAN, canonical docx, registry path",
+    "owner": "orchestrator",
+    "status": "pending",
+    "required_evidence": [
+      "workspace_sop_version_confirmed",
+      "edit_plan_phases_noted",
+      "canonical_docx_path_verified",
+      "active_sidecar_registry_path",
+      "legacy_registry_archived_if_found"
+    ]
+  },
+  {
+    "task_id": "step-002",
+    "title": "Orchestrator runs registry_report.py and records current document state",
+    "owner": "orchestrator",
+    "status": "pending",
+    "required_evidence": [
+      "total_active_paragraphs",
+      "status_breakdown",
+      "locked_paragraph_count",
+      "update_needed_count",
+      "comment_anchor_count",
+      "consistency_map_entry_count",
+      "registry_report_output"
+    ]
+  },
+  {
+    "task_id": "step-003",
+    "title": "Orchestrator writes or updates EDIT_PLAN.md with all planned changes in execution order",
+    "owner": "orchestrator",
+    "status": "pending",
+    "required_evidence": [
+      "edit_plan_phases",
+      "locked_items_listed",
+      "route_declared",
+      "route_b_source_clean_confirmed"
+    ]
+  },
+  {
+    "task_id": "step-004",
+    "title": "Reviewer pre-edit plan review",
+    "owner": "reviewer",
+    "status": "pending",
+    "required_evidence": [
+      "plan_verdict",
+      "locked_items_check",
+      "consistency_dependencies_noted",
+      "route_b_replacement_map_check",
+      "blockers"
+    ]
+  },
+  {
+    "task_id": "step-005",
+    "title": "Route pre-flight checks",
+    "owner": "editor",
+    "status": "pending",
+    "required_evidence": [
+      "route_a_target_uuids_verified",
+      "route_a_comment_protection_paragraphs_listed",
+      "route_a_edit_mode_declared",
+      "route_b_stamp_contamination_check",
+      "route_b_replacement_map_fully_confirmed",
+      "route_b_anchor_uuid_verified",
+      "route_b_figure_placement_map",
+      "backup_exists_in_workspace_backups"
+    ]
+  },
+  {
+    "task_id": "step-006",
+    "title": "Editor executes Phase 1 edits per EDIT_PLAN order",
+    "owner": "editor",
+    "status": "pending",
+    "required_evidence": [
+      "paragraphs_changed",
+      "registry_updated_per_paragraph",
+      "edit_plan_phase1_items_marked_done",
+      "verify_injection_pass",
+      "heading_sequence_ok"
+    ]
+  },
+  {
+    "task_id": "step-007",
+    "title": "Consistency sweep for Phase 1: run consistency_check.py on all changed UUIDs",
+    "owner": "editor",
+    "status": "pending",
+    "required_evidence": [
+      "consistency_check_output",
+      "flagged_outbound_mentions",
+      "flagged_inbound_dependents",
+      "orchestrator_resolution_per_flagged_paragraph"
+    ]
+  },
+  {
+    "task_id": "step-008",
+    "title": "Phase insertion validation (if phase used insert_paragraph.py or Route B)",
+    "owner": "editor",
+    "status": "pending",
+    "required_evidence": [
+      "extract_to_markdown_validate_output",
+      "heading_sequence_ok"
+    ]
+  },
+  {
+    "task_id": "step-009",
+    "title": "Repeat Phase execution + consistency sweep + insertion validation for all remaining EDIT_PLAN phases",
+    "owner": "editor",
+    "status": "pending",
+    "required_evidence": [
+      "all_phases_completed",
+      "all_phases_consistency_swept",
+      "all_phases_insertion_validated",
+      "edit_plan_all_items_marked_done"
+    ]
+  },
+  {
+    "task_id": "step-010",
+    "title": "Final document verification: registry report + verify_injection + strip_stamps (Route B)",
+    "owner": "orchestrator",
+    "status": "pending",
+    "required_evidence": [
+      "registry_report_zero_update_needed",
+      "verify_injection_8_8_pass",
+      "heading_sequence_ok",
+      "route_b_review_registry_all_4_sections",
+      "route_b_total_accounted_for_matches",
+      "route_b_strip_stamps_exit_0",
+      "route_b_submission_copy_zero_stamps",
+      "route_b_submission_copy_zero_highlights",
+      "submission_copy_file_size_reasonable"
+    ]
+  },
+  {
+    "task_id": "step-011",
+    "title": "Reviewer final inspection of output document",
+    "owner": "reviewer",
+    "status": "pending",
+    "required_evidence": [
+      "all_planned_edit_items_present",
+      "no_unintended_changes",
+      "locked_content_unchanged",
+      "no_missing_figures_or_tables",
+      "heading_sequence_correct",
+      "final_verdict",
+      "blockers"
+    ]
+  },
+  {
+    "task_id": "step-012",
+    "title": "Fix reviewer blockers and retest",
+    "owner": "editor",
+    "status": "pending",
+    "required_evidence": [
+      "blocker_list",
+      "fixes_applied",
+      "retests_passed",
+      "reviewer_reconfirmation"
+    ]
+  },
+  {
+    "task_id": "step-013",
+    "title": "End-of-session sync: EDIT_PLAN, registry, session_notes, chain guard",
+    "owner": "orchestrator",
+    "status": "pending",
+    "required_evidence": [
+      "edit_plan_fully_updated",
+      "registry_synced_to_document",
+      "session_notes_end_of_session_entry",
+      "insert_session_json_present",
+      "no_loose_files_outside_workspace"
+    ]
+  },
+  {
+    "task_id": "step-014",
+    "title": "Final closeout",
+    "owner": "orchestrator",
+    "status": "pending",
+    "required_evidence": [
+      "all_edit_plan_phases_done",
+      "consistency_sweep_complete",
+      "final_document_verification_passed",
+      "reviewer_no_blocker_verdict",
+      "open_issues_empty",
+      "session_notes_complete",
+      "exit_condition_met"
+    ]
+  }
+]

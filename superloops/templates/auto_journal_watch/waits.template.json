@@ -1,0 +1,87 @@
+[
+  {
+    "wait_id": "await_okta_push",
+    "owner": "human",
+    "trigger": "Configured library route, publisher, or Zotero step requires MFA or push approval.",
+    "timeout_policy": "block_until_human_response",
+    "resume_evidence": [
+      "human confirmation",
+      "authenticated browser/session check"
+    ]
+  },
+  {
+    "wait_id": "await_human_login",
+    "owner": "human",
+    "trigger": "Browser session is expired or a platform requires interactive login.",
+    "timeout_policy": "block_until_human_response",
+    "resume_evidence": [
+      "human confirmation",
+      "session recheck"
+    ]
+  },
+  {
+    "wait_id": "await_captcha_or_cloudflare",
+    "owner": "human",
+    "trigger": "Captcha, Cloudflare, robotic-click warning, or equivalent access challenge.",
+    "timeout_policy": "bounded_wait_then_classify",
+    "resume_evidence": [
+      "human completion confirmation",
+      "platform route status update",
+      "pending item classification if unresolved"
+    ]
+  },
+  {
+    "wait_id": "await_human_selection",
+    "owner": "human",
+    "trigger": "Reviewer bundle is ready for final selected rows.",
+    "timeout_policy": "block_until_human_response",
+    "resume_evidence": [
+      "selection workbook or CSV",
+      "selected row count"
+    ]
+  },
+  {
+    "wait_id": "await_download_arrival",
+    "owner": "orchestrator",
+    "trigger": "Browser download may arrive late after click or route transition.",
+    "timeout_policy": "bounded_recheck_then_reconcile",
+    "resume_evidence": [
+      "Downloads folder recheck",
+      "file promotion log",
+      "download reconciliation update"
+    ]
+  },
+  {
+    "wait_id": "await_manual_pdf_supply",
+    "owner": "human",
+    "trigger": "Automated and library routes cannot safely retrieve a selected PDF.",
+    "timeout_policy": "block_or_close_with_pending_manual",
+    "resume_evidence": [
+      "manual PDF file",
+      "title/metadata match report",
+      "valid PDF header check"
+    ]
+  },
+  {
+    "wait_id": "await_agent_receipt",
+    "owner": "orchestrator",
+    "trigger": "The loop needs confirmation that librarian or reviewer received a task.",
+    "timeout_policy": "classify_as_dispatch_unverified",
+    "resume_evidence": [
+      "delivery receipt",
+      "agent reply",
+      "dispatch status update"
+    ]
+  },
+  {
+    "wait_id": "await_long_running_heartbeat",
+    "owner": "orchestrator",
+    "trigger": "Docling, download batch, search sync, or note generation is running longer than one heartbeat interval.",
+    "timeout_policy": "pause_if_stale_over_300_seconds",
+    "resume_evidence": [
+      "fresh heartbeat",
+      "process check",
+      "status file update"
+    ]
+  }
+]

@@ -1,0 +1,88 @@
+[
+  {
+    "issue_type": "auth_required",
+    "severity": "blocker",
+    "owner": "human",
+    "examples": [
+      "Okta push required",
+      "EZProxy session expired",
+      "publisher login required"
+    ],
+    "default_action": "open human wait and stop automated retries"
+  },
+  {
+    "issue_type": "captcha_or_cloudflare",
+    "severity": "blocker",
+    "owner": "human",
+    "examples": [
+      "captcha page",
+      "Cloudflare security check",
+      "robotic-click warning"
+    ],
+    "default_action": "pause host route, request human handling, and classify unresolved items"
+  },
+  {
+    "issue_type": "manifest_boundary_drift",
+    "severity": "blocker",
+    "owner": "orchestrator",
+    "examples": [
+      "planned targets exceed manifest rows",
+      "script attempts to process all library files",
+      "selected set changed without approval"
+    ],
+    "default_action": "fail fast, stop execution, and require reviewer gate"
+  },
+  {
+    "issue_type": "duplicate_selected_rows",
+    "severity": "non_blocker_if_documented",
+    "owner": "librarian",
+    "examples": [
+      "same no-DOI article appears twice with title formatting differences",
+      "same PDF hash covers two selected rows"
+    ],
+    "default_action": "document row coverage and unique-paper coverage separately"
+  },
+  {
+    "issue_type": "dispatch_unverified",
+    "severity": "blocker",
+    "owner": "orchestrator",
+    "examples": [
+      "task message drafted but not delivered",
+      "no verifiable reply from librarian or reviewer"
+    ],
+    "default_action": "mark dispatch_prepared or dispatch_unverified; do not claim contact"
+  },
+  {
+    "issue_type": "heartbeat_stale",
+    "severity": "blocker",
+    "owner": "orchestrator",
+    "examples": [
+      "no status update for more than 300 seconds",
+      "worker session gone",
+      "process not found while task marked running"
+    ],
+    "default_action": "pause, inspect process and status files, then report true state"
+  },
+  {
+    "issue_type": "platform_route_unsupported",
+    "severity": "non_blocker_or_blocker",
+    "owner": "librarian",
+    "examples": [
+      "purchase-only page",
+      "no PDF link",
+      "unsupported host route"
+    ],
+    "default_action": "record platform status and route to alternate DB or manual pending list"
+  },
+  {
+    "issue_type": "search_sync_scope_risk",
+    "severity": "blocker",
+    "owner": "librarian",
+    "examples": [
+      "missing batch tag",
+      "wrong query DB path",
+      "whole-library sync attempted for scoped batch"
+    ],
+    "default_action": "stop and rerun only with scoped DB-only sync evidence"
+  }
+]

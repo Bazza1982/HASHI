@@ -1,0 +1,306 @@
+[
+  {
+    "task_id": "step-001",
+    "title": "Intake revision brief, current draft set, evidence base, literature base, and exit condition",
+    "owner": "orchestrator",
+    "status": "pending",
+    "required_evidence": [
+      "paper_folder_path",
+      "current_draft_paths",
+      "revision_brief_recorded",
+      "evidence_base_paths",
+      "literature_base_paths",
+      "master_draft_target_path",
+      "exit_condition_recorded"
+    ]
+  },
+  {
+    "task_id": "step-002",
+    "title": "G1 — Orchestrator revision-mode lock: confirm this is revision, not drafting or editing",
+    "owner": "orchestrator",
+    "status": "pending",
+    "depends_on": ["step-001"],
+    "required_evidence": [
+      "existing_manuscript_confirmed",
+      "revision_problem_named",
+      "service_mode_confirmed",
+      "drafting_redirect_not_needed",
+      "editing_redirect_not_needed"
+    ]
+  },
+  {
+    "task_id": "step-003",
+    "title": "Stage 1 — Librarian audits current draft set and writes diagnosis note",
+    "owner": "librarian",
+    "status": "pending",
+    "depends_on": ["step-002"],
+    "required_evidence": [
+      "diagnosis_note_path",
+      "usable_sections_list",
+      "obsolete_sections_list",
+      "structural_problems_list",
+      "argument_problems_list",
+      "evidence_integration_problems_list"
+    ]
+  },
+  {
+    "task_id": "step-004",
+    "title": "G2 — Reviewer diagnosis gate: confirm the paper problem is clearly and credibly diagnosed",
+    "owner": "reviewer",
+    "status": "pending",
+    "depends_on": ["step-003"],
+    "required_evidence": [
+      "diagnosis_verdict",
+      "usable_vs_obsolete_distinction_confirmed",
+      "revision_need_confirmed",
+      "overall_verdict",
+      "blockers"
+    ]
+  },
+  {
+    "task_id": "step-005",
+    "title": "Stage 2 — Librarian defines revised governing argument, findings architecture, and target contribution",
+    "owner": "librarian",
+    "status": "pending",
+    "depends_on": ["step-004"],
+    "required_evidence": [
+      "governing_argument_note_path",
+      "revised_governing_argument",
+      "revised_findings_architecture",
+      "primary_contribution_named",
+      "secondary_contributions_named",
+      "retired_old_logic_noted"
+    ]
+  },
+  {
+    "task_id": "step-006",
+    "title": "G3 — Orchestrator governing argument gate",
+    "owner": "orchestrator",
+    "status": "pending",
+    "depends_on": ["step-005"],
+    "required_evidence": [
+      "central_claim_explicit",
+      "findings_architecture_confirmed",
+      "discussion_contribution_target_confirmed",
+      "old_governing_logic_retired",
+      "gate_verdict"
+    ]
+  },
+  {
+    "task_id": "step-007",
+    "title": "Stage 3 — Librarian audits all major materials and builds keep/cut/rewrite/integrate revision map",
+    "owner": "librarian",
+    "status": "pending",
+    "depends_on": ["step-006"],
+    "required_evidence": [
+      "revision_map_path",
+      "retain_paths",
+      "retain_with_light_revision_paths",
+      "rewrite_paths",
+      "replace_paths",
+      "integrate_elsewhere_paths",
+      "hold_for_later_paths"
+    ]
+  },
+  {
+    "task_id": "step-008",
+    "title": "G4 — Reviewer revision-map gate",
+    "owner": "reviewer",
+    "status": "pending",
+    "depends_on": ["step-007"],
+    "required_evidence": [
+      "classification_scheme_confirmed",
+      "evidence_sources_mapped_to_argument",
+      "weak_sections_not_preserved_by_default",
+      "revision_map_actionable",
+      "overall_verdict",
+      "blockers"
+    ]
+  },
+  {
+    "task_id": "step-009",
+    "title": "Stage 4 — Librarian writes revised section architecture and redevelopment order",
+    "owner": "librarian",
+    "status": "pending",
+    "depends_on": ["step-008"],
+    "required_evidence": [
+      "revised_section_plan_path",
+      "section_order_defined",
+      "findings_discussion_boundary_defined",
+      "retained_front_half_sections_list",
+      "rebuild_order_defined"
+    ]
+  },
+  {
+    "task_id": "step-010",
+    "title": "Stage 5 — Librarian rebuilds findings from best current evidence base",
+    "owner": "librarian",
+    "status": "pending",
+    "depends_on": ["step-009"],
+    "required_evidence": [
+      "findings_draft_path",
+      "findings_word_count",
+      "evidence_sources_used",
+      "documentary_and_interview_material_integrated",
+      "analytical_purpose_per_subsection_named"
+    ]
+  },
+  {
+    "task_id": "step-011",
+    "title": "G5 — Reviewer findings redevelopment gate",
+    "owner": "reviewer",
+    "status": "pending",
+    "depends_on": ["step-010"],
+    "required_evidence": [
+      "findings_structure_verdict",
+      "evidence_depth_verdict",
+      "source_provenance_spotcheck_results",
+      "findings_not_overloaded_with_discussion_claims",
+      "overall_verdict",
+      "blockers"
+    ]
+  },
+  {
+    "task_id": "step-012",
+    "title": "Stage 6 — Librarian rebuilds discussion as literature conversation and contribution section",
+    "owner": "librarian",
+    "status": "pending",
+    "depends_on": ["step-011"],
+    "required_evidence": [
+      "discussion_draft_path",
+      "discussion_word_count",
+      "literature_sources_used",
+      "conceptual_contribution_named",
+      "primary_vs_secondary_contributions_distinguished"
+    ]
+  },
+  {
+    "task_id": "step-013",
+    "title": "G6 — Reviewer discussion literature-integration gate",
+    "owner": "reviewer",
+    "status": "pending",
+    "depends_on": ["step-012"],
+    "required_evidence": [
+      "discussion_not_mere_restatement_confirmed",
+      "literature_conversation_quality_verdict",
+      "contribution_clarity_verdict",
+      "discussion_stronger_than_old_logic_confirmed",
+      "overall_verdict",
+      "blockers"
+    ]
+  },
+  {
+    "task_id": "step-014",
+    "title": "Stage 7 — Librarian rewrites conclusion for closure and final contribution framing",
+    "owner": "librarian",
+    "status": "pending",
+    "depends_on": ["step-013"],
+    "required_evidence": [
+      "conclusion_draft_path",
+      "conclusion_word_count",
+      "final_contribution_statement",
+      "discussion_opening_duplication_removed",
+      "limits_or_implications_stated"
+    ]
+  },
+  {
+    "task_id": "step-015",
+    "title": "G7 — Orchestrator conclusion closure gate",
+    "owner": "orchestrator",
+    "status": "pending",
+    "depends_on": ["step-014"],
+    "required_evidence": [
+      "conclusion_closes_paper_confirmed",
+      "no_reopened_discussion",
+      "final_contribution_statement_confirmed",
+      "gate_verdict"
+    ]
+  },
+  {
+    "task_id": "step-016",
+    "title": "Stage 8 — Librarian integrates retained and rebuilt sections into one master draft",
+    "owner": "librarian",
+    "status": "pending",
+    "depends_on": ["step-015"],
+    "required_evidence": [
+      "integrated_master_draft_path",
+      "retained_sections_used",
+      "replaced_sections_list",
+      "section_numbering_checked",
+      "join_transitions_checked",
+      "single_authoritative_master_declared"
+    ]
+  },
+  {
+    "task_id": "step-017",
+    "title": "G8 — Reviewer master-draft integration gate",
+    "owner": "reviewer",
+    "status": "pending",
+    "depends_on": ["step-016"],
+    "required_evidence": [
+      "obsolete_sections_replaced_confirmed",
+      "section_order_coherent",
+      "transitions_read_as_one_paper",
+      "authoritative_master_confirmed",
+      "overall_verdict",
+      "blockers"
+    ]
+  },
+  {
+    "task_id": "step-018",
+    "title": "G9 — Orchestrator stability check: stable for citation/editing, one more revision pass, or return to drafting",
+    "owner": "orchestrator",
+    "status": "pending",
+    "depends_on": ["step-017"],
+    "required_evidence": [
+      "repeat_claims_audit_result",
+      "placeholder_audit_result",
+      "terminology_consistency_result",
+      "methods_alignment_result",
+      "stability_decision"
+    ]
+  },
+  {
+    "task_id": "step-019",
+    "title": "G10 — Reviewer final clearance on integrated master draft",
+    "owner": "reviewer",
+    "status": "pending",
+    "depends_on": ["step-018"],
+    "required_evidence": [
+      "argument_flow_verdict",
+      "findings_discussion_conclusion_distinct_roles_confirmed",
+      "no_major_structural_blockers",
+      "draft_substantially_improved_confirmed",
+      "overall_verdict",
+      "blockers"
+    ]
+  },
+  {
+    "task_id": "step-020",
+    "title": "Stage 9 — Librarian writes unresolved issues list and downstream handoff note",
+    "owner": "librarian",
+    "status": "pending",
+    "depends_on": ["step-019"],
+    "required_evidence": [
+      "unresolved_issues_path",
+      "handoff_note_path",
+      "handoff_target_declared",
+      "remaining_minor_tasks_listed"
+    ]
+  },
+  {
+    "task_id": "step-021",
+    "title": "G11 — Orchestrator closeout",
+    "owner": "orchestrator",
+    "status": "pending",
+    "depends_on": ["step-020"],
+    "required_evidence": [
+      "all_revision_stages_complete",
+      "all_gates_passed",
+      "integrated_master_draft_exists",
+      "reviewer_final_approval_recorded",
+      "no_open_blockers",
+      "exit_condition_met"
+    ]
+  }
+]
