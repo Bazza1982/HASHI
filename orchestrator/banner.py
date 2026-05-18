@@ -61,9 +61,6 @@ def _stdout_looks_unicode_safe() -> bool:
     if os.environ.get("BRIDGE_FORCE_ASCII_BANNER") == "1":
         return False
 
-    if _running_under_wsl() and os.environ.get("BRIDGE_ALLOW_UNICODE_BANNER") != "1":
-        return False
-
     if os.name == "nt" and os.environ.get("BRIDGE_ALLOW_UNICODE_BANNER") != "1":
         return False
 
@@ -89,16 +86,6 @@ def _stdout_looks_unicode_safe() -> bool:
     return os.environ.get("LANG", "").lower().endswith("utf-8")
 
 
-def _running_under_wsl() -> bool:
-    if os.environ.get("WSL_INTEROP") or os.environ.get("WSL_DISTRO_NAME"):
-        return True
-    try:
-        with open("/proc/sys/kernel/osrelease", "r", encoding="utf-8") as fh:
-            return "microsoft" in fh.read().lower()
-    except OSError:
-        return False
-
-
 def _show_ascii_startup_banner(
     agent_names: list,
     boot_state: dict | None = None,
@@ -110,95 +97,62 @@ def _show_ascii_startup_banner(
     logo_only: bool = False,
     inactive_agents: list | None = None,
 ) -> None:
-    logo = [
-        "  _   _    _    ____  _   _ ___",
-        " | | | |  / \\  / ___|| | | |_ _|",
-        " | |_| | / _ \\ \\___ \\| |_| || | ",
-        " |  _  |/ ___ \\ ___) |  _  || | ",
-        " |_| |_/_/   \\_\\____/|_| |_|___|",
-    ]
-    spinner = "|/-\\"
+    print()
+    print("  BRIDGE-U-F")
+    print("  Universal Flexible Safe AI Agents")
+    print("  Powered by CLI backends")
+    print()
+    print("  Designed by Barry Li")
+    print("  AI tool usage")
+    print("  (ASCII banner fallback: terminal is not Unicode-safe)")
+    print()
 
-    def render_header(frame: int) -> None:
-        if sys.stdout.isatty():
-            _cls()
+    if logo_only:
+        return
+
+    print(f"  agents      {len(agent_names)} active")
+    print(f"  workbench   :{workbench_port}" if workbench_port else "  workbench   disabled")
+    print(f"  api gateway {'enabled' if api_gateway_enabled else 'disabled'}")
+    print(f"  whatsapp    {'enabled' if wa_enabled else 'disabled'}")
+
+    if skipped_agents:
         print()
-        phase = frame % (len(logo[0]) + 1)
-        for line in logo:
-            shown = line[:phase]
-            hidden = "".join("#" if ch != " " else " " for ch in line[phase:])
-            print(f"{_c(75)}{shown}{_c(238)}{hidden}{_R}")
-        print()
-        print(f"  {_BOLD}Universal Flexible Safe AI Agents{_R}  Powered by CLI backends")
-        print("  ASCII-safe startup animation")
-        print("  Designed by Barry Li")
-        print()
+        print("  skipped (backend unavailable):")
+        for name, reason in skipped_agents:
+            print(f"    x {name}: {reason}")
 
-    def state_line(name: str) -> str:
-        state = (boot_state or {}).get(name, "pending")
-        if state == "online":
-            return f"  ok  {name}"
-        if state == "local":
-            return f"  !!  {name} (local mode)"
-        if state == "failed":
-            return f"  xx  {name} failed"
-        if state == "connecting":
-            reason = (boot_reason or {}).get(name, "")
-            suffix = f" ({reason})" if reason else ""
-            return f"  ..  {name} still connecting{suffix}"
-        return f"  --  {name} pending"
-
-    _hide()
-    try:
-        for frame in range(0, len(logo[0]) + 1, 4):
-            render_header(frame)
-            time.sleep(0.035)
-
-        render_header(len(logo[0]))
-
-        if logo_only:
-            return
-
-        print(f"  agents      {len(agent_names)} active")
-        print(f"  workbench   :{workbench_port}" if workbench_port else "  workbench   disabled")
-        print(f"  api gateway {'enabled' if api_gateway_enabled else 'disabled'}")
-        print(f"  whatsapp    {'enabled' if wa_enabled else 'disabled'}")
-
-        if skipped_agents:
-            print()
-            print("  skipped (backend unavailable):")
-            for name, reason in skipped_agents:
-                print(f"    x {name}: {reason}")
+    if boot_state is not None:
+        deadline = time.time() + _ANIM_BUDGET
+        while time.time() < deadline:
+            if all(state in ("online", "local", "failed") for state in boot_state.values()):
+                break
+            time.sleep(0.12)
 
         print()
-        if boot_state is not None:
-            deadline = time.time() + _ANIM_BUDGET
-            frame = 0
-            while time.time() < deadline:
-                if all(state in ("online", "local", "failed") for state in boot_state.values()):
-                    break
-                marker = spinner[frame % len(spinner)]
-                _write(f"\r  {marker} starting agents...")
-                time.sleep(0.12)
-                frame += 1
-            _write("\r  startup status        \n")
-
-            for name in agent_names:
-                print(state_line(name))
-
-            for name in (inactive_agents or []):
-                print(f"  --  {name} (inactive)")
-        else:
-            for i in range(8):
-                _write(f"\r  {spinner[i % len(spinner)]} loading agents...")
-                time.sleep(0.08)
-            _write(f"\r  queued {len(agent_names)} agent(s)      \n")
-
+        for name in agent_names:
+            state = boot_state.get(name, "pending")
+            if state == "online":
+                print(f"  ok  {name}")
+            elif state == "local":
+                print(f"  !!  {name} (local mode)")
+            elif state == "failed":
+                print(f"  xx  {name} failed")
+            elif state == "connecting":
+                reason = (boot_reason or {}).get(name, "")
+                suffix = f" ({reason})" if reason else ""
+                print(f"  ..  {name} still connecting{suffix}")
+            else:
+                print(f"  --  {name} pending")
+        
+        for name in (inactive_agents or []):
+            print(f"  --  {name} (inactive)")
+    else:
         print()
-        print("  starting up")
-        print()
-    finally:
-        _show()
+        print(f"  queued {len(agent_names)} agent(s)")
+
+    print()
+    print("  starting up")
+    print()
 
 
 # ── atomic frame renderer ─────────────────────────────────────────────────────
