@@ -26,6 +26,20 @@ class _FakeRuntime:
         return "req-test"
 
 
+class _RuntimeWithNativeCommands:
+    def __init__(self):
+        self.global_config = SimpleNamespace(authorized_id=1)
+
+    async def cmd_mode(self, update, context):
+        await update.message.reply_text("mode ok")
+
+    async def cmd_notepad(self, update, context):
+        await update.message.reply_text("notepad ok")
+
+    async def cmd_brain(self, update, context):
+        await update.message.reply_text("brain ok")
+
+
 def test_runtime_command_registry_loads_external_private_commands(monkeypatch, tmp_path):
     private_dir = tmp_path / "private_commands"
     private_dir.mkdir()
@@ -81,3 +95,22 @@ async def test_admin_local_command_executes_registered_private_command(monkeypat
     assert result["command"] == "private_sample"
     assert "private_sample" in supported_commands(runtime)
     assert result["messages"][0]["text"] == "private ok: hello"
+
+
+def test_admin_supported_commands_include_runtime_bound_native_commands():
+    commands = supported_commands(_RuntimeWithNativeCommands())
+
+    assert "mode" in commands
+    assert "notepad" in commands
+    assert "brain" in commands
+
+
+@pytest.mark.asyncio
+async def test_admin_local_command_blocks_human_restart_even_when_registered():
+    runtime = _FakeRuntime()
+
+    result = await execute_local_command(runtime, "/restart", chat_id=123)
+
+    assert result["ok"] is False
+    assert result["command"] == "restart"
+    assert "human-only" in result["error"]

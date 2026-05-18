@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -12,12 +13,15 @@ from orchestrator.ephemeral_invoker import BackendSidecarInvoker, SidecarFailure
 class _BackendResponse:
     text: str
     is_success: bool = True
+    usage: object | None = None
+    cost_usd: float | None = None
 
 
 class _BackendManager:
-    def __init__(self, *, fail: bool = False):
+    def __init__(self, *, fail: bool = False, workspace_dir=None):
         self.config = SimpleNamespace(
             active_backend="codex-cli",
+            workspace_dir=workspace_dir,
             allowed_backends=[
                 {"engine": "codex-cli", "model": "gpt-5.4"},
                 {"engine": "claude-cli", "model": "claude-sonnet"},
@@ -42,7 +46,7 @@ class _BackendManager:
 
 def test_sidecar_context_uses_active_core_backend_and_current_model():
     manager = _BackendManager()
-    invoker = BackendSidecarInvoker(manager)
+    invoker = BackendSidecarInvoker(manager, session_id_getter=lambda: "session-test")
 
     assert invoker.current_context() == {
         "engine": "codex-cli",
@@ -53,7 +57,7 @@ def test_sidecar_context_uses_active_core_backend_and_current_model():
 @pytest.mark.asyncio
 async def test_sidecar_invocation_uses_ephemeral_backend_without_core_mutation():
     manager = _BackendManager()
-    invoker = BackendSidecarInvoker(manager)
+    invoker = BackendSidecarInvoker(manager, session_id_getter=lambda: "session-test")
 
     response = await invoker(
         engine="codex-cli",
@@ -119,3 +123,37 @@ def test_sidecar_context_falls_back_to_allowed_backend_model():
         "engine": "codex-cli",
         "model": "gpt-5.4",
     }
+
+
+@pytest.mark.asyncio
+async def test_sidecar_invocation_records_usage_and_audit(tmp_path):
+    manager = _BackendManager(workspace_dir=tmp_path)
+    manager.response = _BackendResponse(
+        "sidecar response",
+        usage=SimpleNamespace(input_tokens=11, output_tokens=7, thinking_tokens=3),
+        cost_usd=0.001,
+    )
+
+    async def generate_ephemeral_response(**kwargs):
+        manager.ephemeral_calls.append(kwargs)
+        return manager.response
+
+    manager.generate_ephemeral_response = generate_ephemeral_response
+    invoker = BackendSidecarInvoker(manager, session_id_getter=lambda: "session-test")
+
+    await invoker(
+        engine="codex-cli",
+        model="gpt-5.5",
+        prompt="Classify this turn.",
+        request_id="req-usage",
+    )
+
+    usage = json.loads((tmp_path / "token_usage.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    audit = json.loads((tmp_path / "token_audit.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+
+    assert usage["session_id"] == "session-test"
+    assert usage["input"] == 11
+    assert usage["output"] == 7
+    assert usage["thinking"] == 3
+    assert audit["completion_path"] == "sidecar"
+    assert audit["request_id"] == "req-usage"

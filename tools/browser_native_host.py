@@ -306,7 +306,13 @@ class UnixBridgeRequestHandler(socketserver.StreamRequestHandler):
         self.wfile.flush()
 
 
-class ThreadedUnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+if hasattr(socketserver, "UnixStreamServer"):
+    _UnixStreamServer = socketserver.UnixStreamServer
+else:  # Windows native Python can import codecs/utilities but cannot host AF_UNIX server.
+    _UnixStreamServer = None
+
+
+class ThreadedUnixServer(socketserver.ThreadingMixIn, _UnixStreamServer if _UnixStreamServer else socketserver.TCPServer):
     daemon_threads = True
 
 
@@ -326,6 +332,8 @@ def native_reader_loop(state: BridgeState) -> None:
 
 
 def start_socket_server(state: BridgeState) -> ThreadedUnixServer:
+    if _UnixStreamServer is None:
+        raise RuntimeError("Unix domain sockets are not available on this platform")
     if state.socket_path.exists():
         state.socket_path.unlink()
     server = ThreadedUnixServer(str(state.socket_path), UnixBridgeRequestHandler)

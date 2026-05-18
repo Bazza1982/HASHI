@@ -8,12 +8,14 @@ from typing import Any
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from orchestrator.command_registry import RuntimeCallback, RuntimeCommand
+from orchestrator.human_restart import build_human_restart_proof, human_restart_secret_path, load_human_restart_secret
 from tools import remote_rescue
 from remote.security.shared_token import load_shared_token
 
 logger = logging.getLogger("BridgeU.RuntimeCommands.ApiRestart")
 
 WATCHTOWER_INSTANCE = "WATCHTOWER"
+ALLOWED_HUMAN_RESTART_SOURCES = {"telegram", "whatsapp", "tui"}
 
 
 def _service_manager(runtime: Any):
@@ -149,6 +151,45 @@ def _restart_auth_kwargs() -> dict[str, str | None]:
     }
 
 
+def _restart_bridge_home(runtime: Any):
+    orchestrator = getattr(runtime, "orchestrator", None)
+    paths = getattr(orchestrator, "paths", None)
+    bridge_home = getattr(paths, "bridge_home", None)
+    return bridge_home or remote_rescue.ROOT
+
+
+def _build_watchtower_restart_payload(runtime: Any, *, human_source: str, reason: str) -> dict[str, Any]:
+    source = str(human_source or "").strip().lower()
+    if source not in ALLOWED_HUMAN_RESTART_SOURCES:
+        raise ValueError(f"unsupported human restart source: {human_source}")
+    notify_agent = str(getattr(runtime, "name", "") or "").strip().lower()
+    if not notify_agent:
+        raise ValueError("runtime name is required for restart notification")
+    bridge_home = _restart_bridge_home(runtime)
+    secret = load_human_restart_secret(bridge_home, remote_rescue.ROOT)
+    if not secret:
+        secret_path = human_restart_secret_path(bridge_home)
+        raise RuntimeError(
+            "human restart secret is not configured; set HASHI_HUMAN_RESTART_SECRET "
+            f"or create {secret_path} with the same value configured in WatchTower"
+        )
+    requester = str(remote_rescue._default_instance_id() or "").strip().upper()
+    proof = build_human_restart_proof(
+        secret,
+        requester=requester,
+        reason=reason,
+        human_source=source,
+        notify_agent=notify_agent,
+    )
+    return {
+        "reason": reason,
+        "human_source": source,
+        "notify_agent": notify_agent,
+        "notify_via": "telegram",
+        "human_restart_proof": proof,
+    }
+
+
 def _watchtower_address() -> str:
     try:
         return remote_rescue._candidate_base_urls(WATCHTOWER_INSTANCE)[0]
@@ -202,18 +243,38 @@ def _restart_status_keyboard(confirm: bool = False, *, available: bool = True) -
 async def restart_command(runtime: Any, update: Any, context: Any) -> None:
     if not _authorized(runtime, update):
         return
-    restart_available = False
-    try:
-        code, payload = await asyncio.to_thread(
-            remote_rescue.rescue_status,
-            WATCHTOWER_INSTANCE,
-            **_restart_auth_kwargs(),
+    if getattr(runtime, "_watchtower_restart_inflight", False):
+        await runtime._reply_text(update, "Restart is already in progress.")
+        return
+    available, error, _payload = await _watchtower_restart_available()
+    if not available:
+        await runtime._reply_text(
+            update,
+            _restart_status_text(error=error or "WatchTower unavailable"),
+            parse_mode="HTML",
         )
-        restart_available = code == 0
-        text = _restart_status_text(payload, error=None if restart_available else payload.get("error") or "remote error")
+        return
+    try:
+        request_payload = _build_watchtower_restart_payload(
+            runtime,
+            human_source="telegram",
+            reason="telegram /restart hard restart",
+        )
     except Exception as exc:
-        text = _restart_status_text(error=str(exc))
-    await runtime._reply_text(update, text, parse_mode="HTML", reply_markup=_restart_status_keyboard(confirm=False, available=restart_available))
+        logger.warning("Failed to build Telegram restart payload: %s", exc)
+        await runtime._reply_text(
+            update,
+            f"❌ WatchTower restart is not configured safely:\n<code>{html.escape(str(exc))}</code>",
+            parse_mode="HTML",
+        )
+        return
+    setattr(runtime, "_watchtower_restart_inflight", True)
+    chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
+    await runtime._reply_text(
+        update,
+        "🔁 WatchTower hard restart requested.\nThis bot may go quiet briefly while HASHI stops and comes back.",
+    )
+    asyncio.create_task(_dispatch_watchtower_restart(runtime, chat_id, request_payload))
 
 
 async def _watchtower_restart_available() -> tuple[bool, str | None, dict[str, Any] | None]:
@@ -230,24 +291,27 @@ async def _watchtower_restart_available() -> tuple[bool, str | None, dict[str, A
     return True, None, payload
 
 
-async def _dispatch_watchtower_restart(runtime: Any, chat_id: int) -> None:
+async def _dispatch_watchtower_restart(runtime: Any, chat_id: int | None, request_payload: dict[str, Any]) -> None:
     try:
         try:
             code, payload = await asyncio.to_thread(
                 remote_rescue.rescue_restart,
                 WATCHTOWER_INSTANCE,
-                reason="telegram /restart hard restart",
+                reason=request_payload.get("reason"),
+                extra_payload=request_payload,
                 timeout=15,
                 **_restart_auth_kwargs(),
             )
         except Exception as exc:
             logger.warning("WatchTower restart HTTP call failed or timed out: %s", exc)
-            await runtime._send_text(chat_id, f"WatchTower restart request failed: {exc}")
+            if chat_id is not None:
+                await runtime._send_text(chat_id, f"WatchTower restart request failed: {exc}")
             return
         if code != 0:
             detail = payload.get("error") or payload.get("detail") or "remote error"
             logger.warning("WatchTower hard restart rejected: %s", detail)
-            await runtime._send_text(chat_id, f"WatchTower restart request failed: {detail}")
+            if chat_id is not None:
+                await runtime._send_text(chat_id, f"WatchTower restart request failed: {detail}")
     finally:
         setattr(runtime, "_watchtower_restart_inflight", False)
 
@@ -349,15 +413,56 @@ async def restart_callback(runtime: Any, update: Any, context: Any) -> None:
             )
             await query.answer("WatchTower unavailable.", show_alert=True)
             return
+        try:
+            request_payload = _build_watchtower_restart_payload(
+                runtime,
+                human_source="telegram",
+                reason="telegram /restart hard restart",
+            )
+        except Exception as exc:
+            logger.warning("Failed to build Telegram restart payload: %s", exc)
+            await query.edit_message_text(
+                f"❌ WatchTower restart is not configured safely:\n<code>{html.escape(str(exc))}</code>",
+                parse_mode="HTML",
+                reply_markup=_restart_status_keyboard(confirm=False, available=True),
+            )
+            await query.answer("Restart setup incomplete.", show_alert=True)
+            return
         setattr(runtime, "_watchtower_restart_inflight", True)
         await query.edit_message_text(
             "🔁 WatchTower hard restart requested.\nThis bot may go quiet briefly while HASHI stops and comes back.",
             reply_markup=None,
         )
-        asyncio.create_task(_dispatch_watchtower_restart(runtime, query.message.chat_id))
+        chat_id = getattr(getattr(query, "message", None), "chat_id", None)
+        asyncio.create_task(_dispatch_watchtower_restart(runtime, chat_id, request_payload))
         await query.answer("Restart requested.")
         return
     await query.answer("Unknown restart control.", show_alert=True)
+
+
+async def request_whatsapp_restart(runtime: Any, *, reason: str = "whatsapp /restart hard restart") -> tuple[bool, str]:
+    try:
+        request_payload = _build_watchtower_restart_payload(runtime, human_source="whatsapp", reason=reason)
+    except Exception as exc:
+        logger.warning("Failed to build WhatsApp restart payload: %s", exc)
+        return False, str(exc)
+    try:
+        code, payload = await asyncio.to_thread(
+            remote_rescue.rescue_restart,
+            WATCHTOWER_INSTANCE,
+            reason=request_payload.get("reason"),
+            extra_payload=request_payload,
+            timeout=15,
+            **_restart_auth_kwargs(),
+        )
+    except Exception as exc:
+        logger.warning("WatchTower WhatsApp restart HTTP call failed or timed out: %s", exc)
+        return False, str(exc)
+    if code != 0:
+        detail = payload.get("error") or payload.get("detail") or "remote error"
+        logger.warning("WatchTower WhatsApp hard restart rejected: %s", detail)
+        return False, str(detail)
+    return True, str(payload.get("restart_id") or "restart requested")
 
 
 COMMANDS = [

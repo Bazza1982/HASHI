@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from orchestrator.command_registry import runtime_command_map
+from orchestrator.runtime_command_binding import COMMAND_BINDINGS
 
 
 def _json_safe(value: Any):
@@ -76,48 +77,12 @@ def _split_command(command_line: str) -> tuple[str, list[str]]:
 
 
 def supported_commands(runtime) -> list[str]:
-    names = [
-        "help",
-        "start",
-        "status",
-        "active",
-        "handoff",
-        "fyi",
-        "model",
-        "new",
-        "clear",
-        "stop",
-        "terminate",
-        "retry",
-        "think",
-        "verbose",
-        "voice",
-        "credit",
-        "effort",
-        "skill",
-        "exp",
-        "debug",
-        "cron",
-        "heartbeat",
-        "wa_on",
-        "wa_off",
-        "wa_send",
-        "memory",
-        "transfer",
-        "fork",
-        "cos",
-        "usecomputer",
-        "usercomputer",
-        "browser",
-        "wol",
-    ]
-    if hasattr(runtime, "cmd_backend"):
-        names.extend(["backend"])
+    names = [binding.name for binding in COMMAND_BINDINGS]
     supported = []
     for name in names:
         if hasattr(runtime, f"cmd_{name}"):
             supported.append(name)
-    supported.extend(runtime_command_map())
+    supported.extend(runtime_command_map().keys())
     return sorted(set(supported))
 
 
@@ -125,6 +90,13 @@ async def execute_local_command(runtime, command_line: str, chat_id: int | None 
     command_name, args = _split_command(command_line)
     if not command_name:
         return {"ok": False, "error": "empty command"}
+    if command_name == "restart":
+        return {
+            "ok": False,
+            "command": command_name,
+            "args": args,
+            "error": "/restart is human-only and cannot be invoked through the local admin API. Use /reboot for agent-driven recovery.",
+        }
 
     method_name = f"cmd_{command_name}"
     method = getattr(runtime, method_name, None)

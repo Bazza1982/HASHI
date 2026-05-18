@@ -32,6 +32,7 @@ from orchestrator.model_catalog import (
     AVAILABLE_CODEX_MODELS,
     AVAILABLE_GEMINI_MODELS,
 )
+from orchestrator.api_gateway_config import load_api_gateway_config
 from adapters.stream_events import StreamEvent, KIND_TEXT_DELTA
 
 logger = logging.getLogger("BridgeU.APIGateway")
@@ -223,7 +224,9 @@ class APIGatewayServer:
         self.global_config = global_config
         self.port: int = getattr(global_config, "api_gateway_port", 18801)
         self.bind_host: str | None = None
-        selected_default = str(default_model or "").strip()
+        gateway_config = load_api_gateway_config(global_config)
+        self.enabled: bool = bool(gateway_config.get("enabled", False))
+        selected_default = str(default_model or gateway_config.get("default_model") or "").strip()
         self.default_model = selected_default if selected_default in _ENGINE_FOR_MODEL else DEFAULT_API_MODEL
         self._pool = _AdapterPool(global_config, secrets, workspace_root)
         self._sessions = _SessionCache()
@@ -296,6 +299,7 @@ class APIGatewayServer:
         return web.json_response(
             {
                 "status": "ok",
+                "enabled": self.enabled,
                 "engines": list(self._pool._adapters.keys()),
                 "default_model": self.default_model,
                 "bind_host": self.bind_host,

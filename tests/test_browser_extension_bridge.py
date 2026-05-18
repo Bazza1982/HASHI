@@ -17,6 +17,13 @@ from tools.browser_extension_bridge import (
 from tools.browser_audit import append_audit_record
 from tools.browser_native_host import decode_native_message, encode_native_message
 
+HAS_UNIX_STREAM_SERVER = hasattr(socketserver, "UnixStreamServer")
+requires_unix_stream_server = pytest.mark.skipif(
+    not HAS_UNIX_STREAM_SERVER,
+    reason="Unix domain socket server is unavailable on this platform",
+)
+_UnixStreamServer = socketserver.UnixStreamServer if HAS_UNIX_STREAM_SERVER else socketserver.TCPServer
+
 
 class _UnixHandler(socketserver.StreamRequestHandler):
     def handle(self) -> None:
@@ -29,7 +36,7 @@ class _UnixHandler(socketserver.StreamRequestHandler):
         self.wfile.flush()
 
 
-class _UnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+class _UnixServer(socketserver.ThreadingMixIn, _UnixStreamServer):
     daemon_threads = True
 
 
@@ -46,18 +53,21 @@ def bridge_socket(tmp_path: Path):
         server.server_close()
 
 
+@requires_unix_stream_server
 def test_send_bridge_command_roundtrip(bridge_socket: Path) -> None:
     response = send_bridge_command("get_text", {"url": "https://example.com"}, socket_path=bridge_socket)
     assert response["ok"] is True
     assert response["output"] == "echo:get_text"
 
 
+@requires_unix_stream_server
 def test_healthcheck_uses_ping(bridge_socket: Path) -> None:
     response = healthcheck(socket_path=bridge_socket)
     assert response["connected"] is True
     assert response["response"]["output"] == "pong"
 
 
+@requires_unix_stream_server
 def test_send_bridge_command_missing_socket(tmp_path: Path) -> None:
     with pytest.raises(BrowserBridgeError):
         send_bridge_command("ping", {}, socket_path=tmp_path / "missing.sock", timeout_s=0.1)
@@ -70,6 +80,7 @@ def test_native_message_codec_roundtrip() -> None:
     assert decoded == message
 
 
+@requires_unix_stream_server
 def test_send_bridge_command_waits_for_socket(tmp_path: Path) -> None:
     socket_path = tmp_path / "late.sock"
 
@@ -95,6 +106,7 @@ def test_send_bridge_command_waits_for_socket(tmp_path: Path) -> None:
     assert response["ok"] is True
 
 
+@requires_unix_stream_server
 def test_send_bridge_command_does_not_unlink_existing_socket_path_on_connect_failure(tmp_path: Path) -> None:
     socket_path = tmp_path / "stale.sock"
     stale_server = _UnixServer(str(socket_path), _UnixHandler)
@@ -121,6 +133,7 @@ def test_append_audit_record_writes_jsonl(tmp_path: Path) -> None:
     assert record["action"] == "get_text"
 
 
+@requires_unix_stream_server
 def test_ensure_bridge_session_raises_without_socket(tmp_path: Path) -> None:
     with pytest.raises(BrowserBridgeError):
         ensure_bridge_session(
