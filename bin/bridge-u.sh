@@ -46,16 +46,15 @@ export PYTHONIOENCODING=utf-8
 export LANG="${LANG:-C.UTF-8}"
 export LC_CTYPE="${LC_CTYPE:-C.UTF-8}"
 if [[ -n "${WSL_INTEROP:-}" || -n "${WSL_DISTRO_NAME:-}" ]]; then
-    # Windows Terminal can report UTF-8 while the selected font still cannot
-    # render the banner's CJK/kana glyphs. Default WSL to the plain ASCII
-    # startup banner so the operator never sees unreadable animation noise.
-    # Operators can opt into the full CJK animation after confirming the font.
-    if [[ "${BRIDGE_ALLOW_CJK_BANNER:-0}" == "1" && "${BRIDGE_FORCE_ASCII_BANNER:-0}" != "1" ]]; then
-        export BRIDGE_FORCE_ASCII_BANNER="${BRIDGE_FORCE_ASCII_BANNER:-0}"
+    # Windows Terminal can render the full CJK HASHI banner when its WSL profile
+    # uses a CJK-capable font. Classic conhost often lacks glyph fallback, so it
+    # keeps the Latin-safe profile. A stale BRIDGE_FORCE_ASCII_BANNER=1 from the
+    # previous HASHI1 launcher bug is treated as stale state and corrected here.
+    if [[ -n "${WT_SESSION:-}" || "${BRIDGE_FORCE_ASCII_BANNER:-0}" == "1" ]]; then
+        export BRIDGE_FORCE_ASCII_BANNER=0
         export BRIDGE_BANNER_GLYPH_PROFILE="full"
     else
-        export BRIDGE_FORCE_ASCII_BANNER="1"
-        export BRIDGE_BANNER_GLYPH_PROFILE="latin"
+        export BRIDGE_BANNER_GLYPH_PROFILE="${BRIDGE_BANNER_GLYPH_PROFILE:-latin}"
     fi
 fi
 
