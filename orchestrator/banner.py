@@ -53,8 +53,40 @@ _HANKAKU = list("ｦｧｨｩｪｫｬｭｮｯｱｲｳｴｵｶｷｸｹｺｻ
 _FW_KANA  = list("アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワン")
 _FW_KANJI = list("橋木喬水火山空海時光風雷電影鉄道城夢力波炎氷")
 _FW_ALL   = _FW_KANA + _FW_KANJI
+_ASCII_SCRAMBLE = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#$%&*+-=<>")
 
 _ANIM_BUDGET = 14.0   # total seconds before we give up waiting for agents
+
+
+def _glyph_profile() -> str:
+    profile = os.environ.get("BRIDGE_BANNER_GLYPH_PROFILE", "full").strip().lower()
+    if profile in {"latin", "latin-safe", "wsl-safe", "no-cjk"}:
+        return "latin"
+    return "full"
+
+
+def _full_glyphs_enabled() -> bool:
+    return _glyph_profile() == "full"
+
+
+def _glyph_symbols() -> dict[str, str]:
+    if _full_glyphs_enabled():
+        return {
+            "online": "✓",
+            "local": "⚡",
+            "connecting": "⠙",
+            "failed": "✗",
+            "inactive": "•",
+            "ellipsis": "…",
+        }
+    return {
+        "online": "OK",
+        "local": "!!",
+        "connecting": "..",
+        "failed": "XX",
+        "inactive": "--",
+        "ellipsis": "...",
+    }
 
 
 def _stdout_looks_unicode_safe() -> bool:
@@ -179,12 +211,13 @@ def _render_frame(lines, row_colors, side_map=None, logo_top=0):
 def _corrupt_lines(rate):
     """Return _LOGO lines with half-width katakana replacing chars at rate.
     Uses _HANKAKU (1 terminal col each) so line widths never change."""
+    noise_chars = _HANKAKU if _full_glyphs_enabled() else _ASCII_SCRAMBLE
     result = []
     for line in _LOGO:
         chars = list(line)
         for i, ch in enumerate(chars):
             if ch != ' ' and random.random() < rate:
-                chars[i] = random.choice(_HANKAKU)
+                chars[i] = random.choice(noise_chars)
         result.append(''.join(chars))
     return result
 
@@ -192,12 +225,13 @@ def _corrupt_lines(rate):
 # ── scramble / spinner helpers ────────────────────────────────────────────────
 
 def _scramble_reveal(target: str, col: str, duration: float = 0.30, steps: int = 18, row: int = 0):
+    noise_chars = _HANKAKU if _full_glyphs_enabled() else _ASCII_SCRAMBLE
     chars = list(target)
     n = len(chars)
     for step in range(steps + 1):
         cutoff = int(step / steps * n)
         buf = [
-            ch if i <= cutoff else (" " if ch == " " else random.choice(_HANKAKU))
+            ch if i <= cutoff else (" " if ch == " " else random.choice(noise_chars))
             for i, ch in enumerate(chars)
         ]
         if row:
@@ -211,11 +245,12 @@ def _scramble_reveal(target: str, col: str, duration: float = 0.30, steps: int =
 
 def _simple_resolve(pending: str, done: str, col: str, secs: float = 1.0):
     t  = time.time() + secs
-    sp = itertools.cycle(_SPIN)
+    symbols = _glyph_symbols()
+    sp = itertools.cycle(_SPIN if _full_glyphs_enabled() else ["|", "/", "-", "\\"])
     while time.time() < t:
         _write(f"\r  {_c(75)}{next(sp)}{_R}  {_c(244)}{pending:<44}{_R}")
         time.sleep(0.08)
-    _write(f"\r  {col}✓{_R}  {col}{done:<44}{_R}\n")
+    _write(f"\r  {col}{symbols['online']}{_R}  {col}{done:<44}{_R}\n")
 
 
 # ── main entry point ──────────────────────────────────────────────────────────
@@ -265,10 +300,15 @@ def show_startup_banner(
         )
         return
 
-    rows       = shutil.get_terminal_size((80, 24)).lines
+    size       = shutil.get_terminal_size((80, 24))
+    rows       = max(size.lines, 8)
     STATUS_ROW = rows - 1
     anim_start = time.time()
     live       = boot_state is not None
+    full_glyphs = _full_glyphs_enabled()
+    symbols = _glyph_symbols()
+    scramble_chars = _HANKAKU if full_glyphs else _ASCII_SCRAMBLE
+    poem_noise_chars = _FW_ALL if full_glyphs else _ASCII_SCRAMBLE
 
     # ── live status bar helpers ───────────────────────────────────────────────
 
@@ -276,10 +316,10 @@ def show_startup_banner(
         parts = []
         for n in agent_names:
             s = boot_state.get(n, "pending")
-            if   s == "online":     parts.append(f"{_c(108)}{n} ✓{_R}")
-            elif s == "local":      parts.append(f"{_c(179)}{n} ⚡{_R}")
-            elif s == "connecting": parts.append(f"{_c(75)}{n} ⠙{_R}")
-            elif s == "failed":     parts.append(f"{_c(203)}{n} ✗{_R}")
+            if   s == "online":     parts.append(f"{_c(108)}{n} {symbols['online']}{_R}")
+            elif s == "local":      parts.append(f"{_c(179)}{n} {symbols['local']}{_R}")
+            elif s == "connecting": parts.append(f"{_c(75)}{n} {symbols['connecting']}{_R}")
+            elif s == "failed":     parts.append(f"{_c(203)}{n} {symbols['failed']}{_R}")
             else:                   parts.append(f"{_c(238)}{n}{_R}")
         return "  " + "  ".join(parts)
 
@@ -300,25 +340,41 @@ def show_startup_banner(
 
     _hide()
     try:
-        # ── Phase 1 : kanji build ─────────────────────────────────────────────
+        # ── Phase 1 : bridge build ────────────────────────────────────────────
         _cls()
         print("\n\n\n")
         pad = " " * 20
 
-        print(f"{pad}{_BOLD}{_c(215)}木{_R}  {_c(240)}ki  ·  wood{_R}", flush=True)
-        _sleep(1.2)
+        if full_glyphs:
+            print(f"{pad}{_BOLD}{_c(215)}木{_R}  {_c(240)}ki  ·  wood{_R}", flush=True)
+            _sleep(1.2)
 
-        print(f"{pad}{_BOLD}{_c(75)}喬{_R}  {_c(240)}qiáo  ·  tall{_R}", flush=True)
-        _sleep(1.2)
+            print(f"{pad}{_BOLD}{_c(75)}喬{_R}  {_c(240)}qiáo  ·  tall{_R}", flush=True)
+            _sleep(1.2)
 
-        print(f"{pad}{_c(240)}↓  combine{_R}", flush=True)
-        _sleep(0.5)
+            print(f"{pad}{_c(240)}↓  combine{_R}", flush=True)
+            _sleep(0.5)
 
-        _write(f"{pad}{_BOLD}{_c(69)}橋{_R}  {_c(240)}はし  ·  hashi  ·  bridge{_R}")
+            bridge_symbol = "橋"
+            bridge_caption = "はし  ·  hashi  ·  bridge"
+        else:
+            print(f"{pad}{_BOLD}{_c(215)}HASHI{_R}  {_c(240)}bridge runtime{_R}", flush=True)
+            _sleep(1.2)
+
+            print(f"{pad}{_BOLD}{_c(75)}agents{_R}  {_c(240)}local orchestration{_R}", flush=True)
+            _sleep(1.2)
+
+            print(f"{pad}{_c(240)}=> connect{_R}", flush=True)
+            _sleep(0.5)
+
+            bridge_symbol = "HASHI"
+            bridge_caption = "hashi  ·  bridge"
+
+        _write(f"{pad}{_BOLD}{_c(69)}{bridge_symbol}{_R}  {_c(240)}{bridge_caption}{_R}")
         time.sleep(0.15)
         for col in [69, 75, 81, 87, 93, 87, 81, 87, 93, 99, 93, 87, 81, 75]:
             _refresh()
-            _write(f"\r{pad}{_BOLD}{_c(col)}橋{_R}  {_c(240)}はし  ·  hashi  ·  bridge{_R}   ")
+            _write(f"\r{pad}{_BOLD}{_c(col)}{bridge_symbol}{_R}  {_c(240)}{bridge_caption}{_R}   ")
             time.sleep(0.09)
         print("\n\n")
         _sleep(0.5)
@@ -329,7 +385,7 @@ def show_startup_banner(
         logo_top = 2  # row 1 blank, logo starts row 2
         for idx, line in enumerate(_LOGO):
             scrambled = "  " + "".join(
-                random.choice(_HANKAKU) if ch != " " else " "
+                random.choice(scramble_chars) if ch != " " else " "
                 for ch in line[2:]
             )
             _write(f"\033[{logo_top + idx};1H\033[K{_c(238)}{scrambled}{_R}")
@@ -344,21 +400,27 @@ def show_startup_banner(
         # Only runs if terminal is wide enough for side panel.
         # Uses _render_frame() for every update — logo + side text rendered
         # atomically in one top-to-bottom pass, no cursor save/restore needed.
-        term_w = shutil.get_terminal_size((80, 24)).columns
+        term_w = max(shutil.get_terminal_size((80, 24)).columns, 80)
         if term_w >= 75:
-            _POEM = [
-                (1, "「橋」は「知」を繋ぎ、",          _c(220), set()),
-                (2, "「知」は未来 を拓く。",            _c(75),  {4, 5}),
-                (4, "The Bridge connects Intellect;",   _c(244), set()),
-                (5, "Intellect opens the future.",      _c(247), set()),
-            ]
+            if full_glyphs:
+                _POEM = [
+                    (1, "「橋」は「知」を繋ぎ、",          _c(220), set()),
+                    (2, "「知」は未来 を拓く。",            _c(75),  {4, 5}),
+                    (4, "The Bridge connects Intellect;",   _c(244), set()),
+                    (5, "Intellect opens the future.",      _c(247), set()),
+                ]
+            else:
+                _POEM = [
+                    (1, "The Bridge connects Intellect;",   _c(244), set()),
+                    (2, "Intellect opens the future.",      _c(247), set()),
+                ]
 
             # possession: logo corrupts, side fills with matching noise
             for frame in range(11):
                 rate     = frame * 0.09
                 logo_col = 202 if frame % 2 == 0 else 196
                 side_map = {
-                    r: (''.join(random.choice(_FW_ALL) for _ in range(len(txt))),
+                    r: (''.join(random.choice(poem_noise_chars) if ch != " " else " " for ch in txt),
                         _c(logo_col))
                     for r, txt, _, _ in _POEM
                 }
@@ -400,7 +462,7 @@ def show_startup_banner(
                             else:
                                 row_out.append(f"{col_code}{s['ch']}{_R}")
                         else:
-                            noise = random.choice(_FW_ALL) if s["ch"] != " " else " "
+                            noise = random.choice(poem_noise_chars) if s["ch"] != " " else " "
                             row_out.append(f"{_c(202)}{noise}{_R}")
                     side_map[logo_row] = ("".join(row_out), "")
                 _render_frame(_LOGO, list(_GRAD), side_map, logo_top=logo_top)
@@ -427,10 +489,17 @@ def show_startup_banner(
         # ── subtitle block ────────────────────────────────────────────────────
         _BLINK = "\033[5m"
         print(f"  {_c(75)}{_BOLD}Universal Flexible Safe AI Agents{_R}  {_c(244)}{_BLINK}Powered by CLI backends{_R}")
-        print(f"  {_c(61)}ユニバーサル・フレキシブルな安全AIエージェント{_R}  {_c(250)}{_BLINK}CLIバックエンド駆動{_R}")
+        if full_glyphs:
+            print(f"  {_c(61)}ユニバーサル・フレキシブルな安全AIエージェント{_R}  {_c(250)}{_BLINK}CLIバックエンド駆動{_R}")
+        else:
+            print(f"  {_c(61)}Flexible local AI orchestration{_R}  {_c(250)}{_BLINK}CLI backend powered{_R}")
         print()
-        print(f"  {_c(240)}デザインド・バイ・バリー・リー  エーアイ・ツール・シヨウ{_R}")
-        print(f"  {_c(238)}© 2026 Barry Li  ·  {_c(245)}MIT License{_R}")
+        if full_glyphs:
+            print(f"  {_c(240)}デザインド・バイ・バリー・リー  エーアイ・ツール・シヨウ{_R}")
+            print(f"  {_c(238)}© 2026 Barry Li  ·  {_c(245)}MIT License{_R}")
+        else:
+            print(f"  {_c(240)}Designed by Barry Li  ·  AI tool usage{_R}")
+            print(f"  {_c(238)}(c) 2026 Barry Li  ·  {_c(245)}MIT License{_R}")
 
         if logo_only:
             print()
@@ -438,8 +507,9 @@ def show_startup_banner(
             return
 
         # ── Phase 3 : status table ────────────────────────────────────────────
-        w    = min(shutil.get_terminal_size((80, 24)).columns, 80)
-        rule = f"  {_c(239)}{'─' * (w - 4)}{_R}"
+        w    = min(max(shutil.get_terminal_size((80, 24)).columns, 80), 80)
+        rule_char = "─" if full_glyphs else "-"
+        rule = f"  {_c(239)}{rule_char * (w - 4)}{_R}"
 
         print()
         print(rule)
@@ -464,7 +534,7 @@ def show_startup_banner(
             print()
             print(f"  {_c(180)}skipped  (backend unavailable):{_R}")
             for name, reason in skipped_agents:
-                print(f"  {_c(203)}  ✗ {name:<14}{_R}{_c(240)}{reason}{_R}")
+                print(f"  {_c(203)}  {symbols['failed']} {name:<14}{_R}{_c(240)}{reason}{_R}")
             print(f"  {_c(240)}use /start to bring them online later{_R}")
 
         print()
@@ -484,30 +554,30 @@ def show_startup_banner(
             for n in agent_names:
                 s = boot_state.get(n, "pending")
                 if s == "online":
-                    print(f"  {_c(108)}✓{_R}  {_c(108)}{n}{_R}")
+                    print(f"  {_c(108)}{symbols['online']}{_R}  {_c(108)}{n}{_R}")
                 elif s == "local":
-                    print(f"  {_c(179)}⚡{_R} {_c(179)}{n}  local mode{_R}")
+                    print(f"  {_c(179)}{symbols['local']}{_R} {_c(179)}{n}  local mode{_R}")
                 elif s == "failed":
-                    print(f"  {_c(203)}✗{_R}  {_c(240)}{n}  failed{_R}")
+                    print(f"  {_c(203)}{symbols['failed']}{_R}  {_c(240)}{n}  failed{_R}")
                 else:
                     reason = (boot_reason or {}).get(n, "")
                     suffix = f" ({reason})" if reason else ""
-                    print(f"  {_c(75)}⠙{_R}  {_c(244)}{n}  still connecting…{suffix}{_R}")
+                    print(f"  {_c(75)}{symbols['connecting']}{_R}  {_c(244)}{n}  still connecting{symbols['ellipsis']}{suffix}{_R}")
                 sys.stdout.flush()
                 time.sleep(0.05)
             
             for n in (inactive_agents or []):
-                print(f"  {_c(238)}•  {n}{_R}")
+                print(f"  {_c(238)}{symbols['inactive']}  {n}{_R}")
                 sys.stdout.flush()
                 time.sleep(0.02)
         else:
-            _simple_resolve("loading agents…",
+            _simple_resolve(f"loading agents{symbols['ellipsis']}",
                             f"{len(agent_names)} agents queued", _c(108), secs=0.7)
             if workbench_port:
-                _simple_resolve("workbench…",
+                _simple_resolve(f"workbench{symbols['ellipsis']}",
                                 f"workbench :{workbench_port}", _c(108), secs=0.4)
             if wa_enabled:
-                _simple_resolve("whatsapp transport…",
+                _simple_resolve(f"whatsapp transport{symbols['ellipsis']}",
                                 "whatsapp active", _c(108), secs=0.4)
 
         print()

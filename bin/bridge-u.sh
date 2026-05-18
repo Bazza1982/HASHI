@@ -45,6 +45,12 @@ export PYTHONUTF8=1
 export PYTHONIOENCODING=utf-8
 export LANG="${LANG:-C.UTF-8}"
 export LC_CTYPE="${LC_CTYPE:-C.UTF-8}"
+if [[ -n "${WSL_INTEROP:-}" || -n "${WSL_DISTRO_NAME:-}" ]]; then
+    # Windows-hosted WSL terminals commonly render ANSI/block art correctly
+    # while lacking CJK glyph fallback. Keep the rich HASHI animation, but use
+    # a Latin-safe text profile unless the operator opts into full CJK glyphs.
+    export BRIDGE_BANNER_GLYPH_PROFILE="${BRIDGE_BANNER_GLYPH_PROFILE:-latin}"
+fi
 
 # Options
 WORKBENCH_LAUNCH=0
