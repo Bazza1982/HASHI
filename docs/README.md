@@ -16,6 +16,7 @@ This directory contains developer documentation and operational notes for HASHI.
 - [tools.md](tools.md) — Tools & operations reference
 - [WORKBENCH_NOTES.md](WORKBENCH_NOTES.md) — Workbench/runtime semantics
 - [HASHI_SLIM_CORE_ARCHITECTURE.md](HASHI_SLIM_CORE_ARCHITECTURE.md) — v3.2 slim core architecture and hot manager rebuild contract
+- [HASHI_LAYERED_RUNTIME_BOUNDARIES.md](HASHI_LAYERED_RUNTIME_BOUNDARIES.md) — four-layer HASHI boundary: protected core, hot-reloadable functions, platform config, and instance config
 - [HASHI_CORE_SLIMMING_PLAN.md](HASHI_CORE_SLIMMING_PLAN.md) — implementation plan and acceptance record for the slim core migration
 - [WRAPPER_AGENT_MODE_PLAN.md](WRAPPER_AGENT_MODE_PLAN.md) — implemented v3.2 wrapper agent mode design, command model, state contract, and acceptance record
 - [API_GUIDE.md](API_GUIDE.md) — OpenAI-compatible API Gateway guide, including per-instance gateway port rules
@@ -25,6 +26,8 @@ This directory contains developer documentation and operational notes for HASHI.
 - [SUPERLOOP_PLAN.md](SUPERLOOP_PLAN.md) — draft architecture plan for a long-running loop controller above Nagare
 - [HASHI_REMOTE_SIDE_PROGRAM_UPGRADE_PLAN.md](HASHI_REMOTE_SIDE_PROGRAM_UPGRADE_PLAN.md) — comprehensive plan to make Hashi Remote a supervised side program with backward-compatible rescue
 - [HASHI_REMOTE_RESCUE_PROTOCOL.md](HASHI_REMOTE_RESCUE_PROTOCOL.md) — Remote sidecar survival model and fixed HASHI start/status rescue endpoints
+- [HASHI_REMOTE_PLATFORM_PROFILES_PLAN.md](HASHI_REMOTE_PLATFORM_PROFILES_PLAN.md) — platform differentiation plan for WSL, Windows sidecars, WatchTower, LAN peers, and validation aliases without forking `main`
+- [HASHI2_WSL_STABLE_PORT_ROLLOUT_PLAN.md](HASHI2_WSL_STABLE_PORT_ROLLOUT_PLAN.md) — staged HASHI2 WSL rollout and full-function validation plan for stable Remote port allocation
 - [AUDIT_VIBE_CODING_SUPERLOOP.md](AUDIT_VIBE_CODING_SUPERLOOP.md) — end-to-end vibe-coded product superloop with mandatory independent reviews and live runtime exit gates
 - [HASHI_VOICE_BRIDGE_PLAN.md](HASHI_VOICE_BRIDGE_PLAN.md) — local-first voice runtime plan for the WhatsApp Desktop call bridge and future provider transports
 
