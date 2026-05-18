@@ -41,12 +41,95 @@ def _latest_recording_id(store: SuperloopStore) -> str | None:
     return candidates[0].name
 
 
+def _template_cards(store: SuperloopStore) -> list[dict[str, str]]:
+    templates_root = store.root_dir / "templates"
+    if not templates_root.exists():
+        return []
+    cards: list[dict[str, str]] = []
+    for template_dir in sorted((item for item in templates_root.iterdir() if item.is_dir()), key=lambda item: item.name.lower()):
+        title = template_dir.name.replace("_", " ").strip() or template_dir.name
+        purpose = "No README summary found."
+        readme_path = template_dir / "README.md"
+        if readme_path.exists():
+            try:
+                lines = readme_path.read_text(encoding="utf-8").splitlines()
+            except Exception:
+                lines = []
+            for line in lines:
+                stripped = line.strip()
+                if stripped.startswith("# "):
+                    title = stripped[2:].strip() or title
+                    break
+            for idx, line in enumerate(lines):
+                if line.strip().lower() == "## purpose":
+                    snippet: list[str] = []
+                    for body_line in lines[idx + 1 :]:
+                        stripped = body_line.strip()
+                        if not stripped:
+                            if snippet:
+                                break
+                            continue
+                        if stripped.startswith("#"):
+                            break
+                        snippet.append(stripped)
+                    if snippet:
+                        purpose = " ".join(snippet)
+                    break
+        includes: list[str] = []
+        if readme_path.exists():
+            includes.append("README")
+        if (template_dir / "taskboard.template.json").exists():
+            includes.append("taskboard")
+        if (template_dir / "roles.template.json").exists():
+            includes.append("roles")
+        if (template_dir / "evidence.schema.md").exists():
+            includes.append("evidence")
+        cards.append(
+            {
+                "slug": template_dir.name,
+                "title": title,
+                "purpose": purpose,
+                "includes": " · ".join(includes) if includes else "template files",
+            }
+        )
+    return cards
+
+
+def _template_list_text(store: SuperloopStore) -> str:
+    cards = _template_cards(store)
+    if not cards:
+        return (
+            "📚 Superloop 模板列表\n\n"
+            "当前未发现模板。\n"
+            "路径: `superloops/templates/`"
+        )
+    lines = [
+        "📚 Superloop 模板列表",
+        f"共 `{len(cards)}` 套模板，路径 `superloops/templates/`",
+        "",
+    ]
+    for index, card in enumerate(cards, start=1):
+        lines.extend(
+            [
+                f"{index}. **{card['title']}**",
+                f"slug: `{card['slug']}`",
+                f"用途: {card['purpose']}",
+                f"包含: `{card['includes']}`",
+                "",
+            ]
+        )
+    lines.append("提示: 细节可直接打开 `superloops/templates/<slug>/README.md`")
+    return "\n".join(lines)
+
+
 def _help_text() -> str:
     return (
         "🧭 Superloop 控制台\n\n"
         "🚀 快速开始\n"
         "/superloop quickstart <goal>\n"
         "/superloop wizard <goal>\n\n"
+        "📚 模板\n"
+        "/superloop list\n\n"
         "🎬 Recording\n"
         "/superloop record start <goal>\n"
         "/superloop record status [recording_id]\n"
@@ -175,6 +258,10 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
             ),
             parse_mode="Markdown",
         )
+        return
+
+    if lowered[:1] == ["list"]:
+        await runtime._reply_text(update, _template_list_text(store), parse_mode="Markdown")
         return
 
     if lowered[:2] == ["record", "start"]:
