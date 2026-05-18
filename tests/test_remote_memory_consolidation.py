@@ -5,10 +5,24 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from scripts.remote_memory_consolidation import main
-from scripts.wiki.config import WikiConfig
-from scripts.wiki.fetcher import fetch_new_memories
-from scripts.wiki.state import WikiState
+
+try:
+    from scripts.wiki.config import WikiConfig
+    from scripts.wiki.fetcher import fetch_new_memories
+    from scripts.wiki.state import WikiState
+except ModuleNotFoundError:  # scripts/wiki is a local generated pipeline on some instances.
+    WikiConfig = None
+    WikiState = None
+    fetch_new_memories = None
+
+
+requires_local_wiki_pipeline = pytest.mark.skipif(
+    WikiConfig is None or WikiState is None or fetch_new_memories is None,
+    reason="local scripts/wiki pipeline is not present in this checkout",
+)
 
 
 def test_export_dry_run_does_not_write_batch(tmp_path: Path) -> None:
@@ -26,6 +40,7 @@ def test_export_dry_run_does_not_write_batch(tmp_path: Path) -> None:
     assert not (root / "private" / "remote_memory_export").exists()
 
 
+@requires_local_wiki_pipeline
 def test_export_and_import_are_idempotent(tmp_path: Path) -> None:
     root = tmp_path
     workspace = root / "workspaces" / "sakura"
