@@ -20,6 +20,8 @@ __pycache__/
 .bridge_u_lang.txt
 scheduler_state.json
 .hashi_onboarding_complete
+runtime_port_assignments.json
+.runtime_port_assignments.lock
 
 # Logs and runtime output
 logs/
