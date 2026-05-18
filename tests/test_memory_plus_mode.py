@@ -18,12 +18,16 @@ from orchestrator.memory_plus_mode import (  # noqa: E402
     MEMORY_PLUS_OBSERVER_FACTORY,
     MEMORY_PLUS_OPEN,
     MemoryPlusObserver,
+    append_memory_plus_manual_note,
+    clear_memory_plus_notepad,
     ensure_memory_plus_notepad,
     ensure_memory_plus_observer,
     extract_memory_plus_update,
     extract_memory_plus_update_details,
     memory_plus_should_write,
     memory_plus_write_reason,
+    read_memory_plus_notepad,
+    replace_memory_plus_notepad,
     write_memory_plus_diagnostic,
 )
 from orchestrator.post_turn_observer import TurnContextRequest  # noqa: E402
@@ -75,6 +79,8 @@ def test_memory_plus_provider_injects_notepad_and_protocol(tmp_path: Path) -> No
     assert "Known preference" in sections[0][1]
     assert MEMORY_PLUS_OPEN in sections[0][1]
     assert "MUST append exactly one machine-readable block" in sections[0][1]
+    assert "prefer, dislike, avoid, usually buy" in sections[0][1]
+    assert "visible answer says you remembered" in sections[0][1]
     assert "project nicknames, folder labels, shelf codes" in sections[0][1]
     assert "do not omit the block" in sections[0][1]
 
@@ -167,3 +173,23 @@ def test_memory_plus_diagnostic_logs_false_without_notepad_write(tmp_path: Path)
     assert row["request_id"] == "req-2"
     assert row["reason"] == "should_write_false"
     assert row["write_result"] is False
+
+
+def test_memory_plus_notepad_manual_controls(tmp_path: Path) -> None:
+    workspace = tmp_path / "sakura"
+    workspace.mkdir()
+
+    append_memory_plus_manual_note(workspace, "Dad wants short operational summaries")
+    view = read_memory_plus_notepad(workspace)
+    assert view.is_empty is False
+    assert "Dad wants short operational summaries" in view.body
+
+    replace_memory_plus_notepad(workspace, "- Manual: replace today's continuity")
+    replaced = read_memory_plus_notepad(workspace)
+    assert "replace today's continuity" in replaced.body
+    assert "Dad wants short operational summaries" not in replaced.body
+
+    clear_memory_plus_notepad(workspace)
+    cleared = read_memory_plus_notepad(workspace)
+    assert cleared.is_empty is True
+    assert "## Continuity" in cleared.content

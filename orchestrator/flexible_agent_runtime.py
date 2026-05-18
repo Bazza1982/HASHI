@@ -76,6 +76,12 @@ from orchestrator.post_turn_observer import (
     PreTurnContextProvider,
 )
 from orchestrator import runtime_observers
+from orchestrator.memory_plus_mode import (
+    append_memory_plus_manual_note,
+    clear_memory_plus_notepad,
+    read_memory_plus_notepad,
+    replace_memory_plus_notepad,
+)
 from orchestrator.usecomputer_mode import (
     build_usecomputer_task_prompt,
     get_usecomputer_examples_text,
@@ -336,7 +342,7 @@ class FlexibleAgentRuntime:
                     self._enabled_commands.add(name.strip().lstrip("/").lower())
 
         # help/status/new/fresh/wipe/clear/model/effort/mode should always be available
-        self._enabled_commands.update({"help", "status", "new", "fresh", "wipe", "reset", "clear", "memory", "model", "effort", "mode", "wrapper", "audit", "core", "wrap", "jobs", "verbose", "think", "voice", "whisper", "transfer", "fork", "cos", "long", "end", "oll", "browser", "exp"})
+        self._enabled_commands.update({"help", "status", "new", "fresh", "wipe", "reset", "clear", "memory", "notepad", "model", "effort", "mode", "wrapper", "audit", "core", "wrap", "jobs", "verbose", "think", "voice", "whisper", "transfer", "fork", "cos", "long", "end", "oll", "browser", "exp"})
 
     def _is_command_allowed(self, cmd: str) -> bool:
         cmd = (cmd or "").lstrip("/").lower()
@@ -5601,6 +5607,193 @@ class FlexibleAgentRuntime:
 
     async def cmd_memory(self, update: Update, context: Any):
         await runtime_workspace.cmd_memory(self, update, context)
+
+    async def cmd_notepad(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        args = [str(arg) for arg in (context.args or [])]
+        action = (args[0].strip().lower() if args else "show")
+        if action in {"show", "status", "view"}:
+            text, markup = self._notepad_view_payload()
+            await self._reply_text(
+                update,
+                text,
+                parse_mode="HTML",
+                reply_markup=markup,
+            )
+            return
+
+        if action in {"edit", "add", "append"}:
+            text = self._notepad_command_tail(update, context, action)
+            if not text:
+                await self._reply_text(
+                    update,
+                    self._notepad_help_text("edit"),
+                    parse_mode="HTML",
+                    reply_markup=self._notepad_back_keyboard(),
+                )
+                return
+            path = append_memory_plus_manual_note(self.workspace_dir, text)
+            await self._reply_text(
+                update,
+                f"✅ Memory+ notepad updated.\nPath: <code>{html.escape(str(path))}</code>",
+                parse_mode="HTML",
+                reply_markup=self._notepad_keyboard(),
+            )
+            return
+
+        if action == "replace":
+            text = self._notepad_command_tail(update, context, action)
+            if not text:
+                await self._reply_text(
+                    update,
+                    self._notepad_help_text("replace"),
+                    parse_mode="HTML",
+                    reply_markup=self._notepad_back_keyboard(),
+                )
+                return
+            path = replace_memory_plus_notepad(self.workspace_dir, text)
+            await self._reply_text(
+                update,
+                f"✅ Memory+ notepad replaced.\nPath: <code>{html.escape(str(path))}</code>",
+                parse_mode="HTML",
+                reply_markup=self._notepad_keyboard(),
+            )
+            return
+
+        if action == "clear":
+            path = clear_memory_plus_notepad(self.workspace_dir)
+            await self._reply_text(
+                update,
+                f"🧹 Memory+ notepad cleared for today.\nPath: <code>{html.escape(str(path))}</code>",
+                parse_mode="HTML",
+                reply_markup=self._notepad_keyboard(),
+            )
+            return
+
+        await self._reply_text(
+            update,
+            self._notepad_help_text("menu"),
+            parse_mode="HTML",
+            reply_markup=self._notepad_keyboard(),
+        )
+
+    def _notepad_keyboard(self) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("🔄 Refresh", callback_data="npad:refresh"),
+                    InlineKeyboardButton("➕ Add note", callback_data="npad:help_edit"),
+                ],
+                [
+                    InlineKeyboardButton("✏️ Replace body", callback_data="npad:help_replace"),
+                    InlineKeyboardButton("🧹 Clear", callback_data="npad:clear_confirm"),
+                ],
+            ]
+        )
+
+    def _notepad_back_keyboard(self) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to notepad", callback_data="npad:refresh")]])
+
+    def _notepad_clear_confirm_keyboard(self) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("✅ Yes, clear", callback_data="npad:clear_now"),
+                    InlineKeyboardButton("Cancel", callback_data="npad:refresh"),
+                ]
+            ]
+        )
+
+    def _notepad_view_payload(self) -> tuple[str, InlineKeyboardMarkup]:
+        view = read_memory_plus_notepad(self.workspace_dir)
+        body = view.body.strip()
+        if not body:
+            body = "(empty)"
+        max_body_chars = 3000
+        truncated = len(body) > max_body_chars
+        if truncated:
+            body = body[-max_body_chars:]
+        header = [
+            f"<b>Memory+ Notepad — {html.escape(self.name)}</b>",
+            f"• Date: <code>{html.escape(view.date or 'unknown')}</code>",
+            f"• Empty: <code>{str(view.is_empty).lower()}</code>",
+            "",
+            "Use the buttons below to refresh, add a manual note, replace the body, or clear today's layer.",
+        ]
+        if truncated:
+            header.append(f"• Showing last <code>{max_body_chars}</code> chars")
+        return "\n".join(header) + "\n\n<pre>" + html.escape(body) + "</pre>", self._notepad_keyboard()
+
+    def _notepad_help_text(self, action: str) -> str:
+        if action == "edit":
+            return (
+                "<b>Add a manual notepad note</b>\n\n"
+                "Send a message like:\n"
+                "<code>/notepad edit Dad prefers short operational summaries.</code>\n\n"
+                "This appends to today's memory+ notepad without replacing automatic notes."
+            )
+        if action == "replace":
+            return (
+                "<b>Replace today's notepad body</b>\n\n"
+                "Send a message like:\n"
+                "<code>/notepad replace - Manual: Dad prefers jasmine rice and avoids eggplant.</code>\n\n"
+                "This replaces today's continuity body, so use it when the current notepad is wrong or noisy."
+            )
+        return (
+            "<b>Memory+ Notepad controls</b>\n\n"
+            "• <code>/notepad</code> — open this panel\n"
+            "• <code>/notepad edit &lt;text&gt;</code> — append a manual note\n"
+            "• <code>/notepad replace &lt;text&gt;</code> — replace today's body\n"
+            "• <code>/notepad clear</code> — clear today's body"
+        )
+
+    def _notepad_command_tail(self, update: Update, context: Any, action: str) -> str:
+        raw = getattr(getattr(update, "message", None), "text", "") or ""
+        if raw:
+            parts = raw.split(None, 2)
+            if len(parts) >= 3 and parts[1].strip().lower() == action:
+                return parts[2].strip()
+        args = [str(arg) for arg in (context.args or [])]
+        if args and args[0].strip().lower() == action:
+            return " ".join(args[1:]).strip()
+        return " ".join(args).strip()
+
+    async def callback_notepad(self, update: Update, context: Any):
+        query = update.callback_query
+        if not self._is_authorized_user(query.from_user.id):
+            return
+        data = query.data or ""
+        action = data.split(":", 1)[1] if ":" in data else ""
+        if action == "refresh":
+            text, markup = self._notepad_view_payload()
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+        elif action == "help_edit":
+            await query.edit_message_text(
+                self._notepad_help_text("edit"),
+                parse_mode="HTML",
+                reply_markup=self._notepad_back_keyboard(),
+            )
+        elif action == "help_replace":
+            await query.edit_message_text(
+                self._notepad_help_text("replace"),
+                parse_mode="HTML",
+                reply_markup=self._notepad_back_keyboard(),
+            )
+        elif action == "clear_confirm":
+            await query.edit_message_text(
+                "🧹 <b>Clear today's memory+ notepad?</b>\n\nThis removes only today's context layer for this agent.",
+                parse_mode="HTML",
+                reply_markup=self._notepad_clear_confirm_keyboard(),
+            )
+        elif action == "clear_now":
+            clear_memory_plus_notepad(self.workspace_dir)
+            text, markup = self._notepad_view_payload()
+            await query.edit_message_text("🧹 Cleared.\n\n" + text, parse_mode="HTML", reply_markup=markup)
+        else:
+            await query.answer("Unknown notepad action.", show_alert=True)
+            return
+        await query.answer()
 
     async def cmd_wipe(self, update: Update, context: Any):
         await runtime_workspace.cmd_wipe(self, update, context)

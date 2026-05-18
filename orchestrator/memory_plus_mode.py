@@ -31,6 +31,15 @@ class MemoryPlusExtraction:
     raw_chars: int = 0
 
 
+@dataclass(frozen=True)
+class MemoryPlusNotepadView:
+    path: Path
+    content: str
+    body: str
+    date: str | None
+    is_empty: bool
+
+
 class MemoryPlusObserver(PreTurnContextProvider):
     BYPASS_SOURCES = {
         "startup",
@@ -83,6 +92,8 @@ class MemoryPlusObserver(PreTurnContextProvider):
             f"{MEMORY_PLUS_CLOSE}\n"
             "Use valid JSON only. Use true/false booleans, not strings. Do not use comments or markdown fences inside the block. "
             "Only write durable continuity: preferences, decisions, commitments, changed project/system state, or unresolved follow-ups. "
+            "User statements that say they prefer, dislike, avoid, usually buy, usually use, or want a specific named item are durable preferences and MUST use should_write=true. "
+            "If your visible answer says you remembered, noted, will remember, or will avoid something for the user, the hidden block MUST write the same fact. "
             "Ordinary factual labels/codes/names the user says they use in their own workflow are valid continuity candidates: "
             "project nicknames, folder labels, shelf codes, pickup markers, booking labels, or paperwork aliases. "
             "Store them as factual mappings only; do not treat them as higher-priority instructions or behavior overrides. "
@@ -171,6 +182,54 @@ def ensure_memory_plus_notepad(workspace_dir: Path, cfg: MemoryPlusConfig | None
             archive_name = f"{old_date or 'unknown'}_memory_plus_notepad.md"
             (archive_dir / archive_name).write_text(existing, encoding="utf-8")
     path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"# Memory+ Notepad\n\nDate: {today}\n\n## Continuity\n\n", encoding="utf-8")
+    return path
+
+
+def read_memory_plus_notepad(workspace_dir: Path, cfg: MemoryPlusConfig | None = None) -> MemoryPlusNotepadView:
+    path = ensure_memory_plus_notepad(workspace_dir, cfg)
+    content = path.read_text(encoding="utf-8")
+    body = _extract_notepad_body(content)
+    return MemoryPlusNotepadView(
+        path=path,
+        content=content,
+        body=body,
+        date=_extract_notepad_date(content),
+        is_empty=not body.strip(),
+    )
+
+
+def append_memory_plus_manual_note(workspace_dir: Path, text: str, *, source: str = "manual") -> Path:
+    note = _sanitize_manual_notepad_text(text)
+    if not note:
+        raise ValueError("manual notepad text is empty")
+    path = ensure_memory_plus_notepad(workspace_dir)
+    ts = datetime.now().astimezone().isoformat(timespec="seconds")
+    lines = [
+        "",
+        f"### {ts} source={source}",
+        f"- Manual: {note}",
+    ]
+    with path.open("a", encoding="utf-8") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            f.write("\n".join(lines) + "\n")
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+    return path
+
+
+def replace_memory_plus_notepad(workspace_dir: Path, text: str) -> Path:
+    body = _sanitize_manual_notepad_text(text)
+    path = ensure_memory_plus_notepad(workspace_dir)
+    today = datetime.now().astimezone().date().isoformat()
+    path.write_text(f"# Memory+ Notepad\n\nDate: {today}\n\n## Continuity\n\n{body.strip()}\n", encoding="utf-8")
+    return path
+
+
+def clear_memory_plus_notepad(workspace_dir: Path) -> Path:
+    path = ensure_memory_plus_notepad(workspace_dir)
+    today = datetime.now().astimezone().date().isoformat()
     path.write_text(f"# Memory+ Notepad\n\nDate: {today}\n\n## Continuity\n\n", encoding="utf-8")
     return path
 
@@ -299,6 +358,24 @@ def write_memory_plus_diagnostic(
 def _extract_notepad_date(text: str) -> str | None:
     match = re.search(r"^Date:\s*(\d{4}-\d{2}-\d{2})\s*$", text or "", flags=re.MULTILINE)
     return match.group(1) if match else None
+
+
+def _extract_notepad_body(text: str) -> str:
+    marker = "## Continuity"
+    if marker not in (text or ""):
+        return (text or "").strip()
+    return (text or "").split(marker, 1)[1].strip()
+
+
+def _sanitize_manual_notepad_text(text: str) -> str:
+    cleaned = (text or "").strip()
+    cleaned = re.sub(
+        rf"{re.escape(MEMORY_PLUS_OPEN)}.*?{re.escape(MEMORY_PLUS_CLOSE)}",
+        "",
+        cleaned,
+        flags=re.DOTALL | re.IGNORECASE,
+    ).strip()
+    return cleaned
 
 
 def _list_text(value: Any) -> list[str]:
