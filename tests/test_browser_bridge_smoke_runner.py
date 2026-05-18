@@ -99,7 +99,7 @@ def test_build_smoke_steps(tmp_path: Path) -> None:
         "get_text",
         "screenshot",
     ]
-    assert steps[1]["argv"][1].endswith("tools/browser_bridge_smoke_runner.py")
+    assert steps[1]["argv"][1].replace("\\", "/").endswith("tools/browser_bridge_smoke_runner.py")
     assert "--wait-for-socket-s" in steps[1]["argv"]
     assert steps[-1]["argv"][-1].endswith("smoke_screenshot.png")
 
