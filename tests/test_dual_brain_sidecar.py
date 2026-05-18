@@ -38,7 +38,7 @@ def test_resolve_backend_reads_requested_agent_state(tmp_path: Path) -> None:
 
     assert resolved.backend == "codex-cli"
     assert resolved.model == "akane-model"
-    assert resolved.source.endswith("workspaces/akane/state.json")
+    assert Path(resolved.source).parts[-3:] == ("workspaces", "akane", "state.json")
 
 
 def test_extract_json_object_uses_first_balanced_object() -> None:

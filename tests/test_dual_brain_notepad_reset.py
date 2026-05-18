@@ -4,7 +4,6 @@ import json
 import sys
 from datetime import datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 
 HASHI_ROOT = Path(__file__).resolve().parents[1]
@@ -29,7 +28,7 @@ def test_reset_notepads_archives_and_clears_all_agents(tmp_path: Path) -> None:
         [root],
         trigger="test-wiki",
         publish_id="publish-1",
-        now=datetime(2026, 5, 16, 4, 30, tzinfo=ZoneInfo("Australia/Sydney")),
+        now=datetime(2026, 5, 16, 4, 30, tzinfo=reset._local_timezone()),
     )
 
     statuses = {(result.agent, result.status) for result in results}
@@ -59,7 +58,7 @@ def test_reset_notepads_dry_run_does_not_clear(tmp_path: Path) -> None:
         [root],
         dry_run=True,
         trigger="test",
-        now=datetime(2026, 5, 16, 4, 30, tzinfo=ZoneInfo("Australia/Sydney")),
+        now=datetime(2026, 5, 16, 4, 30, tzinfo=reset._local_timezone()),
     )
 
     assert [(result.agent, result.status) for result in results] == [("lily", "dry-run")]
