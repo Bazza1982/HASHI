@@ -1,0 +1,374 @@
+[
+  {
+    "task_id": "P01",
+    "phase": "preflight",
+    "title": "Verify database connectivity and data counts",
+    "owner": "worker",
+    "status": "pending",
+    "required_evidence": [
+      "db_connection_confirmed",
+      "han_scripture_count",
+      "pali_scripture_count",
+      "known_parallels_count",
+      "unmatched_han_count"
+    ]
+  },
+  {
+    "task_id": "P02",
+    "phase": "preflight",
+    "title": "Verify HASHI API translation endpoint health and model availability",
+    "owner": "worker",
+    "status": "pending",
+    "required_evidence": [
+      "api_endpoint",
+      "model_confirmed",
+      "test_translation_response",
+      "latency_estimate"
+    ]
+  },
+  {
+    "task_id": "P03",
+    "phase": "preflight",
+    "title": "Verify OpenAI embedding API access",
+    "owner": "worker",
+    "status": "pending",
+    "required_evidence": [
+      "embedding_model_confirmed",
+      "test_embedding_dimensions",
+      "api_key_valid"
+    ]
+  },
+  {
+    "task_id": "P04",
+    "phase": "preflight",
+    "title": "Lock translation prompt version and record in evidence",
+    "owner": "orchestrator",
+    "status": "pending",
+    "required_evidence": [
+      "prompt_version",
+      "prompt_text_hash",
+      "prompt_stored_path"
+    ]
+  },
+  {
+    "task_id": "P05",
+    "phase": "preflight",
+    "title": "Create experiment output directory structure",
+    "owner": "worker",
+    "status": "pending",
+    "required_evidence": [
+      "output_root",
+      "translations_dir",
+      "embeddings_dir",
+      "metrics_dir",
+      "candidates_dir"
+    ]
+  },
+  {
+    "task_id": "E1-01",
+    "phase": "phase1",
+    "title": "Draw 100 positive pairs from known parallels (stratified by collection, length, correspondence type, structure)",
+    "owner": "worker",
+    "status": "pending",
+    "depends_on": ["P01", "P02", "P03", "P04", "P05"],
+    "required_evidence": [
+      "sample_count",
+      "stratification_table",
+      "sample_file_path",
+      "ea_special_treatment_note"
+    ]
+  },
+  {
+    "task_id": "E1-02",
+    "phase": "phase1",
+    "title": "Construct 300 negative pairs — 3 tiers (easy / hard / near-miss), 100 per tier",
+    "owner": "worker",
+    "status": "pending",
+    "depends_on": ["E1-01"],
+    "required_evidence": [
+      "easy_negative_count",
+      "hard_negative_count",
+      "near_miss_negative_count",
+      "hard_negative_selection_criteria",
+      "near_miss_selection_criteria",
+      "negatives_file_path"
+    ]
+  },
+  {
+    "task_id": "E1-03",
+    "phase": "phase1",
+    "title": "Translate 100 Han sutras to modern Chinese via HASHI API (temperature=0, locked prompt v1.0)",
+    "owner": "worker",
+    "status": "pending",
+    "depends_on": ["E1-01", "P04"],
+    "required_evidence": [
+      "translations_completed",
+      "model_version_used",
+      "prompt_version_used",
+      "failed_translations",
+      "translations_output_path",
+      "total_tokens_used"
+    ]
+  },
+  {
+    "task_id": "E1-04",
+    "phase": "phase1",
+    "title": "Translation stability test — 10 sutras × 3 translation instances each",
+    "owner": "worker",
+    "status": "pending",
+    "depends_on": ["E1-03"],
+    "required_evidence": [
+      "stability_sutras_selected",
+      "instance_count_per_sutra",
+      "stability_translations_output_path",
+      "embedding_score_std_per_sutra",
+      "mean_stability_score"
+    ]
+  },
+  {
+    "task_id": "E1-05",
+    "phase": "phase1",
+    "title": "Generate embeddings for all texts — 4 strategies (whole-text, segment-max, chunk-512, structural)",
+    "owner": "worker",
+    "status": "pending",
+    "depends_on": ["E1-03", "E1-02"],
+    "required_evidence": [
+      "texts_embedded_count",
+      "strategies_completed",
+      "embeddings_output_path",
+      "total_tokens_used",
+      "any_failures"
+    ]
+  },
+  {
+    "task_id": "E1-06",
+    "phase": "phase1",
+    "title": "Compute cosine similarity matrix for all 60 pairs × 4 strategies",
+    "owner": "worker",
+    "status": "pending",
+    "depends_on": ["E1-05"],
+    "required_evidence": [
+      "similarity_matrix_path",
+      "true_pair_similarity_summary",
+      "negative_tier_similarity_summary",
+      "per_strategy_summary"
+    ]
+  },
+  {
+    "task_id": "E1-07",
+    "phase": "phase1",
+    "title": "Compute Phase 1 metrics: AUC-ROC, PR-AUC, bootstrap 95% CI, per-tier AUC, per-stratum breakdown, translation stability",
+    "owner": "worker",
+    "status": "pending",
+    "depends_on": ["E1-06", "E1-04"],
+    "required_evidence": [
+      "auc_roc_per_strategy",
+      "pr_auc_per_strategy",
+      "bootstrap_ci_lower_per_strategy",
+      "per_tier_auc_table",
+      "per_collection_auc_table",
+      "per_length_auc_table",
+      "best_strategy_identified",
+      "translation_stability_summary",
+      "metrics_report_path"
+    ]
+  },
+  {
+    "task_id": "E1-R01",
+    "phase": "phase1",
+    "title": "Akane: independent quality review of Phase 1 metrics and methodology",
+    "owner": "reviewer",
+    "status": "pending",
+    "depends_on": ["E1-07"],
+    "required_evidence": [
+      "auc_tier2_assessment",
+      "ci_lower_bound_assessment",
+      "statistical_validity_assessment",
+      "anomalies_flagged",
+      "methodology_concerns",
+      "gate_verdict",
+      "gate_rationale"
+    ]
+  },
+  {
+    "task_id": "E1-QG",
+    "phase": "phase1",
+    "title": "Orchestrator Phase 1 quality gate decision (AUC > 0.80 Tier-2, CI lower > 0.70)",
+    "owner": "orchestrator",
+    "status": "pending",
+    "depends_on": ["E1-R01"],
+    "required_evidence": [
+      "gate_outcome",
+      "gate_basis",
+      "proceed_to_phase2_decision",
+      "fallback_action_if_fail"
+    ]
+  },
+  {
+    "task_id": "E2-01",
+    "phase": "phase2",
+    "title": "Embed all 3,413 Pali/English texts using best Phase 1 strategy",
+    "owner": "worker",
+    "status": "pending",
+    "depends_on": ["E1-QG"],
+    "condition": "E1-QG gate passed",
+    "required_evidence": [
+      "strategy_used",
+      "texts_embedded_count",
+      "embeddings_output_path",
+      "any_failures"
+    ]
+  },
+  {
+    "task_id": "E2-02",
+    "phase": "phase2",
+    "title": "Run retrieval simulation: all 1,040 known Han–Pali pairs as queries against full 3,413-text corpus",
+    "owner": "worker",
+    "status": "pending",
+    "depends_on": ["E2-01"],
+    "required_evidence": [
+      "queries_run",
+      "true_parallel_rank_distribution",
+      "retrieval_results_path"
+    ]
+  },
+  {
+    "task_id": "E2-03",
+    "phase": "phase2",
+    "title": "Compute Phase 2 retrieval metrics: Recall@1/5/10/20, MRR, per-collection, per-correspondence-type breakdown",
+    "owner": "worker",
+    "status": "pending",
+    "depends_on": ["E2-02"],
+    "required_evidence": [
+      "recall_at_1",
+      "recall_at_5",
+      "recall_at_10",
+      "recall_at_20",
+      "mrr",
+      "median_rank",
+      "per_collection_table",
+      "per_correspondence_type_table",
+      "metrics_report_path"
+    ]
+  },
+  {
+    "task_id": "E2-R01",
+    "phase": "phase2",
+    "title": "Akane: independent quality review of Phase 2 retrieval metrics",
+    "owner": "reviewer",
+    "status": "pending",
+    "depends_on": ["E2-03"],
+    "required_evidence": [
+      "recall_at_10_assessment",
+      "mrr_assessment",
+      "collection_breakdown_anomalies",
+      "systematic_failure_patterns",
+      "gate_verdict",
+      "gate_rationale"
+    ]
+  },
+  {
+    "task_id": "E2-QG",
+    "phase": "phase2",
+    "title": "Orchestrator Phase 2 quality gate decision (Recall@10 > 60%, MRR > 0.40)",
+    "owner": "orchestrator",
+    "status": "pending",
+    "depends_on": ["E2-R01"],
+    "required_evidence": [
+      "gate_outcome",
+      "gate_basis",
+      "proceed_to_discovery_decision",
+      "fallback_action_if_fail"
+    ]
+  },
+  {
+    "task_id": "E2-04",
+    "phase": "phase2",
+    "title": "Discovery run: embed 625 unmatched Han sutras, collect top-20 Pali candidates each",
+    "owner": "worker",
+    "status": "pending",
+    "depends_on": ["E2-QG"],
+    "condition": "E2-QG gate passed",
+    "required_evidence": [
+      "han_sutras_queried",
+      "candidates_per_query",
+      "score_threshold_used",
+      "candidates_above_threshold",
+      "candidates_file_path"
+    ]
+  },
+  {
+    "task_id": "E2-05",
+    "phase": "phase2",
+    "title": "EA/AN special candidate report: all 51 EA sutras, score distribution, top candidates",
+    "owner": "worker",
+    "status": "pending",
+    "depends_on": ["E2-04"],
+    "required_evidence": [
+      "ea_sutras_queried",
+      "ea_score_distribution",
+      "ea_top_candidates",
+      "score_comparison_to_known_true_pairs",
+      "ea_report_path"
+    ]
+  },
+  {
+    "task_id": "E2-R02",
+    "phase": "phase2",
+    "title": "Akane: review discovery candidates and EA/AN special report for fitness for expert review",
+    "owner": "reviewer",
+    "status": "pending",
+    "depends_on": ["E2-05"],
+    "required_evidence": [
+      "candidate_quality_assessment",
+      "false_positive_pattern_assessment",
+      "ea_candidate_assessment",
+      "fitness_for_expert_review_verdict",
+      "presentation_recommendations"
+    ]
+  },
+  {
+    "task_id": "F01",
+    "phase": "final",
+    "title": "Update research memo with actual experiment results",
+    "owner": "orchestrator",
+    "status": "pending",
+    "depends_on": ["E2-R02"],
+    "required_evidence": [
+      "memo_path_updated",
+      "phase1_results_recorded",
+      "phase2_results_recorded",
+      "discovery_results_recorded",
+      "ea_findings_recorded"
+    ]
+  },
+  {
+    "task_id": "F02",
+    "phase": "final",
+    "title": "Drain and classify all pending worker/reviewer replies for this loop",
+    "owner": "orchestrator",
+    "status": "pending",
+    "depends_on": ["F01"],
+    "required_evidence": [
+      "pending_replies_checked",
+      "classification_log",
+      "new_blockers_found",
+      "late_contradictions_found"
+    ]
+  },
+  {
+    "task_id": "F03",
+    "phase": "final",
+    "title": "Record exit evidence and close loop",
+    "owner": "orchestrator",
+    "status": "pending",
+    "depends_on": ["F02"],
+    "required_evidence": [
+      "exit_condition_met",
+      "all_phase_gates_recorded",
+      "open_risks",
+      "next_recommended_steps",
+      "closed_at"
+    ]
+  }
+]
