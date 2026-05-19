@@ -18,6 +18,7 @@ __pycache__/
 .bridge_u_f.pid
 .bridge_u_last_agents.txt
 .bridge_u_lang.txt
+api_gateway_state.json
 scheduler_state.json
 .hashi_onboarding_complete
 runtime_port_assignments.json
@@ -167,6 +168,7 @@ tools/browser_bridge.log
 
 # Local runtime backups/state
 backups/
+.rollback/
 managed_active_heartbeats.json
 tasks.json.bak.*
 
