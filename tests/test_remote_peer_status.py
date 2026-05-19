@@ -1368,7 +1368,9 @@ def test_bootstrap_known_peers_recovers_stale_windows_remote_port(tmp_path):
     }
     manager._dedupe_bootstrap_instances = lambda instances: instances
     manager._candidate_hosts_for_entry = lambda entry: ["192.168.0.6"]
-    manager._probe_route = lambda host, port, timeout=2: host == "192.168.0.6" and int(port) == 8766
+    manager._probe_instance_route = (
+        lambda host, port, instance_id, timeout=2: host == "192.168.0.6" and int(port) == 8766 and instance_id == "INTEL"
+    )
 
     asyncio.run(manager._bootstrap_known_peers())
 
@@ -1415,7 +1417,9 @@ def test_bootstrap_known_peers_repairs_existing_offline_peer(tmp_path):
     }
     manager._dedupe_bootstrap_instances = lambda instances: instances
     manager._candidate_hosts_for_entry = lambda entry: ["192.168.0.6"]
-    manager._probe_route = lambda host, port, timeout=2: host == "192.168.0.6" and int(port) == 8766
+    manager._probe_instance_route = (
+        lambda host, port, instance_id, timeout=2: host == "192.168.0.6" and int(port) == 8766 and instance_id == "INTEL"
+    )
 
     asyncio.run(manager._bootstrap_known_peers())
 
@@ -1481,6 +1485,18 @@ def test_bootstrap_known_peers_logs_when_no_probe_ports(caplog, tmp_path):
     asyncio.run(manager._bootstrap_known_peers())
 
     assert "Bootstrap: HASHI2 has no live or fallback probe ports, skipping" in caplog.text
+
+
+def test_bootstrap_probe_rejects_mismatched_instance_identity(tmp_path):
+    manager = object.__new__(ProtocolManager)
+    manager._use_tls = False
+    manager._candidate_urls = lambda host, port, path: [f"http://{host}:{port}{path}"]
+    manager._get_json = lambda url, timeout=2: {
+        "ok": True,
+        "instance": {"instance_id": "HASHI1"},
+    }
+
+    assert manager._probe_instance_route("127.0.0.1", 8766, "WATCHTOWER_VALIDATE2") is False
 
 
 def test_live_endpoints_file_is_private(tmp_path):

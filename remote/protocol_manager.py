@@ -347,7 +347,7 @@ class ProtocolManager:
                 for remote_port in probe_ports:
                     reachable = await asyncio.get_running_loop().run_in_executor(
                         None,
-                        lambda h=host, p=int(remote_port): self._probe_route(h, p, timeout=2),
+                        lambda h=host, p=int(remote_port), iid=instance_id: self._probe_instance_route(h, p, iid, timeout=2),
                     )
                     if reachable:
                         selected_port = int(remote_port)
@@ -1238,6 +1238,22 @@ class ProtocolManager:
                 continue
             except Exception:
                 continue
+        return False
+
+    def _probe_instance_route(self, host: str, port: int, expected_instance_id: str, timeout: int = 2) -> bool:
+        expected = str(expected_instance_id or "").strip().upper()
+        for url in self._candidate_urls(host, port, "/health"):
+            try:
+                health = self._get_json(url, timeout=timeout)
+            except Exception:
+                continue
+            if not health or not health.get("ok", True):
+                continue
+            instance = health.get("instance") or {}
+            actual = str(instance.get("instance_id") or "").strip().upper()
+            if actual and actual == expected:
+                return True
+            logger.debug("Bootstrap probe ignored %s for expected %s via %s", actual or "unknown", expected, url)
         return False
 
     def resolve_forward_urls(self, instance_id: str, path: str) -> list[str]:
