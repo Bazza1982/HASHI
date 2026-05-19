@@ -35,7 +35,13 @@ def _entry_from_peer(peer: Any, *, now: float) -> tuple[str, dict[str, Any]] | N
     }
 
 
-def write_live_endpoints(root: Path | str, peers: Iterable[Any], *, preserve_existing: bool = False) -> dict[str, Any]:
+def write_live_endpoints(
+    root: Path | str,
+    peers: Iterable[Any],
+    *,
+    preserve_existing: bool = False,
+    preserve_instance_ids: set[str] | None = None,
+) -> dict[str, Any]:
     now = time.time()
     entries: dict[str, dict[str, Any]] = {}
     path = live_endpoints_path(root)
@@ -44,7 +50,14 @@ def write_live_endpoints(root: Path | str, peers: Iterable[Any], *, preserve_exi
             existing = json.loads(path.read_text(encoding="utf-8"))
             current = existing.get("endpoints") if isinstance(existing, dict) else {}
             if isinstance(current, dict):
-                entries.update({str(key): value for key, value in current.items() if isinstance(value, dict)})
+                allowed = {str(item).strip().lower() for item in preserve_instance_ids or set() if str(item).strip()}
+                entries.update(
+                    {
+                        str(key): value
+                        for key, value in current.items()
+                        if isinstance(value, dict) and (not allowed or str(key).strip().lower() in allowed)
+                    }
+                )
         except Exception:
             entries = {}
     for peer in peers:

@@ -511,10 +511,15 @@ class ProtocolManager:
     async def _refresh_peer_liveness_once(self) -> None:
         if not self._peer_registry:
             return
-        for peer in self._peer_registry.get_peers():
-            await self._refresh_single_peer_liveness(peer)
+        semaphore = asyncio.Semaphore(4)
 
-    async def _refresh_single_peer_liveness(self, peer) -> bool:
+        async def refresh(peer) -> bool:
+            async with semaphore:
+                return await self._refresh_single_peer_liveness(peer)
+
+        await asyncio.gather(*(refresh(peer) for peer in self._peer_registry.get_peers()))
+
+    async def _refresh_single_peer_liveness(self, peer, *, timeout: float = 4) -> bool:
         if not self._peer_registry or peer is None:
             return False
         candidate_hosts = self._candidate_hosts_for_peer(peer)
@@ -525,7 +530,7 @@ class ProtocolManager:
                 try:
                     health = await asyncio.get_running_loop().run_in_executor(
                         None,
-                        lambda u=url: self._get_json(u, timeout=4),
+                        lambda u=url: self._get_json(u, timeout=timeout),
                     )
                     if not health or not health.get("ok", True):
                         continue
@@ -562,6 +567,44 @@ class ProtocolManager:
                 last_error=str(last_exc or f"all health probes failed: {candidate_hosts}"),
             )
         return refreshed
+
+    async def refresh_peer_liveness_for_status(
+        self,
+        *,
+        max_age_seconds: int = 75,
+        timeout: float = 1.0,
+        max_peers: int = 6,
+    ) -> dict[str, Any]:
+        """Refresh stale/offline peer liveness before rendering operator status."""
+        if not self._peer_registry:
+            return {"checked": 0, "refreshed": 0, "skipped": 0}
+        now = int(time.time())
+        checked = 0
+        refreshed = 0
+        skipped = 0
+        for peer in self._peer_registry.get_peers():
+            props = peer.properties or {}
+            live_status = str(props.get("live_status") or "").strip().lower()
+            try:
+                last_seen_ok = int(props.get("last_seen_ok") or 0)
+            except Exception:
+                last_seen_ok = 0
+            age = now - last_seen_ok if last_seen_ok > 0 else None
+            needs_refresh = live_status in {"", "unknown", "stale", "offline"}
+            if age is None or age > max_age_seconds:
+                needs_refresh = True
+            if not needs_refresh:
+                skipped += 1
+                continue
+            if checked >= max_peers:
+                skipped += 1
+                continue
+            checked += 1
+            if await self._refresh_single_peer_liveness(peer, timeout=timeout):
+                refreshed += 1
+        if checked:
+            logger.info("Status liveness refresh: checked=%s refreshed=%s skipped=%s", checked, refreshed, skipped)
+        return {"checked": checked, "refreshed": refreshed, "skipped": skipped}
 
     async def _handshake_once(self) -> None:
         if not self._peer_registry:
