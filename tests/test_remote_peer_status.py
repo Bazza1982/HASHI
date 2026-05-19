@@ -2097,6 +2097,8 @@ def test_registry_prunes_unknown_bootstrap_instance_without_live_timestamp(tmp_p
                         "remote_port": 8766,
                         "workbench_port": 18800,
                         "_discovery": "bootstrap",
+                        "last_seen": int(time.time()),
+                        "last_seen_ok": 0,
                         "live_status": "unknown",
                         "active": True,
                     },
