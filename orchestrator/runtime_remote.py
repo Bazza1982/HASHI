@@ -281,7 +281,7 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
         return
 
     if arg == "list":
-        data, _url = await runtime._fetch_remote_json("/peers")
+        data, _url = await runtime._fetch_remote_json("/peers?refresh=1")
         peers = list((data or {}).get("peers") or [])
         if not peers:
             if data and data.get("trusted_view") is False:

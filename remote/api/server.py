@@ -643,13 +643,15 @@ def create_app(
 
     @app.get("/peers")
     async def list_peers(request: Request):
+        authenticated = try_authenticate_request(request, allow_loopback=True)
         peers = []
+        if authenticated and _protocol_manager and str(request.query_params.get("refresh") or "").lower() in {"1", "true", "yes"}:
+            await _protocol_manager.refresh_peer_liveness_for_status()
         if _peer_registry:
             if _protocol_manager:
                 peers = [_protocol_manager.get_peer_view(p) for p in _peer_registry.get_peers()]
             else:
                 peers = [p.to_dict() for p in _peer_registry.get_peers()]
-        authenticated = try_authenticate_request(request, allow_loopback=True)
         if not authenticated:
             return {"ok": True, "peers": [], "count": len(peers), "trusted_view": False}
         return {"ok": True, "peers": peers, "count": len(peers)}

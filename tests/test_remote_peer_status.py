@@ -9,6 +9,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.modules.setdefault("edge_tts", SimpleNamespace())
 sys.modules.setdefault(
@@ -239,6 +241,85 @@ def test_registry_marks_healthy_peer_stale_after_refresh_window_expires(tmp_path
     )
 
     assert status == "stale"
+
+
+def test_registry_does_not_mark_old_success_offline_without_failures(tmp_path):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    (hashi_root / "instances.json").write_text('{"instances": {}}', encoding="utf-8")
+    registry = PeerRegistry(hashi_root, "HASHI2")
+
+    now = int(time.time())
+    status = registry._derive_live_status(
+        {
+            "handshake_state": "handshake_accepted",
+            "last_seen_ok": now - 300,
+            "consecutive_failures": 0,
+        },
+        now=now,
+    )
+
+    assert status == "stale"
+
+
+@pytest.mark.asyncio
+async def test_protocol_status_refresh_recovers_reachable_cached_offline_peer(tmp_path, monkeypatch):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    (hashi_root / "instances.json").write_text('{"instances": {}}', encoding="utf-8")
+    registry = PeerRegistry(hashi_root, "HASHI1")
+    now = int(time.time())
+    registry._peers = {
+        "WATCHTOWER": PeerInfo(
+            instance_id="WATCHTOWER",
+            display_name="HASHI WatchTower",
+            host="192.168.0.211",
+            port=43766,
+            workbench_port=18800,
+            platform="windows",
+            properties={
+                "live_status": "offline",
+                "handshake_state": "handshake_accepted",
+                "last_seen_ok": now - 300,
+                "consecutive_failures": 2,
+            },
+        )
+    }
+    protocol = ProtocolManager(
+        hashi_root=hashi_root,
+        instance_info={"instance_id": "HASHI1"},
+        peer_registry=registry,
+        workbench_port=18800,
+        use_tls=False,
+    )
+
+    def fake_get_json(url: str, timeout: float = 4):
+        assert timeout == 1.0
+        return {
+            "ok": True,
+            "instance": {
+                "instance_id": "WATCHTOWER",
+                "remote_port": 43766,
+                "workbench_port": 18800,
+            },
+            "local_network_profile": {
+                "host_identity": "a9max",
+                "environment_kind": "windows",
+                "address_candidates": [{"host": "192.168.0.211", "scope": "lan"}],
+                "observed_candidates": [{"host": "192.168.0.211", "scope": "lan"}],
+            },
+        }
+
+    monkeypatch.setattr(protocol, "_get_json", fake_get_json)
+
+    result = await protocol.refresh_peer_liveness_for_status(timeout=1.0)
+
+    props = registry.get_peer("WATCHTOWER").properties
+    assert result["checked"] == 1
+    assert result["refreshed"] == 1
+    assert props["live_status"] == "online"
+    assert props["consecutive_failures"] == 0
+    assert props["last_seen_ok"] >= now
 
 
 def test_registry_refresh_success_derives_live_status_via_common_path(tmp_path):
@@ -1486,6 +1567,41 @@ def test_write_live_endpoints_can_preserve_self_endpoint(tmp_path):
     assert endpoints["hashi2"]["port"] == 8767
 
 
+def test_write_live_endpoints_can_preserve_only_selected_existing_endpoint(tmp_path):
+    write_live_endpoint(
+        tmp_path,
+        PeerInfo(
+            instance_id="HASHI9",
+            display_name="HASHI9",
+            host="192.168.0.211",
+            port=35821,
+            workbench_port=18819,
+            platform="windows",
+        ),
+    )
+    write_live_endpoint(
+        tmp_path,
+        PeerInfo(
+            instance_id="WATCHTOWER",
+            display_name="WatchTower",
+            host="192.168.0.211",
+            port=43766,
+            workbench_port=18800,
+            platform="windows",
+        ),
+    )
+    write_live_endpoints(
+        tmp_path,
+        [],
+        preserve_existing=True,
+        preserve_instance_ids={"hashi9"},
+    )
+
+    endpoints = read_live_endpoints(tmp_path)
+    assert set(endpoints) == {"hashi9"}
+    assert endpoints["hashi9"]["port"] == 35821
+
+
 def test_tailscale_discovery_uses_live_endpoint_port(monkeypatch, tmp_path):
     status_path = tmp_path / "tailscale.json"
     status_path.write_text(
@@ -1606,7 +1722,7 @@ def test_registry_prunes_legacy_alias_with_same_host_and_workbench(tmp_path):
                         "platform": "windows",
                         "api_host": "192.168.0.41",
                         "lan_ip": "192.168.0.41",
-                        "remote_port": 8766,
+                        "remote_port": 8767,
                         "workbench_port": 8779,
                         "protocol_version": "1.0",
                         "capabilities": [],
@@ -1641,7 +1757,7 @@ def test_registry_prunes_legacy_alias_with_same_host_and_workbench(tmp_path):
             instance_id="HASHI-DESKTOP",
             display_name="HASHI Desktop",
             host="192.168.0.41",
-            port=8766,
+            port=8767,
             workbench_port=8779,
             platform="windows",
             protocol_version="1.0",
@@ -1778,6 +1894,41 @@ def test_registry_keeps_distinct_live_instance_entries_with_same_host_and_workbe
 
     assert changed is False
     assert set(pruned) == {"hashi1", "watchtower"}
+
+
+def test_registry_keeps_distinct_mixed_backend_entries_with_same_host_and_workbench_but_different_remote_port(tmp_path):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    (hashi_root / "instances.json").write_text('{"instances": {}}', encoding="utf-8")
+    registry = PeerRegistry(hashi_root, "HASHI1")
+
+    instances = {
+        "hashi9": {
+            "instance_id": "HASHI9",
+            "platform": "windows",
+            "api_host": "192.168.0.211",
+            "lan_ip": "192.168.0.211",
+            "remote_port": 35821,
+            "workbench_port": 18800,
+            "_discovery": "bootstrap_fallback",
+            "live_status": "stale",
+        },
+        "watchtower": {
+            "instance_id": "WATCHTOWER",
+            "platform": "windows",
+            "api_host": "192.168.0.211",
+            "lan_ip": "192.168.0.211",
+            "remote_port": 43766,
+            "workbench_port": 18800,
+            "_discovery": "lan",
+            "live_status": "online",
+        },
+    }
+
+    pruned, changed = registry._prune_duplicate_instance_aliases(instances)
+
+    assert changed is False
+    assert set(pruned) == {"hashi9", "watchtower"}
 
 
 def test_render_remote_peer_block_keeps_remote_list_compact():

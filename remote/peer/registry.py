@@ -232,8 +232,8 @@ class PeerRegistry:
         if last_seen_ok > 0:
             age = max(0, now_ts - last_seen_ok)
             # Keep healthy peers online across the 30s liveness refresh window.
-            if age <= 75 and consecutive_failures == 0:
-                return "online"
+            if consecutive_failures == 0:
+                return "online" if age <= 75 else "stale"
             if age <= 150 and consecutive_failures < 2:
                 return "stale"
             return "offline"
@@ -488,31 +488,39 @@ class PeerRegistry:
         _add(peer.host)
         return hosts
 
-    def _instance_alias_key(self, entry: dict) -> tuple[str, int] | None:
+    def _instance_alias_key(self, entry: dict) -> tuple[str, int, int] | None:
         if not isinstance(entry, dict):
             return None
         try:
             workbench_port = int(entry.get("workbench_port") or 0)
         except Exception:
             workbench_port = 0
+        try:
+            remote_port = int(entry.get("remote_port") or entry.get("announced_port") or 0)
+        except Exception:
+            remote_port = 0
         if workbench_port <= 0:
             return None
         hosts = self._alias_host_candidates_from_entry(entry)
         if not hosts:
             return None
-        return hosts[0], workbench_port
+        return hosts[0], workbench_port, remote_port
 
-    def _peer_alias_key(self, peer: PeerInfo, observations: dict[str, PeerInfo] | None = None) -> tuple[str, int] | None:
+    def _peer_alias_key(self, peer: PeerInfo, observations: dict[str, PeerInfo] | None = None) -> tuple[str, int, int] | None:
         try:
             workbench_port = int(peer.workbench_port or 0)
         except Exception:
             workbench_port = 0
+        try:
+            remote_port = int(peer.port or 0)
+        except Exception:
+            remote_port = 0
         if workbench_port <= 0:
             return None
         hosts = self._alias_host_candidates_for_peer(peer, observations)
         if not hosts:
             return None
-        return hosts[0], workbench_port
+        return hosts[0], workbench_port, remote_port
 
     def _entry_alias_score(self, entry: dict) -> tuple[int, int, str]:
         caps = list(entry.get("capabilities") or [])
@@ -1096,7 +1104,12 @@ class PeerRegistry:
     def _sync_to_instances_json(self) -> None:
         """Write discovered peer IPs into instances.json for hchat routing."""
         try:
-            write_live_endpoints(self._root, self._peers.values(), preserve_existing=True)
+            write_live_endpoints(
+                self._root,
+                self._peers.values(),
+                preserve_existing=True,
+                preserve_instance_ids={self._self_id.lower()},
+            )
         except Exception as exc:
             logger.warning("Registry: failed to write live endpoint cache: %s", exc)
         if not self._instances_path.exists():
