@@ -26,12 +26,14 @@ import struct
 import time
 import numpy as np
 from datetime import datetime, timezone
+from pathlib import Path
 
 # ── Paths ──────────────────────────────────────────────────────
 LILY_WORKSPACE = "/home/lily/projects/hashi/workspaces/lily"
 CONSOLIDATED_DB = os.path.join(LILY_WORKSPACE, "consolidated_memory.sqlite")
 HABIT_EVAL_DB = os.path.join(LILY_WORKSPACE, "habit_evaluation.sqlite")
 CONSOLIDATION_LOG = os.path.join(LILY_WORKSPACE, "consolidation_log.jsonl")
+DEFAULT_SOURCE_CONFIG = "/home/lily/projects/hashi/private/memory_consolidation_sources.json"
 
 # BGE-M3 paths (Phase 2)
 BGE_MODEL_PATH = "/mnt/c/Users/thene/.cache/bge-m3-onnx-npu/bge-m3-int8.onnx"
@@ -40,8 +42,8 @@ BGE_DIM = 1024
 BGE_BATCH_SIZE = 16
 BGE_MAX_LENGTH = 512
 
-# Instances to scan (order matters: WSL direct first, Windows via /mnt last)
-INSTANCES = [
+# Fallback instances to scan when private config is unavailable.
+DEFAULT_INSTANCES = [
     {"name": "HASHI1", "path": "/home/lily/projects/hashi", "cross_fs": False},
     {"name": "HASHI2", "path": "/home/lily/projects/hashi2", "cross_fs": False},
     {"name": "HASHI9", "path": "/mnt/c/Users/thene/projects/HASHI", "cross_fs": True},
@@ -219,26 +221,99 @@ def get_existing_keys(conn: sqlite3.Connection) -> set:
     return set(rows)
 
 
+def load_instances(config_path: str = DEFAULT_SOURCE_CONFIG) -> list:
+    """Load memory consolidation sources from private config."""
+    path = Path(config_path)
+    print(f"Source config: {path}")
+    if not path.exists():
+        print("Source config missing; using built-in fallback instances.")
+        return DEFAULT_INSTANCES
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        raise RuntimeError(f"Failed to read source config {path}: {e}") from e
+    instances = data.get("instances")
+    if not isinstance(instances, list) or not instances:
+        raise RuntimeError(f"Source config {path} must contain a non-empty instances list")
+    loaded = []
+    for item in instances:
+        if not isinstance(item, dict):
+            raise RuntimeError(f"Invalid instance entry in {path}: {item!r}")
+        name = str(item.get("name") or "").strip()
+        root = str(item.get("path") or "").strip()
+        if not name or not root:
+            raise RuntimeError(f"Instance entry must include name and path: {item!r}")
+        loaded.append({
+            "name": name,
+            "path": root,
+            "cross_fs": bool(item.get("cross_fs", False)),
+            "exclude_agents": set(item.get("exclude_agents") or []),
+            "source_id_offset": int(item.get("source_id_offset") or 0),
+        })
+    return loaded
+
+
+def load_agent_workspace_map(instance: dict) -> dict:
+    """Map workspace directory names to configured agent ids."""
+    agents_path = os.path.join(instance["path"], "agents.json")
+    mapping = {}
+    if not os.path.isfile(agents_path):
+        return mapping
+    try:
+        with open(agents_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, IOError) as e:
+        print(f"  WARNING reading agents.json failed: {agents_path}: {e}")
+        return mapping
+    agents = data.get("agents", data if isinstance(data, list) else [])
+    if not isinstance(agents, list):
+        return mapping
+    for item in agents:
+        if not isinstance(item, dict):
+            continue
+        agent_id = item.get("id") or item.get("agent_id") or item.get("name")
+        workspace = item.get("workspace") or item.get("workspace_dir")
+        if not agent_id or not workspace:
+            continue
+        workspace_name = os.path.basename(str(workspace).rstrip("/\\"))
+        if workspace_name:
+            mapping[workspace_name] = str(agent_id)
+    return mapping
+
+
 def find_sync_agents(instance: dict) -> list:
     """Return list of (agent_id, db_path, transcript_path) for agents with memory_sync=on."""
     ws_dir = os.path.join(instance["path"], "workspaces")
     if not os.path.isdir(ws_dir):
         return []
     agents = []
-    for agent in sorted(os.listdir(ws_dir)):
-        ss = os.path.join(ws_dir, agent, "skill_state.json")
-        db = os.path.join(ws_dir, agent, "bridge_memory.sqlite")
-        transcript = os.path.join(ws_dir, agent, "transcript.jsonl")
+    workspace_map = load_agent_workspace_map(instance)
+    exclude_agents = set(instance.get("exclude_agents") or [])
+    print(f"  workspace_map_entries={len(workspace_map)} exclude_agents={sorted(exclude_agents)}")
+    for workspace_name in sorted(os.listdir(ws_dir)):
+        agent_id = workspace_map.get(workspace_name, workspace_name)
+        if agent_id in exclude_agents:
+            print(f"  {agent_id}: skipped by exclude_agents")
+            continue
+        ss = os.path.join(ws_dir, workspace_name, "skill_state.json")
+        db = os.path.join(ws_dir, workspace_name, "bridge_memory.sqlite")
+        transcript = os.path.join(ws_dir, workspace_name, "transcript.jsonl")
         if not os.path.isfile(ss) or not os.path.isfile(db):
             continue
         try:
             with open(ss) as f:
                 state = json.load(f)
             if state.get("memory_sync"):
-                agents.append((agent, db, transcript if os.path.isfile(transcript) else None))
+                agents.append((agent_id, db, transcript if os.path.isfile(transcript) else None))
         except (json.JSONDecodeError, IOError):
             continue
     return agents
+
+
+def instance_source_id(instance: dict, source_id: int) -> int:
+    """Apply optional per-source offset to avoid collisions after bridge-home moves."""
+    return int(source_id) + int(instance.get("source_id_offset") or 0)
 
 
 def read_memories(db_path: str, cross_fs: bool) -> list:
@@ -424,6 +499,7 @@ def consolidate():
     """Main consolidation routine."""
     now = datetime.now(timezone.utc).isoformat()
     print(f"=== Memory Consolidation — {now} ===\n")
+    instances = load_instances()
 
     habit_conn = init_habit_evaluation_db(HABIT_EVAL_DB)
     habit_conn.close()
@@ -444,7 +520,7 @@ def consolidate():
         "by_instance": {},
     }
 
-    for instance in INSTANCES:
+    for instance in instances:
         inst_name = instance["name"]
         print(f"--- {inst_name} ({instance['path']}) ---")
         stats["by_instance"][inst_name] = {"agents": 0, "new": 0}
@@ -469,7 +545,8 @@ def consolidate():
             agent_new = 0
 
             for row in all_rows:
-                source_id, ts, ts_source, mem_type, importance, content = row
+                raw_source_id, ts, ts_source, mem_type, importance, content = row
+                source_id = instance_source_id(instance, raw_source_id)
                 stats["scanned_memories"] += 1
                 key = (inst_name, agent_id, source_id)
 
