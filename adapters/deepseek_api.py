@@ -18,6 +18,14 @@ from adapters.stream_events import KIND_THINKING, StreamEvent
 _DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
 
 
+def _with_reasoning_content(result: _APIResult, reasoning_content: str) -> _APIResult:
+    # /reboot min can reload this adapter while retaining the already-imported
+    # OpenRouter _APIResult class. Attach dynamically so the DeepSeek fix works
+    # with both the old and new dataclass shapes.
+    result.reasoning_content = reasoning_content
+    return result
+
+
 class DeepSeekAdapter(OpenRouterAdapter):
 
     def _build_payload(self, messages: list[dict], use_streaming: bool = False,
@@ -54,10 +62,11 @@ class DeepSeekAdapter(OpenRouterAdapter):
         message = choice.get("message") or {}
         finish_reason = choice.get("finish_reason") or "stop"
         ai_text = message.get("content") or ""
+        reasoning_content = str(message.get("reasoning_content") or "")
 
         # DeepSeek uses "reasoning_content" for thinking tokens
         if on_stream_event is not None:
-            reasoning = str(message.get("reasoning_content") or "").strip()
+            reasoning = reasoning_content.strip()
             if reasoning:
                 await on_stream_event(StreamEvent(kind=KIND_THINKING, summary=reasoning[:400]))
 
@@ -72,14 +81,18 @@ class DeepSeekAdapter(OpenRouterAdapter):
         comp_details = usage.get("completion_tokens_details") or {}
         thinking_tokens = comp_details.get("reasoning_tokens", 0)
 
-        return _APIResult(
-            text=ai_text, tool_calls=tool_calls, finish_reason=finish_reason,
-            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
-            thinking_tokens=thinking_tokens,
+        return _with_reasoning_content(
+            _APIResult(
+                text=ai_text, tool_calls=tool_calls, finish_reason=finish_reason,
+                prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+                thinking_tokens=thinking_tokens,
+            ),
+            reasoning_content,
         )
 
     async def _stream_api_once(self, payload, headers, on_stream_event) -> _APIResult:
         text_chunks: list[str] = []
+        reasoning_chunks: list[str] = []
         tool_calls_acc: dict[int, dict] = {}
         finish_reason = "stop"
         stream_usage: dict = {}
@@ -112,7 +125,10 @@ class DeepSeekAdapter(OpenRouterAdapter):
                 finish_reason = choice.get("finish_reason") or finish_reason
 
                 # DeepSeek streams thinking in "reasoning_content"
-                reasoning_text = str(delta.get("reasoning_content") or "").strip()
+                reasoning_delta = str(delta.get("reasoning_content") or "")
+                if reasoning_delta:
+                    reasoning_chunks.append(reasoning_delta)
+                reasoning_text = reasoning_delta.strip()
                 if reasoning_text and on_stream_event:
                     asyncio.create_task(
                         on_stream_event(StreamEvent(kind=KIND_THINKING, summary=reasoning_text[:400]))
@@ -145,13 +161,17 @@ class DeepSeekAdapter(OpenRouterAdapter):
                         acc["function"]["arguments"] += fn_delta["arguments"]
 
         full_text = "".join(text_chunks)
+        reasoning_content = "".join(reasoning_chunks)
         tool_calls = list(tool_calls_acc.values()) if tool_calls_acc else None
         comp_details = stream_usage.get("completion_tokens_details") or {}
-        return _APIResult(
-            text=full_text, tool_calls=tool_calls, finish_reason=finish_reason,
-            prompt_tokens=stream_usage.get("prompt_tokens", 0),
-            completion_tokens=stream_usage.get("completion_tokens", 0),
-            thinking_tokens=comp_details.get("reasoning_tokens", 0),
+        return _with_reasoning_content(
+            _APIResult(
+                text=full_text, tool_calls=tool_calls, finish_reason=finish_reason,
+                prompt_tokens=stream_usage.get("prompt_tokens", 0),
+                completion_tokens=stream_usage.get("completion_tokens", 0),
+                thinking_tokens=comp_details.get("reasoning_tokens", 0),
+            ),
+            reasoning_content,
         )
 
     async def generate_response(self, prompt, request_id, is_retry=False, silent=False, on_stream_event=None):
@@ -198,6 +218,9 @@ class DeepSeekAdapter(OpenRouterAdapter):
                 assistant_msg: dict = {"role": "assistant"}
                 if result.text:
                     assistant_msg["content"] = result.text
+                reasoning_content = getattr(result, "reasoning_content", "")
+                if reasoning_content:
+                    assistant_msg["reasoning_content"] = reasoning_content
                 assistant_msg["tool_calls"] = result.tool_calls
                 messages.append(assistant_msg)
                 await self._run_tool_calls(result.tool_calls, messages, on_stream_event)
