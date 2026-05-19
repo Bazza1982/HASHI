@@ -1,0 +1,70 @@
+{
+  "roles": {
+    "orchestrator": {
+      "default_agent": "arale",
+      "responsibilities": [
+        "define experiment scope and exit condition",
+        "assign worker task scope per phase",
+        "assign reviewer quality gate scope",
+        "receive and classify worker reports",
+        "make go/no-go decisions at each quality gate",
+        "advance or halt phases based on gate results",
+        "produce final exit evidence",
+        "update research memo with actual results"
+      ],
+      "must_not": [
+        "execute data retrieval, translation, or embedding tasks directly",
+        "advance to next phase without reviewer gate approval",
+        "close with unresolved quality gate failures",
+        "treat worker completion reports as evidence without concrete values"
+      ]
+    },
+    "worker": {
+      "default_agent": "feiyan",
+      "responsibilities": [
+        "execute database queries and data sampling",
+        "perform Han-to-modern-Chinese translations via HASHI API",
+        "run embedding calls and store outputs",
+        "compute similarity scores and metrics",
+        "produce reports with exact counts, scores, and file paths",
+        "run translation stability tests",
+        "execute discovery candidate retrieval"
+      ],
+      "must_not": [
+        "advance phases without orchestrator instruction",
+        "claim metric values without showing computation evidence",
+        "use translation prompt versions other than the locked version",
+        "skip saving output artifacts to the designated output directory"
+      ]
+    },
+    "reviewer": {
+      "default_agent": "akane",
+      "responsibilities": [
+        "review worker reports and inspect actual metric distributions",
+        "evaluate Phase 1 quality gate: AUC, CI, stability, stratum breakdown",
+        "evaluate Phase 2 quality gate: Recall@k, MRR, collection breakdown",
+        "evaluate discovery gate: candidate quality and fitness for expert review",
+        "classify findings as pass / conditional-pass / fail with written rationale",
+        "flag anomalies, methodology concerns, and statistical risks",
+        "confirm that discovery candidates are presented as candidates, not findings"
+      ],
+      "must_not": [
+        "review only summaries when full metric tables are available",
+        "accept score distributions without seeing per-stratum breakdowns",
+        "pass a gate on confidence alone without evidence",
+        "take over worker execution scope"
+      ]
+    },
+    "consultant": {
+      "default_agent": null,
+      "responsibilities": [
+        "advise on repeated quality gate failures",
+        "help redesign methodology if Phase 1 approach fails",
+        "review statistical validity of new metric designs"
+      ],
+      "must_not": [
+        "replace worker or reviewer responsibilities"
+      ]
+    }
+  }
+}
