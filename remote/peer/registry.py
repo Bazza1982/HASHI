@@ -506,6 +506,13 @@ class PeerRegistry:
             return None
         return hosts[0], workbench_port, remote_port
 
+    def _instance_alias_base_key(self, entry: dict) -> tuple[str, int] | None:
+        alias_key = self._instance_alias_key(entry)
+        if alias_key is None:
+            return None
+        host, workbench_port, _remote_port = alias_key
+        return host, workbench_port
+
     def _peer_alias_key(self, peer: PeerInfo, observations: dict[str, PeerInfo] | None = None) -> tuple[str, int, int] | None:
         try:
             workbench_port = int(peer.workbench_port or 0)
@@ -599,7 +606,8 @@ class PeerRegistry:
         if not isinstance(instances, dict):
             return {}, False
         keep_keys: set[str] = set()
-        alias_groups: dict[tuple[str, int], list[tuple[str, dict]]] = {}
+        alias_groups: dict[tuple[str, int, int], list[tuple[str, dict]]] = {}
+        live_by_base: dict[tuple[str, int], list[tuple[str, dict]]] = {}
         for key, entry in instances.items():
             if not isinstance(entry, dict):
                 continue
@@ -608,7 +616,10 @@ class PeerRegistry:
                 keep_keys.add(key)
                 continue
             alias_groups.setdefault(alias_key, []).append((key, entry))
-        best_by_alias: dict[tuple[str, int], tuple[str, dict]] = {}
+            base_key = self._instance_alias_base_key(entry)
+            if base_key is not None and self._entry_is_live_discovery_identity(entry):
+                live_by_base.setdefault(base_key, []).append((key, entry))
+        best_by_alias: dict[tuple[str, int, int], tuple[str, dict]] = {}
         for alias_key, grouped_entries in alias_groups.items():
             live_entries = [
                 (key, entry)
@@ -641,6 +652,29 @@ class PeerRegistry:
                     "Registry: pruning duplicate instance alias %s in favor of %s",
                     str(entry.get("instance_id") or key).upper(),
                     str(winner.get("instance_id") or best_by_alias.get(alias_key, (key, entry))[0]).upper(),
+                )
+                changed = True
+                continue
+            base_key = self._instance_alias_base_key(entry)
+            state = str(entry.get("handshake_state") or "").strip().lower()
+            live_status = str(entry.get("live_status") or "").strip().lower()
+            active = bool(entry.get("active", True))
+            obsolete_failed_alias = (
+                base_key is not None
+                and not self._entry_is_live_discovery_identity(entry)
+                and any(live_key != key for live_key, _live_entry in live_by_base.get(base_key, []))
+                and (
+                    live_status == "offline"
+                    or active is False
+                    or state in {"handshake_timed_out", "handshake_rejected", "unreachable"}
+                )
+            )
+            if obsolete_failed_alias:
+                winner = live_by_base.get(base_key, [(key, entry)])[0][1]
+                logger.info(
+                    "Registry: pruning obsolete instance alias %s in favor of live %s",
+                    str(entry.get("instance_id") or key).upper(),
+                    str(winner.get("instance_id") or "").upper(),
                 )
                 changed = True
                 continue
@@ -1148,7 +1182,7 @@ class PeerRegistry:
             local_hosts.discard("")
             local_host_identity = _normalize_identity(local_entry.get("host_identity") or "")
 
-            changed = bool(pruned_invalid_instances or pruned_stale_instances)
+            changed = bool(pruned_invalid_instances or pruned_instances or pruned_stale_instances)
             for iid, peer in self._peers.items():
                 key = iid.lower()
                 preferred = peer.properties.get("preferred_backend") or peer.properties.get("discovery", "lan")
@@ -1330,7 +1364,7 @@ class PeerRegistry:
                         if refreshed:
                             changed = True
 
-            if changed or pruned_instances:
+            if changed:
                 data["instances"] = instances
                 _write_json_atomic(self._instances_path, data)
                 logger.info("Registry: instances.json updated (%d peers)", len(self._peers))

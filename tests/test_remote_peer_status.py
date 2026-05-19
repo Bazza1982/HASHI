@@ -1801,6 +1801,52 @@ def test_registry_prunes_legacy_alias_with_same_host_and_workbench(tmp_path):
     assert "hashi-desktop" not in pruned
 
 
+def test_registry_prunes_failed_legacy_alias_with_obsolete_remote_port(tmp_path):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    (hashi_root / "instances.json").write_text('{"instances": {}}', encoding="utf-8")
+    registry = PeerRegistry(hashi_root, "HASHI1")
+
+    instances = {
+        "msi": {
+            "instance_id": "MSI",
+            "display_name": "MSI",
+            "platform": "windows",
+            "api_host": "192.168.0.41",
+            "lan_ip": "192.168.0.41",
+            "remote_port": 8767,
+            "workbench_port": 8779,
+            "_discovery": "lan",
+            "protocol_version": "2.0",
+            "capabilities": ["handshake_v2"],
+            "host_identity": "desktopvn0amd7",
+            "environment_kind": "windows",
+            "handshake_state": "handshake_accepted",
+            "live_status": "online",
+        },
+        "hashi-desktop": {
+            "instance_id": "HASHI-DESKTOP",
+            "display_name": "HASHI Desktop",
+            "platform": "windows",
+            "api_host": "192.168.0.41",
+            "lan_ip": "192.168.0.41",
+            "remote_port": 8768,
+            "workbench_port": 8779,
+            "_discovery": "bootstrap",
+            "protocol_version": "1.0",
+            "capabilities": [],
+            "handshake_state": "handshake_timed_out",
+            "live_status": "offline",
+        },
+    }
+
+    pruned, changed = registry._prune_duplicate_instance_aliases(instances)
+
+    assert changed is True
+    assert "msi" in pruned
+    assert "hashi-desktop" not in pruned
+
+
 def test_registry_keeps_distinct_live_peers_with_same_host_and_workbench(tmp_path):
     hashi_root = tmp_path / "hashi"
     hashi_root.mkdir()
@@ -2114,6 +2160,41 @@ def test_registry_prunes_unknown_bootstrap_instance_without_live_timestamp(tmp_p
     instances = json.loads((hashi_root / "instances.json").read_text(encoding="utf-8"))["instances"]
     assert "hashi1" in instances
     assert "watchtower_validate2" not in instances
+
+
+def test_registry_sync_writes_prune_only_changes_without_live_peers(tmp_path):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    (hashi_root / "instances.json").write_text(
+        json.dumps(
+            {
+                "instances": {
+                    "hashi1": {"instance_id": "HASHI1", "platform": "wsl"},
+                    "watchtower_validate2": {
+                        "instance_id": "WATCHTOWER_VALIDATE2",
+                        "platform": "windows",
+                        "api_host": "127.0.0.1",
+                        "lan_ip": "192.168.0.211",
+                        "remote_port": 8766,
+                        "workbench_port": 18800,
+                        "_discovery": "bootstrap",
+                        "last_seen": int(time.time()),
+                        "last_seen_ok": 0,
+                        "live_status": "unknown",
+                        "active": True,
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    registry = PeerRegistry(hashi_root, "HASHI1")
+    registry._peers = {}
+
+    registry._sync_to_instances_json()
+
+    instances = json.loads((hashi_root / "instances.json").read_text(encoding="utf-8"))["instances"]
+    assert set(instances) == {"hashi1"}
 
 
 def test_registry_keeps_current_peer_even_when_legacy_timestamp_is_old(tmp_path):
