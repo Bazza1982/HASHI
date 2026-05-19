@@ -710,7 +710,9 @@ class PeerRegistry:
                 )
                 changed = True
                 continue
-            if not timestamp and (live_status == "offline" or active is False):
+            backend = self._entry_alias_backend(entry)
+            unknown_bootstrap = live_status in {"", "unknown"} and backend in {"bootstrap", "bootstrap_fallback", "handshake_inbound"}
+            if not timestamp and (live_status == "offline" or active is False or unknown_bootstrap):
                 logger.info("Registry: pruning stale legacy instance %s without live timestamp", str(entry.get("instance_id") or key).upper())
                 changed = True
                 continue
