@@ -2081,6 +2081,39 @@ def test_registry_prunes_stale_legacy_instance_not_in_live_peers(tmp_path):
     assert "msi" not in instances
 
 
+def test_registry_prunes_unknown_bootstrap_instance_without_live_timestamp(tmp_path):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    (hashi_root / "instances.json").write_text(
+        json.dumps(
+            {
+                "instances": {
+                    "hashi1": {"instance_id": "HASHI1", "platform": "wsl"},
+                    "watchtower_validate2": {
+                        "instance_id": "WATCHTOWER_VALIDATE2",
+                        "platform": "windows",
+                        "api_host": "127.0.0.1",
+                        "lan_ip": "192.168.0.211",
+                        "remote_port": 8766,
+                        "workbench_port": 18800,
+                        "_discovery": "bootstrap",
+                        "live_status": "unknown",
+                        "active": True,
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    registry = PeerRegistry(hashi_root, "HASHI1")
+
+    registry._sync_to_instances_json()
+
+    instances = json.loads((hashi_root / "instances.json").read_text(encoding="utf-8"))["instances"]
+    assert "hashi1" in instances
+    assert "watchtower_validate2" not in instances
+
+
 def test_registry_keeps_current_peer_even_when_legacy_timestamp_is_old(tmp_path):
     hashi_root = tmp_path / "hashi"
     hashi_root.mkdir()
