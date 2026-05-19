@@ -87,6 +87,12 @@ class MemoryPlusObserver(PreTurnContextProvider):
     def should_provide(self, source: str, *, is_bridge_request: bool) -> bool:
         return self._enabled() and not self._should_bypass_source(source, is_bridge_request=is_bridge_request)
 
+    def should_observe(self, source: str, *, is_bridge_request: bool) -> bool:
+        return False
+
+    def schedule_observation(self, request: Any, background_tasks: set[Any]) -> None:
+        return None
+
     async def build_context_sections(self, request: TurnContextRequest) -> list[tuple[str, str]]:
         cfg = self._config()
         ensure_memory_plus_notepad(self.workspace_dir, cfg)
