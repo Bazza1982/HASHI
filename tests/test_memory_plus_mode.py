@@ -85,6 +85,18 @@ def test_memory_plus_provider_injects_notepad_and_protocol(tmp_path: Path) -> No
     assert "do not omit the block" in sections[0][1]
 
 
+def test_memory_plus_observer_is_post_turn_safe_noop(tmp_path: Path) -> None:
+    workspace = tmp_path / "sakura"
+    workspace.mkdir()
+    (workspace / "state.json").write_text(json.dumps({"agent_mode": "memory+"}), encoding="utf-8")
+    observer = MemoryPlusObserver(workspace_dir=workspace)
+
+    assert observer.should_provide("text", is_bridge_request=False) is True
+    assert observer.should_observe("text", is_bridge_request=False) is False
+    assert observer.should_observe("api", is_bridge_request=True) is False
+    observer.schedule_observation(SimpleNamespace(request_id="req-1"), set())
+
+
 def test_extract_memory_plus_update_strips_visible_response() -> None:
     visible, update = extract_memory_plus_update(
         "Answer first.\n"
