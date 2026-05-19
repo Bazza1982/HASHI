@@ -33,6 +33,7 @@ class _APIResult:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     thinking_tokens: int = 0
+    reasoning_content: str = ""
 
 
 class OpenRouterAdapter(BaseBackend):
