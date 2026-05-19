@@ -702,6 +702,10 @@ class PeerRegistry:
                     continue
             live_status = str(entry.get("live_status") or "").strip().lower()
             active = bool(entry.get("active", True))
+            try:
+                last_seen_ok = int(entry.get("last_seen_ok") or 0)
+            except Exception:
+                last_seen_ok = 0
             if timestamp and now_ts - timestamp > LEGACY_INSTANCE_TTL_SECONDS:
                 logger.info(
                     "Registry: pruning stale legacy instance %s after %ds without live refresh",
@@ -711,9 +715,17 @@ class PeerRegistry:
                 changed = True
                 continue
             backend = self._entry_alias_backend(entry)
-            unknown_bootstrap = live_status in {"", "unknown"} and backend in {"bootstrap", "bootstrap_fallback", "handshake_inbound"}
+            unknown_bootstrap = (
+                live_status in {"", "unknown"}
+                and last_seen_ok <= 0
+                and backend in {"bootstrap", "bootstrap_fallback", "handshake_inbound"}
+            )
             if not timestamp and (live_status == "offline" or active is False or unknown_bootstrap):
                 logger.info("Registry: pruning stale legacy instance %s without live timestamp", str(entry.get("instance_id") or key).upper())
+                changed = True
+                continue
+            if unknown_bootstrap:
+                logger.info("Registry: pruning stale bootstrap instance %s without successful sighting", str(entry.get("instance_id") or key).upper())
                 changed = True
                 continue
             pruned[key] = entry
