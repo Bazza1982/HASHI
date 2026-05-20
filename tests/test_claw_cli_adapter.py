@@ -14,6 +14,7 @@ from adapters.claw_cli import (
     ClawBinaryNotFound,
     ClawCommandError,
     ClawJsonError,
+    ClawProviderSecretMissing,
     ClawTimeoutError,
     build_claw_task_args,
     build_claw_env,
@@ -47,6 +48,19 @@ def test_find_claw_binary_accepts_configured_executable(tmp_path):
 def test_find_claw_binary_reports_missing_configured_path(tmp_path):
     with pytest.raises(ClawBinaryNotFound):
         find_claw_binary(tmp_path / "missing", env={"PATH": ""})
+
+
+def test_find_claw_binary_accepts_global_claw_provider_binary(tmp_path):
+    fake = _write_exe(
+        tmp_path / "claw",
+        """
+        #!/usr/bin/env python3
+        print("ok")
+        """,
+    )
+    global_cfg = SimpleNamespace(claw_providers={"binary_path": str(fake)})
+
+    assert find_claw_binary(global_config=global_cfg, env={"PATH": ""}) == fake.resolve()
 
 
 def test_build_claw_env_uses_allowlist_only():
@@ -201,6 +215,113 @@ def test_registry_exposes_claw_backend():
     assert "openrouter_key" in get_secret_lookup_order("claw-cli", "ying")
 
 
+def test_claw_provider_env_resolves_secret_and_base_url(tmp_path):
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="openrouter:deepseek/test",
+        extra={},
+        resolve_access_root=lambda: tmp_path,
+        _hashi_secrets={"openrouter_key": "provider-secret"},
+    )
+    global_cfg = SimpleNamespace(
+        claw_providers={
+            "providers": {
+                "openrouter": {
+                    "base_url": "https://openrouter.invalid/v1",
+                    "secret": "openrouter_key",
+                    "status": "stable",
+                }
+            }
+        }
+    )
+    adapter = ClawCLIAdapter(cfg, global_cfg, api_key="legacy-secret")
+
+    assert adapter._claw_model() == "deepseek/test"
+    assert adapter._task_env()["OPENAI_BASE_URL"] == "https://openrouter.invalid/v1"
+    assert adapter._task_env()["OPENAI_API_KEY"] == "provider-secret"
+
+
+def test_claw_provider_missing_secret_raises(tmp_path):
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={"provider": "openrouter"},
+        resolve_access_root=lambda: tmp_path,
+        _hashi_secrets={},
+    )
+    global_cfg = SimpleNamespace(
+        claw_providers={
+            "providers": {
+                "openrouter": {
+                    "base_url": "https://openrouter.invalid/v1",
+                    "secret": "openrouter_key",
+                }
+            }
+        }
+    )
+    adapter = ClawCLIAdapter(cfg, global_cfg, api_key="legacy-secret")
+
+    with pytest.raises(ClawProviderSecretMissing):
+        adapter._task_env()
+
+
+def test_claw_provider_legacy_env_fallback(tmp_path):
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={"openai_base_url": "https://legacy.invalid/v1"},
+        resolve_access_root=lambda: tmp_path,
+    )
+    global_cfg = SimpleNamespace(claw_providers={})
+    adapter = ClawCLIAdapter(cfg, global_cfg, api_key="legacy-secret")
+
+    assert adapter._task_env()["OPENAI_BASE_URL"] == "https://legacy.invalid/v1"
+    assert adapter._task_env()["OPENAI_API_KEY"] == "legacy-secret"
+
+
+def test_claw_provider_ollama_dummy_key_is_not_redacted(tmp_path):
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="ollama:qwen2.5-coder:32b",
+        extra={},
+        resolve_access_root=lambda: tmp_path,
+    )
+    global_cfg = SimpleNamespace(
+        claw_providers={
+            "providers": {
+                "ollama": {
+                    "base_url": "http://localhost:11434/v1",
+                    "secret": None,
+                    "dummy_api_key": "__ollama_dummy__",
+                    "status": "provisional",
+                }
+            }
+        }
+    )
+    adapter = ClawCLIAdapter(cfg, global_cfg, api_key=None)
+
+    assert adapter._claw_model() == "qwen2.5-coder:32b"
+    assert adapter._task_env()["OPENAI_API_KEY"] == "__ollama_dummy__"
+
+
+def test_claw_permission_mode_respects_global_max(tmp_path):
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={"permission_mode": "danger-full-access"},
+        resolve_access_root=lambda: tmp_path,
+    )
+    global_cfg = SimpleNamespace(claw_providers={"max_permission_mode": "workspace-write"})
+    adapter = ClawCLIAdapter(cfg, global_cfg, api_key="test-key")
+
+    assert adapter._permission_mode() == "workspace-write"
+
+
 @pytest.mark.asyncio
 async def test_claw_adapter_degrades_when_binary_missing(tmp_path):
     cfg = SimpleNamespace(
@@ -212,6 +333,39 @@ async def test_claw_adapter_degrades_when_binary_missing(tmp_path):
     )
     global_cfg = SimpleNamespace()
     adapter = ClawCLIAdapter(cfg, global_cfg, api_key="test-key")
+
+    assert await adapter.initialize() is False
+
+
+@pytest.mark.asyncio
+async def test_claw_adapter_degrades_when_provider_secret_missing(tmp_path):
+    fake = _write_exe(
+        tmp_path / "claw",
+        """
+        #!/usr/bin/env python3
+        import json
+        print(json.dumps({"kind": "version", "version": "0.1.0"}))
+        """,
+    )
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={"claw_binary_path": str(fake), "provider": "openrouter"},
+        resolve_access_root=lambda: tmp_path,
+        _hashi_secrets={},
+    )
+    global_cfg = SimpleNamespace(
+        claw_providers={
+            "providers": {
+                "openrouter": {
+                    "base_url": "https://openrouter.invalid/v1",
+                    "secret": "openrouter_key",
+                }
+            }
+        }
+    )
+    adapter = ClawCLIAdapter(cfg, global_cfg, api_key=None)
 
     assert await adapter.initialize() is False
 

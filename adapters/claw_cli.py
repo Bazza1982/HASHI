@@ -18,7 +18,9 @@ from adapters.stream_events import StreamCallback, StreamEvent, KIND_PROGRESS, K
 DEFAULT_CLAW_TIMEOUT_SEC = 30
 DEFAULT_CLAW_TASK_TIMEOUT_SEC = 1800
 VALID_PERMISSION_MODES = {"read-only", "workspace-write", "danger-full-access"}
+PERMISSION_MODE_RANK = {"read-only": 0, "workspace-write": 1, "danger-full-access": 2}
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OLLAMA_DUMMY_API_KEY = "__ollama_dummy__"
 SECRET_ENV_KEYS = {
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
@@ -36,6 +38,14 @@ class ClawError(RuntimeError):
 
 class ClawBinaryNotFound(ClawError):
     """Raised when no executable Claw binary can be resolved."""
+
+
+class ClawProviderConfigError(ClawError):
+    """Raised when a named Claw provider is missing or disabled."""
+
+
+class ClawProviderSecretMissing(ClawProviderConfigError):
+    """Raised when a provider references a missing secret."""
 
 
 class ClawCommandError(ClawError):
@@ -110,7 +120,7 @@ def redact_secret_text(text: str | None, extra_values: list[str] | None = None) 
         if value:
             redacted = redacted.replace(value, "<redacted>")
     for value in extra_values or []:
-        if value:
+        if value and value != OLLAMA_DUMMY_API_KEY:
             redacted = redacted.replace(value, "<redacted>")
     return redacted
 
@@ -153,6 +163,13 @@ def find_claw_binary(
         value = getattr(global_config, key, None)
         if value:
             candidates.append(value)
+
+    global_claw = getattr(global_config, "claw_providers", None) or {}
+    if isinstance(global_claw, Mapping):
+        for key in ("binary_path", "claw_binary_path", "claw_cmd"):
+            value = global_claw.get(key)
+            if value:
+                candidates.append(value)
 
     env = env or os.environ
     for key in ("CLAW_BINARY", "CLAW_BIN"):
@@ -454,22 +471,112 @@ class ClawCLIAdapter(BaseBackend):
             return [str(item).strip() for item in raw if str(item).strip()]
         return None
 
+    def _global_claw_config(self) -> dict[str, Any]:
+        raw = getattr(self.global_config, "claw_providers", None) or {}
+        return dict(raw) if isinstance(raw, Mapping) else {}
+
+    def _provider_configs(self) -> dict[str, Any]:
+        providers = self._global_claw_config().get("providers") or {}
+        return dict(providers) if isinstance(providers, Mapping) else {}
+
+    def _provider_and_model(self) -> tuple[str | None, str]:
+        model = str(self.config.model or "").strip()
+        provider = self._extra.get("provider")
+        if provider:
+            return str(provider).strip(), model
+        if ":" in model:
+            maybe_provider, maybe_model = model.split(":", 1)
+            if maybe_provider in self._provider_configs() and maybe_model:
+                return maybe_provider, maybe_model
+        return None, model
+
+    def _claw_model(self) -> str:
+        return self._provider_and_model()[1]
+
     def _permission_mode(self) -> str:
-        return str(self._extra.get("permission_mode") or "workspace-write")
+        requested = str(self._extra.get("permission_mode") or "workspace-write")
+        if requested not in VALID_PERMISSION_MODES:
+            return requested
+        max_mode = str(self._global_claw_config().get("max_permission_mode") or "").strip()
+        if max_mode in VALID_PERMISSION_MODES and PERMISSION_MODE_RANK[requested] > PERMISSION_MODE_RANK[max_mode]:
+            self.logger.warning(
+                "Claw permission_mode %s exceeds global max_permission_mode %s; using %s.",
+                requested,
+                max_mode,
+                max_mode,
+            )
+            return max_mode
+        return requested
 
     def _skip_permissions(self) -> bool:
         return bool(self._extra.get("skip_permissions") or self._extra.get("dangerously_skip_permissions"))
 
-    def _openai_base_url(self) -> str:
+    def _legacy_openai_base_url(self) -> str:
         return str(self._extra.get("openai_base_url") or DEFAULT_OPENROUTER_BASE_URL)
 
-    def _task_env(self) -> dict[str, str]:
+    def _hashi_secrets(self) -> dict[str, Any]:
+        raw = getattr(self.config, "_hashi_secrets", None)
+        if isinstance(raw, Mapping):
+            return dict(raw)
+        raw = getattr(self.global_config, "secrets", None)
+        return dict(raw) if isinstance(raw, Mapping) else {}
+
+    def _env_from_agent_extra(self) -> dict[str, str]:
         env_source = dict(os.environ)
         if self.api_key:
             env_source["OPENAI_API_KEY"] = str(self.api_key)
-        if self._openai_base_url():
-            env_source["OPENAI_BASE_URL"] = self._openai_base_url()
+        if self._legacy_openai_base_url():
+            env_source["OPENAI_BASE_URL"] = self._legacy_openai_base_url()
         return build_claw_env(env_source)
+
+    def _env_from_provider(self, provider_name: str) -> dict[str, str]:
+        providers = self._provider_configs()
+        provider = providers.get(provider_name)
+        if not isinstance(provider, Mapping):
+            raise ClawProviderConfigError(f"Claw provider is not configured: {provider_name}")
+
+        status = str(provider.get("status") or "stable").strip().lower()
+        if status == "disabled":
+            raise ClawProviderConfigError(f"Claw provider is disabled: {provider_name}")
+        if status == "provisional":
+            self.logger.warning("Claw provider %s is provisional; running with warning diagnostics.", provider_name)
+
+        base_url = str(provider.get("base_url") or "").strip()
+        if not base_url:
+            raise ClawProviderConfigError(f"Claw provider {provider_name} has no base_url")
+
+        secret_name = provider.get("secret")
+        api_key = None
+        if secret_name:
+            secrets = self._hashi_secrets()
+            api_key = secrets.get(str(secret_name))
+            if not api_key:
+                raise ClawProviderSecretMissing(
+                    f"Claw provider {provider_name} requires missing secret: {secret_name}"
+                )
+        else:
+            api_key = provider.get("dummy_api_key")
+
+        env_source = dict(os.environ)
+        env_source["OPENAI_BASE_URL"] = base_url
+        if api_key:
+            env_source["OPENAI_API_KEY"] = str(api_key)
+        return build_claw_env(env_source)
+
+    def _resolve_task_env(self) -> dict[str, str]:
+        provider_name, _ = self._provider_and_model()
+        if provider_name:
+            if self._extra.get("openai_base_url"):
+                self.logger.warning(
+                    "Claw provider=%s overrides legacy openai_base_url for %s.",
+                    provider_name,
+                    self.config.name,
+                )
+            return self._env_from_provider(provider_name)
+        return self._env_from_agent_extra()
+
+    def _task_env(self) -> dict[str, str]:
+        return self._resolve_task_env()
 
     def _has_saved_session(self) -> bool:
         sessions_dir = self.effective_workdir / ".claw" / "sessions"
@@ -601,7 +708,7 @@ class ClawCLIAdapter(BaseBackend):
             raise ClawBinaryNotFound("Claw binary not initialized")
         args = build_claw_task_args(
             prompt,
-            self.config.model,
+            self._claw_model(),
             permission_mode=self._permission_mode(),
             resume=resume,
             allowed_tools=self._allowed_tools(),
@@ -657,7 +764,7 @@ class ClawCLIAdapter(BaseBackend):
             )
         return ClawTaskResult(
             text=str(parsed.get("message") or ""),
-            model=str(parsed.get("model") or self.config.model),
+            model=str(parsed.get("model") or self._claw_model()),
             permission_mode=self._permission_mode(),
             cwd=str(self.effective_workdir),
             returncode=proc.returncode or 0,
