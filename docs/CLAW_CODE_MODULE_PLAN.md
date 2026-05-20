@@ -1,10 +1,12 @@
 # Claw-Code Optional Module Plan
 
-Status: research plan only
+Status: research plan updated after local build/tool smoke
 Owner: HASHI
 Last researched: 2026-05-20
 Local research copy: `/home/lily/projects/external/claw-code`
 Claw commit reviewed: `f8e1bb7262b261da1ee6bfcd461bfc5b676f6a6d`
+Local release binary tested:
+`/home/lily/projects/external/claw-code/rust/target/release/claw`
 
 ## Decision
 
@@ -14,7 +16,7 @@ HASHI core and not as an embedded Rust library.
 The first integration should be a subprocess boundary:
 
 ```text
-HASHI runtime -> claw module/adapter -> claw CLI process -> .claw session state
+HASHI runtime -> claw adapter -> configured claw CLI binary -> .claw session state
 ```
 
 This keeps HASHI minimal and hot-rebootable while allowing Claw to own its own
@@ -54,22 +56,44 @@ API models without making HASHI's native API backend loop overly complex.
   - `claw --resume latest ...`
   - `.claw/worker-state.json`
   - `.claw/sessions/...`
-- Local machine currently lacks `cargo`, so build/test must be a Phase 0 gate
-  before any HASHI runtime integration is accepted.
+- Local Linux/WSL build/test now passes, but build and failure-path tests must
+  remain Phase 0 gates before any HASHI runtime integration is accepted.
+
+## Local Smoke Evidence
+
+On 2026-05-20, the external research copy was tested locally:
+
+- `cargo build --workspace` succeeded.
+- `cargo build --release -p rusty-claude-cli` succeeded.
+- Release binary:
+  `/home/lily/projects/external/claw-code/rust/target/release/claw`
+- Release binary size: about 17 MB.
+- Release binary SHA256:
+  `910be0eaef337a2ad3fb22a761bbf72cff572ca3f5e52891b53ad5574a8f697e`
+- `claw version --output-format json` returned `version=0.1.0`,
+  `git_sha=f8e1bb7`, and `target=x86_64-unknown-linux-gnu`.
+- `claw status --output-format json`, `claw config --output-format json`, and
+  `claw doctor --output-format json` returned parseable JSON.
+- OpenRouter route with model `deepseek/deepseek-v4-flash` returned
+  `message=ready`.
+- A read-only tool smoke with `--allowedTools read` successfully used
+  `read_file` on a disposable workspace and returned the expected answer.
+
+This proves the Linux/WSL local path is viable. It does not prove native
+Windows/HASHI9 packaging or runtime integration.
 
 ## Proposed HASHI Shape
 
-Add a module, not core code:
+Do not add a new generic `modules/` layer for Claw. HASHI does not currently
+have a module directory convention, and a one-off `modules/claw_code/` would
+create a new architecture category without enough design justification.
+
+Use the existing adapter shape first:
 
 ```text
-modules/claw_code/
-  README.md
-  install_probe.py
-  runner.py
-  schemas.py
-  tests/
-
 adapters/claw_cli.py
+scripts/claw_code_probe.py
+tests/test_claw_cli_adapter.py
 ```
 
 The adapter exposes Claw to HASHI as a backend-like function:
@@ -83,6 +107,14 @@ The adapter exposes Claw to HASHI as a backend-like function:
 }
 ```
 
+Runtime must accept a configured binary path, for example:
+
+```json
+{
+  "claw_binary_path": "/home/lily/projects/external/claw-code/rust/target/release/claw"
+}
+```
+
 This should be opt-in per agent. It should not change normal
 `claude-cli`, `codex-cli`, `openrouter-api`, or `deepseek-api` behavior.
 
@@ -92,33 +124,37 @@ Goal: prove Claw works locally before touching HASHI runtime behavior.
 
 Tasks:
 
-1. Install Rust/Cargo on the host or choose a container path.
-2. Build Claw from the external copy:
+1. Prefer a prebuilt upstream release binary when one exists. Download its
+   matching checksum and verify it before use.
+2. If no release binary exists, build from source as a research-only fallback.
+   Cargo is allowed for this spike, but must not become a HASHI runtime
+   dependency.
+3. Build Claw from the external copy if using the fallback path:
 
    ```bash
    cd /home/lily/projects/external/claw-code/rust
-   cargo build --workspace
+   cargo build --release -p rusty-claude-cli
    ```
 
-3. Run no-credential commands:
+4. Run no-credential commands:
 
    ```bash
-   ./target/debug/claw --help
-   ./target/debug/claw status --output-format json
-   ./target/debug/claw acp --output-format json
+   ./target/release/claw --help
+   ./target/release/claw status --output-format json
+   ./target/release/claw doctor --output-format json
    ```
 
-4. Run provider smoke with OpenRouter:
+5. Run provider smoke with OpenRouter:
 
    ```bash
    OPENAI_BASE_URL=https://openrouter.ai/api/v1 \
    OPENAI_API_KEY=... \
-   ./target/debug/claw --model openai/deepseek-v4-pro \
+   ./target/release/claw --model deepseek/deepseek-v4-flash \
      --output-format json \
      prompt "reply with ready"
    ```
 
-5. Run a workspace smoke in a disposable repo:
+6. Run a workspace smoke in a disposable repo:
 
    ```bash
    claw init --output-format json
@@ -127,6 +163,15 @@ Tasks:
    claw --resume latest /status
    ```
 
+7. Run failure-path smoke tests:
+
+   - Missing or invalid binary path.
+   - Invalid API key.
+   - Invalid model name.
+   - Read-only `.claw/` directory.
+   - Non-JSON or truncated command output.
+   - Timeout and cancellation.
+
 Acceptance:
 
 - Build succeeds.
@@ -134,17 +179,24 @@ Acceptance:
 - OpenRouter/DeepSeek route works.
 - `.claw/worker-state.json` appears after a prompt.
 - `.claw/sessions/...` appears and can resume.
+- Failure modes produce clear non-zero exits or typed errors, not silent
+  success.
 
 ## Phase 1: Read-Only HASHI Function
 
-Goal: add a callable HASHI function that runs Claw for diagnostics only.
+Goal: add a callable HASHI diagnostic path that runs Claw diagnostics only.
 
-Add `modules/claw_code/runner.py` with:
+Add `scripts/claw_code_probe.py` and internal helpers in `adapters/claw_cli.py`
+with:
 
 - `find_claw_binary()`
 - `run_claw_doctor(cwd, env) -> dict`
 - `run_claw_status(cwd, env) -> dict`
 - `run_claw_state(cwd, env) -> dict`
+- `ClawBinaryNotFound`
+- `ClawCommandError`
+- `ClawJsonError`
+- `ClawTimeoutError`
 
 Rules:
 
@@ -153,13 +205,16 @@ Rules:
 - Capture stdout/stderr separately.
 - Apply a timeout.
 - Store audit logs under HASHI logs.
+- Do not require Cargo at runtime.
+- If `claw_binary_path` is missing or invalid, report a typed error.
 
 Acceptance:
 
 - HASHI can call `claw doctor --output-format json`.
 - HASHI can call `claw status --output-format json`.
-- Missing binary, missing cargo build, and missing credentials produce typed
-  errors.
+- Missing binary, missing configured build artifact, and missing credentials
+  produce typed errors.
+- A missing binary does not prevent unrelated agents from starting.
 
 ## Phase 2: One-Shot Claw Task Function
 
@@ -200,6 +255,8 @@ Acceptance:
 - Can run a workspace-write patch task in a disposable repo.
 - HASHI captures result text, return code, stdout/stderr, elapsed time, and
   worker/session paths.
+- Invalid API key, invalid model, read-only `.claw/`, timeout, and cancellation
+  have explicit result states.
 
 ## Phase 3: Backend Adapter
 
@@ -216,6 +273,23 @@ backends:
 
 Use Claw's own session as the long-running state. HASHI owns queueing,
 delivery, logging, and restart boundaries.
+
+Lifecycle rules:
+
+- `initialize()` returns `False` if the configured Claw binary is missing,
+  not executable, or fails `version --output-format json`.
+- A failed `initialize()` puts only that agent/backend into degraded state and
+  must not block other agents.
+- Do not silently fall back to `openrouter-api` or `deepseek-api`; the user
+  must be able to see that Claw is unavailable.
+- `handle_new_session()` creates or switches to a new Claw session reference.
+  It must not delete old `.claw/sessions` files by default.
+- Adding `claw-cli` to `adapters/registry.py` requires one cold restart, just
+  like any new adapter class. Later config changes can follow normal HASHI
+  reboot behavior.
+- If another live Claw process owns the same workzone, the adapter must refuse
+  to start the task and report a clear conflict. Use a lock file or the
+  `.claw/worker-state.json` pid when available.
 
 Acceptance:
 
@@ -246,6 +320,15 @@ Acceptance:
 ## Security Rules
 
 - Do not pass HASHI secrets wholesale. Build a minimal environment per task.
+- The Claw subprocess environment should be an allowlist, not a copy of
+  `os.environ`.
+- Initial allowlist:
+  - `OPENAI_BASE_URL`
+  - `OPENAI_API_KEY`
+  - OS-required process variables such as `HOME`, `USER`, `TMPDIR`, `TEMP`, and
+    a minimal `PATH` only when needed to execute the configured binary.
+- Do not pass Anthropic keys, HASHI instance secrets, WhatsApp/Bridge tokens,
+  or unrelated agent secrets to Claw.
 - Redact `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and any
   key-like values from logs.
 - Default to `workspace-write`, not `danger-full-access`.
@@ -273,7 +356,12 @@ Poor fit:
 
 ## Recommended Next Step
 
-Run Phase 0 only. If it passes, implement Phase 1 as a small optional module.
+Phase 0 Linux/WSL smoke has passed for local build, OpenRouter/DeepSeek, and
+read-only file tool use. Before runtime integration, update this plan into an
+execution checklist and run the remaining failure-path tests.
+
+Then implement Phase 1 as a small optional adapter/probe path, not a new
+generic module layer.
 
 Do not add `claw-cli` to active agents until:
 
@@ -282,3 +370,6 @@ Do not add `claw-cli` to active agents until:
 - OpenRouter/DeepSeek smoke passes;
 - read-only workspace smoke passes;
 - workspace-write disposable patch smoke passes.
+- failure-path smokes pass;
+- binary missing/degraded lifecycle behavior is implemented;
+- subprocess environment allowlist is implemented.
