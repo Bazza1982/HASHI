@@ -317,6 +317,173 @@ Acceptance:
 - Cancelling from HASHI stops the Claw subprocess.
 - Crash/reboot can report previous Claw session state.
 
+## Phase 5: Stable All-Agent Backend
+
+Goal: make `claw-cli` a stable optional backend that any HASHI agent can choose,
+while keeping provider credentials, model routing, and filesystem permissions
+explicit and auditable.
+
+This phase promotes Claw from a tested experimental backend to a normal HASHI
+backend option. It must not make Claw the default backend, and it must not make
+Cargo, OpenRouter, DeepSeek, Ollama, or any single provider a HASHI runtime
+dependency.
+
+### Provider Model
+
+Claw currently routes through OpenAI-compatible environment variables:
+
+```text
+OPENAI_BASE_URL
+OPENAI_API_KEY
+```
+
+HASHI should expose that through named provider profiles instead of repeating
+raw URLs and secret names in every agent config.
+
+Proposed global shape:
+
+```json
+{
+  "claw": {
+    "binary_path": "/opt/hashi/bin/claw",
+    "providers": {
+      "openrouter": {
+        "base_url": "https://openrouter.ai/api/v1",
+        "secret": "openrouter_key"
+      },
+      "deepseek": {
+        "base_url": "https://api.deepseek.com/v1",
+        "secret": "deepseek_api_key"
+      },
+      "ollama": {
+        "base_url": "http://localhost:11434/v1",
+        "secret": null,
+        "dummy_api_key": "ollama"
+      }
+    }
+  }
+}
+```
+
+Agent backend entries should refer to a provider and model:
+
+```json
+{
+  "engine": "claw-cli",
+  "provider": "openrouter",
+  "model": "deepseek/deepseek-v4-flash",
+  "permission_mode": "read-only",
+  "allowed_tools": ["read", "glob", "grep"]
+}
+```
+
+For local Ollama models:
+
+```json
+{
+  "engine": "claw-cli",
+  "provider": "ollama",
+  "model": "qwen2.5-coder:32b",
+  "permission_mode": "workspace-write"
+}
+```
+
+### Provider Verification Gates
+
+Do not mark a provider profile stable until these probes pass:
+
+1. `claw version --output-format json`
+2. `claw doctor --output-format json`
+3. One short no-tool prompt.
+4. One read-only file tool prompt in a disposable workzone.
+5. One workspace-write patch prompt in a disposable workzone.
+6. Invalid API key or invalid model returns a clear non-zero error.
+7. Timeout/cancellation kills the Claw subprocess.
+
+Current evidence:
+
+- OpenRouter with `deepseek/deepseek-v4-flash`: passed live Ying/T4 testing.
+- DeepSeek official API: not yet verified through Claw.
+- Ollama OpenAI-compatible `/v1`: not yet verified through Claw.
+
+Ollama must be treated as provisional until Claw is tested against
+`http://localhost:11434/v1`. If Claw requires `OPENAI_API_KEY`, HASHI may pass
+a non-secret dummy value such as `ollama`, but only for the Ollama provider
+profile.
+
+### Permission Profiles
+
+All agents may list `claw-cli` as an allowed backend, but the default Claw
+profile must be conservative:
+
+```json
+{
+  "permission_mode": "read-only",
+  "allowed_tools": ["read", "glob", "grep"]
+}
+```
+
+Coding agents can opt into:
+
+```json
+{
+  "permission_mode": "workspace-write"
+}
+```
+
+`danger-full-access` is only allowed for disposable live tests or explicit
+maintainer work. It must not be committed as a normal agent default.
+
+### Runtime Selection UX
+
+Backend switching should make the provider visible:
+
+```text
+/backend claw-cli openrouter:deepseek/deepseek-v4-flash
+/backend claw-cli ollama:qwen2.5-coder:32b
+```
+
+The runtime should resolve that into:
+
+```text
+engine=claw-cli
+provider=<provider>
+model=<model>
+OPENAI_BASE_URL=<provider base_url>
+OPENAI_API_KEY=<provider secret or dummy key>
+```
+
+If the provider is missing, the secret is missing, or the model probe fails,
+HASHI should report a typed backend error. It must not silently fall back to a
+different backend or provider.
+
+### All-Agent Rollout
+
+Rollout order:
+
+1. Add global Claw provider config support.
+2. Add a provider-aware Claw probe command or script.
+3. Add `claw-cli` as an allowed backend for all agents using the read-only
+   default profile.
+4. Enable `workspace-write` only for agents that are expected to perform coding
+   work.
+5. Run live smoke on at least one academic/research agent and one coding agent.
+6. Document provider/model examples for OpenRouter, DeepSeek official API, and
+   Ollama.
+
+Acceptance:
+
+- Any agent can switch to `claw-cli` when a valid provider/model is configured.
+- A missing Claw binary degrades only that backend, not the whole HASHI runtime.
+- Provider secrets are resolved by secret name and redacted in logs.
+- OpenRouter and at least one DeepSeek model pass read-only and workspace-write
+  live tests.
+- Ollama is either verified and documented as stable, or explicitly marked
+  unsupported/provisional with the observed failure reason.
+- Default all-agent configuration is read-only.
+- No committed config contains private local paths, real API keys, or
+  `danger-full-access` defaults.
+
 ## Security Rules
 
 - Do not pass HASHI secrets wholesale. Build a minimal environment per task.
