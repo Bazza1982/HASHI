@@ -1,18 +1,24 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
 import time
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
+
+from adapters.base import BaseBackend, BackendCapabilities, BackendResponse, TokenUsage
+from adapters.stream_events import StreamCallback, StreamEvent, KIND_PROGRESS, KIND_TOOL_END
 
 
 DEFAULT_CLAW_TIMEOUT_SEC = 30
 DEFAULT_CLAW_TASK_TIMEOUT_SEC = 1800
 VALID_PERMISSION_MODES = {"read-only", "workspace-write", "danger-full-access"}
+DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 SECRET_ENV_KEYS = {
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
@@ -95,12 +101,15 @@ class ClawTaskResult:
     estimated_cost: str | None = None
 
 
-def redact_secret_text(text: str | None) -> str:
+def redact_secret_text(text: str | None, extra_values: list[str] | None = None) -> str:
     if not text:
         return ""
     redacted = str(text)
     for key in SECRET_ENV_KEYS:
         value = os.environ.get(key)
+        if value:
+            redacted = redacted.replace(value, "<redacted>")
+    for value in extra_values or []:
         if value:
             redacted = redacted.replace(value, "<redacted>")
     return redacted
@@ -206,11 +215,13 @@ def run_claw_json_command(
     binary = find_claw_binary(binary_path, env=env)
     command = [str(binary), *args]
     started = time.perf_counter()
+    process_env = build_claw_env(env)
+    secret_values = [process_env.get(key, "") for key in SECRET_ENV_KEYS]
     try:
         completed = subprocess.run(
             command,
             cwd=str(cwd),
-            env=build_claw_env(env),
+            env=process_env,
             capture_output=True,
             text=True,
             timeout=timeout_s,
@@ -223,8 +234,8 @@ def run_claw_json_command(
         ) from exc
 
     duration_ms = round((time.perf_counter() - started) * 1000, 2)
-    stdout = redact_secret_text(completed.stdout)
-    stderr = redact_secret_text(completed.stderr)
+    stdout = redact_secret_text(completed.stdout, secret_values)
+    stderr = redact_secret_text(completed.stderr, secret_values)
     output = stdout.strip() or stderr.strip()
     parsed = _parse_json_output(output, command=command) if output else {}
 
@@ -373,3 +384,172 @@ def run_claw_state(
         env=env,
         timeout_s=timeout_s,
     ).json_data
+
+
+class ClawCLIAdapter(BaseBackend):
+    DEFAULT_IDLE_TIMEOUT_SEC = 300
+    DEFAULT_HARD_TIMEOUT_SEC = 1800
+
+    def _define_capabilities(self) -> BackendCapabilities:
+        return BackendCapabilities(
+            supports_sessions=True,
+            supports_files=True,
+            supports_tool_use=True,
+            supports_thinking_stream=False,
+            supports_headless_mode=True,
+        )
+
+    def __init__(self, agent_config, global_config, api_key: str = None):
+        super().__init__(agent_config, global_config, api_key)
+        self.logger = logging.getLogger(f"Backend.Claw.{self.config.name}")
+        self.current_proc = None
+        self._binary: Path | None = None
+        self._fresh_next = False
+
+    @property
+    def _extra(self) -> dict[str, Any]:
+        extra = getattr(self.config, "extra", None) or {}
+        return dict(extra) if isinstance(extra, Mapping) else {}
+
+    def _allowed_tools(self) -> list[str] | None:
+        raw = self._extra.get("allowed_tools")
+        if raw is None:
+            return None
+        if isinstance(raw, str):
+            return [item.strip() for item in raw.split(",") if item.strip()]
+        if isinstance(raw, list):
+            return [str(item).strip() for item in raw if str(item).strip()]
+        return None
+
+    def _permission_mode(self) -> str:
+        return str(self._extra.get("permission_mode") or "workspace-write")
+
+    def _openai_base_url(self) -> str:
+        return str(self._extra.get("openai_base_url") or DEFAULT_OPENROUTER_BASE_URL)
+
+    def _task_env(self) -> dict[str, str]:
+        env_source = dict(os.environ)
+        if self.api_key:
+            env_source["OPENAI_API_KEY"] = str(self.api_key)
+        if self._openai_base_url():
+            env_source["OPENAI_BASE_URL"] = self._openai_base_url()
+        return build_claw_env(env_source)
+
+    def _has_saved_session(self) -> bool:
+        sessions_dir = self.effective_workdir / ".claw" / "sessions"
+        return sessions_dir.is_dir() and any(sessions_dir.glob("*.jsonl"))
+
+    def _resume_target(self) -> str | None:
+        if self._fresh_next:
+            return None
+        configured = self._extra.get("resume")
+        if configured is False or configured == "none":
+            return None
+        if configured:
+            return str(configured)
+        return "latest" if self._has_saved_session() else None
+
+    async def initialize(self) -> bool:
+        self.logger.info("Initializing Claw CLI backend...")
+        self.config.workspace_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self._binary = find_claw_binary(
+                global_config=self.global_config,
+                agent_config=self.config,
+            )
+            version = await asyncio.to_thread(
+                run_claw_version,
+                self.effective_workdir,
+                binary_path=self._binary,
+                env=self._task_env(),
+                timeout_s=30,
+            )
+            self.logger.info(
+                "Claw CLI version check passed "
+                f"(binary={self._binary}, version={version.get('version')}, git_sha={version.get('git_sha')})"
+            )
+            return True
+        except ClawError as exc:
+            self.logger.error(f"Claw CLI unavailable: {exc}")
+            self._binary = None
+            return False
+        except Exception as exc:
+            self.logger.error(f"Claw CLI initialization failed: {exc}")
+            self._binary = None
+            return False
+
+    async def handle_new_session(self) -> bool:
+        self._fresh_next = True
+        self.logger.info("Claw handle_new_session: next request will start without --resume.")
+        return True
+
+    async def shutdown(self):
+        self.current_proc = None
+
+    async def generate_response(
+        self,
+        prompt: str,
+        request_id: str,
+        is_retry: bool = False,
+        silent: bool = False,
+        on_stream_event: StreamCallback = None,
+    ) -> BackendResponse:
+        if self._binary is None:
+            try:
+                self._binary = find_claw_binary(global_config=self.global_config, agent_config=self.config)
+            except ClawError as exc:
+                return BackendResponse(text="", duration_ms=0, error=str(exc), is_success=False)
+
+        if on_stream_event is not None:
+            await on_stream_event(StreamEvent(kind=KIND_PROGRESS, summary="Claw task started"))
+
+        started = time.perf_counter()
+        resume = self._resume_target()
+        self._fresh_next = False
+        try:
+            result = await asyncio.to_thread(
+                run_claw_task,
+                self.effective_workdir,
+                prompt,
+                self.config.model,
+                permission_mode=self._permission_mode(),
+                resume=resume,
+                allowed_tools=self._allowed_tools(),
+                binary_path=self._binary,
+                env=self._task_env(),
+                timeout_s=self.HARD_TIMEOUT_SEC,
+            )
+        except ClawTimeoutError as exc:
+            return BackendResponse(text="", duration_ms=self._duration_ms(started), error=str(exc), is_success=False)
+        except ClawCommandError as exc:
+            return BackendResponse(text="", duration_ms=self._duration_ms(started), error=str(exc), is_success=False)
+        except (ClawError, ValueError) as exc:
+            return BackendResponse(text="", duration_ms=self._duration_ms(started), error=str(exc), is_success=False)
+
+        if on_stream_event is not None:
+            for tool in result.tool_uses:
+                if isinstance(tool, dict):
+                    await on_stream_event(
+                        StreamEvent(
+                            kind=KIND_TOOL_END,
+                            summary=f"Claw used {tool.get('name') or 'tool'}",
+                            tool_name=str(tool.get("name") or ""),
+                        )
+                    )
+        return BackendResponse(
+            text=result.text,
+            duration_ms=result.duration_ms,
+            is_success=True,
+            usage=TokenUsage(
+                input_tokens=int((result.json_data.get("usage") or {}).get("input_tokens") or 0),
+                output_tokens=int((result.json_data.get("usage") or {}).get("output_tokens") or 0),
+                thinking_tokens=0,
+            ),
+            cost_usd=None,
+            tool_call_count=len(result.tool_uses),
+            tool_loop_count=result.iterations or 0,
+        )
+
+    @staticmethod
+    def _duration_ms(started: float) -> float:
+        return round((time.perf_counter() - started) * 1000, 2)

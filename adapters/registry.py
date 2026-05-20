@@ -16,6 +16,9 @@ def get_backend_class(engine_name: str):
     elif engine_name == "codex-cli":
         from adapters.codex_cli import CodexCLIAdapter
         return CodexCLIAdapter
+    elif engine_name == "claw-cli":
+        from adapters.claw_cli import ClawCLIAdapter
+        return ClawCLIAdapter
     elif engine_name == "ollama-api":
         from adapters.ollama_api import OllamaAdapter
         return OllamaAdapter
