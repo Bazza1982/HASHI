@@ -338,32 +338,50 @@ OPENAI_API_KEY
 ```
 
 HASHI should expose that through named provider profiles instead of repeating
-raw URLs and secret names in every agent config.
+raw URLs and secret names in every agent config. The provider config must live
+in a HASHI global config section named `claw_providers`, outside `secrets.json`
+and outside individual agent backend entries. URLs and provider status are not
+secrets; only the referenced secret values live in `secrets.json`.
 
 Proposed global shape:
 
 ```json
 {
-  "claw": {
+  "claw_providers": {
     "binary_path": "/opt/hashi/bin/claw",
+    "max_permission_mode": "workspace-write",
     "providers": {
       "openrouter": {
         "base_url": "https://openrouter.ai/api/v1",
-        "secret": "openrouter_key"
+        "secret": "openrouter_key",
+        "status": "stable"
       },
       "deepseek": {
         "base_url": "https://api.deepseek.com/v1",
-        "secret": "deepseek_api_key"
+        "secret": "deepseek_api_key",
+        "status": "provisional"
       },
       "ollama": {
         "base_url": "http://localhost:11434/v1",
         "secret": null,
-        "dummy_api_key": "ollama"
+        "dummy_api_key": "__ollama_dummy__",
+        "status": "provisional"
       }
     }
   }
 }
 ```
+
+Resolution priority:
+
+1. `provider` on the agent backend entry, if present.
+2. Legacy `agent.extra.openai_base_url` / adapter API key fallback, for
+   backwards compatibility only.
+3. Global default provider, if one is explicitly configured.
+
+If both `provider` and legacy `openai_base_url` are set, `provider` wins and the
+adapter logs a WARNING. Legacy `openai_base_url` and per-agent API key config
+are deprecated after Phase 5 but must not be removed during this rollout.
 
 Agent backend entries should refer to a provider and model:
 
@@ -388,6 +406,35 @@ For local Ollama models:
 }
 ```
 
+Secret resolution chain:
+
+```text
+agent backend entry
+-> provider name
+-> claw_providers.providers[provider]
+-> provider.secret
+-> secrets.json[provider.secret]
+-> OPENAI_API_KEY
+```
+
+If the provider references a secret that is missing from `secrets.json`, the
+adapter raises `ClawProviderSecretMissing`, `initialize()` returns `False`, and
+only that backend/agent enters degraded state. Other agents must continue to
+start normally.
+
+Implementation should replace direct `_task_env()` branching with one resolver:
+
+```python
+def _resolve_task_env(self) -> dict[str, str]:
+    provider_name = self._extra.get("provider")
+    if provider_name:
+        return self._env_from_provider(provider_name)
+    return self._env_from_agent_extra()
+```
+
+This avoids a double configuration track and gives one place to apply secret
+lookup, provider status warnings, redaction, and Ollama dummy-key handling.
+
 ### Provider Verification Gates
 
 Do not mark a provider profile stable until these probes pass:
@@ -408,8 +455,16 @@ Current evidence:
 
 Ollama must be treated as provisional until Claw is tested against
 `http://localhost:11434/v1`. If Claw requires `OPENAI_API_KEY`, HASHI may pass
-a non-secret dummy value such as `ollama`, but only for the Ollama provider
-profile.
+the non-secret dummy value `__ollama_dummy__`, but only for the Ollama provider
+profile. Redaction should skip this dummy value to avoid noisy replacement of
+ordinary text.
+
+Provider status semantics:
+
+- `stable`: no warning after probes pass.
+- `provisional`: allowed to run, but `initialize()` logs a WARNING and records
+  the provider as provisional in backend diagnostics.
+- `disabled`: rejected during `initialize()` with `ClawProviderConfigError`.
 
 ### Permission Profiles
 
@@ -434,6 +489,12 @@ Coding agents can opt into:
 `danger-full-access` is only allowed for disposable live tests or explicit
 maintainer work. It must not be committed as a normal agent default.
 
+The adapter must enforce the global `max_permission_mode`. If an agent requests
+`danger-full-access` while the global maximum is `workspace-write`, the adapter
+must downgrade the effective permission mode to `workspace-write` and log a
+WARNING. This keeps the all-agent default safe even if one agent config is too
+permissive.
+
 ### Runtime Selection UX
 
 Backend switching should make the provider visible:
@@ -442,6 +503,12 @@ Backend switching should make the provider visible:
 /backend claw-cli openrouter:deepseek/deepseek-v4-flash
 /backend claw-cli ollama:qwen2.5-coder:32b
 ```
+
+The command layer should not understand provider semantics. It should store the
+`provider:model` string or parsed `provider`/`model` fields in agent backend
+state and let the `claw-cli` adapter resolve provider details inside
+`_resolve_task_env()`. This keeps Claw provider rules inside the Claw adapter
+boundary instead of spreading them through generic command handling.
 
 The runtime should resolve that into:
 
@@ -454,28 +521,43 @@ OPENAI_API_KEY=<provider secret or dummy key>
 ```
 
 If the provider is missing, the secret is missing, or the model probe fails,
-HASHI should report a typed backend error. It must not silently fall back to a
-different backend or provider.
+HASHI should report a typed backend error. Use `ClawProviderConfigError` for
+missing/disabled provider and `ClawProviderSecretMissing` for missing provider
+secret. These errors follow the same lifecycle as `ClawBinaryNotFound`:
+`initialize()` returns `False`, that backend becomes degraded, and HASHI must not
+silently fall back to a different backend or provider.
 
 ### All-Agent Rollout
 
 Rollout order:
 
-1. Add global Claw provider config support.
-2. Add a provider-aware Claw probe command or script.
-3. Add `claw-cli` as an allowed backend for all agents using the read-only
-   default profile.
-4. Enable `workspace-write` only for agents that are expected to perform coding
-   work.
-5. Run live smoke on at least one academic/research agent and one coding agent.
-6. Document provider/model examples for OpenRouter, DeepSeek official API, and
+1. Phase 5a: add provider resolver, error types, global `claw_providers`
+   loading, and legacy extra fallback.
+2. Phase 5b: add a provider-aware Claw probe command or script.
+3. Phase 5c: migrate existing Claw agent entries from legacy
+   `openai_base_url`/API-key fields to provider profiles.
+4. Phase 5d: add `claw-cli` as an allowed backend for all agents using the
+   read-only default profile.
+5. Phase 5e: enable `workspace-write` only for agents that are expected to
+   perform coding work.
+6. Run live smoke on at least one academic/research agent and one coding agent.
+7. Document provider/model examples for OpenRouter, DeepSeek official API, and
    Ollama.
+8. Mark legacy extra fallback as deprecated in logs and docs, but do not remove
+   it in Phase 5.
 
 Acceptance:
 
 - Any agent can switch to `claw-cli` when a valid provider/model is configured.
 - A missing Claw binary degrades only that backend, not the whole HASHI runtime.
+- Missing provider config or provider secret degrades only that backend, not the
+  whole HASHI runtime.
 - Provider secrets are resolved by secret name and redacted in logs.
+- `provider` and legacy `openai_base_url` coexist predictably, with `provider`
+  taking precedence and a WARNING emitted.
+- Provisional providers run with explicit WARNING diagnostics.
+- `max_permission_mode` prevents accidental committed `danger-full-access`
+  defaults.
 - OpenRouter and at least one DeepSeek model pass read-only and workspace-write
   live tests.
 - Ollama is either verified and documented as stable, or explicitly marked
