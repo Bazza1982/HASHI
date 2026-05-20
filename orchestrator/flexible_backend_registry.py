@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-CLI_ENGINES = frozenset({"gemini-cli", "claude-cli", "codex-cli"})
+CLI_ENGINES = frozenset({"gemini-cli", "claude-cli", "codex-cli", "claw-cli"})
 
 BACKEND_REGISTRY: dict[str, dict] = {
     "gemini-cli": {
@@ -45,6 +45,22 @@ BACKEND_REGISTRY: dict[str, dict] = {
         "efforts": ["low", "medium", "high", "xhigh"],
         "default_effort": "medium",
         "secret_keys": ["codex-cli_key"],
+    },
+    "claw-cli": {
+        "label": "claw",
+        "models": [
+            "deepseek/deepseek-v4-flash",
+            "deepseek/deepseek-v4-pro",
+            "openai/gpt-4.1-mini",
+        ],
+        "default_model": "deepseek/deepseek-v4-flash",
+        "efforts": [],
+        "default_effort": None,
+        "secret_keys": [
+            "{agent_name}_openrouter_key",
+            "openrouter-api_key",
+            "openrouter_key",
+        ],
     },
     "deepseek-api": {
         "label": "deepseek",

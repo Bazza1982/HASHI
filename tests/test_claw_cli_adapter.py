@@ -4,10 +4,12 @@ import os
 import stat
 import textwrap
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from adapters.claw_cli import (
+    ClawCLIAdapter,
     ClawBinaryNotFound,
     ClawCommandError,
     ClawJsonError,
@@ -18,6 +20,8 @@ from adapters.claw_cli import (
     run_claw_json_command,
     run_claw_task,
 )
+from adapters.registry import get_backend_class
+from orchestrator.flexible_backend_registry import get_secret_lookup_order, is_cli_backend
 
 
 def _write_exe(path: Path, body: str) -> Path:
@@ -162,3 +166,63 @@ def test_run_claw_task_builds_safe_one_shot_command(tmp_path):
 def test_run_claw_task_rejects_invalid_permission_mode(tmp_path):
     with pytest.raises(ValueError, match="permission_mode"):
         run_claw_task(tmp_path, "prompt", "model", permission_mode="root")
+
+
+def test_registry_exposes_claw_backend():
+    assert get_backend_class("claw-cli") is ClawCLIAdapter
+    assert is_cli_backend("claw-cli")
+    assert "openrouter_key" in get_secret_lookup_order("claw-cli", "ying")
+
+
+@pytest.mark.asyncio
+async def test_claw_adapter_degrades_when_binary_missing(tmp_path):
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={"claw_binary_path": str(tmp_path / "missing")},
+        resolve_access_root=lambda: tmp_path,
+    )
+    global_cfg = SimpleNamespace()
+    adapter = ClawCLIAdapter(cfg, global_cfg, api_key="test-key")
+
+    assert await adapter.initialize() is False
+
+
+@pytest.mark.asyncio
+async def test_claw_adapter_generate_response_with_fake_binary(tmp_path):
+    fake = _write_exe(
+        tmp_path / "claw",
+        """
+        #!/usr/bin/env python3
+        import json, sys
+        if sys.argv[1] == "version":
+            print(json.dumps({"kind": "version", "version": "0.1.0", "git_sha": "fake"}))
+        else:
+            print(json.dumps({
+              "message": "adapter done",
+              "model": "deepseek/test",
+              "iterations": 1,
+              "tool_uses": [],
+              "tool_results": [],
+              "usage": {"input_tokens": 3, "output_tokens": 2}
+            }))
+        """,
+    )
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={"claw_binary_path": str(fake), "permission_mode": "read-only"},
+        resolve_access_root=lambda: tmp_path,
+    )
+    global_cfg = SimpleNamespace()
+    adapter = ClawCLIAdapter(cfg, global_cfg, api_key="test-key")
+
+    assert await adapter.initialize() is True
+    response = await adapter.generate_response("hello", "req-1")
+
+    assert response.is_success is True
+    assert response.text == "adapter done"
+    assert response.usage.input_tokens == 3
+    assert response.usage.output_tokens == 2
