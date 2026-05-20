@@ -10,6 +10,7 @@ from orchestrator.workzone import (
     resolve_workzone_input,
     save_workzone,
 )
+from tools.schemas import ALL_TOOL_NAMES
 
 
 def test_workzone_off_has_no_prompt(tmp_path: Path):
@@ -175,3 +176,37 @@ def test_tool_registry_uses_external_workzone_as_access_root_when_outside_scope(
 
     assert manager.current_backend.tool_registry.workspace_dir == zone.resolve()
     assert manager.current_backend.tool_registry.access_root == zone.resolve()
+
+
+def test_tool_registry_wildcard_survives_global_default_merge():
+    manager = FlexibleBackendManager.__new__(FlexibleBackendManager)
+    manager._load_global_raw = lambda: {
+        "default_tools": {"allowed": ["telegram_send_file"], "max_loops": 5}
+    }
+
+    merged = manager._resolve_tools_config(
+        {"tools": {"allowed": ["*"], "max_loops": 25}}
+    )
+
+    assert merged == {"allowed": ["*"], "max_loops": 25}
+
+
+def test_tool_registry_wildcard_allows_all_registered_tools(tmp_path: Path):
+    manager = FlexibleBackendManager.__new__(FlexibleBackendManager)
+    manager.current_backend = SimpleNamespace(tool_registry=None)
+    manager.secrets = {}
+    manager.global_config = SimpleNamespace(authorized_id=123)
+    manager.config = SimpleNamespace(name="agent", telegram_token_key="agent")
+    manager.logger = SimpleNamespace(error=lambda *args, **kwargs: None, info=lambda *args, **kwargs: None)
+    adapter_cfg = SimpleNamespace(
+        name="agent",
+        extra={},
+        workspace_dir=tmp_path,
+        resolve_access_root=lambda: tmp_path,
+    )
+
+    manager._attach_tool_registry({"allowed": ["*"], "max_loops": 25}, adapter_cfg)
+
+    registry = manager.current_backend.tool_registry
+    assert registry.max_loops == 25
+    assert set(registry._allowed) == set(ALL_TOOL_NAMES)

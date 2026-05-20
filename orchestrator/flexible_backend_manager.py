@@ -242,10 +242,15 @@ class FlexibleBackendManager:
         if not global_tools and not backend_tools:
             return None
 
-        # Merge allowed lists (union, global first)
+        # Merge allowed lists (union, global first). A backend-level wildcard must
+        # survive the merge with global defaults; otherwise ["*"] + defaults would
+        # become ["*", "telegram_send_file"] and fail ToolRegistry's wildcard check.
         global_allowed = set(global_tools.get("allowed", []))
         backend_allowed = set(backend_tools.get("allowed", []))
-        merged_allowed = list(global_allowed | backend_allowed)
+        if "*" in global_allowed or "*" in backend_allowed:
+            merged_allowed = ["*"]
+        else:
+            merged_allowed = list(global_allowed | backend_allowed)
 
         if not merged_allowed:
             return None

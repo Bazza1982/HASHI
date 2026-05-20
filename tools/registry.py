@@ -99,7 +99,7 @@ class ToolRegistry:
         self.agents_config = agents_config or []
         self.audit_context = audit_context or {}
 
-        if allowed_tools == ["*"]:
+        if "*" in allowed_tools:
             self._allowed = set(ALL_TOOL_NAMES)
         else:
             self._allowed = set(allowed_tools) & set(ALL_TOOL_NAMES)
