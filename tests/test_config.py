@@ -98,3 +98,46 @@ def test_explicit_flex_agent_type_does_not_warn(tmp_path, caplog):
 
     assert agents[0].type == "flex"
     assert "has no explicit type" not in caplog.text
+
+
+def test_global_claw_providers_are_loaded(tmp_path):
+    config_path = tmp_path / "agents.json"
+    secrets_path = tmp_path / "secrets.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "global": {
+                    "authorized_id": 0,
+                    "base_logs_dir": "logs",
+                    "base_media_dir": "media",
+                    "claw_providers": {
+                        "binary_path": "/opt/hashi/bin/claw",
+                        "max_permission_mode": "workspace-write",
+                        "providers": {
+                            "openrouter": {
+                                "base_url": "https://openrouter.ai/api/v1",
+                                "secret": "openrouter_key",
+                            }
+                        },
+                    },
+                },
+                "agents": [
+                    {
+                        "name": "flexy",
+                        "type": "flex",
+                        "workspace_dir": "workspaces/flexy",
+                        "system_md": "workspaces/flexy/agent.md",
+                        "allowed_backends": [{"engine": "claw-cli", "model": "deepseek/test"}],
+                        "active_backend": "claw-cli",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    secrets_path.write_text(json.dumps({"authorized_telegram_id": 0}), encoding="utf-8")
+
+    global_cfg, _, _ = ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
+
+    assert global_cfg.claw_providers["binary_path"] == "/opt/hashi/bin/claw"
+    assert global_cfg.claw_providers["providers"]["openrouter"]["secret"] == "openrouter_key"

@@ -104,6 +104,39 @@ def test_save_state_writes_active_model_when_override_exists(tmp_path):
     assert state["active_model"] == "gpt-5.5"
 
 
+def test_claw_provider_model_is_parsed_into_adapter_extra(tmp_path):
+    workspace = tmp_path / "agent"
+    workspace.mkdir()
+    cfg = FlexibleAgentConfig(
+        name="test-flex",
+        workspace_dir=workspace,
+        system_md=workspace / "AGENT.md",
+        telegram_token_key="test-flex",
+        allowed_backends=[
+            {"engine": "claw-cli", "model": "deepseek/default"},
+        ],
+        active_backend="claw-cli",
+        project_root=workspace,
+    )
+    global_cfg = GlobalConfig(
+        authorized_id=1,
+        base_logs_dir=workspace / "logs",
+        base_media_dir=workspace / "media",
+        project_root=workspace,
+        claw_providers={"providers": {"openrouter": {"base_url": "https://example.invalid/v1"}}},
+    )
+    manager = FlexibleBackendManager(cfg, global_cfg, secrets={"openrouter_key": "secret"})
+
+    adapter_cfg = manager._build_adapter_config(
+        "claw-cli",
+        cfg.allowed_backends[0],
+        target_model="openrouter:deepseek/deepseek-v4-flash",
+    )
+
+    assert adapter_cfg.model == "deepseek/deepseek-v4-flash"
+    assert adapter_cfg.extra["provider"] == "openrouter"
+
+
 def test_save_state_recovers_from_invalid_existing_json(tmp_path):
     workspace = tmp_path / "agent"
     workspace.mkdir()

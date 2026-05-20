@@ -49,6 +49,7 @@ class GlobalConfig:
     codex_cmd: str = "codex"
     gh_copilot_cmd: str = "gh copilot"
     openrouter_url: str = "https://openrouter.ai/api/v1/chat/completions"
+    claw_providers: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class AgentConfig:
@@ -154,7 +155,8 @@ class ConfigManager:
                 config_dir=config_dir,
                 bridge_home=bridge_home,
             ),
-            openrouter_url=g_raw.get("openrouter_url", "https://openrouter.ai/api/v1/chat/completions")
+            openrouter_url=g_raw.get("openrouter_url", "https://openrouter.ai/api/v1/chat/completions"),
+            claw_providers=dict(g_raw.get("claw_providers") or {}),
         )
 
         agents = []

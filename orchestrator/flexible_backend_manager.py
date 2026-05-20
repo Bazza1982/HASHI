@@ -139,6 +139,14 @@ class FlexibleBackendManager:
         backend_scope = backend_cfg_raw.get("access_scope", self.config.access_scope)
         backend_extra.pop("access_scope", None)
         extra = {**agent_extra, **backend_extra}
+        if engine == "claw-cli" and target_model and ":" in str(target_model):
+            provider_name, model_name = str(target_model).split(":", 1)
+            providers = (
+                getattr(self.global_config, "claw_providers", None) or {}
+            ).get("providers", {})
+            if provider_name in providers and model_name:
+                extra["provider"] = provider_name
+                target_model = model_name
         return AgentConfig(
             name=self.config.name,
             engine=engine,
@@ -157,6 +165,8 @@ class FlexibleBackendManager:
             raise ValueError(f"Backend {engine} not allowed for {self.config.name}.")
 
         adapter_cfg = self._build_adapter_config(engine, backend_cfg_raw, target_model=target_model)
+        if engine == "claw-cli":
+            setattr(adapter_cfg, "_hashi_secrets", self.secrets)
         from adapters.registry import get_backend_class
 
         BackendClass = get_backend_class(engine)
@@ -215,6 +225,8 @@ class FlexibleBackendManager:
             from adapters.registry import get_backend_class
             BackendClass = get_backend_class(engine)
             api_key = self._resolve_api_key(engine)
+            if engine == "claw-cli":
+                setattr(adapter_cfg, "_hashi_secrets", self.secrets)
 
             self.current_backend = BackendClass(adapter_cfg, self.global_config, api_key)
 

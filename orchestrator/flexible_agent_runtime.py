@@ -4184,7 +4184,7 @@ class FlexibleAgentRuntime:
             if target_engine == "claude-cli":
                 requested_model = CLAUDE_MODEL_ALIASES.get(requested_model.lower(), requested_model)
             available = self._get_available_models_for(target_engine)
-            if available and requested_model not in available:
+            if target_engine != "claw-cli" and available and requested_model not in available:
                 await self._reply_text(
                     update,
                     f"Unknown model for {target_engine}: {requested_model}\nUse /backend {target_engine} to see available options.",
@@ -4798,7 +4798,7 @@ class FlexibleAgentRuntime:
             allowed = ", ".join(b.get("engine", "?") for b in self.config.allowed_backends)
             return f"Backend not allowed for this agent: {engine}\nAllowed: {allowed}"
         available = self._get_available_models_for(engine)
-        if available and model not in available:
+        if engine != "claw-cli" and available and model not in available:
             return f"Unknown model for {engine}: {model}"
         return None
 
