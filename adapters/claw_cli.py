@@ -283,19 +283,13 @@ def run_claw_task(
     if not str(model or "").strip():
         raise ValueError("model must not be empty")
 
-    args = [
-        "--model",
+    args = build_claw_task_args(
+        prompt,
         model,
-        "--permission-mode",
-        permission_mode,
-        "--output-format",
-        "json",
-    ]
-    if allowed_tools:
-        args.extend(["--allowedTools", ",".join(allowed_tools)])
-    if resume:
-        args.extend(["--resume", resume])
-    args.extend(["prompt", prompt])
+        permission_mode=permission_mode,
+        resume=resume,
+        allowed_tools=allowed_tools,
+    )
 
     result = run_claw_json_command(
         args,
@@ -320,6 +314,39 @@ def run_claw_task(
         iterations=data.get("iterations") if isinstance(data.get("iterations"), int) else None,
         estimated_cost=data.get("estimated_cost") if isinstance(data.get("estimated_cost"), str) else None,
     )
+
+
+def build_claw_task_args(
+    prompt: str,
+    model: str,
+    *,
+    permission_mode: str = "workspace-write",
+    resume: str | None = None,
+    allowed_tools: list[str] | None = None,
+) -> list[str]:
+    if permission_mode not in VALID_PERMISSION_MODES:
+        raise ValueError(
+            f"invalid Claw permission_mode {permission_mode!r}; "
+            f"expected one of {sorted(VALID_PERMISSION_MODES)}"
+        )
+    if not str(prompt or "").strip():
+        raise ValueError("prompt must not be empty")
+    if not str(model or "").strip():
+        raise ValueError("model must not be empty")
+    args = [
+        "--model",
+        model,
+        "--permission-mode",
+        permission_mode,
+        "--output-format",
+        "json",
+    ]
+    if allowed_tools:
+        args.extend(["--allowedTools", ",".join(allowed_tools)])
+    if resume:
+        args.extend(["--resume", resume])
+    args.extend(["prompt", prompt])
+    return args
 
 
 def run_claw_version(
@@ -484,6 +511,12 @@ class ClawCLIAdapter(BaseBackend):
         return True
 
     async def shutdown(self):
+        if self.current_proc:
+            await self.force_kill_process_tree(
+                self.current_proc,
+                logger=self.logger,
+                reason="shutdown",
+            )
         self.current_proc = None
 
     async def generate_response(
@@ -507,18 +540,18 @@ class ClawCLIAdapter(BaseBackend):
         resume = self._resume_target()
         self._fresh_next = False
         try:
-            result = await asyncio.to_thread(
-                run_claw_task,
-                self.effective_workdir,
+            result = await self._run_task_async(
                 prompt,
-                self.config.model,
-                permission_mode=self._permission_mode(),
                 resume=resume,
-                allowed_tools=self._allowed_tools(),
-                binary_path=self._binary,
-                env=self._task_env(),
-                timeout_s=self.HARD_TIMEOUT_SEC,
             )
+        except asyncio.CancelledError:
+            if self.current_proc:
+                await self.force_kill_process_tree(
+                    self.current_proc,
+                    logger=self.logger,
+                    reason=f"cancelled:{request_id}",
+                )
+            raise
         except ClawTimeoutError as exc:
             return BackendResponse(text="", duration_ms=self._duration_ms(started), error=str(exc), is_success=False)
         except ClawCommandError as exc:
@@ -553,3 +586,76 @@ class ClawCLIAdapter(BaseBackend):
     @staticmethod
     def _duration_ms(started: float) -> float:
         return round((time.perf_counter() - started) * 1000, 2)
+
+    async def _run_task_async(self, prompt: str, *, resume: str | None) -> ClawTaskResult:
+        if self._binary is None:
+            raise ClawBinaryNotFound("Claw binary not initialized")
+        args = build_claw_task_args(
+            prompt,
+            self.config.model,
+            permission_mode=self._permission_mode(),
+            resume=resume,
+            allowed_tools=self._allowed_tools(),
+        )
+        command = [str(self._binary), *args]
+        started = time.perf_counter()
+        extra_kwargs = {}
+        if os.name != "nt":
+            extra_kwargs["start_new_session"] = True
+        proc = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(self.effective_workdir),
+            env=self._task_env(),
+            limit=1024 * 1024,
+            **extra_kwargs,
+        )
+        self.current_proc = proc
+        self._touch_activity()
+        try:
+            stdout_data, stderr_data = await asyncio.wait_for(proc.communicate(), timeout=self.HARD_TIMEOUT_SEC)
+        except asyncio.TimeoutError as exc:
+            await self.force_kill_process_tree(
+                proc,
+                logger=self.logger,
+                reason=f"hard-timeout:{self.HARD_TIMEOUT_SEC}s",
+            )
+            raise ClawTimeoutError(
+                f"Claw command timed out after {self.HARD_TIMEOUT_SEC}s: {' '.join(command)}",
+                timeout_s=self.HARD_TIMEOUT_SEC,
+            ) from exc
+        finally:
+            self.current_proc = None
+
+        duration_ms = self._duration_ms(started)
+        env = self._task_env()
+        secret_values = [env.get(key, "") for key in SECRET_ENV_KEYS]
+        stdout = redact_secret_text(stdout_data.decode(errors="replace"), secret_values)
+        stderr = redact_secret_text(stderr_data.decode(errors="replace"), secret_values)
+        output = stdout.strip() or stderr.strip()
+        parsed = _parse_json_output(output, command=command) if output else {}
+        if proc.returncode != 0:
+            message = parsed.get("error") if isinstance(parsed, dict) else None
+            raise ClawCommandError(
+                message or f"Claw command exited with code {proc.returncode}",
+                returncode=proc.returncode or 1,
+                stdout=stdout,
+                stderr=stderr,
+                parsed_error=parsed if parsed else None,
+            )
+        return ClawTaskResult(
+            text=str(parsed.get("message") or ""),
+            model=str(parsed.get("model") or self.config.model),
+            permission_mode=self._permission_mode(),
+            cwd=str(self.effective_workdir),
+            returncode=proc.returncode or 0,
+            duration_ms=duration_ms,
+            stdout=stdout,
+            stderr=stderr,
+            json_data=parsed,
+            tool_uses=list(parsed.get("tool_uses") or []),
+            tool_results=list(parsed.get("tool_results") or []),
+            iterations=parsed.get("iterations") if isinstance(parsed.get("iterations"), int) else None,
+            estimated_cost=parsed.get("estimated_cost") if isinstance(parsed.get("estimated_cost"), str) else None,
+        )

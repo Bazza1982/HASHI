@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import stat
 import textwrap
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +15,7 @@ from adapters.claw_cli import (
     ClawCommandError,
     ClawJsonError,
     ClawTimeoutError,
+    build_claw_task_args,
     build_claw_env,
     find_claw_binary,
     run_claw_doctor,
@@ -168,6 +170,29 @@ def test_run_claw_task_rejects_invalid_permission_mode(tmp_path):
         run_claw_task(tmp_path, "prompt", "model", permission_mode="root")
 
 
+def test_build_claw_task_args_matches_cli_shape():
+    assert build_claw_task_args(
+        "hello",
+        "deepseek/test",
+        permission_mode="read-only",
+        resume="latest",
+        allowed_tools=["read"],
+    ) == [
+        "--model",
+        "deepseek/test",
+        "--permission-mode",
+        "read-only",
+        "--output-format",
+        "json",
+        "--allowedTools",
+        "read",
+        "--resume",
+        "latest",
+        "prompt",
+        "hello",
+    ]
+
+
 def test_registry_exposes_claw_backend():
     assert get_backend_class("claw-cli") is ClawCLIAdapter
     assert is_cli_backend("claw-cli")
@@ -226,3 +251,40 @@ async def test_claw_adapter_generate_response_with_fake_binary(tmp_path):
     assert response.text == "adapter done"
     assert response.usage.input_tokens == 3
     assert response.usage.output_tokens == 2
+
+
+@pytest.mark.asyncio
+async def test_claw_adapter_shutdown_kills_running_process(tmp_path):
+    fake = _write_exe(
+        tmp_path / "claw",
+        """
+        #!/usr/bin/env python3
+        import json, sys, time
+        if sys.argv[1] == "version":
+            print(json.dumps({"kind": "version", "version": "0.1.0"}))
+        else:
+            time.sleep(20)
+        """,
+    )
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={"claw_binary_path": str(fake), "permission_mode": "read-only", "hard_timeout_sec": 30},
+        resolve_access_root=lambda: tmp_path,
+    )
+    global_cfg = SimpleNamespace()
+    adapter = ClawCLIAdapter(cfg, global_cfg, api_key="test-key")
+    assert await adapter.initialize() is True
+
+    task = asyncio.create_task(adapter.generate_response("hello", "req-slow"))
+    for _ in range(50):
+        if adapter.current_proc is not None:
+            break
+        await asyncio.sleep(0.02)
+    assert adapter.current_proc is not None
+
+    await adapter.shutdown()
+    response = await task
+
+    assert response.is_success is False
