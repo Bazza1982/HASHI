@@ -226,7 +226,15 @@ class DeepSeekAdapter(OpenRouterAdapter):
                 await self._run_tool_calls(result.tool_calls, messages, on_stream_event)
 
                 if loop_idx == max_loops - 1:
-                    self.logger.warning(f"Tool loop limit ({max_loops}) reached for {request_id}")
+                    result = await self._call_final_after_tool_loop_limit(
+                        messages, headers, use_streaming, on_stream_event,
+                        request_id, max_loops
+                    )
+                    total_prompt += result.prompt_tokens
+                    total_completion += result.completion_tokens
+                    total_thinking += result.thinking_tokens
+                    last_text = result.text
+                    break
 
             from adapters.base import BackendResponse, TokenUsage
             duration_ms = round((time.perf_counter() - started) * 1000, 2)

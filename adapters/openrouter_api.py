@@ -38,6 +38,10 @@ class _APIResult:
 
 class OpenRouterAdapter(BaseBackend):
     MAX_TOOL_LOOPS = 25
+    TOOL_LOOP_LIMIT_FINAL_PROMPT = (
+        "Tool loop limit reached. Use the tool results already shown above and "
+        "write the best final answer now. Do not call any more tools."
+    )
 
     def _define_capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
@@ -210,6 +214,37 @@ class OpenRouterAdapter(BaseBackend):
                 "tool_call_id": tc_id,
                 "content": result.output,
             })
+
+    async def _call_final_after_tool_loop_limit(
+        self,
+        messages: list[dict],
+        headers: dict,
+        use_streaming: bool,
+        on_stream_event: StreamCallback,
+        request_id: str,
+        max_loops: int,
+    ) -> _APIResult:
+        self.logger.warning(
+            f"Tool loop limit ({max_loops}) reached for request {request_id}; "
+            "requesting final no-tools answer"
+        )
+        if on_stream_event:
+            await self._emit(
+                on_stream_event, KIND_PROGRESS,
+                f"⚠️ Tool loop limit ({max_loops}) reached; asking for final answer"
+            )
+        final_messages = [
+            *messages,
+            {"role": "user", "content": self.TOOL_LOOP_LIMIT_FINAL_PROMPT},
+        ]
+        payload = self._build_payload(
+            final_messages,
+            use_streaming=use_streaming,
+            tool_tiers=[],
+        )
+        if use_streaming:
+            return await self._stream_api_once(payload, headers, on_stream_event)
+        return await self._call_api_once(payload, headers, on_stream_event)
 
     # ------------------------------------------------------------------
     # Non-streaming single API call
@@ -444,14 +479,15 @@ class OpenRouterAdapter(BaseBackend):
 
                 # If this was the last allowed loop, break
                 if loop_idx == max_loops - 1:
-                    self.logger.warning(
-                        f"Tool loop limit ({max_loops}) reached for request {request_id}"
+                    result = await self._call_final_after_tool_loop_limit(
+                        messages, headers, use_streaming, on_stream_event,
+                        request_id, max_loops
                     )
-                    if on_stream_event:
-                        await self._emit(
-                            on_stream_event, KIND_PROGRESS,
-                            f"⚠️ Tool loop limit ({max_loops}) reached"
-                        )
+                    total_prompt += result.prompt_tokens
+                    total_completion += result.completion_tokens
+                    total_thinking += result.thinking_tokens
+                    last_text = result.text
+                    break
 
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
             from adapters.base import TokenUsage

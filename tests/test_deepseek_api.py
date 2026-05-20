@@ -12,6 +12,8 @@ class _DummyToolRegistry:
     max_loops = 2
 
     def get_tool_definitions(self, tiers=None):
+        if tiers == []:
+            return []
         return [
             {
                 "type": "function",
@@ -92,6 +94,39 @@ async def test_deepseek_tool_loop_preserves_reasoning_content_non_stream(monkeyp
     assert response.text == "done"
     assert response.tool_call_count == 1
     assert response.tool_loop_count == 1
+
+
+@pytest.mark.asyncio
+async def test_deepseek_tool_loop_limit_requests_final_no_tools_answer(monkeypatch, tmp_path):
+    adapter = _adapter(tmp_path)
+    adapter.tool_registry.max_loops = 1
+    seen_payloads = []
+    tool_calls = [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "file_list", "arguments": '{"path": "/tmp"}'},
+        }
+    ]
+
+    async def fake_call(payload, headers, on_stream_event):
+        seen_payloads.append(payload)
+        if len(seen_payloads) == 1:
+            assert "tools" in payload
+            return _APIResult(text="", tool_calls=tool_calls, finish_reason="tool_calls")
+        assert "tools" not in payload
+        assert payload["messages"][-1]["content"].startswith("Tool loop limit reached.")
+        return _APIResult(text="final answer", tool_calls=None, finish_reason="stop")
+
+    monkeypatch.setattr(adapter, "_call_api_once", fake_call)
+
+    response = await adapter.generate_response("check files", "req-test")
+
+    assert response.is_success is True
+    assert response.text == "final answer"
+    assert response.tool_call_count == 1
+    assert response.tool_loop_count == 1
+    assert len(seen_payloads) == 2
 
 
 @pytest.mark.asyncio
