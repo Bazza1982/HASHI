@@ -222,6 +222,7 @@ def run_claw_json_command(
             command,
             cwd=str(cwd),
             env=process_env,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=timeout_s,
@@ -268,6 +269,7 @@ def run_claw_task(
     permission_mode: str = "workspace-write",
     resume: str | None = None,
     allowed_tools: list[str] | None = None,
+    skip_permissions: bool = False,
     binary_path: str | os.PathLike[str] | None = None,
     env: Mapping[str, str] | None = None,
     timeout_s: float = DEFAULT_CLAW_TASK_TIMEOUT_SEC,
@@ -289,6 +291,7 @@ def run_claw_task(
         permission_mode=permission_mode,
         resume=resume,
         allowed_tools=allowed_tools,
+        skip_permissions=skip_permissions,
     )
 
     result = run_claw_json_command(
@@ -323,6 +326,7 @@ def build_claw_task_args(
     permission_mode: str = "workspace-write",
     resume: str | None = None,
     allowed_tools: list[str] | None = None,
+    skip_permissions: bool = False,
 ) -> list[str]:
     if permission_mode not in VALID_PERMISSION_MODES:
         raise ValueError(
@@ -343,6 +347,8 @@ def build_claw_task_args(
     ]
     if allowed_tools:
         args.extend(["--allowedTools", ",".join(allowed_tools)])
+    if skip_permissions:
+        args.append("--dangerously-skip-permissions")
     if resume:
         args.extend(["--resume", resume])
     args.extend(["prompt", prompt])
@@ -450,6 +456,9 @@ class ClawCLIAdapter(BaseBackend):
 
     def _permission_mode(self) -> str:
         return str(self._extra.get("permission_mode") or "workspace-write")
+
+    def _skip_permissions(self) -> bool:
+        return bool(self._extra.get("skip_permissions") or self._extra.get("dangerously_skip_permissions"))
 
     def _openai_base_url(self) -> str:
         return str(self._extra.get("openai_base_url") or DEFAULT_OPENROUTER_BASE_URL)
@@ -596,6 +605,7 @@ class ClawCLIAdapter(BaseBackend):
             permission_mode=self._permission_mode(),
             resume=resume,
             allowed_tools=self._allowed_tools(),
+            skip_permissions=self._skip_permissions(),
         )
         command = [str(self._binary), *args]
         started = time.perf_counter()
@@ -604,6 +614,7 @@ class ClawCLIAdapter(BaseBackend):
             extra_kwargs["start_new_session"] = True
         proc = await asyncio.create_subprocess_exec(
             *command,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(self.effective_workdir),
