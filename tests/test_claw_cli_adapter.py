@@ -177,6 +177,7 @@ def test_build_claw_task_args_matches_cli_shape():
         permission_mode="read-only",
         resume="latest",
         allowed_tools=["read"],
+        skip_permissions=True,
     ) == [
         "--model",
         "deepseek/test",
@@ -186,6 +187,7 @@ def test_build_claw_task_args_matches_cli_shape():
         "json",
         "--allowedTools",
         "read",
+        "--dangerously-skip-permissions",
         "--resume",
         "latest",
         "prompt",
