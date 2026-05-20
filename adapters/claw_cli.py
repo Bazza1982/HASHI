@@ -11,6 +11,8 @@ from typing import Any, Mapping
 
 
 DEFAULT_CLAW_TIMEOUT_SEC = 30
+DEFAULT_CLAW_TASK_TIMEOUT_SEC = 1800
+VALID_PERMISSION_MODES = {"read-only", "workspace-write", "danger-full-access"}
 SECRET_ENV_KEYS = {
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
@@ -74,6 +76,23 @@ class ClawCommandResult:
     stderr: str
     duration_ms: float
     json_data: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ClawTaskResult:
+    text: str
+    model: str
+    permission_mode: str
+    cwd: str
+    returncode: int
+    duration_ms: float
+    stdout: str
+    stderr: str
+    json_data: dict[str, Any]
+    tool_uses: list[Any]
+    tool_results: list[Any]
+    iterations: int | None = None
+    estimated_cost: str | None = None
 
 
 def redact_secret_text(text: str | None) -> str:
@@ -227,6 +246,68 @@ def run_claw_json_command(
         stderr=stderr,
         duration_ms=duration_ms,
         json_data=parsed,
+    )
+
+
+def run_claw_task(
+    workspace_dir: str | os.PathLike[str],
+    prompt: str,
+    model: str,
+    *,
+    permission_mode: str = "workspace-write",
+    resume: str | None = None,
+    allowed_tools: list[str] | None = None,
+    binary_path: str | os.PathLike[str] | None = None,
+    env: Mapping[str, str] | None = None,
+    timeout_s: float = DEFAULT_CLAW_TASK_TIMEOUT_SEC,
+) -> ClawTaskResult:
+    """Run one Claw prompt and return the machine-readable result."""
+    if permission_mode not in VALID_PERMISSION_MODES:
+        raise ValueError(
+            f"invalid Claw permission_mode {permission_mode!r}; "
+            f"expected one of {sorted(VALID_PERMISSION_MODES)}"
+        )
+    if not str(prompt or "").strip():
+        raise ValueError("prompt must not be empty")
+    if not str(model or "").strip():
+        raise ValueError("model must not be empty")
+
+    args = [
+        "--model",
+        model,
+        "--permission-mode",
+        permission_mode,
+        "--output-format",
+        "json",
+    ]
+    if allowed_tools:
+        args.extend(["--allowedTools", ",".join(allowed_tools)])
+    if resume:
+        args.extend(["--resume", resume])
+    args.extend(["prompt", prompt])
+
+    result = run_claw_json_command(
+        args,
+        cwd=workspace_dir,
+        binary_path=binary_path,
+        env=env,
+        timeout_s=timeout_s,
+    )
+    data = result.json_data
+    return ClawTaskResult(
+        text=str(data.get("message") or ""),
+        model=str(data.get("model") or model),
+        permission_mode=permission_mode,
+        cwd=result.cwd,
+        returncode=result.returncode,
+        duration_ms=result.duration_ms,
+        stdout=result.stdout,
+        stderr=result.stderr,
+        json_data=data,
+        tool_uses=list(data.get("tool_uses") or []),
+        tool_results=list(data.get("tool_results") or []),
+        iterations=data.get("iterations") if isinstance(data.get("iterations"), int) else None,
+        estimated_cost=data.get("estimated_cost") if isinstance(data.get("estimated_cost"), str) else None,
     )
 
 

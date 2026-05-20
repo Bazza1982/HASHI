@@ -16,6 +16,7 @@ from adapters.claw_cli import (
     find_claw_binary,
     run_claw_doctor,
     run_claw_json_command,
+    run_claw_task,
 )
 
 
@@ -119,3 +120,45 @@ def test_run_claw_json_command_timeout(tmp_path):
     with pytest.raises(ClawTimeoutError):
         run_claw_json_command(["doctor", "--output-format", "json"], cwd=tmp_path, binary_path=fake, timeout_s=0.1)
 
+
+def test_run_claw_task_builds_safe_one_shot_command(tmp_path):
+    fake = _write_exe(
+        tmp_path / "claw",
+        """
+        #!/usr/bin/env python3
+        import json, sys
+        assert "--permission-mode" in sys.argv
+        assert "read-only" in sys.argv
+        assert "--allowedTools" in sys.argv
+        assert "read,glob" in sys.argv
+        print(json.dumps({
+          "message": "done",
+          "model": "deepseek/test",
+          "iterations": 2,
+          "estimated_cost": "$0.0001",
+          "tool_uses": [{"name": "read_file"}],
+          "tool_results": [{"is_error": False}]
+        }))
+        """,
+    )
+
+    result = run_claw_task(
+        tmp_path,
+        "inspect",
+        "deepseek/test",
+        permission_mode="read-only",
+        allowed_tools=["read", "glob"],
+        binary_path=fake,
+    )
+
+    assert result.text == "done"
+    assert result.model == "deepseek/test"
+    assert result.permission_mode == "read-only"
+    assert result.iterations == 2
+    assert result.tool_uses == [{"name": "read_file"}]
+    assert result.tool_results == [{"is_error": False}]
+
+
+def test_run_claw_task_rejects_invalid_permission_mode(tmp_path):
+    with pytest.raises(ValueError, match="permission_mode"):
+        run_claw_task(tmp_path, "prompt", "model", permission_mode="root")
