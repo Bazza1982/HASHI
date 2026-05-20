@@ -104,7 +104,7 @@ def test_save_state_writes_active_model_when_override_exists(tmp_path):
     assert state["active_model"] == "gpt-5.5"
 
 
-def test_claw_provider_model_is_parsed_into_adapter_extra(tmp_path):
+def test_provider_prefixed_model_is_preserved_for_adapter_resolution(tmp_path):
     workspace = tmp_path / "agent"
     workspace.mkdir()
     cfg = FlexibleAgentConfig(
@@ -133,8 +133,8 @@ def test_claw_provider_model_is_parsed_into_adapter_extra(tmp_path):
         target_model="openrouter:deepseek/deepseek-v4-flash",
     )
 
-    assert adapter_cfg.model == "deepseek/deepseek-v4-flash"
-    assert adapter_cfg.extra["provider"] == "openrouter"
+    assert adapter_cfg.model == "openrouter:deepseek/deepseek-v4-flash"
+    assert "provider" not in adapter_cfg.extra
 
 
 def test_save_state_recovers_from_invalid_existing_json(tmp_path):

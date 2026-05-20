@@ -62,6 +62,7 @@ from orchestrator.flexible_backend_registry import (
     CLAUDE_MODEL_ALIASES,
     get_available_efforts,
     get_available_models,
+    allows_custom_models,
     get_backend_label,
     normalize_effort,
     normalize_model,
@@ -4184,7 +4185,7 @@ class FlexibleAgentRuntime:
             if target_engine == "claude-cli":
                 requested_model = CLAUDE_MODEL_ALIASES.get(requested_model.lower(), requested_model)
             available = self._get_available_models_for(target_engine)
-            if target_engine != "claw-cli" and available and requested_model not in available:
+            if not allows_custom_models(target_engine) and available and requested_model not in available:
                 await self._reply_text(
                     update,
                     f"Unknown model for {target_engine}: {requested_model}\nUse /backend {target_engine} to see available options.",
@@ -4798,7 +4799,7 @@ class FlexibleAgentRuntime:
             allowed = ", ".join(b.get("engine", "?") for b in self.config.allowed_backends)
             return f"Backend not allowed for this agent: {engine}\nAllowed: {allowed}"
         available = self._get_available_models_for(engine)
-        if engine != "claw-cli" and available and model not in available:
+        if not allows_custom_models(engine) and available and model not in available:
             return f"Unknown model for {engine}: {model}"
         return None
 

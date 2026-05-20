@@ -24,7 +24,7 @@ from adapters.claw_cli import (
     run_claw_task,
 )
 from adapters.registry import get_backend_class
-from orchestrator.flexible_backend_registry import get_secret_lookup_order, is_cli_backend
+from orchestrator.flexible_backend_registry import allows_custom_models, get_secret_lookup_order, is_cli_backend
 
 
 def _write_exe(path: Path, body: str) -> Path:
@@ -212,6 +212,8 @@ def test_build_claw_task_args_matches_cli_shape():
 def test_registry_exposes_claw_backend():
     assert get_backend_class("claw-cli") is ClawCLIAdapter
     assert is_cli_backend("claw-cli")
+    assert allows_custom_models("claw-cli")
+    assert not allows_custom_models("codex-cli")
     assert "openrouter_key" in get_secret_lookup_order("claw-cli", "ying")
 
 

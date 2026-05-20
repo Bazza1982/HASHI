@@ -48,6 +48,7 @@ BACKEND_REGISTRY: dict[str, dict] = {
     },
     "claw-cli": {
         "label": "claw",
+        "allow_custom_models": True,
         "models": [
             "deepseek/deepseek-v4-flash",
             "deepseek/deepseek-v4-pro",
@@ -138,6 +139,10 @@ def get_backend_label(engine: str) -> str:
 
 def get_available_models(engine: str) -> list[str]:
     return list(get_backend_entry(engine).get("models") or [])
+
+
+def allows_custom_models(engine: str) -> bool:
+    return bool(get_backend_entry(engine).get("allow_custom_models"))
 
 
 def get_default_model(engine: str) -> str | None:

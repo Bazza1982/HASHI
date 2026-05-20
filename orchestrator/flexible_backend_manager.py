@@ -139,14 +139,6 @@ class FlexibleBackendManager:
         backend_scope = backend_cfg_raw.get("access_scope", self.config.access_scope)
         backend_extra.pop("access_scope", None)
         extra = {**agent_extra, **backend_extra}
-        if engine == "claw-cli" and target_model and ":" in str(target_model):
-            provider_name, model_name = str(target_model).split(":", 1)
-            providers = (
-                getattr(self.global_config, "claw_providers", None) or {}
-            ).get("providers", {})
-            if provider_name in providers and model_name:
-                extra["provider"] = provider_name
-                target_model = model_name
         return AgentConfig(
             name=self.config.name,
             engine=engine,
@@ -159,14 +151,16 @@ class FlexibleBackendManager:
             project_root=self.config.project_root,
         )
 
+    def _attach_runtime_context(self, adapter_cfg: AgentConfig) -> None:
+        setattr(adapter_cfg, "_hashi_secrets", self.secrets)
+
     def create_ephemeral_backend(self, engine: str, target_model: str | None = None):
         backend_cfg_raw = next((b for b in self.config.allowed_backends if b["engine"] == engine), None)
         if not backend_cfg_raw:
             raise ValueError(f"Backend {engine} not allowed for {self.config.name}.")
 
         adapter_cfg = self._build_adapter_config(engine, backend_cfg_raw, target_model=target_model)
-        if engine == "claw-cli":
-            setattr(adapter_cfg, "_hashi_secrets", self.secrets)
+        self._attach_runtime_context(adapter_cfg)
         from adapters.registry import get_backend_class
 
         BackendClass = get_backend_class(engine)
@@ -225,8 +219,7 @@ class FlexibleBackendManager:
             from adapters.registry import get_backend_class
             BackendClass = get_backend_class(engine)
             api_key = self._resolve_api_key(engine)
-            if engine == "claw-cli":
-                setattr(adapter_cfg, "_hashi_secrets", self.secrets)
+            self._attach_runtime_context(adapter_cfg)
 
             self.current_backend = BackendClass(adapter_cfg, self.global_config, api_key)
 
