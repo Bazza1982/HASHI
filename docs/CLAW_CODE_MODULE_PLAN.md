@@ -449,9 +449,14 @@ Do not mark a provider profile stable until these probes pass:
 
 Current evidence:
 
-- OpenRouter with `deepseek/deepseek-v4-flash`: passed live Ying/T4 testing.
-- DeepSeek official API: not yet verified through Claw.
-- Ollama OpenAI-compatible `/v1`: not yet verified through Claw.
+- OpenRouter with `deepseek/deepseek-v4-flash`: passed live Claw smoke.
+- DeepSeek official API with `deepseek-v4-flash`: passed live Claw smoke
+  after the Claw binary was rebuilt with bare OpenAI-compatible model support
+  when `OPENAI_BASE_URL` is set.
+- Ollama OpenAI-compatible `/v1`: Claw route and bare local model syntax passed
+  against a local `/v1/chat/completions` mock. Real daemon validation is still
+  blocked on this host because `ollama` is not installed/running and
+  `localhost:11434` refuses connections.
 
 Ollama must be treated as provisional until Claw is tested against
 `http://localhost:11434/v1`. If Claw requires `OPENAI_API_KEY`, HASHI may pass
@@ -533,7 +538,8 @@ Rollout order:
 
 1. Phase 5a: add provider resolver, error types, global `claw_providers`
    loading, and legacy extra fallback.
-2. Phase 5b: add a provider-aware Claw probe command or script.
+2. Phase 5b: add a provider-aware Claw probe command or script. Done via
+   `scripts/claw_code_probe.py --provider <name> --model <model>`.
 3. Phase 5c: migrate existing Claw agent entries from legacy
    `openai_base_url`/API-key fields to provider profiles.
 4. Phase 5d: add `claw-cli` as an allowed backend for all agents using the
