@@ -9,7 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-No unreleased changes yet.
+### ✨ Added
+
+- **Claw provider smoke probe** — `scripts/claw_code_probe.py` can now run provider-aware smoke tests from `global.claw_providers`, loading provider base URLs and secrets from the normal HASHI config chain without printing secret values.
+
+### 🧪 Tests
+
+- Live-validated Claw through OpenRouter and DeepSeek official API with `HASHI_CLAW_SMOKE_OK` no-tool prompts.
+- Verified the Ollama/OpenAI-compatible route against a local mock `/v1/chat/completions` server; real Ollama live validation still requires a local daemon and pulled model.
 
 ## [3.2.1] - 2026-05-12
 
