@@ -1,6 +1,8 @@
 # Claw-Code Optional Module Plan
 
-Status: research plan updated after local build/tool smoke
+Status: superseded for packaging direction by
+[CLAW_TOOL_GATEWAY_TELEMETRY_PLAN.md](CLAW_TOOL_GATEWAY_TELEMETRY_PLAN.md);
+kept as historical research and local smoke evidence.
 Owner: HASHI
 Last researched: 2026-05-20
 Local research copy: `/home/lily/projects/external/claw-code`
@@ -10,13 +12,16 @@ Local release binary tested:
 
 ## Decision
 
-Use `claw-code` as an optional long-running coding-agent function/backend, not as
-HASHI core and not as an embedded Rust library.
+Use `claw-code` as a long-running coding-agent function/backend, not as HASHI
+core. The original research direction treated Claw as an optional external
+subprocess. The current long-term direction is stronger: vendor/refactor Claw
+into the HASHI repository and ship a HASHI-managed packaged `hashi-claw`
+runtime so users do not need to download a separate Claw checkout.
 
-The first integration should be a subprocess boundary:
+The integration should still keep a subprocess boundary:
 
 ```text
-HASHI runtime -> claw adapter -> configured claw CLI binary -> .claw session state
+HASHI runtime -> claw adapter -> packaged hashi-claw binary -> .claw session state
 ```
 
 This keeps HASHI minimal and hot-rebootable while allowing Claw to own its own

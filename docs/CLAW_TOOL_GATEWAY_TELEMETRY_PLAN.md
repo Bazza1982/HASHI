@@ -1,8 +1,9 @@
 # Claw Tool Gateway And Telemetry Plan
 
-Status: proposed long-term architecture
+Status: proposed long-term architecture, updated for in-package Claw runtime
 Owner: HASHI
 Created: 2026-05-23
+Updated: 2026-05-23
 Related docs:
 
 - [CLAW_CODE_MODULE_PLAN.md](CLAW_CODE_MODULE_PLAN.md)
@@ -15,14 +16,29 @@ Related docs:
 
 Do not solve Claw internet access with a short-lived adapter-only shim.
 
-The long-term solution is a protocol boundary:
+Since the Claw codebase must be modified for durable tool and telemetry
+support, HASHI should stop treating Claw as a user-installed external binary.
+The long-term solution is to vendor/refactor Claw into the HASHI repository and
+ship a HASHI-managed Claw runtime as part of the HASHI package.
+
+Users should not need to download or build a separate Claw checkout to use Claw
+mode.
+
+The runtime boundary remains process-level:
 
 ```text
-HASHI Tool Gateway -> MCP/tools protocol -> Claw runtime -> HASHI telemetry
+HASHI package
+  -> packaged hashi-claw executable
+  -> HASHI Tool Gateway over MCP/tools protocol
+  -> HASHI telemetry
 ```
 
-Claw should not know the internal shape of HASHI's `ToolRegistry`, and HASHI
-should not embed Claw-specific tool routing into the core runtime. HASHI should
+Claw should become a HASHI-owned packaged subsystem, not HASHI core. HASHI
+should preserve a stable adapter/process boundary so `/reboot` can adopt Python
+adapter and gateway changes without restarting the whole process. The packaged
+Claw binary can be upgraded through normal HASHI release/package updates.
+
+Claw should not know the internal shape of HASHI's `ToolRegistry`. HASHI should
 expose a stable tool gateway that can serve Claw, OpenRouter API agents,
 DeepSeek API agents, Ollama API agents, and future model runtimes through
 backend-appropriate protocol adapters.
@@ -51,7 +67,7 @@ Claw mode is different:
 
 ```text
 claw-cli
-  -> HASHI starts a Claw subprocess
+  -> HASHI starts a Claw subprocess, currently resolved from an external binary
   -> Claw owns its own model/tool loop
   -> HASHI receives final JSON only
 ```
@@ -65,6 +81,11 @@ This caused agents such as `diaochan` to correctly report that the current
 Claw backend did not have browser or URL-fetch capability, even though the same
 agent has `openrouter-api` and `deepseek-api` configurations with HASHI
 `tools.allowed = ["*"]`.
+
+There is also a deployment problem. If another HASHI instance pulls the latest
+adapter code but does not have a compatible Claw binary installed, Claw mode is
+not actually portable. That violates the desired user experience for the HASHI
+deck: the package should carry what it needs.
 
 ## Evidence From Current Code
 
@@ -118,7 +139,7 @@ thinking blocks are rendered as hidden summaries, not emitted as machine telemet
 ## Architecture Goals
 
 1. Keep HASHI core slim and hot-rebootable.
-2. Keep Claw optional and replaceable.
+2. Make Claw mode work from the HASHI package without a separate user download.
 3. Make internet tools available to Claw through a standard tool protocol.
 4. Reuse one HASHI tool permission/audit implementation instead of duplicating
    web/browser tool behavior for every backend.
@@ -126,15 +147,18 @@ thinking blocks are rendered as hidden summaries, not emitted as machine telemet
 6. Preserve backward compatibility for current API backends and current
    `claw-cli` agents.
 7. Avoid pretending that estimated or unavailable thinking tokens are real.
+8. Keep the packaged Claw runtime replaceable at the adapter boundary.
 
 ## Non-Goals
 
 - Do not move Claw into `main.py`.
-- Do not make Cargo, Rust, or Claw source checkout a HASHI runtime dependency.
+- Do not require users to install Cargo, Rust, or a separate Claw checkout at
+  runtime.
 - Do not add Claw-only internet code paths to HASHI core.
 - Do not parse human terminal output as the permanent telemetry protocol.
 - Do not expose raw hidden chain-of-thought by default.
 - Do not report `thinking_tokens = 0` when the correct value is unknown.
+- Do not make HASHI process startup depend on compiling Rust.
 
 ## Target Architecture
 
@@ -173,12 +197,109 @@ thinking blocks are rendered as hidden summaries, not emitted as machine telemet
 For Claw specifically:
 
 ```text
-claw-cli
+hashi-claw packaged runtime
   -> configured MCP stdio server: hashi-tool-gateway
   -> Claw model calls MCP tools
   -> Tool Gateway executes existing HASHI tools
   -> Claw emits structured telemetry
   -> HASHI records usage and displays verbose status
+```
+
+## In-Package Claw Runtime
+
+Claw should be integrated into the HASHI source and release pipeline as a
+packaged sidecar runtime.
+
+Recommended source layout:
+
+```text
+vendor/claw-code/
+  LICENSE
+  rust/
+    Cargo.toml
+    crates/...
+
+packaging/claw/
+  build.py                 # build/release helper
+  manifest.json            # expected binary names, versions, checksums
+  README.md                # maintainer notes
+
+hashi_assets/claw/
+  bin/
+    linux-x86_64/claw
+    windows-x86_64/claw.exe
+    macos-arm64/claw
+  manifest.json
+```
+
+The exact path can be adjusted to match packaging conventions, but the boundary
+should stay clear:
+
+```text
+vendored source -> release build artifact -> packaged runtime binary
+```
+
+Runtime lookup order in `adapters/claw_cli.py` should become:
+
+1. Explicit backend `claw_binary_path` or `claw_cmd`.
+2. Global HASHI `claw_binary_path`.
+3. Packaged HASHI Claw binary for the current platform.
+4. `CLAW_BINARY` / `CLAW_BIN`.
+5. `PATH` fallback for developer overrides.
+
+That keeps developer flexibility while making the packaged runtime the normal
+user path.
+
+### License And Attribution
+
+The reviewed Claw source is MIT licensed:
+
+```text
+Copyright (c) 2026 UltraWorkers and Claw Code contributors
+```
+
+HASHI packaging must preserve:
+
+- Claw `LICENSE`.
+- A vendored attribution note in HASHI release materials.
+- Any dependency license obligations from the Rust `Cargo.lock` dependency set.
+
+No vendoring should occur without keeping the upstream license text in the
+distributed package.
+
+### Build-Time Versus Runtime Dependency
+
+Cargo and Rust are allowed in release/build CI.
+
+Cargo and Rust are not allowed as normal runtime prerequisites for HASHI users.
+
+Release artifacts should ship prebuilt Claw binaries for supported platforms.
+If a platform has no packaged binary, Claw mode should report a clear
+unsupported-platform diagnostic rather than asking the user to manually build
+Claw.
+
+### Versioning
+
+The packaged Claw runtime should have explicit version metadata:
+
+```json
+{
+  "hashi_claw_version": "0.1.0-hashi.1",
+  "upstream_claw_commit": "f8e1bb7262b261da1ee6bfcd461bfc5b676f6a6d",
+  "build_target": "linux-x86_64",
+  "sha256": "..."
+}
+```
+
+`claw-cli` backend status should include:
+
+```text
+binary_source = packaged | explicit | env | path
+binary_path
+hashi_claw_version
+upstream_claw_commit
+tool_gateway = healthy | degraded | unavailable
+telemetry = stream-json | json-fallback
 ```
 
 ## HASHI Tool Gateway
@@ -364,10 +485,11 @@ Do not use `0` to mean unknown.
 
 ## Claw Telemetry Requirements
 
-Claw should gain a machine-readable streaming output format:
+The packaged HASHI Claw runtime should gain a machine-readable streaming output
+format:
 
 ```text
-claw --output-format stream-json prompt "..."
+hashi-claw --output-format stream-json prompt "..."
 ```
 
 Each line should be a JSON event matching a stable schema. Required event kinds:
@@ -388,7 +510,7 @@ hidden human summary and does not emit it into prompt JSON. Long-term parity
 requires preserving structured thinking telemetry without leaking raw hidden
 chain-of-thought by default.
 
-Suggested Claw-side changes:
+Required Claw-side changes in the vendored/refactored runtime:
 
 ```text
 runtime/src/usage.rs
@@ -448,6 +570,28 @@ default. Store hashes, sizes, and redacted previews.
 
 ## Rollout Plan
 
+### Phase 0: Vendor And Package Claw Runtime
+
+Deliverables:
+
+- Import the reviewed MIT Claw source into a dedicated vendor directory.
+- Preserve Claw `LICENSE` and attribution.
+- Add packaging metadata for supported binary targets.
+- Add release/build scripts that compile `hashi-claw` during CI or release
+  preparation, not during normal HASHI startup.
+- Add packaged-binary lookup to `adapters/claw_cli.py`.
+- Add status diagnostics for binary source, version, build target, and checksum.
+
+Acceptance:
+
+- A clean HASHI package install can resolve a Claw binary without a separate
+  Claw checkout.
+- Runtime startup does not require Cargo or Rust.
+- Explicit `claw_binary_path` still overrides the packaged binary for developer
+  testing.
+- Unsupported platforms fail with a clear diagnostic.
+- License text is present in the distributed package.
+
 ### Phase A: Tool Gateway Foundation
 
 Deliverables:
@@ -488,9 +632,12 @@ Deliverables:
 - Generate/select per-agent Claw MCP config.
 - Validate required `hashi-tools` MCP server before accepting the backend.
 - Add `/status` or backend diagnostics showing Claw gateway readiness.
+- Ensure generated Claw config targets the packaged `hashi-claw` runtime by
+  default.
 
 Acceptance:
 
+- The packaged Claw runtime starts from a clean HASHI install.
 - A Claw backend agent can fetch a public URL through the gateway.
 - Removing the gateway command causes clear backend initialization failure.
 - Existing non-Claw backends are unchanged.
@@ -559,6 +706,19 @@ If `stream-json` is unavailable:
 This preserves compatibility with existing Claw binaries while establishing the
 new target contract.
 
+Current explicit external binary configuration also remains supported. The
+packaged binary is the default user path, but developers can still override it:
+
+```json
+{
+  "engine": "claw-cli",
+  "claw_binary_path": "/path/to/custom/claw"
+}
+```
+
+This prevents the integrated package from blocking upstream Claw testing or
+hotfix validation.
+
 ## Validation Matrix
 
 Focused Python checks:
@@ -566,6 +726,13 @@ Focused Python checks:
 ```bash
 python3 -m py_compile adapters/claw_cli.py tools/registry.py
 pytest tests/test_claw_cli_adapter.py tests/test_workzone.py tests/test_deepseek_api.py
+```
+
+Packaged runtime checks:
+
+```bash
+pytest tests/test_claw_packaging.py
+python3 scripts/claw_package_probe.py --json
 ```
 
 Gateway checks:
@@ -577,6 +744,8 @@ pytest tests/test_tool_gateway.py tests/test_tool_gateway_mcp.py
 Live smoke checks:
 
 ```text
+Packaged Claw binary resolves without external checkout
+Packaged Claw version/sha appears in backend status
 Claw MCP list: sees web and browser tools
 Claw web_fetch: fetches a public URL
 Claw browser_get_text: reads a public page
@@ -592,6 +761,7 @@ Regression checks:
 /reboot max keeps all active agents online
 API backend tools still work
 No secrets in logs
+No Cargo/Rust needed at runtime
 No HASHI core restart required for gateway/adapter updates
 ```
 
@@ -607,6 +777,10 @@ No HASHI core restart required for gateway/adapter updates
    and token counts?
 5. Should API backends move to Tool Gateway in the same release or after Claw
    parity is proven?
+6. Should HASHI ship one full package with Claw included, or split a slim core
+   package and a full deck package?
+7. Which platform binaries are release-blocking for the first in-package Claw
+   rollout?
 
 ## Recommended Answers
 
@@ -617,6 +791,10 @@ No HASHI core restart required for gateway/adapter updates
 3. Prefer existing browser bridge discovery first, with Playwright fallback.
 4. Do not show raw hidden reasoning by default. Show status and token counts.
 5. Keep API direct path initially; migrate to gateway facade after parity tests.
+6. Ship Claw in the normal full HASHI deck. A separate slim package can exist
+   later, but it must not be the default user path for Claw mode.
+7. Treat Linux/WSL x86_64 and Windows x86_64 as first rollout gates; add macOS
+   after the build pipeline is stable.
 
 ## Acceptance Definition
 
@@ -627,4 +805,5 @@ This plan is complete when:
 - Thinking/token telemetry is explicit and source-labelled.
 - Existing API backend behavior is preserved.
 - No Claw-specific behavior is added to HASHI core.
+- A normal HASHI package contains the Claw runtime needed by `claw-cli` mode.
 - The feature can be adopted by `/reboot` without restarting the HASHI process.
