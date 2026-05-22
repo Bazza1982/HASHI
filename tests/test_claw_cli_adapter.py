@@ -4,6 +4,8 @@ import os
 import stat
 import textwrap
 import asyncio
+import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,11 +16,16 @@ from adapters.claw_cli import (
     ClawBinaryNotFound,
     ClawCommandError,
     ClawJsonError,
+    ClawPackagedRuntimeError,
     ClawProviderSecretMissing,
     ClawTimeoutError,
     build_claw_task_args,
     build_claw_env,
+    detect_hashi_claw_platform,
+    discover_claw_binary,
     find_claw_binary,
+    load_packaged_claw_manifest,
+    resolve_packaged_claw_binary,
     run_claw_doctor,
     run_claw_json_command,
     run_claw_task,
@@ -33,6 +40,37 @@ def _write_exe(path: Path, body: str) -> Path:
     return path
 
 
+def _write_packaged_claw(
+    root: Path,
+    *,
+    platform_key: str = "linux-x86_64",
+    rust_target_triple: str = "x86_64-unknown-linux-gnu",
+    body: str = "#!/usr/bin/env python3\nprint('ok')\n",
+) -> Path:
+    (root / "bin" / platform_key).mkdir(parents=True, exist_ok=True)
+    binary = _write_exe(root / "bin" / platform_key / "hashi-claw", body)
+    digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+    (root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "manifest_version": 1,
+                "runtime": "hashi-claw",
+                "version": "0.0.0-test",
+                "binaries": {
+                    platform_key: {
+                        "path": str(binary.relative_to(root)),
+                        "binary_name": "hashi-claw",
+                        "rust_target_triple": rust_target_triple,
+                        "sha256": digest,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return binary
+
+
 def test_find_claw_binary_accepts_configured_executable(tmp_path):
     fake = _write_exe(
         tmp_path / "claw",
@@ -43,6 +81,90 @@ def test_find_claw_binary_accepts_configured_executable(tmp_path):
     )
 
     assert find_claw_binary(fake) == fake.resolve()
+
+
+def test_detect_hashi_claw_platform_linux_wsl_candidate():
+    platform = detect_hashi_claw_platform(
+        system="Linux",
+        machine="x86_64",
+        release="6.6.0-microsoft-standard-WSL2",
+    )
+
+    assert platform.key == "linux-x86_64"
+    assert platform.rust_target_triple == "x86_64-unknown-linux-gnu"
+    assert platform.is_wsl is True
+    assert platform.candidate_keys == ("linux-x86_64-wsl", "linux-x86_64")
+
+
+def test_load_packaged_claw_manifest_rejects_non_hashi_runtime(tmp_path):
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps({"manifest_version": 1, "runtime": "claw", "version": "1", "binaries": {}}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ClawPackagedRuntimeError, match="hashi-claw"):
+        load_packaged_claw_manifest(manifest)
+
+
+def test_resolve_packaged_claw_binary_validates_checksum(tmp_path):
+    root = tmp_path / "hashi_assets" / "claw"
+    binary = _write_packaged_claw(root)
+    platform = detect_hashi_claw_platform(system="Linux", machine="x86_64", release="6.8")
+
+    resolved = resolve_packaged_claw_binary(root, platform=platform)
+
+    assert resolved.path == binary.resolve()
+    assert resolved.source == "packaged"
+    assert resolved.packaged_version == "0.0.0-test"
+
+
+def test_find_claw_binary_uses_packaged_runtime_before_env(tmp_path):
+    root = tmp_path / "hashi_assets" / "claw"
+    packaged = _write_packaged_claw(root)
+    env_claw = _write_exe(
+        tmp_path / "env-claw",
+        """
+        #!/usr/bin/env python3
+        print("env")
+        """,
+    )
+    global_cfg = SimpleNamespace(project_root=tmp_path)
+
+    assert find_claw_binary(global_config=global_cfg, env={"CLAW_BINARY": str(env_claw), "PATH": ""}) == packaged.resolve()
+
+
+def test_find_claw_binary_checksum_mismatch_falls_back_to_env(tmp_path):
+    root = tmp_path / "hashi_assets" / "claw"
+    packaged = _write_packaged_claw(root)
+    packaged.write_text("#!/usr/bin/env python3\nprint('tampered')\n", encoding="utf-8")
+    packaged.chmod(packaged.stat().st_mode | stat.S_IXUSR)
+    env_claw = _write_exe(
+        tmp_path / "env-claw",
+        """
+        #!/usr/bin/env python3
+        print("env")
+        """,
+    )
+    global_cfg = SimpleNamespace(project_root=tmp_path)
+
+    resolved = discover_claw_binary(global_config=global_cfg, env={"CLAW_BINARY": str(env_claw), "PATH": ""})
+
+    assert resolved.path == env_claw.resolve()
+    assert resolved.source == "env:CLAW_BINARY"
+    assert any("checksum mismatch" in warning for warning in resolved.warnings)
+
+
+def test_find_claw_binary_require_packaged_fails_closed(tmp_path):
+    root = tmp_path / "hashi_assets" / "claw"
+    packaged = _write_packaged_claw(root)
+    packaged.write_text("#!/usr/bin/env python3\nprint('tampered')\n", encoding="utf-8")
+    packaged.chmod(packaged.stat().st_mode | stat.S_IXUSR)
+    global_cfg = SimpleNamespace(project_root=tmp_path)
+    agent_cfg = SimpleNamespace(extra={"claw_runtime_policy": "require-packaged"})
+
+    with pytest.raises(ClawBinaryNotFound, match="required but unavailable"):
+        find_claw_binary(global_config=global_cfg, agent_config=agent_cfg, env={"PATH": ""})
 
 
 def test_find_claw_binary_reports_missing_configured_path(tmp_path):
