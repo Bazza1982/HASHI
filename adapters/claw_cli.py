@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
+import platform as py_platform
 import shutil
 import subprocess
 import time
@@ -21,6 +23,9 @@ VALID_PERMISSION_MODES = {"read-only", "workspace-write", "danger-full-access"}
 PERMISSION_MODE_RANK = {"read-only": 0, "workspace-write": 1, "danger-full-access": 2}
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OLLAMA_DUMMY_API_KEY = "__ollama_dummy__"
+PACKAGED_CLAW_RUNTIME = "hashi-claw"
+PACKAGED_CLAW_MANIFEST_VERSION = 1
+CLAW_RUNTIME_POLICIES = {"prefer-packaged", "require-packaged", "system-only"}
 SECRET_ENV_KEYS = {
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
@@ -38,6 +43,10 @@ class ClawError(RuntimeError):
 
 class ClawBinaryNotFound(ClawError):
     """Raised when no executable Claw binary can be resolved."""
+
+
+class ClawPackagedRuntimeError(ClawBinaryNotFound):
+    """Raised when a packaged Claw runtime exists but is unsafe or unusable."""
 
 
 class ClawProviderConfigError(ClawError):
@@ -111,6 +120,42 @@ class ClawTaskResult:
     estimated_cost: str | None = None
 
 
+@dataclass(frozen=True)
+class ClawPlatform:
+    key: str
+    rust_target_triple: str
+    system: str
+    machine: str
+    is_wsl: bool = False
+    candidate_keys: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class PackagedClawBinarySpec:
+    platform_key: str
+    relative_path: Path
+    sha256: str
+    rust_target_triple: str
+    binary_name: str
+
+
+@dataclass(frozen=True)
+class PackagedClawManifest:
+    manifest_path: Path
+    version: str
+    binaries: dict[str, PackagedClawBinarySpec]
+
+
+@dataclass(frozen=True)
+class ClawBinaryResolution:
+    path: Path
+    source: str
+    warnings: tuple[str, ...] = ()
+    platform: ClawPlatform | None = None
+    manifest_path: Path | None = None
+    packaged_version: str | None = None
+
+
 def redact_secret_text(text: str | None, extra_values: list[str] | None = None) -> str:
     if not text:
         return ""
@@ -140,6 +185,275 @@ def build_claw_env(source: Mapping[str, str] | None = None) -> dict[str, str]:
     return env
 
 
+def detect_hashi_claw_platform(
+    *,
+    system: str | None = None,
+    machine: str | None = None,
+    release: str | None = None,
+) -> ClawPlatform:
+    raw_system = (system or py_platform.system() or "").strip().lower()
+    raw_machine = (machine or py_platform.machine() or "").strip().lower()
+    raw_release = (release or py_platform.release() or "").strip().lower()
+    normalized_machine = {
+        "amd64": "x86_64",
+        "x64": "x86_64",
+        "x86-64": "x86_64",
+        "x86_64": "x86_64",
+        "arm64": "arm64",
+        "aarch64": "arm64",
+    }.get(raw_machine, raw_machine)
+    normalized_system = {
+        "linux": "linux",
+        "windows": "windows",
+        "darwin": "macos",
+    }.get(raw_system, raw_system)
+    is_wsl = normalized_system == "linux" and "microsoft" in raw_release
+    mapping = {
+        ("linux", "x86_64"): ("linux-x86_64", "x86_64-unknown-linux-gnu"),
+        ("linux", "arm64"): ("linux-arm64", "aarch64-unknown-linux-gnu"),
+        ("windows", "x86_64"): ("windows-x86_64", "x86_64-pc-windows-msvc"),
+        ("windows", "arm64"): ("windows-arm64", "aarch64-pc-windows-msvc"),
+        ("macos", "x86_64"): ("macos-x86_64", "x86_64-apple-darwin"),
+        ("macos", "arm64"): ("macos-arm64", "aarch64-apple-darwin"),
+    }
+    resolved = mapping.get((normalized_system, normalized_machine))
+    if not resolved:
+        raise ClawPackagedRuntimeError(
+            "Unsupported packaged Claw platform "
+            f"(system={raw_system or '<unknown>'}, machine={raw_machine or '<unknown>'})"
+        )
+    key, triple = resolved
+    candidate_keys = (f"{key}-wsl", key) if is_wsl else (key,)
+    return ClawPlatform(
+        key=key,
+        rust_target_triple=triple,
+        system=normalized_system,
+        machine=normalized_machine,
+        is_wsl=is_wsl,
+        candidate_keys=candidate_keys,
+    )
+
+
+def _packaged_claw_roots(global_config: Any | None = None) -> list[Path]:
+    roots: list[Path] = []
+    project_root = getattr(global_config, "project_root", None)
+    if project_root:
+        roots.append(Path(project_root).expanduser() / "hashi_assets" / "claw")
+    roots.append(Path(__file__).resolve().parent.parent / "hashi_assets" / "claw")
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        key = str(root)
+        if key not in seen:
+            seen.add(key)
+            unique.append(root)
+    return unique
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def load_packaged_claw_manifest(manifest_path: Path) -> PackagedClawManifest:
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ClawPackagedRuntimeError(f"Packaged Claw manifest not found: {manifest_path}") from exc
+    except json.JSONDecodeError as exc:
+        raise ClawPackagedRuntimeError(f"Packaged Claw manifest is invalid JSON: {manifest_path}") from exc
+    if not isinstance(payload, dict):
+        raise ClawPackagedRuntimeError(f"Packaged Claw manifest must be an object: {manifest_path}")
+    manifest_version = payload.get("manifest_version")
+    if manifest_version != PACKAGED_CLAW_MANIFEST_VERSION:
+        raise ClawPackagedRuntimeError(
+            f"Packaged Claw manifest_version must be {PACKAGED_CLAW_MANIFEST_VERSION}; got {manifest_version!r}"
+        )
+    runtime = str(payload.get("runtime") or "").strip()
+    if runtime != PACKAGED_CLAW_RUNTIME:
+        raise ClawPackagedRuntimeError(
+            f"Packaged Claw manifest runtime must be {PACKAGED_CLAW_RUNTIME!r}; got {runtime!r}"
+        )
+    version = str(payload.get("version") or "").strip()
+    if not version:
+        raise ClawPackagedRuntimeError(f"Packaged Claw manifest missing version: {manifest_path}")
+    raw_binaries = payload.get("binaries")
+    if not isinstance(raw_binaries, Mapping):
+        raise ClawPackagedRuntimeError(f"Packaged Claw manifest binaries must be an object: {manifest_path}")
+    binaries: dict[str, PackagedClawBinarySpec] = {}
+    for platform_key, raw_spec in raw_binaries.items():
+        if not isinstance(raw_spec, Mapping):
+            raise ClawPackagedRuntimeError(f"Packaged Claw binary entry must be an object: {platform_key}")
+        rel_path = Path(str(raw_spec.get("path") or "").strip())
+        sha256 = str(raw_spec.get("sha256") or "").strip().lower()
+        rust_target_triple = str(raw_spec.get("rust_target_triple") or raw_spec.get("triple") or "").strip()
+        binary_name = str(raw_spec.get("binary_name") or rel_path.name).strip()
+        if not rel_path.as_posix() or rel_path.is_absolute() or ".." in rel_path.parts:
+            raise ClawPackagedRuntimeError(f"Packaged Claw path must be relative and stay under root: {platform_key}")
+        if len(sha256) != 64 or any(ch not in "0123456789abcdef" for ch in sha256):
+            raise ClawPackagedRuntimeError(f"Packaged Claw sha256 must be a 64-character hex digest: {platform_key}")
+        if not rust_target_triple:
+            raise ClawPackagedRuntimeError(f"Packaged Claw rust_target_triple missing: {platform_key}")
+        binaries[str(platform_key)] = PackagedClawBinarySpec(
+            platform_key=str(platform_key),
+            relative_path=rel_path,
+            sha256=sha256,
+            rust_target_triple=rust_target_triple,
+            binary_name=binary_name,
+        )
+    return PackagedClawManifest(manifest_path=manifest_path, version=version, binaries=binaries)
+
+
+def resolve_packaged_claw_binary(
+    packaged_root: Path,
+    *,
+    platform: ClawPlatform | None = None,
+) -> ClawBinaryResolution:
+    platform = platform or detect_hashi_claw_platform()
+    manifest = load_packaged_claw_manifest(packaged_root / "manifest.json")
+    spec = next((manifest.binaries.get(key) for key in platform.candidate_keys if manifest.binaries.get(key)), None)
+    if spec is None:
+        supported = ", ".join(sorted(manifest.binaries)) or "<none>"
+        raise ClawPackagedRuntimeError(
+            f"Packaged Claw manifest has no binary for {platform.key}; supported={supported}"
+        )
+    if spec.rust_target_triple != platform.rust_target_triple:
+        raise ClawPackagedRuntimeError(
+            f"Packaged Claw target mismatch for {spec.platform_key}: "
+            f"expected {platform.rust_target_triple}, got {spec.rust_target_triple}"
+        )
+    binary_path = (packaged_root / spec.relative_path).resolve()
+    try:
+        binary_path.relative_to(packaged_root.resolve())
+    except ValueError as exc:
+        raise ClawPackagedRuntimeError(f"Packaged Claw binary escapes packaged root: {spec.relative_path}") from exc
+    if not binary_path.is_file():
+        raise ClawPackagedRuntimeError(f"Packaged Claw binary missing: {binary_path}")
+    if not os.access(binary_path, os.X_OK):
+        raise ClawPackagedRuntimeError(f"Packaged Claw binary is not executable: {binary_path}")
+    actual_sha256 = _sha256_file(binary_path)
+    if actual_sha256 != spec.sha256:
+        raise ClawPackagedRuntimeError(
+            f"Packaged Claw checksum mismatch for {binary_path}: "
+            f"expected {spec.sha256[:12]}..., got {actual_sha256[:12]}..."
+        )
+    return ClawBinaryResolution(
+        path=binary_path,
+        source="packaged",
+        platform=platform,
+        manifest_path=manifest.manifest_path,
+        packaged_version=manifest.version,
+    )
+
+
+def _claw_runtime_policy(global_config: Any | None = None, agent_config: Any | None = None) -> str:
+    extra = getattr(agent_config, "extra", None) or {}
+    if isinstance(extra, Mapping) and extra.get("claw_runtime_policy"):
+        policy = str(extra.get("claw_runtime_policy")).strip().lower()
+    else:
+        global_claw = getattr(global_config, "claw_providers", None) or {}
+        policy = str(global_claw.get("runtime_policy") or "prefer-packaged").strip().lower() if isinstance(global_claw, Mapping) else "prefer-packaged"
+    if policy not in CLAW_RUNTIME_POLICIES:
+        raise ClawBinaryNotFound(f"Invalid claw_runtime_policy={policy!r}; expected one of {sorted(CLAW_RUNTIME_POLICIES)}")
+    return policy
+
+
+def _resolve_executable_candidate(candidate: str | os.PathLike[str]) -> tuple[Path | None, str | None]:
+    raw = str(candidate).strip()
+    if not raw:
+        return None, None
+    resolved = shutil.which(raw) if os.path.basename(raw) == raw else raw
+    if not resolved:
+        return None, f"{raw}: not found on PATH"
+    path = Path(resolved).expanduser()
+    if not path.exists():
+        return None, f"{path}: does not exist"
+    if not path.is_file():
+        return None, f"{path}: not a file"
+    if not os.access(path, os.X_OK):
+        return None, f"{path}: not executable"
+    return path.resolve(), None
+
+
+def discover_claw_binary(
+    configured_path: str | os.PathLike[str] | None = None,
+    *,
+    global_config: Any | None = None,
+    agent_config: Any | None = None,
+    env: Mapping[str, str] | None = None,
+) -> ClawBinaryResolution:
+    """Resolve an executable Claw binary without requiring Cargo."""
+    policy = _claw_runtime_policy(global_config, agent_config)
+    early_candidates: list[tuple[str, str | os.PathLike[str]]] = []
+    if configured_path:
+        early_candidates.append(("configured", configured_path))
+
+    extra = getattr(agent_config, "extra", None) or {}
+    if isinstance(extra, Mapping):
+        for key in ("claw_binary_path", "claw_cmd"):
+            value = extra.get(key)
+            if value:
+                early_candidates.append((f"agent:{key}", value))
+
+    for key in ("claw_binary_path", "claw_cmd"):
+        value = getattr(global_config, key, None)
+        if value:
+            early_candidates.append((f"global:{key}", value))
+
+    global_claw = getattr(global_config, "claw_providers", None) or {}
+    if isinstance(global_claw, Mapping):
+        for key in ("binary_path", "claw_binary_path", "claw_cmd"):
+            value = global_claw.get(key)
+            if value:
+                early_candidates.append((f"global.claw_providers:{key}", value))
+
+    failures: list[str] = []
+    for source, candidate in early_candidates:
+        path, failure = _resolve_executable_candidate(candidate)
+        if path is not None:
+            return ClawBinaryResolution(path=path, source=source)
+        if failure:
+            failures.append(failure)
+
+    packaged_errors: list[str] = []
+    if policy != "system-only":
+        for root in _packaged_claw_roots(global_config):
+            manifest_path = root / "manifest.json"
+            if not manifest_path.exists():
+                continue
+            try:
+                return resolve_packaged_claw_binary(root)
+            except ClawPackagedRuntimeError as exc:
+                packaged_errors.append(str(exc))
+        failures.extend(packaged_errors)
+        if policy == "require-packaged":
+            detail = "; ".join(failures) if failures else "no packaged Claw manifest found"
+            raise ClawBinaryNotFound(f"Packaged Claw runtime required but unavailable ({detail})")
+
+    candidates: list[tuple[str, str | os.PathLike[str]]] = []
+    env = env or os.environ
+    for key in ("CLAW_BINARY", "CLAW_BIN"):
+        value = env.get(key)
+        if value:
+            candidates.append((f"env:{key}", value))
+
+    candidates.append(("PATH", "claw"))
+
+    for source, candidate in candidates:
+        path, failure = _resolve_executable_candidate(candidate)
+        if path is not None:
+            warnings = tuple(packaged_errors) if packaged_errors and source.startswith(("env:", "PATH")) else ()
+            return ClawBinaryResolution(path=path, source=source, warnings=warnings)
+        if failure:
+            failures.append(failure)
+
+    detail = "; ".join(failures) if failures else "no candidate configured"
+    raise ClawBinaryNotFound(f"Claw binary not found ({detail})")
+
+
 def find_claw_binary(
     configured_path: str | os.PathLike[str] | None = None,
     *,
@@ -147,61 +461,12 @@ def find_claw_binary(
     agent_config: Any | None = None,
     env: Mapping[str, str] | None = None,
 ) -> Path:
-    """Resolve an executable Claw binary without requiring Cargo."""
-    candidates: list[str | os.PathLike[str]] = []
-    if configured_path:
-        candidates.append(configured_path)
-
-    extra = getattr(agent_config, "extra", None) or {}
-    if isinstance(extra, Mapping):
-        for key in ("claw_binary_path", "claw_cmd"):
-            value = extra.get(key)
-            if value:
-                candidates.append(value)
-
-    for key in ("claw_binary_path", "claw_cmd"):
-        value = getattr(global_config, key, None)
-        if value:
-            candidates.append(value)
-
-    global_claw = getattr(global_config, "claw_providers", None) or {}
-    if isinstance(global_claw, Mapping):
-        for key in ("binary_path", "claw_binary_path", "claw_cmd"):
-            value = global_claw.get(key)
-            if value:
-                candidates.append(value)
-
-    env = env or os.environ
-    for key in ("CLAW_BINARY", "CLAW_BIN"):
-        value = env.get(key)
-        if value:
-            candidates.append(value)
-
-    candidates.append("claw")
-
-    failures: list[str] = []
-    for candidate in candidates:
-        raw = str(candidate).strip()
-        if not raw:
-            continue
-        resolved = shutil.which(raw) if os.path.basename(raw) == raw else raw
-        if not resolved:
-            failures.append(f"{raw}: not found on PATH")
-            continue
-        path = Path(resolved).expanduser()
-        if not path.exists():
-            failures.append(f"{path}: does not exist")
-            continue
-        if not path.is_file():
-            failures.append(f"{path}: not a file")
-            continue
-        if not os.access(path, os.X_OK):
-            failures.append(f"{path}: not executable")
-            continue
-        return path.resolve()
-
-    detail = "; ".join(failures) if failures else "no candidate configured"
-    raise ClawBinaryNotFound(f"Claw binary not found ({detail})")
+    return discover_claw_binary(
+        configured_path,
+        global_config=global_config,
+        agent_config=agent_config,
+        env=env,
+    ).path
 
 
 def _parse_json_output(text: str, *, command: list[str]) -> dict[str, Any]:
@@ -454,6 +719,7 @@ class ClawCLIAdapter(BaseBackend):
         self.logger = logging.getLogger(f"Backend.Claw.{self.config.name}")
         self.current_proc = None
         self._binary: Path | None = None
+        self._binary_resolution: ClawBinaryResolution | None = None
         self._fresh_next = False
 
     @property
@@ -596,10 +862,13 @@ class ClawCLIAdapter(BaseBackend):
         self.logger.info("Initializing Claw CLI backend...")
         self.config.workspace_dir.mkdir(parents=True, exist_ok=True)
         try:
-            self._binary = find_claw_binary(
+            self._binary_resolution = discover_claw_binary(
                 global_config=self.global_config,
                 agent_config=self.config,
             )
+            self._binary = self._binary_resolution.path
+            for warning in self._binary_resolution.warnings:
+                self.logger.warning("Claw binary discovery warning: %s", warning)
             version = await asyncio.to_thread(
                 run_claw_version,
                 self.effective_workdir,
@@ -609,7 +878,10 @@ class ClawCLIAdapter(BaseBackend):
             )
             self.logger.info(
                 "Claw CLI version check passed "
-                f"(binary={self._binary}, version={version.get('version')}, git_sha={version.get('git_sha')})"
+                f"(binary={self._binary}, source={self._binary_resolution.source}, "
+                f"packaged_version={self._binary_resolution.packaged_version}, "
+                f"manifest={self._binary_resolution.manifest_path}, "
+                f"version={version.get('version')}, git_sha={version.get('git_sha')})"
             )
             return True
         except ClawError as exc:
@@ -645,7 +917,10 @@ class ClawCLIAdapter(BaseBackend):
     ) -> BackendResponse:
         if self._binary is None:
             try:
-                self._binary = find_claw_binary(global_config=self.global_config, agent_config=self.config)
+                self._binary_resolution = discover_claw_binary(global_config=self.global_config, agent_config=self.config)
+                self._binary = self._binary_resolution.path
+                for warning in self._binary_resolution.warnings:
+                    self.logger.warning("Claw binary discovery warning: %s", warning)
             except ClawError as exc:
                 return BackendResponse(text="", duration_ms=0, error=str(exc), is_success=False)
 
