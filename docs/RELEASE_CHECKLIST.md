@@ -16,6 +16,11 @@
   - `docs/HASHI_SLIM_CORE_ARCHITECTURE.md` reflects current manager boundaries
   - `docs/HASHI_CORE_SLIMMING_PLAN.md` reflects latest implementation and validation status
   - `CHANGELOG.md` records structural changes and residual notes
+- Claw mode gates:
+  - `python -m pytest tests/test_claw_cli_adapter.py -q`
+  - `python -m py_compile adapters/claw_cli.py tests/test_claw_cli_adapter.py`
+  - `python scripts/claw_code_probe.py --check version` returns a clear success or expected `ClawBinaryNotFound` diagnostic while packaged binaries are absent
+  - At least one live `claw-cli` agent workzone smoke validates repo-root read/write/edit before release notes claim agentic file work support
 
 ## Nagare
 
