@@ -1,6 +1,6 @@
 # HASHI
 
-> **Status (v3.2.1 hotfix release):** HASHI 3.2 is the current official release line. The v3.2.1 hotfix hardens Workbench API recovery, HChat hot-reload behavior, and cross-instance route fallback for HASHI1/HASHI2/HASHI9 style deployments. It builds on v3.2.0's slim core architecture, Wrapper Agent Mode, Anatta live self-assembly controls, Audit Agent Mode, per-instance API Gateway ports, `/browser` route dashboard, Hashi Remote file transfer, OLL HASHI Chrome extension integration, Workzone support, and imported `/exp` guidebook corpus.
+> **Status (v4.0.0-alpha.1):** HASHI 4 alpha introduces the Claw mode foundation and Superloop operational foundation on top of the v3.2.1 hotfix line. Claw mode adds a scoped `claw-cli` backend, provider routing, packaged runtime discovery, and live repo-root read/write/edit validation. Superloop alpha documents the runnable controller contract for taskboards, waits, HChat replies, evidence, and closeout barriers.
 >
 > **Changelog:** see [`CHANGELOG.md`](CHANGELOG.md) · **Roadmap:** see [`docs/ROADMAP.md`](docs/ROADMAP.md) · **Nagare Docs:** see [`docs/NAGARE_FLOW_SYSTEM.md`](docs/NAGARE_FLOW_SYSTEM.md).
 
@@ -68,7 +68,7 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
 
 **What makes HASHI different:**
 1. **No Token Storage** — Uses CLI backends with local authentication, not stored tokens
-2. **6 Backend Adapters** — Claude CLI, Gemini CLI, Codex CLI, OpenRouter API, DeepSeek API, Ollama (local LLM)
+2. **7 Backend Adapters** — Claude CLI, Gemini CLI, Codex CLI, OpenRouter API, DeepSeek API, Ollama (local LLM), and Claw CLI
 3. **Multi-Agent, Single Interface** — Chat with multiple specialized agents through one account
 4. **Nagare Flow System** — Describe a task in natural language; Nagare designs, executes, and improves a multi-agent workflow automatically
 5. **Self-Improving Agents** — Habit system with `/good` and `/bad` feedback, nightly dream reflection, and cross-agent habit governance
@@ -86,13 +86,14 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
 17. **Pack & Go** — Build a self-contained USB for Windows or macOS; recipients just plug in and double-click
 18. **Vibe-Coded** — Every line written by AI, reviewed by AI, directed by human vision
 19. **Claw Mode Foundation** — `claw-cli` can run as a scoped backend with provider routing, packaged runtime discovery, checksum-checked manifest metadata, and repo workzone read/write/edit validation
+20. **Superloop Operational Foundation** — Long-running controller loops use explicit taskboards, waits, issue registers, HChat reply classification, and inbox-drain closeout barriers
 
 ---
 
 ## Project Status
 
-- **Unreleased / next version prep** — Claw mode foundation, packaged Claw runtime discovery, provider smoke probe, and live momo repo-root read/write/edit validation
-- **v3.2.1** *(current hotfix release)* — Workbench API self-repair on `/reboot`, HChat tool hot reload, and cross-instance route fallback hardening for multi-instance deployments
+- **v4.0.0-alpha.1** *(current alpha release)* — Claw mode foundation, packaged Claw runtime discovery, provider smoke probe, live momo repo-root read/write/edit validation, and Superloop operational contract
+- **v3.2.1** — Workbench API self-repair on `/reboot`, HChat tool hot reload, and cross-instance route fallback hardening for multi-instance deployments
 - **v3.2.0** — Slim core architecture, Wrapper Agent Mode, Audit Agent Mode, Anatta controls, EXP guidebooks, `/browser` route dashboard, Hashi Remote file transfer, per-instance API Gateway ports, OLL HASHI Chrome extension integration, Workzone support, runtime/backend hardening
 - **v3.1** — Claude Opus 4.7, GPT-5.5, Codex CLI 0.125.0, `xhigh`/`max` effort levels, HASHI Remote remediation
 - **v3.0-beta** — **Self-improving agents**, 6 LLM backends, SafeVoice, cross-instance messaging, token audit, agent behavior audit, remote backend policy, Minato MCP, Obsidian wiki integration
@@ -1173,9 +1174,9 @@ python tui.py
 
 ## Warnings
 
-### This is Version v3.2.1
+### This is Version v4.0.0-alpha.1
 
-HASHI v3.2.1 is a **hotfix release** for the v3.2 line. It keeps the v3.2.0 feature set intact while hardening Workbench API recovery, HChat delivery reloadability, and cross-instance route fallback for local multi-instance deployments.
+HASHI v4.0.0-alpha.1 is an **alpha release** for the v4 line. It introduces the Claw mode foundation and Superloop operational foundation while preserving the v3.2.1 hotfix behavior for Workbench API recovery, HChat reloadability, and cross-instance route fallback.
 
 **Known Limitations:**
 - **Stability** — Expect edge cases and unexpected behavior
@@ -1200,7 +1201,15 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
 
 ## Release History
 
-### v3.2.1 *(current hotfix release)* — Workbench/HChat/Remote Recovery (May 2026)
+### v4.0.0-alpha.1 *(current alpha release)* — Claw Mode And Superloop Foundation (May 2026)
+
+- **Claw mode foundation** — `claw-cli` is available as a scoped backend with provider routing, packaged runtime discovery, checksum-checked manifest metadata, and clear `ClawBinaryNotFound` diagnostics while release binaries are absent
+- **Live Claw agent validation** — momo validated repo-root read/write/edit through `claw-cli / deepseek/deepseek-v4-flash`, with runtime audit evidence and workzone routing
+- **Superloop operational foundation** — `docs/SUPERLOOP_FUNCTION_CONTRACT.md` defines runnable loop schema, wait/resume policy, HChat reply handling, issue tracking, evidence requirements, and closeout barriers
+- **Release gates expanded** — Claw and Superloop checks are now part of `docs/RELEASE_CHECKLIST.md`
+- **Alpha limits** — packaged `hashi-claw` binaries, Claw Tool Gateway/MCP parity, Claw shell/test execution, and stable unattended Superloop automation remain release-blocking work for later v4 milestones
+
+### v3.2.1 — Workbench/HChat/Remote Recovery (May 2026)
 
 - **Workbench API self-repair** — `/reboot` health-checks the live Workbench API and rebuilds it when the listener exists but `/api/health` is unresponsive
 - **HChat reloadability** — hot reboot reloads `tools.*`, and HChat draft delivery refreshes `tools.hchat_send` before sending so delivery fixes do not require a full HASHI process restart
