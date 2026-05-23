@@ -2,7 +2,7 @@
 
 This directory contains developer documentation and operational notes for HASHI.
 
-> **Status:** v3.2.0 official release — slim core architecture accepted, Wrapper Agent Mode and Audit Agent Mode implemented, Anatta controls added, EXP guidebooks imported, per-instance API Gateway ports fixed, browser routing and Hashi Remote file transfer documented.
+> **Status:** v3.2.1 current hotfix release — Workbench API recovery, HChat hot-reload behavior, and cross-instance route fallback hardened on top of the v3.2.0 slim core release line. The next version prep currently tracks Claw mode foundation and packaged Claw runtime discovery.
 >
 > **Changelog:** see [`../CHANGELOG.md`](../CHANGELOG.md) · **Roadmap:** see [ROADMAP.md](ROADMAP.md).
 
@@ -31,6 +31,7 @@ This directory contains developer documentation and operational notes for HASHI.
 - [AUDIT_VIBE_CODING_SUPERLOOP.md](AUDIT_VIBE_CODING_SUPERLOOP.md) — end-to-end vibe-coded product superloop with mandatory independent reviews and live runtime exit gates
 - [HASHI_VOICE_BRIDGE_PLAN.md](HASHI_VOICE_BRIDGE_PLAN.md) — local-first voice runtime plan for the WhatsApp Desktop call bridge and future provider transports
 - [CLAW_TOOL_GATEWAY_TELEMETRY_PLAN.md](CLAW_TOOL_GATEWAY_TELEMETRY_PLAN.md) — long-term plan for packaging Claw into HASHI, exposing internet tools through Tool Gateway/MCP, and structured thinking/token telemetry
+- [CLAW_CODE_MODULE_PLAN.md](CLAW_CODE_MODULE_PLAN.md) — Claw module packaging notes, runtime binary expectations, and local release-binary evidence
 
 ### Nagare Flow System (v2.1)
 - [NAGARE_FLOW_SYSTEM.md](NAGARE_FLOW_SYSTEM.md) — Complete technical reference for the multi-agent workflow orchestration engine

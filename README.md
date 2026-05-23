@@ -85,11 +85,13 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
 16. **Audit Agent Mode** — run a core model plus a separate auditor that emits follow-up findings without rewriting the core answer
 17. **Pack & Go** — Build a self-contained USB for Windows or macOS; recipients just plug in and double-click
 18. **Vibe-Coded** — Every line written by AI, reviewed by AI, directed by human vision
+19. **Claw Mode Foundation** — `claw-cli` can run as a scoped backend with provider routing, packaged runtime discovery, checksum-checked manifest metadata, and repo workzone read/write/edit validation
 
 ---
 
 ## Project Status
 
+- **Unreleased / next version prep** — Claw mode foundation, packaged Claw runtime discovery, provider smoke probe, and live momo repo-root read/write/edit validation
 - **v3.2.1** *(current hotfix release)* — Workbench API self-repair on `/reboot`, HChat tool hot reload, and cross-instance route fallback hardening for multi-instance deployments
 - **v3.2.0** — Slim core architecture, Wrapper Agent Mode, Audit Agent Mode, Anatta controls, EXP guidebooks, `/browser` route dashboard, Hashi Remote file transfer, per-instance API Gateway ports, OLL HASHI Chrome extension integration, Workzone support, runtime/backend hardening
 - **v3.1** — Claude Opus 4.7, GPT-5.5, Codex CLI 0.125.0, `xhigh`/`max` effort levels, HASHI Remote remediation
