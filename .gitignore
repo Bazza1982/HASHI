@@ -14,6 +14,7 @@ __pycache__/
 # Runtime state
 *.lock
 *.pid
+.claw/
 .bridge_u_f.lock
 .bridge_u_f.pid
 .bridge_u_last_agents.txt
