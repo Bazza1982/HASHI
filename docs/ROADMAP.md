@@ -4,6 +4,27 @@
 
 ---
 
+## v4.0.0-alpha.1 (Current)
+
+HASHI v4 alpha is focused on two foundations:
+
+- **Claw mode foundation** — `claw-cli` is integrated as a scoped backend with
+  provider routing, packaged runtime discovery, checksum-checked manifest
+  metadata, and live repo-root read/write/edit validation.
+- **Superloop operational foundation** — long-running controller loops now have
+  an explicit function contract for taskboards, waits, HChat replies, evidence,
+  issue handling, and closeout barriers.
+
+Alpha limitations:
+
+- Packaged `hashi-claw` release binaries are not yet shipped.
+- Claw Tool Gateway/MCP parity is planned, not complete.
+- Claw shell/test execution and browser/web parity require later gates.
+- Superloop is not yet a stable unattended automation product; alpha loops must
+  preserve explicit waits, evidence, issue state, and inbox-drain closeout.
+
+---
+
 ## v1.1 (Completed)
 
 - `v1.1-debugging` is now considered **completed** (stabilization + semantics fixes).

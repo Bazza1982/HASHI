@@ -9,12 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Notes
+
+- No unreleased changes yet.
+
+## [4.0.0-alpha.1] - 2026-05-23
+
 ### ✨ Added
 
 - **Claw provider smoke probe** — `scripts/claw_code_probe.py` can now run provider-aware smoke tests from `global.claw_providers`, loading provider base URLs and secrets from the normal HASHI config chain without printing secret values.
 - **Claw CLI backend foundation** — registered the `claw-cli` backend and provider resolver as a scoped adapter path for Claw/OpenClaw-style execution without leaking Claw-specific logic into protected core modules.
 - **Packaged Claw runtime discovery** — added manifest-based packaged binary lookup between explicit/global config and env/PATH fallback, with checksum verification, `prefer`/`require`/`system-only` runtime policies, and clear fail-closed diagnostics.
 - **Momo Claw integration enablement** — validated a live `claw-cli` agent workzone at the HASHI repo root with read/write/edit smoke coverage through HChat.
+- **Superloop operational foundation** — added a function contract for runnable superloops, documenting taskboard schema, wait/resume policy, HChat reply handling, closeout barriers, and release gates for controller-driven loops.
 
 ### 🧪 Tests
 
@@ -22,11 +29,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Verified the Ollama/OpenAI-compatible route against a local mock `/v1/chat/completions` server; real Ollama live validation still requires a local daemon and pulled model.
 - Added focused Claw adapter tests for packaged runtime discovery, manifest validation, checksum mismatch fallback, require-packaged failure, and WSL platform-key handling.
 - Validated momo live integration on `claw-cli / deepseek/deepseek-v4-flash`: repo-root read succeeded, repo-root write succeeded, repo-root edit succeeded, and runtime audit reported `success=true`.
+- Release preparation must include the Superloop unit suite and at least one template dry-run or live controller loop before claiming autonomous superloop readiness.
 
 ### ⚠️ Known Limitations
 
 - Release binaries are not yet packaged under `hashi_assets/claw/bin/`; until then, `scripts/claw_code_probe.py` is expected to report `ClawBinaryNotFound` unless a system `claw` fallback is configured.
 - Momo's current Claw enablement exposes file-level `read`/`glob`/`grep`/`write`/`edit`; shell execution and full test-running workflows remain separate release-gate tests.
+- Superloop is documented as an alpha operational foundation. It is not yet a stable unattended automation product; loops must keep explicit waits, evidence, issue state, and inbox-drain closeout records.
 
 ## [3.2.1] - 2026-05-12
 

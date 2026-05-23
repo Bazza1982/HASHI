@@ -31,7 +31,7 @@ if requirements_file.exists():
 
 setup(
     name="hashi-bridge",
-    version="3.2.1",
+    version="4.0.0a1",
     description="HASHI — Universal AI Agent Orchestration Platform",
     long_description=long_description,
     long_description_content_type="text/markdown",

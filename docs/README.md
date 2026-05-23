@@ -2,7 +2,7 @@
 
 This directory contains developer documentation and operational notes for HASHI.
 
-> **Status:** v3.2.1 current hotfix release — Workbench API recovery, HChat hot-reload behavior, and cross-instance route fallback hardened on top of the v3.2.0 slim core release line. The next version prep currently tracks Claw mode foundation and packaged Claw runtime discovery.
+> **Status:** v4.0.0-alpha.1 current alpha release — Claw mode foundation and Superloop operational foundation on top of the v3.2.1 hotfix line. This is an alpha release, not a stable unattended automation claim.
 >
 > **Changelog:** see [`../CHANGELOG.md`](../CHANGELOG.md) · **Roadmap:** see [ROADMAP.md](ROADMAP.md).
 
@@ -24,6 +24,7 @@ This directory contains developer documentation and operational notes for HASHI.
 - [HASHI_REMOTE_FILE_TRANSFER.md](HASHI_REMOTE_FILE_TRANSFER.md) — direct cross-PC file push support for release artifacts and EXP transfer
 - [HASHI_REMOTE_FILE_TRANSFER_AND_ATTACHMENTS_PLAN.md](HASHI_REMOTE_FILE_TRANSFER_AND_ATTACHMENTS_PLAN.md) — planned shared-token file transfer upgrade and message attachment design
 - [SUPERLOOP_PLAN.md](SUPERLOOP_PLAN.md) — draft architecture plan for a long-running loop controller above Nagare
+- [SUPERLOOP_FUNCTION_CONTRACT.md](SUPERLOOP_FUNCTION_CONTRACT.md) — runnable Superloop operational contract for schema, waits, HChat replies, evidence, and closeout
 - [HASHI_REMOTE_SIDE_PROGRAM_UPGRADE_PLAN.md](HASHI_REMOTE_SIDE_PROGRAM_UPGRADE_PLAN.md) — comprehensive plan to make Hashi Remote a supervised side program with backward-compatible rescue
 - [HASHI_REMOTE_RESCUE_PROTOCOL.md](HASHI_REMOTE_RESCUE_PROTOCOL.md) — Remote sidecar survival model and fixed HASHI start/status rescue endpoints
 - [HASHI_REMOTE_PLATFORM_PROFILES_PLAN.md](HASHI_REMOTE_PLATFORM_PROFILES_PLAN.md) — platform differentiation plan for WSL, Windows sidecars, WatchTower, LAN peers, and validation aliases without forking `main`
@@ -57,6 +58,7 @@ This directory contains developer documentation and operational notes for HASHI.
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — Troubleshooting guide
 
 ### Release Notes
+- [RELEASE_NOTES_v4.0.0-alpha.1.md](RELEASE_NOTES_v4.0.0-alpha.1.md) — v4 alpha release notes for Claw mode and Superloop foundation
 - [RELEASE_NOTES_v1.1.md](RELEASE_NOTES_v1.1.md) — v1.1 release notes
 
 ---
