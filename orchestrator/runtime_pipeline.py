@@ -308,17 +308,20 @@ async def setup_interactive_feedback(
         except Exception as e:
             runtime.telegram_logger.warning(f"Failed to send placeholder: {e}")
 
+        backend = runtime.backend_manager.current_backend
+        capabilities = getattr(backend, "capabilities", None)
+        supports_stream_display = bool(getattr(capabilities, "supports_thinking_stream", False))
         stream_queue = None
         use_stream = runtime._verbose or runtime._think or audit_active
         if use_stream:
-            if runtime._verbose:
+            if runtime._verbose and supports_stream_display:
                 stream_queue = asyncio.Queue(maxsize=200)
             stream_callback = runtime._make_stream_callback(
                 event_queue=stream_queue,
                 think_buffer=runtime._think_buffer if runtime._think else None,
                 audit_collector=audit_collector,
             )
-        if runtime._verbose:
+        if runtime._verbose and supports_stream_display:
             escalation_task = asyncio.create_task(
                 runtime._streaming_display_loop(
                     item.chat_id,
@@ -326,7 +329,7 @@ async def setup_interactive_feedback(
                     item.request_id,
                     stop_typing,
                     stream_queue,
-                    backend=runtime.backend_manager.current_backend,
+                    backend=backend,
                 )
             )
         else:
@@ -336,7 +339,7 @@ async def setup_interactive_feedback(
                     placeholder,
                     item.request_id,
                     stop_typing,
-                    backend=runtime.backend_manager.current_backend,
+                    backend=backend,
                 )
             )
         if runtime._think:
