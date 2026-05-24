@@ -37,7 +37,10 @@ class _ContextAssembler:
 class _BackendManager:
     def __init__(self, response=None, delay_s: float = 0.0):
         self.agent_mode = "flex"
-        self.current_backend = SimpleNamespace(_session_id=None)
+        self.current_backend = SimpleNamespace(
+            _session_id=None,
+            capabilities=SimpleNamespace(supports_thinking_stream=True),
+        )
         self.response = response or SimpleNamespace(is_success=True, text="ok")
         self.delay_s = delay_s
         self.calls = []
@@ -170,6 +173,8 @@ def _runtime():
     runtime._openrouter_think_chunk = ""
     runtime._last_openrouter_think_snippet = None
     runtime.stream_callbacks = []
+    runtime.escalating_loops = []
+    runtime.streaming_loops = []
 
     async def _typing_loop(chat_id, stop_typing):
         await stop_typing.wait()
@@ -177,11 +182,13 @@ def _runtime():
     runtime.typing_loop = _typing_loop
 
     async def _escalating_placeholder_loop(chat_id, placeholder, request_id, stop_typing, *, backend):
+        runtime.escalating_loops.append(request_id)
         await stop_typing.wait()
 
     runtime._escalating_placeholder_loop = _escalating_placeholder_loop
 
     async def _streaming_display_loop(chat_id, placeholder, request_id, stop_typing, stream_queue, *, backend):
+        runtime.streaming_loops.append((request_id, stream_queue is not None))
         await stop_typing.wait()
 
     runtime._streaming_display_loop = _streaming_display_loop
@@ -412,6 +419,51 @@ async def test_setup_interactive_feedback_creates_placeholder_and_cleanup_tasks(
     feedback.stop_typing.set()
     await feedback.typing_task
     await feedback.escalation_task
+
+
+@pytest.mark.asyncio
+async def test_verbose_non_streaming_backend_uses_escalating_placeholder():
+    runtime = _runtime()
+    runtime._verbose = True
+    runtime.backend_manager.current_backend.capabilities.supports_thinking_stream = False
+
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(),
+        audit_active=False,
+        audit_collector=None,
+    )
+
+    assert feedback.on_stream_event[0] == "stream"
+    assert runtime.stream_callbacks == [
+        {"event_queue": None, "think_buffer": None, "audit_collector": None}
+    ]
+    assert runtime.streaming_loops == []
+    feedback.stop_typing.set()
+    await feedback.typing_task
+    await feedback.escalation_task
+    assert runtime.escalating_loops == ["req-1"]
+
+
+@pytest.mark.asyncio
+async def test_verbose_streaming_backend_uses_streaming_display():
+    runtime = _runtime()
+    runtime._verbose = True
+
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(),
+        audit_active=False,
+        audit_collector=None,
+    )
+
+    assert feedback.on_stream_event[0] == "stream"
+    assert runtime.stream_callbacks[0]["event_queue"] is not None
+    feedback.stop_typing.set()
+    await feedback.typing_task
+    await feedback.escalation_task
+    assert runtime.streaming_loops == [("req-1", True)]
+    assert runtime.escalating_loops == []
 
 
 @pytest.mark.asyncio
