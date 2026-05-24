@@ -743,10 +743,17 @@ run_finished
 error
 ```
 
-Claw currently has `AssistantEvent::Thinking`, but the CLI path renders it as a
-hidden human summary and does not emit it into prompt JSON. Long-term parity
-requires preserving structured thinking telemetry without leaking raw hidden
-chain-of-thought by default.
+Implementation status: the Claw CLI now accepts `--output-format stream-json`
+and emits JSONL events for `run_started`, `assistant_delta`,
+`thinking_summary`, `tool_call`, `tool_start`, `tool_end`, `usage`,
+`message_stop`, and `run_finished`. HASHI's `claw-cli` adapter detects this
+capability, prefers it when verbose callbacks are active, and converts the
+events into HASHI `StreamEvent` records.
+
+Claw currently has `AssistantEvent::Thinking`. The stream-json path exposes a
+safe `thinking_summary` with character counts/signature metadata rather than
+raw hidden chain-of-thought. Long-term parity still requires provider-level
+reasoning token accounting.
 
 Required Claw-side changes in the vendored/refactored runtime:
 
@@ -759,9 +766,8 @@ api/providers/openai_compat.rs
   preserve DeepSeek reasoning_content as thinking telemetry
 
 rusty-claude-cli/src/main.rs
-  add CliOutputFormat::StreamJson
   emit tool/thinking/usage/run events
-  include thinking_token_source in final JSON
+  include thinking_token_source in stream usage events
 ```
 
 ## HASHI Claw Adapter Requirements
@@ -952,10 +958,12 @@ Acceptance:
 
 Deliverables:
 
-- Add or adopt Claw `stream-json`.
-- Add HASHI parser for Claw telemetry events.
-- Convert tool and model events to `StreamEvent`.
-- Record `thinking_token_source`.
+- Add or adopt Claw `stream-json`. **Done for CLI JSONL event transport.**
+- Add HASHI parser for Claw telemetry events. **Done for verbose callbacks.**
+- Convert tool and model events to `StreamEvent`. **Done for progress,
+  thinking summaries, text deltas, tool start/end, usage, and errors.**
+- Record `thinking_token_source`. **Partially done as stream usage metadata;
+  token audit persistence still needs the schema-level source field.**
 - Detect when the packaged binary changed since the last version check and
   re-run a lightweight version/integrity check.
 
