@@ -14,7 +14,16 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from adapters.base import BaseBackend, BackendCapabilities, BackendResponse, TokenUsage
-from adapters.stream_events import StreamCallback, StreamEvent, KIND_PROGRESS, KIND_TOOL_END
+from adapters.stream_events import (
+    StreamCallback,
+    StreamEvent,
+    KIND_ERROR,
+    KIND_PROGRESS,
+    KIND_TEXT_DELTA,
+    KIND_THINKING,
+    KIND_TOOL_END,
+    KIND_TOOL_START,
+)
 
 
 DEFAULT_CLAW_TIMEOUT_SEC = 30
@@ -486,6 +495,95 @@ def _parse_json_output(text: str, *, command: list[str]) -> dict[str, Any]:
     return loaded
 
 
+def _parse_stream_json_output(text: str, *, command: list[str]) -> dict[str, Any]:
+    final: dict[str, Any] | None = None
+    last_error: dict[str, Any] | None = None
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ClawJsonError(
+                f"Claw stream-json produced non-JSON line for {' '.join(command)}: {line[:400]}",
+                output=text,
+            ) from exc
+        if isinstance(event, dict):
+            if event.get("kind") == "run_finished":
+                final = event
+            elif event.get("kind") == "error" or event.get("type") == "error" or event.get("error"):
+                last_error = event
+    if final is None:
+        if last_error is not None:
+            return last_error
+        raise ClawJsonError(
+            f"Claw stream-json did not include run_finished for {' '.join(command)}",
+            output=text,
+        )
+    return final
+
+
+def _claw_jsonl_to_stream_event(event: Mapping[str, Any]) -> StreamEvent | None:
+    kind = str(event.get("kind") or "")
+    if kind == "run_started":
+        return StreamEvent(kind=KIND_PROGRESS, summary=f"Claw run started ({event.get('model') or 'model unknown'})")
+    if kind == "thinking_summary":
+        summary = str(event.get("summary") or "Claw thinking")
+        return StreamEvent(kind=KIND_THINKING, summary=summary[:400])
+    if kind == "assistant_delta":
+        text = str(event.get("text") or "")
+        return StreamEvent(kind=KIND_TEXT_DELTA, summary=text[:200]) if text else None
+    if kind in {"tool_call", "tool_start"}:
+        name = str(event.get("name") or event.get("tool_name") or "tool")
+        summary = str(event.get("summary") or f"Claw tool started: {name}")
+        return StreamEvent(kind=KIND_TOOL_START, summary=summary[:200], tool_name=name)
+    if kind == "tool_end":
+        name = str(event.get("name") or event.get("tool_name") or "tool")
+        summary = str(event.get("summary") or f"Claw tool finished: {name}")
+        detail = str(event.get("output_preview") or "")
+        return StreamEvent(kind=KIND_TOOL_END, summary=summary[:200], detail=detail[:500], tool_name=name)
+    if kind == "usage":
+        return StreamEvent(
+            kind=KIND_PROGRESS,
+            summary=(
+                f"Claw usage input={int(event.get('input_tokens') or 0)} "
+                f"output={int(event.get('output_tokens') or 0)} "
+                f"thinking_source={event.get('thinking_token_source') or 'unavailable'}"
+            ),
+        )
+    if kind == "error":
+        return StreamEvent(kind=KIND_ERROR, summary=str(event.get("error") or event)[:400])
+    if event.get("type") == "error" or event.get("error"):
+        return StreamEvent(kind=KIND_ERROR, summary=str(event.get("error") or event)[:400])
+    if kind in {"message_stop", "run_finished", "prompt_cache"}:
+        return None
+    return StreamEvent(kind=KIND_PROGRESS, summary=f"Claw event: {kind}"[:200])
+
+
+def claw_supports_stream_json(
+    binary_path: str | os.PathLike[str],
+    cwd: str | os.PathLike[str],
+    env: Mapping[str, str] | None = None,
+    timeout_s: float = 5,
+) -> bool:
+    process_env = build_claw_env(env)
+    try:
+        completed = subprocess.run(
+            [str(binary_path), "--help"],
+            cwd=cwd,
+            env=process_env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout_s,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return "stream-json" in f"{completed.stdout}\n{completed.stderr}"
+
+
 def run_claw_json_command(
     args: list[str],
     *,
@@ -609,6 +707,7 @@ def build_claw_task_args(
     resume: str | None = None,
     allowed_tools: list[str] | None = None,
     skip_permissions: bool = False,
+    output_format: str = "json",
 ) -> list[str]:
     if permission_mode not in VALID_PERMISSION_MODES:
         raise ValueError(
@@ -619,13 +718,15 @@ def build_claw_task_args(
         raise ValueError("prompt must not be empty")
     if not str(model or "").strip():
         raise ValueError("model must not be empty")
+    if output_format not in {"json", "stream-json"}:
+        raise ValueError("output_format must be json or stream-json")
     args = [
         "--model",
         model,
         "--permission-mode",
         permission_mode,
         "--output-format",
-        "json",
+        output_format,
     ]
     if allowed_tools:
         args.extend(["--allowedTools", ",".join(allowed_tools)])
@@ -720,6 +821,7 @@ class ClawCLIAdapter(BaseBackend):
         self.current_proc = None
         self._binary: Path | None = None
         self._binary_resolution: ClawBinaryResolution | None = None
+        self._supports_stream_json = False
         self._fresh_next = False
 
     @property
@@ -883,6 +985,15 @@ class ClawCLIAdapter(BaseBackend):
                 f"manifest={self._binary_resolution.manifest_path}, "
                 f"version={version.get('version')}, git_sha={version.get('git_sha')})"
             )
+            self._supports_stream_json = await asyncio.to_thread(
+                claw_supports_stream_json,
+                self._binary,
+                self.effective_workdir,
+                self._task_env(),
+            )
+            self.capabilities.supports_thinking_stream = self._supports_stream_json
+            if not self._supports_stream_json:
+                self.logger.warning("Claw binary does not advertise stream-json; verbose mode will use JSON fallback.")
             return True
         except ClawError as exc:
             self.logger.error(f"Claw CLI unavailable: {exc}")
@@ -934,6 +1045,7 @@ class ClawCLIAdapter(BaseBackend):
             result = await self._run_task_async(
                 prompt,
                 resume=resume,
+                on_stream_event=on_stream_event,
             )
         except asyncio.CancelledError:
             if self.current_proc:
@@ -978,7 +1090,13 @@ class ClawCLIAdapter(BaseBackend):
     def _duration_ms(started: float) -> float:
         return round((time.perf_counter() - started) * 1000, 2)
 
-    async def _run_task_async(self, prompt: str, *, resume: str | None) -> ClawTaskResult:
+    async def _run_task_async(
+        self,
+        prompt: str,
+        *,
+        resume: str | None,
+        on_stream_event: StreamCallback = None,
+    ) -> ClawTaskResult:
         if self._binary is None:
             raise ClawBinaryNotFound("Claw binary not initialized")
         args = build_claw_task_args(
@@ -988,6 +1106,7 @@ class ClawCLIAdapter(BaseBackend):
             resume=resume,
             allowed_tools=self._allowed_tools(),
             skip_permissions=self._skip_permissions(),
+            output_format="stream-json" if on_stream_event is not None and self._supports_stream_json else "json",
         )
         command = [str(self._binary), *args]
         started = time.perf_counter()
@@ -1007,7 +1126,13 @@ class ClawCLIAdapter(BaseBackend):
         self.current_proc = proc
         self._touch_activity()
         try:
-            stdout_data, stderr_data = await asyncio.wait_for(proc.communicate(), timeout=self.HARD_TIMEOUT_SEC)
+            if on_stream_event is not None and self._supports_stream_json:
+                stdout_data, stderr_data = await asyncio.wait_for(
+                    self._communicate_stream_json(proc, command, on_stream_event),
+                    timeout=self.HARD_TIMEOUT_SEC,
+                )
+            else:
+                stdout_data, stderr_data = await asyncio.wait_for(proc.communicate(), timeout=self.HARD_TIMEOUT_SEC)
         except asyncio.TimeoutError as exc:
             await self.force_kill_process_tree(
                 proc,
@@ -1027,7 +1152,11 @@ class ClawCLIAdapter(BaseBackend):
         stdout = redact_secret_text(stdout_data.decode(errors="replace"), secret_values)
         stderr = redact_secret_text(stderr_data.decode(errors="replace"), secret_values)
         output = stdout.strip() or stderr.strip()
-        parsed = _parse_json_output(output, command=command) if output else {}
+        parsed = (
+            _parse_stream_json_output(output, command=command)
+            if on_stream_event is not None and self._supports_stream_json
+            else (_parse_json_output(output, command=command) if output else {})
+        )
         if proc.returncode != 0:
             message = parsed.get("error") if isinstance(parsed, dict) else None
             raise ClawCommandError(
@@ -1052,3 +1181,42 @@ class ClawCLIAdapter(BaseBackend):
             iterations=parsed.get("iterations") if isinstance(parsed.get("iterations"), int) else None,
             estimated_cost=parsed.get("estimated_cost") if isinstance(parsed.get("estimated_cost"), str) else None,
         )
+
+    async def _communicate_stream_json(
+        self,
+        proc: asyncio.subprocess.Process,
+        command: list[str],
+        on_stream_event: StreamCallback,
+    ) -> tuple[bytes, bytes]:
+        stdout_chunks: list[bytes] = []
+        stderr_chunks: list[bytes] = []
+
+        async def read_stdout() -> None:
+            assert proc.stdout is not None
+            while True:
+                line = await proc.stdout.readline()
+                if not line:
+                    break
+                stdout_chunks.append(line)
+                self._touch_activity()
+                try:
+                    event = json.loads(line.decode(errors="replace"))
+                except json.JSONDecodeError:
+                    self.logger.warning("Ignoring non-JSON Claw stream line: %r", line[:200])
+                    continue
+                stream_event = _claw_jsonl_to_stream_event(event)
+                if stream_event is not None:
+                    await on_stream_event(stream_event)
+
+        async def read_stderr() -> None:
+            assert proc.stderr is not None
+            while True:
+                line = await proc.stderr.readline()
+                if not line:
+                    break
+                stderr_chunks.append(line)
+                self._touch_activity()
+
+        await asyncio.gather(read_stdout(), read_stderr())
+        await proc.wait()
+        return b"".join(stdout_chunks), b"".join(stderr_chunks)

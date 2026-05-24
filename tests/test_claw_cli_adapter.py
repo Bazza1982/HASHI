@@ -31,6 +31,7 @@ from adapters.claw_cli import (
     run_claw_task,
 )
 from adapters.registry import get_backend_class
+from adapters.stream_events import KIND_TEXT_DELTA, KIND_THINKING, KIND_TOOL_END, KIND_TOOL_START
 from orchestrator.flexible_backend_registry import allows_custom_models, get_secret_lookup_order, is_cli_backend
 
 
@@ -331,6 +332,17 @@ def test_build_claw_task_args_matches_cli_shape():
     ]
 
 
+def test_build_claw_task_args_accepts_stream_json():
+    args = build_claw_task_args(
+        "hello",
+        "deepseek/test",
+        permission_mode="read-only",
+        output_format="stream-json",
+    )
+
+    assert args[args.index("--output-format") + 1] == "stream-json"
+
+
 def test_registry_exposes_claw_backend():
     assert get_backend_class("claw-cli") is ClawCLIAdapter
     assert is_cli_backend("claw-cli")
@@ -531,6 +543,61 @@ async def test_claw_adapter_generate_response_with_fake_binary(tmp_path):
     assert response.text == "adapter done"
     assert response.usage.input_tokens == 3
     assert response.usage.output_tokens == 2
+
+
+@pytest.mark.asyncio
+async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path):
+    fake = _write_exe(
+        tmp_path / "claw",
+        """
+        #!/usr/bin/env python3
+        import json, sys, time
+        if "--help" in sys.argv:
+            print("Usage: claw [--output-format text|json|stream-json] prompt TEXT")
+        elif sys.argv[1] == "version":
+            print(json.dumps({"kind": "version", "version": "0.1.0", "git_sha": "fake"}))
+        else:
+            assert "stream-json" in sys.argv
+            for event in [
+                {"kind": "run_started", "model": "deepseek/test"},
+                {"kind": "thinking_summary", "summary": "thinking block received (12 chars hidden)"},
+                {"kind": "assistant_delta", "text": "partial answer"},
+                {"kind": "tool_start", "name": "read_file", "summary": "reading README.md"},
+                {"kind": "tool_end", "name": "read_file", "summary": "read_file completed", "output_preview": "ok"},
+                {"kind": "usage", "input_tokens": 5, "output_tokens": 7, "thinking_token_source": "unavailable"},
+                {"kind": "run_finished", "message": "final answer", "model": "deepseek/test", "iterations": 1,
+                 "tool_uses": [{"name": "read_file"}], "tool_results": [],
+                 "usage": {"input_tokens": 5, "output_tokens": 7}},
+            ]:
+                print(json.dumps(event), flush=True)
+                time.sleep(0.01)
+        """,
+    )
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={"claw_binary_path": str(fake), "permission_mode": "read-only"},
+        resolve_access_root=lambda: tmp_path,
+    )
+    adapter = ClawCLIAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    events = []
+
+    async def collect(event):
+        events.append(event)
+
+    assert await adapter.initialize() is True
+    response = await adapter.generate_response("hello", "req-stream", on_stream_event=collect)
+
+    assert response.is_success is True
+    assert response.text == "final answer"
+    assert response.usage.input_tokens == 5
+    assert response.usage.output_tokens == 7
+    assert adapter.capabilities.supports_thinking_stream is True
+    assert KIND_THINKING in [event.kind for event in events]
+    assert KIND_TEXT_DELTA in [event.kind for event in events]
+    assert KIND_TOOL_START in [event.kind for event in events]
+    assert KIND_TOOL_END in [event.kind for event in events]
 
 
 @pytest.mark.asyncio
