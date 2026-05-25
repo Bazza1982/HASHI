@@ -3,6 +3,7 @@
 ## Status
 
 Drafted: 2026-05-25
+Reviewed: 2026-05-25 by Akane. No blockers. Six non-blocker implementation clarifications were accepted and resolved in this revision.
 
 Goal: make `claw-cli` reasoning capture useful for live debugging, quality control, transcript review, and audit evidence. The current hidden-count output proves that provider reasoning exists, but it is not sufficient:
 
@@ -11,6 +12,18 @@ provider reasoning block received (8 chars hidden)
 ```
 
 The target behavior is to capture and stream the actual provider-returned reasoning details wherever the provider exposes them, matching the behavior already present in direct HASHI backends such as `openrouter-api` and `deepseek-api`.
+
+## Review Resolution
+
+Akane's review found no architectural blockers. The feedback is valid because it targets implementation ambiguity rather than the core design. This revision accepts the feedback with the following decisions:
+
+1. `thinking_delta` is the canonical new event for actual provider-returned reasoning text. `thinking_summary` remains a legacy compatibility event and must not be emitted for the same text chunk in the new Claw stream-json path.
+2. `_stream_json_usage()` must avoid double-counting. It should count new events first (`thinking_delta`, `thinking_redacted`) and count legacy `thinking_summary` only when no new thinking events were observed in that stream.
+3. A single provider delta containing multiple text/summary reasoning fragments should emit one `thinking_delta` with fragments joined in provider order. Encrypted/redacted fragments should emit separate `thinking_redacted` events.
+4. Stream metadata must cross the adapter/runtime boundary as a structured object, not as ad hoc counters. The collector must preserve `thinking_chars`, `thinking_event_count`, `thinking_redacted_count`, and `thinking_sources`.
+5. Audit evidence keeps the current bounded event policy. The phase does not expand the `observable_thinking` limit from 80 events; it ensures each event carries enough source metadata.
+6. Reasoning text uses the same workspace log retention lifecycle as ordinary LLM output. A reasoning-specific retention policy is out of scope for this implementation and should be a separate change.
+7. The `run_started` thinking message should be neutral once actual reasoning text is available: `Claw stream started ({model})`.
 
 ## Problem
 
@@ -163,6 +176,17 @@ struct ReasoningFragment {
 
 This avoids flattening useful provider metadata too early.
 
+Chunking strategy:
+
+- For a single provider delta, collect text-bearing fragments in provider order:
+  - `reasoning_content`
+  - `reasoning`
+  - `reasoning_details[].text`
+  - `reasoning_details[].summary`
+- Emit one `thinking_delta` for that provider delta with text fragments joined by a single newline.
+- Emit a separate `thinking_redacted` when the same provider delta includes encrypted/redacted fragments.
+- Do not buffer across unrelated provider deltas unless the provider protocol explicitly marks continuation metadata. The stream should remain low-latency and easy to audit.
+
 ### 3. Emit Claw stream-json events that HASHI can consume directly
 
 Add JSONL event kinds:
@@ -187,6 +211,7 @@ Recommended schema:
 For backwards compatibility:
 
 - keep accepting old `thinking_summary`
+- treat `thinking_summary` as legacy or aggregate-only; do not emit it for the same actual reasoning text chunk when `thinking_delta` is emitted
 - keep `thinking_chars` on all thinking events
 - do not remove `message_stop`, `usage`, or `run_finished`
 
@@ -214,7 +239,23 @@ Also:
 
 - `thinking_redacted` should become a clear audit event, not a fake reasoning text.
 - `_stream_json_usage()` should count `thinking_delta` and `thinking_redacted`.
+- `_stream_json_usage()` should count legacy `thinking_summary` only when no `thinking_delta` or `thinking_redacted` events were observed for the stream.
 - stream capabilities should remain `supports_thinking_stream=True`.
+
+Recommended collector shape:
+
+```python
+@dataclass
+class ClawThinkingStreamUsage:
+    thinking_chars: int = 0
+    thinking_tokens: int = 0
+    thinking_event_count: int = 0
+    thinking_redacted_count: int = 0
+    thinking_sources: set[str] = field(default_factory=set)
+    saw_actual_thinking_event: bool = False
+```
+
+The adapter may convert this into plain dicts at the API boundary, but internally the richer shape prevents metadata loss.
 
 ### 5. Improve persistence for quality control
 
@@ -239,6 +280,19 @@ Required logs:
 
 Do not overload `response.text` with reasoning content. Reasoning should remain a separate stream/log channel.
 
+Collection point:
+
+- collect Claw stream metadata inside `adapters/claw_cli.py` while parsing JSONL
+- attach the collected metadata to the adapter response in a backwards-compatible side channel
+- have `runtime_pipeline.py` read that metadata when writing `token_audit.jsonl`
+- keep `usage.thinking_tokens` as the existing scalar compatibility field
+
+Retention policy:
+
+- provider-returned reasoning text written to `transcript.jsonl` uses the same workspace retention lifecycle as ordinary LLM output
+- this implementation does not introduce a separate reasoning-only retention/deletion policy
+- a future retention policy can be added as an independent change if needed
+
 ### 6. Add tests
 
 Claw Rust tests:
@@ -246,7 +300,9 @@ Claw Rust tests:
 - streaming `delta.reasoning` emits `thinking_delta` with text.
 - streaming `delta.reasoning_content` emits `thinking_delta` with text.
 - streaming `reasoning_details[].text` emits `thinking_delta` with source metadata.
+- mixed `reasoning_details` text fragments in one provider delta emit one joined `thinking_delta`.
 - streaming encrypted/redacted reasoning emits `thinking_redacted`.
+- mixed text plus encrypted/redacted fragments emit both one `thinking_delta` and one `thinking_redacted`.
 - non-streaming responses preserve reasoning text and source metadata.
 - `cargo fmt --check`.
 
@@ -256,9 +312,12 @@ HASHI Python tests:
   - `thinking_delta` maps to `KIND_THINKING` with actual text.
   - `thinking_redacted` maps to an audit-visible redaction event.
   - `_stream_json_usage()` counts `thinking_delta`.
+  - `_stream_json_usage()` does not double-count legacy `thinking_summary` when new thinking events are present.
   - old `thinking_summary` remains compatible.
+  - `run_started` uses the neutral message once actual thinking events are supported.
 - runtime pipeline tests:
   - `thinking_tokens` are non-zero when Claw emits thinking text.
+  - `thinking_event_count`, `thinking_redacted_count`, and `thinking_sources` survive into token audit metadata.
   - transcript receives thinking text when `/think` is on.
 
 Live smoke:
@@ -280,6 +339,16 @@ Expected:
 - Workbench shows meaningful thinking text, not only hidden counts.
 - `transcript.jsonl` has `role: thinking` rows with provider-returned reasoning text.
 - `token_audit.jsonl` has non-zero `thinking_tokens`.
+
+Concrete verification:
+
+```bash
+grep '"role": "thinking"' /home/lily/projects/hashi/workspaces/diaochan/transcript.jsonl | tail -3
+grep '"thinking_tokens"' /home/lily/projects/hashi/workspaces/diaochan/token_audit.jsonl | tail -1
+grep '"thinking_sources"' /home/lily/projects/hashi/workspaces/diaochan/token_audit.jsonl | tail -1
+```
+
+The transcript check should show actual provider-returned reasoning text, not only `provider reasoning block received (N chars hidden)`. The token audit check should show non-zero `thinking_tokens` and populated `thinking_sources` when the provider returned reasoning text.
 
 ## Rollout Plan
 
@@ -318,6 +387,7 @@ Outcome:
 - `thinking_delta` becomes `KIND_THINKING` with real text.
 - `thinking_redacted` remains visible as redaction metadata.
 - usage counting works for text and redacted events.
+- `run_started` maps to a neutral message: `Claw stream started ({model})`.
 
 Validation:
 
@@ -339,6 +409,7 @@ Outcome:
 
 - `thinking_event_count`, `thinking_chars`, `thinking_sources`, and redaction counts are recorded.
 - audit mode can review observable thinking evidence without scraping transcript text.
+- `observable_thinking` keeps its existing bounded history policy (`thinking[-80:]`), but each event should carry text plus `reasoning_source`/`visibility` metadata.
 
 Validation:
 
@@ -375,7 +446,9 @@ The fix is complete only when all are true:
 5. redacted/encrypted provider blocks are recorded honestly as redacted, not silently dropped.
 6. old Claw stream-json clients remain compatible.
 7. tests cover OpenRouter `reasoning`, DeepSeek `reasoning_content`, and `reasoning_details`.
-8. no HASHI runtime restart is performed without explicit user approval.
+8. `_stream_json_usage()` avoids double-counting when both old and new thinking events appear in one stream.
+9. `reasoning_details` mixed text/encrypted fragments follow the documented one-delta chunking strategy.
+10. no HASHI runtime restart is performed without explicit user approval.
 
 ## Risks
 
@@ -387,10 +460,14 @@ The fix is complete only when all are true:
 
 ## Recommended Implementation Order
 
-1. Add Claw `thinking_delta` event with provider-returned text.
-2. Preserve reasoning source metadata in `openai_compat.rs`.
-3. Update HASHI `claw_cli.py` to map `thinking_delta` to `KIND_THINKING`.
-4. Add tests for text, summary, redacted, and backwards-compatible hidden-count events.
-5. Build release Claw binary.
-6. Run live smoke on diaochan without HASHI restart.
-7. If Python adapter reload is required for live runtime, request approval before reboot/restart.
+1. Keep the accepted review constraints in this document as Phase 0 implementation rules.
+2. Add Claw `thinking_delta` event with provider-returned text.
+3. Preserve reasoning source metadata in `openai_compat.rs`.
+4. Implement the documented one-delta chunking strategy for `reasoning_details`.
+5. Update HASHI `claw_cli.py` to map `thinking_delta` to `KIND_THINKING`.
+6. Update `_stream_json_usage()` with the no-double-count strategy.
+7. Add tests for text, summary, redacted, mixed fragments, and backwards-compatible hidden-count events.
+8. Add token audit metadata propagation tests.
+9. Build release Claw binary.
+10. Run live smoke on diaochan without HASHI restart.
+11. If Python adapter reload is required for live runtime, request approval before reboot/restart.
