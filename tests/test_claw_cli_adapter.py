@@ -560,11 +560,11 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path):
             assert "stream-json" in sys.argv
             for event in [
                 {"kind": "run_started", "model": "deepseek/test"},
-                {"kind": "thinking_summary", "summary": "thinking block received (12 chars hidden)"},
+                {"kind": "thinking_summary", "summary": "thinking block received (48 chars hidden)", "thinking_chars": 48},
                 {"kind": "assistant_delta", "text": "partial answer"},
                 {"kind": "tool_start", "name": "read_file", "summary": "reading README.md"},
                 {"kind": "tool_end", "name": "read_file", "summary": "read_file completed", "output_preview": "ok"},
-                {"kind": "usage", "input_tokens": 5, "output_tokens": 7, "thinking_token_source": "unavailable"},
+                {"kind": "usage", "input_tokens": 5, "output_tokens": 7, "thinking_token_source": "estimated"},
                 {"kind": "run_finished", "message": "final answer", "model": "deepseek/test", "iterations": 1,
                  "tool_uses": [{"name": "read_file"}], "tool_results": [],
                  "usage": {"input_tokens": 5, "output_tokens": 7}},
@@ -593,11 +593,17 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path):
     assert response.text == "final answer"
     assert response.usage.input_tokens == 5
     assert response.usage.output_tokens == 7
+    assert response.usage.thinking_tokens == 12
     assert adapter.capabilities.supports_thinking_stream is True
     assert KIND_THINKING in [event.kind for event in events]
+    assert any(
+        event.kind == KIND_THINKING and "Claw stream started" in event.summary
+        for event in events
+    )
     assert KIND_TEXT_DELTA in [event.kind for event in events]
     assert KIND_TOOL_START in [event.kind for event in events]
     assert KIND_TOOL_END in [event.kind for event in events]
+    assert any(event.detail == "thinking_chars=48" for event in events)
 
 
 @pytest.mark.asyncio
