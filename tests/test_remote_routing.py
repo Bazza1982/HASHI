@@ -1,7 +1,7 @@
 from remote.routing import build_route_candidates, same_machine_hint, validate_same_host_port_conflicts, wsl_unc_anchor
 
 
-def test_same_host_wsl_siblings_prefer_loopback_route():
+def test_same_host_wsl_siblings_keep_loopback_as_fallback_route():
     local = {
         "instance_id": "HASHI1",
         "platform": "wsl",
@@ -21,9 +21,9 @@ def test_same_host_wsl_siblings_prefer_loopback_route():
     candidates = build_route_candidates(target_entry=target, remote_port=8767, same_host=same_host)
 
     assert same_host is True
-    assert candidates[0].host == "127.0.0.1"
-    assert candidates[0].scope == "same_host"
-    assert [candidate.host for candidate in candidates] == ["127.0.0.1", "192.168.0.211"]
+    assert candidates[0].host == "192.168.0.211"
+    assert candidates[0].scope == "lan"
+    assert [candidate.host for candidate in candidates] == ["192.168.0.211", "127.0.0.1"]
 
 
 def test_cross_host_windows_routes_over_lan_not_loopback():
