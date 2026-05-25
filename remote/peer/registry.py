@@ -1093,54 +1093,63 @@ class PeerRegistry:
                 properties=props,
             )
             previous = self._peers.get(iid)
+            route_changed = True
             if previous:
+                route_changed = not (
+                    str(previous.host or "").strip().lower() == str(merged.host or "").strip().lower()
+                    and int(previous.port or 0) == int(merged.port or 0)
+                    and int(previous.workbench_port or 0) == int(merged.workbench_port or 0)
+                    and str((previous.properties or {}).get("preferred_backend") or "").strip().lower()
+                    == str(merged.properties.get("preferred_backend") or "").strip().lower()
+                )
                 prev_props = dict(previous.properties or {})
-                try:
-                    prev_handshake = int(prev_props.get("last_handshake_at") or 0)
-                except Exception:
-                    prev_handshake = 0
-                try:
-                    chosen_handshake = int(merged.properties.get("last_handshake_at") or 0)
-                except Exception:
-                    chosen_handshake = 0
-                if prev_handshake > chosen_handshake:
-                    for key in ("handshake_state", "last_handshake_at", "last_error", "remote_agents"):
-                        if key in prev_props:
-                            merged.properties[key] = prev_props[key]
-                else:
-                    for key in ("handshake_state", "last_handshake_at", "last_error", "remote_agents"):
-                        if key not in merged.properties and key in prev_props:
-                            merged.properties[key] = prev_props[key]
+                if not route_changed:
+                    try:
+                        prev_handshake = int(prev_props.get("last_handshake_at") or 0)
+                    except Exception:
+                        prev_handshake = 0
+                    try:
+                        chosen_handshake = int(merged.properties.get("last_handshake_at") or 0)
+                    except Exception:
+                        chosen_handshake = 0
+                    if prev_handshake > chosen_handshake:
+                        for key in ("handshake_state", "last_handshake_at", "last_error", "remote_agents"):
+                            if key in prev_props:
+                                merged.properties[key] = prev_props[key]
+                    else:
+                        for key in ("handshake_state", "last_handshake_at", "last_error", "remote_agents"):
+                            if key not in merged.properties and key in prev_props:
+                                merged.properties[key] = prev_props[key]
 
-                try:
-                    prev_seen_ok = int(prev_props.get("last_seen_ok") or 0)
-                except Exception:
-                    prev_seen_ok = 0
-                try:
-                    chosen_seen_ok = int(merged.properties.get("last_seen_ok") or 0)
-                except Exception:
-                    chosen_seen_ok = 0
-                try:
-                    prev_seen_error = int(prev_props.get("last_seen_error") or 0)
-                except Exception:
-                    prev_seen_error = 0
-                try:
-                    chosen_seen_error = int(merged.properties.get("last_seen_error") or 0)
-                except Exception:
-                    chosen_seen_error = 0
+                    try:
+                        prev_seen_ok = int(prev_props.get("last_seen_ok") or 0)
+                    except Exception:
+                        prev_seen_ok = 0
+                    try:
+                        chosen_seen_ok = int(merged.properties.get("last_seen_ok") or 0)
+                    except Exception:
+                        chosen_seen_ok = 0
+                    try:
+                        prev_seen_error = int(prev_props.get("last_seen_error") or 0)
+                    except Exception:
+                        prev_seen_error = 0
+                    try:
+                        chosen_seen_error = int(merged.properties.get("last_seen_error") or 0)
+                    except Exception:
+                        chosen_seen_error = 0
 
-                if prev_seen_ok > chosen_seen_ok:
-                    for key in ("last_seen_ok", "consecutive_failures"):
-                        if key in prev_props:
-                            merged.properties[key] = prev_props[key]
-                if prev_seen_error > chosen_seen_error:
-                    for key in ("last_seen_error", "last_refresh_error"):
-                        if key in prev_props:
-                            merged.properties[key] = prev_props[key]
-                    if prev_seen_error >= chosen_seen_ok and "consecutive_failures" in prev_props:
-                        merged.properties["consecutive_failures"] = prev_props["consecutive_failures"]
-                if "same_host_loopback" in prev_props:
-                    merged.properties["same_host_loopback"] = prev_props["same_host_loopback"]
+                    if prev_seen_ok > chosen_seen_ok:
+                        for key in ("last_seen_ok", "consecutive_failures"):
+                            if key in prev_props:
+                                merged.properties[key] = prev_props[key]
+                    if prev_seen_error > chosen_seen_error:
+                        for key in ("last_seen_error", "last_refresh_error"):
+                            if key in prev_props:
+                                merged.properties[key] = prev_props[key]
+                        if prev_seen_error >= chosen_seen_ok and "consecutive_failures" in prev_props:
+                            merged.properties["consecutive_failures"] = prev_props["consecutive_failures"]
+                    if "same_host_loopback" in prev_props:
+                        merged.properties["same_host_loopback"] = prev_props["same_host_loopback"]
             if self._same_machine_hint(iid, by_backend, chosen):
                 merged.properties["same_host_loopback"] = "127.0.0.1"
             merged.properties = self._normalize_live_props(merged.properties)

@@ -8,7 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from orchestrator.runtime_nudge import handle_nudge_callback, parse_nudge_create_args
+from orchestrator.runtime_jobs import CALLBACK_DATA_LIMIT, mint_callback_token
+from orchestrator.runtime_nudge import build_nudge_with_buttons, handle_nudge_callback, parse_nudge_create_args
 from orchestrator import scheduler as scheduler_module
 from orchestrator.scheduler import TaskScheduler, _should_fire
 from orchestrator.skill_manager import SkillManager
@@ -245,3 +246,103 @@ async def test_manual_nudge_trigger_enqueues_scheduler_source(tmp_path):
             "summary": f"Nudge Manual Trigger [{job['id']}]",
         }
     ]
+
+
+def test_build_nudge_with_buttons_uses_short_callbacks_for_long_ids():
+    long_id = "lin_yueru-nudge-until-hashi-remote-watchdog-stays-healthy-for-seven-days"
+
+    class SkillManager:
+        def list_jobs(self, kind, agent_name=None):
+            return [
+                {
+                    "id": long_id,
+                    "agent": "zelda",
+                    "enabled": True,
+                    "interval_seconds": 300,
+                    "exit_condition": "until healthy",
+                    "nudge_meta": {"count": 1, "max": 100},
+                }
+            ]
+
+    runtime = SimpleNamespace()
+    text, markup = build_nudge_with_buttons(SkillManager(), "zelda", runtime=runtime)
+
+    assert long_id in text
+    callbacks = [
+        button.callback_data
+        for row in markup.inline_keyboard
+        for button in row
+        if button.callback_data and button.callback_data != "noop"
+    ]
+    assert callbacks
+    assert all(len(callback_data) <= CALLBACK_DATA_LIMIT for callback_data in callbacks)
+    assert any(callback_data.startswith("nudgejob:key:") for callback_data in callbacks)
+
+
+@pytest.mark.asyncio
+async def test_tokenized_nudge_toggle_callback():
+    class SkillManager:
+        def __init__(self):
+            self.toggles = []
+
+        def set_job_enabled(self, kind, task_id, enabled=False):
+            self.toggles.append((kind, task_id, enabled))
+            return True, "ok"
+
+        def list_jobs(self, kind, agent_name=None):
+            return []
+
+    class Runtime:
+        name = "zelda"
+
+        def __init__(self):
+            self.skill_manager = SkillManager()
+
+    class Query:
+        def __init__(self):
+            self.answers = []
+            self.edits = []
+
+        async def answer(self, text=None, **kwargs):
+            self.answers.append((text, kwargs))
+
+        async def edit_message_text(self, text, **kwargs):
+            self.edits.append((text, kwargs))
+
+    runtime = Runtime()
+    token = mint_callback_token(
+        runtime,
+        "nudgejob_action",
+        {"task_id": "nudge-123", "action": "toggle", "value": "off"},
+        prefix="nj",
+    )
+    query = Query()
+
+    handled = await handle_nudge_callback(runtime, query, f"nudgejob:key:{token}:toggle")
+
+    assert handled is True
+    assert runtime.skill_manager.toggles == [("nudge", "nudge-123", False)]
+    assert query.answers[-1][0] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_expired_nudge_token_shows_alert():
+    class Runtime:
+        def __init__(self):
+            self.skill_manager = SimpleNamespace()
+
+    class Query:
+        def __init__(self):
+            self.answers = []
+
+        async def answer(self, text=None, **kwargs):
+            self.answers.append((text, kwargs))
+
+    runtime = Runtime()
+    query = Query()
+
+    handled = await handle_nudge_callback(runtime, query, "nudgejob:key:njdead:trigger")
+
+    assert handled is True
+    assert query.answers[-1][0] == "This nudge action expired. Open /nudge again."
+    assert query.answers[-1][1]["show_alert"] is True

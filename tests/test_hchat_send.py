@@ -415,3 +415,53 @@ def test_find_remote_instance_accepts_agent_on_explicit_target(monkeypatch):
 
     assert route is not None
     assert route["instance_id"] == "HASHI9"
+
+
+def test_preferred_host_deprioritizes_same_host_loopback():
+    instance_info = {
+        "same_host_loopback": "127.0.0.1",
+        "api_host": "127.0.0.1",
+        "lan_ip": "192.168.0.211",
+        "tailscale_ip": "100.64.0.9",
+        "internet_host": "198.51.100.10",
+    }
+
+    assert hchat_send._preferred_host(instance_info) == "192.168.0.211"
+    assert hchat_send._preferred_host(instance_info, for_remote=True) == "192.168.0.211"
+
+
+def test_workbench_hosts_for_route_prefers_canonical_before_loopback():
+    route = {
+        "host": "192.168.0.211",
+        "api_host": "127.0.0.1",
+        "lan_ip": "192.168.0.211",
+        "same_host_loopback": "127.0.0.1",
+    }
+
+    hosts = hchat_send._workbench_hosts_for_route(route)
+
+    assert hosts[0] == "192.168.0.211"
+    assert hosts[-1] == "127.0.0.1"
+
+
+def test_find_exchange_instance_prefers_non_loopback_host(monkeypatch):
+    monkeypatch.setattr(
+        hchat_send,
+        "_load_instances",
+        lambda: {
+            "hashi1": {
+                "instance_id": "HASHI1",
+                "active": True,
+                "api_host": "127.0.0.1",
+                "lan_ip": "172.21.12.144",
+                "same_host_loopback": "127.0.0.1",
+                "workbench_port": 18800,
+                "remote_port": 8766,
+            }
+        },
+    )
+
+    route = hchat_send._find_exchange_instance("HASHI2")
+
+    assert route is not None
+    assert route["host"] == "172.21.12.144"

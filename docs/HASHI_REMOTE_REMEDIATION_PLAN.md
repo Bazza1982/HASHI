@@ -1,8 +1,23 @@
 # HASHI Remote Remediation Plan
 
-**Status:** Active remediation plan  
+**Status:** Partially implemented; key routing and peer-visibility fixes landed on `hashi_remote_fix` on 2026-05-26  
 **Date:** 2026-04-27  
 **Scope:** HASHI Remote peer visibility, same-host routing, startup verification, operator diagnostics, and validation discipline
+
+**Implementation reference:** `docs/HASHI_REMOTE_FIX_BUNDLE_2026-05-26.md`
+
+The branch implementation completed these major remediation items:
+
+- `/remote` now shows the connected peer list directly
+- `/remote list` no longer forces a fresh peer refresh during display
+- LAN and handshake host selection now prefer non-loopback candidates
+- canonical peer rebuild no longer preserves stale failure state across route
+  replacement
+- same-host loopback is now a fallback route instead of the first route
+- `hchat_send` host selection now follows the corrected route preference order
+
+This plan remains useful as the broader root-cause record and validation
+discipline reference, but it is no longer only theoretical.
 
 ## 1. Purpose
 

@@ -106,6 +106,7 @@ def build_route_candidates(
 ) -> list[RouteCandidate]:
     candidates: list[RouteCandidate] = []
     seen: set[str] = set()
+    deferred_same_host: list[tuple[Any, str, str, bool]] = []
 
     def add(host: Any, scope: str, source: str, *, allow_loopback: bool = False) -> None:
         host_text = str(host or "").strip()
@@ -121,7 +122,7 @@ def build_route_candidates(
 
     loopback = str(target_entry.get("same_host_loopback") or "").strip()
     if same_host:
-        add(loopback or "127.0.0.1", "same_host", "same_host_loopback", allow_loopback=True)
+        deferred_same_host.append((loopback or "127.0.0.1", "same_host", "same_host_loopback", True))
 
     for item in address_candidates or []:
         if not isinstance(item, dict):
@@ -137,6 +138,8 @@ def build_route_candidates(
         add(target_entry.get(key), scope, key)
 
     add(peer_host, "peer", "canonical_peer")
+    for host, scope, source, allow_loopback in deferred_same_host:
+        add(host, scope, source, allow_loopback=allow_loopback)
     return candidates
 
 

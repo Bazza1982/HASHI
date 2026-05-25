@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import types
 from pathlib import Path
@@ -135,15 +136,25 @@ def test_flexible_job_transfer_keyboard_uses_short_callbacks_for_long_targets():
 def test_job_transfer_token_store_is_bounded_for_fixed_and_flexible_runtimes():
     for runtime_cls in (BridgeAgentRuntime, FlexibleAgentRuntime):
         runtime = object.__new__(runtime_cls)
-        runtime._job_transfer_selections = {
-            f"old{idx}": {"kind": "cron", "task_id": "old", "target_agent": "agent"}
-            for idx in range(256)
+        runtime._ui_callback_tokens = {
+            "skilljob_transfer": {
+                f"old{idx}": {
+                    "payload": {"kind": "cron", "task_id": "old", "target_agent": "agent"},
+                    "created_at": float(idx),
+                    "expires_at": 9999999999.0,
+                }
+                for idx in range(256)
+            }
         }
+        runtime._job_transfer_selections = {}
 
         callback_data = runtime._job_transfer_callback("cron", "new-task", "zhaojun")
 
-        assert callback_data == "skilljob:cron:xferkey:jtx1:go"
-        assert list(runtime._job_transfer_selections) == ["jtx1"]
+        assert callback_data.startswith("skilljob:cron:xferkey:jtx")
+        assert len(callback_data) <= runtime_jobs.CALLBACK_DATA_LIMIT
+        token = callback_data.split(":")[3]
+        assert list(runtime._job_transfer_selections) == [token]
+        assert len(runtime._ui_callback_tokens["skilljob_transfer"]) == 256
 
 
 def test_flexible_job_transfer_keyboard_logs_remote_instance_errors(tmp_path):
@@ -185,3 +196,89 @@ async def test_runtime_jobs_handle_flexible_xferkey_transfer():
     assert runtime.skill_manager.transfers == [("cron", "arale-daily-security-scan", "zhaojun")]
     assert query.answers[-1]["text"].startswith("Transferred to zhaojun")
     assert "Job transferred to <b>zhaojun</b>" in query.edits[-1]["text"]
+
+
+def test_jobs_panel_uses_short_tokenized_callbacks_for_long_job_ids(tmp_path):
+    tasks_path = tmp_path / "tasks.json"
+    long_id = "lin_yueru-loop-hashi-remote-watchdog-7d"
+    tasks_path.write_text(
+        json.dumps(
+            {
+                "heartbeats": [
+                    {
+                        "id": long_id,
+                        "agent": "lin_yueru",
+                        "enabled": True,
+                        "interval_seconds": 7200,
+                        "note": "watchdog",
+                    }
+                ],
+                "crons": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.name = "lin_yueru"
+    runtime.global_config = SimpleNamespace(project_root=tmp_path)
+    runtime.skill_manager = SimpleNamespace(tasks_path=tasks_path)
+
+    text, markup = runtime_jobs._build_jobs_with_buttons(runtime, runtime.name, runtime.skill_manager, filter_agent=runtime.name)
+
+    assert long_id in text
+    callbacks = [
+        button.callback_data
+        for row in markup.inline_keyboard
+        for button in row
+        if button.callback_data and button.callback_data != "noop"
+    ]
+    assert callbacks
+    assert all(len(callback_data) <= runtime_jobs.CALLBACK_DATA_LIMIT for callback_data in callbacks)
+    assert any(callback_data.startswith("skilljob:heartbeat:key:") for callback_data in callbacks)
+
+
+@pytest.mark.asyncio
+async def test_runtime_jobs_handle_tokenized_toggle_callback():
+    class SkillManager(_FakeSkillManager):
+        def __init__(self):
+            super().__init__()
+            self.enabled_changes = []
+
+        def set_job_enabled(self, kind: str, task_id: str, enabled: bool):
+            self.enabled_changes.append((kind, task_id, enabled))
+            return True, f"set {task_id}"
+
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.skill_manager = SkillManager()
+    render_calls = []
+
+    async def _render(query, kind):
+        render_calls.append((query, kind))
+
+    runtime._render_skill_jobs = _render
+    token = runtime_jobs.mint_callback_token(
+        runtime,
+        "skilljob_action",
+        {"kind": "cron", "task_id": "arale-daily-security-scan", "action": "toggle", "value": "off"},
+        prefix="j",
+    )
+    query = _FakeQuery(f"skilljob:cron:key:{token}:toggle")
+
+    handled = await runtime_jobs.handle_skill_job_callback(runtime, query, query.data)
+
+    assert handled is True
+    assert runtime.skill_manager.enabled_changes == [("cron", "arale-daily-security-scan", False)]
+    assert render_calls == [(query, "cron")]
+
+
+@pytest.mark.asyncio
+async def test_runtime_jobs_expired_token_shows_alert():
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.skill_manager = _FakeSkillManager()
+    query = _FakeQuery("skilljob:cron:key:jdeadbe:run")
+
+    handled = await runtime_jobs.handle_skill_job_callback(runtime, query, query.data)
+
+    assert handled is True
+    assert query.answers[-1]["text"] == "This jobs action expired. Open /jobs again."
+    assert query.answers[-1]["show_alert"] is True

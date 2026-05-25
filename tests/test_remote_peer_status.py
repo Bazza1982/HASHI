@@ -44,12 +44,14 @@ class _RemoteStartDummy:
 
 
 class _RemoteRenderDummy:
+    _remote_state_root = FlexibleAgentRuntime._remote_state_root
     _render_remote_peer_endpoints = FlexibleAgentRuntime._render_remote_peer_endpoints
     _load_remote_instances = FlexibleAgentRuntime._load_remote_instances
     _peer_network_hosts = FlexibleAgentRuntime._peer_network_hosts
 
 
 class _RemoteConfigDummy:
+    _remote_state_root = FlexibleAgentRuntime._remote_state_root
     _remote_config_snapshot = FlexibleAgentRuntime._remote_config_snapshot
     _remote_urls = FlexibleAgentRuntime._remote_urls
 
@@ -107,6 +109,29 @@ def test_lan_discovery_rejects_unknown_instance_id():
     assert _service_info_to_peer(FakeInfo(), "HASHI1") is None
 
 
+def test_lan_discovery_prefers_advertised_non_loopback_candidate_when_mdns_address_is_loopback():
+    class FakeInfo:
+        properties = {
+            b"instance_id": b"HASHI9",
+            b"display_name": b"HASHI9",
+            b"platform": b"windows",
+            b"workbench_port": b"18819",
+            b"protocol_version": b"2.0",
+            b"address_candidates_json": json.dumps([["192.168.0.211", "l", "in"]]).encode(),
+            b"observed_candidates_json": json.dumps([["192.168.0.211", "l", "in"]]).encode(),
+        }
+        port = 35821
+        server = "hashi9.local."
+
+        def parsed_addresses(self):
+            return ["127.0.0.1"]
+
+    peer = _service_info_to_peer(FakeInfo(), "HASHI2")
+
+    assert peer is not None
+    assert peer.host == "192.168.0.211"
+
+
 def test_registry_rejects_unknown_peer_and_prunes_unknown_instance_seed(tmp_path):
     hashi_root = tmp_path / "hashi"
     hashi_root.mkdir()
@@ -151,6 +176,44 @@ def test_registry_rejects_unknown_peer_and_prunes_unknown_instance_seed(tmp_path
     data = json.loads((hashi_root / "instances.json").read_text(encoding="utf-8"))
     assert "unknown" not in data["instances"]
     assert "hashi2" in data["instances"]
+
+
+def test_handle_handshake_prefers_payload_lan_candidate_over_loopback_client_ip(tmp_path):
+    captured = []
+
+    class RegistryStub:
+        def on_peers_changed(self, peers):
+            captured.extend(peers)
+
+    manager = object.__new__(ProtocolManager)
+    manager._instance_info = {"instance_id": "HASHI2", "remote_port": 8767, "workbench_port": 18802, "platform": "wsl"}
+    manager._peer_registry = RegistryStub()
+    manager._capabilities = ["handshake_v2"]
+    manager.get_local_agents_snapshot = lambda: []
+    manager.get_local_agent_directory_state = lambda: {"version": "", "directory_state": "fresh"}
+    manager._local_network_profile = lambda: {
+        "host_identity": "a9max",
+        "environment_kind": "wsl",
+        "address_candidates": [{"host": "172.21.12.144", "scope": "lan", "source": "interface_scan"}],
+        "observed_candidates": [{"host": "172.21.12.144", "scope": "lan", "source": "interface_scan"}],
+    }
+
+    response = ProtocolManager.handle_handshake(
+        manager,
+        {
+            "from_instance": "HASHI1",
+            "_client_ip": "127.0.0.1",
+            "remote_port": 8766,
+            "workbench_port": 18800,
+            "platform": "wsl",
+            "address_candidates": [{"host": "192.168.0.211", "scope": "lan", "source": "in"}],
+            "observed_candidates": [{"host": "192.168.0.211", "scope": "lan", "source": "in"}],
+        },
+    )
+
+    assert response["status"] == "handshake_accept"
+    assert captured
+    assert captured[0].host == "192.168.0.211"
 
 
 def test_live_endpoints_skip_unknown_instance_id(tmp_path):
@@ -475,6 +538,57 @@ def test_handshake_success_does_not_clobber_lan_peer_with_loopback_fallback(tmp_
     assert peer.host == "192.168.0.211"
     assert peer.port == 8767
     assert peer.properties["preferred_backend"] == "lan"
+
+
+def test_registry_route_replacement_drops_stale_loopback_handshake_state(tmp_path):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    (hashi_root / "instances.json").write_text('{"instances": {}}', encoding="utf-8")
+    registry = PeerRegistry(hashi_root, "HASHI2")
+    now = int(time.time())
+
+    registry._peers["HASHI9"] = PeerInfo(
+        instance_id="HASHI9",
+        display_name="HASHI9",
+        host="127.0.0.1",
+        port=60862,
+        workbench_port=18819,
+        platform="windows",
+        properties={
+            "discovery": "bootstrap_fallback",
+            "preferred_backend": "bootstrap_fallback",
+            "handshake_state": "handshake_timed_out",
+            "last_handshake_at": now,
+            "last_error": "all hosts unreachable",
+            "same_host_loopback": "127.0.0.1",
+            "last_seen_error": now,
+            "consecutive_failures": 3,
+            "live_status": "offline",
+        },
+    )
+    registry._observations["HASHI9"] = {
+        "lan": PeerInfo(
+            instance_id="HASHI9",
+            display_name="HASHI9",
+            host="192.168.0.211",
+            port=35821,
+            workbench_port=18819,
+            platform="windows",
+            properties={"discovery": "lan", "host_identity": "a9max", "environment_kind": "windows"},
+        )
+    }
+
+    registry._rebuild_canonical_peers()
+
+    peer = registry.get_peer("HASHI9")
+    assert peer is not None
+    assert peer.host == "192.168.0.211"
+    assert peer.port == 35821
+    assert peer.properties["preferred_backend"] == "lan"
+    assert peer.properties.get("handshake_state", "") == ""
+    assert peer.properties.get("last_error") is None
+    assert peer.properties["consecutive_failures"] == 0
+    assert peer.properties["live_status"] == "unknown"
 
 
 def test_registry_prunes_legacy_alias_when_new_identity_shares_same_endpoint(tmp_path):
@@ -1064,6 +1178,38 @@ def test_remote_config_snapshot_prefers_instances_remote_port_over_agents_and_ya
     assert cfg["port"] == 8766
 
 
+def test_remote_config_snapshot_prefers_bridge_home_runtime_state_when_separated(tmp_path):
+    code_root = tmp_path / "code"
+    state_root = tmp_path / "home"
+    (code_root / "remote").mkdir(parents=True)
+    (state_root / "state").mkdir(parents=True)
+    (code_root / "remote" / "config.yaml").write_text(
+        "server:\n  port: 8767\n  use_tls: false\ndiscovery:\n  backend: lan\n",
+        encoding="utf-8",
+    )
+    (state_root / "agents.json").write_text(
+        json.dumps({"global": {"instance_id": "HASHI9", "remote_port": 8766}}),
+        encoding="utf-8",
+    )
+    (state_root / "instances.json").write_text(
+        json.dumps({"instances": {"hashi9": {"instance_id": "HASHI9", "remote_port": 8768}}}),
+        encoding="utf-8",
+    )
+    (state_root / "state" / "remote_runtime_claim.json").write_text(
+        json.dumps({"instance_id": "HASHI9", "port": 8768}),
+        encoding="utf-8",
+    )
+    dummy = _RemoteConfigDummy()
+    dummy.global_config = SimpleNamespace(project_root=code_root, bridge_home=state_root)
+
+    cfg = FlexibleAgentRuntime._remote_config_snapshot(dummy)
+
+    assert cfg["root"] == code_root
+    assert cfg["state_root"] == state_root
+    assert cfg["port"] == 8768
+    assert cfg["ports"] == [8768]
+
+
 def test_remote_urls_use_local_http_hosts_for_wsl_alias(monkeypatch, tmp_path):
     dummy = _RemoteConfigDummy()
     dummy.global_config = SimpleNamespace(project_root=tmp_path)
@@ -1084,6 +1230,23 @@ def test_remote_urls_use_local_http_hosts_for_wsl_alias(monkeypatch, tmp_path):
         "https://10.255.255.254:8766/peers",
     ]
     assert "http://127.0.0.1:8766/peers" in urls
+
+
+def test_load_remote_instances_uses_bridge_home_when_present(tmp_path):
+    code_root = tmp_path / "code"
+    state_root = tmp_path / "home"
+    code_root.mkdir()
+    state_root.mkdir()
+    (state_root / "instances.json").write_text(
+        json.dumps({"instances": {"hashi9": {"instance_id": "HASHI9", "remote_port": 8768}}}),
+        encoding="utf-8",
+    )
+    dummy = _RemoteRenderDummy()
+    dummy.global_config = SimpleNamespace(project_root=code_root, bridge_home=state_root)
+
+    instances = FlexibleAgentRuntime._load_remote_instances(dummy)
+
+    assert instances["hashi9"]["remote_port"] == 8768
 
 
 def test_render_remote_peer_endpoints_explains_same_host_loopback(tmp_path):
@@ -1465,6 +1628,50 @@ def test_bootstrap_known_peers_skips_existing_online_peer(tmp_path):
     manager._dedupe_bootstrap_instances = lambda instances: instances
     manager._candidate_hosts_for_entry = lambda entry: ["192.168.0.6"]
     manager._probe_route = lambda host, port, timeout=2: True
+
+    asyncio.run(manager._bootstrap_known_peers())
+
+    assert captured == []
+
+
+def test_bootstrap_known_peers_skips_existing_peer_owned_by_live_discovery(tmp_path):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    existing_peer = PeerInfo(
+        instance_id="INTEL",
+        display_name="INTEL",
+        host="192.168.0.6",
+        port=8766,
+        workbench_port=18802,
+        platform="windows",
+        properties={"live_status": "offline", "handshake_state": "handshake_timed_out", "preferred_backend": "lan"},
+    )
+    captured = []
+
+    class RegistryStub:
+        def get_peer(self, instance_id):
+            return existing_peer
+
+        def on_peers_changed(self, peers):
+            captured.extend(peers)
+
+    manager = object.__new__(ProtocolManager)
+    manager._hashi_root = hashi_root
+    manager._instance_info = {"instance_id": "HASHI1"}
+    manager._peer_registry = RegistryStub()
+    manager._load_instances = lambda: {
+        "intel": {
+            "instance_id": "INTEL",
+            "display_name": "INTEL",
+            "platform": "windows",
+            "lan_ip": "192.168.0.6",
+            "remote_port": 40050,
+            "workbench_port": 18802,
+        }
+    }
+    manager._dedupe_bootstrap_instances = lambda instances: instances
+    manager._candidate_hosts_for_entry = lambda entry: ["192.168.0.6"]
+    manager._probe_instance_route = lambda host, port, instance_id, timeout=2: True
 
     asyncio.run(manager._bootstrap_known_peers())
 

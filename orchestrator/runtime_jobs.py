@@ -2,12 +2,93 @@ from __future__ import annotations
 
 import json
 import logging
+import time
+import uuid
 from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+CALLBACK_DATA_LIMIT = 64
+CALLBACK_TOKEN_TTL_SECONDS = 30 * 60
+MAX_CALLBACK_TOKENS = 256
 
-def _build_jobs_with_buttons(agent_name: str, skill_manager, filter_agent: str | None = None):
+
+def _runtime_logger(runtime):
+    return getattr(runtime, "logger", logging.getLogger(__name__))
+
+
+def _callback_token_buckets(runtime):
+    buckets = getattr(runtime, "_ui_callback_tokens", None)
+    if buckets is None:
+        buckets = {}
+        runtime._ui_callback_tokens = buckets
+    return buckets
+
+
+def _callback_token_store(runtime, namespace: str) -> dict[str, dict]:
+    return _callback_token_buckets(runtime).setdefault(namespace, {})
+
+
+def _prune_callback_token_store(store: dict[str, dict], *, now: float, ttl_seconds: int) -> int:
+    expired = [
+        token
+        for token, entry in list(store.items())
+        if float(entry.get("expires_at", 0)) <= now
+    ]
+    for token in expired:
+        store.pop(token, None)
+    return len(expired)
+
+
+def mint_callback_token(
+    runtime,
+    namespace: str,
+    payload: dict,
+    *,
+    prefix: str,
+    ttl_seconds: int = CALLBACK_TOKEN_TTL_SECONDS,
+    max_entries: int = MAX_CALLBACK_TOKENS,
+) -> str:
+    logger = _runtime_logger(runtime)
+    store = _callback_token_store(runtime, namespace)
+    now = time.time()
+    pruned = _prune_callback_token_store(store, now=now, ttl_seconds=ttl_seconds)
+    if pruned:
+        logger.info("Pruned %s expired %s callback token(s).", pruned, namespace)
+    if len(store) >= max_entries:
+        for token, _entry in sorted(store.items(), key=lambda item: float(item[1].get("created_at", 0)))[: len(store) - max_entries + 1]:
+            store.pop(token, None)
+        logger.info("Pruned %s callback token store to stay within %s entries.", namespace, max_entries)
+    for _ in range(16):
+        token = f"{prefix}{uuid.uuid4().hex[:6]}"
+        if token not in store:
+            store[token] = {
+                "payload": dict(payload),
+                "created_at": now,
+                "expires_at": now + ttl_seconds,
+            }
+            logger.debug("Created %s callback token %s for %s", namespace, token, payload)
+            return token
+    raise RuntimeError(f"Could not allocate unique callback token for {namespace}")
+
+
+def resolve_callback_token(runtime, namespace: str, token: str, *, now: float | None = None) -> dict | None:
+    logger = _runtime_logger(runtime)
+    store = _callback_token_store(runtime, namespace)
+    current_time = time.time() if now is None else now
+    _prune_callback_token_store(store, now=current_time, ttl_seconds=CALLBACK_TOKEN_TTL_SECONDS)
+    entry = store.get(token)
+    if not entry:
+        logger.warning("Unknown or expired %s callback token: %s", namespace, token)
+        return None
+    if float(entry.get("expires_at", 0)) <= current_time:
+        store.pop(token, None)
+        logger.warning("Expired %s callback token: %s", namespace, token)
+        return None
+    return dict(entry.get("payload") or {})
+
+
+def _build_jobs_with_buttons(runtime, agent_name: str, skill_manager, filter_agent: str | None = None):
     """Build combined jobs message text and inline keyboard with run/toggle buttons.
 
     filter_agent: if set, only show jobs whose 'agent' field matches. None means show all.
@@ -93,12 +174,31 @@ def _build_jobs_with_buttons(agent_name: str, skill_manager, filter_agent: str |
         toggle_label = "ON" if enabled else "OFF"
         icon = "⏱" if kind == "heartbeat" else "📅"
         short_id = jid[:22]
+        run_token = mint_callback_token(runtime, "skilljob_action", {"kind": kind, "task_id": jid, "action": "run"}, prefix="j")
+        toggle_token = mint_callback_token(
+            runtime,
+            "skilljob_action",
+            {"kind": kind, "task_id": jid, "action": "toggle", "value": toggle_mode},
+            prefix="j",
+        )
+        transfer_token = mint_callback_token(
+            runtime,
+            "skilljob_action",
+            {"kind": kind, "task_id": jid, "action": "transfer"},
+            prefix="j",
+        )
+        delete_token = mint_callback_token(
+            runtime,
+            "skilljob_action",
+            {"kind": kind, "task_id": jid, "action": "delete"},
+            prefix="j",
+        )
         buttons.append([InlineKeyboardButton(f"{icon} {short_id}", callback_data="noop")])
         buttons.append([
-            InlineKeyboardButton("▶ Run", callback_data=f"skilljob:{kind}:run:{jid}:now"),
-            InlineKeyboardButton(toggle_label, callback_data=f"skilljob:{kind}:toggle:{jid}:{toggle_mode}"),
-            InlineKeyboardButton("📤 Transfer", callback_data=f"skilljob:{kind}:transfer:{jid}:select"),
-            InlineKeyboardButton("🗑 Del", callback_data=f"skilljob:{kind}:delete:{jid}:confirm"),
+            InlineKeyboardButton("▶ Run", callback_data=f"skilljob:{kind}:key:{run_token}:run"),
+            InlineKeyboardButton(toggle_label, callback_data=f"skilljob:{kind}:key:{toggle_token}:toggle"),
+            InlineKeyboardButton("📤 Transfer", callback_data=f"skilljob:{kind}:key:{transfer_token}:transfer"),
+            InlineKeyboardButton("🗑 Del", callback_data=f"skilljob:{kind}:key:{delete_token}:delete"),
         ])
 
     if not all_jobs:
@@ -251,14 +351,24 @@ def job_transfer_callback(
     instance_id: str | None = None,
     max_selections: int = 256,
 ) -> str:
-    store = getattr(runtime, "_job_transfer_selections", None)
-    if store is None:
-        store = {}
-        runtime._job_transfer_selections = store
-    if len(store) >= max_selections:
-        store.clear()
-    token = f"jtx{len(store) + 1:x}"
-    store[token] = {
+    token = mint_callback_token(
+        runtime,
+        "skilljob_transfer",
+        {
+            "kind": kind,
+            "task_id": task_id,
+            "target_agent": target_agent,
+            "instance_id": instance_id,
+            "remote": instance_id is not None,
+        },
+        prefix="jtx",
+        max_entries=max_selections,
+    )
+    legacy_store = getattr(runtime, "_job_transfer_selections", None)
+    if legacy_store is None:
+        legacy_store = {}
+        runtime._job_transfer_selections = legacy_store
+    legacy_store[token] = {
         "kind": kind,
         "task_id": task_id,
         "target_agent": target_agent,
@@ -272,7 +382,23 @@ async def handle_skill_job_callback(runtime, query, data: str) -> bool:
     if not data.startswith("skilljob:"):
         return False
 
-    _, kind, action, task_id, value = data.split(":", 4)
+    parts = data.split(":", 4)
+    if len(parts) != 5:
+        await query.answer("Malformed jobs callback.", show_alert=True)
+        return True
+    _, kind, action, task_id, value = parts
+    if action == "key":
+        _runtime_logger(runtime).debug("Handling tokenized jobs callback: %s", data)
+        selection = resolve_callback_token(runtime, "skilljob_action", task_id)
+        if not selection:
+            await query.answer("This jobs action expired. Open /jobs again.", show_alert=True)
+            return True
+        if selection.get("kind") != kind or selection.get("action") != value:
+            await query.answer("Invalid jobs action. Open /jobs again.", show_alert=True)
+            return True
+        task_id = selection["task_id"]
+        action = selection["action"]
+        value = str(selection.get("value", ""))
     if action == "toggle":
         ok, message = runtime.skill_manager.set_job_enabled(kind, task_id, enabled=(value == "on"))
         await query.answer(message, show_alert=not ok)
@@ -338,7 +464,9 @@ async def handle_skill_job_callback(runtime, query, data: str) -> bool:
             await query.edit_message_text(f"❌ Transfer failed: {msg}")
         return True
     if action == "xferkey":
-        selection = getattr(runtime, "_job_transfer_selections", {}).get(task_id)
+        selection = resolve_callback_token(runtime, "skilljob_transfer", task_id)
+        if not selection:
+            selection = getattr(runtime, "_job_transfer_selections", {}).get(task_id)
         if not selection:
             await query.answer("Transfer selection expired. Open /jobs and try again.", show_alert=True)
             return True
