@@ -485,6 +485,8 @@ def record_foreground_usage_audit(
             for s in prompt_audit.get("sections", [])
         }
         section_counts = {s["key"]: s.get("item_count", 0) for s in prompt_audit.get("sections", [])}
+        stream_metadata = getattr(response, "stream_metadata", None) or {}
+        claw_thinking = stream_metadata.get("claw_thinking") or {}
         record_audit_event(
             runtime.workspace_dir,
             {
@@ -509,6 +511,10 @@ def record_foreground_usage_audit(
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "thinking_tokens": thinking_tokens,
+                "thinking_chars": int(claw_thinking.get("thinking_chars") or 0),
+                "thinking_event_count": int(claw_thinking.get("thinking_event_count") or 0),
+                "thinking_redacted_count": int(claw_thinking.get("thinking_redacted_count") or 0),
+                "thinking_sources": list(claw_thinking.get("thinking_sources") or []),
                 "tool_call_count": int(getattr(response, "tool_call_count", 0) or 0),
                 "tool_loop_count": int(getattr(response, "tool_loop_count", 0) or 0),
                 "tool_catalog_count": 0,

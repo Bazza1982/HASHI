@@ -171,12 +171,27 @@ def test_audit_full_prompt_clips_long_user_request_and_stays_under_cap():
 async def test_telemetry_collector_keeps_raw_events_for_audit():
     collector = AuditTelemetryCollector()
 
-    await collector.record(StreamEvent(kind=KIND_THINKING, summary="Thinking..."))
+    await collector.record(
+        StreamEvent(
+            kind=KIND_THINKING,
+            summary="Need to inspect adapter mapping.",
+            detail="thinking_chars=32;source=reasoning",
+        )
+    )
+    await collector.record(
+        StreamEvent(
+            kind=KIND_THINKING,
+            summary="provider emitted encrypted reasoning block",
+            detail="thinking_chars=0;redacted=true;source=reasoning_details.encrypted",
+        )
+    )
     await collector.record(StreamEvent(kind=KIND_SHELL_EXEC, summary="Running rm", detail="rm -rf /tmp/example"))
 
     data = collector.to_dict()
-    assert data["stream_event_count"] == 2
-    assert data["thinking_event_count"] == 1
+    assert data["stream_event_count"] == 3
+    assert data["thinking_event_count"] == 2
+    assert data["thinking_redacted_count"] == 1
+    assert data["thinking_sources"] == ["reasoning", "reasoning_details.encrypted"]
     assert data["action_event_count"] == 1
     assert data["observable_actions"][0]["detail"] == "rm -rf /tmp/example"
 

@@ -8,7 +8,7 @@ import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from adapters.stream_events import StreamCallback
 
@@ -42,6 +42,7 @@ class BackendResponse:
     cost_usd: Optional[float] = None    # Real cost from CLI/API when available
     tool_call_count: int = 0
     tool_loop_count: int = 0
+    stream_metadata: Optional[dict[str, Any]] = None
 
 
 class BaseBackend(ABC):
