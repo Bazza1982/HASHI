@@ -79,3 +79,60 @@ def test_superloop_scheduler_keeps_future_deadline_pending(tmp_path: Path) -> No
     assert stats["waits_satisfied"] == 0
     assert stats["loops_advanced"] == 0
     assert waits.has_open_waits("sl-test-002") is True
+
+
+def test_superloop_scheduler_does_not_start_task_without_wait_or_opt_in(tmp_path: Path) -> None:
+    store = SuperloopStore(tmp_path / "superloops")
+    store.create_compiled_loop(
+        loop_id="sl-test-003",
+        loop_state={
+            "loop_id": "sl-test-003",
+            "status": "running",
+            "current_step": None,
+            "taskboard_path": "superloops/loops/sl-test-003/taskboard.json",
+            "waits_path": "superloops/loops/sl-test-003/waits.json",
+        },
+        taskboard=[],
+        issues=[],
+        waits=[],
+        operator_summary="# summary\n",
+    )
+    taskboard = SuperloopTaskboardService(store)
+    taskboard.add_task("sl-test-003", title="dispatch worker", owner_agent="zelda", owner_instance="HASHI1")
+
+    stats = advance_superloops_once(tmp_path / "superloops")
+
+    assert stats["loops_checked"] == 1
+    assert stats["loops_advanced"] == 0
+    state = store.load_loop_state("sl-test-003")
+    assert state["current_step"] is None
+    assert taskboard.list_tasks("sl-test-003")[0]["status"] == "pending"
+
+
+def test_superloop_scheduler_starts_task_without_wait_when_explicitly_enabled(tmp_path: Path) -> None:
+    store = SuperloopStore(tmp_path / "superloops")
+    store.create_compiled_loop(
+        loop_id="sl-test-004",
+        loop_state={
+            "loop_id": "sl-test-004",
+            "status": "running",
+            "current_step": None,
+            "scheduler_auto_advance": True,
+            "taskboard_path": "superloops/loops/sl-test-004/taskboard.json",
+            "waits_path": "superloops/loops/sl-test-004/waits.json",
+        },
+        taskboard=[],
+        issues=[],
+        waits=[],
+        operator_summary="# summary\n",
+    )
+    taskboard = SuperloopTaskboardService(store)
+    taskboard.add_task("sl-test-004", title="dispatch worker", owner_agent="zelda", owner_instance="HASHI1")
+
+    stats = advance_superloops_once(tmp_path / "superloops")
+
+    assert stats["loops_checked"] == 1
+    assert stats["loops_advanced"] == 1
+    state = store.load_loop_state("sl-test-004")
+    assert state["current_step"].startswith("task-")
+    assert taskboard.list_tasks("sl-test-004")[0]["status"] == "in_progress"
