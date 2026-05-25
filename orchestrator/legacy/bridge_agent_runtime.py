@@ -962,7 +962,7 @@ class BridgeAgentRuntime:
         return InlineKeyboardMarkup(buttons) if buttons else None
 
     async def _render_skill_jobs(self, update_or_query, kind: str):
-        text, markup = _build_jobs_with_buttons(self.name, self.skill_manager, filter_agent=self.name)
+        text, markup = _build_jobs_with_buttons(self, self.name, self.skill_manager, filter_agent=self.name)
         if hasattr(update_or_query, "edit_message_text"):
             await update_or_query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
         else:
@@ -4146,7 +4146,7 @@ class BridgeAgentRuntime:
             await update.message.reply_text("No task scheduler configured.")
             return
         if not args or args[0].strip().lower() in {"list", "show"}:
-            text, markup = _build_jobs_with_buttons(self.name, self.skill_manager, filter_agent=self.name)
+            text, markup = _build_jobs_with_buttons(self, self.name, self.skill_manager, filter_agent=self.name)
             await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
             return
         if args[0].strip().lower() != "run" or len(args) < 2:
@@ -4700,7 +4700,7 @@ class BridgeAgentRuntime:
             filter_agent = arg
         else:
             filter_agent = self.name
-        text, markup = _build_jobs_with_buttons(self.name, self.skill_manager, filter_agent=filter_agent)
+        text, markup = _build_jobs_with_buttons(self, self.name, self.skill_manager, filter_agent=filter_agent)
         await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
 
     async def cmd_timeout(self, update, context):

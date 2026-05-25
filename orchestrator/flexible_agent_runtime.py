@@ -1262,7 +1262,7 @@ class FlexibleAgentRuntime:
 
     async def _render_skill_jobs(self, update_or_query, kind: str):
         from orchestrator.runtime_jobs import _build_jobs_with_buttons
-        text, markup = _build_jobs_with_buttons(self.name, self.skill_manager, filter_agent=self.name)
+        text, markup = _build_jobs_with_buttons(self, self.name, self.skill_manager, filter_agent=self.name)
         if hasattr(update_or_query, "edit_message_text"):
             await update_or_query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
         else:
@@ -3204,7 +3204,7 @@ class FlexibleAgentRuntime:
             return
         if not args or args[0].strip().lower() in {"list", "show"}:
             from orchestrator.runtime_jobs import _build_jobs_with_buttons
-            text, markup = _build_jobs_with_buttons(self.name, self.skill_manager, filter_agent=self.name)
+            text, markup = _build_jobs_with_buttons(self, self.name, self.skill_manager, filter_agent=self.name)
             await self._reply_text(update, text, parse_mode="HTML", reply_markup=markup)
             return
         if args[0].strip().lower() != "run" or len(args) < 2:
@@ -3294,7 +3294,7 @@ class FlexibleAgentRuntime:
             filter_agent = arg
         else:
             filter_agent = self.name
-        text, markup = _build_jobs_with_buttons(self.name, self.skill_manager, filter_agent=filter_agent)
+        text, markup = _build_jobs_with_buttons(self, self.name, self.skill_manager, filter_agent=filter_agent)
         await self._reply_text(update, text, parse_mode="HTML", reply_markup=markup)
 
     async def cmd_timeout(self, update: Update, context: Any):
@@ -6238,11 +6238,21 @@ class FlexibleAgentRuntime:
     # /remote — one-click Hashi Remote start/stop
     # ------------------------------------------------------------------
 
+    def _remote_state_root(self) -> Path:
+        bridge_home = getattr(self.global_config, "bridge_home", None)
+        if bridge_home:
+            try:
+                return Path(bridge_home).expanduser().resolve()
+            except Exception:
+                pass
+        return Path(self.global_config.project_root).expanduser().resolve()
+
     def _remote_config_snapshot(self) -> dict[str, Any]:
-        root = self.global_config.project_root
+        root = Path(self.global_config.project_root).expanduser().resolve()
+        state_root = self._remote_state_root()
         config_path = root / "remote" / "config.yaml"
-        agents_path = root / "agents.json"
-        instances_path = root / "instances.json"
+        agents_path = state_root / "agents.json"
+        instances_path = state_root / "instances.json"
         data: dict[str, Any] = {}
         try:
             data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
@@ -6266,7 +6276,7 @@ class FlexibleAgentRuntime:
             except Exception:
                 pass
         ports: list[int] = []
-        claim = read_runtime_claim(root)
+        claim = read_runtime_claim(state_root)
         if claim:
             try:
                 ports.append(int(claim.get("port") or 0))
@@ -6279,6 +6289,7 @@ class FlexibleAgentRuntime:
         ports = [port for index, port in enumerate(ports) if port > 0 and port not in ports[:index]]
         return {
             "root": root,
+            "state_root": state_root,
             "port": ports[0],
             "ports": ports,
             "use_tls": bool(server.get("use_tls", True)),
@@ -6468,7 +6479,7 @@ class FlexibleAgentRuntime:
         return lines
 
     def _load_remote_instances(self) -> dict[str, dict[str, Any]]:
-        path = self.global_config.project_root / "instances.json"
+        path = self._remote_state_root() / "instances.json"
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except Exception:

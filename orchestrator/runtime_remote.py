@@ -137,6 +137,37 @@ async def do_move(
         await runtime._send_text(chat_id, f"Error running migration: {exc}")
 
 
+def render_remote_peer_lines(runtime: Any, peers: list[dict[str, Any]], *, include_refreshed_at: bool = True) -> list[str]:
+    peers = sorted(
+        peers,
+        key=lambda peer: (
+            runtime._remote_peer_presence(peer)[0],
+            str(peer.get("instance_id") or ""),
+        ),
+    )
+    counts = {"online": 0, "attention": 0, "offline": 0}
+    for peer in peers:
+        rank, _presence, _state = runtime._remote_peer_presence(peer)
+        if rank == 0:
+            counts["online"] += 1
+        elif rank in {1, 2}:
+            counts["attention"] += 1
+        else:
+            counts["offline"] += 1
+    lines = [
+        "📡 <b>Remote Instances</b>",
+        f"online: <code>{counts['online']}</code>  ·  attention: <code>{counts['attention']}</code>  ·  offline: <code>{counts['offline']}</code>",
+    ]
+    if include_refreshed_at:
+        lines.append(f"refreshed: <code>{datetime.now().strftime('%H:%M:%S')}</code>")
+    lines.append("")
+    for idx, peer in enumerate(peers):
+        lines.extend(runtime._render_remote_peer_block(peer))
+        if idx != len(peers) - 1:
+            lines.append("")
+    return lines
+
+
 async def handle_move_callback(runtime: Any, update: Any, context: Any) -> None:
     """Handle move: callback queries."""
     query = update.callback_query
@@ -277,11 +308,19 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
             conflicts = list(route_diagnostics.get("port_conflicts") or [])
             if conflicts:
                 lines.append(f"Route warnings: <code>{len(conflicts)}</code> same-host port conflict(s)")
+        if peers:
+            lines.extend(["", *render_remote_peer_lines(runtime, peers, include_refreshed_at=False)])
         await runtime._reply_text(update, "\n".join(lines), parse_mode="HTML")
         return
 
     if arg == "list":
-        data, _url = await runtime._fetch_remote_json("/peers?refresh=1")
+        data, _url = await runtime._fetch_remote_json("/peers")
+        if data is None:
+            await runtime._reply_text(
+                update,
+                "⚠️ Remote peer view is currently unavailable.",
+            )
+            return
         peers = list((data or {}).get("peers") or [])
         if not peers:
             if data and data.get("trusted_view") is False:
@@ -289,33 +328,11 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
             else:
                 await runtime._reply_text(update, "⚪ No remote peers are currently visible.")
             return
-        peers = sorted(
-            peers,
-            key=lambda peer: (
-                runtime._remote_peer_presence(peer)[0],
-                str(peer.get("instance_id") or ""),
-            ),
+        await runtime._reply_text(
+            update,
+            "\n".join(render_remote_peer_lines(runtime, peers, include_refreshed_at=True)),
+            parse_mode="HTML",
         )
-        counts = {"online": 0, "attention": 0, "offline": 0}
-        for peer in peers:
-            rank, _presence, _state = runtime._remote_peer_presence(peer)
-            if rank == 0:
-                counts["online"] += 1
-            elif rank in {1, 2}:
-                counts["attention"] += 1
-            else:
-                counts["offline"] += 1
-        lines = [
-            "📡 <b>Remote Instances</b>",
-            f"online: <code>{counts['online']}</code>  ·  attention: <code>{counts['attention']}</code>  ·  offline: <code>{counts['offline']}</code>",
-            f"refreshed: <code>{datetime.now().strftime('%H:%M:%S')}</code>",
-            "",
-        ]
-        for idx, peer in enumerate(peers):
-            lines.extend(runtime._render_remote_peer_block(peer))
-            if idx != len(peers) - 1:
-                lines.append("")
-        await runtime._reply_text(update, "\n".join(lines), parse_mode="HTML")
         return
 
     if arg == "off":
@@ -401,7 +418,11 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
         )
         return
 
-    await runtime._reply_text(update, "Usage: /remote [on|off|status|list]")
+    await runtime._reply_text(
+        update,
+        "Usage: /remote [on|off|status]\nDefault: `/remote` shows status and connected instances.\nLegacy: `/remote list` is still supported.",
+        parse_mode="Markdown",
+    )
 
 
 async def cmd_oll(runtime: Any, update: Any, context: Any) -> None:

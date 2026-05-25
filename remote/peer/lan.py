@@ -74,6 +74,39 @@ def _decode_candidate_records(raw: str) -> list[dict]:
     return items
 
 
+def _is_loopback_host(value: str | None) -> bool:
+    host = str(value or "").strip().lower()
+    return host in {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
+
+
+def _pick_best_peer_host(
+    parsed_addresses: list[str],
+    address_candidates: list[dict],
+    observed_candidates: list[dict],
+    fallback_host: str,
+) -> str:
+    preferred_scopes = {"lan", "overlay", "routable", "peer"}
+
+    for host in parsed_addresses or []:
+        host = str(host or "").strip()
+        if host and not _is_loopback_host(host):
+            return host
+
+    for items in (observed_candidates, address_candidates):
+        for item in items or []:
+            host = str((item or {}).get("host") or "").strip()
+            scope = str((item or {}).get("scope") or "").strip().lower()
+            if host and scope in preferred_scopes and not _is_loopback_host(host):
+                return host
+
+    for host in parsed_addresses or []:
+        host = str(host or "").strip()
+        if host:
+            return host
+
+    return str(fallback_host or "127.0.0.1")
+
+
 def _get_local_ip() -> str:
     candidates, _observed = _collect_ipv4_candidates()
     for item in candidates:
@@ -244,7 +277,7 @@ def _service_info_to_peer(info: ServiceInfo, self_instance_id: str) -> Optional[
             return None  # Don't include ourselves
 
         addresses = info.parsed_addresses()
-        host = addresses[0] if addresses else info.server.rstrip(".")
+        host = _pick_best_peer_host(addresses, address_candidates, observed_candidates, info.server.rstrip("."))
 
         return PeerInfo(
             instance_id=instance_id,
