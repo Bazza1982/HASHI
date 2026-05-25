@@ -4,6 +4,7 @@ from typing import Any
 
 from orchestrator.superloop_store import SuperloopStore
 from orchestrator.superloop_taskboard import SuperloopTaskboardService
+from orchestrator.superloop_validator import validate_loop
 from orchestrator.superloop_waits import SuperloopWaitsService
 
 
@@ -63,6 +64,27 @@ class SuperloopRunner:
                     break
 
             if next_task is None:
+                closeout_report = validate_loop(self.store, loop_id, closeout=True)
+                if closeout_report.get("blocking"):
+                    state["status"] = "blocked"
+                    state["next_action"] = {
+                        "kind": "repair_closeout_evidence",
+                        "reason": "validation_blocked",
+                        "errors": closeout_report.get("summary", {}).get("errors", 0),
+                    }
+                    self._save_loop_state(loop_id, state)
+                    self.store.append_loop_event(
+                        loop_id,
+                        event_type="loop.closeout_blocked",
+                        data={"summary": closeout_report.get("summary"), "findings": closeout_report.get("findings", [])[:8]},
+                    )
+                    return {
+                        "ok": False,
+                        "loop_id": loop_id,
+                        "advanced": False,
+                        "reason": "closeout_blocked",
+                        "validation": closeout_report,
+                    }
                 state["status"] = "completed"
                 state["next_action"] = {"kind": "none", "reason": "all_tasks_completed"}
                 self._save_loop_state(loop_id, state)
