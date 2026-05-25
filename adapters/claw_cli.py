@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import time
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -43,6 +43,25 @@ SECRET_ENV_KEYS = {
     "DASHSCOPE_API_KEY",
 }
 OS_ENV_ALLOWLIST = ("HOME", "USER", "TMPDIR", "TEMP", "PATH")
+
+
+@dataclass
+class ClawThinkingStreamUsage:
+    thinking_chars: int = 0
+    thinking_tokens: int = 0
+    thinking_event_count: int = 0
+    thinking_redacted_count: int = 0
+    thinking_sources: set[str] = field(default_factory=set)
+    saw_actual_thinking_event: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "thinking_chars": self.thinking_chars,
+            "thinking_tokens": self.thinking_tokens,
+            "thinking_event_count": self.thinking_event_count,
+            "thinking_redacted_count": self.thinking_redacted_count,
+            "thinking_sources": sorted(self.thinking_sources),
+        }
 CLAW_ENV_ALLOWLIST = ("OPENAI_BASE_URL", "OPENAI_API_KEY", *OS_ENV_ALLOWLIST)
 
 
@@ -524,8 +543,9 @@ def _parse_stream_json_output(text: str, *, command: list[str]) -> dict[str, Any
     return final
 
 
-def _stream_json_usage(text: str) -> dict[str, int]:
-    usage: dict[str, int] = {"thinking_chars": 0, "thinking_tokens": 0}
+def _stream_json_usage(text: str) -> dict[str, Any]:
+    usage = ClawThinkingStreamUsage()
+    legacy_summary_chars = 0
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line:
@@ -536,18 +556,32 @@ def _stream_json_usage(text: str) -> dict[str, int]:
             continue
         if not isinstance(event, Mapping):
             continue
-        if event.get("kind") == "thinking_summary":
-            usage["thinking_chars"] += int(event.get("thinking_chars") or 0)
+        kind = event.get("kind")
+        if kind in {"thinking_delta", "thinking_redacted"}:
+            thinking_chars = int(event.get("thinking_chars") or 0)
+            usage.thinking_chars += thinking_chars
+            usage.thinking_event_count += 1
+            usage.saw_actual_thinking_event = True
+            source = str(event.get("reasoning_source") or "").strip()
+            if source:
+                usage.thinking_sources.add(source)
+            if kind == "thinking_redacted":
+                usage.thinking_redacted_count += 1
+        elif kind == "thinking_summary":
+            legacy_summary_chars += int(event.get("thinking_chars") or 0)
         if event.get("kind") == "usage":
             thinking_tokens = int(
                 event.get("thinking_tokens")
                 or (event.get("completion_tokens_details") or {}).get("reasoning_tokens")
                 or 0
             )
-            usage["thinking_tokens"] = max(usage["thinking_tokens"], thinking_tokens)
-    if usage["thinking_tokens"] == 0 and usage["thinking_chars"] > 0:
-        usage["thinking_tokens"] = max(1, usage["thinking_chars"] // 4)
-    return usage
+            usage.thinking_tokens = max(usage.thinking_tokens, thinking_tokens)
+    if not usage.saw_actual_thinking_event and legacy_summary_chars > 0:
+        usage.thinking_chars += legacy_summary_chars
+        usage.thinking_event_count += 1
+    if usage.thinking_tokens == 0 and usage.thinking_chars > 0:
+        usage.thinking_tokens = max(1, usage.thinking_chars // 4)
+    return usage.to_dict()
 
 
 def _claw_jsonl_to_stream_event(event: Mapping[str, Any]) -> StreamEvent | None:
@@ -556,8 +590,28 @@ def _claw_jsonl_to_stream_event(event: Mapping[str, Any]) -> StreamEvent | None:
         model = event.get("model") or "model unknown"
         return StreamEvent(
             kind=KIND_THINKING,
-            summary=f"Claw stream started ({model}); provider reasoning may be summarized or hidden.",
+            summary=f"Claw stream started ({model})",
         )
+    if kind == "thinking_delta":
+        text = str(event.get("text") or "")
+        thinking_chars = int(event.get("thinking_chars") or len(text))
+        source = str(event.get("reasoning_source") or "").strip()
+        detail_parts = [f"thinking_chars={thinking_chars}"] if thinking_chars > 0 else []
+        if source:
+            detail_parts.append(f"source={source}")
+        return (
+            StreamEvent(kind=KIND_THINKING, summary=text[:400], detail=";".join(detail_parts))
+            if text
+            else None
+        )
+    if kind == "thinking_redacted":
+        summary = str(event.get("summary") or "provider emitted redacted reasoning block")
+        thinking_chars = int(event.get("thinking_chars") or 0)
+        source = str(event.get("reasoning_source") or "").strip()
+        detail_parts = [f"thinking_chars={thinking_chars}", "redacted=true"]
+        if source:
+            detail_parts.append(f"source={source}")
+        return StreamEvent(kind=KIND_THINKING, summary=summary[:400], detail=";".join(detail_parts))
     if kind == "thinking_summary":
         summary = str(event.get("summary") or "Claw thinking")
         thinking_chars = int(event.get("thinking_chars") or 0)
@@ -1130,6 +1184,7 @@ class ClawCLIAdapter(BaseBackend):
             cost_usd=None,
             tool_call_count=len(result.tool_uses),
             tool_loop_count=result.iterations or 0,
+            stream_metadata={"claw_thinking": stream_usage} if stream_usage else None,
         )
 
     @staticmethod

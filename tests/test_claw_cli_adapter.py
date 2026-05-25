@@ -604,6 +604,71 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path):
     assert KIND_TOOL_START in [event.kind for event in events]
     assert KIND_TOOL_END in [event.kind for event in events]
     assert any(event.detail == "thinking_chars=48" for event in events)
+    assert not any("may be summarized or hidden" in event.summary for event in events)
+
+
+@pytest.mark.asyncio
+async def test_claw_adapter_stream_json_emits_actual_thinking_delta(tmp_path):
+    fake = _write_exe(
+        tmp_path / "claw",
+        """
+        #!/usr/bin/env python3
+        import json, sys
+        if "--help" in sys.argv:
+            print("Usage: claw [--output-format text|json|stream-json] prompt TEXT")
+        elif sys.argv[1] == "version":
+            print(json.dumps({"kind": "version", "version": "0.1.0", "git_sha": "fake"}))
+        else:
+            for event in [
+                {"kind": "run_started", "model": "deepseek/test"},
+                {"kind": "thinking_delta", "text": "Need to inspect adapter mapping.", "thinking_chars": 32,
+                 "reasoning_source": "reasoning", "visibility": "provider_returned"},
+                {"kind": "thinking_redacted", "summary": "provider emitted encrypted reasoning block", "thinking_chars": 0,
+                 "reasoning_source": "reasoning_details.encrypted", "visibility": "provider_redacted"},
+                {"kind": "thinking_summary", "summary": "legacy aggregate should not double count", "thinking_chars": 99},
+                {"kind": "usage", "input_tokens": 5, "output_tokens": 7},
+                {"kind": "run_finished", "message": "final answer", "model": "deepseek/test", "iterations": 1,
+                 "tool_uses": [], "tool_results": [], "usage": {"input_tokens": 5, "output_tokens": 7}},
+            ]:
+                print(json.dumps(event), flush=True)
+        """,
+    )
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={"claw_binary_path": str(fake), "permission_mode": "read-only"},
+        resolve_access_root=lambda: tmp_path,
+    )
+    adapter = ClawCLIAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    events = []
+
+    async def collect(event):
+        events.append(event)
+
+    assert await adapter.initialize() is True
+    response = await adapter.generate_response("hello", "req-stream", on_stream_event=collect)
+
+    assert response.is_success is True
+    assert response.usage.thinking_tokens == 8
+    assert response.stream_metadata["claw_thinking"] == {
+        "thinking_chars": 32,
+        "thinking_tokens": 8,
+        "thinking_event_count": 2,
+        "thinking_redacted_count": 1,
+        "thinking_sources": ["reasoning", "reasoning_details.encrypted"],
+    }
+    assert any(
+        event.kind == KIND_THINKING
+        and event.summary == "Need to inspect adapter mapping."
+        and event.detail == "thinking_chars=32;source=reasoning"
+        for event in events
+    )
+    assert any(
+        event.kind == KIND_THINKING
+        and event.detail == "thinking_chars=0;redacted=true;source=reasoning_details.encrypted"
+        for event in events
+    )
 
 
 @pytest.mark.asyncio

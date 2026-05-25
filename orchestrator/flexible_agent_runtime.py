@@ -6966,7 +6966,8 @@ class FlexibleAgentRuntime:
                 detail = event.detail or ""
                 if detail.startswith("thinking_chars="):
                     with suppress(Exception):
-                        self._thinking_chars_this_req += max(0, int(detail.split("=", 1)[1]))
+                        value = detail.split("=", 1)[1].split(";", 1)[0]
+                        self._thinking_chars_this_req += max(0, int(value))
             if think_buffer is not None:
                 if event.kind != KIND_THINKING:
                     return

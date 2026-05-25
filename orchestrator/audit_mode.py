@@ -136,10 +136,23 @@ class AuditTelemetryCollector:
         action_kinds = {"tool_start", "tool_end", "file_read", "file_edit", "shell_exec"}
         thinking = [e for e in self.events if e.get("kind") == "thinking"]
         actions = [e for e in self.events if e.get("kind") in action_kinds]
+        thinking_sources: set[str] = set()
+        thinking_redacted_count = 0
+        for event in thinking:
+            detail = str(event.get("detail") or "")
+            for part in detail.split(";"):
+                if part.startswith("source="):
+                    source = part.split("=", 1)[1].strip()
+                    if source:
+                        thinking_sources.add(source)
+                elif part == "redacted=true":
+                    thinking_redacted_count += 1
         return {
             "stream_events": list(self.events),
             "stream_event_count": len(self.events),
             "thinking_event_count": len(thinking),
+            "thinking_redacted_count": thinking_redacted_count,
+            "thinking_sources": sorted(thinking_sources),
             "action_event_count": len(actions),
             "observable_thinking": thinking[-80:],
             "observable_actions": actions[-120:],

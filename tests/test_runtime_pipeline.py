@@ -557,6 +557,14 @@ def test_record_foreground_usage_audit_records_estimated_usage(monkeypatch):
         usage=None,
         tool_call_count=2,
         tool_loop_count=1,
+        stream_metadata={
+            "claw_thinking": {
+                "thinking_chars": 44,
+                "thinking_event_count": 2,
+                "thinking_redacted_count": 1,
+                "thinking_sources": ["reasoning", "reasoning_details.encrypted"],
+            }
+        },
     )
 
     runtime_pipeline.record_foreground_usage_audit(
@@ -575,6 +583,10 @@ def test_record_foreground_usage_audit_records_estimated_usage(monkeypatch):
     event = audit_records[0][0][1]
     assert event["request_id"] == "req-1"
     assert event["token_source"] == "estimated"
+    assert event["thinking_chars"] == 44
+    assert event["thinking_event_count"] == 2
+    assert event["thinking_redacted_count"] == 1
+    assert event["thinking_sources"] == ["reasoning", "reasoning_details.encrypted"]
     assert event["section_chars"] == {"Workzone": 8}
     assert event["wrapper_applied"] is True
 
