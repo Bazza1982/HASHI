@@ -51,6 +51,33 @@ def _wsl_unc_anchor(value: str) -> str:
         return ""
     return f"\\\\{parts[0]}\\{parts[1]}\\"
 
+
+def _is_loopback_host(value: str | None) -> bool:
+    host = str(value or "").strip().lower()
+    return host in {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
+
+
+def _pick_best_payload_host(
+    client_ip: str | None,
+    address_candidates: list[dict] | None = None,
+    observed_candidates: list[dict] | None = None,
+) -> str:
+    preferred_scopes = {"lan", "overlay", "routable", "peer"}
+    direct = str(client_ip or "").strip()
+    if direct and not _is_loopback_host(direct):
+        return direct
+
+    for items in (observed_candidates or [], address_candidates or []):
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            host = str(item.get("host") or "").strip()
+            scope = str(item.get("scope") or "").strip().lower()
+            if host and scope in preferred_scopes and not _is_loopback_host(host):
+                return host
+
+    return direct or "127.0.0.1"
+
 PROTOCOL_VERSION = "2.0"
 DEFAULT_REMOTE_PORT = 8766
 DEFAULT_CAPABILITIES = [
@@ -335,6 +362,8 @@ class ProtocolManager:
             existing_peer = self._peer_registry.get_peer(instance_id) if self._peer_registry else None
             if existing_peer and self._bootstrap_existing_peer_is_healthy(existing_peer):
                 continue  # Already known via a healthy discovery path.
+            if existing_peer and self._bootstrap_existing_peer_has_live_discovery(existing_peer):
+                continue  # Live discovery already owns this peer; don't re-inject fallback routes.
             live_entry = live_endpoints.get(instance_id.lower(), {})
             probe_ports = self._bootstrap_probe_ports(entry, live_entry)
             if not probe_ports:
@@ -410,6 +439,11 @@ class ProtocolManager:
         if live_status == "online":
             return True
         return handshake_state == "handshake_accepted"
+
+    def _bootstrap_existing_peer_has_live_discovery(self, peer) -> bool:
+        properties = dict(getattr(peer, "properties", None) or {})
+        preferred = str(properties.get("preferred_backend") or properties.get("discovery") or "").strip().lower()
+        return preferred in {"lan", "tailscale"}
 
     def _bootstrap_entry_score(self, entry: dict) -> tuple[int, int, str]:
         caps = list(entry.get("capabilities") or [])
@@ -720,10 +754,17 @@ class ProtocolManager:
         remote_port = int(payload.get("remote_port") or 0)
         if client_ip and remote_port and self._peer_registry:
             from remote.peer.base import PeerInfo
+            address_candidates = list(payload.get("address_candidates") or [])
+            observed_candidates = list(payload.get("observed_candidates") or [])
+            effective_host = _pick_best_payload_host(
+                client_ip,
+                address_candidates=address_candidates,
+                observed_candidates=observed_candidates,
+            )
             peer = PeerInfo(
                 instance_id=from_instance,
                 display_name=str(payload.get("display_handle") or from_instance),
-                host=client_ip,
+                host=effective_host,
                 port=remote_port,
                 workbench_port=int(payload.get("workbench_port") or 18800),
                 platform=str(payload.get("platform") or "unknown"),
@@ -733,8 +774,8 @@ class ProtocolManager:
                 capabilities=list(payload.get("capabilities") or []),
                 properties={
                     "discovery": "handshake_inbound",
-                    "address_candidates": list(payload.get("address_candidates") or []),
-                    "observed_candidates": list(payload.get("observed_candidates") or []),
+                    "address_candidates": address_candidates,
+                    "observed_candidates": observed_candidates,
                     "host_identity": _normalize_identity(payload.get("host_identity") or ""),
                     "environment_kind": str(payload.get("environment_kind") or "").strip().lower(),
                     "remote_supervisor": dict(payload.get("remote_supervisor") or {}),
@@ -745,7 +786,7 @@ class ProtocolManager:
             self._peer_registry.on_peers_changed([peer])
             logger.info(
                 "Handshake: reverse-registered %s @ %s:%d",
-                from_instance, client_ip, remote_port,
+                from_instance, effective_host, remote_port,
             )
 
         local_profile = self._local_network_profile()
