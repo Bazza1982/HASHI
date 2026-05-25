@@ -478,16 +478,47 @@ def _remote_agent_names(instance_id: str, instance_info: dict) -> list[str]:
     )
 
 
-def _preferred_host(instance_info: dict, *, for_remote: bool = False) -> str:
-    loopback = instance_info.get("same_host_loopback")
-    if loopback:
-        return loopback
+def _is_loopback_host(value: str | None) -> bool:
+    host = str(value or "").strip().lower()
+    return host in {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
+
+
+def _ordered_candidate_hosts(*values: str | None) -> list[str]:
+    preferred: list[str] = []
+    fallbacks: list[str] = []
+    for value in values:
+        host = str(value or "").strip()
+        if not host:
+            continue
+        bucket = fallbacks if _is_loopback_host(host) else preferred
+        if host not in bucket and host not in preferred and host not in fallbacks:
+            bucket.append(host)
+    return preferred + fallbacks
+
+
+def _instance_host_candidates(instance_info: dict, *, for_remote: bool = False) -> list[str]:
     if for_remote:
-        keys = ["internet_host", "tailscale_ip", "lan_ip", "api_host", "host"]
-    else:
-        keys = ["api_host", "lan_ip", "tailscale_ip", "internet_host", "host"]
-    for key in keys:
-        value = instance_info.get(key)
+        return _ordered_candidate_hosts(
+            instance_info.get("host"),
+            instance_info.get("lan_ip"),
+            instance_info.get("tailscale_ip"),
+            instance_info.get("internet_host"),
+            instance_info.get("api_host"),
+            instance_info.get("same_host_loopback"),
+        )
+    return _ordered_candidate_hosts(
+        instance_info.get("host"),
+        instance_info.get("api_host"),
+        instance_info.get("lan_ip"),
+        instance_info.get("tailscale_ip"),
+        instance_info.get("internet_host"),
+        "10.255.255.254",
+        instance_info.get("same_host_loopback"),
+    )
+
+
+def _preferred_host(instance_info: dict, *, for_remote: bool = False) -> str:
+    for value in _instance_host_candidates(instance_info, for_remote=for_remote):
         if value:
             return value
     return "127.0.0.1"
@@ -564,14 +595,14 @@ def _send_via_local_workbench(
 
 
 def _workbench_hosts_for_route(route: dict) -> list[str]:
-    return _unique_hosts(
+    return _ordered_candidate_hosts(
         route.get("host"),
-        route.get("same_host_loopback"),
-        "10.255.255.254",
         route.get("api_host"),
         route.get("lan_ip"),
         route.get("tailscale_ip"),
         route.get("internet_host"),
+        "10.255.255.254",
+        route.get("same_host_loopback"),
     )
 
 
@@ -664,9 +695,18 @@ def _find_exchange_instance(local_instance_id: str) -> dict | None:
             continue
         if not inst_info.get("active", False):
             continue
+        exchange_host = _ordered_candidate_hosts(
+            inst_info.get("exchange_host"),
+            inst_info.get("host"),
+            inst_info.get("lan_ip"),
+            inst_info.get("tailscale_ip"),
+            inst_info.get("internet_host"),
+            inst_info.get("api_host"),
+            inst_info.get("same_host_loopback"),
+        )
         return {
             "instance_id": DEFAULT_EXCHANGE_INSTANCE,
-            "host": inst_info.get("exchange_host") or inst_info.get("api_host") or _preferred_host(inst_info, for_remote=True),
+            "host": exchange_host[0] if exchange_host else _preferred_host(inst_info, for_remote=True),
             "workbench_port": inst_info.get("workbench_port"),
             "remote_port": inst_info.get("remote_port", DEFAULT_REMOTE_PORT),
         }

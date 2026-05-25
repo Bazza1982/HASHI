@@ -4,6 +4,8 @@ import html
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from orchestrator.runtime_jobs import mint_callback_token, resolve_callback_token
+
 
 def parse_nudge_create_args(args_text: str) -> tuple[int, str]:
     raw = (args_text or "").strip()
@@ -22,7 +24,7 @@ def parse_nudge_create_args(args_text: str) -> tuple[int, str]:
     return minutes, exit_condition
 
 
-def build_nudge_with_buttons(skill_manager, agent_name: str):
+def build_nudge_with_buttons(skill_manager, agent_name: str, runtime=None):
     """Build nudge panel with inline control buttons, jobs list, and creation hint.
 
     Returns (text: str, markup: InlineKeyboardMarkup | None).
@@ -63,12 +65,28 @@ def build_nudge_with_buttons(skill_manager, agent_name: str):
 
         toggle_mode = "off" if enabled else "on"
         toggle_label = "⏸ Pause" if enabled else "▶ Resume"
+        if runtime is None:
+            trigger_callback = "noop"
+            toggle_callback = "noop"
+            delete_callback = "noop"
+        else:
+            trigger_token = mint_callback_token(runtime, "nudgejob_action", {"task_id": jid, "action": "trigger"}, prefix="nj")
+            toggle_token = mint_callback_token(
+                runtime,
+                "nudgejob_action",
+                {"task_id": jid, "action": "toggle", "value": toggle_mode},
+                prefix="nj",
+            )
+            delete_token = mint_callback_token(runtime, "nudgejob_action", {"task_id": jid, "action": "delete"}, prefix="nj")
+            trigger_callback = f"nudgejob:key:{trigger_token}:trigger"
+            toggle_callback = f"nudgejob:key:{toggle_token}:toggle"
+            delete_callback = f"nudgejob:key:{delete_token}:delete"
 
         buttons.append([InlineKeyboardButton(f"🫧 {short_id}", callback_data="noop")])
         buttons.append([
-            InlineKeyboardButton("⚡ Trigger", callback_data=f"nudgejob:trigger:{jid}:now"),
-            InlineKeyboardButton(toggle_label, callback_data=f"nudgejob:toggle:{jid}:{toggle_mode}"),
-            InlineKeyboardButton("🗑 Delete", callback_data=f"nudgejob:delete:{jid}:confirm"),
+            InlineKeyboardButton("⚡ Trigger", callback_data=trigger_callback),
+            InlineKeyboardButton(toggle_label, callback_data=toggle_callback),
+            InlineKeyboardButton("🗑 Delete", callback_data=delete_callback),
         ])
 
     lines.append("\n<i>Add: <code>/nudge &lt;minutes&gt; &lt;exit condition&gt;</code></i>")
@@ -109,6 +127,17 @@ async def handle_nudge_callback(runtime, query, data: str) -> bool:
         return True
 
     _, action, task_id, value = parts
+    if action == "key":
+        selection = resolve_callback_token(runtime, "nudgejob_action", task_id)
+        if not selection:
+            await query.answer("This nudge action expired. Open /nudge again.", show_alert=True)
+            return True
+        if selection.get("action") != value:
+            await query.answer("Invalid nudge action. Open /nudge again.", show_alert=True)
+            return True
+        task_id = selection["task_id"]
+        action = selection["action"]
+        value = str(selection.get("value", ""))
 
     if action == "toggle":
         enabled = value == "on"
@@ -147,7 +176,7 @@ async def handle_nudge_callback(runtime, query, data: str) -> bool:
 
 
 async def _refresh_nudge_view(runtime, query):
-    text, markup = build_nudge_with_buttons(runtime.skill_manager, runtime.name)
+    text, markup = build_nudge_with_buttons(runtime.skill_manager, runtime.name, runtime=runtime)
     await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
 
 
@@ -158,7 +187,7 @@ async def handle_nudge_command(runtime, update, args_text: str) -> None:
 
     raw = (args_text or "").strip()
     if not raw or raw.lower() == "list":
-        text, markup = build_nudge_with_buttons(runtime.skill_manager, runtime.name)
+        text, markup = build_nudge_with_buttons(runtime.skill_manager, runtime.name, runtime=runtime)
         await runtime._reply_text(update, text, parse_mode="HTML", reply_markup=markup)
         return
 
@@ -167,7 +196,7 @@ async def handle_nudge_command(runtime, update, args_text: str) -> None:
     if lowered.startswith("stop"):
         stop_arg = lowered[4:].strip()
         result = stop_nudges(runtime.skill_manager, runtime.name, stop_arg)
-        text, markup = build_nudge_with_buttons(runtime.skill_manager, runtime.name)
+        text, markup = build_nudge_with_buttons(runtime.skill_manager, runtime.name, runtime=runtime)
         await runtime._reply_text(update, result + "\n\n" + text, parse_mode="HTML", reply_markup=markup)
         return
 
@@ -188,7 +217,7 @@ async def handle_nudge_command(runtime, update, args_text: str) -> None:
         f"Every: <b>{minutes} min</b> when idle\n"
         f"Exit: {html.escape(exit_condition)}\n"
     )
-    list_text, markup = build_nudge_with_buttons(runtime.skill_manager, runtime.name)
+    list_text, markup = build_nudge_with_buttons(runtime.skill_manager, runtime.name, runtime=runtime)
     await runtime._reply_text(
         update,
         created_text + "\n" + list_text,
