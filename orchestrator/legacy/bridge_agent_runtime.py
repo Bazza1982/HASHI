@@ -31,6 +31,7 @@ from orchestrator.usecomputer_mode import (
     set_usecomputer_mode,
 )
 from orchestrator.skill_manager import SkillDefinition, SkillManager
+from orchestrator.source_policy import source_requires_manual_remote_api_permission
 from orchestrator.voice_manager import VoiceManager
 from orchestrator.private_wol import describe_wol_targets, private_wol_available, run_private_wol
 from orchestrator.workzone import access_root_for_workzone, build_workzone_prompt, clear_workzone, load_workzone, resolve_workzone_input, save_workzone
@@ -559,23 +560,7 @@ class BridgeAgentRuntime:
         return "\n\n".join(sections + [item.prompt])
 
     def _source_requires_manual_permission(self, source: str) -> bool:
-        normalized = (source or "").strip().lower()
-        if not normalized:
-            return True
-        hchat_sources = {"bridge:hchat", "bridge:hchat-draft"}
-        if normalized in hchat_sources or normalized.startswith("hchat-reply:"):
-            return False
-        automated_prefixes = (
-            "scheduler",
-            "bridge:",
-            "bridge-transfer:",
-            "hchat-reply:",
-            "cos-query:",
-            "ticket:",
-            "loop_skill",
-            "startup",
-        )
-        return normalized.startswith(automated_prefixes)
+        return source_requires_manual_remote_api_permission(source)
 
     def _remote_backend_block_reason(self, source: str) -> str | None:
         engine = (self.config.engine or "").strip().lower()
