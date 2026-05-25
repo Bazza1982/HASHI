@@ -39,6 +39,16 @@ def _wait_deadline(wait: dict[str, Any]) -> datetime | None:
     return None
 
 
+def _scheduler_auto_advance_enabled(state: dict[str, Any]) -> bool:
+    scheduler_cfg = state.get("scheduler") if isinstance(state.get("scheduler"), dict) else {}
+    automation_cfg = state.get("automation") if isinstance(state.get("automation"), dict) else {}
+    return bool(
+        state.get("scheduler_auto_advance") is True
+        or scheduler_cfg.get("auto_advance") is True
+        or automation_cfg.get("scheduler_auto_advance") is True
+    )
+
+
 def advance_superloops_once(superloops_root: Path, now: datetime | None = None) -> dict[str, int]:
     now_utc = now or datetime.now(timezone.utc)
     store = SuperloopStore(superloops_root)
@@ -88,7 +98,7 @@ def advance_superloops_once(superloops_root: Path, now: datetime | None = None) 
                         related_task_ids=[str(state.get("current_step") or "")] if state.get("current_step") else [],
                     )
 
-        if wait_satisfied_this_loop or not wait_ids:
+        if wait_satisfied_this_loop or (not wait_ids and _scheduler_auto_advance_enabled(state)):
             result = runner.next_action(loop_id)
             if result.get("advanced"):
                 loops_advanced += 1
