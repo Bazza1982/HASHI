@@ -893,6 +893,9 @@ class FlexibleAgentRuntime:
         normalized = (source or "").strip().lower()
         if not normalized:
             return True
+        hchat_sources = {"bridge:hchat", "bridge:hchat-draft"}
+        if normalized in hchat_sources or normalized.startswith("hchat-reply:"):
+            return False
         automated_prefixes = (
             "scheduler",
             "bridge:",
