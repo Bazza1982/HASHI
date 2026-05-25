@@ -524,13 +524,45 @@ def _parse_stream_json_output(text: str, *, command: list[str]) -> dict[str, Any
     return final
 
 
+def _stream_json_usage(text: str) -> dict[str, int]:
+    usage: dict[str, int] = {"thinking_chars": 0, "thinking_tokens": 0}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, Mapping):
+            continue
+        if event.get("kind") == "thinking_summary":
+            usage["thinking_chars"] += int(event.get("thinking_chars") or 0)
+        if event.get("kind") == "usage":
+            thinking_tokens = int(
+                event.get("thinking_tokens")
+                or (event.get("completion_tokens_details") or {}).get("reasoning_tokens")
+                or 0
+            )
+            usage["thinking_tokens"] = max(usage["thinking_tokens"], thinking_tokens)
+    if usage["thinking_tokens"] == 0 and usage["thinking_chars"] > 0:
+        usage["thinking_tokens"] = max(1, usage["thinking_chars"] // 4)
+    return usage
+
+
 def _claw_jsonl_to_stream_event(event: Mapping[str, Any]) -> StreamEvent | None:
     kind = str(event.get("kind") or "")
     if kind == "run_started":
-        return StreamEvent(kind=KIND_PROGRESS, summary=f"Claw run started ({event.get('model') or 'model unknown'})")
+        model = event.get("model") or "model unknown"
+        return StreamEvent(
+            kind=KIND_THINKING,
+            summary=f"Claw stream started ({model}); provider reasoning may be summarized or hidden.",
+        )
     if kind == "thinking_summary":
         summary = str(event.get("summary") or "Claw thinking")
-        return StreamEvent(kind=KIND_THINKING, summary=summary[:400])
+        thinking_chars = int(event.get("thinking_chars") or 0)
+        detail = f"thinking_chars={thinking_chars}" if thinking_chars > 0 else ""
+        return StreamEvent(kind=KIND_THINKING, summary=summary[:400], detail=detail)
     if kind == "assistant_delta":
         text = str(event.get("text") or "")
         return StreamEvent(kind=KIND_TEXT_DELTA, summary=text[:200]) if text else None
@@ -544,11 +576,17 @@ def _claw_jsonl_to_stream_event(event: Mapping[str, Any]) -> StreamEvent | None:
         detail = str(event.get("output_preview") or "")
         return StreamEvent(kind=KIND_TOOL_END, summary=summary[:200], detail=detail[:500], tool_name=name)
     if kind == "usage":
+        thinking_tokens = int(
+            event.get("thinking_tokens")
+            or (event.get("completion_tokens_details") or {}).get("reasoning_tokens")
+            or 0
+        )
         return StreamEvent(
             kind=KIND_PROGRESS,
             summary=(
                 f"Claw usage input={int(event.get('input_tokens') or 0)} "
                 f"output={int(event.get('output_tokens') or 0)} "
+                f"thinking={thinking_tokens} "
                 f"thinking_source={event.get('thinking_token_source') or 'unavailable'}"
             ),
         )
@@ -1072,14 +1110,22 @@ class ClawCLIAdapter(BaseBackend):
                             tool_name=str(tool.get("name") or ""),
                         )
                     )
+        usage_data = result.json_data.get("usage") or {}
+        stream_usage = _stream_json_usage(result.stdout) if on_stream_event is not None else {}
+        thinking_tokens = int(
+            usage_data.get("thinking_tokens")
+            or (usage_data.get("completion_tokens_details") or {}).get("reasoning_tokens")
+            or stream_usage.get("thinking_tokens")
+            or 0
+        )
         return BackendResponse(
             text=result.text,
             duration_ms=result.duration_ms,
             is_success=True,
             usage=TokenUsage(
-                input_tokens=int((result.json_data.get("usage") or {}).get("input_tokens") or 0),
-                output_tokens=int((result.json_data.get("usage") or {}).get("output_tokens") or 0),
-                thinking_tokens=0,
+                input_tokens=int(usage_data.get("input_tokens") or 0),
+                output_tokens=int(usage_data.get("output_tokens") or 0),
+                thinking_tokens=thinking_tokens,
             ),
             cost_usd=None,
             tool_call_count=len(result.tool_uses),

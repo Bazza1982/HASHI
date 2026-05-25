@@ -6963,6 +6963,10 @@ class FlexibleAgentRuntime:
                 raw = event.summary or ""
                 if raw and raw not in ("Thinking...",):
                     self._thinking_chars_this_req += len(raw)
+                detail = event.detail or ""
+                if detail.startswith("thinking_chars="):
+                    with suppress(Exception):
+                        self._thinking_chars_this_req += max(0, int(detail.split("=", 1)[1]))
             if think_buffer is not None:
                 if event.kind != KIND_THINKING:
                     return
@@ -7043,6 +7047,7 @@ class FlexibleAgentRuntime:
         while not stop_event.is_set():
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=6)
+                await self._flush_thinking(chat_id)
                 break  # stop_event was set
             except asyncio.TimeoutError:
                 pass  # 6s elapsed — flush
