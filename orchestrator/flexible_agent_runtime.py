@@ -38,6 +38,7 @@ from orchestrator import runtime_mode
 from orchestrator import runtime_nudge
 from orchestrator import runtime_pipeline
 from orchestrator import runtime_remote
+from orchestrator.source_policy import source_requires_manual_remote_api_permission
 from remote.local_http import local_http_hosts
 from remote.runtime_identity import read_runtime_claim
 from orchestrator import runtime_session
@@ -890,23 +891,7 @@ class FlexibleAgentRuntime:
         return "\n\n".join(sections + [item.prompt])
 
     def _source_requires_manual_permission(self, source: str) -> bool:
-        normalized = (source or "").strip().lower()
-        if not normalized:
-            return True
-        hchat_sources = {"bridge:hchat", "bridge:hchat-draft"}
-        if normalized in hchat_sources or normalized.startswith("hchat-reply:"):
-            return False
-        automated_prefixes = (
-            "scheduler",
-            "bridge:",
-            "bridge-transfer:",
-            "hchat-reply:",
-            "cos-query:",
-            "ticket:",
-            "loop_skill",
-            "startup",
-        )
-        return normalized.startswith(automated_prefixes)
+        return source_requires_manual_remote_api_permission(source)
 
     def _remote_backend_block_reason(self, source: str) -> str | None:
         engine = (self.config.active_backend or "").strip().lower()
