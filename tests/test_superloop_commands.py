@@ -49,6 +49,9 @@ async def test_superloop_record_start_try_finish_status(tmp_path: Path) -> None:
     await handle_superloop_command(runtime, _FakeUpdate(f"/superloop status {loop_id}"), f"status {loop_id}")
     assert any("Superloop status" in text for text in runtime.messages)
 
+    await handle_superloop_command(runtime, _FakeUpdate(f"/superloop validate {loop_id}"), f"validate {loop_id}")
+    assert any("Superloop validation" in text for text in runtime.messages)
+
     await handle_superloop_command(runtime, _FakeUpdate(f"/superloop resume {loop_id}"), f"resume {loop_id}")
     assert any("Resumed" in text for text in runtime.messages)
 
@@ -137,6 +140,8 @@ async def test_superloop_help_is_visual(tmp_path: Path) -> None:
     assert "快速开始" in help_text
     assert "/superloop quickstart <goal>" in help_text
     assert "/superloop list" in help_text
+    assert "/superloop validate <loop_id>" in help_text
+    assert "/superloop closeout <loop_id>" in help_text
 
 
 @pytest.mark.asyncio
@@ -167,3 +172,76 @@ async def test_superloop_list_shows_templates(tmp_path: Path) -> None:
     assert "Remote Install Superloop Template" in list_text
     assert "slug: `auto_debug`" in list_text
     assert "包含: `README · taskboard`" in list_text
+
+
+@pytest.mark.asyncio
+async def test_superloop_closeout_blocks_missing_hchat_receipt(tmp_path: Path) -> None:
+    runtime = _FakeRuntime(tmp_path)
+    store = SuperloopStore(tmp_path / "superloops")
+    store.create_compiled_loop(
+        loop_id="sl-test-closeout",
+        loop_state={
+            "loop_id": "sl-test-closeout",
+            "status": "running",
+            "taskboard_path": "superloops/loops/sl-test-closeout/taskboard.json",
+            "issues_path": "superloops/loops/sl-test-closeout/issues.json",
+            "waits_path": "superloops/loops/sl-test-closeout/waits.json",
+        },
+        taskboard=[
+            {
+                "task_id": "task-001",
+                "title": "Ask Nana",
+                "status": "completed",
+                "owner_agent": "nana",
+                "owner_instance": "HASHI1",
+                "depends_on": [],
+                "execution_mode": "hchat_agent",
+            }
+        ],
+        issues=[],
+        waits=[],
+        operator_summary="# summary\n",
+    )
+
+    await handle_superloop_command(runtime, _FakeUpdate("/superloop closeout sl-test-closeout"), "closeout sl-test-closeout")
+
+    assert "blocking: `True`" in runtime.messages[-1]
+    assert "hchat_task_missing_receipt" in runtime.messages[-1]
+    assert store.load_loop_state("sl-test-closeout")["status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_superloop_closeout_accepts_validated_loop(tmp_path: Path) -> None:
+    runtime = _FakeRuntime(tmp_path)
+    store = SuperloopStore(tmp_path / "superloops")
+    store.create_compiled_loop(
+        loop_id="sl-test-closeout-ok",
+        loop_state={
+            "loop_id": "sl-test-closeout-ok",
+            "status": "running",
+            "taskboard_path": "superloops/loops/sl-test-closeout-ok/taskboard.json",
+            "issues_path": "superloops/loops/sl-test-closeout-ok/issues.json",
+            "waits_path": "superloops/loops/sl-test-closeout-ok/waits.json",
+        },
+        taskboard=[
+            {
+                "task_id": "task-001",
+                "title": "Ask Nana",
+                "status": "completed",
+                "owner_agent": "nana",
+                "owner_instance": "HASHI1",
+                "depends_on": [],
+                "execution_mode": "hchat_agent",
+                "dispatch_refs": ["dispatch_nana.md"],
+                "receipt_refs": ["nana_report.md"],
+            }
+        ],
+        issues=[],
+        waits=[],
+        operator_summary="# summary\n",
+    )
+
+    await handle_superloop_command(runtime, _FakeUpdate("/superloop closeout sl-test-closeout-ok"), "closeout sl-test-closeout-ok")
+
+    assert "closeout accepted" in runtime.messages[-1]
+    assert store.load_loop_state("sl-test-closeout-ok")["status"] == "completed"

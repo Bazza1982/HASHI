@@ -12,6 +12,7 @@ from orchestrator.superloop_recording import SuperloopRecordingService
 from orchestrator.superloop_runner import SuperloopRunner
 from orchestrator.superloop_store import SuperloopStore
 from orchestrator.superloop_taskboard import SuperloopTaskboardService
+from orchestrator.superloop_validator import format_validation_report, validate_loop
 from orchestrator.superloop_waits import SuperloopWaitsService
 
 logger = logging.getLogger("BridgeU.Superloop")
@@ -139,6 +140,8 @@ def _help_text() -> str:
         "/superloop record finish [recording_id]\n\n"
         "🛠 Loop 运行\n"
         "/superloop status <loop_id>\n"
+        "/superloop validate <loop_id>\n"
+        "/superloop closeout <loop_id>\n"
         "/superloop pause <loop_id>\n"
         "/superloop resume <loop_id>\n"
         "/superloop next <loop_id>\n\n"
@@ -437,6 +440,46 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
                 f"current_step: `{state.get('current_step')}`\n"
                 f"next_action: `{json.dumps(state.get('next_action'), ensure_ascii=False)}`"
             ),
+            parse_mode="Markdown",
+        )
+        return
+
+    if lowered[:1] == ["validate"]:
+        if len(parts) < 2:
+            await runtime._reply_text(update, "Usage: /superloop validate <loop_id>")
+            return
+        loop_id = parts[1]
+        report = validate_loop(store, loop_id, closeout=False)
+        await runtime._reply_text(update, format_validation_report(report), parse_mode="Markdown")
+        return
+
+    if lowered[:1] == ["closeout"]:
+        if len(parts) < 2:
+            await runtime._reply_text(update, "Usage: /superloop closeout <loop_id>")
+            return
+        loop_id = parts[1]
+        report = validate_loop(store, loop_id, closeout=True)
+        if report.get("blocking"):
+            if store.loop_dir(loop_id).exists():
+                store.append_loop_event(
+                    loop_id,
+                    event_type="loop.closeout_blocked",
+                    data={"source": "command", "summary": report.get("summary"), "findings": report.get("findings", [])[:8]},
+                )
+            await runtime._reply_text(update, format_validation_report(report), parse_mode="Markdown")
+            return
+        try:
+            state = store.load_loop_state(loop_id)
+        except FileNotFoundError:
+            await runtime._reply_text(update, f"Loop not found: {loop_id}")
+            return
+        state["status"] = "completed"
+        state["next_action"] = {"kind": "none", "reason": "validated_closeout"}
+        store.save_loop_state(loop_id, state)
+        store.append_loop_event(loop_id, event_type="loop.completed", data={"reason": "validated_closeout"})
+        await runtime._reply_text(
+            update,
+            format_validation_report(report) + "\n\n✅ closeout accepted: loop marked `completed`.",
             parse_mode="Markdown",
         )
         return
