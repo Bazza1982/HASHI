@@ -10,7 +10,7 @@ from orchestrator.superloop_store import SuperloopStore
 
 ALLOWED_LOOP_STATUSES = {"draft", "running", "waiting", "blocked", "paused", "completed", "aborted", "failed"}
 ALLOWED_TASK_STATUSES = {"pending", "in_progress", "waiting", "blocked", "completed", "skipped", "failed"}
-ALLOWED_WAIT_STATUSES = {"pending", "open", "satisfied", "resolved", "timeout", "timed_out", "cancelled", "stale"}
+ALLOWED_WAIT_STATUSES = {"pending", "open", "satisfied", "resolved", "completed", "timeout", "timed_out", "cancelled", "stale"}
 ALLOWED_ISSUE_STATUSES = {"open", "in_progress", "resolved", "waived", "stale"}
 REQUIRED_LOOP_FILES = ("state.json", "taskboard.json", "issues.json", "waits.json", "events.jsonl")
 TRUTH_CLAIM_STATUSES = {"completed"}
@@ -182,10 +182,16 @@ def _validate_completed_task(
     closeout: bool,
 ) -> None:
     required_evidence = task.get("required_evidence") or []
-    if required_evidence and not _has_evidence(task):
+    missing_evidence = _missing_required_evidence(task, required_evidence)
+    if missing_evidence:
         severity = "error" if closeout else "warn"
         findings.append(
-            SuperloopFinding(severity, "completed_task_missing_evidence", "Completed task has required_evidence but no evidence refs.", ref)
+            SuperloopFinding(
+                severity,
+                "completed_task_missing_evidence",
+                f"Completed task is missing required evidence: {', '.join(missing_evidence)}.",
+                ref,
+            )
         )
 
     execution_mode = str(task.get("execution_mode") or "")
@@ -267,6 +273,32 @@ def _has_evidence(task: dict[str, Any]) -> bool:
         "worker_report_refs",
         "review_report_refs",
     )
+
+
+def _missing_required_evidence(task: dict[str, Any], required_evidence: Any) -> list[str]:
+    if not isinstance(required_evidence, list):
+        return []
+    missing: list[str] = []
+    for raw_item in required_evidence:
+        item = str(raw_item or "").strip()
+        if not item:
+            continue
+        key = item.lower()
+        if "dispatch" in key:
+            present = _has_any(task, "dispatch_refs", "dispatch_evidence", "hchat_dispatch_ref", "hchat_request_id")
+        elif "receipt" in key or "reply" in key:
+            present = _has_any(task, "receipt_refs", "reply_refs", "hchat_reply_ref", "worker_report_refs", "review_report_refs")
+        elif "artifact" in key or "file" in key:
+            present = _has_any(task, "artifact_refs", "artifacts")
+        elif "validation" in key:
+            present = _has_any(task, "validation_report", "validation_refs", "evidence_refs", "artifact_refs")
+        elif "closeout" in key:
+            present = _has_any(task, "closeout_result", "closeout_refs", "evidence_refs", "artifact_refs")
+        else:
+            present = _has_evidence(task)
+        if not present:
+            missing.append(item)
+    return missing
 
 
 def _has_any(payload: dict[str, Any], *keys: str) -> bool:

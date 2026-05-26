@@ -122,3 +122,36 @@ def test_closeout_accepts_hchat_task_with_dispatch_and_receipt(tmp_path: Path) -
 
     assert report["blocking"] is False
     assert report["summary"]["errors"] == 0
+
+
+def test_completed_dispatch_task_accepts_dispatch_refs_as_required_evidence(tmp_path: Path) -> None:
+    store = SuperloopStore(tmp_path / "superloops")
+    _create_loop(
+        store,
+        taskboard=[
+            {
+                "task_id": "task-001",
+                "title": "Dispatch worker",
+                "status": "completed",
+                "owner_agent": "zelda",
+                "owner_instance": "HASHI1",
+                "depends_on": [],
+                "execution_mode": "local_self",
+                "required_evidence": ["dispatch_refs"],
+                "dispatch_refs": ["dispatch_mimi.md"],
+            }
+        ],
+        waits=[
+            {
+                "wait_id": "wait-001",
+                "kind": "await_hchat_reply",
+                "status": "completed",
+            }
+        ],
+    )
+
+    report = validate_loop(store, "sl-test-001", closeout=True)
+
+    assert report["blocking"] is False
+    assert report["summary"]["errors"] == 0
+    assert not any(item["code"] == "wait_status_noncontract" for item in report["findings"])
