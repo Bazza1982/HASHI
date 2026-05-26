@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from orchestrator.superloop_store import SuperloopStore
+from orchestrator.superloop_store import SuperloopStore, system_actor
 
 
 def _utc_now() -> str:
@@ -23,6 +23,7 @@ class SuperloopWaitsService:
         details: dict[str, Any] | None = None,
         resume_policy: dict[str, Any] | None = None,
         deadline: str | None = None,
+        actor: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         waits_path = self._waits_path(loop_id)
         with self.store._lock:
@@ -40,10 +41,22 @@ class SuperloopWaitsService:
             waits.append(wait)
             self.store.save_loop_json_list(waits_path, waits)
             self.store.refresh_loop_stats(loop_id)
-        self.store.append_loop_event(loop_id, event_type="wait.entered", data={"wait_id": wait_id, "kind": kind})
+        self.store.append_loop_event(
+            loop_id,
+            event_type="wait.entered",
+            data={"wait_id": wait_id, "kind": kind},
+            actor=actor or system_actor("superloop_waits"),
+        )
         return wait
 
-    def satisfy_wait(self, loop_id: str, wait_id: str, *, source: str = "manual") -> bool:
+    def satisfy_wait(
+        self,
+        loop_id: str,
+        wait_id: str,
+        *,
+        source: str = "manual",
+        actor: dict[str, Any] | None = None,
+    ) -> bool:
         waits_path = self._waits_path(loop_id)
         with self.store._lock:
             waits = self.store.load_loop_json_list(waits_path)
@@ -60,7 +73,12 @@ class SuperloopWaitsService:
                 return False
             self.store.save_loop_json_list(waits_path, waits)
             self.store.refresh_loop_stats(loop_id)
-        self.store.append_loop_event(loop_id, event_type="wait.satisfied", data={"wait_id": wait_id, "source": source})
+        self.store.append_loop_event(
+            loop_id,
+            event_type="wait.satisfied",
+            data={"wait_id": wait_id, "source": source},
+            actor=actor or system_actor("superloop_waits"),
+        )
         return True
 
     def has_open_waits(self, loop_id: str) -> bool:

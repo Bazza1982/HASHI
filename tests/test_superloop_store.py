@@ -48,3 +48,21 @@ def test_store_create_compiled_loop(tmp_path: Path) -> None:
     assert lines
     payload = json.loads(lines[-1])
     assert payload["kind"] == "loop.created"
+
+
+def test_loop_event_without_actor_gets_auditable_default(tmp_path: Path) -> None:
+    store = SuperloopStore(tmp_path / "superloops")
+    store.create_compiled_loop(
+        loop_id="sl-test-actor",
+        loop_state={"loop_id": "sl-test-actor", "status": "running"},
+        taskboard=[],
+        issues=[],
+        waits=[],
+        operator_summary="# summary\n",
+    )
+
+    event = store.append_loop_event("sl-test-actor", event_type="task.started", data={"task_id": "t1"})
+
+    assert event["actor"]["agent"] == "superloop_unknown_writer"
+    assert event["actor"]["kind"] == "system"
+    assert event["actor"]["reason"] == "actor_not_supplied"

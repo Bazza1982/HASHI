@@ -79,6 +79,7 @@ class WorkbenchApiServer:
             runtimes=self._runtime_list(),
         )
         self.transfer_store = TransferStore(self.config_path.parent / "state" / "bridge_transfers.sqlite")
+        self.browser_chat_jobs: dict[str, dict] = {}
         self.app = web.Application(client_max_size=64 * 1024 * 1024)
         self.app.router.add_get("/api/agents", self.handle_agents)
         self.app.router.add_get("/api/transcript/{name}", self.handle_transcript_recent)
@@ -86,6 +87,7 @@ class WorkbenchApiServer:
         self.app.router.add_get("/api/project-chat/{name}/{project}", self.handle_project_chat_log)
         self.app.router.add_post("/api/chat", self.handle_chat)
         self.app.router.add_post("/api/browser/chat/send", self.handle_browser_chat_send)
+        self.app.router.add_get("/api/browser/chat/jobs/{request_id}", self.handle_browser_chat_job)
         self.app.router.add_post("/api/bridge/message", self.handle_bridge_message)
         self.app.router.add_post("/api/bridge/reply", self.handle_bridge_reply)
         self.app.router.add_post("/api/bridge/hchat-exchange", self.handle_hchat_exchange)
@@ -111,6 +113,21 @@ class WorkbenchApiServer:
         self.runner = None
         self.site = None
         self.bind_host = None
+
+    def _prune_browser_chat_jobs(self, *, ttl_s: float = 86400.0, max_jobs: int = 1000) -> None:
+        now = time.time()
+        stale = [
+            request_id
+            for request_id, job in self.browser_chat_jobs.items()
+            if now - float(job.get("queued_at") or job.get("completed_at") or now) > ttl_s
+        ]
+        for request_id in stale:
+            self.browser_chat_jobs.pop(request_id, None)
+        if len(self.browser_chat_jobs) <= max_jobs:
+            return
+        ordered = sorted(self.browser_chat_jobs.items(), key=lambda item: float(item[1].get("queued_at") or 0.0))
+        for request_id, _job in ordered[: len(self.browser_chat_jobs) - max_jobs]:
+            self.browser_chat_jobs.pop(request_id, None)
 
     def _learn_reply_route(self, text: str, reply_route: dict) -> None:
         """Auto-learn sender's routing info from reply_route metadata in hchat messages."""
@@ -506,6 +523,11 @@ class WorkbenchApiServer:
         text = (payload.get("text") or "").strip()
         source = (payload.get("source") or "browser-api").strip()
         timeout_s = max(5.0, min(float(payload.get("timeout_s") or 120.0), 600.0))
+        wait_for_completion = payload.get("wait")
+        if wait_for_completion is None:
+            wait_for_completion = not bool(payload.get("async"))
+        else:
+            wait_for_completion = bool(wait_for_completion)
 
         runtime = runtime_map.get(agent_name)
         if runtime is None:
@@ -517,6 +539,19 @@ class WorkbenchApiServer:
         completion_future = loop.create_future()
 
         async def _listener(result: dict) -> None:
+            job = self.browser_chat_jobs.get(request_id)
+            if job is not None:
+                job.update(
+                    {
+                        "status": "completed" if result.get("success") else "failed",
+                        "ok": bool(result.get("success")),
+                        "text": result.get("text"),
+                        "error": result.get("error"),
+                        "source": result.get("source") or source,
+                        "summary": result.get("summary"),
+                        "completed_at": time.time(),
+                    }
+                )
             if completion_future.done():
                 return
             completion_future.set_result(result)
@@ -529,7 +564,30 @@ class WorkbenchApiServer:
         if request_id is None:
             return web.json_response({"ok": False, "error": "failed to enqueue browser request"}, status=500)
 
+        self._prune_browser_chat_jobs()
+        self.browser_chat_jobs[request_id] = {
+            "ok": True,
+            "request_id": request_id,
+            "agent": agent_name,
+            "source": source,
+            "status": "queued",
+            "queued_at": time.time(),
+        }
         runtime.register_request_listener(request_id, _listener)
+        self.browser_chat_jobs[request_id]["status"] = "running"
+
+        if not wait_for_completion:
+            return web.json_response(
+                {
+                    "ok": True,
+                    "request_id": request_id,
+                    "status": "running",
+                    "agent": agent_name,
+                    "source": source,
+                    "job_url": f"/api/browser/chat/jobs/{request_id}",
+                },
+                status=202,
+            )
 
         try:
             result = await asyncio.wait_for(completion_future, timeout=timeout_s)
@@ -554,6 +612,14 @@ class WorkbenchApiServer:
             "summary": result.get("summary"),
         }
         return web.json_response(response_payload, status=200 if response_payload["ok"] else 502)
+
+    async def handle_browser_chat_job(self, request):
+        self._prune_browser_chat_jobs()
+        request_id = request.match_info.get("request_id")
+        job = self.browser_chat_jobs.get(request_id)
+        if job is None:
+            return web.json_response({"ok": False, "error": "browser chat job not found", "request_id": request_id}, status=404)
+        return web.json_response(dict(job))
 
     async def handle_bridge_message(self, request):
         self._refresh_bridge_router()

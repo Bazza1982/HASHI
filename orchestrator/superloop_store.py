@@ -28,6 +28,33 @@ def _json_load(path: Path) -> dict[str, Any]:
     return data
 
 
+def system_actor(name: str, *, instance: str = "HASHI1", reason: str | None = None) -> dict[str, Any]:
+    actor = {"kind": "system", "agent": name, "instance": instance}
+    if reason:
+        actor["reason"] = reason
+    return actor
+
+
+def agent_actor(agent: str, *, instance: str = "HASHI1", source: str | None = None) -> dict[str, Any]:
+    actor = {"kind": "agent", "agent": agent, "instance": instance}
+    if source:
+        actor["source"] = source
+    return actor
+
+
+def normalize_event_actor(actor: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(actor, dict) or not actor:
+        return system_actor("superloop_unknown_writer", reason="actor_not_supplied")
+    normalized = dict(actor)
+    if not str(normalized.get("agent") or "").strip():
+        normalized["agent"] = "superloop_unknown_writer"
+    if not str(normalized.get("instance") or "").strip():
+        normalized["instance"] = "HASHI1"
+    if not str(normalized.get("kind") or "").strip():
+        normalized["kind"] = "agent" if normalized.get("source") else "system"
+    return normalized
+
+
 class SuperloopStore:
     def __init__(self, root_dir: Path):
         self.root_dir = root_dir
@@ -237,7 +264,7 @@ class SuperloopStore:
             "ts": _utc_now(),
             "loop_id": loop_id,
             "kind": event_type,
-            "actor": actor or {},
+            "actor": normalize_event_actor(actor),
             "refs": refs or {},
             "data": data or {},
         }

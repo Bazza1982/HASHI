@@ -127,6 +127,7 @@ async def test_superloop_quickstart_and_wizard(tmp_path: Path) -> None:
     created_events = [event for event in events if event.get("kind") == "loop.created"]
     assert len(created_events) == 1
     assert created_events[0]["data"]["recording_id"].startswith("slrec-")
+    assert all(event.get("actor", {}).get("agent") for event in events)
 
     await handle_superloop_command(runtime, _FakeUpdate("/superloop wizard wizard goal"), "wizard wizard goal")
     assert any("Wizard" in text for text in runtime.messages)
