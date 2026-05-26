@@ -246,3 +246,9 @@ async def test_superloop_closeout_accepts_validated_loop(tmp_path: Path) -> None
 
     assert "closeout accepted" in runtime.messages[-1]
     assert store.load_loop_state("sl-test-closeout-ok")["status"] == "completed"
+    events_path = tmp_path / "superloops" / "loops" / "sl-test-closeout-ok" / "events.jsonl"
+    events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines()]
+    completed_events = [event for event in events if event.get("kind") == "loop.completed"]
+    assert completed_events
+    assert completed_events[-1]["actor"]["agent"] == "zelda"
+    assert completed_events[-1]["actor"]["source"] == "superloop_command"
