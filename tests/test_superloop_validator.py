@@ -101,6 +101,14 @@ def test_runner_does_not_auto_complete_when_closeout_validation_fails(tmp_path: 
 
 def test_closeout_accepts_hchat_task_with_dispatch_and_receipt(tmp_path: Path) -> None:
     store = SuperloopStore(tmp_path / "superloops")
+    transcript = tmp_path / "workspaces" / "nana" / "transcript.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(
+        '{"role":"assistant","text":"done sl-test-001 task-001 receipt-nana artifact nana_report.md"}\n',
+        encoding="utf-8",
+    )
+    artifact = tmp_path / "nana_report.md"
+    artifact.write_text("# Nana report\n", encoding="utf-8")
     _create_loop(
         store,
         taskboard=[
@@ -113,7 +121,17 @@ def test_closeout_accepts_hchat_task_with_dispatch_and_receipt(tmp_path: Path) -
                 "depends_on": [],
                 "execution_mode": "hchat_agent",
                 "dispatch_refs": ["dispatch_nana.md"],
-                "receipt_refs": ["nana_report.md"],
+                "receipt_refs": ["receipt-nana"],
+                "artifact_refs": ["nana_report.md"],
+                "receipt_sources": [
+                    {
+                        "agent": "nana",
+                        "transcript_path": "workspaces/nana/transcript.jsonl",
+                        "line_start": 1,
+                        "line_end": 1,
+                        "artifact_path": "nana_report.md",
+                    }
+                ],
             }
         ],
     )
@@ -122,6 +140,32 @@ def test_closeout_accepts_hchat_task_with_dispatch_and_receipt(tmp_path: Path) -
 
     assert report["blocking"] is False
     assert report["summary"]["errors"] == 0
+
+
+def test_closeout_blocks_hchat_task_with_unverifiable_receipt_ref(tmp_path: Path) -> None:
+    store = SuperloopStore(tmp_path / "superloops")
+    _create_loop(
+        store,
+        taskboard=[
+            {
+                "task_id": "task-001",
+                "title": "Ask Nana",
+                "status": "completed",
+                "owner_agent": "nana",
+                "owner_instance": "HASHI1",
+                "depends_on": [],
+                "execution_mode": "hchat_agent",
+                "dispatch_refs": ["dispatch_nana.md"],
+                "receipt_refs": ["receipt-nana"],
+                "artifact_refs": ["nana_report.md"],
+            }
+        ],
+    )
+
+    report = validate_loop(store, "sl-test-001", closeout=True)
+
+    assert report["blocking"] is True
+    assert any(item["code"] == "hchat_receipt_unverifiable" for item in report["findings"])
 
 
 def test_completed_dispatch_task_accepts_dispatch_refs_as_required_evidence(tmp_path: Path) -> None:

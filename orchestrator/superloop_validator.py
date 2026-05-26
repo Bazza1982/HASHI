@@ -77,7 +77,7 @@ def validate_loop(store: SuperloopStore, loop_id: str, *, closeout: bool = False
     events = _load_jsonl_list(loop_dir / "events.jsonl", findings, "events.jsonl")
 
     _validate_state(state, findings, closeout=closeout)
-    _validate_tasks(tasks, findings, closeout=closeout)
+    _validate_tasks(store, loop_id, tasks, findings, closeout=closeout)
     _validate_issues(issues, findings, closeout=closeout)
     _validate_waits(waits, findings, closeout=closeout)
     _validate_events(events, findings)
@@ -191,7 +191,14 @@ def _validate_state(state: dict[str, Any], findings: list[SuperloopFinding], *, 
         findings.append(SuperloopFinding("warn", "loop_id_missing", "state.json has no loop_id.", "state.json"))
 
 
-def _validate_tasks(tasks: list[dict[str, Any]], findings: list[SuperloopFinding], *, closeout: bool) -> None:
+def _validate_tasks(
+    store: SuperloopStore,
+    loop_id: str,
+    tasks: list[dict[str, Any]],
+    findings: list[SuperloopFinding],
+    *,
+    closeout: bool,
+) -> None:
     in_progress = []
     for index, task in enumerate(tasks):
         ref = str(task.get("task_id") or f"taskboard[{index}]")
@@ -204,7 +211,7 @@ def _validate_tasks(tasks: list[dict[str, Any]], findings: list[SuperloopFinding
         if status == "in_progress":
             in_progress.append(ref)
         if status in TRUTH_CLAIM_STATUSES:
-            _validate_completed_task(task, findings, ref=ref, closeout=closeout)
+            _validate_completed_task(store, loop_id, task, findings, ref=ref, closeout=closeout)
     if len(in_progress) > 1:
         findings.append(
             SuperloopFinding("warn", "multiple_tasks_in_progress", f"Multiple tasks in progress: {', '.join(in_progress)}")
@@ -212,6 +219,8 @@ def _validate_tasks(tasks: list[dict[str, Any]], findings: list[SuperloopFinding
 
 
 def _validate_completed_task(
+    store: SuperloopStore,
+    loop_id: str,
     task: dict[str, Any],
     findings: list[SuperloopFinding],
     *,
@@ -248,6 +257,178 @@ def _validate_completed_task(
                     ref,
                 )
             )
+        elif _has_any(task, "receipt_refs", "reply_refs", "hchat_reply_ref", "worker_report_refs", "review_report_refs"):
+            _validate_hchat_receipt_sources(store, loop_id, task, findings, ref=ref, closeout=closeout)
+
+
+def _validate_hchat_receipt_sources(
+    store: SuperloopStore,
+    loop_id: str,
+    task: dict[str, Any],
+    findings: list[SuperloopFinding],
+    *,
+    ref: str,
+    closeout: bool,
+) -> None:
+    entries = _receipt_source_entries(task)
+    severity = "error" if closeout else "warn"
+    if not entries:
+        findings.append(
+            SuperloopFinding(
+                severity,
+                "hchat_receipt_unverifiable",
+                "Completed hchat_agent task has receipt refs but no transcript-backed receipt_sources.",
+                ref,
+            )
+        )
+        return
+
+    owner_agent = str(task.get("owner_agent") or "").strip()
+    receipt_refs = _string_list_values(task, "receipt_refs", "reply_refs", "hchat_reply_ref")
+    task_id = str(task.get("task_id") or ref)
+    for index, entry in enumerate(entries):
+        entry_ref = f"{ref}.receipt_sources[{index}]"
+        agent = str(entry.get("agent") or "").strip()
+        if not agent:
+            findings.append(SuperloopFinding(severity, "hchat_receipt_agent_missing", "Receipt evidence has no agent.", entry_ref))
+        elif owner_agent and agent != owner_agent:
+            findings.append(
+                SuperloopFinding(
+                    severity,
+                    "hchat_receipt_agent_mismatch",
+                    f"Receipt evidence agent {agent} does not match task owner {owner_agent}.",
+                    entry_ref,
+                )
+            )
+
+        transcript_path = str(entry.get("transcript_path") or entry.get("path") or entry.get("source") or "").strip()
+        if not transcript_path:
+            findings.append(
+                SuperloopFinding(severity, "hchat_receipt_transcript_missing", "Receipt evidence has no transcript_path.", entry_ref)
+            )
+            continue
+
+        transcript = _resolve_project_path(store, transcript_path)
+        if not transcript.exists():
+            findings.append(
+                SuperloopFinding(
+                    severity,
+                    "hchat_receipt_transcript_missing",
+                    f"Receipt transcript does not exist: {transcript_path}",
+                    entry_ref,
+                )
+            )
+            continue
+
+        try:
+            transcript_text = _read_receipt_transcript_window(transcript, entry)
+        except Exception as exc:
+            findings.append(
+                SuperloopFinding(severity, "hchat_receipt_transcript_unreadable", f"Could not read receipt transcript: {exc}", entry_ref)
+            )
+            continue
+
+        request_id = str(entry.get("request_id") or "").strip()
+        expected_tokens = [loop_id, task_id, request_id, *receipt_refs]
+        if not any(token and token in transcript_text for token in expected_tokens):
+            findings.append(
+                SuperloopFinding(
+                    severity,
+                    "hchat_receipt_transcript_mismatch",
+                    "Receipt transcript window does not mention the loop id, task id, request id, or receipt ref.",
+                    entry_ref,
+                )
+            )
+
+        artifact_path = str(entry.get("artifact_path") or entry.get("artifact_ref") or "").strip()
+        if artifact_path and not _resolve_project_path(store, artifact_path).exists():
+            findings.append(
+                SuperloopFinding(
+                    severity,
+                    "hchat_receipt_artifact_missing",
+                    f"Receipt artifact does not exist: {artifact_path}",
+                    entry_ref,
+                )
+            )
+
+
+def _receipt_source_entries(task: dict[str, Any]) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for key in ("receipt_sources", "receipt_evidence"):
+        value = task.get(key)
+        if isinstance(value, dict):
+            entries.append(value)
+        elif isinstance(value, list):
+            entries.extend(item for item in value if isinstance(item, dict))
+
+    receipt_source = task.get("receipt_source") or task.get("transcript_path")
+    if isinstance(receipt_source, str) and receipt_source.strip():
+        entry: dict[str, Any] = {
+            "agent": task.get("owner_agent"),
+            "transcript_path": receipt_source,
+        }
+        if task.get("receipt_lines") is not None:
+            start_line, end_line = _parse_line_range(task.get("receipt_lines"))
+            if start_line is not None:
+                entry["line_start"] = start_line
+            if end_line is not None:
+                entry["line_end"] = end_line
+        entries.append(entry)
+    return entries
+
+
+def _parse_line_range(value: Any) -> tuple[int | None, int | None]:
+    if isinstance(value, int):
+        return value, value
+    raw = str(value or "").strip()
+    if not raw:
+        return None, None
+    if "-" in raw:
+        left, right = raw.split("-", 1)
+    else:
+        left = right = raw
+    try:
+        start = int(left.strip())
+    except Exception:
+        start = None
+    try:
+        end = int(right.strip())
+    except Exception:
+        end = start
+    return start, end
+
+
+def _read_receipt_transcript_window(path: Path, entry: dict[str, Any]) -> str:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    start, end = _parse_line_range(entry.get("line_start") or entry.get("line") or entry.get("lines"))
+    if entry.get("line_end") is not None:
+        try:
+            end = int(entry["line_end"])
+        except Exception:
+            pass
+    if start is None:
+        return "\n".join(lines)
+    start_index = max(start - 1, 0)
+    end_index = max((end or start), start)
+    return "\n".join(lines[start_index:end_index])
+
+
+def _resolve_project_path(store: SuperloopStore, raw_path: str) -> Path:
+    path = Path(raw_path).expanduser()
+    if path.is_absolute():
+        return path
+    return (store.root_dir.parent / path).resolve()
+
+
+def _string_list_values(payload: dict[str, Any], *keys: str) -> list[str]:
+    values: list[str] = []
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            values.append(value.strip())
+        elif isinstance(value, list):
+            values.extend(str(item).strip() for item in value if str(item).strip())
+    return values
 
 
 def _validate_issues(issues: list[dict[str, Any]], findings: list[SuperloopFinding], *, closeout: bool) -> None:
