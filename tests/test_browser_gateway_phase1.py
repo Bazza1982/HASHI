@@ -118,43 +118,6 @@ async def test_workbench_browser_chat_send_awaits_completion(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_workbench_browser_chat_send_can_return_async_job(tmp_path: Path):
-    config_path = tmp_path / "agents.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "global": {"workbench_port": 18800},
-                "agents": [{"name": "demo", "workspace_dir": "workspaces/demo", "type": "flex"}],
-            }
-        ),
-        encoding="utf-8",
-    )
-    global_config = SimpleNamespace(
-        workbench_port=18800,
-        project_root=tmp_path,
-        bridge_home=tmp_path,
-    )
-    runtime = _FakeRuntime()
-    server = WorkbenchApiServer(config_path=config_path, global_config=global_config, runtimes=[runtime])
-
-    response = await server.handle_browser_chat_send(
-        _FakeRequest({"agent": "demo", "text": "long task", "source": "browser:test", "wait": False})
-    )
-    payload = json.loads(response.text)
-    assert response.status == 202
-    assert payload["ok"] is True
-    assert payload["status"] == "running"
-    assert payload["request_id"] == "req-123"
-
-    await asyncio.sleep(0)
-    job_response = await server.handle_browser_chat_job(_FakeRequest({}, match_info={"request_id": "req-123"}))
-    job = json.loads(job_response.text)
-    assert job["ok"] is True
-    assert job["status"] == "completed"
-    assert job["text"] == "browser completion ok"
-
-
-@pytest.mark.asyncio
 async def test_browser_gateway_file_upload_notifies_agent(tmp_path: Path):
     project_root = tmp_path
     store = BrowserGatewayStore(tmp_path / "browser_gateway.sqlite")

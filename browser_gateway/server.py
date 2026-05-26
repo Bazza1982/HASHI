@@ -97,7 +97,6 @@ class BrowserGatewayServer:
         self.app.router.add_get("/browser/thread/{thread_id}/attachments", self.handle_thread_attachments)
         self.app.router.add_post("/browser/file/upload", self.handle_file_upload)
         self.app.router.add_post("/browser/chat/send", self.handle_chat_send)
-        self.app.router.add_get("/browser/chat/job/{request_id}", self.handle_chat_job)
         self.app.router.add_get("/browser/chat/stream/{thread_id}", self.handle_chat_stream)
         self.app.router.add_get("/browser/device/status", self.handle_device_status)
 
@@ -144,14 +143,12 @@ class BrowserGatewayServer:
         text: str,
         source: str,
         timeout_s: float,
-        wait: bool = True,
     ) -> dict[str, Any]:
         body = {
             "agent": agent,
             "text": text,
             "source": source,
             "timeout_s": timeout_s,
-            "wait": wait,
         }
         async with ClientSession() as session:
             async with session.post(f"{self.workbench_url}/api/browser/chat/send", json=body) as resp:
@@ -162,22 +159,6 @@ class BrowserGatewayServer:
                     payload = {
                         "ok": False,
                         "error": f"workbench browser endpoint unavailable: HTTP {resp.status}",
-                        "detail": text_body[:300],
-                    }
-                if resp.status >= 400:
-                    payload.setdefault("ok", False)
-                return payload
-
-    async def _fetch_workbench_chat_job(self, request_id: str) -> dict[str, Any]:
-        async with ClientSession() as session:
-            async with session.get(f"{self.workbench_url}/api/browser/chat/jobs/{request_id}") as resp:
-                try:
-                    payload = await resp.json()
-                except Exception:
-                    text_body = await resp.text()
-                    payload = {
-                        "ok": False,
-                        "error": f"workbench browser job endpoint unavailable: HTTP {resp.status}",
                         "detail": text_body[:300],
                     }
                 if resp.status >= 400:
@@ -467,11 +448,6 @@ class BrowserGatewayServer:
         thread_id = str(payload.get("thread_id") or "").strip()
         text = str(payload.get("text") or "").strip()
         timeout_s = max(5.0, min(float(payload.get("timeout_s") or 120.0), 600.0))
-        wait_for_completion = payload.get("wait")
-        if wait_for_completion is None:
-            wait_for_completion = not bool(payload.get("async"))
-        else:
-            wait_for_completion = bool(wait_for_completion)
         if not thread_id or not text:
             return self._json({"ok": False, "error": "thread_id and text are required"}, status=400)
 
@@ -496,21 +472,7 @@ class BrowserGatewayServer:
             text=text,
             source=source_tag,
             timeout_s=timeout_s,
-            wait=wait_for_completion,
         )
-        if result.get("status") in {"queued", "running"} and result.get("request_id"):
-            self.store.complete_message(user_message_id, "queued", text_preview=text)
-            await self.broker.publish(
-                thread_id,
-                {
-                    "type": "request_queued",
-                    "thread_id": thread_id,
-                    "request_id": result.get("request_id"),
-                    "job_url": result.get("job_url"),
-                },
-            )
-            return self._json({"ok": True, "thread_id": thread_id, **result}, status=202)
-
         assistant_message_id = self.store.append_message(
             thread_id,
             "assistant",
@@ -545,14 +507,6 @@ class BrowserGatewayServer:
             bytes_out=len(str(result.get("text") or "").encode("utf-8")),
         )
         return self._json({"ok": bool(result.get("ok")), "thread_id": thread_id, **result}, status=200 if result.get("ok") else 502)
-
-    async def handle_chat_job(self, request: web.Request) -> web.Response:
-        device = await self._require_device(request)
-        if isinstance(device, web.Response):
-            return device
-        request_id = request.match_info["request_id"]
-        result = await self._fetch_workbench_chat_job(request_id)
-        return self._json(result, status=200 if result.get("ok") else 404)
 
     async def handle_chat_stream(self, request: web.Request) -> web.StreamResponse:
         device = await self._require_device(request)
