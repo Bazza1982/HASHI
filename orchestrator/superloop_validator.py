@@ -10,8 +10,19 @@ from orchestrator.superloop_store import SuperloopStore
 
 ALLOWED_LOOP_STATUSES = {"draft", "running", "waiting", "blocked", "paused", "completed", "aborted", "failed"}
 ALLOWED_TASK_STATUSES = {"pending", "in_progress", "waiting", "blocked", "completed", "skipped", "failed"}
-ALLOWED_WAIT_STATUSES = {"pending", "open", "satisfied", "resolved", "completed", "timeout", "timed_out", "cancelled", "stale"}
-ALLOWED_ISSUE_STATUSES = {"open", "in_progress", "resolved", "waived", "stale"}
+ALLOWED_WAIT_STATUSES = {
+    "pending",
+    "open",
+    "satisfied",
+    "resolved",
+    "completed",
+    "closed",
+    "timeout",
+    "timed_out",
+    "cancelled",
+    "stale",
+}
+ALLOWED_ISSUE_STATUSES = {"open", "in_progress", "resolved", "closed", "waived", "stale"}
 REQUIRED_LOOP_FILES = ("state.json", "taskboard.json", "issues.json", "waits.json", "events.jsonl")
 TRUTH_CLAIM_STATUSES = {"completed"}
 
