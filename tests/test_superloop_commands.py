@@ -215,6 +215,14 @@ async def test_superloop_closeout_blocks_missing_hchat_receipt(tmp_path: Path) -
 async def test_superloop_closeout_accepts_validated_loop(tmp_path: Path) -> None:
     runtime = _FakeRuntime(tmp_path)
     store = SuperloopStore(tmp_path / "superloops")
+    transcript = tmp_path / "workspaces" / "nana" / "transcript.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(
+        '{"role":"assistant","text":"done sl-test-closeout-ok task-001 receipt-nana artifact nana_report.md"}\n',
+        encoding="utf-8",
+    )
+    artifact = tmp_path / "nana_report.md"
+    artifact.write_text("# Nana report\n", encoding="utf-8")
     store.create_compiled_loop(
         loop_id="sl-test-closeout-ok",
         loop_state={
@@ -234,7 +242,17 @@ async def test_superloop_closeout_accepts_validated_loop(tmp_path: Path) -> None
                 "depends_on": [],
                 "execution_mode": "hchat_agent",
                 "dispatch_refs": ["dispatch_nana.md"],
-                "receipt_refs": ["nana_report.md"],
+                "receipt_refs": ["receipt-nana"],
+                "artifact_refs": ["nana_report.md"],
+                "receipt_sources": [
+                    {
+                        "agent": "nana",
+                        "transcript_path": "workspaces/nana/transcript.jsonl",
+                        "line_start": 1,
+                        "line_end": 1,
+                        "artifact_path": "nana_report.md",
+                    }
+                ],
             }
         ],
         issues=[],
