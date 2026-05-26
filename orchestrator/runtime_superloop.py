@@ -10,7 +10,7 @@ from orchestrator.superloop_compiler import SuperloopCompiler
 from orchestrator.superloop_issues import SuperloopIssuesService
 from orchestrator.superloop_recording import SuperloopRecordingService
 from orchestrator.superloop_runner import SuperloopRunner
-from orchestrator.superloop_store import SuperloopStore
+from orchestrator.superloop_store import SuperloopStore, agent_actor
 from orchestrator.superloop_taskboard import SuperloopTaskboardService
 from orchestrator.superloop_validator import format_validation_report, validate_loop
 from orchestrator.superloop_waits import SuperloopWaitsService
@@ -165,6 +165,7 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
     parts = raw.split()
     lowered = [part.lower() for part in parts]
     local_instance = _local_instance_id()
+    command_actor = agent_actor(runtime.name, instance=local_instance, source="superloop_command")
 
     if lowered[:1] == ["quickstart"]:
         goal = raw[len("quickstart") :].strip()
@@ -209,12 +210,13 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
             return
         loop_id = str(result["loop_id"])
         store.save_loop_state(loop_id, {**store.load_loop_state(loop_id), "status": "running"})
-        store.append_loop_event(loop_id, event_type="loop.resumed", data={"source": "quickstart"})
+        store.append_loop_event(loop_id, event_type="loop.resumed", data={"source": "quickstart"}, actor=command_actor)
         task = SuperloopTaskboardService(store).add_task(
             loop_id,
             title=f"First actionable task for: {goal}",
             owner_agent=runtime.name,
             owner_instance=local_instance,
+            actor=command_actor,
         )
         await runtime._reply_text(
             update,
@@ -465,6 +467,7 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
                     loop_id,
                     event_type="loop.closeout_blocked",
                     data={"source": "command", "summary": report.get("summary"), "findings": report.get("findings", [])[:8]},
+                    actor=command_actor,
                 )
             await runtime._reply_text(update, format_validation_report(report), parse_mode="Markdown")
             return
@@ -476,7 +479,7 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
         state["status"] = "completed"
         state["next_action"] = {"kind": "none", "reason": "validated_closeout"}
         store.save_loop_state(loop_id, state)
-        store.append_loop_event(loop_id, event_type="loop.completed", data={"reason": "validated_closeout"})
+        store.append_loop_event(loop_id, event_type="loop.completed", data={"reason": "validated_closeout"}, actor=command_actor)
         await runtime._reply_text(
             update,
             format_validation_report(report) + "\n\n✅ closeout accepted: loop marked `completed`.",
@@ -496,7 +499,7 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
             return
         state["status"] = "paused"
         store.save_loop_state(loop_id, state)
-        store.append_loop_event(loop_id, event_type="loop.paused", data={"source": "command"})
+        store.append_loop_event(loop_id, event_type="loop.paused", data={"source": "command"}, actor=command_actor)
         await runtime._reply_text(update, f"⏸ Paused `{loop_id}`", parse_mode="Markdown")
         return
 
@@ -512,7 +515,7 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
             return
         state["status"] = "running"
         store.save_loop_state(loop_id, state)
-        store.append_loop_event(loop_id, event_type="loop.resumed", data={"source": "command"})
+        store.append_loop_event(loop_id, event_type="loop.resumed", data={"source": "command"}, actor=command_actor)
         await runtime._reply_text(update, f"▶ Resumed `{loop_id}`", parse_mode="Markdown")
         return
 
@@ -553,6 +556,7 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
                 title=title,
                 owner_agent=runtime.name,
                 owner_instance=local_instance,
+                actor=command_actor,
             )
         except FileNotFoundError:
             await runtime._reply_text(update, f"Loop not found: {loop_id}")
@@ -574,6 +578,7 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
                 severity="medium",
                 opened_by_agent=runtime.name,
                 opened_by_instance=local_instance,
+                actor=command_actor,
             )
         except FileNotFoundError:
             await runtime._reply_text(update, f"Loop not found: {loop_id}")
@@ -591,7 +596,7 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
         details = {"until": deadline} if kind == "sleep_until" and deadline else None
         service = SuperloopWaitsService(store)
         try:
-            wait = service.add_wait(loop_id, kind=kind, details=details, deadline=deadline)
+            wait = service.add_wait(loop_id, kind=kind, details=details, deadline=deadline, actor=command_actor)
         except FileNotFoundError:
             await runtime._reply_text(update, f"Loop not found: {loop_id}")
             return

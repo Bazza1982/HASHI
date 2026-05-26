@@ -97,6 +97,26 @@ async def test_admin_local_command_executes_registered_private_command(monkeypat
     assert result["messages"][0]["text"] == "private ok: hello"
 
 
+@pytest.mark.asyncio
+async def test_admin_local_command_exposes_message_text_to_handlers(monkeypatch, tmp_path):
+    private_dir = tmp_path / "private_commands"
+    private_dir.mkdir()
+    (private_dir / "sample.py").write_text(
+        "from orchestrator.command_registry import RuntimeCommand\n"
+        "async def callback(runtime, update, context):\n"
+        "    await update.message.reply_text('text: ' + update.message.text)\n"
+        "COMMANDS = [RuntimeCommand(name='read_text', description='Read text', callback=callback)]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HASHI_PRIVATE_COMMAND_DIRS", str(private_dir))
+    runtime = _FakeRuntime()
+
+    result = await execute_local_command(runtime, "/read_text validate sl-demo", chat_id=123)
+
+    assert result["ok"] is True
+    assert result["messages"][0]["text"] == "text: /read_text validate sl-demo"
+
+
 def test_admin_supported_commands_include_runtime_bound_native_commands():
     commands = supported_commands(_RuntimeWithNativeCommands())
 

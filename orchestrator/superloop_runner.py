@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from orchestrator.superloop_store import SuperloopStore
+from orchestrator.superloop_store import SuperloopStore, system_actor
 from orchestrator.superloop_taskboard import SuperloopTaskboardService
 from orchestrator.superloop_validator import validate_loop
 from orchestrator.superloop_waits import SuperloopWaitsService
@@ -19,6 +19,7 @@ class SuperloopRunner:
         self.store = store
         self.taskboard = taskboard_service or SuperloopTaskboardService(store)
         self.waits = waits_service or SuperloopWaitsService(store)
+        self.actor = system_actor("superloop_runner")
 
     def next_action(self, loop_id: str) -> dict[str, Any]:
         with self.store._lock:
@@ -77,6 +78,7 @@ class SuperloopRunner:
                         loop_id,
                         event_type="loop.closeout_blocked",
                         data={"summary": closeout_report.get("summary"), "findings": closeout_report.get("findings", [])[:8]},
+                        actor=self.actor,
                     )
                     return {
                         "ok": False,
@@ -88,15 +90,20 @@ class SuperloopRunner:
                 state["status"] = "completed"
                 state["next_action"] = {"kind": "none", "reason": "all_tasks_completed"}
                 self._save_loop_state(loop_id, state)
-                self.store.append_loop_event(loop_id, event_type="loop.completed", data={"reason": "all_tasks_completed"})
+                self.store.append_loop_event(
+                    loop_id,
+                    event_type="loop.completed",
+                    data={"reason": "all_tasks_completed"},
+                    actor=self.actor,
+                )
                 return {"ok": True, "loop_id": loop_id, "advanced": False, "reason": "completed"}
 
             task_id = str(next_task["task_id"])
-            self.taskboard.update_task_status(loop_id, task_id, "in_progress")
+            self.taskboard.update_task_status(loop_id, task_id, "in_progress", actor=self.actor)
             state["current_step"] = task_id
             state["next_action"] = {"kind": "run_task", "task_id": task_id}
             self._save_loop_state(loop_id, state)
-            self.store.append_loop_event(loop_id, event_type="task.started", data={"task_id": task_id})
+            self.store.append_loop_event(loop_id, event_type="task.started", data={"task_id": task_id}, actor=self.actor)
             return {"ok": True, "loop_id": loop_id, "advanced": True, "task_id": task_id}
 
     def _save_loop_state(self, loop_id: str, state: dict[str, Any]) -> None:

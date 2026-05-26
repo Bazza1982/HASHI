@@ -63,11 +63,13 @@ def validate_loop(store: SuperloopStore, loop_id: str, *, closeout: bool = False
     tasks = _load_json_list(_resolve_json_path(store, loop_id, state, "taskboard_path", "taskboard.json"), findings, "taskboard.json")
     issues = _load_json_list(_resolve_json_path(store, loop_id, state, "issues_path", "issues.json"), findings, "issues.json")
     waits = _load_json_list(_resolve_json_path(store, loop_id, state, "waits_path", "waits.json"), findings, "waits.json")
+    events = _load_jsonl_list(loop_dir / "events.jsonl", findings, "events.jsonl")
 
     _validate_state(state, findings, closeout=closeout)
     _validate_tasks(tasks, findings, closeout=closeout)
     _validate_issues(issues, findings, closeout=closeout)
     _validate_waits(waits, findings, closeout=closeout)
+    _validate_events(events, findings)
     _validate_closeout_shape(state, tasks, issues, waits, findings, closeout=closeout)
 
     counts = {
@@ -143,6 +145,30 @@ def _load_json_list(path: Path, findings: list[SuperloopFinding], ref: str) -> l
         findings.append(SuperloopFinding("error", "json_not_list", "Expected JSON list.", ref))
         return []
     return [item for item in payload if isinstance(item, dict)]
+
+
+def _load_jsonl_list(path: Path, findings: list[SuperloopFinding], ref: str) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    events: list[dict[str, Any]] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception as exc:
+        findings.append(SuperloopFinding("warn", "jsonl_unreadable", f"Could not read JSONL: {exc}", ref))
+        return []
+    for index, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except Exception:
+            findings.append(SuperloopFinding("legacy", "event_json_invalid", "Invalid event JSON line.", f"{ref}:{index}"))
+            continue
+        if isinstance(payload, dict):
+            events.append(payload)
+        else:
+            findings.append(SuperloopFinding("legacy", "event_not_object", "Expected event object.", f"{ref}:{index}"))
+    return events
 
 
 def _validate_state(state: dict[str, Any], findings: list[SuperloopFinding], *, closeout: bool) -> None:
@@ -233,6 +259,29 @@ def _validate_waits(waits: list[dict[str, Any]], findings: list[SuperloopFinding
         if status in {"pending", "open"}:
             severity = "error" if closeout else "warn"
             findings.append(SuperloopFinding(severity, "open_wait", "Open wait prevents closeout.", ref))
+
+
+def _validate_events(events: list[dict[str, Any]], findings: list[SuperloopFinding]) -> None:
+    missing_refs: list[str] = []
+    for index, event in enumerate(events, start=1):
+        actor = event.get("actor")
+        ref = str(event.get("event_id") or f"events.jsonl:{index}")
+        if not isinstance(actor, dict) or not actor:
+            missing_refs.append(ref)
+            continue
+        if not str(actor.get("agent") or "").strip():
+            missing_refs.append(ref)
+    if missing_refs:
+        shown = ", ".join(missing_refs[:5])
+        suffix = f" (+{len(missing_refs) - 5} more)" if len(missing_refs) > 5 else ""
+        findings.append(
+            SuperloopFinding(
+                "legacy",
+                "event_actor_missing",
+                f"Event ledger has missing actor attribution: {shown}{suffix}",
+                "events.jsonl",
+            )
+        )
 
 
 def _validate_closeout_shape(

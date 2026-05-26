@@ -47,18 +47,19 @@ class _CaptureStore:
 
 
 class _FakeMessage:
-    def __init__(self, store: _CaptureStore):
+    def __init__(self, store: _CaptureStore, text: str):
         self._store = store
+        self.text = text
 
     async def reply_text(self, text: str, **kwargs):
         return await self._store.capture_reply(text, **kwargs)
 
 
 class _FakeUpdate:
-    def __init__(self, user_id: int, chat_id: int, store: _CaptureStore):
+    def __init__(self, user_id: int, chat_id: int, store: _CaptureStore, text: str):
         self.effective_user = SimpleNamespace(id=user_id)
         self.effective_chat = SimpleNamespace(id=chat_id)
-        self.message = _FakeMessage(store)
+        self.message = _FakeMessage(store, text)
 
 
 def _split_command(command_line: str) -> tuple[str, list[str]]:
@@ -112,7 +113,7 @@ async def execute_local_command(runtime, command_line: str, chat_id: int | None 
 
     store = _CaptureStore(messages=[])
     local_chat_id = chat_id or runtime.global_config.authorized_id
-    update = _FakeUpdate(runtime.global_config.authorized_id, local_chat_id, store)
+    update = _FakeUpdate(runtime.global_config.authorized_id, local_chat_id, store, command_line)
     context = SimpleNamespace(args=args)
 
     lock = getattr(runtime, "_local_admin_lock", None)

@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from orchestrator.superloop_store import SuperloopStore
+from orchestrator.superloop_store import SuperloopStore, agent_actor, system_actor
 
 
 def _utc_now() -> str:
@@ -27,6 +27,7 @@ class SuperloopIssuesService:
         opened_by_agent: str,
         opened_by_instance: str,
         related_task_ids: list[str] | None = None,
+        actor: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         path = self._issues_path(loop_id)
         with self.store._lock:
@@ -46,10 +47,22 @@ class SuperloopIssuesService:
             issues.append(issue)
             self.store.save_loop_json_list(path, issues)
             self.store.refresh_loop_stats(loop_id)
-        self.store.append_loop_event(loop_id, event_type="issue.opened", data={"issue_id": issue_id, "title": title})
+        self.store.append_loop_event(
+            loop_id,
+            event_type="issue.opened",
+            data={"issue_id": issue_id, "title": title},
+            actor=actor or agent_actor(opened_by_agent, instance=opened_by_instance),
+        )
         return issue
 
-    def resolve_issue(self, loop_id: str, issue_id: str, resolution: str) -> bool:
+    def resolve_issue(
+        self,
+        loop_id: str,
+        issue_id: str,
+        resolution: str,
+        *,
+        actor: dict[str, Any] | None = None,
+    ) -> bool:
         path = self._issues_path(loop_id)
         with self.store._lock:
             issues = self.store.load_loop_json_list(path)
@@ -66,7 +79,12 @@ class SuperloopIssuesService:
                 return False
             self.store.save_loop_json_list(path, issues)
             self.store.refresh_loop_stats(loop_id)
-        self.store.append_loop_event(loop_id, event_type="issue.resolved", data={"issue_id": issue_id})
+        self.store.append_loop_event(
+            loop_id,
+            event_type="issue.resolved",
+            data={"issue_id": issue_id},
+            actor=actor or system_actor("superloop_issues"),
+        )
         return True
 
     def _issues_path(self, loop_id: str) -> Path:

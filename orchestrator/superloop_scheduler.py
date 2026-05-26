@@ -6,7 +6,7 @@ from typing import Any
 
 from orchestrator.superloop_issues import SuperloopIssuesService
 from orchestrator.superloop_runner import SuperloopRunner
-from orchestrator.superloop_store import SuperloopStore
+from orchestrator.superloop_store import SuperloopStore, system_actor
 from orchestrator.superloop_waits import SuperloopWaitsService
 
 
@@ -55,6 +55,7 @@ def advance_superloops_once(superloops_root: Path, now: datetime | None = None) 
     waits = SuperloopWaitsService(store)
     issues = SuperloopIssuesService(store)
     runner = SuperloopRunner(store, waits_service=waits)
+    scheduler_actor = system_actor("superloop_scheduler")
 
     loops_checked = 0
     waits_satisfied = 0
@@ -85,7 +86,7 @@ def advance_superloops_once(superloops_root: Path, now: datetime | None = None) 
                 continue
             kind = str(wait_obj.get("kind") or "wait")
             resume_policy = wait_obj.get("resume_policy") if isinstance(wait_obj.get("resume_policy"), dict) else {}
-            if waits.satisfy_wait(loop_id, wait_id, source="scheduler.deadline"):
+            if waits.satisfy_wait(loop_id, wait_id, source="scheduler.deadline", actor=scheduler_actor):
                 waits_satisfied += 1
                 wait_satisfied_this_loop = True
                 if resume_policy.get("on_timeout") == "raise_issue":
@@ -96,6 +97,7 @@ def advance_superloops_once(superloops_root: Path, now: datetime | None = None) 
                         opened_by_agent="scheduler",
                         opened_by_instance="local",
                         related_task_ids=[str(state.get("current_step") or "")] if state.get("current_step") else [],
+                        actor=scheduler_actor,
                     )
 
         if wait_satisfied_this_loop or (not wait_ids and _scheduler_auto_advance_enabled(state)):

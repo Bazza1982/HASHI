@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from orchestrator.superloop_store import SuperloopStore
+from orchestrator.superloop_store import SuperloopStore, system_actor
 
 
 def _utc_now() -> str:
@@ -27,6 +27,7 @@ class SuperloopTaskboardService:
         owner_instance: str,
         depends_on: list[str] | None = None,
         task_id: str | None = None,
+        actor: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         path = self._taskboard_path(loop_id)
         with self.store._lock:
@@ -50,10 +51,22 @@ class SuperloopTaskboardService:
             tasks.append(task)
             self.store.save_loop_json_list(path, tasks)
             self.store.refresh_loop_stats(loop_id)
-        self.store.append_loop_event(loop_id, event_type="task.added", data={"task_id": assigned_task_id})
+        self.store.append_loop_event(
+            loop_id,
+            event_type="task.added",
+            data={"task_id": assigned_task_id},
+            actor=actor or system_actor("superloop_taskboard"),
+        )
         return task
 
-    def update_task_status(self, loop_id: str, task_id: str, status: str) -> bool:
+    def update_task_status(
+        self,
+        loop_id: str,
+        task_id: str,
+        status: str,
+        *,
+        actor: dict[str, Any] | None = None,
+    ) -> bool:
         path = self._taskboard_path(loop_id)
         with self.store._lock:
             tasks = self.store.load_loop_json_list(path)
@@ -69,7 +82,12 @@ class SuperloopTaskboardService:
                 return False
             self.store.save_loop_json_list(path, tasks)
             self.store.refresh_loop_stats(loop_id)
-        self.store.append_loop_event(loop_id, event_type="task.status_updated", data={"task_id": task_id, "status": status})
+        self.store.append_loop_event(
+            loop_id,
+            event_type="task.status_updated",
+            data={"task_id": task_id, "status": status},
+            actor=actor or system_actor("superloop_taskboard"),
+        )
         return True
 
     def _taskboard_path(self, loop_id: str) -> Path:
