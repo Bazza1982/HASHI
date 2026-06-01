@@ -1,0 +1,112 @@
+{
+  "name": "auto_paper_draft_hard_state_machine",
+  "principle": "No state transition without external evidence.",
+  "states": [
+    {
+      "state": "dispatch_prepared",
+      "description": "Orchestrator has written a dispatch brief, but the worker has not yet confirmed.",
+      "required_evidence": [
+        "dispatch_file_path"
+      ],
+      "may_advance_to": [
+        "hchat_confirmed"
+      ],
+      "forbidden_claims": [
+        "worker_started",
+        "worker_completed"
+      ]
+    },
+    {
+      "state": "hchat_confirmed",
+      "description": "The worker has replied through the real HASHI/hchat route and accepted the task.",
+      "required_evidence": [
+        "hchat_reply_source",
+        "hchat_reply_timestamp",
+        "worker_acceptance_text"
+      ],
+      "may_advance_to": [
+        "worker_artifact_present"
+      ],
+      "forbidden_claims": [
+        "worker_completed"
+      ]
+    },
+    {
+      "state": "worker_artifact_present",
+      "description": "All required worker output artifacts exist on disk.",
+      "required_evidence": [
+        "expected_artifact_paths",
+        "artifact_existence_check"
+      ],
+      "may_advance_to": [
+        "orchestrator_harvested"
+      ],
+      "forbidden_claims": [
+        "reviewer_dispatched",
+        "closeout_allowed"
+      ]
+    },
+    {
+      "state": "orchestrator_harvested",
+      "description": "The orchestrator has read the worker artifacts and written a harvest note.",
+      "required_evidence": [
+        "harvest_note_path",
+        "artifact_summary",
+        "blocker_check"
+      ],
+      "may_advance_to": [
+        "reviewer_dispatched"
+      ],
+      "forbidden_claims": [
+        "reviewer_verdict_present",
+        "closeout_allowed"
+      ]
+    },
+    {
+      "state": "reviewer_dispatched",
+      "description": "The reviewer has been sent a real hchat review request.",
+      "required_evidence": [
+        "review_dispatch_file_path",
+        "reviewer_hchat_delivery_confirmation"
+      ],
+      "may_advance_to": [
+        "reviewer_verdict_present"
+      ],
+      "forbidden_claims": [
+        "closeout_allowed"
+      ]
+    },
+    {
+      "state": "reviewer_verdict_present",
+      "description": "The reviewer has written a valid review report with a verdict.",
+      "required_evidence": [
+        "review_report_path",
+        "verdict"
+      ],
+      "allowed_verdicts": [
+        "NO_BLOCKER_FOR_CITALIO_HANDOFF",
+        "REVISION_REQUIRED",
+        "HOLD_FOR_EVIDENCE_CHECK"
+      ],
+      "may_advance_to": [
+        "closeout_allowed",
+        "revision_required",
+        "evidence_check_required"
+      ]
+    },
+    {
+      "state": "closeout_allowed",
+      "description": "Only reachable after a no-blocker reviewer verdict.",
+      "required_evidence": [
+        "review_report_path",
+        "no_blocker_verdict",
+        "closeout_decision_path",
+        "citalio_handoff_path"
+      ],
+      "may_advance_to": [
+        "closed"
+      ]
+    }
+  ]
+}
+

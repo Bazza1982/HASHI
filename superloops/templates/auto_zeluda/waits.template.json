@@ -1,0 +1,26 @@
+{
+  "default_heartbeat_seconds": 300,
+  "default_agent_reply_deadline_seconds": 1800,
+  "round_review_deadline_seconds": 3600,
+  "stale_report_policy": "classify_before_use",
+  "managed_waits": [
+    {
+      "wait_type": "coding_agent_round_output",
+      "owner": "orchestrator",
+      "follow_up_required": true,
+      "on_timeout": "check_output_paths_then_reprompt_or_reassign"
+    },
+    {
+      "wait_type": "reviewer_report",
+      "owner": "orchestrator",
+      "follow_up_required": true,
+      "on_timeout": "send_targeted_review_reminder_or_pause_with_status"
+    },
+    {
+      "wait_type": "human_scope_decision",
+      "owner": "human",
+      "follow_up_required": false,
+      "on_timeout": "pause_without_guessing"
+    }
+  ]
+}

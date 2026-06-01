@@ -1,0 +1,67 @@
+{
+  "roles": {
+    "orchestrator": {
+      "default_agent": "sakura",
+      "responsibilities": [
+        "Own the research charter, theory alignment, dataset boundary, taskboard, events, waits, and final sufficiency decision.",
+        "Dispatch bounded coding work to the coding agent and bounded review work to the reviewer.",
+        "Keep source status explicit: direct excerpt, daily memory, generated topic synthesis, remote memory, agent context, or metadata.",
+        "Decide whether to refine the codebook, run another coding round, pause, or exit to writing.",
+        "Maintain heartbeat discipline for long coding loops and classify stale reports before acting on them."
+      ],
+      "must_not": [
+        "Must not code the whole corpus before pilot coding stabilises the codebook.",
+        "Must not claim sufficiency without reviewer inspection of coded excerpts.",
+        "Must not let the reviewer decide loop exit.",
+        "Must not accept themes without representative evidence.",
+        "Must not treat generated topic summaries as raw transcript evidence without marking source status."
+      ]
+    },
+    "coding_agent": {
+      "default_agent": "yuhuan",
+      "responsibilities": [
+        "Generate and refine the codebook from the theory-led guide, method memo, and pilot data.",
+        "Extract emotionally meaningful work episodes and preserve source traceability.",
+        "Apply codes consistently according to definitions, inclusion criteria, and exclusion criteria.",
+        "Produce coded episode tables, analytic memos, theme candidates, and evidence matrices.",
+        "Flag ambiguous excerpts, weak evidence, negative cases, and codebook problems."
+      ],
+      "must_not": [
+        "Must not edit source data files in place.",
+        "Must not code isolated keywords as findings without episode context.",
+        "Must not hide uncertain or ambiguous coding decisions.",
+        "Must not collapse source types or remove traceability.",
+        "Must not write final findings before reviewer sufficiency review."
+      ]
+    },
+    "reviewer": {
+      "default_agent": "momo",
+      "responsibilities": [
+        "Review the codebook, coded excerpts, source traceability, coding consistency, and evidence strength.",
+        "Challenge unsupported interpretations, overbroad codes, weak themes, and missing negative cases.",
+        "Classify findings as blocker, non-blocker, or follow-up.",
+        "Assess whether each major theme is supported by strong empirical material.",
+        "Provide a sufficiency judgement before the loop exits to writing."
+      ],
+      "must_not": [
+        "Must not execute the main coding work.",
+        "Must not approve coding based only on summaries.",
+        "Must not ignore source-type differences.",
+        "Must not decide loop exit on behalf of the orchestrator.",
+        "Must not accept saturation claims without evidence."
+      ]
+    },
+    "human": {
+      "default_agent": "Barry",
+      "responsibilities": [
+        "Approve research direction, theory changes, major sampling changes, and movement into manuscript writing.",
+        "Clarify ambiguous research intent or sensitive ethics boundaries.",
+        "Approve any coding rounds beyond the default three-round plan."
+      ],
+      "must_not": [
+        "Should not be asked to decide routine code application when the codebook already covers it.",
+        "Should not be bypassed for major theory or scope changes."
+      ]
+    }
+  }
+}
