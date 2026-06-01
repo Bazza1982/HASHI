@@ -908,6 +908,43 @@ Mitigation:
 
 ## Immediate Next Actions
 
+### Function-layer implementation status
+
+The following function-layer checkpoints have been implemented without touching
+the protected HASHI core paths:
+
+- `remote/protocol_router.py` validates structured envelopes before dispatch:
+  required fields, `agent_reply` correlation, TTL clamp, hop-count expiry, and
+  route-trace loop rejection.
+- `remote/protocol_outbound.py` records outbound correlations through the
+  sidecar-owned `/protocol/outbound` endpoint, with `tools/protocol_send.py`
+  retaining the legacy file fallback for old sidecars.
+- `remote/protocol_ack.py` records authenticated protocol ACKs through
+  `/protocol/ack`.
+- `remote/api/server.py` now exposes authenticated `/protocol/directory`,
+  `/protocol/outbound`, `/protocol/ack`, and `/protocol/reply` endpoints.
+- `/protocol/status` advertises the API-layer endpoint capabilities and reports
+  trusted `protocol_api_state` counts for outbound correlations and ACKs.
+- `tools/hchat_send.py` delegates protocol transport sends to
+  `tools.protocol_send.send_protocol_message`, so Hchat protocol sends share the
+  same outbound correlation path.
+- Hchat remote discovery now prefers authenticated `/protocol/directory` and
+  falls back to legacy `/protocol/agents` for mixed-version peers.
+
+The following items remain deliberately unfinished because they require changes
+to protected core paths such as `remote/protocol_manager.py` or
+`remote/peer/base.py`, or because they require live multi-instance rollout
+evidence before removing compatibility paths:
+
+- full sidecar restart catch-up and transcript resume for non-terminal inflight
+  records;
+- deeper peer-state canonicalization that changes `PeerInfo` or peer registry
+  semantics;
+- complete retirement of legacy cross-instance `/hchat` and `HASHI1` exchange
+  fallback;
+- manager-level reply reinjection behaviour when the originating local agent is
+  unavailable.
+
 1. Add a dedicated remote router module under `remote/` for envelope validation and message lifecycle.
 2. Extend `PeerInfo` and discovery payloads with protocol metadata.
 3. Add handshake + directory endpoints in `remote/api/server.py`, including `handshake_reject`.
