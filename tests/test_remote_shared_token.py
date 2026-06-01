@@ -179,6 +179,77 @@ def test_protocol_message_requires_auth_when_token_configured(tmp_path):
     assert protocol.messages == []
 
 
+def test_protocol_message_rejects_route_loop_before_manager(tmp_path):
+    token = _write_shared_token(tmp_path)
+    client, protocol = _client(tmp_path)
+    payload = {
+        "message_id": "m-loop",
+        "conversation_id": "c-loop",
+        "from_instance": "HASHI2",
+        "from_agent": "rika",
+        "to_instance": "HASHI_LOCAL",
+        "to_agent": "lily",
+        "body": {"text": "hello"},
+        "ttl": 8,
+        "route_trace": ["HASHI2", "HASHI_LOCAL"],
+    }
+    body = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    headers.update(
+        build_auth_headers(
+            shared_token=token,
+            method="POST",
+            path="/protocol/message",
+            from_instance="HASHI2",
+            body_bytes=body,
+            timestamp=int(time.time()),
+            nonce="message-loop",
+        )
+    )
+
+    response = client.post("/protocol/message", content=body, headers=headers)
+
+    assert response.status_code == 409
+    assert response.json()["body"]["code"] == "loop_detected"
+    assert protocol.messages == []
+
+
+def test_protocol_message_rejects_expired_ttl_before_manager(tmp_path):
+    token = _write_shared_token(tmp_path)
+    client, protocol = _client(tmp_path)
+    payload = {
+        "message_id": "m-expired",
+        "conversation_id": "c-expired",
+        "from_instance": "HASHI2",
+        "from_agent": "rika",
+        "to_instance": "HASHI_LOCAL",
+        "to_agent": "lily",
+        "body": {"text": "hello"},
+        "ttl": 1,
+        "hop_count": 1,
+        "route_trace": ["HASHI2"],
+    }
+    body = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    headers.update(
+        build_auth_headers(
+            shared_token=token,
+            method="POST",
+            path="/protocol/message",
+            from_instance="HASHI2",
+            body_bytes=body,
+            timestamp=int(time.time()),
+            nonce="message-expired",
+        )
+    )
+
+    response = client.post("/protocol/message", content=body, headers=headers)
+
+    assert response.status_code == 400
+    assert response.json()["body"]["code"] == "delivery_expired"
+    assert protocol.messages == []
+
+
 def test_protocol_outbound_accepts_valid_shared_token(tmp_path, monkeypatch):
     monkeypatch.setattr("remote.protocol_outbound.Path.home", lambda: tmp_path)
     token = _write_shared_token(tmp_path)
