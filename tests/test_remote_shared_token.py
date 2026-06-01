@@ -250,6 +250,42 @@ def test_protocol_message_rejects_expired_ttl_before_manager(tmp_path):
     assert protocol.messages == []
 
 
+def test_protocol_reply_forces_agent_reply_message_type(tmp_path):
+    token = _write_shared_token(tmp_path)
+    client, protocol = _client(tmp_path)
+    payload = {
+        "message_id": "m-reply",
+        "conversation_id": "c-reply",
+        "in_reply_to": "m-original",
+        "from_instance": "HASHI2",
+        "from_agent": "rika",
+        "to_instance": "HASHI_LOCAL",
+        "to_agent": "lily",
+        "body": {"text": "done"},
+        "ttl": 8,
+        "route_trace": ["HASHI2"],
+    }
+    body = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    headers.update(
+        build_auth_headers(
+            shared_token=token,
+            method="POST",
+            path="/protocol/reply",
+            from_instance="HASHI2",
+            body_bytes=body,
+            timestamp=int(time.time()),
+            nonce="reply-1",
+        )
+    )
+
+    response = client.post("/protocol/reply", content=body, headers=headers)
+
+    assert response.status_code == 202
+    assert protocol.messages[0]["message_type"] == "agent_reply"
+    assert protocol.messages[0]["in_reply_to"] == "m-original"
+
+
 def test_protocol_outbound_accepts_valid_shared_token(tmp_path, monkeypatch):
     monkeypatch.setattr("remote.protocol_outbound.Path.home", lambda: tmp_path)
     token = _write_shared_token(tmp_path)

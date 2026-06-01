@@ -749,6 +749,17 @@ def create_app(
     async def protocol_message(request: Request, payload: ProtocolMessagePayload):
         if _protocol_manager is None:
             return JSONResponse(status_code=503, content={"ok": False, "error": "protocol manager unavailable"})
+        return await _dispatch_protocol_message(request, payload)
+
+    @app.post("/protocol/reply")
+    async def protocol_reply(request: Request, payload: ProtocolMessagePayload):
+        if _protocol_manager is None:
+            return JSONResponse(status_code=503, content={"ok": False, "error": "protocol manager unavailable"})
+        data = payload.model_dump()
+        data["message_type"] = "agent_reply"
+        return await _dispatch_protocol_message(request, ProtocolMessagePayload(**data))
+
+    async def _dispatch_protocol_message(request: Request, payload: ProtocolMessagePayload):
         body_bytes = await request.body()
         ok, reason, _auth_identity = verify_protocol_request(
             request,
