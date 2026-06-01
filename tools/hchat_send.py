@@ -26,8 +26,6 @@ import re
 import ssl
 import sys
 import time
-import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
@@ -39,7 +37,6 @@ if __name__ == "__main__":
     sys.modules.setdefault("tools.hchat_send", sys.modules[__name__])
 
 from remote.delivery_results import format_delivery_result
-from remote.security.client_auth import build_client_auth_headers
 
 CONTACTS_FILE = ROOT / "contacts.json"
 INSTANCES_FILE = ROOT / "instances.json"
@@ -732,73 +729,18 @@ def _send_via_protocol_transport(
     shared_token = _shared_token_for_protocol()
     if not shared_token:
         return False
-    cfg = _load_config()
-    source_instance = _normalize_instance_id(_get_instance_id(cfg))
-    remote = _find_remote_instance(to_agent, source_instance, target_instance=target_instance)
-    if not remote:
-        return False
-    remote_port = remote.get("remote_port") or remote.get("port")
-    remote_host = remote.get("remote_host", remote.get("host"))
-    if not remote_host or not remote_port:
-        return False
-    if not _probe_remote_http(remote_host, int(remote_port)):
-        return False
-
-    message_id = f"msg-{uuid.uuid4().hex[:16]}"
-    payload = {
-        "message_type": "agent_message",
-        "message_id": message_id,
-        "conversation_id": f"conv-{uuid.uuid4().hex[:16]}",
-        "from_instance": source_instance,
-        "from_agent": from_agent.lower(),
-        "to_instance": _normalize_instance_id(target_instance),
-        "to_agent": to_agent.lower(),
-        "body": {"text": text},
-        "hop_count": 0,
-        "ttl": 8,
-        "route_trace": [source_instance],
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    url = f"http://{remote_host}:{int(remote_port)}/protocol/message"
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib_request.Request(
-        url,
-        data=data,
-        headers=build_client_auth_headers(
-            url=url,
-            method="POST",
-            data=data,
-            token=None,
-            shared_token=shared_token,
-            from_instance=source_instance,
-            normalize_instance=_normalize_instance_id,
-        ),
-        method="POST",
-    )
     try:
-        with urllib_request.urlopen(req, timeout=10) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-        if result.get("ok"):
-            print(f"✅ Hchat delivered (protocol transport, {remote_host}:{int(remote_port)}): {from_agent} → {to_agent}@{target_instance}")
-            print(f"   Message: {text[:80]}{'...' if len(text) > 80 else ''}")
-            return True
-        print(f"⚠️ Protocol transport error: {format_delivery_result(result)}", file=sys.stderr)
-        print(f"   Raw: {json.dumps(result, ensure_ascii=False)}", file=sys.stderr)
-        return False
-    except HTTPError as exc:
-        try:
-            body = exc.read().decode("utf-8")
-            payload = json.loads(body)
-        except Exception:
-            payload = None
-            body = str(exc)
-        print(f"⚠️ Protocol transport HTTP error: {format_delivery_result(payload, transport_error=body)}", file=sys.stderr)
-        print(f"   Raw: {body}", file=sys.stderr)
-        return False
+        from tools.protocol_send import send_protocol_message
     except Exception as exc:
-        print(f"⚠️ Protocol transport handoff failed: {format_delivery_result(transport_error=str(exc))}", file=sys.stderr)
-        print(f"   Raw: {exc}", file=sys.stderr)
+        print(f"⚠️ Protocol transport unavailable: {format_delivery_result(transport_error=str(exc))}", file=sys.stderr)
         return False
+    return send_protocol_message(
+        f"{to_agent}@{target_instance}",
+        from_agent,
+        text,
+        target_instance=target_instance,
+        shared_token=shared_token,
+    )
 
 
 def _send_via_workbench(
