@@ -274,36 +274,20 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
         instance = health.get("instance") or {}
         peers = list((health.get("peers") or []))
         lines = [
-            "🟢 <b>Hashi Remote Status</b>",
+            "🟢 <b>Hashi Remote</b>",
             f"Instance: <code>{instance.get('instance_id') or runtime.global_config.project_root.name.upper()}</code>",
             f"API: <code>{health_url}</code>",
-            f"Port: <code>{cfg['port']}</code>  ·  TLS: <code>{'on' if cfg['use_tls'] else 'off'}</code>",
-            f"Discovery: <code>{cfg['backend']}</code>",
-            f"Lifecycle: <code>{'enabled' if lifecycle.enabled else 'disabled_by_config'}</code>  ·  Disabled state: <code>{'yes' if disabled else 'no'}</code>",
-            f"Supervisor: <code>{'requested' if lifecycle.supervised else 'child_fallback'}</code>",
-            f"Process: <code>{'running' if alive else 'external/unknown'}</code>" + (f" (PID {runtime._remote_process.pid})" if alive else ""),
-            f"Peers: <code>{len(peers)}</code>",
         ]
         if disabled:
+            lines.append("Remote: <code>disabled</code>")
             lines.append(f"Disabled reason: <code>{html.escape(str(disabled.get('reason') or 'unknown'))}</code>")
         if status:
-            inflight = int(status.get("inflight_count") or 0)
-            lines.append(f"Inflight: <code>{inflight}</code>")
-            lines.append(
-                "Auth: <code>%s</code>  ·  shared token: <code>%s</code>  ·  lan mode: <code>%s</code>"
-                % (
-                    html.escape(str(status.get("protocol_auth_mode") or health.get("protocol_auth_mode") or "unknown")),
-                    "yes" if (status.get("shared_token_configured") or health.get("shared_token_configured")) else "no",
-                    "on" if (status.get("lan_mode") if "lan_mode" in status else health.get("lan_mode")) else "off",
-                )
-            )
-            if not (status.get("shared_token_configured") or health.get("shared_token_configured")):
-                lines.append("Mode: <code>discovery-only</code> — trusted protocol messaging is unavailable.")
-            rescue_enabled = bool(status.get("rescue_start_enabled"))
-            if rescue_enabled:
-                lines.append("Rescue start: <code>enabled</code>")
-            else:
-                lines.append("Rescue start: <code>false</code> (<code>requires L3_RESTART</code>)")
+            shared_token = bool(status.get("shared_token_configured") or health.get("shared_token_configured"))
+            lan_mode = bool(status.get("lan_mode") if "lan_mode" in status else health.get("lan_mode"))
+            if not shared_token:
+                lines.append("Security: <code>discovery-only</code> — trusted protocol messaging is unavailable.")
+            elif lan_mode:
+                lines.append("Security: <code>token ok</code>  ·  LAN relaxed mode: <code>on</code>")
             route_diagnostics = status.get("route_diagnostics") or {}
             conflicts = list(route_diagnostics.get("port_conflicts") or [])
             if conflicts:

@@ -220,8 +220,10 @@ async def test_remote_status_includes_peer_list(tmp_path, monkeypatch):
     await runtime_remote.cmd_remote(runtime, update, context)
 
     text = replies[-1]["text"]
-    assert "🟢 <b>Hashi Remote Status</b>" in text
-    assert "Peers: <code>2</code>" in text
+    assert "🟢 <b>Hashi Remote</b>" in text
+    assert "Peers:" not in text
+    assert "Inflight:" not in text
+    assert "Rescue:" not in text
     assert "📡 <b>Remote Instances</b>" in text
     assert "online: <code>1</code>  ·  attention: <code>0</code>  ·  offline: <code>1</code>" in text
     assert "peer:HASHI9" in text

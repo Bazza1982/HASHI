@@ -65,7 +65,7 @@ class _RemoteListDummy:
         self._instances = {}
 
     def _render_remote_peer_endpoints(self, peer):
-        return ["route: <code>127.0.0.1:8766</code>  ·  <code>same host</code>  ·  network: <code>100.64.100.6:8766</code>"]
+        return ["addr: <code>local 127.0.0.1:8766</code>  ·  <code>lan 100.64.100.6:8766</code>"]
 
 
 def test_registry_derives_offline_for_timed_out_peer_without_live_fields(tmp_path):
@@ -1277,9 +1277,7 @@ def test_render_remote_peer_endpoints_explains_same_host_loopback(tmp_path):
 
     lines = FlexibleAgentRuntime._render_remote_peer_endpoints(dummy, peer)
 
-    assert lines == [
-        "route: <code>127.0.0.1:8768</code>  ·  <code>same host</code>  ·  network: <code>192.168.0.211:8768</code>"
-    ]
+    assert lines == ["addr: <code>local 127.0.0.1:8768</code>  ·  <code>lan 192.168.0.211:8768</code>"]
 
 
 def test_render_remote_peer_endpoints_shows_route_and_network_when_they_differ(tmp_path):
@@ -1310,8 +1308,8 @@ def test_render_remote_peer_endpoints_shows_route_and_network_when_they_differ(t
     lines = FlexibleAgentRuntime._render_remote_peer_endpoints(dummy, peer)
 
     assert lines == [
-        "route: <code>desktopvn0amd7:8767</code>",
-        "network: <code>192.168.0.41:8767</code>",
+        "addr: <code>desktopvn0amd7:8767</code>",
+        "lan: <code>192.168.0.41:8767</code>",
     ]
 
 
@@ -2533,3 +2531,30 @@ def test_flex_hchat_reply_body_is_not_replied_again(monkeypatch):
     asyncio.run(runtime._hchat_route_reply(item, "ack"))
 
     send_mock.assert_not_called()
+
+
+def test_protocol_status_counts_only_active_inflight_messages():
+    manager = ProtocolManager.__new__(ProtocolManager)
+    manager._peer_registry = None
+    manager._instance_info = {"instance_id": "HASHI1"}
+    manager._capabilities = ["protocol_message_v1"]
+    manager._inflight = {
+        "active": {"state": "assistant_started"},
+        "queued": {"state": "delivered_to_local_queue"},
+        "sent": {"state": "reply_sent"},
+        "failed": {"state": "failed"},
+        "timed_out": {"state": "timed_out"},
+    }
+    manager._max_allowed_ttl = 8
+    manager._reply_soft_timeout_seconds = 45
+    manager._reply_hard_timeout_seconds = 180
+    manager.get_local_agents_snapshot = lambda: []
+    manager.get_local_agent_directory_state = lambda: {}
+    manager.get_route_diagnostics = lambda: {}
+    manager._local_network_profile = lambda: {}
+
+    status = manager.get_protocol_status()
+
+    assert status["inflight_count"] == 2
+    assert status["inflight_total_count"] == 5
+    assert status["inflight_terminal_count"] == 3
