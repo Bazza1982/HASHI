@@ -43,6 +43,7 @@ from pydantic import BaseModel
 
 from ..attachments import AttachmentStore
 from ..protocol_outbound import register_outbound_correlation
+from ..protocol_router import validate_protocol_envelope
 from ..security.auth import (
     authenticate_request_detailed,
     has_shared_token,
@@ -761,7 +762,18 @@ def create_app(
                     },
                 },
             )
-        status, result = await _protocol_manager.handle_protocol_message(payload.model_dump())
+        try:
+            max_allowed_ttl = int((_protocol_manager.get_protocol_status() or {}).get("max_allowed_ttl") or 8)
+        except Exception:
+            max_allowed_ttl = 8
+        validation = validate_protocol_envelope(
+            payload.model_dump(),
+            local_instance=str(_instance_info.get("instance_id") or ""),
+            max_allowed_ttl=max_allowed_ttl,
+        )
+        if not validation.ok:
+            return JSONResponse(status_code=validation.status_code, content=validation.error)
+        status, result = await _protocol_manager.handle_protocol_message(validation.payload)
         return JSONResponse(status_code=status, content=result)
 
     @app.post("/protocol/outbound")
