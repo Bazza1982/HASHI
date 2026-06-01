@@ -204,6 +204,28 @@ def test_send_hchat_remote_prefers_protocol_transport_when_shared_token_availabl
     assert calls == [("agent1", "INTEL", "zelda", "hello over protocol")]
 
 
+def test_protocol_transport_delegates_to_protocol_send(monkeypatch):
+    from tools import protocol_send
+
+    calls = []
+    monkeypatch.setattr(hchat_send, "_shared_token_for_protocol", lambda: "shared-secret")
+    monkeypatch.setattr(
+        protocol_send,
+        "send_protocol_message",
+        lambda target, from_agent, text, **kwargs: calls.append((target, from_agent, text, kwargs)) or True,
+    )
+
+    assert hchat_send._send_via_protocol_transport("agent1", "INTEL", "zelda", "hello over protocol") is True
+    assert calls == [
+        (
+            "agent1@INTEL",
+            "zelda",
+            "hello over protocol",
+            {"target_instance": "INTEL", "shared_token": "shared-secret"},
+        )
+    ]
+
+
 def test_check_hchat_route_reports_protocol_transport_when_available(monkeypatch):
     cfg = _local_cfg()
     remote = {
