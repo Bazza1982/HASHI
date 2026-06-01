@@ -70,6 +70,30 @@ python tools/hchat_send.py --to agent@INSTANCE --from <agent> --check
 The first `git pull` updates code only. Restart or refresh the Remote sidecar on
 that instance before treating `/remote list` as evidence for the new behavior.
 
+For the Remote P2P function-layer upgrade, "upgraded" means all of the
+following are true on each instance:
+
+1. The instance has pulled the published commits from GitHub.
+2. The running code has been refreshed with `/reboot` or `/remote off` followed
+   by `/remote on`.
+3. Local loopback `/protocol/status` reports:
+
+   - `ok: true`
+   - `protocol_announce_v1`
+   - `protocol_directory_v1`
+   - `protocol_outbound_correlation_v1`
+   - `protocol_ack_v1`
+   - `protocol_reply_v1`
+
+4. Local loopback `/protocol/directory` returns `ok: true`, `agents`, and
+   `agent_directory`.
+5. A cross-instance smoke to `agent@INSTANCE` reaches the target without
+   duplicate delivery or reply recursion.
+
+During mixed-version rollout, successful GitHub push alone is not sufficient
+evidence. A peer that has not pulled and refreshed may still use legacy
+directory or `/hchat` compatibility paths.
+
 ## Supervisor Install
 
 Linux / WSL:
@@ -106,6 +130,11 @@ Only use `L3_RESTART` on trusted LAN/Tailscale machines.
 - `/remote list` shows peers as `online` after secure handshake.
 - `/protocol/status` includes `route_diagnostics`, `local_agent_directory`, and
   rescue capability flags.
+- For P2P function-layer rollout, `/protocol/status` also advertises
+  `protocol_announce_v1`, `protocol_directory_v1`,
+  `protocol_outbound_correlation_v1`, `protocol_ack_v1`, and
+  `protocol_reply_v1`.
+- `/protocol/directory` returns authenticated local agent directory data.
 - `python tools/remote_rescue.py status <INSTANCE>` returns the core state.
 - `python tools/remote_rescue.py logs <INSTANCE> --name start` returns a bounded
   log tail.

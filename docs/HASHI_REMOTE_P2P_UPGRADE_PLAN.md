@@ -910,6 +910,11 @@ Mitigation:
 
 ### Function-layer implementation status
 
+Status as of 2026-06-01: the function-layer portion of this plan is
+implemented and tested. It is ready for GitHub rollout, but every peer must
+pull the code and refresh its running Remote sidecar before the new behaviour
+is considered active on that instance.
+
 The following function-layer checkpoints have been implemented without touching
 the protected HASHI core paths:
 
@@ -930,6 +935,84 @@ the protected HASHI core paths:
   same outbound correlation path.
 - Hchat remote discovery now prefers authenticated `/protocol/directory` and
   falls back to legacy `/protocol/agents` for mixed-version peers.
+
+### GitHub rollout and instance adoption checklist
+
+Publishing to GitHub only publishes source code. It does not update already
+running HASHI instances by itself. For each peer, the required adoption sequence
+is:
+
+1. Pull the latest branch:
+
+   ```bash
+   git pull
+   ```
+
+2. Refresh the running code by using either normal reboot:
+
+   ```text
+   /reboot
+   ```
+
+   or Remote-only refresh if the operator wants to avoid agent reboot:
+
+   ```text
+   /remote off
+   /remote on
+   ```
+
+3. Check the local sidecar status:
+
+   ```bash
+   curl -s http://127.0.0.1:8766/protocol/status
+   ```
+
+   A successful function-layer adoption should report `ok: true` and advertise
+   these API-layer capabilities:
+
+   - `protocol_announce_v1`
+   - `protocol_directory_v1`
+   - `protocol_outbound_correlation_v1`
+   - `protocol_ack_v1`
+   - `protocol_reply_v1`
+
+4. Check the authenticated directory endpoint:
+
+   ```bash
+   curl -s http://127.0.0.1:8766/protocol/directory
+   ```
+
+   Expected result:
+
+   - `ok: true`
+   - local `instance_id`
+   - non-empty `agents` when local agents are online
+   - `agent_directory`
+   - `trusted_view: true` for loopback or authenticated callers
+
+5. Refresh peer liveness:
+
+   ```bash
+   curl -s "http://127.0.0.1:8766/peers?refresh=1"
+   ```
+
+   Mixed-version peers can still appear as legacy or untrusted during rollout.
+   Do not treat that as a failure until all peers have pulled and refreshed.
+
+6. Run one explicit cross-instance Hchat smoke after both source and target
+   peers have adopted the new code:
+
+   ```bash
+   python tools/hchat_send.py --to target_agent@HASHI2 --from zelda --text "remote protocol smoke test"
+   ```
+
+   The expected behaviour is protocol-first delivery, outbound correlation
+   state recorded under `~/.hashi-remote/`, no duplicate inbound work, and no
+   reply loop.
+
+The rollout is not complete until every supported peer has completed this
+sequence. A single upgraded sender talking to an old peer may intentionally
+fall back to compatibility behaviour.
 
 The following items remain deliberately unfinished because they require changes
 to protected core paths such as `remote/protocol_manager.py` or
