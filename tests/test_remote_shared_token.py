@@ -578,6 +578,40 @@ def test_protocol_status_trusted_view_includes_api_endpoint_capabilities(tmp_pat
     assert "protocol_reply_v1" in body["capabilities"]
 
 
+def test_protocol_status_trusted_view_reports_api_state_counts(tmp_path, monkeypatch):
+    monkeypatch.setattr("remote.protocol_outbound.Path.home", lambda: tmp_path)
+    monkeypatch.setattr("remote.protocol_ack.Path.home", lambda: tmp_path)
+    state_dir = tmp_path / ".hashi-remote"
+    state_dir.mkdir()
+    (state_dir / "protocol_outbound_hashi_local.json").write_text(
+        json.dumps({"messages": {"m1": {}, "m2": {}}}),
+        encoding="utf-8",
+    )
+    (state_dir / "protocol_ack_hashi_local.json").write_text(
+        json.dumps({"messages": {"m1": {}}}),
+        encoding="utf-8",
+    )
+    token = _write_shared_token(tmp_path)
+    client, _protocol = _client(tmp_path)
+    headers = build_auth_headers(
+        shared_token=token,
+        method="GET",
+        path="/protocol/status",
+        from_instance="HASHI2",
+        body_bytes=b"",
+        timestamp=int(time.time()),
+        nonce="status-state",
+    )
+
+    response = client.get("/protocol/status", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["protocol_api_state"] == {
+        "outbound_correlation_count": 2,
+        "ack_count": 1,
+    }
+
+
 def test_protocol_directory_requires_auth_when_token_configured(tmp_path):
     _write_shared_token(tmp_path)
     client, _protocol = _client(tmp_path)
