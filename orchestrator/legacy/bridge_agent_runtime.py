@@ -5036,7 +5036,7 @@ class BridgeAgentRuntime:
         self.app.add_handler(CallbackQueryHandler(self.callback_voice, pattern=r"^voice:"))
         self.app.add_handler(CallbackQueryHandler(self.callback_safevoice, pattern=r"^safevoice:"))
         self.app.add_handler(CallbackQueryHandler(self.callback_start_agent, pattern=r"^startagent:"))
-        self.app.add_handler(CallbackQueryHandler(self.callback_skill, pattern=r"^(skill|skilljob):"))
+        self.app.add_handler(CallbackQueryHandler(self.callback_skill, pattern=r"^(skill|skilljob|nudgejob):"))
         self.app.add_handler(CommandHandler("new", self.cmd_new))
         self.app.add_handler(CommandHandler("fresh", self.cmd_fresh))
         self.app.add_handler(CommandHandler("memory", self.cmd_memory))
