@@ -87,7 +87,13 @@ DEFAULT_CAPABILITIES = [
     "agent_reply_v1",
     "rescue_control",
 ]
-TERMINAL_INFLIGHT_STATES = {"reply_sent", "failed", "timed_out"}
+TERMINAL_INFLIGHT_STATES = {
+    "reply_sent",
+    "failed",
+    "timed_out",
+    "abandoned_after_restart",
+    "reply_delivered_locally",
+}
 
 
 def build_default_capabilities(*, rescue_start_enabled: bool = False) -> list[str]:
@@ -132,6 +138,8 @@ class ProtocolManager:
         instance_key = str(instance_info.get("instance_id") or "hashi").lower()
         self._inflight_path = self._state_dir / f"protocol_inflight_{instance_key}.json"
         self._inflight: dict[str, dict[str, Any]] = self._load_json(self._inflight_path).get("messages", {})
+        if self._mark_nonterminal_inflight_abandoned_after_restart():
+            self._save_inflight()
         self._shared_token = load_shared_token(self._hashi_root)
         self._task: asyncio.Task | None = None
         self._running = False
@@ -941,12 +949,50 @@ class ProtocolManager:
         }
 
     async def _handle_agent_reply(self, payload: dict) -> tuple[int, dict]:
+        message_id = str(payload.get("message_id") or "").strip()
+        conversation_id = str(payload.get("conversation_id") or "").strip()
+        in_reply_to = str(payload.get("in_reply_to") or "").strip()
         to_agent = str(payload.get("to_agent") or "").strip().lower()
         from_agent = str(payload.get("from_agent") or "").strip().lower()
         from_instance = str(payload.get("from_instance") or "").strip().upper()
         body = payload.get("body") or {}
-        if not to_agent:
-            return 400, self._error_payload("invalid_reply", "Missing to_agent for agent_reply", retryable=False, payload=payload)
+        route_trace = [str(x).upper() for x in (payload.get("route_trace") or []) if str(x).strip()]
+        local_instance = str(self._instance_info.get("instance_id") or "").strip().upper()
+        normalized_ttl = min(max(int(payload.get("ttl") or self._max_allowed_ttl), 0), self._max_allowed_ttl)
+
+        if normalized_ttl <= 0:
+            return 400, self._error_payload("delivery_expired", "TTL expired or invalid", retryable=False, payload=payload)
+        if not all([message_id, conversation_id, in_reply_to, from_instance, from_agent, to_agent]):
+            return 400, self._error_payload("invalid_reply", "Missing required agent_reply fields", retryable=False, payload=payload)
+        if local_instance in route_trace:
+            return 409, self._error_payload("loop_detected", "Local instance already present in reply route_trace", retryable=False, payload=payload)
+        if from_instance == local_instance:
+            return 409, self._error_payload("loop_detected", "Refusing local self-bounce agent_reply", retryable=False, payload=payload)
+
+        existing_reply = self._inflight.get(message_id)
+        if existing_reply:
+            state = str(existing_reply.get("state") or "")
+            if state in TERMINAL_INFLIGHT_STATES:
+                return 409, self._error_payload("duplicate_message", "Reply message already terminal", retryable=False, payload=payload)
+            return 202, {
+                "ok": True,
+                "message_type": "ack",
+                "message_id": message_id,
+                "conversation_id": conversation_id,
+                "accepted": True,
+                "state": state,
+                "request_id": existing_reply.get("request_id"),
+                "normalized_ttl": existing_reply.get("ttl", normalized_ttl),
+            }
+
+        correlation_state = "missing_legacy_allowed"
+        correlated = self._inflight.get(in_reply_to)
+        if correlated:
+            correlated_conversation_id = str(correlated.get("conversation_id") or "").strip()
+            if correlated_conversation_id and correlated_conversation_id != conversation_id:
+                return 409, self._error_payload("reply_correlation_mismatch", "Reply conversation_id does not match correlation record", retryable=False, payload=payload)
+            correlation_state = "matched"
+
         local_agents = {item["agent_name"] for item in self.get_local_agents_snapshot()}
         if to_agent not in local_agents:
             return 404, self._error_payload("target_agent_unavailable", f"Reply target '{to_agent}' is unavailable", retryable=True, payload=payload)
@@ -954,14 +1000,39 @@ class ProtocolManager:
         request_id = await self._enqueue_local_prompt(to_agent, prompt_text)
         if not request_id:
             return 502, self._error_payload("local_enqueue_failed", "Failed to inject reply into local agent", retryable=True, payload=payload)
+        now = int(time.time())
+        if correlated:
+            correlated["state"] = "reply_delivered_locally"
+            correlated["reply_message_id"] = message_id
+            correlated["reply_delivered_at"] = now
+        self._inflight[message_id] = {
+            "message_id": message_id,
+            "conversation_id": conversation_id,
+            "in_reply_to": in_reply_to,
+            "from_instance": from_instance,
+            "from_agent": from_agent,
+            "to_instance": local_instance,
+            "to_agent": to_agent,
+            "request_id": request_id,
+            "state": "reply_delivered_locally",
+            "correlation_state": correlation_state,
+            "route_trace": route_trace,
+            "ttl": normalized_ttl,
+            "created_at": now,
+            "updated_at": now,
+        }
+        self._save_inflight()
         return 202, {
             "ok": True,
             "message_type": "ack",
+            "message_id": message_id,
             "accepted": True,
             "state": "reply_delivered_locally",
             "request_id": request_id,
-            "in_reply_to": payload.get("in_reply_to"),
-            "conversation_id": payload.get("conversation_id"),
+            "in_reply_to": in_reply_to,
+            "conversation_id": conversation_id,
+            "correlation_state": correlation_state,
+            "normalized_ttl": normalized_ttl,
         }
 
     def _render_remote_message_prompt(self, from_agent: str, from_instance: str, body: dict) -> str:
@@ -1145,6 +1216,24 @@ class ProtocolManager:
                 "details": {},
             },
         }
+
+    def _mark_nonterminal_inflight_abandoned_after_restart(self) -> bool:
+        """Make restart adoption explicit instead of leaving old inflight state ambiguous."""
+        changed = False
+        now = int(time.time())
+        for message_id, item in list(self._inflight.items()):
+            if not isinstance(item, dict):
+                continue
+            state = str(item.get("state") or "")
+            if state in TERMINAL_INFLIGHT_STATES:
+                continue
+            item["previous_state"] = state or "unknown"
+            item["state"] = "abandoned_after_restart"
+            item["abandoned_reason"] = "sidecar_restart_without_rebind"
+            item["updated_at"] = now
+            self._inflight[message_id] = item
+            changed = True
+        return changed
 
     def _get_json(self, url: str, timeout: int = 10) -> dict:
         req = urllib_request.Request(url, method="GET")

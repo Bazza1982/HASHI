@@ -2558,3 +2558,124 @@ def test_protocol_status_counts_only_active_inflight_messages():
     assert status["inflight_count"] == 2
     assert status["inflight_total_count"] == 5
     assert status["inflight_terminal_count"] == 3
+
+
+def _reply_payload(**overrides):
+    payload = {
+        "message_type": "agent_reply",
+        "message_id": "msg-1:reply",
+        "conversation_id": "conv-1",
+        "in_reply_to": "msg-1",
+        "from_instance": "HASHI2",
+        "from_agent": "rika",
+        "to_instance": "HASHI1",
+        "to_agent": "zelda",
+        "body": {"text": "done"},
+        "ttl": 8,
+        "route_trace": ["HASHI2"],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _reply_manager(tmp_path):
+    manager = ProtocolManager.__new__(ProtocolManager)
+    manager._instance_info = {"instance_id": "HASHI1"}
+    manager._max_allowed_ttl = 8
+    manager._inflight = {}
+    manager._inflight_path = tmp_path / "inflight.json"
+    manager.get_local_agents_snapshot = lambda: [{"agent_name": "zelda"}]
+
+    async def enqueue(agent_name, text):
+        manager._last_enqueue = (agent_name, text)
+        return "req-1"
+
+    manager._enqueue_local_prompt = enqueue
+    return manager
+
+
+def test_agent_reply_rejects_missing_correlation_field(tmp_path):
+    manager = _reply_manager(tmp_path)
+
+    status, result = asyncio.run(manager._handle_agent_reply(_reply_payload(in_reply_to="")))
+
+    assert status == 400
+    assert result["body"]["code"] == "invalid_reply"
+
+
+def test_agent_reply_rejects_route_trace_loop(tmp_path):
+    manager = _reply_manager(tmp_path)
+
+    status, result = asyncio.run(manager._handle_agent_reply(_reply_payload(route_trace=["HASHI2", "HASHI1"])))
+
+    assert status == 409
+    assert result["body"]["code"] == "loop_detected"
+
+
+def test_agent_reply_dedupes_terminal_reply_without_second_enqueue(tmp_path):
+    manager = _reply_manager(tmp_path)
+    manager._inflight["msg-1:reply"] = {"state": "reply_delivered_locally", "request_id": "req-old"}
+
+    status, result = asyncio.run(manager._handle_agent_reply(_reply_payload()))
+
+    assert status == 409
+    assert result["body"]["code"] == "duplicate_message"
+    assert not hasattr(manager, "_last_enqueue")
+
+
+def test_agent_reply_accepts_and_records_legacy_missing_correlation(tmp_path):
+    manager = _reply_manager(tmp_path)
+
+    status, result = asyncio.run(manager._handle_agent_reply(_reply_payload()))
+
+    assert status == 202
+    assert result["state"] == "reply_delivered_locally"
+    assert result["correlation_state"] == "missing_legacy_allowed"
+    assert manager._inflight["msg-1:reply"]["state"] == "reply_delivered_locally"
+    assert manager._inflight["msg-1:reply"]["correlation_state"] == "missing_legacy_allowed"
+    assert manager._last_enqueue == ("zelda", "System exchange reply from rika@HASHI2:\ndone")
+
+
+def test_agent_reply_marks_existing_correlation_terminal(tmp_path):
+    manager = _reply_manager(tmp_path)
+    manager._inflight["msg-1"] = {"state": "outbound_sent", "conversation_id": "conv-1"}
+
+    status, result = asyncio.run(manager._handle_agent_reply(_reply_payload()))
+
+    assert status == 202
+    assert result["correlation_state"] == "matched"
+    assert manager._inflight["msg-1"]["state"] == "reply_delivered_locally"
+    assert manager._inflight["msg-1"]["reply_message_id"] == "msg-1:reply"
+
+
+def test_protocol_manager_marks_nonterminal_inflight_abandoned_after_restart(tmp_path, monkeypatch):
+    state_dir = tmp_path / ".hashi-remote"
+    state_dir.mkdir()
+    inflight_path = state_dir / "protocol_inflight_hashi1.json"
+    inflight_path.write_text(
+        json.dumps(
+            {
+                "messages": {
+                    "active": {"state": "assistant_started"},
+                    "sent": {"state": "reply_sent"},
+                    "reply": {"state": "reply_delivered_locally"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("remote.protocol_manager.Path.home", lambda: tmp_path)
+
+    manager = ProtocolManager(
+        hashi_root=tmp_path,
+        instance_info={"instance_id": "HASHI1"},
+        peer_registry=None,
+        workbench_port=18800,
+    )
+
+    assert manager._inflight["active"]["state"] == "abandoned_after_restart"
+    assert manager._inflight["active"]["previous_state"] == "assistant_started"
+    assert manager._inflight["sent"]["state"] == "reply_sent"
+    assert manager._inflight["reply"]["state"] == "reply_delivered_locally"
+    saved = json.loads(inflight_path.read_text(encoding="utf-8"))
+    assert saved["messages"]["active"]["state"] == "abandoned_after_restart"
