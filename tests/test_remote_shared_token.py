@@ -127,6 +127,52 @@ def test_protocol_handshake_accepts_valid_shared_token(tmp_path):
     assert protocol.handshakes[0]["_client_ip"] is not None
 
 
+def test_protocol_announce_accepts_valid_shared_token(tmp_path):
+    token = _write_shared_token(tmp_path)
+    client, protocol = _client(tmp_path)
+    payload = {
+        "from_instance": "HASHI2",
+        "display_handle": "@hashi2",
+        "remote_port": 8767,
+        "capabilities": ["handshake_v2"],
+    }
+    body = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    headers.update(
+        build_auth_headers(
+            shared_token=token,
+            method="POST",
+            path="/protocol/announce",
+            from_instance="HASHI2",
+            body_bytes=body,
+            timestamp=int(time.time()),
+            nonce="announce-1",
+        )
+    )
+
+    response = client.post("/protocol/announce", content=body, headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "handshake_accept"
+    assert protocol.handshakes[0]["from_instance"] == "HASHI2"
+
+
+def test_protocol_announce_requires_auth_when_token_configured(tmp_path):
+    _write_shared_token(tmp_path)
+    client, protocol = _client(tmp_path)
+    payload = {
+        "from_instance": "HASHI2",
+        "display_handle": "@hashi2",
+        "remote_port": 8767,
+    }
+
+    response = client.post("/protocol/announce", json=payload)
+
+    assert response.status_code == 401
+    assert response.json()["reason"] == "auth_required"
+    assert protocol.handshakes == []
+
+
 def test_protocol_handshake_rejects_replayed_nonce(tmp_path):
     token = _write_shared_token(tmp_path)
     client, protocol = _client(tmp_path)
@@ -572,6 +618,7 @@ def test_protocol_status_trusted_view_includes_api_endpoint_capabilities(tmp_pat
     body = response.json()
     assert body["trusted_view"] is True
     assert "handshake_v2" in body["capabilities"]
+    assert "protocol_announce_v1" in body["capabilities"]
     assert "protocol_directory_v1" in body["capabilities"]
     assert "protocol_outbound_correlation_v1" in body["capabilities"]
     assert "protocol_ack_v1" in body["capabilities"]

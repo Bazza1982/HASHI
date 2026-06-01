@@ -78,6 +78,7 @@ _workbench_port: int = 18800
 _attachment_store: Optional[AttachmentStore] = None
 _HCHAT_HEADER_RE = re.compile(r"^\[hchat from (?P<agent>\w+)(?:@(?P<instance>[\w-]+))?\]\s*(?P<body>.*)$", re.DOTALL)
 API_PROTOCOL_CAPABILITIES = [
+    "protocol_announce_v1",
     "protocol_directory_v1",
     "protocol_outbound_correlation_v1",
     "protocol_ack_v1",
@@ -735,8 +736,7 @@ def create_app(
             "trusted_view": True,
         }
 
-    @app.post("/protocol/handshake")
-    async def protocol_handshake(request: Request, payload: ProtocolHandshakePayload):
+    async def _handle_protocol_handshake_like(request: Request, payload: ProtocolHandshakePayload, *, endpoint_name: str):
         if _protocol_manager is None:
             return JSONResponse(status_code=503, content={"status": "handshake_reject", "reason": "protocol unavailable"})
         body_bytes = await request.body()
@@ -746,7 +746,7 @@ def create_app(
             from_instance=payload.from_instance,
         )
         if not ok:
-            logger.warning("Protocol handshake rejected: reason=%s from=%s", reason, payload.from_instance)
+            logger.warning("Protocol %s rejected: reason=%s from=%s", endpoint_name, reason, payload.from_instance)
             return JSONResponse(status_code=401, content={"status": "handshake_reject", "reason": reason})
         # Pass the sender's IP so we can register them as a peer (reverse registration)
         client_ip = request.client.host if request.client else None
@@ -755,6 +755,14 @@ def create_app(
         result = _protocol_manager.handle_handshake(data)
         status = 200 if str(result.get("status")) == "handshake_accept" else 409
         return JSONResponse(status_code=status, content=result)
+
+    @app.post("/protocol/handshake")
+    async def protocol_handshake(request: Request, payload: ProtocolHandshakePayload):
+        return await _handle_protocol_handshake_like(request, payload, endpoint_name="handshake")
+
+    @app.post("/protocol/announce")
+    async def protocol_announce(request: Request, payload: ProtocolHandshakePayload):
+        return await _handle_protocol_handshake_like(request, payload, endpoint_name="announce")
 
     @app.get("/protocol/agents")
     async def protocol_agents():
