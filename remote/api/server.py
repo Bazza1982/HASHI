@@ -42,8 +42,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from ..attachments import AttachmentStore
-from ..protocol_ack import record_protocol_ack
-from ..protocol_outbound import register_outbound_correlation
+from ..protocol_ack import ack_state_path, load_ack_state, record_protocol_ack
+from ..protocol_outbound import load_outbound_state, outbound_state_path, register_outbound_correlation
 from ..protocol_router import validate_protocol_envelope
 from ..security.auth import (
     authenticate_request_detailed,
@@ -92,6 +92,16 @@ def _protocol_capabilities_with_api_endpoints(capabilities: list[str]) -> list[s
         if value and value not in merged:
             merged.append(value)
     return merged
+
+
+def _protocol_api_state_summary() -> dict[str, Any]:
+    instance_id = str(_instance_info.get("instance_id") or "hashi")
+    outbound = load_outbound_state(outbound_state_path(instance_id))
+    ack = load_ack_state(ack_state_path(instance_id))
+    return {
+        "outbound_correlation_count": len(outbound),
+        "ack_count": len(ack),
+    }
 
 
 def _redacted_protocol_status() -> dict[str, Any]:
@@ -719,6 +729,7 @@ def create_app(
             "protocol_auth_mode": protocol_auth_mode(),
             "shared_token_configured": has_shared_token(),
             "lan_mode": is_lan_mode(),
+            "protocol_api_state": _protocol_api_state_summary(),
             "rescue_start_enabled": rescue_start_enabled,
             "rescue_start_requirement": "L3_RESTART",
             "trusted_view": True,
