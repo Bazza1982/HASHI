@@ -2584,6 +2584,7 @@ def _reply_manager(tmp_path):
     manager._max_allowed_ttl = 8
     manager._inflight = {}
     manager._inflight_path = tmp_path / "inflight.json"
+    manager._outbound_path = tmp_path / "outbound.json"
     manager.get_local_agents_snapshot = lambda: [{"agent_name": "zelda"}]
 
     async def enqueue(agent_name, text):
@@ -2646,6 +2647,32 @@ def test_agent_reply_marks_existing_correlation_terminal(tmp_path):
     assert result["correlation_state"] == "matched"
     assert manager._inflight["msg-1"]["state"] == "reply_delivered_locally"
     assert manager._inflight["msg-1"]["reply_message_id"] == "msg-1:reply"
+
+
+def test_agent_reply_matches_outbound_correlation_file(tmp_path):
+    manager = _reply_manager(tmp_path)
+    manager._outbound_path.write_text(
+        json.dumps(
+            {
+                "messages": {
+                    "msg-1": {
+                        "message_id": "msg-1",
+                        "conversation_id": "conv-1",
+                        "state": "delivered_to_local_queue",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    status, result = asyncio.run(manager._handle_agent_reply(_reply_payload()))
+
+    assert status == 202
+    assert result["correlation_state"] == "matched_outbound"
+    saved = json.loads(manager._outbound_path.read_text(encoding="utf-8"))
+    assert saved["messages"]["msg-1"]["state"] == "reply_delivered_locally"
+    assert saved["messages"]["msg-1"]["reply_message_id"] == "msg-1:reply"
 
 
 def test_protocol_manager_marks_nonterminal_inflight_abandoned_after_restart(tmp_path, monkeypatch):

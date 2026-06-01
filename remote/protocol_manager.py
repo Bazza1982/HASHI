@@ -137,6 +137,7 @@ class ProtocolManager:
         self._state_dir.mkdir(parents=True, exist_ok=True)
         instance_key = str(instance_info.get("instance_id") or "hashi").lower()
         self._inflight_path = self._state_dir / f"protocol_inflight_{instance_key}.json"
+        self._outbound_path = self._state_dir / f"protocol_outbound_{instance_key}.json"
         self._inflight: dict[str, dict[str, Any]] = self._load_json(self._inflight_path).get("messages", {})
         if self._mark_nonterminal_inflight_abandoned_after_restart():
             self._save_inflight()
@@ -987,11 +988,19 @@ class ProtocolManager:
 
         correlation_state = "missing_legacy_allowed"
         correlated = self._inflight.get(in_reply_to)
+        outbound_correlation = None
         if correlated:
             correlated_conversation_id = str(correlated.get("conversation_id") or "").strip()
             if correlated_conversation_id and correlated_conversation_id != conversation_id:
                 return 409, self._error_payload("reply_correlation_mismatch", "Reply conversation_id does not match correlation record", retryable=False, payload=payload)
             correlation_state = "matched"
+        else:
+            outbound_correlation = self._outbound_correlation_for(in_reply_to)
+            if outbound_correlation:
+                correlated_conversation_id = str(outbound_correlation.get("conversation_id") or "").strip()
+                if correlated_conversation_id and correlated_conversation_id != conversation_id:
+                    return 409, self._error_payload("reply_correlation_mismatch", "Reply conversation_id does not match outbound correlation record", retryable=False, payload=payload)
+                correlation_state = "matched_outbound"
 
         local_agents = {item["agent_name"] for item in self.get_local_agents_snapshot()}
         if to_agent not in local_agents:
@@ -1005,6 +1014,8 @@ class ProtocolManager:
             correlated["state"] = "reply_delivered_locally"
             correlated["reply_message_id"] = message_id
             correlated["reply_delivered_at"] = now
+        if outbound_correlation:
+            self._mark_outbound_reply_delivered(in_reply_to, reply_message_id=message_id, delivered_at=now)
         self._inflight[message_id] = {
             "message_id": message_id,
             "conversation_id": conversation_id,
@@ -1234,6 +1245,33 @@ class ProtocolManager:
             self._inflight[message_id] = item
             changed = True
         return changed
+
+    def _load_outbound_correlations(self) -> dict[str, dict[str, Any]]:
+        data = self._load_json(self._outbound_path)
+        messages = data.get("messages", {}) if isinstance(data, dict) else {}
+        return messages if isinstance(messages, dict) else {}
+
+    def _save_outbound_correlations(self, messages: dict[str, dict[str, Any]]) -> None:
+        self._outbound_path.write_text(
+            json.dumps({"messages": messages}, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    def _outbound_correlation_for(self, message_id: str) -> dict[str, Any] | None:
+        item = self._load_outbound_correlations().get(str(message_id or "").strip())
+        return item if isinstance(item, dict) else None
+
+    def _mark_outbound_reply_delivered(self, message_id: str, *, reply_message_id: str, delivered_at: int) -> None:
+        messages = self._load_outbound_correlations()
+        item = messages.get(str(message_id or "").strip())
+        if not isinstance(item, dict):
+            return
+        item["state"] = "reply_delivered_locally"
+        item["reply_message_id"] = reply_message_id
+        item["reply_delivered_at"] = delivered_at
+        item["updated_at"] = delivered_at
+        messages[str(message_id).strip()] = item
+        self._save_outbound_correlations(messages)
 
     def _get_json(self, url: str, timeout: int = 10) -> dict:
         req = urllib_request.Request(url, method="GET")

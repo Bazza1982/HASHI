@@ -131,6 +131,58 @@ def _build_message_payload(
     }
 
 
+def _outbound_state_path(source_instance: str) -> Path:
+    instance_key = _normalize_instance_id(source_instance).lower() or "hashi"
+    return Path.home() / ".hashi-remote" / f"protocol_outbound_{instance_key}.json"
+
+
+def _load_outbound_state(path: Path) -> dict:
+    if not path.exists():
+        return {"messages": {}}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return {"messages": {}}
+    if not isinstance(data, dict):
+        return {"messages": {}}
+    messages = data.get("messages")
+    if not isinstance(messages, dict):
+        data["messages"] = {}
+    return data
+
+
+def _record_outbound_correlation(payload: dict, *, state: str, result: dict | None = None) -> None:
+    source_instance = str(payload.get("from_instance") or "").strip()
+    message_id = str(payload.get("message_id") or "").strip()
+    if not source_instance or not message_id:
+        return
+    path = _outbound_state_path(source_instance)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = _load_outbound_state(path)
+    messages = data.setdefault("messages", {})
+    now = datetime.now(timezone.utc).isoformat()
+    item = dict(messages.get(message_id) or {})
+    item.update(
+        {
+            "message_id": message_id,
+            "conversation_id": payload.get("conversation_id"),
+            "from_instance": payload.get("from_instance"),
+            "from_agent": payload.get("from_agent"),
+            "to_instance": payload.get("to_instance"),
+            "to_agent": payload.get("to_agent"),
+            "state": state,
+            "updated_at": now,
+        }
+    )
+    item.setdefault("created_at", now)
+    if result is not None:
+        item["last_result"] = result
+    messages[message_id] = item
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp_path.replace(path)
+
+
 def _encode_attachment(path: Path, *, message_id: str, index: int) -> dict:
     data = path.read_bytes()
     mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
@@ -319,6 +371,7 @@ def send_protocol_message(
             break
     base_url = f"http://{remote_host}:{remote_port}"
     attachments = attachments or []
+    _record_outbound_correlation(payload, state="sending")
     if attachments:
         result = _send_with_attachments(
             base_url=base_url,
@@ -338,6 +391,7 @@ def send_protocol_message(
             timeout=timeout,
         )
     if result.get("ok"):
+        _record_outbound_correlation(payload, state=str(result.get("state") or "accepted"), result=result)
         print(f"✅ Protocol message delivered: {from_agent} → {to_agent}@{target_instance}")
         print(f"   message_id: {payload['message_id']}")
         print(f"   conversation_id: {payload['conversation_id']}")
@@ -345,6 +399,7 @@ def send_protocol_message(
         if attachments:
             print(f"   attachments: {len(attachments)}")
         return True
+    _record_outbound_correlation(payload, state="failed", result=result)
     body = result.get("body") if isinstance(result.get("body"), dict) else {}
     if str(body.get("code") or "") == "local_enqueue_failed":
         print(
