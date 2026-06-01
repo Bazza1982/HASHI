@@ -77,6 +77,21 @@ _control_hashi_root: Optional[str] = None
 _workbench_port: int = 18800
 _attachment_store: Optional[AttachmentStore] = None
 _HCHAT_HEADER_RE = re.compile(r"^\[hchat from (?P<agent>\w+)(?:@(?P<instance>[\w-]+))?\]\s*(?P<body>.*)$", re.DOTALL)
+API_PROTOCOL_CAPABILITIES = [
+    "protocol_directory_v1",
+    "protocol_outbound_correlation_v1",
+    "protocol_ack_v1",
+    "protocol_reply_v1",
+]
+
+
+def _protocol_capabilities_with_api_endpoints(capabilities: list[str]) -> list[str]:
+    merged = []
+    for item in list(capabilities or []) + API_PROTOCOL_CAPABILITIES:
+        value = str(item or "").strip()
+        if value and value not in merged:
+            merged.append(value)
+    return merged
 
 
 def _redacted_protocol_status() -> dict[str, Any]:
@@ -86,6 +101,7 @@ def _redacted_protocol_status() -> dict[str, Any]:
     if status:
         capabilities = list(status.get("capabilities") or [])
         remote_supervisor = dict(status.get("remote_supervisor") or {})
+    capabilities = _protocol_capabilities_with_api_endpoints(capabilities)
     return {
         "protocol_version": status.get("protocol_version", "2.0"),
         "display_handle": getattr(_protocol_manager, "display_handle", f"@{str(_instance_info.get('instance_id') or 'hashi').lower()}"),
@@ -636,7 +652,9 @@ def create_app(
                 "remote_port": _instance_info.get("remote_port"),
             }
             if _protocol_manager:
-                instance_view["capabilities"] = list(_protocol_manager.get_protocol_status().get("capabilities") or [])
+                instance_view["capabilities"] = _protocol_capabilities_with_api_endpoints(
+                    list(_protocol_manager.get_protocol_status().get("capabilities") or [])
+                )
             return {
                 "ok": True,
                 "instance": instance_view,
@@ -695,6 +713,9 @@ def create_app(
         return {
             "ok": True,
             **_protocol_manager.get_protocol_status(),
+            "capabilities": _protocol_capabilities_with_api_endpoints(
+                list((_protocol_manager.get_protocol_status() or {}).get("capabilities") or [])
+            ),
             "protocol_auth_mode": protocol_auth_mode(),
             "shared_token_configured": has_shared_token(),
             "lan_mode": is_lan_mode(),
