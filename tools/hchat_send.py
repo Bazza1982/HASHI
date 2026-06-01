@@ -37,6 +37,7 @@ if __name__ == "__main__":
     sys.modules.setdefault("tools.hchat_send", sys.modules[__name__])
 
 from remote.delivery_results import format_delivery_result
+from remote.security.client_auth import build_client_auth_headers
 
 CONTACTS_FILE = ROOT / "contacts.json"
 INSTANCES_FILE = ROOT / "instances.json"
@@ -426,6 +427,34 @@ def _load_remote_agents_live(instance_info: dict) -> list[str]:
     if not remote_port:
         return []
     host = _preferred_host(instance_info, for_remote=True)
+    shared_token = _shared_token_for_protocol()
+    if shared_token:
+        url = f"http://{host}:{int(remote_port)}/protocol/directory"
+        cfg = _load_config()
+        source_instance = _normalize_instance_id(_get_instance_id(cfg))
+        try:
+            req = urllib_request.Request(
+                url,
+                headers=build_client_auth_headers(
+                    url=url,
+                    method="GET",
+                    data=b"",
+                    token=None,
+                    shared_token=shared_token,
+                    from_instance=source_instance,
+                    normalize_instance=_normalize_instance_id,
+                ),
+                method="GET",
+            )
+            with urllib_request.urlopen(req, timeout=3) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+            return [
+                str(agent.get("agent_name") or agent.get("name") or agent.get("id") or "").strip().lower()
+                for agent in body.get("agents", [])
+                if agent.get("is_active", True) and str(agent.get("agent_name") or agent.get("name") or agent.get("id") or "").strip()
+            ]
+        except Exception:
+            pass
     url = f"http://{host}:{int(remote_port)}/protocol/agents"
     try:
         req = urllib_request.Request(url, method="GET")

@@ -385,6 +385,7 @@ def test_remote_agent_names_falls_back_to_workbench_agents(monkeypatch):
             raise body
         return FakeResponse(body)
 
+    monkeypatch.setattr(hchat_send, "_shared_token_for_protocol", lambda: None)
     monkeypatch.setattr(hchat_send.urllib_request, "urlopen", fake_urlopen)
 
     agents = hchat_send._remote_agent_names(
@@ -399,6 +400,55 @@ def test_remote_agent_names_falls_back_to_workbench_agents(monkeypatch):
     )
 
     assert agents == ["lily", "agent1"]
+
+
+def test_remote_agent_names_prefers_authenticated_protocol_directory(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "ok": True,
+                    "agents": [
+                        {"agent_name": "lily", "is_active": True},
+                        {"agent_name": "offline", "is_active": False},
+                    ],
+                    "agent_directory": {"directory_state": "fresh"},
+                }
+            ).encode("utf-8")
+
+    def fake_urlopen(req, timeout):
+        captured["url"] = req.full_url
+        captured["headers"] = dict(req.header_items())
+        return FakeResponse()
+
+    monkeypatch.setattr(hchat_send, "_shared_token_for_protocol", lambda: "shared-secret")
+    monkeypatch.setattr(hchat_send, "_load_config", lambda: _local_cfg())
+    monkeypatch.setattr(hchat_send.urllib_request, "urlopen", fake_urlopen)
+
+    agents = hchat_send._remote_agent_names(
+        "intel",
+        {
+            "instance_id": "INTEL",
+            "api_host": "192.168.0.6",
+            "lan_ip": "192.168.0.6",
+            "remote_port": 40050,
+            "workbench_port": 18802,
+        },
+    )
+
+    assert agents == ["lily"]
+    assert captured["url"] == "http://192.168.0.6:40050/protocol/directory"
+    headers = {key.lower(): value for key, value in captured["headers"].items()}
+    assert headers["x-hashi-auth-scheme"] == "hashi-shared-hmac-v1"
+    assert headers["x-hashi-from-instance"] == "HASHI1"
 
 
 def test_find_remote_instance_requires_agent_on_explicit_target(monkeypatch):
