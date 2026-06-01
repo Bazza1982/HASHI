@@ -314,7 +314,7 @@ Cross-instance replies should no longer depend on runtime-level hchat auto-routi
 
 The receiver side must define what happens when an `agent_reply` arrives. This cannot be left implicit.
 
-Required receiver steps:
+Target receiver steps for the upgraded protocol path:
 
 1. validate `in_reply_to` against an existing outbound correlation record
 2. mark the original outbound message as terminal success
@@ -384,6 +384,9 @@ Recommended reply collection rules:
 6. If an explicit assistant error entry or runtime error marker is observed, sidecar marks `failed`.
 7. If the assistant text is a refusal or a system policy block, sidecar marks `rejected`.
 8. If no assistant output reaches terminal state before timeout, sidecar marks `timed_out`.
+9. If sidecar restarts before a non-terminal inflight item is safely resumed,
+   it must mark that item `abandoned_after_restart` or explicitly rebind it to
+   a valid resumed correlation record. This must not be left ambiguous.
 
 Default timing values for v1:
 
@@ -617,6 +620,135 @@ These should be added inside `remote/api/server.py` or a split router module:
 
 Keep legacy `/hchat` for compatibility, but treat it as a legacy ingress path.
 
+## Cross-Instance Hchat Simplification Plan
+
+The long-term target should be simpler than the current migration-era shape.
+For cross-instance and cross-platform Hchat, keep one transport and one trust
+model:
+
+- remote `agent@INSTANCE` delivery should use `POST /protocol/message` only
+- instance-to-instance authentication should use shared-token HMAC only
+- remote `/hchat` should stop acting as a second cross-instance delivery path
+
+This simplification is intentionally scoped to remote delivery only. Local
+Hchat must keep its current behaviour:
+
+- `/hchat agent ...` stays local and continues to enqueue through the local
+  Workbench/runtime path
+- `/hchat agent@INSTANCE ...` uses remote protocol transport
+- user-facing `/hchat` syntax stays unchanged
+
+### Why simplify this way
+
+The current dual-path model exists mostly because of migration and backward
+compatibility:
+
+- legacy remote `/hchat` existed as an earlier relay-style ingress path
+- `/protocol/message` was added later as the structured peer protocol
+- bearer/pairing auth was designed for client-to-remote access control
+- shared-token HMAC was designed for trusted instance-to-instance messaging
+
+For cross-instance Hchat, keeping both paths and both auth models creates
+unnecessary ambiguity:
+
+- protocol transport can succeed while legacy `/hchat` fails with different
+  auth semantics
+- operators must reason about two different failure surfaces for one logical
+  action
+- readiness can look healthy at the Remote layer while delivery semantics still
+  differ by endpoint
+
+### Simplification steps
+
+1. Keep local `/hchat` untouched.
+2. Restrict cross-instance `/hchat agent@INSTANCE ...` to protocol routing.
+3. Remove legacy `/hchat` fallback from `tools/hchat_send.py` for
+   cross-instance delivery once all supported peers have protocol transport.
+4. Treat remote `/hchat` as legacy ingress only, not the primary peer-to-peer
+   message path.
+5. Standardize cross-instance auth on shared-token HMAC and stop requiring
+   bearer/pairing auth for trusted peer message delivery.
+6. Return one of a small set of delivery outcomes for remote Hchat:
+   `target_not_found`, `target_instance_offline`, `target_agent_unavailable`,
+   `auth_failed`, `delivery_rejected`, `delivery_timed_out`, or
+   `internal_error`.
+
+### Delivery failure semantics
+
+Cross-instance Hchat should report delivery failure as a small set of operator-
+meaningful outcomes rather than exposing only low-level transport symptoms such
+as `401`, `timeout`, `SSL error`, or `connection refused`.
+
+Preferred remote delivery result classes:
+
+- `target_not_found` — target agent name does not exist in the resolved target
+  directory
+- `target_instance_offline` — target instance cannot be reached, has no
+  healthy Remote, or is not currently trusted/reachable as a peer
+- `target_agent_unavailable` — target instance is online, but the local HASHI
+  runtime/workbench cannot accept delivery for the target agent
+- `auth_failed` — shared-token HMAC authentication failed or trust is missing
+- `delivery_rejected` — target explicitly rejected the message, for example
+  invalid payload, TTL violation, or policy refusal
+- `delivery_timed_out` — no authoritative delivery result could be obtained
+  inside the protocol timeout window
+- `internal_error` — uncategorized local or remote implementation failure
+
+Preferred mapping from protocol-facing errors to operator-facing Hchat results:
+
+| Operator-facing result | Example protocol/error sources |
+| --- | --- |
+| `target_not_found` | `target_agent_not_found` |
+| `target_instance_offline` | `target_instance_not_found`, `forward_failed`, peer offline/stale after refresh |
+| `target_agent_unavailable` | `target_agent_unavailable`, `local_enqueue_failed` on confirmed-live target |
+| `auth_failed` | `auth_required`, `auth_failed`, invalid signature / missing trust |
+| `delivery_rejected` | explicit policy refusal, invalid payload, TTL rejection |
+| `delivery_timed_out` | reply soft/hard timeout without terminal success |
+| `internal_error` | unexpected local or remote exception outside the classified set |
+
+Operator and user-facing surfaces should present:
+
+- one primary delivery status from the list above
+- one short explanatory note, for example `Remote online but local workbench
+  unavailable`
+- optional low-level debug detail only as a secondary field
+
+### Reply and loop-safety rules
+
+Cross-instance reply must stay possible, but loop prevention must be explicit.
+
+Required rules:
+
+1. Distinguish `agent_message` from `agent_reply`. A reply must not be treated
+   as a new outbound top-level message.
+2. Every remote message must carry stable correlation fields such as
+   `message_id`, `conversation_id`, `from_instance`, `from_agent`,
+   `to_instance`, and `to_agent`.
+3. Every forwarded message must enforce `hop_count` and TTL limits as a hard
+   safety brake.
+4. Replies must follow an explicit return route to the originating sender
+   rather than re-running free target discovery.
+5. A received `agent_reply` must not itself generate another automatic remote
+   reply unless a fresh local user/agent action creates a new `agent_message`
+   turn.
+6. Duplicate message ids must be deduped at the Remote layer so retry and side-
+   car restart cannot create reply storms.
+7. `_handle_agent_reply` must enforce the same class of loop-safety controls as
+   `handle_protocol_message`: route-trace validation, TTL enforcement, and
+   duplicate suppression on reply identity / correlation state.
+
+In other words:
+
+- new outbound turns use `agent_message`
+- direct responses use `agent_reply`
+- reply traffic is correlated, bounded, and non-recursive
+
+### Non-goals
+
+- changing local same-instance `/hchat`
+- removing pairing/bearer auth from endpoints that are genuinely client-facing
+- redesigning reply semantics beyond the transport/auth simplification above
+
 ## Backward Compatibility Strategy
 
 This upgrade must be explicit about compatibility.
@@ -665,6 +797,9 @@ New remote protocol should never assume the remote peer can understand structure
 - Add dedupe and TTL checks
 - Add route trace recording
 - Add local request correlation store
+- Normalize remote delivery result codes for operator-facing Hchat failures
+- Add an explicit mapping layer from protocol error payloads to operator-facing
+  Hchat delivery outcomes
 
 ### Phase 4: Local delivery without core coupling
 
@@ -674,6 +809,8 @@ New remote protocol should never assume the remote peer can understand structure
 - Observe transcript completion
 - Add explicit reply collection state machine and settle window rules
 - Add target-agent-not-found / target-agent-unavailable error path
+- Define how non-terminal inflight items become `abandoned_after_restart` after
+  sidecar restart unless successfully rebound
 
 ### Phase 5: Reply dispatch
 
@@ -681,12 +818,31 @@ New remote protocol should never assume the remote peer can understand structure
 - Stop depending on runtime hchat auto-route for remote traffic
 - Persist inflight reply correlation and resume after sidecar restart
 - Define `agent_reply` receiver reinjection rules for the originating local agent
+- Prevent reply-to-reply recursion unless a new local turn explicitly starts a
+  fresh `agent_message`
+- Extend `_handle_agent_reply` with route-trace checks, TTL validation, and
+  reply dedupe comparable to `handle_protocol_message`
 
 ### Phase 6: Compatibility and migration
 
 - Keep legacy `/hchat`
 - Mark peers by supported protocol level
 - Gradually move `tools/hchat_send.py` toward remote-directory-first routing
+- Explicitly retire exchange relay only after protocol forwarding covers every
+  supported topology now served by `HASHI1` exchange
+- After protocol support is universal on supported peers, remove legacy
+  cross-instance `/hchat` fallback and keep `/protocol/message` as the only
+  remote Hchat transport
+- Remove or retire the legacy `/hchat` server-side exchange relay in lockstep
+  with the client-side fallback removal so the two paths cannot drift apart
+
+For this document, "protocol support is universal on supported peers" means all
+currently supported instances:
+
+- advertise protocol capability for `protocol_message_v1`
+- are reachable through peer-registry based forwarding without requiring
+  exchange relay
+- pass a cross-instance Hchat smoke test without touching legacy `/hchat`
 
 ## Acceptance Criteria
 
@@ -710,6 +866,14 @@ The upgrade is complete only when the following are true:
 - Receiver enforces `max_allowed_message_ttl` even if sender requests a larger value
 - A mixed-version peer does not destabilize local hchat
 - Local hchat behaviour is unchanged
+- Cross-instance Hchat uses one remote transport and one instance-auth model
+- Cross-instance Hchat failures resolve to explicit delivery result classes
+- Reply traffic cannot recurse indefinitely, while direct reply to the original
+  sender still works
+- `_handle_agent_reply` enforces loop-safety rules equivalent to the primary
+  `agent_message` path
+- Exchange relay retirement criteria are explicit and the server/client legacy
+  `/hchat` removal happens in sync
 - Enabling the upgraded remote service requires only sidecar restart or `/reboot`, not cold restart
 
 ## Risks And Trade-Offs

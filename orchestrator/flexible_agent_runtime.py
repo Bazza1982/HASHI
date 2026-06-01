@@ -6514,15 +6514,15 @@ class FlexibleAgentRuntime:
 
         if same_host and route_host in {"127.0.0.1", "localhost"}:
             network_host = network_hosts[0] if network_hosts else ""
-            line = f"route: <code>{html.escape(route_host)}:{html.escape(route_port)}</code>  ·  <code>same host</code>"
+            line = f"addr: <code>local {html.escape(route_host)}:{html.escape(route_port)}</code>"
             if network_host:
-                line += f"  ·  network: <code>{html.escape(network_host)}:{html.escape(route_port)}</code>"
+                line += f"  ·  <code>lan {html.escape(network_host)}:{html.escape(route_port)}</code>"
             return [line]
 
         if network_hosts and route_host not in network_hosts and route_host not in {"?", ""}:
             return [
-                f"route: <code>{html.escape(route_host)}:{html.escape(route_port)}</code>",
-                f"network: <code>{html.escape(network_hosts[0])}:{html.escape(route_port)}</code>",
+                f"addr: <code>{html.escape(route_host)}:{html.escape(route_port)}</code>",
+                f"lan: <code>{html.escape(network_hosts[0])}:{html.escape(route_port)}</code>",
             ]
 
         return [f"addr: <code>{html.escape(route_host)}:{html.escape(route_port)}</code>"]

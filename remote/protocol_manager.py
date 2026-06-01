@@ -87,6 +87,7 @@ DEFAULT_CAPABILITIES = [
     "agent_reply_v1",
     "rescue_control",
 ]
+TERMINAL_INFLIGHT_STATES = {"reply_sent", "failed", "timed_out"}
 
 
 def build_default_capabilities(*, rescue_start_enabled: bool = False) -> list[str]:
@@ -154,6 +155,12 @@ class ProtocolManager:
             for peer in self._peer_registry.get_peers():
                 peers.append(self._peer_registry.get_peer_state(peer.instance_id))
         local_profile = self._local_network_profile()
+        active_inflight_count = sum(
+            1
+            for item in self._inflight.values()
+            if str((item or {}).get("state") or "") not in TERMINAL_INFLIGHT_STATES
+        )
+        total_inflight_count = len(self._inflight)
         return {
             "protocol_version": PROTOCOL_VERSION,
             "display_handle": self.display_handle,
@@ -164,7 +171,9 @@ class ProtocolManager:
             "local_network_profile": local_profile,
             "route_diagnostics": self.get_route_diagnostics(),
             "peers": peers,
-            "inflight_count": len(self._inflight),
+            "inflight_count": active_inflight_count,
+            "inflight_total_count": total_inflight_count,
+            "inflight_terminal_count": total_inflight_count - active_inflight_count,
             "max_allowed_ttl": self._max_allowed_ttl,
             "reply_soft_timeout_seconds": self._reply_soft_timeout_seconds,
             "reply_hard_timeout_seconds": self._reply_hard_timeout_seconds,
@@ -1014,7 +1023,7 @@ class ProtocolManager:
         now = time.time()
         for message_id, item in list(self._inflight.items()):
             state = str(item.get("state") or "")
-            if state in {"reply_sent", "failed", "timed_out"}:
+            if state in TERMINAL_INFLIGHT_STATES:
                 continue
             if now >= float(item.get("reply_hard_deadline") or 0):
                 item["state"] = "timed_out"
