@@ -151,7 +151,62 @@ def _load_outbound_state(path: Path) -> dict:
     return data
 
 
-def _record_outbound_correlation(payload: dict, *, state: str, result: dict | None = None) -> None:
+def _local_sidecar_base_url(source_instance: str, cfg: dict, instances: dict) -> str | None:
+    source_key = _normalize_instance_id(source_instance).lower()
+    entry = instances.get(source_key) if isinstance(instances, dict) else None
+    remote_port = None
+    if isinstance(entry, dict):
+        remote_port = entry.get("remote_port") or entry.get("port")
+    if remote_port is None:
+        global_cfg = cfg.get("global") if isinstance(cfg, dict) else None
+        if isinstance(global_cfg, dict):
+            remote_port = global_cfg.get("remote_port")
+    try:
+        port = int(remote_port)
+    except (TypeError, ValueError):
+        return None
+    if port <= 0:
+        return None
+    return f"http://127.0.0.1:{port}"
+
+
+def _record_outbound_correlation_via_sidecar(
+    payload: dict,
+    *,
+    state: str,
+    result: dict | None = None,
+    sidecar_base_url: str | None = None,
+    timeout: int = 2,
+) -> bool:
+    if not sidecar_base_url:
+        return False
+    outbound_payload = {
+        "message_id": payload.get("message_id"),
+        "conversation_id": payload.get("conversation_id"),
+        "from_instance": payload.get("from_instance"),
+        "from_agent": payload.get("from_agent"),
+        "to_instance": payload.get("to_instance"),
+        "to_agent": payload.get("to_agent"),
+        "state": state,
+    }
+    if result is not None:
+        outbound_payload["result"] = result
+    data = json.dumps(outbound_payload).encode("utf-8")
+    req = urllib_request.Request(
+        f"{sidecar_base_url.rstrip('/')}/protocol/outbound",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib_request.urlopen(req, timeout=timeout) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        return bool(isinstance(body, dict) and body.get("ok"))
+    except Exception:
+        return False
+
+
+def _record_outbound_correlation_file(payload: dict, *, state: str, result: dict | None = None) -> None:
     source_instance = str(payload.get("from_instance") or "").strip()
     message_id = str(payload.get("message_id") or "").strip()
     if not source_instance or not message_id:
@@ -181,6 +236,23 @@ def _record_outbound_correlation(payload: dict, *, state: str, result: dict | No
     tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     tmp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     tmp_path.replace(path)
+
+
+def _record_outbound_correlation(
+    payload: dict,
+    *,
+    state: str,
+    result: dict | None = None,
+    sidecar_base_url: str | None = None,
+) -> None:
+    if _record_outbound_correlation_via_sidecar(
+        payload,
+        state=state,
+        result=result,
+        sidecar_base_url=sidecar_base_url,
+    ):
+        return
+    _record_outbound_correlation_file(payload, state=state, result=result)
 
 
 def _encode_attachment(path: Path, *, message_id: str, index: int) -> dict:
@@ -351,6 +423,7 @@ def send_protocol_message(
         conversation_id=conversation_id,
     )
     instances = _load_instances()
+    local_sidecar_base_url = _local_sidecar_base_url(source_instance, cfg, instances)
     target_info = instances.get(str(target_instance or "").lower(), {})
     candidate_hosts = []
     for value in (remote.get("remote_host"), remote.get("host")):
@@ -371,7 +444,7 @@ def send_protocol_message(
             break
     base_url = f"http://{remote_host}:{remote_port}"
     attachments = attachments or []
-    _record_outbound_correlation(payload, state="sending")
+    _record_outbound_correlation(payload, state="sending", sidecar_base_url=local_sidecar_base_url)
     if attachments:
         result = _send_with_attachments(
             base_url=base_url,
@@ -391,7 +464,12 @@ def send_protocol_message(
             timeout=timeout,
         )
     if result.get("ok"):
-        _record_outbound_correlation(payload, state=str(result.get("state") or "accepted"), result=result)
+        _record_outbound_correlation(
+            payload,
+            state=str(result.get("state") or "accepted"),
+            result=result,
+            sidecar_base_url=local_sidecar_base_url,
+        )
         print(f"✅ Protocol message delivered: {from_agent} → {to_agent}@{target_instance}")
         print(f"   message_id: {payload['message_id']}")
         print(f"   conversation_id: {payload['conversation_id']}")
@@ -399,7 +477,7 @@ def send_protocol_message(
         if attachments:
             print(f"   attachments: {len(attachments)}")
         return True
-    _record_outbound_correlation(payload, state="failed", result=result)
+    _record_outbound_correlation(payload, state="failed", result=result, sidecar_base_url=local_sidecar_base_url)
     body = result.get("body") if isinstance(result.get("body"), dict) else {}
     if str(body.get("code") or "") == "local_enqueue_failed":
         print(

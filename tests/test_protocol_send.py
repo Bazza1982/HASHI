@@ -107,6 +107,84 @@ def test_send_protocol_message_records_outbound_correlation(monkeypatch, tmp_pat
     assert item["state"] == "delivered_to_local_queue"
 
 
+def test_send_protocol_message_prefers_local_sidecar_outbound_registration(monkeypatch, tmp_path):
+    captured: list[dict] = []
+
+    def fake_urlopen(req, timeout=0):
+        body = json.loads((req.data or b"{}").decode("utf-8"))
+        captured.append({"url": req.full_url, "body": body, "timeout": timeout})
+        if req.full_url.endswith("/protocol/outbound"):
+            return _FakeResponse({"ok": True})
+        if req.full_url.endswith("/protocol/message"):
+            return _FakeResponse({"ok": True, "state": "delivered_to_local_queue"})
+        raise AssertionError(f"unexpected request url: {req.full_url}")
+
+    monkeypatch.setattr(protocol_send.urllib_request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(protocol_send, "_load_config", lambda: {"global": {"instance_id": "HASHI1"}})
+    monkeypatch.setattr(protocol_send, "_load_instances", lambda: {"hashi1": {"remote_port": 8766}})
+    monkeypatch.setattr(
+        protocol_send,
+        "_find_remote_instance",
+        lambda *args, **kwargs: {"remote_host": "10.0.0.9", "remote_port": 8767},
+    )
+    monkeypatch.setattr(protocol_send, "_probe_remote_http", lambda host, port: True)
+    monkeypatch.setattr(
+        protocol_send,
+        "fetch_remote_protocol_capabilities",
+        lambda base_url, timeout=5: ({"message_attachments_v1"}, None),
+    )
+
+    assert protocol_send.send_protocol_message("lily@HASHI9", "zelda", "hello", shared_token="shared-secret")
+
+    assert [item["url"] for item in captured] == [
+        "http://127.0.0.1:8766/protocol/outbound",
+        "http://10.0.0.9:8767/protocol/message",
+        "http://127.0.0.1:8766/protocol/outbound",
+    ]
+    assert captured[0]["body"]["state"] == "sending"
+    assert captured[2]["body"]["state"] == "delivered_to_local_queue"
+    assert not (tmp_path / ".hashi-remote" / "protocol_outbound_hashi1.json").exists()
+
+
+def test_send_protocol_message_falls_back_to_file_when_local_sidecar_unavailable(monkeypatch, tmp_path):
+    captured: list[str] = []
+
+    def fake_urlopen(req, timeout=0):
+        captured.append(req.full_url)
+        if req.full_url.endswith("/protocol/outbound"):
+            raise protocol_send.URLError("sidecar unavailable")
+        if req.full_url.endswith("/protocol/message"):
+            return _FakeResponse({"ok": True, "state": "delivered_to_local_queue"})
+        raise AssertionError(f"unexpected request url: {req.full_url}")
+
+    monkeypatch.setattr(protocol_send.urllib_request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(protocol_send, "_load_config", lambda: {"global": {"instance_id": "HASHI1"}})
+    monkeypatch.setattr(protocol_send, "_load_instances", lambda: {"hashi1": {"remote_port": 8766}})
+    monkeypatch.setattr(
+        protocol_send,
+        "_find_remote_instance",
+        lambda *args, **kwargs: {"remote_host": "10.0.0.9", "remote_port": 8767},
+    )
+    monkeypatch.setattr(protocol_send, "_probe_remote_http", lambda host, port: True)
+    monkeypatch.setattr(
+        protocol_send,
+        "fetch_remote_protocol_capabilities",
+        lambda base_url, timeout=5: ({"message_attachments_v1"}, None),
+    )
+
+    assert protocol_send.send_protocol_message("lily@HASHI9", "zelda", "hello", shared_token="shared-secret")
+
+    assert captured == [
+        "http://127.0.0.1:8766/protocol/outbound",
+        "http://10.0.0.9:8767/protocol/message",
+        "http://127.0.0.1:8766/protocol/outbound",
+    ]
+    state_path = tmp_path / ".hashi-remote" / "protocol_outbound_hashi1.json"
+    data = json.loads(state_path.read_text(encoding="utf-8"))
+    [item] = list(data["messages"].values())
+    assert item["state"] == "delivered_to_local_queue"
+
+
 def test_send_protocol_message_uploads_attachments_then_commits(monkeypatch, tmp_path, capsys):
     attachment = tmp_path / "report.txt"
     attachment.write_text("hello", encoding="utf-8")
