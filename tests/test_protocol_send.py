@@ -2,8 +2,15 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from remote.security.shared_token import AUTH_SCHEME
 from tools import protocol_send
+
+
+@pytest.fixture(autouse=True)
+def isolate_outbound_state(tmp_path, monkeypatch):
+    monkeypatch.setattr(protocol_send.Path, "home", lambda: tmp_path)
 
 
 class _FakeResponse:
@@ -67,6 +74,37 @@ def test_send_protocol_message_uses_shared_token_for_plain_protocol_send(monkeyp
     assert request["body"]["body"]["text"] == "hello there"
     assert request["body"]["to_agent"] == "lily"
     assert "Protocol message delivered" in capsys.readouterr().out
+
+
+def test_send_protocol_message_records_outbound_correlation(monkeypatch, tmp_path):
+    def fake_urlopen(req, timeout=0):
+        return _FakeResponse({"ok": True, "state": "delivered_to_local_queue"})
+
+    monkeypatch.setattr(protocol_send.urllib_request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(protocol_send, "_load_config", lambda: {"global": {"instance_id": "HASHI1"}})
+    monkeypatch.setattr(protocol_send, "_load_instances", lambda: {})
+    monkeypatch.setattr(
+        protocol_send,
+        "_find_remote_instance",
+        lambda *args, **kwargs: {"remote_host": "10.0.0.9", "remote_port": 8766},
+    )
+    monkeypatch.setattr(protocol_send, "_probe_remote_http", lambda host, port: True)
+    monkeypatch.setattr(
+        protocol_send,
+        "fetch_remote_protocol_capabilities",
+        lambda base_url, timeout=5: ({"message_attachments_v1"}, None),
+    )
+
+    assert protocol_send.send_protocol_message("lily@HASHI9", "zelda", "hello", shared_token="shared-secret")
+
+    state_path = tmp_path / ".hashi-remote" / "protocol_outbound_hashi1.json"
+    data = json.loads(state_path.read_text(encoding="utf-8"))
+    [item] = list(data["messages"].values())
+    assert item["from_instance"] == "HASHI1"
+    assert item["from_agent"] == "zelda"
+    assert item["to_instance"] == "HASHI9"
+    assert item["to_agent"] == "lily"
+    assert item["state"] == "delivered_to_local_queue"
 
 
 def test_send_protocol_message_uploads_attachments_then_commits(monkeypatch, tmp_path, capsys):
