@@ -179,7 +179,7 @@ CALLBACK_BINDINGS: tuple[CallbackBinding, ...] = (
     CallbackBinding(r"^safevoice:", "callback_safevoice"),
     CallbackBinding(r"^startagent:", "callback_start_agent"),
     CallbackBinding(r"^agents:", "callback_agents"),
-    CallbackBinding(r"^(skill|skilljob):", "callback_skill"),
+    CallbackBinding(r"^(skill|skilljob|nudgejob):", "callback_skill"),
     CallbackBinding(r"^tgl:", "callback_toggle"),
     CallbackBinding(r"^group:", "callback_group"),
     CallbackBinding(r"^move:", "callback_move"),

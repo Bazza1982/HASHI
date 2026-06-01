@@ -326,6 +326,53 @@ async def test_tokenized_nudge_toggle_callback():
 
 
 @pytest.mark.asyncio
+async def test_tokenized_nudge_delete_callback():
+    class SkillManager:
+        def __init__(self):
+            self.deleted = []
+
+        def delete_job(self, kind, task_id):
+            self.deleted.append((kind, task_id))
+            return True, "deleted"
+
+        def list_jobs(self, kind, agent_name=None):
+            return []
+
+    class Runtime:
+        name = "zelda"
+
+        def __init__(self):
+            self.skill_manager = SkillManager()
+
+    class Query:
+        def __init__(self):
+            self.answers = []
+            self.edits = []
+
+        async def answer(self, text=None, **kwargs):
+            self.answers.append((text, kwargs))
+
+        async def edit_message_text(self, text, **kwargs):
+            self.edits.append((text, kwargs))
+
+    runtime = Runtime()
+    token = mint_callback_token(
+        runtime,
+        "nudgejob_action",
+        {"task_id": "nudge-123", "action": "delete"},
+        prefix="nj",
+    )
+    query = Query()
+
+    handled = await handle_nudge_callback(runtime, query, f"nudgejob:key:{token}:delete")
+
+    assert handled is True
+    assert runtime.skill_manager.deleted == [("nudge", "nudge-123")]
+    assert query.answers[-1][0] == "deleted"
+    assert query.edits
+
+
+@pytest.mark.asyncio
 async def test_expired_nudge_token_shows_alert():
     class Runtime:
         def __init__(self):

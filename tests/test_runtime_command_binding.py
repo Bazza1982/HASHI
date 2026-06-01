@@ -42,6 +42,15 @@ def test_command_binding_method_names_exist_on_flexible_runtime():
     assert missing == []
 
 
+def test_skill_callback_binding_includes_nudge_buttons():
+    patterns = [
+        binding.pattern
+        for binding in runtime_command_binding.CALLBACK_BINDINGS
+        if binding.method_name == "callback_skill"
+    ]
+    assert patterns == [r"^(skill|skilljob|nudgejob):"]
+
+
 def test_bind_flexible_runtime_handlers_preserves_static_binding_count(monkeypatch):
     added_handlers = []
     added_errors = []
