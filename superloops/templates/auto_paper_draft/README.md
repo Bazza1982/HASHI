@@ -56,6 +56,36 @@ quote provenance, and anonymisation integrity across all sections.
 
 ## Non-Negotiable Gates
 
+### Hard State Machine
+
+Every `auto_paper_draft` run must follow the hard state machine in:
+
+```text
+state_machine.template.json
+```
+
+The core rule is:
+
+```text
+No state transition without external evidence.
+```
+
+The orchestrator may not treat a local dispatch file as worker acceptance, may
+not treat seed material as worker output, and may not close a loop without a
+reviewer verdict. The required sequence is:
+
+```text
+dispatch_prepared
+-> hchat_confirmed
+-> worker_artifact_present
+-> orchestrator_harvested
+-> reviewer_dispatched
+-> reviewer_verdict_present
+-> closeout_allowed
+```
+
+Any skipped state is a blocker.
+
 Before starting, read the shared orchestration guidance:
 
 ```text

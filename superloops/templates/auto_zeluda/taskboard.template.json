@@ -1,0 +1,123 @@
+[
+  {
+    "task_id": "az-001",
+    "title": "Capture research charter, theory framework, dataset boundary, and exit criteria",
+    "owner": "orchestrator",
+    "status": "pending",
+    "round": 0,
+    "required_evidence": ["research_question", "theory_framework", "dataset_boundary", "coding_unit", "exit_condition", "round_plan"]
+  },
+  {
+    "task_id": "az-002",
+    "title": "Verify source folders, manifests, and source-type categories",
+    "owner": "coding_agent",
+    "status": "pending",
+    "round": 0,
+    "required_evidence": ["source_paths", "file_manifest", "source_type_map", "do_not_edit_source_confirmation"]
+  },
+  {
+    "task_id": "az-003",
+    "title": "Generate initial theory-led codebook",
+    "owner": "coding_agent",
+    "status": "pending",
+    "round": 0,
+    "required_evidence": ["codebook_path", "parent_codes", "child_codes", "inclusion_exclusion_rules", "example_excerpts"]
+  },
+  {
+    "task_id": "az-004",
+    "title": "Run bounded pilot coding on high-yield sample",
+    "owner": "coding_agent",
+    "status": "pending",
+    "round": 0,
+    "required_evidence": ["pilot_scope", "coded_episode_table", "source_traceability", "ambiguous_cases", "pilot_distribution"]
+  },
+  {
+    "task_id": "az-005",
+    "title": "Review pilot codebook and coded sample",
+    "owner": "reviewer",
+    "status": "pending",
+    "round": 0,
+    "required_evidence": ["review_report", "blockers", "non_blockers", "follow_ups", "source_context_checks"]
+  },
+  {
+    "task_id": "az-006",
+    "title": "Refine codebook after pilot review",
+    "owner": "orchestrator",
+    "status": "pending",
+    "round": 0,
+    "required_evidence": ["codebook_changes", "decision_log", "resolved_blockers", "round1_scope"]
+  },
+  {
+    "task_id": "az-007",
+    "title": "Run coding round 1 on high-density generated topics and linked Daily context",
+    "owner": "coding_agent",
+    "status": "pending",
+    "round": 1,
+    "required_evidence": ["round1_scope", "coded_episode_table", "linked_daily_context", "negative_case_candidates", "coding_log"]
+  },
+  {
+    "task_id": "az-008",
+    "title": "Write analytic memo 1 and preliminary theme list",
+    "owner": "coding_agent",
+    "status": "pending",
+    "round": 1,
+    "required_evidence": ["analytic_memo", "theme_candidates", "representative_excerpts", "weak_theme_notes", "codebook_issues"]
+  },
+  {
+    "task_id": "az-009",
+    "title": "Review round 1 coding and analytic memo",
+    "owner": "reviewer",
+    "status": "pending",
+    "round": 1,
+    "required_evidence": ["review_report", "theme_support_assessment", "coding_consistency_findings", "negative_case_gaps", "blockers"]
+  },
+  {
+    "task_id": "az-010",
+    "title": "Refine codebook and sampling plan for round 2",
+    "owner": "orchestrator",
+    "status": "pending",
+    "round": 1,
+    "required_evidence": ["codebook_v2_path", "sampling_plan_v2", "resolved_review_points", "round2_scope"]
+  },
+  {
+    "task_id": "az-011",
+    "title": "Run coding round 2 across chronological Daily cases and gap areas",
+    "owner": "coding_agent",
+    "status": "pending",
+    "round": 2,
+    "required_evidence": ["round2_scope", "coded_episode_table", "chronological_case_links", "negative_cases", "coding_log"]
+  },
+  {
+    "task_id": "az-012",
+    "title": "Write analytic memo 2 and theme/evidence matrix",
+    "owner": "coding_agent",
+    "status": "pending",
+    "round": 2,
+    "required_evidence": ["analytic_memo", "theme_evidence_matrix", "representative_excerpts", "negative_cases", "writing_readiness_notes"]
+  },
+  {
+    "task_id": "az-013",
+    "title": "Reviewer sufficiency review",
+    "owner": "reviewer",
+    "status": "pending",
+    "round": 2,
+    "required_evidence": ["sufficiency_judgement", "theme_evidence_assessment", "remaining_blockers", "round3_recommendation", "writing_readiness"]
+  },
+  {
+    "task_id": "az-014",
+    "title": "Optional round 3 for weak themes, negative cases, or saturation check",
+    "owner": "coding_agent",
+    "status": "pending",
+    "round": 3,
+    "optional": true,
+    "required_evidence": ["round3_reason", "targeted_coding_output", "updated_evidence_matrix", "saturation_or_gap_assessment"]
+  },
+  {
+    "task_id": "az-015",
+    "title": "Final codebook, coded dataset, memos, and writing handoff",
+    "owner": "orchestrator",
+    "status": "pending",
+    "round": "closeout",
+    "required_evidence": ["final_codebook_path", "coded_dataset_path", "review_report_path", "analysis_memo_paths", "theme_evidence_matrix_path", "limitations", "exit_decision"]
+  }
+]
