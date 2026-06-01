@@ -26,6 +26,7 @@ This directory contains developer documentation and operational notes for HASHI.
 - [SUPERLOOP_PLAN.md](SUPERLOOP_PLAN.md) — draft architecture plan for a long-running loop controller above Nagare
 - [SUPERLOOP_FUNCTION_CONTRACT.md](SUPERLOOP_FUNCTION_CONTRACT.md) — runnable Superloop operational contract for schema, waits, HChat replies, evidence, and closeout
 - [HASHI_REMOTE_SIDE_PROGRAM_UPGRADE_PLAN.md](HASHI_REMOTE_SIDE_PROGRAM_UPGRADE_PLAN.md) — comprehensive plan to make Hashi Remote a supervised side program with backward-compatible rescue
+- [HASHI_REMOTE_P2P_UPGRADE_PLAN.md](HASHI_REMOTE_P2P_UPGRADE_PLAN.md) — Remote peer-to-peer messaging plan, function-layer implementation status, and rollout/adoption checklist
 - [HASHI_REMOTE_RESCUE_PROTOCOL.md](HASHI_REMOTE_RESCUE_PROTOCOL.md) — Remote sidecar survival model and fixed HASHI start/status rescue endpoints
 - [HASHI_REMOTE_PLATFORM_PROFILES_PLAN.md](HASHI_REMOTE_PLATFORM_PROFILES_PLAN.md) — platform differentiation plan for WSL, Windows sidecars, WatchTower, LAN peers, and validation aliases without forking `main`
 - [HASHI2_WSL_STABLE_PORT_ROLLOUT_PLAN.md](HASHI2_WSL_STABLE_PORT_ROLLOUT_PLAN.md) — staged HASHI2 WSL rollout and full-function validation plan for stable Remote port allocation
