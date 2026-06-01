@@ -305,6 +305,56 @@ def test_protocol_outbound_requires_auth_when_token_configured(tmp_path):
     assert response.json()["code"] == "auth_required"
 
 
+def test_protocol_ack_accepts_valid_shared_token(tmp_path, monkeypatch):
+    monkeypatch.setattr("remote.protocol_ack.Path.home", lambda: tmp_path)
+    token = _write_shared_token(tmp_path)
+    client, _protocol = _client(tmp_path)
+    payload = {
+        "message_id": "m-ack-1",
+        "conversation_id": "c-ack-1",
+        "from_instance": "HASHI2",
+        "to_instance": "HASHI_LOCAL",
+        "state": "delivered_to_local_queue",
+        "details": {"request_id": "req-1"},
+    }
+    body = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    headers.update(
+        build_auth_headers(
+            shared_token=token,
+            method="POST",
+            path="/protocol/ack",
+            from_instance="HASHI2",
+            body_bytes=body,
+            timestamp=int(time.time()),
+            nonce="ack-1",
+        )
+    )
+
+    response = client.post("/protocol/ack", content=body, headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    data = json.loads((tmp_path / ".hashi-remote" / "protocol_ack_hashi_local.json").read_text(encoding="utf-8"))
+    assert data["messages"]["m-ack-1"]["details"] == {"request_id": "req-1"}
+
+
+def test_protocol_ack_requires_auth_when_token_configured(tmp_path):
+    _write_shared_token(tmp_path)
+    client, _protocol = _client(tmp_path)
+    payload = {
+        "message_id": "m-ack-1",
+        "conversation_id": "c-ack-1",
+        "from_instance": "HASHI2",
+        "to_instance": "HASHI_LOCAL",
+    }
+
+    response = client.post("/protocol/ack", json=payload)
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "auth_required"
+
+
 def test_file_push_requires_auth_when_token_configured_and_lan_off(tmp_path):
     _write_shared_token(tmp_path)
     client, _protocol = _client_lan_mode(tmp_path, lan_mode=False)

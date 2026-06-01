@@ -42,6 +42,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from ..attachments import AttachmentStore
+from ..protocol_ack import record_protocol_ack
 from ..protocol_outbound import register_outbound_correlation
 from ..protocol_router import validate_protocol_envelope
 from ..security.auth import (
@@ -175,6 +176,15 @@ class ProtocolOutboundRegisterPayload(BaseModel):
     to_agent: str
     state: str = "sending"
     result: Optional[dict] = None
+
+
+class ProtocolAckPayload(BaseModel):
+    message_id: str
+    conversation_id: str
+    from_instance: str
+    to_instance: str
+    state: str = "ack"
+    details: Optional[dict] = None
 
 
 class AttachmentUploadPayload(BaseModel):
@@ -793,6 +803,27 @@ def create_app(
                 content={"ok": False, "error": "Protocol outbound registration authentication failed", "code": auth_reason},
             )
         result = register_outbound_correlation(
+            payload.model_dump(),
+            local_instance=str(_instance_info.get("instance_id") or ""),
+        )
+        if not result.get("ok"):
+            return JSONResponse(status_code=400, content=result)
+        return result
+
+    @app.post("/protocol/ack")
+    async def protocol_ack(request: Request, payload: ProtocolAckPayload):
+        if _protocol_manager is None:
+            return JSONResponse(status_code=503, content={"ok": False, "error": "protocol manager unavailable"})
+        body_bytes = await request.body()
+        client_id, auth_reason = authenticate_request_detailed(
+            request,
+            body_bytes=body_bytes,
+            from_instance=payload.from_instance,
+            allow_loopback=True,
+        )
+        if not client_id:
+            return JSONResponse(status_code=401, content={"ok": False, "error": "Protocol ack authentication failed", "code": auth_reason})
+        result = record_protocol_ack(
             payload.model_dump(),
             local_instance=str(_instance_info.get("instance_id") or ""),
         )
