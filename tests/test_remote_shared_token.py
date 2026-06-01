@@ -547,8 +547,35 @@ def test_protocol_status_is_redacted_without_auth(tmp_path):
     body = response.json()
     assert body["trusted_view"] is False
     assert body["protocol_auth_mode"] == "shared-token"
+    assert "protocol_directory_v1" in body["capabilities"]
+    assert "protocol_reply_v1" in body["capabilities"]
     assert "local_agents" not in body
     assert "peers" not in body
+
+
+def test_protocol_status_trusted_view_includes_api_endpoint_capabilities(tmp_path):
+    token = _write_shared_token(tmp_path)
+    client, _protocol = _client(tmp_path)
+    headers = build_auth_headers(
+        shared_token=token,
+        method="GET",
+        path="/protocol/status",
+        from_instance="HASHI2",
+        body_bytes=b"",
+        timestamp=int(time.time()),
+        nonce="status-capabilities",
+    )
+
+    response = client.get("/protocol/status", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["trusted_view"] is True
+    assert "handshake_v2" in body["capabilities"]
+    assert "protocol_directory_v1" in body["capabilities"]
+    assert "protocol_outbound_correlation_v1" in body["capabilities"]
+    assert "protocol_ack_v1" in body["capabilities"]
+    assert "protocol_reply_v1" in body["capabilities"]
 
 
 def test_protocol_directory_requires_auth_when_token_configured(tmp_path):
