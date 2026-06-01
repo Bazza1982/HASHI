@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from remote.delivery_results import format_delivery_result
 from remote.security.client_auth import build_client_auth_headers
 from tools.remote_capabilities import fetch_remote_protocol_capabilities
 from tools.hchat_send import (
@@ -350,6 +351,7 @@ def send_protocol_message(
             "⚠️  Remote protocol reached the peer, but that peer failed to enqueue into its local Workbench/runtime.",
             file=sys.stderr,
         )
+    print(f"❌ Delivery result: {format_delivery_result(result)}", file=sys.stderr)
     print(f"❌ Protocol message failed: {json.dumps(result, ensure_ascii=False)}", file=sys.stderr)
     return False
 
