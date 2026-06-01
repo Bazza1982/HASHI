@@ -42,6 +42,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from ..attachments import AttachmentStore
+from ..protocol_outbound import register_outbound_correlation
 from ..security.auth import (
     authenticate_request_detailed,
     has_shared_token,
@@ -162,6 +163,17 @@ class ProtocolMessagePayload(BaseModel):
     route_trace: list[str] = []
     message_type: str = "agent_message"
     created_at: Optional[str] = None
+
+
+class ProtocolOutboundRegisterPayload(BaseModel):
+    message_id: str
+    conversation_id: str
+    from_instance: str
+    from_agent: str
+    to_instance: str
+    to_agent: str
+    state: str = "sending"
+    result: Optional[dict] = None
 
 
 class AttachmentUploadPayload(BaseModel):
@@ -736,6 +748,30 @@ def create_app(
             )
         status, result = await _protocol_manager.handle_protocol_message(payload.model_dump())
         return JSONResponse(status_code=status, content=result)
+
+    @app.post("/protocol/outbound")
+    async def protocol_outbound(request: Request, payload: ProtocolOutboundRegisterPayload):
+        if _protocol_manager is None:
+            return JSONResponse(status_code=503, content={"ok": False, "error": "protocol manager unavailable"})
+        body_bytes = await request.body()
+        client_id, auth_reason = authenticate_request_detailed(
+            request,
+            body_bytes=body_bytes,
+            from_instance=payload.from_instance,
+            allow_loopback=True,
+        )
+        if not client_id:
+            return JSONResponse(
+                status_code=401,
+                content={"ok": False, "error": "Protocol outbound registration authentication failed", "code": auth_reason},
+            )
+        result = register_outbound_correlation(
+            payload.model_dump(),
+            local_instance=str(_instance_info.get("instance_id") or ""),
+        )
+        if not result.get("ok"):
+            return JSONResponse(status_code=400, content=result)
+        return result
 
     @app.post("/attachments/upload")
     async def attachment_upload(request: Request, payload: AttachmentUploadPayload):
