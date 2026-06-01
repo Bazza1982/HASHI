@@ -262,3 +262,39 @@ def test_send_protocol_message_rejects_attachment_send_when_live_peer_lacks_capa
 
     assert ok is False
     assert "message_attachments_v1" in capsys.readouterr().err
+
+
+def test_send_protocol_message_prints_operator_delivery_result(monkeypatch, capsys):
+    def fake_urlopen(req, timeout=0):
+        return _FakeResponse(
+            {
+                "ok": False,
+                "message_type": "error",
+                "body": {
+                    "code": "target_agent_not_found",
+                    "message": "Target agent 'lily' not found",
+                },
+            }
+        )
+
+    monkeypatch.setattr(protocol_send.urllib_request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(protocol_send, "_load_config", lambda: {"global": {"instance_id": "HASHI1"}})
+    monkeypatch.setattr(protocol_send, "_load_instances", lambda: {})
+    monkeypatch.setattr(
+        protocol_send,
+        "_find_remote_instance",
+        lambda *args, **kwargs: {"remote_host": "10.0.0.9", "remote_port": 8766},
+    )
+    monkeypatch.setattr(protocol_send, "_probe_remote_http", lambda host, port: True)
+
+    ok = protocol_send.send_protocol_message(
+        "lily@HASHI9",
+        "zelda",
+        "hello there",
+        shared_token="shared-secret",
+    )
+
+    assert ok is False
+    err = capsys.readouterr().err
+    assert "Delivery result: target_not_found:" in err
+    assert "Target agent 'lily' not found" in err

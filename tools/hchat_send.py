@@ -38,6 +38,7 @@ if str(ROOT) not in sys.path:
 if __name__ == "__main__":
     sys.modules.setdefault("tools.hchat_send", sys.modules[__name__])
 
+from remote.delivery_results import format_delivery_result
 from remote.security.client_auth import build_client_auth_headers
 
 CONTACTS_FILE = ROOT / "contacts.json"
@@ -781,17 +782,22 @@ def _send_via_protocol_transport(
             print(f"✅ Hchat delivered (protocol transport, {remote_host}:{int(remote_port)}): {from_agent} → {to_agent}@{target_instance}")
             print(f"   Message: {text[:80]}{'...' if len(text) > 80 else ''}")
             return True
-        print(f"⚠️ Protocol transport error: {json.dumps(result, ensure_ascii=False)}", file=sys.stderr)
+        print(f"⚠️ Protocol transport error: {format_delivery_result(result)}", file=sys.stderr)
+        print(f"   Raw: {json.dumps(result, ensure_ascii=False)}", file=sys.stderr)
         return False
     except HTTPError as exc:
         try:
             body = exc.read().decode("utf-8")
+            payload = json.loads(body)
         except Exception:
+            payload = None
             body = str(exc)
-        print(f"⚠️ Protocol transport HTTP error: {body}", file=sys.stderr)
+        print(f"⚠️ Protocol transport HTTP error: {format_delivery_result(payload, transport_error=body)}", file=sys.stderr)
+        print(f"   Raw: {body}", file=sys.stderr)
         return False
     except Exception as exc:
-        print(f"⚠️ Protocol transport handoff failed: {exc}", file=sys.stderr)
+        print(f"⚠️ Protocol transport handoff failed: {format_delivery_result(transport_error=str(exc))}", file=sys.stderr)
+        print(f"   Raw: {exc}", file=sys.stderr)
         return False
 
 
