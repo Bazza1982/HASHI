@@ -719,6 +719,21 @@ def create_app(
             return JSONResponse(status_code=503, content={"ok": False, "error": "protocol manager unavailable"})
         return {"ok": True, "agents": _protocol_manager.get_local_agents_snapshot()}
 
+    @app.get("/protocol/directory")
+    async def protocol_directory(request: Request):
+        if _protocol_manager is None:
+            return JSONResponse(status_code=503, content={"ok": False, "error": "protocol manager unavailable"})
+        authenticated = try_authenticate_request(request, allow_loopback=True)
+        if not authenticated:
+            return JSONResponse(status_code=401, content={"ok": False, "error": "auth_required", "code": "auth_required"})
+        return {
+            "ok": True,
+            "instance_id": _instance_info.get("instance_id"),
+            "agents": _protocol_manager.get_local_agents_snapshot(),
+            "agent_directory": _protocol_manager.get_local_agent_directory_state(),
+            "trusted_view": True,
+        }
+
     @app.post("/protocol/message")
     async def protocol_message(request: Request, payload: ProtocolMessagePayload):
         if _protocol_manager is None:

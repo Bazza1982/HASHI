@@ -394,6 +394,40 @@ def test_protocol_status_is_redacted_without_auth(tmp_path):
     assert "peers" not in body
 
 
+def test_protocol_directory_requires_auth_when_token_configured(tmp_path):
+    _write_shared_token(tmp_path)
+    client, _protocol = _client(tmp_path)
+
+    response = client.get("/protocol/directory")
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "auth_required"
+
+
+def test_protocol_directory_accepts_valid_shared_token(tmp_path):
+    token = _write_shared_token(tmp_path)
+    client, _protocol = _client(tmp_path)
+    headers = build_auth_headers(
+        shared_token=token,
+        method="GET",
+        path="/protocol/directory",
+        from_instance="HASHI2",
+        body_bytes=b"",
+        timestamp=int(time.time()),
+        nonce="directory-1",
+    )
+
+    response = client.get("/protocol/directory", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["instance_id"] == "HASHI_LOCAL"
+    assert body["agents"] == [{"id": "local-agent"}]
+    assert body["agent_directory"] == {"directory_state": "fresh", "version": "local-snapshot"}
+    assert body["trusted_view"] is True
+
+
 def test_remote_config_defaults_lan_mode_off():
     config_path = Path(__file__).resolve().parent.parent / "remote" / "config.yaml"
     text = config_path.read_text(encoding="utf-8")
