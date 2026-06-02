@@ -515,6 +515,7 @@ HASHI agents respond to both natural language and structured commands:
 | `/active [on\|off\|minutes]` | Toggle proactive heartbeat |
 | `/whisper [small\|medium\|large]` | Set local voice transcription model |
 | `/voice [on\|off\|menu\|use <alias>]` | Control bridge voice replies |
+| `/say` | Read the last assistant reply as voice; forces one TTS attempt even when `/voice off` if a voice is configured |
 | `/api [status\|on\|off\|model <name>]` | Show API Gateway address, switch it on/off, or set its default model |
 
 #### Lifecycle Commands

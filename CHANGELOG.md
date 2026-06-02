@@ -9,9 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Notes
+### Fixed
 
-- No unreleased changes yet.
+- **Telegram `/nudge` inline actions** — routed `nudgejob:` callback data through the existing skill callback handler so Trigger, Pause/Resume, and Delete buttons are dispatched instead of being ignored by the Telegram callback pattern.
+- **Telegram `/say` command visibility** — restored `/say` to the bot command menu and default limited-agent allowlist so conversational agents can expose the command again.
+- **Flexible runtime `/say` execution** — restored transcript lookup in `FlexibleAgentRuntime` so `/say` can read the last assistant reply before forcing TTS generation. Forced `/say` generation bypasses `/voice off`, but still requires a configured and working voice provider/voice selection.
+
+### Tests
+
+- Added focused regression coverage for tokenized nudge delete callbacks, `/say` bot menu metadata, limited-agent allowlist behavior, forced `/say` voice generation with voice replies disabled, and flexible-runtime transcript lookup.
 
 ## [4.0.0-alpha.1] - 2026-05-23
 
