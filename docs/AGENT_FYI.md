@@ -26,6 +26,7 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - `/fyi [prompt]`: explicit bridge environment awareness refresh.
 - `/active [on|off] [minutes]`: toggle proactive follow-up heartbeat; default is 10 minutes.
 - `/voice [status|on|off|provider|providers|voices|use <alias>]`: control native bridge-owned voice replies.
+- `/say`: read the last assistant reply as a voice message. This forces one TTS attempt even when `/voice off`, as long as a usable voice provider and voice choice are configured.
 - `/retry`: resend last response or rerun last prompt.
 - `/debug <prompt>`: strict debug mode with verification-first behavior.
 - `/usecomputer [on|off|status|examples|task]`: load managed GUI-aware operating guidance. This is a unified shortcut for desktop/browser/Windows computer use, but it does not force GUI when a better non-GUI path exists.
