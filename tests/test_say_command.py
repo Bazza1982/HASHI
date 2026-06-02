@@ -27,6 +27,28 @@ def test_say_is_allowed_for_default_allowlist_commands():
     assert runtime._is_command_allowed("say") is True
 
 
+def test_flexible_runtime_loads_last_assistant_text_from_transcript(tmp_path):
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text(
+        "\n".join(
+            [
+                json.dumps({"role": "assistant", "text": "older reply"}),
+                "not-json",
+                json.dumps({"role": "user", "text": "latest prompt"}),
+                json.dumps({"role": "assistant", "text": "latest reply"}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
+    runtime.transcript_log_path = transcript
+
+    assert runtime._load_last_text_from_transcript("assistant") == "latest reply"
+    assert runtime._load_last_text_from_transcript("user") == "latest prompt"
+
+
 @pytest.mark.asyncio
 async def test_cmd_say_forces_voice_even_when_voice_replies_are_off():
     calls = []
