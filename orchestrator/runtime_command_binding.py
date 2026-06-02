@@ -111,6 +111,7 @@ BOT_COMMAND_BINDINGS: tuple[BotCommandBinding, ...] = (
     BotCommandBinding("agents", "List all agents with controls; add <id> <name> [token]"),
     BotCommandBinding("status", "View agent status"),
     BotCommandBinding("voice", "Toggle native voice replies"),
+    BotCommandBinding("say", "Read the last assistant reply as voice"),
     BotCommandBinding("safevoice", "Toggle voice confirmation safety layer"),
     BotCommandBinding("whisper", "Set Whisper model size [small|medium|large]"),
     BotCommandBinding("active", "Toggle proactive heartbeat"),
