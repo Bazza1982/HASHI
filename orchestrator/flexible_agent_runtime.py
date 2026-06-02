@@ -7089,6 +7089,28 @@ class FlexibleAgentRuntime:
             wrapper_result=wrapper_result,
         )
 
+    def _load_last_text_from_transcript(self, role: str) -> str | None:
+        """Read the last transcript message for commands like /say and /retry."""
+        try:
+            path = getattr(self, "transcript_log_path", None)
+            if path is None or not path.exists():
+                return None
+            last_text = None
+            with path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except Exception:
+                        continue
+                    if entry.get("role") == role and entry.get("text"):
+                        last_text = entry["text"]
+            return last_text
+        except Exception:
+            return None
+
     async def _send_wrapper_polishing_placeholder(self, item: QueuedRequest):
         return await runtime_wrapper.send_wrapper_polishing_placeholder(self, item)
 
