@@ -2,6 +2,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from telegram.error import TimedOut
 
 from orchestrator import runtime_media
 
@@ -12,6 +13,9 @@ class _Logger:
 
     def info(self, message):
         self.messages.append(("info", message))
+
+    def warning(self, message):
+        self.messages.append(("warning", message))
 
     def error(self, message):
         self.messages.append(("error", message))
@@ -33,8 +37,19 @@ class _TelegramFile:
 class _Bot:
     def __init__(self):
         self.file = _TelegramFile()
+        self.get_file_calls = 0
 
     async def get_file(self, file_id):
+        self.get_file_calls += 1
+        self.file_id = file_id
+        return self.file
+
+
+class _FlakyBot(_Bot):
+    async def get_file(self, file_id):
+        self.get_file_calls += 1
+        if self.get_file_calls == 1:
+            raise TimedOut("temporary timeout")
         self.file_id = file_id
         return self.file
 
@@ -116,6 +131,26 @@ async def test_handle_document_downloads_and_enqueues(tmp_path):
     assert runtime.enqueued[0]["source"] == "document"
     assert "notes.txt" in runtime.enqueued[0]["prompt"]
     assert "please read" in runtime.enqueued[0]["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_download_media_retries_transient_telegram_timeout(tmp_path, monkeypatch):
+    runtime = _runtime(tmp_path)
+    runtime.app.bot = _FlakyBot()
+    sleep_calls = []
+
+    async def fake_sleep(delay):
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr(runtime_media.asyncio, "sleep", fake_sleep)
+
+    local_path = await runtime_media.download_media(runtime, "file-1", "photo.jpg")
+
+    assert local_path == tmp_path / "media" / "photo.jpg"
+    assert runtime.app.bot.get_file_calls == 2
+    assert runtime.app.bot.file.downloaded_to == local_path
+    assert sleep_calls == [0.75]
+    assert any(level == "warning" for level, _message in runtime.logger.messages)
 
 
 @pytest.mark.asyncio

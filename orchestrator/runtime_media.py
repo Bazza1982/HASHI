@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import NetworkError, TimedOut
 
 from orchestrator.media_utils import is_image_file
 from orchestrator.runtime_common import _print_user_message
@@ -71,12 +73,43 @@ def build_media_prompt(
     return f'User sent a file "{filename}" (saved at {{local_path}}). Read it if possible and respond.', filename
 
 
+def _log_warning(runtime: Any, message: str) -> None:
+    logger = getattr(runtime, "logger", None)
+    warning = getattr(logger, "warning", None)
+    if callable(warning):
+        warning(message)
+    else:
+        info = getattr(logger, "info", None)
+        if callable(info):
+            info(message)
+
+
 async def download_media(runtime: Any, file_id: str, filename: str) -> Path:
-    tg_file = await runtime.app.bot.get_file(file_id)
     local_path = runtime.media_dir / filename
-    await tg_file.download_to_drive(local_path)
-    runtime.logger.info(f"Downloaded media: {local_path}")
-    return local_path
+    retryable_errors = (TimedOut, NetworkError, TimeoutError, OSError)
+    max_attempts = 3
+    last_error: Exception | None = None
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            tg_file = await runtime.app.bot.get_file(file_id)
+            await tg_file.download_to_drive(local_path)
+            runtime.logger.info(f"Downloaded media: {local_path}")
+            return local_path
+        except retryable_errors as e:
+            last_error = e
+            if attempt >= max_attempts:
+                break
+            delay = 0.75 * attempt
+            _log_warning(
+                runtime,
+                f"Media download attempt {attempt}/{max_attempts} failed for {filename}: {e}; retrying in {delay:.2f}s",
+            )
+            await asyncio.sleep(delay)
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError(f"Media download failed for {filename}")
 
 
 async def handle_media_message(
