@@ -411,7 +411,9 @@ async def test_setup_interactive_feedback_creates_placeholder_and_cleanup_tasks(
         audit_collector=None,
     )
 
-    assert runtime.app.bot.sent == [{"chat_id": 123, "text": "typing", "parse_mode": None}]
+    assert runtime.app.bot.sent == [
+        {"chat_id": 123, "text": "typing", "parse_mode": None, "disable_notification": True}
+    ]
     assert feedback.placeholder.message_id == 77
     assert feedback.typing_task is not None
     assert feedback.escalation_task is not None

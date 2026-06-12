@@ -91,6 +91,7 @@ from orchestrator.usecomputer_mode import (
     set_usecomputer_mode,
 )
 from orchestrator.skill_manager import SkillDefinition, SkillManager
+from orchestrator.telegram_notifications import apply_disable_notification_default
 from orchestrator.voice_manager import VoiceManager
 from orchestrator.private_wol import describe_wol_targets, private_wol_available, run_private_wol
 from orchestrator.workzone import load_workzone
@@ -191,6 +192,8 @@ class FlexibleAgentRuntime:
         self._verbose: bool = not (self.workspace_dir / ".verbose_off").exists()
         # Load persisted think preference (.think_off file presence = OFF, absence = ON)
         self._think: bool = not (self.workspace_dir / ".think_off").exists()
+        # Load persisted Telegram notification preference (.notify_on presence = audible, absence = silent)
+        self._notify_enabled: bool = (self.workspace_dir / ".notify_on").exists()
         self._think_buffer: list[str] = []
         self._openrouter_think_chunk: str = ""
         self._last_openrouter_think_snippet: str | None = None
@@ -533,6 +536,7 @@ class FlexibleAgentRuntime:
                         await self.enqueue_request(chat_id, prompt, "startup", "Startup bootstrap", silent=True)
 
     async def _reply_text(self, update: Update, text: str, **kwargs):
+        apply_disable_notification_default(self, kwargs)
         last_error = None
         for _ in range(2):
             try:
@@ -544,6 +548,7 @@ class FlexibleAgentRuntime:
         raise last_error
 
     async def _send_text(self, chat_id: int, text: str, **kwargs):
+        apply_disable_notification_default(self, kwargs)
         last_error = None
         for _ in range(2):
             try:
@@ -7031,12 +7036,22 @@ class FlexibleAgentRuntime:
             return
         _think_msg = f"💭 <i>{_html.escape(text)}</i>"
         try:
-            await self.app.bot.send_message(chat_id=chat_id, text=_think_msg, parse_mode="HTML")
+            await self.app.bot.send_message(
+                chat_id=chat_id,
+                text=_think_msg,
+                parse_mode="HTML",
+                disable_notification=not self._notify_enabled,
+            )
         except Exception as e:
             if "ConnectError" in type(e).__name__ or "ConnectError" in str(e):
                 await asyncio.sleep(2)
                 try:
-                    await self.app.bot.send_message(chat_id=chat_id, text=_think_msg, parse_mode="HTML")
+                    await self.app.bot.send_message(
+                        chat_id=chat_id,
+                        text=_think_msg,
+                        parse_mode="HTML",
+                        disable_notification=not self._notify_enabled,
+                    )
                 except Exception as e2:
                     self.telegram_logger.warning(f"Failed to send thinking message (retry): {e2}")
             else:

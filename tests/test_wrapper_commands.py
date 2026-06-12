@@ -535,8 +535,8 @@ class FakeBot:
         self.messages = []
         self.deleted = []
 
-    async def send_message(self, chat_id, text, parse_mode=None):
-        self.messages.append({"chat_id": chat_id, "text": text, "parse_mode": parse_mode})
+    async def send_message(self, chat_id, text, parse_mode=None, **kwargs):
+        self.messages.append({"chat_id": chat_id, "text": text, "parse_mode": parse_mode, **kwargs})
         return SimpleNamespace(message_id=len(self.messages))
 
     async def delete_message(self, chat_id, message_id):

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Telegram `/notify` preference** — added a functional-layer `/notify [on|off]` command. Telegram notifications default to `off`, which still delivers messages but sends them with Telegram `disable_notification=true`; `/notify on` restores audible notifications and persists per agent workspace.
+
 ### Fixed
 
 - **Telegram `/nudge` inline actions** — routed `nudgejob:` callback data through the existing skill callback handler so Trigger, Pause/Resume, and Delete buttons are dispatched instead of being ignored by the Telegram callback pattern.
@@ -20,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Added focused regression coverage for tokenized nudge delete callbacks, `/say` bot menu metadata, limited-agent allowlist behavior, forced `/say` voice generation with voice replies disabled, and flexible-runtime transcript lookup.
 - Added regression coverage for a transient Telegram media `get_file()` timeout that succeeds on retry.
+- Added focused coverage for `/notify` persistence and Telegram `disable_notification` defaults.
 
 ## [4.0.0-alpha.1] - 2026-05-23
 

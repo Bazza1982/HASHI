@@ -7,6 +7,7 @@ from typing import Any
 from telegram import constants
 
 from orchestrator.runtime_common import _md_to_html
+from orchestrator.telegram_notifications import disable_notification
 
 
 async def send_long_message(
@@ -53,7 +54,11 @@ async def send_long_message(
         if len(msg) > tg_max_len:
             msg = msg[: tg_max_len - 20] + "\n... (truncated)"
 
-        await runtime.app.bot.send_message(chat_id=chat_id, text=msg)
+        await runtime.app.bot.send_message(
+            chat_id=chat_id,
+            text=msg,
+            disable_notification=disable_notification(runtime),
+        )
         runtime.telegram_logger.info(
             f"Sent Telegram message for request_id={request_id or '<none>'} "
             f"(purpose=error, chunks=1, text_len={len(msg)})"
@@ -68,6 +73,7 @@ async def send_long_message(
                 chat_id=chat_id,
                 text=chunk_html,
                 parse_mode=constants.ParseMode.HTML,
+                disable_notification=disable_notification(runtime),
             )
         except Exception as e:
             runtime.telegram_logger.warning(
@@ -75,17 +81,29 @@ async def send_long_message(
                 f"(purpose={purpose}, chunk={chunk_index}, mode=html): {e}. Fallback to raw text."
             )
             if len(chunk_raw) <= tg_max_len:
-                await runtime.app.bot.send_message(chat_id=chat_id, text=chunk_raw)
+                await runtime.app.bot.send_message(
+                    chat_id=chat_id,
+                    text=chunk_raw,
+                    disable_notification=disable_notification(runtime),
+                )
             else:
                 remain = chunk_raw
                 while remain:
                     if len(remain) <= tg_max_len:
-                        await runtime.app.bot.send_message(chat_id=chat_id, text=remain)
+                        await runtime.app.bot.send_message(
+                            chat_id=chat_id,
+                            text=remain,
+                            disable_notification=disable_notification(runtime),
+                        )
                         break
                     split_at = remain.rfind("\n", 0, tg_max_len)
                     if split_at == -1:
                         split_at = tg_max_len
-                    await runtime.app.bot.send_message(chat_id=chat_id, text=remain[:split_at])
+                    await runtime.app.bot.send_message(
+                        chat_id=chat_id,
+                        text=remain[:split_at],
+                        disable_notification=disable_notification(runtime),
+                    )
                     remain = remain[split_at:].lstrip("\n")
 
     if len(html) <= tg_max_len:
