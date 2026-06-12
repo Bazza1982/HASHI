@@ -7,6 +7,7 @@ from typing import Any
 import hashlib as _hashlib
 
 from orchestrator.runtime_common import _print_final_response, _safe_excerpt
+from orchestrator.telegram_notifications import disable_notification
 
 EMPTY_SUCCESS_TOOL_FAILURE_MESSAGE = (
     "I wasn't able to complete that — a tool I tried to use didn't return a result. "
@@ -299,6 +300,7 @@ async def setup_interactive_feedback(
                 chat_id=item.chat_id,
                 text=placeholder_text,
                 parse_mode=placeholder_parse_mode,
+                disable_notification=disable_notification(runtime),
             )
             placeholder_elapsed_s = (datetime.now() - placeholder_started).total_seconds()
             runtime.telegram_logger.info(

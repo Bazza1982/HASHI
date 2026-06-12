@@ -41,6 +41,7 @@ def _runtime(tmp_path: Path, *, connected: bool = True):
         telegram_connected=connected,
         telegram_logger=_Logger(),
         workspace_dir=tmp_path,
+        _notify_enabled=False,
     )
 
 
@@ -77,8 +78,25 @@ async def test_send_long_message_sends_html_by_default(tmp_path):
             "chat_id": 123,
             "text": "<b>hello</b>",
             "parse_mode": constants.ParseMode.HTML,
+            "disable_notification": True,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_send_long_message_respects_notify_on(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime._notify_enabled = True
+
+    _elapsed, chunks = await runtime_delivery.send_long_message(
+        runtime,
+        chat_id=123,
+        text="hello",
+        request_id="req-2b",
+    )
+
+    assert chunks == 1
+    assert runtime.app.bot.messages[0]["disable_notification"] is False
 
 
 @pytest.mark.asyncio
@@ -96,6 +114,7 @@ async def test_send_long_message_error_uses_plain_summary(tmp_path):
     assert chunks == 1
     message = runtime.app.bot.messages[0]
     assert message["chat_id"] == 123
+    assert message["disable_notification"] is True
     assert "parse_mode" not in message
     assert "Backend error (codex-cli) | req-err" in message["text"]
     assert "Full log (local):" in message["text"]
