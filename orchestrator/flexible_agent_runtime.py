@@ -4797,7 +4797,7 @@ class FlexibleAgentRuntime:
         return None
 
     def _wrapper_core_keyboard(self, cfg) -> InlineKeyboardMarkup:
-        models = ["gpt-5.5", "gpt-5.4", "gpt-5.3-codex"]
+        models = ["gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.3-codex"]
         rows: list[list[InlineKeyboardButton]] = []
         for model in models:
             label = f"✅ {model}" if cfg.core_backend == "codex-cli" and cfg.core_model == model else model
