@@ -99,6 +99,7 @@ class _Bot:
     def __init__(self):
         self.sent = []
         self.edits = []
+        self.deleted = []
 
     async def send_message(self, **kwargs):
         self.sent.append(kwargs)
@@ -106,6 +107,9 @@ class _Bot:
 
     async def edit_message_text(self, **kwargs):
         self.edits.append(kwargs)
+
+    async def delete_message(self, **kwargs):
+        self.deleted.append(kwargs)
 
 
 def _item(**overrides):
@@ -406,6 +410,33 @@ async def test_cleanup_interactive_feedback_stops_typing_and_deletes_placeholder
 
 
 @pytest.mark.asyncio
+async def test_cleanup_interactive_feedback_can_leave_stream_owned_placeholder():
+    runtime = _runtime()
+    stop_typing = asyncio.Event()
+
+    async def _typing_task():
+        await stop_typing.wait()
+
+    typing_task = asyncio.create_task(_typing_task())
+    runtime._flush_thinking = lambda chat_id: None
+    placeholder = SimpleNamespace(message_id=99)
+
+    await runtime_pipeline.cleanup_interactive_feedback(
+        runtime,
+        _item(),
+        stop_typing=stop_typing,
+        typing_task=typing_task,
+        escalation_task=None,
+        think_flush_task=None,
+        placeholder=placeholder,
+        delete_placeholder=False,
+    )
+
+    assert typing_task.done()
+    assert runtime.app.bot.deleted == []
+
+
+@pytest.mark.asyncio
 async def test_setup_interactive_feedback_creates_placeholder_and_cleanup_tasks():
     runtime = _runtime()
 
@@ -424,6 +455,26 @@ async def test_setup_interactive_feedback_creates_placeholder_and_cleanup_tasks(
     assert feedback.escalation_task is None
     assert feedback.answer_preview_task is not None
     assert feedback.on_stream_event is not None
+    feedback.stop_typing.set()
+    await feedback.typing_task
+    await feedback.answer_preview_task
+
+
+@pytest.mark.asyncio
+async def test_setup_interactive_feedback_creates_stream_state_only_when_capability_and_flag_enabled():
+    runtime = _runtime()
+    runtime.config.extra = {"answer_stream_final_delivery": True}
+    runtime.backend_manager.current_backend.capabilities.supports_answer_stream = True
+
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(),
+        audit_active=False,
+        audit_collector=None,
+    )
+
+    assert feedback.answer_stream_state is not None
+    assert feedback.answer_stream_state.placeholder is feedback.placeholder
     feedback.stop_typing.set()
     await feedback.typing_task
     await feedback.answer_preview_task
@@ -463,6 +514,49 @@ async def test_answer_preview_stream_edits_placeholder():
 
     assert runtime.app.bot.edits
     assert "Hello world" in runtime.app.bot.edits[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_answer_preview_records_stream_state_deltas_and_edits():
+    runtime = _runtime()
+    runtime.config.extra = {
+        "answer_stream_edit_interval_s": 0.01,
+        "answer_stream_min_chars": 1,
+    }
+    stream_state = runtime_pipeline.StreamedAnswerState(
+        request_id="req-1",
+        chat_id=123,
+        placeholder=SimpleNamespace(message_id=77),
+        buffer=[],
+        started_at=datetime.now(),
+    )
+    event_queue = asyncio.Queue()
+    stop_event = asyncio.Event()
+    task = asyncio.create_task(
+        runtime_pipeline.answer_preview_loop(
+            runtime,
+            _item(),
+            placeholder=SimpleNamespace(message_id=77),
+            stop_event=stop_event,
+            event_queue=event_queue,
+            stream_state=stream_state,
+        )
+    )
+
+    await event_queue.put(StreamEvent(kind=KIND_TEXT_DELTA, summary="Hello "))
+    await event_queue.put(StreamEvent(kind=KIND_TEXT_DELTA, summary="world"))
+    for _ in range(20):
+        if runtime.app.bot.edits:
+            break
+        await asyncio.sleep(0.02)
+
+    stop_event.set()
+    await task
+
+    assert "".join(stream_state.buffer) == "Hello world"
+    assert stream_state.delta_count == 2
+    assert stream_state.char_count == len("Hello world")
+    assert stream_state.edit_count >= 1
 
 
 @pytest.mark.asyncio
@@ -860,6 +954,129 @@ async def test_handle_success_delivery_sends_response_and_routes_hchat():
     assert runtime.audit_followups[0]["audit_collector"] == "audit"
     assert runtime.hchat_routes == [("req-1", "visible text")]
     assert runtime.maintenance_events[-1][0] == "send_success"
+
+
+@pytest.mark.asyncio
+async def test_finalize_streamed_answer_promotes_placeholder_to_final_text():
+    runtime = _runtime()
+    item = _item()
+    stream_state = runtime_pipeline.StreamedAnswerState(
+        request_id=item.request_id,
+        chat_id=item.chat_id,
+        placeholder=SimpleNamespace(message_id=77),
+        buffer=["raw ", "preview"],
+        started_at=datetime.now(),
+        delta_count=2,
+        char_count=len("raw preview"),
+        edit_count=1,
+    )
+
+    result = await runtime_pipeline.finalize_streamed_answer(
+        runtime,
+        item,
+        stream_state=stream_state,
+        final_text="wrapped final text",
+    )
+
+    assert result.final_delivered is True
+    assert result.fallback_required is False
+    assert stream_state.final_promoted is True
+    assert runtime.app.bot.edits[-1]["text"] == "wrapped final text"
+    assert not hasattr(runtime, "sent_message")
+
+
+@pytest.mark.asyncio
+async def test_finalize_streamed_answer_without_deltas_deletes_placeholder_and_falls_back():
+    runtime = _runtime()
+    item = _item()
+    stream_state = runtime_pipeline.StreamedAnswerState(
+        request_id=item.request_id,
+        chat_id=item.chat_id,
+        placeholder=SimpleNamespace(message_id=77),
+        buffer=[],
+        started_at=datetime.now(),
+    )
+
+    result = await runtime_pipeline.finalize_streamed_answer(
+        runtime,
+        item,
+        stream_state=stream_state,
+        final_text="wrapped final text",
+    )
+
+    assert result.final_delivered is False
+    assert result.fallback_required is True
+    assert runtime.app.bot.deleted == [{"chat_id": 123, "message_id": 77}]
+
+
+@pytest.mark.asyncio
+async def test_handle_success_delivery_promotes_streamed_final_after_wrapper_text():
+    runtime = _runtime()
+    item = _item(prompt="user text")
+    stream_state = runtime_pipeline.StreamedAnswerState(
+        request_id=item.request_id,
+        chat_id=item.chat_id,
+        placeholder=SimpleNamespace(message_id=77),
+        buffer=["raw backend"],
+        started_at=datetime.now(),
+        delta_count=1,
+        char_count=len("raw backend"),
+        edit_count=1,
+    )
+
+    await runtime_pipeline.handle_success_delivery(
+        runtime,
+        item,
+        SimpleNamespace(text="core text"),
+        visible_text="wrapped final text",
+        wrapper_result={"mode": "wrapper"},
+        is_bridge_request=False,
+        session_reset_source="session_reset",
+        queued_at=datetime.now() - timedelta(seconds=1),
+        queue_wait_s=0.2,
+        backend_elapsed_s=0.3,
+        audit_collector="audit",
+        answer_stream_state=stream_state,
+    )
+
+    assert runtime.app.bot.edits[-1]["text"] == "wrapped final text"
+    assert not hasattr(runtime, "sent_message")
+    assert runtime.voice_replies == [(123, "wrapped final text", "req-1")]
+    assert runtime.hchat_routes == [("req-1", "wrapped final text")]
+
+
+@pytest.mark.asyncio
+async def test_handle_success_delivery_buffered_transfer_deletes_stream_placeholder():
+    runtime = _runtime()
+    runtime._should_buffer_during_transfer = lambda request_id: True
+    item = _item(prompt="user text")
+    stream_state = runtime_pipeline.StreamedAnswerState(
+        request_id=item.request_id,
+        chat_id=item.chat_id,
+        placeholder=SimpleNamespace(message_id=77),
+        buffer=["raw backend"],
+        started_at=datetime.now(),
+        delta_count=1,
+        char_count=len("raw backend"),
+    )
+
+    await runtime_pipeline.handle_success_delivery(
+        runtime,
+        item,
+        SimpleNamespace(text="core text"),
+        visible_text="wrapped final text",
+        wrapper_result={"mode": "wrapper"},
+        is_bridge_request=False,
+        session_reset_source="session_reset",
+        queued_at=datetime.now(),
+        queue_wait_s=0,
+        backend_elapsed_s=0,
+        audit_collector=None,
+        answer_stream_state=stream_state,
+    )
+
+    assert runtime.suppressed == {"success": True, "text": "wrapped final text"}
+    assert runtime.app.bot.deleted == [{"chat_id": 123, "message_id": 77}]
 
 
 @pytest.mark.asyncio

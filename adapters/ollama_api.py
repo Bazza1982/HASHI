@@ -160,7 +160,7 @@ class OllamaAdapter(OpenRouterAdapter):
                     text_chunks.append(content)
                     if on_stream_event:
                         asyncio.create_task(
-                            on_stream_event(StreamEvent(kind=KIND_TEXT_DELTA, summary=content[:120]))
+                            on_stream_event(StreamEvent(kind=KIND_TEXT_DELTA, summary=content))
                         )
 
                 for tc_delta in (delta.get("tool_calls") or []):

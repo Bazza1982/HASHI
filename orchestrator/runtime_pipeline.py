@@ -48,12 +48,41 @@ class SuccessfulResponse:
     wrapper_result: Any
 
 
+@dataclass
+class StreamedAnswerState:
+    request_id: str
+    chat_id: int
+    placeholder: Any | None
+    buffer: list[str]
+    started_at: datetime
+    delta_count: int = 0
+    char_count: int = 0
+    edit_count: int = 0
+    failed: bool = False
+    failure_reason: str = ""
+    final_promoted: bool = False
+
+    @property
+    def has_text(self) -> bool:
+        return self.delta_count > 0 and bool("".join(self.buffer))
+
+
+@dataclass(frozen=True)
+class StreamFinalization:
+    streamed: bool
+    final_delivered: bool
+    continuation_chunks_sent: int = 0
+    fallback_required: bool = False
+    error: str = ""
+
+
 @dataclass(frozen=True)
 class InteractiveFeedback:
     stop_typing: asyncio.Event | None
     typing_task: asyncio.Task | None
     escalation_task: asyncio.Task | None
     answer_preview_task: asyncio.Task | None
+    answer_stream_state: StreamedAnswerState | None
     placeholder: Any | None
     stream_callback: Any | None
     think_flush_task: asyncio.Task | None
@@ -248,6 +277,7 @@ async def cleanup_interactive_feedback(
     answer_preview_task=None,
     think_flush_task,
     placeholder,
+    delete_placeholder: bool = True,
 ) -> None:
     if stop_typing and typing_task:
         stop_typing.set()
@@ -271,7 +301,7 @@ async def cleanup_interactive_feedback(
             pass
         await runtime._flush_thinking(item.chat_id)
 
-    if placeholder:
+    if placeholder and delete_placeholder:
         try:
             delete_started = datetime.now()
             await runtime.app.bot.delete_message(chat_id=item.chat_id, message_id=placeholder.message_id)
@@ -291,6 +321,7 @@ async def answer_preview_loop(
     placeholder,
     stop_event: asyncio.Event,
     event_queue: asyncio.Queue,
+    stream_state: StreamedAnswerState | None = None,
 ) -> None:
     """Edit the Telegram placeholder with assistant text deltas while generating."""
     if placeholder is None:
@@ -347,6 +378,8 @@ async def answer_preview_loop(
                 message_id=placeholder.message_id,
                 text=text,
             )
+            if stream_state is not None:
+                stream_state.edit_count += 1
             last_edit_at = asyncio.get_running_loop().time()
             dirty = False
         except Exception as exc:
@@ -355,6 +388,9 @@ async def answer_preview_loop(
             elif "message is not modified" in str(exc).lower():
                 dirty = False
             else:
+                if stream_state is not None:
+                    stream_state.failed = True
+                    stream_state.failure_reason = str(exc)
                 runtime.telegram_logger.warning(
                     f"Answer stream preview edit failed for {item.request_id}: {exc}"
                 )
@@ -367,6 +403,10 @@ async def answer_preview_loop(
             summary = raw_summary.strip()
             if kind == KIND_TEXT_DELTA and raw_summary:
                 chunks.append(raw_summary)
+                if stream_state is not None:
+                    stream_state.buffer.append(raw_summary)
+                    stream_state.delta_count += 1
+                    stream_state.char_count += len(raw_summary)
                 dirty = True
             elif kind in status_kinds and summary and not chunks:
                 latest_status = summary[:240]
@@ -396,6 +436,7 @@ async def setup_interactive_feedback(
     stream_callback = None
     think_flush_task = None
     answer_preview_task = None
+    answer_stream_state = None
     if not item.silent and item.deliver_to_telegram:
         placeholder_text, placeholder_parse_mode = runtime.get_typing_placeholder()
         stop_typing = asyncio.Event()
@@ -423,6 +464,22 @@ async def setup_interactive_feedback(
         answer_preview_queue = None
         preview_enabled = bool((getattr(runtime.config, "extra", {}) or {}).get("answer_stream_preview", True))
         preview_enabled = preview_enabled and placeholder is not None
+        final_stream_enabled = bool((getattr(runtime.config, "extra", {}) or {}).get("answer_stream_final_delivery", False))
+        supports_answer_stream = bool(getattr(capabilities, "supports_answer_stream", False))
+        if final_stream_enabled and supports_answer_stream and placeholder is not None:
+            answer_stream_state = StreamedAnswerState(
+                request_id=item.request_id,
+                chat_id=item.chat_id,
+                placeholder=placeholder,
+                buffer=[],
+                started_at=datetime.now(),
+            )
+        runtime.logger.info(
+            f"Answer stream eligibility {item.request_id}: "
+            f"preview={preview_enabled}, final={answer_stream_state is not None}, "
+            f"backend={getattr(runtime.config, 'active_backend', 'unknown')}, "
+            f"supports_answer_stream={supports_answer_stream}"
+        )
         use_stream = runtime._verbose or runtime._think or audit_active or preview_enabled
         if use_stream:
             if runtime._verbose and supports_stream_display and not preview_enabled:
@@ -454,6 +511,7 @@ async def setup_interactive_feedback(
                     placeholder=placeholder,
                     stop_event=stop_typing,
                     event_queue=answer_preview_queue,
+                    stream_state=answer_stream_state,
                 )
             )
         elif runtime._verbose and supports_stream_display:
@@ -494,11 +552,86 @@ async def setup_interactive_feedback(
         typing_task=typing_task,
         escalation_task=escalation_task,
         answer_preview_task=answer_preview_task,
+        answer_stream_state=answer_stream_state,
         placeholder=placeholder,
         stream_callback=stream_callback,
         think_flush_task=think_flush_task,
         on_stream_event=on_stream_event,
     )
+
+
+async def finalize_streamed_answer(
+    runtime,
+    item,
+    *,
+    stream_state: StreamedAnswerState | None,
+    final_text: str,
+) -> StreamFinalization:
+    if stream_state is None:
+        return StreamFinalization(streamed=False, final_delivered=False, fallback_required=True)
+
+    if not stream_state.has_text or stream_state.failed or stream_state.placeholder is None:
+        if stream_state.placeholder is not None:
+            try:
+                await runtime.app.bot.delete_message(
+                    chat_id=item.chat_id,
+                    message_id=stream_state.placeholder.message_id,
+                )
+            except Exception:
+                pass
+        runtime.logger.info(
+            f"Answer stream finalize fallback {item.request_id}: "
+            f"deltas={stream_state.delta_count}, edits={stream_state.edit_count}, "
+            f"failed={stream_state.failed}, reason={stream_state.failure_reason}"
+        )
+        return StreamFinalization(
+            streamed=stream_state.has_text,
+            final_delivered=False,
+            fallback_required=True,
+            error=stream_state.failure_reason,
+        )
+
+    extra = getattr(getattr(runtime, "config", None), "extra", {}) or {}
+    max_chars = int(extra.get("answer_stream_max_chars", 3400))
+    first_chunk = (final_text or "")[:max_chars]
+    continuation = (final_text or "")[max_chars:]
+    try:
+        await runtime.app.bot.edit_message_text(
+            chat_id=item.chat_id,
+            message_id=stream_state.placeholder.message_id,
+            text=first_chunk,
+        )
+        stream_state.final_promoted = True
+        continuation_chunks = 0
+        if continuation:
+            _elapsed, continuation_chunks = await runtime.send_long_message(
+                chat_id=item.chat_id,
+                text=continuation,
+                request_id=item.request_id,
+                purpose="response_continuation",
+            )
+        runtime.logger.info(
+            f"Answer stream finalized {item.request_id}: promoted=True, "
+            f"deltas={stream_state.delta_count}, edits={stream_state.edit_count}, "
+            f"chars={stream_state.char_count}, continuation_chunks={continuation_chunks}"
+        )
+        return StreamFinalization(
+            streamed=True,
+            final_delivered=True,
+            continuation_chunks_sent=continuation_chunks,
+        )
+    except Exception as exc:
+        stream_state.failed = True
+        stream_state.failure_reason = str(exc)
+        runtime.telegram_logger.warning(
+            f"Answer stream final promotion failed for {item.request_id}: {exc}"
+        )
+        return StreamFinalization(
+            streamed=True,
+            final_delivered=False,
+            fallback_required=True,
+            error=str(exc),
+        )
 
 
 async def handle_empty_success_response(runtime, item) -> None:
@@ -776,8 +909,17 @@ async def handle_success_delivery(
     queue_wait_s: float,
     backend_elapsed_s: float,
     audit_collector,
+    answer_stream_state: StreamedAnswerState | None = None,
 ) -> None:
     if runtime._should_buffer_during_transfer(item.request_id):
+        if answer_stream_state is not None and answer_stream_state.placeholder is not None:
+            try:
+                await runtime.app.bot.delete_message(
+                    chat_id=item.chat_id,
+                    message_id=answer_stream_state.placeholder.message_id,
+                )
+            except Exception:
+                pass
         runtime._record_suppressed_transfer_result(item, success=True, text=visible_text)
         return
     runtime.last_response = {
@@ -814,12 +956,22 @@ async def handle_success_delivery(
         else:
             cos_handled = True
     _print_final_response(runtime.name, response_text)
-    send_elapsed_s, chunk_count = await runtime.send_long_message(
-        chat_id=item.chat_id,
-        text=response_text,
-        request_id=item.request_id,
-        purpose="response",
+    stream_finalization = await finalize_streamed_answer(
+        runtime,
+        item,
+        stream_state=answer_stream_state,
+        final_text=response_text,
     )
+    if stream_finalization.final_delivered:
+        send_elapsed_s = 0.0
+        chunk_count = 1 + stream_finalization.continuation_chunks_sent
+    else:
+        send_elapsed_s, chunk_count = await runtime.send_long_message(
+            chat_id=item.chat_id,
+            text=response_text,
+            request_id=item.request_id,
+            purpose="response",
+        )
     await runtime._send_voice_reply(item.chat_id, response_text, item.request_id)
     runtime._schedule_audit_followup(
         item,
