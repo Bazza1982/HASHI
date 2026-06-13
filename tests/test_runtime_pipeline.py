@@ -9,7 +9,7 @@ import types
 import pytest
 
 from orchestrator import runtime_pipeline
-from adapters.stream_events import KIND_TEXT_DELTA, StreamEvent
+from adapters.stream_events import KIND_PROGRESS, KIND_TEXT_DELTA, StreamEvent
 
 
 class _Logger:
@@ -463,6 +463,71 @@ async def test_answer_preview_stream_edits_placeholder():
 
     assert runtime.app.bot.edits
     assert "Hello world" in runtime.app.bot.edits[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_answer_preview_heartbeat_edits_without_text_delta():
+    runtime = _runtime()
+    runtime.config.extra = {
+        "answer_stream_edit_interval_s": 0.01,
+        "answer_stream_min_chars": 1,
+    }
+
+    event_queue = asyncio.Queue()
+    stop_event = asyncio.Event()
+    task = asyncio.create_task(
+        runtime_pipeline.answer_preview_loop(
+            runtime,
+            _item(),
+            placeholder=SimpleNamespace(message_id=77),
+            stop_event=stop_event,
+            event_queue=event_queue,
+        )
+    )
+
+    for _ in range(20):
+        if runtime.app.bot.edits:
+            break
+        await asyncio.sleep(0.02)
+
+    stop_event.set()
+    await task
+
+    assert runtime.app.bot.edits
+    assert "Still working..." in runtime.app.bot.edits[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_answer_preview_shows_progress_when_text_delta_absent():
+    runtime = _runtime()
+    runtime.config.extra = {
+        "answer_stream_edit_interval_s": 0.01,
+        "answer_stream_min_chars": 1,
+    }
+
+    event_queue = asyncio.Queue()
+    stop_event = asyncio.Event()
+    task = asyncio.create_task(
+        runtime_pipeline.answer_preview_loop(
+            runtime,
+            _item(),
+            placeholder=SimpleNamespace(message_id=77),
+            stop_event=stop_event,
+            event_queue=event_queue,
+        )
+    )
+
+    await event_queue.put(StreamEvent(kind=KIND_PROGRESS, summary="Codex started reasoning"))
+    for _ in range(20):
+        if runtime.app.bot.edits:
+            break
+        await asyncio.sleep(0.02)
+
+    stop_event.set()
+    await task
+
+    assert runtime.app.bot.edits
+    assert "Codex started reasoning" in runtime.app.bot.edits[-1]["text"]
 
 
 @pytest.mark.asyncio
