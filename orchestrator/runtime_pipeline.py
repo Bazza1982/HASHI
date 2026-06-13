@@ -299,7 +299,7 @@ async def answer_preview_loop(
     from adapters.stream_events import KIND_TEXT_DELTA
 
     extra = getattr(getattr(runtime, "config", None), "extra", {}) or {}
-    min_edit_interval = float(extra.get("answer_stream_edit_interval_s", 1.8))
+    min_edit_interval = float(extra.get("answer_stream_edit_interval_s", 1.0))
     min_chars = int(extra.get("answer_stream_min_chars", 24))
     max_chars = int(extra.get("answer_stream_max_chars", 3400))
     started = datetime.now()
@@ -395,10 +395,10 @@ async def setup_interactive_feedback(
         stream_queue = None
         answer_preview_queue = None
         preview_enabled = bool((getattr(runtime.config, "extra", {}) or {}).get("answer_stream_preview", True))
-        preview_enabled = preview_enabled and supports_stream_display and not runtime._verbose and placeholder is not None
+        preview_enabled = preview_enabled and placeholder is not None
         use_stream = runtime._verbose or runtime._think or audit_active or preview_enabled
         if use_stream:
-            if runtime._verbose and supports_stream_display:
+            if runtime._verbose and supports_stream_display and not preview_enabled:
                 stream_queue = asyncio.Queue(maxsize=200)
             if preview_enabled:
                 answer_preview_queue = asyncio.Queue(maxsize=300)
@@ -419,7 +419,17 @@ async def setup_interactive_feedback(
             else:
                 stream_callback = base_stream_callback
 
-        if runtime._verbose and supports_stream_display:
+        if preview_enabled and answer_preview_queue is not None:
+            answer_preview_task = asyncio.create_task(
+                answer_preview_loop(
+                    runtime,
+                    item,
+                    placeholder=placeholder,
+                    stop_event=stop_typing,
+                    event_queue=answer_preview_queue,
+                )
+            )
+        elif runtime._verbose and supports_stream_display:
             escalation_task = asyncio.create_task(
                 runtime._streaming_display_loop(
                     item.chat_id,
@@ -428,16 +438,6 @@ async def setup_interactive_feedback(
                     stop_typing,
                     stream_queue,
                     backend=backend,
-                )
-            )
-        elif preview_enabled and answer_preview_queue is not None:
-            answer_preview_task = asyncio.create_task(
-                answer_preview_loop(
-                    runtime,
-                    item,
-                    placeholder=placeholder,
-                    stop_event=stop_typing,
-                    event_queue=answer_preview_queue,
                 )
             )
         else:

@@ -466,9 +466,51 @@ async def test_answer_preview_stream_edits_placeholder():
 
 
 @pytest.mark.asyncio
+async def test_answer_preview_does_not_require_verbose_stream_capability():
+    runtime = _runtime()
+    runtime.backend_manager.current_backend.capabilities.supports_thinking_stream = False
+
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(),
+        audit_active=False,
+        audit_collector=None,
+    )
+
+    assert feedback.answer_preview_task is not None
+    assert feedback.escalation_task is None
+    assert feedback.on_stream_event is not None
+    feedback.stop_typing.set()
+    await feedback.typing_task
+    await feedback.answer_preview_task
+
+
+@pytest.mark.asyncio
+async def test_answer_preview_takes_precedence_over_verbose_display():
+    runtime = _runtime()
+    runtime._verbose = True
+
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(),
+        audit_active=False,
+        audit_collector=None,
+    )
+
+    assert feedback.answer_preview_task is not None
+    assert feedback.escalation_task is None
+    assert runtime.streaming_loops == []
+    assert runtime.stream_callbacks[0]["event_queue"] is None
+    feedback.stop_typing.set()
+    await feedback.typing_task
+    await feedback.answer_preview_task
+
+
+@pytest.mark.asyncio
 async def test_verbose_non_streaming_backend_uses_escalating_placeholder():
     runtime = _runtime()
     runtime._verbose = True
+    runtime.config.extra = {"answer_stream_preview": False}
     runtime.backend_manager.current_backend.capabilities.supports_thinking_stream = False
 
     feedback = await runtime_pipeline.setup_interactive_feedback(
@@ -493,6 +535,7 @@ async def test_verbose_non_streaming_backend_uses_escalating_placeholder():
 async def test_verbose_streaming_backend_uses_streaming_display():
     runtime = _runtime()
     runtime._verbose = True
+    runtime.config.extra = {"answer_stream_preview": False}
 
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
