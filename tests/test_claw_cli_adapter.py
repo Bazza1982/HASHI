@@ -595,6 +595,7 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path):
     assert response.usage.output_tokens == 7
     assert response.usage.thinking_tokens == 12
     assert adapter.capabilities.supports_thinking_stream is True
+    assert adapter.capabilities.supports_answer_stream is True
     assert KIND_THINKING in [event.kind for event in events]
     assert any(
         event.kind == KIND_THINKING and "Claw stream started" in event.summary
