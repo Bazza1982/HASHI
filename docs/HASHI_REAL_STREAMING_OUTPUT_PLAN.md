@@ -8,6 +8,8 @@
 
 **Non-goal:** rewrite HASHI core identity, queue ownership, memory semantics, remote registry, or tool execution contracts.
 
+**Review update:** Lily reviewed this plan after the first draft. The main corrections are included below: placeholder ownership must be split before final promotion can work; Claw CLI must be included; DeepSeek and Ollama already have streaming paths but need full-delta preservation; capability rollout should start with optional `getattr` checks; and final promotion must use wrapper/COS-processed `response_text`, not raw backend text.
+
 ---
 
 ## 1. Problem Statement
@@ -90,6 +92,9 @@ Existing pieces:
 | `claude_cli.py` | Emits `KIND_TEXT_DELTA` from `text_delta` in stream-json | Good candidate if CLI emits partial text in live runs |
 | `codex_cli.py` | Parses Codex CLI JSON lines | Does not emit real answer deltas from current `codex exec --json` path |
 | `gemini_cli.py` | Best-effort CLI parsing | Needs verification; likely weak or non-delta depending on CLI behavior |
+| `claw_cli.py` | Emits `assistant_delta` as `KIND_TEXT_DELTA` through stream-json | Conditional answer-stream candidate if stream-json is supported |
+| `deepseek_api.py` | Already has streaming delta path | Needs full-delta preservation; do not treat as greenfield |
+| `ollama_api.py` | Already has streaming line/delta path | Needs full-delta preservation; do not treat as greenfield |
 | `runtime_pipeline.answer_preview_loop()` | Edits placeholder with deltas or heartbeat | Still preview-only; final delivery sends full answer separately |
 | `send_long_message()` delivery | Sends final response | Needs stream-aware bypass/promote behavior |
 | `api_gateway._handle_streaming()` | SSE response for API clients | Already streams if adapter emits deltas; falls back to one full chunk |
@@ -107,9 +112,10 @@ QueueItem
 -> backend emits StreamEvent(KIND_TEXT_DELTA)
 -> StreamedAnswerState accumulates answer_text
 -> TelegramAnswerStreamer edits visible message on a throttle
--> backend returns BackendResponse(final_text)
+-> backend returns BackendResponse(raw_final_text)
+-> wrapper/COS may produce authoritative response_text
 -> finalize streamed message:
-   - if streamed text matches final text closely: edit same message to final
+   - if streamed text exists: edit same message to authoritative response_text
    - if final is too long: edit first message and send continuation chunks
    - if no deltas or stream failed: use existing send_long_message()
 -> persist final response normally
@@ -119,9 +125,19 @@ Key distinction:
 
 ```text
 streamed answer state = volatile UI state
-BackendResponse.text = authoritative final content
+wrapper/COS-processed response_text = authoritative final content
 memory/transcript/audit = final content only
 ```
+
+Important ownership split:
+
+```text
+cleanup_interactive_feedback() stops typing/tasks
+stream finalization decides placeholder disposition
+final delivery checks StreamFinalization before send_long_message()
+```
+
+The first implementation must not let cleanup delete the placeholder before stream finalization can promote it.
 
 ---
 
@@ -183,6 +199,8 @@ class StreamFinalization:
 ```
 
 If `final_delivered=True`, the normal final `send_long_message()` path must not send the same answer again.
+
+The finalization step must run after wrapper/COS processing has produced the final user-visible `response_text`. Streamed preview text may be raw backend text, but final promotion must use the same text that would otherwise be passed to `send_long_message()`.
 
 ---
 
@@ -282,39 +300,62 @@ Risk:
 
 - Heuristic parsing can create false deltas or leak non-answer status text into the answer.
 
-### 7.5 DeepSeek API
+### 7.5 Claw CLI
 
 Current state:
 
-- Needs inspection against current adapter implementation.
+- `adapters/claw_cli.py` already maps `assistant_delta` to `KIND_TEXT_DELTA`.
+- Stream behavior depends on Claw stream-json support and runtime configuration.
 
 Required changes:
 
-- If OpenAI-compatible streaming is available, implement SSE delta parsing like OpenRouter.
-- If not currently streaming, add `stream=True` support.
+- Add Claw CLI to the capability matrix.
+- Preserve full assistant deltas for answer streaming.
+- Add fixtures for `assistant_delta`, completion, and fallback events.
+- Mark as `supports_answer_stream=True` only when stream-json is available and verified.
+
+Risk:
+
+- Claw event shapes may differ by version.
+- Tool/action deltas must not be appended to visible answer text.
+
+### 7.6 DeepSeek API
+
+Current state:
+
+- Existing adapter already has a streaming delta path.
+- The current text delta emission truncates visible content for display-style streaming.
+
+Required changes:
+
+- Verify the existing SSE stream path end-to-end.
+- Preserve full answer deltas for answer streaming rather than emitting only `content[:120]`.
 - Handle reasoning content separately from visible answer content.
+- Add tests that streamed deltas reconstruct the same final answer.
 
 Risk:
 
 - Some providers expose reasoning deltas differently or require model-specific fields.
 
-### 7.6 Ollama API
+### 7.7 Ollama API
 
 Current state:
 
-- Needs inspection against current adapter implementation.
+- Existing adapter already has a streaming line/delta path.
+- The current text delta emission truncates visible content for display-style streaming.
 
 Required changes:
 
-- Use Ollama streaming response lines when available.
-- Emit answer deltas from `response` chunks.
+- Verify the existing streaming response line handling.
+- Preserve full answer deltas from `response` chunks.
 - Finalize from `done=true` aggregate.
+- Add tests that streamed deltas reconstruct the same final answer.
 
 Risk:
 
 - Local model streaming can produce very small chunks; Telegram edit throttling must batch them.
 
-### 7.7 Mock/Test Backends
+### 7.8 Mock/Test Backends
 
 Required changes:
 
@@ -490,9 +531,9 @@ max editable chars: 3400 initially
 ### 9.2 On Completion
 
 ```text
-final_text = BackendResponse.text
+response_text = wrapper/COS-processed visible final text
 if streamed_state has real deltas and not failed:
-    edit placeholder to final first chunk
+    edit placeholder to response_text first chunk
     send continuation chunks if needed
     mark final_delivered=True
 else:
@@ -503,7 +544,7 @@ else:
 Matching rule:
 
 - Do not require streamed buffer to exactly equal final text.
-- Final text is authoritative and should replace the in-flight preview on final edit.
+- Wrapper/COS-processed `response_text` is authoritative and should replace the in-flight preview on final edit.
 - Log mismatch ratio for diagnostics.
 
 ### 9.3 On Error
@@ -521,7 +562,13 @@ if backend fails:
 
 Current `supports_thinking_stream` is too broad.
 
-Add or emulate:
+Initial rollout should avoid adding new required dataclass fields. Use optional capability checks first:
+
+```python
+supports_answer_stream = bool(getattr(capabilities, "supports_answer_stream", False))
+```
+
+After the first behavior is proven, add explicit optional fields or defaults:
 
 ```python
 supports_activity_stream: bool
@@ -538,8 +585,9 @@ Backend examples:
 | Claude CLI | Yes | Yes if stream-json emits deltas | Yes if emitted | Needs live verification |
 | Codex CLI current | Yes | No | Partial/progress only | Needs direct Responses path for true parity |
 | Gemini CLI | Unknown | Unknown/weak | Unknown | Verify before claiming |
-| DeepSeek API | Likely | Likely if SSE implemented | Model-dependent | Needs adapter check |
-| Ollama API | Likely | Yes if streaming endpoint used | No/limited | Local line streaming |
+| Claw CLI | Yes | Conditional | Unknown | `assistant_delta` via stream-json when supported |
+| DeepSeek API | Yes | Yes, needs full-delta preservation | Model-dependent | Existing stream path truncates deltas for display |
+| Ollama API | Yes | Yes, needs full-delta preservation | No/limited | Existing line stream path truncates deltas for display |
 
 User-facing behavior must be driven by `supports_answer_stream`, not by `supports_thinking_stream`.
 
@@ -558,7 +606,7 @@ Files:
 Tasks:
 
 - Log when answer streaming is eligible.
-- Log backend capability flags.
+- Log backend capability flags using `getattr(..., False)` so Phase 0 has no broad adapter churn.
 - Log every stream finalization result.
 - Log edit count, delta count, char count, fallback reason.
 
@@ -572,13 +620,16 @@ Tasks:
 
 - Add `StreamedAnswerState`.
 - Add streamed finalization path.
+- Split cleanup ownership so stopping feedback does not automatically delete a placeholder that stream finalization owns.
 - Add fake backend tests.
 - Ensure final `send_long_message()` is skipped when final message was promoted.
+- Promote only fake backend streams in this phase.
 
 Acceptance:
 
 - Unit test shows Telegram bot receives multiple edits and no duplicate final send.
 - Final persisted response remains unchanged.
+- Cleanup does not delete a placeholder that finalization will promote.
 
 ### Phase 2: OpenRouter Real Answer Streaming
 
@@ -593,6 +644,18 @@ Acceptance:
 
 - Live OpenRouter long answer visibly grows in Telegram.
 - Final answer is the same message, not a new duplicate.
+
+### Phase 2b: Existing API Full-Delta Preservation
+
+Tasks:
+
+- Preserve full deltas for OpenRouter, DeepSeek, and Ollama.
+- Keep display truncation separate from answer reconstruction.
+- Add adapter tests for all three paths.
+
+Acceptance:
+
+- The streamed buffer can reconstruct the final visible answer without `content[:120]` truncation loss.
 
 ### Phase 3: Claude CLI Real Answer Streaming
 
@@ -627,8 +690,9 @@ Acceptance for fallback path:
 
 Tasks:
 
-- DeepSeek API: add/verify SSE streaming.
-- Ollama API: add/verify line streaming.
+- Claw CLI: verify stream-json `assistant_delta` and mark conditional answer-stream support.
+- DeepSeek API: verify existing SSE streaming and full-delta preservation.
+- Ollama API: verify existing line streaming and full-delta preservation.
 - Gemini CLI: verify or mark non-answer-streaming.
 - Any legacy/fixed backend: define explicit capability.
 
@@ -661,8 +725,9 @@ Acceptance:
 Add tests for:
 
 - Fake backend emits `["Hello", " ", "world"]`; Telegram edits accumulate text.
-- Finalization edits streamed message to authoritative final text.
+- Finalization edits streamed message to wrapper/COS-processed authoritative final text.
 - Normal final delivery is skipped when `final_delivered=True`.
+- Cleanup stops feedback without deleting stream-owned placeholder.
 - No deltas means existing final delivery path is used.
 - Stream edit failure falls back to final delivery.
 - Long final text streams first chunk and sends continuation chunks.
@@ -677,7 +742,9 @@ Add fixtures for:
 
 - OpenRouter SSE `delta.content`.
 - Claude CLI `content_block_delta` text events.
+- Claw CLI `assistant_delta` events.
 - Codex Responses `response.output_text.delta` if direct path is implemented.
+- DeepSeek SSE deltas with full content preservation.
 - Ollama streaming JSON lines.
 - Non-streaming backend fallback.
 
@@ -689,11 +756,12 @@ Run:
 1. Telegram + OpenRouter + /verbose off + long answer
 2. Telegram + OpenRouter + /verbose on + long answer with tool use
 3. Telegram + Claude CLI + long answer
-4. Telegram + Codex current CLI + long answer, verify explicit non-stream fallback
-5. API gateway stream=true + OpenRouter
-6. /stop during streamed answer
-7. Long answer > Telegram edit limit
-8. Background detach during streamed answer
+4. Telegram + Claw CLI + long answer if stream-json is available
+5. Telegram + Codex current CLI + long answer, verify explicit non-stream fallback
+6. API gateway stream=true + OpenRouter
+7. /stop during streamed answer
+8. Long answer > Telegram edit limit
+9. Background detach during streamed answer
 ```
 
 Logs must show:
@@ -735,6 +803,8 @@ Rollback behavior:
 | Tool/progress events leak into answer | Bad user output | Separate answer/activity channels |
 | Long answer exceeds edit limit | Finalization fails | Stream first chunk, send continuations |
 | Codex CLI cannot provide deltas | Zelda remains non-smooth | Add direct streaming backend or honest fallback |
+| Cleanup deletes placeholder before finalization | Stream promotion cannot happen | Split feedback cleanup from placeholder disposition |
+| Wrapper/COS final text differs from raw streamed text | Final edit appears to jump | Promote wrapper/COS `response_text` as authoritative and log mismatch |
 | Background detach duplicates text | Confusing Telegram output | Explicit detach finalization contract |
 | Memory polluted by partial output | Core consistency regression | Persist final response only |
 
@@ -752,7 +822,8 @@ HASHI has real streaming output when:
 6. Memory, transcript, audit, and token accounting use final response only.
 7. API gateway still supports OpenAI-compatible SSE.
 8. Live logs can prove whether a turn was truly streamed or fallback-delivered.
-9. Tests cover streaming, fallback, long messages, cancellation, silent mode, verbose mode, and at least two real streaming adapters.
+9. Tests cover streaming, fallback, cleanup ownership, long messages, cancellation, silent mode, verbose mode, and at least two real streaming adapters.
+10. Claw CLI, DeepSeek, and Ollama are represented accurately in the capability matrix.
 
 ---
 
@@ -760,10 +831,12 @@ HASHI has real streaming output when:
 
 Start with the smallest behavior-changing patch:
 
-1. Add `supports_answer_stream` capability detection without changing backend behavior.
+1. Add instrumentation plus `getattr(capabilities, "supports_answer_stream", False)` capability detection without changing backend behavior.
 2. Add `StreamedAnswerState` and fake backend tests.
-3. Implement final-message promotion for fake deltas only.
-4. Enable real final promotion for OpenRouter after tests pass.
-5. Leave `codex-cli` as explicit non-answer-streaming until a direct Responses streaming path exists.
+3. Split cleanup/finalization ownership so stream finalization controls placeholder disposition.
+4. Implement final-message promotion for fake deltas only.
+5. Preserve full deltas for OpenRouter, DeepSeek, and Ollama.
+6. Enable real final promotion for OpenRouter behind a config flag after tests pass.
+7. Leave `codex-cli` as explicit non-answer-streaming until a direct Responses streaming path exists.
 
 This keeps HASHI core stable while moving the user-visible output path toward Hermes-style streaming.
