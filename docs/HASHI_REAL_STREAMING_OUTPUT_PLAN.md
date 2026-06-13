@@ -2,7 +2,7 @@
 
 **Goal:** make HASHI deliver assistant answers progressively, like Hermes, instead of showing a placeholder and then sending the full final answer at the end.
 
-**Status:** implementation plan with Phase 0, Phase 1, Phase 2 capability marking, and Phase 2b full-delta preservation implemented behind explicit capability/config gates. Claude CLI, Gemini CLI, and direct Codex Responses streaming remain future work.
+**Status:** implementation plan with Phase 0, Phase 1, Phase 2 capability marking, Phase 2b full-delta preservation, and CLI stream-json full-delta preservation implemented behind explicit capability/config gates. Direct Codex Responses streaming remains future work.
 
 **Scope:** backend adapters, runtime streaming state, Telegram delivery, API gateway streaming, audit/transcript persistence, and all user-facing modes.
 
@@ -582,9 +582,9 @@ Backend examples:
 | Backend | Activity stream | Answer stream | Reasoning stream | Notes |
 |---|---:|---:|---:|---|
 | OpenRouter API | Yes | Yes, implemented behind config gate | Model-dependent | SSE `delta.content`; full deltas preserved |
-| Claude CLI | Yes | Yes if stream-json emits deltas | Yes if emitted | Needs live verification |
+| Claude CLI | Yes | Yes, implemented behind config gate | Yes if emitted | Stream-json `text_delta`; live version verification still required |
 | Codex CLI current | Yes | No | Partial/progress only | Needs direct Responses path for true parity |
-| Gemini CLI | Unknown | Unknown/weak | Unknown | Verify before claiming |
+| Gemini CLI | Yes | Yes, implemented behind config gate | Unknown | Stream-json assistant `message` content; live version verification still required |
 | Claw CLI | Yes | Conditional, implemented capability flag | Unknown | `assistant_delta` via stream-json when supported |
 | DeepSeek API | Yes | Yes, implemented behind config gate | Model-dependent | Existing SSE path; full deltas preserved |
 | Ollama API | Yes | Yes, implemented behind config gate | No/limited | Existing line stream path; full deltas preserved |
@@ -667,7 +667,7 @@ Acceptance:
 
 ### Phase 3: Claude CLI Real Answer Streaming
 
-Status: not implemented.
+Status: partially implemented. Claude stream-json `text_delta` now preserves full answer chunks and advertises answer streaming. Live CLI verification is still required.
 
 Tasks:
 
@@ -700,7 +700,7 @@ Acceptance for fallback path:
 
 ### Phase 5: Remaining Backends
 
-Status: partially implemented. Claw CLI now advertises answer streaming only after stream-json support is detected; DeepSeek and Ollama are represented as real streaming API backends with full-delta preservation. Gemini remains unverified.
+Status: partially implemented. Claw CLI now advertises answer streaming only after stream-json support is detected; DeepSeek and Ollama are represented as real streaming API backends with full-delta preservation. Gemini stream-json assistant messages now preserve full answer chunks and advertise answer streaming, pending live version verification.
 
 Tasks:
 
