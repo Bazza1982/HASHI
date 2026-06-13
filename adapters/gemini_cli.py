@@ -33,13 +33,15 @@ class GeminiCLIAdapter(BaseBackend):
     ]
 
     def _define_capabilities(self) -> BackendCapabilities:
-        return BackendCapabilities(
+        capabilities = BackendCapabilities(
             supports_sessions=False,
             supports_files=True,
             supports_tool_use=True,
             supports_thinking_stream=True,
             supports_headless_mode=True,
         )
+        capabilities.supports_answer_stream = True
+        return capabilities
 
     def __init__(self, agent_config, global_config, api_key: str = None):
         super().__init__(agent_config, global_config, api_key)
@@ -165,7 +167,7 @@ class GeminiCLIAdapter(BaseBackend):
             if content:
                 text_fragments.append(content)
                 self._emit_stream_event(
-                    StreamEvent(kind=KIND_TEXT_DELTA, summary=content[:200]),
+                    StreamEvent(kind=KIND_TEXT_DELTA, summary=content),
                     on_stream_event,
                 )
             return False

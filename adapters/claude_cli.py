@@ -21,13 +21,15 @@ class ClaudeCLIAdapter(BaseBackend):
     DEFAULT_HARD_TIMEOUT_SEC = 1800
 
     def _define_capabilities(self) -> BackendCapabilities:
-        return BackendCapabilities(
+        capabilities = BackendCapabilities(
             supports_sessions=True,
             supports_files=True,
             supports_tool_use=True,
             supports_thinking_stream=True,
             supports_headless_mode=True,
         )
+        capabilities.supports_answer_stream = True
+        return capabilities
 
     def __init__(self, agent_config, global_config, api_key: str = None):
         super().__init__(agent_config, global_config, api_key)
@@ -210,7 +212,7 @@ class ClaudeCLIAdapter(BaseBackend):
             delta_type = delta.get("type", "")
 
             if delta_type == "text_delta":
-                text = (delta.get("text") or "")[:200]
+                text = delta.get("text") or ""
                 if text:
                     self._emit_stream_event(
                         StreamEvent(kind=KIND_TEXT_DELTA, summary=text),
