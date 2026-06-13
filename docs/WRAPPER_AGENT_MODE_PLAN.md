@@ -484,7 +484,7 @@ For fixed/flex agents:
 
 Current Telegram controls:
 
-- `/core` shows core model buttons such as `gpt-5.5`, `gpt-5.4`, and `gpt-5.3-codex`.
+- `/core` shows core model buttons such as `gpt-5.5`, `gpt-5.3-codex-spark`, `gpt-5.4`, and `gpt-5.3-codex`.
 - `/wrap` groups wrapper choices by provider: Claude Haiku/Sonnet, Gemini Flash/Lite, DeepSeek Flash/Chat, and OpenRouter DeepSeek/Gemini.
 - Context buttons adjust only the wrapper's recent visible context window.
 - `/wrapper` summarizes the active core/wrapper pair and persona/style slots, with navigation buttons to `/core` and `/wrap`.

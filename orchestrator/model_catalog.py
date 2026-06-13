@@ -31,6 +31,7 @@ AVAILABLE_CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"]
 
 AVAILABLE_CODEX_MODELS = [
     "gpt-5.5",
+    "gpt-5.3-codex-spark",
     "gpt-5.3-codex",
     "gpt-5.4",
     "gpt-5.2-codex",
