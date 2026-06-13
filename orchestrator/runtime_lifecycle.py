@@ -148,6 +148,11 @@ async def process_queue(runtime: Any) -> None:
                 answer_preview_task=feedback.answer_preview_task,
                 think_flush_task=feedback.think_flush_task,
                 placeholder=feedback.placeholder,
+                delete_placeholder=not (
+                    response.is_success
+                    and bool(response.text)
+                    and feedback.answer_stream_state is not None
+                ),
             )
 
             if response.is_success and not response.text:
@@ -198,6 +203,7 @@ async def process_queue(runtime: Any) -> None:
                         queue_wait_s=queue_wait_s,
                         backend_elapsed_s=backend_elapsed,
                         audit_collector=audit_collector,
+                        answer_stream_state=feedback.answer_stream_state,
                     )
             else:
                 runtime._notify_right_brain_interrupted(
