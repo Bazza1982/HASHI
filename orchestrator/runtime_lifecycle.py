@@ -111,6 +111,9 @@ async def process_queue(runtime: Any) -> None:
                     if feedback.escalation_task is not None:
                         with suppress(asyncio.CancelledError):
                             await feedback.escalation_task
+                    if feedback.answer_preview_task is not None:
+                        with suppress(asyncio.CancelledError):
+                            await feedback.answer_preview_task
                 if feedback.placeholder:
                     with suppress(Exception):
                         await runtime.app.bot.edit_message_text(
@@ -142,6 +145,7 @@ async def process_queue(runtime: Any) -> None:
                 stop_typing=feedback.stop_typing,
                 typing_task=feedback.typing_task,
                 escalation_task=feedback.escalation_task,
+                answer_preview_task=feedback.answer_preview_task,
                 think_flush_task=feedback.think_flush_task,
                 placeholder=feedback.placeholder,
             )
