@@ -899,13 +899,15 @@ class ClawCLIAdapter(BaseBackend):
     DEFAULT_HARD_TIMEOUT_SEC = 1800
 
     def _define_capabilities(self) -> BackendCapabilities:
-        return BackendCapabilities(
+        capabilities = BackendCapabilities(
             supports_sessions=True,
             supports_files=True,
             supports_tool_use=True,
             supports_thinking_stream=False,
             supports_headless_mode=True,
         )
+        capabilities.supports_answer_stream = False
+        return capabilities
 
     def __init__(self, agent_config, global_config, api_key: str = None):
         super().__init__(agent_config, global_config, api_key)
@@ -1084,6 +1086,7 @@ class ClawCLIAdapter(BaseBackend):
                 self._task_env(),
             )
             self.capabilities.supports_thinking_stream = self._supports_stream_json
+            self.capabilities.supports_answer_stream = self._supports_stream_json
             if not self._supports_stream_json:
                 self.logger.warning("Claw binary does not advertise stream-json; verbose mode will use JSON fallback.")
             return True

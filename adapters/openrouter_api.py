@@ -44,13 +44,15 @@ class OpenRouterAdapter(BaseBackend):
     )
 
     def _define_capabilities(self) -> BackendCapabilities:
-        return BackendCapabilities(
+        capabilities = BackendCapabilities(
             supports_sessions=False,
             supports_files=False,
             supports_tool_use=True,
             supports_thinking_stream=True,
             supports_headless_mode=True,
         )
+        capabilities.supports_answer_stream = True
+        return capabilities
 
     def __init__(self, agent_config, global_config, api_key: str = None):
         super().__init__(agent_config, global_config, api_key)

@@ -2,7 +2,7 @@
 
 **Goal:** make HASHI deliver assistant answers progressively, like Hermes, instead of showing a placeholder and then sending the full final answer at the end.
 
-**Status:** planning document.
+**Status:** implementation plan with Phase 0, Phase 1, Phase 2 capability marking, and Phase 2b full-delta preservation implemented behind explicit capability/config gates. Claude CLI, Gemini CLI, and direct Codex Responses streaming remain future work.
 
 **Scope:** backend adapters, runtime streaming state, Telegram delivery, API gateway streaming, audit/transcript persistence, and all user-facing modes.
 
@@ -581,13 +581,13 @@ Backend examples:
 
 | Backend | Activity stream | Answer stream | Reasoning stream | Notes |
 |---|---:|---:|---:|---|
-| OpenRouter API | Yes | Yes | Model-dependent | SSE `delta.content` |
+| OpenRouter API | Yes | Yes, implemented behind config gate | Model-dependent | SSE `delta.content`; full deltas preserved |
 | Claude CLI | Yes | Yes if stream-json emits deltas | Yes if emitted | Needs live verification |
 | Codex CLI current | Yes | No | Partial/progress only | Needs direct Responses path for true parity |
 | Gemini CLI | Unknown | Unknown/weak | Unknown | Verify before claiming |
-| Claw CLI | Yes | Conditional | Unknown | `assistant_delta` via stream-json when supported |
-| DeepSeek API | Yes | Yes, needs full-delta preservation | Model-dependent | Existing stream path truncates deltas for display |
-| Ollama API | Yes | Yes, needs full-delta preservation | No/limited | Existing line stream path truncates deltas for display |
+| Claw CLI | Yes | Conditional, implemented capability flag | Unknown | `assistant_delta` via stream-json when supported |
+| DeepSeek API | Yes | Yes, implemented behind config gate | Model-dependent | Existing SSE path; full deltas preserved |
+| Ollama API | Yes | Yes, implemented behind config gate | No/limited | Existing line stream path; full deltas preserved |
 
 User-facing behavior must be driven by `supports_answer_stream`, not by `supports_thinking_stream`.
 
@@ -596,6 +596,8 @@ User-facing behavior must be driven by `supports_answer_stream`, not by `support
 ## 11. Implementation Phases
 
 ### Phase 0: Instrument Current Behavior
+
+Status: implemented.
 
 Files:
 
@@ -616,6 +618,8 @@ Acceptance:
 
 ### Phase 1: Streamed Final Message for Fake Backend
 
+Status: implemented for guarded runtime finalization.
+
 Tasks:
 
 - Add `StreamedAnswerState`.
@@ -633,6 +637,8 @@ Acceptance:
 
 ### Phase 2: OpenRouter Real Answer Streaming
 
+Status: partially implemented. OpenRouter now advertises `supports_answer_stream=True`, preserves full answer deltas, and can use streamed final promotion when `answer_stream_final_delivery` is enabled. Live Telegram verification is still required before enabling broadly.
+
 Tasks:
 
 - Preserve full text deltas.
@@ -647,6 +653,8 @@ Acceptance:
 
 ### Phase 2b: Existing API Full-Delta Preservation
 
+Status: implemented for OpenRouter, DeepSeek, and Ollama.
+
 Tasks:
 
 - Preserve full deltas for OpenRouter, DeepSeek, and Ollama.
@@ -659,6 +667,8 @@ Acceptance:
 
 ### Phase 3: Claude CLI Real Answer Streaming
 
+Status: not implemented.
+
 Tasks:
 
 - Verify actual stream-json event shape.
@@ -670,6 +680,8 @@ Acceptance:
 - Live Claude CLI long answer visibly grows in Telegram.
 
 ### Phase 4: Codex Strategy
+
+Status: current `codex-cli` remains explicitly non-answer-streaming.
 
 Decision point:
 
@@ -687,6 +699,8 @@ Acceptance for fallback path:
 - No heartbeat is described as answer streaming.
 
 ### Phase 5: Remaining Backends
+
+Status: partially implemented. Claw CLI now advertises answer streaming only after stream-json support is detected; DeepSeek and Ollama are represented as real streaming API backends with full-delta preservation. Gemini remains unverified.
 
 Tasks:
 
@@ -829,7 +843,7 @@ HASHI has real streaming output when:
 
 ## 16. Recommended First Patch
 
-Start with the smallest behavior-changing patch:
+The first implementation checkpoint is complete:
 
 1. Add instrumentation plus `getattr(capabilities, "supports_answer_stream", False)` capability detection without changing backend behavior.
 2. Add `StreamedAnswerState` and fake backend tests.
