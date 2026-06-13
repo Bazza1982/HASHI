@@ -2,7 +2,7 @@
 
 **Goal:** make HASHI deliver assistant answers progressively, like Hermes, instead of showing a placeholder and then sending the full final answer at the end.
 
-**Status:** implementation plan with Phase 0, Phase 1, Phase 2 capability marking, Phase 2b full-delta preservation, and CLI stream-json full-delta preservation implemented behind explicit capability/config gates. Direct Codex Responses streaming remains future work.
+**Status:** implementation plan with Phase 0, Phase 1, Phase 2 OpenRouter streaming, Phase 2b full-delta preservation, and CLI stream-json full-delta preservation implemented behind explicit capability/config gates. OpenRouter live streaming was verified on 2026-06-13 with the `temp` agent. Direct Codex Responses streaming remains future work.
 
 **Scope:** backend adapters, runtime streaming state, Telegram delivery, API gateway streaming, audit/transcript persistence, and all user-facing modes.
 
@@ -637,7 +637,15 @@ Acceptance:
 
 ### Phase 2: OpenRouter Real Answer Streaming
 
-Status: partially implemented. OpenRouter now advertises `supports_answer_stream=True`, preserves full answer deltas, and can use streamed final promotion when `answer_stream_final_delivery` is enabled. Live Telegram verification is still required before enabling broadly.
+Status: implemented and live-verified. OpenRouter advertises `supports_answer_stream=True`, preserves full answer deltas, and can use streamed final promotion when `answer_stream_final_delivery` is enabled.
+
+Live verification:
+
+- Date: 2026-06-13.
+- Agent: `temp`.
+- Backend: `openrouter-api`.
+- Result: user-visible Telegram output streaming worked as intended for OpenRouter.
+- Scope: validates the OpenRouter path only. It does not prove Codex CLI, Claude CLI, Gemini CLI, DeepSeek, Ollama, or Claw CLI live behavior.
 
 Tasks:
 
@@ -649,7 +657,7 @@ Tasks:
 Acceptance:
 
 - Live OpenRouter long answer visibly grows in Telegram.
-- Final answer is the same message, not a new duplicate.
+- Final answer is the same streamed message when `answer_stream_final_delivery=true`, not a new duplicate.
 
 ### Phase 2b: Existing API Full-Delta Preservation
 
