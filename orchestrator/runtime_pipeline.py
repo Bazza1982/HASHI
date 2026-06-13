@@ -296,7 +296,16 @@ async def answer_preview_loop(
     if placeholder is None:
         return
 
-    from adapters.stream_events import KIND_TEXT_DELTA
+    from adapters.stream_events import (
+        KIND_ERROR,
+        KIND_FILE_EDIT,
+        KIND_PROGRESS,
+        KIND_SHELL_EXEC,
+        KIND_TEXT_DELTA,
+        KIND_THINKING,
+        KIND_TOOL_END,
+        KIND_TOOL_START,
+    )
 
     extra = getattr(getattr(runtime, "config", None), "extra", {}) or {}
     min_edit_interval = float(extra.get("answer_stream_edit_interval_s", 1.0))
@@ -305,7 +314,17 @@ async def answer_preview_loop(
     started = datetime.now()
     last_edit_at = 0.0
     chunks: list[str] = []
+    latest_status = "Still working..."
     dirty = False
+    status_kinds = {
+        KIND_ERROR,
+        KIND_FILE_EDIT,
+        KIND_PROGRESS,
+        KIND_SHELL_EXEC,
+        KIND_THINKING,
+        KIND_TOOL_END,
+        KIND_TOOL_START,
+    }
 
     def _preview_text() -> str:
         text = "".join(chunks).strip()
@@ -313,7 +332,9 @@ async def answer_preview_loop(
             text = "...\n" + text[-max_chars:]
         elapsed = int((datetime.now() - started).total_seconds())
         header = f"✍️ {runtime.name} is replying... ({elapsed}s)\n\n"
-        return header + text
+        if text:
+            return header + text
+        return header + latest_status
 
     async def _edit() -> None:
         nonlocal dirty, last_edit_at
@@ -341,11 +362,17 @@ async def answer_preview_loop(
     while not stop_event.is_set():
         try:
             event = await asyncio.wait_for(event_queue.get(), timeout=min_edit_interval)
-            if getattr(event, "kind", None) == KIND_TEXT_DELTA and getattr(event, "summary", ""):
-                chunks.append(str(event.summary))
+            kind = getattr(event, "kind", None)
+            raw_summary = str(getattr(event, "summary", "") or "")
+            summary = raw_summary.strip()
+            if kind == KIND_TEXT_DELTA and raw_summary:
+                chunks.append(raw_summary)
+                dirty = True
+            elif kind in status_kinds and summary and not chunks:
+                latest_status = summary[:240]
                 dirty = True
         except asyncio.TimeoutError:
-            pass
+            dirty = True
 
         now = asyncio.get_running_loop().time()
         if dirty and (now - last_edit_at) >= min_edit_interval:
