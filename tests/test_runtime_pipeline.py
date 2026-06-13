@@ -9,6 +9,7 @@ import types
 import pytest
 
 from orchestrator import runtime_pipeline
+from adapters.stream_events import KIND_TEXT_DELTA, StreamEvent
 
 
 class _Logger:
@@ -97,10 +98,14 @@ class _ProjectChatLogger:
 class _Bot:
     def __init__(self):
         self.sent = []
+        self.edits = []
 
     async def send_message(self, **kwargs):
         self.sent.append(kwargs)
         return SimpleNamespace(message_id=77)
+
+    async def edit_message_text(self, **kwargs):
+        self.edits.append(kwargs)
 
 
 def _item(**overrides):
@@ -416,11 +421,48 @@ async def test_setup_interactive_feedback_creates_placeholder_and_cleanup_tasks(
     ]
     assert feedback.placeholder.message_id == 77
     assert feedback.typing_task is not None
-    assert feedback.escalation_task is not None
-    assert feedback.on_stream_event is None
+    assert feedback.escalation_task is None
+    assert feedback.answer_preview_task is not None
+    assert feedback.on_stream_event is not None
     feedback.stop_typing.set()
     await feedback.typing_task
-    await feedback.escalation_task
+    await feedback.answer_preview_task
+
+
+@pytest.mark.asyncio
+async def test_answer_preview_stream_edits_placeholder():
+    runtime = _runtime()
+    runtime.config.extra = {
+        "answer_stream_edit_interval_s": 0.01,
+        "answer_stream_min_chars": 1,
+    }
+
+    async def _noop_stream_callback(_event):
+        return None
+
+    runtime._make_stream_callback = lambda **kwargs: _noop_stream_callback
+
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(),
+        audit_active=False,
+        audit_collector=None,
+    )
+
+    await feedback.on_stream_event(StreamEvent(kind=KIND_TEXT_DELTA, summary="Hello "))
+    await feedback.on_stream_event(StreamEvent(kind=KIND_TEXT_DELTA, summary="world"))
+
+    for _ in range(20):
+        if runtime.app.bot.edits:
+            break
+        await asyncio.sleep(0.02)
+
+    feedback.stop_typing.set()
+    await feedback.typing_task
+    await feedback.answer_preview_task
+
+    assert runtime.app.bot.edits
+    assert "Hello world" in runtime.app.bot.edits[-1]["text"]
 
 
 @pytest.mark.asyncio

@@ -53,6 +53,7 @@ class InteractiveFeedback:
     stop_typing: asyncio.Event | None
     typing_task: asyncio.Task | None
     escalation_task: asyncio.Task | None
+    answer_preview_task: asyncio.Task | None
     placeholder: Any | None
     stream_callback: Any | None
     think_flush_task: asyncio.Task | None
@@ -244,6 +245,7 @@ async def cleanup_interactive_feedback(
     stop_typing,
     typing_task,
     escalation_task,
+    answer_preview_task=None,
     think_flush_task,
     placeholder,
 ) -> None:
@@ -253,6 +255,11 @@ async def cleanup_interactive_feedback(
         if escalation_task is not None:
             try:
                 await escalation_task
+            except asyncio.CancelledError:
+                pass
+        if answer_preview_task is not None:
+            try:
+                await answer_preview_task
             except asyncio.CancelledError:
                 pass
 
@@ -277,6 +284,77 @@ async def cleanup_interactive_feedback(
             pass
 
 
+async def answer_preview_loop(
+    runtime,
+    item,
+    *,
+    placeholder,
+    stop_event: asyncio.Event,
+    event_queue: asyncio.Queue,
+) -> None:
+    """Edit the Telegram placeholder with assistant text deltas while generating."""
+    if placeholder is None:
+        return
+
+    from adapters.stream_events import KIND_TEXT_DELTA
+
+    extra = getattr(getattr(runtime, "config", None), "extra", {}) or {}
+    min_edit_interval = float(extra.get("answer_stream_edit_interval_s", 1.8))
+    min_chars = int(extra.get("answer_stream_min_chars", 24))
+    max_chars = int(extra.get("answer_stream_max_chars", 3400))
+    started = datetime.now()
+    last_edit_at = 0.0
+    chunks: list[str] = []
+    dirty = False
+
+    def _preview_text() -> str:
+        text = "".join(chunks).strip()
+        if len(text) > max_chars:
+            text = "...\n" + text[-max_chars:]
+        elapsed = int((datetime.now() - started).total_seconds())
+        header = f"✍️ {runtime.name} is replying... ({elapsed}s)\n\n"
+        return header + text
+
+    async def _edit() -> None:
+        nonlocal dirty, last_edit_at
+        text = _preview_text()
+        if len(text.strip()) < min_chars:
+            return
+        try:
+            await runtime.app.bot.edit_message_text(
+                chat_id=item.chat_id,
+                message_id=placeholder.message_id,
+                text=text,
+            )
+            last_edit_at = asyncio.get_running_loop().time()
+            dirty = False
+        except Exception as exc:
+            if "429" in str(exc) or "RetryAfter" in str(exc):
+                await asyncio.sleep(3)
+            elif "message is not modified" in str(exc).lower():
+                dirty = False
+            else:
+                runtime.telegram_logger.warning(
+                    f"Answer stream preview edit failed for {item.request_id}: {exc}"
+                )
+
+    while not stop_event.is_set():
+        try:
+            event = await asyncio.wait_for(event_queue.get(), timeout=min_edit_interval)
+            if getattr(event, "kind", None) == KIND_TEXT_DELTA and getattr(event, "summary", ""):
+                chunks.append(str(event.summary))
+                dirty = True
+        except asyncio.TimeoutError:
+            pass
+
+        now = asyncio.get_running_loop().time()
+        if dirty and (now - last_edit_at) >= min_edit_interval:
+            await _edit()
+
+    if dirty:
+        await _edit()
+
+
 async def setup_interactive_feedback(
     runtime,
     item,
@@ -290,6 +368,7 @@ async def setup_interactive_feedback(
     placeholder = None
     stream_callback = None
     think_flush_task = None
+    answer_preview_task = None
     if not item.silent and item.deliver_to_telegram:
         placeholder_text, placeholder_parse_mode = runtime.get_typing_placeholder()
         stop_typing = asyncio.Event()
@@ -314,15 +393,32 @@ async def setup_interactive_feedback(
         capabilities = getattr(backend, "capabilities", None)
         supports_stream_display = bool(getattr(capabilities, "supports_thinking_stream", False))
         stream_queue = None
-        use_stream = runtime._verbose or runtime._think or audit_active
+        answer_preview_queue = None
+        preview_enabled = bool((getattr(runtime.config, "extra", {}) or {}).get("answer_stream_preview", True))
+        preview_enabled = preview_enabled and supports_stream_display and not runtime._verbose and placeholder is not None
+        use_stream = runtime._verbose or runtime._think or audit_active or preview_enabled
         if use_stream:
             if runtime._verbose and supports_stream_display:
                 stream_queue = asyncio.Queue(maxsize=200)
-            stream_callback = runtime._make_stream_callback(
+            if preview_enabled:
+                answer_preview_queue = asyncio.Queue(maxsize=300)
+            base_stream_callback = runtime._make_stream_callback(
                 event_queue=stream_queue,
                 think_buffer=runtime._think_buffer if runtime._think else None,
                 audit_collector=audit_collector,
             )
+
+            if preview_enabled:
+                async def stream_callback(event):
+                    if answer_preview_queue is not None:
+                        try:
+                            answer_preview_queue.put_nowait(event)
+                        except asyncio.QueueFull:
+                            pass
+                    await base_stream_callback(event)
+            else:
+                stream_callback = base_stream_callback
+
         if runtime._verbose and supports_stream_display:
             escalation_task = asyncio.create_task(
                 runtime._streaming_display_loop(
@@ -332,6 +428,16 @@ async def setup_interactive_feedback(
                     stop_typing,
                     stream_queue,
                     backend=backend,
+                )
+            )
+        elif preview_enabled and answer_preview_queue is not None:
+            answer_preview_task = asyncio.create_task(
+                answer_preview_loop(
+                    runtime,
+                    item,
+                    placeholder=placeholder,
+                    stop_event=stop_typing,
+                    event_queue=answer_preview_queue,
                 )
             )
         else:
@@ -360,6 +466,7 @@ async def setup_interactive_feedback(
         stop_typing=stop_typing,
         typing_task=typing_task,
         escalation_task=escalation_task,
+        answer_preview_task=answer_preview_task,
         placeholder=placeholder,
         stream_callback=stream_callback,
         think_flush_task=think_flush_task,
