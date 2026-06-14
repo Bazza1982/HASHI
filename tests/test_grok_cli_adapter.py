@@ -7,13 +7,13 @@ from types import SimpleNamespace
 import pytest
 
 from adapters.grok_cli import GrokCLIAdapter
-from adapters.stream_events import KIND_TEXT_DELTA
+from adapters.stream_events import KIND_TEXT_DELTA, KIND_THINKING
 
 
 def _agent_config(tmp_path: Path):
     return SimpleNamespace(
         name="test",
-        model="grok-build",
+        model="grok-composer-2.5-fast",
         workspace_dir=tmp_path,
         system_md=None,
         extra={},
@@ -45,9 +45,10 @@ if 'fail' in prompt:
     raise SystemExit(7)
 
 print(json.dumps({{"type": "session", "session_id": "sess-123", "summary": "started"}}), flush=True)
-print(json.dumps({{"type": "assistant_delta", "content": {{"text": "Hel"}}}}), flush=True)
+print(json.dumps({{"type": "thought", "data": "thinking"}}), flush=True)
+print(json.dumps({{"type": "text", "data": "Hel"}}), flush=True)
 print(json.dumps({{"sessionUpdate": "agent_message_chunk", "content": {{"text": "lo"}}}}), flush=True)
-print(json.dumps({{"type": "completed", "result": {{"text": "Hello"}}}}), flush=True)
+print(json.dumps({{"type": "end", "sessionId": "sess-123", "stopReason": "EndTurn"}}), flush=True)
 """,
         encoding="utf-8",
     )
@@ -94,6 +95,8 @@ async def test_grok_streaming_json_reconstructs_final_answer_and_emits_deltas(tm
     assert adapter._session_id == "sess-123"
     text_events = [event for event in events if event.kind == KIND_TEXT_DELTA]
     assert [event.summary for event in text_events] == ["Hel", "lo"]
+    thinking_events = [event for event in events if event.kind == KIND_THINKING]
+    assert [event.summary for event in thinking_events] == ["thinking"]
 
 
 @pytest.mark.asyncio

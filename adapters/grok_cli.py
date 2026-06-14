@@ -122,7 +122,7 @@ class GrokCLIAdapter(BaseBackend):
                     parts.append(self._extract_content_text(item.get("text") or item.get("content")))
             return "".join(parts)
         if isinstance(value, dict):
-            for key in ("text", "content", "value", "message"):
+            for key in ("text", "content", "data", "value", "message"):
                 text = self._extract_content_text(value.get(key))
                 if text:
                     return text
@@ -133,8 +133,10 @@ class GrokCLIAdapter(BaseBackend):
         update = str(event.get("sessionUpdate") or event.get("session_update") or "").lower()
         if update == "agent_message_chunk":
             return self._extract_content_text(event.get("content"))
+        if etype == "text":
+            return self._extract_content_text(event.get("data") or event.get("content") or event.get("text"))
         if any(marker in etype for marker in ("delta", "chunk", "text_delta", "assistant_delta")):
-            for key in ("content", "delta", "text", "chunk", "message"):
+            for key in ("content", "data", "delta", "text", "chunk", "message"):
                 text = self._extract_content_text(event.get(key))
                 if text:
                     return text
@@ -190,10 +192,10 @@ class GrokCLIAdapter(BaseBackend):
             return ""
 
         etype = str(event.get("type") or event.get("event") or "").lower()
-        summary = self._extract_content_text(event.get("summary") or event.get("message") or event.get("text"))
+        summary = self._extract_content_text(event.get("summary") or event.get("message") or event.get("text") or event.get("data"))
         if "error" in etype and summary:
             await self._emit(on_stream_event, StreamEvent(kind=KIND_ERROR, summary=summary[:300]))
-        elif "thinking" in etype or "reasoning" in etype:
+        elif etype == "thought" or "thinking" in etype or "reasoning" in etype:
             await self._emit(on_stream_event, StreamEvent(kind=KIND_THINKING, summary=summary[:300] or "Grok thinking"))
         elif "tool" in etype and "end" in etype:
             await self._emit(on_stream_event, StreamEvent(kind=KIND_TOOL_END, summary=summary[:300] or "Grok tool finished"))

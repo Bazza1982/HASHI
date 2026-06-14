@@ -58,10 +58,10 @@ Key facts from official docs and announcements:
   ```
 
   In ACP, assistant text arrives through `session/update` chunks where `sessionUpdate == "agent_message_chunk"` and `content.text` contains the chunk.
-- Current model docs list:
-  - `grok-build`: current CLI default model reported by `grok models` in Grok CLI `0.2.51`.
-  - `grok-build-0.1`: documented fast coding model, 256k context, trained for agentic coding workflows.
-  - `grok-4.3`: general model with 1M context and configurable reasoning.
+- Logged-in Grok CLI `0.2.51` currently reports:
+  - `grok-composer-2.5-fast`: default model.
+  - `grok-build`: available coding model.
+- Current `--output-format streaming-json` emits direct events such as `{"type":"thought","data":"..."}`, `{"type":"text","data":"..."}`, and `{"type":"end","sessionId":"..."}`.
 
 Sources:
 
@@ -121,8 +121,8 @@ Core backend registration:
     ```python
     "grok-cli": {
         "label": "grok",
-        "models": ["grok-build", "grok-build-0.1", "grok-4.3"],
-        "default_model": "grok-build",
+        "models": ["grok-composer-2.5-fast", "grok-build"],
+        "default_model": "grok-composer-2.5-fast",
         "efforts": [],
         "default_effort": None,
         "secret_keys": [],
@@ -173,7 +173,7 @@ Tests:
 - `tests/test_answer_stream_capabilities.py`
   - assert `grok-cli` advertises `supports_answer_stream` only when parser path is enabled.
 - registry/model tests:
-  - `get_available_models("grok-cli")` includes `grok-build` and `grok-build-0.1`.
+  - `get_available_models("grok-cli")` includes `grok-composer-2.5-fast` and `grok-build`.
   - `is_cli_backend("grok-cli")` is true.
 
 Docs:
@@ -250,7 +250,7 @@ Preconditions:
 Smoke:
 
 ```text
-/backend grok-cli model=grok-build
+/backend grok-cli model=grok-composer-2.5-fast
 Write a concise but multi-paragraph explanation of this repository.
 ```
 
