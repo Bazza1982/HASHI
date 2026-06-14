@@ -43,7 +43,23 @@ prompt = sys.argv[-1] if sys.argv else ''
 if 'fail' in prompt:
     print('grok failed', file=sys.stderr)
     raise SystemExit(7)
+if 'empty-retry-ok' in prompt:
+    if 'previous Grok CLI response ended without any answer text' in prompt:
+        print(json.dumps({{"type": "session", "session_id": "sess-retry", "summary": "started"}}), flush=True)
+        print(json.dumps({{"type": "text", "data": "Retry"}}), flush=True)
+        print(json.dumps({{"type": "end", "sessionId": "sess-retry", "stopReason": "EndTurn"}}), flush=True)
+        raise SystemExit(0)
+    print(json.dumps({{"type": "session", "session_id": "sess-empty", "summary": "started"}}), flush=True)
+    print(json.dumps({{"type": "thought", "data": "thinking only"}}), flush=True)
+    print(json.dumps({{"type": "end", "sessionId": "sess-empty", "stopReason": "EndTurn"}}), flush=True)
+    raise SystemExit(0)
 if 'empty' in prompt:
+    if 'side-effect' in prompt:
+        print(json.dumps({{"type": "session", "session_id": "sess-side-effect", "summary": "started"}}), flush=True)
+        print(json.dumps({{"type": "thought", "data": "thinking only"}}), flush=True)
+        print(json.dumps({{"type": "tool_start", "name": "shell"}}), flush=True)
+        print(json.dumps({{"type": "end", "sessionId": "sess-side-effect", "stopReason": "EndTurn"}}), flush=True)
+        raise SystemExit(0)
     print(json.dumps({{"type": "session", "session_id": "sess-empty", "summary": "started"}}), flush=True)
     print(json.dumps({{"type": "thought", "data": "thinking only"}}), flush=True)
     print(json.dumps({{"type": "end", "sessionId": "sess-empty", "stopReason": "EndTurn"}}), flush=True)
@@ -136,7 +152,68 @@ async def test_grok_zero_exit_empty_answer_is_failure_with_diagnostic(tmp_path):
 
     assert response.is_success is False
     assert response.text == ""
-    assert "Grok CLI returned no answer text" in response.error
-    assert "stdout_lines=3" in response.error
-    assert "recent_events=['session', 'thought', 'end']" in response.error
-    assert response.stream_metadata == {"grok_text_delta_count": 0}
+    assert "Grok CLI returned no answer text after one retry" in response.error
+    assert "empty_answer_pattern=thought_end_no_text" in response.error
+    assert "stop_reason=EndTurn" in response.error
+    assert response.stream_metadata["grok_empty_answer_retry_attempted"] is True
+    assert response.stream_metadata["grok_empty_answer_retry_succeeded"] is False
+
+
+@pytest.mark.asyncio
+async def test_grok_empty_thought_end_retries_once_and_succeeds(tmp_path):
+    fake_grok = _write_fake_grok(tmp_path)
+    adapter = GrokCLIAdapter(_agent_config(tmp_path), SimpleNamespace(grok_cmd=str(fake_grok)))
+
+    response = await adapter.generate_response(
+        "please empty-retry-ok",
+        "req-grok-empty-retry",
+        is_retry=False,
+        silent=False,
+        on_stream_event=None,
+    )
+
+    assert response.is_success is True
+    assert response.text == "Retry"
+    assert response.stream_metadata["grok_empty_answer_retry_attempted"] is True
+    assert response.stream_metadata["grok_empty_answer_retry_succeeded"] is True
+    assert response.stream_metadata["grok_empty_answer_pattern"] == "thought_end_no_text"
+
+
+@pytest.mark.asyncio
+async def test_grok_empty_answer_skips_retry_when_is_retry_true(tmp_path):
+    fake_grok = _write_fake_grok(tmp_path)
+    adapter = GrokCLIAdapter(_agent_config(tmp_path), SimpleNamespace(grok_cmd=str(fake_grok)))
+
+    response = await adapter.generate_response(
+        "please empty",
+        "req-grok-empty-no-retry",
+        is_retry=True,
+        silent=False,
+        on_stream_event=None,
+    )
+
+    assert response.is_success is False
+    assert response.text == ""
+    assert "after one retry" not in response.error
+    assert response.stream_metadata["grok_empty_answer_pattern"] == "thought_end_no_text"
+    assert "grok_empty_answer_retry_attempted" not in response.stream_metadata
+
+
+@pytest.mark.asyncio
+async def test_grok_empty_answer_does_not_retry_after_side_effect_events(tmp_path):
+    fake_grok = _write_fake_grok(tmp_path)
+    adapter = GrokCLIAdapter(_agent_config(tmp_path), SimpleNamespace(grok_cmd=str(fake_grok)))
+
+    response = await adapter.generate_response(
+        "please empty side-effect",
+        "req-grok-empty-side-effect",
+        is_retry=False,
+        silent=False,
+        on_stream_event=None,
+    )
+
+    assert response.is_success is False
+    assert response.text == ""
+    assert "after one retry" not in response.error
+    assert response.stream_metadata["grok_empty_answer_pattern"] == "side_effect_events_no_text"
+    assert "grok_empty_answer_retry_attempted" not in response.stream_metadata
