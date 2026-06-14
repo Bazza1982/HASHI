@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-CLI_ENGINES = frozenset({"gemini-cli", "claude-cli", "codex-cli", "claw-cli"})
+CLI_ENGINES = frozenset({"gemini-cli", "claude-cli", "codex-cli", "claw-cli", "grok-cli"})
 
 BACKEND_REGISTRY: dict[str, dict] = {
     "gemini-cli": {
@@ -63,6 +63,17 @@ BACKEND_REGISTRY: dict[str, dict] = {
             "openrouter-api_key",
             "openrouter_key",
         ],
+    },
+    "grok-cli": {
+        "label": "grok",
+        "models": [
+            "grok-build-0.1",
+            "grok-4.3",
+        ],
+        "default_model": "grok-build-0.1",
+        "efforts": [],
+        "default_effort": None,
+        "secret_keys": [],
     },
     "deepseek-api": {
         "label": "deepseek",

@@ -38,6 +38,7 @@ class BackendPreflight:
             "gemini-cli": global_cfg.gemini_cmd,
             "claude-cli": global_cfg.claude_cmd,
             "codex-cli": global_cfg.codex_cmd,
+            "grok-cli": getattr(global_cfg, "grok_cmd", "grok"),
         }
         for engine in engines:
             if engine in cli_map:

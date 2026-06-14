@@ -9,6 +9,7 @@ from adapters.claw_cli import ClawCLIAdapter
 from adapters.codex_cli import CodexCLIAdapter
 from adapters.deepseek_api import DeepSeekAdapter
 from adapters.gemini_cli import GeminiCLIAdapter
+from adapters.grok_cli import GrokCLIAdapter
 from adapters.ollama_api import OllamaAdapter
 from adapters.openrouter_api import OpenRouterAdapter
 from adapters.stream_events import KIND_TEXT_DELTA
@@ -42,9 +43,11 @@ def test_stream_json_cli_backends_advertise_answer_stream(tmp_path):
 
     claude = ClaudeCLIAdapter(cfg, SimpleNamespace(claude_cmd="claude"), api_key="test-key")
     gemini = GeminiCLIAdapter(cfg, SimpleNamespace(gemini_cmd="gemini"), api_key="test-key")
+    grok = GrokCLIAdapter(cfg, SimpleNamespace(grok_cmd="grok"), api_key="test-key")
 
     assert getattr(claude.capabilities, "supports_answer_stream", False) is True
     assert getattr(gemini.capabilities, "supports_answer_stream", False) is True
+    assert getattr(grok.capabilities, "supports_answer_stream", False) is True
 
 
 def test_cli_backends_do_not_advertise_answer_stream_by_default(tmp_path):

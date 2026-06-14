@@ -199,3 +199,4 @@ class SimpleGlobalConfig:
         self.gemini_cmd = "gemini"
         self.claude_cmd = "claude"
         self.codex_cmd = "codex"
+        self.grok_cmd = "grok"
