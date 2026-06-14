@@ -34,6 +34,10 @@ from datetime import datetime
 from pathlib import Path
 
 from orchestrator.pathing import resolve_path_value
+from orchestrator.slash_command_audit import (
+    SlashCommandAuditSession,
+    bridge_audit_path,
+)
 from transports.chat_router import ChatRouter
 
 logger = logging.getLogger("WhatsApp")
@@ -403,44 +407,89 @@ class WhatsAppTransport:
     # Command handling
     # ------------------------------------------------------------------
 
+    def _whatsapp_audit_path(self) -> Path:
+        base_logs_dir = getattr(self.global_cfg, "base_logs_dir", None)
+        if base_logs_dir is None:
+            bridge_home = getattr(self.global_cfg, "bridge_home", Path("."))
+            return bridge_home / "logs" / "whatsapp_slash_command_audit.jsonl"
+        return bridge_audit_path(Path(base_logs_dir))
+
+    def _whatsapp_command_session(
+        self,
+        chat_key: str,
+        command_name: str,
+        args: list[str],
+        *,
+        handler_kind: str,
+    ) -> SlashCommandAuditSession:
+        # Residual gap: agent-forwarded slash commands (e.g. /status via WhatsApp)
+        # are not audited at transport layer.
+        return SlashCommandAuditSession(
+            audit_path=self._whatsapp_audit_path(),
+            agent="_whatsapp",
+            command_name=command_name,
+            args=args,
+            source_channel="whatsapp",
+            handler_kind=handler_kind,
+            actor_id=chat_key,
+            chat_id=chat_key,
+        )
+
+
     async def _handle_routing_command(self, chat_key: str, text: str):
         """Handle /agent [...] and /all routing commands."""
         parts = text.split()
         cmd = parts[0].lower()
+        command_name = "all" if cmd == "/all" else "agent"
+        session = self._whatsapp_command_session(
+            chat_key,
+            command_name,
+            parts[1:],
+            handler_kind="whatsapp_routing",
+        )
+        try:
+            parts = text.split()
+            cmd = parts[0].lower()
 
-        if cmd == "/all":
-            all_agents = [rt.name for rt in self.orchestrator.runtimes]
-            if not all_agents:
-                await self._send_text(chat_key, "No agents are currently running.")
+            if cmd == "/all":
+                all_agents = [rt.name for rt in self.orchestrator.runtimes]
+                if not all_agents:
+                    await self._send_text(chat_key, "No agents are currently running.")
+                    return
+                self._router.set_broadcast(chat_key, all_agents)
+                await self._send_text(
+                    chat_key, f"Broadcasting to all agents: {', '.join(all_agents)}"
+                )
                 return
-            self._router.set_broadcast(chat_key, all_agents)
-            await self._send_text(
-                chat_key, f"Broadcasting to all agents: {', '.join(all_agents)}"
-            )
-            return
 
-        # /agent [name...]
-        if len(parts) == 1:
-            await self._send_text(chat_key, self._routing_status(chat_key))
-            return
+            # /agent [name...]
+            if len(parts) == 1:
+                await self._send_text(chat_key, self._routing_status(chat_key))
+                return
 
-        requested = parts[1:]
-        running_names = {rt.name for rt in self.orchestrator.runtimes}
-        unknown = [a for a in requested if a not in running_names]
-        if unknown:
-            available = ", ".join(sorted(running_names)) or "(none running)"
-            await self._send_text(
-                chat_key,
-                f"Unknown or stopped agent(s): {', '.join(unknown)}\nRunning: {available}",
-            )
-            return
+            requested = parts[1:]
+            running_names = {rt.name for rt in self.orchestrator.runtimes}
+            unknown = [a for a in requested if a not in running_names]
+            if unknown:
+                available = ", ".join(sorted(running_names)) or "(none running)"
+                await self._send_text(
+                    chat_key,
+                    f"Unknown or stopped agent(s): {', '.join(unknown)}\nRunning: {available}",
+                )
+                return
 
-        if len(requested) == 1:
-            self._router.set_single(chat_key, requested[0])
-            await self._send_text(chat_key, f"Routing to: {requested[0]}")
-        else:
-            self._router.set_group(chat_key, requested)
-            await self._send_text(chat_key, f"Group chat with: {', '.join(requested)}")
+            if len(requested) == 1:
+                self._router.set_single(chat_key, requested[0])
+                await self._send_text(chat_key, f"Routing to: {requested[0]}")
+            else:
+                self._router.set_group(chat_key, requested)
+                await self._send_text(chat_key, f"Group chat with: {', '.join(requested)}")
+
+        except Exception as exc:
+            session.fail(exc)
+            raise
+        finally:
+            session.finish()
 
     def _routing_status(self, chat_key: str) -> str:
         """Build a status string: current routing + all agents online/offline."""
@@ -478,98 +527,112 @@ class WhatsAppTransport:
         """Handle /reboot, /restart, /terminate, /start, /stop lifecycle commands via WhatsApp."""
         parts = text.split()
         cmd = parts[0].lower()
+        command_name = cmd.lstrip("/") or "lifecycle"
+        session = self._whatsapp_command_session(
+            chat_key,
+            command_name,
+            parts[1:],
+            handler_kind="whatsapp_lifecycle",
+        )
+        try:
+            parts = text.split()
+            cmd = parts[0].lower()
 
-        if cmd == "/reboot":
-            # Request hot restart of all agents
-            await self._send_text(chat_key, "🔄 Requesting hot restart...")
-            self.orchestrator.request_restart(mode="same")
-            return
-
-        if cmd == "/restart":
-            from orchestrator.commands import api_restart
-
-            confirm = len(parts) > 1 and parts[1].lower() in {"confirm", "now"}
-            if not confirm:
-                await self._send_text(
-                    chat_key,
-                    "⚠️ Hard restart goes through WatchTower and can briefly stop HASHI.\n"
-                    "Reply `/restart confirm` to continue.",
-                )
+            if cmd == "/reboot":
+                await self._send_text(chat_key, "🔄 Requesting hot restart...")
+                session.add_side_effect("hot_restart")
+                self.orchestrator.request_restart(mode="same")
                 return
-            targets = self._router.get_targets(chat_key)
-            if not targets:
-                running = [rt.name for rt in self.orchestrator.runtimes]
-                if len(running) == 1:
-                    targets = running
-            if len(targets) != 1:
-                await self._send_text(
-                    chat_key,
-                    "Human /restart needs exactly one routed agent.\nUse /agent <name> first.",
-                )
-                return
-            runtime = self._get_runtime(targets[0])
-            if runtime is None:
-                await self._send_text(chat_key, f"Agent '{targets[0]}' is not running.")
-                return
-            await self._send_text(chat_key, "🔁 Requesting hard restart via WatchTower...")
-            ok, message = await api_restart.request_whatsapp_restart(runtime)
-            if ok:
-                await self._send_text(chat_key, "✅ Hard restart requested. Telegram will report when the restarted agent is back.")
-            else:
-                await self._send_text(chat_key, f"❌ Hard restart failed: {message}")
-            return
 
-        if cmd == "/terminate":
-            # Stop a specific agent or show options
-            if len(parts) < 2:
-                running = [rt.name for rt in self.orchestrator.runtimes]
-                if not running:
-                    await self._send_text(chat_key, "No agents are currently running.")
-                else:
+            if cmd == "/restart":
+                from orchestrator.commands import api_restart
+
+                confirm = len(parts) > 1 and parts[1].lower() in {"confirm", "now"}
+                if not confirm:
+                    session.block("restart_confirm_required")
                     await self._send_text(
                         chat_key,
-                        f"Usage: /terminate <agent_name>\nRunning: {', '.join(running)}"
+                        "⚠️ Hard restart goes through WatchTower and can briefly stop HASHI.\n"
+                        "Reply `/restart confirm` to continue.",
                     )
-                return
-            agent_name = parts[1]
-            ok, message = await self.orchestrator.stop_agent(agent_name)
-            await self._send_text(chat_key, f"{'✓' if ok else '✗'} {message}")
-            return
-
-        if cmd == "/start":
-            # Start a specific agent
-            if len(parts) < 2:
-                startable = self.orchestrator.get_startable_agent_names()
-                if not startable:
-                    await self._send_text(chat_key, "All configured agents are already running.")
-                else:
+                    return
+                targets = self._router.get_targets(chat_key)
+                if not targets:
+                    running = [rt.name for rt in self.orchestrator.runtimes]
+                    if len(running) == 1:
+                        targets = running
+                if len(targets) != 1:
                     await self._send_text(
                         chat_key,
-                        f"Usage: /start <agent_name>\nAvailable: {', '.join(startable)}"
+                        "Human /restart needs exactly one routed agent.\nUse /agent <name> first.",
                     )
-                return
-            agent_name = parts[1]
-            await self._send_text(chat_key, f"🚀 Starting {agent_name}...")
-            ok, message = await self.orchestrator.start_agent(agent_name)
-            await self._send_text(chat_key, f"{'✓' if ok else '✗'} {message}")
-            return
-
-        if cmd == "/stop":
-            # Alias for /terminate
-            if len(parts) < 2:
-                running = [rt.name for rt in self.orchestrator.runtimes]
-                if not running:
-                    await self._send_text(chat_key, "No agents are currently running.")
+                    return
+                runtime = self._get_runtime(targets[0])
+                if runtime is None:
+                    await self._send_text(chat_key, f"Agent '{targets[0]}' is not running.")
+                    return
+                await self._send_text(chat_key, "🔁 Requesting hard restart via WatchTower...")
+                ok, message = await api_restart.request_whatsapp_restart(runtime)
+                if ok:
+                    await self._send_text(chat_key, "✅ Hard restart requested. Telegram will report when the restarted agent is back.")
                 else:
-                    await self._send_text(
-                        chat_key,
-                        f"Usage: /stop <agent_name>\nRunning: {', '.join(running)}"
-                    )
+                    await self._send_text(chat_key, f"❌ Hard restart failed: {message}")
                 return
-            agent_name = parts[1]
-            ok, message = await self.orchestrator.stop_agent(agent_name)
-            await self._send_text(chat_key, f"{'✓' if ok else '✗'} {message}")
-            return
+
+            if cmd == "/terminate":
+                if len(parts) < 2:
+                    running = [rt.name for rt in self.orchestrator.runtimes]
+                    if not running:
+                        await self._send_text(chat_key, "No agents are currently running.")
+                    else:
+                        await self._send_text(
+                            chat_key,
+                            f"Usage: /terminate <agent_name>\nRunning: {', '.join(running)}"
+                        )
+                    return
+                agent_name = parts[1]
+                ok, message = await self.orchestrator.stop_agent(agent_name)
+                await self._send_text(chat_key, f"{'✓' if ok else '✗'} {message}")
+                return
+
+            if cmd == "/start":
+                if len(parts) < 2:
+                    startable = self.orchestrator.get_startable_agent_names()
+                    if not startable:
+                        await self._send_text(chat_key, "All configured agents are already running.")
+                    else:
+                        await self._send_text(
+                            chat_key,
+                            f"Usage: /start <agent_name>\nAvailable: {', '.join(startable)}"
+                        )
+                    return
+                agent_name = parts[1]
+                await self._send_text(chat_key, f"🚀 Starting {agent_name}...")
+                ok, message = await self.orchestrator.start_agent(agent_name)
+                await self._send_text(chat_key, f"{'✓' if ok else '✗'} {message}")
+                return
+
+            if cmd == "/stop":
+                if len(parts) < 2:
+                    running = [rt.name for rt in self.orchestrator.runtimes]
+                    if not running:
+                        await self._send_text(chat_key, "No agents are currently running.")
+                    else:
+                        await self._send_text(
+                            chat_key,
+                            f"Usage: /stop <agent_name>\nRunning: {', '.join(running)}"
+                        )
+                    return
+                agent_name = parts[1]
+                ok, message = await self.orchestrator.stop_agent(agent_name)
+                await self._send_text(chat_key, f"{'✓' if ok else '✗'} {message}")
+                return
+
+        except Exception as exc:
+            session.fail(exc)
+            raise
+        finally:
+            session.finish()
 
     # ------------------------------------------------------------------
     # Voice handling

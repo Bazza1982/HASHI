@@ -47,6 +47,11 @@ from orchestrator import runtime_transfer
 from orchestrator import runtime_workspace
 from orchestrator import runtime_wrapper
 from orchestrator import runtime_workzone
+from orchestrator.slash_command_audit import (
+    SlashCommandAuditSession,
+    default_audit_path,
+    resolve_handler_kind,
+)
 from orchestrator.runtime_common import (
     QueuedRequest,
     _print_final_response,
@@ -384,13 +389,36 @@ class FlexibleAgentRuntime:
 
     def _wrap_cmd(self, cmd: str, handler):
         async def _wrapped(update: Update, context: Any):
-            if not self._is_authorized_user(update.effective_user.id):
-                return
-            self._record_active_chat(update)
-            if not self._is_command_allowed(cmd):
-                await self._reply_text(update, f"/{cmd} is disabled for this agent.")
-                return
-            return await handler(update, context)
+            # Residual gap: /api/chat slash-looking text and inline callback actions
+            # (e.g. tgl:reboot) are not audited here.
+            args = list(getattr(context, "args", None) or [])
+            actor_id = getattr(getattr(update, "effective_user", None), "id", None)
+            chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
+            session = SlashCommandAuditSession(
+                audit_path=default_audit_path(self.workspace_dir),
+                agent=self.name,
+                command_name=cmd,
+                args=args,
+                source_channel="telegram",
+                handler_kind=resolve_handler_kind(self, cmd),
+                actor_id=actor_id,
+                chat_id=chat_id,
+            )
+            try:
+                if not self._is_authorized_user(actor_id):
+                    session.deny("unauthorized")
+                    return
+                self._record_active_chat(update)
+                if not self._is_command_allowed(cmd):
+                    session.block("command_disabled")
+                    await self._reply_text(update, f"/{cmd} is disabled for this agent.")
+                    return
+                await handler(update, context)
+            except Exception as exc:
+                session.fail(exc)
+                raise
+            finally:
+                session.finish()
         return _wrapped
 
     def _setup_logging(self):
