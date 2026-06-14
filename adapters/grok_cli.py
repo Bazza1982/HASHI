@@ -283,6 +283,16 @@ class GrokCLIAdapter(BaseBackend):
                 )
             if not response_text:
                 response_text = self._extract_last_text_from_stdout(stdout_lines)
+            if not response_text:
+                diagnostic = self._summarize_empty_response(stdout_lines, stderr)
+                self.logger.warning("Grok request %s returned no answer text: %s", request_id, diagnostic)
+                return BackendResponse(
+                    text="",
+                    error=f"Grok CLI returned no answer text. {diagnostic}",
+                    is_success=False,
+                    duration_ms=(time.time() - started) * 1000,
+                    stream_metadata={"grok_text_delta_count": len(deltas)},
+                )
             return BackendResponse(
                 text=response_text,
                 duration_ms=(time.time() - started) * 1000,
@@ -319,3 +329,24 @@ class GrokCLIAdapter(BaseBackend):
                 if text:
                     return text
         return ""
+
+    def _summarize_empty_response(self, stdout_lines: list[str], stderr: str) -> str:
+        event_types: list[str] = []
+        for line in stdout_lines[-8:]:
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                event_types.append("plain")
+                continue
+            if not isinstance(event, dict):
+                event_types.append(type(event).__name__)
+                continue
+            etype = event.get("type") or event.get("event") or event.get("sessionUpdate") or "unknown"
+            event_types.append(str(etype))
+        parts = [
+            f"stdout_lines={len(stdout_lines)}",
+            f"recent_events={event_types or ['none']}",
+        ]
+        if stderr:
+            parts.append(f"stderr={self._preview_text(stderr, 300)}")
+        return "; ".join(parts)
