@@ -265,3 +265,71 @@ async def test_wrap_callback_audits_telegram_callback(tmp_path, monkeypatch):
     assert rows[0]["command_name"] == "tgl:verbose"
     assert rows[0]["args_redacted"] == ["on"]
 
+class _PolicyRuntime(_Runtime):
+    def __init__(self, tmp_path):
+        super().__init__(tmp_path)
+        self._disabled_commands = {"status"}
+
+    def _is_command_allowed(self, cmd: str) -> bool:
+        return (cmd or "").lstrip("/").lower() not in self._disabled_commands
+
+
+@pytest.mark.asyncio
+async def test_try_execute_slash_command_text_blocks_disabled_command(tmp_path):
+    runtime = _PolicyRuntime(tmp_path)
+    calls = []
+
+    async def tracked_status(update, context):
+        calls.append("executed")
+
+    runtime.cmd_status = tracked_status
+    result = await try_execute_slash_command_text(runtime, "/status", source_channel="api_chat", chat_id=7)
+    assert result is not None
+    assert result["ok"] is False
+    assert result["command"] == "status"
+    assert calls == []
+    rows = _read_jsonl(default_audit_path(tmp_path))
+    assert len(rows) == 1
+    assert rows[0]["status"] == "blocked"
+    assert rows[0]["blocked_reason"] == "command_disabled"
+    assert rows[0]["source_channel"] == "api_chat"
+
+
+@pytest.mark.asyncio
+async def test_try_execute_slash_command_text_blocks_disabled_whatsapp_forwarded(tmp_path):
+    runtime = _PolicyRuntime(tmp_path)
+    calls = []
+
+    async def tracked_status(update, context):
+        calls.append("executed")
+
+    runtime.cmd_status = tracked_status
+    result = await try_execute_slash_command_text(
+        runtime,
+        "/status",
+        source_channel="whatsapp_forwarded",
+        chat_id="wa-chat-1",
+    )
+    assert result is not None
+    assert result["ok"] is False
+    assert calls == []
+    rows = _read_jsonl(default_audit_path(tmp_path))
+    assert rows[0]["source_channel"] == "whatsapp_forwarded"
+    assert rows[0]["status"] == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_try_execute_slash_command_text_normalizes_bot_suffix(tmp_path):
+    runtime = _Runtime(tmp_path)
+
+    async def cmd_help(update, context):
+        await update.message.reply_text("help ok")
+
+    runtime.cmd_help = cmd_help
+    result = await try_execute_slash_command_text(runtime, "/help@botname", source_channel="api_chat")
+    assert result is not None
+    assert result["ok"] is True
+    assert result["command"] == "help"
+    rows = _read_jsonl(default_audit_path(tmp_path))
+    assert rows[0]["command_name"] == "help"
+
