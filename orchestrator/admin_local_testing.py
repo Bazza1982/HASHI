@@ -1,7 +1,6 @@
 from __future__ import annotations
 import asyncio
 import shlex
-import time
 from pathlib import Path
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -12,6 +11,9 @@ from orchestrator.runtime_command_binding import COMMAND_BINDINGS
 from orchestrator.slash_command_audit import (
     SlashCommandAuditSession,
     default_audit_path,
+    is_supported_slash_command,
+    looks_like_slash_command,
+    parse_slash_command_text,
     resolve_handler_kind,
 )
 
@@ -110,7 +112,32 @@ def _runtime_agent_name(runtime) -> str:
     return str(getattr(runtime, "name", None) or getattr(getattr(runtime, "config", None), "name", "unknown"))
 
 
-async def execute_local_command(runtime, command_line: str, chat_id: int | None = None) -> dict[str, Any]:
+async def try_execute_slash_command_text(
+    runtime,
+    text: str,
+    *,
+    source_channel: str = "api_chat",
+    chat_id: int | str | None = None,
+) -> dict[str, Any] | None:
+    if not looks_like_slash_command(text):
+        return None
+    command_name, _args = parse_slash_command_text(text)
+    if not is_supported_slash_command(runtime, command_name):
+        return None
+    return await execute_local_command(
+        runtime,
+        text.strip(),
+        chat_id=chat_id,
+        source_channel=source_channel,
+    )
+
+
+async def execute_local_command(
+    runtime,
+    command_line: str,
+    chat_id: int | None = None,
+    source_channel: str = "workbench_api",
+) -> dict[str, Any]:
     command_name, args = _split_command(command_line)
     local_chat_id = chat_id or runtime.global_config.authorized_id
     actor_id = getattr(runtime.global_config, "authorized_id", None)
@@ -119,7 +146,7 @@ async def execute_local_command(runtime, command_line: str, chat_id: int | None 
         agent=_runtime_agent_name(runtime),
         command_name=command_name or "(empty)",
         args=args,
-        source_channel="workbench_api",
+        source_channel=source_channel,
         handler_kind=resolve_handler_kind(runtime, command_name) if command_name else "unknown",
         actor_id=actor_id,
         chat_id=local_chat_id,

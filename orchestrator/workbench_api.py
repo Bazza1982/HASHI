@@ -9,7 +9,11 @@ from uuid import uuid4
 
 from aiohttp import web
 
-from orchestrator.admin_local_testing import execute_local_command, supported_commands
+from orchestrator.admin_local_testing import (
+    execute_local_command,
+    supported_commands,
+    try_execute_slash_command_text,
+)
 from orchestrator.conversation_router import ConversationRouter
 from orchestrator.pathing import resolve_path_value
 from orchestrator.transfer_store import TransferStore
@@ -414,6 +418,12 @@ class WorkbenchApiServer:
 
             request_ids = []
             if text and not uploads:
+                slash_result = await try_execute_slash_command_text(runtime, text, source_channel="api_chat")
+                if slash_result is not None:
+                    slash_result["agent"] = agent_name
+                    slash_result["slash_command"] = True
+                    status = 200 if slash_result.get("ok") else 400
+                    return web.json_response(slash_result, status=status)
                 request_id = await runtime.enqueue_api_text(text)
                 request_ids.append(request_id)
 
@@ -447,6 +457,13 @@ class WorkbenchApiServer:
         reply_route = payload.get("reply_route")
         if reply_route and isinstance(reply_route, dict):
             self._learn_reply_route(text, reply_route)
+
+        slash_result = await try_execute_slash_command_text(runtime, text, source_channel="api_chat")
+        if slash_result is not None:
+            slash_result["agent"] = agent_name
+            slash_result["slash_command"] = True
+            status = 200 if slash_result.get("ok") else 400
+            return web.json_response(slash_result, status=status)
 
         request_id = await runtime.enqueue_api_text(text)
         return web.json_response({"ok": True, "request_id": request_id})

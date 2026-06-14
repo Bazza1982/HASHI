@@ -207,3 +207,55 @@ class SlashCommandAuditSession:
             blocked_reason=self.blocked_reason,
             side_effects=self.side_effects,
         )
+
+def looks_like_slash_command(text: str) -> bool:
+    raw = (text or "").strip()
+    if not raw.startswith("/"):
+        return False
+    body = raw[1:].strip()
+    if not body:
+        return False
+    if body.startswith(" "):
+        return False
+    return bool(body.split()[0])
+
+
+def parse_slash_command_text(text: str) -> tuple[str, list[str]]:
+    import shlex
+
+    raw = (text or "").strip()
+    if not raw.startswith("/"):
+        return "", []
+    body = raw[1:]
+    try:
+        parts = shlex.split(body)
+    except Exception:
+        parts = body.split()
+    if not parts:
+        return "", []
+    return parts[0].split("@", 1)[0].lower(), parts[1:]
+
+
+def parse_inline_callback_command(callback_data: str) -> tuple[str, list[str]]:
+    raw = (callback_data or "").strip()
+    if not raw:
+        return "callback", []
+    if ":" in raw:
+        head, tail = raw.split(":", 1)
+        if ":" in tail:
+            target, value = tail.split(":", 1)
+            return f"{head}:{target}", [value]
+        return head, [tail]
+    return raw, []
+
+
+def is_supported_slash_command(runtime: Any, command_name: str) -> bool:
+    if not command_name:
+        return False
+    try:
+        from orchestrator.admin_local_testing import supported_commands
+
+        return command_name in supported_commands(runtime)
+    except Exception:
+        return False
+

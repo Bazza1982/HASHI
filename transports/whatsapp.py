@@ -34,6 +34,7 @@ from datetime import datetime
 from pathlib import Path
 
 from orchestrator.pathing import resolve_path_value
+from orchestrator.admin_local_testing import try_execute_slash_command_text
 from orchestrator.slash_command_audit import (
     SlashCommandAuditSession,
     bridge_audit_path,
@@ -328,6 +329,33 @@ class WhatsAppTransport:
 
             # Fan-out to target agents
             mode = self._router.get_mode(chat_key)
+
+            slash_dispatched = False
+            for agent_name in targets:
+                runtime = self._get_runtime(agent_name)
+                if runtime is None:
+                    continue
+                slash_result = await try_execute_slash_command_text(
+                    runtime,
+                    prompt,
+                    source_channel="whatsapp_forwarded",
+                    chat_id=chat_key,
+                )
+                if slash_result is None:
+                    continue
+                slash_dispatched = True
+                messages = slash_result.get("messages") or []
+                parts = [str(m.get("text") or "").strip() for m in messages if str(m.get("text") or "").strip()]
+                if parts:
+                    reply = "\n".join(parts)
+                elif slash_result.get("ok"):
+                    reply = f"/{slash_result.get('command', 'command')} ok"
+                else:
+                    reply = str(slash_result.get("error") or "command failed")
+                await self._send_text(chat_key, f"[{agent_name}]: {reply}")
+            if slash_dispatched:
+                return
+
             for agent_name in targets:
                 runtime = self._get_runtime(agent_name)
                 if runtime is None:
@@ -422,8 +450,6 @@ class WhatsAppTransport:
         *,
         handler_kind: str,
     ) -> SlashCommandAuditSession:
-        # Residual gap: agent-forwarded slash commands (e.g. /status via WhatsApp)
-        # are not audited at transport layer.
         return SlashCommandAuditSession(
             audit_path=self._whatsapp_audit_path(),
             agent="_whatsapp",

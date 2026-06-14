@@ -184,3 +184,84 @@ async def test_execute_local_command_writes_failed_unknown_audit(tmp_path):
     rows = _read_jsonl(default_audit_path(tmp_path))
     assert rows[0]["status"] == "failed"
     assert "unknown command" in (rows[0]["error"] or "")
+
+from orchestrator.admin_local_testing import try_execute_slash_command_text
+from orchestrator.slash_command_audit import (
+    looks_like_slash_command,
+    parse_inline_callback_command,
+    parse_slash_command_text,
+)
+
+
+def test_looks_like_and_parse_slash_command_text():
+    assert looks_like_slash_command("/status full") is True
+    assert looks_like_slash_command("hello") is False
+    assert looks_like_slash_command("/") is False
+    assert parse_slash_command_text("/status full") == ("status", ["full"])
+    assert parse_slash_command_text("/help@botname") == ("help", [])
+
+
+def test_parse_inline_callback_command():
+    assert parse_inline_callback_command("tgl:reboot:min") == ("tgl:reboot", ["min"])
+    assert parse_inline_callback_command("model:gpt-4") == ("model", ["gpt-4"])
+    assert parse_inline_callback_command("") == ("callback", [])
+
+
+@pytest.mark.asyncio
+async def test_try_execute_slash_command_text_dispatches_and_audits(tmp_path):
+    runtime = _Runtime(tmp_path)
+    result = await try_execute_slash_command_text(runtime, "/status", source_channel="api_chat", chat_id=7)
+    assert result is not None
+    assert result["ok"] is True
+    rows = _read_jsonl(default_audit_path(tmp_path))
+    assert rows[0]["source_channel"] == "api_chat"
+    assert rows[0]["command_name"] == "status"
+
+
+@pytest.mark.asyncio
+async def test_try_execute_slash_command_text_returns_none_for_non_slash(tmp_path):
+    runtime = _Runtime(tmp_path)
+    assert await try_execute_slash_command_text(runtime, "hello") is None
+
+
+@pytest.mark.asyncio
+async def test_try_execute_slash_command_text_returns_none_for_unknown(tmp_path):
+    runtime = _Runtime(tmp_path)
+    assert await try_execute_slash_command_text(runtime, "/definitely_missing_command") is None
+
+
+@pytest.mark.asyncio
+async def test_wrap_callback_audits_telegram_callback(tmp_path, monkeypatch):
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    class _MiniRuntime:
+        name = "nana"
+        workspace_dir = tmp_path
+        global_config = SimpleNamespace(authorized_id=42)
+
+        def _is_authorized_user(self, user_id):
+            return user_id == 42
+
+    runtime = _MiniRuntime()
+    calls = []
+
+    async def handler(update, context):
+        calls.append(update.callback_query.data)
+
+    wrapped = FlexibleAgentRuntime._wrap_callback(runtime, "callback_toggle", handler)
+    query = SimpleNamespace(
+        data="tgl:verbose:on",
+        from_user=SimpleNamespace(id=42),
+        message=SimpleNamespace(chat=SimpleNamespace(id=99)),
+        answer=lambda: None,
+    )
+    update = SimpleNamespace(callback_query=query)
+    await wrapped(update, SimpleNamespace())
+
+    assert calls == ["tgl:verbose:on"]
+    rows = _read_jsonl(default_audit_path(tmp_path))
+    assert len(rows) == 1
+    assert rows[0]["source_channel"] == "telegram_callback"
+    assert rows[0]["command_name"] == "tgl:verbose"
+    assert rows[0]["args_redacted"] == ["on"]
+

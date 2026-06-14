@@ -229,7 +229,10 @@ def bind_flexible_runtime_handlers(runtime) -> None:
         callback = getattr(runtime, binding.method_name)
         runtime.app.add_handler(CommandHandler(binding.name, runtime._wrap_cmd(binding.name, callback)))
     for binding in CALLBACK_BINDINGS:
-        runtime.app.add_handler(CallbackQueryHandler(getattr(runtime, binding.method_name), pattern=binding.pattern))
+        callback = getattr(runtime, binding.method_name)
+        if hasattr(runtime, "_wrap_callback"):
+            callback = runtime._wrap_callback(binding.method_name, callback)
+        runtime.app.add_handler(CallbackQueryHandler(callback, pattern=binding.pattern))
 
     bind_runtime_commands(runtime, wrap=True)
 
