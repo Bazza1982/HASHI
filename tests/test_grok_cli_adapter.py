@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from adapters.grok_cli import GrokCLIAdapter
-from adapters.stream_events import KIND_TEXT_DELTA, KIND_THINKING
+from adapters.stream_events import KIND_FILE_EDIT, KIND_FILE_READ, KIND_SHELL_EXEC, KIND_TEXT_DELTA, KIND_THINKING
 
 
 def _agent_config(tmp_path: Path):
@@ -64,6 +64,14 @@ if 'empty' in prompt:
     print(json.dumps({{"type": "thought", "data": "thinking only"}}), flush=True)
     print(json.dumps({{"type": "end", "sessionId": "sess-empty", "stopReason": "EndTurn"}}), flush=True)
     raise SystemExit(0)
+if 'tool-events' in prompt:
+    print(json.dumps({{"type": "session", "session_id": "sess-tool", "summary": "started"}}), flush=True)
+    print(json.dumps({{"type": "tool_call", "name": "Read", "path": "README.md"}}), flush=True)
+    print(json.dumps({{"type": "tool_call", "name": "Shell", "command": "mkdir -p demo"}}), flush=True)
+    print(json.dumps({{"type": "tool_call", "name": "Write", "path": "demo/file.txt"}}), flush=True)
+    print(json.dumps({{"type": "text", "data": "done"}}), flush=True)
+    print(json.dumps({{"type": "end", "sessionId": "sess-tool", "stopReason": "EndTurn"}}), flush=True)
+    raise SystemExit(0)
 
 print(json.dumps({{"type": "session", "session_id": "sess-123", "summary": "started"}}), flush=True)
 print(json.dumps({{"type": "thought", "data": "thinking"}}), flush=True)
@@ -93,6 +101,37 @@ async def test_grok_initialize_fails_when_cli_version_fails(tmp_path):
     assert await adapter.initialize() is False
 
 
+def test_grok_build_cmd_defaults_to_execution_ready_flags(tmp_path):
+    adapter = GrokCLIAdapter(_agent_config(tmp_path), SimpleNamespace(grok_cmd="grok"))
+
+    cmd = adapter._build_cmd("do work")
+
+    assert "--permission-mode" in cmd
+    assert cmd[cmd.index("--permission-mode") + 1] == "bypassPermissions"
+    assert "--always-approve" in cmd
+    assert "--check" in cmd
+
+
+def test_grok_build_cmd_allows_agent_overrides(tmp_path):
+    cfg = _agent_config(tmp_path)
+    cfg.extra = {
+        "grok_permission_mode": "default",
+        "grok_always_approve": False,
+        "grok_check": False,
+        "grok_tools": "Read,Write",
+        "grok_deny": "Shell(*)",
+    }
+    adapter = GrokCLIAdapter(cfg, SimpleNamespace(grok_cmd="grok"))
+
+    cmd = adapter._build_cmd("do work")
+
+    assert cmd[cmd.index("--permission-mode") + 1] == "default"
+    assert "--always-approve" not in cmd
+    assert "--check" not in cmd
+    assert cmd[cmd.index("--tools") + 1] == "Read,Write"
+    assert cmd[cmd.index("--deny") + 1] == "Shell(*)"
+
+
 @pytest.mark.asyncio
 async def test_grok_streaming_json_reconstructs_final_answer_and_emits_deltas(tmp_path):
     fake_grok = _write_fake_grok(tmp_path)
@@ -112,12 +151,40 @@ async def test_grok_streaming_json_reconstructs_final_answer_and_emits_deltas(tm
 
     assert response.is_success is True
     assert response.text == "Hello"
-    assert response.stream_metadata == {"grok_text_delta_count": 2}
+    assert response.stream_metadata == {"grok_text_delta_count": 2, "grok_action_event_count": 0}
+    assert response.tool_call_count == 0
     assert adapter._session_id == "sess-123"
     text_events = [event for event in events if event.kind == KIND_TEXT_DELTA]
     assert [event.summary for event in text_events] == ["Hel", "lo"]
     thinking_events = [event for event in events if event.kind == KIND_THINKING]
     assert [event.summary for event in thinking_events] == ["thinking"]
+
+
+@pytest.mark.asyncio
+async def test_grok_tool_events_map_to_hashi_stream_events_and_counts(tmp_path):
+    fake_grok = _write_fake_grok(tmp_path)
+    adapter = GrokCLIAdapter(_agent_config(tmp_path), SimpleNamespace(grok_cmd=str(fake_grok)))
+    events = []
+
+    async def collect(event):
+        events.append(event)
+
+    response = await adapter.generate_response(
+        "please emit tool-events",
+        "req-grok-tools",
+        is_retry=False,
+        silent=False,
+        on_stream_event=collect,
+    )
+
+    assert response.is_success is True
+    assert response.text == "done"
+    assert response.tool_call_count == 3
+    assert response.stream_metadata["grok_action_event_count"] == 3
+    by_kind = [event.kind for event in events]
+    assert KIND_FILE_READ in by_kind
+    assert KIND_SHELL_EXEC in by_kind
+    assert KIND_FILE_EDIT in by_kind
 
 
 @pytest.mark.asyncio
