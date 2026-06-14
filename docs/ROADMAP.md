@@ -19,6 +19,11 @@ HASHI v4 alpha is focused on two foundations:
 - **Superloop operational foundation** — long-running controller loops now have
   an explicit function contract for taskboards, waits, HChat replies, evidence,
   issue handling, and closeout barriers.
+- **Enterprise AAI strategy** — HASHI Enterprise is now framed around
+  Agent as Interface: a governed, auditable, open-source control plane for
+  human-AI work orchestration. See
+  [HASHI_ENTERPRISE_AAI_VALUE_PROPOSITION.md](HASHI_ENTERPRISE_AAI_VALUE_PROPOSITION.md)
+  and [HASHI_ENTERPRISE_AAI_PRD.md](HASHI_ENTERPRISE_AAI_PRD.md).
 
 Alpha limitations:
 

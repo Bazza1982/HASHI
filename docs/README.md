@@ -15,6 +15,8 @@ This directory contains developer documentation and operational notes for HASHI.
 - [initial.md](initial.md) — Onboarding prompt template (onboarding-only)
 - [tools.md](tools.md) — Tools & operations reference
 - [WORKBENCH_NOTES.md](WORKBENCH_NOTES.md) — Workbench/runtime semantics
+- [HASHI_ENTERPRISE_AAI_VALUE_PROPOSITION.md](HASHI_ENTERPRISE_AAI_VALUE_PROPOSITION.md) — Agent as Interface value proposition and enterprise positioning
+- [HASHI_ENTERPRISE_AAI_PRD.md](HASHI_ENTERPRISE_AAI_PRD.md) — Enterprise AAI product requirements and development plan
 - [HASHI_SLIM_CORE_ARCHITECTURE.md](HASHI_SLIM_CORE_ARCHITECTURE.md) — v3.2 slim core architecture and hot manager rebuild contract
 - [HASHI_LAYERED_RUNTIME_BOUNDARIES.md](HASHI_LAYERED_RUNTIME_BOUNDARIES.md) — four-layer HASHI boundary: protected core, hot-reloadable functions, platform config, and instance config
 - [HASHI_CORE_SLIMMING_PLAN.md](HASHI_CORE_SLIMMING_PLAN.md) — implementation plan and acceptance record for the slim core migration
