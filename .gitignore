@@ -173,6 +173,7 @@ backups/
 .rollback/
 managed_active_heartbeats.json
 tasks.json.bak.*
+rss_cache/
 
 # Private local-only commands/config (never commit)
 private/
