@@ -13,7 +13,7 @@ from adapters.stream_events import KIND_TEXT_DELTA
 def _agent_config(tmp_path: Path):
     return SimpleNamespace(
         name="test",
-        model="grok-build-0.1",
+        model="grok-build",
         workspace_dir=tmp_path,
         system_md=None,
         extra={},

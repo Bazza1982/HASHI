@@ -11,5 +11,6 @@ def test_codex_spark_model_is_available_to_flex_backend_registry():
 
 
 def test_grok_build_model_is_available_to_flex_backend_registry():
+    assert "grok-build" in get_available_models("grok-cli")
     assert "grok-build-0.1" in get_available_models("grok-cli")
     assert is_cli_backend("grok-cli") is True
