@@ -47,6 +47,7 @@ class GlobalConfig:
     gemini_cmd: str = "gemini"
     claude_cmd: str = "claude"
     codex_cmd: str = "codex"
+    grok_cmd: str = "grok"
     gh_copilot_cmd: str = "gh copilot"
     openrouter_url: str = "https://openrouter.ai/api/v1/chat/completions"
     claw_providers: Dict[str, Any] = field(default_factory=dict)
@@ -147,6 +148,11 @@ class ConfigManager:
             ),
             codex_cmd=resolve_command_value(
                 g_raw.get("codex_cmd", "codex"),
+                config_dir=config_dir,
+                bridge_home=bridge_home,
+            ),
+            grok_cmd=resolve_command_value(
+                g_raw.get("grok_cmd", "grok"),
                 config_dir=config_dir,
                 bridge_home=bridge_home,
             ),

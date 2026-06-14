@@ -4,7 +4,7 @@
 
 **Date:** 2026-06-14.
 
-**Goal:** add xAI Grok Build as a first-class HASHI backend, with true final-output streaming where the CLI/API provides text deltas.
+**Goal:** add xAI Grok Build as a first-class HASHI backend, using the official authenticated CLI path with true final-output streaming where the CLI provides text deltas.
 
 **Non-goal:** install Grok Build, authenticate to xAI, or change live agent routing before a human approves a smoke test.
 
@@ -23,7 +23,7 @@ Key facts from official docs and announcements:
   ```
 
 - Access is advertised for SuperGrok and X Premium Plus users.
-- First launch can authenticate through a browser; non-browser environments can use `XAI_API_KEY`.
+- First launch can authenticate through a browser. HASHI should treat Grok like Codex and Claude: the operator authenticates the CLI out-of-band, then HASHI runs the authenticated command.
 - The command name is `grok`.
 - Interactive usage:
 
@@ -58,8 +58,6 @@ Key facts from official docs and announcements:
   ```
 
   In ACP, assistant text arrives through `session/update` chunks where `sessionUpdate == "agent_message_chunk"` and `content.text` contains the chunk.
-- xAI also exposes the underlying Grok Build model through the API as `grok-build-0.1` in early access.
-- xAI API supports OpenAI-compatible `chat.completions` streaming with `stream: true`, returning SSE chunks containing `choices[].delta.content`.
 - Current model docs list:
   - `grok-build-0.1`: fast coding model, 256k context, trained for agentic coding workflows.
   - `grok-4.3`: general model with 1M context and configurable reasoning.
@@ -70,28 +68,19 @@ Sources:
 - https://x.ai/news/grok-build-cli
 - https://docs.x.ai/build/overview
 - https://docs.x.ai/build/cli/headless-scripting
-- https://docs.x.ai/developers/model-capabilities/text/streaming
 - https://docs.x.ai/developers/models
 
 ---
 
 ## 2. Recommended Architecture
 
-HASHI should support Grok in two layers:
+HASHI should support Grok as a CLI-authenticated backend only:
 
-1. `grok-cli`
-   - Primary first implementation.
-   - Uses the official `grok` command in headless mode.
-   - Best fit for parity with `claude-cli`, `gemini-cli`, and `codex-cli`.
-   - Should parse `--output-format streaming-json` and emit `KIND_TEXT_DELTA` for final answer chunks.
-
-2. `grok-api`
-   - Later optional implementation.
-   - Uses `https://api.x.ai/v1`.
-   - Can share much of the OpenRouter/DeepSeek SSE parsing shape.
-   - Better for deterministic server-side API integrations, but less like the native coding-agent CLI.
-
-The first production path should be `grok-cli`, because the user request is specifically about the newly released CLI coding tool.
+- Engine name: `grok-cli`.
+- Uses the official `grok` command in headless mode.
+- Authentication is out-of-band, like `codex-cli` and `claude-cli`.
+- Parses `--output-format streaming-json` and emits `KIND_TEXT_DELTA` for final answer chunks.
+- ACP (`grok agent stdio`) can be considered later as an alternate CLI transport, not as an API fallback.
 
 ---
 
@@ -112,10 +101,9 @@ capabilities.supports_answer_stream = True
 
 The `supports_answer_stream=True` claim must be gated by a live fixture or smoke proving that `streaming-json` contains assistant text deltas. Until the event shape is captured, implement the parser behind tests and keep the docs honest.
 
-If `streaming-json` proves unreliable, fallback options:
+If `streaming-json` proves unreliable, the only planned fallback is still CLI-based:
 
 - Use ACP `grok agent stdio`, parse `session/update` with `agent_message_chunk`.
-- Use `grok-api` with xAI SSE streaming.
 
 ---
 
@@ -136,7 +124,7 @@ Core backend registration:
         "default_model": "grok-build-0.1",
         "efforts": [],
         "default_effort": None,
-        "secret_keys": ["xai_api_key", "XAI_API_KEY", "grok-cli_key"],
+        "secret_keys": [],
     }
     ```
 
@@ -146,9 +134,7 @@ Core backend registration:
 - `orchestrator/backend_preflight.py`
   - Include `grok-cli` command availability checks.
 - `orchestrator/model_catalog.py`
-  - If API gateway should expose Grok models, add `AVAILABLE_GROK_MODELS`.
-- `orchestrator/api_gateway.py` and `orchestrator/api_gateway_config.py`
-  - Add model-to-engine routing if `grok-cli` should be exposed through `/v1/models`.
+  - Optional later: expose Grok models through the OpenAI-compatible local API gateway if CLI-backed gateway routing is desired.
 - `agents.json`
   - Add `grok-cli` to selected agents' `allowed_backends` only after smoke testing.
 
@@ -257,7 +243,7 @@ Acceptance:
 Preconditions:
 
 - `grok` installed.
-- Either browser login has been completed or `XAI_API_KEY` exists.
+- Browser/CLI login has been completed for the `grok` command in the runtime environment.
 - Use a non-critical test agent, not Zelda.
 
 Smoke:
@@ -279,22 +265,21 @@ Acceptance:
   Answer stream finalized ... promoted=True
   ```
 
-### Phase 4: Optional `grok-api`
+### Phase 4: Optional ACP Transport
 
-Implement only if CLI streaming is not stable enough.
+Implement only if headless `streaming-json` is not stable enough.
 
 Tasks:
 
-- Add `GrokAPIAdapter`.
-- Use `https://api.x.ai/v1/chat/completions`.
-- Send `stream: true`.
-- Parse SSE `choices[].delta.content` into `KIND_TEXT_DELTA`.
-- Support models `grok-build-0.1` and `grok-4.3`.
+- Add an ACP transport mode inside `GrokCLIAdapter`.
+- Launch `grok agent stdio`.
+- Parse ACP `session/update` messages.
+- Map `agent_message_chunk` to `KIND_TEXT_DELTA`.
 
 Acceptance:
 
-- Same streaming behavior as OpenRouter/DeepSeek.
-- No dependence on TUI/headless CLI behavior.
+- Same user-visible streaming behavior as the headless CLI path.
+- Authentication still relies on the official Grok CLI login state.
 
 ---
 
@@ -302,7 +287,7 @@ Acceptance:
 
 - Do not pipe-install Grok Build during automated tests.
 - Treat `curl | bash` as a manual operator step only.
-- Keep `XAI_API_KEY` in `secrets.json` or environment, never in `agents.json`.
+- Do not require `XAI_API_KEY` for the normal `grok-cli` backend. Treat auth like Codex/Claude: the CLI must already be logged in.
 - Use `--no-auto-update` for scripted/headless HASHI calls to avoid surprise CLI updates mid-turn.
 - Use `--no-alt-screen` so subprocess output remains machine-readable.
 - Start with a test agent because Grok Build is early beta.
@@ -322,7 +307,7 @@ Acceptance:
 2. Does `grok -p` support prompt via stdin for long prompts?
 3. Does `--always-approve` bypass all tool confirmations, and should HASHI ever use it by default?
 4. Does Grok Build maintain per-directory session state that should map to HASHI `/new`, `/clear`, `/retry`, and handoff semantics?
-5. Does xAI account access differ between SuperGrok browser login and `XAI_API_KEY` in WSL/headless environments?
+5. Does xAI account access differ between browser login and headless WSL sessions?
 
 ---
 

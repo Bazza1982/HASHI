@@ -19,6 +19,9 @@ def get_backend_class(engine_name: str):
     elif engine_name == "claw-cli":
         from adapters.claw_cli import ClawCLIAdapter
         return ClawCLIAdapter
+    elif engine_name == "grok-cli":
+        from adapters.grok_cli import GrokCLIAdapter
+        return GrokCLIAdapter
     elif engine_name == "ollama-api":
         from adapters.ollama_api import OllamaAdapter
         return OllamaAdapter
