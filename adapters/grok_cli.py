@@ -11,6 +11,7 @@ from typing import Any
 from adapters.base import BaseBackend, BackendCapabilities, BackendResponse
 from adapters.stream_events import (
     KIND_ERROR,
+    KIND_FILE_READ,
     KIND_FILE_EDIT,
     KIND_PROGRESS,
     KIND_SHELL_EXEC,
@@ -49,6 +50,20 @@ class GrokCLIAdapter(BaseBackend):
             self.cmd_base = f"{self.cmd_base}.cmd"
         self.access_root = str(self.config.resolve_access_root())
         self._session_id: str | None = None
+
+    def _extra_bool(self, key: str, default: bool) -> bool:
+        extra = getattr(self.config, "extra", {}) or {}
+        value = extra.get(key, default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    def _extra_str(self, key: str, default: str = "") -> str:
+        extra = getattr(self.config, "extra", {}) or {}
+        value = extra.get(key, default)
+        return str(value or "").strip()
 
     async def initialize(self) -> bool:
         self.logger.info("Initializing Grok CLI backend...")
@@ -92,6 +107,7 @@ class GrokCLIAdapter(BaseBackend):
         self._active_read_tasks = []
 
     def _build_cmd(self, prompt: str) -> list[str]:
+        permission_mode = self._extra_str("grok_permission_mode", "bypassPermissions")
         cmd = [
             self.cmd_base,
             "--no-auto-update",
@@ -103,6 +119,25 @@ class GrokCLIAdapter(BaseBackend):
             "--output-format",
             "streaming-json",
         ]
+        if permission_mode:
+            cmd.extend(["--permission-mode", permission_mode])
+        if self._extra_bool("grok_always_approve", True):
+            cmd.append("--always-approve")
+        if self._extra_bool("grok_check", True):
+            cmd.append("--check")
+        sandbox = self._extra_str("grok_sandbox")
+        if sandbox:
+            cmd.extend(["--sandbox", sandbox])
+        for option_key, flag in (
+            ("grok_tools", "--tools"),
+            ("grok_disallowed_tools", "--disallowed-tools"),
+            ("grok_allow", "--allow"),
+            ("grok_deny", "--deny"),
+            ("grok_rules", "--rules"),
+        ):
+            option_value = self._extra_str(option_key)
+            if option_value:
+                cmd.extend([flag, option_value])
         if self._session_id:
             cmd.extend(["--resume", self._session_id])
         cmd.extend(["-p", prompt])
@@ -164,6 +199,97 @@ class GrokCLIAdapter(BaseBackend):
                 return value.strip()
         return None
 
+    def _extract_tool_name(self, event: dict[str, Any]) -> str:
+        for key in ("tool_name", "toolName", "name", "tool", "command", "cmd"):
+            value = event.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        data = event.get("data")
+        if isinstance(data, dict):
+            for key in ("tool_name", "toolName", "name", "tool", "command", "cmd"):
+                value = data.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return ""
+
+    def _event_preview(self, event: dict[str, Any], limit: int = 600) -> str:
+        try:
+            text = json.dumps(event, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            text = repr(event)
+        return text[:limit]
+
+    def _stream_event_from_grok_event(self, event: dict[str, Any]) -> StreamEvent | None:
+        etype = str(event.get("type") or event.get("event") or "").lower()
+        tool_name = self._extract_tool_name(event)
+        tool_key = tool_name.lower()
+        summary = self._extract_content_text(
+            event.get("summary")
+            or event.get("message")
+            or event.get("text")
+            or event.get("data")
+            or event.get("input")
+            or event.get("args")
+        )
+        detail = self._event_preview(event)
+        file_path = ""
+        for key in ("file_path", "filePath", "path", "filename"):
+            value = event.get(key)
+            if isinstance(value, str) and value.strip():
+                file_path = value.strip()
+                break
+
+        if "error" in etype and summary:
+            return StreamEvent(kind=KIND_ERROR, summary=summary[:300], detail=detail)
+        if etype == "thought" or "thinking" in etype or "reasoning" in etype:
+            return StreamEvent(kind=KIND_THINKING, summary=summary[:300] or "Grok thinking", detail=detail)
+
+        action_markers = ("tool", "shell", "exec", "command", "file", "edit", "write", "patch", "read", "glob", "grep")
+        is_action = any(marker in etype for marker in action_markers) or bool(tool_name)
+        if not is_action:
+            if summary:
+                return StreamEvent(kind=KIND_PROGRESS, summary=summary[:300], detail=detail)
+            return None
+
+        if any(marker in tool_key or marker in etype for marker in ("shell", "bash", "exec", "command")):
+            return StreamEvent(
+                kind=KIND_SHELL_EXEC,
+                summary=summary[:300] or f"Grok ran {tool_name or 'a command'}",
+                detail=detail,
+                tool_name=tool_name or "Shell",
+            )
+        if any(marker in tool_key or marker in etype for marker in ("write", "edit", "patch", "create", "multi_edit")):
+            return StreamEvent(
+                kind=KIND_FILE_EDIT,
+                summary=summary[:300] or f"Grok changed files with {tool_name or 'a file tool'}",
+                detail=detail,
+                tool_name=tool_name or "FileEdit",
+                file_path=file_path,
+            )
+        if any(marker in tool_key or marker in etype for marker in ("read", "glob", "grep", "search", "ls", "list")):
+            return StreamEvent(
+                kind=KIND_FILE_READ,
+                summary=summary[:300] or f"Grok inspected files with {tool_name or 'a read tool'}",
+                detail=detail,
+                tool_name=tool_name or "Read",
+                file_path=file_path,
+            )
+        if "end" in etype or "result" in etype or "done" in etype:
+            return StreamEvent(
+                kind=KIND_TOOL_END,
+                summary=summary[:300] or f"Grok tool finished: {tool_name or 'tool'}",
+                detail=detail,
+                tool_name=tool_name,
+                file_path=file_path,
+            )
+        return StreamEvent(
+            kind=KIND_TOOL_START,
+            summary=summary[:300] or f"Grok tool started: {tool_name or 'tool'}",
+            detail=detail,
+            tool_name=tool_name,
+            file_path=file_path,
+        )
+
     async def _emit(self, on_stream_event: StreamCallback, event: StreamEvent | None) -> None:
         if on_stream_event is not None and event is not None:
             await on_stream_event(event)
@@ -173,6 +299,7 @@ class GrokCLIAdapter(BaseBackend):
         raw_line: str,
         on_stream_event: StreamCallback,
         deltas: list[str],
+        action_events: list[StreamEvent] | None = None,
     ) -> str:
         try:
             event = json.loads(raw_line)
@@ -191,22 +318,12 @@ class GrokCLIAdapter(BaseBackend):
             await self._emit(on_stream_event, StreamEvent(kind=KIND_TEXT_DELTA, summary=delta))
             return ""
 
-        etype = str(event.get("type") or event.get("event") or "").lower()
-        summary = self._extract_content_text(event.get("summary") or event.get("message") or event.get("text") or event.get("data"))
-        if "error" in etype and summary:
-            await self._emit(on_stream_event, StreamEvent(kind=KIND_ERROR, summary=summary[:300]))
-        elif etype == "thought" or "thinking" in etype or "reasoning" in etype:
-            await self._emit(on_stream_event, StreamEvent(kind=KIND_THINKING, summary=summary[:300] or "Grok thinking"))
-        elif "tool" in etype and "end" in etype:
-            await self._emit(on_stream_event, StreamEvent(kind=KIND_TOOL_END, summary=summary[:300] or "Grok tool finished"))
-        elif "tool" in etype:
-            await self._emit(on_stream_event, StreamEvent(kind=KIND_TOOL_START, summary=summary[:300] or "Grok tool started"))
-        elif "file" in etype:
-            await self._emit(on_stream_event, StreamEvent(kind=KIND_FILE_EDIT, summary=summary[:300] or "Grok changed files"))
-        elif "shell" in etype or "command" in etype:
-            await self._emit(on_stream_event, StreamEvent(kind=KIND_SHELL_EXEC, summary=summary[:300] or "Grok ran a command"))
-        elif summary:
-            await self._emit(on_stream_event, StreamEvent(kind=KIND_PROGRESS, summary=summary[:300]))
+        stream_event = self._stream_event_from_grok_event(event)
+        if stream_event is not None:
+            if stream_event.kind in {KIND_TOOL_START, KIND_TOOL_END, KIND_FILE_READ, KIND_FILE_EDIT, KIND_SHELL_EXEC}:
+                if action_events is not None:
+                    action_events.append(stream_event)
+            await self._emit(on_stream_event, stream_event)
 
         return self._extract_final_text(event)
 
@@ -223,6 +340,7 @@ class GrokCLIAdapter(BaseBackend):
         stdout_lines: list[str] = []
         stderr_chunks: list[bytes] = []
         deltas: list[str] = []
+        action_events: list[StreamEvent] = []
         final_text = ""
         plain_lines: list[str] = []
 
@@ -251,7 +369,7 @@ class GrokCLIAdapter(BaseBackend):
                     self._touch_activity()
                     decoded = line.decode(errors="replace")
                     stdout_lines.append(decoded)
-                    parsed_final = await self._handle_stream_json_line(decoded, on_stream_event, deltas)
+                    parsed_final = await self._handle_stream_json_line(decoded, on_stream_event, deltas, action_events)
                     if parsed_final:
                         final_text = parsed_final
                     elif not decoded.lstrip().startswith("{"):
@@ -335,13 +453,19 @@ class GrokCLIAdapter(BaseBackend):
                     duration_ms=(time.time() - started) * 1000,
                     stream_metadata={
                         "grok_text_delta_count": len(deltas),
+                        "grok_action_event_count": len(action_events),
                         "grok_empty_answer_pattern": empty_pattern,
                     },
+                    tool_call_count=len(action_events),
                 )
             return BackendResponse(
                 text=response_text,
                 duration_ms=(time.time() - started) * 1000,
-                stream_metadata={"grok_text_delta_count": len(deltas)},
+                tool_call_count=len(action_events),
+                stream_metadata={
+                    "grok_text_delta_count": len(deltas),
+                    "grok_action_event_count": len(action_events),
+                },
             )
         except asyncio.TimeoutError:
             await self.force_kill_process_tree(self.current_proc, self.logger, reason="grok hard timeout")
