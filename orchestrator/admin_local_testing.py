@@ -83,7 +83,14 @@ def _split_command(command_line: str) -> tuple[str, list[str]]:
         parts = raw.split()
     if not parts:
         return "", []
-    return parts[0].lower(), parts[1:]
+    return parts[0].split("@", 1)[0].lower(), parts[1:]
+
+
+def _format_slash_command_line(command_name: str, args: list[str]) -> str:
+    line = f"/{command_name}"
+    if args:
+        line += " " + " ".join(shlex.quote(arg) for arg in args)
+    return line
 
 
 def supported_commands(runtime) -> list[str]:
@@ -121,12 +128,38 @@ async def try_execute_slash_command_text(
 ) -> dict[str, Any] | None:
     if not looks_like_slash_command(text):
         return None
-    command_name, _args = parse_slash_command_text(text)
+    command_name, args = parse_slash_command_text(text)
     if not is_supported_slash_command(runtime, command_name):
         return None
+
+    is_allowed = getattr(runtime, "_is_command_allowed", None)
+    if callable(is_allowed) and not is_allowed(command_name):
+        local_chat_id = chat_id or runtime.global_config.authorized_id
+        actor_id = getattr(runtime.global_config, "authorized_id", None)
+        session = SlashCommandAuditSession(
+            audit_path=_runtime_audit_path(runtime),
+            agent=_runtime_agent_name(runtime),
+            command_name=command_name,
+            args=args,
+            source_channel=source_channel,
+            handler_kind=resolve_handler_kind(runtime, command_name),
+            actor_id=actor_id,
+            chat_id=local_chat_id,
+        )
+        try:
+            session.block("command_disabled")
+            return {
+                "ok": False,
+                "command": command_name,
+                "args": args,
+                "error": f"/{command_name} is disabled for this agent.",
+            }
+        finally:
+            session.finish()
+
     return await execute_local_command(
         runtime,
-        text.strip(),
+        _format_slash_command_line(command_name, args),
         chat_id=chat_id,
         source_channel=source_channel,
     )
