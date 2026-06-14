@@ -284,14 +284,59 @@ class GrokCLIAdapter(BaseBackend):
             if not response_text:
                 response_text = self._extract_last_text_from_stdout(stdout_lines)
             if not response_text:
-                diagnostic = self._summarize_empty_response(stdout_lines, stderr)
+                empty_pattern = self._classify_empty_stdout(stdout_lines)
+                if (
+                    not is_retry
+                    and proc.returncode == 0
+                    and empty_pattern == "thought_end_no_text"
+                ):
+                    self.logger.warning(
+                        "Retrying Grok request %s once after thought/end with no answer text.",
+                        request_id,
+                    )
+                    self._session_id = None
+                    retry_response = await self.generate_response(
+                        self._build_empty_answer_retry_prompt(prompt),
+                        request_id,
+                        is_retry=True,
+                        silent=silent,
+                        on_stream_event=on_stream_event,
+                    )
+                    retry_metadata = dict(retry_response.stream_metadata or {})
+                    retry_metadata["grok_empty_answer_retry_attempted"] = True
+                    retry_metadata["grok_empty_answer_retry_succeeded"] = retry_response.is_success
+                    retry_metadata["grok_empty_answer_pattern"] = empty_pattern
+                    retry_response.stream_metadata = retry_metadata
+                    if retry_response.is_success and retry_response.text:
+                        return retry_response
+                    diagnostic = self._summarize_empty_response(stdout_lines, stderr, empty_pattern)
+                    retry_error = retry_response.error or "retry returned no answer text"
+                    self.logger.warning(
+                        "Grok request %s empty-answer retry failed: %s",
+                        request_id,
+                        retry_error,
+                    )
+                    return BackendResponse(
+                        text="",
+                        error=(
+                            f"Grok CLI returned no answer text after one retry. "
+                            f"{diagnostic}; retry_error={retry_error}"
+                        ),
+                        is_success=False,
+                        duration_ms=(time.time() - started) * 1000,
+                        stream_metadata=retry_metadata,
+                    )
+                diagnostic = self._summarize_empty_response(stdout_lines, stderr, empty_pattern)
                 self.logger.warning("Grok request %s returned no answer text: %s", request_id, diagnostic)
                 return BackendResponse(
                     text="",
                     error=f"Grok CLI returned no answer text. {diagnostic}",
                     is_success=False,
                     duration_ms=(time.time() - started) * 1000,
-                    stream_metadata={"grok_text_delta_count": len(deltas)},
+                    stream_metadata={
+                        "grok_text_delta_count": len(deltas),
+                        "grok_empty_answer_pattern": empty_pattern,
+                    },
                 )
             return BackendResponse(
                 text=response_text,
@@ -330,8 +375,66 @@ class GrokCLIAdapter(BaseBackend):
                     return text
         return ""
 
-    def _summarize_empty_response(self, stdout_lines: list[str], stderr: str) -> str:
+    @staticmethod
+    def _build_empty_answer_retry_prompt(original_prompt: str) -> str:
+        return (
+            "Your previous Grok CLI response ended without any answer text. "
+            "Reply with only the final answer to the following request:\n\n"
+            f"{original_prompt}"
+        )
+
+    def _classify_empty_stdout(self, stdout_lines: list[str]) -> str:
+        saw_thought = False
+        saw_end = False
+        saw_text = False
+        saw_side_effect_event = False
+        for line in stdout_lines:
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            etype = str(event.get("type") or event.get("event") or "").lower()
+            if self._extract_delta_text(event) or self._extract_final_text(event):
+                saw_text = True
+            if etype == "thought" or "thinking" in etype or "reasoning" in etype:
+                saw_thought = True
+            if etype == "end" or "complete" in etype or "completed" in etype:
+                saw_end = True
+            if any(
+                marker in etype
+                for marker in (
+                    "tool",
+                    "shell",
+                    "exec",
+                    "command",
+                    "file",
+                    "edit",
+                    "write",
+                    "patch",
+                )
+            ):
+                saw_side_effect_event = True
+        if saw_text:
+            return "no_text_extracted"
+        if saw_side_effect_event:
+            return "side_effect_events_no_text"
+        if saw_thought and saw_end:
+            return "thought_end_no_text"
+        if saw_end:
+            return "end_no_text"
+        return "no_answer_events"
+
+    def _summarize_empty_response(
+        self,
+        stdout_lines: list[str],
+        stderr: str,
+        empty_pattern: str | None = None,
+    ) -> str:
         event_types: list[str] = []
+        stop_reason = None
+        session_id = None
         for line in stdout_lines[-8:]:
             try:
                 event = json.loads(line)
@@ -343,10 +446,18 @@ class GrokCLIAdapter(BaseBackend):
                 continue
             etype = event.get("type") or event.get("event") or event.get("sessionUpdate") or "unknown"
             event_types.append(str(etype))
+            if str(event.get("type") or "").lower() == "end":
+                stop_reason = event.get("stopReason") or event.get("stop_reason") or stop_reason
+            session_id = self._extract_session_id(event) or session_id
         parts = [
             f"stdout_lines={len(stdout_lines)}",
             f"recent_events={event_types or ['none']}",
+            f"empty_answer_pattern={empty_pattern or self._classify_empty_stdout(stdout_lines)}",
         ]
+        if stop_reason:
+            parts.append(f"stop_reason={stop_reason}")
+        if session_id:
+            parts.append(f"session_id={session_id}")
         if stderr:
             parts.append(f"stderr={self._preview_text(stderr, 300)}")
         return "; ".join(parts)
