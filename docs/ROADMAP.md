@@ -11,6 +11,11 @@ HASHI v4 alpha is focused on two foundations:
 - **Claw mode foundation** — `claw-cli` is integrated as a scoped backend with
   provider routing, packaged runtime discovery, checksum-checked manifest
   metadata, and live repo-root read/write/edit validation.
+- **Grok CLI backend support** — `grok-cli` is integrated into the flex backend
+  ecosystem with local CLI authentication, `streaming-json` parsing, guarded
+  empty-answer retry, and live controlled-probe validation. Empty-answer retry
+  recovery is unit-covered; the post-reboot live probe did not naturally trigger
+  that path.
 - **Superloop operational foundation** — long-running controller loops now have
   an explicit function contract for taskboards, waits, HChat replies, evidence,
   issue handling, and closeout barriers.

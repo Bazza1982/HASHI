@@ -1,12 +1,63 @@
-# HASHI Grok Backend Plan
+# HASHI Grok CLI Backend Support
 
-**Status:** research and implementation plan.
+**Status:** implemented and enabled as part of the HASHI support ecosystem.
 
 **Date:** 2026-06-14.
 
-**Goal:** add xAI Grok Build as a first-class HASHI backend, using the official authenticated CLI path with true final-output streaming where the CLI provides text deltas.
+**Goal:** operate xAI Grok Build as a first-class HASHI CLI backend, using the official authenticated `grok` CLI path with structured streaming output, backend switching, preflight detection, and guarded empty-answer handling.
 
-**Non-goal:** install Grok Build, authenticate to xAI, or change live agent routing before a human approves a smoke test.
+**Non-goal:** install Grok Build, authenticate to xAI, or require `XAI_API_KEY` for normal HASHI use. The operator authenticates the CLI out-of-band, like Codex and Claude.
+
+---
+
+## 0. Current Implementation Summary
+
+Grok CLI is now part of HASHI's supported backend ecosystem:
+
+- Engine ID: `grok-cli`.
+- Adapter: `adapters/grok_cli.py`.
+- Default model: `grok-composer-2.5-fast`.
+- Additional model: `grok-build`.
+- Config command: `global.grok_cmd`, defaulting to `grok`.
+- Backend picker: registered in `orchestrator/flexible_backend_registry.py`.
+- Adapter registry: registered in `adapters/registry.py`.
+- Preflight: included in `orchestrator/backend_preflight.py`.
+- Answer streaming: supported via `--output-format streaming-json` text events.
+- Empty-answer hardening:
+  - classifies pure `thought` + `end` + no text as `thought_end_no_text`;
+  - clears the Grok session and retries once only for side-effect-free empty answers;
+  - refuses retry when side-effect events are present, reporting `side_effect_events_no_text`.
+
+### Validation Snapshot
+
+Completed on 2026-06-14:
+
+- Unit and integration-focused checks:
+
+  ```text
+  pytest -q tests/test_grok_cli_adapter.py \
+    tests/test_answer_stream_capabilities.py \
+    tests/test_model_catalog.py
+  ```
+
+- `tests/test_grok_cli_adapter.py`: 8 targeted Grok adapter tests passed after the empty-answer hardening.
+- Nana live controlled probe after reboot:
+  - Prompt A: `Reply exactly: OK` passed.
+  - Prompt B: normal summary passed.
+  - Prompt C: retry-risk/safety prompt passed.
+  - Prompt D: safety refusal prompt passed.
+- The real empty-answer retry path is covered by unit tests; the post-reboot live probe did not trigger an empty-answer retry, so that remains a residual live-observability note rather than a blocker.
+
+### Operational Status
+
+Grok CLI can now be selected for flex agents that include `grok-cli` in `allowed_backends`:
+
+```text
+/backend grok-cli
+/model grok-composer-2.5-fast
+```
+
+Use Grok for controlled human or reviewed agent work first. Because Grok Build is still young and can expose tool/file/shell events, agents using it should keep conservative workspace access scopes until a project-specific smoke test is complete.
 
 ---
 
@@ -73,9 +124,9 @@ Sources:
 
 ---
 
-## 2. Recommended Architecture
+## 2. Implemented Architecture
 
-HASHI should support Grok as a CLI-authenticated backend only:
+HASHI supports Grok as a CLI-authenticated backend only:
 
 - Engine name: `grok-cli`.
 - Uses the official `grok` command in headless mode.
@@ -85,9 +136,9 @@ HASHI should support Grok as a CLI-authenticated backend only:
 
 ---
 
-## 3. Backend Capability Target
+## 3. Backend Capability
 
-Initial `grok-cli` capability should be:
+Current `grok-cli` capability is:
 
 ```python
 BackendCapabilities(
@@ -100,7 +151,7 @@ BackendCapabilities(
 capabilities.supports_answer_stream = True
 ```
 
-The `supports_answer_stream=True` claim must be gated by a live fixture or smoke proving that `streaming-json` contains assistant text deltas. Until the event shape is captured, implement the parser behind tests and keep the docs honest.
+The `supports_answer_stream=True` claim is backed by the parser tests and live controlled probe. If a future Grok CLI release changes event shape, HASHI should fail with explicit diagnostics rather than silently returning empty success.
 
 If `streaming-json` proves unreliable, the only planned fallback is still CLI-based:
 
@@ -108,15 +159,15 @@ If `streaming-json` proves unreliable, the only planned fallback is still CLI-ba
 
 ---
 
-## 4. Files To Change
+## 4. Implementation Files
 
 Core backend registration:
 
 - `adapters/registry.py`
-  - Add `grok-cli -> GrokCLIAdapter`.
+  - Maps `grok-cli -> GrokCLIAdapter`.
 - `orchestrator/flexible_backend_registry.py`
-  - Add `grok-cli` to `CLI_ENGINES`.
-  - Add registry entry:
+  - Includes `grok-cli` in `CLI_ENGINES`.
+  - Includes registry entry:
 
     ```python
     "grok-cli": {
@@ -130,20 +181,20 @@ Core backend registration:
     ```
 
 - `orchestrator/config.py`
-  - Add `grok_cmd: str = "grok"` to `GlobalConfig`.
-  - Load `global.grok_cmd` from `agents.json`.
+  - Includes `grok_cmd: str = "grok"` in `GlobalConfig`.
+  - Loads `global.grok_cmd` from `agents.json`.
 - `orchestrator/backend_preflight.py`
-  - Include `grok-cli` command availability checks.
+  - Includes `grok-cli` command availability checks.
 - `orchestrator/model_catalog.py`
   - Optional later: expose Grok models through the OpenAI-compatible local API gateway if CLI-backed gateway routing is desired.
 - `agents.json`
-  - Add `grok-cli` to selected agents' `allowed_backends` only after smoke testing.
+  - Selected agents can include `grok-cli` in `allowed_backends` after smoke testing.
 
 New adapter:
 
 - `adapters/grok_cli.py`
-  - Follow the CLI subprocess shape of `claude_cli.py` / `gemini_cli.py`.
-  - Prefer command:
+  - Follows the CLI subprocess shape of `claude_cli.py` / `gemini_cli.py`.
+  - Uses command shape:
 
     ```bash
     grok --no-auto-update --no-alt-screen \
@@ -153,14 +204,14 @@ New adapter:
       -p <prompt>
     ```
 
-  - Use stdin transport for long or multiline prompts if the CLI supports it; otherwise keep prompt arg within safe limits.
-  - Parse newline JSON events.
-  - Emit:
+  - Parses newline JSON events.
+  - Emits:
     - `KIND_TEXT_DELTA` for assistant chunks.
     - `KIND_THINKING` for reasoning/thought events if exposed.
     - `KIND_TOOL_START`, `KIND_TOOL_END`, `KIND_FILE_EDIT`, `KIND_SHELL_EXEC`, and `KIND_PROGRESS` where event fields support it.
-  - Accumulate final visible text into `BackendResponse.text`.
-  - Capture usage/cost if exposed.
+  - Accumulates final visible text into `BackendResponse.text`.
+  - Captures stream metadata for diagnostics.
+  - Does not treat zero-exit empty text as success.
 
 Tests:
 
@@ -169,7 +220,9 @@ Tests:
   - parses `streaming-json` assistant text chunks into `KIND_TEXT_DELTA`.
   - reconstructs final response text.
   - handles stderr and nonzero exit.
-  - supports no-delta fallback if CLI only emits final JSON.
+  - treats zero-exit empty answer as failure.
+  - retries once for `thought_end_no_text`.
+  - skips retry for `side_effect_events_no_text`.
 - `tests/test_answer_stream_capabilities.py`
   - assert `grok-cli` advertises `supports_answer_stream` only when parser path is enabled.
 - registry/model tests:
@@ -185,9 +238,9 @@ Docs:
 
 ---
 
-## 5. Implementation Phases
+## 5. Implementation Phases And Current State
 
-### Phase 0: Capture Real Event Shape
+### Phase 0: Capture Real Event Shape ✅
 
 Do this before writing production parser logic.
 
@@ -209,7 +262,7 @@ Acceptance:
 - We know whether assistant deltas are emitted before final completion.
 - We know the nonzero auth/error format.
 
-### Phase 1: Minimal `grok-cli` Adapter
+### Phase 1: Minimal `grok-cli` Adapter ✅
 
 Tasks:
 
@@ -225,7 +278,7 @@ Acceptance:
 - Unit tests pass from sanitized fixtures.
 - `supports_answer_stream=True` only if the fixture proves real answer chunks.
 
-### Phase 2: HASHI Runtime Integration
+### Phase 2: HASHI Runtime Integration ✅
 
 Tasks:
 
@@ -239,7 +292,7 @@ Acceptance:
 - `temp` or a dedicated test agent can switch to `grok-cli`.
 - Telegram final answer visibly streams when Grok emits text chunks.
 
-### Phase 3: Live Smoke
+### Phase 3: Live Smoke ✅
 
 Preconditions:
 
@@ -268,7 +321,7 @@ Acceptance:
 
 ### Phase 4: Optional ACP Transport
 
-Implement only if headless `streaming-json` is not stable enough.
+Deferred. Implement only if headless `streaming-json` becomes unstable enough to justify a second transport.
 
 Tasks:
 
@@ -296,30 +349,44 @@ Acceptance:
 
 ---
 
-## 7. Open Questions
+## 7. Residual Risks And Open Questions
 
-1. What is the exact `streaming-json` schema for:
-   - assistant text chunks
-   - final message
-   - tool calls
-   - file edits
-   - errors
-   - usage/cost
-2. Does `grok -p` support prompt via stdin for long prompts?
-3. Does `--always-approve` bypass all tool confirmations, and should HASHI ever use it by default?
-4. Does Grok Build maintain per-directory session state that should map to HASHI `/new`, `/clear`, `/retry`, and handoff semantics?
-5. Does xAI account access differ between browser login and headless WSL sessions?
+1. Live retry recovery remains unproven because the post-reboot live probe did not naturally trigger an empty-answer retry.
+2. Grok CLI event schema may change while Grok Build is early beta. Keep parser tests current when upgrading the CLI.
+3. Does `grok -p` support prompt via stdin for long prompts?
+4. Does `--always-approve` bypass all tool confirmations, and should HASHI ever use it by default? Current HASHI usage should stay conservative.
+5. Does Grok Build maintain per-directory session state that should map to HASHI `/new`, `/clear`, `/retry`, and handoff semantics?
+6. Does xAI account access differ between browser login and headless WSL sessions?
 
 ---
 
-## 8. Recommended First Patch
+## 8. Push Readiness Notes
 
-First patch should be a no-live-risk scaffold:
+The Grok support line is ready to push with the related hardening and audit commits:
 
-1. Add `grok_cmd` config.
-2. Add `grok-cli` registry entry and preflight detection.
-3. Add `GrokCLIAdapter` with fixture-driven parser tests.
-4. Add docs.
-5. Do not add `grok-cli` to active production agents yet.
+- `0b53b2a Add basic Grok CLI backend`
+- `c76bf1b Align Grok CLI default model`
+- `1cb6980 Update Grok CLI streaming schema`
+- `2736b9f Handle empty Grok CLI answers`
+- `6b1aaf4 Harden Grok empty answer retry`
 
-Second patch should run live smoke and then add `grok-cli` to selected agents' `allowed_backends`.
+Related support-ecosystem hardening now also includes structured slash-command audit logging:
+
+- `01da7cc Add structured slash command audit logging`
+- `e359849 Complete slash command audit Phase 2 residual paths`
+- `437f7e3 Fix slash dispatch policy bypass and bot suffix parsing`
+
+Before pushing, run:
+
+```bash
+python3 -m py_compile adapters/grok_cli.py tests/test_grok_cli_adapter.py \
+  orchestrator/slash_command_audit.py orchestrator/admin_local_testing.py \
+  orchestrator/flexible_agent_runtime.py orchestrator/runtime_command_binding.py \
+  orchestrator/workbench_api.py transports/whatsapp.py tests/test_slash_command_audit.py
+
+pytest -q tests/test_grok_cli_adapter.py tests/test_answer_stream_capabilities.py \
+  tests/test_model_catalog.py tests/test_slash_command_audit.py \
+  tests/test_command_registry.py tests/test_runtime_command_binding.py \
+  tests/test_queue_command.py tests/test_api_restart_commands.py \
+  tests/test_wrapper_commands.py
+```
