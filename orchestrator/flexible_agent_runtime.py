@@ -50,6 +50,7 @@ from orchestrator import runtime_workzone
 from orchestrator.slash_command_audit import (
     SlashCommandAuditSession,
     default_audit_path,
+    parse_inline_callback_command,
     resolve_handler_kind,
 )
 from orchestrator.runtime_common import (
@@ -387,10 +388,40 @@ class FlexibleAgentRuntime:
         # denylist
         return True
 
+    def _wrap_callback(self, handler_kind: str, handler):
+        async def _wrapped(update: Update, context: Any):
+            query = update.callback_query
+            callback_data = getattr(query, "data", None) or ""
+            command_name, args = parse_inline_callback_command(callback_data)
+            actor_id = getattr(getattr(query, "from_user", None), "id", None)
+            chat_id = getattr(getattr(getattr(query, "message", None), "chat", None), "id", None)
+            session = SlashCommandAuditSession(
+                audit_path=default_audit_path(self.workspace_dir),
+                agent=self.name,
+                command_name=command_name,
+                args=args,
+                source_channel="telegram_callback",
+                handler_kind=handler_kind,
+                actor_id=actor_id,
+                chat_id=chat_id,
+            )
+            try:
+                if not self._is_authorized_user(actor_id):
+                    session.deny("unauthorized")
+                    if query is not None:
+                        await query.answer()
+                    return
+                await handler(update, context)
+            except Exception as exc:
+                session.fail(exc)
+                raise
+            finally:
+                session.finish()
+
+        return _wrapped
+
     def _wrap_cmd(self, cmd: str, handler):
         async def _wrapped(update: Update, context: Any):
-            # Residual gap: /api/chat slash-looking text and inline callback actions
-            # (e.g. tgl:reboot) are not audited here.
             args = list(getattr(context, "args", None) or [])
             actor_id = getattr(getattr(update, "effective_user", None), "id", None)
             chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
