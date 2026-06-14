@@ -1,6 +1,6 @@
 # HASHI
 
-> **Status (v4.0.0-alpha.1):** HASHI 4 alpha introduces the Claw mode foundation and Superloop operational foundation on top of the v3.2.1 hotfix line. Claw mode adds a scoped `claw-cli` backend, provider routing, packaged runtime discovery, and live repo-root read/write/edit validation. Superloop alpha documents the runnable controller contract for taskboards, waits, HChat replies, evidence, and closeout barriers.
+> **Status (v4.0.0-alpha.1):** HASHI 4 alpha introduces the Claw mode foundation and Superloop operational foundation on top of the v3.2.1 hotfix line. Claw mode adds a scoped `claw-cli` backend, provider routing, packaged runtime discovery, and live repo-root read/write/edit validation. Grok CLI is now available as a CLI-authenticated flex backend with streaming JSON parsing, guarded empty-answer retry, and support-ecosystem audit coverage. Superloop alpha documents the runnable controller contract for taskboards, waits, HChat replies, evidence, and closeout barriers.
 >
 > **Changelog:** see [`CHANGELOG.md`](CHANGELOG.md) · **Roadmap:** see [`docs/ROADMAP.md`](docs/ROADMAP.md) · **Nagare Docs:** see [`docs/NAGARE_FLOW_SYSTEM.md`](docs/NAGARE_FLOW_SYSTEM.md).
 
@@ -630,6 +630,7 @@ HASHI's **adapter system** provides a unified interface to multiple AI backends:
 | Gemini CLI | `gemini-cli` | `gemini` CLI installed | Local auth |
 | Claude Code | `claude-cli` | `claude` CLI installed | Local auth |
 | Codex CLI | `codex-cli` | `codex` CLI installed | Local auth |
+| Grok CLI | `grok-cli` | `grok` CLI installed and logged in | Local auth, streaming JSON |
 | OpenRouter API | `openrouter-api` | API key in `secrets.json` | Multi-model access |
 | DeepSeek API | `deepseek-api` | API key in `secrets.json` | Direct API, cost-effective |
 | Ollama | `ollama-api` | Ollama installed locally | Free, no API key needed |
@@ -642,11 +643,12 @@ API backends (OpenRouter, DeepSeek) are protected by an automatic cost-control p
 
 This prevents runaway API costs from automated workflows.
 
-#### CLI Backends (Gemini, Claude, Codex)
+#### CLI Backends (Gemini, Claude, Codex, Grok)
 - Spawn subprocess and communicate via stdin/stdout
 - No OAuth tokens stored — uses local CLI authentication
 - Full tool support
 - Conversation memory managed by CLI
+- Grok CLI uses `--output-format streaming-json`; HASHI treats zero-exit empty answers as failures, retries once only for side-effect-free `thought`/`end` empty output, and refuses retry after side-effect events.
 
 #### API Backends (OpenRouter, DeepSeek)
 - HTTP API with streaming support
