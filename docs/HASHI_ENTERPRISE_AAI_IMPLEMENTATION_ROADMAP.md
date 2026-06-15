@@ -769,12 +769,13 @@ Implemented checkpoints:
   - `deploy/docker-compose.enterprise.yml`;
   - `deploy/enterprise.env.example`;
   - `docs/HASHI_ENTERPRISE_DEPLOYMENT.md`.
+- `hashi.py enterprise migrate` initializes or refreshes the enterprise SQLite schema idempotently and reports before/after schema versions.
 
 Residual P9 limitations:
 
 - Docker Compose skeleton is present but has not yet been build/run verified in CI.
 - Backup policy and scheduled backups are not yet implemented.
-- Migration runner CLI is not yet wired.
+- Migration runner is a schema initializer, not yet a multi-file versioned migration framework.
 
 **Scope:**
 
@@ -798,7 +799,7 @@ Residual P9 limitations:
 
 - `ENT-110` Add enterprise Docker Compose skeleton. Done as first-pass compose template.
 - `ENT-111` Add enterprise volume layout. Done for state, workspaces, logs, and backups named volumes.
-- `ENT-112` Add migration runner command.
+- `ENT-112` Add migration runner command. Done for idempotent schema initialization and schema version reporting.
 - `ENT-113` Add backup/restore command. Done for backup, restore, and manifest inspection CLI.
 - `ENT-114` Add enterprise health checks.
 - `ENT-115` Add upgrade and rollback documentation.
