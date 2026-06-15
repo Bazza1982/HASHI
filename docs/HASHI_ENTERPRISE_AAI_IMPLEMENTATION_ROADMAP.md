@@ -345,12 +345,18 @@ Implemented checkpoints:
   - allowed registry decisions can still be denied by `channel.access` policy;
   - `approval_required` channel decisions block access until the approval queue exists;
 - backend switching is now gated by `backend.switch` policy before the backend manager changes active backend;
+- HASHI-controlled API tool execution is now gated before `tool_registry.execute(...)`:
+  - `bash` maps to `shell.execute`;
+  - `file_write` maps to `file.write`;
+  - `file_read` maps to `file.read`;
+  - other tool calls map to `tool.execute`;
+  - blocked tool calls return explicit tool-result errors instead of executing;
 - targeted tests for default allow, explicit deny, approval-required, helper loading, personal profile behavior, and runtime command enforcement.
 
 Residual P3 limitations:
 
 - command deny currently maps to the existing `command_disabled` path until P4 ledger events distinguish `policy_denied`;
-- file read/write, shell, browser, and tool execution gates are not yet wired to the evaluator;
+- browser automation and CLI-backend internal shell/file actions are not yet hard-gated by the evaluator;
 - approval-required decisions block execution but do not yet create approval queue records.
 
 **Scope:**
@@ -376,7 +382,7 @@ Residual P3 limitations:
 - `ENT-052` Wire channel checks to evaluator. Done as a policy overlay after channel registry authorization.
 - `ENT-053` Wire slash command checks to evaluator. Done for runtime command allow checks.
 - `ENT-054` Wire backend switch checks to evaluator. Done for `_switch_backend_mode(...)`.
-- `ENT-055` Wire file read/write and shell checks to evaluator.
+- `ENT-055` Wire file read/write and shell checks to evaluator. Done for HASHI-controlled API tool registry execution.
 - `ENT-056` Add approval-required stub. Done at decision level; queue record pending.
 - `ENT-057` Add policy deny audit events.
 
