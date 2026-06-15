@@ -587,12 +587,15 @@ Implemented checkpoints:
 - denied file-tool actions fail closed, write normal tool audit records, and do not register artifacts.
 - `ToolRegistry.execute()` applies an enterprise shell gate before `bash` dispatch when org/project context is present;
 - governed shell execution defaults closed and requires explicit `enterprise_shell_enabled` or `bash.enterprise_enabled`.
+- `ToolRegistry.execute()` applies an enterprise network egress gate before `http_request`, `web_fetch`, and `web_search`;
+- governed network egress defaults closed and supports exact hosts, `*.example.com` suffix patterns, or `*` via `enterprise_network_allow_hosts` / `network.allow_hosts`.
 
 Residual P6 limitations:
 
 - workspace boundary is wired into HASHI-controlled file tools;
 - shell execution has an explicit governed enable gate; command allow/deny pattern policy still uses the existing bash `blocked_patterns`;
-- network/browser enforcement are still pending;
+- network egress has a host allowlist stub for HASHI-controlled network tools;
+- browser enforcement is still pending;
 - the verification hook is service-level and is not yet wired into every runtime completion path;
 - CLI backend internal writes still need tool-event mapping or post-run artifact discovery.
 
@@ -610,7 +613,7 @@ Residual P6 limitations:
 - `ENT-081` Add path traversal block tests. Done for relative, absolute, and symlink escapes.
 - `ENT-082a` Wire workspace boundary into HASHI-controlled file tools. Done for `file_read`, `file_write`, `file_list`, and `apply_patch`.
 - `ENT-082` Add shell command policy checks. Done for default-deny governed shell gate; command pattern policies remain configured through existing `bash.blocked_patterns`.
-- `ENT-083` Add network egress allowlist stub.
+- `ENT-083` Add network egress allowlist stub. Done for `http_request`, `web_fetch`, and `web_search`.
 - `ENT-084` Add browser automation policy flag.
 - `ENT-085` Add completion verification hook. Done at service layer for promised artifact checks.
 

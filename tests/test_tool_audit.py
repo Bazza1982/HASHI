@@ -256,3 +256,74 @@ async def test_tool_registry_enterprise_shell_gate_can_be_explicitly_enabled(tmp
 
     assert result.is_error is False
     assert result.output == "governed-ok"
+
+
+@pytest.mark.asyncio
+async def test_tool_registry_enterprise_network_gate_defaults_closed(tmp_path):
+    registry = ToolRegistry(
+        allowed_tools=["http_request"],
+        access_root=tmp_path,
+        workspace_dir=tmp_path,
+        secrets={},
+        audit_context={
+            "agent_name": "nana",
+            "workspace_dir": str(tmp_path),
+            "org_id": "ORG-001",
+            "project_id": "prj-research",
+        },
+    )
+
+    result = await registry.execute("http_request", {"url": "https://example.com/api"}, tool_call_id="call-http-deny")
+
+    assert result.is_error is True
+    assert result.output == "Error: enterprise network egress denied: host_not_allowed; host='example.com'"
+    record = json.loads((tmp_path / "tool_action_audit.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["tool_name"] == "http_request"
+    assert record["status"] == "failed"
+    assert "host_not_allowed" in record["output_snippet"]
+
+
+@pytest.mark.asyncio
+async def test_tool_registry_enterprise_network_gate_allows_configured_host(tmp_path):
+    registry = ToolRegistry(
+        allowed_tools=["http_request"],
+        access_root=tmp_path,
+        workspace_dir=tmp_path,
+        secrets={},
+        audit_context={
+            "agent_name": "nana",
+            "workspace_dir": str(tmp_path),
+            "org_id": "ORG-001",
+            "project_id": "prj-research",
+            "enterprise_network_allow_hosts": ["example.com"],
+        },
+    )
+
+    assert registry._check_enterprise_network_gate(
+        "http_request",
+        {"url": "https://example.com/api"},
+        tool_call_id="call-http-allow",
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_tool_registry_enterprise_network_gate_supports_wildcards(tmp_path):
+    registry = ToolRegistry(
+        allowed_tools=["web_fetch"],
+        access_root=tmp_path,
+        workspace_dir=tmp_path,
+        secrets={},
+        audit_context={
+            "agent_name": "nana",
+            "workspace_dir": str(tmp_path),
+            "org_id": "ORG-001",
+            "project_id": "prj-research",
+            "enterprise_network_allow_hosts": ["*.example.com"],
+        },
+    )
+
+    assert registry._check_enterprise_network_gate(
+        "web_fetch",
+        {"url": "https://docs.example.com/page"},
+        tool_call_id="call-fetch-allow",
+    ) is None
