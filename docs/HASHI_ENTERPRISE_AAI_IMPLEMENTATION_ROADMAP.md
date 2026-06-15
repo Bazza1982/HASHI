@@ -762,12 +762,14 @@ Implemented checkpoints:
 - Enterprise backup/restore service primitive can create `.tar.gz` archives with a JSON manifest.
 - Required backup items fail fast when missing; optional missing items are recorded in the manifest.
 - Restore is safe-by-default: archive paths are validated, overwrite is blocked unless explicit, and unsupported member types are rejected.
+- `hashi.py enterprise backup|restore|inspect-backup` wraps the backup service for operator use.
+- CLI backup defaults include `state/enterprise.sqlite`, `state/enterprise_audit.jsonl`, `agents.json`, and `agent_capabilities.json`; workspaces are opt-in to avoid unexpectedly large archives.
 
 Residual P9 limitations:
 
-- CLI commands are not yet wired.
 - Docker Compose / image packaging is not yet implemented.
 - Backup policy and scheduled backups are not yet implemented.
+- Migration runner CLI is not yet wired.
 
 **Scope:**
 
@@ -792,7 +794,7 @@ Residual P9 limitations:
 - `ENT-110` Add enterprise Docker Compose skeleton.
 - `ENT-111` Add enterprise volume layout.
 - `ENT-112` Add migration runner command.
-- `ENT-113` Add backup/restore command. Service primitive is done; CLI wrapper remains pending.
+- `ENT-113` Add backup/restore command. Done for backup, restore, and manifest inspection CLI.
 - `ENT-114` Add enterprise health checks.
 - `ENT-115` Add upgrade and rollback documentation.
 
