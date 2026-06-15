@@ -164,6 +164,58 @@ def test_evaluate_governance_policy_creates_approval_request(tmp_path):
     assert ledger_events[0].context["approval_request_id"] == result.approval_request_id
 
 
+def test_policy_evaluator_decides_approval_request_and_writes_ledger(tmp_path):
+    _init_org(tmp_path)
+    evaluator = PolicyEvaluator.from_path(tmp_path / "state" / "enterprise.sqlite", org_id="ORG-001")
+    request = evaluator.create_approval_request(
+        action="file.write",
+        resource="file:report.md",
+        context={"actor_id": "usr-1", "project_id": "prj-finance", "task_id": "task-1"},
+        rule_id="rule-1",
+        reason="high-risk file write",
+        request_id="appr-test",
+    )
+
+    decided = evaluator.decide_approval_request(
+        request.id,
+        status="approve",
+        decided_by="admin-1",
+        reason="approved for finance report",
+    )
+
+    assert decided.status == "approved"
+    assert decided.decided_by == "admin-1"
+    assert decided.decided_at is not None
+    assert decided.decision_reason == "approved for finance report"
+    assert evaluator.list_approval_requests(status="pending") == []
+    assert evaluator.list_approval_requests(status="approved") == [decided]
+
+    ledger = EnterpriseAuditLedger.from_path(tmp_path / "state" / "enterprise.sqlite", org_id="ORG-001")
+    events = ledger.query(event_type="policy")
+    assert len(events) == 1
+    assert events[0].action == "approval.decide"
+    assert events[0].status == "approved"
+    assert events[0].actor_id == "admin-1"
+    assert events[0].project_id == "prj-finance"
+    assert events[0].task_id == "task-1"
+    assert events[0].request_id == "appr-test"
+    assert events[0].context["original_action"] == "file.write"
+
+
+def test_policy_evaluator_rejects_double_decision(tmp_path):
+    _init_org(tmp_path)
+    evaluator = PolicyEvaluator.from_path(tmp_path / "state" / "enterprise.sqlite", org_id="ORG-001")
+    request = evaluator.create_approval_request(
+        action="backend.switch",
+        resource="backend:grok-cli",
+        request_id="appr-double",
+    )
+    evaluator.decide_approval_request(request.id, status="deny", decided_by="admin-1")
+
+    with pytest.raises(ValueError, match="already decided"):
+        evaluator.decide_approval_request(request.id, status="approve", decided_by="admin-2")
+
+
 def test_personal_profile_policy_stays_allow_by_default(tmp_path):
     result = evaluate_governance_policy(
         "command.execute",
