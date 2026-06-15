@@ -55,6 +55,7 @@ from orchestrator.slash_command_audit import (
 )
 from orchestrator.enterprise.audit_schema import AuditEventWriter
 from orchestrator.enterprise.channel_gate import EnterpriseChannelGate
+from orchestrator.enterprise.policy import evaluate_governance_policy
 from orchestrator.runtime_common import (
     QueuedRequest,
     _print_final_response,
@@ -382,6 +383,19 @@ class FlexibleAgentRuntime:
         cmd = (cmd or "").lstrip("/").lower()
         if not cmd:
             return True
+        global_config = getattr(self, "global_config", None)
+        if global_config is not None:
+            evaluation = evaluate_governance_policy(
+                "command.execute",
+                {
+                    "global_config": global_config,
+                    "agent_id": getattr(self, "name", None),
+                    "command_name": cmd,
+                    "resource": f"command:{cmd}",
+                },
+            )
+            if not evaluation.allowed:
+                return False
         if cmd in self._disabled_commands:
             return False
         if self._command_policy_mode == "allow_all":

@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class EnterpriseStore:
@@ -119,6 +119,20 @@ class EnterpriseStore:
                     created_at TEXT NOT NULL,
                     PRIMARY KEY(channel_id, scope_type, scope_id, permission),
                     FOREIGN KEY(channel_id) REFERENCES channels(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS policy_rules (
+                    id TEXT PRIMARY KEY,
+                    org_id TEXT NOT NULL,
+                    scope_type TEXT NOT NULL,
+                    scope_id TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    resource TEXT NOT NULL,
+                    effect TEXT NOT NULL,
+                    conditions_json TEXT NOT NULL,
+                    priority INTEGER NOT NULL DEFAULT 100,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(org_id) REFERENCES organizations(id) ON DELETE CASCADE
                 );
                 """
             )

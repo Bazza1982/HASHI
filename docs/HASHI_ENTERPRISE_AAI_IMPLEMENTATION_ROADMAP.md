@@ -328,6 +328,27 @@ Residual P2 limitations:
 
 **Goal:** replace scattered allow/deny checks with a central policy decision path for high-value actions.
 
+**Implementation status:** P3A foundation completed; broader execution gates remain.
+
+Implemented checkpoints:
+
+- `policy_rules` persistence in the enterprise SQLite store;
+- `PolicyEvaluator` with action/resource matching, scoped rules, simple conditions, priorities, and decisions:
+  - `allow`;
+  - `deny`;
+  - `approval_required`;
+- `evaluate_governance_policy(...)` compatibility entry point;
+- personal profile remains allow-by-default;
+- governed profiles can deny configured slash commands through `FlexibleAgentRuntime._is_command_allowed(...)`;
+- targeted tests for default allow, explicit deny, approval-required, helper loading, personal profile behavior, and runtime command enforcement.
+
+Residual P3 limitations:
+
+- channel gates still use `EnterpriseChannelGate`; unifying channel checks into `PolicyEvaluator` is next;
+- command deny currently maps to the existing `command_disabled` path until P4 ledger events distinguish `policy_denied`;
+- backend switch, file read/write, shell, browser, and tool execution gates are not yet wired to the evaluator;
+- approval-required decisions block execution but do not yet create approval queue records.
+
 **Scope:**
 
 - RBAC-first policy evaluator;
@@ -346,13 +367,13 @@ Residual P2 limitations:
 
 **Tickets:**
 
-- `ENT-050` Implement `PolicyEvaluator`.
+- `ENT-050` Implement `PolicyEvaluator`. Done for P3A foundation.
 - `ENT-051` Add role and project context to policy input.
 - `ENT-052` Wire channel checks to evaluator.
-- `ENT-053` Wire slash command checks to evaluator.
+- `ENT-053` Wire slash command checks to evaluator. Done for runtime command allow checks.
 - `ENT-054` Wire backend switch checks to evaluator.
 - `ENT-055` Wire file read/write and shell checks to evaluator.
-- `ENT-056` Add approval-required stub.
+- `ENT-056` Add approval-required stub. Done at decision level; queue record pending.
 - `ENT-057` Add policy deny audit events.
 
 **Acceptance:**

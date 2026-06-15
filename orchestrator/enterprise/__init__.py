@@ -17,7 +17,7 @@ from orchestrator.enterprise.channels import (
     ChannelType,
 )
 from orchestrator.enterprise.identity import EnterpriseRole, IdentityService
-from orchestrator.enterprise.policy import PolicyDecision, PolicyEvaluation, evaluate_governance_policy
+from orchestrator.enterprise.policy import PolicyDecision, PolicyEvaluation, PolicyEvaluator, PolicyRule, evaluate_governance_policy
 from orchestrator.enterprise.store import EnterpriseStore
 
 __all__ = [
@@ -42,5 +42,7 @@ __all__ = [
     "IdentityService",
     "PolicyDecision",
     "PolicyEvaluation",
+    "PolicyEvaluator",
+    "PolicyRule",
     "evaluate_governance_policy",
 ]
