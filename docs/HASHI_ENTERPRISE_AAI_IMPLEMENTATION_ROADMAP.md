@@ -764,10 +764,15 @@ Implemented checkpoints:
 - Restore is safe-by-default: archive paths are validated, overwrite is blocked unless explicit, and unsupported member types are rejected.
 - `hashi.py enterprise backup|restore|inspect-backup` wraps the backup service for operator use.
 - CLI backup defaults include `state/enterprise.sqlite`, `state/enterprise_audit.jsonl`, `agents.json`, and `agent_capabilities.json`; workspaces are opt-in to avoid unexpectedly large archives.
+- Enterprise deployment skeleton added:
+  - `Dockerfile.enterprise`;
+  - `deploy/docker-compose.enterprise.yml`;
+  - `deploy/enterprise.env.example`;
+  - `docs/HASHI_ENTERPRISE_DEPLOYMENT.md`.
 
 Residual P9 limitations:
 
-- Docker Compose / image packaging is not yet implemented.
+- Docker Compose skeleton is present but has not yet been build/run verified in CI.
 - Backup policy and scheduled backups are not yet implemented.
 - Migration runner CLI is not yet wired.
 
@@ -791,8 +796,8 @@ Residual P9 limitations:
 
 **Tickets:**
 
-- `ENT-110` Add enterprise Docker Compose skeleton.
-- `ENT-111` Add enterprise volume layout.
+- `ENT-110` Add enterprise Docker Compose skeleton. Done as first-pass compose template.
+- `ENT-111` Add enterprise volume layout. Done for state, workspaces, logs, and backups named volumes.
 - `ENT-112` Add migration runner command.
 - `ENT-113` Add backup/restore command. Done for backup, restore, and manifest inspection CLI.
 - `ENT-114` Add enterprise health checks.
