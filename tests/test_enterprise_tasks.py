@@ -12,6 +12,8 @@ from orchestrator.enterprise import (
     TaskStatus,
     complete_task_with_artifact_verification,
     fail_task_if_promised_artifacts_missing,
+    record_failed_task_escalation,
+    transition_task_with_failure_escalation,
     verify_promised_artifacts,
 )
 
@@ -245,6 +247,74 @@ def test_complete_task_with_artifact_verification_fails_when_outputs_missing(tmp
     assert failed is not None
     assert failed.status == "failed"
     assert failed.failed_reason == "missing promised artifacts: final-report.md"
+
+
+def test_record_failed_task_escalation_writes_task_audit_event(tmp_path):
+    svc = _init_services(tmp_path)
+    task = svc["tasks"].create_task(
+        org_id="ORG-001",
+        project_id="prj-research",
+        user_id="usr-1",
+        agent_id="zelda",
+        prompt_summary="Prepare report",
+        task_id="task-escalate",
+    )
+    failed = svc["tasks"].transition_task(task.id, TaskStatus.FAILED, failed_reason="tool timeout")
+
+    event = record_failed_task_escalation(
+        svc["ledger"],
+        failed,
+        escalation_target="org_admin",
+        severity="medium",
+    )
+
+    assert event.event_type == "task"
+    assert event.action == "task.escalate_failed"
+    assert event.status == "open"
+    assert event.project_id == "prj-research"
+    assert event.task_id == "task-escalate"
+    assert event.actor_id == "zelda"
+    assert event.context["failed_reason"] == "tool timeout"
+    assert event.context["escalation_target"] == "org_admin"
+    assert event.context["severity"] == "medium"
+
+
+def test_record_failed_task_escalation_requires_failed_task(tmp_path):
+    svc = _init_services(tmp_path)
+    task = svc["tasks"].create_task(
+        org_id="ORG-001",
+        project_id="prj-research",
+        prompt_summary="Prepare report",
+        task_id="task-not-failed",
+    )
+
+    with pytest.raises(ValueError, match="task must be failed"):
+        record_failed_task_escalation(svc["ledger"], task)
+
+
+def test_transition_task_with_failure_escalation_fails_and_records_event(tmp_path):
+    svc = _init_services(tmp_path)
+    task = svc["tasks"].create_task(
+        org_id="ORG-001",
+        project_id="prj-research",
+        user_id="usr-1",
+        prompt_summary="Prepare report",
+        task_id="task-fail-and-escalate",
+    )
+
+    result = transition_task_with_failure_escalation(
+        svc["tasks"],
+        svc["ledger"],
+        task.id,
+        failed_reason="missing approval",
+        actor_id="system-operator",
+    )
+
+    assert result.task.status == "failed"
+    assert result.task.failed_reason == "missing approval"
+    assert result.event.action == "task.escalate_failed"
+    assert result.event.actor_id == "system-operator"
+    assert result.event.context["failed_reason"] == "missing approval"
 
 
 def test_execution_scope_allows_paths_inside_project_workspace(tmp_path):

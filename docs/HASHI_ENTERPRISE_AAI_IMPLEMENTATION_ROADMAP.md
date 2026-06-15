@@ -647,12 +647,17 @@ Implemented checkpoints:
   - sender and target agents must both be assigned to the requested project;
   - cross-project targets fail before runtime enqueue;
   - legacy messages without `project_id` preserve current personal behavior.
+- failed tasks can now emit canonical escalation ledger events:
+  - `task.escalate_failed` records project/task correlation;
+  - escalation context includes failure reason, task summary, agent/user ids, severity, and optional escalation target;
+  - a helper can fail a task and record the escalation event in one operation.
 
 Residual P7 limitations:
 
 - Workbench approval UI is not yet implemented;
 - approved requests are not yet consumed to resume blocked work automatically;
 - project-aware routing is implemented only for explicit bridge `project_id`; broader channel/project resolution remains pending.
+- failed-task escalation writes audit events only; notification delivery and retry routing remain pending.
 
 **Scope:**
 
@@ -676,7 +681,7 @@ Residual P7 limitations:
 - `ENT-090` Add project-aware inbound routing. Done for bridge messages that carry explicit `project_id`, with fail-closed sender/target checks.
 - `ENT-091` Add approval queue APIs. Done for Workbench admin list endpoint.
 - `ENT-092` Add admin approve/deny action. Done for service and Workbench admin API routes with ledger events.
-- `ENT-093` Add failed-task escalation events.
+- `ENT-093` Add failed-task escalation events. Done with ledger-backed `task.escalate_failed` helpers.
 - `ENT-094` Add agent capability registry.
 
 **Acceptance:**
