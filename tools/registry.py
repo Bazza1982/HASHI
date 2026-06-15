@@ -7,6 +7,7 @@ when the backend config contains a `tools` key.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -132,22 +133,52 @@ class ToolRegistry:
         Execute a tool call with permission checking.
         Always returns a ToolResult — never raises.
         """
+        started = time.monotonic()
         if not self.is_allowed(tool_name):
-            return ToolResult(
+            result = ToolResult(
                 tool_call_id=tool_call_id,
                 output=f"Error: tool '{tool_name}' is not in your allowed tools list",
                 is_error=True,
             )
+            self._record_tool_audit(tool_name, arguments, result, started)
+            return result
 
         try:
             output = await self._dispatch(tool_name, arguments)
         except Exception as e:
             self.logger.error(f"Tool '{tool_name}' raised unexpected error: {e}", exc_info=True)
             output = f"Error: unexpected failure in '{tool_name}': {e}"
-            return ToolResult(tool_call_id=tool_call_id, output=output, is_error=True)
+            result = ToolResult(tool_call_id=tool_call_id, output=output, is_error=True)
+            self._record_tool_audit(tool_name, arguments, result, started)
+            return result
 
         is_error = output.startswith("Error:")
-        return ToolResult(tool_call_id=tool_call_id, output=output, is_error=is_error)
+        result = ToolResult(tool_call_id=tool_call_id, output=output, is_error=is_error)
+        self._record_tool_audit(tool_name, arguments, result, started)
+        return result
+
+    def _record_tool_audit(
+        self,
+        tool_name: str,
+        arguments: dict,
+        result: ToolResult,
+        started: float,
+    ) -> None:
+        try:
+            from tools.tool_audit import record_tool_action
+
+            record_tool_action(
+                workspace_dir=self.workspace_dir,
+                tool_name=tool_name,
+                tool_call_id=result.tool_call_id,
+                arguments=arguments,
+                output=result.output,
+                is_error=result.is_error,
+                duration_ms=int((time.monotonic() - started) * 1000),
+                audit_context=self.audit_context,
+            )
+        except Exception:
+            pass
 
     async def _dispatch(self, tool_name: str, arguments: dict) -> str:
         from tools.builtins import (
