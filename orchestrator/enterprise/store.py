@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 class EnterpriseStore:
@@ -151,6 +151,33 @@ class EnterpriseStore:
                     decision_reason TEXT,
                     FOREIGN KEY(org_id) REFERENCES organizations(id) ON DELETE CASCADE
                 );
+
+                CREATE TABLE IF NOT EXISTS audit_events (
+                    id TEXT PRIMARY KEY,
+                    org_id TEXT NOT NULL,
+                    ts TEXT NOT NULL,
+                    schema_version INTEGER NOT NULL,
+                    event_type TEXT NOT NULL,
+                    actor_id TEXT,
+                    action TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    project_id TEXT,
+                    task_id TEXT,
+                    request_id TEXT,
+                    correlation_id TEXT,
+                    parent_event_id TEXT,
+                    context_json TEXT NOT NULL,
+                    FOREIGN KEY(org_id) REFERENCES organizations(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_audit_events_org_ts
+                    ON audit_events(org_id, ts);
+                CREATE INDEX IF NOT EXISTS idx_audit_events_org_type_ts
+                    ON audit_events(org_id, event_type, ts);
+                CREATE INDEX IF NOT EXISTS idx_audit_events_org_actor_ts
+                    ON audit_events(org_id, actor_id, ts);
+                CREATE INDEX IF NOT EXISTS idx_audit_events_org_project_ts
+                    ON audit_events(org_id, project_id, ts);
                 """
             )
             con.execute(
