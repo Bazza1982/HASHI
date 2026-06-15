@@ -20,6 +20,7 @@ from orchestrator.enterprise.audit_adapters import (
     ingest_token_audit_jsonl,
     ingest_tool_action_audit_jsonl,
 )
+from orchestrator.enterprise.backup import BackupItem, BackupResult, EnterpriseBackup
 from orchestrator.enterprise.channel_gate import ChannelGateResult, EnterpriseChannelGate
 from orchestrator.enterprise.capabilities import AgentCapabilityRegistry, AgentCapabilitySummary
 from orchestrator.enterprise.channels import (
@@ -74,6 +75,9 @@ __all__ = [
     "SlashAuditIngestResult",
     "TokenAuditIngestResult",
     "ToolAuditIngestResult",
+    "BackupItem",
+    "BackupResult",
+    "EnterpriseBackup",
     "ingest_browser_action_audit_jsonl",
     "ingest_remote_audit_jsonl",
     "ingest_slash_command_audit_jsonl",
