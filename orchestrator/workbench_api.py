@@ -20,6 +20,7 @@ from orchestrator.enterprise.audit_schema import AuditEvent, AuditEventWriter
 from orchestrator.enterprise.capabilities import AgentCapabilityRegistry
 from orchestrator.enterprise.channel_gate import EnterpriseChannelGate
 from orchestrator.enterprise.channels import ChannelRegistry
+from orchestrator.enterprise.connectors import ConnectorRegistry
 from orchestrator.enterprise.identity import EnterpriseRole, IdentityService
 from orchestrator.enterprise.policy import PolicyEvaluator
 from orchestrator.enterprise.routing import agent_project_ids
@@ -78,7 +79,15 @@ class WorkbenchApiServer:
     TRANSFER_ACCEPT_PREFIX = "TRANSFER_ACCEPTED "
     FORK_ACCEPT_PREFIX = "FORK_ACCEPTED "
 
-    def __init__(self, config_path: Path, global_config, runtimes: list | None = None, secrets: dict | None = None, orchestrator=None):
+    def __init__(
+        self,
+        config_path: Path,
+        global_config,
+        runtimes: list | None = None,
+        secrets: dict | None = None,
+        orchestrator=None,
+        connectors: list | None = None,
+    ):
         self.config_path = config_path
         self.global_config = global_config
         self.runtimes = runtimes or []
@@ -88,6 +97,7 @@ class WorkbenchApiServer:
         self.channel_registry = self._build_channel_registry()
         self.audit_writer = self._build_audit_writer()
         self.audit_ledger = self._build_audit_ledger()
+        self.connector_registry = ConnectorRegistry(connectors)
         self.bridge_router = ConversationRouter(
             config_path=self.config_path,
             capabilities_path=self.config_path.parent / "agent_capabilities.json",
@@ -114,6 +124,7 @@ class WorkbenchApiServer:
         self.app.router.add_post("/api/enterprise/approvals/{request_id}/approve", self.handle_enterprise_approval_approve)
         self.app.router.add_post("/api/enterprise/approvals/{request_id}/deny", self.handle_enterprise_approval_deny)
         self.app.router.add_get("/api/enterprise/agent-capabilities", self.handle_enterprise_agent_capabilities)
+        self.app.router.add_get("/api/enterprise/connectors/health", self.handle_enterprise_connector_health)
         self.app.router.add_get("/api/agents", self.handle_agents)
         self.app.router.add_get("/api/transcript/{name}", self.handle_transcript_recent)
         self.app.router.add_get("/api/transcript/{name}/poll", self.handle_transcript_poll)
@@ -1073,6 +1084,20 @@ class WorkbenchApiServer:
                 "agent_capabilities": summaries,
                 "count": len(summaries),
                 "project_id": project_id,
+            }
+        )
+
+    async def handle_enterprise_connector_health(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        health = [summary.to_dict() for summary in self.connector_registry.health_checks(ledger=self.audit_ledger)]
+        return web.json_response(
+            {
+                "ok": True,
+                "healthy": all(item["ok"] for item in health),
+                "connectors": health,
+                "count": len(health),
             }
         )
 
