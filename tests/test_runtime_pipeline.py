@@ -7,6 +7,7 @@ import sys
 import types
 
 import pytest
+from telegram.error import RetryAfter
 
 from orchestrator import runtime_pipeline
 from adapters.stream_events import KIND_PROGRESS, KIND_TEXT_DELTA, StreamEvent
@@ -96,16 +97,19 @@ class _ProjectChatLogger:
 
 
 class _Bot:
-    def __init__(self):
+    def __init__(self, *, edit_error=None):
         self.sent = []
         self.edits = []
         self.deleted = []
+        self.edit_error = edit_error
 
     async def send_message(self, **kwargs):
         self.sent.append(kwargs)
         return SimpleNamespace(message_id=77)
 
     async def edit_message_text(self, **kwargs):
+        if self.edit_error is not None:
+            raise self.edit_error
         self.edits.append(kwargs)
 
     async def delete_message(self, **kwargs):
@@ -557,6 +561,49 @@ async def test_answer_preview_records_stream_state_deltas_and_edits():
     assert stream_state.delta_count == 2
     assert stream_state.char_count == len("Hello world")
     assert stream_state.edit_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_answer_preview_disables_after_retry_after():
+    runtime = _runtime()
+    runtime.config.extra = {
+        "answer_stream_edit_interval_s": 0.01,
+        "answer_stream_min_chars": 1,
+    }
+    runtime.app.bot = _Bot(edit_error=RetryAfter(123))
+    stream_state = runtime_pipeline.StreamedAnswerState(
+        request_id="req-1",
+        chat_id=123,
+        placeholder=SimpleNamespace(message_id=77),
+        buffer=[],
+        started_at=datetime.now(),
+    )
+    event_queue = asyncio.Queue()
+    stop_event = asyncio.Event()
+    task = asyncio.create_task(
+        runtime_pipeline.answer_preview_loop(
+            runtime,
+            _item(),
+            placeholder=SimpleNamespace(message_id=77),
+            stop_event=stop_event,
+            event_queue=event_queue,
+            stream_state=stream_state,
+        )
+    )
+
+    await event_queue.put(StreamEvent(kind=KIND_TEXT_DELTA, summary="Hello"))
+    for _ in range(20):
+        if stream_state.failed:
+            break
+        await asyncio.sleep(0.02)
+
+    stop_event.set()
+    await task
+
+    assert runtime.app.bot.edits == []
+    assert stream_state.failed is True
+    assert "Flood control exceeded" in stream_state.failure_reason
+    assert any("Answer stream preview disabled" in message for message in runtime.telegram_logger.messages)
 
 
 @pytest.mark.asyncio

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 from telegram import constants
+from telegram.error import RetryAfter
 
 from orchestrator import runtime_delivery
 
@@ -20,23 +21,28 @@ class _Logger:
 
 
 class _Bot:
-    def __init__(self):
+    def __init__(self, *, error=None):
         self.messages = []
         self.actions = []
+        self.error = error
 
     async def send_message(self, **kwargs):
+        if self.error is not None:
+            raise self.error
         self.messages.append(kwargs)
 
     async def send_chat_action(self, **kwargs):
         self.actions.append(kwargs)
 
 
-def _runtime(tmp_path: Path, *, connected: bool = True):
-    bot = _Bot()
+def _runtime(tmp_path: Path, *, connected: bool = True, bot_error=None):
+    bot = _Bot(error=bot_error)
     return SimpleNamespace(
         app=SimpleNamespace(bot=bot),
-        config=SimpleNamespace(active_backend="codex-cli"),
+        config=SimpleNamespace(active_backend="codex-cli", telegram_token_key="test-agent"),
+        global_config=SimpleNamespace(project_root=tmp_path),
         logger=_Logger(),
+        name="test-agent",
         session_dir=tmp_path,
         telegram_connected=connected,
         telegram_logger=_Logger(),
@@ -119,6 +125,22 @@ async def test_send_long_message_error_uses_plain_summary(tmp_path):
     assert "Backend error (codex-cli) | req-err" in message["text"]
     assert "Full log (local):" in message["text"]
     assert "... (truncated) ..." in message["text"]
+
+
+@pytest.mark.asyncio
+async def test_send_long_message_skips_retry_after_without_raising(tmp_path):
+    runtime = _runtime(tmp_path, bot_error=RetryAfter(123))
+
+    _elapsed, chunks = await runtime_delivery.send_long_message(
+        runtime,
+        chat_id=123,
+        text="hello",
+        request_id="req-flood",
+    )
+
+    assert chunks == 0
+    assert runtime.app.bot.messages == []
+    assert any("Telegram flood control" in message for _level, message in runtime.telegram_logger.messages)
 
 
 @pytest.mark.asyncio

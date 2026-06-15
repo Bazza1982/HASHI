@@ -8,11 +8,13 @@ import os
 import socket
 import sys
 import traceback
+from contextlib import suppress
 from pathlib import Path
 
 from orchestrator.agent_directory import AgentDirectory
 from orchestrator.api_gateway import APIGatewayServer, available_gateway_models, default_gateway_model
 from orchestrator.scheduler import TaskScheduler
+from orchestrator.telegram_delivery_failover import delivery_health_watcher
 from orchestrator.workbench_api import WorkbenchApiServer
 
 main_logger = logging.getLogger("BridgeU.Orchestrator")
@@ -304,11 +306,21 @@ class ServiceManager:
         )
         self.kernel.scheduler_task = asyncio.create_task(self.kernel.scheduler.run(), name="scheduler")
 
+    def start_delivery_health_watcher(self):
+        existing = getattr(self.kernel, "delivery_health_task", None)
+        if existing is not None and not existing.done():
+            return
+        self.kernel.delivery_health_task = asyncio.create_task(
+            delivery_health_watcher(self.kernel),
+            name="telegram-delivery-health",
+        )
+
     async def start_runtime_services(self, global_cfg, secrets):
         self.build_agent_directory()
         await self.start_workbench_api(global_cfg, secrets)
         await self.start_api_gateway(global_cfg, secrets)
         self.start_scheduler(global_cfg)
+        self.start_delivery_health_watcher()
 
     async def stop_scheduler(self, timeout: float = 5.0):
         if self.kernel.scheduler_task is None:
@@ -416,5 +428,11 @@ class ServiceManager:
 
     async def stop_runtime_services(self):
         await self.stop_scheduler()
+        task = getattr(self.kernel, "delivery_health_task", None)
+        if task is not None:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+            self.kernel.delivery_health_task = None
         await self.stop_workbench_api()
         await self.stop_api_gateway()

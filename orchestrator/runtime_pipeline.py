@@ -6,7 +6,10 @@ from datetime import datetime
 from typing import Any
 import hashlib as _hashlib
 
+from telegram.error import RetryAfter
+
 from orchestrator.runtime_common import _print_final_response, _safe_excerpt
+from orchestrator import telegram_delivery_failover
 from orchestrator.telegram_notifications import disable_notification
 
 EMPTY_SUCCESS_TOOL_FAILURE_MESSAGE = (
@@ -347,6 +350,7 @@ async def answer_preview_loop(
     chunks: list[str] = []
     latest_status = "Still working..."
     dirty = False
+    preview_disabled = False
     status_kinds = {
         KIND_ERROR,
         KIND_FILE_EDIT,
@@ -368,7 +372,10 @@ async def answer_preview_loop(
         return header + latest_status
 
     async def _edit() -> None:
-        nonlocal dirty, last_edit_at
+        nonlocal dirty, last_edit_at, preview_disabled
+        if preview_disabled:
+            dirty = False
+            return
         text = _preview_text()
         if len(text.strip()) < min_chars:
             return
@@ -383,8 +390,24 @@ async def answer_preview_loop(
             last_edit_at = asyncio.get_running_loop().time()
             dirty = False
         except Exception as exc:
-            if "429" in str(exc) or "RetryAfter" in str(exc):
-                await asyncio.sleep(3)
+            retry_after = getattr(exc, "retry_after", None) if isinstance(exc, RetryAfter) else None
+            if retry_after is not None or "429" in str(exc) or "RetryAfter" in str(exc):
+                preview_disabled = True
+                dirty = False
+                if stream_state is not None:
+                    stream_state.failed = True
+                    stream_state.failure_reason = str(exc)
+                if isinstance(exc, RetryAfter):
+                    await telegram_delivery_failover.handle_retry_after(
+                        runtime,
+                        exc=exc,
+                        chat_id=item.chat_id,
+                        request_id=item.request_id,
+                        purpose="answer_preview",
+                    )
+                runtime.telegram_logger.warning(
+                    f"Answer stream preview disabled for {item.request_id}: {exc}"
+                )
             elif "message is not modified" in str(exc).lower():
                 dirty = False
             else:
@@ -462,7 +485,7 @@ async def setup_interactive_feedback(
         supports_stream_display = bool(getattr(capabilities, "supports_thinking_stream", False))
         stream_queue = None
         answer_preview_queue = None
-        preview_enabled = bool((getattr(runtime.config, "extra", {}) or {}).get("answer_stream_preview", True))
+        preview_enabled = telegram_delivery_failover.effective_preview_enabled(runtime)
         preview_enabled = preview_enabled and placeholder is not None
         final_stream_enabled = bool((getattr(runtime.config, "extra", {}) or {}).get("answer_stream_final_delivery", False))
         supports_answer_stream = bool(getattr(capabilities, "supports_answer_stream", False))
@@ -623,13 +646,22 @@ async def finalize_streamed_answer(
     except Exception as exc:
         stream_state.failed = True
         stream_state.failure_reason = str(exc)
+        if isinstance(exc, RetryAfter):
+            await telegram_delivery_failover.handle_retry_after(
+                runtime,
+                exc=exc,
+                chat_id=item.chat_id,
+                request_id=item.request_id,
+                purpose="response",
+                text=final_text,
+            )
         runtime.telegram_logger.warning(
             f"Answer stream final promotion failed for {item.request_id}: {exc}"
         )
         return StreamFinalization(
             streamed=True,
             final_delivered=False,
-            fallback_required=True,
+            fallback_required=not isinstance(exc, RetryAfter),
             error=str(exc),
         )
 
@@ -965,13 +997,15 @@ async def handle_success_delivery(
     if stream_finalization.final_delivered:
         send_elapsed_s = 0.0
         chunk_count = 1 + stream_finalization.continuation_chunks_sent
-    else:
+    elif stream_finalization.fallback_required:
         send_elapsed_s, chunk_count = await runtime.send_long_message(
             chat_id=item.chat_id,
             text=response_text,
             request_id=item.request_id,
             purpose="response",
         )
+    else:
+        send_elapsed_s, chunk_count = 0.0, 0
     await runtime._send_voice_reply(item.chat_id, response_text, item.request_id)
     runtime._schedule_audit_followup(
         item,
