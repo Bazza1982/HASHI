@@ -402,7 +402,7 @@ Residual P3 limitations:
 
 **Goal:** promote audit stubs and fragmented logs into a queryable enterprise ledger.
 
-**Implementation status:** P4A ledger foundation completed; adapters and API remain.
+**Implementation status:** P4A-C ledger foundation, dual-write, and query APIs completed; first legacy adapter completed.
 
 Implemented checkpoints:
 
@@ -417,13 +417,18 @@ Implemented checkpoints:
 - Workbench enterprise audit APIs:
   - `GET /api/enterprise/audit` for admin-gated ledger query;
   - `GET /api/enterprise/audit/export` for admin-gated NDJSON export;
-- tests for append/query/export and compatibility with existing `AuditEvent`.
+- slash command audit JSONL adapter:
+  - imports legacy `slash_command_audit.jsonl` records as `slash_command` ledger events;
+  - preserves legacy timestamp, actor, command, status, channel, handler, duration, error, blocked reason, and side effects;
+  - uses deterministic event IDs so migration/backfill jobs can be rerun without duplicate ledger rows;
+- tests for append/query/export, compatibility with existing `AuditEvent`, and slash audit ingestion.
 
 Residual P4 limitations:
 
-- slash/token/HChat/tool JSONL writers are not yet dual-writing to the ledger;
+- slash command JSONL can now be ingested into the ledger, but live slash command dual-write is still pending;
+- token/HChat/tool JSONL writers are not yet dual-writing to the ledger;
 - auditor read-only role semantics are not yet separated from broader admin access;
-- slash/token/HChat/tool adapters are still pending;
+- token/HChat/tool adapters are still pending;
 - retention and SIEM mapping remain future P4 work.
 
 **Scope:**
@@ -450,7 +455,7 @@ Residual P4 limitations:
 - `ENT-060` Implement append-only ledger store. Done for P4A foundation.
 - `ENT-061` Add query API and pagination. Query filters and Workbench API done; pagination cursor pending.
 - `ENT-062` Add JSONL export. Done for P4A foundation.
-- `ENT-063` Add slash audit adapter.
+- `ENT-063` Add slash audit adapter. Done for legacy JSONL ingest with idempotent event IDs; live dual-write pending.
 - `ENT-064` Add token/model invocation adapter.
 - `ENT-065` Add HChat/Remote adapter.
 - `ENT-066` Add tool/file event adapters. Policy/channel governance events dual-write; tool/file adapters pending.
