@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from orchestrator.enterprise import IdentityService, PolicyDecision, PolicyEvaluator, evaluate_governance_policy
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 
@@ -112,13 +114,44 @@ def test_runtime_command_allowed_honors_enterprise_policy_deny(tmp_path):
     _init_org(tmp_path)
     evaluator = PolicyEvaluator.from_path(tmp_path / "state" / "enterprise.sqlite", org_id="ORG-001")
     evaluator.add_rule(action="command.execute", resource="command:backend", effect="deny")
-    runtime = SimpleNamespace(
-        name="zelda",
-        global_config=_global_config(tmp_path),
-        _disabled_commands=set(),
-        _enabled_commands=set(),
-        _command_policy_mode="allow_all",
-    )
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.name = "zelda"
+    runtime.global_config = _global_config(tmp_path)
+    runtime._disabled_commands = set()
+    runtime._enabled_commands = set()
+    runtime._command_policy_mode = "allow_all"
 
     assert FlexibleAgentRuntime._is_command_allowed(runtime, "backend") is False
     assert FlexibleAgentRuntime._is_command_allowed(runtime, "status") is True
+
+
+@pytest.mark.asyncio
+async def test_runtime_backend_switch_honors_enterprise_policy_deny(tmp_path):
+    _init_org(tmp_path)
+    evaluator = PolicyEvaluator.from_path(tmp_path / "state" / "enterprise.sqlite", org_id="ORG-001")
+    evaluator.add_rule(action="backend.switch", resource="backend:claude-cli", effect="deny")
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.name = "zelda"
+    runtime.global_config = _global_config(tmp_path)
+    runtime.config = SimpleNamespace(allowed_backends=[{"engine": "claude-cli"}])
+
+    ok, message = await FlexibleAgentRuntime._switch_backend_mode(runtime, 123, "claude-cli")
+
+    assert ok is False
+    assert message == "Backend switch blocked by policy: claude-cli"
+
+
+@pytest.mark.asyncio
+async def test_runtime_backend_switch_blocks_approval_required_policy(tmp_path):
+    _init_org(tmp_path)
+    evaluator = PolicyEvaluator.from_path(tmp_path / "state" / "enterprise.sqlite", org_id="ORG-001")
+    evaluator.add_rule(action="backend.switch", resource="backend:claude-cli", effect="approval_required")
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.name = "zelda"
+    runtime.global_config = _global_config(tmp_path)
+    runtime.config = SimpleNamespace(allowed_backends=[{"engine": "claude-cli"}])
+
+    ok, message = await FlexibleAgentRuntime._switch_backend_mode(runtime, 123, "claude-cli")
+
+    assert ok is False
+    assert message == "Backend switch requires approval: claude-cli"
