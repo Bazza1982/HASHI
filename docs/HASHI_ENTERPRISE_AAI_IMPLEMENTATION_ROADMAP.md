@@ -573,7 +573,7 @@ Residual P5 limitations:
 - completion verification hook for file-producing tasks;
 - explicit failure report when verification fails.
 
-**Implementation status:** P6A verification primitive completed.
+**Implementation status:** P6A-P6B service primitives completed.
 
 Implemented checkpoints:
 
@@ -581,10 +581,13 @@ Implemented checkpoints:
 - task metadata keys `promised_artifacts`, `required_artifacts`, and `expected_artifacts` are supported;
 - artifact requirements can match by full path, basename, artifact id, or type;
 - `fail_task_if_promised_artifacts_missing()` provides the completion hook that marks a task failed with a clear missing-artifact reason.
+- `ExecutionScope.from_project()` resolves the governed project workspace root;
+- `ExecutionScope.check_path()` and `require_path()` block path traversal, out-of-workspace absolute paths, and symlink escape attempts.
 
 Residual P6 limitations:
 
-- workspace boundary and shell/network/browser enforcement are still pending;
+- workspace boundary exists as a service primitive but is not yet wired into every tool path;
+- shell/network/browser enforcement are still pending;
 - the verification hook is service-level and is not yet wired into every runtime completion path;
 - CLI backend internal writes still need tool-event mapping or post-run artifact discovery.
 
@@ -598,8 +601,8 @@ Residual P6 limitations:
 
 **Tickets:**
 
-- `ENT-080` Add execution scope resolver.
-- `ENT-081` Add path traversal block tests.
+- `ENT-080` Add execution scope resolver. Done at service layer for project workspace roots.
+- `ENT-081` Add path traversal block tests. Done for relative, absolute, and symlink escapes.
 - `ENT-082` Add shell command policy checks.
 - `ENT-083` Add network egress allowlist stub.
 - `ENT-084` Add browser automation policy flag.
