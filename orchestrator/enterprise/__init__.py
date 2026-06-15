@@ -34,9 +34,11 @@ from orchestrator.enterprise.channels import (
 )
 from orchestrator.enterprise.connectors import (
     ConnectorAction,
+    ConnectorGateResult,
     ConnectorHealth,
     ConnectorResult,
     EnterpriseConnector,
+    evaluate_connector_action,
     record_connector_event,
 )
 from orchestrator.enterprise.credentials import ConnectorCredential, ConnectorCredentialStore
@@ -103,6 +105,7 @@ __all__ = [
     "ChannelScopeType",
     "ChannelType",
     "ConnectorAction",
+    "ConnectorGateResult",
     "ConnectorHealth",
     "ConnectorResult",
     "ConnectorCredential",
@@ -130,6 +133,7 @@ __all__ = [
     "agent_project_ids",
     "evaluate_governance_policy",
     "evaluate_project_route",
+    "evaluate_connector_action",
     "fail_task_if_promised_artifacts_missing",
     "record_failed_task_escalation",
     "record_connector_event",
