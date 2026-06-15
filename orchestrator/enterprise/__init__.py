@@ -42,6 +42,11 @@ from orchestrator.enterprise.policy import (
 from orchestrator.enterprise.routing import ProjectRouteDecision, agent_project_ids, evaluate_project_route
 from orchestrator.enterprise.store import EnterpriseStore
 from orchestrator.enterprise.evidence import EvidenceBundle, EvidenceBundleRegistry
+from orchestrator.enterprise.escalation import (
+    FailedTaskEscalation,
+    record_failed_task_escalation,
+    transition_task_with_failure_escalation,
+)
 from orchestrator.enterprise.execution import ExecutionPathDecision, ExecutionScope
 from orchestrator.enterprise.tasks import EnterpriseTask, TaskRegistry, TaskStatus
 from orchestrator.enterprise.verification import (
@@ -86,6 +91,7 @@ __all__ = [
     "EnterpriseTask",
     "EvidenceBundle",
     "EvidenceBundleRegistry",
+    "FailedTaskEscalation",
     "ExecutionPathDecision",
     "ExecutionScope",
     "EnterpriseStore",
@@ -104,5 +110,7 @@ __all__ = [
     "evaluate_governance_policy",
     "evaluate_project_route",
     "fail_task_if_promised_artifacts_missing",
+    "record_failed_task_escalation",
+    "transition_task_with_failure_escalation",
     "verify_promised_artifacts",
 ]
