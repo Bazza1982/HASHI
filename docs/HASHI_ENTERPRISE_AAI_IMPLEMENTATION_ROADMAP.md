@@ -857,6 +857,11 @@ Implemented checkpoints:
   - supports `dry_run` without external calls;
   - sends issue title, body, and labels through GitHub's issues API when executed;
   - returns issue id, number, URL, title, and state.
+- GitHub `pr.create` action added:
+  - validates repository, title, head, and base inputs;
+  - supports `dry_run` without external calls;
+  - sends pull request title, head, base, body, and draft state through GitHub's pulls API when executed;
+  - returns pull request id, number, URL, title, state, and draft state.
 - Gated connector execution service added:
   - every execution checks credential state and policy before invoking the connector;
   - policy deny and approval-required decisions return blocked `ConnectorResult` values without calling connector code;
@@ -914,7 +919,7 @@ Implemented checkpoints:
 
 Residual P10 limitations:
 
-- GitHub has a read-only connector foundation, but no write actions such as PR creation or merge are implemented yet.
+- GitHub has repository metadata, issue creation, and PR creation actions; PR merge remains pending.
 - Slack exists as an incoming webhook MVP only; Slack OAuth, Bot API, channel discovery, and user mapping are not implemented yet.
 - No Teams, Google Chat, or Feishu connector is implemented yet.
 - Credential store records secret references only; environment and HASHI secrets can now be resolved through a dedicated resolver, while Vault/Kubernetes secret resolution remains pending.
@@ -945,7 +950,7 @@ Residual P10 limitations:
 - `ENT-121` Add scoped credential store abstraction. Done for secret references, scopes, active listing, and revoke.
 - `ENT-122` Add connector execution gate. Done for credential existence, org isolation, revoke fail-closed, type match, policy deny, and approval-required decisions.
 - `ENT-126` Add first enterprise channel connector. Done for Slack incoming webhook health, dry-run, `message.send`, injectable transport, and factory construction from secret refs.
-- `ENT-123` Add GitHub connector with audit. In progress with health, repository metadata, and issue creation actions; PR create/merge remain pending.
+- `ENT-123` Add GitHub connector with audit. In progress with health, repository metadata, issue creation, and PR creation actions; PR merge remains pending.
 - `ENT-124` Add connector health checks. Done for in-process registry, normalized health summaries, ledger health events, and Workbench admin health API.
 - `ENT-125` Add credential revoke tests. Done for gate-level fail-closed behavior.
 - `ENT-127` Add gated connector execution service. Done for credential gate, policy gate, connector invocation, fail-closed missing connector handling, and ledger events.
