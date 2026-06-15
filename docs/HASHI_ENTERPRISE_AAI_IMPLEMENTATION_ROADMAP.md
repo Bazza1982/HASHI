@@ -845,10 +845,17 @@ Implemented checkpoints:
   - health probes normalize connector exceptions to `unhealthy` summaries;
   - health probes can write canonical connector ledger events;
   - Workbench exposes admin-gated `GET /api/enterprise/connectors/health`.
+- First GitHub connector added as a read-only connector:
+  - `health_check()` probes GitHub rate-limit metadata;
+  - `repo.get` and `repo.read` fetch repository metadata;
+  - `dry_run` returns the planned repository lookup without external calls;
+  - unsupported write actions fail closed as `unsupported_action`;
+  - network transport is injectable for deterministic tests.
 
 Residual P10 limitations:
 
-- No real GitHub, Slack, Teams, Google Chat, or Feishu connector is implemented yet.
+- GitHub has a read-only connector foundation, but no write actions such as PR creation or merge are implemented yet.
+- No Slack, Teams, Google Chat, or Feishu connector is implemented yet.
 - Credential store records secret references only; Vault/Kubernetes secret resolution is still pending.
 - Connector gate is a service helper; real connectors still need to call it consistently.
 - Connector health API exists for registered in-process connectors, but no built-in external connector is registered yet.
@@ -874,7 +881,7 @@ Residual P10 limitations:
 - `ENT-121` Add scoped credential store abstraction. Done for secret references, scopes, active listing, and revoke.
 - `ENT-122` Add connector execution gate. Done for credential existence, org isolation, revoke fail-closed, type match, policy deny, and approval-required decisions.
 - `ENT-126` Add first enterprise channel connector.
-- `ENT-123` Add GitHub connector with audit.
+- `ENT-123` Add GitHub connector with audit. Started with read-only health and repository metadata actions; write actions and full gated execution audit remain pending.
 - `ENT-124` Add connector health checks. Done for in-process registry, normalized health summaries, ledger health events, and Workbench admin health API.
 - `ENT-125` Add credential revoke tests. Done for gate-level fail-closed behavior.
 

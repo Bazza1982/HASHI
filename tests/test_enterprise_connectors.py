@@ -7,6 +7,7 @@ from orchestrator.enterprise import (
     ConnectorRegistry,
     ConnectorResult,
     EnterpriseAuditLedger,
+    GitHubConnector,
     IdentityService,
     PolicyEvaluator,
 )
@@ -23,12 +24,87 @@ class _FakeConnector:
         return ConnectorResult(ok=True, status="success", message=f"executed {action.action}", data={"id": 123})
 
 
+class _FakeGitHubTransport:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, method, path, headers, body):
+        self.calls.append({"method": method, "path": path, "headers": dict(headers), "body": body})
+        if path == "/rate_limit":
+            return {"rate": {"remaining": 42, "limit": 5000}}
+        if path == "/repos/Bazza1982/hashi":
+            return {
+                "id": 123,
+                "full_name": "Bazza1982/hashi",
+                "private": False,
+                "default_branch": "main",
+                "html_url": "https://github.com/Bazza1982/hashi",
+            }
+        raise AssertionError(f"unexpected GitHub request: {method} {path}")
+
+
 def test_connector_interface_can_execute_and_report_health():
     connector = _FakeConnector()
     action = ConnectorAction(connector_type="github", action="repo.read", resource="repo:hashi")
 
     assert connector.health_check().status == "healthy"
     assert connector.execute(action).data == {"id": 123}
+
+
+def test_github_connector_health_uses_rate_limit_and_auth_header():
+    transport = _FakeGitHubTransport()
+    connector = GitHubConnector(token="ghp-test", transport=transport)
+
+    health = connector.health_check()
+
+    assert health.ok is True
+    assert health.status == "healthy"
+    assert health.data["rate"]["remaining"] == 42
+    assert transport.calls[0]["path"] == "/rate_limit"
+    assert transport.calls[0]["headers"]["Authorization"] == "Bearer ghp-test"
+
+
+def test_github_connector_repo_get_from_resource_returns_repository_metadata():
+    connector = GitHubConnector(transport=_FakeGitHubTransport())
+    action = ConnectorAction(connector_type="github", action="repo.get", resource="repo:Bazza1982/hashi")
+
+    result = connector.execute(action)
+
+    assert result.ok is True
+    assert result.status == "success"
+    assert result.data == {
+        "id": 123,
+        "full_name": "Bazza1982/hashi",
+        "private": False,
+        "default_branch": "main",
+        "html_url": "https://github.com/Bazza1982/hashi",
+    }
+
+
+def test_github_connector_repo_get_from_parameters_supports_dry_run():
+    connector = GitHubConnector(transport=_FakeGitHubTransport())
+    action = ConnectorAction(
+        connector_type="github",
+        action="repo.read",
+        dry_run=True,
+        parameters={"owner": "Bazza1982", "repo": "hashi"},
+    )
+
+    result = connector.execute(action)
+
+    assert result.ok is True
+    assert result.status == "dry_run"
+    assert result.data == {"owner": "Bazza1982", "repo": "hashi"}
+
+
+def test_github_connector_rejects_unsupported_action():
+    connector = GitHubConnector(transport=_FakeGitHubTransport())
+    action = ConnectorAction(connector_type="github", action="pr.create", resource="repo:Bazza1982/hashi")
+
+    result = connector.execute(action)
+
+    assert result.ok is False
+    assert result.status == "unsupported_action"
 
 
 def test_connector_registry_reports_health_and_records_ledger_event(tmp_path):
