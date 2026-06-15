@@ -21,6 +21,7 @@ from orchestrator.enterprise.audit_adapters import (
     ingest_tool_action_audit_jsonl,
 )
 from orchestrator.enterprise.channel_gate import ChannelGateResult, EnterpriseChannelGate
+from orchestrator.enterprise.capabilities import AgentCapabilityRegistry, AgentCapabilitySummary
 from orchestrator.enterprise.channels import (
     Channel,
     ChannelAccess,
@@ -80,6 +81,8 @@ __all__ = [
     "ingest_tool_action_audit_jsonl",
     "ChannelGateResult",
     "EnterpriseChannelGate",
+    "AgentCapabilityRegistry",
+    "AgentCapabilitySummary",
     "Channel",
     "ChannelAccess",
     "ChannelBinding",
