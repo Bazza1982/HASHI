@@ -284,6 +284,97 @@ async def test_enterprise_connector_registry_refresh_reports_unresolved_secret(t
 
 
 @pytest.mark.asyncio
+async def test_enterprise_admin_can_execute_slack_dry_run_from_secret_ref(tmp_path):
+    server = _server(tmp_path, secrets={"slack_webhook": "https://hooks.slack.test/services/abc"})
+    headers = _admin_headers(server)
+    create_response = await server.handle_enterprise_connector_credentials_create(
+        _FakeRequest(
+            headers=headers,
+            path="/api/enterprise/connectors/credentials",
+            body={
+                "connector_type": "slack",
+                "display_name": "Slack Webhook",
+                "secret_ref": "secrets://slack_webhook",
+                "scopes": ["message.send"],
+                "credential_id": "cred-slack",
+            },
+        )
+    )
+    PolicyEvaluator.from_path(tmp_path / "state" / "enterprise.sqlite", org_id="ORG-001").add_rule(
+        action="connector.execute",
+        resource="connector:slack:message.send",
+        effect="allow",
+        rule_id="pol-allow-slack-message",
+    )
+
+    response = await server.handle_enterprise_connector_execute(
+        _FakeRequest(
+            headers=headers,
+            path="/api/enterprise/connectors/execute",
+            body={
+                "connector_type": "slack",
+                "action": "message.send",
+                "credential_id": "cred-slack",
+                "dry_run": True,
+                "parameters": {"text": "Hello from HASHI"},
+            },
+        )
+    )
+
+    payload = json.loads(response.text)
+    assert create_response.status == 201
+    assert server.connector_registry.list_types() == ["slack"]
+    assert response.status == 200
+    assert payload["ok"] is True
+    assert payload["gate"]["allowed"] is True
+    assert payload["result"]["status"] == "dry_run"
+    assert payload["result"]["data"]["payload"] == {"text": "Hello from HASHI"}
+
+
+@pytest.mark.asyncio
+async def test_default_connector_policy_requires_approval_for_slack_messages(tmp_path):
+    server = _server(tmp_path, secrets={"slack_webhook": "https://hooks.slack.test/services/abc"})
+    headers = _admin_headers(server)
+    await server.handle_enterprise_connector_credentials_create(
+        _FakeRequest(
+            headers=headers,
+            path="/api/enterprise/connectors/credentials",
+            body={
+                "connector_type": "slack",
+                "display_name": "Slack Webhook",
+                "secret_ref": "secrets://slack_webhook",
+                "scopes": ["message.send"],
+                "credential_id": "cred-slack",
+            },
+        )
+    )
+    await server.handle_enterprise_policies_install_defaults(_FakeRequest(headers=headers))
+
+    response = await server.handle_enterprise_connector_execute(
+        _FakeRequest(
+            headers=headers,
+            path="/api/enterprise/connectors/execute",
+            body={
+                "connector_type": "slack",
+                "action": "message.send",
+                "credential_id": "cred-slack",
+                "dry_run": True,
+                "parameters": {"text": "Hello from HASHI"},
+            },
+        )
+    )
+
+    payload = json.loads(response.text)
+    assert response.status == 200
+    assert payload["ok"] is False
+    assert payload["gate"]["allowed"] is False
+    assert payload["gate"]["reason"] == "connector_action_requires_approval"
+    assert payload["gate"]["policy_rule_id"] == "tpl-connector-slack-message-send-approval"
+    assert payload["gate"]["approval_request_id"]
+    assert payload["result"]["status"] == "connector_action_requires_approval"
+
+
+@pytest.mark.asyncio
 async def test_enterprise_admin_can_execute_connector_through_gate(tmp_path):
     connector = _RecordingConnector()
     server = _server(tmp_path, connectors=[connector])

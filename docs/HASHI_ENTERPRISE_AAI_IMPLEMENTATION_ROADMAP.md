@@ -962,6 +962,9 @@ Residual P10 limitations:
 - Connector actions produce audit events.
 - Revoked credentials fail closed.
 - Connector access is scoped by project and role.
+- Slack credential creation refreshes the in-process registry from secret references.
+- Workbench Slack dry-run execution succeeds only when connector policy allows it.
+- Default connector policy requires approval for Slack outbound messages before connector code can run.
 
 ---
 
