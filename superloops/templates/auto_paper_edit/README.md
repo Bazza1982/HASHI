@@ -275,3 +275,65 @@ next_session_notes:
 - Leaving `_workspace/` with loose files outside the defined structure.
 - Accepting `assembled_draft_vN.md` that contains `══` lines as clean input.
 - Treating a partial replacement_map (unconfirmed entries) as safe to run.
+
+---
+
+## Route C: Markdown Structural Rewrite
+
+Use Route C when the source manuscript is a Markdown paper and the required work
+is a structural rewrite rather than direct DOCX paragraph editing.
+
+Route C is appropriate for full-manuscript academic rewriting where the task is
+to revise title, research question, section framing, method/data presentation,
+findings structure, discussion balance, limitations, and voice.
+
+### Route C Roles
+
+- `orchestrator`: prepares the plan, locks scope, dispatches work through real
+  hchat, harvests artifacts, and enforces gates.
+- `worker`: rewrites the manuscript according to the approved plan and produces
+  a worker report.
+- `reviewer`: reviews the rewritten manuscript against the plan and issues an
+  explicit blocker/no-blocker verdict.
+
+### Route C Non-Negotiable Gates
+
+1. The edit plan must exist before worker dispatch.
+2. The worker must be dispatched through a real hchat route.
+3. The orchestrator must not claim that the worker has started unless hchat
+   delivery or worker confirmation exists.
+4. The reviewer is dispatched only after the worker artifact exists.
+5. The loop exits only when all chapters have been rewritten according to plan
+   and the reviewer issues a no-blocker/pass verdict.
+
+### Route C Expected Artifacts
+
+- Source draft path.
+- Fixing plan path.
+- Rewritten manuscript path.
+- Worker completion report.
+- Reviewer quality report.
+- Final closeout note.
+
+### Route C Quality Standard
+
+The rewritten paper should read like a journal manuscript, not an internal
+project report. It should remove local file paths, internal file lists,
+over-repeated audit statistics, and mechanical model blocks unless they are
+genuinely necessary for the reader.
+
+### Route C Anti-Degradation Gate
+
+For autoethnographic manuscript edits, structural cleanliness is not enough.
+The orchestrator must define and enforce minimum thresholds for:
+
+- total word count
+- Findings word count
+- Method word count
+- direct excerpt count
+- direct excerpt coverage for the central contribution section
+- comparison against the pre-edit evidence-rich source
+
+The reviewer must compare the revised manuscript against both the structural
+source and the evidence-rich source. A draft that is cleaner but materially
+thinner must not receive closeout.
