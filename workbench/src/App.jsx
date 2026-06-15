@@ -1033,6 +1033,15 @@ function EnterpriseAdminPanel() {
     secret_ref: 'env://SLACK_WEBHOOK_URL',
     scopes: 'message.send',
   });
+  const [executionForm, setExecutionForm] = useState({
+    credential_id: '',
+    connector_type: 'slack',
+    action: 'message.send',
+    resource: '*',
+    parameters: '{\n  "text": "HASHI connector dry run"\n}',
+    dry_run: true,
+  });
+  const [executionResult, setExecutionResult] = useState(null);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY_ENTERPRISE_AUTH, authToken);
@@ -1140,6 +1149,43 @@ function EnterpriseAdminPanel() {
     }
   };
 
+  const runConnectorAction = async (event) => {
+    event.preventDefault();
+    setLoading(true);
+    setExecutionResult(null);
+    try {
+      const parameters = executionForm.parameters.trim()
+        ? JSON.parse(executionForm.parameters)
+        : {};
+      const payload = await api('/api/enterprise/connectors/execute', {
+        method: 'POST',
+        body: JSON.stringify({
+          credential_id: executionForm.credential_id,
+          connector_type: executionForm.connector_type,
+          action: executionForm.action,
+          resource: executionForm.resource || '*',
+          parameters,
+          dry_run: executionForm.dry_run,
+        }),
+      });
+      setExecutionResult(payload);
+      setStatus(payload?.gate?.reason || payload?.result?.message || 'Connector execution completed.');
+    } catch (error) {
+      setStatus(error.message || 'Connector execution failed.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const chooseExecutionCredential = (credentialId) => {
+    const credential = credentials.find((item) => item.id === credentialId);
+    setExecutionForm((prev) => ({
+      ...prev,
+      credential_id: credentialId,
+      connector_type: credential?.connector_type || prev.connector_type,
+    }));
+  };
+
   return (
     <main className="enterprise-layout">
       <section className="enterprise-toolbar">
@@ -1232,6 +1278,64 @@ function EnterpriseAdminPanel() {
             <div className="enterprise-errors">
               {registryErrors.map((error, idx) => <div key={idx}>{error}</div>)}
             </div>
+          )}
+        </div>
+
+        <div className="enterprise-panel enterprise-panel-wide">
+          <div className="enterprise-panel-header">
+            <h3>Connector Test Run</h3>
+            <label className="enterprise-check">
+              <input
+                type="checkbox"
+                checked={executionForm.dry_run}
+                onChange={(e) => setExecutionForm((prev) => ({ ...prev, dry_run: e.target.checked }))}
+              />
+              <span>Dry run</span>
+            </label>
+          </div>
+          <form className="connector-execute-form" onSubmit={runConnectorAction}>
+            <select
+              value={executionForm.credential_id}
+              onChange={(e) => chooseExecutionCredential(e.target.value)}
+              required
+            >
+              <option value="">Select credential</option>
+              {credentials.filter((credential) => credential.status !== 'revoked').map((credential) => (
+                <option key={credential.id} value={credential.id}>
+                  {credential.connector_type} · {credential.display_name}
+                </option>
+              ))}
+            </select>
+            <select
+              value={executionForm.connector_type}
+              onChange={(e) => setExecutionForm((prev) => ({ ...prev, connector_type: e.target.value }))}
+            >
+              <option value="slack">Slack</option>
+              <option value="github">GitHub</option>
+            </select>
+            <input
+              value={executionForm.action}
+              onChange={(e) => setExecutionForm((prev) => ({ ...prev, action: e.target.value }))}
+              placeholder="Action"
+              required
+            />
+            <input
+              value={executionForm.resource}
+              onChange={(e) => setExecutionForm((prev) => ({ ...prev, resource: e.target.value }))}
+              placeholder="Resource"
+            />
+            <textarea
+              value={executionForm.parameters}
+              onChange={(e) => setExecutionForm((prev) => ({ ...prev, parameters: e.target.value }))}
+              placeholder="JSON parameters"
+              rows={5}
+            />
+            <button type="submit" className="refresh-btn" disabled={loading}>
+              {executionForm.dry_run ? 'Dry run' : 'Execute'}
+            </button>
+          </form>
+          {executionResult && (
+            <pre className="enterprise-result">{JSON.stringify(executionResult, null, 2)}</pre>
           )}
         </div>
 
