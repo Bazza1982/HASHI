@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import pytest
+
 from orchestrator.enterprise import (
     ConnectorAction,
     ConnectorCredentialStore,
     ConnectorExecutionService,
+    ConnectorFactory,
     ConnectorHealth,
     ConnectorRegistry,
     ConnectorResult,
@@ -11,6 +14,7 @@ from orchestrator.enterprise import (
     GitHubConnector,
     IdentityService,
     PolicyEvaluator,
+    ConnectorSecretResolver,
 )
 from orchestrator.enterprise.connectors import evaluate_connector_action, record_connector_event
 
@@ -106,6 +110,64 @@ def test_github_connector_rejects_unsupported_action():
 
     assert result.ok is False
     assert result.status == "unsupported_action"
+
+
+def test_connector_factory_builds_github_connector_from_env_secret(tmp_path):
+    credentials, _, credential = _connector_gate_services(tmp_path)
+    credentials.revoke_credential(credential.id)
+    credential = credentials.create_credential(
+        org_id="ORG-001",
+        connector_type="github",
+        display_name="GitHub Env",
+        secret_ref="env://GITHUB_TOKEN",
+        scopes=["repo:read"],
+        credential_id="cred-github-env",
+    )
+    transport = _FakeGitHubTransport()
+    factory = ConnectorFactory(
+        secret_resolver=ConnectorSecretResolver(environ={"GITHUB_TOKEN": "ghp-env"}),
+        transports={"github": transport},
+    )
+
+    connector = factory.build(credential)
+    health = connector.health_check()
+
+    assert health.ok is True
+    assert transport.calls[0]["headers"]["Authorization"] == "Bearer ghp-env"
+
+
+def test_connector_factory_build_registry_skips_revoked_credentials(tmp_path):
+    credentials, _, credential = _connector_gate_services(tmp_path)
+    credentials.revoke_credential(credential.id)
+    factory = ConnectorFactory(secret_resolver=ConnectorSecretResolver(secrets={"github_token": "ghp"}))
+
+    registry = factory.build_registry(credentials.list_credentials(org_id="ORG-001", include_revoked=True))
+
+    assert registry.list_types() == []
+
+
+def test_connector_factory_fails_closed_for_unsupported_connector_type(tmp_path):
+    credentials, _, _ = _connector_gate_services(tmp_path)
+    credential = credentials.create_credential(
+        org_id="ORG-001",
+        connector_type="slack",
+        display_name="Slack Bot",
+        secret_ref="secrets://slack_token",
+        scopes=["chat:write"],
+        credential_id="cred-slack",
+    )
+    factory = ConnectorFactory(secret_resolver=ConnectorSecretResolver(secrets={"slack_token": "xoxb"}))
+
+    with pytest.raises(ValueError, match="unsupported connector type"):
+        factory.build(credential)
+
+
+def test_connector_factory_fails_closed_when_secret_ref_cannot_resolve(tmp_path):
+    _, _, credential = _connector_gate_services(tmp_path)
+    factory = ConnectorFactory(secret_resolver=ConnectorSecretResolver())
+
+    with pytest.raises(ValueError, match="vault secret resolver is not configured"):
+        factory.build(credential)
 
 
 def test_connector_registry_reports_health_and_records_ledger_event(tmp_path):
