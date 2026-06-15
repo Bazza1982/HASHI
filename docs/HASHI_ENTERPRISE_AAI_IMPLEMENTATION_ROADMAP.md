@@ -903,6 +903,11 @@ Implemented checkpoints:
   - `dry_run` returns the planned Slack payload without posting externally;
   - real execution posts text and optional block payloads through an injectable transport;
   - factory can build Slack connectors from scoped credential secret references.
+- Workbench connector admin UI MVP added:
+  - Enterprise layout exposes connector credentials, health, and default connector policy controls;
+  - admins can create connector credential references, include revoked credentials in the list, and revoke active credentials;
+  - admins can refresh connector health and see registry secret-resolution errors;
+  - admins can install the default connector policy template from the Workbench.
 
 Residual P10 limitations:
 
@@ -915,7 +920,7 @@ Residual P10 limitations:
 - Default connector policy covers GitHub reads, GitHub writes, and Slack outbound message approval; silent auto-install remains intentionally avoided to prevent overwriting administrator policy edits.
 - Workbench/admin connector execution API now uses the gated execution service.
 - Connector health API exists for registered in-process connectors; built-in GitHub and Slack connectors can now be constructed from credential references.
-- Connector admin UI is still pending.
+- Connector admin UI exists as a Workbench MVP; richer guided setup, connector-specific validation, and execution/test-run screens remain pending.
 
 **Scope:**
 
@@ -948,6 +953,7 @@ Residual P10 limitations:
 - `ENT-132` Add Workbench connector registry refresh. Done for startup refresh, create/revoke refresh, static connector precedence, and fail-soft registry errors.
 - `ENT-133` Add default connector policy template. Done for GitHub read allow, GitHub write approval-required, Slack outbound message approval-required, and idempotent install.
 - `ENT-134` Add default connector policy install API. Done for admin-gated install, idempotent responses, and audit event emission.
+- `ENT-135` Add connector admin UI. Done for Workbench MVP covering credential create/list/revoke, health refresh, registry errors, and default policy installation.
 
 **Acceptance:**
 

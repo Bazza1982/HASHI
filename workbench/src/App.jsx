@@ -1016,6 +1016,252 @@ const STORAGE_KEY_LANG = 'workbench-lang';
 const STORAGE_KEY_THEME = 'workbench-theme';
 const STORAGE_KEY_LAYOUT = 'workbench-layout';
 const STORAGE_KEY_TELEGRAM_ACTIVE = 'workbench-telegram-active';
+const STORAGE_KEY_ENTERPRISE_AUTH = 'workbench-enterprise-auth';
+
+function EnterpriseAdminPanel() {
+  const [authToken, setAuthToken] = useState(() => localStorage.getItem(STORAGE_KEY_ENTERPRISE_AUTH) || '');
+  const [credentials, setCredentials] = useState([]);
+  const [health, setHealth] = useState([]);
+  const [registryErrors, setRegistryErrors] = useState([]);
+  const [policies, setPolicies] = useState([]);
+  const [status, setStatus] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [includeRevoked, setIncludeRevoked] = useState(false);
+  const [form, setForm] = useState({
+    connector_type: 'slack',
+    display_name: 'Slack Webhook',
+    secret_ref: 'env://SLACK_WEBHOOK_URL',
+    scopes: 'message.send',
+  });
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY_ENTERPRISE_AUTH, authToken);
+  }, [authToken]);
+
+  const authHeaders = () => {
+    const token = authToken.trim();
+    if (!token) return {};
+    return {
+      Authorization: token.toLowerCase().startsWith('bearer ') ? token : `Bearer ${token}`,
+      'X-Workbench-Session': token.replace(/^bearer\s+/i, ''),
+      'X-Workbench-Token': token.replace(/^bearer\s+/i, ''),
+    };
+  };
+
+  const api = async (path, options = {}) => {
+    const response = await fetch(path, {
+      ...options,
+      headers: {
+        ...authHeaders(),
+        ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(options.headers || {}),
+      },
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload?.ok === false) {
+      throw new Error(payload?.error || `HTTP ${response.status}`);
+    }
+    return payload;
+  };
+
+  const refreshEnterpriseConnectors = async () => {
+    setLoading(true);
+    setStatus('');
+    try {
+      const [credentialPayload, healthPayload, policyPayload] = await Promise.all([
+        api(`/api/enterprise/connectors/credentials${includeRevoked ? '?include_revoked=true' : ''}`),
+        api('/api/enterprise/connectors/health'),
+        api('/api/enterprise/policies'),
+      ]);
+      setCredentials(credentialPayload.credentials || []);
+      setHealth(healthPayload.connectors || []);
+      setRegistryErrors(healthPayload.registry_errors || []);
+      setPolicies(policyPayload.policies || []);
+      setStatus('Loaded enterprise connector state.');
+    } catch (error) {
+      setStatus(error.message || 'Failed to load enterprise connector state.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    refreshEnterpriseConnectors();
+  }, [includeRevoked]);
+
+  const createCredential = async (event) => {
+    event.preventDefault();
+    setLoading(true);
+    try {
+      await api('/api/enterprise/connectors/credentials', {
+        method: 'POST',
+        body: JSON.stringify({
+          connector_type: form.connector_type.trim(),
+          display_name: form.display_name.trim(),
+          secret_ref: form.secret_ref.trim(),
+          scopes: form.scopes.split(',').map((scope) => scope.trim()).filter(Boolean),
+        }),
+      });
+      setStatus('Connector credential created.');
+      await refreshEnterpriseConnectors();
+    } catch (error) {
+      setStatus(error.message || 'Credential create failed.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const revokeCredential = async (credentialId) => {
+    if (!credentialId) return;
+    setLoading(true);
+    try {
+      await api(`/api/enterprise/connectors/credentials/${encodeURIComponent(credentialId)}/revoke`, {
+        method: 'POST',
+      });
+      setStatus('Connector credential revoked.');
+      await refreshEnterpriseConnectors();
+    } catch (error) {
+      setStatus(error.message || 'Credential revoke failed.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const installDefaults = async () => {
+    setLoading(true);
+    try {
+      const payload = await api('/api/enterprise/policies/install-defaults', { method: 'POST' });
+      setPolicies(payload.policies || []);
+      setStatus(`Installed ${payload.count || 0} default connector policies.`);
+    } catch (error) {
+      setStatus(error.message || 'Policy install failed.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <main className="enterprise-layout">
+      <section className="enterprise-toolbar">
+        <div>
+          <h2>Enterprise Connectors</h2>
+          <p>Credentials, health, and default policy controls</p>
+        </div>
+        <div className="enterprise-auth">
+          <input
+            type="password"
+            value={authToken}
+            onChange={(e) => setAuthToken(e.target.value)}
+            placeholder="Enterprise session or admin token"
+          />
+          <button type="button" className="refresh-btn" onClick={refreshEnterpriseConnectors} disabled={loading}>
+            {loading ? '...' : 'Refresh'}
+          </button>
+        </div>
+      </section>
+
+      {status && <div className="enterprise-status">{status}</div>}
+
+      <section className="enterprise-grid">
+        <div className="enterprise-panel">
+          <div className="enterprise-panel-header">
+            <h3>Credentials</h3>
+            <label className="enterprise-check">
+              <input type="checkbox" checked={includeRevoked} onChange={(e) => setIncludeRevoked(e.target.checked)} />
+              <span>Include revoked</span>
+            </label>
+          </div>
+          <form className="connector-form" onSubmit={createCredential}>
+            <select value={form.connector_type} onChange={(e) => setForm((prev) => ({ ...prev, connector_type: e.target.value }))}>
+              <option value="slack">Slack</option>
+              <option value="github">GitHub</option>
+            </select>
+            <input value={form.display_name} onChange={(e) => setForm((prev) => ({ ...prev, display_name: e.target.value }))} placeholder="Display name" />
+            <input value={form.secret_ref} onChange={(e) => setForm((prev) => ({ ...prev, secret_ref: e.target.value }))} placeholder="Secret reference" />
+            <input value={form.scopes} onChange={(e) => setForm((prev) => ({ ...prev, scopes: e.target.value }))} placeholder="Scopes, comma separated" />
+            <button type="submit" className="refresh-btn" disabled={loading}>Create</button>
+          </form>
+          <div className="enterprise-table">
+            <div className="enterprise-row enterprise-row-head">
+              <span>Type</span>
+              <span>Name</span>
+              <span>Status</span>
+              <span>Secret</span>
+              <span />
+            </div>
+            {credentials.map((credential) => (
+              <div key={credential.id} className="enterprise-row">
+                <span>{credential.connector_type}</span>
+                <span>{credential.display_name}</span>
+                <span>{credential.status}</span>
+                <span>{credential.secret_ref}</span>
+                <button
+                  type="button"
+                  className="agent-toggle-btn deactivate"
+                  disabled={credential.status === 'revoked' || loading}
+                  onClick={() => revokeCredential(credential.id)}
+                >
+                  Revoke
+                </button>
+              </div>
+            ))}
+            {!credentials.length && <div className="enterprise-empty">No connector credentials</div>}
+          </div>
+        </div>
+
+        <div className="enterprise-panel">
+          <div className="enterprise-panel-header">
+            <h3>Health</h3>
+          </div>
+          <div className="enterprise-table compact">
+            <div className="enterprise-row enterprise-row-head">
+              <span>Connector</span>
+              <span>Status</span>
+              <span>Message</span>
+            </div>
+            {health.map((item) => (
+              <div key={item.connector_type} className="enterprise-row">
+                <span>{item.connector_type}</span>
+                <span className={item.ok ? 'enterprise-ok' : 'enterprise-bad'}>{item.status}</span>
+                <span>{item.message || '-'}</span>
+              </div>
+            ))}
+            {!health.length && <div className="enterprise-empty">No registered connectors</div>}
+          </div>
+          {!!registryErrors.length && (
+            <div className="enterprise-errors">
+              {registryErrors.map((error, idx) => <div key={idx}>{error}</div>)}
+            </div>
+          )}
+        </div>
+
+        <div className="enterprise-panel enterprise-panel-wide">
+          <div className="enterprise-panel-header">
+            <h3>Default Connector Policies</h3>
+            <button type="button" className="refresh-btn" onClick={installDefaults} disabled={loading}>Install defaults</button>
+          </div>
+          <div className="enterprise-table policy-table">
+            <div className="enterprise-row enterprise-row-head">
+              <span>Rule</span>
+              <span>Resource</span>
+              <span>Effect</span>
+            </div>
+            {policies.filter((policy) => String(policy.resource || '').startsWith('connector:')).map((policy) => (
+              <div key={policy.id} className="enterprise-row">
+                <span>{policy.id}</span>
+                <span>{policy.resource}</span>
+                <span>{policy.effect}</span>
+              </div>
+            ))}
+            {!policies.filter((policy) => String(policy.resource || '').startsWith('connector:')).length && (
+              <div className="enterprise-empty">No connector policies</div>
+            )}
+          </div>
+        </div>
+      </section>
+    </main>
+  );
+}
 
 export default function App() {
   const [agents, setAgents] = useState([]);
@@ -1505,6 +1751,7 @@ export default function App() {
               >
                 <option value="workspace">{ui.layoutWorkspace}</option>
                 <option value="telegram">{ui.layoutTelegram}</option>
+                <option value="enterprise">Enterprise</option>
               </select>
             </span>
             <span className="metric-chip language-chip">
@@ -1536,7 +1783,7 @@ export default function App() {
         </div>
       </header>
 
-      {layout !== 'telegram' ? (
+      {layout !== 'telegram' && layout !== 'enterprise' ? (
         <div className="selector">
           <button
             className={`refresh-btn reboot-btn ${rebooting ? 'refreshing' : ''}`}
@@ -1593,7 +1840,9 @@ export default function App() {
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
       >
-        {layout === 'telegram' ? (
+        {layout === 'enterprise' ? (
+          <EnterpriseAdminPanel />
+        ) : layout === 'telegram' ? (
           <main className="telegram-layout">
             <aside className="telegram-sidebar">
               <div className="telegram-sidebar-header">
