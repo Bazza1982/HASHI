@@ -39,6 +39,7 @@ from orchestrator.enterprise.connectors import (
     EnterpriseConnector,
     record_connector_event,
 )
+from orchestrator.enterprise.credentials import ConnectorCredential, ConnectorCredentialStore
 from orchestrator.enterprise.identity import EnterpriseRole, IdentityService
 from orchestrator.enterprise.policy import (
     ApprovalRequest,
@@ -104,6 +105,8 @@ __all__ = [
     "ConnectorAction",
     "ConnectorHealth",
     "ConnectorResult",
+    "ConnectorCredential",
+    "ConnectorCredentialStore",
     "EnterpriseConnector",
     "EnterpriseRole",
     "EnterpriseTask",
