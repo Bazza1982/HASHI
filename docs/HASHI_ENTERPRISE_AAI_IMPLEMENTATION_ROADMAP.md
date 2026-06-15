@@ -706,13 +706,16 @@ Implemented checkpoints:
 
 - Workbench admin API exposes project-filterable agent capability summaries at `GET /api/enterprise/agent-capabilities`.
 - The endpoint is guarded by enterprise admin auth and returns normalized backend/tool/project/bridge capability data.
+- Workbench admin API exposes policy rules at `GET /api/enterprise/policies` and `POST /api/enterprise/policies`.
+- Policy rule creation supports action, resource, effect, scope, conditions, priority, and optional explicit rule id.
 - `/api/health` includes an enterprise block in governed profiles with identity, channel registry, audit ledger, and policy evaluator readiness.
 - Personal profile health keeps the legacy response shape without enterprise fields.
 
 Residual P8 limitations:
 
 - Frontend admin screens are not yet implemented.
-- Capability summaries are read-only; policy editing and approval UI remain pending.
+- Capability summaries are read-only; approval UI remains pending.
+- Policy API supports list/create only; delete, simulation, and richer versioning remain pending.
 - Enterprise health is a readiness summary, not yet a full monitoring dashboard.
 
 **Minimum scope:**
@@ -737,7 +740,7 @@ Residual P8 limitations:
 - `ENT-101` Add users and roles screens.
 - `ENT-102` Add projects screen.
 - `ENT-103` Add channel registry screen.
-- `ENT-104` Add policy viewer/editor.
+- `ENT-104` Add policy viewer/editor. API list/create done; frontend and advanced edit operations remain pending.
 - `ENT-105` Add audit timeline and export screen.
 - `ENT-106` Add enterprise health screen.
 - `ENT-106A` Add enterprise service readiness to `/api/health`. Done for API-level identity/channel/audit/policy checks.
