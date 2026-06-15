@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from orchestrator.enterprise.audit_ledger import EnterpriseAuditLedger
 from orchestrator.enterprise.audit_schema import AuditEvent, AuditEventWriter
 from orchestrator.enterprise.channels import ChannelPermission, ChannelRegistry
 from orchestrator.enterprise.policy import evaluate_governance_policy
@@ -167,12 +168,28 @@ class EnterpriseChannelGate:
             "channel_id": result.channel_id,
         }
         context.update(audit_context or {})
-        self.audit_writer.append(
-            AuditEvent(
-                event_type="channel",
-                actor_id=actor_id,
-                action="channel_access",
-                status="denied",
-                context=context,
-            )
+        event = AuditEvent(
+            event_type="channel",
+            actor_id=actor_id,
+            action="channel_access",
+            status="denied",
+            context=context,
         )
+        self.audit_writer.append(event)
+        self._append_ledger_event(event, context)
+
+    def _append_ledger_event(self, event: AuditEvent, context: dict) -> None:
+        if not self.org_id:
+            return
+        try:
+            bridge_home = Path(getattr(self.global_config, "bridge_home", None) or ".")
+            ledger = EnterpriseAuditLedger.from_path(bridge_home / "state" / "enterprise.sqlite", org_id=self.org_id)
+            ledger.append_audit_event(
+                event,
+                project_id=context.get("project_id"),
+                task_id=context.get("task_id"),
+                request_id=context.get("request_id"),
+                correlation_id=context.get("correlation_id"),
+            )
+        except Exception:
+            pass

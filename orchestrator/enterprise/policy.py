@@ -8,6 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from orchestrator.enterprise.audit_schema import AuditEvent, AuditEventWriter
+from orchestrator.enterprise.audit_ledger import EnterpriseAuditLedger
 from orchestrator.enterprise.store import EnterpriseStore
 
 
@@ -376,6 +377,23 @@ def _write_policy_audit(
             context=audit_context,
         )
     )
+    org_id = context.get("org_id") or getattr(context.get("global_config"), "organization_id", None)
+    if org_id:
+        try:
+            ledger = EnterpriseAuditLedger.from_path(bridge_home / "state" / "enterprise.sqlite", org_id=str(org_id))
+            ledger.append(
+                event_type="policy",
+                actor_id=actor_id,
+                action=action,
+                status=status,
+                project_id=context.get("project_id"),
+                task_id=context.get("task_id"),
+                request_id=context.get("request_id"),
+                correlation_id=context.get("correlation_id"),
+                context=audit_context,
+            )
+        except Exception:
+            pass
 
 
 def _json_safe_context(context: dict) -> dict:

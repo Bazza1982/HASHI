@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from orchestrator.enterprise import IdentityService, PolicyDecision, PolicyEvaluator, evaluate_governance_policy
+from orchestrator.enterprise import EnterpriseAuditLedger, IdentityService, PolicyDecision, PolicyEvaluator, evaluate_governance_policy
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 
 
@@ -108,6 +108,12 @@ def test_evaluate_governance_policy_uses_enterprise_db(tmp_path):
     assert event["status"] == "denied"
     assert event["context"]["resource"] == "command:sys"
     assert event["context"]["decision"] == "deny"
+    ledger = EnterpriseAuditLedger.from_path(tmp_path / "state" / "enterprise.sqlite", org_id="ORG-001")
+    ledger_events = ledger.query(event_type="policy")
+    assert len(ledger_events) == 1
+    assert ledger_events[0].action == "command.execute"
+    assert ledger_events[0].status == "denied"
+    assert ledger_events[0].context["resource"] == "command:sys"
 
 
 def test_evaluate_governance_policy_creates_approval_request(tmp_path):
@@ -151,6 +157,11 @@ def test_evaluate_governance_policy_creates_approval_request(tmp_path):
     assert event["status"] == "approval_required"
     assert event["context"]["approval_request_id"] == result.approval_request_id
     assert event["context"]["decision"] == "approval_required"
+    ledger = EnterpriseAuditLedger.from_path(tmp_path / "state" / "enterprise.sqlite", org_id="ORG-001")
+    ledger_events = ledger.query(event_type="policy")
+    assert len(ledger_events) == 1
+    assert ledger_events[0].status == "approval_required"
+    assert ledger_events[0].context["approval_request_id"] == result.approval_request_id
 
 
 def test_personal_profile_policy_stays_allow_by_default(tmp_path):
