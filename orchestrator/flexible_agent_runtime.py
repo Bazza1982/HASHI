@@ -53,6 +53,8 @@ from orchestrator.slash_command_audit import (
     parse_inline_callback_command,
     resolve_handler_kind,
 )
+from orchestrator.enterprise.audit_schema import AuditEventWriter
+from orchestrator.enterprise.channel_gate import EnterpriseChannelGate
 from orchestrator.runtime_common import (
     QueuedRequest,
     _print_final_response,
@@ -224,6 +226,7 @@ class FlexibleAgentRuntime:
         self.voice_manager = VoiceManager(self.workspace_dir, self.media_dir, ffmpeg_cmd="ffmpeg", secrets=self.secrets)
         self._authorized_telegram_ids = resolve_authorized_telegram_ids(self.config.extra, self.global_config.authorized_id)
         self._active_chat_ids: dict[int, int] = {}  # user_id -> chat_id, populated on first message
+        self._channel_gate = self._build_channel_gate()
 
         # Safe voice confirmation layer
         self._safevoice_enabled: bool = self._get_skill_state().get("safevoice", True)
@@ -388,6 +391,60 @@ class FlexibleAgentRuntime:
         # denylist
         return True
 
+    def _build_channel_gate(self) -> EnterpriseChannelGate:
+        profile = str(getattr(self.global_config, "deployment_profile", "personal") or "personal")
+        if profile == "personal":
+            return EnterpriseChannelGate.from_global_config(self.global_config)
+        bridge_home = Path(getattr(self.global_config, "bridge_home", Path(".")))
+        return EnterpriseChannelGate.from_global_config(
+            self.global_config,
+            audit_writer=AuditEventWriter(
+                enabled=True,
+                jsonl_path=bridge_home / "state" / "enterprise_audit.jsonl",
+            ),
+        )
+
+    def _get_channel_gate(self) -> EnterpriseChannelGate:
+        gate = getattr(self, "_channel_gate", None)
+        if gate is None:
+            gate = FlexibleAgentRuntime._build_channel_gate(self)
+            self._channel_gate = gate
+        return gate
+
+    async def _telegram_channel_allowed(self, update: Update, *, source_channel: str) -> bool:
+        query = getattr(update, "callback_query", None)
+        effective_user = getattr(update, "effective_user", None) or getattr(query, "from_user", None)
+        effective_chat = getattr(update, "effective_chat", None)
+        if effective_chat is None and query is not None:
+            effective_chat = getattr(getattr(query, "message", None), "chat", None)
+        actor_id = getattr(effective_user, "id", None)
+        chat_id = getattr(effective_chat, "id", None)
+        result = FlexibleAgentRuntime._get_channel_gate(self).check_ingress(
+            "telegram",
+            actor_id=actor_id,
+            user_id=str(actor_id) if actor_id is not None else None,
+            agent_id=getattr(self, "name", None),
+            audit_context={"chat_id": chat_id, "source_channel": source_channel},
+        )
+        if result.allowed:
+            return True
+        self.logger.warning(
+            "Denied Telegram ingress via enterprise channel gate: agent=%s actor=%s chat=%s reason=%s",
+            getattr(self, "name", None),
+            actor_id,
+            chat_id,
+            result.reason,
+        )
+        if query is not None:
+            answer = getattr(query, "answer", None)
+            if callable(answer):
+                maybe_awaitable = answer("Telegram access is not enabled for this enterprise HASHI workspace.")
+                if inspect.isawaitable(maybe_awaitable):
+                    await maybe_awaitable
+        else:
+            await self._reply_text(update, "Telegram access is not enabled for this enterprise HASHI workspace.")
+        return False
+
     def _wrap_callback(self, handler_kind: str, handler):
         async def _wrapped(update: Update, context: Any):
             query = update.callback_query
@@ -410,6 +467,9 @@ class FlexibleAgentRuntime:
                     session.deny("unauthorized")
                     if query is not None:
                         await query.answer()
+                    return
+                if not await FlexibleAgentRuntime._telegram_channel_allowed(self, update, source_channel="telegram_callback"):
+                    session.block("channel_denied")
                     return
                 await handler(update, context)
             except Exception as exc:
@@ -438,6 +498,9 @@ class FlexibleAgentRuntime:
             try:
                 if not self._is_authorized_user(actor_id):
                     session.deny("unauthorized")
+                    return
+                if not await FlexibleAgentRuntime._telegram_channel_allowed(self, update, source_channel="telegram"):
+                    session.block("channel_denied")
                     return
                 self._record_active_chat(update)
                 if not self._is_command_allowed(cmd):
@@ -6723,6 +6786,8 @@ class FlexibleAgentRuntime:
     async def handle_message(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             self.logger.warning(f"Ignored message from unauthorized user ID: {update.effective_user.id}")
+            return
+        if not await FlexibleAgentRuntime._telegram_channel_allowed(self, update, source_channel="telegram"):
             return
         self._record_active_chat(update)
         if self._should_redirect_after_transfer():
