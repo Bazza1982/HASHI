@@ -260,6 +260,62 @@ class PolicyEvaluator:
                 ).fetchall()
         return [_approval_from_row(row) for row in rows]
 
+    def decide_approval_request(
+        self,
+        request_id: str,
+        *,
+        status: str,
+        decided_by: str,
+        reason: str | None = None,
+    ) -> ApprovalRequest:
+        status = _normalize_approval_decision(status)
+        request_id = _require_id(request_id, "request_id")
+        decided_by = _require_id(decided_by, "decided_by")
+        now = _utc_now_iso()
+        with self.store.connect() as con:
+            current = con.execute(
+                "SELECT status FROM approval_requests WHERE org_id = ? AND id = ?",
+                (self.org_id, request_id),
+            ).fetchone()
+            if current is None:
+                raise ValueError(f"approval request not found: {request_id!r}")
+            if current["status"] != "pending":
+                raise ValueError(f"approval request is already decided: {request_id!r}")
+            con.execute(
+                """
+                UPDATE approval_requests
+                SET status = ?, decided_by = ?, decided_at = ?, decision_reason = ?
+                WHERE org_id = ? AND id = ?
+                """,
+                (status, decided_by, now, _optional_text(reason), self.org_id, request_id),
+            )
+        request = self.get_approval_request(request_id)
+        self._write_approval_decision_ledger_event(request)
+        return request
+
+    def _write_approval_decision_ledger_event(self, request: ApprovalRequest) -> None:
+        try:
+            ledger = EnterpriseAuditLedger(self.store, org_id=self.org_id)
+            ledger.append(
+                event_type="policy",
+                action="approval.decide",
+                status=request.status,
+                actor_id=request.decided_by,
+                project_id=request.context.get("project_id"),
+                task_id=request.context.get("task_id"),
+                request_id=request.id,
+                correlation_id=request.context.get("correlation_id"),
+                context={
+                    "approval_request_id": request.id,
+                    "original_action": request.action,
+                    "original_resource": request.resource,
+                    "rule_id": request.rule_id,
+                    "decision_reason": request.decision_reason,
+                },
+            )
+        except Exception:
+            pass
+
 
 def evaluate_governance_policy(action: str, context: dict | None = None) -> PolicyEvaluation:
     context = context or {}
@@ -435,6 +491,15 @@ def _conditions_match(conditions: dict, context: dict) -> bool:
     return True
 
 
+def _normalize_approval_decision(status: str) -> str:
+    normalized = _require_text(status, "status").lower()
+    if normalized in {"approve", "approved", "allow", "allowed"}:
+        return "approved"
+    if normalized in {"deny", "denied", "reject", "rejected"}:
+        return "denied"
+    raise ValueError(f"unsupported approval decision: {status!r}")
+
+
 def _require_id(value: str, field_name: str) -> str:
     normalized = str(value or "").strip()
     if not normalized:
@@ -447,3 +512,8 @@ def _require_text(value: str, field_name: str) -> str:
     if not normalized:
         raise ValueError(f"{field_name} is required")
     return normalized
+
+
+def _optional_text(value) -> str | None:
+    normalized = str(value or "").strip()
+    return normalized or None
