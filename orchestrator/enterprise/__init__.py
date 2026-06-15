@@ -57,6 +57,7 @@ from orchestrator.enterprise.policy import (
     evaluate_governance_policy,
 )
 from orchestrator.enterprise.routing import ProjectRouteDecision, agent_project_ids, evaluate_project_route
+from orchestrator.enterprise.secret_refs import ConnectorSecretResolver, ResolvedSecret
 from orchestrator.enterprise.store import EnterpriseStore
 from orchestrator.enterprise.evidence import EvidenceBundle, EvidenceBundleRegistry
 from orchestrator.enterprise.escalation import (
@@ -117,6 +118,7 @@ __all__ = [
     "ConnectorHealthSummary",
     "ConnectorRegistry",
     "ConnectorResult",
+    "ConnectorSecretResolver",
     "ConnectorCredential",
     "ConnectorCredentialStore",
     "EnterpriseConnector",
@@ -135,6 +137,7 @@ __all__ = [
     "PolicyEvaluator",
     "PolicyRule",
     "ProjectRouteDecision",
+    "ResolvedSecret",
     "ApprovalRequest",
     "ArtifactVerificationResult",
     "TaskRegistry",
