@@ -5,6 +5,7 @@ from typing import Any
 from orchestrator.agent_directory import AgentDirectory
 from orchestrator.bridge_protocol import build_result_reply, validate_reply_payload, validate_request_payload
 from orchestrator.conversation_store import ConversationStore
+from orchestrator.enterprise.routing import evaluate_project_route
 
 _C_BRIDGE = "\033[38;5;110m"
 _C_RESET = "\033[0m"
@@ -36,12 +37,29 @@ class ConversationRouter:
 
     async def send_message(self, payload: dict[str, Any]) -> dict[str, Any]:
         message = validate_request_payload(payload)
+        project_id = self._extract_project_id(payload)
+        if project_id:
+            message["project_id"] = project_id
+            message.setdefault("meta", {})["project_id"] = project_id
         self.store.ensure_thread(
             message["thread_id"],
             created_by=message["from_agent"],
             participants=[message["from_agent"], message["to_agent"]],
         )
         self.store.save_message(message, status="received")
+
+        route_decision = evaluate_project_route(
+            project_id=project_id,
+            from_agent=message["from_agent"],
+            to_agent=message["to_agent"],
+            sender_row=self.directory.get_agent_row(message["from_agent"]),
+            target_row=self.directory.get_agent_row(message["to_agent"]),
+        )
+        if not route_decision.allowed:
+            self.store.record_permission_audit(message["message_id"], "deny", route_decision.reason)
+            self.store.update_message_status(message["message_id"], "rejected", error_text=route_decision.reason)
+            self.store.update_thread_status(message["thread_id"], "rejected")
+            raise PermissionError(route_decision.reason)
 
         allowed, reason = self.directory.check_permission(message)
         self.store.record_permission_audit(message["message_id"], "allow" if allowed else "deny", reason)
@@ -179,3 +197,12 @@ class ConversationRouter:
             "Respond directly to this task. The bridge layer will capture your final response "
             "and route it back to the requesting agent thread."
         )
+
+    def _extract_project_id(self, payload: dict[str, Any]) -> str:
+        project_id = str(payload.get("project_id") or "").strip()
+        if project_id:
+            return project_id
+        meta = payload.get("meta") or {}
+        if isinstance(meta, dict):
+            return str(meta.get("project_id") or "").strip()
+        return ""

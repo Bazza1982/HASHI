@@ -632,7 +632,7 @@ Residual P6 limitations:
 
 **Goal:** route work by project, role, and approval state.
 
-**Implementation status:** P7A approval queue service foundation completed.
+**Implementation status:** P7A-P7C service/API foundations completed.
 
 Implemented checkpoints:
 
@@ -643,12 +643,16 @@ Implemented checkpoints:
   - `GET /api/enterprise/approvals`;
   - `POST /api/enterprise/approvals/{request_id}/approve`;
   - `POST /api/enterprise/approvals/{request_id}/deny`.
+- bridge routing now enforces explicit `project_id` context:
+  - sender and target agents must both be assigned to the requested project;
+  - cross-project targets fail before runtime enqueue;
+  - legacy messages without `project_id` preserve current personal behavior.
 
 Residual P7 limitations:
 
 - Workbench approval UI is not yet implemented;
 - approved requests are not yet consumed to resume blocked work automatically;
-- project-aware inbound routing is still pending.
+- project-aware routing is implemented only for explicit bridge `project_id`; broader channel/project resolution remains pending.
 
 **Scope:**
 
@@ -669,7 +673,7 @@ Residual P7 limitations:
 
 **Tickets:**
 
-- `ENT-090` Add project-aware inbound routing.
+- `ENT-090` Add project-aware inbound routing. Done for bridge messages that carry explicit `project_id`, with fail-closed sender/target checks.
 - `ENT-091` Add approval queue APIs. Done for Workbench admin list endpoint.
 - `ENT-092` Add admin approve/deny action. Done for service and Workbench admin API routes with ledger events.
 - `ENT-093` Add failed-task escalation events.
