@@ -270,7 +270,7 @@ class TaskScheduler:
 
         def _on_result(payload: dict) -> None:
             text = str((payload or {}).get("text") or "")
-            if marker not in text:
+            if not any(line.strip() == marker for line in text.splitlines()):
                 return
             if self._disable_nudge(task_id, reason="exit_condition_met"):
                 scheduler_logger.info("Nudge %s completed by response marker.", task_id)
