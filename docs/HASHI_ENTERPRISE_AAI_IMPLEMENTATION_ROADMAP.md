@@ -228,6 +228,34 @@ Deferred:
 
 **Goal:** make channels administrator-controlled and disabled by default in governed profiles.
 
+**Implementation status:** completed for the current P2 code slice.
+
+Implemented checkpoints:
+
+- enterprise channel schema and `ChannelRegistry`;
+- default channel bootstrap:
+  - `workbench` registered as the control-plane channel;
+  - `hchat`, `telegram`, `whatsapp`, `email`, `slack`, `teams`, `google_chat`, and `feishu` registered disabled by default;
+- channel admin API:
+  - `GET /api/enterprise/channels`;
+  - `POST /api/enterprise/channels`;
+  - `POST /api/enterprise/channels/bind`;
+- unified `EnterpriseChannelGate`;
+- governed-profile gates for:
+  - WhatsApp ingress and egress;
+  - HChat Workbench exchange ingress and egress;
+  - HChat CLI send-side egress;
+  - Telegram command, message, and inline callback ingress;
+- deny events written to the enterprise audit JSONL writer;
+- personal profile remains allow-by-default for existing single-user behavior.
+
+Residual P2 limitations:
+
+- channel bindings currently use pragmatic identifiers such as Telegram user id, WhatsApp phone number, and agent id;
+- project/task-aware channel authorization is deferred to P3/P5/P7;
+- Workbench UI for channel administration is deferred to P8-min;
+- direct Remote protocol paths outside Workbench exchange still need deeper trust and policy integration.
+
 **Scope:**
 
 - channel registry;
@@ -248,12 +276,12 @@ Deferred:
 
 **Tickets:**
 
-- `ENT-030` Add channel schema and registry APIs.
-- `ENT-031` Default all non-core channels disabled in `team` and `enterprise`.
-- `ENT-032` Gate inbound channel messages.
-- `ENT-033` Gate outbound channel replies.
-- `ENT-034` Add channel audit events.
-- `ENT-035` Add admin APIs for channel enable and binding.
+- `ENT-030` Add channel schema and registry APIs. Done for MVP.
+- `ENT-031` Default all non-core channels disabled in `team` and `enterprise`. Done for MVP.
+- `ENT-032` Gate inbound channel messages. Done for Telegram, WhatsApp, and HChat exchange.
+- `ENT-033` Gate outbound channel replies. Done for WhatsApp and HChat send/exchange; Telegram outbound remains tied to Telegram ingress in this slice.
+- `ENT-034` Add channel audit events. Done for denied channel decisions.
+- `ENT-035` Add admin APIs for channel enable and binding. Done for MVP.
 
 **Acceptance:**
 
@@ -623,8 +651,8 @@ P10 starts after beta control plane is stable
 |---|---|---|
 | S1 | P0 skeleton, profiles, audit/policy contracts | personal unchanged; enterprise fails fast without bootstrap |
 | S2 | P1A identity bootstrap and sessions | admin login works; individual user blocked from admin APIs |
-| S3 | P1B projects/tokens and P2 channel registry | channel disabled-by-default behavior works |
-| S4 | P2.5 admin API and P3 policy MVP start | admin can configure channels through API |
+| S3 | P1B projects/tokens and P2 channel registry | Done for MVP channel registry and disabled-by-default behavior |
+| S4 | P2.5 admin API and P3 policy MVP start | Channel admin API done; P3 policy MVP starts next |
 | S5 | P3 policy MVP and P4 ledger start | command/file/shell/backend decisions audited |
 | S6 | P4 ledger query/export and P5 task/artifact start | governed task timeline query works |
 | S7 | P6 secure execution and P8-min admin console | unsafe write/shell blocked; audit viewer works |
