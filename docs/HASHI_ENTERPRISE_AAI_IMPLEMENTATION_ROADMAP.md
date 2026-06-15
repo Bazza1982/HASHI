@@ -820,7 +820,7 @@ Residual P9 limitations:
 
 **Goal:** add governed integrations after the control plane is stable.
 
-**Implementation status:** P10 service interface groundwork started.
+**Implementation status:** P10 service interface and execution gate groundwork started.
 
 Implemented checkpoints:
 
@@ -831,12 +831,21 @@ Implemented checkpoints:
   - credentials store connector type, display name, secret reference, scopes, and status;
   - revoke marks credentials as revoked and hides them from default active queries;
   - schema version now includes `connector_credentials`.
+- Connector execution gate added:
+  - validates the requested connector credential exists before action execution;
+  - fails closed when a credential is revoked or inactive;
+  - fails closed when a credential belongs to a different organization than the active policy evaluator;
+  - fails closed when the credential connector type does not match the requested connector action;
+  - calls the enterprise `PolicyEvaluator` with `connector.execute` and a `connector:{type}:{action}` resource;
+  - supports explicit policy deny and `approval_required` decisions before a connector implementation can run;
+  - creates pending approval requests for connector actions that require approval.
 
 Residual P10 limitations:
 
 - No real GitHub, Slack, Teams, Google Chat, or Feishu connector is implemented yet.
 - Credential store records secret references only; Vault/Kubernetes secret resolution is still pending.
-- Connector policy gate and revoke behavior are still pending.
+- Connector gate is a service helper; real connectors and Workbench connector APIs still need to call it consistently.
+- Connector health probes and admin UI are still pending.
 
 **Scope:**
 
@@ -856,10 +865,11 @@ Residual P10 limitations:
 
 - `ENT-120` Define connector interface. Done for service contract and audit event helper.
 - `ENT-121` Add scoped credential store abstraction. Done for secret references, scopes, active listing, and revoke.
-- `ENT-122` Add first enterprise channel connector.
+- `ENT-122` Add connector execution gate. Done for credential existence, org isolation, revoke fail-closed, type match, policy deny, and approval-required decisions.
+- `ENT-126` Add first enterprise channel connector.
 - `ENT-123` Add GitHub connector with audit.
 - `ENT-124` Add connector health checks.
-- `ENT-125` Add credential revoke tests.
+- `ENT-125` Add credential revoke tests. Done for gate-level fail-closed behavior.
 
 **Acceptance:**
 
