@@ -1799,19 +1799,35 @@ class WorkbenchApiServer:
     async def handle_health(self, request):
         running_agents = [runtime.name for runtime in self._runtime_list() if runtime.startup_success]
         orchestrator = self.orchestrator
-        return web.json_response(
-            {
-                "ok": True,
-                "instance_id": getattr(self.global_config, "instance_id", None)
-                or getattr(orchestrator, "instance_id", None)
-                or "HASHI",
-                "workbench_port": getattr(self.global_config, "workbench_port", None),
-                "api_gateway_port": getattr(self.global_config, "api_gateway_port", None),
-                "api_gateway_enabled": bool(getattr(orchestrator, "api_gateway", None)),
-                "api_gateway_default_model": getattr(getattr(orchestrator, "api_gateway", None), "default_model", None),
-                "agents": running_agents,
-            }
-        )
+        payload = {
+            "ok": True,
+            "instance_id": getattr(self.global_config, "instance_id", None)
+            or getattr(orchestrator, "instance_id", None)
+            or "HASHI",
+            "workbench_port": getattr(self.global_config, "workbench_port", None),
+            "api_gateway_port": getattr(self.global_config, "api_gateway_port", None),
+            "api_gateway_enabled": bool(getattr(orchestrator, "api_gateway", None)),
+            "api_gateway_default_model": getattr(getattr(orchestrator, "api_gateway", None), "default_model", None),
+            "agents": running_agents,
+        }
+        if self._is_governed_profile():
+            payload["enterprise"] = self._enterprise_health_payload()
+        return web.json_response(payload)
+
+    def _enterprise_health_payload(self) -> dict:
+        policy_evaluator = self._enterprise_policy_evaluator()
+        services = {
+            "identity": self.identity_service is not None,
+            "channel_registry": self.channel_registry is not None,
+            "audit_ledger": self.audit_ledger is not None,
+            "policy_evaluator": policy_evaluator is not None,
+        }
+        return {
+            "profile": str(getattr(self.global_config, "deployment_profile", "") or ""),
+            "organization_id": str(getattr(self.global_config, "organization_id", "") or "").strip() or None,
+            "services": services,
+            "ok": all(services.values()),
+        }
 
     async def handle_jobs_import(self, request):
         """Import a job from a remote instance (cross-instance job transfer).
