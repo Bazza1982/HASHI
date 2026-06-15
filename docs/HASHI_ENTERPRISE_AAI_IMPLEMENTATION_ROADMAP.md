@@ -496,7 +496,7 @@ Residual P4 limitations:
 
 **Goal:** make delegated work inspectable as tasks with artifacts and evidence bundles.
 
-**Implementation status:** P5A data and service foundation completed.
+**Implementation status:** P5A-P5C service foundation completed.
 
 Implemented checkpoints:
 
@@ -513,12 +513,17 @@ Implemented checkpoints:
   - `tool_action_audit.jsonl` includes org, project, task, and artifact identifiers when available;
 - evidence bundle schema and `EvidenceBundleRegistry` service:
   - bundles link a task to audit event ids and artifact ids;
-  - helper builds a bundle from current ledger task events and registered artifacts.
+  - helper builds a bundle from current ledger task events and registered artifacts;
+- Superloop evidence linkage:
+  - `SuperloopStore.attach_evidence_bundle()` records enterprise evidence bundle ids in loop state;
+  - matching taskboard tasks receive `evidence_bundle_ids` and `enterprise_evidence_bundle_id`;
+  - the operation is idempotent and writes an auditable `evidence.bundle_attached` loop event;
+  - closeout validation treats evidence bundle fields as valid evidence.
 
 Residual P5 limitations:
 
 - artifact auto-registration currently covers HASHI-controlled `file_write`; CLI backend internal writes still need event mapping or completion verification;
-- Superloop closeout does not yet attach evidence bundle ids;
+- runtime closeout does not yet automatically build and attach evidence bundles;
 - task APIs and Workbench UI are deferred to P7/P8;
 - missing promised artifact verification remains P6 work.
 
@@ -545,7 +550,7 @@ Residual P5 limitations:
 - `ENT-071` Add artifact registry. Done for service-layer foundation.
 - `ENT-072` Register artifacts from governed file writes. Done for `ToolRegistry` `file_write` with explicit enterprise task context.
 - `ENT-073` Build evidence bundle from audit range and artifacts. Done for task-scoped ledger events and registered artifacts.
-- `ENT-074` Link Superloop closeout to evidence bundles.
+- `ENT-074` Link Superloop closeout to evidence bundles. Done at the store/taskboard layer; runtime closeout automation remains P7/P8 wiring.
 
 **Acceptance:**
 

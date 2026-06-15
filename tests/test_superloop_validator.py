@@ -201,6 +201,31 @@ def test_completed_dispatch_task_accepts_dispatch_refs_as_required_evidence(tmp_
     assert not any(item["code"] == "wait_status_noncontract" for item in report["findings"])
 
 
+def test_closeout_accepts_enterprise_evidence_bundle_as_closeout_evidence(tmp_path: Path) -> None:
+    store = SuperloopStore(tmp_path / "superloops")
+    _create_loop(
+        store,
+        taskboard=[
+            {
+                "task_id": "task-001",
+                "title": "Complete governed task",
+                "status": "completed",
+                "owner_agent": "zelda",
+                "owner_instance": "HASHI1",
+                "depends_on": [],
+                "execution_mode": "local_self",
+                "required_evidence": ["closeout evidence"],
+                "evidence_bundle_ids": ["evb-001"],
+            }
+        ],
+    )
+
+    report = validate_loop(store, "sl-test-001", closeout=True)
+
+    assert report["blocking"] is False
+    assert report["summary"]["errors"] == 0
+
+
 def test_closed_issue_and_wait_statuses_are_contract_terminal_states(tmp_path: Path) -> None:
     store = SuperloopStore(tmp_path / "superloops")
     _create_loop(
