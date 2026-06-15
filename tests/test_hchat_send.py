@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from urllib.error import URLError
 
+from orchestrator.enterprise import ChannelRegistry, IdentityService
 from tools import hchat_send
 
 
@@ -20,6 +21,24 @@ def _local_cfg() -> dict:
     }
 
 
+def _enterprise_cfg(tmp_path) -> dict:
+    cfg = _local_cfg()
+    cfg["global"] = {
+        **cfg["global"],
+        "deployment_profile": "enterprise",
+        "organization_id": "ORG-001",
+        "bridge_home": str(tmp_path),
+    }
+    return cfg
+
+
+def _audit_events(tmp_path) -> list[dict]:
+    path = tmp_path / "state" / "enterprise_audit.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
 def test_send_hchat_local_agent_uses_local_workbench_fallback(monkeypatch):
     calls = []
     cfg = _local_cfg()
@@ -35,6 +54,63 @@ def test_send_hchat_local_agent_uses_local_workbench_fallback(monkeypatch):
     assert hchat_send.send_hchat("akane", "zelda", "hello") is True
 
     assert calls == [(cfg, 18800, "akane", "zelda", "hello", "HASHI1", {"instance_id": "HASHI1"})]
+
+
+def test_send_hchat_enterprise_denies_disabled_hchat_egress(tmp_path, monkeypatch):
+    calls = []
+    cfg = _enterprise_cfg(tmp_path)
+    IdentityService.from_path(tmp_path / "state" / "enterprise.sqlite").create_organization(
+        org_id="ORG-001",
+        name="Acme",
+    )
+
+    monkeypatch.setattr(hchat_send, "_load_config", lambda: cfg)
+    monkeypatch.setattr(hchat_send, "_build_reply_route", lambda _cfg: {"instance_id": "HASHI1"})
+    monkeypatch.setattr(
+        hchat_send,
+        "_send_via_local_workbench",
+        lambda *args: calls.append(args) or True,
+    )
+
+    assert hchat_send.send_hchat("akane", "zelda", "hello") is False
+    assert calls == []
+    event = _audit_events(tmp_path)[-1]
+    assert event["event_type"] == "channel"
+    assert event["status"] == "denied"
+    assert event["context"]["channel_type"] == "hchat"
+    assert event["context"]["reason"] == "channel_disabled"
+    assert event["context"]["send_hchat"] is True
+
+
+def test_send_hchat_enterprise_allows_bound_sender_agent(tmp_path, monkeypatch):
+    calls = []
+    cfg = _enterprise_cfg(tmp_path)
+    IdentityService.from_path(tmp_path / "state" / "enterprise.sqlite").create_organization(
+        org_id="ORG-001",
+        name="Acme",
+    )
+    registry = ChannelRegistry.from_path(tmp_path / "state" / "enterprise.sqlite")
+    registry.ensure_default_channels(org_id="ORG-001")
+    registry.register_channel(org_id="ORG-001", channel_type="hchat", enabled=True)
+    registry.bind_channel(
+        org_id="ORG-001",
+        channel_type="hchat",
+        scope_type="agent",
+        scope_id="zelda",
+        permission="egress",
+    )
+
+    monkeypatch.setattr(hchat_send, "_load_config", lambda: cfg)
+    monkeypatch.setattr(hchat_send, "_build_reply_route", lambda _cfg: {"instance_id": "HASHI1"})
+    monkeypatch.setattr(
+        hchat_send,
+        "_send_via_local_workbench",
+        lambda *args: calls.append(args) or True,
+    )
+
+    assert hchat_send.send_hchat("akane", "zelda", "hello") is True
+    assert calls == [(cfg, 18800, "akane", "zelda", "hello", "HASHI1", {"instance_id": "HASHI1"})]
+    assert _audit_events(tmp_path) == []
 
 
 def test_send_hchat_explicit_local_instance_uses_local_workbench_fallback(monkeypatch):
