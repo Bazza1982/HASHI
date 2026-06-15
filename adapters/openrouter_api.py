@@ -22,6 +22,7 @@ from adapters.stream_events import (
     StreamCallback,
     StreamEvent,
 )
+from orchestrator.enterprise.policy import evaluate_governance_policy
 
 
 @dataclass
@@ -34,6 +35,19 @@ class _APIResult:
     completion_tokens: int = 0
     thinking_tokens: int = 0
     reasoning_content: str = ""
+
+
+def _tool_target_path(arguments: dict) -> str | None:
+    for key in ("path", "file_path", "target_path"):
+        value = arguments.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _file_resource(arguments: dict) -> str:
+    path = _tool_target_path(arguments)
+    return f"file:{path}" if path else "file:*"
 
 
 class OpenRouterAdapter(BaseBackend):
@@ -204,6 +218,18 @@ class OpenRouterAdapter(BaseBackend):
                 })
                 continue
 
+            policy = self._evaluate_tool_policy(tool_name, arguments)
+            if not policy.allowed:
+                result_text = self._blocked_tool_result_text(tool_name, policy)
+                await self._emit(on_stream_event, KIND_TOOL_END,
+                                 f"{tool_name}: blocked by policy", tool_name=tool_name)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc_id,
+                    "content": result_text,
+                })
+                continue
+
             # Execute
             result = await self.tool_registry.execute(tool_name, arguments, tool_call_id=tc_id)
 
@@ -216,6 +242,36 @@ class OpenRouterAdapter(BaseBackend):
                 "tool_call_id": tc_id,
                 "content": result.output,
             })
+
+    def _evaluate_tool_policy(self, tool_name: str, arguments: dict):
+        action, resource = self._tool_policy_action_resource(tool_name, arguments)
+        return evaluate_governance_policy(
+            action,
+            {
+                "global_config": self.global_config,
+                "agent_id": getattr(self.config, "name", None),
+                "backend": getattr(self.config, "engine", None),
+                "tool_name": tool_name,
+                "tool_arguments": arguments,
+                "resource": resource,
+                "target_path": _tool_target_path(arguments),
+            },
+        )
+
+    def _tool_policy_action_resource(self, tool_name: str, arguments: dict) -> tuple[str, str]:
+        normalized = (tool_name or "").strip().lower()
+        if normalized == "bash":
+            return "shell.execute", "shell:bash"
+        if normalized == "file_write":
+            return "file.write", _file_resource(arguments)
+        if normalized == "file_read":
+            return "file.read", _file_resource(arguments)
+        return "tool.execute", f"tool:{normalized or 'unknown'}"
+
+    def _blocked_tool_result_text(self, tool_name: str, policy) -> str:
+        if policy.decision.value == "approval_required":
+            return f"Error: tool call requires approval by enterprise policy: {tool_name}"
+        return f"Error: tool call blocked by enterprise policy: {tool_name}"
 
     async def _call_final_after_tool_loop_limit(
         self,
