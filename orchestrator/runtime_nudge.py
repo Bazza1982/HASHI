@@ -48,7 +48,8 @@ def build_nudge_with_buttons(skill_manager, agent_name: str, runtime=None):
         enabled = job.get("enabled", False)
         status = "🟢" if enabled else "🔴"
         count = int(meta.get("count", 0) or 0)
-        max_count = int(meta.get("max", 100) or 100)
+        max_count = int(meta.get("max", 0) or 0)
+        max_label = "∞" if max_count <= 0 else str(max_count)
         interval = int(job.get("interval_seconds", 0) or 0)
         minutes = max(1, interval // 60) if interval else "?"
         reason = meta.get("stopped_reason", "")
@@ -57,7 +58,7 @@ def build_nudge_with_buttons(skill_manager, agent_name: str, runtime=None):
         short_id = jid[:24]
 
         lines.append(f"\n{status} <code>{html.escape(jid)}</code>")
-        lines.append(f"   every {minutes} min · fired {count}/{max_count}")
+        lines.append(f"   every {minutes} min · fired {count}/{max_label}")
         if exit_condition:
             lines.append(f"   until: {exit_condition}")
         if reason:

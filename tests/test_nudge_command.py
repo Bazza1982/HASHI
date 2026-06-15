@@ -38,7 +38,38 @@ def test_create_nudge_job_writes_prompt_and_metadata(tmp_path):
     assert saved["interval_seconds"] == 120
     assert saved["exit_condition"] == "until the scan is done"
     assert saved["nudge_meta"]["count"] == 0
+    assert saved["nudge_meta"]["max"] == 0
     assert f"NUDGE_COMPLETE:{job['id']}" in saved["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_scheduler_nudge_default_max_is_unlimited(tmp_path):
+    manager = SkillManager(project_root=tmp_path, tasks_path=tmp_path / "tasks.json")
+    job = manager.create_nudge_job(
+        agent_name="zelda",
+        interval_minutes=1,
+        exit_condition="until complete",
+    )
+
+    data = json.loads((tmp_path / "tasks.json").read_text(encoding="utf-8"))
+    data["nudges"][0]["nudge_meta"]["count"] = 999
+    (tmp_path / "tasks.json").write_text(json.dumps(data), encoding="utf-8")
+
+    runtime = FakeRuntime(busy=False)
+    scheduler = TaskScheduler(
+        tasks_path=tmp_path / "tasks.json",
+        state_path=tmp_path / "scheduler_state.json",
+        runtimes=[runtime],
+        authorized_id=123,
+    )
+    scheduler.state["nudges"][job["id"]] = 0
+
+    await _run_one_scheduler_pass(scheduler)
+
+    data = json.loads((tmp_path / "tasks.json").read_text(encoding="utf-8"))
+    assert data["nudges"][0]["nudge_meta"]["count"] == 1000
+    assert data["nudges"][0]["enabled"] is True
+    assert len(runtime.enqueued) == 1
 
 
 def test_should_fire_returns_missed_seconds_for_due_cron():
@@ -277,6 +308,24 @@ def test_build_nudge_with_buttons_uses_short_callbacks_for_long_ids():
     assert callbacks
     assert all(len(callback_data) <= CALLBACK_DATA_LIMIT for callback_data in callbacks)
     assert any(callback_data.startswith("nudgejob:key:") for callback_data in callbacks)
+
+
+def test_nudge_list_shows_unlimited_max_when_set_to_zero():
+    class SkillManager:
+        def list_jobs(self, kind, agent_name=None):
+            return [
+                {
+                    "id": "zelda-nudge-123",
+                    "agent": "zelda",
+                    "enabled": True,
+                    "interval_seconds": 300,
+                    "exit_condition": "until healthy",
+                    "nudge_meta": {"count": 1, "max": 0},
+                }
+            ]
+
+    text, _ = build_nudge_with_buttons(SkillManager(), "zelda")
+    assert "fired 1/∞" in text
 
 
 @pytest.mark.asyncio

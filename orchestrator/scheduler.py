@@ -388,8 +388,8 @@ class TaskScheduler:
 
                     meta = nudge.setdefault("nudge_meta", {})
                     count = int(meta.get("count", 0)) + 1
-                    max_count = int(meta.get("max", 100))
-                    if count > max_count:
+                    max_count = int(meta.get("max", 0) or 0)
+                    if max_count > 0 and count > max_count:
                         scheduler_logger.info("Nudge %s reached max (%s). Auto-disabling.", task_id, max_count)
                         nudge["enabled"] = False
                         meta["count"] = count - 1
