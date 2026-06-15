@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from orchestrator.enterprise.artifacts import Artifact
+from orchestrator.enterprise.artifacts import Artifact, ArtifactRegistry
 from orchestrator.enterprise.tasks import EnterpriseTask, TaskRegistry, TaskStatus
 
 
@@ -54,6 +54,26 @@ def fail_task_if_promised_artifacts_missing(
     result = verify_promised_artifacts(task, artifacts, promised_artifacts=promised_artifacts)
     if not result.ok:
         registry.transition_task(task.id, TaskStatus.FAILED, failed_reason=result.reason)
+    return result
+
+
+def complete_task_with_artifact_verification(
+    tasks: TaskRegistry,
+    artifacts: ArtifactRegistry,
+    task: EnterpriseTask,
+    *,
+    promised_artifacts: Iterable[object] | None = None,
+) -> ArtifactVerificationResult:
+    task_artifacts = artifacts.list_artifacts(org_id=task.org_id, task_id=task.id)
+    result = verify_promised_artifacts(
+        task,
+        task_artifacts,
+        promised_artifacts=promised_artifacts,
+    )
+    if result.ok:
+        tasks.transition_task(task.id, TaskStatus.COMPLETED)
+    else:
+        tasks.transition_task(task.id, TaskStatus.FAILED, failed_reason=result.reason)
     return result
 
 

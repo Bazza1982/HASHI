@@ -10,6 +10,7 @@ from orchestrator.enterprise import (
     IdentityService,
     TaskRegistry,
     TaskStatus,
+    complete_task_with_artifact_verification,
     fail_task_if_promised_artifacts_missing,
     verify_promised_artifacts,
 )
@@ -198,6 +199,52 @@ def test_fail_task_if_promised_artifacts_missing_records_clear_failure(tmp_path)
     assert failed is not None
     assert failed.status == "failed"
     assert failed.failed_reason == "missing promised artifacts: appendix.csv"
+
+
+def test_complete_task_with_artifact_verification_completes_when_outputs_exist(tmp_path):
+    svc = _init_services(tmp_path)
+    task = svc["tasks"].create_task(
+        org_id="ORG-001",
+        project_id="prj-research",
+        prompt_summary="Write governed report",
+        task_id="task-complete-ok",
+        metadata={"promised_artifacts": ["final-report.md"]},
+    )
+    svc["artifacts"].register_artifact(
+        org_id="ORG-001",
+        project_id="prj-research",
+        task_id=task.id,
+        artifact_type="file",
+        path=tmp_path / "final-report.md",
+        artifact_id="art-final-report",
+    )
+
+    result = complete_task_with_artifact_verification(svc["tasks"], svc["artifacts"], task)
+
+    assert result.ok is True
+    completed = svc["tasks"].get_task(task.id)
+    assert completed is not None
+    assert completed.status == "completed"
+    assert completed.failed_reason is None
+
+
+def test_complete_task_with_artifact_verification_fails_when_outputs_missing(tmp_path):
+    svc = _init_services(tmp_path)
+    task = svc["tasks"].create_task(
+        org_id="ORG-001",
+        project_id="prj-research",
+        prompt_summary="Write governed report",
+        task_id="task-complete-missing",
+        metadata={"promised_artifacts": ["final-report.md"]},
+    )
+
+    result = complete_task_with_artifact_verification(svc["tasks"], svc["artifacts"], task)
+
+    assert result.ok is False
+    failed = svc["tasks"].get_task(task.id)
+    assert failed is not None
+    assert failed.status == "failed"
+    assert failed.failed_reason == "missing promised artifacts: final-report.md"
 
 
 def test_execution_scope_allows_paths_inside_project_workspace(tmp_path):
