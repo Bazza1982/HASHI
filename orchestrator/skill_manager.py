@@ -473,7 +473,7 @@ class SkillManager:
         agent_name: str,
         interval_minutes: int,
         exit_condition: str,
-        max_nudges: int = 100,
+        max_nudges: int = 0,
     ) -> dict[str, Any]:
         tasks = self._load_tasks()
         task_id = f"{agent_name}-nudge-{uuid4().hex[:6]}"
@@ -490,7 +490,7 @@ class SkillManager:
             "exit_condition": exit_condition,
             "nudge_meta": {
                 "count": 0,
-                "max": max(1, int(max_nudges)),
+                "max": int(max_nudges),
                 "created_at": self._now(),
             },
         }
