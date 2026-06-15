@@ -1,0 +1,32 @@
+services:
+  hashi-enterprise:
+    build:
+      context: ..
+      dockerfile: Dockerfile.enterprise
+    env_file:
+      - enterprise.env
+    environment:
+      HASHI_DEPLOYMENT_PROFILE: enterprise
+      HASHI_BRIDGE_HOME: /data
+    ports:
+      - "${HASHI_WORKBENCH_PORT:-18800}:18800"
+    volumes:
+      - hashi_enterprise_state:/data/state
+      - hashi_enterprise_workspaces:/data/workspaces
+      - hashi_enterprise_logs:/data/logs
+      - hashi_enterprise_backups:/data/backups
+      - ../agents.json:/app/agents.json:ro
+      - ../agent_capabilities.json:/app/agent_capabilities.json:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18800/api/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  hashi_enterprise_state:
+  hashi_enterprise_workspaces:
+  hashi_enterprise_logs:
+  hashi_enterprise_backups:
