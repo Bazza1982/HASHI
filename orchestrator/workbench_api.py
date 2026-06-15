@@ -679,7 +679,7 @@ class WorkbenchApiServer:
         org_id = str(getattr(self.global_config, "organization_id", "") or "").strip()
         channels = [
             self._enterprise_channel_payload(channel)
-            for channel in self.channel_registry.list_channels(org_id=org_id)
+            for channel in self.channel_registry.ensure_default_channels(org_id=org_id)
         ]
         return web.json_response({"ok": True, "channels": channels})
 

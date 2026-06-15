@@ -86,7 +86,11 @@ async def test_enterprise_admin_can_register_and_list_channels(tmp_path):
     assert channel["enabled"] is False
     assert "config" not in channel
     channels = json.loads(list_response.text)["channels"]
-    assert [item["type"] for item in channels] == ["teams"]
+    by_type = {item["type"]: item for item in channels}
+    assert by_type["workbench"]["enabled"] is True
+    assert by_type["telegram"]["enabled"] is False
+    assert by_type["whatsapp"]["enabled"] is False
+    assert by_type["teams"]["display_name"] == "Microsoft Teams"
     event = _audit_events(tmp_path)[-1]
     assert event["action"] == "channel_register"
     assert event["context"]["channel_type"] == "teams"
@@ -118,9 +122,26 @@ async def test_enterprise_admin_can_bind_channel_to_project(tmp_path):
     binding = json.loads(bind_response.text)["binding"]
     assert binding["scope_type"] == "project"
     assert binding["scope_id"] == "prj-research"
-    listed = json.loads(list_response.text)["channels"][0]
+    listed = next(
+        item for item in json.loads(list_response.text)["channels"]
+        if item["type"] == "hchat"
+    )
     assert listed["bindings"][0]["scope_id"] == "prj-research"
     assert _audit_events(tmp_path)[-1]["action"] == "channel_bind"
+
+
+@pytest.mark.asyncio
+async def test_enterprise_channel_list_bootstraps_default_channels(tmp_path):
+    server = _server(tmp_path)
+    headers = _admin_headers(server)
+
+    response = await server.handle_enterprise_channels(_FakeRequest(headers=headers))
+
+    assert response.status == 200
+    channels = {channel["type"]: channel for channel in json.loads(response.text)["channels"]}
+    assert channels["workbench"]["enabled"] is True
+    for channel_type in ["hchat", "telegram", "whatsapp", "email", "slack", "teams", "google_chat", "feishu"]:
+        assert channels[channel_type]["enabled"] is False
 
 
 @pytest.mark.asyncio
