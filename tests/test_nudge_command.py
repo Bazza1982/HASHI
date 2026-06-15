@@ -231,6 +231,38 @@ async def test_scheduler_nudge_completion_marker_disables_job(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_scheduler_nudge_inline_marker_mention_does_not_disable_job(tmp_path):
+    manager = SkillManager(project_root=tmp_path, tasks_path=tmp_path / "tasks.json")
+    job = manager.create_nudge_job(
+        agent_name="zelda",
+        interval_minutes=1,
+        exit_condition="until complete",
+    )
+    runtime = FakeRuntime(busy=False)
+    scheduler = TaskScheduler(
+        tasks_path=tmp_path / "tasks.json",
+        state_path=tmp_path / "scheduler_state.json",
+        runtimes=[runtime],
+        authorized_id=123,
+    )
+
+    await _run_one_scheduler_pass(scheduler)
+    request_id, _ = runtime.enqueued[0]
+    runtime.listeners[request_id](
+        {
+            "success": True,
+            "text": (
+                f"Current state is not complete; do not emit `NUDGE_COMPLETE:{job['id']}` yet."
+            ),
+        }
+    )
+
+    data = json.loads((tmp_path / "tasks.json").read_text(encoding="utf-8"))
+    assert data["nudges"][0]["enabled"] is True
+    assert "stopped_reason" not in data["nudges"][0]["nudge_meta"]
+
+
+@pytest.mark.asyncio
 async def test_manual_nudge_trigger_enqueues_scheduler_source(tmp_path):
     manager = SkillManager(project_root=tmp_path, tasks_path=tmp_path / "tasks.json")
     job = manager.create_nudge_job(
