@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class EnterpriseStore:
@@ -96,10 +96,33 @@ class EnterpriseStore:
                     UNIQUE(org_id, name),
                     FOREIGN KEY(org_id) REFERENCES organizations(id) ON DELETE CASCADE
                 );
+
+                CREATE TABLE IF NOT EXISTS channels (
+                    id TEXT PRIMARY KEY,
+                    org_id TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    display_name TEXT NOT NULL,
+                    config_json TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 0,
+                    risk_tier TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(org_id, type),
+                    FOREIGN KEY(org_id) REFERENCES organizations(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS channel_bindings (
+                    channel_id TEXT NOT NULL,
+                    scope_type TEXT NOT NULL,
+                    scope_id TEXT NOT NULL,
+                    permission TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(channel_id, scope_type, scope_id, permission),
+                    FOREIGN KEY(channel_id) REFERENCES channels(id) ON DELETE CASCADE
+                );
                 """
             )
             con.execute(
                 "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
                 ("schema_version", str(SCHEMA_VERSION)),
             )
-
