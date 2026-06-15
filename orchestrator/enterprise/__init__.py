@@ -9,7 +9,9 @@ from orchestrator.enterprise.audit_schema import AuditEvent, AuditEventWriter
 from orchestrator.enterprise.audit_ledger import EnterpriseAuditLedger, LedgerEvent
 from orchestrator.enterprise.audit_adapters import (
     SlashAuditIngestResult,
+    TokenAuditIngestResult,
     ingest_slash_command_audit_jsonl,
+    ingest_token_audit_jsonl,
 )
 from orchestrator.enterprise.channel_gate import ChannelGateResult, EnterpriseChannelGate
 from orchestrator.enterprise.channels import (
@@ -43,7 +45,9 @@ __all__ = [
     "EnterpriseAuditLedger",
     "LedgerEvent",
     "SlashAuditIngestResult",
+    "TokenAuditIngestResult",
     "ingest_slash_command_audit_jsonl",
+    "ingest_token_audit_jsonl",
     "ChannelGateResult",
     "EnterpriseChannelGate",
     "Channel",
