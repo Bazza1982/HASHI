@@ -700,6 +700,18 @@ Residual P7 limitations:
 
 **Goal:** provide a human admin surface for enterprise controls.
 
+**Implementation status:** P8-min API groundwork started.
+
+Implemented checkpoints:
+
+- Workbench admin API exposes project-filterable agent capability summaries at `GET /api/enterprise/agent-capabilities`.
+- The endpoint is guarded by enterprise admin auth and returns normalized backend/tool/project/bridge capability data.
+
+Residual P8 limitations:
+
+- Frontend admin screens are not yet implemented.
+- Capability summaries are read-only; policy editing and approval UI remain pending.
+
 **Minimum scope:**
 
 - users and roles;
@@ -725,6 +737,7 @@ Residual P7 limitations:
 - `ENT-104` Add policy viewer/editor.
 - `ENT-105` Add audit timeline and export screen.
 - `ENT-106` Add enterprise health screen.
+- `ENT-107` Add admin API for agent capability inventory. Done for read-only project-filtered summaries.
 
 **Acceptance:**
 
