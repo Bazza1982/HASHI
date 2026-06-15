@@ -710,6 +710,7 @@ Implemented checkpoints:
 - Policy rule creation supports action, resource, effect, scope, conditions, priority, and optional explicit rule id.
 - `/api/health` includes an enterprise block in governed profiles with identity, channel registry, audit ledger, and policy evaluator readiness.
 - Personal profile health keeps the legacy response shape without enterprise fields.
+- `auditor` role can query and export audit records without receiving broader admin mutation rights.
 
 Residual P8 limitations:
 
@@ -749,7 +750,7 @@ Residual P8 limitations:
 **Acceptance:**
 
 - `org_admin` can enable a channel and assign it to a project.
-- `auditor` can export audit but cannot mutate settings.
+- `auditor` can export audit but cannot mutate settings. API-level audit query/export is implemented.
 - `individual_user` cannot see admin navigation.
 
 ---

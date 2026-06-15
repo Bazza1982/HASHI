@@ -298,6 +298,19 @@ class WorkbenchApiServer:
         memberships = self.identity_service.list_project_memberships(user_id=user_id)
         return any(row.get("role") in admin_roles for row in memberships)
 
+    def _enterprise_user_has_audit_reader_role(self, user_id: str) -> bool:
+        if self.identity_service is None:
+            return False
+        audit_roles = {
+            EnterpriseRole.ORG_ADMIN.value,
+            EnterpriseRole.TEAM_ADMIN.value,
+            EnterpriseRole.SECURITY_ADMIN.value,
+            EnterpriseRole.SYSTEM_OPERATOR.value,
+            EnterpriseRole.AUDITOR.value,
+        }
+        memberships = self.identity_service.list_project_memberships(user_id=user_id)
+        return any(row.get("role") in audit_roles for row in memberships)
+
     def _enterprise_visible_project_ids(self, user_id: str) -> set[str]:
         if self.identity_service is None:
             return set()
@@ -639,6 +652,23 @@ class WorkbenchApiServer:
             return web.json_response({"ok": False, "error": "admin auth failed"}, status=403)
         return None
 
+    def _enterprise_audit_read_error_response(self, request):
+        if not self._is_governed_profile():
+            return web.json_response({"ok": False, "error": "enterprise API requires governed profile"}, status=404)
+        if self.identity_service is None:
+            return web.json_response({"ok": False, "error": "identity service unavailable"}, status=503)
+        user = self._enterprise_user_from_request(request)
+        if user is None or not self._enterprise_user_has_audit_reader_role(user.id):
+            self._append_enterprise_audit(
+                event_type="admin_api",
+                action="audit_read_auth",
+                status="denied",
+                actor_id=user.id if user else None,
+                context={"path": getattr(request, "path", "")},
+            )
+            return web.json_response({"ok": False, "error": "audit read auth failed"}, status=403)
+        return None
+
     async def handle_enterprise_users(self, request):
         error = self._enterprise_admin_error_response(request)
         if error is not None:
@@ -892,7 +922,7 @@ class WorkbenchApiServer:
         return filters
 
     async def handle_enterprise_audit(self, request):
-        error = self._enterprise_admin_error_response(request)
+        error = self._enterprise_audit_read_error_response(request)
         if error is not None:
             return error
         if self.audit_ledger is None:
@@ -909,7 +939,7 @@ class WorkbenchApiServer:
         )
 
     async def handle_enterprise_audit_export(self, request):
-        error = self._enterprise_admin_error_response(request)
+        error = self._enterprise_audit_read_error_response(request)
         if error is not None:
             return error
         if self.audit_ledger is None:

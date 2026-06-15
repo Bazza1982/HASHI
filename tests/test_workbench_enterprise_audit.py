@@ -116,6 +116,47 @@ async def test_enterprise_admin_can_export_audit_ledger_as_ndjson(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_enterprise_auditor_can_query_and_export_audit_ledger(tmp_path):
+    server = _server(tmp_path)
+    server.identity_service.bootstrap_org_admin(
+        org_id="ORG-001",
+        org_name="Acme",
+        email="admin@example.com",
+        display_name="Admin",
+        password="secret-password",
+    )
+    auditor = server.identity_service.create_user(
+        org_id="ORG-001",
+        email="auditor@example.com",
+        display_name="Auditor",
+        password="secret-password",
+        user_id="usr-auditor",
+    )
+    server.identity_service.assign_project_role(
+        user_id=auditor.id,
+        project_id="ORG-001-default",
+        role=EnterpriseRole.AUDITOR,
+    )
+    session = server.identity_service.create_session(user_id=auditor.id)
+    headers = {"Authorization": f"Bearer {session.token}"}
+    server.audit_ledger.append(
+        event_type="policy",
+        actor_id="usr-1",
+        action="command.execute",
+        status="denied",
+        context={"command_name": "backend"},
+    )
+
+    query_response = await server.handle_enterprise_audit(_FakeRequest(headers=headers))
+    export_response = await server.handle_enterprise_audit_export(_FakeRequest(headers=headers))
+
+    assert query_response.status == 200
+    assert json.loads(query_response.text)["count"] == 1
+    assert export_response.status == 200
+    assert json.loads(export_response.text.splitlines()[0])["event_type"] == "policy"
+
+
+@pytest.mark.asyncio
 async def test_enterprise_audit_api_rejects_individual_user(tmp_path):
     server = _server(tmp_path)
     server.identity_service.bootstrap_org_admin(
@@ -144,7 +185,7 @@ async def test_enterprise_audit_api_rejects_individual_user(tmp_path):
     )
 
     assert response.status == 403
-    assert json.loads(response.text)["error"] == "admin auth failed"
+    assert json.loads(response.text)["error"] == "audit read auth failed"
 
 
 @pytest.mark.asyncio
