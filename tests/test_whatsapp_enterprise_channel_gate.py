@@ -22,6 +22,7 @@ def _transport(tmp_path, *, profile: str = "enterprise", org_id: str | None = "O
         transport.sent.append((chat_key, text))
 
     transport._send_text = _send_text
+    transport._get_runtime = lambda _agent_name: None
     audit_writer = AuditEventWriter(enabled=True, jsonl_path=tmp_path / "state" / "enterprise_audit.jsonl")
     transport._channel_gate = EnterpriseChannelGate.from_global_config(
         transport.global_cfg,
@@ -99,4 +100,55 @@ async def test_enterprise_whatsapp_ingress_allows_bound_phone(tmp_path):
 
     assert allowed is True
     assert transport.sent == []
+    assert _audit_events(tmp_path) == []
+
+
+@pytest.mark.asyncio
+async def test_enterprise_whatsapp_egress_denies_disabled_default_and_audits(tmp_path):
+    identity = IdentityService.from_path(tmp_path / "state" / "enterprise.sqlite")
+    identity.create_organization(org_id="ORG-001", name="Acme")
+    transport = _transport(tmp_path)
+
+    await transport._on_agent_response(
+        "61400000000@s.whatsapp.net",
+        "nana",
+        {"success": True, "text": "hello"},
+        "single",
+        ["nana"],
+    )
+
+    assert transport.sent == []
+    event = _audit_events(tmp_path)[-1]
+    assert event["event_type"] == "channel"
+    assert event["status"] == "denied"
+    assert event["context"]["channel_type"] == "whatsapp"
+    assert event["context"]["direction"] == "egress"
+    assert event["context"]["reason"] == "channel_disabled"
+
+
+@pytest.mark.asyncio
+async def test_enterprise_whatsapp_egress_allows_bound_agent(tmp_path):
+    identity = IdentityService.from_path(tmp_path / "state" / "enterprise.sqlite")
+    identity.create_organization(org_id="ORG-001", name="Acme")
+    registry = ChannelRegistry.from_path(tmp_path / "state" / "enterprise.sqlite")
+    registry.ensure_default_channels(org_id="ORG-001")
+    registry.register_channel(org_id="ORG-001", channel_type="whatsapp", enabled=True)
+    registry.bind_channel(
+        org_id="ORG-001",
+        channel_type="whatsapp",
+        scope_type="agent",
+        scope_id="nana",
+        permission="egress",
+    )
+    transport = _transport(tmp_path)
+
+    await transport._on_agent_response(
+        "61400000000@s.whatsapp.net",
+        "nana",
+        {"success": True, "text": "hello"},
+        "single",
+        ["nana"],
+    )
+
+    assert transport.sent == [("61400000000@s.whatsapp.net", "[nana]: hello")]
     assert _audit_events(tmp_path) == []

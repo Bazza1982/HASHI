@@ -405,6 +405,9 @@ class WhatsAppTransport:
         all_targets: list,
     ):
         """Send an agent's response back to the originating WhatsApp chat."""
+        if not await self._check_whatsapp_egress_allowed(chat_key=chat_key, agent_name=agent_name):
+            return
+
         if not payload.get("success"):
             err = payload.get("error", "Unknown error")
             logger.warning("WhatsApp agent response failed: agent=%s error=%s", agent_name, err)
@@ -478,6 +481,25 @@ class WhatsAppTransport:
         await self._send_text(
             chat_key,
             "WhatsApp access is not enabled for this enterprise HASHI workspace.",
+        )
+        return False
+
+    async def _check_whatsapp_egress_allowed(self, *, chat_key: str, agent_name: str) -> bool:
+        phone = self._phone_from_chat_key(chat_key)
+        result = self._channel_gate.check_egress(
+            "whatsapp",
+            actor_id=agent_name,
+            user_id=phone,
+            agent_id=agent_name,
+            audit_context={"chat_id": chat_key},
+        )
+        if result.allowed:
+            return True
+        logger.warning(
+            "Denied WhatsApp egress via enterprise channel gate: chat=%s agent=%s reason=%s",
+            chat_key,
+            agent_name,
+            result.reason,
         )
         return False
 
@@ -1199,6 +1221,12 @@ class WhatsAppTransport:
             if user_part.isdigit():
                 candidates.add(f"+{user_part}")
         return candidates
+
+    def _phone_from_chat_key(self, chat_key: str) -> str:
+        user_part = str(chat_key or "").split("@", 1)[0].strip()
+        if user_part.isdigit():
+            return f"+{user_part}"
+        return user_part
 
     def _ensure_file_logging(self):
         log_dir = Path(str(self.global_cfg.base_logs_dir)) / "whatsapp"
