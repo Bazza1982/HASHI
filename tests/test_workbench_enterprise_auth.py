@@ -11,9 +11,10 @@ from orchestrator.workbench_api import WorkbenchApiServer
 
 
 class _FakeRequest:
-    def __init__(self, payload: dict | None = None, *, headers: dict | None = None):
+    def __init__(self, payload: dict | None = None, *, headers: dict | None = None, path: str = ""):
         self._payload = payload or {}
         self.headers = headers or {}
+        self.path = path
 
     async def json(self):
         return self._payload
@@ -40,6 +41,13 @@ def _server(tmp_path: Path, *, profile: str = "enterprise") -> WorkbenchApiServe
     return WorkbenchApiServer(config_path=config_path, global_config=global_config)
 
 
+def _audit_events(tmp_path: Path) -> list[dict]:
+    path = tmp_path / "state" / "enterprise_audit.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
 @pytest.mark.asyncio
 async def test_enterprise_login_me_and_logout_flow(tmp_path):
     server = _server(tmp_path)
@@ -61,6 +69,7 @@ async def test_enterprise_login_me_and_logout_flow(tmp_path):
     assert login_response.status == 200
     assert login_payload["ok"] is True
     assert login_payload["user"]["memberships"][0]["role"] == EnterpriseRole.ORG_ADMIN.value
+    assert _audit_events(tmp_path)[-1]["action"] == "login"
 
     me_response = await server.handle_auth_me(_FakeRequest(headers={"Authorization": f"Bearer {token}"}))
     me_payload = json.loads(me_response.text)
@@ -69,6 +78,7 @@ async def test_enterprise_login_me_and_logout_flow(tmp_path):
 
     logout_response = await server.handle_auth_logout(_FakeRequest(headers={"Authorization": f"Bearer {token}"}))
     assert json.loads(logout_response.text)["revoked"] is True
+    assert _audit_events(tmp_path)[-1]["action"] == "logout"
 
     me_after_logout = await server.handle_auth_me(_FakeRequest(headers={"Authorization": f"Bearer {token}"}))
     assert me_after_logout.status == 401
@@ -91,6 +101,10 @@ async def test_enterprise_login_rejects_bad_credentials(tmp_path):
 
     assert response.status == 401
     assert json.loads(response.text)["ok"] is False
+    event = _audit_events(tmp_path)[-1]
+    assert event["action"] == "login"
+    assert event["status"] == "failed"
+    assert "wrong" not in json.dumps(event)
 
 
 def test_enterprise_admin_auth_requires_admin_project_role(tmp_path):
@@ -152,6 +166,9 @@ async def test_enterprise_admin_can_create_and_list_projects(tmp_path):
     assert create_response.status == 201
     projects = json.loads(list_response.text)["projects"]
     assert [project["id"] for project in projects] == ["ORG-001-default", "prj-research"]
+    event = _audit_events(tmp_path)[-1]
+    assert event["action"] == "project_create"
+    assert event["context"]["project_id"] == "prj-research"
 
 
 @pytest.mark.asyncio
@@ -193,6 +210,10 @@ async def test_enterprise_admin_can_create_and_list_users(tmp_path):
     assert [user["email"] for user in users] == ["admin@example.com", "user@example.com"]
     created = json.loads(create_response.text)["user"]
     assert created["memberships"][0]["role"] == EnterpriseRole.INDIVIDUAL_USER.value
+    event = _audit_events(tmp_path)[-1]
+    assert event["action"] == "user_create"
+    assert event["context"]["target_user_id"] == "usr-user"
+    assert "secret-password" not in json.dumps(event)
 
 
 @pytest.mark.asyncio
@@ -220,11 +241,15 @@ async def test_enterprise_admin_api_rejects_individual_user(tmp_path):
     session = server.identity_service.create_session(user_id=user.id)
 
     response = await server.handle_enterprise_users(
-        _FakeRequest(headers={"Authorization": f"Bearer {session.token}"})
+        _FakeRequest(headers={"Authorization": f"Bearer {session.token}"}, path="/api/enterprise/users")
     )
 
     assert response.status == 403
     assert json.loads(response.text)["error"] == "admin auth failed"
+    event = _audit_events(tmp_path)[-1]
+    assert event["action"] == "admin_auth"
+    assert event["status"] == "denied"
+    assert event["context"]["path"] == "/api/enterprise/users"
 
 
 def test_personal_profile_keeps_legacy_workbench_token(tmp_path):

@@ -15,6 +15,7 @@ from orchestrator.admin_local_testing import (
     try_execute_slash_command_text,
 )
 from orchestrator.conversation_router import ConversationRouter
+from orchestrator.enterprise.audit_schema import AuditEvent, AuditEventWriter
 from orchestrator.enterprise.identity import EnterpriseRole, IdentityService
 from orchestrator.pathing import resolve_path_value
 from orchestrator.transfer_store import TransferStore
@@ -78,6 +79,7 @@ class WorkbenchApiServer:
         self.orchestrator = orchestrator
         self.admin_token = ((secrets or {}).get("workbench_admin_token") or "").strip()
         self.identity_service = self._build_identity_service()
+        self.audit_writer = self._build_audit_writer()
         self.bridge_router = ConversationRouter(
             config_path=self.config_path,
             capabilities_path=self.config_path.parent / "agent_capabilities.json",
@@ -162,6 +164,34 @@ class WorkbenchApiServer:
             return None
         bridge_home = Path(getattr(self.global_config, "bridge_home", None) or self.config_path.parent)
         return IdentityService.from_path(bridge_home / "state" / "enterprise.sqlite")
+
+    def _build_audit_writer(self) -> AuditEventWriter:
+        if not self._is_governed_profile():
+            return AuditEventWriter(enabled=False)
+        bridge_home = Path(getattr(self.global_config, "bridge_home", None) or self.config_path.parent)
+        return AuditEventWriter(
+            enabled=True,
+            jsonl_path=bridge_home / "state" / "enterprise_audit.jsonl",
+        )
+
+    def _append_enterprise_audit(
+        self,
+        *,
+        event_type: str,
+        action: str,
+        status: str,
+        actor_id: str | int | None = None,
+        context: dict | None = None,
+    ) -> None:
+        self.audit_writer.append(
+            AuditEvent(
+                event_type=event_type,
+                actor_id=actor_id,
+                action=action,
+                status=status,
+                context=context or {},
+            )
+        )
 
     def _refresh_bridge_router(self) -> None:
         self.bridge_router.refresh(self._runtime_list())
@@ -379,8 +409,22 @@ class WorkbenchApiServer:
 
         user = self.identity_service.authenticate_user(org_id=org_id, email=email, password=password)
         if user is None:
+            self._append_enterprise_audit(
+                event_type="auth",
+                action="login",
+                status="failed",
+                actor_id=email,
+                context={"org_id": org_id},
+            )
             return web.json_response({"ok": False, "error": "invalid credentials"}, status=401)
         session = self.identity_service.create_session(user_id=user.id)
+        self._append_enterprise_audit(
+            event_type="auth",
+            action="login",
+            status="success",
+            actor_id=user.id,
+            context={"org_id": org_id},
+        )
         return web.json_response(
             {
                 "ok": True,
@@ -398,7 +442,14 @@ class WorkbenchApiServer:
         if self.identity_service is None:
             return web.json_response({"ok": False, "error": "identity service unavailable"}, status=503)
         token = self._bearer_token_from_request(request)
+        user = self.identity_service.get_session_user(token) if token else None
         revoked = self.identity_service.revoke_session(token) if token else False
+        self._append_enterprise_audit(
+            event_type="auth",
+            action="logout",
+            status="success" if revoked else "noop",
+            actor_id=user.id if user else None,
+        )
         return web.json_response({"ok": True, "revoked": revoked})
 
     async def handle_auth_me(self, request):
@@ -439,6 +490,12 @@ class WorkbenchApiServer:
         if self.identity_service is None:
             return web.json_response({"ok": False, "error": "identity service unavailable"}, status=503)
         if not self._check_admin_auth(request):
+            self._append_enterprise_audit(
+                event_type="admin_api",
+                action="admin_auth",
+                status="denied",
+                context={"path": getattr(request, "path", "")},
+            )
             return web.json_response({"ok": False, "error": "admin auth failed"}, status=403)
         return None
 
@@ -454,6 +511,7 @@ class WorkbenchApiServer:
         error = self._enterprise_admin_error_response(request)
         if error is not None:
             return error
+        actor = self._enterprise_user_from_request(request)
         try:
             payload = await request.json()
         except Exception:
@@ -480,7 +538,21 @@ class WorkbenchApiServer:
             if project_id and role:
                 self.identity_service.assign_project_role(user_id=user.id, project_id=project_id, role=role)
         except Exception as exc:
+            self._append_enterprise_audit(
+                event_type="admin_api",
+                action="user_create",
+                status="failed",
+                actor_id=actor.id if actor else None,
+                context={"error": str(exc)},
+            )
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        self._append_enterprise_audit(
+            event_type="admin_api",
+            action="user_create",
+            status="success",
+            actor_id=actor.id if actor else None,
+            context={"target_user_id": user.id, "org_id": org_id},
+        )
         return web.json_response({"ok": True, "user": self._enterprise_user_payload(user)}, status=201)
 
     async def handle_enterprise_projects(self, request):
@@ -498,6 +570,7 @@ class WorkbenchApiServer:
         error = self._enterprise_admin_error_response(request)
         if error is not None:
             return error
+        actor = self._enterprise_user_from_request(request)
         try:
             payload = await request.json()
         except Exception:
@@ -514,7 +587,21 @@ class WorkbenchApiServer:
                 project_id=payload.get("project_id"),
             )
         except Exception as exc:
+            self._append_enterprise_audit(
+                event_type="admin_api",
+                action="project_create",
+                status="failed",
+                actor_id=actor.id if actor else None,
+                context={"error": str(exc)},
+            )
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        self._append_enterprise_audit(
+            event_type="admin_api",
+            action="project_create",
+            status="success",
+            actor_id=actor.id if actor else None,
+            context={"project_id": project.id, "org_id": org_id},
+        )
         return web.json_response({"ok": True, "project": self._enterprise_project_payload(project)}, status=201)
 
     async def handle_agents(self, request):
