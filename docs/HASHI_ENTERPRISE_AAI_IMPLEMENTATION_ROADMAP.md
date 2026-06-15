@@ -437,6 +437,10 @@ Implemented checkpoints:
   - `ToolRegistry.execute()` now writes best-effort `tool_action_audit.jsonl` records for allowed, failed, and not-allowed tool calls;
   - records tool name, tool call id, agent, workspace, safety mode, redacted arguments, output snippet, status, and duration;
   - imports `tool_action_audit.jsonl` records as `tool` ledger events with deterministic event IDs;
+- audit schema contract tests:
+  - lock the required top-level ledger keys;
+  - verify canonical event types remain queryable and exportable;
+  - verify ledger context remains JSON-safe for non-primitive Python values;
 - tests for append/query/export, compatibility with existing `AuditEvent`, and slash audit ingestion.
 
 Residual P4 limitations:
@@ -478,7 +482,7 @@ Residual P4 limitations:
 - `ENT-064` Add token/model invocation adapter. Done for legacy JSONL ingest with idempotent event IDs; live dual-write pending.
 - `ENT-065` Add HChat/Remote adapter. Done for legacy Remote audit JSONL ingest with idempotent event IDs; live dual-write pending.
 - `ENT-066` Add tool/file event adapters. Browser action legacy JSONL ingest done; HASHI-controlled tool action JSONL source and ingest adapter done; live ledger dual-write pending.
-- `ENT-067` Add audit schema contract tests.
+- `ENT-067` Add audit schema contract tests. Done for required ledger keys, canonical event types, export shape, and JSON-safe context.
 
 **Acceptance:**
 
