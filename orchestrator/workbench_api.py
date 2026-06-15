@@ -16,6 +16,7 @@ from orchestrator.admin_local_testing import (
 )
 from orchestrator.conversation_router import ConversationRouter
 from orchestrator.enterprise.audit_schema import AuditEvent, AuditEventWriter
+from orchestrator.enterprise.channel_gate import EnterpriseChannelGate
 from orchestrator.enterprise.channels import ChannelRegistry
 from orchestrator.enterprise.identity import EnterpriseRole, IdentityService
 from orchestrator.pathing import resolve_path_value
@@ -202,6 +203,14 @@ class WorkbenchApiServer:
                 status=status,
                 context=context or {},
             )
+        )
+
+    def _enterprise_channel_gate(self) -> EnterpriseChannelGate:
+        return EnterpriseChannelGate(
+            governed=self._is_governed_profile(),
+            org_id=str(getattr(self.global_config, "organization_id", "") or "").strip() or None,
+            registry=self.channel_registry,
+            audit_writer=self.audit_writer,
         )
 
     def _refresh_bridge_router(self) -> None:
@@ -984,6 +993,23 @@ class WorkbenchApiServer:
         local_instance = str(detect_instance(self.global_config.project_root)).upper()
 
         if to_instance == local_instance:
+            gate_result = self._enterprise_channel_gate().check_ingress(
+                "hchat",
+                actor_id=from_agent,
+                agent_id=to_agent,
+                audit_context={
+                    "from_agent": from_agent,
+                    "from_instance": from_instance,
+                    "to_agent": to_agent,
+                    "to_instance": to_instance,
+                    "exchange": True,
+                },
+            )
+            if not gate_result.allowed:
+                return web.json_response(
+                    {"ok": False, "error": f"hchat ingress denied: {gate_result.reason}"},
+                    status=403,
+                )
             # Target is this instance: deliver directly to avoid blocking the event loop
             # with a synchronous HTTP self-call (which would deadlock for 10s and cause
             # the sender to fall back to Remote, resulting in duplicate delivery).
@@ -997,6 +1023,24 @@ class WorkbenchApiServer:
                 self._learn_reply_route(message_text, reply_route)
             await runtime.enqueue_api_text(message_text)
             return web.json_response({"ok": True, "relayed": True, "exchange": True})
+
+        gate_result = self._enterprise_channel_gate().check_egress(
+            "hchat",
+            actor_id=from_agent,
+            agent_id=from_agent,
+            audit_context={
+                "from_agent": from_agent,
+                "from_instance": from_instance,
+                "to_agent": to_agent,
+                "to_instance": to_instance,
+                "exchange": True,
+            },
+        )
+        if not gate_result.allowed:
+            return web.json_response(
+                {"ok": False, "error": f"hchat egress denied: {gate_result.reason}"},
+                status=403,
+            )
 
         # Target is a different instance: relay via send_hchat
         try:
