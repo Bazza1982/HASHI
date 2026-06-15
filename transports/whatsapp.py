@@ -35,6 +35,8 @@ from pathlib import Path
 
 from orchestrator.pathing import resolve_path_value
 from orchestrator.admin_local_testing import try_execute_slash_command_text
+from orchestrator.enterprise.audit_schema import AuditEventWriter
+from orchestrator.enterprise.channel_gate import EnterpriseChannelGate
 from orchestrator.slash_command_audit import (
     SlashCommandAuditSession,
     bridge_audit_path,
@@ -68,6 +70,7 @@ class WhatsAppTransport:
         self._ensure_file_logging()
         self._config_path = Path(str(global_cfg.config_path))
         self._config_mtime_ns = 0
+        self._channel_gate = self._build_channel_gate()
 
         session_dir = resolve_path_value(
             wa_cfg.get("session_dir", "@home/wa_session"),
@@ -211,6 +214,8 @@ class WhatsAppTransport:
                     (candidate for candidate in all_candidates if candidate in self._allowed_numbers),
                     phone,
                 )
+            if not await self._check_whatsapp_ingress_allowed(chat_key=chat_key, phone=phone):
+                return
 
             text = self._extract_text(msg)
             is_voice = self._is_voice(msg)
@@ -441,6 +446,40 @@ class WhatsAppTransport:
             bridge_home = getattr(self.global_cfg, "bridge_home", Path("."))
             return bridge_home / "logs" / "whatsapp_slash_command_audit.jsonl"
         return bridge_audit_path(Path(base_logs_dir))
+
+    def _build_channel_gate(self) -> EnterpriseChannelGate:
+        profile = str(getattr(self.global_cfg, "deployment_profile", "personal") or "personal")
+        if profile == "personal":
+            return EnterpriseChannelGate.from_global_config(self.global_cfg)
+        bridge_home = Path(getattr(self.global_cfg, "bridge_home", Path(".")))
+        return EnterpriseChannelGate.from_global_config(
+            self.global_cfg,
+            audit_writer=AuditEventWriter(
+                enabled=True,
+                jsonl_path=bridge_home / "state" / "enterprise_audit.jsonl",
+            ),
+        )
+
+    async def _check_whatsapp_ingress_allowed(self, *, chat_key: str, phone: str) -> bool:
+        result = self._channel_gate.check_ingress(
+            "whatsapp",
+            actor_id=phone,
+            user_id=phone,
+            audit_context={"chat_id": chat_key},
+        )
+        if result.allowed:
+            return True
+        logger.warning(
+            "Denied WhatsApp ingress via enterprise channel gate: chat=%s phone=%s reason=%s",
+            chat_key,
+            phone,
+            result.reason,
+        )
+        await self._send_text(
+            chat_key,
+            "WhatsApp access is not enabled for this enterprise HASHI workspace.",
+        )
+        return False
 
     def _whatsapp_command_session(
         self,
