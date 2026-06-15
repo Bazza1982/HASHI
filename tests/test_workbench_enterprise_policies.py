@@ -112,6 +112,32 @@ async def test_enterprise_policy_create_rejects_invalid_effect(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_enterprise_admin_can_install_default_connector_policies(tmp_path):
+    server = _server(tmp_path)
+    headers = _admin_headers(server)
+
+    response = await server.handle_enterprise_policies_install_defaults(_FakeRequest(headers=headers))
+    second_response = await server.handle_enterprise_policies_install_defaults(_FakeRequest(headers=headers))
+    list_response = await server.handle_enterprise_policies(_FakeRequest(headers=headers))
+
+    payload = json.loads(response.text)
+    second_payload = json.loads(second_response.text)
+    listed = json.loads(list_response.text)
+    assert response.status == 200
+    assert payload["ok"] is True
+    assert payload["count"] == 5
+    assert {policy["id"] for policy in payload["policies"]} == {
+        "tpl-connector-github-repo-read-allow",
+        "tpl-connector-github-repo-get-allow",
+        "tpl-connector-github-issue-create-approval",
+        "tpl-connector-github-pr-create-approval",
+        "tpl-connector-github-pr-merge-approval",
+    }
+    assert second_payload["count"] == 5
+    assert listed["count"] == 5
+
+
+@pytest.mark.asyncio
 async def test_enterprise_policy_api_requires_admin(tmp_path):
     server = _server(tmp_path)
     user = server.identity_service.bootstrap_org_admin(

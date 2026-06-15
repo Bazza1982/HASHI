@@ -11,30 +11,37 @@ def install_default_connector_policy(evaluator: PolicyEvaluator) -> list[PolicyR
     silently expand enterprise write capability.
     """
 
-    rules = [
-        evaluator.add_rule(
-            rule_id="tpl-connector-github-repo-read-allow",
-            action="connector.execute",
-            resource="connector:github:repo.read",
-            effect="allow",
-            priority=90,
-        ),
-        evaluator.add_rule(
-            rule_id="tpl-connector-github-repo-get-allow",
-            action="connector.execute",
-            resource="connector:github:repo.get",
-            effect="allow",
-            priority=90,
-        ),
+    existing_ids = {rule.id for rule in evaluator.list_rules()}
+    rules = []
+    specs = [
+        {
+            "rule_id": "tpl-connector-github-repo-read-allow",
+            "action": "connector.execute",
+            "resource": "connector:github:repo.read",
+            "effect": "allow",
+            "priority": 90,
+        },
+        {
+            "rule_id": "tpl-connector-github-repo-get-allow",
+            "action": "connector.execute",
+            "resource": "connector:github:repo.get",
+            "effect": "allow",
+            "priority": 90,
+        },
     ]
     for action in ("issue.create", "pr.create", "pr.merge"):
-        rules.append(
-            evaluator.add_rule(
-                rule_id=f"tpl-connector-github-{action.replace('.', '-')}-approval",
-                action="connector.execute",
-                resource=f"connector:github:{action}",
-                effect="approval_required",
-                priority=100,
-            )
+        specs.append(
+            {
+                "rule_id": f"tpl-connector-github-{action.replace('.', '-')}-approval",
+                "action": "connector.execute",
+                "resource": f"connector:github:{action}",
+                "effect": "approval_required",
+                "priority": 100,
+            }
         )
+    for spec in specs:
+        if spec["rule_id"] in existing_ids:
+            rules.append(evaluator.get_rule(spec["rule_id"]))
+        else:
+            rules.append(evaluator.add_rule(**spec))
     return rules

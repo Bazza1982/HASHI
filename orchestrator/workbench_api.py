@@ -24,6 +24,7 @@ from orchestrator.enterprise.connectors import ConnectorAction, ConnectorExecuti
 from orchestrator.enterprise.credentials import ConnectorCredentialStore
 from orchestrator.enterprise.identity import EnterpriseRole, IdentityService
 from orchestrator.enterprise.policy import PolicyEvaluator
+from orchestrator.enterprise.policy_templates import install_default_connector_policy
 from orchestrator.enterprise.routing import agent_project_ids
 from orchestrator.enterprise.secret_refs import ConnectorSecretResolver
 from orchestrator.pathing import resolve_path_value
@@ -127,6 +128,7 @@ class WorkbenchApiServer:
         self.app.router.add_get("/api/enterprise/audit/export", self.handle_enterprise_audit_export)
         self.app.router.add_get("/api/enterprise/policies", self.handle_enterprise_policies)
         self.app.router.add_post("/api/enterprise/policies", self.handle_enterprise_policies_create)
+        self.app.router.add_post("/api/enterprise/policies/install-defaults", self.handle_enterprise_policies_install_defaults)
         self.app.router.add_get("/api/enterprise/approvals", self.handle_enterprise_approvals)
         self.app.router.add_post("/api/enterprise/approvals/{request_id}/approve", self.handle_enterprise_approval_approve)
         self.app.router.add_post("/api/enterprise/approvals/{request_id}/deny", self.handle_enterprise_approval_deny)
@@ -1076,6 +1078,30 @@ class WorkbenchApiServer:
             context={"policy_rule_id": rule.id, "effect": rule.effect.value, "action": rule.action},
         )
         return web.json_response({"ok": True, "policy": self._enterprise_policy_rule_payload(rule)}, status=201)
+
+    async def handle_enterprise_policies_install_defaults(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        evaluator = self._enterprise_policy_evaluator()
+        if evaluator is None:
+            return web.json_response({"ok": False, "error": "policy evaluator unavailable"}, status=503)
+        actor = self._enterprise_user_from_request(request)
+        rules = install_default_connector_policy(evaluator)
+        self._append_enterprise_audit(
+            event_type="admin_api",
+            action="policy_defaults_install",
+            status="success",
+            actor_id=actor.id if actor else None,
+            context={"rule_ids": [rule.id for rule in rules]},
+        )
+        return web.json_response(
+            {
+                "ok": True,
+                "policies": [self._enterprise_policy_rule_payload(rule) for rule in rules],
+                "count": len(rules),
+            }
+        )
 
     async def handle_enterprise_approvals(self, request):
         error = self._enterprise_admin_error_response(request)

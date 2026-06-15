@@ -892,6 +892,10 @@ Implemented checkpoints:
   - explicitly allows GitHub read-only repository metadata actions;
   - requires approval for GitHub `issue.create`, `pr.create`, and `pr.merge`;
   - template installation is idempotent.
+- Default connector policy install API added:
+  - `POST /api/enterprise/policies/install-defaults` is admin-gated;
+  - installs or returns the default connector policy rules without duplicating them;
+  - writes an admin audit event with installed rule ids.
 
 Residual P10 limitations:
 
@@ -900,7 +904,7 @@ Residual P10 limitations:
 - Credential store records secret references only; environment and HASHI secrets can now be resolved through a dedicated resolver, while Vault/Kubernetes secret resolution remains pending.
 - Connector factory currently supports GitHub only; enterprise channel connectors still need factory support.
 - Workbench registry refresh is in-process; multi-node registry synchronization remains future work.
-- Default connector policy template is available as code but is not yet auto-installed during enterprise bootstrap.
+- Default connector policy can be installed through admin setup API; silent auto-install remains intentionally avoided to prevent overwriting administrator policy edits.
 - Workbench/admin connector execution API now uses the gated execution service.
 - Connector health API exists for registered in-process connectors, but no built-in external connector is registered yet.
 - Connector admin UI is still pending.
@@ -935,6 +939,7 @@ Residual P10 limitations:
 - `ENT-131` Add connector factory. Done for GitHub connector construction from credential refs, secret resolution, revoked credential skipping, and unsupported type fail-closed behavior.
 - `ENT-132` Add Workbench connector registry refresh. Done for startup refresh, create/revoke refresh, static connector precedence, and fail-soft registry errors.
 - `ENT-133` Add default connector policy template. Done for GitHub read allow, GitHub write approval-required, and idempotent install.
+- `ENT-134` Add default connector policy install API. Done for admin-gated install, idempotent responses, and audit event emission.
 
 **Acceptance:**
 
