@@ -651,6 +651,9 @@ Implemented checkpoints:
   - `task.escalate_failed` records project/task correlation;
   - escalation context includes failure reason, task summary, agent/user ids, severity, and optional escalation target;
   - a helper can fail a task and record the escalation event in one operation.
+- enterprise agent capability summaries are now available as a service primitive:
+  - project assignments, active backend, allowed backends, allowed tools, bridge permissions, scopes, and tags are normalized;
+  - summaries can be filtered by project for governed routing/admin views.
 
 Residual P7 limitations:
 
@@ -658,6 +661,7 @@ Residual P7 limitations:
 - approved requests are not yet consumed to resume blocked work automatically;
 - project-aware routing is implemented only for explicit bridge `project_id`; broader channel/project resolution remains pending.
 - failed-task escalation writes audit events only; notification delivery and retry routing remain pending.
+- agent capability registry is service-layer only; Workbench API/UI exposure remains pending.
 
 **Scope:**
 
@@ -682,7 +686,7 @@ Residual P7 limitations:
 - `ENT-091` Add approval queue APIs. Done for Workbench admin list endpoint.
 - `ENT-092` Add admin approve/deny action. Done for service and Workbench admin API routes with ledger events.
 - `ENT-093` Add failed-task escalation events. Done with ledger-backed `task.escalate_failed` helpers.
-- `ENT-094` Add agent capability registry.
+- `ENT-094` Add agent capability registry. Done as a service primitive with project-filtered summaries.
 
 **Acceptance:**
 
