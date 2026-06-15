@@ -856,13 +856,19 @@ Implemented checkpoints:
   - policy deny and approval-required decisions return blocked `ConnectorResult` values without calling connector code;
   - missing connector registrations fail closed;
   - successful, blocked, failed, and approval-required attempts can write canonical connector ledger events.
+- Workbench connector execution API added:
+  - `POST /api/enterprise/connectors/execute` is admin-gated;
+  - requests require `connector_type`, `action`, and `credential_id`;
+  - the API constructs a `ConnectorAction` with actor, project, task, request, correlation, dry-run, and parameters;
+  - execution always goes through `ConnectorExecutionService`;
+  - responses include both connector `result` and explicit `gate` decision metadata.
 
 Residual P10 limitations:
 
 - GitHub has a read-only connector foundation, but no write actions such as PR creation or merge are implemented yet.
 - No Slack, Teams, Google Chat, or Feishu connector is implemented yet.
 - Credential store records secret references only; Vault/Kubernetes secret resolution is still pending.
-- Connector gate is now wired into the connector execution service, but Workbench/admin execution APIs still need to use that service.
+- Workbench/admin connector execution API now uses the gated execution service.
 - Connector health API exists for registered in-process connectors, but no built-in external connector is registered yet.
 - Connector admin UI is still pending.
 
@@ -886,10 +892,11 @@ Residual P10 limitations:
 - `ENT-121` Add scoped credential store abstraction. Done for secret references, scopes, active listing, and revoke.
 - `ENT-122` Add connector execution gate. Done for credential existence, org isolation, revoke fail-closed, type match, policy deny, and approval-required decisions.
 - `ENT-126` Add first enterprise channel connector.
-- `ENT-123` Add GitHub connector with audit. Started with read-only health and repository metadata actions; write actions and Workbench/admin execution API integration remain pending.
+- `ENT-123` Add GitHub connector with audit. Started with read-only health and repository metadata actions; write actions remain pending.
 - `ENT-124` Add connector health checks. Done for in-process registry, normalized health summaries, ledger health events, and Workbench admin health API.
 - `ENT-125` Add credential revoke tests. Done for gate-level fail-closed behavior.
 - `ENT-127` Add gated connector execution service. Done for credential gate, policy gate, connector invocation, fail-closed missing connector handling, and ledger events.
+- `ENT-128` Add Workbench connector execution API. Done for admin-gated execution through `ConnectorExecutionService` with result and gate metadata.
 
 **Acceptance:**
 
