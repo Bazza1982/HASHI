@@ -160,6 +160,7 @@ The decision does not prevent future packaging differences. A hosted or supporte
 - `deployment_profile` defaults to `personal` when omitted.
 - `team` and `enterprise` are governed profiles and require bootstrap metadata to avoid accidental activation.
 - Current one-owner behavior is preserved unless `HASHI_DEPLOYMENT_PROFILE` or `global.deployment_profile` is explicitly set.
+- Deployment time overrides are supported: `HASHI_ORGANIZATION_ID` and `HASHI_ENTERPRISE_BOOTSTRAP_COMPLETE`.
 
 ### Example config snippet
 
@@ -179,6 +180,6 @@ The decision does not prevent future packaging differences. A hosted or supporte
 When `team` or `enterprise` is active:
 
 1. `global.organization_id` must exist;
-2. `global.enterprise_bootstrap_complete` must be true.
+2. `global.enterprise_bootstrap_complete` (or `HASHI_ENTERPRISE_BOOTSTRAP_COMPLETE`) must be true.
 
 P0 implementation rejects startup at config-load time with explicit errors when either requirement is missing.
