@@ -755,6 +755,20 @@ Residual P8 limitations:
 
 **Goal:** make enterprise mode installable, upgradeable, and recoverable.
 
+**Implementation status:** P9-min service groundwork started.
+
+Implemented checkpoints:
+
+- Enterprise backup/restore service primitive can create `.tar.gz` archives with a JSON manifest.
+- Required backup items fail fast when missing; optional missing items are recorded in the manifest.
+- Restore is safe-by-default: archive paths are validated, overwrite is blocked unless explicit, and unsupported member types are rejected.
+
+Residual P9 limitations:
+
+- CLI commands are not yet wired.
+- Docker Compose / image packaging is not yet implemented.
+- Backup policy and scheduled backups are not yet implemented.
+
 **Scope:**
 
 - Docker Compose enterprise profile;
@@ -778,7 +792,7 @@ Residual P8 limitations:
 - `ENT-110` Add enterprise Docker Compose skeleton.
 - `ENT-111` Add enterprise volume layout.
 - `ENT-112` Add migration runner command.
-- `ENT-113` Add backup/restore command.
+- `ENT-113` Add backup/restore command. Service primitive is done; CLI wrapper remains pending.
 - `ENT-114` Add enterprise health checks.
 - `ENT-115` Add upgrade and rollback documentation.
 
