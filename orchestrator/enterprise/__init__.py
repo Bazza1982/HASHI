@@ -42,6 +42,11 @@ from orchestrator.enterprise.policy import (
 from orchestrator.enterprise.store import EnterpriseStore
 from orchestrator.enterprise.evidence import EvidenceBundle, EvidenceBundleRegistry
 from orchestrator.enterprise.tasks import EnterpriseTask, TaskRegistry, TaskStatus
+from orchestrator.enterprise.verification import (
+    ArtifactVerificationResult,
+    fail_task_if_promised_artifacts_missing,
+    verify_promised_artifacts,
+)
 
 __all__ = [
     "DeploymentProfile",
@@ -85,7 +90,10 @@ __all__ = [
     "PolicyEvaluator",
     "PolicyRule",
     "ApprovalRequest",
+    "ArtifactVerificationResult",
     "TaskRegistry",
     "TaskStatus",
     "evaluate_governance_policy",
+    "fail_task_if_promised_artifacts_missing",
+    "verify_promised_artifacts",
 ]
