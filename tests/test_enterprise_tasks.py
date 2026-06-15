@@ -6,6 +6,7 @@ from orchestrator.enterprise import (
     ArtifactRegistry,
     EnterpriseAuditLedger,
     EvidenceBundleRegistry,
+    ExecutionScope,
     IdentityService,
     TaskRegistry,
     TaskStatus,
@@ -197,3 +198,41 @@ def test_fail_task_if_promised_artifacts_missing_records_clear_failure(tmp_path)
     assert failed is not None
     assert failed.status == "failed"
     assert failed.failed_reason == "missing promised artifacts: appendix.csv"
+
+
+def test_execution_scope_allows_paths_inside_project_workspace(tmp_path):
+    svc = _init_services(tmp_path)
+    project = svc["project"]
+
+    scope = ExecutionScope.from_project(project)
+    resolved = scope.require_path("reports/final.md")
+
+    assert resolved == (tmp_path / "workspaces" / "research" / "reports" / "final.md").resolve()
+    assert scope.check_path(resolved).allowed is True
+
+
+def test_execution_scope_blocks_workspace_escape(tmp_path):
+    svc = _init_services(tmp_path)
+    scope = ExecutionScope.from_project(svc["project"])
+
+    decision = scope.check_path("../outside.txt")
+
+    assert decision.allowed is False
+    assert decision.reason == "workspace_escape"
+    with pytest.raises(PermissionError, match="workspace_escape"):
+        scope.require_path(tmp_path / "outside.txt")
+
+
+def test_execution_scope_blocks_symlink_escape(tmp_path):
+    svc = _init_services(tmp_path)
+    workspace = tmp_path / "workspaces" / "research"
+    workspace.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (workspace / "escape").symlink_to(outside, target_is_directory=True)
+    scope = ExecutionScope.from_project(svc["project"])
+
+    decision = scope.check_path("escape/leak.txt")
+
+    assert decision.allowed is False
+    assert decision.reason == "workspace_escape"

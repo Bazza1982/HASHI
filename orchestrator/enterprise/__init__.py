@@ -41,6 +41,7 @@ from orchestrator.enterprise.policy import (
 )
 from orchestrator.enterprise.store import EnterpriseStore
 from orchestrator.enterprise.evidence import EvidenceBundle, EvidenceBundleRegistry
+from orchestrator.enterprise.execution import ExecutionPathDecision, ExecutionScope
 from orchestrator.enterprise.tasks import EnterpriseTask, TaskRegistry, TaskStatus
 from orchestrator.enterprise.verification import (
     ArtifactVerificationResult,
@@ -83,6 +84,8 @@ __all__ = [
     "EnterpriseTask",
     "EvidenceBundle",
     "EvidenceBundleRegistry",
+    "ExecutionPathDecision",
+    "ExecutionScope",
     "EnterpriseStore",
     "IdentityService",
     "PolicyDecision",
