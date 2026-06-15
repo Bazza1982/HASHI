@@ -3,6 +3,7 @@ from __future__ import annotations
 from orchestrator.enterprise import (
     ConnectorAction,
     ConnectorCredentialStore,
+    ConnectorExecutionService,
     ConnectorHealth,
     ConnectorRegistry,
     ConnectorResult,
@@ -189,6 +190,19 @@ def _connector_gate_services(tmp_path):
     return credentials, policy, credential
 
 
+def _connector_execution_services(tmp_path, *, connector=None):
+    credentials, policy, _ = _connector_gate_services(tmp_path)
+    ledger = EnterpriseAuditLedger.from_path(tmp_path / "enterprise.sqlite", org_id="ORG-001")
+    registry = ConnectorRegistry([connector or _FakeConnector()])
+    service = ConnectorExecutionService(
+        registry=registry,
+        credential_store=credentials,
+        policy_evaluator=policy,
+        ledger=ledger,
+    )
+    return service, credentials, policy, ledger
+
+
 def test_evaluate_connector_action_allows_active_credential_without_policy_rule(tmp_path):
     credentials, policy, _ = _connector_gate_services(tmp_path)
     action = ConnectorAction(connector_type="github", action="repo.read", actor_id="usr-1")
@@ -292,3 +306,93 @@ def test_evaluate_connector_action_creates_approval_request(tmp_path):
     assert approval.action == "connector.execute"
     assert approval.context["connector_type"] == "github"
     assert approval.context["project_id"] == "prj-research"
+
+
+def test_connector_execution_service_runs_allowed_action_and_records_audit(tmp_path):
+    service, _, _, ledger = _connector_execution_services(tmp_path)
+    action = ConnectorAction(
+        connector_type="github",
+        action="repo.read",
+        resource="repo:Bazza1982/hashi",
+        actor_id="usr-1",
+        project_id="prj-research",
+        parameters={"token": "should-redact"},
+    )
+
+    execution = service.execute(action, credential_id="cred-github")
+
+    assert execution.gate.allowed is True
+    assert execution.result.ok is True
+    assert execution.result.status == "success"
+    events = ledger.query(event_type="connector")
+    assert len(events) == 1
+    assert events[0].action == "github.repo.read"
+    assert events[0].context["credential_id"] == "cred-github"
+    assert events[0].context["gate_reason"] == "allowed"
+    assert events[0].context["parameters"]["token"] == "[REDACTED]"
+
+
+def test_connector_execution_service_blocks_policy_deny_without_calling_connector(tmp_path):
+    class FailingConnector(_FakeConnector):
+        def execute(self, action: ConnectorAction):
+            raise AssertionError("connector should not execute")
+
+    service, _, policy, ledger = _connector_execution_services(tmp_path, connector=FailingConnector())
+    policy.add_rule(
+        action="connector.execute",
+        resource="connector:github:repo.read",
+        effect="deny",
+        rule_id="pol-deny-repo-read",
+    )
+    action = ConnectorAction(connector_type="github", action="repo.read")
+
+    execution = service.execute(action, credential_id="cred-github")
+
+    assert execution.gate.allowed is False
+    assert execution.result.ok is False
+    assert execution.result.status == "connector_action_denied"
+    events = ledger.query(event_type="connector")
+    assert len(events) == 1
+    assert events[0].status == "connector_action_denied"
+    assert events[0].context["policy_rule_id"] == "pol-deny-repo-read"
+
+
+def test_connector_execution_service_records_approval_required_without_calling_connector(tmp_path):
+    class FailingConnector(_FakeConnector):
+        def execute(self, action: ConnectorAction):
+            raise AssertionError("connector should not execute")
+
+    service, _, policy, ledger = _connector_execution_services(tmp_path, connector=FailingConnector())
+    policy.add_rule(
+        action="connector.execute",
+        resource="connector:github:repo.read",
+        effect="approval_required",
+        rule_id="pol-approval-repo-read",
+    )
+    action = ConnectorAction(connector_type="github", action="repo.read", actor_id="usr-1")
+
+    execution = service.execute(action, credential_id="cred-github")
+
+    assert execution.gate.allowed is False
+    assert execution.result.status == "connector_action_requires_approval"
+    assert execution.gate.approval_request_id
+    events = ledger.query(event_type="connector")
+    assert len(events) == 1
+    assert events[0].context["approval_request_id"] == execution.gate.approval_request_id
+
+
+def test_connector_execution_service_fails_closed_when_connector_not_registered(tmp_path):
+    credentials, policy, _ = _connector_gate_services(tmp_path)
+    ledger = EnterpriseAuditLedger.from_path(tmp_path / "enterprise.sqlite", org_id="ORG-001")
+    service = ConnectorExecutionService(
+        registry=ConnectorRegistry(),
+        credential_store=credentials,
+        policy_evaluator=policy,
+        ledger=ledger,
+    )
+
+    execution = service.execute(ConnectorAction(connector_type="github", action="repo.read"), credential_id="cred-github")
+
+    assert execution.gate.allowed is True
+    assert execution.result.ok is False
+    assert execution.result.status == "connector_not_registered"

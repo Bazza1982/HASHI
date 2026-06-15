@@ -34,6 +34,8 @@ from orchestrator.enterprise.channels import (
 )
 from orchestrator.enterprise.connectors import (
     ConnectorAction,
+    ConnectorExecution,
+    ConnectorExecutionService,
     ConnectorGateResult,
     ConnectorHealth,
     ConnectorHealthSummary,
@@ -108,6 +110,8 @@ __all__ = [
     "ChannelScopeType",
     "ChannelType",
     "ConnectorAction",
+    "ConnectorExecution",
+    "ConnectorExecutionService",
     "ConnectorGateResult",
     "ConnectorHealth",
     "ConnectorHealthSummary",
