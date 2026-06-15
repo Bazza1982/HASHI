@@ -827,11 +827,15 @@ Implemented checkpoints:
 - Connector interface package added under `orchestrator/enterprise/connectors/`.
 - `ConnectorAction`, `ConnectorResult`, `ConnectorHealth`, and `EnterpriseConnector` protocol define the first connector contract.
 - `record_connector_event()` writes canonical connector ledger events and redacts sensitive action parameters.
+- Connector scoped credential store added:
+  - credentials store connector type, display name, secret reference, scopes, and status;
+  - revoke marks credentials as revoked and hides them from default active queries;
+  - schema version now includes `connector_credentials`.
 
 Residual P10 limitations:
 
 - No real GitHub, Slack, Teams, Google Chat, or Feishu connector is implemented yet.
-- Scoped credential store is still pending.
+- Credential store records secret references only; Vault/Kubernetes secret resolution is still pending.
 - Connector policy gate and revoke behavior are still pending.
 
 **Scope:**
@@ -851,7 +855,7 @@ Residual P10 limitations:
 **Tickets:**
 
 - `ENT-120` Define connector interface. Done for service contract and audit event helper.
-- `ENT-121` Add scoped credential store abstraction.
+- `ENT-121` Add scoped credential store abstraction. Done for secret references, scopes, active listing, and revoke.
 - `ENT-122` Add first enterprise channel connector.
 - `ENT-123` Add GitHub connector with audit.
 - `ENT-124` Add connector health checks.

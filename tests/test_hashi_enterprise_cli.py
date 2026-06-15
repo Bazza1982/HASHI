@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 import hashi
+from orchestrator.enterprise.store import SCHEMA_VERSION
 
 
 def _prepare_enterprise_root(root):
@@ -68,4 +69,4 @@ def test_enterprise_migrate_cli_initializes_schema(tmp_path, monkeypatch, capsys
     output = capsys.readouterr().out
     assert "Enterprise schema migrated" in output
     assert "Before: (none)" in output
-    assert "After : 6" in output
+    assert f"After : {SCHEMA_VERSION}" in output

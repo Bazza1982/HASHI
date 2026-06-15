@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 class EnterpriseStore:
@@ -234,6 +234,22 @@ class EnterpriseStore:
 
                 CREATE INDEX IF NOT EXISTS idx_evidence_bundles_org_task
                     ON evidence_bundles(org_id, task_id);
+
+                CREATE TABLE IF NOT EXISTS connector_credentials (
+                    id TEXT PRIMARY KEY,
+                    org_id TEXT NOT NULL,
+                    connector_type TEXT NOT NULL,
+                    display_name TEXT NOT NULL,
+                    secret_ref TEXT NOT NULL,
+                    scopes_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    revoked_at TEXT,
+                    FOREIGN KEY(org_id) REFERENCES organizations(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_connector_credentials_org_type
+                    ON connector_credentials(org_id, connector_type, status);
                 """
             )
             con.execute(
