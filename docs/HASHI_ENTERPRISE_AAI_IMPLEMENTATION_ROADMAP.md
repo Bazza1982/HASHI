@@ -888,6 +888,10 @@ Implemented checkpoints:
   - credential create/revoke refreshes the registry;
   - static test/injected connectors take precedence over credential-built connectors of the same type;
   - unresolved connector secrets are captured as registry errors instead of breaking Workbench startup.
+- Default connector policy template added:
+  - explicitly allows GitHub read-only repository metadata actions;
+  - requires approval for GitHub `issue.create`, `pr.create`, and `pr.merge`;
+  - template installation is idempotent.
 
 Residual P10 limitations:
 
@@ -896,6 +900,7 @@ Residual P10 limitations:
 - Credential store records secret references only; environment and HASHI secrets can now be resolved through a dedicated resolver, while Vault/Kubernetes secret resolution remains pending.
 - Connector factory currently supports GitHub only; enterprise channel connectors still need factory support.
 - Workbench registry refresh is in-process; multi-node registry synchronization remains future work.
+- Default connector policy template is available as code but is not yet auto-installed during enterprise bootstrap.
 - Workbench/admin connector execution API now uses the gated execution service.
 - Connector health API exists for registered in-process connectors, but no built-in external connector is registered yet.
 - Connector admin UI is still pending.
@@ -929,6 +934,7 @@ Residual P10 limitations:
 - `ENT-130` Add connector secret reference resolver. Done for env/HASHI secret refs, redacted metadata, unsupported scheme failures, and unconfigured vault fail-closed behavior.
 - `ENT-131` Add connector factory. Done for GitHub connector construction from credential refs, secret resolution, revoked credential skipping, and unsupported type fail-closed behavior.
 - `ENT-132` Add Workbench connector registry refresh. Done for startup refresh, create/revoke refresh, static connector precedence, and fail-soft registry errors.
+- `ENT-133` Add default connector policy template. Done for GitHub read allow, GitHub write approval-required, and idempotent install.
 
 **Acceptance:**
 

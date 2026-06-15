@@ -5,7 +5,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from orchestrator.enterprise import EnterpriseAuditLedger, IdentityService, PolicyDecision, PolicyEvaluator, evaluate_governance_policy
+from orchestrator.enterprise import (
+    EnterpriseAuditLedger,
+    IdentityService,
+    PolicyDecision,
+    PolicyEvaluator,
+    evaluate_governance_policy,
+    install_default_connector_policy,
+)
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 
 
@@ -42,6 +49,35 @@ def test_policy_evaluator_defaults_to_allow_without_rules(tmp_path):
     assert result.allowed is True
     assert result.decision == PolicyDecision.ALLOW
     assert result.rule_id is None
+
+
+def test_default_connector_policy_allows_github_reads_and_requires_write_approval(tmp_path):
+    _init_org(tmp_path)
+    evaluator = PolicyEvaluator.from_path(tmp_path / "state" / "enterprise.sqlite", org_id="ORG-001")
+
+    rules = install_default_connector_policy(evaluator)
+
+    assert len(rules) == 5
+    read = evaluator.evaluate("connector.execute", resource="connector:github:repo.read")
+    issue = evaluator.evaluate("connector.execute", resource="connector:github:issue.create")
+    merge = evaluator.evaluate("connector.execute", resource="connector:github:pr.merge")
+    assert read.allowed is True
+    assert read.rule_id == "tpl-connector-github-repo-read-allow"
+    assert issue.allowed is False
+    assert issue.decision == PolicyDecision.APPROVAL_REQUIRED
+    assert issue.rule_id == "tpl-connector-github-issue-create-approval"
+    assert merge.allowed is False
+    assert merge.decision == PolicyDecision.APPROVAL_REQUIRED
+
+
+def test_default_connector_policy_install_is_idempotent(tmp_path):
+    _init_org(tmp_path)
+    evaluator = PolicyEvaluator.from_path(tmp_path / "state" / "enterprise.sqlite", org_id="ORG-001")
+
+    install_default_connector_policy(evaluator)
+    install_default_connector_policy(evaluator)
+
+    assert len(evaluator.list_rules()) == 5
 
 
 def test_policy_evaluator_denies_matching_command_rule(tmp_path):
