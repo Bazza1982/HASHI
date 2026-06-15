@@ -402,6 +402,26 @@ Residual P3 limitations:
 
 **Goal:** promote audit stubs and fragmented logs into a queryable enterprise ledger.
 
+**Implementation status:** P4A ledger foundation completed; adapters and API remain.
+
+Implemented checkpoints:
+
+- `audit_events` persistence in enterprise SQLite store with indexes for org/time, event type, actor, and project;
+- `EnterpriseAuditLedger` with:
+  - append;
+  - append from existing `AuditEvent`;
+  - query by event type, actor, project, task, request, and correlation id;
+  - JSONL export;
+- stable ledger event schema version field;
+- tests for append/query/export and compatibility with existing `AuditEvent`.
+
+Residual P4 limitations:
+
+- existing JSONL writers are not yet dual-writing to the ledger;
+- Workbench query/export APIs are not yet exposed;
+- slash/token/HChat/tool adapters are still pending;
+- retention and SIEM mapping remain future P4 work.
+
 **Scope:**
 
 - append-only SQLite-backed ledger;
@@ -423,9 +443,9 @@ Residual P3 limitations:
 
 **Tickets:**
 
-- `ENT-060` Implement append-only ledger store.
-- `ENT-061` Add query API and pagination.
-- `ENT-062` Add JSONL export.
+- `ENT-060` Implement append-only ledger store. Done for P4A foundation.
+- `ENT-061` Add query API and pagination. Query filters done; pagination cursor pending.
+- `ENT-062` Add JSONL export. Done for P4A foundation.
 - `ENT-063` Add slash audit adapter.
 - `ENT-064` Add token/model invocation adapter.
 - `ENT-065` Add HChat/Remote adapter.

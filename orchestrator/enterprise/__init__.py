@@ -6,6 +6,7 @@ from orchestrator.enterprise.profile import (
     validate_profile_context,
 )
 from orchestrator.enterprise.audit_schema import AuditEvent, AuditEventWriter
+from orchestrator.enterprise.audit_ledger import EnterpriseAuditLedger, LedgerEvent
 from orchestrator.enterprise.channel_gate import ChannelGateResult, EnterpriseChannelGate
 from orchestrator.enterprise.channels import (
     Channel,
@@ -35,6 +36,8 @@ __all__ = [
     "validate_profile_context",
     "AuditEvent",
     "AuditEventWriter",
+    "EnterpriseAuditLedger",
+    "LedgerEvent",
     "ChannelGateResult",
     "EnterpriseChannelGate",
     "Channel",
