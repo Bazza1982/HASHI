@@ -108,6 +108,8 @@ class WorkbenchApiServer:
         self.app.router.add_post("/api/enterprise/channels/bind", self.handle_enterprise_channels_bind)
         self.app.router.add_get("/api/enterprise/audit", self.handle_enterprise_audit)
         self.app.router.add_get("/api/enterprise/audit/export", self.handle_enterprise_audit_export)
+        self.app.router.add_get("/api/enterprise/policies", self.handle_enterprise_policies)
+        self.app.router.add_post("/api/enterprise/policies", self.handle_enterprise_policies_create)
         self.app.router.add_get("/api/enterprise/approvals", self.handle_enterprise_approvals)
         self.app.router.add_post("/api/enterprise/approvals/{request_id}/approve", self.handle_enterprise_approval_approve)
         self.app.router.add_post("/api/enterprise/approvals/{request_id}/deny", self.handle_enterprise_approval_deny)
@@ -608,6 +610,20 @@ class WorkbenchApiServer:
             "decision_reason": approval.decision_reason,
         }
 
+    def _enterprise_policy_rule_payload(self, rule) -> dict:
+        return {
+            "id": rule.id,
+            "org_id": rule.org_id,
+            "scope_type": rule.scope_type,
+            "scope_id": rule.scope_id,
+            "action": rule.action,
+            "resource": rule.resource,
+            "effect": rule.effect.value,
+            "conditions": rule.conditions,
+            "priority": rule.priority,
+            "created_at": rule.created_at,
+        }
+
     def _enterprise_admin_error_response(self, request):
         if not self._is_governed_profile():
             return web.json_response({"ok": False, "error": "enterprise API requires governed profile"}, status=404)
@@ -907,6 +923,58 @@ class WorkbenchApiServer:
         if body:
             body += "\n"
         return web.Response(text=body, content_type="application/x-ndjson")
+
+    async def handle_enterprise_policies(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        evaluator = self._enterprise_policy_evaluator()
+        if evaluator is None:
+            return web.json_response({"ok": False, "error": "policy evaluator unavailable"}, status=503)
+        rules = [self._enterprise_policy_rule_payload(rule) for rule in evaluator.list_rules()]
+        return web.json_response({"ok": True, "policies": rules, "count": len(rules)})
+
+    async def handle_enterprise_policies_create(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        evaluator = self._enterprise_policy_evaluator()
+        if evaluator is None:
+            return web.json_response({"ok": False, "error": "policy evaluator unavailable"}, status=503)
+        actor = self._enterprise_user_from_request(request)
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
+        conditions = payload.get("conditions") if isinstance(payload.get("conditions"), dict) else {}
+        try:
+            rule = evaluator.add_rule(
+                action=payload.get("action"),
+                resource=payload.get("resource") or "*",
+                effect=payload.get("effect"),
+                scope_type=payload.get("scope_type") or "org",
+                scope_id=payload.get("scope_id"),
+                conditions=conditions,
+                priority=int(payload.get("priority") or 100),
+                rule_id=payload.get("rule_id"),
+            )
+        except Exception as exc:
+            self._append_enterprise_audit(
+                event_type="admin_api",
+                action="policy_rule_create",
+                status="failed",
+                actor_id=actor.id if actor else None,
+                context={"error": str(exc)},
+            )
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        self._append_enterprise_audit(
+            event_type="admin_api",
+            action="policy_rule_create",
+            status="success",
+            actor_id=actor.id if actor else None,
+            context={"policy_rule_id": rule.id, "effect": rule.effect.value, "action": rule.action},
+        )
+        return web.json_response({"ok": True, "policy": self._enterprise_policy_rule_payload(rule)}, status=201)
 
     async def handle_enterprise_approvals(self, request):
         error = self._enterprise_admin_error_response(request)
