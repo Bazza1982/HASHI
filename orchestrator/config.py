@@ -6,6 +6,10 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Union
 
+from orchestrator.enterprise.profile import (
+    parse_profile_context,
+    validate_profile_context,
+)
 from orchestrator.pathing import resolve_command_value, resolve_path_value
 
 # Valid access_scope values:
@@ -32,6 +36,8 @@ def resolve_access_root(scope: str, workspace_dir: Path, project_root: Path) -> 
 @dataclass
 class GlobalConfig:
     authorized_id: int
+    deployment_profile: str
+    organization_id: str | None
     base_logs_dir: Path
     base_media_dir: Path
     instance_id: str = "HASHI"
@@ -102,6 +108,8 @@ class ConfigManager:
             secrets = json.load(f)
 
         g_raw = raw_cfg["global"]
+        profile_ctx = parse_profile_context(g_raw)
+        validate_profile_context(profile_ctx)
         config_dir = self.config_path.parent
         code_root = Path(__file__).resolve().parent.parent
         bridge_home = self.bridge_home
@@ -116,6 +124,8 @@ class ConfigManager:
 
         global_cfg = GlobalConfig(
             authorized_id=_auth_id,
+            deployment_profile=profile_ctx.profile.value,
+            organization_id=profile_ctx.organization_id,
             base_logs_dir=resolve_path_value(
                 g_raw.get("base_logs_dir", "logs"),
                 config_dir=config_dir,
