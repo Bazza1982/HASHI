@@ -32,6 +32,13 @@ from orchestrator.enterprise.channels import (
     ChannelScopeType,
     ChannelType,
 )
+from orchestrator.enterprise.connectors import (
+    ConnectorAction,
+    ConnectorHealth,
+    ConnectorResult,
+    EnterpriseConnector,
+    record_connector_event,
+)
 from orchestrator.enterprise.identity import EnterpriseRole, IdentityService
 from orchestrator.enterprise.policy import (
     ApprovalRequest,
@@ -94,6 +101,10 @@ __all__ = [
     "ChannelRegistry",
     "ChannelScopeType",
     "ChannelType",
+    "ConnectorAction",
+    "ConnectorHealth",
+    "ConnectorResult",
+    "EnterpriseConnector",
     "EnterpriseRole",
     "EnterpriseTask",
     "EvidenceBundle",
@@ -118,6 +129,7 @@ __all__ = [
     "evaluate_project_route",
     "fail_task_if_promised_artifacts_missing",
     "record_failed_task_escalation",
+    "record_connector_event",
     "transition_task_with_failure_escalation",
     "verify_promised_artifacts",
 ]
