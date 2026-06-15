@@ -878,6 +878,11 @@ Implemented checkpoints:
   - creates GitHub connector instances with resolved tokens;
   - skips revoked credentials when building registries;
   - unsupported connector types fail closed.
+- Workbench connector registry refresh added:
+  - Workbench builds its in-process connector registry from active credential references at startup;
+  - credential create/revoke refreshes the registry;
+  - static test/injected connectors take precedence over credential-built connectors of the same type;
+  - unresolved connector secrets are captured as registry errors instead of breaking Workbench startup.
 
 Residual P10 limitations:
 
@@ -885,6 +890,7 @@ Residual P10 limitations:
 - No Slack, Teams, Google Chat, or Feishu connector is implemented yet.
 - Credential store records secret references only; environment and HASHI secrets can now be resolved through a dedicated resolver, while Vault/Kubernetes secret resolution remains pending.
 - Connector factory currently supports GitHub only; enterprise channel connectors still need factory support.
+- Workbench registry refresh is in-process; multi-node registry synchronization remains future work.
 - Workbench/admin connector execution API now uses the gated execution service.
 - Connector health API exists for registered in-process connectors, but no built-in external connector is registered yet.
 - Connector admin UI is still pending.
@@ -917,6 +923,7 @@ Residual P10 limitations:
 - `ENT-129` Add Workbench connector credential API. Done for admin-gated list, create, revoke, active-only listing, include-revoked listing, and audit events.
 - `ENT-130` Add connector secret reference resolver. Done for env/HASHI secret refs, redacted metadata, unsupported scheme failures, and unconfigured vault fail-closed behavior.
 - `ENT-131` Add connector factory. Done for GitHub connector construction from credential refs, secret resolution, revoked credential skipping, and unsupported type fail-closed behavior.
+- `ENT-132` Add Workbench connector registry refresh. Done for startup refresh, create/revoke refresh, static connector precedence, and fail-soft registry errors.
 
 **Acceptance:**
 

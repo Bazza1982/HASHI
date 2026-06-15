@@ -20,11 +20,12 @@ from orchestrator.enterprise.audit_schema import AuditEvent, AuditEventWriter
 from orchestrator.enterprise.capabilities import AgentCapabilityRegistry
 from orchestrator.enterprise.channel_gate import EnterpriseChannelGate
 from orchestrator.enterprise.channels import ChannelRegistry
-from orchestrator.enterprise.connectors import ConnectorAction, ConnectorExecutionService, ConnectorRegistry
+from orchestrator.enterprise.connectors import ConnectorAction, ConnectorExecutionService, ConnectorFactory, ConnectorRegistry
 from orchestrator.enterprise.credentials import ConnectorCredentialStore
 from orchestrator.enterprise.identity import EnterpriseRole, IdentityService
 from orchestrator.enterprise.policy import PolicyEvaluator
 from orchestrator.enterprise.routing import agent_project_ids
+from orchestrator.enterprise.secret_refs import ConnectorSecretResolver
 from orchestrator.pathing import resolve_path_value
 from orchestrator.transfer_store import TransferStore
 
@@ -93,13 +94,17 @@ class WorkbenchApiServer:
         self.global_config = global_config
         self.runtimes = runtimes or []
         self.orchestrator = orchestrator
-        self.admin_token = ((secrets or {}).get("workbench_admin_token") or "").strip()
+        self.secrets = dict(secrets or {})
+        self.admin_token = (self.secrets.get("workbench_admin_token") or "").strip()
+        self._static_connectors = list(connectors or [])
         self.identity_service = self._build_identity_service()
         self.channel_registry = self._build_channel_registry()
         self.audit_writer = self._build_audit_writer()
         self.audit_ledger = self._build_audit_ledger()
         self.connector_credentials = self._build_connector_credentials()
-        self.connector_registry = ConnectorRegistry(connectors)
+        self.connector_secret_resolver = ConnectorSecretResolver(secrets=self.secrets)
+        self.connector_registry_errors: list[dict] = []
+        self.connector_registry = self._build_connector_registry()
         self.bridge_router = ConversationRouter(
             config_path=self.config_path,
             capabilities_path=self.config_path.parent / "agent_capabilities.json",
@@ -235,6 +240,33 @@ class WorkbenchApiServer:
             return None
         bridge_home = Path(getattr(self.global_config, "bridge_home", None) or self.config_path.parent)
         return ConnectorCredentialStore.from_path(bridge_home / "state" / "enterprise.sqlite")
+
+    def _build_connector_registry(self) -> ConnectorRegistry:
+        registry = ConnectorRegistry(self._static_connectors)
+        self.connector_registry_errors = []
+        if not self._is_governed_profile() or self.connector_credentials is None:
+            return registry
+        org_id = str(getattr(self.global_config, "organization_id", "") or "").strip()
+        if not org_id:
+            return registry
+        factory = ConnectorFactory(secret_resolver=self.connector_secret_resolver)
+        for credential in self.connector_credentials.list_credentials(org_id=org_id):
+            if credential.connector_type in registry.list_types():
+                continue
+            try:
+                registry.register(factory.build(credential))
+            except Exception as exc:
+                self.connector_registry_errors.append(
+                    {
+                        "credential_id": credential.id,
+                        "connector_type": credential.connector_type,
+                        "error": str(exc),
+                    }
+                )
+        return registry
+
+    def _refresh_connector_registry(self) -> None:
+        self.connector_registry = self._build_connector_registry()
 
     def _enterprise_policy_evaluator(self) -> PolicyEvaluator | None:
         if not self._is_governed_profile():
@@ -1176,6 +1208,7 @@ class WorkbenchApiServer:
             actor_id=actor.id if actor else None,
             context={"credential_id": credential.id, "connector_type": credential.connector_type},
         )
+        self._refresh_connector_registry()
         return web.json_response(
             {"ok": True, "credential": self._enterprise_connector_credential_payload(credential)},
             status=201,
@@ -1209,6 +1242,7 @@ class WorkbenchApiServer:
             actor_id=actor.id if actor else None,
             context={"credential_id": credential.id, "connector_type": credential.connector_type},
         )
+        self._refresh_connector_registry()
         return web.json_response({"ok": True, "credential": self._enterprise_connector_credential_payload(credential)})
 
     async def handle_enterprise_connector_health(self, request):
@@ -1221,6 +1255,7 @@ class WorkbenchApiServer:
                 "ok": True,
                 "healthy": all(item["ok"] for item in health),
                 "connectors": health,
+                "registry_errors": list(self.connector_registry_errors),
                 "count": len(health),
             }
         )
