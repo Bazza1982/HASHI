@@ -63,6 +63,12 @@ class _FakeGitHubTransport:
                 "state": "open",
                 "draft": body["draft"],
             }
+        if method == "PUT" and path == "/repos/Bazza1982/hashi/pulls/8/merge":
+            return {
+                "sha": "abc123",
+                "merged": True,
+                "message": "Pull Request successfully merged",
+            }
         raise AssertionError(f"unexpected GitHub request: {method} {path}")
 
 
@@ -276,9 +282,99 @@ def test_github_connector_pr_create_validates_required_fields(parameters, messag
     assert message in result.message
 
 
+def test_github_connector_pr_merge_supports_dry_run_without_transport_call():
+    transport = _FakeGitHubTransport()
+    connector = GitHubConnector(transport=transport)
+    action = ConnectorAction(
+        connector_type="github",
+        action="pr.merge",
+        resource="repo:Bazza1982/hashi",
+        dry_run=True,
+        parameters={
+            "pull_number": 8,
+            "merge_method": "squash",
+            "commit_title": "Enterprise merge",
+            "commit_message": "Reviewed by HASHI",
+            "sha": "abc123",
+        },
+    )
+
+    result = connector.execute(action)
+
+    assert result.ok is True
+    assert result.status == "dry_run"
+    assert result.data == {
+        "owner": "Bazza1982",
+        "repo": "hashi",
+        "pull_number": 8,
+        "payload": {
+            "merge_method": "squash",
+            "commit_title": "Enterprise merge",
+            "commit_message": "Reviewed by HASHI",
+            "sha": "abc123",
+        },
+    }
+    assert transport.calls == []
+
+
+def test_github_connector_pr_merge_sends_merge_payload():
+    transport = _FakeGitHubTransport()
+    connector = GitHubConnector(token="ghp-test", transport=transport)
+    action = ConnectorAction(
+        connector_type="github",
+        action="pr.merge",
+        resource="repo:Bazza1982/hashi",
+        parameters={
+            "pull_number": 8,
+            "merge_method": "squash",
+            "commit_title": "Enterprise merge",
+            "commit_message": "Reviewed by HASHI",
+        },
+    )
+
+    result = connector.execute(action)
+
+    assert result.ok is True
+    assert result.status == "success"
+    assert result.data["sha"] == "abc123"
+    assert result.data["merged"] is True
+    assert transport.calls[0]["method"] == "PUT"
+    assert transport.calls[0]["path"] == "/repos/Bazza1982/hashi/pulls/8/merge"
+    assert transport.calls[0]["body"] == {
+        "merge_method": "squash",
+        "commit_title": "Enterprise merge",
+        "commit_message": "Reviewed by HASHI",
+    }
+    assert transport.calls[0]["headers"]["Authorization"] == "Bearer ghp-test"
+
+
+@pytest.mark.parametrize(
+    ("parameters", "message"),
+    [
+        ({}, "pull_number"),
+        ({"pull_number": 0}, "pull_number"),
+        ({"pull_number": 8, "merge_method": "force"}, "merge_method"),
+    ],
+)
+def test_github_connector_pr_merge_validates_required_fields(parameters, message):
+    connector = GitHubConnector(transport=_FakeGitHubTransport())
+    action = ConnectorAction(
+        connector_type="github",
+        action="pr.merge",
+        resource="repo:Bazza1982/hashi",
+        parameters=parameters,
+    )
+
+    result = connector.execute(action)
+
+    assert result.ok is False
+    assert result.status == "invalid_parameters"
+    assert message in result.message
+
+
 def test_github_connector_rejects_unsupported_action():
     connector = GitHubConnector(transport=_FakeGitHubTransport())
-    action = ConnectorAction(connector_type="github", action="pr.merge", resource="repo:Bazza1982/hashi")
+    action = ConnectorAction(connector_type="github", action="release.create", resource="repo:Bazza1982/hashi")
 
     result = connector.execute(action)
 

@@ -48,6 +48,8 @@ class GitHubConnector:
             return self._create_issue(action)
         if action_name == "pr.create":
             return self._create_pull_request(action)
+        if action_name == "pr.merge":
+            return self._merge_pull_request(action)
         return ConnectorResult(
             ok=False,
             status="unsupported_action",
@@ -170,6 +172,61 @@ class GitHubConnector:
             },
         )
 
+    def _merge_pull_request(self, action: ConnectorAction) -> ConnectorResult:
+        repo_ref = _repo_ref_from_action(action)
+        parameters = dict(action.parameters or {})
+        pull_number = _int_parameter(parameters.get("pull_number") or parameters.get("number"))
+        if repo_ref is None:
+            return ConnectorResult(
+                ok=False,
+                status="invalid_parameters",
+                message="pr.merge requires owner/repo in resource or parameters",
+            )
+        if pull_number is None:
+            return ConnectorResult(ok=False, status="invalid_parameters", message="pr.merge requires pull_number")
+        merge_method = str(parameters.get("merge_method") or "merge").strip().lower()
+        if merge_method not in {"merge", "squash", "rebase"}:
+            return ConnectorResult(
+                ok=False,
+                status="invalid_parameters",
+                message="pr.merge merge_method must be merge, squash, or rebase",
+            )
+        owner, repo = repo_ref
+        payload = {
+            "merge_method": merge_method,
+        }
+        commit_title = str(parameters.get("commit_title") or "").strip()
+        commit_message = str(parameters.get("commit_message") or "").strip()
+        sha = str(parameters.get("sha") or "").strip()
+        if commit_title:
+            payload["commit_title"] = commit_title
+        if commit_message:
+            payload["commit_message"] = commit_message
+        if sha:
+            payload["sha"] = sha
+        if action.dry_run:
+            return ConnectorResult(
+                ok=True,
+                status="dry_run",
+                message="pull request merge dry run",
+                data={"owner": owner, "repo": repo, "pull_number": pull_number, "payload": payload},
+            )
+        data = self._request_json(
+            "PUT",
+            f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/pulls/{pull_number}/merge",
+            payload,
+        )
+        return ConnectorResult(
+            ok=bool(data.get("merged", True)),
+            status="success" if data.get("merged", True) else "not_merged",
+            message=str(data.get("message") or "pull request merged"),
+            data={
+                "sha": data.get("sha"),
+                "merged": data.get("merged"),
+                "message": data.get("message"),
+            },
+        )
+
     def _request_json(self, method: str, path: str, body: Mapping[str, Any] | None = None) -> Mapping[str, Any]:
         headers = {
             "Accept": "application/vnd.github+json",
@@ -212,3 +269,11 @@ def _json_safe_mapping(value: Any) -> dict:
         else:
             result[str(key)] = repr(item)
     return result
+
+
+def _int_parameter(value: Any) -> int | None:
+    try:
+        number = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
