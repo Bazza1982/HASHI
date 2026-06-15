@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 
 from orchestrator.enterprise import EnterpriseAuditLedger, IdentityService
-from orchestrator.enterprise.audit_adapters import ingest_slash_command_audit_jsonl
+from orchestrator.enterprise.audit_adapters import (
+    ingest_slash_command_audit_jsonl,
+    ingest_token_audit_jsonl,
+)
 from orchestrator.slash_command_audit import build_audit_record
 
 
@@ -112,3 +115,71 @@ def test_slash_audit_ingest_skips_malformed_lines(tmp_path):
     assert event.action == "slash.queue"
     assert event.status == "failed"
     assert event.context["error"] == "boom"
+
+
+def test_ingests_token_audit_jsonl_into_ledger(tmp_path):
+    ledger = _init_ledger(tmp_path)
+    audit_path = tmp_path / "token_audit.jsonl"
+    record = {
+        "ts": "2026-06-14T13:00:00+00:00",
+        "request_id": "req-1",
+        "request_fingerprint": "fingerprint-1",
+        "agent": "zelda",
+        "runtime": "flex",
+        "completion_path": "foreground",
+        "backend": "codex-cli",
+        "model": "gpt-5.5",
+        "source": "scheduler",
+        "summary": "Nudge Task",
+        "success": True,
+        "input_tokens": 123,
+        "output_tokens": 45,
+        "thinking_tokens": 6,
+        "tool_call_count": 2,
+        "wrapper_used": False,
+    }
+    audit_path.write_text(json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    result = ingest_token_audit_jsonl(ledger, audit_path)
+
+    assert result.ingested == 1
+    event = ledger.query(event_type="model_invocation")[0]
+    assert event.ts == "2026-06-14T13:00:00+00:00"
+    assert event.action == "model.invoke"
+    assert event.status == "success"
+    assert event.request_id == "req-1"
+    assert event.correlation_id == "fingerprint-1"
+    assert event.context["backend"] == "codex-cli"
+    assert event.context["model"] == "gpt-5.5"
+    assert event.context["input_tokens"] == 123
+    assert event.context["tool_call_count"] == 2
+
+
+def test_token_audit_ingest_is_idempotent_and_skips_bad_lines(tmp_path):
+    ledger = _init_ledger(tmp_path)
+    audit_path = tmp_path / "token_audit.jsonl"
+    record = {
+        "ts": "2026-06-14T13:01:00+00:00",
+        "request_id": "req-2",
+        "backend": "grok-cli",
+        "model": "grok-composer-2.5-fast",
+        "success": False,
+        "error": "empty answer",
+    }
+    audit_path.write_text(
+        "{bad-json\n" + json.dumps(record, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    first = ingest_token_audit_jsonl(ledger, audit_path)
+    second = ingest_token_audit_jsonl(ledger, audit_path)
+
+    assert first.ingested == 1
+    assert first.skipped == 1
+    assert second.ingested == 0
+    assert second.skipped == 1
+    assert second.duplicate == 1
+    event = ledger.query(event_type="model_invocation")[0]
+    assert event.status == "failed"
+    assert event.request_id == "req-2"
+    assert event.context["error"] == "empty answer"

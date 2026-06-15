@@ -421,14 +421,19 @@ Implemented checkpoints:
   - imports legacy `slash_command_audit.jsonl` records as `slash_command` ledger events;
   - preserves legacy timestamp, actor, command, status, channel, handler, duration, error, blocked reason, and side effects;
   - uses deterministic event IDs so migration/backfill jobs can be rerun without duplicate ledger rows;
+- token audit JSONL adapter:
+  - imports legacy `token_audit.jsonl` records as `model_invocation` ledger events;
+  - preserves request id, request fingerprint, backend, model, source, success status, token counts, tool telemetry, wrapper telemetry, and legacy context;
+  - uses deterministic event IDs for safe migration/backfill reruns;
 - tests for append/query/export, compatibility with existing `AuditEvent`, and slash audit ingestion.
 
 Residual P4 limitations:
 
 - slash command JSONL can now be ingested into the ledger, but live slash command dual-write is still pending;
-- token/HChat/tool JSONL writers are not yet dual-writing to the ledger;
+- token audit JSONL can now be ingested into the ledger, but live token audit dual-write is still pending;
+- HChat/tool JSONL writers are not yet dual-writing to the ledger;
 - auditor read-only role semantics are not yet separated from broader admin access;
-- token/HChat/tool adapters are still pending;
+- HChat/tool adapters are still pending;
 - retention and SIEM mapping remain future P4 work.
 
 **Scope:**
@@ -456,7 +461,7 @@ Residual P4 limitations:
 - `ENT-061` Add query API and pagination. Query filters and Workbench API done; pagination cursor pending.
 - `ENT-062` Add JSONL export. Done for P4A foundation.
 - `ENT-063` Add slash audit adapter. Done for legacy JSONL ingest with idempotent event IDs; live dual-write pending.
-- `ENT-064` Add token/model invocation adapter.
+- `ENT-064` Add token/model invocation adapter. Done for legacy JSONL ingest with idempotent event IDs; live dual-write pending.
 - `ENT-065` Add HChat/Remote adapter.
 - `ENT-066` Add tool/file event adapters. Policy/channel governance events dual-write; tool/file adapters pending.
 - `ENT-067` Add audit schema contract tests.
