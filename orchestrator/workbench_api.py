@@ -20,6 +20,7 @@ from orchestrator.enterprise.audit_schema import AuditEvent, AuditEventWriter
 from orchestrator.enterprise.channel_gate import EnterpriseChannelGate
 from orchestrator.enterprise.channels import ChannelRegistry
 from orchestrator.enterprise.identity import EnterpriseRole, IdentityService
+from orchestrator.enterprise.policy import PolicyEvaluator
 from orchestrator.pathing import resolve_path_value
 from orchestrator.transfer_store import TransferStore
 
@@ -105,6 +106,9 @@ class WorkbenchApiServer:
         self.app.router.add_post("/api/enterprise/channels/bind", self.handle_enterprise_channels_bind)
         self.app.router.add_get("/api/enterprise/audit", self.handle_enterprise_audit)
         self.app.router.add_get("/api/enterprise/audit/export", self.handle_enterprise_audit_export)
+        self.app.router.add_get("/api/enterprise/approvals", self.handle_enterprise_approvals)
+        self.app.router.add_post("/api/enterprise/approvals/{request_id}/approve", self.handle_enterprise_approval_approve)
+        self.app.router.add_post("/api/enterprise/approvals/{request_id}/deny", self.handle_enterprise_approval_deny)
         self.app.router.add_get("/api/agents", self.handle_agents)
         self.app.router.add_get("/api/transcript/{name}", self.handle_transcript_recent)
         self.app.router.add_get("/api/transcript/{name}/poll", self.handle_transcript_poll)
@@ -189,6 +193,15 @@ class WorkbenchApiServer:
             return None
         bridge_home = Path(getattr(self.global_config, "bridge_home", None) or self.config_path.parent)
         return EnterpriseAuditLedger.from_path(bridge_home / "state" / "enterprise.sqlite", org_id=org_id)
+
+    def _enterprise_policy_evaluator(self) -> PolicyEvaluator | None:
+        if not self._is_governed_profile():
+            return None
+        org_id = str(getattr(self.global_config, "organization_id", "") or "").strip()
+        if not org_id:
+            return None
+        bridge_home = Path(getattr(self.global_config, "bridge_home", None) or self.config_path.parent)
+        return PolicyEvaluator.from_path(bridge_home / "state" / "enterprise.sqlite", org_id=org_id)
 
     def _build_audit_writer(self) -> AuditEventWriter:
         if not self._is_governed_profile():
@@ -572,6 +585,23 @@ class WorkbenchApiServer:
             "bindings": bindings,
         }
 
+    def _enterprise_approval_payload(self, approval) -> dict:
+        return {
+            "id": approval.id,
+            "org_id": approval.org_id,
+            "actor_id": approval.actor_id,
+            "action": approval.action,
+            "resource": approval.resource,
+            "status": approval.status,
+            "rule_id": approval.rule_id,
+            "reason": approval.reason,
+            "context": approval.context,
+            "created_at": approval.created_at,
+            "decided_by": approval.decided_by,
+            "decided_at": approval.decided_at,
+            "decision_reason": approval.decision_reason,
+        }
+
     def _enterprise_admin_error_response(self, request):
         if not self._is_governed_profile():
             return web.json_response({"ok": False, "error": "enterprise API requires governed profile"}, status=404)
@@ -871,6 +901,56 @@ class WorkbenchApiServer:
         if body:
             body += "\n"
         return web.Response(text=body, content_type="application/x-ndjson")
+
+    async def handle_enterprise_approvals(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        evaluator = self._enterprise_policy_evaluator()
+        if evaluator is None:
+            return web.json_response({"ok": False, "error": "policy evaluator unavailable"}, status=503)
+        query = getattr(request, "query", {}) or {}
+        status = str(query.get("status") or "pending").strip() or None
+        approvals = evaluator.list_approval_requests(status=status)
+        return web.json_response(
+            {
+                "ok": True,
+                "approvals": [self._enterprise_approval_payload(approval) for approval in approvals],
+                "count": len(approvals),
+            }
+        )
+
+    async def _handle_enterprise_approval_decision(self, request, *, status: str):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        evaluator = self._enterprise_policy_evaluator()
+        if evaluator is None:
+            return web.json_response({"ok": False, "error": "policy evaluator unavailable"}, status=503)
+        actor = self._enterprise_user_from_request(request)
+        request_id = str(getattr(request, "match_info", {}).get("request_id") or "").strip()
+        if not request_id:
+            return web.json_response({"ok": False, "error": "request_id is required"}, status=400)
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        try:
+            approval = evaluator.decide_approval_request(
+                request_id,
+                status=status,
+                decided_by=actor.id if actor else "unknown",
+                reason=payload.get("reason") if isinstance(payload, dict) else None,
+            )
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        return web.json_response({"ok": True, "approval": self._enterprise_approval_payload(approval)})
+
+    async def handle_enterprise_approval_approve(self, request):
+        return await self._handle_enterprise_approval_decision(request, status="approved")
+
+    async def handle_enterprise_approval_deny(self, request):
+        return await self._handle_enterprise_approval_decision(request, status="denied")
 
     async def handle_agents(self, request):
         runtime_map = self._runtime_map()
