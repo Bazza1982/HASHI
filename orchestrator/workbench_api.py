@@ -16,6 +16,7 @@ from orchestrator.admin_local_testing import (
 )
 from orchestrator.conversation_router import ConversationRouter
 from orchestrator.enterprise.audit_schema import AuditEvent, AuditEventWriter
+from orchestrator.enterprise.channels import ChannelRegistry
 from orchestrator.enterprise.identity import EnterpriseRole, IdentityService
 from orchestrator.pathing import resolve_path_value
 from orchestrator.transfer_store import TransferStore
@@ -79,6 +80,7 @@ class WorkbenchApiServer:
         self.orchestrator = orchestrator
         self.admin_token = ((secrets or {}).get("workbench_admin_token") or "").strip()
         self.identity_service = self._build_identity_service()
+        self.channel_registry = self._build_channel_registry()
         self.audit_writer = self._build_audit_writer()
         self.bridge_router = ConversationRouter(
             config_path=self.config_path,
@@ -95,6 +97,9 @@ class WorkbenchApiServer:
         self.app.router.add_post("/api/enterprise/users", self.handle_enterprise_users_create)
         self.app.router.add_get("/api/enterprise/projects", self.handle_enterprise_projects)
         self.app.router.add_post("/api/enterprise/projects", self.handle_enterprise_projects_create)
+        self.app.router.add_get("/api/enterprise/channels", self.handle_enterprise_channels)
+        self.app.router.add_post("/api/enterprise/channels", self.handle_enterprise_channels_register)
+        self.app.router.add_post("/api/enterprise/channels/bind", self.handle_enterprise_channels_bind)
         self.app.router.add_get("/api/agents", self.handle_agents)
         self.app.router.add_get("/api/transcript/{name}", self.handle_transcript_recent)
         self.app.router.add_get("/api/transcript/{name}/poll", self.handle_transcript_poll)
@@ -164,6 +169,12 @@ class WorkbenchApiServer:
             return None
         bridge_home = Path(getattr(self.global_config, "bridge_home", None) or self.config_path.parent)
         return IdentityService.from_path(bridge_home / "state" / "enterprise.sqlite")
+
+    def _build_channel_registry(self) -> ChannelRegistry | None:
+        if str(getattr(self.global_config, "deployment_profile", "personal") or "personal") == "personal":
+            return None
+        bridge_home = Path(getattr(self.global_config, "bridge_home", None) or self.config_path.parent)
+        return ChannelRegistry.from_path(bridge_home / "state" / "enterprise.sqlite")
 
     def _build_audit_writer(self) -> AuditEventWriter:
         if not self._is_governed_profile():
@@ -514,6 +525,31 @@ class WorkbenchApiServer:
             "created_at": project.created_at,
         }
 
+    def _enterprise_channel_payload(self, channel, *, include_bindings: bool = True) -> dict:
+        bindings = []
+        if include_bindings and self.channel_registry is not None:
+            bindings = [
+                {
+                    "channel_id": binding.channel_id,
+                    "scope_type": binding.scope_type,
+                    "scope_id": binding.scope_id,
+                    "permission": binding.permission,
+                    "created_at": binding.created_at,
+                }
+                for binding in self.channel_registry.list_bindings(channel_id=channel.id)
+            ]
+        return {
+            "id": channel.id,
+            "org_id": channel.org_id,
+            "type": channel.type,
+            "display_name": channel.display_name,
+            "enabled": channel.enabled,
+            "risk_tier": channel.risk_tier,
+            "created_at": channel.created_at,
+            "updated_at": channel.updated_at,
+            "bindings": bindings,
+        }
+
     def _enterprise_admin_error_response(self, request):
         if not self._is_governed_profile():
             return web.json_response({"ok": False, "error": "enterprise API requires governed profile"}, status=404)
@@ -633,6 +669,137 @@ class WorkbenchApiServer:
             context={"project_id": project.id, "org_id": org_id},
         )
         return web.json_response({"ok": True, "project": self._enterprise_project_payload(project)}, status=201)
+
+    async def handle_enterprise_channels(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        if self.channel_registry is None:
+            return web.json_response({"ok": False, "error": "channel registry unavailable"}, status=503)
+        org_id = str(getattr(self.global_config, "organization_id", "") or "").strip()
+        channels = [
+            self._enterprise_channel_payload(channel)
+            for channel in self.channel_registry.list_channels(org_id=org_id)
+        ]
+        return web.json_response({"ok": True, "channels": channels})
+
+    async def handle_enterprise_channels_register(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        if self.channel_registry is None:
+            return web.json_response({"ok": False, "error": "channel registry unavailable"}, status=503)
+        actor = self._enterprise_user_from_request(request)
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
+        org_id = str(payload.get("org_id") or getattr(self.global_config, "organization_id", "") or "").strip()
+        channel_type = str(payload.get("type") or "").strip()
+        if not org_id or not channel_type:
+            return web.json_response({"ok": False, "error": "org_id and type are required"}, status=400)
+        try:
+            channel = self.channel_registry.register_channel(
+                org_id=org_id,
+                channel_type=channel_type,
+                display_name=payload.get("display_name"),
+                config=payload.get("config") if isinstance(payload.get("config"), dict) else {},
+                enabled=bool(payload.get("enabled", False)),
+                risk_tier=str(payload.get("risk_tier") or "medium"),
+                channel_id=payload.get("channel_id"),
+            )
+        except Exception as exc:
+            self._append_enterprise_audit(
+                event_type="admin_api",
+                action="channel_register",
+                status="failed",
+                actor_id=actor.id if actor else None,
+                context={"channel_type": channel_type, "error": str(exc)},
+            )
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        self._append_enterprise_audit(
+            event_type="admin_api",
+            action="channel_register",
+            status="success",
+            actor_id=actor.id if actor else None,
+            context={
+                "channel_id": channel.id,
+                "channel_type": channel.type,
+                "enabled": channel.enabled,
+                "risk_tier": channel.risk_tier,
+            },
+        )
+        return web.json_response({"ok": True, "channel": self._enterprise_channel_payload(channel)}, status=201)
+
+    async def handle_enterprise_channels_bind(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        if self.channel_registry is None:
+            return web.json_response({"ok": False, "error": "channel registry unavailable"}, status=503)
+        actor = self._enterprise_user_from_request(request)
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
+        org_id = str(payload.get("org_id") or getattr(self.global_config, "organization_id", "") or "").strip()
+        channel_type = str(payload.get("type") or "").strip()
+        scope_type = str(payload.get("scope_type") or "").strip()
+        scope_id = str(payload.get("scope_id") or "").strip()
+        permission = str(payload.get("permission") or "both").strip()
+        if not org_id or not channel_type or not scope_type or not scope_id:
+            return web.json_response(
+                {"ok": False, "error": "org_id, type, scope_type, and scope_id are required"},
+                status=400,
+            )
+        try:
+            binding = self.channel_registry.bind_channel(
+                org_id=org_id,
+                channel_type=channel_type,
+                scope_type=scope_type,
+                scope_id=scope_id,
+                permission=permission,
+            )
+        except Exception as exc:
+            self._append_enterprise_audit(
+                event_type="admin_api",
+                action="channel_bind",
+                status="failed",
+                actor_id=actor.id if actor else None,
+                context={
+                    "channel_type": channel_type,
+                    "scope_type": scope_type,
+                    "scope_id": scope_id,
+                    "error": str(exc),
+                },
+            )
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        self._append_enterprise_audit(
+            event_type="admin_api",
+            action="channel_bind",
+            status="success",
+            actor_id=actor.id if actor else None,
+            context={
+                "channel_id": binding.channel_id,
+                "channel_type": channel_type,
+                "scope_type": binding.scope_type,
+                "scope_id": binding.scope_id,
+                "permission": binding.permission,
+            },
+        )
+        return web.json_response(
+            {
+                "ok": True,
+                "binding": {
+                    "channel_id": binding.channel_id,
+                    "scope_type": binding.scope_type,
+                    "scope_id": binding.scope_id,
+                    "permission": binding.permission,
+                    "created_at": binding.created_at,
+                },
+            },
+            status=201,
+        )
 
     async def handle_agents(self, request):
         runtime_map = self._runtime_map()
