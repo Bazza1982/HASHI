@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -311,6 +312,68 @@ def cmd_whatsapp_wizard():
 
 
 # ──────────────────────────────────────────────
+# enterprise backup / restore
+# ──────────────────────────────────────────────
+
+def _enterprise_backup_items(include_workspaces: bool = False):
+    from orchestrator.enterprise import BackupItem
+
+    items = [
+        BackupItem("state/enterprise.sqlite", ROOT_DIR / "state" / "enterprise.sqlite", required=True),
+        BackupItem("state/enterprise_audit.jsonl", ROOT_DIR / "state" / "enterprise_audit.jsonl"),
+        BackupItem("agents.json", ROOT_DIR / "agents.json", required=True),
+        BackupItem("agent_capabilities.json", ROOT_DIR / "agent_capabilities.json"),
+    ]
+    if include_workspaces:
+        items.append(BackupItem("workspaces", ROOT_DIR / "workspaces"))
+    return items
+
+
+def _default_enterprise_backup_path() -> Path:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return ROOT_DIR / "backups" / f"hashi-enterprise-{stamp}.tar.gz"
+
+
+def cmd_enterprise_backup(args) -> int:
+    from orchestrator.enterprise import EnterpriseBackup
+
+    output = Path(args.output).expanduser() if args.output else _default_enterprise_backup_path()
+    result = EnterpriseBackup().create_archive(
+        output,
+        _enterprise_backup_items(include_workspaces=bool(args.include_workspaces)),
+    )
+    print(_g(f"✓ Enterprise backup written: {result.archive_path}"))
+    print(f"  Backup id: {result.manifest['backup_id']}")
+    included = [item["name"] for item in result.manifest["items"] if item["included"]]
+    skipped = [item["name"] for item in result.manifest["items"] if not item["included"]]
+    print(f"  Included : {', '.join(included) if included else '(none)'}")
+    if skipped:
+        print(f"  Skipped  : {', '.join(skipped)}")
+    return 0
+
+
+def cmd_enterprise_restore(args) -> int:
+    from orchestrator.enterprise import EnterpriseBackup
+
+    result = EnterpriseBackup().restore_archive(
+        Path(args.archive).expanduser(),
+        Path(args.destination).expanduser(),
+        overwrite=bool(args.overwrite),
+    )
+    print(_g(f"✓ Enterprise backup restored to: {result['destination']}"))
+    print(f"  Restored: {', '.join(result['restored']) if result['restored'] else '(none)'}")
+    return 0
+
+
+def cmd_enterprise_backup_inspect(args) -> int:
+    from orchestrator.enterprise import EnterpriseBackup
+
+    manifest = EnterpriseBackup().read_manifest(Path(args.archive).expanduser())
+    print(json.dumps(manifest, indent=2, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+# ──────────────────────────────────────────────
 # Entry point
 # ──────────────────────────────────────────────
 
@@ -330,6 +393,28 @@ def main():
         help="status = show config | reset = clear saved session | (none) = full wizard",
     )
 
+    enterprise_parser = sub.add_parser("enterprise", help="Enterprise mode operations")
+    enterprise_sub = enterprise_parser.add_subparsers(dest="enterprise_cmd")
+
+    enterprise_backup = enterprise_sub.add_parser("backup", help="Create an enterprise backup archive")
+    enterprise_backup.add_argument("--output", help="Backup archive path. Defaults to backups/hashi-enterprise-<utc>.tar.gz")
+    enterprise_backup.add_argument(
+        "--include-workspaces",
+        action="store_true",
+        help="Also include the workspaces directory. This may create a large archive.",
+    )
+    enterprise_backup.set_defaults(func=cmd_enterprise_backup)
+
+    enterprise_restore = enterprise_sub.add_parser("restore", help="Restore an enterprise backup archive")
+    enterprise_restore.add_argument("archive", help="Backup archive to restore")
+    enterprise_restore.add_argument("destination", help="Destination directory")
+    enterprise_restore.add_argument("--overwrite", action="store_true", help="Overwrite existing restore targets")
+    enterprise_restore.set_defaults(func=cmd_enterprise_restore)
+
+    enterprise_inspect = enterprise_sub.add_parser("inspect-backup", help="Print an enterprise backup manifest")
+    enterprise_inspect.add_argument("archive", help="Backup archive to inspect")
+    enterprise_inspect.set_defaults(func=cmd_enterprise_backup_inspect)
+
     args = parser.parse_args()
 
     if args.cmd == "whatsapp":
@@ -341,6 +426,10 @@ def main():
             cmd_whatsapp_reset(data)
         else:
             cmd_whatsapp_wizard()
+    elif args.cmd == "enterprise":
+        if hasattr(args, "func"):
+            raise SystemExit(args.func(args))
+        enterprise_parser.print_help()
     else:
         parser.print_help()
 
