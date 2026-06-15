@@ -54,6 +54,15 @@ class _FakeGitHubTransport:
                 "html_url": "https://github.com/Bazza1982/hashi/issues/7",
                 "state": "open",
             }
+        if method == "POST" and path == "/repos/Bazza1982/hashi/pulls":
+            return {
+                "id": 789,
+                "number": 8,
+                "title": body["title"],
+                "html_url": "https://github.com/Bazza1982/hashi/pull/8",
+                "state": "open",
+                "draft": body["draft"],
+            }
         raise AssertionError(f"unexpected GitHub request: {method} {path}")
 
 
@@ -174,9 +183,102 @@ def test_github_connector_issue_create_requires_title():
     assert "title" in result.message
 
 
+def test_github_connector_pr_create_supports_dry_run_without_transport_call():
+    transport = _FakeGitHubTransport()
+    connector = GitHubConnector(transport=transport)
+    action = ConnectorAction(
+        connector_type="github",
+        action="pr.create",
+        resource="repo:Bazza1982/hashi",
+        dry_run=True,
+        parameters={
+            "title": "Enterprise PR",
+            "head": "feature/aai",
+            "base": "main",
+            "body": "Details",
+            "draft": True,
+        },
+    )
+
+    result = connector.execute(action)
+
+    assert result.ok is True
+    assert result.status == "dry_run"
+    assert result.data == {
+        "owner": "Bazza1982",
+        "repo": "hashi",
+        "payload": {
+            "title": "Enterprise PR",
+            "head": "feature/aai",
+            "base": "main",
+            "body": "Details",
+            "draft": True,
+        },
+    }
+    assert transport.calls == []
+
+
+def test_github_connector_pr_create_posts_pull_request_payload():
+    transport = _FakeGitHubTransport()
+    connector = GitHubConnector(token="ghp-test", transport=transport)
+    action = ConnectorAction(
+        connector_type="github",
+        action="pr.create",
+        resource="repo:Bazza1982/hashi",
+        parameters={
+            "title": "Enterprise PR",
+            "head": "feature/aai",
+            "base": "main",
+            "body": "Details",
+            "draft": True,
+        },
+    )
+
+    result = connector.execute(action)
+
+    assert result.ok is True
+    assert result.status == "success"
+    assert result.data["html_url"] == "https://github.com/Bazza1982/hashi/pull/8"
+    assert result.data["draft"] is True
+    assert transport.calls[0]["method"] == "POST"
+    assert transport.calls[0]["path"] == "/repos/Bazza1982/hashi/pulls"
+    assert transport.calls[0]["body"] == {
+        "title": "Enterprise PR",
+        "head": "feature/aai",
+        "base": "main",
+        "body": "Details",
+        "draft": True,
+    }
+    assert transport.calls[0]["headers"]["Authorization"] == "Bearer ghp-test"
+
+
+@pytest.mark.parametrize(
+    ("parameters", "message"),
+    [
+        ({}, "title"),
+        ({"title": "Enterprise PR"}, "head"),
+        ({"title": "Enterprise PR", "head": "feature/aai"}, "base"),
+    ],
+)
+def test_github_connector_pr_create_validates_required_fields(parameters, message):
+    connector = GitHubConnector(transport=_FakeGitHubTransport())
+    action = ConnectorAction(
+        connector_type="github",
+        action="pr.create",
+        resource="repo:Bazza1982/hashi",
+        parameters=parameters,
+    )
+
+    result = connector.execute(action)
+
+    assert result.ok is False
+    assert result.status == "invalid_parameters"
+    assert message in result.message
+
+
 def test_github_connector_rejects_unsupported_action():
     connector = GitHubConnector(transport=_FakeGitHubTransport())
-    action = ConnectorAction(connector_type="github", action="pr.create", resource="repo:Bazza1982/hashi")
+    action = ConnectorAction(connector_type="github", action="pr.merge", resource="repo:Bazza1982/hashi")
 
     result = connector.execute(action)
 

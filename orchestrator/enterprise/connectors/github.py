@@ -46,6 +46,8 @@ class GitHubConnector:
             return self._get_repository(action)
         if action_name == "issue.create":
             return self._create_issue(action)
+        if action_name == "pr.create":
+            return self._create_pull_request(action)
         return ConnectorResult(
             ok=False,
             status="unsupported_action",
@@ -117,6 +119,54 @@ class GitHubConnector:
                 "title": data.get("title"),
                 "html_url": data.get("html_url"),
                 "state": data.get("state"),
+            },
+        )
+
+    def _create_pull_request(self, action: ConnectorAction) -> ConnectorResult:
+        repo_ref = _repo_ref_from_action(action)
+        parameters = dict(action.parameters or {})
+        title = str(parameters.get("title") or "").strip()
+        head = str(parameters.get("head") or "").strip()
+        base = str(parameters.get("base") or "").strip()
+        if repo_ref is None:
+            return ConnectorResult(
+                ok=False,
+                status="invalid_parameters",
+                message="pr.create requires owner/repo in resource or parameters",
+            )
+        if not title:
+            return ConnectorResult(ok=False, status="invalid_parameters", message="pr.create requires title")
+        if not head:
+            return ConnectorResult(ok=False, status="invalid_parameters", message="pr.create requires head")
+        if not base:
+            return ConnectorResult(ok=False, status="invalid_parameters", message="pr.create requires base")
+        owner, repo = repo_ref
+        payload = {
+            "title": title,
+            "head": head,
+            "base": base,
+            "body": str(parameters.get("body") or ""),
+            "draft": bool(parameters.get("draft")),
+        }
+        if action.dry_run:
+            return ConnectorResult(
+                ok=True,
+                status="dry_run",
+                message="pull request creation dry run",
+                data={"owner": owner, "repo": repo, "payload": payload},
+            )
+        data = self._request_json("POST", f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/pulls", payload)
+        return ConnectorResult(
+            ok=True,
+            status="success",
+            message="pull request created",
+            data={
+                "id": data.get("id"),
+                "number": data.get("number"),
+                "title": data.get("title"),
+                "html_url": data.get("html_url"),
+                "state": data.get("state"),
+                "draft": data.get("draft"),
             },
         )
 
