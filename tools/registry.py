@@ -11,6 +11,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 from tools.schemas import TOOL_SCHEMA_MAP, ALL_TOOL_NAMES
 
@@ -50,6 +51,18 @@ def resolve_tiers(tier_names: list[str]) -> list[str]:
         elif t in ALL_TOOL_NAMES:
             tools.append(t)  # allow individual tool names too
     return tools
+
+
+def _host_allowed(host: str, allowed_hosts: set[str]) -> bool:
+    normalized = str(host or "").strip().casefold()
+    if not normalized:
+        return True
+    if "*" in allowed_hosts or normalized in allowed_hosts:
+        return True
+    return any(
+        pattern.startswith("*.") and normalized.endswith(pattern[1:])
+        for pattern in allowed_hosts
+    )
 
 
 @dataclass
@@ -153,6 +166,11 @@ class ToolRegistry:
             self._record_tool_audit(tool_name, arguments, enterprise_denial, started)
             return enterprise_denial
 
+        enterprise_denial = self._check_enterprise_network_gate(tool_name, arguments, tool_call_id=tool_call_id)
+        if enterprise_denial is not None:
+            self._record_tool_audit(tool_name, arguments, enterprise_denial, started)
+            return enterprise_denial
+
         try:
             output = await self._dispatch(tool_name, arguments)
         except Exception as e:
@@ -232,6 +250,56 @@ class ToolRegistry:
             output="Error: enterprise execution denied: shell_disabled",
             is_error=True,
         )
+
+    def _check_enterprise_network_gate(
+        self,
+        tool_name: str,
+        arguments: dict,
+        *,
+        tool_call_id: str,
+    ) -> ToolResult | None:
+        if tool_name not in {"http_request", "web_fetch", "web_search"}:
+            return None
+        context = self.audit_context or {}
+        org_id = str(context.get("org_id") or "").strip()
+        project_id = str(context.get("project_id") or "").strip()
+        if not org_id or not project_id:
+            return None
+        host = self._network_tool_host(tool_name, arguments)
+        if not host:
+            return None
+        allowed_hosts = self._enterprise_network_allowed_hosts()
+        if _host_allowed(host, allowed_hosts):
+            return None
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            output=(
+                f"Error: enterprise network egress denied: host_not_allowed; "
+                f"host={host!r}"
+            ),
+            is_error=True,
+        )
+
+    def _network_tool_host(self, tool_name: str, arguments: dict) -> str:
+        if tool_name == "web_search":
+            return "api.search.brave.com"
+        raw_url = str((arguments or {}).get("url") or "").strip()
+        if not raw_url:
+            return ""
+        parsed = urlparse(raw_url)
+        return str(parsed.hostname or "").strip().casefold()
+
+    def _enterprise_network_allowed_hosts(self) -> set[str]:
+        context = self.audit_context or {}
+        raw_hosts = (
+            context.get("enterprise_network_allow_hosts")
+            or context.get("network_allow_hosts")
+            or self.tool_options.get("network", {}).get("allow_hosts")
+            or []
+        )
+        if isinstance(raw_hosts, str):
+            raw_hosts = [raw_hosts]
+        return {str(host or "").strip().casefold() for host in raw_hosts if str(host or "").strip()}
 
     def _record_tool_audit(
         self,
