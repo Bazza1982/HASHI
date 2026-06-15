@@ -12,10 +12,12 @@ from orchestrator.enterprise.audit_adapters import (
     RemoteAuditIngestResult,
     SlashAuditIngestResult,
     TokenAuditIngestResult,
+    ToolAuditIngestResult,
     ingest_browser_action_audit_jsonl,
     ingest_remote_audit_jsonl,
     ingest_slash_command_audit_jsonl,
     ingest_token_audit_jsonl,
+    ingest_tool_action_audit_jsonl,
 )
 from orchestrator.enterprise.channel_gate import ChannelGateResult, EnterpriseChannelGate
 from orchestrator.enterprise.channels import (
@@ -52,10 +54,12 @@ __all__ = [
     "RemoteAuditIngestResult",
     "SlashAuditIngestResult",
     "TokenAuditIngestResult",
+    "ToolAuditIngestResult",
     "ingest_browser_action_audit_jsonl",
     "ingest_remote_audit_jsonl",
     "ingest_slash_command_audit_jsonl",
     "ingest_token_audit_jsonl",
+    "ingest_tool_action_audit_jsonl",
     "ChannelGateResult",
     "EnterpriseChannelGate",
     "Channel",

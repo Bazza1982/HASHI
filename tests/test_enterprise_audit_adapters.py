@@ -8,6 +8,7 @@ from orchestrator.enterprise.audit_adapters import (
     ingest_remote_audit_jsonl,
     ingest_slash_command_audit_jsonl,
     ingest_token_audit_jsonl,
+    ingest_tool_action_audit_jsonl,
 )
 from orchestrator.slash_command_audit import build_audit_record
 
@@ -313,3 +314,68 @@ def test_browser_action_audit_ingest_is_idempotent_and_skips_bad_lines(tmp_path)
     by_action = {event.action: event for event in events}
     assert set(by_action) == {"browser.unknown", "browser.active_tab"}
     assert by_action["browser.active_tab"].status == "failed"
+
+
+def test_ingests_tool_action_audit_jsonl_into_ledger(tmp_path):
+    ledger = _init_ledger(tmp_path)
+    audit_path = tmp_path / "tool_action_audit.jsonl"
+    record = {
+        "ts": 1781256800.0,
+        "kind": "tool_action",
+        "tool_name": "file_write",
+        "tool_call_id": "call-file",
+        "agent": "nana",
+        "workspace_dir": str(tmp_path),
+        "safety_mode": "read_write",
+        "status": "success",
+        "is_error": False,
+        "duration_ms": 11,
+        "args_redacted": {"path": "report.md", "content": "hello"},
+        "output_snippet": "OK: wrote 5 characters",
+    }
+    audit_path.write_text(json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    result = ingest_tool_action_audit_jsonl(ledger, audit_path)
+
+    assert result.ingested == 1
+    event = ledger.query(event_type="tool")[0]
+    assert event.action == "tool.file_write"
+    assert event.status == "success"
+    assert event.actor_id == "nana"
+    assert event.correlation_id == "call-file"
+    assert event.ts == "2026-06-12T09:33:20+00:00"
+    assert event.context["args_redacted"]["path"] == "report.md"
+    assert event.context["output_snippet"] == "OK: wrote 5 characters"
+
+
+def test_tool_action_audit_ingest_is_idempotent_and_skips_bad_lines(tmp_path):
+    ledger = _init_ledger(tmp_path)
+    audit_path = tmp_path / "tool_action_audit.jsonl"
+    record = {
+        "ts": "2026-06-14T16:00:00+00:00",
+        "kind": "tool_action",
+        "tool_name": "bash",
+        "tool_call_id": "call-bash",
+        "agent": "zelda",
+        "status": "failed",
+        "is_error": True,
+        "args_redacted": {"command": "rm -rf /tmp/example"},
+        "output_snippet": "Error: blocked",
+    }
+    audit_path.write_text(
+        "{bad-json\n" + json.dumps(record, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    first = ingest_tool_action_audit_jsonl(ledger, audit_path)
+    second = ingest_tool_action_audit_jsonl(ledger, audit_path)
+
+    assert first.ingested == 1
+    assert first.skipped == 1
+    assert second.ingested == 0
+    assert second.skipped == 1
+    assert second.duplicate == 1
+    event = ledger.query(event_type="tool")[0]
+    assert event.action == "tool.bash"
+    assert event.status == "failed"
+    assert event.actor_id == "zelda"
