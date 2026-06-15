@@ -414,12 +414,15 @@ Implemented checkpoints:
   - JSONL export;
 - stable ledger event schema version field;
 - policy and channel deny/approval audit paths now dual-write into the unified ledger;
+- Workbench enterprise audit APIs:
+  - `GET /api/enterprise/audit` for admin-gated ledger query;
+  - `GET /api/enterprise/audit/export` for admin-gated NDJSON export;
 - tests for append/query/export and compatibility with existing `AuditEvent`.
 
 Residual P4 limitations:
 
 - slash/token/HChat/tool JSONL writers are not yet dual-writing to the ledger;
-- Workbench query/export APIs are not yet exposed;
+- auditor read-only role semantics are not yet separated from broader admin access;
 - slash/token/HChat/tool adapters are still pending;
 - retention and SIEM mapping remain future P4 work.
 
@@ -445,7 +448,7 @@ Residual P4 limitations:
 **Tickets:**
 
 - `ENT-060` Implement append-only ledger store. Done for P4A foundation.
-- `ENT-061` Add query API and pagination. Query filters done; pagination cursor pending.
+- `ENT-061` Add query API and pagination. Query filters and Workbench API done; pagination cursor pending.
 - `ENT-062` Add JSONL export. Done for P4A foundation.
 - `ENT-063` Add slash audit adapter.
 - `ENT-064` Add token/model invocation adapter.
