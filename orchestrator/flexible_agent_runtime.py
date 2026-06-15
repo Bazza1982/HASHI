@@ -383,19 +383,13 @@ class FlexibleAgentRuntime:
         cmd = (cmd or "").lstrip("/").lower()
         if not cmd:
             return True
-        global_config = getattr(self, "global_config", None)
-        if global_config is not None:
-            evaluation = evaluate_governance_policy(
-                "command.execute",
-                {
-                    "global_config": global_config,
-                    "agent_id": getattr(self, "name", None),
-                    "command_name": cmd,
-                    "resource": f"command:{cmd}",
-                },
-            )
-            if not evaluation.allowed:
-                return False
+        evaluation = self._evaluate_enterprise_policy(
+            "command.execute",
+            resource=f"command:{cmd}",
+            command_name=cmd,
+        )
+        if not evaluation.allowed:
+            return False
         if cmd in self._disabled_commands:
             return False
         if self._command_policy_mode == "allow_all":
@@ -404,6 +398,20 @@ class FlexibleAgentRuntime:
             return cmd in self._enabled_commands
         # denylist
         return True
+
+    def _evaluate_enterprise_policy(self, action: str, *, resource: str = "*", **context):
+        global_config = getattr(self, "global_config", None)
+        if global_config is None:
+            return evaluate_governance_policy("noop", {"deployment_profile": "personal"})
+        return evaluate_governance_policy(
+            action,
+            {
+                "global_config": global_config,
+                "agent_id": getattr(self, "name", None),
+                "resource": resource,
+                **context,
+            },
+        )
 
     def _build_channel_gate(self) -> EnterpriseChannelGate:
         profile = str(getattr(self.global_config, "deployment_profile", "personal") or "personal")
@@ -4745,6 +4753,18 @@ class FlexibleAgentRuntime:
         allowed_engines = [b["engine"] for b in self.config.allowed_backends]
         if target_engine not in allowed_engines:
             return False, f"Backend not allowed: {target_engine}"
+
+        policy = self._evaluate_enterprise_policy(
+            "backend.switch",
+            resource=f"backend:{target_engine}",
+            target_backend=target_engine,
+            target_model=target_model,
+            with_context=with_context,
+        )
+        if not policy.allowed:
+            if policy.decision.value == "approval_required":
+                return False, f"Backend switch requires approval: {target_engine}"
+            return False, f"Backend switch blocked by policy: {target_engine}"
 
         if self._backend_busy():
             return False, "Backend switch blocked while a request is running or queued."

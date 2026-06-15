@@ -43,6 +43,8 @@ def _make_manager(workspace: Path) -> FlexibleBackendManager:
         base_logs_dir=workspace / "logs",
         base_media_dir=workspace / "media",
         project_root=workspace,
+        deployment_profile="personal",
+        organization_id=None,
     )
     return FlexibleBackendManager(cfg, global_cfg, secrets={})
 
