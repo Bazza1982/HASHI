@@ -21,9 +21,13 @@ HASHI v4 alpha is focused on two foundations:
   issue handling, and closeout barriers.
 - **Enterprise AAI strategy** — HASHI Enterprise is now framed around
   Agent as Interface: a governed, auditable, open-source control plane for
-  human-AI work orchestration. See
+  human-AI work orchestration. The enterprise direction keeps one codebase with
+  `personal`, `team`, and `enterprise` profiles: `personal` preserves the
+  current one-owner model, while enterprise `individual_user` is a governed
+  identity role rather than a top administrator. See
   [HASHI_ENTERPRISE_AAI_VALUE_PROPOSITION.md](HASHI_ENTERPRISE_AAI_VALUE_PROPOSITION.md)
-  and [HASHI_ENTERPRISE_AAI_PRD.md](HASHI_ENTERPRISE_AAI_PRD.md).
+  [HASHI_ENTERPRISE_AAI_PRD.md](HASHI_ENTERPRISE_AAI_PRD.md), and
+  [HASHI_ENTERPRISE_PROFILE_ADR.md](HASHI_ENTERPRISE_PROFILE_ADR.md).
 
 Alpha limitations:
 
