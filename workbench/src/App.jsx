@@ -1018,6 +1018,25 @@ const STORAGE_KEY_LAYOUT = 'workbench-layout';
 const STORAGE_KEY_TELEGRAM_ACTIVE = 'workbench-telegram-active';
 const STORAGE_KEY_ENTERPRISE_AUTH = 'workbench-enterprise-auth';
 
+const CONNECTOR_PRESETS = {
+  slack: {
+    displayName: 'Slack Webhook',
+    secretRef: 'env://SLACK_WEBHOOK_URL',
+    scopes: 'message.send',
+    action: 'message.send',
+    resource: '*',
+    parameters: '{\n  "text": "HASHI connector dry run"\n}',
+  },
+  github: {
+    displayName: 'GitHub Token',
+    secretRef: 'env://GITHUB_TOKEN',
+    scopes: 'repo:read',
+    action: 'repo.read',
+    resource: 'repo:owner/name',
+    parameters: '{}',
+  },
+};
+
 function EnterpriseAdminPanel() {
   const [authToken, setAuthToken] = useState(() => localStorage.getItem(STORAGE_KEY_ENTERPRISE_AUTH) || '');
   const [credentials, setCredentials] = useState([]);
@@ -1029,19 +1048,20 @@ function EnterpriseAdminPanel() {
   const [includeRevoked, setIncludeRevoked] = useState(false);
   const [form, setForm] = useState({
     connector_type: 'slack',
-    display_name: 'Slack Webhook',
-    secret_ref: 'env://SLACK_WEBHOOK_URL',
-    scopes: 'message.send',
+    display_name: CONNECTOR_PRESETS.slack.displayName,
+    secret_ref: CONNECTOR_PRESETS.slack.secretRef,
+    scopes: CONNECTOR_PRESETS.slack.scopes,
   });
   const [executionForm, setExecutionForm] = useState({
     credential_id: '',
     connector_type: 'slack',
-    action: 'message.send',
-    resource: '*',
-    parameters: '{\n  "text": "HASHI connector dry run"\n}',
+    action: CONNECTOR_PRESETS.slack.action,
+    resource: CONNECTOR_PRESETS.slack.resource,
+    parameters: CONNECTOR_PRESETS.slack.parameters,
     dry_run: true,
   });
   const [executionResult, setExecutionResult] = useState(null);
+  const [parametersError, setParametersError] = useState('');
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY_ENTERPRISE_AUTH, authToken);
@@ -1153,6 +1173,7 @@ function EnterpriseAdminPanel() {
     event.preventDefault();
     setLoading(true);
     setExecutionResult(null);
+    setParametersError('');
     try {
       const parameters = executionForm.parameters.trim()
         ? JSON.parse(executionForm.parameters)
@@ -1171,7 +1192,12 @@ function EnterpriseAdminPanel() {
       setExecutionResult(payload);
       setStatus(payload?.gate?.reason || payload?.result?.message || 'Connector execution completed.');
     } catch (error) {
-      setStatus(error.message || 'Connector execution failed.');
+      if (error instanceof SyntaxError) {
+        setParametersError(error.message || 'Invalid JSON parameters.');
+        setStatus('Invalid JSON parameters.');
+      } else {
+        setStatus(error.message || 'Connector execution failed.');
+      }
     } finally {
       setLoading(false);
     }
@@ -1179,10 +1205,36 @@ function EnterpriseAdminPanel() {
 
   const chooseExecutionCredential = (credentialId) => {
     const credential = credentials.find((item) => item.id === credentialId);
+    const preset = CONNECTOR_PRESETS[credential?.connector_type] || {};
     setExecutionForm((prev) => ({
       ...prev,
       credential_id: credentialId,
       connector_type: credential?.connector_type || prev.connector_type,
+      action: preset.action || prev.action,
+      resource: preset.resource || prev.resource,
+      parameters: preset.parameters || prev.parameters,
+    }));
+  };
+
+  const applyCredentialPreset = (connectorType) => {
+    const preset = CONNECTOR_PRESETS[connectorType] || {};
+    setForm((prev) => ({
+      ...prev,
+      connector_type: connectorType,
+      display_name: preset.displayName || prev.display_name,
+      secret_ref: preset.secretRef || prev.secret_ref,
+      scopes: preset.scopes || prev.scopes,
+    }));
+  };
+
+  const applyExecutionPreset = (connectorType) => {
+    const preset = CONNECTOR_PRESETS[connectorType] || {};
+    setExecutionForm((prev) => ({
+      ...prev,
+      connector_type: connectorType,
+      action: preset.action || prev.action,
+      resource: preset.resource || prev.resource,
+      parameters: preset.parameters || prev.parameters,
     }));
   };
 
@@ -1218,7 +1270,7 @@ function EnterpriseAdminPanel() {
             </label>
           </div>
           <form className="connector-form" onSubmit={createCredential}>
-            <select value={form.connector_type} onChange={(e) => setForm((prev) => ({ ...prev, connector_type: e.target.value }))}>
+            <select value={form.connector_type} onChange={(e) => applyCredentialPreset(e.target.value)}>
               <option value="slack">Slack</option>
               <option value="github">GitHub</option>
             </select>
@@ -1308,7 +1360,7 @@ function EnterpriseAdminPanel() {
             </select>
             <select
               value={executionForm.connector_type}
-              onChange={(e) => setExecutionForm((prev) => ({ ...prev, connector_type: e.target.value }))}
+              onChange={(e) => applyExecutionPreset(e.target.value)}
             >
               <option value="slack">Slack</option>
               <option value="github">GitHub</option>
@@ -1334,6 +1386,7 @@ function EnterpriseAdminPanel() {
               {executionForm.dry_run ? 'Dry run' : 'Execute'}
             </button>
           </form>
+          {parametersError && <div className="enterprise-errors">{parametersError}</div>}
           {executionResult && (
             <pre className="enterprise-result">{JSON.stringify(executionResult, null, 2)}</pre>
           )}
