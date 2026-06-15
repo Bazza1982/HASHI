@@ -15,6 +15,7 @@ from orchestrator.admin_local_testing import (
     try_execute_slash_command_text,
 )
 from orchestrator.conversation_router import ConversationRouter
+from orchestrator.enterprise.identity import EnterpriseRole, IdentityService
 from orchestrator.pathing import resolve_path_value
 from orchestrator.transfer_store import TransferStore
 
@@ -76,6 +77,7 @@ class WorkbenchApiServer:
         self.runtimes = runtimes or []
         self.orchestrator = orchestrator
         self.admin_token = ((secrets or {}).get("workbench_admin_token") or "").strip()
+        self.identity_service = self._build_identity_service()
         self.bridge_router = ConversationRouter(
             config_path=self.config_path,
             capabilities_path=self.config_path.parent / "agent_capabilities.json",
@@ -84,6 +86,9 @@ class WorkbenchApiServer:
         )
         self.transfer_store = TransferStore(self.config_path.parent / "state" / "bridge_transfers.sqlite")
         self.app = web.Application(client_max_size=64 * 1024 * 1024)
+        self.app.router.add_post("/api/auth/login", self.handle_auth_login)
+        self.app.router.add_post("/api/auth/logout", self.handle_auth_logout)
+        self.app.router.add_get("/api/auth/me", self.handle_auth_me)
         self.app.router.add_get("/api/agents", self.handle_agents)
         self.app.router.add_get("/api/transcript/{name}", self.handle_transcript_recent)
         self.app.router.add_get("/api/transcript/{name}/poll", self.handle_transcript_poll)
@@ -145,10 +150,24 @@ class WorkbenchApiServer:
     def _runtime_map(self) -> dict:
         return {runtime.name: runtime for runtime in self._runtime_list()}
 
+    def _is_governed_profile(self) -> bool:
+        return str(getattr(self.global_config, "deployment_profile", "personal") or "personal") != "personal"
+
+    def _build_identity_service(self) -> IdentityService | None:
+        if str(getattr(self.global_config, "deployment_profile", "personal") or "personal") == "personal":
+            return None
+        bridge_home = Path(getattr(self.global_config, "bridge_home", None) or self.config_path.parent)
+        return IdentityService.from_path(bridge_home / "state" / "enterprise.sqlite")
+
     def _refresh_bridge_router(self) -> None:
         self.bridge_router.refresh(self._runtime_list())
 
     def _check_admin_auth(self, request) -> bool:
+        if self._is_governed_profile():
+            user = self._enterprise_user_from_request(request)
+            if user is None:
+                return False
+            return self._enterprise_user_has_admin_role(user.id)
         if not self.admin_token:
             return True
         provided = (
@@ -156,6 +175,32 @@ class WorkbenchApiServer:
             or request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
         )
         return provided == self.admin_token
+
+    def _bearer_token_from_request(self, request) -> str:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.lower().startswith("bearer "):
+            return auth_header[7:].strip()
+        return request.headers.get("X-Workbench-Session", "").strip()
+
+    def _enterprise_user_from_request(self, request):
+        if self.identity_service is None:
+            return None
+        token = self._bearer_token_from_request(request)
+        if not token:
+            return None
+        return self.identity_service.get_session_user(token)
+
+    def _enterprise_user_has_admin_role(self, user_id: str) -> bool:
+        if self.identity_service is None:
+            return False
+        admin_roles = {
+            EnterpriseRole.ORG_ADMIN.value,
+            EnterpriseRole.TEAM_ADMIN.value,
+            EnterpriseRole.SECURITY_ADMIN.value,
+            EnterpriseRole.SYSTEM_OPERATOR.value,
+        }
+        memberships = self.identity_service.list_project_memberships(user_id=user_id)
+        return any(row.get("role") in admin_roles for row in memberships)
 
     def _default_smoke_commands(self, runtime) -> list[str]:
         commands = ["/status", "/model"]
@@ -306,6 +351,74 @@ class WorkbenchApiServer:
     async def shutdown(self):
         if self.runner:
             await self.runner.cleanup()
+
+    async def handle_auth_login(self, request):
+        if not self._is_governed_profile():
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "session login is only enabled for team/enterprise deployment profiles",
+                },
+                status=404,
+            )
+        if self.identity_service is None:
+            return web.json_response({"ok": False, "error": "identity service unavailable"}, status=503)
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
+        org_id = str(payload.get("org_id") or getattr(self.global_config, "organization_id", "") or "").strip()
+        email = str(payload.get("email") or "").strip()
+        password = str(payload.get("password") or "")
+        if not org_id or not email or not password:
+            return web.json_response({"ok": False, "error": "org_id, email, and password are required"}, status=400)
+
+        user = self.identity_service.authenticate_user(org_id=org_id, email=email, password=password)
+        if user is None:
+            return web.json_response({"ok": False, "error": "invalid credentials"}, status=401)
+        session = self.identity_service.create_session(user_id=user.id)
+        return web.json_response(
+            {
+                "ok": True,
+                "session": {
+                    "token": session.token,
+                    "expires_at": session.expires_at,
+                },
+                "user": self._enterprise_user_payload(user),
+            }
+        )
+
+    async def handle_auth_logout(self, request):
+        if not self._is_governed_profile():
+            return web.json_response({"ok": True})
+        if self.identity_service is None:
+            return web.json_response({"ok": False, "error": "identity service unavailable"}, status=503)
+        token = self._bearer_token_from_request(request)
+        revoked = self.identity_service.revoke_session(token) if token else False
+        return web.json_response({"ok": True, "revoked": revoked})
+
+    async def handle_auth_me(self, request):
+        if not self._is_governed_profile():
+            return web.json_response({"ok": True, "profile": "personal", "user": {"role": "owner"}})
+        user = self._enterprise_user_from_request(request)
+        if user is None:
+            return web.json_response({"ok": False, "error": "not authenticated"}, status=401)
+        return web.json_response({"ok": True, "profile": "enterprise", "user": self._enterprise_user_payload(user)})
+
+    def _enterprise_user_payload(self, user) -> dict:
+        memberships = (
+            self.identity_service.list_project_memberships(user_id=user.id)
+            if self.identity_service is not None
+            else []
+        )
+        return {
+            "id": user.id,
+            "org_id": user.org_id,
+            "email": user.email,
+            "display_name": user.display_name,
+            "status": user.status,
+            "memberships": memberships,
+        }
 
     async def handle_agents(self, request):
         runtime_map = self._runtime_map()
