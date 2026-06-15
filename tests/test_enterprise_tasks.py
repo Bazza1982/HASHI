@@ -9,6 +9,8 @@ from orchestrator.enterprise import (
     IdentityService,
     TaskRegistry,
     TaskStatus,
+    fail_task_if_promised_artifacts_missing,
+    verify_promised_artifacts,
 )
 
 
@@ -142,3 +144,56 @@ def test_evidence_bundle_builds_from_task_audit_and_artifacts(tmp_path):
     assert bundle.audit_event_ids == (event.id,)
     assert bundle.artifact_ids == (artifact.id,)
     assert bundle.metadata == {"source": "build_for_task"}
+
+
+def test_verify_promised_artifacts_accepts_registered_output(tmp_path):
+    svc = _init_services(tmp_path)
+    task = svc["tasks"].create_task(
+        org_id="ORG-001",
+        project_id="prj-research",
+        prompt_summary="Write governed report",
+        task_id="task-verify-ok",
+        metadata={"promised_artifacts": ["final-report.md"]},
+    )
+    artifact = svc["artifacts"].register_artifact(
+        org_id="ORG-001",
+        project_id="prj-research",
+        task_id=task.id,
+        artifact_type="file",
+        path=tmp_path / "final-report.md",
+        artifact_id="art-final-report",
+    )
+
+    result = verify_promised_artifacts(task, [artifact])
+
+    assert result.ok is True
+    assert result.matched == ("final-report.md",)
+    assert result.missing == ()
+
+
+def test_fail_task_if_promised_artifacts_missing_records_clear_failure(tmp_path):
+    svc = _init_services(tmp_path)
+    task = svc["tasks"].create_task(
+        org_id="ORG-001",
+        project_id="prj-research",
+        prompt_summary="Write governed report",
+        task_id="task-verify-missing",
+        metadata={"promised_artifacts": ["final-report.md", {"path": "appendix.csv"}]},
+    )
+    artifact = svc["artifacts"].register_artifact(
+        org_id="ORG-001",
+        project_id="prj-research",
+        task_id=task.id,
+        artifact_type="file",
+        path=tmp_path / "final-report.md",
+        artifact_id="art-final-report",
+    )
+
+    result = fail_task_if_promised_artifacts_missing(svc["tasks"], task, [artifact])
+
+    assert result.ok is False
+    assert result.missing == ("appendix.csv",)
+    failed = svc["tasks"].get_task(task.id)
+    assert failed is not None
+    assert failed.status == "failed"
+    assert failed.failed_reason == "missing promised artifacts: appendix.csv"

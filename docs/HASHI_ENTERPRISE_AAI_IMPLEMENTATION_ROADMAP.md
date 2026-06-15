@@ -573,6 +573,21 @@ Residual P5 limitations:
 - completion verification hook for file-producing tasks;
 - explicit failure report when verification fails.
 
+**Implementation status:** P6A verification primitive completed.
+
+Implemented checkpoints:
+
+- `verify_promised_artifacts()` compares a task's promised artifacts with registered artifact records;
+- task metadata keys `promised_artifacts`, `required_artifacts`, and `expected_artifacts` are supported;
+- artifact requirements can match by full path, basename, artifact id, or type;
+- `fail_task_if_promised_artifacts_missing()` provides the completion hook that marks a task failed with a clear missing-artifact reason.
+
+Residual P6 limitations:
+
+- workspace boundary and shell/network/browser enforcement are still pending;
+- the verification hook is service-level and is not yet wired into every runtime completion path;
+- CLI backend internal writes still need tool-event mapping or post-run artifact discovery.
+
 **Primary code areas:**
 
 - `orchestrator/enterprise/execution.py`;
@@ -588,7 +603,7 @@ Residual P5 limitations:
 - `ENT-082` Add shell command policy checks.
 - `ENT-083` Add network egress allowlist stub.
 - `ENT-084` Add browser automation policy flag.
-- `ENT-085` Add completion verification hook.
+- `ENT-085` Add completion verification hook. Done at service layer for promised artifact checks.
 
 **Acceptance:**
 
