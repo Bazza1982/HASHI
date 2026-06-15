@@ -70,6 +70,22 @@ Major current gaps:
 
 ## 4. Product Requirements
 
+### 4.0 Current HASHI To Enterprise Mapping
+
+Enterprise development should not restart from zero. Existing HASHI capabilities should be promoted into governed enterprise primitives.
+
+| Current capability | Enterprise primitive | Required evolution |
+|---|---|---|
+| `agents.json` and per-agent workspace config | agent registry and assignment model | move from local config file semantics to admin-managed project/role assignments |
+| Telegram, WhatsApp, Workbench | channel gateway layer | add admin enablement, policy checks, ingress/egress audit, and channel-specific risk controls |
+| HChat and Remote | cross-agent / cross-instance routing | add organization/project trust, route policy, and audit correlation IDs |
+| token audit and slash command audit | unified audit ledger | normalize event schema, correlate by request/task, add export and retention |
+| Nagare and Superloop | governed workflow orchestration | add task ownership, approval gates, evidence bundles, and admin visibility |
+| tool registry and backend adapters | execution connectors | add centralized policy evaluation, tool risk levels, and verification loops |
+| wrapper/audit mode | review and supervision layer | integrate with enterprise policy, approval, and evidence workflows |
+
+This mapping should guide implementation tickets. The goal is to harden and unify existing strengths, not replace them wholesale.
+
 ### 4.1 Identity And Organization
 
 **Goal:** HASHI must support real users and organizations, not only local single-user operation.
@@ -207,6 +223,8 @@ Future:
 - SIEM export;
 - OpenTelemetry integration;
 - WORM/object storage backend.
+
+Enterprise v1 should still design the schema around future tamper evidence. Even if the first store is SQLite or JSONL, the event model should include stable event IDs, parent IDs, task IDs, actor IDs, and correlation IDs so it can later be promoted into a hash-chained or SIEM-backed ledger.
 
 ---
 
@@ -365,16 +383,58 @@ Future:
 - OpenTelemetry metrics/traces/logs;
 - enterprise installer.
 
+Deployment should run in parallel with identity, policy, and audit work. Enterprise evaluators often ask "can we install, back up, upgrade, and observe it?" before they inspect advanced agent capability.
+
 ---
 
-### 4.9 Enterprise Integrations
+### 4.9 Channel Governance And Enterprise Connectors
+
+**Goal:** HASHI should connect to the channels organizations already use, but every channel must be governed.
+
+Supported-channel direction:
+
+- Workbench should be the default enterprise control and inspection surface.
+- Microsoft Teams, Slack, Google Chat, and Feishu/Lark are high-priority enterprise channels.
+- Telegram, WhatsApp, and voice remain useful but should be optional, policy-gated, and not presented as the default enterprise path.
+
+Channel control requirements:
+
+- channels disabled by default unless enabled by an administrator;
+- per-organization, per-project, per-team, and per-agent channel policy;
+- ingress audit for every user message;
+- egress audit for every agent message or artifact share;
+- channel-specific data loss controls;
+- impersonation and identity binding rules;
+- emergency channel disable/kill switch;
+- clear separation between consumer/local channels and enterprise-approved channels.
+
+Minimum v1:
+
+- channel registry;
+- Workbench as first admin-controlled channel;
+- at least one enterprise chat connector design target;
+- channel policy decisions in audit ledger;
+- admin UI to enable/disable channels per project/agent.
+
+Future:
+
+- Microsoft Teams connector;
+- Slack connector;
+- Google Chat connector;
+- Feishu/Lark connector;
+- email connector;
+- channel DLP rules;
+- channel-specific retention and export.
+
+---
+
+### 4.10 Enterprise System Integrations
 
 **Goal:** AAI must bridge humans and real enterprise systems.
 
 Minimum v1 candidates:
 
 - GitHub;
-- Slack or Teams;
 - Jira or Linear;
 - Google Drive or SharePoint;
 - email/SMTP;
@@ -388,6 +448,43 @@ Integration requirements:
 - connector health;
 - dry-run mode where possible;
 - artifact linking.
+
+The first integration wave should be intentionally narrow. A credible Enterprise v1 should ship one or two well-governed integrations rather than many shallow connectors.
+
+---
+
+### 4.11 Threat Model And Data Governance
+
+**Goal:** Enterprise AAI must explicitly address security reviewers, not only product users.
+
+Threat model areas:
+
+- prompt injection through documents, browser content, chat messages, and remote agents;
+- channel impersonation and account takeover;
+- data exfiltration through chat channels, tools, browser, and integrations;
+- SSRF and uncontrolled network egress;
+- workspace escape and unauthorized file access;
+- overbroad backend/model use that sends data outside approved regions;
+- agent impersonation and sub-agent delegation ambiguity;
+- secret leakage through prompts, logs, artifacts, or connector output.
+
+Minimum v1:
+
+- documented STRIDE-style threat model summary;
+- data classification labels for tasks/artifacts;
+- retention settings for audit and artifacts;
+- PII-sensitive logging redaction rules;
+- backend/model allowlist by project;
+- emergency agent/channel revocation;
+- security review checklist for new connectors.
+
+Future:
+
+- DLP scanning;
+- regional data residency enforcement;
+- customer-managed keys;
+- SIEM integration;
+- incident response workflows.
 
 ---
 
@@ -451,12 +548,13 @@ Acceptance:
 - admin can assign a project role;
 - audit records admin changes.
 
-### Phase 2: Policy Control Plane
+### Phase 2: Policy Control Plane And Channel Governance
 
 Deliverables:
 
 - centralized policy evaluator;
 - agent/tool/command/backend policy model;
+- channel registry and channel policy model;
 - policy decision audit events;
 - approval-required actions.
 
@@ -464,7 +562,8 @@ Acceptance:
 
 - blocked actions do not execute;
 - policy decisions are visible in audit;
-- tests cover allow, deny, and approval-required paths.
+- tests cover allow, deny, and approval-required paths;
+- disabled channels cannot deliver messages to agents.
 
 ### Phase 3: Unified Audit Ledger
 
@@ -472,7 +571,7 @@ Deliverables:
 
 - audit event schema;
 - append-only store;
-- event writers for commands, tasks, tools, files, approvals, and admin changes;
+- event writers for channels, commands, tasks, tools, files, approvals, and admin changes;
 - Workbench audit viewer.
 
 Acceptance:
@@ -481,35 +580,37 @@ Acceptance:
 - export works;
 - schema tests protect required fields.
 
-### Phase 4: Secure Execution And Evidence
+### Phase 4: Secure Execution, Evidence, And Deployability
 
 Deliverables:
 
 - execution scope enforcement;
 - file/task artifact registry;
 - verification checklist for file-producing tasks;
-- evidence bundle generation.
+- evidence bundle generation;
+- Docker Compose deployment profile;
+- backup/restore procedure;
+- health endpoints.
 
 Acceptance:
 
 - task cannot write outside allowed workspace;
 - missing promised deliverables cause failure;
-- evidence bundle links output files and tool events.
+- evidence bundle links output files and tool events;
+- fresh enterprise deployment starts from documented steps.
 
-### Phase 5: Deployment And Operations
+### Phase 5: Operations Hardening
 
 Deliverables:
 
-- Docker image;
-- compose deployment;
 - production config template;
-- health checks;
-- backup/restore;
-- migration runner.
+- migration runner;
+- operational metrics;
+- upgrade rollback guide;
+- connector health reporting.
 
 Acceptance:
 
-- fresh enterprise deployment can be started from docs;
 - upgrade path preserves data;
 - health endpoint reports core services.
 
@@ -518,7 +619,7 @@ Acceptance:
 Deliverables:
 
 - GitHub connector;
-- Slack or Teams connector;
+- first governed enterprise chat connector from the channel governance roadmap;
 - Jira/Linear connector;
 - Drive/SharePoint connector;
 - integration audit events.
@@ -542,12 +643,39 @@ Enterprise v1 should not attempt:
 - physical AI integration;
 - complex marketplace packaging;
 - unrestricted autonomous agent execution.
+- all chat channels enabled by default.
 
 These are future phases after the control plane is reliable.
 
 ---
 
-## 8. Success Metrics
+## 8. Enterprise v1 MVP Cut Line
+
+Enterprise v1 beta is credible when the following are in scope:
+
+| Area | In v1 beta | Deferred |
+|---|---|---|
+| Identity | local admin, users, roles, API tokens | SAML/SCIM full enterprise provisioning |
+| Projects | project registry, workspace assignment | advanced portfolio management |
+| Policy | RBAC, tool/command/backend/channel policy | full ABAC policy language |
+| Audit | unified ledger, export, Workbench viewer | tamper-evident WORM/SIEM production adapter |
+| Channels | Workbench plus one enterprise chat connector target | every chat platform |
+| Execution | workspace-scoped tools and verification checklist | full container sandbox for every task |
+| Deployment | Docker Compose, backup/restore, health checks | HA Kubernetes and multi-region |
+| Integrations | GitHub plus one work-management/document connector target | broad marketplace |
+
+Out of scope for v1 beta:
+
+- billing;
+- multi-region HA;
+- physical AI;
+- broad connector marketplace;
+- unsupervised high-risk automation;
+- default consumer-channel exposure.
+
+---
+
+## 9. Success Metrics
 
 Product metrics:
 
@@ -576,22 +704,23 @@ Security metrics:
 
 ---
 
-## 9. First Engineering Tickets
+## 10. First Engineering Tickets
 
 1. Create enterprise data model for organizations, users, projects, roles, and API tokens.
 2. Add local admin login and session management for Workbench.
 3. Build centralized policy evaluator.
 4. Create unified audit event schema and store.
 5. Migrate slash command audit into the unified audit writer.
-6. Add task and artifact registry.
-7. Add execution verification requirement for file-producing agent tasks.
-8. Add Workbench admin console skeleton.
-9. Add Docker Compose deployment profile.
-10. Add backup/restore and migration commands.
+6. Add channel registry and disabled-by-default channel policy.
+7. Add task and artifact registry.
+8. Add execution verification requirement for file-producing agent tasks.
+9. Add Workbench admin console skeleton.
+10. Add Docker Compose deployment profile.
+11. Add backup/restore and migration commands.
 
 ---
 
-## 10. Open Questions
+## 11. Open Questions
 
 1. Should enterprise mode be a separate runtime mode or a configuration profile?
 2. Should the first persistent store be SQLite, Postgres, or a pluggable interface with SQLite default?
@@ -601,3 +730,4 @@ Security metrics:
 6. Which integration should be first: GitHub, Slack/Teams, Jira, or Drive/SharePoint?
 7. Should agent memory be project-scoped, user-scoped, or both?
 8. What actions require mandatory human approval in Enterprise v1?
+9. Which enterprise chat channel should be the first governed connector: Microsoft Teams, Slack, Google Chat, or Feishu/Lark?

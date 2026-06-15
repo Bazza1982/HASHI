@@ -64,15 +64,13 @@ AAI brings that mental model into software.
 
 ## 4. HASHI's Position
 
-HASHI's enterprise value is not "more agents" or "more backends." It is a governed bridge between humans and the growing ecosystem of digital and future physical systems.
+HASHI's enterprise value is not "more agents" or "more backends." It is a governed bridge between humans and the growing ecosystem of digital systems.
 
 Human-facing channels:
 
-- Telegram
-- WhatsApp
-- Workbench
-- voice
-- future enterprise chat surfaces such as Slack or Teams
+- Workbench as the enterprise control and inspection surface
+- enterprise chat surfaces such as Microsoft Teams, Slack, Google Chat, Feishu/Lark, and similar systems
+- controlled optional channels such as Telegram, WhatsApp, and voice for local, personal, or field use cases
 - human-readable artifacts such as PDF, docs, spreadsheets, commits, and dashboards
 
 System-facing connections:
@@ -84,9 +82,17 @@ System-facing connections:
 - Nagare workflows and Superloop controllers
 - MCP servers and future tool gateways
 - enterprise systems such as GitHub, Jira, email, Drive, SharePoint, CRM, ERP, and ticketing systems
-- future physical AI systems and edge agents
+- future physical AI systems and edge agents, treated as a future horizon rather than an Enterprise v1 claim
 
 HASHI Enterprise should own the control layer between these sides.
+
+The value of channel support is not opening every channel by default. In enterprise settings, every new channel is also a new leak path, impersonation path, prompt-injection path, and operational risk. HASHI Enterprise should make channels an administrator-controlled capability:
+
+- disabled by default unless explicitly enabled;
+- scoped to organizations, teams, projects, and agents;
+- governed by policy and approval rules;
+- audited as first-class ingress and egress events;
+- revocable without changing the agent implementation.
 
 ---
 
@@ -132,6 +138,17 @@ The system should not force executives and workers to inspect internal agent tra
 - evidence packs
 - audit exports
 
+### 5.6 Governed channels, not channel sprawl
+
+HASHI should connect to the channels enterprises already use, but channel breadth is not the core value proposition. The core value is safe orchestration across those channels.
+
+Enterprise AAI should treat channels as managed gateways:
+
+- Microsoft Teams, Slack, Google Chat, Feishu/Lark, Workbench, Telegram, WhatsApp, email, and future channels use the same policy and audit layer.
+- Admins decide which channels are available for which users, projects, and agents.
+- Sensitive agents can be restricted to Workbench or approved enterprise chat only.
+- Consumer-style channels can remain useful for local or field work, but they should never imply uncontrolled enterprise access.
+
 ---
 
 ## 6. Product Promise
@@ -147,6 +164,15 @@ The user experience:
 5. HASHI records what happened, which tools were used, which files changed, and what evidence supports completion.
 6. The user or manager inspects the result, requests changes, approves, or escalates.
 7. Administrators can audit, search, export, revoke, and govern the work.
+
+Buyer story:
+
+```text
+A finance leader asks an agent to prepare a monthly operations report.
+HASHI routes the task to an approved project agent, allows only approved data sources,
+requires manager approval before external sharing, produces a PDF and spreadsheet,
+and records the prompts, tools, files, approvals, and evidence bundle in the audit ledger.
+```
 
 ---
 
@@ -212,6 +238,21 @@ Technical phrasing:
 ```text
 An open-source orchestration and governance layer for multi-agent, multi-backend, human-supervised AI work.
 ```
+
+Competitive positioning:
+
+```text
+HASHI is not a copilot inside one app, and not a developer-only agent framework.
+It is the self-hosted control plane that turns governed agents into accountable team members across channels, backends, and enterprise systems.
+```
+
+| Category | HASHI Enterprise difference | Acknowledge honestly |
+|---|---|---|
+| Microsoft Copilot | Self-hosted, multi-backend, cross-system, governed AAI control plane | Microsoft has stronger M365-native integration and procurement maturity |
+| Salesforce Agentforce | Not CRM-bound; open-source and backend-agnostic | Salesforce owns the CRM data model and enterprise sales channel |
+| ServiceNow AI agents | Lighter, agent-native, multi-channel bridge outside ITSM | ServiceNow has mature ITSM workflows and compliance posture |
+| LangGraph/LangSmith | Human-facing AAI, artifacts, channels, admin governance, and enterprise controls | LangChain ecosystem is stronger for developer workflow graphs and observability |
+| Generic copilots/chatbots | Accountable delegated work with evidence and audit | Simple chatbots are easier to adopt for narrow Q&A |
 
 ---
 
