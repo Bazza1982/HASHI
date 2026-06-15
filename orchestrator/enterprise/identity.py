@@ -209,6 +209,19 @@ class IdentityService:
                 status=status,
             )
 
+    def get_user(self, user_id: str) -> User | None:
+        with self.store.connect() as con:
+            row = con.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        return _user_from_row(row) if row else None
+
+    def list_users(self, *, org_id: str) -> list[User]:
+        with self.store.connect() as con:
+            rows = con.execute(
+                "SELECT * FROM users WHERE org_id = ? ORDER BY email",
+                (_require_id(org_id, "org_id"),),
+            ).fetchall()
+        return [_user_from_row(row) for row in rows]
+
     def authenticate_user(self, *, org_id: str, email: str, password: str) -> User | None:
         with self.store.connect() as con:
             row = con.execute(
@@ -276,6 +289,19 @@ class IdentityService:
                 workspace_root=workspace_root,
                 project_id=project_id,
             )
+
+    def get_project(self, project_id: str) -> Project | None:
+        with self.store.connect() as con:
+            row = con.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+        return _project_from_row(row) if row else None
+
+    def list_projects(self, *, org_id: str) -> list[Project]:
+        with self.store.connect() as con:
+            rows = con.execute(
+                "SELECT * FROM projects WHERE org_id = ? ORDER BY name",
+                (_require_id(org_id, "org_id"),),
+            ).fetchall()
+        return [_project_from_row(row) for row in rows]
 
     def assign_project_role(self, *, user_id: str, project_id: str, role: EnterpriseRole | str) -> None:
         with self.store.connect() as con:
@@ -479,6 +505,16 @@ def _user_from_row(row) -> User:
     )
 
 
+def _project_from_row(row) -> Project:
+    return Project(
+        id=row["id"],
+        org_id=row["org_id"],
+        name=row["name"],
+        workspace_root=row["workspace_root"],
+        created_at=row["created_at"],
+    )
+
+
 def _api_token_from_row(row, *, token: str) -> ApiToken:
     return ApiToken(
         id=row["id"],
@@ -488,4 +524,3 @@ def _api_token_from_row(row, *, token: str) -> ApiToken:
         expires_at=row["expires_at"],
         created_at=row["created_at"],
     )
-

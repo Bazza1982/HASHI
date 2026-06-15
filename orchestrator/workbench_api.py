@@ -89,6 +89,10 @@ class WorkbenchApiServer:
         self.app.router.add_post("/api/auth/login", self.handle_auth_login)
         self.app.router.add_post("/api/auth/logout", self.handle_auth_logout)
         self.app.router.add_get("/api/auth/me", self.handle_auth_me)
+        self.app.router.add_get("/api/enterprise/users", self.handle_enterprise_users)
+        self.app.router.add_post("/api/enterprise/users", self.handle_enterprise_users_create)
+        self.app.router.add_get("/api/enterprise/projects", self.handle_enterprise_projects)
+        self.app.router.add_post("/api/enterprise/projects", self.handle_enterprise_projects_create)
         self.app.router.add_get("/api/agents", self.handle_agents)
         self.app.router.add_get("/api/transcript/{name}", self.handle_transcript_recent)
         self.app.router.add_get("/api/transcript/{name}/poll", self.handle_transcript_poll)
@@ -419,6 +423,99 @@ class WorkbenchApiServer:
             "status": user.status,
             "memberships": memberships,
         }
+
+    def _enterprise_project_payload(self, project) -> dict:
+        return {
+            "id": project.id,
+            "org_id": project.org_id,
+            "name": project.name,
+            "workspace_root": project.workspace_root,
+            "created_at": project.created_at,
+        }
+
+    def _enterprise_admin_error_response(self, request):
+        if not self._is_governed_profile():
+            return web.json_response({"ok": False, "error": "enterprise API requires governed profile"}, status=404)
+        if self.identity_service is None:
+            return web.json_response({"ok": False, "error": "identity service unavailable"}, status=503)
+        if not self._check_admin_auth(request):
+            return web.json_response({"ok": False, "error": "admin auth failed"}, status=403)
+        return None
+
+    async def handle_enterprise_users(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        org_id = str(getattr(self.global_config, "organization_id", "") or "").strip()
+        users = [self._enterprise_user_payload(user) for user in self.identity_service.list_users(org_id=org_id)]
+        return web.json_response({"ok": True, "users": users})
+
+    async def handle_enterprise_users_create(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
+        org_id = str(payload.get("org_id") or getattr(self.global_config, "organization_id", "") or "").strip()
+        email = str(payload.get("email") or "").strip()
+        display_name = str(payload.get("display_name") or "").strip()
+        password = str(payload.get("password") or "")
+        if not org_id or not email or not display_name or not password:
+            return web.json_response(
+                {"ok": False, "error": "org_id, email, display_name, and password are required"},
+                status=400,
+            )
+        try:
+            user = self.identity_service.create_user(
+                org_id=org_id,
+                email=email,
+                display_name=display_name,
+                password=password,
+                user_id=payload.get("user_id"),
+            )
+            project_id = str(payload.get("project_id") or "").strip()
+            role = str(payload.get("role") or "").strip()
+            if project_id and role:
+                self.identity_service.assign_project_role(user_id=user.id, project_id=project_id, role=role)
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        return web.json_response({"ok": True, "user": self._enterprise_user_payload(user)}, status=201)
+
+    async def handle_enterprise_projects(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        org_id = str(getattr(self.global_config, "organization_id", "") or "").strip()
+        projects = [
+            self._enterprise_project_payload(project)
+            for project in self.identity_service.list_projects(org_id=org_id)
+        ]
+        return web.json_response({"ok": True, "projects": projects})
+
+    async def handle_enterprise_projects_create(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
+        org_id = str(payload.get("org_id") or getattr(self.global_config, "organization_id", "") or "").strip()
+        name = str(payload.get("name") or "").strip()
+        if not org_id or not name:
+            return web.json_response({"ok": False, "error": "org_id and name are required"}, status=400)
+        try:
+            project = self.identity_service.create_project(
+                org_id=org_id,
+                name=name,
+                workspace_root=payload.get("workspace_root"),
+                project_id=payload.get("project_id"),
+            )
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        return web.json_response({"ok": True, "project": self._enterprise_project_payload(project)}, status=201)
 
     async def handle_agents(self, request):
         runtime_map = self._runtime_map()
