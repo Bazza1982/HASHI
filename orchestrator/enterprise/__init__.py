@@ -6,7 +6,9 @@ from orchestrator.enterprise.profile import (
     validate_profile_context,
 )
 from orchestrator.enterprise.audit_schema import AuditEvent, AuditEventWriter
+from orchestrator.enterprise.identity import EnterpriseRole, IdentityService
 from orchestrator.enterprise.policy import PolicyDecision, PolicyEvaluation, evaluate_governance_policy
+from orchestrator.enterprise.store import EnterpriseStore
 
 __all__ = [
     "DeploymentProfile",
@@ -16,6 +18,9 @@ __all__ = [
     "validate_profile_context",
     "AuditEvent",
     "AuditEventWriter",
+    "EnterpriseRole",
+    "EnterpriseStore",
+    "IdentityService",
     "PolicyDecision",
     "PolicyEvaluation",
     "evaluate_governance_policy",
