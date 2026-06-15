@@ -45,6 +45,14 @@ class _FakeGitHubTransport:
                 "default_branch": "main",
                 "html_url": "https://github.com/Bazza1982/hashi",
             }
+        if method == "POST" and path == "/repos/Bazza1982/hashi/issues":
+            return {
+                "id": 456,
+                "number": 7,
+                "title": body["title"],
+                "html_url": "https://github.com/Bazza1982/hashi/issues/7",
+                "state": "open",
+            }
         raise AssertionError(f"unexpected GitHub request: {method} {path}")
 
 
@@ -100,6 +108,60 @@ def test_github_connector_repo_get_from_parameters_supports_dry_run():
     assert result.ok is True
     assert result.status == "dry_run"
     assert result.data == {"owner": "Bazza1982", "repo": "hashi"}
+
+
+def test_github_connector_issue_create_supports_dry_run_without_transport_call():
+    transport = _FakeGitHubTransport()
+    connector = GitHubConnector(transport=transport)
+    action = ConnectorAction(
+        connector_type="github",
+        action="issue.create",
+        resource="repo:Bazza1982/hashi",
+        dry_run=True,
+        parameters={"title": "Enterprise task", "body": "Details", "labels": ["enterprise"]},
+    )
+
+    result = connector.execute(action)
+
+    assert result.ok is True
+    assert result.status == "dry_run"
+    assert result.data == {
+        "owner": "Bazza1982",
+        "repo": "hashi",
+        "payload": {"title": "Enterprise task", "body": "Details", "labels": ["enterprise"]},
+    }
+    assert transport.calls == []
+
+
+def test_github_connector_issue_create_posts_issue_payload():
+    transport = _FakeGitHubTransport()
+    connector = GitHubConnector(token="ghp-test", transport=transport)
+    action = ConnectorAction(
+        connector_type="github",
+        action="issue.create",
+        resource="repo:Bazza1982/hashi",
+        parameters={"title": "Enterprise task", "body": "Details", "labels": ["enterprise"]},
+    )
+
+    result = connector.execute(action)
+
+    assert result.ok is True
+    assert result.status == "success"
+    assert result.data["html_url"] == "https://github.com/Bazza1982/hashi/issues/7"
+    assert transport.calls[0]["method"] == "POST"
+    assert transport.calls[0]["body"] == {"title": "Enterprise task", "body": "Details", "labels": ["enterprise"]}
+    assert transport.calls[0]["headers"]["Authorization"] == "Bearer ghp-test"
+
+
+def test_github_connector_issue_create_requires_title():
+    connector = GitHubConnector(transport=_FakeGitHubTransport())
+    action = ConnectorAction(connector_type="github", action="issue.create", resource="repo:Bazza1982/hashi")
+
+    result = connector.execute(action)
+
+    assert result.ok is False
+    assert result.status == "invalid_parameters"
+    assert "title" in result.message
 
 
 def test_github_connector_rejects_unsupported_action():
