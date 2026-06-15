@@ -585,11 +585,14 @@ Implemented checkpoints:
 - `ExecutionScope.check_path()` and `require_path()` block path traversal, out-of-workspace absolute paths, and symlink escape attempts.
 - `ToolRegistry.execute()` applies the enterprise path gate before HASHI-controlled `file_read`, `file_write`, `file_list`, and `apply_patch` dispatch when org/project context is present;
 - denied file-tool actions fail closed, write normal tool audit records, and do not register artifacts.
+- `ToolRegistry.execute()` applies an enterprise shell gate before `bash` dispatch when org/project context is present;
+- governed shell execution defaults closed and requires explicit `enterprise_shell_enabled` or `bash.enterprise_enabled`.
 
 Residual P6 limitations:
 
 - workspace boundary is wired into HASHI-controlled file tools;
-- shell/network/browser enforcement are still pending;
+- shell execution has an explicit governed enable gate; command allow/deny pattern policy still uses the existing bash `blocked_patterns`;
+- network/browser enforcement are still pending;
 - the verification hook is service-level and is not yet wired into every runtime completion path;
 - CLI backend internal writes still need tool-event mapping or post-run artifact discovery.
 
@@ -606,7 +609,7 @@ Residual P6 limitations:
 - `ENT-080` Add execution scope resolver. Done at service layer for project workspace roots.
 - `ENT-081` Add path traversal block tests. Done for relative, absolute, and symlink escapes.
 - `ENT-082a` Wire workspace boundary into HASHI-controlled file tools. Done for `file_read`, `file_write`, `file_list`, and `apply_patch`.
-- `ENT-082` Add shell command policy checks.
+- `ENT-082` Add shell command policy checks. Done for default-deny governed shell gate; command pattern policies remain configured through existing `bash.blocked_patterns`.
 - `ENT-083` Add network egress allowlist stub.
 - `ENT-084` Add browser automation policy flag.
 - `ENT-085` Add completion verification hook. Done at service layer for promised artifact checks.

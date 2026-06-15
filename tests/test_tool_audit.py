@@ -34,6 +34,22 @@ def test_build_tool_audit_record_redacts_and_truncates_sensitive_values():
 
 
 @pytest.mark.asyncio
+async def test_tool_registry_allows_bash_without_enterprise_context(tmp_path):
+    registry = ToolRegistry(
+        allowed_tools=["bash"],
+        access_root=tmp_path,
+        workspace_dir=tmp_path,
+        secrets={},
+        audit_context={"agent_name": "nana", "workspace_dir": str(tmp_path)},
+    )
+
+    result = await registry.execute("bash", {"command": "printf ok"}, tool_call_id="call-bash")
+
+    assert result.is_error is False
+    assert result.output == "ok"
+
+
+@pytest.mark.asyncio
 async def test_tool_registry_writes_success_audit_record(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -192,3 +208,51 @@ async def test_tool_registry_enterprise_path_gate_blocks_workspace_escape(tmp_pa
     assert record["status"] == "failed"
     assert record["tool_name"] == "file_write"
     assert "workspace_escape" in record["output_snippet"]
+
+
+@pytest.mark.asyncio
+async def test_tool_registry_enterprise_shell_gate_defaults_closed(tmp_path):
+    registry = ToolRegistry(
+        allowed_tools=["bash"],
+        access_root=tmp_path,
+        workspace_dir=tmp_path,
+        secrets={},
+        audit_context={
+            "agent_name": "nana",
+            "workspace_dir": str(tmp_path),
+            "org_id": "ORG-001",
+            "project_id": "prj-research",
+        },
+    )
+
+    result = await registry.execute("bash", {"command": "touch should-not-exist"}, tool_call_id="call-shell-deny")
+
+    assert result.is_error is True
+    assert result.output == "Error: enterprise execution denied: shell_disabled"
+    assert not (tmp_path / "should-not-exist").exists()
+    record = json.loads((tmp_path / "tool_action_audit.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["tool_name"] == "bash"
+    assert record["status"] == "failed"
+    assert "shell_disabled" in record["output_snippet"]
+
+
+@pytest.mark.asyncio
+async def test_tool_registry_enterprise_shell_gate_can_be_explicitly_enabled(tmp_path):
+    registry = ToolRegistry(
+        allowed_tools=["bash"],
+        access_root=tmp_path,
+        workspace_dir=tmp_path,
+        secrets={},
+        audit_context={
+            "agent_name": "nana",
+            "workspace_dir": str(tmp_path),
+            "org_id": "ORG-001",
+            "project_id": "prj-research",
+            "enterprise_shell_enabled": True,
+        },
+    )
+
+    result = await registry.execute("bash", {"command": "printf governed-ok"}, tool_call_id="call-shell-allow")
+
+    assert result.is_error is False
+    assert result.output == "governed-ok"
