@@ -327,3 +327,51 @@ async def test_tool_registry_enterprise_network_gate_supports_wildcards(tmp_path
         {"url": "https://docs.example.com/page"},
         tool_call_id="call-fetch-allow",
     ) is None
+
+
+@pytest.mark.asyncio
+async def test_tool_registry_enterprise_browser_gate_defaults_closed(tmp_path):
+    registry = ToolRegistry(
+        allowed_tools=["browser_get_text"],
+        access_root=tmp_path,
+        workspace_dir=tmp_path,
+        secrets={},
+        audit_context={
+            "agent_name": "nana",
+            "workspace_dir": str(tmp_path),
+            "org_id": "ORG-001",
+            "project_id": "prj-research",
+        },
+    )
+
+    result = await registry.execute(
+        "browser_get_text",
+        {"url": "https://example.com"},
+        tool_call_id="call-browser-deny",
+    )
+
+    assert result.is_error is True
+    assert result.output == "Error: enterprise execution denied: browser_disabled"
+    record = json.loads((tmp_path / "tool_action_audit.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["tool_name"] == "browser_get_text"
+    assert record["status"] == "failed"
+    assert "browser_disabled" in record["output_snippet"]
+
+
+@pytest.mark.asyncio
+async def test_tool_registry_enterprise_browser_gate_can_be_explicitly_enabled(tmp_path):
+    registry = ToolRegistry(
+        allowed_tools=["browser_get_text"],
+        access_root=tmp_path,
+        workspace_dir=tmp_path,
+        secrets={},
+        audit_context={
+            "agent_name": "nana",
+            "workspace_dir": str(tmp_path),
+            "org_id": "ORG-001",
+            "project_id": "prj-research",
+            "enterprise_browser_enabled": True,
+        },
+    )
+
+    assert registry._check_enterprise_browser_gate("browser_get_text", tool_call_id="call-browser-allow") is None

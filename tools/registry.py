@@ -171,6 +171,11 @@ class ToolRegistry:
             self._record_tool_audit(tool_name, arguments, enterprise_denial, started)
             return enterprise_denial
 
+        enterprise_denial = self._check_enterprise_browser_gate(tool_name, tool_call_id=tool_call_id)
+        if enterprise_denial is not None:
+            self._record_tool_audit(tool_name, arguments, enterprise_denial, started)
+            return enterprise_denial
+
         try:
             output = await self._dispatch(tool_name, arguments)
         except Exception as e:
@@ -300,6 +305,24 @@ class ToolRegistry:
         if isinstance(raw_hosts, str):
             raw_hosts = [raw_hosts]
         return {str(host or "").strip().casefold() for host in raw_hosts if str(host or "").strip()}
+
+    def _check_enterprise_browser_gate(self, tool_name: str, *, tool_call_id: str) -> ToolResult | None:
+        if not tool_name.startswith("browser_"):
+            return None
+        context = self.audit_context or {}
+        org_id = str(context.get("org_id") or "").strip()
+        project_id = str(context.get("project_id") or "").strip()
+        if not org_id or not project_id:
+            return None
+        browser_opts = self.tool_options.get("browser", {})
+        enabled = bool(context.get("enterprise_browser_enabled") or browser_opts.get("enterprise_enabled"))
+        if enabled:
+            return None
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            output="Error: enterprise execution denied: browser_disabled",
+            is_error=True,
+        )
 
     def _record_tool_audit(
         self,
