@@ -123,6 +123,110 @@ def test_enterprise_admin_auth_requires_admin_project_role(tmp_path):
     assert not server._check_admin_auth(_FakeRequest(headers={}))
 
 
+@pytest.mark.asyncio
+async def test_enterprise_admin_can_create_and_list_projects(tmp_path):
+    server = _server(tmp_path)
+    admin = server.identity_service.bootstrap_org_admin(
+        org_id="ORG-001",
+        org_name="Acme",
+        email="admin@example.com",
+        display_name="Admin",
+        password="secret-password",
+        user_id="usr-admin",
+    )
+    session = server.identity_service.create_session(user_id=admin.id)
+    headers = {"Authorization": f"Bearer {session.token}"}
+
+    create_response = await server.handle_enterprise_projects_create(
+        _FakeRequest(
+            {
+                "name": "Research",
+                "workspace_root": "/srv/hashi/research",
+                "project_id": "prj-research",
+            },
+            headers=headers,
+        )
+    )
+    list_response = await server.handle_enterprise_projects(_FakeRequest(headers=headers))
+
+    assert create_response.status == 201
+    projects = json.loads(list_response.text)["projects"]
+    assert [project["id"] for project in projects] == ["ORG-001-default", "prj-research"]
+
+
+@pytest.mark.asyncio
+async def test_enterprise_admin_can_create_and_list_users(tmp_path):
+    server = _server(tmp_path)
+    admin = server.identity_service.bootstrap_org_admin(
+        org_id="ORG-001",
+        org_name="Acme",
+        email="admin@example.com",
+        display_name="Admin",
+        password="secret-password",
+        user_id="usr-admin",
+    )
+    project = server.identity_service.create_project(
+        org_id="ORG-001",
+        name="Research",
+        project_id="prj-research",
+    )
+    session = server.identity_service.create_session(user_id=admin.id)
+    headers = {"Authorization": f"Bearer {session.token}"}
+
+    create_response = await server.handle_enterprise_users_create(
+        _FakeRequest(
+            {
+                "email": "user@example.com",
+                "display_name": "User",
+                "password": "secret-password",
+                "user_id": "usr-user",
+                "project_id": project.id,
+                "role": EnterpriseRole.INDIVIDUAL_USER.value,
+            },
+            headers=headers,
+        )
+    )
+    list_response = await server.handle_enterprise_users(_FakeRequest(headers=headers))
+
+    assert create_response.status == 201
+    users = json.loads(list_response.text)["users"]
+    assert [user["email"] for user in users] == ["admin@example.com", "user@example.com"]
+    created = json.loads(create_response.text)["user"]
+    assert created["memberships"][0]["role"] == EnterpriseRole.INDIVIDUAL_USER.value
+
+
+@pytest.mark.asyncio
+async def test_enterprise_admin_api_rejects_individual_user(tmp_path):
+    server = _server(tmp_path)
+    server.identity_service.bootstrap_org_admin(
+        org_id="ORG-001",
+        org_name="Acme",
+        email="admin@example.com",
+        display_name="Admin",
+        password="secret-password",
+    )
+    user = server.identity_service.create_user(
+        org_id="ORG-001",
+        email="user@example.com",
+        display_name="User",
+        password="secret-password",
+        user_id="usr-user",
+    )
+    server.identity_service.assign_project_role(
+        user_id=user.id,
+        project_id="ORG-001-default",
+        role=EnterpriseRole.INDIVIDUAL_USER,
+    )
+    session = server.identity_service.create_session(user_id=user.id)
+
+    response = await server.handle_enterprise_users(
+        _FakeRequest(headers={"Authorization": f"Bearer {session.token}"})
+    )
+
+    assert response.status == 403
+    assert json.loads(response.text)["error"] == "admin auth failed"
+
+
 def test_personal_profile_keeps_legacy_workbench_token(tmp_path):
     config_path = tmp_path / "agents.json"
     config_path.write_text(json.dumps({"global": {}, "agents": []}), encoding="utf-8")
@@ -140,4 +244,3 @@ def test_personal_profile_keeps_legacy_workbench_token(tmp_path):
 
     assert server._check_admin_auth(_FakeRequest(headers={"X-Workbench-Token": "legacy-secret"}))
     assert not server._check_admin_auth(_FakeRequest(headers={"X-Workbench-Token": "wrong"}))
-
