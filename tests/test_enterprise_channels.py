@@ -140,3 +140,23 @@ def test_unregistered_channel_fails_closed(tmp_path):
 
     assert access.allowed is False
     assert access.reason == "channel_not_registered"
+
+
+def test_default_channels_seed_control_plane_without_opening_external_channels(tmp_path):
+    identity = IdentityService.from_path(tmp_path / "enterprise.sqlite")
+    identity.create_organization(org_id="ORG-001", name="Acme")
+    registry = _registry(tmp_path)
+
+    channels = registry.ensure_default_channels(org_id="ORG-001")
+
+    by_type = {channel.type: channel for channel in channels}
+    assert by_type["workbench"].enabled is True
+    assert by_type["workbench"].risk_tier == "low"
+    for channel_type in ["hchat", "telegram", "whatsapp", "email", "slack", "teams", "google_chat", "feishu"]:
+        assert by_type[channel_type].enabled is False
+    assert registry.check_access(
+        org_id="ORG-001",
+        channel_type=ChannelType.TELEGRAM,
+        direction=ChannelPermission.INGRESS,
+        project_id="prj-research",
+    ).reason == "channel_disabled"

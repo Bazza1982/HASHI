@@ -95,6 +95,64 @@ class ChannelAccess:
     channel_id: str | None = None
 
 
+DEFAULT_CHANNEL_DEFINITIONS = (
+    {
+        "channel_type": ChannelType.WORKBENCH,
+        "display_name": "Workbench",
+        "enabled": True,
+        "risk_tier": "low",
+    },
+    {
+        "channel_type": ChannelType.HCHAT,
+        "display_name": "HChat",
+        "enabled": False,
+        "risk_tier": "medium",
+    },
+    {
+        "channel_type": ChannelType.TELEGRAM,
+        "display_name": "Telegram",
+        "enabled": False,
+        "risk_tier": "high",
+    },
+    {
+        "channel_type": ChannelType.WHATSAPP,
+        "display_name": "WhatsApp",
+        "enabled": False,
+        "risk_tier": "high",
+    },
+    {
+        "channel_type": ChannelType.EMAIL,
+        "display_name": "Email",
+        "enabled": False,
+        "risk_tier": "high",
+    },
+    {
+        "channel_type": ChannelType.SLACK,
+        "display_name": "Slack",
+        "enabled": False,
+        "risk_tier": "high",
+    },
+    {
+        "channel_type": ChannelType.TEAMS,
+        "display_name": "Microsoft Teams",
+        "enabled": False,
+        "risk_tier": "high",
+    },
+    {
+        "channel_type": ChannelType.GOOGLE_CHAT,
+        "display_name": "Google Chat",
+        "enabled": False,
+        "risk_tier": "high",
+    },
+    {
+        "channel_type": ChannelType.FEISHU,
+        "display_name": "Feishu",
+        "enabled": False,
+        "risk_tier": "high",
+    },
+)
+
+
 class ChannelRegistry:
     def __init__(self, store: EnterpriseStore):
         self.store = store
@@ -165,6 +223,15 @@ class ChannelRegistry:
                 (_require_id(org_id, "org_id"),),
             ).fetchall()
         return [_channel_from_row(row) for row in rows]
+
+    def ensure_default_channels(self, *, org_id: str) -> list[Channel]:
+        org_id = _require_id(org_id, "org_id")
+        for definition in DEFAULT_CHANNEL_DEFINITIONS:
+            channel_type = definition["channel_type"]
+            if self.get_channel(org_id=org_id, channel_type=channel_type) is not None:
+                continue
+            self.register_channel(org_id=org_id, **definition)
+        return self.list_channels(org_id=org_id)
 
     def set_enabled(self, *, org_id: str, channel_type: ChannelType | str, enabled: bool) -> Channel:
         channel = self.get_channel(org_id=org_id, channel_type=channel_type)
