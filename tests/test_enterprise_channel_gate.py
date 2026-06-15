@@ -3,7 +3,14 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-from orchestrator.enterprise import AuditEventWriter, ChannelRegistry, EnterpriseChannelGate, IdentityService, PolicyEvaluator
+from orchestrator.enterprise import (
+    AuditEventWriter,
+    ChannelRegistry,
+    EnterpriseAuditLedger,
+    EnterpriseChannelGate,
+    IdentityService,
+    PolicyEvaluator,
+)
 
 
 def _global_config(tmp_path, *, profile: str = "enterprise", org_id: str | None = "ORG-001"):
@@ -51,6 +58,12 @@ def test_governed_channel_gate_denies_disabled_default_and_audits(tmp_path):
     assert event["status"] == "denied"
     assert event["context"]["channel_type"] == "telegram"
     assert event["context"]["source"] == "telegram"
+    ledger = EnterpriseAuditLedger.from_path(tmp_path / "state" / "enterprise.sqlite", org_id="ORG-001")
+    ledger_events = ledger.query(event_type="channel")
+    assert len(ledger_events) == 1
+    assert ledger_events[0].action == "channel_access"
+    assert ledger_events[0].status == "denied"
+    assert ledger_events[0].context["channel_type"] == "telegram"
 
 
 def test_governed_channel_gate_allows_enabled_bound_project(tmp_path):

@@ -413,11 +413,12 @@ Implemented checkpoints:
   - query by event type, actor, project, task, request, and correlation id;
   - JSONL export;
 - stable ledger event schema version field;
+- policy and channel deny/approval audit paths now dual-write into the unified ledger;
 - tests for append/query/export and compatibility with existing `AuditEvent`.
 
 Residual P4 limitations:
 
-- existing JSONL writers are not yet dual-writing to the ledger;
+- slash/token/HChat/tool JSONL writers are not yet dual-writing to the ledger;
 - Workbench query/export APIs are not yet exposed;
 - slash/token/HChat/tool adapters are still pending;
 - retention and SIEM mapping remain future P4 work.
@@ -449,7 +450,7 @@ Residual P4 limitations:
 - `ENT-063` Add slash audit adapter.
 - `ENT-064` Add token/model invocation adapter.
 - `ENT-065` Add HChat/Remote adapter.
-- `ENT-066` Add tool/file event adapters.
+- `ENT-066` Add tool/file event adapters. Policy/channel governance events dual-write; tool/file adapters pending.
 - `ENT-067` Add audit schema contract tests.
 
 **Acceptance:**
