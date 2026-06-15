@@ -40,6 +40,7 @@ from orchestrator.enterprise.connectors import (
     ConnectorRegistry,
     ConnectorResult,
     EnterpriseConnector,
+    GitHubConnector,
     evaluate_connector_action,
     record_connector_event,
 )
@@ -115,6 +116,7 @@ __all__ = [
     "ConnectorCredential",
     "ConnectorCredentialStore",
     "EnterpriseConnector",
+    "GitHubConnector",
     "EnterpriseRole",
     "EnterpriseTask",
     "EvidenceBundle",
