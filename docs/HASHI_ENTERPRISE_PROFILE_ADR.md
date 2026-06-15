@@ -154,3 +154,31 @@ This decision means:
 - product language should distinguish deployment profile from identity role.
 
 The decision does not prevent future packaging differences. A hosted or supported enterprise distribution may exist later, but it should be built from the same core architecture rather than a divergent fork.
+
+## Implementation Defaults (P0)
+
+- `deployment_profile` defaults to `personal` when omitted.
+- `team` and `enterprise` are governed profiles and require bootstrap metadata to avoid accidental activation.
+- Current one-owner behavior is preserved unless `HASHI_DEPLOYMENT_PROFILE` or `global.deployment_profile` is explicitly set.
+
+### Example config snippet
+
+```json
+{
+  "global": {
+    "deployment_profile": "team",
+    "organization_id": "acme-lab",
+    "enterprise_bootstrap_complete": true
+  },
+  "agents": [...]
+}
+```
+
+### Startup gate
+
+When `team` or `enterprise` is active:
+
+1. `global.organization_id` must exist;
+2. `global.enterprise_bootstrap_complete` must be true.
+
+P0 implementation rejects startup at config-load time with explicit errors when either requirement is missing.
