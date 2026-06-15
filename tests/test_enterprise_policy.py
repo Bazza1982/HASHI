@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -19,6 +20,13 @@ def _global_config(tmp_path, *, profile: str = "enterprise", org_id: str | None 
         organization_id=org_id,
         bridge_home=tmp_path,
     )
+
+
+def _audit_events(tmp_path) -> list[dict]:
+    path = tmp_path / "state" / "enterprise_audit.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 def test_policy_evaluator_defaults_to_allow_without_rules(tmp_path):
@@ -94,6 +102,12 @@ def test_evaluate_governance_policy_uses_enterprise_db(tmp_path):
 
     assert result.allowed is False
     assert result.decision == PolicyDecision.DENY
+    event = _audit_events(tmp_path)[-1]
+    assert event["event_type"] == "policy"
+    assert event["action"] == "command.execute"
+    assert event["status"] == "denied"
+    assert event["context"]["resource"] == "command:sys"
+    assert event["context"]["decision"] == "deny"
 
 
 def test_evaluate_governance_policy_creates_approval_request(tmp_path):
@@ -131,6 +145,12 @@ def test_evaluate_governance_policy_creates_approval_request(tmp_path):
     assert request.rule_id == rule.id
     assert request.context["project_id"] == "prj-finance"
     assert "global_config" not in request.context
+    event = _audit_events(tmp_path)[-1]
+    assert event["event_type"] == "policy"
+    assert event["action"] == "file.write"
+    assert event["status"] == "approval_required"
+    assert event["context"]["approval_request_id"] == result.approval_request_id
+    assert event["context"]["decision"] == "approval_required"
 
 
 def test_personal_profile_policy_stays_allow_by_default(tmp_path):

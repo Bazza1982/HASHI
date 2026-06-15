@@ -7,6 +7,7 @@ from enum import Enum
 from pathlib import Path
 from uuid import uuid4
 
+from orchestrator.enterprise.audit_schema import AuditEvent, AuditEventWriter
 from orchestrator.enterprise.store import EnterpriseStore
 
 
@@ -293,11 +294,19 @@ def evaluate_governance_policy(action: str, context: dict | None = None) -> Poli
             rule_id=evaluation.rule_id,
             reason=evaluation.reason,
         )
-        return PolicyEvaluation(
+        evaluation = PolicyEvaluation(
             decision=evaluation.decision,
             reason=evaluation.reason,
             rule_id=evaluation.rule_id,
             approval_request_id=approval.id,
+        )
+    if evaluation.decision != PolicyDecision.ALLOW:
+        _write_policy_audit(
+            bridge_home=Path(context.get("bridge_home") or getattr(global_config, "bridge_home", ".")),
+            action=action,
+            resource=str(context.get("resource") or "*"),
+            evaluation=evaluation,
+            context=context,
         )
     return evaluation
 
@@ -332,6 +341,40 @@ def _approval_from_row(row) -> ApprovalRequest:
         decided_by=row["decided_by"],
         decided_at=row["decided_at"],
         decision_reason=row["decision_reason"],
+    )
+
+
+def _write_policy_audit(
+    *,
+    bridge_home: Path,
+    action: str,
+    resource: str,
+    evaluation: PolicyEvaluation,
+    context: dict,
+) -> None:
+    status = "approval_required" if evaluation.decision == PolicyDecision.APPROVAL_REQUIRED else "denied"
+    actor_id = context.get("actor_id") or context.get("user_id")
+    audit_context = {
+        "action": action,
+        "resource": resource,
+        "decision": evaluation.decision.value,
+        "reason": evaluation.reason,
+        "rule_id": evaluation.rule_id,
+        "approval_request_id": evaluation.approval_request_id,
+        **_json_safe_context(context),
+    }
+    writer = AuditEventWriter(
+        enabled=True,
+        jsonl_path=bridge_home / "state" / "enterprise_audit.jsonl",
+    )
+    writer.append(
+        AuditEvent(
+            event_type="policy",
+            actor_id=actor_id,
+            action=action,
+            status=status,
+            context=audit_context,
+        )
     )
 
 
