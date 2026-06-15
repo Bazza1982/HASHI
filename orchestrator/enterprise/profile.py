@@ -5,6 +5,15 @@ from enum import Enum
 import os
 
 
+def _as_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    normalized = str(value).strip().lower()
+    return normalized in {"1", "true", "yes", "y", "on"}
+
+
 class DeploymentProfile(str, Enum):
     PERSONAL = "personal"
     TEAM = "team"
@@ -44,9 +53,15 @@ def resolve_deployment_profile(global_cfg: dict[str, object]) -> DeploymentProfi
 
 def parse_profile_context(global_cfg: dict[str, object]) -> ProfileContext:
     profile = resolve_deployment_profile(global_cfg)
-    organization_id = (global_cfg or {}).get("organization_id")
+    organization_id = (
+        os.environ.get("HASHI_ORGANIZATION_ID")
+        or (global_cfg or {}).get("organization_id")
+    )
     normalized_org_id = str(organization_id).strip() if organization_id not in (None, "") else None
-    bootstrap_complete = bool((global_cfg or {}).get("enterprise_bootstrap_complete", False))
+    bootstrap_complete = _as_bool(
+        os.environ.get("HASHI_ENTERPRISE_BOOTSTRAP_COMPLETE")
+        or (global_cfg or {}).get("enterprise_bootstrap_complete", False)
+    )
     return ProfileContext(profile=profile, organization_id=normalized_org_id or None, bootstrap_complete=bootstrap_complete)
 
 

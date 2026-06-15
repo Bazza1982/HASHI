@@ -60,6 +60,21 @@ def test_profile_from_env_is_respected(tmp_path, monkeypatch):
     assert global_cfg.organization_id == "ENV-ORG"
 
 
+def test_profile_env_bootstrap_fields_are_respected(tmp_path, monkeypatch):
+    config_path, secrets_path = _write_config(
+        tmp_path,
+        profile="team",
+        bootstrap_complete=False,
+        global_extra={"organization_id": "CFG-ORG"},
+    )
+    monkeypatch.setenv("HASHI_ORGANIZATION_ID", "ENV-ORG")
+    monkeypatch.setenv("HASHI_ENTERPRISE_BOOTSTRAP_COMPLETE", "true")
+
+    global_cfg, _, _ = ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
+    assert global_cfg.deployment_profile == "team"
+    assert global_cfg.organization_id == "ENV-ORG"
+
+
 @pytest.mark.parametrize("profile", ["team", "enterprise"])
 def test_governed_profiles_require_organization(tmp_path, profile):
     config_path, secrets_path = _write_config(
