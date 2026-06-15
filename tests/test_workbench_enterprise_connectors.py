@@ -54,7 +54,7 @@ class _RecordingConnector:
         return ConnectorResult(ok=True, status="success", message="done", data={"resource": action.resource})
 
 
-def _server(tmp_path: Path, *, connectors: list | None = None) -> WorkbenchApiServer:
+def _server(tmp_path: Path, *, connectors: list | None = None, secrets: dict | None = None) -> WorkbenchApiServer:
     config_path = tmp_path / "agents.json"
     config_path.write_text(
         json.dumps(
@@ -72,7 +72,7 @@ def _server(tmp_path: Path, *, connectors: list | None = None) -> WorkbenchApiSe
         workbench_port=18800,
         project_root=tmp_path,
     )
-    return WorkbenchApiServer(config_path=config_path, global_config=global_config, connectors=connectors)
+    return WorkbenchApiServer(config_path=config_path, global_config=global_config, connectors=connectors, secrets=secrets)
 
 
 def _admin_headers(server: WorkbenchApiServer) -> dict[str, str]:
@@ -216,6 +216,71 @@ async def test_enterprise_admin_can_create_list_and_revoke_connector_credentials
         )
     )
     assert json.loads(all_response.text)["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_enterprise_connector_credential_create_refreshes_registry_from_secret_ref(tmp_path):
+    server = _server(tmp_path, secrets={"github_token": "ghp-test"})
+    headers = _admin_headers(server)
+
+    create_response = await server.handle_enterprise_connector_credentials_create(
+        _FakeRequest(
+            headers=headers,
+            path="/api/enterprise/connectors/credentials",
+            body={
+                "connector_type": "github",
+                "display_name": "GitHub App",
+                "secret_ref": "secrets://github_token",
+                "scopes": ["repo:read"],
+                "credential_id": "cred-github",
+            },
+        )
+    )
+
+    assert create_response.status == 201
+    assert server.connector_registry.list_types() == ["github"]
+    assert server.connector_registry_errors == []
+
+    revoke_response = await server.handle_enterprise_connector_credential_revoke(
+        _FakeRequest(
+            headers=headers,
+            path="/api/enterprise/connectors/credentials/cred-github/revoke",
+            match_info={"credential_id": "cred-github"},
+        )
+    )
+
+    assert revoke_response.status == 200
+    assert server.connector_registry.list_types() == []
+
+
+@pytest.mark.asyncio
+async def test_enterprise_connector_registry_refresh_reports_unresolved_secret(tmp_path):
+    server = _server(tmp_path)
+    headers = _admin_headers(server)
+
+    response = await server.handle_enterprise_connector_credentials_create(
+        _FakeRequest(
+            headers=headers,
+            path="/api/enterprise/connectors/credentials",
+            body={
+                "connector_type": "github",
+                "display_name": "GitHub App",
+                "secret_ref": "secrets://missing_github_token",
+                "scopes": ["repo:read"],
+                "credential_id": "cred-github",
+            },
+        )
+    )
+
+    assert response.status == 201
+    assert server.connector_registry.list_types() == []
+    assert server.connector_registry_errors == [
+        {
+            "credential_id": "cred-github",
+            "connector_type": "github",
+            "error": "HASHI secret is not set: missing_github_token",
+        }
+    ]
 
 
 @pytest.mark.asyncio
