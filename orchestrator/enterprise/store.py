@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 class EnterpriseStore:
@@ -178,6 +178,62 @@ class EnterpriseStore:
                     ON audit_events(org_id, actor_id, ts);
                 CREATE INDEX IF NOT EXISTS idx_audit_events_org_project_ts
                     ON audit_events(org_id, project_id, ts);
+
+                CREATE TABLE IF NOT EXISTS tasks (
+                    id TEXT PRIMARY KEY,
+                    org_id TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    user_id TEXT,
+                    agent_id TEXT,
+                    status TEXT NOT NULL,
+                    prompt_summary TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    failed_reason TEXT,
+                    metadata_json TEXT NOT NULL,
+                    FOREIGN KEY(org_id) REFERENCES organizations(id) ON DELETE CASCADE,
+                    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+                    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_tasks_org_project_status
+                    ON tasks(org_id, project_id, status);
+                CREATE INDEX IF NOT EXISTS idx_tasks_org_user_created
+                    ON tasks(org_id, user_id, created_at);
+
+                CREATE TABLE IF NOT EXISTS artifacts (
+                    id TEXT PRIMARY KEY,
+                    org_id TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    hash TEXT,
+                    created_at TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL,
+                    FOREIGN KEY(org_id) REFERENCES organizations(id) ON DELETE CASCADE,
+                    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+                    FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_artifacts_org_task
+                    ON artifacts(org_id, task_id);
+
+                CREATE TABLE IF NOT EXISTS evidence_bundles (
+                    id TEXT PRIMARY KEY,
+                    org_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    audit_event_ids_json TEXT NOT NULL,
+                    artifact_ids_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL,
+                    FOREIGN KEY(org_id) REFERENCES organizations(id) ON DELETE CASCADE,
+                    FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_evidence_bundles_org_task
+                    ON evidence_bundles(org_id, task_id);
                 """
             )
             con.execute(

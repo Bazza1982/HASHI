@@ -7,6 +7,7 @@ from orchestrator.enterprise.profile import (
 )
 from orchestrator.enterprise.audit_schema import AuditEvent, AuditEventWriter
 from orchestrator.enterprise.audit_ledger import EnterpriseAuditLedger, LedgerEvent
+from orchestrator.enterprise.artifacts import Artifact, ArtifactRegistry
 from orchestrator.enterprise.audit_adapters import (
     BrowserAuditIngestResult,
     RemoteAuditIngestResult,
@@ -39,6 +40,8 @@ from orchestrator.enterprise.policy import (
     evaluate_governance_policy,
 )
 from orchestrator.enterprise.store import EnterpriseStore
+from orchestrator.enterprise.evidence import EvidenceBundle, EvidenceBundleRegistry
+from orchestrator.enterprise.tasks import EnterpriseTask, TaskRegistry, TaskStatus
 
 __all__ = [
     "DeploymentProfile",
@@ -50,6 +53,8 @@ __all__ = [
     "AuditEventWriter",
     "EnterpriseAuditLedger",
     "LedgerEvent",
+    "Artifact",
+    "ArtifactRegistry",
     "BrowserAuditIngestResult",
     "RemoteAuditIngestResult",
     "SlashAuditIngestResult",
@@ -70,6 +75,9 @@ __all__ = [
     "ChannelScopeType",
     "ChannelType",
     "EnterpriseRole",
+    "EnterpriseTask",
+    "EvidenceBundle",
+    "EvidenceBundleRegistry",
     "EnterpriseStore",
     "IdentityService",
     "PolicyDecision",
@@ -77,5 +85,7 @@ __all__ = [
     "PolicyEvaluator",
     "PolicyRule",
     "ApprovalRequest",
+    "TaskRegistry",
+    "TaskStatus",
     "evaluate_governance_policy",
 ]
