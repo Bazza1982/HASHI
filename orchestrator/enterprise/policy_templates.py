@@ -7,8 +7,9 @@ def install_default_connector_policy(evaluator: PolicyEvaluator) -> list[PolicyR
     """Install conservative connector defaults.
 
     Read-only GitHub metadata actions are explicitly allowed. GitHub write
-    actions require approval by default so adding connector support does not
-    silently expand enterprise write capability.
+    actions and outbound Slack messages require approval by default so adding
+    connector support does not silently expand enterprise write or data egress
+    capability.
     """
 
     existing_ids = {rule.id for rule in evaluator.list_rules()}
@@ -39,6 +40,15 @@ def install_default_connector_policy(evaluator: PolicyEvaluator) -> list[PolicyR
                 "priority": 100,
             }
         )
+    specs.append(
+        {
+            "rule_id": "tpl-connector-slack-message-send-approval",
+            "action": "connector.execute",
+            "resource": "connector:slack:message.send",
+            "effect": "approval_required",
+            "priority": 100,
+        }
+    )
     for spec in specs:
         if spec["rule_id"] in existing_ids:
             rules.append(evaluator.get_rule(spec["rule_id"]))

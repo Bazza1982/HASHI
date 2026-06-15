@@ -891,6 +891,7 @@ Implemented checkpoints:
 - Default connector policy template added:
   - explicitly allows GitHub read-only repository metadata actions;
   - requires approval for GitHub `issue.create`, `pr.create`, and `pr.merge`;
+  - requires approval for Slack `message.send` to avoid enabling outbound channel egress by default;
   - template installation is idempotent.
 - Default connector policy install API added:
   - `POST /api/enterprise/policies/install-defaults` is admin-gated;
@@ -911,7 +912,7 @@ Residual P10 limitations:
 - Credential store records secret references only; environment and HASHI secrets can now be resolved through a dedicated resolver, while Vault/Kubernetes secret resolution remains pending.
 - Connector factory currently supports GitHub and Slack; Teams, Google Chat, and Feishu factory support remains pending.
 - Workbench registry refresh is in-process; multi-node registry synchronization remains future work.
-- Default connector policy can be installed through admin setup API; silent auto-install remains intentionally avoided to prevent overwriting administrator policy edits.
+- Default connector policy covers GitHub reads, GitHub writes, and Slack outbound message approval; silent auto-install remains intentionally avoided to prevent overwriting administrator policy edits.
 - Workbench/admin connector execution API now uses the gated execution service.
 - Connector health API exists for registered in-process connectors; built-in GitHub and Slack connectors can now be constructed from credential references.
 - Connector admin UI is still pending.
@@ -945,7 +946,7 @@ Residual P10 limitations:
 - `ENT-130` Add connector secret reference resolver. Done for env/HASHI secret refs, redacted metadata, unsupported scheme failures, and unconfigured vault fail-closed behavior.
 - `ENT-131` Add connector factory. Done for GitHub connector construction from credential refs, secret resolution, revoked credential skipping, and unsupported type fail-closed behavior.
 - `ENT-132` Add Workbench connector registry refresh. Done for startup refresh, create/revoke refresh, static connector precedence, and fail-soft registry errors.
-- `ENT-133` Add default connector policy template. Done for GitHub read allow, GitHub write approval-required, and idempotent install.
+- `ENT-133` Add default connector policy template. Done for GitHub read allow, GitHub write approval-required, Slack outbound message approval-required, and idempotent install.
 - `ENT-134` Add default connector policy install API. Done for admin-gated install, idempotent responses, and audit event emission.
 
 **Acceptance:**
