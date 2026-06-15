@@ -862,6 +862,11 @@ Implemented checkpoints:
   - the API constructs a `ConnectorAction` with actor, project, task, request, correlation, dry-run, and parameters;
   - execution always goes through `ConnectorExecutionService`;
   - responses include both connector `result` and explicit `gate` decision metadata.
+- Workbench connector credential admin API added:
+  - `GET /api/enterprise/connectors/credentials` lists active connector credential references;
+  - `POST /api/enterprise/connectors/credentials` creates scoped connector credential references;
+  - `POST /api/enterprise/connectors/credentials/{credential_id}/revoke` revokes credentials;
+  - credential create and revoke operations write admin audit events.
 
 Residual P10 limitations:
 
@@ -897,6 +902,7 @@ Residual P10 limitations:
 - `ENT-125` Add credential revoke tests. Done for gate-level fail-closed behavior.
 - `ENT-127` Add gated connector execution service. Done for credential gate, policy gate, connector invocation, fail-closed missing connector handling, and ledger events.
 - `ENT-128` Add Workbench connector execution API. Done for admin-gated execution through `ConnectorExecutionService` with result and gate metadata.
+- `ENT-129` Add Workbench connector credential API. Done for admin-gated list, create, revoke, active-only listing, include-revoked listing, and audit events.
 
 **Acceptance:**
 

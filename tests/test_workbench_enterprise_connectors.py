@@ -18,11 +18,13 @@ class _FakeRequest:
         path: str = "",
         query: dict | None = None,
         body: dict | None = None,
+        match_info: dict | None = None,
     ):
         self.headers = headers or {}
         self.path = path
         self.query = query or {}
         self._body = body or {}
+        self.match_info = match_info or {}
 
     async def json(self):
         return self._body
@@ -156,6 +158,64 @@ async def test_enterprise_connector_health_requires_admin(tmp_path):
 
     assert response.status == 403
     assert json.loads(response.text)["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_enterprise_admin_can_create_list_and_revoke_connector_credentials(tmp_path):
+    server = _server(tmp_path)
+    headers = _admin_headers(server)
+
+    create_response = await server.handle_enterprise_connector_credentials_create(
+        _FakeRequest(
+            headers=headers,
+            path="/api/enterprise/connectors/credentials",
+            body={
+                "connector_type": "github",
+                "display_name": "GitHub App",
+                "secret_ref": "vault://github/app",
+                "scopes": ["repo:read"],
+                "credential_id": "cred-github",
+            },
+        )
+    )
+    create_payload = json.loads(create_response.text)
+    assert create_response.status == 201
+    assert create_payload["ok"] is True
+    assert create_payload["credential"]["status"] == "active"
+    assert create_payload["credential"]["secret_ref"] == "vault://github/app"
+
+    list_response = await server.handle_enterprise_connector_credentials(
+        _FakeRequest(headers=headers, path="/api/enterprise/connectors/credentials")
+    )
+    list_payload = json.loads(list_response.text)
+    assert list_response.status == 200
+    assert list_payload["count"] == 1
+    assert list_payload["credentials"][0]["id"] == "cred-github"
+
+    revoke_response = await server.handle_enterprise_connector_credential_revoke(
+        _FakeRequest(
+            headers=headers,
+            path="/api/enterprise/connectors/credentials/cred-github/revoke",
+            match_info={"credential_id": "cred-github"},
+        )
+    )
+    revoke_payload = json.loads(revoke_response.text)
+    assert revoke_response.status == 200
+    assert revoke_payload["credential"]["status"] == "revoked"
+
+    active_response = await server.handle_enterprise_connector_credentials(
+        _FakeRequest(headers=headers, path="/api/enterprise/connectors/credentials")
+    )
+    assert json.loads(active_response.text)["count"] == 0
+
+    all_response = await server.handle_enterprise_connector_credentials(
+        _FakeRequest(
+            headers=headers,
+            path="/api/enterprise/connectors/credentials",
+            query={"include_revoked": "true"},
+        )
+    )
+    assert json.loads(all_response.text)["count"] == 1
 
 
 @pytest.mark.asyncio

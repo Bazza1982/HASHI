@@ -128,6 +128,12 @@ class WorkbenchApiServer:
         self.app.router.add_get("/api/enterprise/agent-capabilities", self.handle_enterprise_agent_capabilities)
         self.app.router.add_get("/api/enterprise/connectors/health", self.handle_enterprise_connector_health)
         self.app.router.add_post("/api/enterprise/connectors/execute", self.handle_enterprise_connector_execute)
+        self.app.router.add_get("/api/enterprise/connectors/credentials", self.handle_enterprise_connector_credentials)
+        self.app.router.add_post("/api/enterprise/connectors/credentials", self.handle_enterprise_connector_credentials_create)
+        self.app.router.add_post(
+            "/api/enterprise/connectors/credentials/{credential_id}/revoke",
+            self.handle_enterprise_connector_credential_revoke,
+        )
         self.app.router.add_get("/api/agents", self.handle_agents)
         self.app.router.add_get("/api/transcript/{name}", self.handle_transcript_recent)
         self.app.router.add_get("/api/transcript/{name}/poll", self.handle_transcript_poll)
@@ -626,6 +632,19 @@ class WorkbenchApiServer:
             "bindings": bindings,
         }
 
+    def _enterprise_connector_credential_payload(self, credential) -> dict:
+        return {
+            "id": credential.id,
+            "org_id": credential.org_id,
+            "connector_type": credential.connector_type,
+            "display_name": credential.display_name,
+            "secret_ref": credential.secret_ref,
+            "scopes": list(credential.scopes),
+            "status": credential.status,
+            "created_at": credential.created_at,
+            "revoked_at": credential.revoked_at,
+        }
+
     def _enterprise_approval_payload(self, approval) -> dict:
         return {
             "id": approval.id,
@@ -1095,6 +1114,102 @@ class WorkbenchApiServer:
                 "project_id": project_id,
             }
         )
+
+    async def handle_enterprise_connector_credentials(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        if self.connector_credentials is None:
+            return web.json_response({"ok": False, "error": "connector credentials unavailable"}, status=503)
+        org_id = str(getattr(self.global_config, "organization_id", "") or "").strip()
+        query = getattr(request, "query", {}) or {}
+        connector_type = str(query.get("connector_type") or "").strip() or None
+        include_revoked = str(query.get("include_revoked") or "").strip().lower() in {"1", "true", "yes"}
+        credentials = self.connector_credentials.list_credentials(
+            org_id=org_id,
+            connector_type=connector_type,
+            include_revoked=include_revoked,
+        )
+        return web.json_response(
+            {
+                "ok": True,
+                "credentials": [self._enterprise_connector_credential_payload(item) for item in credentials],
+                "count": len(credentials),
+            }
+        )
+
+    async def handle_enterprise_connector_credentials_create(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        if self.connector_credentials is None:
+            return web.json_response({"ok": False, "error": "connector credentials unavailable"}, status=503)
+        actor = self._enterprise_user_from_request(request)
+        org_id = str(getattr(self.global_config, "organization_id", "") or "").strip()
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
+        scopes = payload.get("scopes") if isinstance(payload.get("scopes"), list) else []
+        try:
+            credential = self.connector_credentials.create_credential(
+                org_id=org_id,
+                connector_type=payload.get("connector_type"),
+                display_name=payload.get("display_name"),
+                secret_ref=payload.get("secret_ref"),
+                scopes=scopes,
+                credential_id=payload.get("credential_id"),
+            )
+        except Exception as exc:
+            self._append_enterprise_audit(
+                event_type="admin_api",
+                action="connector_credential_create",
+                status="failed",
+                actor_id=actor.id if actor else None,
+                context={"error": str(exc)},
+            )
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        self._append_enterprise_audit(
+            event_type="admin_api",
+            action="connector_credential_create",
+            status="success",
+            actor_id=actor.id if actor else None,
+            context={"credential_id": credential.id, "connector_type": credential.connector_type},
+        )
+        return web.json_response(
+            {"ok": True, "credential": self._enterprise_connector_credential_payload(credential)},
+            status=201,
+        )
+
+    async def handle_enterprise_connector_credential_revoke(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        if self.connector_credentials is None:
+            return web.json_response({"ok": False, "error": "connector credentials unavailable"}, status=503)
+        actor = self._enterprise_user_from_request(request)
+        credential_id = str(getattr(request, "match_info", {}).get("credential_id") or "").strip()
+        if not credential_id:
+            return web.json_response({"ok": False, "error": "credential_id is required"}, status=400)
+        try:
+            credential = self.connector_credentials.revoke_credential(credential_id)
+        except Exception as exc:
+            self._append_enterprise_audit(
+                event_type="admin_api",
+                action="connector_credential_revoke",
+                status="failed",
+                actor_id=actor.id if actor else None,
+                context={"credential_id": credential_id, "error": str(exc)},
+            )
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        self._append_enterprise_audit(
+            event_type="admin_api",
+            action="connector_credential_revoke",
+            status="success",
+            actor_id=actor.id if actor else None,
+            context={"credential_id": credential.id, "connector_type": credential.connector_type},
+        )
+        return web.json_response({"ok": True, "credential": self._enterprise_connector_credential_payload(credential)})
 
     async def handle_enterprise_connector_health(self, request):
         error = self._enterprise_admin_error_response(request)
