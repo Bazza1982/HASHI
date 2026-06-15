@@ -44,6 +44,7 @@ from orchestrator.enterprise.connectors import (
     ConnectorResult,
     EnterpriseConnector,
     GitHubConnector,
+    SlackWebhookConnector,
     evaluate_connector_action,
     record_connector_event,
 )
@@ -126,6 +127,7 @@ __all__ = [
     "ConnectorCredentialStore",
     "EnterpriseConnector",
     "GitHubConnector",
+    "SlackWebhookConnector",
     "EnterpriseRole",
     "EnterpriseTask",
     "EvidenceBundle",

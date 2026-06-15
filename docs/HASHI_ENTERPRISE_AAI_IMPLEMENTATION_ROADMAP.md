@@ -896,17 +896,24 @@ Implemented checkpoints:
   - `POST /api/enterprise/policies/install-defaults` is admin-gated;
   - installs or returns the default connector policy rules without duplicating them;
   - writes an admin audit event with installed rule ids.
+- First enterprise channel connector added:
+  - Slack incoming webhook connector supports `message.send`;
+  - `health_check()` validates webhook configuration without making a network call;
+  - `dry_run` returns the planned Slack payload without posting externally;
+  - real execution posts text and optional block payloads through an injectable transport;
+  - factory can build Slack connectors from scoped credential secret references.
 
 Residual P10 limitations:
 
 - GitHub has a read-only connector foundation, but no write actions such as PR creation or merge are implemented yet.
-- No Slack, Teams, Google Chat, or Feishu connector is implemented yet.
+- Slack exists as an incoming webhook MVP only; Slack OAuth, Bot API, channel discovery, and user mapping are not implemented yet.
+- No Teams, Google Chat, or Feishu connector is implemented yet.
 - Credential store records secret references only; environment and HASHI secrets can now be resolved through a dedicated resolver, while Vault/Kubernetes secret resolution remains pending.
-- Connector factory currently supports GitHub only; enterprise channel connectors still need factory support.
+- Connector factory currently supports GitHub and Slack; Teams, Google Chat, and Feishu factory support remains pending.
 - Workbench registry refresh is in-process; multi-node registry synchronization remains future work.
 - Default connector policy can be installed through admin setup API; silent auto-install remains intentionally avoided to prevent overwriting administrator policy edits.
 - Workbench/admin connector execution API now uses the gated execution service.
-- Connector health API exists for registered in-process connectors, but no built-in external connector is registered yet.
+- Connector health API exists for registered in-process connectors; built-in GitHub and Slack connectors can now be constructed from credential references.
 - Connector admin UI is still pending.
 
 **Scope:**
@@ -928,7 +935,7 @@ Residual P10 limitations:
 - `ENT-120` Define connector interface. Done for service contract and audit event helper.
 - `ENT-121` Add scoped credential store abstraction. Done for secret references, scopes, active listing, and revoke.
 - `ENT-122` Add connector execution gate. Done for credential existence, org isolation, revoke fail-closed, type match, policy deny, and approval-required decisions.
-- `ENT-126` Add first enterprise channel connector.
+- `ENT-126` Add first enterprise channel connector. Done for Slack incoming webhook health, dry-run, `message.send`, injectable transport, and factory construction from secret refs.
 - `ENT-123` Add GitHub connector with audit. In progress with health, repository metadata, and issue creation actions; PR create/merge remain pending.
 - `ENT-124` Add connector health checks. Done for in-process registry, normalized health summaries, ledger health events, and Workbench admin health API.
 - `ENT-125` Add credential revoke tests. Done for gate-level fail-closed behavior.

@@ -15,6 +15,7 @@ from orchestrator.enterprise import (
     IdentityService,
     PolicyEvaluator,
     ConnectorSecretResolver,
+    SlackWebhookConnector,
 )
 from orchestrator.enterprise.connectors import evaluate_connector_action, record_connector_event
 
@@ -54,6 +55,15 @@ class _FakeGitHubTransport:
                 "state": "open",
             }
         raise AssertionError(f"unexpected GitHub request: {method} {path}")
+
+
+class _FakeSlackTransport:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, webhook_url, payload):
+        self.calls.append({"webhook_url": webhook_url, "payload": dict(payload)})
+        return {"status_code": 200, "text": "ok"}
 
 
 def test_connector_interface_can_execute_and_report_health():
@@ -174,6 +184,56 @@ def test_github_connector_rejects_unsupported_action():
     assert result.status == "unsupported_action"
 
 
+def test_slack_webhook_connector_health_and_dry_run():
+    connector = SlackWebhookConnector(webhook_url="https://hooks.slack.test/services/abc")
+    action = ConnectorAction(
+        connector_type="slack",
+        action="message.send",
+        dry_run=True,
+        parameters={"text": "Hello enterprise"},
+    )
+
+    health = connector.health_check()
+    result = connector.execute(action)
+
+    assert health.ok is True
+    assert result.ok is True
+    assert result.status == "dry_run"
+    assert result.data == {"payload": {"text": "Hello enterprise"}}
+
+
+def test_slack_webhook_connector_posts_message_payload():
+    transport = _FakeSlackTransport()
+    connector = SlackWebhookConnector(webhook_url="https://hooks.slack.test/services/abc", transport=transport)
+    action = ConnectorAction(
+        connector_type="slack",
+        action="message.send",
+        parameters={"text": "Hello enterprise", "blocks": [{"type": "section"}]},
+    )
+
+    result = connector.execute(action)
+
+    assert result.ok is True
+    assert result.status == "success"
+    assert result.data == {"status_code": 200, "text": "ok"}
+    assert transport.calls == [
+        {
+            "webhook_url": "https://hooks.slack.test/services/abc",
+            "payload": {"text": "Hello enterprise", "blocks": [{"type": "section"}]},
+        }
+    ]
+
+
+def test_slack_webhook_connector_requires_text():
+    connector = SlackWebhookConnector(webhook_url="https://hooks.slack.test/services/abc")
+    action = ConnectorAction(connector_type="slack", action="message.send")
+
+    result = connector.execute(action)
+
+    assert result.ok is False
+    assert result.status == "invalid_parameters"
+
+
 def test_connector_factory_builds_github_connector_from_env_secret(tmp_path):
     credentials, _, credential = _connector_gate_services(tmp_path)
     credentials.revoke_credential(credential.id)
@@ -212,16 +272,41 @@ def test_connector_factory_fails_closed_for_unsupported_connector_type(tmp_path)
     credentials, _, _ = _connector_gate_services(tmp_path)
     credential = credentials.create_credential(
         org_id="ORG-001",
-        connector_type="slack",
-        display_name="Slack Bot",
-        secret_ref="secrets://slack_token",
+        connector_type="teams",
+        display_name="Teams Bot",
+        secret_ref="secrets://teams_token",
         scopes=["chat:write"],
-        credential_id="cred-slack",
+        credential_id="cred-teams",
     )
-    factory = ConnectorFactory(secret_resolver=ConnectorSecretResolver(secrets={"slack_token": "xoxb"}))
+    factory = ConnectorFactory(secret_resolver=ConnectorSecretResolver(secrets={"teams_token": "token"}))
 
     with pytest.raises(ValueError, match="unsupported connector type"):
         factory.build(credential)
+
+
+def test_connector_factory_builds_slack_connector_from_secret_ref(tmp_path):
+    credentials, _, _ = _connector_gate_services(tmp_path)
+    credential = credentials.create_credential(
+        org_id="ORG-001",
+        connector_type="slack",
+        display_name="Slack Bot",
+        secret_ref="secrets://slack_webhook",
+        scopes=["chat:write"],
+        credential_id="cred-slack",
+    )
+    transport = _FakeSlackTransport()
+    factory = ConnectorFactory(
+        secret_resolver=ConnectorSecretResolver(secrets={"slack_webhook": "https://hooks.slack.test/services/abc"}),
+        transports={"slack": transport},
+    )
+
+    connector = factory.build(credential)
+    result = connector.execute(
+        ConnectorAction(connector_type="slack", action="message.send", parameters={"text": "Hello"})
+    )
+
+    assert result.ok is True
+    assert transport.calls[0]["webhook_url"] == "https://hooks.slack.test/services/abc"
 
 
 def test_connector_factory_fails_closed_when_secret_ref_cannot_resolve(tmp_path):
