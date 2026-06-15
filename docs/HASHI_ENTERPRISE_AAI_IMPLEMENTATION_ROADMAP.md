@@ -639,10 +639,14 @@ Implemented checkpoints:
 - `PolicyEvaluator.decide_approval_request()` supports pending approval decisions;
 - approval requests can transition to `approved` or `denied` exactly once;
 - approval decisions write canonical `policy` ledger events with project/task/request correlation.
+- Workbench exposes approval queue API routes:
+  - `GET /api/enterprise/approvals`;
+  - `POST /api/enterprise/approvals/{request_id}/approve`;
+  - `POST /api/enterprise/approvals/{request_id}/deny`.
 
 Residual P7 limitations:
 
-- Workbench approval UI/API routes are not yet implemented;
+- Workbench approval UI is not yet implemented;
 - approved requests are not yet consumed to resume blocked work automatically;
 - project-aware inbound routing is still pending.
 
@@ -666,8 +670,8 @@ Residual P7 limitations:
 **Tickets:**
 
 - `ENT-090` Add project-aware inbound routing.
-- `ENT-091` Add approval queue APIs. Service-layer list/get already exists; Workbench API routes pending.
-- `ENT-092` Add admin approve/deny action. Done at service layer with ledger events; Workbench API routes pending.
+- `ENT-091` Add approval queue APIs. Done for Workbench admin list endpoint.
+- `ENT-092` Add admin approve/deny action. Done for service and Workbench admin API routes with ledger events.
 - `ENT-093` Add failed-task escalation events.
 - `ENT-094` Add agent capability registry.
 
