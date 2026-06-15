@@ -509,6 +509,8 @@ def _has_evidence(task: dict[str, Any]) -> bool:
         task,
         "artifact_refs",
         "evidence_refs",
+        "evidence_bundle_ids",
+        "enterprise_evidence_bundle_id",
         "completion_evidence",
         "evidence",
         "worker_report_refs",
@@ -532,9 +534,25 @@ def _missing_required_evidence(task: dict[str, Any], required_evidence: Any) -> 
         elif "artifact" in key or "file" in key:
             present = _has_any(task, "artifact_refs", "artifacts")
         elif "validation" in key:
-            present = _has_any(task, "validation_report", "validation_refs", "evidence_refs", "artifact_refs")
+            present = _has_any(
+                task,
+                "validation_report",
+                "validation_refs",
+                "evidence_refs",
+                "evidence_bundle_ids",
+                "enterprise_evidence_bundle_id",
+                "artifact_refs",
+            )
         elif "closeout" in key:
-            present = _has_any(task, "closeout_result", "closeout_refs", "evidence_refs", "artifact_refs")
+            present = _has_any(
+                task,
+                "closeout_result",
+                "closeout_refs",
+                "evidence_refs",
+                "evidence_bundle_ids",
+                "enterprise_evidence_bundle_id",
+                "artifact_refs",
+            )
         else:
             present = _has_evidence(task)
         if not present:

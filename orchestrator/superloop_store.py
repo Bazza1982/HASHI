@@ -250,6 +250,74 @@ class SuperloopStore:
             self.save_loop_state(loop_id, state)
             return state["stats"]
 
+    def attach_evidence_bundle(
+        self,
+        loop_id: str,
+        *,
+        task_id: str,
+        evidence_bundle_id: str,
+        actor: dict[str, Any] | None = None,
+        summary: str | None = None,
+        refs: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        task_id = str(task_id or "").strip()
+        evidence_bundle_id = str(evidence_bundle_id or "").strip()
+        if not task_id:
+            raise ValueError("task_id is required")
+        if not evidence_bundle_id:
+            raise ValueError("evidence_bundle_id is required")
+
+        attached_at = _utc_now()
+        entry = {
+            "task_id": task_id,
+            "evidence_bundle_id": evidence_bundle_id,
+            "attached_at": attached_at,
+        }
+        if summary:
+            entry["summary"] = summary
+
+        with self._lock:
+            state = self.load_loop_state(loop_id)
+            bundles = [item for item in state.get("evidence_bundles", []) if isinstance(item, dict)]
+            state_changed = not any(
+                item.get("task_id") == task_id and item.get("evidence_bundle_id") == evidence_bundle_id
+                for item in bundles
+            )
+            if state_changed:
+                bundles.append(entry)
+                state["evidence_bundles"] = bundles
+                self.save_loop_state(loop_id, state)
+
+            taskboard_changed = False
+            taskboard_path = self.resolve_loop_path(loop_id, state.get("taskboard_path"), "taskboard.json")
+            tasks = self.load_loop_json_list(taskboard_path)
+            for task in tasks:
+                if str(task.get("task_id") or "").strip() != task_id:
+                    continue
+                bundle_ids = [
+                    str(value)
+                    for value in task.get("evidence_bundle_ids", [])
+                    if str(value or "").strip()
+                ]
+                if evidence_bundle_id not in bundle_ids:
+                    bundle_ids.append(evidence_bundle_id)
+                    task["evidence_bundle_ids"] = bundle_ids
+                    task["enterprise_evidence_bundle_id"] = evidence_bundle_id
+                    taskboard_changed = True
+            if taskboard_changed:
+                self.save_loop_json_list(taskboard_path, tasks)
+
+        event_data = dict(entry)
+        event_data["state_changed"] = state_changed
+        event_data["taskboard_changed"] = taskboard_changed
+        return self.append_loop_event(
+            loop_id,
+            event_type="evidence.bundle_attached",
+            data=event_data,
+            actor=actor,
+            refs=refs,
+        )
+
     def append_loop_event(
         self,
         loop_id: str,
