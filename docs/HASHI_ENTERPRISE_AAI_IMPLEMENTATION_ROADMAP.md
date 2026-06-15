@@ -820,6 +820,20 @@ Residual P9 limitations:
 
 **Goal:** add governed integrations after the control plane is stable.
 
+**Implementation status:** P10 service interface groundwork started.
+
+Implemented checkpoints:
+
+- Connector interface package added under `orchestrator/enterprise/connectors/`.
+- `ConnectorAction`, `ConnectorResult`, `ConnectorHealth`, and `EnterpriseConnector` protocol define the first connector contract.
+- `record_connector_event()` writes canonical connector ledger events and redacts sensitive action parameters.
+
+Residual P10 limitations:
+
+- No real GitHub, Slack, Teams, Google Chat, or Feishu connector is implemented yet.
+- Scoped credential store is still pending.
+- Connector policy gate and revoke behavior are still pending.
+
 **Scope:**
 
 - choose one enterprise channel connector and one system connector first;
@@ -836,7 +850,7 @@ Residual P9 limitations:
 
 **Tickets:**
 
-- `ENT-120` Define connector interface.
+- `ENT-120` Define connector interface. Done for service contract and audit event helper.
 - `ENT-121` Add scoped credential store abstraction.
 - `ENT-122` Add first enterprise channel connector.
 - `ENT-123` Add GitHub connector with audit.
