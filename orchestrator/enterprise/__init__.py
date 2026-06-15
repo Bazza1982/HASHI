@@ -45,6 +45,7 @@ from orchestrator.enterprise.execution import ExecutionPathDecision, ExecutionSc
 from orchestrator.enterprise.tasks import EnterpriseTask, TaskRegistry, TaskStatus
 from orchestrator.enterprise.verification import (
     ArtifactVerificationResult,
+    complete_task_with_artifact_verification,
     fail_task_if_promised_artifacts_missing,
     verify_promised_artifacts,
 )
@@ -96,6 +97,7 @@ __all__ = [
     "ArtifactVerificationResult",
     "TaskRegistry",
     "TaskStatus",
+    "complete_task_with_artifact_verification",
     "evaluate_governance_policy",
     "fail_task_if_promised_artifacts_missing",
     "verify_promised_artifacts",
