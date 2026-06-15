@@ -4,6 +4,7 @@ import json
 
 from orchestrator.enterprise import EnterpriseAuditLedger, IdentityService
 from orchestrator.enterprise.audit_adapters import (
+    ingest_remote_audit_jsonl,
     ingest_slash_command_audit_jsonl,
     ingest_token_audit_jsonl,
 )
@@ -183,3 +184,70 @@ def test_token_audit_ingest_is_idempotent_and_skips_bad_lines(tmp_path):
     assert event.status == "failed"
     assert event.request_id == "req-2"
     assert event.context["error"] == "empty answer"
+
+
+def test_ingests_remote_audit_jsonl_into_ledger(tmp_path):
+    ledger = _init_ledger(tmp_path)
+    audit_path = tmp_path / "remote_audit.jsonl"
+    records = [
+        {
+            "ts": 1778395658.0,
+            "event": "hchat_received",
+            "from": "HASHI2",
+            "to_agent": "nana",
+            "snippet": "[hchat from zelda@HASHI2] please review",
+        },
+        {
+            "ts": 1778395659.0,
+            "event": "terminal_exec",
+            "client": "remote-cli",
+            "command": "ls",
+            "allowed": False,
+        },
+    ]
+    audit_path.write_text(
+        "\n".join(json.dumps(record, ensure_ascii=False) for record in records) + "\n",
+        encoding="utf-8",
+    )
+
+    result = ingest_remote_audit_jsonl(ledger, audit_path)
+
+    assert result.ingested == 2
+    events = ledger.query(event_type="remote")
+    assert [event.action for event in events] == ["remote.hchat_received", "remote.terminal_exec"]
+    assert events[0].status == "observed"
+    assert events[0].actor_id == "HASHI2"
+    assert events[0].ts == "2026-05-10T06:47:38+00:00"
+    assert events[0].context["to_agent"] == "nana"
+    assert events[1].status == "denied"
+    assert events[1].actor_id == "remote-cli"
+    assert events[1].context["command"] == "ls"
+
+
+def test_remote_audit_ingest_is_idempotent_and_skips_bad_lines(tmp_path):
+    ledger = _init_ledger(tmp_path)
+    audit_path = tmp_path / "remote_audit.jsonl"
+    record = {
+        "ts": "2026-06-14T14:00:00+00:00",
+        "event": "pairing_request",
+        "client": "HASHI2",
+        "name": "hashi2 peer",
+        "auto_approved": False,
+    }
+    audit_path.write_text(
+        json.dumps(["not", "object"]) + "\n" + json.dumps(record, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    first = ingest_remote_audit_jsonl(ledger, audit_path)
+    second = ingest_remote_audit_jsonl(ledger, audit_path)
+
+    assert first.ingested == 1
+    assert first.skipped == 1
+    assert second.ingested == 0
+    assert second.skipped == 1
+    assert second.duplicate == 1
+    event = ledger.query(event_type="remote")[0]
+    assert event.action == "remote.pairing_request"
+    assert event.status == "pending"
+    assert event.actor_id == "HASHI2"

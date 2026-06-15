@@ -8,8 +8,10 @@ from orchestrator.enterprise.profile import (
 from orchestrator.enterprise.audit_schema import AuditEvent, AuditEventWriter
 from orchestrator.enterprise.audit_ledger import EnterpriseAuditLedger, LedgerEvent
 from orchestrator.enterprise.audit_adapters import (
+    RemoteAuditIngestResult,
     SlashAuditIngestResult,
     TokenAuditIngestResult,
+    ingest_remote_audit_jsonl,
     ingest_slash_command_audit_jsonl,
     ingest_token_audit_jsonl,
 )
@@ -44,8 +46,10 @@ __all__ = [
     "AuditEventWriter",
     "EnterpriseAuditLedger",
     "LedgerEvent",
+    "RemoteAuditIngestResult",
     "SlashAuditIngestResult",
     "TokenAuditIngestResult",
+    "ingest_remote_audit_jsonl",
     "ingest_slash_command_audit_jsonl",
     "ingest_token_audit_jsonl",
     "ChannelGateResult",
