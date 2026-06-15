@@ -1,0 +1,140 @@
+# HASHI Enterprise AAI Readiness Review
+
+**Date:** 2026-06-16
+
+**Status:** Enterprise MVP implementation is ready for review. The broader future roadmap is not complete.
+
+Related documents:
+
+- [HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md](HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md)
+- [HASHI_ENTERPRISE_AAI_PRD.md](HASHI_ENTERPRISE_AAI_PRD.md)
+- [HASHI_ENTERPRISE_AAI_VALUE_PROPOSITION.md](HASHI_ENTERPRISE_AAI_VALUE_PROPOSITION.md)
+- [HASHI_ENTERPRISE_PROFILE_ADR.md](HASHI_ENTERPRISE_PROFILE_ADR.md)
+
+---
+
+## 1. Readiness Decision
+
+HASHI Enterprise AAI has reached an **MVP review-ready** state for the governed AAI control plane:
+
+- one codebase with `personal`, `team`, and `enterprise` profiles;
+- enterprise identity, sessions, roles, projects, memberships, service accounts, and API tokens;
+- default-disabled governed channels and channel gates;
+- central policy decisions for commands, channels, backends, tools, execution, and connectors;
+- unified audit ledger and adapters for existing HASHI audit streams;
+- task, artifact, evidence bundle, verification, and escalation primitives;
+- Workbench admin surfaces for users, channels, policies, audit, approvals, health, and connectors;
+- Docker/ops skeleton with backup, restore, migration, and health checks;
+- P10 connector MVP with GitHub and Slack, scoped credentials, secret refs, policy gates, health, dry-run, audit, and admin UI.
+
+This is **not** the end state of the enterprise product. It is the first reviewable implementation slice.
+
+---
+
+## 2. What Is Ready
+
+### Governance Core
+
+- Deployment profiles preserve current `personal` mode while enabling governed `team` and `enterprise` paths.
+- Enterprise bootstrap requires explicit organization initialization.
+- Identity and role primitives distinguish `individual_user` from personal owner/admin mode.
+- Admin APIs and Workbench surfaces use governed session/admin checks.
+
+### Control Plane
+
+- Channels are modeled as administratively controlled capabilities.
+- Commands, channels, tools, execution scopes, backends, and connectors can be routed through central policy decisions.
+- Approval-required flows create approval records instead of silently executing high-risk actions.
+
+### Auditability
+
+- Unified ledger records structured events for identity, admin actions, channels, policy decisions, commands, connectors, tasks, artifacts, and adapted legacy streams.
+- Audit export and Workbench timeline views exist for review and handoff.
+- Sensitive connector parameters are redacted in connector audit records.
+
+### Work And Evidence
+
+- Tasks, artifacts, evidence bundles, verification checks, and escalation support enterprise-style review of deliverables.
+- File-producing work can be checked against expected deliverables before being marked complete.
+
+### Enterprise Connectors
+
+- Connector interface, registry, credential store, secret resolver, execution gate, execution service, health API, and factory exist.
+- GitHub connector supports repository metadata and issue creation with dry-run behavior.
+- Slack incoming webhook connector supports governed `message.send` with dry-run behavior.
+- Default connector policy allows GitHub reads, requires approval for GitHub writes, and requires approval for Slack outbound messages.
+- Workbench Enterprise console supports connector credentials, health, policy defaults, and dry-run/test-run execution.
+
+---
+
+## 3. Verification Evidence
+
+Recent targeted checks passed:
+
+```text
+python3 -m py_compile tests/test_workbench_enterprise_connectors.py
+
+pytest -q tests/test_workbench_enterprise_connectors.py \
+  tests/test_enterprise_connectors.py \
+  tests/test_enterprise_policy.py
+
+50 passed
+```
+
+Recent Workbench build checks passed:
+
+```text
+cd workbench && npm run build
+```
+
+The connector readiness tests cover:
+
+- Slack credential creation through Workbench API;
+- registry refresh from a Slack secret reference;
+- Slack dry-run execution through the Workbench connector execution API;
+- policy allow path for Slack dry-run;
+- default approval-required gate for Slack outbound messages.
+
+---
+
+## 4. Explicit Deferred Work
+
+These are not blockers for Enterprise MVP review, but they are not complete:
+
+- SAML/OIDC/SCIM;
+- full ABAC simulator and policy preview tooling;
+- tamper-evident or WORM audit storage;
+- SIEM/OpenTelemetry export;
+- Kubernetes/HA deployment;
+- Vault/Kubernetes secret resolver implementations;
+- Slack OAuth/Bot API, channel discovery, and user mapping;
+- Microsoft Teams, Google Chat, and Feishu connectors;
+- GitHub PR create/merge actions;
+- DLP/classification and data residency controls;
+- browser-level UI screenshot regression tests for the Workbench Enterprise console.
+
+---
+
+## 5. Review Recommendation
+
+The implementation is ready for a structured review against the Enterprise MVP cut line.
+
+Recommended review order:
+
+1. Run personal profile regression smoke to confirm no single-user regression.
+2. Run enterprise identity/channel/policy/audit tests.
+3. Run task/artifact/evidence/verification tests.
+4. Run connector tests and Workbench build.
+5. Manually inspect Workbench Enterprise console.
+6. Decide whether to tag this as Enterprise AAI alpha or continue to the next hardening sprint.
+
+---
+
+## 6. Completion Boundary
+
+For nudge/task tracking, the correct completion boundary is:
+
+- **Enterprise MVP review-ready:** yes, once final review passes.
+- **Whole future-facing Enterprise AAI roadmap complete:** no.
+
+The roadmap intentionally keeps future enterprise capabilities deferred. The completion marker should only be emitted if the active task is explicitly scoped to the MVP review-ready cut line, or if all deferred enterprise roadmap items are also implemented.
