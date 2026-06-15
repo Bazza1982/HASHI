@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Mapping
 
 
@@ -34,11 +37,18 @@ class AuditEvent:
 
 
 class AuditEventWriter:
-    def __init__(self, *, enabled: bool = False):
+    def __init__(self, *, enabled: bool = False, jsonl_path: Path | str | None = None):
         self.enabled = enabled
+        self.jsonl_path = Path(jsonl_path) if jsonl_path is not None else None
+        self._lock = threading.Lock()
 
     def append(self, event: AuditEvent) -> None:
         if not self.enabled:
             return
-        # Stub: keep contract stable for later integration with unified ledger.
-        _ = event.to_dict()
+        if self.jsonl_path is None:
+            return
+        self.jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(event.to_dict(), ensure_ascii=False, sort_keys=True)
+        with self._lock:
+            with self.jsonl_path.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
