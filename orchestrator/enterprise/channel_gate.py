@@ -5,6 +5,7 @@ from pathlib import Path
 
 from orchestrator.enterprise.audit_schema import AuditEvent, AuditEventWriter
 from orchestrator.enterprise.channels import ChannelPermission, ChannelRegistry
+from orchestrator.enterprise.policy import evaluate_governance_policy
 
 
 @dataclass(frozen=True)
@@ -22,11 +23,13 @@ class EnterpriseChannelGate:
         org_id: str | None,
         registry: ChannelRegistry | None = None,
         audit_writer: AuditEventWriter | None = None,
+        global_config=None,
     ):
         self.governed = governed
         self.org_id = str(org_id or "").strip() or None
         self.registry = registry
         self.audit_writer = audit_writer or AuditEventWriter(enabled=False)
+        self.global_config = global_config
 
     @classmethod
     def from_global_config(cls, global_config, *, audit_writer: AuditEventWriter | None = None) -> "EnterpriseChannelGate":
@@ -37,7 +40,13 @@ class EnterpriseChannelGate:
         if governed:
             bridge_home = Path(getattr(global_config, "bridge_home", None) or ".")
             registry = ChannelRegistry.from_path(bridge_home / "state" / "enterprise.sqlite")
-        return cls(governed=governed, org_id=org_id, registry=registry, audit_writer=audit_writer)
+        return cls(
+            governed=governed,
+            org_id=org_id,
+            registry=registry,
+            audit_writer=audit_writer,
+            global_config=global_config,
+        )
 
     def check_ingress(self, channel_type: str, **context) -> ChannelGateResult:
         return self.check(channel_type=channel_type, direction=ChannelPermission.INGRESS, **context)
@@ -85,7 +94,62 @@ class EnterpriseChannelGate:
         result = ChannelGateResult(allowed=access.allowed, reason=access.reason, channel_id=access.channel_id)
         if not result.allowed:
             self._audit_denial(channel_type, direction, actor_id, result, audit_context)
+            return result
+        policy_result = self._check_policy(
+            channel_type=channel_type,
+            direction=direction,
+            channel_id=result.channel_id,
+            actor_id=actor_id,
+            user_id=user_id,
+            team_id=team_id,
+            project_id=project_id,
+            agent_id=agent_id,
+        )
+        if not policy_result.allowed:
+            result = policy_result
+            policy_context = {
+                "policy_reason": policy_result.reason,
+                **(audit_context or {}),
+            }
+            self._audit_denial(channel_type, direction, actor_id, result, policy_context)
         return result
+
+    def _check_policy(
+        self,
+        *,
+        channel_type: str,
+        direction: ChannelPermission | str,
+        channel_id: str | None,
+        actor_id: str | int | None,
+        user_id: str | None,
+        team_id: str | None,
+        project_id: str | None,
+        agent_id: str | None,
+    ) -> ChannelGateResult:
+        direction_value = direction.value if isinstance(direction, ChannelPermission) else str(direction)
+        try:
+            evaluation = evaluate_governance_policy(
+                "channel.access",
+                {
+                    "global_config": self.global_config,
+                    "org_id": self.org_id,
+                    "resource": f"channel:{channel_type}",
+                    "channel_type": str(channel_type),
+                    "direction": direction_value,
+                    "actor_id": actor_id,
+                    "user_id": user_id,
+                    "team_id": team_id,
+                    "project_id": project_id,
+                    "agent_id": agent_id,
+                },
+            )
+        except Exception:
+            return ChannelGateResult(allowed=False, reason="policy_error", channel_id=channel_id)
+        if evaluation.allowed:
+            return ChannelGateResult(allowed=True, reason="allowed", channel_id=channel_id)
+        if evaluation.decision.value == "approval_required":
+            return ChannelGateResult(allowed=False, reason="approval_required", channel_id=channel_id)
+        return ChannelGateResult(allowed=False, reason="policy_denied", channel_id=channel_id)
 
     def _audit_denial(
         self,
