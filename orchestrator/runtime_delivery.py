@@ -5,9 +5,17 @@ from datetime import datetime
 from typing import Any
 
 from telegram import constants
+from telegram.error import RetryAfter
 
 from orchestrator.runtime_common import _md_to_html
+from orchestrator import telegram_delivery_failover
 from orchestrator.telegram_notifications import disable_notification
+
+
+def _retry_after_seconds(exc: Exception) -> int | None:
+    if isinstance(exc, RetryAfter):
+        return int(getattr(exc, "retry_after", 0) or 0)
+    return None
 
 
 async def send_long_message(
@@ -17,6 +25,7 @@ async def send_long_message(
     text: str,
     request_id: str | None = None,
     purpose: str = "response",
+    delivery_mode: str = "final_delivery",
 ):
     """Send a message to Telegram with safe chunking."""
     if not runtime.telegram_connected:
@@ -29,6 +38,41 @@ async def send_long_message(
     send_started = datetime.now()
     tg_max_len = 4096
     chunk_count = 0
+
+    if await telegram_delivery_failover.handle_blocked_send(
+        runtime,
+        chat_id=chat_id,
+        request_id=request_id,
+        purpose=purpose,
+        text=text,
+    ):
+        runtime.telegram_logger.warning(
+            f"Telegram delivery blocked for {request_id or '<none>'} "
+            f"(purpose={purpose}, mode={delivery_mode})"
+        )
+        return 0.0, 0
+
+    async def _send_or_skip(**kwargs) -> bool:
+        try:
+            await runtime.app.bot.send_message(**kwargs)
+            return True
+        except Exception as exc:
+            retry_after = _retry_after_seconds(exc)
+            if retry_after is not None:
+                await telegram_delivery_failover.handle_retry_after(
+                    runtime,
+                    exc=exc,
+                    chat_id=chat_id,
+                    request_id=request_id,
+                    purpose=purpose,
+                    text=text,
+                )
+                runtime.telegram_logger.warning(
+                    f"Telegram flood control for request_id={request_id or '<none>'} "
+                    f"(purpose={purpose}); skipping send, retry_after_s={retry_after}"
+                )
+                return False
+            raise
 
     if purpose == "error":
         errors_path = str(getattr(runtime, "session_dir", runtime.workspace_dir) / "errors.log")
@@ -54,11 +98,13 @@ async def send_long_message(
         if len(msg) > tg_max_len:
             msg = msg[: tg_max_len - 20] + "\n... (truncated)"
 
-        await runtime.app.bot.send_message(
+        sent = await _send_or_skip(
             chat_id=chat_id,
             text=msg,
             disable_notification=disable_notification(runtime),
         )
+        if not sent:
+            return (datetime.now() - send_started).total_seconds(), 0
         runtime.telegram_logger.info(
             f"Sent Telegram message for request_id={request_id or '<none>'} "
             f"(purpose=error, chunks=1, text_len={len(msg)})"
@@ -69,46 +115,54 @@ async def send_long_message(
 
     async def _send_chunk(chunk_raw: str, chunk_html: str, chunk_index: int):
         try:
-            await runtime.app.bot.send_message(
+            sent = await _send_or_skip(
                 chat_id=chat_id,
                 text=chunk_html,
                 parse_mode=constants.ParseMode.HTML,
                 disable_notification=disable_notification(runtime),
             )
+            if not sent:
+                return False
         except Exception as e:
             runtime.telegram_logger.warning(
                 f"Send failed for request_id={request_id or '<none>'} "
                 f"(purpose={purpose}, chunk={chunk_index}, mode=html): {e}. Fallback to raw text."
             )
             if len(chunk_raw) <= tg_max_len:
-                await runtime.app.bot.send_message(
+                sent = await _send_or_skip(
                     chat_id=chat_id,
                     text=chunk_raw,
                     disable_notification=disable_notification(runtime),
                 )
+                if not sent:
+                    return False
             else:
                 remain = chunk_raw
                 while remain:
                     if len(remain) <= tg_max_len:
-                        await runtime.app.bot.send_message(
+                        sent = await _send_or_skip(
                             chat_id=chat_id,
                             text=remain,
                             disable_notification=disable_notification(runtime),
                         )
-                        break
+                        return sent
                     split_at = remain.rfind("\n", 0, tg_max_len)
                     if split_at == -1:
                         split_at = tg_max_len
-                    await runtime.app.bot.send_message(
+                    sent = await _send_or_skip(
                         chat_id=chat_id,
                         text=remain[:split_at],
                         disable_notification=disable_notification(runtime),
                     )
+                    if not sent:
+                        return False
                     remain = remain[split_at:].lstrip("\n")
+        return True
 
     if len(html) <= tg_max_len:
         chunk_count = 1
-        await _send_chunk(text, html, chunk_count)
+        if not await _send_chunk(text, html, chunk_count):
+            return (datetime.now() - send_started).total_seconds(), 0
         runtime.telegram_logger.info(
             f"Sent Telegram message for request_id={request_id or '<none>'} "
             f"(purpose={purpose}, chunks={chunk_count}, text_len={len(text)})"
@@ -135,7 +189,8 @@ async def send_long_message(
         html_remain = html_remain[split_at:].lstrip("\n")
 
     for chunk_count, (rc, hc) in enumerate(zip(raw_chunks, html_chunks), start=1):
-        await _send_chunk(rc, hc, chunk_count)
+        if not await _send_chunk(rc, hc, chunk_count):
+            return (datetime.now() - send_started).total_seconds(), chunk_count - 1
     runtime.telegram_logger.info(
         f"Sent Telegram message for request_id={request_id or '<none>'} "
         f"(purpose={purpose}, chunks={chunk_count}, text_len={len(text)})"

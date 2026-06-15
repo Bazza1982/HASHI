@@ -3,12 +3,15 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from orchestrator.audit_mode import load_audit_config, visible_audit_criteria
+from orchestrator import telegram_delivery_failover
 from orchestrator.wrapper_mode import load_wrapper_config, visible_wrapper_slots
 
 
 def compute_status_string(runtime) -> str:
     if not runtime.backend_ready:
         return "offline"
+    if telegram_delivery_failover.is_delivery_blocked(runtime):
+        return "delivery-blocked"
     if runtime.telegram_connected:
         return "online"
     return "local"
@@ -120,6 +123,8 @@ def build_status_text(runtime, detailed: bool = False) -> str:
         if runtime.last_error_summary
         else "✅ healthy"
     )
+    delivery = telegram_delivery_failover.delivery_status_summary(runtime)
+    preview_enabled, preview_source = telegram_delivery_failover.preview_status(runtime)
     tg_status = "✓" if runtime.telegram_connected else "✗"
     wa_status = "✓" if runtime._get_whatsapp_connected() else "✗"
     channel_line = f"Telegram {tg_status} • WhatsApp {wa_status} • Workbench ✓"
@@ -143,6 +148,12 @@ def build_status_text(runtime, detailed: bool = False) -> str:
     lines.extend(
         [
             f"📶 Channels: {channel_line}",
+            (
+                f"📨 Delivery: blocked until {delivery.get('blocked_until')} via "
+                f"{delivery.get('active_failover_agent') or 'failover'}"
+                if delivery
+                else "📨 Delivery: healthy"
+            ),
             f"📡 Runtime: {'busy' if runtime.is_generating else 'idle'} • queue {runtime.queue.qsize()} • process {runtime._process_info()}",
             f"🧾 Current: {current_line}",
             f"🧠 Memory: skills {', '.join(active_skills) if active_skills else 'none'} • recall {'ON' if recall_on else 'OFF'} • FYI {'armed' if runtime._pending_session_primer else 'clear'}",
@@ -174,6 +185,7 @@ def build_status_text(runtime, detailed: bool = False) -> str:
                 f"📘 Handoff Files: recent {'yes' if runtime.recent_context_path.exists() else 'no'} • handoff {'yes' if runtime.handoff_path.exists() else 'no'}",
                 f"🔍 Verbose: {'ON' if runtime._verbose else 'OFF'}",
                 f"💭 Think: {'ON' if runtime._think else 'OFF'}",
+                f"👁 Preview: {'ON' if preview_enabled else 'OFF'} ({preview_source})",
                 f"🕓 Last Switch: {runtime._format_age(runtime.last_backend_switch_at)}",
             ]
         )

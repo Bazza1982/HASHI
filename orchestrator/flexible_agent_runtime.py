@@ -17,7 +17,7 @@ import json
 import aiohttp
 import yaml
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, constants
-from telegram.error import TimedOut as TelegramTimedOut
+from telegram.error import RetryAfter, TimedOut as TelegramTimedOut
 from telegram.ext import ApplicationBuilder
 
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
@@ -38,6 +38,7 @@ from orchestrator import runtime_mode
 from orchestrator import runtime_nudge
 from orchestrator import runtime_pipeline
 from orchestrator import runtime_remote
+from orchestrator import telegram_delivery_failover
 from orchestrator.source_policy import source_requires_manual_remote_api_permission
 from remote.local_http import local_http_hosts
 from remote.runtime_identity import read_runtime_claim
@@ -681,10 +682,35 @@ class FlexibleAgentRuntime:
 
     async def _reply_text(self, update: Update, text: str, **kwargs):
         apply_disable_notification_default(self, kwargs)
+        request_id = kwargs.pop("_request_id", None)
+        purpose = kwargs.pop("_purpose", "reply")
+        delivery_mode = kwargs.pop("_delivery_mode", "normal_reply")
+        chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
+        if delivery_mode != "failover_notice":
+            if await telegram_delivery_failover.handle_blocked_send(
+                self,
+                chat_id=chat_id,
+                request_id=request_id,
+                purpose=purpose,
+                text=text,
+            ):
+                return None
         last_error = None
         for _ in range(2):
             try:
                 return await update.message.reply_text(text, **kwargs)
+            except RetryAfter as exc:
+                last_error = exc
+                await telegram_delivery_failover.handle_retry_after(
+                    self,
+                    exc=exc,
+                    chat_id=chat_id,
+                    request_id=request_id,
+                    purpose=purpose,
+                    text=text,
+                )
+                self.telegram_logger.warning(f"Reply failed: {exc}")
+                return None
             except Exception as e:
                 last_error = e
                 self.telegram_logger.warning(f"Reply failed: {e}")
@@ -693,10 +719,34 @@ class FlexibleAgentRuntime:
 
     async def _send_text(self, chat_id: int, text: str, **kwargs):
         apply_disable_notification_default(self, kwargs)
+        request_id = kwargs.pop("_request_id", None)
+        purpose = kwargs.pop("_purpose", "send")
+        delivery_mode = kwargs.pop("_delivery_mode", "normal_send")
+        if delivery_mode != "failover_notice":
+            if await telegram_delivery_failover.handle_blocked_send(
+                self,
+                chat_id=chat_id,
+                request_id=request_id,
+                purpose=purpose,
+                text=text,
+            ):
+                return None
         last_error = None
         for _ in range(2):
             try:
                 return await self.app.bot.send_message(chat_id=chat_id, text=text, **kwargs)
+            except RetryAfter as exc:
+                last_error = exc
+                await telegram_delivery_failover.handle_retry_after(
+                    self,
+                    exc=exc,
+                    chat_id=chat_id,
+                    request_id=request_id,
+                    purpose=purpose,
+                    text=text,
+                )
+                self.telegram_logger.warning(f"Send failed: {exc}")
+                return None
             except Exception as e:
                 last_error = e
                 self.telegram_logger.warning(f"Send failed: {e}")
@@ -856,6 +906,8 @@ class FlexibleAgentRuntime:
         return "\n".join(parts)
 
     def get_runtime_metadata(self) -> dict:
+        delivery = telegram_delivery_failover.delivery_status_summary(self)
+        preview_enabled, preview_source = telegram_delivery_failover.preview_status(self)
         return {
             "id": self.name,
             "name": self.name,
@@ -871,6 +923,11 @@ class FlexibleAgentRuntime:
             "status": self._compute_status_string(),
             "type": self.config.type,
             "telegram_connected": self.telegram_connected,
+            "telegram_delivery_blocked": bool(delivery),
+            "telegram_delivery_blocked_until": delivery.get("blocked_until") if delivery else None,
+            "telegram_delivery_failover_agent": delivery.get("active_failover_agent") if delivery else None,
+            "answer_stream_preview": preview_enabled,
+            "answer_stream_preview_source": preview_source,
             "channels": {
                 "telegram": self.telegram_connected,
                 "workbench": True,
@@ -3431,6 +3488,40 @@ class FlexibleAgentRuntime:
             f"Thinking display: {state}\n"
             f"{'Thinking traces will be sent as permanent italic messages every ~60s during generation.' if self._think else 'Thinking traces will not be displayed.'}",
             reply_markup=markup,
+        )
+
+    async def cmd_preview(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        args = [a.strip().lower() for a in (context.args or []) if a.strip()]
+        action = args[0] if args else "toggle"
+        current, source = telegram_delivery_failover.preview_status(self)
+        if action == "status":
+            recommended = "Recommended OFF for long-task Grok agents like kasumi." if current else "Preview already minimized for long-task Telegram runs."
+            await self._reply_text(
+                update,
+                f"Answer stream preview: {'ON 👁️' if current else 'OFF'}\n"
+                f"Source: {source}\n"
+                f"{recommended}",
+            )
+            return
+
+        if action in {"on", "true", "1"}:
+            new_value = True
+        elif action in {"off", "false", "0"}:
+            new_value = False
+        else:
+            new_value = not current
+        telegram_delivery_failover.set_preview_enabled(self, new_value)
+        state = "ON 👁️" if new_value else "OFF"
+        advice = (
+            "Preview edits may add Telegram noise during long tasks."
+            if new_value
+            else "Future long tasks will skip answer preview edits."
+        )
+        await self._reply_text(
+            update,
+            f"Answer stream preview: {state}\n{advice}",
         )
 
     async def cmd_jobs(self, update: Update, context: Any):
@@ -6988,6 +7079,15 @@ class FlexibleAgentRuntime:
                     f"(idle_s={idle_s}, events={events}, verbose={self._verbose})"
                 )
             except Exception as exc:
+                if isinstance(exc, RetryAfter):
+                    await telegram_delivery_failover.handle_retry_after(
+                        self,
+                        exc=exc,
+                        chat_id=chat_id,
+                        request_id=request_id,
+                        purpose="placeholder_status",
+                    )
+                    return
                 self.telegram_logger.warning(
                     f"Failed to escalate placeholder for {request_id} at {elapsed}s: {exc}"
                 )
@@ -7062,6 +7162,16 @@ class FlexibleAgentRuntime:
                 last_edit_at = time.time()
                 dirty = False
             except Exception as exc:
+                if isinstance(exc, RetryAfter):
+                    await telegram_delivery_failover.handle_retry_after(
+                        self,
+                        exc=exc,
+                        chat_id=chat_id,
+                        request_id=request_id,
+                        purpose="streaming_display",
+                    )
+                    dirty = False
+                    return
                 if "429" in str(exc) or "RetryAfter" in str(exc):
                     await asyncio.sleep(3)
                 elif "message to edit not found" in str(exc).lower() or "message is not modified" in str(exc).lower():
