@@ -25,9 +25,11 @@ HASHI v4 alpha is focused on two foundations:
   `personal`, `team`, and `enterprise` profiles: `personal` preserves the
   current one-owner model, while enterprise `individual_user` is a governed
   identity role rather than a top administrator. See
-  [HASHI_ENTERPRISE_AAI_VALUE_PROPOSITION.md](HASHI_ENTERPRISE_AAI_VALUE_PROPOSITION.md)
+  [HASHI_ENTERPRISE_AAI_VALUE_PROPOSITION.md](HASHI_ENTERPRISE_AAI_VALUE_PROPOSITION.md),
   [HASHI_ENTERPRISE_AAI_PRD.md](HASHI_ENTERPRISE_AAI_PRD.md), and
-  [HASHI_ENTERPRISE_PROFILE_ADR.md](HASHI_ENTERPRISE_PROFILE_ADR.md).
+  [HASHI_ENTERPRISE_PROFILE_ADR.md](HASHI_ENTERPRISE_PROFILE_ADR.md). The
+  ready-to-implement phase plan is tracked in
+  [HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md](HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md).
 
 Alpha limitations:
 

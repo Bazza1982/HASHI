@@ -6,6 +6,8 @@
 
 **Related concept doc:** [HASHI_ENTERPRISE_AAI_VALUE_PROPOSITION.md](HASHI_ENTERPRISE_AAI_VALUE_PROPOSITION.md)
 
+**Implementation roadmap:** [HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md](HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md)
+
 ---
 
 ## 1. Product Goal
@@ -729,6 +731,8 @@ Security metrics:
 ---
 
 ## 10. First Engineering Tickets
+
+The implementation sequence is maintained in [HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md](HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md). The first ready-to-implement tickets are `ENT-001` through `ENT-007`, which create the enterprise package skeleton, profile loader, governed-mode validation, audit/policy contracts, and personal regression checks.
 
 1. Create enterprise data model for organizations, users, projects, roles, and API tokens.
 2. Add local admin login and session management for Workbench.
