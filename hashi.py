@@ -373,6 +373,17 @@ def cmd_enterprise_backup_inspect(args) -> int:
     return 0
 
 
+def cmd_enterprise_migrate(args) -> int:
+    from orchestrator.enterprise import EnterpriseStore
+
+    db_path = Path(args.db).expanduser() if args.db else ROOT_DIR / "state" / "enterprise.sqlite"
+    result = EnterpriseStore(db_path).migrate()
+    print(_g(f"✓ Enterprise schema migrated: {result['db_path']}"))
+    print(f"  Before: {result['before'] if result['before'] is not None else '(none)'}")
+    print(f"  After : {result['after']}")
+    return 0
+
+
 # ──────────────────────────────────────────────
 # Entry point
 # ──────────────────────────────────────────────
@@ -414,6 +425,10 @@ def main():
     enterprise_inspect = enterprise_sub.add_parser("inspect-backup", help="Print an enterprise backup manifest")
     enterprise_inspect.add_argument("archive", help="Backup archive to inspect")
     enterprise_inspect.set_defaults(func=cmd_enterprise_backup_inspect)
+
+    enterprise_migrate = enterprise_sub.add_parser("migrate", help="Initialize or migrate the enterprise SQLite schema")
+    enterprise_migrate.add_argument("--db", help="Enterprise SQLite path. Defaults to state/enterprise.sqlite")
+    enterprise_migrate.set_defaults(func=cmd_enterprise_migrate)
 
     args = parser.parse_args()
 

@@ -55,3 +55,17 @@ def test_enterprise_backup_cli_fails_when_required_state_missing(tmp_path, monke
 
     with pytest.raises(FileNotFoundError, match="required backup item missing"):
         hashi.cmd_enterprise_backup(SimpleNamespace(output=str(tmp_path / "backup.tar.gz"), include_workspaces=False))
+
+
+def test_enterprise_migrate_cli_initializes_schema(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(hashi, "ROOT_DIR", tmp_path)
+    db_path = tmp_path / "state" / "enterprise.sqlite"
+
+    rc = hashi.cmd_enterprise_migrate(SimpleNamespace(db=str(db_path)))
+
+    assert rc == 0
+    assert db_path.exists()
+    output = capsys.readouterr().out
+    assert "Enterprise schema migrated" in output
+    assert "Before: (none)" in output
+    assert "After : 6" in output

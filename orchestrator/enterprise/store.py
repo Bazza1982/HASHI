@@ -240,3 +240,24 @@ class EnterpriseStore:
                 "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
                 ("schema_version", str(SCHEMA_VERSION)),
             )
+
+    def schema_version(self) -> int | None:
+        if not self.db_path.exists():
+            return None
+        with self.connect() as con:
+            try:
+                row = con.execute("SELECT value FROM schema_meta WHERE key = ?", ("schema_version",)).fetchone()
+            except sqlite3.OperationalError:
+                return None
+        return int(row["value"]) if row else None
+
+    def migrate(self) -> dict:
+        before = self.schema_version()
+        self.init_schema()
+        after = self.schema_version()
+        return {
+            "db_path": str(self.db_path),
+            "before": before,
+            "after": after,
+            "schema_version": SCHEMA_VERSION,
+        }
