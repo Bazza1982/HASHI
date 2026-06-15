@@ -706,11 +706,14 @@ Implemented checkpoints:
 
 - Workbench admin API exposes project-filterable agent capability summaries at `GET /api/enterprise/agent-capabilities`.
 - The endpoint is guarded by enterprise admin auth and returns normalized backend/tool/project/bridge capability data.
+- `/api/health` includes an enterprise block in governed profiles with identity, channel registry, audit ledger, and policy evaluator readiness.
+- Personal profile health keeps the legacy response shape without enterprise fields.
 
 Residual P8 limitations:
 
 - Frontend admin screens are not yet implemented.
 - Capability summaries are read-only; policy editing and approval UI remain pending.
+- Enterprise health is a readiness summary, not yet a full monitoring dashboard.
 
 **Minimum scope:**
 
@@ -737,6 +740,7 @@ Residual P8 limitations:
 - `ENT-104` Add policy viewer/editor.
 - `ENT-105` Add audit timeline and export screen.
 - `ENT-106` Add enterprise health screen.
+- `ENT-106A` Add enterprise service readiness to `/api/health`. Done for API-level identity/channel/audit/policy checks.
 - `ENT-107` Add admin API for agent capability inventory. Done for read-only project-filtered summaries.
 
 **Acceptance:**
