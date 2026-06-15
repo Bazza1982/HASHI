@@ -21,6 +21,7 @@ from orchestrator.enterprise.channel_gate import EnterpriseChannelGate
 from orchestrator.enterprise.channels import ChannelRegistry
 from orchestrator.enterprise.identity import EnterpriseRole, IdentityService
 from orchestrator.enterprise.policy import PolicyEvaluator
+from orchestrator.enterprise.routing import agent_project_ids
 from orchestrator.pathing import resolve_path_value
 from orchestrator.transfer_store import TransferStore
 
@@ -289,15 +290,7 @@ class WorkbenchApiServer:
         return {str(row.get("project_id") or "").strip() for row in memberships if row.get("project_id")}
 
     def _agent_project_ids(self, agent_row: dict) -> set[str]:
-        values = []
-        if agent_row.get("project_id"):
-            values.append(agent_row.get("project_id"))
-        project_ids = agent_row.get("project_ids") or []
-        if isinstance(project_ids, str):
-            values.append(project_ids)
-        else:
-            values.extend(project_ids)
-        return {str(value).strip() for value in values if str(value).strip()}
+        return agent_project_ids(agent_row)
 
     def _filter_enterprise_agent_rows_for_user(self, user, agent_rows: list[dict]) -> list[dict]:
         if self._enterprise_user_has_admin_role(user.id):

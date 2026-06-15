@@ -39,6 +39,7 @@ from orchestrator.enterprise.policy import (
     PolicyRule,
     evaluate_governance_policy,
 )
+from orchestrator.enterprise.routing import ProjectRouteDecision, agent_project_ids, evaluate_project_route
 from orchestrator.enterprise.store import EnterpriseStore
 from orchestrator.enterprise.evidence import EvidenceBundle, EvidenceBundleRegistry
 from orchestrator.enterprise.execution import ExecutionPathDecision, ExecutionScope
@@ -93,12 +94,15 @@ __all__ = [
     "PolicyEvaluation",
     "PolicyEvaluator",
     "PolicyRule",
+    "ProjectRouteDecision",
     "ApprovalRequest",
     "ArtifactVerificationResult",
     "TaskRegistry",
     "TaskStatus",
     "complete_task_with_artifact_verification",
+    "agent_project_ids",
     "evaluate_governance_policy",
+    "evaluate_project_route",
     "fail_task_if_promised_artifacts_missing",
     "verify_promised_artifacts",
 ]
