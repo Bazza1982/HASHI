@@ -57,6 +57,7 @@ from orchestrator.enterprise.policy import (
     PolicyRule,
     evaluate_governance_policy,
 )
+from orchestrator.enterprise.policy_templates import install_default_connector_policy
 from orchestrator.enterprise.routing import ProjectRouteDecision, agent_project_ids, evaluate_project_route
 from orchestrator.enterprise.secret_refs import ConnectorSecretResolver, ResolvedSecret
 from orchestrator.enterprise.store import EnterpriseStore
@@ -150,6 +151,7 @@ __all__ = [
     "evaluate_project_route",
     "evaluate_connector_action",
     "fail_task_if_promised_artifacts_missing",
+    "install_default_connector_policy",
     "record_failed_task_escalation",
     "record_connector_event",
     "transition_task_with_failure_escalation",
