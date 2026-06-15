@@ -845,12 +845,17 @@ Implemented checkpoints:
   - health probes normalize connector exceptions to `unhealthy` summaries;
   - health probes can write canonical connector ledger events;
   - Workbench exposes admin-gated `GET /api/enterprise/connectors/health`.
-- First GitHub connector added as a read-only connector:
+- First GitHub connector foundation added:
   - `health_check()` probes GitHub rate-limit metadata;
   - `repo.get` and `repo.read` fetch repository metadata;
   - `dry_run` returns the planned repository lookup without external calls;
   - unsupported write actions fail closed as `unsupported_action`;
   - network transport is injectable for deterministic tests.
+- GitHub `issue.create` action added:
+  - validates repository and title inputs;
+  - supports `dry_run` without external calls;
+  - sends issue title, body, and labels through GitHub's issues API when executed;
+  - returns issue id, number, URL, title, and state.
 - Gated connector execution service added:
   - every execution checks credential state and policy before invoking the connector;
   - policy deny and approval-required decisions return blocked `ConnectorResult` values without calling connector code;
@@ -915,7 +920,7 @@ Residual P10 limitations:
 - `ENT-121` Add scoped credential store abstraction. Done for secret references, scopes, active listing, and revoke.
 - `ENT-122` Add connector execution gate. Done for credential existence, org isolation, revoke fail-closed, type match, policy deny, and approval-required decisions.
 - `ENT-126` Add first enterprise channel connector.
-- `ENT-123` Add GitHub connector with audit. Started with read-only health and repository metadata actions; write actions remain pending.
+- `ENT-123` Add GitHub connector with audit. In progress with health, repository metadata, and issue creation actions; PR create/merge remain pending.
 - `ENT-124` Add connector health checks. Done for in-process registry, normalized health summaries, ledger health events, and Workbench admin health API.
 - `ENT-125` Add credential revoke tests. Done for gate-level fail-closed behavior.
 - `ENT-127` Add gated connector execution service. Done for credential gate, policy gate, connector invocation, fail-closed missing connector handling, and ledger events.

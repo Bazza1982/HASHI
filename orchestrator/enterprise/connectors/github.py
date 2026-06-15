@@ -44,6 +44,8 @@ class GitHubConnector:
         action_name = action.action.lower()
         if action_name in {"repo.get", "repo.read"}:
             return self._get_repository(action)
+        if action_name == "issue.create":
+            return self._create_issue(action)
         return ConnectorResult(
             ok=False,
             status="unsupported_action",
@@ -78,6 +80,43 @@ class GitHubConnector:
                 "private": data.get("private"),
                 "default_branch": data.get("default_branch"),
                 "html_url": data.get("html_url"),
+            },
+        )
+
+    def _create_issue(self, action: ConnectorAction) -> ConnectorResult:
+        repo_ref = _repo_ref_from_action(action)
+        parameters = dict(action.parameters or {})
+        title = str(parameters.get("title") or "").strip()
+        if repo_ref is None:
+            return ConnectorResult(
+                ok=False,
+                status="invalid_parameters",
+                message="issue.create requires owner/repo in resource or parameters",
+            )
+        if not title:
+            return ConnectorResult(ok=False, status="invalid_parameters", message="issue.create requires title")
+        owner, repo = repo_ref
+        body = str(parameters.get("body") or "")
+        labels = parameters.get("labels") if isinstance(parameters.get("labels"), list) else []
+        payload = {"title": title, "body": body, "labels": [str(label) for label in labels]}
+        if action.dry_run:
+            return ConnectorResult(
+                ok=True,
+                status="dry_run",
+                message="issue creation dry run",
+                data={"owner": owner, "repo": repo, "payload": payload},
+            )
+        data = self._request_json("POST", f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/issues", payload)
+        return ConnectorResult(
+            ok=True,
+            status="success",
+            message="issue created",
+            data={
+                "id": data.get("id"),
+                "number": data.get("number"),
+                "title": data.get("title"),
+                "html_url": data.get("html_url"),
+                "state": data.get("state"),
             },
         )
 
