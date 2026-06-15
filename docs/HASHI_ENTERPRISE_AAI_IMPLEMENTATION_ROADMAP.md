@@ -351,13 +351,14 @@ Implemented checkpoints:
   - `file_read` maps to `file.read`;
   - other tool calls map to `tool.execute`;
   - blocked tool calls return explicit tool-result errors instead of executing;
+- `approval_required` policy decisions now create pending `approval_requests` records with sanitized context;
 - targeted tests for default allow, explicit deny, approval-required, helper loading, personal profile behavior, and runtime command enforcement.
 
 Residual P3 limitations:
 
 - command deny currently maps to the existing `command_disabled` path until P4 ledger events distinguish `policy_denied`;
 - browser automation and CLI-backend internal shell/file actions are not yet hard-gated by the evaluator;
-- approval-required decisions block execution but do not yet create approval queue records.
+- approval queue API/UI, deduplication, and approve/deny execution resume are not yet implemented.
 
 **Scope:**
 
@@ -383,7 +384,7 @@ Residual P3 limitations:
 - `ENT-053` Wire slash command checks to evaluator. Done for runtime command allow checks.
 - `ENT-054` Wire backend switch checks to evaluator. Done for `_switch_backend_mode(...)`.
 - `ENT-055` Wire file read/write and shell checks to evaluator. Done for HASHI-controlled API tool registry execution.
-- `ENT-056` Add approval-required stub. Done at decision level; queue record pending.
+- `ENT-056` Add approval-required stub. Done with pending approval request records.
 - `ENT-057` Add policy deny audit events.
 
 **Acceptance:**
