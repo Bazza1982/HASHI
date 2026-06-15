@@ -140,3 +140,55 @@ async def test_tool_registry_auto_registers_file_write_artifact_with_enterprise_
     assert record["project_id"] == "prj-research"
     assert record["task_id"] == "task-1"
     assert record["artifact_id"] == artifact.id
+
+
+@pytest.mark.asyncio
+async def test_tool_registry_enterprise_path_gate_blocks_workspace_escape(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    db_path = tmp_path / "enterprise.sqlite"
+    identity = IdentityService.from_path(db_path)
+    identity.create_organization(org_id="ORG-001", name="Acme")
+    identity.create_project(
+        org_id="ORG-001",
+        name="Research",
+        workspace_root=str(workspace),
+        project_id="prj-research",
+    )
+    task = TaskRegistry.from_path(db_path).create_task(
+        org_id="ORG-001",
+        project_id="prj-research",
+        prompt_summary="Attempt unsafe write",
+        task_id="task-unsafe",
+    )
+    registry = ToolRegistry(
+        allowed_tools=["file_write"],
+        access_root=workspace,
+        workspace_dir=workspace,
+        secrets={},
+        audit_context={
+            "agent_name": "nana",
+            "workspace_dir": str(workspace),
+            "enterprise_db_path": str(db_path),
+            "org_id": "ORG-001",
+            "project_id": "prj-research",
+            "task_id": task.id,
+            "enterprise_workspace_root": str(workspace),
+        },
+    )
+
+    result = await registry.execute(
+        "file_write",
+        {"path": "../outside.txt", "content": "leak"},
+        tool_call_id="call-escape",
+    )
+
+    assert result.is_error is True
+    assert "enterprise execution denied: workspace_escape" in result.output
+    assert not (tmp_path / "outside.txt").exists()
+    assert ArtifactRegistry.from_path(db_path).list_artifacts(org_id="ORG-001", task_id=task.id) == []
+
+    record = json.loads((workspace / "tool_action_audit.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["status"] == "failed"
+    assert record["tool_name"] == "file_write"
+    assert "workspace_escape" in record["output_snippet"]

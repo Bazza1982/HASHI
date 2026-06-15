@@ -143,6 +143,11 @@ class ToolRegistry:
             self._record_tool_audit(tool_name, arguments, result, started)
             return result
 
+        enterprise_denial = self._check_enterprise_path_gate(tool_name, arguments, tool_call_id=tool_call_id)
+        if enterprise_denial is not None:
+            self._record_tool_audit(tool_name, arguments, enterprise_denial, started)
+            return enterprise_denial
+
         try:
             output = await self._dispatch(tool_name, arguments)
         except Exception as e:
@@ -156,6 +161,54 @@ class ToolRegistry:
         result = ToolResult(tool_call_id=tool_call_id, output=output, is_error=is_error)
         self._record_tool_audit(tool_name, arguments, result, started)
         return result
+
+    def _check_enterprise_path_gate(
+        self,
+        tool_name: str,
+        arguments: dict,
+        *,
+        tool_call_id: str,
+    ) -> ToolResult | None:
+        if tool_name not in {"file_read", "file_write", "file_list", "apply_patch"}:
+            return None
+        context = self.audit_context or {}
+        org_id = str(context.get("org_id") or "").strip()
+        project_id = str(context.get("project_id") or "").strip()
+        if not org_id or not project_id:
+            return None
+        raw_path = str((arguments or {}).get("path") or "").strip()
+        if not raw_path:
+            return None
+        root = (
+            context.get("enterprise_workspace_root")
+            or context.get("project_workspace_root")
+            or self.access_root
+        )
+        try:
+            from orchestrator.enterprise.execution import ExecutionScope
+
+            scope = ExecutionScope(
+                org_id=org_id,
+                project_id=project_id,
+                workspace_root=Path(root).expanduser().resolve(),
+            )
+            decision = scope.check_path(raw_path)
+        except Exception as exc:
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                output=f"Error: enterprise execution scope check failed: {exc}",
+                is_error=True,
+            )
+        if decision.allowed:
+            return None
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            output=(
+                f"Error: enterprise execution denied: {decision.reason}; "
+                f"path={raw_path!r}; root={decision.root}"
+            ),
+            is_error=True,
+        )
 
     def _record_tool_audit(
         self,
