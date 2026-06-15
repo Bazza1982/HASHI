@@ -27,6 +27,7 @@ import ssl
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
 
@@ -250,6 +251,55 @@ def _get_workbench_port(cfg: dict) -> int:
 
 def _get_instance_id(cfg: dict) -> str:
     return cfg.get("global", {}).get("instance_id") or _infer_instance_id_from_root()
+
+
+def _hchat_channel_egress_allowed(
+    cfg: dict,
+    *,
+    from_agent: str,
+    to_agent: str,
+    target_instance: str | None,
+    source_instance: str,
+) -> bool:
+    global_cfg = cfg.get("global", {}) if isinstance(cfg, dict) else {}
+    profile = str(global_cfg.get("deployment_profile") or "personal").strip().lower()
+    if profile == "personal":
+        return True
+    try:
+        from orchestrator.enterprise.audit_schema import AuditEventWriter
+        from orchestrator.enterprise.channel_gate import EnterpriseChannelGate
+    except Exception as exc:
+        print(f"❌ HChat enterprise channel gate unavailable: {exc}", file=sys.stderr)
+        return False
+
+    bridge_home = Path(str(global_cfg.get("bridge_home") or ROOT))
+    gate = EnterpriseChannelGate.from_global_config(
+        SimpleNamespace(
+            deployment_profile=profile,
+            organization_id=global_cfg.get("organization_id"),
+            bridge_home=bridge_home,
+        ),
+        audit_writer=AuditEventWriter(
+            enabled=True,
+            jsonl_path=bridge_home / "state" / "enterprise_audit.jsonl",
+        ),
+    )
+    result = gate.check_egress(
+        "hchat",
+        actor_id=from_agent,
+        agent_id=from_agent,
+        audit_context={
+            "from_agent": from_agent,
+            "to_agent": to_agent,
+            "target_instance": target_instance,
+            "source_instance": source_instance,
+            "send_hchat": True,
+        },
+    )
+    if result.allowed:
+        return True
+    print(f"❌ HChat egress denied by enterprise channel policy: {result.reason}", file=sys.stderr)
+    return False
 
 
 def _is_local_agent(cfg: dict, agent_name: str) -> bool:
@@ -990,6 +1040,15 @@ def send_hchat(
         succeeded = sum(results)
         print(f"📢 Group @{group_name}: {succeeded}/{len(members)} delivered.")
         return succeeded > 0
+
+    if not _hchat_channel_egress_allowed(
+        cfg,
+        from_agent=from_agent,
+        to_agent=to_agent,
+        target_instance=target_instance,
+        source_instance=source_instance,
+    ):
+        return False
 
     if not target_instance:
         if _is_local_agent(cfg, to_agent):
