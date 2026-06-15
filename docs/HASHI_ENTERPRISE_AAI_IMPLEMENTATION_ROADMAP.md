@@ -429,6 +429,10 @@ Implemented checkpoints:
   - imports legacy Hashi Remote `audit.jsonl` records as `remote` ledger events;
   - preserves HChat relay, terminal execution, pairing, and peer discovery metadata;
   - converts epoch timestamps to ISO8601 and uses deterministic event IDs for safe migration/backfill reruns;
+- browser action audit JSONL adapter:
+  - imports legacy `browser_action_audit.jsonl` records as `tool` ledger events;
+  - preserves action, request id, browser session id, actor hints, arguments, response metadata, and elapsed time;
+  - converts epoch timestamps to ISO8601 and uses deterministic event IDs for safe migration/backfill reruns;
 - tests for append/query/export, compatibility with existing `AuditEvent`, and slash audit ingestion.
 
 Residual P4 limitations:
@@ -436,9 +440,10 @@ Residual P4 limitations:
 - slash command JSONL can now be ingested into the ledger, but live slash command dual-write is still pending;
 - token audit JSONL can now be ingested into the ledger, but live token audit dual-write is still pending;
 - Remote audit JSONL can now be ingested into the ledger, but live Remote/HChat dual-write is still pending;
-- tool JSONL writers are not yet dual-writing to the ledger;
+- browser action JSONL can now be ingested into the ledger, but live browser/tool dual-write is still pending;
+- generic shell/file tool execution still needs a first-class action JSONL writer or direct ledger hook;
 - auditor read-only role semantics are not yet separated from broader admin access;
-- tool adapters are still pending;
+- generic shell/file tool adapters are still pending until their canonical live event source is added;
 - retention and SIEM mapping remain future P4 work.
 
 **Scope:**
@@ -468,7 +473,7 @@ Residual P4 limitations:
 - `ENT-063` Add slash audit adapter. Done for legacy JSONL ingest with idempotent event IDs; live dual-write pending.
 - `ENT-064` Add token/model invocation adapter. Done for legacy JSONL ingest with idempotent event IDs; live dual-write pending.
 - `ENT-065` Add HChat/Remote adapter. Done for legacy Remote audit JSONL ingest with idempotent event IDs; live dual-write pending.
-- `ENT-066` Add tool/file event adapters. Policy/channel governance events dual-write; tool/file adapters pending.
+- `ENT-066` Add tool/file event adapters. Browser action legacy JSONL ingest done; generic shell/file live event source and adapter pending.
 - `ENT-067` Add audit schema contract tests.
 
 **Acceptance:**

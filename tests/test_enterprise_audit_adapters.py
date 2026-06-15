@@ -4,6 +4,7 @@ import json
 
 from orchestrator.enterprise import EnterpriseAuditLedger, IdentityService
 from orchestrator.enterprise.audit_adapters import (
+    ingest_browser_action_audit_jsonl,
     ingest_remote_audit_jsonl,
     ingest_slash_command_audit_jsonl,
     ingest_token_audit_jsonl,
@@ -251,3 +252,64 @@ def test_remote_audit_ingest_is_idempotent_and_skips_bad_lines(tmp_path):
     assert event.action == "remote.pairing_request"
     assert event.status == "pending"
     assert event.actor_id == "HASHI2"
+
+
+def test_ingests_browser_action_audit_jsonl_into_ledger(tmp_path):
+    ledger = _init_ledger(tmp_path)
+    audit_path = tmp_path / "browser_action_audit.jsonl"
+    record = {
+        "ts": 1781256728.0,
+        "kind": "browser_action",
+        "action": "evaluate",
+        "request_id": "req-browser",
+        "session_id": "browser-session",
+        "args": {
+            "url": "https://example.com",
+            "agent_name": "sakura",
+            "_audit": {"agent_name": "sakura", "call_id": "call-1"},
+        },
+        "response": {"ok": True, "output": "done"},
+        "elapsed_ms": 15,
+    }
+    audit_path.write_text(json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    result = ingest_browser_action_audit_jsonl(ledger, audit_path)
+
+    assert result.ingested == 1
+    event = ledger.query(event_type="tool")[0]
+    assert event.action == "browser.evaluate"
+    assert event.status == "success"
+    assert event.actor_id == "sakura"
+    assert event.request_id == "req-browser"
+    assert event.correlation_id == "browser-session"
+    assert event.ts == "2026-06-12T09:32:08+00:00"
+    assert event.context["legacy_source"] == "browser_action_audit"
+    assert event.context["response"]["ok"] is True
+
+
+def test_browser_action_audit_ingest_is_idempotent_and_skips_bad_lines(tmp_path):
+    ledger = _init_ledger(tmp_path)
+    audit_path = tmp_path / "browser_action_audit.jsonl"
+    record = {
+        "ts": "2026-06-14T15:00:00+00:00",
+        "kind": "browser_action",
+        "action": "active_tab",
+        "request_id": "req-tab",
+        "args": {},
+        "response": {"ok": False, "error": "bridge down"},
+    }
+    audit_path.write_text(
+        json.dumps({"not": "browser"}) + "\n" + json.dumps(record, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    first = ingest_browser_action_audit_jsonl(ledger, audit_path)
+    second = ingest_browser_action_audit_jsonl(ledger, audit_path)
+
+    assert first.ingested == 2
+    assert second.ingested == 0
+    assert second.duplicate == 2
+    events = ledger.query(event_type="tool")
+    by_action = {event.action: event for event in events}
+    assert set(by_action) == {"browser.unknown", "browser.active_tab"}
+    assert by_action["browser.active_tab"].status == "failed"
