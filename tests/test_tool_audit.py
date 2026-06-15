@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from orchestrator.enterprise import ArtifactRegistry, IdentityService, TaskRegistry
 from tools.registry import ToolRegistry
 from tools.tool_audit import build_tool_audit_record
 
@@ -24,6 +25,9 @@ def test_build_tool_audit_record_redacts_and_truncates_sensitive_values():
     )
 
     assert record["agent"] == "zelda"
+    assert record["org_id"] is None
+    assert record["project_id"] is None
+    assert record["task_id"] is None
     assert record["args_redacted"]["command"] == "echo token=[redacted]"
     assert record["args_redacted"]["content"].endswith("...[truncated]")
     assert record["status"] == "success"
@@ -80,3 +84,59 @@ async def test_tool_registry_writes_denied_audit_record(tmp_path):
     assert record["tool_call_id"] == "call-deny"
     assert record["status"] == "failed"
     assert "not in your allowed tools" in record["output_snippet"]
+
+
+@pytest.mark.asyncio
+async def test_tool_registry_auto_registers_file_write_artifact_with_enterprise_context(tmp_path):
+    db_path = tmp_path / "enterprise.sqlite"
+    identity = IdentityService.from_path(db_path)
+    identity.create_organization(org_id="ORG-001", name="Acme")
+    identity.create_project(
+        org_id="ORG-001",
+        name="Research",
+        workspace_root=str(tmp_path),
+        project_id="prj-research",
+    )
+    task = TaskRegistry.from_path(db_path).create_task(
+        org_id="ORG-001",
+        project_id="prj-research",
+        prompt_summary="Write an artifact",
+        task_id="task-1",
+    )
+    registry = ToolRegistry(
+        allowed_tools=["file_write"],
+        access_root=tmp_path,
+        workspace_dir=tmp_path,
+        secrets={},
+        audit_context={
+            "agent_name": "nana",
+            "workspace_dir": str(tmp_path),
+            "safety_mode": "read_write",
+            "enterprise_db_path": str(db_path),
+            "org_id": "ORG-001",
+            "project_id": "prj-research",
+            "task_id": task.id,
+        },
+    )
+
+    result = await registry.execute(
+        "file_write",
+        {"path": "deliverables/report.md", "content": "hello enterprise"},
+        tool_call_id="call-artifact",
+    )
+
+    assert result.is_error is False
+    artifacts = ArtifactRegistry.from_path(db_path).list_artifacts(org_id="ORG-001", task_id=task.id)
+    assert len(artifacts) == 1
+    artifact = artifacts[0]
+    assert artifact.type == "file"
+    assert artifact.path.endswith("deliverables/report.md")
+    assert artifact.hash.startswith("sha256:")
+    assert artifact.metadata["source"] == "tool_registry.file_write"
+    assert artifact.metadata["tool_call_id"] == "call-artifact"
+
+    record = json.loads((tmp_path / "tool_action_audit.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["org_id"] == "ORG-001"
+    assert record["project_id"] == "prj-research"
+    assert record["task_id"] == "task-1"
+    assert record["artifact_id"] == artifact.id

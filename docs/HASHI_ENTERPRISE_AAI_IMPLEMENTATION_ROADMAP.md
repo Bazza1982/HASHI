@@ -507,13 +507,17 @@ Implemented checkpoints:
 - artifact schema and `ArtifactRegistry` service:
   - task-linked artifact records;
   - artifact type, path, metadata, and optional file hash;
+- governed file-write artifact registration:
+  - `ToolRegistry.execute()` auto-registers successful `file_write` artifacts when enterprise task context is present;
+  - personal/non-enterprise tool calls remain unchanged;
+  - `tool_action_audit.jsonl` includes org, project, task, and artifact identifiers when available;
 - evidence bundle schema and `EvidenceBundleRegistry` service:
   - bundles link a task to audit event ids and artifact ids;
   - helper builds a bundle from current ledger task events and registered artifacts.
 
 Residual P5 limitations:
 
-- governed file writes do not yet auto-register artifacts;
+- artifact auto-registration currently covers HASHI-controlled `file_write`; CLI backend internal writes still need event mapping or completion verification;
 - Superloop closeout does not yet attach evidence bundle ids;
 - task APIs and Workbench UI are deferred to P7/P8;
 - missing promised artifact verification remains P6 work.
@@ -539,7 +543,7 @@ Residual P5 limitations:
 
 - `ENT-070` Add task schema and state machine. Done for service-layer foundation.
 - `ENT-071` Add artifact registry. Done for service-layer foundation.
-- `ENT-072` Register artifacts from governed file writes.
+- `ENT-072` Register artifacts from governed file writes. Done for `ToolRegistry` `file_write` with explicit enterprise task context.
 - `ENT-073` Build evidence bundle from audit range and artifacts. Done for task-scoped ledger events and registered artifacts.
 - `ENT-074` Link Superloop closeout to evidence bundles.
 

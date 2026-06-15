@@ -167,6 +167,10 @@ class ToolRegistry:
         try:
             from tools.tool_audit import record_tool_action
 
+            audit_context = dict(self.audit_context or {})
+            artifact_id = self._register_file_write_artifact(tool_name, arguments, result)
+            if artifact_id:
+                audit_context["artifact_id"] = artifact_id
             record_tool_action(
                 workspace_dir=self.workspace_dir,
                 tool_name=tool_name,
@@ -175,10 +179,52 @@ class ToolRegistry:
                 output=result.output,
                 is_error=result.is_error,
                 duration_ms=int((time.monotonic() - started) * 1000),
-                audit_context=self.audit_context,
+                audit_context=audit_context,
             )
         except Exception:
             pass
+
+    def _register_file_write_artifact(
+        self,
+        tool_name: str,
+        arguments: dict,
+        result: ToolResult,
+    ) -> str | None:
+        if tool_name != "file_write" or result.is_error:
+            return None
+        context = self.audit_context or {}
+        db_path = context.get("enterprise_db_path")
+        org_id = context.get("org_id")
+        project_id = context.get("project_id")
+        task_id = context.get("task_id")
+        raw_path = str((arguments or {}).get("path") or "").strip()
+        if not all([db_path, org_id, project_id, task_id, raw_path]):
+            return None
+        try:
+            path = Path(raw_path)
+            if not path.is_absolute():
+                path = (self.workspace_dir / path).resolve()
+            else:
+                path = path.resolve()
+            path.relative_to(self.access_root.resolve())
+
+            from orchestrator.enterprise.artifacts import ArtifactRegistry
+
+            artifact = ArtifactRegistry.from_path(db_path).register_artifact(
+                org_id=str(org_id),
+                project_id=str(project_id),
+                task_id=str(task_id),
+                artifact_type=str(context.get("artifact_type") or "file"),
+                path=path,
+                metadata={
+                    "source": "tool_registry.file_write",
+                    "tool_call_id": result.tool_call_id,
+                    "agent": context.get("agent_name"),
+                },
+            )
+            return artifact.id
+        except Exception:
+            return None
 
     async def _dispatch(self, tool_name: str, arguments: dict) -> str:
         from tools.builtins import (
