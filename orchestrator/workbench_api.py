@@ -20,7 +20,8 @@ from orchestrator.enterprise.audit_schema import AuditEvent, AuditEventWriter
 from orchestrator.enterprise.capabilities import AgentCapabilityRegistry
 from orchestrator.enterprise.channel_gate import EnterpriseChannelGate
 from orchestrator.enterprise.channels import ChannelRegistry
-from orchestrator.enterprise.connectors import ConnectorRegistry
+from orchestrator.enterprise.connectors import ConnectorAction, ConnectorExecutionService, ConnectorRegistry
+from orchestrator.enterprise.credentials import ConnectorCredentialStore
 from orchestrator.enterprise.identity import EnterpriseRole, IdentityService
 from orchestrator.enterprise.policy import PolicyEvaluator
 from orchestrator.enterprise.routing import agent_project_ids
@@ -97,6 +98,7 @@ class WorkbenchApiServer:
         self.channel_registry = self._build_channel_registry()
         self.audit_writer = self._build_audit_writer()
         self.audit_ledger = self._build_audit_ledger()
+        self.connector_credentials = self._build_connector_credentials()
         self.connector_registry = ConnectorRegistry(connectors)
         self.bridge_router = ConversationRouter(
             config_path=self.config_path,
@@ -125,6 +127,7 @@ class WorkbenchApiServer:
         self.app.router.add_post("/api/enterprise/approvals/{request_id}/deny", self.handle_enterprise_approval_deny)
         self.app.router.add_get("/api/enterprise/agent-capabilities", self.handle_enterprise_agent_capabilities)
         self.app.router.add_get("/api/enterprise/connectors/health", self.handle_enterprise_connector_health)
+        self.app.router.add_post("/api/enterprise/connectors/execute", self.handle_enterprise_connector_execute)
         self.app.router.add_get("/api/agents", self.handle_agents)
         self.app.router.add_get("/api/transcript/{name}", self.handle_transcript_recent)
         self.app.router.add_get("/api/transcript/{name}/poll", self.handle_transcript_poll)
@@ -220,6 +223,12 @@ class WorkbenchApiServer:
             return None
         bridge_home = Path(getattr(self.global_config, "bridge_home", None) or self.config_path.parent)
         return EnterpriseAuditLedger.from_path(bridge_home / "state" / "enterprise.sqlite", org_id=org_id)
+
+    def _build_connector_credentials(self) -> ConnectorCredentialStore | None:
+        if str(getattr(self.global_config, "deployment_profile", "personal") or "personal") == "personal":
+            return None
+        bridge_home = Path(getattr(self.global_config, "bridge_home", None) or self.config_path.parent)
+        return ConnectorCredentialStore.from_path(bridge_home / "state" / "enterprise.sqlite")
 
     def _enterprise_policy_evaluator(self) -> PolicyEvaluator | None:
         if not self._is_governed_profile():
@@ -1098,6 +1107,62 @@ class WorkbenchApiServer:
                 "healthy": all(item["ok"] for item in health),
                 "connectors": health,
                 "count": len(health),
+            }
+        )
+
+    async def handle_enterprise_connector_execute(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        evaluator = self._enterprise_policy_evaluator()
+        if evaluator is None or self.connector_credentials is None:
+            return web.json_response({"ok": False, "error": "connector execution unavailable"}, status=503)
+        actor = self._enterprise_user_from_request(request)
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
+        credential_id = str(payload.get("credential_id") or "").strip()
+        if not credential_id:
+            return web.json_response({"ok": False, "error": "credential_id is required"}, status=400)
+        parameters = payload.get("parameters") if isinstance(payload.get("parameters"), dict) else {}
+        action = ConnectorAction(
+            connector_type=str(payload.get("connector_type") or "").strip(),
+            action=str(payload.get("action") or "").strip(),
+            resource=str(payload.get("resource") or "*").strip() or "*",
+            actor_id=actor.id if actor else None,
+            project_id=str(payload.get("project_id") or "").strip() or None,
+            task_id=str(payload.get("task_id") or "").strip() or None,
+            request_id=str(payload.get("request_id") or "").strip() or None,
+            correlation_id=str(payload.get("correlation_id") or "").strip() or None,
+            dry_run=bool(payload.get("dry_run")),
+            parameters=parameters,
+        )
+        if not action.connector_type or not action.action:
+            return web.json_response({"ok": False, "error": "connector_type and action are required"}, status=400)
+        service = ConnectorExecutionService(
+            registry=self.connector_registry,
+            credential_store=self.connector_credentials,
+            policy_evaluator=evaluator,
+            ledger=self.audit_ledger,
+        )
+        execution = service.execute(action, credential_id=credential_id)
+        return web.json_response(
+            {
+                "ok": execution.result.ok,
+                "result": {
+                    "ok": execution.result.ok,
+                    "status": execution.result.status,
+                    "message": execution.result.message,
+                    "data": dict(execution.result.data or {}),
+                },
+                "gate": {
+                    "allowed": execution.gate.allowed,
+                    "reason": execution.gate.reason,
+                    "credential_id": execution.gate.credential_id,
+                    "policy_rule_id": execution.gate.policy_rule_id,
+                    "approval_request_id": execution.gate.approval_request_id,
+                },
             }
         )
 
