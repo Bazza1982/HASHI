@@ -208,6 +208,9 @@ async def test_handle_message_captures_followup_before_enqueue(monkeypatch):
     runtime.logger = Mock()
     runtime.name = "akane"
     runtime._active_chat_ids = {}
+    runtime._channel_gate = SimpleNamespace(
+        check_ingress=lambda *args, **kwargs: SimpleNamespace(allowed=True, reason="personal_profile")
+    )
 
     monkeypatch.setattr(flex_module, "_print_user_message", lambda *args, **kwargs: None)
 
