@@ -96,6 +96,43 @@ def test_evaluate_governance_policy_uses_enterprise_db(tmp_path):
     assert result.decision == PolicyDecision.DENY
 
 
+def test_evaluate_governance_policy_creates_approval_request(tmp_path):
+    _init_org(tmp_path)
+    evaluator = PolicyEvaluator.from_path(tmp_path / "state" / "enterprise.sqlite", org_id="ORG-001")
+    rule = evaluator.add_rule(
+        action="file.write",
+        resource="file:/tmp/report.md",
+        effect="approval_required",
+    )
+
+    result = evaluate_governance_policy(
+        "file.write",
+        {
+            "global_config": _global_config(tmp_path),
+            "resource": "file:/tmp/report.md",
+            "actor_id": "usr-1",
+            "project_id": "prj-finance",
+            "tool_arguments": {"path": "/tmp/report.md", "content": "secret"},
+        },
+    )
+
+    assert result.allowed is False
+    assert result.decision == PolicyDecision.APPROVAL_REQUIRED
+    assert result.rule_id == rule.id
+    assert result.approval_request_id
+    requests = evaluator.list_approval_requests(status="pending")
+    assert len(requests) == 1
+    request = requests[0]
+    assert request.id == result.approval_request_id
+    assert request.actor_id == "usr-1"
+    assert request.action == "file.write"
+    assert request.resource == "file:/tmp/report.md"
+    assert request.status == "pending"
+    assert request.rule_id == rule.id
+    assert request.context["project_id"] == "prj-finance"
+    assert "global_config" not in request.context
+
+
 def test_personal_profile_policy_stays_allow_by_default(tmp_path):
     result = evaluate_governance_policy(
         "command.execute",

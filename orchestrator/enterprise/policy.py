@@ -33,6 +33,7 @@ class PolicyEvaluation:
     decision: PolicyDecision
     reason: str | None = None
     rule_id: str | None = None
+    approval_request_id: str | None = None
 
     @property
     def allowed(self) -> bool:
@@ -51,6 +52,23 @@ class PolicyRule:
     conditions: dict
     priority: int
     created_at: str
+
+
+@dataclass(frozen=True)
+class ApprovalRequest:
+    id: str
+    org_id: str
+    actor_id: str | None
+    action: str
+    resource: str
+    status: str
+    rule_id: str | None
+    reason: str | None
+    context: dict
+    created_at: str
+    decided_by: str | None = None
+    decided_at: str | None = None
+    decision_reason: str | None = None
 
 
 class PolicyEvaluator:
@@ -166,6 +184,80 @@ class PolicyEvaluator:
             reason="default allow (no matching enterprise policy rule)",
         )
 
+    def create_approval_request(
+        self,
+        *,
+        action: str,
+        resource: str,
+        context: dict | None = None,
+        rule_id: str | None = None,
+        reason: str | None = None,
+        request_id: str | None = None,
+    ) -> ApprovalRequest:
+        action = _require_text(action, "action").lower()
+        resource = _require_text(resource, "resource").lower()
+        context = context or {}
+        request_id = _require_id(request_id or f"appr-{uuid4().hex}", "request_id")
+        actor_id = context.get("actor_id") or context.get("user_id")
+        now = _utc_now_iso()
+        with self.store.connect() as con:
+            con.execute(
+                """
+                INSERT INTO approval_requests(
+                    id, org_id, actor_id, action, resource, status, rule_id,
+                    reason, context_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    request_id,
+                    self.org_id,
+                    str(actor_id) if actor_id is not None else None,
+                    action,
+                    resource,
+                    "pending",
+                    rule_id,
+                    reason,
+                    json.dumps(_json_safe_context(context), ensure_ascii=False, sort_keys=True),
+                    now,
+                ),
+            )
+        return self.get_approval_request(request_id)
+
+    def get_approval_request(self, request_id: str) -> ApprovalRequest:
+        with self.store.connect() as con:
+            row = con.execute(
+                "SELECT * FROM approval_requests WHERE org_id = ? AND id = ?",
+                (self.org_id, _require_id(request_id, "request_id")),
+            ).fetchone()
+        if row is None:
+            raise ValueError(f"approval request not found: {request_id!r}")
+        return _approval_from_row(row)
+
+    def list_approval_requests(self, *, status: str | None = None) -> list[ApprovalRequest]:
+        with self.store.connect() as con:
+            if status is None:
+                rows = con.execute(
+                    """
+                    SELECT *
+                    FROM approval_requests
+                    WHERE org_id = ?
+                    ORDER BY created_at ASC, id ASC
+                    """,
+                    (self.org_id,),
+                ).fetchall()
+            else:
+                rows = con.execute(
+                    """
+                    SELECT *
+                    FROM approval_requests
+                    WHERE org_id = ? AND status = ?
+                    ORDER BY created_at ASC, id ASC
+                    """,
+                    (self.org_id, status),
+                ).fetchall()
+        return [_approval_from_row(row) for row in rows]
+
 
 def evaluate_governance_policy(action: str, context: dict | None = None) -> PolicyEvaluation:
     context = context or {}
@@ -188,11 +280,26 @@ def evaluate_governance_policy(action: str, context: dict | None = None) -> Poli
         db_path = bridge_home / "state" / "enterprise.sqlite"
 
     evaluator = PolicyEvaluator.from_path(db_path, org_id=str(org_id))
-    return evaluator.evaluate(
+    evaluation = evaluator.evaluate(
         action,
         resource=str(context.get("resource") or "*"),
         context=context,
     )
+    if evaluation.decision == PolicyDecision.APPROVAL_REQUIRED:
+        approval = evaluator.create_approval_request(
+            action=action,
+            resource=str(context.get("resource") or "*"),
+            context=context,
+            rule_id=evaluation.rule_id,
+            reason=evaluation.reason,
+        )
+        return PolicyEvaluation(
+            decision=evaluation.decision,
+            reason=evaluation.reason,
+            rule_id=evaluation.rule_id,
+            approval_request_id=approval.id,
+        )
+    return evaluation
 
 
 def _rule_from_row(row) -> PolicyRule:
@@ -208,6 +315,38 @@ def _rule_from_row(row) -> PolicyRule:
         priority=int(row["priority"]),
         created_at=row["created_at"],
     )
+
+
+def _approval_from_row(row) -> ApprovalRequest:
+    return ApprovalRequest(
+        id=row["id"],
+        org_id=row["org_id"],
+        actor_id=row["actor_id"],
+        action=row["action"],
+        resource=row["resource"],
+        status=row["status"],
+        rule_id=row["rule_id"],
+        reason=row["reason"],
+        context=json.loads(row["context_json"] or "{}"),
+        created_at=row["created_at"],
+        decided_by=row["decided_by"],
+        decided_at=row["decided_at"],
+        decision_reason=row["decision_reason"],
+    )
+
+
+def _json_safe_context(context: dict) -> dict:
+    return {str(key): _json_safe_value(value) for key, value in (context or {}).items() if key != "global_config"}
+
+
+def _json_safe_value(value):
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _json_safe_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe_value(item) for item in value]
+    return repr(value)
 
 
 def _matches(pattern: str, value: str) -> bool:
