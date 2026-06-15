@@ -4,6 +4,7 @@ from orchestrator.enterprise import (
     ConnectorAction,
     ConnectorCredentialStore,
     ConnectorHealth,
+    ConnectorRegistry,
     ConnectorResult,
     EnterpriseAuditLedger,
     IdentityService,
@@ -28,6 +29,40 @@ def test_connector_interface_can_execute_and_report_health():
 
     assert connector.health_check().status == "healthy"
     assert connector.execute(action).data == {"id": 123}
+
+
+def test_connector_registry_reports_health_and_records_ledger_event(tmp_path):
+    IdentityService.from_path(tmp_path / "enterprise.sqlite").create_organization(org_id="ORG-001", name="Acme")
+    ledger = EnterpriseAuditLedger.from_path(tmp_path / "enterprise.sqlite", org_id="ORG-001")
+    registry = ConnectorRegistry([_FakeConnector()])
+
+    summaries = registry.health_checks(ledger=ledger)
+
+    assert [summary.connector_type for summary in summaries] == ["github"]
+    assert summaries[0].ok is True
+    assert summaries[0].status == "healthy"
+    events = ledger.query(event_type="connector")
+    assert len(events) == 1
+    assert events[0].action == "github.health_check"
+
+
+def test_connector_registry_converts_health_exceptions_to_unhealthy():
+    class BrokenConnector:
+        connector_type = "github"
+
+        def health_check(self):
+            raise RuntimeError("offline")
+
+        def execute(self, action: ConnectorAction):
+            raise AssertionError("not used")
+
+    registry = ConnectorRegistry([BrokenConnector()])
+
+    summaries = registry.health_checks()
+
+    assert summaries[0].ok is False
+    assert summaries[0].status == "unhealthy"
+    assert summaries[0].message == "offline"
 
 
 def test_record_connector_event_writes_canonical_ledger_event_and_redacts_parameters(tmp_path):

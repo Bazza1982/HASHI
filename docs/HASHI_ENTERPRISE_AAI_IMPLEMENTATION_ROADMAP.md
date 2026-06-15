@@ -839,13 +839,20 @@ Implemented checkpoints:
   - calls the enterprise `PolicyEvaluator` with `connector.execute` and a `connector:{type}:{action}` resource;
   - supports explicit policy deny and `approval_required` decisions before a connector implementation can run;
   - creates pending approval requests for connector actions that require approval.
+- Connector registry and health probe foundation added:
+  - connectors can be registered by connector type;
+  - duplicate or unnamed connector types fail fast;
+  - health probes normalize connector exceptions to `unhealthy` summaries;
+  - health probes can write canonical connector ledger events;
+  - Workbench exposes admin-gated `GET /api/enterprise/connectors/health`.
 
 Residual P10 limitations:
 
 - No real GitHub, Slack, Teams, Google Chat, or Feishu connector is implemented yet.
 - Credential store records secret references only; Vault/Kubernetes secret resolution is still pending.
-- Connector gate is a service helper; real connectors and Workbench connector APIs still need to call it consistently.
-- Connector health probes and admin UI are still pending.
+- Connector gate is a service helper; real connectors still need to call it consistently.
+- Connector health API exists for registered in-process connectors, but no built-in external connector is registered yet.
+- Connector admin UI is still pending.
 
 **Scope:**
 
@@ -868,7 +875,7 @@ Residual P10 limitations:
 - `ENT-122` Add connector execution gate. Done for credential existence, org isolation, revoke fail-closed, type match, policy deny, and approval-required decisions.
 - `ENT-126` Add first enterprise channel connector.
 - `ENT-123` Add GitHub connector with audit.
-- `ENT-124` Add connector health checks.
+- `ENT-124` Add connector health checks. Done for in-process registry, normalized health summaries, ledger health events, and Workbench admin health API.
 - `ENT-125` Add credential revoke tests. Done for gate-level fail-closed behavior.
 
 **Acceptance:**
