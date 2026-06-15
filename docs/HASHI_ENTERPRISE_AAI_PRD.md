@@ -70,7 +70,30 @@ Major current gaps:
 
 ## 4. Product Requirements
 
-### 4.0 Current HASHI To Enterprise Mapping
+### 4.0 Deployment Profiles And Enterprise Identity
+
+Enterprise AAI should remain one HASHI codebase with profile-driven behavior, not a separate fork.
+
+Deployment profiles:
+
+| Profile | Meaning | Control model |
+|---|---|---|
+| `personal` | current HASHI style: one owner-user controls the full system | user = owner = top admin |
+| `team` | small group deployment with shared projects and agents | admins and members are separated |
+| `enterprise` | organization deployment with identity, policy, audit, governed channels, and operations controls | formal RBAC/ABAC, admin console, audit, approval, and deployment controls |
+
+The term **Individual User** is reserved for enterprise identity. It means a normal human user inside a team or enterprise deployment. An individual user may delegate work to agents and inspect artifacts, but does not automatically control global policies, channels, backends, secrets, audit retention, or organization settings.
+
+This distinction is important:
+
+```text
+Personal profile = deployment mode for one owner-user.
+Individual User = governed human identity inside a team or enterprise deployment.
+```
+
+See [HASHI_ENTERPRISE_PROFILE_ADR.md](HASHI_ENTERPRISE_PROFILE_ADR.md) for the accepted decision.
+
+### 4.0.1 Current HASHI To Enterprise Mapping
 
 Enterprise development should not restart from zero. Existing HASHI capabilities should be promoted into governed enterprise primitives.
 
@@ -96,6 +119,7 @@ Requirements:
 - users;
 - teams/groups;
 - roles;
+- explicit distinction between `personal` profile owner and enterprise `individual_user`;
 - service accounts;
 - invitation and onboarding flow;
 - local dev auth mode;
@@ -109,7 +133,7 @@ Minimum v1:
 - local username/password or single-admin bootstrap;
 - user table;
 - role table;
-- admin/user distinction;
+- admin/individual-user distinction;
 - scoped API tokens.
 
 Future:
@@ -722,7 +746,7 @@ Security metrics:
 
 ## 11. Open Questions
 
-1. Should enterprise mode be a separate runtime mode or a configuration profile?
+1. Should enterprise mode be a separate runtime mode or a configuration profile? **Decision:** configuration profile in the same codebase; see [HASHI_ENTERPRISE_PROFILE_ADR.md](HASHI_ENTERPRISE_PROFILE_ADR.md).
 2. Should the first persistent store be SQLite, Postgres, or a pluggable interface with SQLite default?
 3. Should Workbench become the primary admin console or should admin UI be separated?
 4. What is the minimum identity model for open-source self-hosted deployment?

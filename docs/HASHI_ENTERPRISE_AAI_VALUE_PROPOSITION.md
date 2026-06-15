@@ -66,6 +66,14 @@ AAI brings that mental model into software.
 
 HASHI's enterprise value is not "more agents" or "more backends." It is a governed bridge between humans and the growing ecosystem of digital systems.
 
+HASHI Enterprise should remain one codebase with profile-driven behavior:
+
+- **Personal profile** preserves current HASHI: one owner-user is also the top administrator.
+- **Team profile** introduces shared work, project agents, and role separation.
+- **Enterprise profile** adds organization identity, policy, audit, channel governance, approvals, deployment, and operations controls.
+
+In enterprise language, an **Individual User** is not the same thing as the Personal profile. An Individual User is a governed human identity inside an organization. They can delegate work and inspect artifacts, but they do not automatically control global channels, backends, secrets, policies, audit retention, or organization settings.
+
 Human-facing channels:
 
 - Workbench as the enterprise control and inspection surface
