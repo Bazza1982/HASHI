@@ -867,12 +867,17 @@ Implemented checkpoints:
   - `POST /api/enterprise/connectors/credentials` creates scoped connector credential references;
   - `POST /api/enterprise/connectors/credentials/{credential_id}/revoke` revokes credentials;
   - credential create and revoke operations write admin audit events.
+- Connector secret reference resolver added:
+  - `env://NAME` and `env:NAME` resolve from environment variables;
+  - `secrets://key` and `hashi://key` resolve from HASHI's in-memory `secrets.json` mapping;
+  - resolved secret metadata redacts values by default;
+  - unsupported schemes and unconfigured `vault://` references fail closed.
 
 Residual P10 limitations:
 
 - GitHub has a read-only connector foundation, but no write actions such as PR creation or merge are implemented yet.
 - No Slack, Teams, Google Chat, or Feishu connector is implemented yet.
-- Credential store records secret references only; Vault/Kubernetes secret resolution is still pending.
+- Credential store records secret references only; environment and HASHI secrets can now be resolved through a dedicated resolver, while Vault/Kubernetes secret resolution remains pending.
 - Workbench/admin connector execution API now uses the gated execution service.
 - Connector health API exists for registered in-process connectors, but no built-in external connector is registered yet.
 - Connector admin UI is still pending.
@@ -903,6 +908,7 @@ Residual P10 limitations:
 - `ENT-127` Add gated connector execution service. Done for credential gate, policy gate, connector invocation, fail-closed missing connector handling, and ledger events.
 - `ENT-128` Add Workbench connector execution API. Done for admin-gated execution through `ConnectorExecutionService` with result and gate metadata.
 - `ENT-129` Add Workbench connector credential API. Done for admin-gated list, create, revoke, active-only listing, include-revoked listing, and audit events.
+- `ENT-130` Add connector secret reference resolver. Done for env/HASHI secret refs, redacted metadata, unsupported scheme failures, and unconfigured vault fail-closed behavior.
 
 **Acceptance:**
 
