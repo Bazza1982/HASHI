@@ -148,6 +148,11 @@ class ToolRegistry:
             self._record_tool_audit(tool_name, arguments, enterprise_denial, started)
             return enterprise_denial
 
+        enterprise_denial = self._check_enterprise_shell_gate(tool_name, tool_call_id=tool_call_id)
+        if enterprise_denial is not None:
+            self._record_tool_audit(tool_name, arguments, enterprise_denial, started)
+            return enterprise_denial
+
         try:
             output = await self._dispatch(tool_name, arguments)
         except Exception as e:
@@ -207,6 +212,24 @@ class ToolRegistry:
                 f"Error: enterprise execution denied: {decision.reason}; "
                 f"path={raw_path!r}; root={decision.root}"
             ),
+            is_error=True,
+        )
+
+    def _check_enterprise_shell_gate(self, tool_name: str, *, tool_call_id: str) -> ToolResult | None:
+        if tool_name != "bash":
+            return None
+        context = self.audit_context or {}
+        org_id = str(context.get("org_id") or "").strip()
+        project_id = str(context.get("project_id") or "").strip()
+        if not org_id or not project_id:
+            return None
+        bash_opts = self.tool_options.get("bash", {})
+        enabled = bool(context.get("enterprise_shell_enabled") or bash_opts.get("enterprise_enabled"))
+        if enabled:
+            return None
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            output="Error: enterprise execution denied: shell_disabled",
             is_error=True,
         )
 
