@@ -1,0 +1,66 @@
+{
+  "template": "auto_paper_edit",
+  "route": "markdown_structural_rewrite",
+  "tasks": [
+    {
+      "id": "PAPER_EDIT-001",
+      "owner": "orchestrator",
+      "title": "Lock source draft and fixing plan",
+      "status": "pending"
+    },
+    {
+      "id": "PAPER_EDIT-002",
+      "owner": "worker",
+      "title": "Rewrite title, research question, abstract, and introduction",
+      "status": "pending"
+    },
+    {
+      "id": "PAPER_EDIT-003",
+      "owner": "worker",
+      "title": "Rewrite literature-review bridge and method/data section",
+      "status": "pending"
+    },
+    {
+      "id": "PAPER_EDIT-004",
+      "owner": "worker",
+      "title": "Restructure findings around lived episodes before code statistics",
+      "status": "pending"
+    },
+    {
+      "id": "PAPER_EDIT-005",
+      "owner": "worker",
+      "title": "Rebalance discussion, implications, limitations, and conclusion",
+      "status": "pending"
+    },
+    {
+      "id": "PAPER_EDIT-006",
+      "owner": "worker",
+      "title": "Run full-manuscript consistency and human-voice pass",
+      "status": "pending"
+    },
+    {
+      "id": "PAPER_EDIT-007",
+      "owner": "orchestrator",
+      "title": "Harvest worker artifact and verify required files exist",
+      "status": "pending"
+    },
+    {
+      "id": "PAPER_EDIT-008",
+      "owner": "reviewer",
+      "title": "Review rewritten manuscript against fixing plan",
+      "status": "pending"
+    },
+    {
+      "id": "PAPER_EDIT-009",
+      "owner": "worker",
+      "title": "Repair reviewer blockers if required",
+      "status": "pending"
+    },
+    {
+      "id": "PAPER_EDIT-010",
+      "owner": "orchestrator",
+      "title": "Close loop after reviewer pass verdict",
+      "status": "pending"
+    }
+  ]
+}
