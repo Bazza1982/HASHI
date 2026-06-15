@@ -236,6 +236,36 @@ class WorkbenchApiServer:
         memberships = self.identity_service.list_project_memberships(user_id=user_id)
         return any(row.get("role") in admin_roles for row in memberships)
 
+    def _enterprise_visible_project_ids(self, user_id: str) -> set[str]:
+        if self.identity_service is None:
+            return set()
+        memberships = self.identity_service.list_project_memberships(user_id=user_id)
+        return {str(row.get("project_id") or "").strip() for row in memberships if row.get("project_id")}
+
+    def _agent_project_ids(self, agent_row: dict) -> set[str]:
+        values = []
+        if agent_row.get("project_id"):
+            values.append(agent_row.get("project_id"))
+        project_ids = agent_row.get("project_ids") or []
+        if isinstance(project_ids, str):
+            values.append(project_ids)
+        else:
+            values.extend(project_ids)
+        return {str(value).strip() for value in values if str(value).strip()}
+
+    def _filter_enterprise_agent_rows_for_user(self, user, agent_rows: list[dict]) -> list[dict]:
+        if self._enterprise_user_has_admin_role(user.id):
+            return agent_rows
+        visible_project_ids = self._enterprise_visible_project_ids(user.id)
+        if not visible_project_ids:
+            return []
+        visible_rows = []
+        for agent_row in agent_rows:
+            agent_project_ids = self._agent_project_ids(agent_row)
+            if agent_project_ids and agent_project_ids.intersection(visible_project_ids):
+                visible_rows.append(agent_row)
+        return visible_rows
+
     def _default_smoke_commands(self, runtime) -> list[str]:
         commands = ["/status", "/model"]
         available = set(supported_commands(runtime))
@@ -606,11 +636,17 @@ class WorkbenchApiServer:
 
     async def handle_agents(self, request):
         runtime_map = self._runtime_map()
+        agent_rows = self._load_agent_rows()
+        if self._is_governed_profile():
+            user = self._enterprise_user_from_request(request)
+            if user is None:
+                return web.json_response({"ok": False, "error": "not authenticated"}, status=401)
+            agent_rows = self._filter_enterprise_agent_rows_for_user(user, agent_rows)
         agents = [
             self._metadata_for_agent(agent_row, runtime_map.get(agent_row["name"]))
-            for agent_row in self._load_agent_rows()
+            for agent_row in agent_rows
         ]
-        return web.json_response({"agents": agents})
+        return web.json_response({"ok": True, "agents": agents})
 
     async def handle_transcript_recent(self, request):
         name = request.match_info["name"]

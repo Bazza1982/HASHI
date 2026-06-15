@@ -20,13 +20,13 @@ class _FakeRequest:
         return self._payload
 
 
-def _server(tmp_path: Path, *, profile: str = "enterprise") -> WorkbenchApiServer:
+def _server(tmp_path: Path, *, profile: str = "enterprise", agents: list[dict] | None = None) -> WorkbenchApiServer:
     config_path = tmp_path / "agents.json"
     config_path.write_text(
         json.dumps(
             {
                 "global": {"deployment_profile": profile, "organization_id": "ORG-001"},
-                "agents": [],
+                "agents": agents or [],
             }
         ),
         encoding="utf-8",
@@ -269,3 +269,151 @@ def test_personal_profile_keeps_legacy_workbench_token(tmp_path):
 
     assert server._check_admin_auth(_FakeRequest(headers={"X-Workbench-Token": "legacy-secret"}))
     assert not server._check_admin_auth(_FakeRequest(headers={"X-Workbench-Token": "wrong"}))
+
+
+@pytest.mark.asyncio
+async def test_personal_profile_lists_all_agents_without_session(tmp_path):
+    server = _server(
+        tmp_path,
+        profile="personal",
+        agents=[
+            {
+                "name": "zelda",
+                "display_name": "Zelda",
+                "workspace_dir": "workspaces/zelda",
+                "type": "flex",
+            },
+            {
+                "name": "nana",
+                "display_name": "Nana",
+                "workspace_dir": "workspaces/nana",
+                "type": "flex",
+                "project_id": "prj-research",
+            },
+        ],
+    )
+
+    response = await server.handle_agents(_FakeRequest())
+
+    assert response.status == 200
+    payload = json.loads(response.text)
+    assert [agent["name"] for agent in payload["agents"]] == ["zelda", "nana"]
+
+
+@pytest.mark.asyncio
+async def test_enterprise_agents_requires_session(tmp_path):
+    server = _server(
+        tmp_path,
+        agents=[
+            {
+                "name": "nana",
+                "display_name": "Nana",
+                "workspace_dir": "workspaces/nana",
+                "type": "flex",
+                "project_id": "prj-research",
+            },
+        ],
+    )
+
+    response = await server.handle_agents(_FakeRequest(path="/api/agents"))
+
+    assert response.status == 401
+    assert json.loads(response.text)["error"] == "not authenticated"
+
+
+@pytest.mark.asyncio
+async def test_enterprise_admin_can_list_all_agents(tmp_path):
+    server = _server(
+        tmp_path,
+        agents=[
+            {
+                "name": "unscoped",
+                "display_name": "Unscoped",
+                "workspace_dir": "workspaces/unscoped",
+                "type": "flex",
+            },
+            {
+                "name": "research",
+                "display_name": "Research",
+                "workspace_dir": "workspaces/research",
+                "type": "flex",
+                "project_id": "prj-research",
+            },
+        ],
+    )
+    admin = server.identity_service.bootstrap_org_admin(
+        org_id="ORG-001",
+        org_name="Acme",
+        email="admin@example.com",
+        display_name="Admin",
+        password="secret-password",
+        user_id="usr-admin",
+    )
+    session = server.identity_service.create_session(user_id=admin.id)
+
+    response = await server.handle_agents(_FakeRequest(headers={"Authorization": f"Bearer {session.token}"}))
+
+    assert response.status == 200
+    assert [agent["name"] for agent in json.loads(response.text)["agents"]] == ["unscoped", "research"]
+
+
+@pytest.mark.asyncio
+async def test_enterprise_individual_user_sees_only_project_agents(tmp_path):
+    server = _server(
+        tmp_path,
+        agents=[
+            {
+                "name": "unscoped",
+                "display_name": "Unscoped",
+                "workspace_dir": "workspaces/unscoped",
+                "type": "flex",
+            },
+            {
+                "name": "research",
+                "display_name": "Research",
+                "workspace_dir": "workspaces/research",
+                "type": "flex",
+                "project_id": "prj-research",
+            },
+            {
+                "name": "finance",
+                "display_name": "Finance",
+                "workspace_dir": "workspaces/finance",
+                "type": "flex",
+                "project_ids": ["prj-finance"],
+            },
+            {
+                "name": "shared",
+                "display_name": "Shared",
+                "workspace_dir": "workspaces/shared",
+                "type": "flex",
+                "project_ids": ["prj-research", "prj-ops"],
+            },
+        ],
+    )
+    server.identity_service.bootstrap_org_admin(
+        org_id="ORG-001",
+        org_name="Acme",
+        email="admin@example.com",
+        display_name="Admin",
+        password="secret-password",
+    )
+    server.identity_service.create_project(org_id="ORG-001", name="Research", project_id="prj-research")
+    user = server.identity_service.create_user(
+        org_id="ORG-001",
+        email="user@example.com",
+        display_name="User",
+        password="secret-password",
+        user_id="usr-user",
+    )
+    server.identity_service.assign_project_role(
+        user_id=user.id,
+        project_id="prj-research",
+        role=EnterpriseRole.INDIVIDUAL_USER,
+    )
+    session = server.identity_service.create_session(user_id=user.id)
+
+    response = await server.handle_agents(_FakeRequest(headers={"Authorization": f"Bearer {session.token}"}))
+
+    assert response.status == 200
+    assert [agent["name"] for agent in json.loads(response.text)["agents"]] == ["research", "shared"]
