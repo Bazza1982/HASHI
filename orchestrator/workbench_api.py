@@ -17,6 +17,7 @@ from orchestrator.admin_local_testing import (
 from orchestrator.conversation_router import ConversationRouter
 from orchestrator.enterprise.audit_ledger import EnterpriseAuditLedger
 from orchestrator.enterprise.audit_schema import AuditEvent, AuditEventWriter
+from orchestrator.enterprise.capabilities import AgentCapabilityRegistry
 from orchestrator.enterprise.channel_gate import EnterpriseChannelGate
 from orchestrator.enterprise.channels import ChannelRegistry
 from orchestrator.enterprise.identity import EnterpriseRole, IdentityService
@@ -110,6 +111,7 @@ class WorkbenchApiServer:
         self.app.router.add_get("/api/enterprise/approvals", self.handle_enterprise_approvals)
         self.app.router.add_post("/api/enterprise/approvals/{request_id}/approve", self.handle_enterprise_approval_approve)
         self.app.router.add_post("/api/enterprise/approvals/{request_id}/deny", self.handle_enterprise_approval_deny)
+        self.app.router.add_get("/api/enterprise/agent-capabilities", self.handle_enterprise_agent_capabilities)
         self.app.router.add_get("/api/agents", self.handle_agents)
         self.app.router.add_get("/api/transcript/{name}", self.handle_transcript_recent)
         self.app.router.add_get("/api/transcript/{name}/poll", self.handle_transcript_poll)
@@ -167,6 +169,17 @@ class WorkbenchApiServer:
     def _load_agent_rows(self) -> list[dict]:
         raw = json.loads(self.config_path.read_text(encoding="utf-8-sig"))
         return [agent for agent in raw.get("agents", []) if agent.get("is_active", True)]
+
+    def _load_agent_capability_rows(self):
+        capabilities_path = self.config_path.parent / "agent_capabilities.json"
+        if not capabilities_path.exists():
+            return []
+        try:
+            raw = json.loads(capabilities_path.read_text(encoding="utf-8-sig"))
+        except Exception:
+            return []
+        entries = raw.get("agents", raw)
+        return entries if isinstance(entries, (list, dict)) else []
 
     def _runtime_map(self) -> dict:
         return {runtime.name: runtime for runtime in self._runtime_list()}
@@ -944,6 +957,26 @@ class WorkbenchApiServer:
 
     async def handle_enterprise_approval_deny(self, request):
         return await self._handle_enterprise_approval_decision(request, status="denied")
+
+    async def handle_enterprise_agent_capabilities(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        query = getattr(request, "query", {}) or {}
+        project_id = str(query.get("project_id") or "").strip() or None
+        registry = AgentCapabilityRegistry(
+            agent_rows=self._load_agent_rows(),
+            capability_rows=self._load_agent_capability_rows(),
+        )
+        summaries = [summary.to_dict() for summary in registry.list_agents(project_id=project_id)]
+        return web.json_response(
+            {
+                "ok": True,
+                "agent_capabilities": summaries,
+                "count": len(summaries),
+                "project_id": project_id,
+            }
+        )
 
     async def handle_agents(self, request):
         runtime_map = self._runtime_map()
