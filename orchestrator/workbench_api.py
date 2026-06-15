@@ -15,6 +15,7 @@ from orchestrator.admin_local_testing import (
     try_execute_slash_command_text,
 )
 from orchestrator.conversation_router import ConversationRouter
+from orchestrator.enterprise.audit_ledger import EnterpriseAuditLedger
 from orchestrator.enterprise.audit_schema import AuditEvent, AuditEventWriter
 from orchestrator.enterprise.channel_gate import EnterpriseChannelGate
 from orchestrator.enterprise.channels import ChannelRegistry
@@ -83,6 +84,7 @@ class WorkbenchApiServer:
         self.identity_service = self._build_identity_service()
         self.channel_registry = self._build_channel_registry()
         self.audit_writer = self._build_audit_writer()
+        self.audit_ledger = self._build_audit_ledger()
         self.bridge_router = ConversationRouter(
             config_path=self.config_path,
             capabilities_path=self.config_path.parent / "agent_capabilities.json",
@@ -101,6 +103,8 @@ class WorkbenchApiServer:
         self.app.router.add_get("/api/enterprise/channels", self.handle_enterprise_channels)
         self.app.router.add_post("/api/enterprise/channels", self.handle_enterprise_channels_register)
         self.app.router.add_post("/api/enterprise/channels/bind", self.handle_enterprise_channels_bind)
+        self.app.router.add_get("/api/enterprise/audit", self.handle_enterprise_audit)
+        self.app.router.add_get("/api/enterprise/audit/export", self.handle_enterprise_audit_export)
         self.app.router.add_get("/api/agents", self.handle_agents)
         self.app.router.add_get("/api/transcript/{name}", self.handle_transcript_recent)
         self.app.router.add_get("/api/transcript/{name}/poll", self.handle_transcript_poll)
@@ -176,6 +180,15 @@ class WorkbenchApiServer:
             return None
         bridge_home = Path(getattr(self.global_config, "bridge_home", None) or self.config_path.parent)
         return ChannelRegistry.from_path(bridge_home / "state" / "enterprise.sqlite")
+
+    def _build_audit_ledger(self) -> EnterpriseAuditLedger | None:
+        if str(getattr(self.global_config, "deployment_profile", "personal") or "personal") == "personal":
+            return None
+        org_id = str(getattr(self.global_config, "organization_id", "") or "").strip()
+        if not org_id:
+            return None
+        bridge_home = Path(getattr(self.global_config, "bridge_home", None) or self.config_path.parent)
+        return EnterpriseAuditLedger.from_path(bridge_home / "state" / "enterprise.sqlite", org_id=org_id)
 
     def _build_audit_writer(self) -> AuditEventWriter:
         if not self._is_governed_profile():
@@ -809,6 +822,55 @@ class WorkbenchApiServer:
             },
             status=201,
         )
+
+    def _enterprise_audit_filters(self, request) -> dict:
+        query = getattr(request, "query", {}) or {}
+        filters = {
+            "event_type": str(query.get("event_type") or "").strip() or None,
+            "actor_id": str(query.get("actor_id") or "").strip() or None,
+            "project_id": str(query.get("project_id") or "").strip() or None,
+            "task_id": str(query.get("task_id") or "").strip() or None,
+            "request_id": str(query.get("request_id") or "").strip() or None,
+            "correlation_id": str(query.get("correlation_id") or "").strip() or None,
+        }
+        try:
+            filters["limit"] = max(1, min(int(query.get("limit") or 100), 1000))
+        except (TypeError, ValueError):
+            filters["limit"] = 100
+        return filters
+
+    async def handle_enterprise_audit(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        if self.audit_ledger is None:
+            return web.json_response({"ok": False, "error": "audit ledger unavailable"}, status=503)
+        filters = self._enterprise_audit_filters(request)
+        events = self.audit_ledger.query(**filters)
+        return web.json_response(
+            {
+                "ok": True,
+                "events": [event.to_dict() for event in events],
+                "count": len(events),
+                "limit": filters["limit"],
+            }
+        )
+
+    async def handle_enterprise_audit_export(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        if self.audit_ledger is None:
+            return web.json_response({"ok": False, "error": "audit ledger unavailable"}, status=503)
+        filters = self._enterprise_audit_filters(request)
+        lines = [
+            json.dumps(event.to_dict(), ensure_ascii=False, sort_keys=True)
+            for event in self.audit_ledger.query(**filters)
+        ]
+        body = "\n".join(lines)
+        if body:
+            body += "\n"
+        return web.Response(text=body, content_type="application/x-ndjson")
 
     async def handle_agents(self, request):
         runtime_map = self._runtime_map()
