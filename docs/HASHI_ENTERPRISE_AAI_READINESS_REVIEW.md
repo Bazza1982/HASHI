@@ -50,6 +50,7 @@ This is **not** the end state of the enterprise product. It is the first reviewa
 ### Auditability
 
 - Unified ledger records structured events for identity, admin actions, channels, policy decisions, commands, connectors, tasks, artifacts, and adapted legacy streams.
+- New ledger events include tamper-evident hash-chain fields and can be verified for in-database modification, deletion, or reordering.
 - Audit export and Workbench timeline views exist for review and handoff.
 - Sensitive connector parameters are redacted in connector audit records.
 
@@ -108,7 +109,7 @@ These are not blockers for Enterprise MVP review, but they are not complete:
 
 - SAML/OIDC/SCIM;
 - full ABAC simulator and policy preview tooling;
-- tamper-evident or WORM audit storage;
+- WORM audit storage or external ledger anchoring;
 - SIEM/OpenTelemetry export;
 - Kubernetes/HA deployment;
 - Vault/Kubernetes secret resolver implementations;

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -11,6 +12,7 @@ from orchestrator.enterprise.store import EnterpriseStore
 
 
 AUDIT_LEDGER_SCHEMA_VERSION = 1
+AUDIT_LEDGER_GENESIS_HASH = "0" * 64
 
 
 def _utc_now_iso() -> str:
@@ -33,6 +35,9 @@ class LedgerEvent:
     request_id: str | None = None
     correlation_id: str | None = None
     parent_event_id: str | None = None
+    chain_index: int | None = None
+    prev_hash: str | None = None
+    event_hash: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -49,8 +54,18 @@ class LedgerEvent:
             "request_id": self.request_id,
             "correlation_id": self.correlation_id,
             "parent_event_id": self.parent_event_id,
+            "chain_index": self.chain_index,
+            "prev_hash": self.prev_hash,
+            "event_hash": self.event_hash,
             "context": dict(self.context or {}),
         }
+
+
+@dataclass(frozen=True)
+class AuditChainVerification:
+    ok: bool
+    checked: int
+    errors: tuple[str, ...]
 
 
 class EnterpriseAuditLedger:
@@ -96,14 +111,39 @@ class EnterpriseAuditLedger:
             context=_json_safe_context(context or {}),
         )
         with self.store.connect() as con:
+            previous = con.execute(
+                """
+                SELECT chain_index, event_hash
+                FROM audit_events
+                WHERE org_id = ? AND chain_index IS NOT NULL AND event_hash IS NOT NULL
+                ORDER BY chain_index DESC
+                LIMIT 1
+                """,
+                (self.org_id,),
+            ).fetchone()
+            if previous:
+                chain_index = int(previous["chain_index"]) + 1
+                prev_hash = str(previous["event_hash"])
+            else:
+                chain_index = 1
+                prev_hash = AUDIT_LEDGER_GENESIS_HASH
+            event_hash = _event_hash(event, chain_index=chain_index, prev_hash=prev_hash)
+            event = LedgerEvent(
+                **{
+                    **event.to_dict(),
+                    "chain_index": chain_index,
+                    "prev_hash": prev_hash,
+                    "event_hash": event_hash,
+                }
+            )
             con.execute(
                 """
                 INSERT INTO audit_events(
                     id, org_id, ts, schema_version, event_type, actor_id, action,
                     status, project_id, task_id, request_id, correlation_id,
-                    parent_event_id, context_json
+                    parent_event_id, context_json, chain_index, prev_hash, event_hash
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event.id,
@@ -120,6 +160,9 @@ class EnterpriseAuditLedger:
                     event.correlation_id,
                     event.parent_event_id,
                     json.dumps(event.context, ensure_ascii=False, sort_keys=True),
+                    event.chain_index,
+                    event.prev_hash,
+                    event.event_hash,
                 ),
             )
         return event
@@ -213,6 +256,33 @@ class EnterpriseAuditLedger:
                 handle.write(json.dumps(event.to_dict(), ensure_ascii=False, sort_keys=True) + "\n")
         return path
 
+    def verify_chain(self) -> AuditChainVerification:
+        with self.store.connect() as con:
+            rows = con.execute(
+                """
+                SELECT *
+                FROM audit_events
+                WHERE org_id = ? AND chain_index IS NOT NULL AND event_hash IS NOT NULL
+                ORDER BY chain_index ASC
+                """,
+                (self.org_id,),
+            ).fetchall()
+        errors: list[str] = []
+        expected_prev_hash = AUDIT_LEDGER_GENESIS_HASH
+        expected_index = 1
+        for row in rows:
+            event = _event_from_row(row)
+            if event.chain_index != expected_index:
+                errors.append(f"{event.id}: expected chain_index {expected_index}, got {event.chain_index}")
+            if event.prev_hash != expected_prev_hash:
+                errors.append(f"{event.id}: prev_hash mismatch")
+            recomputed = _event_hash(event, chain_index=int(event.chain_index or 0), prev_hash=event.prev_hash or "")
+            if event.event_hash != recomputed:
+                errors.append(f"{event.id}: event_hash mismatch")
+            expected_prev_hash = event.event_hash or ""
+            expected_index += 1
+        return AuditChainVerification(ok=not errors, checked=len(rows), errors=tuple(errors))
+
 
 def _event_from_row(row) -> LedgerEvent:
     return LedgerEvent(
@@ -229,8 +299,34 @@ def _event_from_row(row) -> LedgerEvent:
         request_id=row["request_id"],
         correlation_id=row["correlation_id"],
         parent_event_id=row["parent_event_id"],
+        chain_index=row["chain_index"],
+        prev_hash=row["prev_hash"],
+        event_hash=row["event_hash"],
         context=json.loads(row["context_json"] or "{}"),
     )
+
+
+def _event_hash(event: LedgerEvent, *, chain_index: int, prev_hash: str) -> str:
+    payload = {
+        "id": event.id,
+        "org_id": event.org_id,
+        "ts": event.ts,
+        "schema_version": event.schema_version,
+        "event_type": event.event_type,
+        "actor_id": event.actor_id,
+        "action": event.action,
+        "status": event.status,
+        "project_id": event.project_id,
+        "task_id": event.task_id,
+        "request_id": event.request_id,
+        "correlation_id": event.correlation_id,
+        "parent_event_id": event.parent_event_id,
+        "context": dict(event.context or {}),
+        "chain_index": chain_index,
+        "prev_hash": prev_hash,
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _json_safe_context(context: dict) -> dict:

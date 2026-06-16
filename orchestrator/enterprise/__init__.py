@@ -6,7 +6,7 @@ from orchestrator.enterprise.profile import (
     validate_profile_context,
 )
 from orchestrator.enterprise.audit_schema import AuditEvent, AuditEventWriter
-from orchestrator.enterprise.audit_ledger import EnterpriseAuditLedger, LedgerEvent
+from orchestrator.enterprise.audit_ledger import AuditChainVerification, EnterpriseAuditLedger, LedgerEvent
 from orchestrator.enterprise.artifacts import Artifact, ArtifactRegistry
 from orchestrator.enterprise.audit_adapters import (
     BrowserAuditIngestResult,
@@ -88,6 +88,7 @@ __all__ = [
     "AuditEvent",
     "AuditEventWriter",
     "EnterpriseAuditLedger",
+    "AuditChainVerification",
     "LedgerEvent",
     "Artifact",
     "ArtifactRegistry",

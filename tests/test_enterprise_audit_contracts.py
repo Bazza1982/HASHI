@@ -19,6 +19,9 @@ REQUIRED_LEDGER_KEYS = {
     "request_id",
     "correlation_id",
     "parent_event_id",
+    "chain_index",
+    "prev_hash",
+    "event_hash",
     "context",
 }
 
