@@ -16,8 +16,9 @@ from orchestrator.enterprise import (
     PolicyEvaluator,
     ConnectorSecretResolver,
     SlackWebhookConnector,
+    GoogleChatWebhookConnector,
 )
-from orchestrator.enterprise.connectors import evaluate_connector_action, record_connector_event
+from orchestrator.enterprise.connectors import evaluate_connector_action, record_connector_event, validate_connector_action
 
 
 class _FakeConnector:
@@ -73,6 +74,15 @@ class _FakeGitHubTransport:
 
 
 class _FakeSlackTransport:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, webhook_url, payload):
+        self.calls.append({"webhook_url": webhook_url, "payload": dict(payload)})
+        return {"status_code": 200, "text": "ok"}
+
+
+class _FakeGoogleChatTransport:
     def __init__(self):
         self.calls = []
 
@@ -430,6 +440,92 @@ def test_slack_webhook_connector_requires_text():
 
     assert result.ok is False
     assert result.status == "invalid_parameters"
+
+
+def test_google_chat_webhook_connector_health_and_dry_run():
+    connector = GoogleChatWebhookConnector(webhook_url="https://chat.googleapis.com/v1/spaces/abc/messages?key=test")
+    action = ConnectorAction(
+        connector_type="google_chat",
+        action="message.send",
+        dry_run=True,
+        parameters={"text": "Hello enterprise"},
+    )
+
+    health = connector.health_check()
+    result = connector.execute(action)
+
+    assert health.ok is True
+    assert result.ok is True
+    assert result.status == "dry_run"
+    assert result.data == {"payload": {"text": "Hello enterprise"}}
+
+
+def test_google_chat_webhook_connector_posts_message_payload():
+    transport = _FakeGoogleChatTransport()
+    connector = GoogleChatWebhookConnector(
+        webhook_url="https://chat.googleapis.com/v1/spaces/abc/messages?key=test",
+        transport=transport,
+    )
+    action = ConnectorAction(
+        connector_type="google_chat",
+        action="message.send",
+        parameters={"text": "Hello enterprise", "cards": [{"header": {"title": "HASHI"}}]},
+    )
+
+    result = connector.execute(action)
+
+    assert result.ok is True
+    assert result.status == "success"
+    assert result.data == {"status_code": 200, "text": "ok"}
+    assert transport.calls == [
+        {
+            "webhook_url": "https://chat.googleapis.com/v1/spaces/abc/messages?key=test",
+            "payload": {"text": "Hello enterprise", "cards": [{"header": {"title": "HASHI"}}]},
+        }
+    ]
+
+
+def test_google_chat_webhook_connector_requires_text():
+    connector = GoogleChatWebhookConnector(webhook_url="https://chat.googleapis.com/v1/spaces/abc/messages?key=test")
+    action = ConnectorAction(connector_type="google_chat", action="message.send")
+
+    result = connector.execute(action)
+
+    assert result.ok is False
+    assert result.status == "invalid_parameters"
+
+
+def test_connector_factory_builds_google_chat_connector_from_secret_ref(tmp_path):
+    credentials, _, _ = _connector_gate_services(tmp_path)
+    credential = credentials.create_credential(
+        org_id="ORG-001",
+        connector_type="google_chat",
+        display_name="Google Chat Webhook",
+        secret_ref="secrets://google_chat_webhook",
+        scopes=["message.send"],
+        credential_id="cred-google-chat",
+    )
+    transport = _FakeGoogleChatTransport()
+    factory = ConnectorFactory(
+        secret_resolver=ConnectorSecretResolver(
+            secrets={"google_chat_webhook": "https://chat.googleapis.com/v1/spaces/abc/messages?key=test"}
+        ),
+        transports={"google_chat": transport},
+    )
+
+    connector = factory.build(credential)
+    result = connector.execute(
+        ConnectorAction(connector_type="google_chat", action="message.send", parameters={"text": "Hello"})
+    )
+
+    assert result.ok is True
+    assert transport.calls[0]["webhook_url"] == "https://chat.googleapis.com/v1/spaces/abc/messages?key=test"
+
+
+def test_validate_connector_action_requires_text_for_webhook_message_send():
+    action = ConnectorAction(connector_type="google_chat", action="message.send", parameters={})
+
+    assert validate_connector_action(action) == "message.send requires non-empty text in parameters"
 
 
 def test_connector_factory_builds_github_connector_from_env_secret(tmp_path):

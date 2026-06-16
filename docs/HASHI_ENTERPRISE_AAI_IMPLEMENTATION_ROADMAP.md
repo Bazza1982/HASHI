@@ -903,6 +903,7 @@ Implemented checkpoints:
   - explicitly allows GitHub read-only repository metadata actions;
   - requires approval for GitHub `issue.create`, `pr.create`, and `pr.merge`;
   - requires approval for Slack `message.send` to avoid enabling outbound channel egress by default;
+  - requires approval for Google Chat `message.send` to avoid enabling outbound channel egress by default;
   - template installation is idempotent.
 - Default connector policy install API added:
   - `POST /api/enterprise/policies/install-defaults` is admin-gated;
@@ -914,26 +915,35 @@ Implemented checkpoints:
   - `dry_run` returns the planned Slack payload without posting externally;
   - real execution posts text and optional block payloads through an injectable transport;
   - factory can build Slack connectors from scoped credential secret references.
+- Second enterprise channel connector added:
+  - Google Chat incoming webhook connector supports `message.send`;
+  - `health_check()` validates webhook configuration without making a network call;
+  - `dry_run` returns the planned Google Chat payload without posting externally;
+  - real execution posts text and optional card payloads through an injectable transport;
+  - factory can build Google Chat connectors from scoped credential secret references.
+- Connector server-side validation added:
+  - Workbench connector execution API rejects webhook `message.send` actions without non-empty `text` before policy/connector execution.
 - Workbench connector admin UI MVP added:
   - Enterprise layout exposes connector credentials, health, and default connector policy controls;
   - admins can create connector credential references, include revoked credentials in the list, and revoke active credentials;
   - admins can refresh connector health and see registry secret-resolution errors;
   - admins can install the default connector policy template from the Workbench;
   - admins can run gated connector test actions, with dry-run enabled by default, and inspect the execution result and policy gate metadata;
-  - Slack and GitHub setup/test forms include safe presets and JSON parameter validation.
+  - Slack, Google Chat, and GitHub setup/test forms include safe presets and JSON parameter validation.
 
 Residual P10 limitations:
 
 - GitHub has repository metadata, issue creation, PR creation, and PR merge actions.
 - Slack exists as an incoming webhook MVP only; Slack OAuth, Bot API, channel discovery, and user mapping are not implemented yet.
-- No Teams, Google Chat, or Feishu connector is implemented yet.
+- Google Chat exists as an incoming webhook MVP only; Google Chat OAuth, space discovery, and user mapping are not implemented yet.
+- No Teams or Feishu connector is implemented yet.
 - Credential store records secret references only; environment and HASHI secrets can now be resolved through a dedicated resolver, while Vault/Kubernetes secret resolution remains pending.
-- Connector factory currently supports GitHub and Slack; Teams, Google Chat, and Feishu factory support remains pending.
+- Connector factory currently supports GitHub, Slack, and Google Chat; Teams and Feishu factory support remains pending.
 - Workbench registry refresh is in-process; multi-node registry synchronization remains future work.
-- Default connector policy covers GitHub reads, GitHub writes, and Slack outbound message approval; silent auto-install remains intentionally avoided to prevent overwriting administrator policy edits.
+- Default connector policy covers GitHub reads, GitHub writes, Slack outbound message approval, and Google Chat outbound message approval; silent auto-install remains intentionally avoided to prevent overwriting administrator policy edits.
 - Workbench/admin connector execution API now uses the gated execution service.
-- Connector health API exists for registered in-process connectors; built-in GitHub and Slack connectors can now be constructed from credential references.
-- Connector admin UI exists as a Workbench MVP; richer guided setup, OAuth flows, and connector-specific server-side validation remain pending.
+- Connector health API exists for registered in-process connectors; built-in GitHub, Slack, and Google Chat connectors can now be constructed from credential references.
+- Connector admin UI exists as a Workbench MVP; richer guided setup, OAuth flows, and broader connector-specific server-side validation remain pending.
 
 **Scope:**
 
@@ -955,6 +965,7 @@ Residual P10 limitations:
 - `ENT-121` Add scoped credential store abstraction. Done for secret references, scopes, active listing, and revoke.
 - `ENT-122` Add connector execution gate. Done for credential existence, org isolation, revoke fail-closed, type match, policy deny, and approval-required decisions.
 - `ENT-126` Add first enterprise channel connector. Done for Slack incoming webhook health, dry-run, `message.send`, injectable transport, and factory construction from secret refs.
+- `ENT-136` Add second enterprise channel connector. Done for Google Chat incoming webhook health, dry-run, `message.send`, injectable transport, factory construction from secret refs, default approval-required policy, Workbench presets, and server-side `message.send` text validation.
 - `ENT-123` Add GitHub connector with audit. Done for health, repository metadata, issue creation, PR creation, and PR merge actions.
 - `ENT-124` Add connector health checks. Done for in-process registry, normalized health summaries, ledger health events, and Workbench admin health API.
 - `ENT-125` Add credential revoke tests. Done for gate-level fail-closed behavior.
@@ -976,6 +987,9 @@ Residual P10 limitations:
 - Slack credential creation refreshes the in-process registry from secret references.
 - Workbench Slack dry-run execution succeeds only when connector policy allows it.
 - Default connector policy requires approval for Slack outbound messages before connector code can run.
+- Google Chat credential creation refreshes the in-process registry from secret references.
+- Workbench Google Chat dry-run execution succeeds only when connector policy allows it.
+- Default connector policy requires approval for Google Chat outbound messages before connector code can run.
 
 ---
 

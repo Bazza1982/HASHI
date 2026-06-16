@@ -44,9 +44,11 @@ from orchestrator.enterprise.connectors import (
     ConnectorResult,
     EnterpriseConnector,
     GitHubConnector,
+    GoogleChatWebhookConnector,
     SlackWebhookConnector,
     evaluate_connector_action,
     record_connector_event,
+    validate_connector_action,
 )
 from orchestrator.enterprise.credentials import ConnectorCredential, ConnectorCredentialStore
 from orchestrator.enterprise.identity import EnterpriseRole, IdentityService
@@ -127,6 +129,7 @@ __all__ = [
     "ConnectorCredentialStore",
     "EnterpriseConnector",
     "GitHubConnector",
+    "GoogleChatWebhookConnector",
     "SlackWebhookConnector",
     "EnterpriseRole",
     "EnterpriseTask",
@@ -156,6 +159,7 @@ __all__ = [
     "install_default_connector_policy",
     "record_failed_task_escalation",
     "record_connector_event",
+    "validate_connector_action",
     "transition_task_with_failure_escalation",
     "verify_promised_artifacts",
 ]
