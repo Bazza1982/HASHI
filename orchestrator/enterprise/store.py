@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 class EnterpriseStore:
@@ -167,6 +167,9 @@ class EnterpriseStore:
                     correlation_id TEXT,
                     parent_event_id TEXT,
                     context_json TEXT NOT NULL,
+                    chain_index INTEGER,
+                    prev_hash TEXT,
+                    event_hash TEXT,
                     FOREIGN KEY(org_id) REFERENCES organizations(id) ON DELETE CASCADE
                 );
 
@@ -256,6 +259,14 @@ class EnterpriseStore:
                 "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
                 ("schema_version", str(SCHEMA_VERSION)),
             )
+            self._ensure_column(con, "audit_events", "chain_index", "INTEGER")
+            self._ensure_column(con, "audit_events", "prev_hash", "TEXT")
+            self._ensure_column(con, "audit_events", "event_hash", "TEXT")
+
+    def _ensure_column(self, con: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+        columns = {row["name"] for row in con.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in columns:
+            con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def schema_version(self) -> int | None:
         if not self.db_path.exists():

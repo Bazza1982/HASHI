@@ -415,6 +415,8 @@ Implemented checkpoints:
   - append from existing `AuditEvent`;
   - query by event type, actor, project, task, request, and correlation id;
   - JSONL export;
+  - tamper-evident hash-chain metadata (`chain_index`, `prev_hash`, `event_hash`) on new events;
+  - `verify_chain()` to detect modified, deleted, or reordered chained events;
 - stable ledger event schema version field;
 - policy and channel deny/approval audit paths now dual-write into the unified ledger;
 - Workbench enterprise audit APIs:
@@ -448,6 +450,7 @@ Implemented checkpoints:
 
 Residual P4 limitations:
 
+- hash-chain verification detects tampering in the SQLite ledger, but it is not WORM storage and does not prevent an attacker with database write access from replacing the whole database or recomputing a chain;
 - slash command JSONL can now be ingested into the ledger, but live slash command dual-write is still pending;
 - token audit JSONL can now be ingested into the ledger, but live token audit dual-write is still pending;
 - Remote audit JSONL can now be ingested into the ledger, but live Remote/HChat dual-write is still pending;
@@ -486,12 +489,14 @@ Residual P4 limitations:
 - `ENT-065` Add HChat/Remote adapter. Done for legacy Remote audit JSONL ingest with idempotent event IDs; live dual-write pending.
 - `ENT-066` Add tool/file event adapters. Browser action legacy JSONL ingest done; HASHI-controlled tool action JSONL source and ingest adapter done; live ledger dual-write pending.
 - `ENT-067` Add audit schema contract tests. Done for required ledger keys, canonical event types, export shape, and JSON-safe context.
+- `ENT-068` Add tamper-evident audit hash chain. Done for new ledger events and verification API; external WORM anchoring remains future work.
 
 **Acceptance:**
 
 - A governed task produces a queryable timeline.
 - Policy deny and channel deny events are never dropped.
 - JSONL export contains stable schema version.
+- New ledger events carry hash-chain fields and fail verification if event content is modified.
 
 ---
 
