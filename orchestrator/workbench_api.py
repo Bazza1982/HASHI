@@ -125,6 +125,12 @@ class WorkbenchApiServer:
         self.app.router.add_get("/api/auth/me", self.handle_auth_me)
         self.app.router.add_get("/api/enterprise/users", self.handle_enterprise_users)
         self.app.router.add_post("/api/enterprise/users", self.handle_enterprise_users_create)
+        self.app.router.add_get("/api/enterprise/api-tokens", self.handle_enterprise_api_tokens)
+        self.app.router.add_post("/api/enterprise/api-tokens", self.handle_enterprise_api_tokens_create)
+        self.app.router.add_post(
+            "/api/enterprise/api-tokens/{token_id}/revoke",
+            self.handle_enterprise_api_token_revoke,
+        )
         self.app.router.add_get("/api/enterprise/projects", self.handle_enterprise_projects)
         self.app.router.add_post("/api/enterprise/projects", self.handle_enterprise_projects_create)
         self.app.router.add_get("/api/enterprise/channels", self.handle_enterprise_channels)
@@ -647,6 +653,19 @@ class WorkbenchApiServer:
             "created_at": project.created_at,
         }
 
+    def _enterprise_api_token_payload(self, token, *, include_plaintext: bool = False) -> dict:
+        payload = {
+            "id": token.id,
+            "user_id": token.user_id,
+            "scopes": list(token.scopes),
+            "expires_at": token.expires_at,
+            "created_at": token.created_at,
+            "revoked_at": token.revoked_at,
+        }
+        if include_plaintext:
+            payload["token"] = token.token
+        return payload
+
     def _enterprise_channel_payload(self, channel, *, include_bindings: bool = True) -> dict:
         bindings = []
         if include_bindings and self.channel_registry is not None:
@@ -803,6 +822,111 @@ class WorkbenchApiServer:
             context={"target_user_id": user.id, "org_id": org_id},
         )
         return web.json_response({"ok": True, "user": self._enterprise_user_payload(user)}, status=201)
+
+    async def handle_enterprise_api_tokens(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        query = getattr(request, "query", {}) or {}
+        org_id = str(getattr(self.global_config, "organization_id", "") or "").strip()
+        user_id = str(query.get("user_id") or "").strip() or None
+        include_revoked = str(query.get("include_revoked") or "").strip().lower() in {"1", "true", "yes"}
+        try:
+            tokens = self.identity_service.list_api_tokens(
+                org_id=org_id,
+                user_id=user_id,
+                include_revoked=include_revoked,
+            )
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        return web.json_response(
+            {
+                "ok": True,
+                "api_tokens": [self._enterprise_api_token_payload(token) for token in tokens],
+                "count": len(tokens),
+            }
+        )
+
+    async def handle_enterprise_api_tokens_create(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        actor = self._enterprise_user_from_request(request)
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
+        user_id = str(payload.get("user_id") or "").strip()
+        scopes = payload.get("scopes")
+        expires_at = str(payload.get("expires_at") or "").strip() or None
+        if not user_id or not isinstance(scopes, list):
+            return web.json_response({"ok": False, "error": "user_id and scopes list are required"}, status=400)
+        org_id = str(getattr(self.global_config, "organization_id", "") or "").strip()
+        try:
+            target_user = self.identity_service.get_user(user_id)
+            if target_user is None or target_user.org_id != org_id:
+                raise ValueError("target user is not in this organization")
+            token = self.identity_service.create_api_token(
+                user_id=user_id,
+                scopes=tuple(str(scope).strip() for scope in scopes if str(scope).strip()),
+                expires_at=expires_at,
+            )
+        except Exception as exc:
+            self._append_enterprise_audit(
+                event_type="admin_api",
+                action="api_token_create",
+                status="failed",
+                actor_id=actor.id if actor else None,
+                context={"target_user_id": user_id, "error": str(exc)},
+            )
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        self._append_enterprise_audit(
+            event_type="admin_api",
+            action="api_token_create",
+            status="success",
+            actor_id=actor.id if actor else None,
+            context={
+                "target_user_id": user_id,
+                "token_id": token.id,
+                "scopes": list(token.scopes),
+                "expires_at": token.expires_at,
+            },
+        )
+        return web.json_response(
+            {"ok": True, "api_token": self._enterprise_api_token_payload(token, include_plaintext=True)},
+            status=201,
+        )
+
+    async def handle_enterprise_api_token_revoke(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        actor = self._enterprise_user_from_request(request)
+        token_id = str(request.match_info.get("token_id") or "").strip()
+        if not token_id:
+            return web.json_response({"ok": False, "error": "token_id is required"}, status=400)
+        tokens = self.identity_service.list_api_tokens(
+            org_id=str(getattr(self.global_config, "organization_id", "") or "").strip(),
+            include_revoked=True,
+        )
+        if token_id not in {token.id for token in tokens}:
+            self._append_enterprise_audit(
+                event_type="admin_api",
+                action="api_token_revoke",
+                status="failed",
+                actor_id=actor.id if actor else None,
+                context={"token_id": token_id, "error": "token not found in organization"},
+            )
+            return web.json_response({"ok": False, "error": "token not found in organization"}, status=404)
+        revoked = self.identity_service.revoke_api_token_by_id(token_id)
+        self._append_enterprise_audit(
+            event_type="admin_api",
+            action="api_token_revoke",
+            status="success" if revoked else "noop",
+            actor_id=actor.id if actor else None,
+            context={"token_id": token_id},
+        )
+        return web.json_response({"ok": True, "token_id": token_id, "revoked": revoked})
 
     async def handle_enterprise_projects(self, request):
         error = self._enterprise_admin_error_response(request)

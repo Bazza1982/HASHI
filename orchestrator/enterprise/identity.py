@@ -106,6 +106,7 @@ class ApiToken:
     scopes: tuple[str, ...]
     expires_at: str | None
     created_at: str
+    revoked_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -366,6 +367,45 @@ class IdentityService:
             )
             return cur.rowcount > 0
 
+    def revoke_api_token_by_id(self, token_id: str) -> bool:
+        with self.store.connect() as con:
+            cur = con.execute(
+                "UPDATE api_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+                (_utc_now_iso(), _require_id(token_id, "token_id")),
+            )
+            return cur.rowcount > 0
+
+    def list_api_tokens(
+        self,
+        *,
+        org_id: str | None = None,
+        user_id: str | None = None,
+        include_revoked: bool = False,
+    ) -> list[ApiToken]:
+        clauses = []
+        params: list[str] = []
+        if org_id is not None:
+            clauses.append("users.org_id = ?")
+            params.append(_require_id(org_id, "org_id"))
+        if user_id is not None:
+            clauses.append("api_tokens.user_id = ?")
+            params.append(_require_id(user_id, "user_id"))
+        if not include_revoked:
+            clauses.append("api_tokens.revoked_at IS NULL")
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self.store.connect() as con:
+            rows = con.execute(
+                f"""
+                SELECT api_tokens.*
+                FROM api_tokens
+                JOIN users ON users.id = api_tokens.user_id
+                {where}
+                ORDER BY api_tokens.created_at DESC, api_tokens.id
+                """,
+                tuple(params),
+            ).fetchall()
+        return [_api_token_from_row(row, token="") for row in rows]
+
     def create_service_account(
         self,
         *,
@@ -523,4 +563,5 @@ def _api_token_from_row(row, *, token: str) -> ApiToken:
         scopes=tuple(json.loads(row["scopes_json"])),
         expires_at=row["expires_at"],
         created_at=row["created_at"],
+        revoked_at=row["revoked_at"],
     )

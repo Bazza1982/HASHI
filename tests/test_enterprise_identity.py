@@ -138,6 +138,40 @@ def test_api_tokens_are_hashed_validated_and_revoked(tmp_path):
     assert service.validate_api_token(token.token) is None
 
 
+def test_api_tokens_can_be_listed_and_revoked_by_id_without_secret_material(tmp_path):
+    service = _service(tmp_path)
+    service.create_organization(org_id="ORG-001", name="Acme")
+    service.create_organization(org_id="ORG-002", name="Other")
+    user = service.create_user(
+        org_id="ORG-001",
+        email="user@example.com",
+        display_name="User",
+        password="secret-password",
+        user_id="usr-1",
+    )
+    other_user = service.create_user(
+        org_id="ORG-002",
+        email="other@example.com",
+        display_name="Other",
+        password="secret-password",
+        user_id="usr-2",
+    )
+
+    token = service.create_api_token(user_id=user.id, scopes=["audit:read"])
+    service.create_api_token(user_id=other_user.id, scopes=["audit:read"])
+
+    active_tokens = service.list_api_tokens(org_id="ORG-001")
+    assert [item.id for item in active_tokens] == [token.id]
+    assert active_tokens[0].token == ""
+    assert service.revoke_api_token_by_id(token.id) is True
+    assert service.validate_api_token(token.token) is None
+    assert service.revoke_api_token_by_id(token.id) is False
+    assert service.list_api_tokens(org_id="ORG-001") == []
+    revoked_tokens = service.list_api_tokens(org_id="ORG-001", include_revoked=True)
+    assert [item.id for item in revoked_tokens] == [token.id]
+    assert revoked_tokens[0].revoked_at
+
+
 def test_service_account_creation_requires_scope(tmp_path):
     service = _service(tmp_path)
     service.create_organization(org_id="ORG-001", name="Acme")
@@ -154,4 +188,3 @@ def test_service_account_creation_requires_scope(tmp_path):
     assert account.id == "svc-nightly"
     assert account.scopes == ("scheduler:run",)
     assert account.status == "active"
-
