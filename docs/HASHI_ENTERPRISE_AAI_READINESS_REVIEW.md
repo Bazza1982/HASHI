@@ -39,6 +39,7 @@ This is **not** the end state of the enterprise product. It is the first reviewa
 - Enterprise bootstrap requires explicit organization initialization.
 - Identity and role primitives distinguish `individual_user` from personal owner/admin mode.
 - Admin APIs and Workbench surfaces use governed session/admin checks.
+- Scoped API tokens can be created, listed as metadata without secret material, and revoked through admin-gated APIs with audit events.
 
 ### Control Plane
 

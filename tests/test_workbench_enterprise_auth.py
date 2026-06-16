@@ -11,10 +11,20 @@ from orchestrator.workbench_api import WorkbenchApiServer
 
 
 class _FakeRequest:
-    def __init__(self, payload: dict | None = None, *, headers: dict | None = None, path: str = ""):
+    def __init__(
+        self,
+        payload: dict | None = None,
+        *,
+        headers: dict | None = None,
+        path: str = "",
+        query: dict | None = None,
+        match_info: dict | None = None,
+    ):
         self._payload = payload or {}
         self.headers = headers or {}
         self.path = path
+        self.query = query or {}
+        self.match_info = match_info or {}
 
     async def json(self):
         return self._payload
@@ -214,6 +224,97 @@ async def test_enterprise_admin_can_create_and_list_users(tmp_path):
     assert event["action"] == "user_create"
     assert event["context"]["target_user_id"] == "usr-user"
     assert "secret-password" not in json.dumps(event)
+
+
+@pytest.mark.asyncio
+async def test_enterprise_admin_can_create_list_and_revoke_api_tokens(tmp_path):
+    server = _server(tmp_path)
+    admin = server.identity_service.bootstrap_org_admin(
+        org_id="ORG-001",
+        org_name="Acme",
+        email="admin@example.com",
+        display_name="Admin",
+        password="secret-password",
+        user_id="usr-admin",
+    )
+    user = server.identity_service.create_user(
+        org_id="ORG-001",
+        email="user@example.com",
+        display_name="User",
+        password="secret-password",
+        user_id="usr-user",
+    )
+    session = server.identity_service.create_session(user_id=admin.id)
+    headers = {"Authorization": f"Bearer {session.token}"}
+
+    create_response = await server.handle_enterprise_api_tokens_create(
+        _FakeRequest({"user_id": user.id, "scopes": ["audit:read", "tasks:write"]}, headers=headers)
+    )
+    create_payload = json.loads(create_response.text)
+    api_token = create_payload["api_token"]
+
+    assert create_response.status == 201
+    assert api_token["token"].startswith("hs_api_")
+    assert api_token["scopes"] == ["audit:read", "tasks:write"]
+    assert server.identity_service.validate_api_token(api_token["token"]).id == api_token["id"]
+
+    list_response = await server.handle_enterprise_api_tokens(_FakeRequest(headers=headers))
+    listed = json.loads(list_response.text)["api_tokens"]
+    assert [item["id"] for item in listed] == [api_token["id"]]
+    assert "token" not in listed[0]
+    assert "token_hash" not in json.dumps(listed)
+
+    revoke_response = await server.handle_enterprise_api_token_revoke(
+        _FakeRequest(headers=headers, match_info={"token_id": api_token["id"]})
+    )
+    assert json.loads(revoke_response.text)["revoked"] is True
+    assert server.identity_service.validate_api_token(api_token["token"]) is None
+
+    active_after_revoke = await server.handle_enterprise_api_tokens(_FakeRequest(headers=headers))
+    assert json.loads(active_after_revoke.text)["count"] == 0
+    revoked_list = await server.handle_enterprise_api_tokens(
+        _FakeRequest(headers=headers, query={"include_revoked": "true"})
+    )
+    assert json.loads(revoked_list.text)["count"] == 1
+
+    events = _audit_events(tmp_path)
+    assert [event["action"] for event in events[-2:]] == ["api_token_create", "api_token_revoke"]
+    assert api_token["token"] not in json.dumps(events)
+
+
+@pytest.mark.asyncio
+async def test_enterprise_api_token_create_rejects_cross_org_user(tmp_path):
+    server = _server(tmp_path)
+    admin = server.identity_service.bootstrap_org_admin(
+        org_id="ORG-001",
+        org_name="Acme",
+        email="admin@example.com",
+        display_name="Admin",
+        password="secret-password",
+        user_id="usr-admin",
+    )
+    server.identity_service.create_organization(org_id="ORG-002", name="Other")
+    other_user = server.identity_service.create_user(
+        org_id="ORG-002",
+        email="other@example.com",
+        display_name="Other",
+        password="secret-password",
+        user_id="usr-other",
+    )
+    session = server.identity_service.create_session(user_id=admin.id)
+
+    response = await server.handle_enterprise_api_tokens_create(
+        _FakeRequest(
+            {"user_id": other_user.id, "scopes": ["audit:read"]},
+            headers={"Authorization": f"Bearer {session.token}"},
+        )
+    )
+
+    assert response.status == 400
+    assert "not in this organization" in json.loads(response.text)["error"]
+    event = _audit_events(tmp_path)[-1]
+    assert event["action"] == "api_token_create"
+    assert event["status"] == "failed"
 
 
 @pytest.mark.asyncio

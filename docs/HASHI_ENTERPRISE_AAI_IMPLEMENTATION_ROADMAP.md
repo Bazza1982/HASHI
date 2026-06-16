@@ -316,10 +316,12 @@ Residual P2 limitations:
 - `ENT-043` Add `/api/enterprise/policies`.
 - `ENT-044` Add `/api/enterprise/audit`.
 - `ENT-045` Add role-gated route tests.
+- `ENT-046` Add `/api/enterprise/api-tokens` create/list/revoke lifecycle management.
 
 **Acceptance:**
 
 - `org_admin` can configure channels through API.
+- `org_admin` can create scoped API tokens, list token metadata without secret material, and revoke tokens by ID.
 - `individual_user` cannot call admin APIs.
 - `auditor` can read audit APIs but cannot mutate settings.
 
