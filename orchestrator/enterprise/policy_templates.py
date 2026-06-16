@@ -49,6 +49,15 @@ def install_default_connector_policy(evaluator: PolicyEvaluator) -> list[PolicyR
             "priority": 100,
         }
     )
+    specs.append(
+        {
+            "rule_id": "tpl-connector-google-chat-message-send-approval",
+            "action": "connector.execute",
+            "resource": "connector:google_chat:message.send",
+            "effect": "approval_required",
+            "priority": 100,
+        }
+    )
     for spec in specs:
         if spec["rule_id"] in existing_ids:
             rules.append(evaluator.get_rule(spec["rule_id"]))

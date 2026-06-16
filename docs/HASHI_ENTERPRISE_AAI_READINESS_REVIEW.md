@@ -25,7 +25,7 @@ HASHI Enterprise AAI has reached an **MVP review-ready** state for the governed 
 - task, artifact, evidence bundle, verification, and escalation primitives;
 - Workbench admin surfaces for users, channels, policies, audit, approvals, health, and connectors;
 - Docker/ops skeleton with backup, restore, migration, and health checks;
-- P10 connector MVP with GitHub and Slack, scoped credentials, secret refs, policy gates, health, dry-run, audit, and admin UI.
+- P10 connector MVP with GitHub, Slack, and Google Chat, scoped credentials, secret refs, policy gates, health, dry-run, audit, and admin UI.
 
 This is **not** the end state of the enterprise product. It is the first reviewable implementation slice.
 
@@ -62,7 +62,9 @@ This is **not** the end state of the enterprise product. It is the first reviewa
 - Connector interface, registry, credential store, secret resolver, execution gate, execution service, health API, and factory exist.
 - GitHub connector supports repository metadata and issue creation with dry-run behavior.
 - Slack incoming webhook connector supports governed `message.send` with dry-run behavior.
-- Default connector policy allows GitHub reads, requires approval for GitHub writes, and requires approval for Slack outbound messages.
+- Google Chat incoming webhook connector supports governed `message.send` with dry-run behavior.
+- Default connector policy allows GitHub reads, requires approval for GitHub writes, and requires approval for Slack and Google Chat outbound messages.
+- Workbench connector execution API rejects webhook `message.send` actions without non-empty `text` before execution.
 - Workbench Enterprise console supports connector credentials, health, policy defaults, and dry-run/test-run execution.
 
 ---
@@ -93,7 +95,9 @@ The connector readiness tests cover:
 - registry refresh from a Slack secret reference;
 - Slack dry-run execution through the Workbench connector execution API;
 - policy allow path for Slack dry-run;
-- default approval-required gate for Slack outbound messages.
+- default approval-required gate for Slack outbound messages;
+- Google Chat credential creation, registry refresh, dry-run execution, and default approval-required gate;
+- server-side rejection of webhook `message.send` without `text`.
 
 ---
 
@@ -108,7 +112,8 @@ These are not blockers for Enterprise MVP review, but they are not complete:
 - Kubernetes/HA deployment;
 - Vault/Kubernetes secret resolver implementations;
 - Slack OAuth/Bot API, channel discovery, and user mapping;
-- Microsoft Teams, Google Chat, and Feishu connectors;
+- Microsoft Teams and Feishu connectors;
+- Google Chat OAuth, space discovery, and user mapping;
 - GitHub PR create/merge actions;
 - DLP/classification and data residency controls;
 - browser-level UI screenshot regression tests for the Workbench Enterprise console.

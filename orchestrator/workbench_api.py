@@ -20,7 +20,13 @@ from orchestrator.enterprise.audit_schema import AuditEvent, AuditEventWriter
 from orchestrator.enterprise.capabilities import AgentCapabilityRegistry
 from orchestrator.enterprise.channel_gate import EnterpriseChannelGate
 from orchestrator.enterprise.channels import ChannelRegistry
-from orchestrator.enterprise.connectors import ConnectorAction, ConnectorExecutionService, ConnectorFactory, ConnectorRegistry
+from orchestrator.enterprise.connectors import (
+    ConnectorAction,
+    ConnectorExecutionService,
+    ConnectorFactory,
+    ConnectorRegistry,
+    validate_connector_action,
+)
 from orchestrator.enterprise.credentials import ConnectorCredentialStore
 from orchestrator.enterprise.identity import EnterpriseRole, IdentityService
 from orchestrator.enterprise.policy import PolicyEvaluator
@@ -1316,6 +1322,9 @@ class WorkbenchApiServer:
         )
         if not action.connector_type or not action.action:
             return web.json_response({"ok": False, "error": "connector_type and action are required"}, status=400)
+        validation_error = validate_connector_action(action)
+        if validation_error:
+            return web.json_response({"ok": False, "error": validation_error}, status=400)
         service = ConnectorExecutionService(
             registry=self.connector_registry,
             credential_store=self.connector_credentials,

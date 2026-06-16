@@ -57,11 +57,12 @@ def test_default_connector_policy_allows_github_reads_and_requires_write_or_egre
 
     rules = install_default_connector_policy(evaluator)
 
-    assert len(rules) == 6
+    assert len(rules) == 7
     read = evaluator.evaluate("connector.execute", resource="connector:github:repo.read")
     issue = evaluator.evaluate("connector.execute", resource="connector:github:issue.create")
     merge = evaluator.evaluate("connector.execute", resource="connector:github:pr.merge")
     slack_send = evaluator.evaluate("connector.execute", resource="connector:slack:message.send")
+    google_chat_send = evaluator.evaluate("connector.execute", resource="connector:google_chat:message.send")
     assert read.allowed is True
     assert read.rule_id == "tpl-connector-github-repo-read-allow"
     assert issue.allowed is False
@@ -72,6 +73,9 @@ def test_default_connector_policy_allows_github_reads_and_requires_write_or_egre
     assert slack_send.allowed is False
     assert slack_send.decision == PolicyDecision.APPROVAL_REQUIRED
     assert slack_send.rule_id == "tpl-connector-slack-message-send-approval"
+    assert google_chat_send.allowed is False
+    assert google_chat_send.decision == PolicyDecision.APPROVAL_REQUIRED
+    assert google_chat_send.rule_id == "tpl-connector-google-chat-message-send-approval"
 
 
 def test_default_connector_policy_install_is_idempotent(tmp_path):
@@ -81,7 +85,7 @@ def test_default_connector_policy_install_is_idempotent(tmp_path):
     install_default_connector_policy(evaluator)
     install_default_connector_policy(evaluator)
 
-    assert len(evaluator.list_rules()) == 6
+    assert len(evaluator.list_rules()) == 7
 
 
 def test_policy_evaluator_denies_matching_command_rule(tmp_path):

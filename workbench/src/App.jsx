@@ -1027,6 +1027,14 @@ const CONNECTOR_PRESETS = {
     resource: '*',
     parameters: '{\n  "text": "HASHI connector dry run"\n}',
   },
+  google_chat: {
+    displayName: 'Google Chat Webhook',
+    secretRef: 'env://GOOGLE_CHAT_WEBHOOK_URL',
+    scopes: 'message.send',
+    action: 'message.send',
+    resource: '*',
+    parameters: '{\n  "text": "HASHI connector dry run"\n}',
+  },
   github: {
     displayName: 'GitHub Token',
     secretRef: 'env://GITHUB_TOKEN',
@@ -1272,6 +1280,7 @@ function EnterpriseAdminPanel() {
           <form className="connector-form" onSubmit={createCredential}>
             <select value={form.connector_type} onChange={(e) => applyCredentialPreset(e.target.value)}>
               <option value="slack">Slack</option>
+              <option value="google_chat">Google Chat</option>
               <option value="github">GitHub</option>
             </select>
             <input value={form.display_name} onChange={(e) => setForm((prev) => ({ ...prev, display_name: e.target.value }))} placeholder="Display name" />
@@ -1363,6 +1372,7 @@ function EnterpriseAdminPanel() {
               onChange={(e) => applyExecutionPreset(e.target.value)}
             >
               <option value="slack">Slack</option>
+              <option value="google_chat">Google Chat</option>
               <option value="github">GitHub</option>
             </select>
             <input

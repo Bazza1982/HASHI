@@ -9,8 +9,10 @@ from orchestrator.enterprise.connectors.executor import ConnectorExecution, Conn
 from orchestrator.enterprise.connectors.factory import ConnectorFactory
 from orchestrator.enterprise.connectors.gate import ConnectorGateResult, evaluate_connector_action
 from orchestrator.enterprise.connectors.github import GitHubConnector
+from orchestrator.enterprise.connectors.google_chat import GoogleChatWebhookConnector
 from orchestrator.enterprise.connectors.registry import ConnectorHealthSummary, ConnectorRegistry
 from orchestrator.enterprise.connectors.slack import SlackWebhookConnector
+from orchestrator.enterprise.connectors.validation import validate_connector_action
 
 __all__ = [
     "ConnectorAction",
@@ -24,7 +26,9 @@ __all__ = [
     "EnterpriseConnector",
     "ConnectorGateResult",
     "GitHubConnector",
+    "GoogleChatWebhookConnector",
     "SlackWebhookConnector",
     "evaluate_connector_action",
     "record_connector_event",
+    "validate_connector_action",
 ]

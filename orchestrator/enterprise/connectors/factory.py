@@ -4,6 +4,7 @@ from collections.abc import Mapping
 
 from orchestrator.enterprise.connectors.base import EnterpriseConnector
 from orchestrator.enterprise.connectors.github import GitHubConnector, GitHubTransport
+from orchestrator.enterprise.connectors.google_chat import GoogleChatTransport, GoogleChatWebhookConnector
 from orchestrator.enterprise.connectors.registry import ConnectorRegistry
 from orchestrator.enterprise.connectors.slack import SlackTransport, SlackWebhookConnector
 from orchestrator.enterprise.credentials import ConnectorCredential
@@ -15,7 +16,7 @@ class ConnectorFactory:
         self,
         *,
         secret_resolver: ConnectorSecretResolver,
-        transports: Mapping[str, GitHubTransport | SlackTransport] | None = None,
+        transports: Mapping[str, GitHubTransport | SlackTransport | GoogleChatTransport] | None = None,
     ):
         self.secret_resolver = secret_resolver
         self.transports = {str(key).lower(): value for key, value in dict(transports or {}).items()}
@@ -27,6 +28,8 @@ class ConnectorFactory:
             return GitHubConnector(token=secret.value, transport=self.transports.get("github"))
         if connector_type == "slack":
             return SlackWebhookConnector(webhook_url=secret.value, transport=self.transports.get("slack"))
+        if connector_type == "google_chat":
+            return GoogleChatWebhookConnector(webhook_url=secret.value, transport=self.transports.get("google_chat"))
         raise ValueError(f"unsupported connector type: {credential.connector_type}")
 
     def build_registry(self, credentials: list[ConnectorCredential] | tuple[ConnectorCredential, ...]) -> ConnectorRegistry:
