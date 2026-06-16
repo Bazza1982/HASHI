@@ -109,6 +109,18 @@ def test_grok_build_cmd_defaults_to_execution_ready_flags(tmp_path):
     assert "--permission-mode" in cmd
     assert cmd[cmd.index("--permission-mode") + 1] == "bypassPermissions"
     assert "--always-approve" in cmd
+    assert "--check" not in cmd
+
+
+def test_grok_build_cmd_can_enable_check_explicitly(tmp_path):
+    cfg = _agent_config(tmp_path)
+    cfg.extra = {
+        "grok_check": True,
+    }
+    adapter = GrokCLIAdapter(cfg, SimpleNamespace(grok_cmd="grok"))
+
+    cmd = adapter._build_cmd("do work")
+
     assert "--check" in cmd
 
 

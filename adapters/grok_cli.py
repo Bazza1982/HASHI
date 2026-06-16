@@ -123,7 +123,7 @@ class GrokCLIAdapter(BaseBackend):
             cmd.extend(["--permission-mode", permission_mode])
         if self._extra_bool("grok_always_approve", True):
             cmd.append("--always-approve")
-        if self._extra_bool("grok_check", True):
+        if self._extra_bool("grok_check", False):
             cmd.append("--check")
         sandbox = self._extra_str("grok_sandbox")
         if sandbox:
