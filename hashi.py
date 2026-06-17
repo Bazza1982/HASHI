@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -434,12 +435,42 @@ def cmd_enterprise_audit_export_live(args) -> int:
         timeout_seconds=float(args.timeout),
         batch_size=int(args.batch_size),
     )
-    cycle = AuditLiveExporter(ledger, transport=_http_post_transport).export_with_checkpoint(
-        endpoint,
-        FileAuditLiveExportCheckpoint(checkpoint_path),
-        max_attempts=int(args.max_attempts),
-        backoff_seconds=float(args.backoff),
-    )
+    exporter = AuditLiveExporter(ledger, transport=_http_post_transport)
+    checkpoint = FileAuditLiveExportCheckpoint(checkpoint_path)
+
+    def run_cycle():
+        return exporter.export_with_checkpoint(
+            endpoint,
+            checkpoint,
+            max_attempts=int(args.max_attempts),
+            backoff_seconds=float(args.backoff),
+        )
+
+    if getattr(args, "daemon", False):
+        interval = max(0.1, float(getattr(args, "interval", 60.0) or 60.0))
+        max_cycles = max(0, int(getattr(args, "max_cycles", 0) or 0))
+        cycles = 0
+        print(_g("✓ Enterprise audit live export daemon started"))
+        print(f"  Interval        : {interval:g}s")
+        print(f"  Checkpoint      : {checkpoint_path}")
+        try:
+            while True:
+                cycle = run_cycle()
+                cycles += 1
+                print(
+                    "  Cycle "
+                    f"{cycles}: sent={cycle.result.sent} attempted={cycle.result.attempted} "
+                    f"last_chain_index={cycle.result.last_chain_index} attempts={cycle.attempts}"
+                )
+                if max_cycles and cycles >= max_cycles:
+                    print(_g("✓ Enterprise audit live export daemon completed max cycles"))
+                    return 0
+                time.sleep(interval)
+        except KeyboardInterrupt:
+            print(_y("Enterprise audit live export daemon stopped"))
+            return 0
+
+    cycle = run_cycle()
     print(_g("✓ Enterprise audit live export completed"))
     print(f"  Attempted       : {cycle.result.attempted}")
     print(f"  Sent            : {cycle.result.sent}")
@@ -517,6 +548,14 @@ def main():
     enterprise_audit_live.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
     enterprise_audit_live.add_argument("--max-attempts", type=int, default=3, help="Retry attempts before failing")
     enterprise_audit_live.add_argument("--backoff", type=float, default=1.0, help="Retry backoff seconds")
+    enterprise_audit_live.add_argument("--daemon", action="store_true", help="Run continuously instead of one cycle")
+    enterprise_audit_live.add_argument("--interval", type=float, default=60.0, help="Seconds between daemon cycles")
+    enterprise_audit_live.add_argument(
+        "--max-cycles",
+        type=int,
+        default=0,
+        help="Stop daemon mode after this many cycles. 0 means run until interrupted.",
+    )
     enterprise_audit_live.add_argument(
         "--header",
         action="append",

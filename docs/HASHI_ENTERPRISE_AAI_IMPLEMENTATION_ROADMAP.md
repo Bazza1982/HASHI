@@ -94,7 +94,7 @@ Deferred:
 
 - IdP-specific SAML/SCIM setup guides beyond the generic deployment runbook, and SCIM 2.0 compatibility beyond baseline Users, read-only Groups, discovery, and bounded Bulk surfaces;
 - full ABAC policy simulation;
-- live SIEM/OpenTelemetry exporter daemon mode, dashboards, deeper transforms, and production validation for each cloud identity model beyond the CLI checkpoint/retry runner, baseline Compose/Kubernetes/Helm scheduling, generic preset runbook, Kubernetes `secretKeyRef` support, and cloud/Vault SecretStore examples;
+- live SIEM/OpenTelemetry exporter supervised daemon deployment manifests, dashboards, deeper transforms, and production validation for each cloud identity model beyond the CLI checkpoint/retry runner, daemon loop, baseline Compose/Kubernetes/Helm scheduling, generic preset runbook, Kubernetes `secretKeyRef` support, and cloud/Vault SecretStore examples;
 - cloud/object-store WORM adapters beyond local filesystem sink;
 - Vault hardening beyond token-auth read provider, such as AppRole/Kubernetes auth and lease renewal;
 - Helm/HA hardening beyond the baseline chart;
@@ -515,6 +515,7 @@ Implemented checkpoints:
   - file-backed checkpoint persistence with atomic saves;
   - retry/backoff export cycle that advances checkpoint only after successful delivery;
   - `hashi enterprise audit-export-live` CLI runner for HTTP SIEM/ledger/OTLP pushes with checkpoint, headers, timeout, retry, and batch-size controls;
+  - daemon mode for bounded or continuous live export loops with configurable interval;
 - live audit export deployment scheduling:
   - Docker Compose `audit-export` profile for one-shot scheduled runs;
   - raw Kubernetes CronJob with `concurrencyPolicy: Forbid`;
@@ -565,7 +566,7 @@ Residual P4 limitations:
 - auditor read-only role semantics are not yet separated from broader admin access;
 - generic shell/file tool execution now has a canonical JSONL event source and ingest adapter;
 - generic object-store WORM sink is present, but cloud-specific SDK wiring and deployment runbooks remain future work;
-- retention, long-running daemon orchestration, deeper vendor transforms/dashboards, and production validation for each cloud identity model remain future P4 work.
+- retention, supervised daemon deployment manifests, deeper vendor transforms/dashboards, and production validation for each cloud identity model remain future P4 work.
 
 **Scope:**
 
@@ -609,6 +610,7 @@ Residual P4 limitations:
 - `ENT-069f` Add Helm secret refs for audit export. Done for endpoint/header `secretKeyRef` values in the audit export CronJob, example secret keys, and operator documentation; External Secrets Operator and cloud-provider secret-store examples remain future work.
 - `ENT-069g` Add audit export secret delivery examples. Done for plain Kubernetes Secret and generic External Secrets Operator `ExternalSecret` examples for audit export endpoint/header delivery; cloud-specific `SecretStore` manifests remain future work.
 - `ENT-069h` Add cloud SecretStore examples. Done for External Secrets Operator `ClusterSecretStore` examples covering AWS Secrets Manager, GCP Secret Manager, Azure Key Vault, and HashiCorp Vault; production identity validation remains future work.
+- `ENT-069i` Add live audit export daemon mode. Done for `--daemon`, `--interval`, bounded `--max-cycles`, checkpoint-safe loop behavior, and runbook guidance; systemd/Kubernetes supervised daemon manifests remain future work.
 
 **Acceptance:**
 
@@ -625,6 +627,7 @@ Residual P4 limitations:
 - Helm operators can keep audit export endpoint/header values in Kubernetes Secrets and reference them through `auditExport.endpointSecretRef` and `auditExport.headerSecretRef`.
 - Operators have example manifests for both direct Kubernetes Secret delivery and External Secrets Operator reconciliation of the same audit export secret keys.
 - Operators have cloud/Vault SecretStore templates to adapt for AWS, GCP, Azure, and Vault-based secret delivery.
+- Operators can run live audit export as a supervised daemon process without changing the delivery/checkpoint contract.
 
 ---
 

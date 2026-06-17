@@ -28,7 +28,7 @@ The exporter advances its checkpoint only after a successful 2xx response. Faile
 
 | Runtime | Asset | Usage |
 | --- | --- | --- |
-| CLI | `hashi enterprise audit-export-live` | Manual one-shot export or custom scheduler |
+| CLI | `hashi enterprise audit-export-live` | Manual one-shot export, bounded maintenance loop, or supervised daemon |
 | Docker Compose | `audit-export` profile | Run from cron or systemd on the host |
 | Raw Kubernetes | `deploy/kubernetes/enterprise/audit-export-cronjob.yaml` | Baseline CronJob |
 | Helm | `auditExport.enabled=true` | Chart-managed CronJob |
@@ -133,7 +133,37 @@ For periodic operation, call that command from cron or systemd. The service exit
 
 ---
 
-## 6. Kubernetes Operation
+## 6. Daemon Operation
+
+Run continuously under a process supervisor:
+
+```bash
+python hashi.py enterprise audit-export-live \
+  --endpoint "$HASHI_AUDIT_EXPORT_ENDPOINT" \
+  --format "$HASHI_AUDIT_EXPORT_FORMAT" \
+  --header "$HASHI_AUDIT_EXPORT_HEADER" \
+  --checkpoint /data/state/audit_live_export_checkpoint.json \
+  --daemon \
+  --interval 60
+```
+
+For maintenance windows or smoke tests, bound the loop:
+
+```bash
+python hashi.py enterprise audit-export-live \
+  --endpoint "$HASHI_AUDIT_EXPORT_ENDPOINT" \
+  --format "$HASHI_AUDIT_EXPORT_FORMAT" \
+  --header "$HASHI_AUDIT_EXPORT_HEADER" \
+  --daemon \
+  --interval 10 \
+  --max-cycles 3
+```
+
+Daemon mode still advances the checkpoint only after a successful export cycle. Use systemd, supervisord, Kubernetes Deployment, or another supervisor for restart policy.
+
+---
+
+## 7. Kubernetes Operation
 
 Raw manifests:
 
@@ -188,12 +218,13 @@ Available `ClusterSecretStore` templates:
 
 ---
 
-## 7. Acceptance Checks
+## 8. Acceptance Checks
 
 - [ ] Export endpoint is reachable from the HASHI runtime.
 - [ ] A first run sends at least one event or reports `attempted=0` without error.
 - [ ] Checkpoint file is created under `/data/state`.
 - [ ] A second run does not resend already checkpointed events.
+- [ ] Daemon mode can run with `--max-cycles` in staging and exits cleanly.
 - [ ] Collector receives the expected format (`siem`, `ledger`, `otel`, `splunk-hec`, or `elastic-bulk`).
 - [ ] Collector rejects bad credentials and HASHI does not advance the checkpoint.
 - [ ] No raw connector secrets, SAML assertions, OIDC tokens, or SCIM tokens appear in exported events.
@@ -203,9 +234,8 @@ Available `ClusterSecretStore` templates:
 
 ---
 
-## 8. Current Deferred Work
+## 9. Current Deferred Work
 
-- Managed long-running daemon mode.
 - Deeper vendor transforms for multi-index Elasticsearch routing and strict Splunk deployments that require one HEC event per request.
 - Provider-specific dashboards, alert packs, and managed daemon deployment patterns.
 - SIEM-specific dashboards, alerts, and field mappings beyond the baseline ECS-style event shape.
