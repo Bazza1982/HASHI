@@ -103,6 +103,22 @@ Use either `auditExport.enabled=true` for the CronJob or
 `auditExport.daemon.enabled=true` for the daemon Deployment. Do not enable both
 against the same ledger/checkpoint.
 
+For multi-replica daemon staging with a shared enterprise database, enable the
+DB lease arguments and keep the holder tied to the pod name:
+
+```bash
+helm upgrade --install hashi-enterprise deploy/helm/hashi-enterprise \
+  --namespace hashi-enterprise --create-namespace \
+  --set auditExport.daemon.enabled=true \
+  --set auditExport.daemon.dbLease.enabled=true \
+  --set auditExport.daemon.dbLease.name=audit-export \
+  --set auditExport.endpointSecretRef.name=hashi-audit-export \
+  --set auditExport.headerSecretRef.name=hashi-audit-export
+```
+
+Run `hashi enterprise migrate` against the target database before enabling the
+daemon lease path.
+
 If your cluster uses External Secrets Operator, adapt and apply:
 
 ```bash

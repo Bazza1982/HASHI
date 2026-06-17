@@ -99,3 +99,16 @@ def test_pod_disruption_budget_example_documents_multi_replica_guard():
     assert "minAvailable: 1" in text
     assert "app.kubernetes.io/name: hashi" in text
     assert "app.kubernetes.io/component: enterprise" in text
+
+
+def test_audit_export_daemon_uses_pod_name_db_lease():
+    text = _read("audit-export-daemon.deployment.yaml")
+
+    assert "name: HASHI_POD_NAME" in text
+    assert "fieldPath: metadata.name" in text
+    assert "- --db-lease-name" in text
+    assert "- audit-export" in text
+    assert "- --db-lease-holder" in text
+    assert "- $(HASHI_POD_NAME)" in text
+    assert "- --db-lease-ttl" in text
+    assert '- "180"' in text
