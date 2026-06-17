@@ -164,6 +164,7 @@ Deferred:
 - OIDC authorization-code start with server-side PKCE verifier storage;
 - OIDC callback state/code validation before token exchange;
 - OIDC token exchange request construction and claim mapping skeleton;
+- OIDC ID token claim validation after future JWT signature verification;
 - Workbench login endpoint;
 - audit events for login/logout/admin bootstrap;
 - personal profile maps current owner behavior to implicit top admin.
@@ -174,6 +175,7 @@ Deferred:
 - `orchestrator/enterprise/auth_providers.py`;
 - `orchestrator/enterprise/oidc_flow.py`;
 - `orchestrator/enterprise/oidc_exchange.py`;
+- `orchestrator/enterprise/oidc_token.py`;
 - `orchestrator/enterprise/auth_session.py`;
 - `orchestrator/enterprise/store.py`;
 - `orchestrator/workbench_api.py`;
@@ -191,6 +193,7 @@ Deferred:
 - `ENT-017` Add OIDC authorization start with PKCE. Done for authorization URL generation, state/nonce, server-side code verifier storage, and start audit.
 - `ENT-018` Add OIDC callback validation skeleton. Done for provider error handling, state validation, code presence checks, pending-flow consumption, and callback audit.
 - `ENT-019` Add OIDC token exchange request and claim mapping skeleton. Done for form-body construction, secret/verifier redaction in public responses, callback exchange preparation, and deterministic external identity mapping; live HTTP token exchange, ID token cryptographic validation, user upsert, and session creation remain future work.
+- `ENT-020` Add OIDC ID token claim validation. Done for issuer, audience, expiry, not-before, issued-at, subject, nonce, and redacted public payload checks after future cryptographic JWT verification; JWKS signature verification, user upsert, and session creation remain future work.
 
 **Acceptance:**
 
@@ -199,6 +202,7 @@ Deferred:
 - OIDC start does not expose `code_verifier`; the browser receives the authorization URL while HASHI keeps verifier and nonce state for callback validation.
 - OIDC callback validates state before token exchange and does not write authorization codes into audit logs.
 - OIDC callback can prepare a token exchange request without exposing authorization codes, PKCE verifiers, or client secrets in browser responses or audit logs.
+- OIDC ID token claims can be validated after cryptographic verification and do not expose nonce or raw token material in public payloads.
 - `individual_user` exists as a role but cannot access admin APIs.
 - Personal profile does not require login migration.
 

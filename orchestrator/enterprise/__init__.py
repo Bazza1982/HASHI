@@ -16,6 +16,7 @@ from orchestrator.enterprise.oidc_exchange import (
     map_oidc_claims,
 )
 from orchestrator.enterprise.oidc_flow import OidcAuthorizationStart, build_oidc_authorization_start
+from orchestrator.enterprise.oidc_token import OidcValidatedClaims, validate_oidc_id_token_claims
 from orchestrator.enterprise.artifacts import Artifact, ArtifactRegistry
 from orchestrator.enterprise.audit_adapters import (
     BrowserAuditIngestResult,
@@ -106,6 +107,7 @@ __all__ = [
     "OidcMappedIdentity",
     "OidcAuthorizationStart",
     "OidcTokenExchangeRequest",
+    "OidcValidatedClaims",
     "Artifact",
     "ArtifactRegistry",
     "BrowserAuditIngestResult",
@@ -178,6 +180,7 @@ __all__ = [
     "build_oidc_authorization_start",
     "build_oidc_token_exchange_request",
     "map_oidc_claims",
+    "validate_oidc_id_token_claims",
     "record_failed_task_escalation",
     "record_connector_event",
     "validate_connector_action",

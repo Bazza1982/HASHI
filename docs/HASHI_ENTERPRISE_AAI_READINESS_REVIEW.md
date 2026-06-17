@@ -20,7 +20,7 @@ HASHI Enterprise AAI has reached an **MVP review-ready** state for the governed 
 - one codebase with `personal`, `team`, and `enterprise` profiles;
 - enterprise identity, sessions, roles, projects, memberships, service accounts, and API tokens;
 - OIDC provider metadata skeleton for enterprise SSO readiness, with secret redaction and fail-closed readiness checks;
-- OIDC authorization-code start, callback state/code validation, token exchange request preparation, and claim mapping skeleton;
+- OIDC authorization-code start, callback state/code validation, token exchange request preparation, ID token claim validation, and claim mapping skeleton;
 - default-disabled governed channels and channel gates;
 - central policy decisions for commands, channels, backends, tools, execution, and connectors;
 - unified audit ledger and adapters for existing HASHI audit streams;
@@ -44,6 +44,7 @@ This is **not** the end state of the enterprise product. It is the first reviewa
 - Scoped API tokens can be created, listed as metadata without secret material, and revoked through admin-gated APIs with audit events.
 - Workbench can discover configured local/OIDC login providers without exposing client secrets.
 - OIDC start returns an authorization URL while keeping the PKCE `code_verifier` server-side; callback validation consumes state and prepares a token exchange request without writing authorization codes, PKCE verifiers, or client secrets into browser responses or audit.
+- OIDC ID token claim validation covers issuer, audience, expiry, not-before, issued-at, subject, and nonce checks after future cryptographic JWT verification.
 
 ### Control Plane
 
@@ -112,7 +113,7 @@ The connector readiness tests cover:
 
 These are not blockers for Enterprise MVP review, but they are not complete:
 
-- complete SAML/SCIM login flows and OIDC HTTP token exchange, ID token cryptographic validation, user upsert, and session creation;
+- complete SAML/SCIM login flows and OIDC HTTP token exchange, JWKS signature validation, user upsert, and session creation;
 - full ABAC simulator and policy preview tooling;
 - WORM audit storage or external ledger anchoring;
 - live SIEM push or OTLP network export;
