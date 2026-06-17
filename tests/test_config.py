@@ -141,3 +141,71 @@ def test_global_claw_providers_are_loaded(tmp_path):
 
     assert global_cfg.claw_providers["binary_path"] == "/opt/hashi/bin/claw"
     assert global_cfg.claw_providers["providers"]["openrouter"]["secret"] == "openrouter_key"
+
+
+def test_enterprise_scheduler_lease_config_is_loaded(tmp_path):
+    config_path = tmp_path / "agents.json"
+    secrets_path = tmp_path / "secrets.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "global": {
+                    "authorized_id": 0,
+                    "base_logs_dir": "logs",
+                    "base_media_dir": "media",
+                    "enterprise_database_url": "sqlite:////data/state/enterprise.sqlite",
+                    "enterprise_scheduler_lease_enabled": True,
+                    "enterprise_scheduler_lease_name": "scheduler-main",
+                    "enterprise_scheduler_lease_holder": "pod-a",
+                    "enterprise_scheduler_lease_ttl_seconds": 90,
+                },
+                "agents": [
+                    {
+                        "name": "flexy",
+                        "type": "flex",
+                        "workspace_dir": "workspaces/flexy",
+                        "system_md": "workspaces/flexy/agent.md",
+                        "allowed_backends": ["gemini-cli"],
+                        "active_backend": "gemini-cli",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    secrets_path.write_text(json.dumps({"authorized_telegram_id": 0}), encoding="utf-8")
+
+    global_cfg, _, _ = ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
+
+    assert global_cfg.enterprise_database_url == "sqlite:////data/state/enterprise.sqlite"
+    assert global_cfg.enterprise_scheduler_lease_enabled is True
+    assert global_cfg.enterprise_scheduler_lease_name == "scheduler-main"
+    assert global_cfg.enterprise_scheduler_lease_holder == "pod-a"
+    assert global_cfg.enterprise_scheduler_lease_ttl_seconds == 90
+
+
+def test_enterprise_scheduler_lease_env_overrides_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("HASHI_ENTERPRISE_DATABASE_URL", "sqlite:////env/state/enterprise.sqlite")
+    monkeypatch.setenv("HASHI_ENTERPRISE_SCHEDULER_LEASE_ENABLED", "1")
+    monkeypatch.setenv("HASHI_ENTERPRISE_SCHEDULER_LEASE_NAME", "scheduler-env")
+    monkeypatch.setenv("HASHI_ENTERPRISE_SCHEDULER_LEASE_HOLDER", "pod-env")
+    monkeypatch.setenv("HASHI_ENTERPRISE_SCHEDULER_LEASE_TTL_SECONDS", "120")
+    config_path, secrets_path = _write_base_files(
+        tmp_path,
+        {
+            "name": "flexy",
+            "type": "flex",
+            "workspace_dir": "workspaces/flexy",
+            "system_md": "workspaces/flexy/agent.md",
+            "allowed_backends": ["gemini-cli"],
+            "active_backend": "gemini-cli",
+        },
+    )
+
+    global_cfg, _, _ = ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
+
+    assert global_cfg.enterprise_database_url == "sqlite:////env/state/enterprise.sqlite"
+    assert global_cfg.enterprise_scheduler_lease_enabled is True
+    assert global_cfg.enterprise_scheduler_lease_name == "scheduler-env"
+    assert global_cfg.enterprise_scheduler_lease_holder == "pod-env"
+    assert global_cfg.enterprise_scheduler_lease_ttl_seconds == 120

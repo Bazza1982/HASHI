@@ -4,6 +4,8 @@ import asyncio
 import http.client
 import json
 import logging
+import os
+import socket
 import sys
 import traceback
 from pathlib import Path
@@ -189,6 +191,51 @@ class ServiceManager:
             self.kernel.api_gateway.set_default_model(normalized)
         return True, f"API Gateway default model set to {normalized}."
 
+    def _resolve_enterprise_database_path(self, raw_url: str | None) -> Path:
+        value = str(raw_url or "").strip()
+        if not value:
+            return self.kernel.paths.bridge_home / "state" / "enterprise.sqlite"
+        if value.startswith("sqlite:///"):
+            return Path(value[len("sqlite:///"):]).expanduser()
+        if "://" in value:
+            raise ValueError(f"unsupported enterprise scheduler lease database URL: {value}")
+        return Path(value).expanduser()
+
+    def _scheduler_enterprise_lease_kwargs(self, global_cfg) -> dict:
+        if not bool(getattr(global_cfg, "enterprise_scheduler_lease_enabled", False)):
+            return {}
+        try:
+            from orchestrator.enterprise import EnterpriseLeaseStore
+
+            db_path = self._resolve_enterprise_database_path(getattr(global_cfg, "enterprise_database_url", None))
+            org_id = (
+                getattr(global_cfg, "organization_id", None)
+                or os.environ.get("HASHI_ORGANIZATION_ID")
+                or os.environ.get("HASHI_ENTERPRISE_ORG_ID")
+                or "ORG-001"
+            )
+            lease_store = EnterpriseLeaseStore.from_path(db_path, org_id=org_id)
+        except Exception as exc:
+            main_logger.warning("Enterprise scheduler DB lease disabled: %s", exc)
+            bridge_logger.warning("Enterprise scheduler DB lease disabled: %s", exc)
+            return {}
+
+        holder = (
+            getattr(global_cfg, "enterprise_scheduler_lease_holder", None)
+            or os.environ.get("POD_NAME")
+            or f"{getattr(global_cfg, 'instance_id', 'HASHI')}:{socket.gethostname()}:{os.getpid()}"
+        )
+        return {
+            "enterprise_lease_store": lease_store,
+            "enterprise_lease_name": str(
+                getattr(global_cfg, "enterprise_scheduler_lease_name", None) or "superloop-scheduler"
+            ),
+            "enterprise_lease_holder": str(holder),
+            "enterprise_lease_ttl_seconds": max(
+                1, int(getattr(global_cfg, "enterprise_scheduler_lease_ttl_seconds", 60) or 60)
+            ),
+        }
+
     def start_scheduler(self, global_cfg):
         self.kernel.scheduler = TaskScheduler(
             self.kernel.paths.tasks_path,
@@ -197,6 +244,7 @@ class ServiceManager:
             global_cfg.authorized_id,
             self.kernel.skill_manager,
             orchestrator=self.kernel,
+            **self._scheduler_enterprise_lease_kwargs(global_cfg),
         )
         self.kernel.scheduler_task = asyncio.create_task(self.kernel.scheduler.run(), name="scheduler")
 
@@ -223,6 +271,11 @@ class ServiceManager:
         await self.repair_workbench_api_if_needed()
         await self.stop_scheduler()
         reloaded_scheduler = sys.modules["orchestrator.scheduler"].TaskScheduler
+        lease_kwargs = (
+            self._scheduler_enterprise_lease_kwargs(self.kernel.global_cfg)
+            if self.kernel.global_cfg
+            else {}
+        )
         self.kernel.scheduler = reloaded_scheduler(
             self.kernel.paths.tasks_path,
             self.kernel.paths.state_path,
@@ -230,6 +283,7 @@ class ServiceManager:
             self.kernel.global_cfg.authorized_id if self.kernel.global_cfg else 0,
             self.kernel.skill_manager,
             orchestrator=self.kernel,
+            **lease_kwargs,
         )
         self.kernel.scheduler_task = asyncio.create_task(self.kernel.scheduler.run(), name="scheduler")
         main_logger.info("Hot restart: scheduler recreated with reloaded code.")

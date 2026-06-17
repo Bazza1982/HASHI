@@ -38,6 +38,12 @@ enterprise:
   bridgeHome: /data
   workbenchPort: "18800"
 
+schedulerLease:
+  enabled: false
+  name: superloop-scheduler
+  holder: "$(HASHI_POD_NAME)"
+  ttl: "60"
+
 secrets:
   adminToken: change-me
   databaseUrl: sqlite:////data/state/enterprise.sqlite

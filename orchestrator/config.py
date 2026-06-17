@@ -21,6 +21,12 @@ LEGACY_FIXED_RUNTIME_ENV = "HASHI_ENABLE_LEGACY_FIXED_RUNTIME"
 config_logger = logging.getLogger("BridgeU.Config")
 
 
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def resolve_access_root(scope: str, workspace_dir: Path, project_root: Path) -> Path:
     """Resolve an access_scope string to an actual filesystem path."""
     if scope == "workspace":
@@ -58,6 +64,11 @@ class GlobalConfig:
     openrouter_url: str = "https://openrouter.ai/api/v1/chat/completions"
     claw_providers: Dict[str, Any] = field(default_factory=dict)
     enterprise_auth_providers: List[Dict[str, Any]] = field(default_factory=list)
+    enterprise_database_url: str | None = None
+    enterprise_scheduler_lease_enabled: bool = False
+    enterprise_scheduler_lease_name: str = "superloop-scheduler"
+    enterprise_scheduler_lease_holder: str | None = None
+    enterprise_scheduler_lease_ttl_seconds: int = 60
 
 @dataclass
 class AgentConfig:
@@ -122,6 +133,39 @@ class ConfigManager:
 
         workbench_port = int(g_raw.get("workbench_port", 18800))
         api_gateway_port = int(g_raw.get("api_gateway_port", workbench_port + 1))
+        enterprise_database_url = (
+            os.environ.get("HASHI_ENTERPRISE_DATABASE_URL")
+            or g_raw.get("enterprise_database_url")
+            or None
+        )
+        enterprise_scheduler_lease_enabled = _truthy(
+            os.environ.get(
+                "HASHI_ENTERPRISE_SCHEDULER_LEASE_ENABLED",
+                g_raw.get("enterprise_scheduler_lease_enabled", False),
+            )
+        )
+        enterprise_scheduler_lease_name = str(
+            os.environ.get(
+                "HASHI_ENTERPRISE_SCHEDULER_LEASE_NAME",
+                g_raw.get("enterprise_scheduler_lease_name", "superloop-scheduler"),
+            )
+            or "superloop-scheduler"
+        )
+        enterprise_scheduler_lease_holder = (
+            os.environ.get("HASHI_ENTERPRISE_SCHEDULER_LEASE_HOLDER")
+            or g_raw.get("enterprise_scheduler_lease_holder")
+            or None
+        )
+        enterprise_scheduler_lease_ttl_seconds = max(
+            1,
+            int(
+                os.environ.get(
+                    "HASHI_ENTERPRISE_SCHEDULER_LEASE_TTL_SECONDS",
+                    g_raw.get("enterprise_scheduler_lease_ttl_seconds", 60),
+                )
+                or 60
+            ),
+        )
 
         global_cfg = GlobalConfig(
             authorized_id=_auth_id,
@@ -175,6 +219,11 @@ class ConfigManager:
             openrouter_url=g_raw.get("openrouter_url", "https://openrouter.ai/api/v1/chat/completions"),
             claw_providers=dict(g_raw.get("claw_providers") or {}),
             enterprise_auth_providers=list(g_raw.get("enterprise_auth_providers") or []),
+            enterprise_database_url=enterprise_database_url,
+            enterprise_scheduler_lease_enabled=enterprise_scheduler_lease_enabled,
+            enterprise_scheduler_lease_name=enterprise_scheduler_lease_name,
+            enterprise_scheduler_lease_holder=enterprise_scheduler_lease_holder,
+            enterprise_scheduler_lease_ttl_seconds=enterprise_scheduler_lease_ttl_seconds,
         )
 
         agents = []

@@ -46,6 +46,10 @@ def test_deployment_uses_enterprise_health_probes_and_port():
     text = _read("deployment.yaml")
 
     assert "containerPort: 18800" in text
+    assert "name: HASHI_POD_NAME" in text
+    assert "fieldPath: metadata.name" in text
+    assert "name: HASHI_ENTERPRISE_SCHEDULER_LEASE_HOLDER" in text
+    assert 'value: "$(HASHI_POD_NAME)"' in text
     assert "livenessProbe:" in text
     assert "readinessProbe:" in text
     assert "path: /api/health" in text
@@ -71,6 +75,9 @@ def test_configmap_sets_enterprise_profile_and_bridge_home():
     assert "HASHI_BRIDGE_HOME: /data" in text
     assert 'HASHI_WORKBENCH_PORT: "18800"' in text
     assert "HASHI_ORGANIZATION_ID: ORG-001" in text
+    assert 'HASHI_ENTERPRISE_SCHEDULER_LEASE_ENABLED: "false"' in text
+    assert "HASHI_ENTERPRISE_SCHEDULER_LEASE_NAME: superloop-scheduler" in text
+    assert 'HASHI_ENTERPRISE_SCHEDULER_LEASE_TTL_SECONDS: "60"' in text
 
 
 def test_secret_example_does_not_contain_real_values():

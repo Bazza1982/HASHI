@@ -30,6 +30,13 @@ spec:
                 name: hashi-enterprise-config
             - secretRef:
                 name: hashi-enterprise-secrets
+          env:
+            - name: HASHI_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: HASHI_ENTERPRISE_SCHEDULER_LEASE_HOLDER
+              value: "$(HASHI_POD_NAME)"
           volumeMounts:
             - name: hashi-data
               mountPath: /data

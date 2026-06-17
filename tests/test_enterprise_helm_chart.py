@@ -53,6 +53,9 @@ def test_enterprise_helm_values_default_to_governed_single_replica():
     assert "autoscaling:" in text
     assert "externalDatabase:" in text
     assert "secretKey: HASHI_ENTERPRISE_DATABASE_URL" in text
+    assert "schedulerLease:" in text
+    assert "name: superloop-scheduler" in text
+    assert 'holder: "$(HASHI_POD_NAME)"' in text
     assert "podDisruptionBudget:" in text
     assert "minAvailable: 1" in text
     assert "dbLease:" in text
@@ -73,6 +76,10 @@ def test_enterprise_helm_deployment_keeps_health_and_secret_contracts():
     assert "readinessProbe:" in text
     assert "path: {{ .Values.livenessProbe.path }}" in text
     assert "path: {{ .Values.readinessProbe.path }}" in text
+    assert "name: HASHI_POD_NAME" in text
+    assert "fieldPath: metadata.name" in text
+    assert "name: HASHI_ENTERPRISE_SCHEDULER_LEASE_HOLDER" in text
+    assert "value: {{ .Values.schedulerLease.holder | quote }}" in text
     assert "{{- if .Values.externalDatabase.enabled }}" in text
     assert "name: HASHI_ENTERPRISE_DATABASE_URL" in text
     assert "name: {{ .Values.externalDatabase.secretName }}" in text
@@ -97,6 +104,9 @@ def test_enterprise_helm_configmap_sets_enterprise_environment():
     assert "HASHI_ORGANIZATION_ID:" in text
     assert "HASHI_BRIDGE_HOME:" in text
     assert "HASHI_WORKBENCH_PORT:" in text
+    assert "HASHI_ENTERPRISE_SCHEDULER_LEASE_ENABLED:" in text
+    assert "HASHI_ENTERPRISE_SCHEDULER_LEASE_NAME:" in text
+    assert "HASHI_ENTERPRISE_SCHEDULER_LEASE_TTL_SECONDS:" in text
 
 
 def test_enterprise_helm_chart_includes_optional_ingress_network_policy_and_hpa():

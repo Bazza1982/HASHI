@@ -46,11 +46,25 @@ spec:
                 name: {{ .Values.secrets.connectorSecretName }}
           {{- if .Values.externalDatabase.enabled }}
           env:
+            - name: HASHI_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: HASHI_ENTERPRISE_SCHEDULER_LEASE_HOLDER
+              value: {{ .Values.schedulerLease.holder | quote }}
             - name: HASHI_ENTERPRISE_DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.externalDatabase.secretName }}
                   key: {{ .Values.externalDatabase.secretKey }}
+          {{- else }}
+          env:
+            - name: HASHI_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: HASHI_ENTERPRISE_SCHEDULER_LEASE_HOLDER
+              value: {{ .Values.schedulerLease.holder | quote }}
           {{- end }}
           volumeMounts:
             - name: hashi-data
