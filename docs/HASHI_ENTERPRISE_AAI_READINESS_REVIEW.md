@@ -54,6 +54,7 @@ This is **not** the end state of the enterprise product. It is the first reviewa
 - Unified ledger records structured events for identity, admin actions, channels, policy decisions, commands, connectors, tasks, artifacts, and adapted legacy streams.
 - New ledger events include tamper-evident hash-chain fields and can be verified for in-database modification, deletion, or reordering.
 - Audit export and Workbench timeline views exist for review and handoff.
+- Audit export supports default ledger NDJSON plus SIEM/ECS-style and OpenTelemetry log-style NDJSON mappings.
 - Sensitive connector parameters are redacted in connector audit records.
 
 ### Work And Evidence
@@ -112,7 +113,7 @@ These are not blockers for Enterprise MVP review, but they are not complete:
 - complete SAML/OIDC/SCIM authorization-code login flows;
 - full ABAC simulator and policy preview tooling;
 - WORM audit storage or external ledger anchoring;
-- SIEM/OpenTelemetry export;
+- live SIEM push or OTLP network export;
 - Kubernetes/HA deployment;
 - Vault/Kubernetes secret resolver implementations;
 - Slack OAuth/Bot API, channel discovery, and user mapping;

@@ -7,6 +7,7 @@ from orchestrator.enterprise.profile import (
 )
 from orchestrator.enterprise.audit_schema import AuditEvent, AuditEventWriter
 from orchestrator.enterprise.audit_ledger import AuditChainVerification, EnterpriseAuditLedger, LedgerEvent
+from orchestrator.enterprise.audit_export import format_otel_log, format_siem_event
 from orchestrator.enterprise.auth_providers import AuthProvider, AuthProviderType, load_auth_providers
 from orchestrator.enterprise.artifacts import Artifact, ArtifactRegistry
 from orchestrator.enterprise.audit_adapters import (
@@ -91,6 +92,8 @@ __all__ = [
     "EnterpriseAuditLedger",
     "AuditChainVerification",
     "LedgerEvent",
+    "format_otel_log",
+    "format_siem_event",
     "AuthProvider",
     "AuthProviderType",
     "Artifact",

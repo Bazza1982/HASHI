@@ -16,6 +16,7 @@ from orchestrator.admin_local_testing import (
 )
 from orchestrator.conversation_router import ConversationRouter
 from orchestrator.enterprise.audit_ledger import EnterpriseAuditLedger
+from orchestrator.enterprise.audit_export import format_otel_log, format_siem_event
 from orchestrator.enterprise.audit_schema import AuditEvent, AuditEventWriter
 from orchestrator.enterprise.auth_providers import load_auth_providers
 from orchestrator.enterprise.capabilities import AgentCapabilityRegistry
@@ -1161,10 +1162,17 @@ class WorkbenchApiServer:
         if self.audit_ledger is None:
             return web.json_response({"ok": False, "error": "audit ledger unavailable"}, status=503)
         filters = self._enterprise_audit_filters(request)
-        lines = [
-            json.dumps(event.to_dict(), ensure_ascii=False, sort_keys=True)
-            for event in self.audit_ledger.query(**filters)
-        ]
+        export_format = str((getattr(request, "query", {}) or {}).get("format") or "ndjson").strip().lower()
+        events = self.audit_ledger.query(**filters)
+        if export_format in {"ndjson", "ledger"}:
+            records = [event.to_dict() for event in events]
+        elif export_format in {"siem", "ecs"}:
+            records = [format_siem_event(event) for event in events]
+        elif export_format in {"otel", "opentelemetry"}:
+            records = [format_otel_log(event) for event in events]
+        else:
+            return web.json_response({"ok": False, "error": f"unsupported audit export format: {export_format}"}, status=400)
+        lines = [json.dumps(record, ensure_ascii=False, sort_keys=True) for record in records]
         body = "\n".join(lines)
         if body:
             body += "\n"
