@@ -191,6 +191,20 @@ helm upgrade --install hashi-enterprise deploy/helm/hashi-enterprise \
 
 Use one export mode per HASHI instance: one-shot scheduler, CronJob, or daemon. Running multiple exporters against the same ledger/checkpoint can duplicate delivery attempts. The CLI creates a singleton lock beside the checkpoint by default (`<checkpoint>.lock`) and fails closed if another exporter already holds it. Use `--lock-path` only when operators need to place that lock on the same shared volume as a custom checkpoint path.
 
+For multi-replica deployments with a shared enterprise database, add a DB lease
+so only the active exporter holder can run:
+
+```bash
+python hashi.py enterprise audit-export-live \
+  --endpoint "$HASHI_AUDIT_EXPORT_ENDPOINT" \
+  --format "$HASHI_AUDIT_EXPORT_FORMAT" \
+  --header "$HASHI_AUDIT_EXPORT_HEADER" \
+  --daemon \
+  --db-lease-name audit-export \
+  --db-lease-holder "$HOSTNAME" \
+  --db-lease-ttl 180
+```
+
 If an exporter process is killed abruptly, inspect the lock file before deleting it. A stale lock should only be removed after confirming no exporter process is still running for that ledger/checkpoint pair.
 
 ---
@@ -209,6 +223,7 @@ Before enabling production export:
 - confirm the PVC used by HASHI is mounted by the CronJob;
 - confirm the CronJob cannot overlap by keeping `concurrencyPolicy: Forbid`;
 - confirm all exporter pods for the same ledger use the same checkpoint and lock path on shared storage;
+- for multi-replica daemon deployments, set `--db-lease-name` and a stable `--db-lease-holder` such as the pod name;
 - verify the collector returns 2xx only after accepting the payload.
 
 Helm:

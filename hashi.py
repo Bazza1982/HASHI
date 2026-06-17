@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import socket
 import sys
 import time
 from datetime import datetime, timezone
@@ -418,6 +420,7 @@ def cmd_enterprise_audit_export_live(args) -> int:
         AuditLiveExportEndpoint,
         AuditLiveExporter,
         EnterpriseAuditLedger,
+        EnterpriseLeaseStore,
         FileAuditLiveExportCheckpoint,
         FileAuditLiveExportLock,
     )
@@ -445,6 +448,39 @@ def cmd_enterprise_audit_export_live(args) -> int:
     )
     if lock_path == checkpoint_path:
         raise ValueError("audit live export lock path must differ from checkpoint path")
+    db_lease_name = str(getattr(args, "db_lease_name", "") or "").strip()
+    db_lease_holder = str(getattr(args, "db_lease_holder", "") or "").strip() or f"{socket.gethostname()}:{os.getpid()}"
+    db_lease_ttl = max(1, int(getattr(args, "db_lease_ttl", 180) or 180))
+    db_lease_store = EnterpriseLeaseStore.from_path(db_path, org_id=args.org_id) if db_lease_name else None
+
+    def acquire_db_lease():
+        if db_lease_store is None:
+            return None
+        attempt = db_lease_store.acquire(
+            db_lease_name,
+            holder_id=db_lease_holder,
+            ttl_seconds=db_lease_ttl,
+            metadata={"component": "audit-export-live", "checkpoint": str(checkpoint_path)},
+        )
+        if not attempt.acquired:
+            raise ValueError(
+                f"audit live export DB lease is already held: {db_lease_name} by {attempt.current_holder_id}"
+            )
+        return attempt
+
+    def renew_db_lease():
+        if db_lease_store is None:
+            return None
+        attempt = db_lease_store.renew(db_lease_name, holder_id=db_lease_holder, ttl_seconds=db_lease_ttl)
+        if not attempt.acquired:
+            raise ValueError(
+                f"audit live export DB lease could not be renewed: {db_lease_name} by {attempt.current_holder_id}"
+            )
+        return attempt
+
+    def release_db_lease() -> None:
+        if db_lease_store is not None:
+            db_lease_store.release(db_lease_name, holder_id=db_lease_holder)
 
     def run_cycle():
         return exporter.export_with_checkpoint(
@@ -459,29 +495,41 @@ def cmd_enterprise_audit_export_live(args) -> int:
         max_cycles = max(0, int(getattr(args, "max_cycles", 0) or 0))
         cycles = 0
         with FileAuditLiveExportLock(lock_path):
-            print(_g("✓ Enterprise audit live export daemon started"))
-            print(f"  Interval        : {interval:g}s")
-            print(f"  Checkpoint      : {checkpoint_path}")
-            print(f"  Lock            : {lock_path}")
+            acquire_db_lease()
             try:
-                while True:
-                    cycle = run_cycle()
-                    cycles += 1
-                    print(
-                        "  Cycle "
-                        f"{cycles}: sent={cycle.result.sent} attempted={cycle.result.attempted} "
-                        f"last_chain_index={cycle.result.last_chain_index} attempts={cycle.attempts}"
-                    )
-                    if max_cycles and cycles >= max_cycles:
-                        print(_g("✓ Enterprise audit live export daemon completed max cycles"))
-                        return 0
-                    time.sleep(interval)
-            except KeyboardInterrupt:
-                print(_y("Enterprise audit live export daemon stopped"))
-                return 0
+                print(_g("✓ Enterprise audit live export daemon started"))
+                print(f"  Interval        : {interval:g}s")
+                print(f"  Checkpoint      : {checkpoint_path}")
+                print(f"  Lock            : {lock_path}")
+                if db_lease_store is not None:
+                    print(f"  DB lease        : {db_lease_name} ({db_lease_holder})")
+                try:
+                    while True:
+                        if cycles:
+                            renew_db_lease()
+                        cycle = run_cycle()
+                        cycles += 1
+                        print(
+                            "  Cycle "
+                            f"{cycles}: sent={cycle.result.sent} attempted={cycle.result.attempted} "
+                            f"last_chain_index={cycle.result.last_chain_index} attempts={cycle.attempts}"
+                        )
+                        if max_cycles and cycles >= max_cycles:
+                            print(_g("✓ Enterprise audit live export daemon completed max cycles"))
+                            return 0
+                        time.sleep(interval)
+                except KeyboardInterrupt:
+                    print(_y("Enterprise audit live export daemon stopped"))
+                    return 0
+            finally:
+                release_db_lease()
 
     with FileAuditLiveExportLock(lock_path):
-        cycle = run_cycle()
+        acquire_db_lease()
+        try:
+            cycle = run_cycle()
+        finally:
+            release_db_lease()
     print(_g("✓ Enterprise audit live export completed"))
     print(f"  Attempted       : {cycle.result.attempted}")
     print(f"  Sent            : {cycle.result.sent}")
@@ -490,6 +538,8 @@ def cmd_enterprise_audit_export_live(args) -> int:
     print(f"  Status code     : {cycle.result.status_code if cycle.result.status_code is not None else '(no-op)'}")
     print(f"  Checkpoint      : {cycle.checkpoint_path}")
     print(f"  Lock            : {lock_path}")
+    if db_lease_store is not None:
+        print(f"  DB lease        : {db_lease_name} ({db_lease_holder})")
     return 0
 
 
@@ -557,6 +607,9 @@ def main():
         help="Checkpoint JSON path. Defaults to state/audit_live_export_checkpoint.json",
     )
     enterprise_audit_live.add_argument("--lock-path", help="Singleton lock path. Defaults to <checkpoint>.lock")
+    enterprise_audit_live.add_argument("--db-lease-name", help="Optional enterprise DB lease name for multi-replica coordination")
+    enterprise_audit_live.add_argument("--db-lease-holder", help="Optional DB lease holder id. Defaults to hostname:pid")
+    enterprise_audit_live.add_argument("--db-lease-ttl", type=int, default=180, help="DB lease TTL seconds. Defaults to 180")
     enterprise_audit_live.add_argument("--batch-size", type=int, default=100, help="Events to send per cycle")
     enterprise_audit_live.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
     enterprise_audit_live.add_argument("--max-attempts", type=int, default=3, help="Retry attempts before failing")

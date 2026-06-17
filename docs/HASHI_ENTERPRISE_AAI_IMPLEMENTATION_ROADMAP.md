@@ -620,6 +620,7 @@ Residual P4 limitations:
 - `ENT-070a` Add Kubernetes disruption budget assets. Done for optional raw Kubernetes PodDisruptionBudget example, Helm `podDisruptionBudget` values, and a conditional PDB template for multi-replica maintenance windows; leader election, singleton jobs, and queue coordination remain future work.
 - `ENT-070b` Add live audit export singleton lock. Done for default checkpoint-adjacent lock files, configurable `--lock-path`, fail-closed concurrent exporter detection, and lock cleanup on normal one-shot/daemon exit; Kubernetes Lease leader election and broader queue coordination remain future work.
 - `ENT-070c` Add enterprise DB lease primitive. Done for schema-backed lease acquire/renew/release, TTL expiry takeover, holder-only release, and tests; wiring specific schedulers/exporters to this primitive and PostgreSQL concurrency rehearsal remain future work.
+- `ENT-070d` Wire live audit export to DB leases. Done for optional `--db-lease-name`, `--db-lease-holder`, and `--db-lease-ttl` CLI controls, fail-closed held-lease behavior, daemon renewals, and release on normal exit; broader scheduler integration and Kubernetes Lease support remain future work.
 
 **Acceptance:**
 
@@ -640,6 +641,7 @@ Residual P4 limitations:
 - Operators can choose one of CronJob, scheduled one-shot, or daemon deployment patterns and avoid duplicate exporters against the same checkpoint.
 - Live audit exporters fail closed when another process already holds the checkpoint lock.
 - Enterprise services have a database-backed lease primitive for future leader/worker coordination.
+- Live audit exporters can opt into enterprise DB leases for multi-replica singleton coordination.
 - Operators have starter SIEM assets under `deploy/siem/` for field mappings, Splunk alerts/dashboard, Elastic index/rules, and OpenTelemetry Collector routing.
 
 ---

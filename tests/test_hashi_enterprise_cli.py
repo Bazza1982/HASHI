@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 import hashi
-from orchestrator.enterprise import EnterpriseAuditLedger, IdentityService
+from orchestrator.enterprise import EnterpriseAuditLedger, EnterpriseLeaseStore, IdentityService
 from orchestrator.enterprise.store import SCHEMA_VERSION
 
 
@@ -121,6 +121,47 @@ def test_enterprise_audit_live_export_cli_sends_events_and_updates_checkpoint(tm
     assert not (tmp_path / "state" / "audit_live_export_checkpoint.json.lock").exists()
 
 
+def test_enterprise_audit_live_export_cli_uses_db_lease_when_configured(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(hashi, "ROOT_DIR", tmp_path)
+    db_path = tmp_path / "state" / "enterprise.sqlite"
+    identity = IdentityService.from_path(db_path)
+    identity.create_organization(org_id="ORG-001", name="Acme")
+    ledger = EnterpriseAuditLedger.from_path(db_path, org_id="ORG-001")
+    ledger.append(event_type="auth", action="login", status="success", actor_id="usr-1")
+    calls = []
+
+    def transport(url, body, headers, timeout):
+        calls.append((url, body, headers, timeout))
+        return 202, "accepted"
+
+    monkeypatch.setattr(hashi, "_http_post_transport", transport)
+
+    rc = hashi.cmd_enterprise_audit_export_live(
+        SimpleNamespace(
+            endpoint="https://siem.example.com/ingest",
+            format="ledger",
+            db=None,
+            org_id="ORG-001",
+            checkpoint=None,
+            lock_path=None,
+            db_lease_name="audit-export",
+            db_lease_holder="pod-a",
+            db_lease_ttl=30,
+            batch_size=10,
+            timeout=5.0,
+            max_attempts=1,
+            backoff=0.0,
+            header=[],
+            daemon=False,
+        )
+    )
+
+    assert rc == 0
+    assert len(calls) == 1
+    assert EnterpriseLeaseStore.from_path(db_path, org_id="ORG-001").get("audit-export") is None
+    assert "DB lease        : audit-export (pod-a)" in capsys.readouterr().out
+
+
 def test_enterprise_audit_live_export_daemon_runs_bounded_cycles(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(hashi, "ROOT_DIR", tmp_path)
     db_path = tmp_path / "state" / "enterprise.sqlite"
@@ -171,6 +212,50 @@ def test_enterprise_audit_live_export_daemon_runs_bounded_cycles(tmp_path, monke
     assert not (tmp_path / "state" / "audit_live_export_checkpoint.json.lock").exists()
 
 
+def test_enterprise_audit_live_export_daemon_uses_and_releases_db_lease(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(hashi, "ROOT_DIR", tmp_path)
+    db_path = tmp_path / "state" / "enterprise.sqlite"
+    identity = IdentityService.from_path(db_path)
+    identity.create_organization(org_id="ORG-001", name="Acme")
+    ledger = EnterpriseAuditLedger.from_path(db_path, org_id="ORG-001")
+    ledger.append(event_type="auth", action="login", status="success", actor_id="usr-1")
+    calls = []
+
+    def transport(url, body, headers, timeout):
+        calls.append((url, body, headers, timeout))
+        return 202, "accepted"
+
+    monkeypatch.setattr(hashi, "_http_post_transport", transport)
+    monkeypatch.setattr(hashi.time, "sleep", lambda _seconds: None)
+
+    rc = hashi.cmd_enterprise_audit_export_live(
+        SimpleNamespace(
+            endpoint="https://siem.example.com/ingest",
+            format="ledger",
+            db=None,
+            org_id="ORG-001",
+            checkpoint=None,
+            lock_path=None,
+            db_lease_name="audit-export",
+            db_lease_holder="pod-a",
+            db_lease_ttl=30,
+            batch_size=10,
+            timeout=5.0,
+            max_attempts=1,
+            backoff=0.0,
+            header=[],
+            daemon=True,
+            interval=0.5,
+            max_cycles=2,
+        )
+    )
+
+    assert rc == 0
+    assert len(calls) == 1
+    assert EnterpriseLeaseStore.from_path(db_path, org_id="ORG-001").get("audit-export") is None
+    assert "DB lease        : audit-export (pod-a)" in capsys.readouterr().out
+
+
 def test_enterprise_audit_live_export_cli_rejects_concurrent_lock(tmp_path, monkeypatch):
     monkeypatch.setattr(hashi, "ROOT_DIR", tmp_path)
     db_path = tmp_path / "state" / "enterprise.sqlite"
@@ -191,6 +276,41 @@ def test_enterprise_audit_live_export_cli_rejects_concurrent_lock(tmp_path, monk
                 org_id="ORG-001",
                 checkpoint=None,
                 lock_path=None,
+                batch_size=10,
+                timeout=5.0,
+                max_attempts=1,
+                backoff=0.0,
+                header=[],
+                daemon=False,
+            )
+        )
+
+
+def test_enterprise_audit_live_export_cli_rejects_held_db_lease(tmp_path, monkeypatch):
+    monkeypatch.setattr(hashi, "ROOT_DIR", tmp_path)
+    db_path = tmp_path / "state" / "enterprise.sqlite"
+    identity = IdentityService.from_path(db_path)
+    identity.create_organization(org_id="ORG-001", name="Acme")
+    ledger = EnterpriseAuditLedger.from_path(db_path, org_id="ORG-001")
+    ledger.append(event_type="auth", action="login", status="success", actor_id="usr-1")
+    EnterpriseLeaseStore.from_path(db_path, org_id="ORG-001").acquire(
+        "audit-export",
+        holder_id="pod-a",
+        ttl_seconds=60,
+    )
+
+    with pytest.raises(ValueError, match="DB lease is already held"):
+        hashi.cmd_enterprise_audit_export_live(
+            SimpleNamespace(
+                endpoint="https://siem.example.com/ingest",
+                format="ledger",
+                db=None,
+                org_id="ORG-001",
+                checkpoint=None,
+                lock_path=None,
+                db_lease_name="audit-export",
+                db_lease_holder="pod-b",
+                db_lease_ttl=30,
                 batch_size=10,
                 timeout=5.0,
                 max_attempts=1,
