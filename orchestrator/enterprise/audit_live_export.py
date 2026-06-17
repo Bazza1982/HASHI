@@ -6,11 +6,16 @@ from pathlib import Path
 import time
 from typing import Any, Callable, Literal
 
-from orchestrator.enterprise.audit_export import format_otel_log, format_siem_event
+from orchestrator.enterprise.audit_export import (
+    format_elastic_bulk_action,
+    format_otel_log,
+    format_siem_event,
+    format_splunk_hec_event,
+)
 from orchestrator.enterprise.audit_ledger import EnterpriseAuditLedger, LedgerEvent
 
 
-AuditLiveExportFormat = Literal["ledger", "siem", "otel"]
+AuditLiveExportFormat = Literal["ledger", "siem", "otel", "splunk-hec", "elastic-bulk"]
 AuditLiveExportTransport = Callable[[str, bytes, dict[str, str], float], tuple[int, str]]
 
 
@@ -157,6 +162,15 @@ def _encode_live_export(events: list[LedgerEvent], export_format: str) -> tuple[
         return ("\n".join(lines) + "\n").encode("utf-8"), "application/x-ndjson"
     if normalized in {"siem", "ecs"}:
         lines = [json.dumps(format_siem_event(event), ensure_ascii=False, sort_keys=True) for event in events]
+        return ("\n".join(lines) + "\n").encode("utf-8"), "application/x-ndjson"
+    if normalized in {"splunk", "splunk-hec", "hec"}:
+        lines = [json.dumps(format_splunk_hec_event(event), ensure_ascii=False, sort_keys=True) for event in events]
+        return ("\n".join(lines) + "\n").encode("utf-8"), "application/json"
+    if normalized in {"elastic", "elastic-bulk", "elasticsearch-bulk"}:
+        lines: list[str] = []
+        for event in events:
+            lines.append(json.dumps(format_elastic_bulk_action(event), ensure_ascii=False, sort_keys=True))
+            lines.append(json.dumps(format_siem_event(event), ensure_ascii=False, sort_keys=True))
         return ("\n".join(lines) + "\n").encode("utf-8"), "application/x-ndjson"
     if normalized in {"otel", "opentelemetry"}:
         payload = {

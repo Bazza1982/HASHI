@@ -28,7 +28,12 @@ from orchestrator.enterprise.audit_object_worm import (
     ObjectStoreObjectExists,
 )
 from orchestrator.enterprise.audit_worm import AuditAnchorReceipt, FilesystemAuditAnchorSink
-from orchestrator.enterprise.audit_export import format_otel_log, format_siem_event
+from orchestrator.enterprise.audit_export import (
+    format_elastic_bulk_action,
+    format_otel_log,
+    format_siem_event,
+    format_splunk_hec_event,
+)
 from orchestrator.enterprise.auth_providers import AuthProvider, AuthProviderType, load_auth_providers
 from orchestrator.enterprise.oidc_exchange import (
     OidcMappedIdentity,
@@ -174,6 +179,8 @@ __all__ = [
     "LedgerEvent",
     "format_otel_log",
     "format_siem_event",
+    "format_splunk_hec_event",
+    "format_elastic_bulk_action",
     "create_audit_ledger_anchor",
     "export_audit_ledger_anchor",
     "load_audit_ledger_anchor",

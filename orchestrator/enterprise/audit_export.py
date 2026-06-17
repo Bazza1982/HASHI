@@ -64,6 +64,29 @@ def format_otel_log(event: LedgerEvent) -> dict[str, Any]:
     }
 
 
+def format_splunk_hec_event(event: LedgerEvent) -> dict[str, Any]:
+    return {
+        "time": _time_unix_nano(event.ts) // 1_000_000_000,
+        "host": "hashi",
+        "source": "hashi.enterprise.audit",
+        "sourcetype": "_json",
+        "event": format_siem_event(event),
+        "fields": {
+            "hashi_audit_id": event.id,
+            "hashi_org_id": event.org_id,
+            "hashi_event_type": event.event_type,
+            "hashi_action": event.action,
+            "hashi_status": event.status,
+            "hashi_chain_index": event.chain_index,
+            "hashi_event_hash": event.event_hash,
+        },
+    }
+
+
+def format_elastic_bulk_action(event: LedgerEvent) -> dict[str, Any]:
+    return {"create": {"_id": event.id}}
+
+
 def _event_category(event_type: str) -> str:
     return {
         "auth": "authentication",
