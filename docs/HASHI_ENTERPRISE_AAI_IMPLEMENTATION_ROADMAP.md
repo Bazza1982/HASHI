@@ -92,7 +92,7 @@ Required:
 
 Deferred:
 
-- complete SAML/SCIM login flows and OIDC HTTP token exchange/callback wiring;
+- complete SAML/SCIM login flows and OIDC callback wiring into the HTTP/JWKS/session services;
 - full ABAC policy simulation;
 - SIEM/OpenTelemetry;
 - WORM storage;
@@ -166,6 +166,7 @@ Deferred:
 - OIDC token exchange request construction and claim mapping skeleton;
 - OIDC RS256/JWKS ID token signature verification and claim validation;
 - OIDC verified identity user upsert and session completion service;
+- OIDC token endpoint exchange and JWKS fetch/cache services;
 - Workbench login endpoint;
 - audit events for login/logout/admin bootstrap;
 - personal profile maps current owner behavior to implicit top admin.
@@ -177,6 +178,7 @@ Deferred:
 - `orchestrator/enterprise/oidc_flow.py`;
 - `orchestrator/enterprise/oidc_exchange.py`;
 - `orchestrator/enterprise/oidc_session.py`;
+- `orchestrator/enterprise/oidc_http.py`;
 - `orchestrator/enterprise/oidc_token.py`;
 - `orchestrator/enterprise/auth_session.py`;
 - `orchestrator/enterprise/store.py`;
@@ -198,6 +200,7 @@ Deferred:
 - `ENT-020` Add OIDC ID token claim validation. Done for issuer, audience, expiry, not-before, issued-at, subject, nonce, and redacted public payload checks.
 - `ENT-021` Add OIDC RS256/JWKS ID token signature verification. Done for compact JWT parsing, `alg=RS256` enforcement, `kid` key selection, RSA signature verification, and fail-closed handling for unsafe JWT/JWKS inputs; live JWKS fetching/cache, user upsert, and session creation remain future work.
 - `ENT-022` Add OIDC verified identity session completion. Done for active-user reuse, new `individual_user` creation, optional default-project membership, session issuance, and random non-OIDC password material for OIDC-created users; live token exchange/JWKS fetch/callback wiring remains future work.
+- `ENT-023` Add OIDC HTTP token exchange and JWKS cache services. Done for injectable token endpoint calls, private token response handling, JWKS response validation, and TTL cache; callback wiring remains future work.
 
 **Acceptance:**
 
@@ -208,6 +211,7 @@ Deferred:
 - OIDC callback can prepare a token exchange request without exposing authorization codes, PKCE verifiers, or client secrets in browser responses or audit logs.
 - OIDC ID tokens can be verified against RS256 JWKS material, then validated for enterprise SSO claims without exposing nonce or raw token material in public payloads.
 - OIDC verified identities can be completed into enterprise users and sessions without granting admin roles by default.
+- OIDC token endpoint and JWKS calls can be tested with injected transports and do not expose token material in public payloads.
 - `individual_user` exists as a role but cannot access admin APIs.
 - Personal profile does not require login migration.
 
