@@ -55,6 +55,7 @@ This is **not** the end state of the enterprise product. It is the first reviewa
 - Commands, channels, tools, execution scopes, backends, and connectors can be routed through central policy decisions.
 - Approval-required flows create approval records instead of silently executing high-risk actions.
 - Data governance primitives can classify baseline sensitive content and produce egress decisions from approval thresholds and destination-region allowlists.
+- Slack and Google Chat webhook `message.send` actions are checked before connector execution; confidential outbound text requires approval, restricted outbound text is denied, and connector audit records redact message text.
 
 ### Auditability
 
@@ -139,7 +140,7 @@ These are not blockers for Enterprise MVP review, but they are not complete:
 - Microsoft Teams and Feishu connectors;
 - Google Chat OAuth, space discovery, and user mapping;
 - GitHub PR create/merge actions;
-- full DLP/data residency enforcement across every runtime, connector, channel, artifact export, and backend path;
+- full DLP/data residency enforcement across every runtime, non-webhook connector, channel, artifact export, and backend path;
 - browser-level UI screenshot regression tests for the Workbench Enterprise console.
 
 ---

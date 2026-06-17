@@ -60,8 +60,8 @@ def record_connector_event(
         "resource": action.resource,
         "dry_run": action.dry_run,
         "message": result.message,
-        "data": dict(result.data or {}),
-        "parameters": _redact_parameters(action.parameters or {}),
+        "data": _redact_result_data(action, result.data or {}),
+        "parameters": _redact_parameters(action, action.parameters or {}),
     }
     if credential_id:
         context["credential_id"] = credential_id
@@ -80,16 +80,45 @@ def record_connector_event(
     )
 
 
-def _redact_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
+def _redact_parameters(action: ConnectorAction, parameters: Mapping[str, Any]) -> dict[str, Any]:
     redacted = {}
     sensitive_terms = ("token", "secret", "password", "key", "credential")
     for key, value in parameters.items():
         text_key = str(key)
         if any(term in text_key.lower() for term in sensitive_terms):
             redacted[text_key] = "[REDACTED]"
+        elif _is_message_text(action, text_key):
+            redacted[text_key] = "[REDACTED_TEXT]"
         else:
             redacted[text_key] = _json_safe_value(value)
     return redacted
+
+
+def _redact_result_data(action: ConnectorAction, data: Mapping[str, Any]) -> dict[str, Any]:
+    return _redact_message_text_values(action, data)
+
+
+def _redact_message_text_values(action: ConnectorAction, value):
+    if isinstance(value, Mapping):
+        redacted = {}
+        for key, item in value.items():
+            text_key = str(key)
+            if _is_message_text(action, text_key):
+                redacted[text_key] = "[REDACTED_TEXT]"
+            else:
+                redacted[text_key] = _redact_message_text_values(action, item)
+        return redacted
+    if isinstance(value, (list, tuple, set)):
+        return [_redact_message_text_values(action, item) for item in value]
+    return _json_safe_value(value)
+
+
+def _is_message_text(action: ConnectorAction, key: str) -> bool:
+    return (
+        str(action.connector_type or "").strip().lower() in {"slack", "google_chat"}
+        and str(action.action or "").strip().lower() == "message.send"
+        and key.lower() == "text"
+    )
 
 
 def _json_safe_value(value):
