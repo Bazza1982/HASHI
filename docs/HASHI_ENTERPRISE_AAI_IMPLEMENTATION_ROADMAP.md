@@ -97,7 +97,7 @@ Deferred:
 - SIEM/OpenTelemetry;
 - cloud/object-store WORM adapters beyond local filesystem sink;
 - Vault hardening beyond token-auth read provider, such as AppRole/Kubernetes auth and lease renewal;
-- Kubernetes/HA;
+- Helm/HA hardening beyond the baseline chart;
 - multiple enterprise connectors;
 - full DLP enforcement across every runtime and connector path.
 
@@ -847,7 +847,7 @@ Residual P8 limitations:
 
 **Goal:** make enterprise mode installable, upgradeable, and recoverable.
 
-**Implementation status:** P9-min service groundwork started.
+**Implementation status:** P9-min service groundwork active, with Kubernetes and Helm baselines present.
 
 Implemented checkpoints:
 
@@ -864,11 +864,12 @@ Implemented checkpoints:
   - `docs/HASHI_ENTERPRISE_DEPLOYMENT.md`.
 - `hashi.py enterprise migrate` initializes or refreshes the enterprise SQLite schema idempotently and reports before/after schema versions.
 - Kubernetes baseline manifests are present for namespace, config, example secrets, persistent data, deployment, service, and `/api/health` probes.
+- Helm baseline chart is present for configurable image/service/resource/probe settings, enterprise profile wiring, persistent `/data`, read-only connector secret mounts, optional ingress, optional NetworkPolicy, and optional HPA skeleton.
 
 Residual P9 limitations:
 
 - Docker Compose skeleton is present but has not yet been build/run verified in CI.
-- Kubernetes baseline is single-replica and manifest-based; Helm packaging, autoscaling, managed ingress, network policy, external database wiring, and multi-replica HA remain future work.
+- Kubernetes/Helm deployment remains baseline-grade; external database wiring, multi-replica state coordination, production ingress policy, cluster-specific NetworkPolicy validation, and autoscaling runbooks remain future work.
 - Backup policy and scheduled backups are not yet implemented.
 - Migration runner is a schema initializer, not yet a multi-file versioned migration framework.
 
@@ -886,6 +887,7 @@ Residual P9 limitations:
 
 - `deploy/docker-compose.enterprise.yml`;
 - `deploy/kubernetes/enterprise/`;
+- `deploy/helm/hashi-enterprise/`;
 - Dockerfile or package metadata;
 - `orchestrator/enterprise/migrations/`;
 - `hashi.py enterprise backup|restore|migrate`;
@@ -900,6 +902,7 @@ Residual P9 limitations:
 - `ENT-114` Add enterprise health checks. Done for Workbench `/api/health`, Docker healthcheck, and Kubernetes liveness/readiness probe manifests.
 - `ENT-115` Add upgrade and rollback documentation.
 - `ENT-116` Add Kubernetes baseline manifests. Done for namespace, config map, example secret, PVC, single-replica deployment, service, data/secret mounts, and manifest contract tests; HA/Helm remains future work.
+- `ENT-117` Add enterprise Helm baseline chart. Done for chart metadata, values, service account, config map, example secret, PVC, deployment, service, optional ingress, optional NetworkPolicy, optional HPA, README, and chart contract tests; true multi-replica HA remains future work.
 
 **Acceptance:**
 

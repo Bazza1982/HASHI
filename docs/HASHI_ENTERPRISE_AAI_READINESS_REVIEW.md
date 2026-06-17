@@ -92,7 +92,8 @@ This is **not** the end state of the enterprise product. It is the first reviewa
 - Docker Compose enterprise profile mirrors the production process model with `/api/health` health checks.
 - Kubernetes baseline manifests exist for namespace, config map, example secret, PVC, single-replica deployment, service, and `/api/health` liveness/readiness probes.
 - Kubernetes baseline mounts `/data` for state/workspaces/logs/backups and mounts connector secrets as read-only files for provider-based secret resolution.
-- The Kubernetes baseline is a deployment starting point, not a full HA release.
+- Helm baseline chart packages the same enterprise deployment contract with configurable image, service, resources, probes, persistence, connector secret mount, optional ingress, optional NetworkPolicy, and optional HPA skeleton.
+- The Kubernetes and Helm baselines are deployment starting points, not a full HA release.
 
 ---
 
@@ -137,7 +138,7 @@ These are not blockers for Enterprise MVP review, but they are not complete:
 - cloud-specific object-store WORM client packages and deployment runbooks for S3/GCS/Azure immutable storage;
 - Vault AppRole/Kubernetes auth, lease renewal, and policy bootstrap;
 - live SIEM push or OTLP network export;
-- Kubernetes HA deployment beyond the baseline manifests, including Helm, autoscaling, managed ingress, network policy, external database wiring, and multi-replica coordination;
+- Kubernetes HA deployment beyond the baseline manifests/chart, including external database wiring, validated production ingress/network policies, autoscaling runbooks, and multi-replica coordination;
 - Slack OAuth/Bot API, channel discovery, and user mapping;
 - Microsoft Teams and Feishu connectors;
 - Google Chat OAuth, space discovery, and user mapping;
