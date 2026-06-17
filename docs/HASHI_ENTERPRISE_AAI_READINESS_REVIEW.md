@@ -77,6 +77,7 @@ This is **not** the end state of the enterprise product. It is the first reviewa
 - Audit export supports default ledger NDJSON plus SIEM/ECS-style and OpenTelemetry log-style NDJSON mappings.
 - Live audit export service primitive can push ledger/SIEM NDJSON or OTLP JSON log payloads from a hash-chain checkpoint through an injectable enterprise transport, persist file-backed checkpoints, and retry transient failures without advancing the checkpoint before delivery succeeds.
 - `hashi enterprise audit-export-live` provides a one-shot operator runner for HTTP SIEM/ledger/OTLP pushes with checkpoint, retry, timeout, batch-size, and custom header controls, so deployments can schedule live export through cron, systemd, or Kubernetes CronJob without embedding vendor SDKs.
+- Deployment assets now include a Docker Compose `audit-export` profile, a raw Kubernetes CronJob, and a Helm-gated CronJob template for scheduled live audit export with persistent checkpoints.
 - Sensitive connector parameters are redacted in connector audit records.
 
 ### Work And Evidence
@@ -100,8 +101,9 @@ This is **not** the end state of the enterprise product. It is the first reviewa
 
 - Docker Compose enterprise profile mirrors the production process model with `/api/health` health checks.
 - Kubernetes baseline manifests exist for namespace, config map, example secret, PVC, single-replica deployment, service, and `/api/health` liveness/readiness probes.
+- Kubernetes baseline manifests include a scheduled live audit export CronJob that runs the one-shot exporter with `concurrencyPolicy: Forbid` and stores checkpoints under `/data/state`.
 - Kubernetes baseline mounts `/data` for state/workspaces/logs/backups and mounts connector secrets as read-only files for provider-based secret resolution.
-- Helm baseline chart packages the same enterprise deployment contract with configurable image, service, resources, probes, persistence, connector secret mount, optional ingress, optional NetworkPolicy, and optional HPA skeleton.
+- Helm baseline chart packages the same enterprise deployment contract with configurable image, service, resources, probes, persistence, connector secret mount, optional ingress, optional NetworkPolicy, optional HPA skeleton, and optional live audit export CronJob.
 - The SSO/SCIM deployment runbook gives operators a concrete path for wiring current SAML XML Signature verification and SCIM 2.0 compatibility surfaces into an enterprise IdP.
 - The Kubernetes and Helm baselines are deployment starting points, not a full HA release.
 
@@ -147,7 +149,7 @@ These are not blockers for Enterprise MVP review, but they are not complete:
 - full ABAC simulator and policy preview tooling;
 - cloud-specific object-store WORM client packages and deployment runbooks for S3/GCS/Azure immutable storage;
 - Vault AppRole/Kubernetes auth, lease renewal, and policy bootstrap;
-- live SIEM/OTLP exporter daemon hardening beyond the one-shot CLI runner, including deployment-specific auth presets, managed background scheduling, and operator runbooks;
+- live SIEM/OTLP exporter hardening beyond the CLI runner and baseline Compose/Kubernetes/Helm scheduling, including vendor-specific auth presets, managed long-running daemon mode, and SIEM-specific operator runbooks;
 - Kubernetes HA deployment beyond the baseline manifests/chart, including external database wiring, validated production ingress/network policies, autoscaling runbooks, and multi-replica coordination;
 - Slack OAuth/Bot API, channel discovery, and user mapping;
 - Microsoft Teams and Feishu connectors;

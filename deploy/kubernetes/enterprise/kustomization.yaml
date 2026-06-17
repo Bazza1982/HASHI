@@ -7,4 +7,5 @@ resources:
   - secret.example.yaml
   - persistent-volume-claim.yaml
   - deployment.yaml
+  - audit-export-cronjob.yaml
   - service.yaml

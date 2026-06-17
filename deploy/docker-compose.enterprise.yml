@@ -25,6 +25,36 @@ services:
       retries: 3
       start_period: 30s
 
+  audit-export-live:
+    profiles:
+      - audit-export
+    build:
+      context: ..
+      dockerfile: Dockerfile.enterprise
+    env_file:
+      - enterprise.env
+    environment:
+      HASHI_DEPLOYMENT_PROFILE: enterprise
+      HASHI_BRIDGE_HOME: /data
+    command:
+      - sh
+      - -c
+      - >
+        python hashi.py enterprise audit-export-live
+        --endpoint "$${HASHI_AUDIT_EXPORT_ENDPOINT:?set HASHI_AUDIT_EXPORT_ENDPOINT}"
+        --format "$${HASHI_AUDIT_EXPORT_FORMAT:-siem}"
+        --db /data/state/enterprise.sqlite
+        --org-id "$${HASHI_ORGANIZATION_ID:-ORG-001}"
+        --checkpoint /data/state/audit_live_export_checkpoint.json
+        --batch-size "$${HASHI_AUDIT_EXPORT_BATCH_SIZE:-100}"
+        --timeout "$${HASHI_AUDIT_EXPORT_TIMEOUT:-10}"
+        --max-attempts "$${HASHI_AUDIT_EXPORT_MAX_ATTEMPTS:-3}"
+        --backoff "$${HASHI_AUDIT_EXPORT_BACKOFF:-1}"
+        --header "$${HASHI_AUDIT_EXPORT_HEADER:-X-HASHI-Audit-Export: unset}"
+    volumes:
+      - hashi_enterprise_state:/data/state
+    restart: "no"
+
 volumes:
   hashi_enterprise_state:
   hashi_enterprise_workspaces:

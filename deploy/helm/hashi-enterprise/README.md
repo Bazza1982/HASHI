@@ -12,6 +12,8 @@ The chart provides:
 - optional ingress;
 - optional NetworkPolicy;
 - optional HPA skeleton.
+- optional live audit export CronJob that runs `hashi enterprise
+  audit-export-live` with a persistent checkpoint under `/data/state`.
 
 It is still a baseline chart. Multi-replica correctness depends on external
 state coordination, external database wiring, and task/queue coordination work
@@ -38,3 +40,21 @@ Before production use:
 2. Set ingress TLS and NetworkPolicy rules for your cluster.
 3. Use external state services before increasing `replicaCount`.
 4. Run backup/restore and migration rehearsals against the target environment.
+
+## Live Audit Export
+
+Enable the one-shot exporter as a Kubernetes CronJob after configuring a real
+SIEM/OTLP endpoint and authorization header through your secret-management
+workflow:
+
+```bash
+helm upgrade --install hashi-enterprise deploy/helm/hashi-enterprise \
+  --namespace hashi-enterprise --create-namespace \
+  --set auditExport.enabled=true \
+  --set auditExport.endpoint=https://siem.example.com/ingest \
+  --set-string auditExport.header='Authorization: Bearer replace-me'
+```
+
+The CronJob uses `concurrencyPolicy: Forbid` and advances
+`/data/state/audit_live_export_checkpoint.json` only after a successful export
+cycle.
