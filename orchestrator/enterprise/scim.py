@@ -12,6 +12,9 @@ SCIM_USER_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:User"
 SCIM_GROUP_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:Group"
 SCIM_LIST_RESPONSE_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:ListResponse"
 SCIM_PATCH_OP_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:PatchOp"
+SCIM_SERVICE_PROVIDER_CONFIG_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig"
+SCIM_RESOURCE_TYPE_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:ResourceType"
+SCIM_SCHEMA_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:Schema"
 
 
 @dataclass(frozen=True)
@@ -249,6 +252,108 @@ def scim_group_list_response(
     }
 
 
+def scim_service_provider_config() -> dict[str, Any]:
+    return {
+        "schemas": [SCIM_SERVICE_PROVIDER_CONFIG_SCHEMA],
+        "documentationUri": "https://github.com/hashiai/hashi",
+        "patch": {"supported": True},
+        "bulk": {"supported": False, "maxOperations": 0, "maxPayloadSize": 0},
+        "filter": {"supported": True, "maxResults": 500},
+        "changePassword": {"supported": False},
+        "sort": {"supported": False},
+        "etag": {"supported": False},
+        "authenticationSchemes": [
+            {
+                "type": "oauthbearertoken",
+                "name": "Bearer token",
+                "description": "HASHI scoped API token with scim:read, scim:write, or scim:* scope.",
+                "primary": True,
+            }
+        ],
+        "meta": {"resourceType": "ServiceProviderConfig", "location": "/scim/v2/ServiceProviderConfig"},
+    }
+
+
+def scim_resource_types() -> dict[str, Any]:
+    resources = [scim_resource_type("User"), scim_resource_type("Group")]
+    return {
+        "schemas": [SCIM_LIST_RESPONSE_SCHEMA],
+        "totalResults": len(resources),
+        "startIndex": 1,
+        "itemsPerPage": len(resources),
+        "Resources": resources,
+    }
+
+
+def scim_resource_type(resource_type: str) -> dict[str, Any]:
+    normalized = str(resource_type or "").strip().lower()
+    if normalized == "user":
+        return {
+            "schemas": [SCIM_RESOURCE_TYPE_SCHEMA],
+            "id": "User",
+            "name": "User",
+            "endpoint": "/Users",
+            "description": "HASHI enterprise user",
+            "schema": SCIM_USER_SCHEMA,
+            "schemaExtensions": [],
+            "meta": {"resourceType": "ResourceType", "location": "/scim/v2/ResourceTypes/User"},
+        }
+    if normalized == "group":
+        return {
+            "schemas": [SCIM_RESOURCE_TYPE_SCHEMA],
+            "id": "Group",
+            "name": "Group",
+            "endpoint": "/Groups",
+            "description": "HASHI project exposed as a read-only SCIM group",
+            "schema": SCIM_GROUP_SCHEMA,
+            "schemaExtensions": [],
+            "meta": {"resourceType": "ResourceType", "location": "/scim/v2/ResourceTypes/Group"},
+        }
+    raise ValueError(f"unsupported SCIM resource type: {resource_type!r}")
+
+
+def scim_schemas() -> dict[str, Any]:
+    resources = [scim_schema(SCIM_USER_SCHEMA), scim_schema(SCIM_GROUP_SCHEMA)]
+    return {
+        "schemas": [SCIM_LIST_RESPONSE_SCHEMA],
+        "totalResults": len(resources),
+        "startIndex": 1,
+        "itemsPerPage": len(resources),
+        "Resources": resources,
+    }
+
+
+def scim_schema(schema_id: str) -> dict[str, Any]:
+    normalized = str(schema_id or "").strip()
+    if normalized == SCIM_USER_SCHEMA:
+        return {
+            "schemas": [SCIM_SCHEMA_SCHEMA],
+            "id": SCIM_USER_SCHEMA,
+            "name": "User",
+            "description": "HASHI enterprise user schema",
+            "attributes": [
+                _schema_attribute("userName", "string", required=True, uniqueness="server"),
+                _schema_attribute("displayName", "string"),
+                _schema_attribute("active", "boolean"),
+                _schema_attribute("emails", "complex", multi_valued=True),
+            ],
+            "meta": {"resourceType": "Schema", "location": f"/scim/v2/Schemas/{SCIM_USER_SCHEMA}"},
+        }
+    if normalized == SCIM_GROUP_SCHEMA:
+        return {
+            "schemas": [SCIM_SCHEMA_SCHEMA],
+            "id": SCIM_GROUP_SCHEMA,
+            "name": "Group",
+            "description": "HASHI project group schema",
+            "attributes": [
+                _schema_attribute("displayName", "string", required=True),
+                _schema_attribute("members", "complex", multi_valued=True),
+            ],
+            "meta": {"resourceType": "Schema", "location": f"/scim/v2/Schemas/{SCIM_GROUP_SCHEMA}"},
+        }
+    raise ValueError(f"unsupported SCIM schema: {schema_id!r}")
+
+
 def filter_scim_users(users: list[User], filter_expression: str | None) -> list[User]:
     expression = str(filter_expression or "").strip()
     if not expression:
@@ -313,6 +418,26 @@ def _apply_patch_value(updates: dict[str, Any], path: str, value: Any) -> None:
             updates["displayName"] = text
         return
     raise ValueError(f"unsupported SCIM PATCH path: {path!r}")
+
+
+def _schema_attribute(
+    name: str,
+    attr_type: str,
+    *,
+    required: bool = False,
+    multi_valued: bool = False,
+    uniqueness: str = "none",
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "type": attr_type,
+        "multiValued": multi_valued,
+        "required": required,
+        "caseExact": False,
+        "mutability": "readWrite",
+        "returned": "default",
+        "uniqueness": uniqueness,
+    }
 
 
 def _parse_bool(value: Any, *, field: str) -> bool:
