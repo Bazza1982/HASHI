@@ -60,6 +60,7 @@ This is **not** the end state of the enterprise product. It is the first reviewa
 - Unified ledger records structured events for identity, admin actions, channels, policy decisions, commands, connectors, tasks, artifacts, and adapted legacy streams.
 - New ledger events include tamper-evident hash-chain fields and can be verified for in-database modification, deletion, or reordering.
 - Audit anchors can export a chain-range manifest with start/end hash, count, and anchor hash for later storage in WORM-capable systems.
+- Filesystem audit anchor sink can write hash-named read-only anchor objects with receipts and verification, providing a local WORM-style adapter for early deployments.
 - Audit export and Workbench timeline views exist for review and handoff.
 - Audit export supports default ledger NDJSON plus SIEM/ECS-style and OpenTelemetry log-style NDJSON mappings.
 - Sensitive connector parameters are redacted in connector audit records.
@@ -119,7 +120,7 @@ These are not blockers for Enterprise MVP review, but they are not complete:
 
 - complete SAML/SCIM login flows;
 - full ABAC simulator and policy preview tooling;
-- WORM storage destination adapters for audit anchors;
+- cloud/object-store WORM storage destination adapters for audit anchors;
 - live SIEM push or OTLP network export;
 - Kubernetes/HA deployment;
 - Vault/Kubernetes secret resolver implementations;
