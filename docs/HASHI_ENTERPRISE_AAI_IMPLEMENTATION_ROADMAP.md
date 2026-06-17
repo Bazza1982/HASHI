@@ -426,6 +426,8 @@ Implemented checkpoints:
 - Workbench enterprise audit APIs:
   - `GET /api/enterprise/audit` for admin-gated ledger query;
   - `GET /api/enterprise/audit/export` for admin-gated NDJSON export;
+  - `GET /api/enterprise/audit/export?format=siem` for SIEM/ECS-style NDJSON mapping;
+  - `GET /api/enterprise/audit/export?format=otel` for OpenTelemetry log-style NDJSON mapping;
 - slash command audit JSONL adapter:
   - imports legacy `slash_command_audit.jsonl` records as `slash_command` ledger events;
   - preserves legacy timestamp, actor, command, status, channel, handler, duration, error, blocked reason, and side effects;
@@ -462,7 +464,7 @@ Residual P4 limitations:
 - HASHI-controlled tool execution now writes `tool_action_audit.jsonl`, but direct live ledger dual-write is still pending;
 - auditor read-only role semantics are not yet separated from broader admin access;
 - generic shell/file tool execution now has a canonical JSONL event source and ingest adapter;
-- retention and SIEM mapping remain future P4 work.
+- retention, live SIEM push, and OTLP network export remain future P4 work.
 
 **Scope:**
 
@@ -494,6 +496,7 @@ Residual P4 limitations:
 - `ENT-066` Add tool/file event adapters. Browser action legacy JSONL ingest done; HASHI-controlled tool action JSONL source and ingest adapter done; live ledger dual-write pending.
 - `ENT-067` Add audit schema contract tests. Done for required ledger keys, canonical event types, export shape, and JSON-safe context.
 - `ENT-068` Add tamper-evident audit hash chain. Done for new ledger events and verification API; external WORM anchoring remains future work.
+- `ENT-069` Add SIEM/OpenTelemetry audit export mappings. Done for admin-gated NDJSON export formats; live push/exporter agents remain future work.
 
 **Acceptance:**
 
@@ -501,6 +504,7 @@ Residual P4 limitations:
 - Policy deny and channel deny events are never dropped.
 - JSONL export contains stable schema version.
 - New ledger events carry hash-chain fields and fail verification if event content is modified.
+- SIEM and OpenTelemetry export formats include event identity, actor, org, correlation, hash-chain metadata, and sanitized context.
 
 ---
 

@@ -116,6 +116,62 @@ async def test_enterprise_admin_can_export_audit_ledger_as_ndjson(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_enterprise_admin_can_export_audit_ledger_for_siem(tmp_path):
+    server = _server(tmp_path)
+    headers = _admin_headers(server)
+    server.audit_ledger.append(
+        event_type="policy",
+        actor_id="usr-1",
+        action="backend.switch",
+        status="denied",
+        correlation_id="corr-1",
+        context={"backend": "grok-cli"},
+    )
+
+    response = await server.handle_enterprise_audit_export(_FakeRequest(headers=headers, query={"format": "siem"}))
+
+    row = json.loads(response.text.splitlines()[0])
+    assert response.status == 200
+    assert row["event"]["outcome"] == "failure"
+    assert row["trace"]["id"] == "corr-1"
+    assert row["labels"]["hashi.audit.event_hash"]
+    assert row["hashi"]["audit"]["context"]["backend"] == "grok-cli"
+
+
+@pytest.mark.asyncio
+async def test_enterprise_admin_can_export_audit_ledger_for_opentelemetry(tmp_path):
+    server = _server(tmp_path)
+    headers = _admin_headers(server)
+    server.audit_ledger.append(
+        event_type="connector",
+        actor_id="usr-1",
+        action="message.send",
+        status="success",
+        context={"connector_type": "google_chat"},
+    )
+
+    response = await server.handle_enterprise_audit_export(_FakeRequest(headers=headers, query={"format": "otel"}))
+
+    row = json.loads(response.text.splitlines()[0])
+    assert response.status == 200
+    assert row["severity_text"] == "INFO"
+    assert row["body"] == "connector.message.send success"
+    assert row["attributes"]["hashi.audit.event_hash"]
+    assert row["attributes"]["hashi.audit.context"]["connector_type"] == "google_chat"
+
+
+@pytest.mark.asyncio
+async def test_enterprise_audit_export_rejects_unknown_format(tmp_path):
+    server = _server(tmp_path)
+    headers = _admin_headers(server)
+
+    response = await server.handle_enterprise_audit_export(_FakeRequest(headers=headers, query={"format": "xml"}))
+
+    assert response.status == 400
+    assert json.loads(response.text)["error"] == "unsupported audit export format: xml"
+
+
+@pytest.mark.asyncio
 async def test_enterprise_auditor_can_query_and_export_audit_ledger(tmp_path):
     server = _server(tmp_path)
     server.identity_service.bootstrap_org_admin(
