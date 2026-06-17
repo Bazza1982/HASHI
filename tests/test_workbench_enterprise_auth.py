@@ -158,6 +158,7 @@ async def test_oidc_start_returns_authorization_url_and_stores_private_flow(tmp_
             "enabled": True,
             "issuer": "https://login.microsoftonline.com/tenant/v2.0",
             "client_id": "hashi-client",
+            "client_secret": "do-not-return",
             "authorization_endpoint": "https://login.microsoftonline.com/tenant/oauth2/v2.0/authorize",
             "token_endpoint": "https://login.microsoftonline.com/tenant/oauth2/v2.0/token",
             "jwks_uri": "https://login.microsoftonline.com/tenant/discovery/v2.0/keys",
@@ -220,6 +221,7 @@ async def test_oidc_callback_validates_state_and_consumes_pending_flow(tmp_path)
             "enabled": True,
             "issuer": "https://login.microsoftonline.com/tenant/v2.0",
             "client_id": "hashi-client",
+            "client_secret": "do-not-return",
             "authorization_endpoint": "https://login.microsoftonline.com/tenant/oauth2/v2.0/authorize",
             "token_endpoint": "https://login.microsoftonline.com/tenant/oauth2/v2.0/token",
             "jwks_uri": "https://login.microsoftonline.com/tenant/discovery/v2.0/keys",
@@ -240,10 +242,24 @@ async def test_oidc_callback_validates_state_and_consumes_pending_flow(tmp_path)
 
     assert response.status == 200
     assert payload["oidc"]["code_received"] is True
-    assert payload["oidc"]["token_exchange"] == "deferred"
+    assert payload["oidc"]["token_exchange"] == "prepared"
+    exchange = payload["oidc"]["token_exchange_request"]
+    assert exchange["provider_id"] == "entra"
+    assert exchange["uses_client_secret"] is True
+    assert exchange["token_endpoint"] == "https://login.microsoftonline.com/tenant/oauth2/v2.0/token"
+    assert "code" not in exchange["body_fields"]
+    assert "code_verifier" not in exchange["body_fields"]
+    assert "client_secret" not in exchange["body_fields"]
     assert state not in server._pending_oidc_flows
-    assert "auth-code" not in json.dumps(_audit_events(tmp_path))
-    assert _audit_events(tmp_path)[-1]["status"] == "validated"
+    response_text = json.dumps(payload)
+    events_text = json.dumps(_audit_events(tmp_path))
+    assert "auth-code" not in response_text
+    assert "do-not-return" not in response_text
+    assert "auth-code" not in events_text
+    assert "do-not-return" not in events_text
+    event = _audit_events(tmp_path)[-1]
+    assert event["status"] == "validated"
+    assert event["context"]["token_exchange"] == "prepared"
 
 
 @pytest.mark.asyncio

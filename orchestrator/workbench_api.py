@@ -32,6 +32,7 @@ from orchestrator.enterprise.connectors import (
 from orchestrator.enterprise.credentials import ConnectorCredentialStore
 from orchestrator.enterprise.identity import EnterpriseRole, IdentityService
 from orchestrator.enterprise.oidc_flow import build_oidc_authorization_start
+from orchestrator.enterprise.oidc_exchange import build_oidc_token_exchange_request
 from orchestrator.enterprise.policy import PolicyEvaluator
 from orchestrator.enterprise.policy_templates import install_default_connector_policy
 from orchestrator.enterprise.routing import agent_project_ids
@@ -746,7 +747,30 @@ class WorkbenchApiServer:
                 context={"provider_id": provider_id, "error": "missing code"},
             )
             return web.json_response({"ok": False, "error": "authorization code is required"}, status=400)
+        providers = load_auth_providers(getattr(self.global_config, "enterprise_auth_providers", []) or [])
+        provider = next((item for item in providers if item.id == provider_id), None)
+        if provider is None:
+            self._append_enterprise_audit(
+                event_type="auth",
+                action="oidc_callback",
+                status="failed",
+                actor_id=provider_id,
+                context={"provider_id": provider_id, "error": "provider not found"},
+            )
+            return web.json_response({"ok": False, "error": "OIDC provider not found"}, status=404)
+        try:
+            exchange = build_oidc_token_exchange_request(provider, flow, code=code)
+        except Exception as exc:
+            self._append_enterprise_audit(
+                event_type="auth",
+                action="oidc_callback",
+                status="failed",
+                actor_id=provider_id,
+                context={"provider_id": provider_id, "error": str(exc)},
+            )
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
         self._pending_oidc_flows.pop(state, None)
+        exchange_payload = exchange.public_payload()
         self._append_enterprise_audit(
             event_type="auth",
             action="oidc_callback",
@@ -755,7 +779,8 @@ class WorkbenchApiServer:
             context={
                 "provider_id": provider_id,
                 "state_validated": True,
-                "token_exchange": "deferred",
+                "token_exchange": "prepared",
+                "token_endpoint": exchange.token_endpoint,
             },
         )
         return web.json_response(
@@ -765,7 +790,8 @@ class WorkbenchApiServer:
                     "provider_id": provider_id,
                     "state": state,
                     "code_received": True,
-                    "token_exchange": "deferred",
+                    "token_exchange": "prepared",
+                    "token_exchange_request": exchange_payload,
                 },
             }
         )
