@@ -94,7 +94,7 @@ Deferred:
 
 - IdP-specific SAML/SCIM setup guides beyond the generic deployment runbook, and SCIM 2.0 compatibility beyond baseline Users, read-only Groups, discovery, and bounded Bulk surfaces;
 - full ABAC policy simulation;
-- live SIEM/OpenTelemetry exporter daemon scheduling beyond the CLI checkpoint/retry runner;
+- live SIEM/OpenTelemetry exporter daemon mode and vendor auth presets beyond the CLI checkpoint/retry runner and baseline Compose/Kubernetes/Helm scheduling;
 - cloud/object-store WORM adapters beyond local filesystem sink;
 - Vault hardening beyond token-auth read provider, such as AppRole/Kubernetes auth and lease renewal;
 - Helm/HA hardening beyond the baseline chart;
@@ -515,6 +515,10 @@ Implemented checkpoints:
   - file-backed checkpoint persistence with atomic saves;
   - retry/backoff export cycle that advances checkpoint only after successful delivery;
   - `hashi enterprise audit-export-live` CLI runner for HTTP SIEM/ledger/OTLP pushes with checkpoint, headers, timeout, retry, and batch-size controls;
+- live audit export deployment scheduling:
+  - Docker Compose `audit-export` profile for one-shot scheduled runs;
+  - raw Kubernetes CronJob with `concurrencyPolicy: Forbid`;
+  - Helm `auditExport.enabled` CronJob template with persistent `/data/state` checkpoint path;
 - slash command audit JSONL adapter:
   - imports legacy `slash_command_audit.jsonl` records as `slash_command` ledger events;
   - preserves legacy timestamp, actor, command, status, channel, handler, duration, error, blocked reason, and side effects;
@@ -552,7 +556,7 @@ Residual P4 limitations:
 - auditor read-only role semantics are not yet separated from broader admin access;
 - generic shell/file tool execution now has a canonical JSONL event source and ingest adapter;
 - generic object-store WORM sink is present, but cloud-specific SDK wiring and deployment runbooks remain future work;
-- retention, long-running daemon orchestration, deployment-specific auth presets, and operator runbooks remain future P4 work.
+- retention, long-running daemon orchestration, and deployment-specific SIEM auth presets remain future P4 work.
 
 **Scope:**
 
@@ -591,6 +595,7 @@ Residual P4 limitations:
 - `ENT-069a` Add live audit export service primitive. Done for SIEM/ECS NDJSON, ledger NDJSON, OTLP JSON log payloads, chain-index checkpoints, injectable transport, no-op current checkpoint behavior, and fail-closed HTTP status handling.
 - `ENT-069b` Add live audit export checkpoint and retry cycle. Done for file-backed checkpoint load/save, corrupt checkpoint fail-fast, retry/backoff, no checkpoint advancement on failed attempts, and checkpoint advancement only after successful delivery.
 - `ENT-069c` Add live audit export CLI runner. Done for `hashi enterprise audit-export-live` with HTTP POST transport, ledger/SIEM/OTLP format selection, operator headers, timeout, retry, batch-size, and checkpoint controls; long-running daemon orchestration and deployment-specific auth presets remain future work.
+- `ENT-069d` Add live audit export deployment scheduling. Done for Docker Compose `audit-export` one-shot profile, raw Kubernetes CronJob, Helm `auditExport.enabled` CronJob template, checkpoint persistence under `/data/state`, and operator documentation; vendor-specific SIEM auth presets and long-running daemon mode remain future work.
 
 **Acceptance:**
 
@@ -602,6 +607,7 @@ Residual P4 limitations:
 - Live export service can push audit batches from a chain-index checkpoint without embedding external SDK dependencies.
 - Live export cycle persists delivery checkpoints and retries transient failures without skipping undelivered events.
 - Operators can run a one-shot live export cycle from the HASHI CLI and schedule it externally through cron, systemd, or Kubernetes CronJob.
+- Raw Kubernetes and Helm deployments include baseline CronJob scheduling for the live exporter, and Compose deployments include an `audit-export` profile suitable for cron/systemd wrappers.
 
 ---
 

@@ -1,0 +1,80 @@
+{{- if .Values.auditExport.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "hashi-enterprise.fullname" . }}-audit-export
+  labels:
+    {{- include "hashi-enterprise.labels" . | nindent 4 }}
+    app.kubernetes.io/component: audit-export
+spec:
+  schedule: {{ .Values.auditExport.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: {{ .Values.auditExport.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.auditExport.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .Values.auditExport.backoffLimit }}
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: {{ include "hashi-enterprise.name" . }}
+            app.kubernetes.io/instance: {{ .Release.Name }}
+            app.kubernetes.io/component: audit-export
+        spec:
+          serviceAccountName: {{ include "hashi-enterprise.serviceAccountName" . }}
+          restartPolicy: Never
+          {{- with .Values.podSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: audit-export
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              {{- with .Values.securityContext }}
+              securityContext:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              envFrom:
+                - configMapRef:
+                    name: {{ include "hashi-enterprise.fullname" . }}-config
+                - secretRef:
+                    name: {{ .Values.secrets.connectorSecretName }}
+              command:
+                - python
+                - hashi.py
+                - enterprise
+                - audit-export-live
+              args:
+                - --endpoint
+                - {{ .Values.auditExport.endpoint | quote }}
+                - --format
+                - {{ .Values.auditExport.format | quote }}
+                - --db
+                - {{ printf "%s/state/enterprise.sqlite" .Values.enterprise.bridgeHome | quote }}
+                - --org-id
+                - {{ .Values.enterprise.organizationId | quote }}
+                - --checkpoint
+                - {{ .Values.auditExport.checkpoint | quote }}
+                - --batch-size
+                - {{ .Values.auditExport.batchSize | quote }}
+                - --timeout
+                - {{ .Values.auditExport.timeout | quote }}
+                - --max-attempts
+                - {{ .Values.auditExport.maxAttempts | quote }}
+                - --backoff
+                - {{ .Values.auditExport.backoff | quote }}
+                - --header
+                - {{ .Values.auditExport.header | quote }}
+              volumeMounts:
+                - name: hashi-data
+                  mountPath: {{ .Values.enterprise.bridgeHome }}
+          volumes:
+            - name: hashi-data
+              {{- if .Values.persistence.enabled }}
+              persistentVolumeClaim:
+                claimName: {{ default (printf "%s-data" (include "hashi-enterprise.fullname" .)) .Values.persistence.existingClaim }}
+              {{- else }}
+              emptyDir: {}
+              {{- end }}
+{{- end }}

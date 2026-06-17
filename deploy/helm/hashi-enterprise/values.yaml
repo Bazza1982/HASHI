@@ -101,6 +101,21 @@ autoscaling:
   maxReplicas: 5
   targetCPUUtilizationPercentage: 70
 
+auditExport:
+  enabled: false
+  schedule: "*/5 * * * *"
+  format: siem
+  endpoint: https://siem.example.com/ingest
+  header: "Authorization: Bearer change-me"
+  batchSize: "100"
+  timeout: "10"
+  maxAttempts: "3"
+  backoff: "1"
+  checkpoint: /data/state/audit_live_export_checkpoint.json
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  backoffLimit: 1
+
 nodeSelector: {}
 tolerations: []
 affinity: {}
