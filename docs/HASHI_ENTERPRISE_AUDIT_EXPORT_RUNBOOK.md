@@ -262,11 +262,29 @@ Available `ClusterSecretStore` templates:
 - [ ] Helm deployments use `secretKeyRef` for endpoint/header values instead of storing tokens in chart values.
 - [ ] If using External Secrets Operator, `hashi-audit-export` is reconciled before enabling the CronJob.
 - [ ] If using a cloud/Vault SecretStore example, provider identity and least-privilege secret access have been reviewed by the platform/security team.
+- [ ] If using the starter SIEM assets, disabled alerts have been reviewed, thresholds have been tuned, and import behavior has been tested in a staging tenant.
 
 ---
 
-## 9. Current Deferred Work
+## 9. SIEM Starter Pack
+
+Starter assets live under `deploy/siem/`.
+
+| Asset | Purpose |
+|-------|---------|
+| `hashi-audit-field-mapping.json` | Canonical field inventory for ECS/SIEM, Splunk HEC, and OTLP-style audit records |
+| `splunk/savedsearches.conf` | Disabled starter alerts for policy denies, high-risk egress approvals, chain gaps, and stale exporter ingestion |
+| `splunk/dashboard.xml` | Compact operational dashboard for audit volume, outcomes, and denied actions |
+| `elastic/hashi-audit-index-template.json` | Starter Elasticsearch index template for `hashi-audit-*` |
+| `elastic/kibana-detection-rules.ndjson` | Disabled starter Kibana detection rule exports |
+| `otel/otel-collector-routing.example.yaml` | OpenTelemetry Collector routing example for HASHI audit logs |
+
+Treat these files as implementation accelerators, not compliance-certified content. Production operators should tune thresholds, index names, routing destinations, notification actions, and retention according to their security operations baseline.
+
+---
+
+## 10. Current Deferred Work
 
 - Deeper vendor transforms for multi-index Elasticsearch routing and strict Splunk deployments that require one HEC event per request.
-- Provider-specific dashboards and alert packs.
-- SIEM-specific dashboards, alerts, and field mappings beyond the baseline ECS-style event shape.
+- Import-validated provider dashboards and alert packs for managed Splunk Cloud, Elastic Cloud, and vendor-specific OpenTelemetry pipelines.
+- Organization-specific SIEM thresholds, notification actions, and compliance reporting packs.

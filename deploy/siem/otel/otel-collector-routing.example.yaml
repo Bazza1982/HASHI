@@ -1,0 +1,32 @@
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+  attributes/hashi_audit:
+    actions:
+      - key: service.name
+        action: upsert
+        value: hashi
+      - key: event.dataset
+        action: upsert
+        value: hashi.enterprise.audit
+
+exporters:
+  logging:
+    verbosity: basic
+  otlphttp/security_lake:
+    endpoint: https://collector.example.com/v1/logs
+    headers:
+      authorization: Bearer ${env:HASHI_AUDIT_EXPORT_FORWARD_TOKEN}
+
+service:
+  pipelines:
+    logs/hashi_audit:
+      receivers: [otlp]
+      processors: [attributes/hashi_audit, batch]
+      exporters: [logging, otlphttp/security_lake]
+
