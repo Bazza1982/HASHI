@@ -92,7 +92,7 @@ Required:
 
 Deferred:
 
-- SAML deployment hardening beyond `xmlsec1` XML Signature verification wiring and SCIM 2.0 compatibility beyond baseline Users and read-only Groups surfaces;
+- IdP-specific SAML/SCIM setup guides beyond the generic deployment runbook, and SCIM 2.0 compatibility beyond baseline Users, read-only Groups, discovery, and bounded Bulk surfaces;
 - full ABAC policy simulation;
 - live SIEM/OpenTelemetry exporter daemon scheduling beyond the CLI checkpoint/retry runner;
 - cloud/object-store WORM adapters beyond local filesystem sink;
@@ -178,6 +178,7 @@ Deferred:
 - read-only SCIM 2.0 Groups compatibility surface that maps HASHI projects to groups and active project memberships to group members;
 - SCIM 2.0 discovery surface for ServiceProviderConfig, ResourceTypes, and Schemas;
 - SCIM 2.0 Bulk operations safety MVP for bounded Users create/get/patch batches;
+- SSO/SCIM deployment runbook for current SAML `xmlsec1` verification and SCIM 2.0 operations;
 - Workbench login endpoint;
 - audit events for login/logout/admin bootstrap;
 - personal profile maps current owner behavior to implicit top admin.
@@ -223,6 +224,7 @@ Deferred:
 - `ENT-029` Add read-only SCIM Groups compatibility surface. Done for admin-gated and IdP-facing `/scim/v2/Groups` list/get, `displayName eq` and `id eq` filters, project-to-group mapping, active project members, scoped `scim:read` token gates, and org boundary checks; group mutation and advanced filters remain future work.
 - `ENT-030` Add SCIM discovery endpoints. Done for admin-gated and IdP-facing `/scim/v2/ServiceProviderConfig`, `/ResourceTypes`, `/ResourceTypes/{type}`, `/Schemas`, and `/Schemas/{schema}` with Users/Groups capability metadata and scoped `scim:read` token gates; deeper schema extension negotiation remains future work.
 - `ENT-031` Add SCIM Bulk operations safety MVP. Done for admin-gated and IdP-facing `/scim/v2/Bulk`, bounded operation count, `failOnErrors`, Users POST/GET/PATCH, org boundary checks for target users, scoped `scim:write` token gates, write-path audit events, and token redaction; Groups mutation and non-User bulk operations remain future work.
+- `ENT-032` Add SSO/SCIM deployment runbook. Done for SAML `xmlsec1` prerequisites, fail-closed SAML readiness checks, SCIM service token scopes, SCIM endpoint matrix, Bulk safety contract, acceptance checklist, and rollback guidance; IdP-specific setup guides remain future work.
 
 **Acceptance:**
 
@@ -238,6 +240,7 @@ Deferred:
 - SAML metadata can be parsed safely and preverified SAML assertion claims can be validated for issuer, audience, validity window, subject, email, and display name.
 - SAML login can complete through HTTP start/callback when a deployment supplies `xmlsec1`, a custom verifier hook, or explicitly enables preverified assertion handoff; unsigned or unverified assertions fail closed by default.
 - SCIM-style provisioning can sync enterprise users through service, admin API, IdP-facing SCIM 2.0 Users paths, and bounded SCIM Bulk batches without restoring old sessions or API tokens after deactivation, expose HASHI projects as read-only SCIM Groups for IdP discovery, and publish SCIM ServiceProviderConfig/ResourceTypes/Schemas metadata for IdP compatibility.
+- Operators have a runbook for configuring SAML verification and SCIM token scopes, validating the deployed endpoints, and rolling back SSO/SCIM integration safely.
 
 ### Enterprise Secret Providers
 
