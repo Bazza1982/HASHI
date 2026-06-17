@@ -50,6 +50,7 @@ Three operating modes:
 - `/verbose [on|off]` — toggle real-time streaming display; in wrapper mode, `on` also shows core raw output, wrapper final output, wrapper status, latency, and fallback reason
 - `/skill` — browse, toggle, and run skills (inline keyboard)
 - `/active [on|off] [minutes]` — toggle bridge-managed proactive heartbeat (default 10 min)
+- `/nudge [list]` — show idle continuation jobs. `/nudge <minutes> <exit condition>` creates an idle-only continuation job; `/nudge max <id-fragment> <+100|-100|number|unlimited>` adjusts the optional fire limit. Telegram nudge panels also include `Max -100`, `Max +100`, and `Max ∞` buttons.
 - `/voice [status|on|off|provider|providers|voices|use <alias>]` — control native bridge-owned voice replies
 - `/reboot [min|max|number|help]` — hot restart agents with live Python code reload and hot manager rebuild; preserves Workbench/API gateway/WhatsApp handles and recreates the scheduler
 - Alias: `/usercomputer`
