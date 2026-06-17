@@ -56,3 +56,27 @@ def test_oidc_public_payload_redacts_secret_material():
     assert payload["scopes"] == ["openid", "email"]
     assert "client_secret" not in payload
     assert "do-not-return" not in repr(payload)
+
+
+def test_saml_provider_requires_metadata_and_redacts_xml():
+    providers = load_auth_providers(
+        [
+            {
+                "type": "saml",
+                "id": "okta-saml",
+                "display_name": "Okta SAML",
+                "enabled": True,
+                "metadata_xml": "<EntityDescriptor>secret metadata</EntityDescriptor>",
+                "sp_entity_id": "hashi-enterprise",
+                "acs_url": "https://hashi.example.com/api/auth/saml/okta-saml/callback",
+            }
+        ]
+    )
+
+    payload = providers[1].public_payload()
+    assert providers[1].ready is True
+    assert payload["type"] == "saml"
+    assert payload["sp_entity_id"] == "hashi-enterprise"
+    assert payload["acs_url"] == "https://hashi.example.com/api/auth/saml/okta-saml/callback"
+    assert "metadata_xml" not in payload
+    assert "secret metadata" not in repr(payload)

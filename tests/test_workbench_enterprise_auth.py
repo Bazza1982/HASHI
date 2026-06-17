@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,6 +10,37 @@ import pytest
 
 from orchestrator.enterprise import EnterpriseRole
 from orchestrator.workbench_api import WorkbenchApiServer
+
+
+SAML_METADATA = """\
+<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata"
+    xmlns:ds="http://www.w3.org/2000/09/xmldsig#"
+    entityID="https://idp.example.com/metadata">
+  <md:IDPSSODescriptor>
+    <md:KeyDescriptor use="signing">
+      <ds:KeyInfo><ds:X509Data><ds:X509Certificate>MIIC FAKE CERT</ds:X509Certificate></ds:X509Data></ds:KeyInfo>
+    </md:KeyDescriptor>
+    <md:SingleSignOnService
+      Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect"
+      Location="https://idp.example.com/sso/redirect"/>
+  </md:IDPSSODescriptor>
+</md:EntityDescriptor>
+"""
+
+
+SAML_ASSERTION = """\
+<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+  <saml:Issuer>https://idp.example.com/metadata</saml:Issuer>
+  <saml:Subject><saml:NameID>saml@example.com</saml:NameID></saml:Subject>
+  <saml:Conditions NotBefore="2026-06-17T00:00:00Z" NotOnOrAfter="2099-06-17T01:00:00Z">
+    <saml:AudienceRestriction><saml:Audience>hashi-enterprise</saml:Audience></saml:AudienceRestriction>
+  </saml:Conditions>
+  <saml:AttributeStatement>
+    <saml:Attribute Name="email"><saml:AttributeValue>saml@example.com</saml:AttributeValue></saml:Attribute>
+    <saml:Attribute Name="displayName"><saml:AttributeValue>SAML User</saml:AttributeValue></saml:Attribute>
+  </saml:AttributeStatement>
+</saml:Assertion>
+"""
 
 
 class _FakeRequest:
@@ -370,6 +402,102 @@ async def test_oidc_callback_reports_provider_error(tmp_path):
     event = _audit_events(tmp_path)[-1]
     assert event["status"] == "failed"
     assert event["context"]["error"] == "access_denied"
+
+
+@pytest.mark.asyncio
+async def test_saml_start_returns_authn_request_and_keeps_metadata_private(tmp_path):
+    server = _server(tmp_path)
+    server.global_config.enterprise_auth_providers = [
+        {
+            "type": "saml",
+            "id": "okta-saml",
+            "enabled": True,
+            "metadata_xml": SAML_METADATA,
+            "sp_entity_id": "hashi-enterprise",
+            "acs_url": "https://hashi.example.com/api/auth/saml/okta-saml/callback",
+        }
+    ]
+
+    response = await server.handle_auth_saml_start(_FakeRequest(match_info={"provider_id": "okta-saml"}))
+    payload = json.loads(response.text)
+
+    assert response.status == 200
+    assert payload["saml"]["provider_id"] == "okta-saml"
+    assert payload["saml"]["state"].startswith("saml_")
+    assert payload["saml"]["request_id"].startswith("_")
+    assert "SAMLRequest=" in payload["saml"]["redirect_url"]
+    assert payload["saml"]["state"] in server._pending_saml_flows
+    assert "MIIC" not in json.dumps(payload)
+    assert _audit_events(tmp_path)[-1]["action"] == "saml_start"
+
+
+@pytest.mark.asyncio
+async def test_saml_callback_can_complete_preverified_login_flow(tmp_path):
+    server = _server(tmp_path)
+    server.global_config.enterprise_saml_allow_preverified_assertions = True
+    server.global_config.enterprise_auth_providers = [
+        {
+            "type": "saml",
+            "id": "okta-saml",
+            "enabled": True,
+            "metadata_xml": SAML_METADATA,
+            "sp_entity_id": "hashi-enterprise",
+            "acs_url": "https://hashi.example.com/api/auth/saml/okta-saml/callback",
+        }
+    ]
+    server.identity_service.create_organization(org_id="ORG-001", name="Acme")
+    server.identity_service.create_project(org_id="ORG-001", name="Default", project_id="ORG-001-default")
+    start_response = await server.handle_auth_saml_start(_FakeRequest(match_info={"provider_id": "okta-saml"}))
+    state = json.loads(start_response.text)["saml"]["state"]
+    encoded_assertion = base64.b64encode(SAML_ASSERTION.encode("utf-8")).decode("ascii")
+
+    response = await server.handle_auth_saml_callback(
+        _FakeRequest(
+            {"RelayState": state, "SAMLResponse": encoded_assertion, "signature_verified": True},
+            match_info={"provider_id": "okta-saml"},
+        )
+    )
+    payload = json.loads(response.text)
+
+    assert response.status == 200
+    assert payload["saml"]["signature_verified"] is True
+    assert payload["user"]["email"] == "saml@example.com"
+    assert payload["session"]["token"].startswith("hs_sess_")
+    assert server.identity_service.get_session_user(payload["session"]["token"]).email == "saml@example.com"
+    memberships = server.identity_service.list_project_memberships(user_id=payload["user"]["id"])
+    assert memberships[0]["project_id"] == "ORG-001-default"
+    events_text = json.dumps(_audit_events(tmp_path))
+    assert "SAMLResponse" not in events_text
+    assert "saml@example.com" not in events_text
+    assert state not in server._pending_saml_flows
+
+
+@pytest.mark.asyncio
+async def test_saml_callback_rejects_unverified_assertion(tmp_path):
+    server = _server(tmp_path)
+    server.global_config.enterprise_auth_providers = [
+        {
+            "type": "saml",
+            "id": "okta-saml",
+            "enabled": True,
+            "metadata_xml": SAML_METADATA,
+            "sp_entity_id": "hashi-enterprise",
+            "acs_url": "https://hashi.example.com/api/auth/saml/okta-saml/callback",
+        }
+    ]
+    start_response = await server.handle_auth_saml_start(_FakeRequest(match_info={"provider_id": "okta-saml"}))
+    state = json.loads(start_response.text)["saml"]["state"]
+
+    response = await server.handle_auth_saml_callback(
+        _FakeRequest(
+            {"RelayState": state, "assertion_xml": SAML_ASSERTION, "signature_verified": True},
+            match_info={"provider_id": "okta-saml"},
+        )
+    )
+
+    assert response.status == 400
+    assert "signature must be verified" in json.loads(response.text)["error"]
+    assert _audit_events(tmp_path)[-1]["action"] == "saml_callback"
 
 
 def test_enterprise_admin_auth_requires_admin_project_role(tmp_path):
