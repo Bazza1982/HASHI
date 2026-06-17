@@ -83,6 +83,7 @@ This is **not** the end state of the enterprise product. It is the first reviewa
 - Raw Kubernetes and Helm audit export daemon assets can pass DB lease arguments using the pod name as holder identity.
 - Superloop scheduler ticks can be guarded by enterprise DB leases when the scheduler is run in multi-replica contexts.
 - Scheduler DB leases can be enabled through global config or deployment environment variables, with raw Kubernetes and Helm assets wiring the pod name as holder identity.
+- Scheduler lease enforcement now guards the whole trigger tick, so secondary replicas skip heartbeat, nudge, cron, parked follow-up, and superloop trigger work while another holder owns the lease.
 - `hashi enterprise audit-export-live` provides a one-shot operator runner for HTTP SIEM/ledger/OTLP pushes with checkpoint, retry, timeout, batch-size, and custom header controls, so deployments can schedule live export through cron, systemd, or Kubernetes CronJob without embedding vendor SDKs.
 - `hashi enterprise audit-export-live --daemon` can run bounded or continuous export loops with configurable interval while preserving checkpoint safety.
 - Deployment assets now include a Docker Compose `audit-export` profile, a raw Kubernetes CronJob, and a Helm-gated CronJob template for scheduled live audit export with persistent checkpoints.
@@ -164,7 +165,7 @@ These are not blockers for Enterprise MVP review, but they are not complete:
 - cloud-specific object-store WORM client packages and deployment runbooks for S3/GCS/Azure immutable storage;
 - Vault AppRole/Kubernetes auth, lease renewal, and policy bootstrap;
 - live SIEM/OTLP exporter hardening beyond the CLI runner, daemon loop, baseline Compose/Kubernetes/Helm scheduling, supervised daemon manifests, generic vendor preset runbook, Kubernetes `secretKeyRef` wiring, External Secrets examples, and starter SIEM assets, including deeper vendor transforms, import-validated dashboards/alerts, and production validation for each cloud identity model;
-- Kubernetes HA deployment beyond the baseline manifests/chart, managed database URL wiring, optional PodDisruptionBudget assets, file-lock guarded audit export, DB lease primitive, audit-export DB lease wiring, superloop lease guard, and scheduler lease environment wiring, including PostgreSQL-backed runtime lease support, schema migration rehearsal, connection pooling, Kubernetes Lease leader election, heartbeat/cron/nudge lease integration, validated production ingress/network policies, autoscaling runbooks, and multi-replica coordination;
+- Kubernetes HA deployment beyond the baseline manifests/chart, managed database URL wiring, optional PodDisruptionBudget assets, file-lock guarded audit export, DB lease primitive, audit-export DB lease wiring, superloop lease guard, scheduler lease environment wiring, and whole-tick scheduler lease enforcement, including PostgreSQL-backed runtime lease support, schema migration rehearsal, connection pooling, Kubernetes Lease leader election, validated production ingress/network policies, autoscaling runbooks, and live multi-replica rehearsal;
 - Slack OAuth/Bot API, channel discovery, and user mapping;
 - Microsoft Teams and Feishu connectors;
 - Google Chat OAuth, space discovery, and user mapping;

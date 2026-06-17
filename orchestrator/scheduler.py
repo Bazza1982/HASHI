@@ -311,10 +311,50 @@ class TaskScheduler:
             )
             return False
 
+    def _acquire_enterprise_scheduler_lease(self) -> bool:
+        if self.enterprise_lease_store is None:
+            return True
+        try:
+            attempt = self.enterprise_lease_store.acquire(
+                self.enterprise_lease_name,
+                holder_id=self.enterprise_lease_holder,
+                ttl_seconds=self.enterprise_lease_ttl_seconds,
+                metadata={"component": "task-scheduler"},
+            )
+        except Exception as e:
+            scheduler_logger.error("Enterprise scheduler lease acquire failed: %s", e, exc_info=True)
+            return False
+        if not attempt.acquired:
+            scheduler_logger.info(
+                "Skipping scheduler tick because enterprise lease %s is held by %s.",
+                self.enterprise_lease_name,
+                attempt.current_holder_id,
+            )
+            return False
+        return True
+
+    def _release_enterprise_scheduler_lease(self) -> None:
+        if self.enterprise_lease_store is None:
+            return
+        try:
+            self.enterprise_lease_store.release(
+                self.enterprise_lease_name,
+                holder_id=self.enterprise_lease_holder,
+            )
+        except Exception as e:
+            scheduler_logger.error("Enterprise scheduler lease release failed: %s", e, exc_info=True)
+
     async def run(self):
         scheduler_logger.info("Task Scheduler started%s.", " (croniter available)" if HAS_CRONITER else " (croniter NOT available, fallback mode)")
         while True:
+            lease_held = False
             try:
+                if self.enterprise_lease_store is not None:
+                    lease_held = self._acquire_enterprise_scheduler_lease()
+                    if not lease_held:
+                        await asyncio.sleep(15)
+                        continue
+
                 tasks = self._load_tasks()
                 now = time.time()
                 now_dt = datetime.now()
@@ -583,7 +623,7 @@ class TaskScheduler:
                 try:
                     superloop_stats = advance_superloops_once(
                         self.tasks_path.parent / "superloops",
-                        lease_store=self.enterprise_lease_store,
+                        lease_store=None if lease_held else self.enterprise_lease_store,
                         lease_name=self.enterprise_lease_name,
                         lease_holder=self.enterprise_lease_holder,
                         lease_ttl_seconds=self.enterprise_lease_ttl_seconds,
@@ -603,5 +643,8 @@ class TaskScheduler:
 
             except Exception as e:
                 scheduler_logger.error(f"Scheduler error: {e}")
+            finally:
+                if lease_held:
+                    self._release_enterprise_scheduler_lease()
 
             await asyncio.sleep(15)
