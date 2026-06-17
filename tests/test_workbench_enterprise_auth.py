@@ -482,6 +482,99 @@ async def test_enterprise_admin_can_create_and_list_users(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_enterprise_admin_can_scim_upsert_user(tmp_path):
+    server = _server(tmp_path)
+    admin = server.identity_service.bootstrap_org_admin(
+        org_id="ORG-001",
+        org_name="Acme",
+        email="admin@example.com",
+        display_name="Admin",
+        password="secret-password",
+        user_id="usr-admin",
+    )
+    project = server.identity_service.create_project(org_id="ORG-001", name="Research", project_id="prj-research")
+    session = server.identity_service.create_session(user_id=admin.id)
+    headers = {"Authorization": f"Bearer {session.token}"}
+
+    create_response = await server.handle_enterprise_scim_users_upsert(
+        _FakeRequest(
+            {
+                "default_project_id": project.id,
+                "scim": {
+                    "userName": "SCIM@Example.com",
+                    "displayName": "SCIM User",
+                    "externalId": "idp-123",
+                    "active": True,
+                },
+            },
+            headers=headers,
+        )
+    )
+    update_response = await server.handle_enterprise_scim_users_upsert(
+        _FakeRequest(
+            {
+                "scim": {
+                    "userName": "scim@example.com",
+                    "displayName": "Renamed User",
+                    "externalId": "idp-123",
+                    "active": True,
+                },
+            },
+            headers=headers,
+        )
+    )
+
+    assert create_response.status == 201
+    assert update_response.status == 200
+    created = json.loads(create_response.text)
+    updated = json.loads(update_response.text)
+    assert created["scim"]["created"] is True
+    assert updated["scim"]["created"] is False
+    assert updated["user"]["display_name"] == "Renamed User"
+    assert created["user"]["memberships"][0]["project_id"] == "prj-research"
+    event = _audit_events(tmp_path)[-1]
+    assert event["action"] == "scim_user_upsert"
+    assert event["context"]["external_id"] == "idp-123"
+
+
+@pytest.mark.asyncio
+async def test_enterprise_admin_can_scim_deactivate_user_and_revoke_tokens(tmp_path):
+    server = _server(tmp_path)
+    admin = server.identity_service.bootstrap_org_admin(
+        org_id="ORG-001",
+        org_name="Acme",
+        email="admin@example.com",
+        display_name="Admin",
+        password="secret-password",
+        user_id="usr-admin",
+    )
+    user = server.identity_service.create_user(
+        org_id="ORG-001",
+        email="user@example.com",
+        display_name="User",
+        password="secret-password",
+        user_id="usr-user",
+    )
+    user_session = server.identity_service.create_session(user_id=user.id)
+    api_token = server.identity_service.create_api_token(user_id=user.id, scopes=["audit:read"])
+    admin_session = server.identity_service.create_session(user_id=admin.id)
+    headers = {"Authorization": f"Bearer {admin_session.token}"}
+
+    response = await server.handle_enterprise_scim_users_deactivate(
+        _FakeRequest({"userName": "user@example.com"}, headers=headers)
+    )
+
+    assert response.status == 200
+    payload = json.loads(response.text)
+    assert payload["user"]["status"] == "disabled"
+    assert server.identity_service.get_session_user(user_session.token) is None
+    assert server.identity_service.validate_api_token(api_token.token) is None
+    event = _audit_events(tmp_path)[-1]
+    assert event["action"] == "scim_user_deactivate"
+    assert event["context"]["target_user_id"] == "usr-user"
+
+
+@pytest.mark.asyncio
 async def test_enterprise_admin_can_create_list_and_revoke_api_tokens(tmp_path):
     server = _server(tmp_path)
     admin = server.identity_service.bootstrap_org_admin(
