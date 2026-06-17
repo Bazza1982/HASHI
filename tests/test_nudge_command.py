@@ -9,7 +9,12 @@ from types import SimpleNamespace
 import pytest
 
 from orchestrator.runtime_jobs import CALLBACK_DATA_LIMIT, mint_callback_token
-from orchestrator.runtime_nudge import build_nudge_with_buttons, handle_nudge_callback, parse_nudge_create_args
+from orchestrator.runtime_nudge import (
+    build_nudge_with_buttons,
+    handle_nudge_callback,
+    handle_nudge_command,
+    parse_nudge_create_args,
+)
 from orchestrator import scheduler as scheduler_module
 from orchestrator.scheduler import TaskScheduler, _should_fire
 from orchestrator.skill_manager import SkillManager
@@ -40,6 +45,30 @@ def test_create_nudge_job_writes_prompt_and_metadata(tmp_path):
     assert saved["nudge_meta"]["count"] == 0
     assert saved["nudge_meta"]["max"] == 0
     assert f"NUDGE_COMPLETE:{job['id']}" in saved["prompt"]
+
+
+def test_nudge_max_can_be_set_and_adjusted(tmp_path):
+    manager = SkillManager(project_root=tmp_path, tasks_path=tmp_path / "tasks.json")
+    job = manager.create_nudge_job(
+        agent_name="zelda",
+        interval_minutes=2,
+        exit_condition="until the scan is done",
+    )
+
+    ok, message = manager.adjust_nudge_max(job["id"], 100)
+    assert ok is True
+    assert "max is now 100" in message
+
+    ok, message = manager.adjust_nudge_max(job["id"], -200)
+    assert ok is True
+    assert "max is now unlimited" in message
+
+    ok, message = manager.set_nudge_max(job["id"], 250)
+    assert ok is True
+    assert "max is now 250" in message
+
+    data = json.loads((tmp_path / "tasks.json").read_text(encoding="utf-8"))
+    assert data["nudges"][0]["nudge_meta"]["max"] == 250
 
 
 @pytest.mark.asyncio
@@ -340,6 +369,8 @@ def test_build_nudge_with_buttons_uses_short_callbacks_for_long_ids():
     assert callbacks
     assert all(len(callback_data) <= CALLBACK_DATA_LIMIT for callback_data in callbacks)
     assert any(callback_data.startswith("nudgejob:key:") for callback_data in callbacks)
+    assert text.count("fired 1/100") == 1
+    assert any(button.text == "Max +100" for row in markup.inline_keyboard for button in row)
 
 
 def test_nudge_list_shows_unlimited_max_when_set_to_zero():
@@ -358,6 +389,36 @@ def test_nudge_list_shows_unlimited_max_when_set_to_zero():
 
     text, _ = build_nudge_with_buttons(SkillManager(), "zelda")
     assert "fired 1/∞" in text
+
+
+@pytest.mark.asyncio
+async def test_nudge_max_command_updates_single_job(tmp_path):
+    manager = SkillManager(project_root=tmp_path, tasks_path=tmp_path / "tasks.json")
+    job = manager.create_nudge_job(
+        agent_name="zelda",
+        interval_minutes=1,
+        exit_condition="until complete",
+    )
+
+    class Runtime:
+        name = "zelda"
+        skill_manager = manager
+
+        def __init__(self):
+            self.replies = []
+
+        async def _reply_text(self, _update, text, **kwargs):
+            self.replies.append((text, kwargs))
+
+    runtime = Runtime()
+
+    await handle_nudge_command(runtime, object(), f"max {job['id'][-6:]} +100")
+    await handle_nudge_command(runtime, object(), "max unlimited")
+
+    data = json.loads((tmp_path / "tasks.json").read_text(encoding="utf-8"))
+    assert data["nudges"][0]["nudge_meta"]["max"] == 0
+    assert "max is now 100" in runtime.replies[0][0]
+    assert "max is now unlimited" in runtime.replies[1][0]
 
 
 @pytest.mark.asyncio
@@ -450,6 +511,76 @@ async def test_tokenized_nudge_delete_callback():
     assert handled is True
     assert runtime.skill_manager.deleted == [("nudge", "nudge-123")]
     assert query.answers[-1][0] == "deleted"
+    assert query.edits
+
+
+@pytest.mark.asyncio
+async def test_tokenized_nudge_max_buttons_adjust_and_set_limit():
+    class SkillManager:
+        def __init__(self):
+            self.max_value = 100
+
+        def adjust_nudge_max(self, task_id, delta):
+            self.max_value = max(0, self.max_value + int(delta))
+            return True, f"{task_id} max is now {self.max_value or 'unlimited'}."
+
+        def set_nudge_max(self, task_id, max_nudges):
+            self.max_value = max(0, int(max_nudges))
+            return True, f"{task_id} max is now {self.max_value or 'unlimited'}."
+
+        def list_jobs(self, kind, agent_name=None):
+            return [
+                {
+                    "id": "nudge-123",
+                    "agent": "zelda",
+                    "enabled": True,
+                    "interval_seconds": 300,
+                    "exit_condition": "until complete",
+                    "nudge_meta": {"count": 2, "max": self.max_value},
+                }
+            ]
+
+    class Runtime:
+        name = "zelda"
+
+        def __init__(self):
+            self.skill_manager = SkillManager()
+
+    class Query:
+        def __init__(self):
+            self.answers = []
+            self.edits = []
+
+        async def answer(self, text=None, **kwargs):
+            self.answers.append((text, kwargs))
+
+        async def edit_message_text(self, text, **kwargs):
+            self.edits.append((text, kwargs))
+
+    runtime = Runtime()
+    delta_token = mint_callback_token(
+        runtime,
+        "nudgejob_action",
+        {"task_id": "nudge-123", "action": "max_delta", "value": "100"},
+        prefix="nj",
+    )
+    set_token = mint_callback_token(
+        runtime,
+        "nudgejob_action",
+        {"task_id": "nudge-123", "action": "max_set", "value": "0"},
+        prefix="nj",
+    )
+    query = Query()
+
+    handled = await handle_nudge_callback(runtime, query, f"nudgejob:key:{delta_token}:max_delta")
+    assert handled is True
+    assert runtime.skill_manager.max_value == 200
+    assert "max is now 200" in query.answers[-1][0]
+
+    handled = await handle_nudge_callback(runtime, query, f"nudgejob:key:{set_token}:max_set")
+    assert handled is True
+    assert runtime.skill_manager.max_value == 0
+    assert "max is now unlimited" in query.answers[-1][0]
     assert query.edits
 
 

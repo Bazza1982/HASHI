@@ -389,6 +389,35 @@ class SkillManager:
             return True, f"{task_id} is now {'ON' if enabled else 'OFF'}."
         return False, f"Unknown {kind} task: {task_id}"
 
+    def set_nudge_max(self, task_id: str, max_nudges: int) -> tuple[bool, str]:
+        tasks = self._load_tasks()
+        max_value = max(0, int(max_nudges or 0))
+        for job in tasks.get("nudges", []):
+            if job.get("id") != task_id:
+                continue
+            meta = job.setdefault("nudge_meta", {})
+            meta["max"] = max_value
+            meta.pop("stopped_reason", None)
+            self._save_tasks(tasks)
+            label = "unlimited" if max_value == 0 else str(max_value)
+            return True, f"{task_id} max is now {label}."
+        return False, f"Unknown nudge task: {task_id}"
+
+    def adjust_nudge_max(self, task_id: str, delta: int) -> tuple[bool, str]:
+        tasks = self._load_tasks()
+        for job in tasks.get("nudges", []):
+            if job.get("id") != task_id:
+                continue
+            meta = job.setdefault("nudge_meta", {})
+            current = max(0, int(meta.get("max", 0) or 0))
+            new_value = max(0, current + int(delta))
+            meta["max"] = new_value
+            meta.pop("stopped_reason", None)
+            self._save_tasks(tasks)
+            label = "unlimited" if new_value == 0 else str(new_value)
+            return True, f"{task_id} max is now {label}."
+        return False, f"Unknown nudge task: {task_id}"
+
     def delete_job(self, kind: str, task_id: str) -> tuple[bool, str]:
         self._ensure_active_heartbeats_migrated()
         if kind == "heartbeat":

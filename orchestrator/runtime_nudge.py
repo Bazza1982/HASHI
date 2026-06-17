@@ -7,6 +7,10 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from orchestrator.runtime_jobs import mint_callback_token, resolve_callback_token
 
 
+def _max_label(value: int) -> str:
+    return "∞" if int(value or 0) <= 0 else str(int(value))
+
+
 def parse_nudge_create_args(args_text: str) -> tuple[int, str]:
     raw = (args_text or "").strip()
     parts = raw.split(None, 1)
@@ -70,6 +74,9 @@ def build_nudge_with_buttons(skill_manager, agent_name: str, runtime=None):
             trigger_callback = "noop"
             toggle_callback = "noop"
             delete_callback = "noop"
+            max_plus_callback = "noop"
+            max_minus_callback = "noop"
+            max_unlimited_callback = "noop"
         else:
             trigger_token = mint_callback_token(runtime, "nudgejob_action", {"task_id": jid, "action": "trigger"}, prefix="nj")
             toggle_token = mint_callback_token(
@@ -79,9 +86,30 @@ def build_nudge_with_buttons(skill_manager, agent_name: str, runtime=None):
                 prefix="nj",
             )
             delete_token = mint_callback_token(runtime, "nudgejob_action", {"task_id": jid, "action": "delete"}, prefix="nj")
+            max_plus_token = mint_callback_token(
+                runtime,
+                "nudgejob_action",
+                {"task_id": jid, "action": "max_delta", "value": "100"},
+                prefix="nj",
+            )
+            max_minus_token = mint_callback_token(
+                runtime,
+                "nudgejob_action",
+                {"task_id": jid, "action": "max_delta", "value": "-100"},
+                prefix="nj",
+            )
+            max_unlimited_token = mint_callback_token(
+                runtime,
+                "nudgejob_action",
+                {"task_id": jid, "action": "max_set", "value": "0"},
+                prefix="nj",
+            )
             trigger_callback = f"nudgejob:key:{trigger_token}:trigger"
             toggle_callback = f"nudgejob:key:{toggle_token}:toggle"
             delete_callback = f"nudgejob:key:{delete_token}:delete"
+            max_plus_callback = f"nudgejob:key:{max_plus_token}:max_delta"
+            max_minus_callback = f"nudgejob:key:{max_minus_token}:max_delta"
+            max_unlimited_callback = f"nudgejob:key:{max_unlimited_token}:max_set"
 
         buttons.append([InlineKeyboardButton(f"🫧 {short_id}", callback_data="noop")])
         buttons.append([
@@ -89,8 +117,14 @@ def build_nudge_with_buttons(skill_manager, agent_name: str, runtime=None):
             InlineKeyboardButton(toggle_label, callback_data=toggle_callback),
             InlineKeyboardButton("🗑 Delete", callback_data=delete_callback),
         ])
+        buttons.append([
+            InlineKeyboardButton("Max -100", callback_data=max_minus_callback),
+            InlineKeyboardButton("Max +100", callback_data=max_plus_callback),
+            InlineKeyboardButton("Max ∞", callback_data=max_unlimited_callback),
+        ])
 
     lines.append("\n<i>Add: <code>/nudge &lt;minutes&gt; &lt;exit condition&gt;</code></i>")
+    lines.append("<i>Adjust max: <code>/nudge max &lt;id&gt; +100</code> or <code>/nudge max &lt;id&gt; unlimited</code></i>")
     markup = InlineKeyboardMarkup(buttons) if buttons else None
     return "\n".join(lines), markup
 
@@ -153,6 +187,28 @@ async def handle_nudge_callback(runtime, query, data: str) -> bool:
         await _refresh_nudge_view(runtime, query)
         return True
 
+    if action == "max_delta":
+        try:
+            delta = int(value)
+        except ValueError:
+            await query.answer("Invalid max adjustment.", show_alert=True)
+            return True
+        ok, message = runtime.skill_manager.adjust_nudge_max(task_id, delta)
+        await query.answer(message, show_alert=not ok)
+        await _refresh_nudge_view(runtime, query)
+        return True
+
+    if action == "max_set":
+        try:
+            max_value = int(value)
+        except ValueError:
+            await query.answer("Invalid max value.", show_alert=True)
+            return True
+        ok, message = runtime.skill_manager.set_nudge_max(task_id, max_value)
+        await query.answer(message, show_alert=not ok)
+        await _refresh_nudge_view(runtime, query)
+        return True
+
     if action == "trigger":
         job = runtime.skill_manager.get_job("nudge", task_id)
         if not job:
@@ -181,6 +237,63 @@ async def _refresh_nudge_view(runtime, query):
     await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
 
 
+def _resolve_nudge_selector(skill_manager, agent_name: str, selector: str) -> tuple[dict | None, str | None]:
+    selector = (selector or "").strip()
+    jobs = [job for job in skill_manager.list_jobs("nudge", agent_name=agent_name) if job.get("nudge_meta")]
+    if not jobs:
+        return None, "No nudge jobs for this agent."
+    if not selector:
+        if len(jobs) == 1:
+            return jobs[0], None
+        return None, "Multiple nudges exist. Specify a job id fragment."
+    matches = [job for job in jobs if selector in str(job.get("id", ""))]
+    if len(matches) == 1:
+        return matches[0], None
+    if not matches:
+        return None, f"No nudge matching '{html.escape(selector)}' found."
+    return None, f"Multiple nudges match '{html.escape(selector)}'. Use a longer id fragment."
+
+
+def _parse_nudge_max_value(raw_value: str) -> tuple[str, int]:
+    value = (raw_value or "").strip().lower()
+    if value in {"∞", "inf", "infinite", "unlimited", "none"}:
+        return "set", 0
+    if value.startswith(("+", "-")):
+        return "delta", int(value)
+    return "set", max(0, int(value))
+
+
+def set_nudge_max_from_command(skill_manager, agent_name: str, args_text: str) -> str:
+    raw = (args_text or "").strip()
+    parts = raw.split()
+    if not parts:
+        return "Usage: /nudge max <id> <+100|-100|number|unlimited>"
+    if len(parts) == 1:
+        selector = ""
+        raw_value = parts[0]
+    else:
+        selector = parts[0]
+        raw_value = parts[1]
+    try:
+        mode, value = _parse_nudge_max_value(raw_value)
+    except ValueError:
+        return "Max must be +100, -100, a whole number, or unlimited."
+    job, error = _resolve_nudge_selector(skill_manager, agent_name, selector)
+    if error:
+        return error
+    if not job:
+        return "Nudge job not found."
+    if mode == "delta":
+        ok, message = skill_manager.adjust_nudge_max(job["id"], value)
+    else:
+        ok, message = skill_manager.set_nudge_max(job["id"], value)
+    if not ok:
+        return message
+    updated = skill_manager.get_job("nudge", job["id"]) or job
+    meta = updated.get("nudge_meta", {})
+    return f"{message} Current fired/max: {int(meta.get('count', 0) or 0)}/{_max_label(int(meta.get('max', 0) or 0))}."
+
+
 async def handle_nudge_command(runtime, update, args_text: str) -> None:
     if not runtime.skill_manager:
         await runtime._reply_text(update, "Skill manager not available.")
@@ -197,6 +310,12 @@ async def handle_nudge_command(runtime, update, args_text: str) -> None:
     if lowered.startswith("stop"):
         stop_arg = lowered[4:].strip()
         result = stop_nudges(runtime.skill_manager, runtime.name, stop_arg)
+        text, markup = build_nudge_with_buttons(runtime.skill_manager, runtime.name, runtime=runtime)
+        await runtime._reply_text(update, result + "\n\n" + text, parse_mode="HTML", reply_markup=markup)
+        return
+
+    if lowered.startswith("max"):
+        result = set_nudge_max_from_command(runtime.skill_manager, runtime.name, raw[3:].strip())
         text, markup = build_nudge_with_buttons(runtime.skill_manager, runtime.name, runtime=runtime)
         await runtime._reply_text(update, result + "\n\n" + text, parse_mode="HTML", reply_markup=markup)
         return
