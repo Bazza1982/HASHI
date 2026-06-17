@@ -151,10 +151,7 @@ Before enabling production export:
 Helm:
 
 ```bash
-kubectl create secret generic hashi-audit-export \
-  --namespace hashi-enterprise \
-  --from-literal=HASHI_AUDIT_EXPORT_ENDPOINT=https://otel-collector.example.com/v1/logs \
-  --from-literal=HASHI_AUDIT_EXPORT_HEADER='Authorization: Bearer replace-me'
+kubectl apply -f deploy/helm/hashi-enterprise/examples/audit-export-secret.kubernetes.yaml
 
 helm upgrade --install hashi-enterprise deploy/helm/hashi-enterprise \
   --namespace hashi-enterprise --create-namespace \
@@ -165,6 +162,14 @@ helm upgrade --install hashi-enterprise deploy/helm/hashi-enterprise \
 ```
 
 For production, avoid putting long-lived tokens in shell history or Helm release values. The chart supports `auditExport.endpointSecretRef` and `auditExport.headerSecretRef` so the CronJob can read endpoint/header values from a Kubernetes Secret.
+
+External Secrets Operator example:
+
+```bash
+kubectl apply -f deploy/helm/hashi-enterprise/examples/audit-export-secret.external-secrets.yaml
+```
+
+The ExternalSecret manifest is intentionally an example, not part of the chart, because each enterprise cluster has its own `SecretStore` or `ClusterSecretStore` and cloud-provider mapping.
 
 ---
 
@@ -178,6 +183,7 @@ For production, avoid putting long-lived tokens in shell history or Helm release
 - [ ] Collector rejects bad credentials and HASHI does not advance the checkpoint.
 - [ ] No raw connector secrets, SAML assertions, OIDC tokens, or SCIM tokens appear in exported events.
 - [ ] Helm deployments use `secretKeyRef` for endpoint/header values instead of storing tokens in chart values.
+- [ ] If using External Secrets Operator, `hashi-audit-export` is reconciled before enabling the CronJob.
 
 ---
 
@@ -185,5 +191,5 @@ For production, avoid putting long-lived tokens in shell history or Helm release
 
 - Managed long-running daemon mode.
 - Deeper vendor transforms for multi-index Elasticsearch routing and strict Splunk deployments that require one HEC event per request.
-- Secret-manager-native wiring beyond Kubernetes `secretKeyRef`, such as External Secrets Operator or cloud-provider secret stores.
+- Cloud-provider-specific `SecretStore` manifests for AWS Secrets Manager, GCP Secret Manager, Azure Key Vault, and Vault.
 - SIEM-specific dashboards, alerts, and field mappings beyond the baseline ECS-style event shape.

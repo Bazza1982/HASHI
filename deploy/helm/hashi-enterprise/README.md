@@ -48,10 +48,7 @@ SIEM/OTLP endpoint and authorization header. For production, store those values
 in a Kubernetes Secret:
 
 ```bash
-kubectl create secret generic hashi-audit-export \
-  --namespace hashi-enterprise \
-  --from-literal=HASHI_AUDIT_EXPORT_ENDPOINT=https://siem.example.com/ingest \
-  --from-literal=HASHI_AUDIT_EXPORT_HEADER='Authorization: Bearer replace-me'
+kubectl apply -f deploy/helm/hashi-enterprise/examples/audit-export-secret.kubernetes.yaml
 ```
 
 ```bash
@@ -65,3 +62,12 @@ helm upgrade --install hashi-enterprise deploy/helm/hashi-enterprise \
 The CronJob uses `concurrencyPolicy: Forbid` and advances
 `/data/state/audit_live_export_checkpoint.json` only after a successful export
 cycle.
+
+If your cluster uses External Secrets Operator, adapt and apply:
+
+```bash
+kubectl apply -f deploy/helm/hashi-enterprise/examples/audit-export-secret.external-secrets.yaml
+```
+
+The ExternalSecret example is not installed by the chart because it depends on
+cluster-specific CRDs and secret-store configuration.
