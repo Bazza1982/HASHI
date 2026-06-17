@@ -27,6 +27,7 @@ def test_enterprise_helm_chart_files_exist():
         "templates/secret.example.yaml",
         "templates/service.yaml",
         "templates/serviceaccount.yaml",
+        "examples/external-postgres-secret.kubernetes.yaml",
     }
 
     actual = {
@@ -49,6 +50,8 @@ def test_enterprise_helm_values_default_to_governed_single_replica():
     assert "enabled: false" in text
     assert "networkPolicy:" in text
     assert "autoscaling:" in text
+    assert "externalDatabase:" in text
+    assert "secretKey: HASHI_ENTERPRISE_DATABASE_URL" in text
 
 
 def test_enterprise_helm_deployment_keeps_health_and_secret_contracts():
@@ -65,6 +68,20 @@ def test_enterprise_helm_deployment_keeps_health_and_secret_contracts():
     assert "readinessProbe:" in text
     assert "path: {{ .Values.livenessProbe.path }}" in text
     assert "path: {{ .Values.readinessProbe.path }}" in text
+    assert "{{- if .Values.externalDatabase.enabled }}" in text
+    assert "name: HASHI_ENTERPRISE_DATABASE_URL" in text
+    assert "name: {{ .Values.externalDatabase.secretName }}" in text
+    assert "key: {{ .Values.externalDatabase.secretKey }}" in text
+
+
+def test_enterprise_helm_external_database_example_uses_postgres_secret_contract():
+    text = _read(CHART_DIR / "examples" / "external-postgres-secret.kubernetes.yaml")
+
+    assert "kind: Secret" in text
+    assert "name: hashi-enterprise-database" in text
+    assert "HASHI_ENTERPRISE_DATABASE_URL:" in text
+    assert "postgresql://hashi:replace-me@" in text
+    assert "sslmode=require" in text
 
 
 def test_enterprise_helm_configmap_sets_enterprise_environment():

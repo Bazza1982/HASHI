@@ -21,6 +21,7 @@ def test_kubernetes_baseline_files_exist():
         "persistent-volume-claim.yaml",
         "deployment.yaml",
         "service.yaml",
+        "external-postgres-secret.example.yaml",
     }
 
     assert expected.issubset({path.name for path in K8S_DIR.iterdir()})
@@ -77,3 +78,14 @@ def test_secret_example_does_not_contain_real_values():
     assert "change-me" in text
     assert "replace-me" in text
     assert "Example only" in text
+    assert "HASHI_ENTERPRISE_DATABASE_URL: sqlite:////data/state/enterprise.sqlite" in text
+
+
+def test_external_postgres_secret_example_documents_database_contract():
+    text = _read("external-postgres-secret.example.yaml")
+
+    assert "kind: Secret" in text
+    assert "name: hashi-enterprise-database" in text
+    assert "HASHI_ENTERPRISE_DATABASE_URL:" in text
+    assert "postgresql://hashi:replace-me@" in text
+    assert "sslmode=require" in text

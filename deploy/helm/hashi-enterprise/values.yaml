@@ -43,6 +43,11 @@ secrets:
   databaseUrl: sqlite:////data/state/enterprise.sqlite
   connectorSecretName: hashi-enterprise-secrets
 
+externalDatabase:
+  enabled: false
+  secretName: hashi-enterprise-database
+  secretKey: HASHI_ENTERPRISE_DATABASE_URL
+
 persistence:
   enabled: true
   existingClaim: ""
