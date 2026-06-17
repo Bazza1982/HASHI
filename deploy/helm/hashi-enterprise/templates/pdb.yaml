@@ -1,0 +1,14 @@
+{{- if .Values.podDisruptionBudget.enabled -}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "hashi-enterprise.fullname" . }}
+  labels:
+    {{- include "hashi-enterprise.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "hashi-enterprise.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}

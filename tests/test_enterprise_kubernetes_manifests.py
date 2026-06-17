@@ -22,6 +22,7 @@ def test_kubernetes_baseline_files_exist():
         "deployment.yaml",
         "service.yaml",
         "external-postgres-secret.example.yaml",
+        "pod-disruption-budget.example.yaml",
     }
 
     assert expected.issubset({path.name for path in K8S_DIR.iterdir()})
@@ -89,3 +90,12 @@ def test_external_postgres_secret_example_documents_database_contract():
     assert "HASHI_ENTERPRISE_DATABASE_URL:" in text
     assert "postgresql://hashi:replace-me@" in text
     assert "sslmode=require" in text
+
+
+def test_pod_disruption_budget_example_documents_multi_replica_guard():
+    text = _read("pod-disruption-budget.example.yaml")
+
+    assert "kind: PodDisruptionBudget" in text
+    assert "minAvailable: 1" in text
+    assert "app.kubernetes.io/name: hashi" in text
+    assert "app.kubernetes.io/component: enterprise" in text

@@ -111,7 +111,7 @@ This is **not** the end state of the enterprise product. It is the first reviewa
 - Kubernetes baseline manifests exist for namespace, config map, example secret, PVC, single-replica deployment, service, and `/api/health` liveness/readiness probes.
 - Kubernetes baseline manifests include a scheduled live audit export CronJob that runs the one-shot exporter with `concurrencyPolicy: Forbid` and stores checkpoints under `/data/state`.
 - Kubernetes baseline mounts `/data` for state/workspaces/logs/backups and mounts connector secrets as read-only files for provider-based secret resolution.
-- Helm baseline chart packages the same enterprise deployment contract with configurable image, service, resources, probes, persistence, connector secret mount, optional ingress, optional NetworkPolicy, optional HPA skeleton, optional external database SecretRef wiring, and optional live audit export CronJob.
+- Helm baseline chart packages the same enterprise deployment contract with configurable image, service, resources, probes, persistence, connector secret mount, optional ingress, optional NetworkPolicy, optional HPA skeleton, optional PodDisruptionBudget, optional external database SecretRef wiring, and optional live audit export CronJob.
 - The SSO/SCIM deployment runbook gives operators a concrete path for wiring current SAML XML Signature verification and SCIM 2.0 compatibility surfaces into an enterprise IdP.
 - The Kubernetes and Helm baselines are deployment starting points, not a full HA release.
 
@@ -158,7 +158,7 @@ These are not blockers for Enterprise MVP review, but they are not complete:
 - cloud-specific object-store WORM client packages and deployment runbooks for S3/GCS/Azure immutable storage;
 - Vault AppRole/Kubernetes auth, lease renewal, and policy bootstrap;
 - live SIEM/OTLP exporter hardening beyond the CLI runner, daemon loop, baseline Compose/Kubernetes/Helm scheduling, supervised daemon manifests, generic vendor preset runbook, Kubernetes `secretKeyRef` wiring, External Secrets examples, and starter SIEM assets, including deeper vendor transforms, import-validated dashboards/alerts, and production validation for each cloud identity model;
-- Kubernetes HA deployment beyond the baseline manifests/chart and managed database URL wiring, including schema migration rehearsal, connection pooling, validated production ingress/network policies, autoscaling runbooks, and multi-replica coordination;
+- Kubernetes HA deployment beyond the baseline manifests/chart, managed database URL wiring, and optional PodDisruptionBudget assets, including schema migration rehearsal, connection pooling, leader election, validated production ingress/network policies, autoscaling runbooks, and multi-replica coordination;
 - Slack OAuth/Bot API, channel discovery, and user mapping;
 - Microsoft Teams and Feishu connectors;
 - Google Chat OAuth, space discovery, and user mapping;

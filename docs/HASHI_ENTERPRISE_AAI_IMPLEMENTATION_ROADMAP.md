@@ -97,7 +97,7 @@ Deferred:
 - live SIEM/OpenTelemetry exporter hardening beyond the CLI checkpoint/retry runner, daemon loop, supervised daemon deployment manifests, baseline Compose/Kubernetes/Helm scheduling, generic preset runbook, Kubernetes `secretKeyRef` support, cloud/Vault SecretStore examples, and starter SIEM field mapping/dashboard/alert packs;
 - cloud/object-store WORM adapters beyond local filesystem sink;
 - Vault hardening beyond token-auth read provider, such as AppRole/Kubernetes auth and lease renewal;
-- Helm/HA hardening beyond the baseline chart, external database SecretRef examples, and managed database URL wiring;
+- Helm/HA hardening beyond the baseline chart, external database SecretRef examples, managed database URL wiring, and optional PodDisruptionBudget manifests;
 - multiple enterprise connectors;
 - full DLP enforcement across every runtime and connector path.
 
@@ -617,6 +617,7 @@ Residual P4 limitations:
 - `ENT-069j` Add live audit export supervisor manifests. Done for systemd service template, raw Kubernetes daemon Deployment example, Helm daemon Deployment template, and operator guidance to avoid enabling multiple exporters for the same checkpoint.
 - `ENT-069k` Add SIEM starter field mapping and alert packs. Done for canonical HASHI audit field mapping, Splunk saved searches and dashboard XML, Elasticsearch index template, Kibana starter detection rules, OpenTelemetry Collector routing example, and static asset validation tests; real tenant import validation and organization-specific alert tuning remain future work.
 - `ENT-070` Add external database deployment wiring. Done for raw Kubernetes and Helm managed database secret examples plus Helm `externalDatabase` SecretRef override wiring for `HASHI_ENTERPRISE_DATABASE_URL`; schema migration rehearsal, connection pooling, and multi-replica coordination remain future work.
+- `ENT-071` Add Kubernetes disruption budget assets. Done for optional raw Kubernetes PodDisruptionBudget example, Helm `podDisruptionBudget` values, and a conditional PDB template for multi-replica maintenance windows; leader election, singleton jobs, and queue coordination remain future work.
 
 **Acceptance:**
 
@@ -935,7 +936,7 @@ Implemented checkpoints:
 Residual P9 limitations:
 
 - Docker Compose skeleton is present but has not yet been build/run verified in CI.
-- Kubernetes/Helm deployment remains baseline-grade; multi-replica state coordination, production ingress policy, cluster-specific NetworkPolicy validation, database migration rehearsal, and autoscaling runbooks remain future work.
+- Kubernetes/Helm deployment remains baseline-grade; multi-replica state coordination, production ingress policy, cluster-specific NetworkPolicy validation, database migration rehearsal, leader election, and autoscaling runbooks remain future work.
 - Backup policy and scheduled backups are not yet implemented.
 - Migration runner is a schema initializer, not yet a multi-file versioned migration framework.
 
