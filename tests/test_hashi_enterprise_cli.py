@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
 
 import hashi
+from orchestrator.enterprise import EnterpriseAuditLedger, IdentityService
 from orchestrator.enterprise.store import SCHEMA_VERSION
 
 
@@ -70,3 +72,52 @@ def test_enterprise_migrate_cli_initializes_schema(tmp_path, monkeypatch, capsys
     assert "Enterprise schema migrated" in output
     assert "Before: (none)" in output
     assert f"After : {SCHEMA_VERSION}" in output
+
+
+def test_enterprise_audit_live_export_cli_sends_events_and_updates_checkpoint(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(hashi, "ROOT_DIR", tmp_path)
+    db_path = tmp_path / "state" / "enterprise.sqlite"
+    identity = IdentityService.from_path(db_path)
+    identity.create_organization(org_id="ORG-001", name="Acme")
+    ledger = EnterpriseAuditLedger.from_path(db_path, org_id="ORG-001")
+    event = ledger.append(event_type="auth", action="login", status="success", actor_id="usr-1")
+    calls = []
+
+    def transport(url, body, headers, timeout):
+        calls.append((url, body, headers, timeout))
+        return 202, "accepted"
+
+    monkeypatch.setattr(hashi, "_http_post_transport", transport)
+
+    rc = hashi.cmd_enterprise_audit_export_live(
+        SimpleNamespace(
+            endpoint="https://siem.example.com/ingest",
+            format="ledger",
+            db=None,
+            org_id="ORG-001",
+            checkpoint=None,
+            batch_size=10,
+            timeout=5.0,
+            max_attempts=1,
+            backoff=0.0,
+            header=["Authorization: Bearer test"],
+        )
+    )
+
+    assert rc == 0
+    url, body, headers, timeout = calls[0]
+    assert url == "https://siem.example.com/ingest"
+    assert headers["authorization"] == "Bearer test"
+    assert timeout == 5.0
+    assert event.id in body.decode("utf-8")
+    checkpoint = tmp_path / "state" / "audit_live_export_checkpoint.json"
+    assert checkpoint.exists()
+    assert json.loads(checkpoint.read_text(encoding="utf-8"))["last_chain_index"] == event.chain_index
+    output = capsys.readouterr().out
+    assert "Enterprise audit live export completed" in output
+    assert "Sent            : 1" in output
+
+
+def test_enterprise_audit_live_export_cli_rejects_malformed_header():
+    with pytest.raises(ValueError, match="Name: value"):
+        hashi._parse_http_headers(["broken"])

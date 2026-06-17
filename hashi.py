@@ -384,6 +384,72 @@ def cmd_enterprise_migrate(args) -> int:
     return 0
 
 
+def _parse_http_headers(raw_headers: list[str] | None) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    for raw in raw_headers or []:
+        if ":" not in raw:
+            raise ValueError("HTTP headers must use 'Name: value' format")
+        name, value = raw.split(":", 1)
+        name = name.strip()
+        value = value.strip()
+        if not name:
+            raise ValueError("HTTP header name cannot be empty")
+        headers[name] = value
+    return headers
+
+
+def _http_post_transport(url: str, body: bytes, headers: dict[str, str], timeout: float) -> tuple[int, str]:
+    import urllib.error
+    import urllib.request
+
+    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return int(response.status), response.read(4096).decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        return int(exc.code), exc.read(4096).decode("utf-8", errors="replace")
+    except urllib.error.URLError as exc:
+        raise ValueError(f"audit live export endpoint is unreachable: {exc.reason}") from exc
+
+
+def cmd_enterprise_audit_export_live(args) -> int:
+    from orchestrator.enterprise import (
+        AuditLiveExportEndpoint,
+        AuditLiveExporter,
+        EnterpriseAuditLedger,
+        FileAuditLiveExportCheckpoint,
+    )
+
+    db_path = Path(args.db).expanduser() if args.db else ROOT_DIR / "state" / "enterprise.sqlite"
+    checkpoint_path = (
+        Path(args.checkpoint).expanduser()
+        if args.checkpoint
+        else ROOT_DIR / "state" / "audit_live_export_checkpoint.json"
+    )
+    ledger = EnterpriseAuditLedger.from_path(db_path, org_id=args.org_id)
+    endpoint = AuditLiveExportEndpoint(
+        url=args.endpoint,
+        format=args.format,
+        headers=_parse_http_headers(args.header),
+        timeout_seconds=float(args.timeout),
+        batch_size=int(args.batch_size),
+    )
+    cycle = AuditLiveExporter(ledger, transport=_http_post_transport).export_with_checkpoint(
+        endpoint,
+        FileAuditLiveExportCheckpoint(checkpoint_path),
+        max_attempts=int(args.max_attempts),
+        backoff_seconds=float(args.backoff),
+    )
+    print(_g("✓ Enterprise audit live export completed"))
+    print(f"  Attempted       : {cycle.result.attempted}")
+    print(f"  Sent            : {cycle.result.sent}")
+    print(f"  Attempts        : {cycle.attempts}")
+    print(f"  Last chain index: {cycle.result.last_chain_index}")
+    print(f"  Status code     : {cycle.result.status_code if cycle.result.status_code is not None else '(no-op)'}")
+    print(f"  Checkpoint      : {cycle.checkpoint_path}")
+    return 0
+
+
 # ──────────────────────────────────────────────
 # Entry point
 # ──────────────────────────────────────────────
@@ -429,6 +495,35 @@ def main():
     enterprise_migrate = enterprise_sub.add_parser("migrate", help="Initialize or migrate the enterprise SQLite schema")
     enterprise_migrate.add_argument("--db", help="Enterprise SQLite path. Defaults to state/enterprise.sqlite")
     enterprise_migrate.set_defaults(func=cmd_enterprise_migrate)
+
+    enterprise_audit_live = enterprise_sub.add_parser(
+        "audit-export-live",
+        help="Push new enterprise audit ledger events to an HTTP SIEM/OTLP endpoint",
+    )
+    enterprise_audit_live.add_argument("--endpoint", required=True, help="HTTP endpoint that accepts audit export payloads")
+    enterprise_audit_live.add_argument(
+        "--format",
+        choices=["ledger", "siem", "otel"],
+        default="siem",
+        help="Export payload format. Defaults to siem.",
+    )
+    enterprise_audit_live.add_argument("--db", help="Enterprise SQLite path. Defaults to state/enterprise.sqlite")
+    enterprise_audit_live.add_argument("--org-id", default="ORG-001", help="Enterprise organization id. Defaults to ORG-001")
+    enterprise_audit_live.add_argument(
+        "--checkpoint",
+        help="Checkpoint JSON path. Defaults to state/audit_live_export_checkpoint.json",
+    )
+    enterprise_audit_live.add_argument("--batch-size", type=int, default=100, help="Events to send per cycle")
+    enterprise_audit_live.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
+    enterprise_audit_live.add_argument("--max-attempts", type=int, default=3, help="Retry attempts before failing")
+    enterprise_audit_live.add_argument("--backoff", type=float, default=1.0, help="Retry backoff seconds")
+    enterprise_audit_live.add_argument(
+        "--header",
+        action="append",
+        default=[],
+        help="HTTP header in 'Name: value' format. Repeat for multiple headers.",
+    )
+    enterprise_audit_live.set_defaults(func=cmd_enterprise_audit_export_live)
 
     args = parser.parse_args()
 
