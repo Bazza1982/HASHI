@@ -31,7 +31,10 @@ The exporter advances its checkpoint only after a successful 2xx response. Faile
 | CLI | `hashi enterprise audit-export-live` | Manual one-shot export, bounded maintenance loop, or supervised daemon |
 | Docker Compose | `audit-export` profile | Run from cron or systemd on the host |
 | Raw Kubernetes | `deploy/kubernetes/enterprise/audit-export-cronjob.yaml` | Baseline CronJob |
+| Raw Kubernetes daemon | `deploy/kubernetes/enterprise/audit-export-daemon.deployment.yaml` | Long-running Deployment alternative |
 | Helm | `auditExport.enabled=true` | Chart-managed CronJob |
+| Helm daemon | `auditExport.daemon.enabled=true` | Chart-managed long-running Deployment alternative |
+| systemd | `packaging/systemd/hashi-enterprise-audit-export.service` | Host process supervisor |
 
 Checkpoint path:
 
@@ -161,6 +164,33 @@ python hashi.py enterprise audit-export-live \
 
 Daemon mode still advances the checkpoint only after a successful export cycle. Use systemd, supervisord, Kubernetes Deployment, or another supervisor for restart policy.
 
+systemd template:
+
+```bash
+cp packaging/systemd/hashi-enterprise-audit-export.service /etc/systemd/system/
+# Replace %HASHI_ROOT% and %PYTHON% with deployment-specific paths.
+systemctl daemon-reload
+systemctl enable --now hashi-enterprise-audit-export.service
+```
+
+Raw Kubernetes daemon:
+
+```bash
+kubectl apply -f deploy/kubernetes/enterprise/audit-export-daemon.deployment.yaml
+```
+
+Helm daemon:
+
+```bash
+helm upgrade --install hashi-enterprise deploy/helm/hashi-enterprise \
+  --namespace hashi-enterprise --create-namespace \
+  --set auditExport.daemon.enabled=true \
+  --set auditExport.endpointSecretRef.name=hashi-audit-export \
+  --set auditExport.headerSecretRef.name=hashi-audit-export
+```
+
+Use one export mode per HASHI instance: one-shot scheduler, CronJob, or daemon. Running multiple exporters against the same ledger/checkpoint can duplicate delivery attempts.
+
 ---
 
 ## 7. Kubernetes Operation
@@ -225,6 +255,7 @@ Available `ClusterSecretStore` templates:
 - [ ] Checkpoint file is created under `/data/state`.
 - [ ] A second run does not resend already checkpointed events.
 - [ ] Daemon mode can run with `--max-cycles` in staging and exits cleanly.
+- [ ] Only one exporter mode is enabled for each HASHI instance.
 - [ ] Collector receives the expected format (`siem`, `ledger`, `otel`, `splunk-hec`, or `elastic-bulk`).
 - [ ] Collector rejects bad credentials and HASHI does not advance the checkpoint.
 - [ ] No raw connector secrets, SAML assertions, OIDC tokens, or SCIM tokens appear in exported events.
@@ -237,5 +268,5 @@ Available `ClusterSecretStore` templates:
 ## 9. Current Deferred Work
 
 - Deeper vendor transforms for multi-index Elasticsearch routing and strict Splunk deployments that require one HEC event per request.
-- Provider-specific dashboards, alert packs, and managed daemon deployment patterns.
+- Provider-specific dashboards and alert packs.
 - SIEM-specific dashboards, alerts, and field mappings beyond the baseline ECS-style event shape.

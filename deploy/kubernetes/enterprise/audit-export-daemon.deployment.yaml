@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hashi-enterprise-audit-export
+  namespace: hashi-enterprise
+  labels:
+    app.kubernetes.io/name: hashi
+    app.kubernetes.io/component: audit-export-daemon
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hashi
+      app.kubernetes.io/component: audit-export-daemon
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: hashi
+        app.kubernetes.io/component: audit-export-daemon
+    spec:
+      containers:
+        - name: audit-export
+          image: ghcr.io/example/hashi-enterprise:replace-me
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: hashi-enterprise-config
+            - secretRef:
+                name: hashi-enterprise-secrets
+          command:
+            - python
+            - hashi.py
+            - enterprise
+            - audit-export-live
+          args:
+            - --endpoint
+            - $(HASHI_AUDIT_EXPORT_ENDPOINT)
+            - --format
+            - $(HASHI_AUDIT_EXPORT_FORMAT)
+            - --db
+            - /data/state/enterprise.sqlite
+            - --org-id
+            - $(HASHI_ORGANIZATION_ID)
+            - --checkpoint
+            - /data/state/audit_live_export_checkpoint.json
+            - --batch-size
+            - $(HASHI_AUDIT_EXPORT_BATCH_SIZE)
+            - --timeout
+            - $(HASHI_AUDIT_EXPORT_TIMEOUT)
+            - --max-attempts
+            - $(HASHI_AUDIT_EXPORT_MAX_ATTEMPTS)
+            - --backoff
+            - $(HASHI_AUDIT_EXPORT_BACKOFF)
+            - --header
+            - $(HASHI_AUDIT_EXPORT_HEADER)
+            - --daemon
+            - --interval
+            - $(HASHI_AUDIT_EXPORT_DAEMON_INTERVAL)
+          volumeMounts:
+            - name: hashi-data
+              mountPath: /data
+      volumes:
+        - name: hashi-data
+          persistentVolumeClaim:
+            claimName: hashi-enterprise-data

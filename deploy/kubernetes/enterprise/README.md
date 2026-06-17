@@ -12,6 +12,8 @@ This directory contains a minimal Kubernetes baseline for running HASHI in
   manifests.
 - `audit-export-cronjob.yaml` runs `hashi enterprise audit-export-live` on a
   schedule and stores its checkpoint under `/data/state`.
+- `audit-export-daemon.deployment.yaml` is an optional long-running daemon
+  alternative to the CronJob. Do not enable both for the same ledger.
 
 This is not a full HA release. A Helm baseline is available at
 `deploy/helm/hashi-enterprise`; autoscaling, multi-replica coordination,
@@ -33,3 +35,14 @@ Before applying in a real environment:
 4. Set a production namespace, storage class, ingress, and network policy.
 5. Replace `HASHI_AUDIT_EXPORT_ENDPOINT` and `HASHI_AUDIT_EXPORT_HEADER` in
    your secret manager before enabling the audit export CronJob.
+
+## Live Audit Export Daemon
+
+For continuous export instead of scheduled one-shot jobs:
+
+```bash
+kubectl apply -f deploy/kubernetes/enterprise/audit-export-daemon.deployment.yaml
+```
+
+Use either the CronJob or daemon Deployment for a given HASHI instance. Running
+both can race on the same checkpoint and duplicate delivery attempts.
