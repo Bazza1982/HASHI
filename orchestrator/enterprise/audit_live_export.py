@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
+import time
 from typing import Any, Callable, Literal
 
 from orchestrator.enterprise.audit_export import format_otel_log, format_siem_event
@@ -39,6 +41,41 @@ class AuditLiveExportResult:
             "format": self.format,
             "endpoint_url": self.endpoint_url,
         }
+
+
+@dataclass(frozen=True)
+class AuditLiveExportCycleResult:
+    result: AuditLiveExportResult
+    attempts: int
+    checkpoint_path: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **self.result.to_dict(),
+            "attempts": self.attempts,
+            "checkpoint_path": self.checkpoint_path,
+        }
+
+
+class FileAuditLiveExportCheckpoint:
+    def __init__(self, path: Path | str):
+        self.path = Path(path)
+
+    def load(self) -> int:
+        if not self.path.exists():
+            return 0
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise ValueError(f"audit live export checkpoint is invalid: {self.path}") from exc
+        return max(0, int(payload.get("last_chain_index") or 0))
+
+    def save(self, chain_index: int) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"last_chain_index": max(0, int(chain_index or 0))}
+        tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+        tmp_path.replace(self.path)
 
 
 class AuditLiveExporter:
@@ -82,6 +119,35 @@ class AuditLiveExporter:
             format=endpoint.format,
             endpoint_url=endpoint.url,
         )
+
+    def export_with_checkpoint(
+        self,
+        endpoint: AuditLiveExportEndpoint,
+        checkpoint: FileAuditLiveExportCheckpoint,
+        *,
+        max_attempts: int = 3,
+        backoff_seconds: float = 1.0,
+        sleeper: Callable[[float], None] | None = None,
+    ) -> AuditLiveExportCycleResult:
+        attempts = max(1, int(max_attempts or 1))
+        sleep = sleeper or time.sleep
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            checkpoint_chain_index = checkpoint.load()
+            try:
+                result = self.export_since(endpoint, checkpoint_chain_index=checkpoint_chain_index)
+                checkpoint.save(result.last_chain_index)
+                return AuditLiveExportCycleResult(
+                    result=result,
+                    attempts=attempt,
+                    checkpoint_path=str(checkpoint.path),
+                )
+            except Exception as exc:
+                last_error = exc
+                if attempt >= attempts:
+                    break
+                sleep(max(0.0, float(backoff_seconds)))
+        raise ValueError(f"audit live export failed after {attempts} attempt(s): {last_error}") from last_error
 
 
 def _encode_live_export(events: list[LedgerEvent], export_format: str) -> tuple[bytes, str]:
