@@ -121,7 +121,19 @@ def _runtime_busy(runtime) -> bool:
 
 
 class TaskScheduler:
-    def __init__(self, tasks_path: Path, state_path: Path, runtimes: list | None, authorized_id: int, skill_manager=None, orchestrator=None):
+    def __init__(
+        self,
+        tasks_path: Path,
+        state_path: Path,
+        runtimes: list | None,
+        authorized_id: int,
+        skill_manager=None,
+        orchestrator=None,
+        enterprise_lease_store=None,
+        enterprise_lease_name: str = "superloop-scheduler",
+        enterprise_lease_holder: str = "local",
+        enterprise_lease_ttl_seconds: int = 60,
+    ):
         self.tasks_path = tasks_path
         self.state_path = state_path
         self.active_heartbeats_path = tasks_path.parent / "managed_active_heartbeats.json"
@@ -129,6 +141,10 @@ class TaskScheduler:
         self.authorized_id = authorized_id
         self.skill_manager = skill_manager
         self.orchestrator = orchestrator
+        self.enterprise_lease_store = enterprise_lease_store
+        self.enterprise_lease_name = enterprise_lease_name
+        self.enterprise_lease_holder = enterprise_lease_holder
+        self.enterprise_lease_ttl_seconds = enterprise_lease_ttl_seconds
         self.state = self._load_state()
         self.state.setdefault("heartbeats", {})
         self.state.setdefault("crons", {})
@@ -565,7 +581,13 @@ class TaskScheduler:
 
                 # Advance long-running superloops from persisted loop state.
                 try:
-                    superloop_stats = advance_superloops_once(self.tasks_path.parent / "superloops")
+                    superloop_stats = advance_superloops_once(
+                        self.tasks_path.parent / "superloops",
+                        lease_store=self.enterprise_lease_store,
+                        lease_name=self.enterprise_lease_name,
+                        lease_holder=self.enterprise_lease_holder,
+                        lease_ttl_seconds=self.enterprise_lease_ttl_seconds,
+                    )
                     if superloop_stats.get("waits_satisfied") or superloop_stats.get("loops_advanced"):
                         scheduler_logger.info(
                             "Superloop tick: checked=%s waits_satisfied=%s loops_advanced=%s",

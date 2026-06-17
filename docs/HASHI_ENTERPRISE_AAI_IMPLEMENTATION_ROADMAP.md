@@ -622,6 +622,7 @@ Residual P4 limitations:
 - `ENT-070c` Add enterprise DB lease primitive. Done for schema-backed lease acquire/renew/release, TTL expiry takeover, holder-only release, and tests; wiring specific schedulers/exporters to this primitive and PostgreSQL concurrency rehearsal remain future work.
 - `ENT-070d` Wire live audit export to DB leases. Done for optional `--db-lease-name`, `--db-lease-holder`, and `--db-lease-ttl` CLI controls, fail-closed held-lease behavior, daemon renewals, and release on normal exit; broader scheduler integration and Kubernetes Lease support remain future work.
 - `ENT-070e` Wire audit export DB lease deployment args. Done for raw Kubernetes daemon pod-name lease holder wiring and Helm `auditExport.daemon.dbLease` values/template controls; rendered Helm validation and live cluster rehearsal remain future work.
+- `ENT-070f` Add superloop scheduler DB lease guard. Done for optional lease-guarded `advance_superloops_once` ticks and `TaskScheduler` lease injection points; heartbeat/cron/nudge lease coverage and deployment wiring remain future work.
 
 **Acceptance:**
 
@@ -644,6 +645,7 @@ Residual P4 limitations:
 - Enterprise services have a database-backed lease primitive for future leader/worker coordination.
 - Live audit exporters can opt into enterprise DB leases for multi-replica singleton coordination.
 - Kubernetes and Helm audit export daemon deployments can pass DB lease arguments without custom command overrides.
+- Superloop scheduler ticks can opt into enterprise DB leases to avoid duplicate advancement in multi-replica runs.
 - Operators have starter SIEM assets under `deploy/siem/` for field mappings, Splunk alerts/dashboard, Elastic index/rules, and OpenTelemetry Collector routing.
 
 ---
