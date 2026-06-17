@@ -134,6 +134,11 @@ auditExport:
     enabled: false
     interval: "60"
     replicaCount: 1
+    dbLease:
+      enabled: false
+      name: audit-export
+      holder: "$(HASHI_POD_NAME)"
+      ttl: "180"
 
 nodeSelector: {}
 tolerations: []

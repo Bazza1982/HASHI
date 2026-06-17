@@ -27,6 +27,11 @@ spec:
                 name: hashi-enterprise-config
             - secretRef:
                 name: hashi-enterprise-secrets
+          env:
+            - name: HASHI_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
           command:
             - python
             - hashi.py
@@ -56,6 +61,12 @@ spec:
             - --daemon
             - --interval
             - $(HASHI_AUDIT_EXPORT_DAEMON_INTERVAL)
+            - --db-lease-name
+            - audit-export
+            - --db-lease-holder
+            - $(HASHI_POD_NAME)
+            - --db-lease-ttl
+            - "180"
           volumeMounts:
             - name: hashi-data
               mountPath: /data

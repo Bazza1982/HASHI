@@ -80,6 +80,7 @@ This is **not** the end state of the enterprise product. It is the first reviewa
 - Live audit exporters create a checkpoint-adjacent singleton lock by default and fail closed when another exporter already holds it.
 - Enterprise store includes a TTL-based database lease primitive for future leader/worker coordination.
 - Live audit exporters can optionally acquire and renew an enterprise DB lease during one-shot or daemon runs.
+- Raw Kubernetes and Helm audit export daemon assets can pass DB lease arguments using the pod name as holder identity.
 - `hashi enterprise audit-export-live` provides a one-shot operator runner for HTTP SIEM/ledger/OTLP pushes with checkpoint, retry, timeout, batch-size, and custom header controls, so deployments can schedule live export through cron, systemd, or Kubernetes CronJob without embedding vendor SDKs.
 - `hashi enterprise audit-export-live --daemon` can run bounded or continuous export loops with configurable interval while preserving checkpoint safety.
 - Deployment assets now include a Docker Compose `audit-export` profile, a raw Kubernetes CronJob, and a Helm-gated CronJob template for scheduled live audit export with persistent checkpoints.

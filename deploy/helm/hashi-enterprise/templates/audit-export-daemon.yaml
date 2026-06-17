@@ -57,6 +57,12 @@ spec:
               {{ else }}
               value: {{ .Values.auditExport.header | quote }}
               {{ end }}
+            {{- if .Values.auditExport.daemon.dbLease.enabled }}
+            - name: HASHI_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            {{- end }}
           command:
             - python
             - hashi.py
@@ -86,6 +92,14 @@ spec:
             - --daemon
             - --interval
             - {{ .Values.auditExport.daemon.interval | quote }}
+            {{- if .Values.auditExport.daemon.dbLease.enabled }}
+            - --db-lease-name
+            - {{ .Values.auditExport.daemon.dbLease.name | quote }}
+            - --db-lease-holder
+            - {{ .Values.auditExport.daemon.dbLease.holder | quote }}
+            - --db-lease-ttl
+            - {{ .Values.auditExport.daemon.dbLease.ttl | quote }}
+            {{- end }}
           volumeMounts:
             - name: hashi-data
               mountPath: {{ .Values.enterprise.bridgeHome }}

@@ -66,5 +66,12 @@ For continuous export instead of scheduled one-shot jobs:
 kubectl apply -f deploy/kubernetes/enterprise/audit-export-daemon.deployment.yaml
 ```
 
+The daemon manifest passes `--db-lease-name audit-export` and uses the pod name
+as `--db-lease-holder`, so initialize the enterprise schema before enabling it:
+
+```bash
+python hashi.py enterprise migrate --db /data/state/enterprise.sqlite
+```
+
 Use either the CronJob or daemon Deployment for a given HASHI instance. Running
 both can race on the same checkpoint and duplicate delivery attempts.

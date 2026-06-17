@@ -55,6 +55,8 @@ def test_enterprise_helm_values_default_to_governed_single_replica():
     assert "secretKey: HASHI_ENTERPRISE_DATABASE_URL" in text
     assert "podDisruptionBudget:" in text
     assert "minAvailable: 1" in text
+    assert "dbLease:" in text
+    assert 'holder: "$(HASHI_POD_NAME)"' in text
 
 
 def test_enterprise_helm_deployment_keeps_health_and_secret_contracts():
@@ -120,3 +122,17 @@ def test_enterprise_helm_chart_includes_optional_pod_disruption_budget():
     assert "minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}" in pdb
     assert "app.kubernetes.io/name: {{ include \"hashi-enterprise.name\" . }}" in pdb
     assert "app.kubernetes.io/instance: {{ .Release.Name }}" in pdb
+
+
+def test_enterprise_helm_audit_export_daemon_supports_optional_db_lease():
+    text = _read(TEMPLATES_DIR / "audit-export-daemon.yaml")
+
+    assert "{{- if .Values.auditExport.daemon.dbLease.enabled }}" in text
+    assert "name: HASHI_POD_NAME" in text
+    assert "fieldPath: metadata.name" in text
+    assert "- --db-lease-name" in text
+    assert "{{ .Values.auditExport.daemon.dbLease.name | quote }}" in text
+    assert "- --db-lease-holder" in text
+    assert "{{ .Values.auditExport.daemon.dbLease.holder | quote }}" in text
+    assert "- --db-lease-ttl" in text
+    assert "{{ .Values.auditExport.daemon.dbLease.ttl | quote }}" in text
