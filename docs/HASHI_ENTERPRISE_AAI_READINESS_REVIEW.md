@@ -54,6 +54,7 @@ This is **not** the end state of the enterprise product. It is the first reviewa
 - SCIM-style provisioning primitives, admin-gated HTTP handlers, and IdP-facing SCIM 2.0 Users routes can create, update, list, fetch, deactivate, and reactivate users, assign default project membership, revoke sessions/API tokens on deactivation, and require scoped SCIM API tokens for `/scim/v2/Users`.
 - Read-only SCIM 2.0 Groups routes can expose HASHI projects as groups with active project members through admin-gated and IdP-facing `/scim/v2/Groups` surfaces protected by scoped `scim:read` service tokens.
 - SCIM 2.0 discovery routes expose ServiceProviderConfig, ResourceTypes, and Schemas metadata for Users and Groups through admin-gated and IdP-facing surfaces.
+- SCIM 2.0 Bulk routes support bounded Users create/get/patch batches with `failOnErrors`, org boundary checks, scoped `scim:write` token gates, and write-path audit events.
 
 ### Control Plane
 
@@ -139,7 +140,7 @@ The connector readiness tests cover:
 
 These are not blockers for Enterprise MVP review, but they are not complete:
 
-- SAML IdP compatibility/deployment runbooks beyond the `xmlsec1` verification wiring, plus SCIM 2.0 compatibility beyond baseline Users/read-only Groups/discovery surfaces, including group mutation, advanced filters, schema extension negotiation, and bulk operations;
+- SAML IdP compatibility/deployment runbooks beyond the `xmlsec1` verification wiring, plus SCIM 2.0 compatibility beyond baseline Users/read-only Groups/discovery/Bulk surfaces, including group mutation, advanced filters, schema extension negotiation, and non-User bulk operations;
 - full ABAC simulator and policy preview tooling;
 - cloud-specific object-store WORM client packages and deployment runbooks for S3/GCS/Azure immutable storage;
 - Vault AppRole/Kubernetes auth, lease renewal, and policy bootstrap;

@@ -195,6 +195,7 @@ class WorkbenchApiServer:
         )
         self.app.router.add_get("/api/enterprise/scim/v2/Schemas", self.handle_enterprise_scim_v2_schemas)
         self.app.router.add_get("/api/enterprise/scim/v2/Schemas/{schema_id:.+}", self.handle_enterprise_scim_v2_schema_get)
+        self.app.router.add_post("/api/enterprise/scim/v2/Bulk", self.handle_enterprise_scim_v2_bulk)
         self.app.router.add_get("/scim/v2/Users", self.handle_public_scim_v2_users_list)
         self.app.router.add_post("/scim/v2/Users", self.handle_public_scim_v2_users_create)
         self.app.router.add_get("/scim/v2/Users/{user_id}", self.handle_public_scim_v2_users_get)
@@ -206,6 +207,7 @@ class WorkbenchApiServer:
         self.app.router.add_get("/scim/v2/ResourceTypes/{resource_type}", self.handle_public_scim_v2_resource_type_get)
         self.app.router.add_get("/scim/v2/Schemas", self.handle_public_scim_v2_schemas)
         self.app.router.add_get("/scim/v2/Schemas/{schema_id:.+}", self.handle_public_scim_v2_schema_get)
+        self.app.router.add_post("/scim/v2/Bulk", self.handle_public_scim_v2_bulk)
         self.app.router.add_get("/api/enterprise/api-tokens", self.handle_enterprise_api_tokens)
         self.app.router.add_post("/api/enterprise/api-tokens", self.handle_enterprise_api_tokens_create)
         self.app.router.add_post(
@@ -1549,6 +1551,36 @@ class WorkbenchApiServer:
             return web.json_response({"ok": False, "error": str(exc)}, status=404)
         return web.json_response(payload)
 
+    async def handle_enterprise_scim_v2_bulk(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        actor = self._enterprise_user_from_request(request)
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"schemas": [], "detail": "invalid JSON body"}, status=400)
+        org_id = str(payload.get("org_id") or getattr(self.global_config, "organization_id", "") or "").strip()
+        try:
+            result = ScimProvisioningService(self.identity_service).bulk(org_id=org_id, payload=payload)
+        except Exception as exc:
+            self._append_enterprise_audit(
+                event_type="admin_api",
+                action="scim_v2_bulk",
+                status="failed",
+                actor_id=actor.id if actor else None,
+                context={"error": str(exc), "org_id": org_id},
+            )
+            return web.json_response({"schemas": [], "detail": str(exc)}, status=400)
+        self._append_enterprise_audit(
+            event_type="admin_api",
+            action="scim_v2_bulk",
+            status="success",
+            actor_id=actor.id if actor else None,
+            context={"org_id": org_id, "operation_count": len(result.get("Operations") or [])},
+        )
+        return web.json_response(result)
+
     async def handle_public_scim_v2_users_list(self, request):
         error = self._enterprise_scim_scope_error_response(request, required_scope="scim:read")
         if error is not None:
@@ -1729,6 +1761,38 @@ class WorkbenchApiServer:
         except Exception as exc:
             return web.json_response({"schemas": [], "detail": str(exc)}, status=404)
         return web.json_response(payload)
+
+    async def handle_public_scim_v2_bulk(self, request):
+        error = self._enterprise_scim_scope_error_response(request, required_scope="scim:write")
+        if error is not None:
+            return error
+        api_token, actor = self._enterprise_scim_actor_from_request(request, required_scope="scim:write")
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"schemas": [], "detail": "invalid JSON body"}, status=400)
+        try:
+            result = ScimProvisioningService(self.identity_service).bulk(org_id=actor.org_id, payload=payload)
+        except Exception as exc:
+            self._append_enterprise_audit(
+                event_type="scim",
+                action="scim_v2_bulk",
+                status="failed",
+                actor_id=actor.id,
+                context={"error": str(exc), "api_token_id": getattr(api_token, "id", None)},
+            )
+            return web.json_response({"schemas": [], "detail": str(exc)}, status=400)
+        self._append_enterprise_audit(
+            event_type="scim",
+            action="scim_v2_bulk",
+            status="success",
+            actor_id=actor.id,
+            context={
+                "operation_count": len(result.get("Operations") or []),
+                "api_token_id": getattr(api_token, "id", None),
+            },
+        )
+        return web.json_response(result)
 
     async def handle_enterprise_api_tokens(self, request):
         error = self._enterprise_admin_error_response(request)

@@ -12,6 +12,8 @@ SCIM_USER_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:User"
 SCIM_GROUP_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:Group"
 SCIM_LIST_RESPONSE_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:ListResponse"
 SCIM_PATCH_OP_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:PatchOp"
+SCIM_BULK_REQUEST_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:BulkRequest"
+SCIM_BULK_RESPONSE_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:BulkResponse"
 SCIM_SERVICE_PROVIDER_CONFIG_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig"
 SCIM_RESOURCE_TYPE_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:ResourceType"
 SCIM_SCHEMA_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:Schema"
@@ -164,6 +166,32 @@ class ScimProvisioningService:
         )
         return ScimProvisioningResult(user=user, created=False, action=action)
 
+    def bulk(
+        self,
+        *,
+        org_id: str,
+        payload: dict[str, Any],
+        max_operations: int = 50,
+    ) -> dict[str, Any]:
+        operations = payload.get("Operations")
+        if not isinstance(operations, list) or not operations:
+            raise ValueError("SCIM Bulk Operations are required")
+        limit = max(1, min(int(max_operations or 50), 100))
+        if len(operations) > limit:
+            raise ValueError(f"SCIM Bulk operation limit exceeded: {len(operations)} > {limit}")
+        fail_on_errors = max(0, int(payload.get("failOnErrors") or 0))
+        responses = []
+        errors = 0
+        for operation in operations:
+            response = self._bulk_operation(org_id=org_id, operation=operation)
+            responses.append(response)
+            status = int(response.get("status") or 500)
+            if status >= 400:
+                errors += 1
+                if fail_on_errors and errors >= fail_on_errors:
+                    break
+        return {"schemas": [SCIM_BULK_RESPONSE_SCHEMA], "Operations": responses}
+
     def _users_by_project(self, *, org_id: str) -> dict[str, list[User]]:
         result: dict[str, list[User]] = {}
         for user in self.identity.list_users(org_id=org_id):
@@ -172,6 +200,48 @@ class ScimProvisioningService:
                 if project_id:
                     result.setdefault(project_id, []).append(user)
         return result
+
+    def _bulk_operation(self, *, org_id: str, operation: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(operation, dict):
+            return _bulk_error(400, "SCIM Bulk operation must be an object")
+        method = str(operation.get("method") or "").strip().upper()
+        path = _normalize_bulk_path(operation.get("path"))
+        bulk_id = _optional_text(operation.get("bulkId"))
+        try:
+            if method == "POST" and path == "/Users":
+                result = self.upsert_user(org_id=org_id, payload=_bulk_data(operation))
+                return _bulk_success(
+                    status=201 if result.created else 200,
+                    location=f"/scim/v2/Users/{result.user.id}",
+                    response=scim_user_resource(result.user),
+                    bulk_id=bulk_id,
+                )
+            if method == "GET" and path.startswith("/Users/"):
+                user_id = path.rsplit("/", 1)[-1]
+                user = self.identity.get_user(user_id)
+                if user is None or user.org_id != org_id:
+                    raise ValueError(f"SCIM user not found: {user_id!r}")
+                return _bulk_success(
+                    status=200,
+                    location=f"/scim/v2/Users/{user.id}",
+                    response=scim_user_resource(user),
+                    bulk_id=bulk_id,
+                )
+            if method == "PATCH" and path.startswith("/Users/"):
+                user_id = path.rsplit("/", 1)[-1]
+                user = self.identity.get_user(user_id)
+                if user is None or user.org_id != org_id:
+                    raise ValueError(f"SCIM user not found: {user_id!r}")
+                result = self.patch_user(user_id=user_id, payload=_bulk_data(operation))
+                return _bulk_success(
+                    status=200,
+                    location=f"/scim/v2/Users/{result.user.id}",
+                    response=scim_user_resource(result.user),
+                    bulk_id=bulk_id,
+                )
+            raise ValueError(f"unsupported SCIM Bulk operation: {method} {path}")
+        except Exception as exc:
+            return _bulk_error(400, str(exc), bulk_id=bulk_id)
 
 
 def scim_user_resource(user: User) -> dict[str, Any]:
@@ -257,7 +327,7 @@ def scim_service_provider_config() -> dict[str, Any]:
         "schemas": [SCIM_SERVICE_PROVIDER_CONFIG_SCHEMA],
         "documentationUri": "https://github.com/hashiai/hashi",
         "patch": {"supported": True},
-        "bulk": {"supported": False, "maxOperations": 0, "maxPayloadSize": 0},
+        "bulk": {"supported": True, "maxOperations": 50, "maxPayloadSize": 1048576},
         "filter": {"supported": True, "maxResults": 500},
         "changePassword": {"supported": False},
         "sort": {"supported": False},
@@ -438,6 +508,34 @@ def _schema_attribute(
         "returned": "default",
         "uniqueness": uniqueness,
     }
+
+
+def _normalize_bulk_path(value: object) -> str:
+    path = "/" + str(value or "").strip().lstrip("/")
+    if path.startswith("/scim/v2/"):
+        path = path[len("/scim/v2") :]
+    return path
+
+
+def _bulk_data(operation: dict[str, Any]) -> dict[str, Any]:
+    data = operation.get("data")
+    if not isinstance(data, dict):
+        raise ValueError("SCIM Bulk operation data must be an object")
+    return data
+
+
+def _bulk_success(*, status: int, location: str, response: dict[str, Any], bulk_id: str | None) -> dict[str, Any]:
+    payload = {"status": str(status), "location": location, "response": response}
+    if bulk_id:
+        payload["bulkId"] = bulk_id
+    return payload
+
+
+def _bulk_error(status: int, detail: str, *, bulk_id: str | None = None) -> dict[str, Any]:
+    payload = {"status": str(status), "response": {"schemas": [], "detail": detail}}
+    if bulk_id:
+        payload["bulkId"] = bulk_id
+    return payload
 
 
 def _parse_bool(value: Any, *, field: str) -> bool:
