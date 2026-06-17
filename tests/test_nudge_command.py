@@ -18,6 +18,7 @@ from orchestrator.runtime_nudge import (
 from orchestrator import scheduler as scheduler_module
 from orchestrator.scheduler import TaskScheduler, _should_fire
 from orchestrator.skill_manager import SkillManager
+from orchestrator.enterprise import EnterpriseLeaseStore, IdentityService
 
 
 def test_parse_nudge_create_args_requires_minutes_and_exit_condition():
@@ -166,6 +167,66 @@ async def test_scheduler_nudge_enqueues_only_when_runtime_idle(tmp_path):
     assert request_id in runtime.listeners
     data = json.loads((tmp_path / "tasks.json").read_text(encoding="utf-8"))
     assert data["nudges"][0]["nudge_meta"]["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_scheduler_tick_skips_when_enterprise_lease_is_held(tmp_path):
+    manager = SkillManager(project_root=tmp_path, tasks_path=tmp_path / "tasks.json")
+    manager.create_nudge_job(
+        agent_name="zelda",
+        interval_minutes=1,
+        exit_condition="until complete",
+    )
+    db_path = tmp_path / "enterprise.sqlite"
+    IdentityService.from_path(db_path).create_organization(org_id="ORG-001", name="Acme")
+    leases = EnterpriseLeaseStore.from_path(db_path, org_id="ORG-001")
+    leases.acquire("scheduler-main", holder_id="pod-a", ttl_seconds=60)
+    runtime = FakeRuntime(busy=False)
+    scheduler = TaskScheduler(
+        tasks_path=tmp_path / "tasks.json",
+        state_path=tmp_path / "scheduler_state.json",
+        runtimes=[runtime],
+        authorized_id=123,
+        enterprise_lease_store=leases,
+        enterprise_lease_name="scheduler-main",
+        enterprise_lease_holder="pod-b",
+        enterprise_lease_ttl_seconds=60,
+    )
+
+    await _run_one_scheduler_pass(scheduler)
+
+    assert runtime.enqueued == []
+    assert scheduler.state["nudges"] == {}
+    assert leases.get("scheduler-main").holder_id == "pod-a"
+
+
+@pytest.mark.asyncio
+async def test_scheduler_tick_releases_enterprise_lease_after_work(tmp_path):
+    manager = SkillManager(project_root=tmp_path, tasks_path=tmp_path / "tasks.json")
+    manager.create_nudge_job(
+        agent_name="zelda",
+        interval_minutes=1,
+        exit_condition="until complete",
+    )
+    db_path = tmp_path / "enterprise.sqlite"
+    IdentityService.from_path(db_path).create_organization(org_id="ORG-001", name="Acme")
+    leases = EnterpriseLeaseStore.from_path(db_path, org_id="ORG-001")
+    runtime = FakeRuntime(busy=False)
+    scheduler = TaskScheduler(
+        tasks_path=tmp_path / "tasks.json",
+        state_path=tmp_path / "scheduler_state.json",
+        runtimes=[runtime],
+        authorized_id=123,
+        enterprise_lease_store=leases,
+        enterprise_lease_name="scheduler-main",
+        enterprise_lease_holder="pod-b",
+        enterprise_lease_ttl_seconds=60,
+    )
+
+    await _run_one_scheduler_pass(scheduler)
+
+    assert len(runtime.enqueued) == 1
+    assert leases.get("scheduler-main") is None
 
 
 @pytest.mark.asyncio
