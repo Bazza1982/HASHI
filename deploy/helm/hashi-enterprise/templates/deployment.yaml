@@ -44,6 +44,14 @@ spec:
                 name: {{ include "hashi-enterprise.fullname" . }}-config
             - secretRef:
                 name: {{ .Values.secrets.connectorSecretName }}
+          {{- if .Values.externalDatabase.enabled }}
+          env:
+            - name: HASHI_ENTERPRISE_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.externalDatabase.secretName }}
+                  key: {{ .Values.externalDatabase.secretKey }}
+          {{- end }}
           volumeMounts:
             - name: hashi-data
               mountPath: {{ .Values.enterprise.bridgeHome }}

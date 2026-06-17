@@ -14,6 +14,7 @@ The chart provides:
 - optional HPA skeleton.
 - optional live audit export CronJob that runs `hashi enterprise
   audit-export-live` with a persistent checkpoint under `/data/state`.
+- optional external database SecretRef wiring for multi-replica staging.
 
 It is still a baseline chart. Multi-replica correctness depends on external
 state coordination, external database wiring, and task/queue coordination work
@@ -40,6 +41,29 @@ Before production use:
 2. Set ingress TLS and NetworkPolicy rules for your cluster.
 3. Use external state services before increasing `replicaCount`.
 4. Run backup/restore and migration rehearsals against the target environment.
+
+## External Database Wiring
+
+The default chart uses a local SQLite URL from the example secret. For
+multi-replica staging, provide a managed database URL through a dedicated
+Kubernetes Secret and enable the external database override:
+
+```bash
+kubectl apply -f deploy/helm/hashi-enterprise/examples/external-postgres-secret.kubernetes.yaml
+```
+
+```bash
+helm upgrade --install hashi-enterprise deploy/helm/hashi-enterprise \
+  --namespace hashi-enterprise --create-namespace \
+  --set replicaCount=2 \
+  --set externalDatabase.enabled=true \
+  --set externalDatabase.secretName=hashi-enterprise-database
+```
+
+This only wires `HASHI_ENTERPRISE_DATABASE_URL` into the control-plane pods.
+Treat production rollout as blocked until schema migrations, backup/restore,
+connection pooling, and multi-replica coordination have been rehearsed against
+the target database.
 
 ## Live Audit Export
 
