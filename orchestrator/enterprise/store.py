@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 class EnterpriseStore:
@@ -253,6 +253,21 @@ class EnterpriseStore:
 
                 CREATE INDEX IF NOT EXISTS idx_connector_credentials_org_type
                     ON connector_credentials(org_id, connector_type, status);
+
+                CREATE TABLE IF NOT EXISTS enterprise_leases (
+                    org_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    holder_id TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    acquired_at TEXT NOT NULL,
+                    renewed_at TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL,
+                    PRIMARY KEY(org_id, name),
+                    FOREIGN KEY(org_id) REFERENCES organizations(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_enterprise_leases_org_expires
+                    ON enterprise_leases(org_id, expires_at);
                 """
             )
             con.execute(

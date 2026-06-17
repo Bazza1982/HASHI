@@ -109,6 +109,7 @@ from orchestrator.enterprise.data_governance import (
     classify_text,
 )
 from orchestrator.enterprise.identity import EnterpriseRole, IdentityService
+from orchestrator.enterprise.leases import EnterpriseLease, EnterpriseLeaseAttempt, EnterpriseLeaseStore
 from orchestrator.enterprise.policy import (
     ApprovalRequest,
     PolicyDecision,
@@ -255,6 +256,9 @@ __all__ = [
     "ExecutionPathDecision",
     "ExecutionScope",
     "EnterpriseStore",
+    "EnterpriseLease",
+    "EnterpriseLeaseAttempt",
+    "EnterpriseLeaseStore",
     "IdentityService",
     "PolicyDecision",
     "PolicyEvaluation",
