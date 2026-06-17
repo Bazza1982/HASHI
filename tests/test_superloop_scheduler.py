@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from orchestrator.enterprise import EnterpriseLeaseStore, IdentityService
 from orchestrator.superloop_scheduler import advance_superloops_once
 from orchestrator.superloop_issues import SuperloopIssuesService
 from orchestrator.superloop_store import SuperloopStore
@@ -136,3 +137,77 @@ def test_superloop_scheduler_starts_task_without_wait_when_explicitly_enabled(tm
     state = store.load_loop_state("sl-test-004")
     assert state["current_step"].startswith("task-")
     assert taskboard.list_tasks("sl-test-004")[0]["status"] == "in_progress"
+
+
+def test_superloop_scheduler_db_lease_guard_skips_when_held(tmp_path: Path) -> None:
+    store = SuperloopStore(tmp_path / "superloops")
+    store.create_compiled_loop(
+        loop_id="sl-test-005",
+        loop_state={
+            "loop_id": "sl-test-005",
+            "status": "running",
+            "current_step": None,
+            "scheduler_auto_advance": True,
+            "taskboard_path": "superloops/loops/sl-test-005/taskboard.json",
+            "waits_path": "superloops/loops/sl-test-005/waits.json",
+        },
+        taskboard=[],
+        issues=[],
+        waits=[],
+        operator_summary="# summary\n",
+    )
+    SuperloopTaskboardService(store).add_task("sl-test-005", title="dispatch worker", owner_agent="zelda", owner_instance="HASHI1")
+    db_path = tmp_path / "enterprise.sqlite"
+    IdentityService.from_path(db_path).create_organization(org_id="ORG-001", name="Acme")
+    leases = EnterpriseLeaseStore.from_path(db_path, org_id="ORG-001")
+    leases.acquire("superloop-scheduler", holder_id="pod-a", ttl_seconds=60)
+
+    skipped = advance_superloops_once(
+        tmp_path / "superloops",
+        lease_store=leases,
+        lease_name="superloop-scheduler",
+        lease_holder="pod-b",
+    )
+
+    assert skipped == {
+        "loops_checked": 0,
+        "waits_satisfied": 0,
+        "loops_advanced": 0,
+        "lease_skipped": 1,
+    }
+    assert store.load_loop_state("sl-test-005")["current_step"] is None
+
+
+def test_superloop_scheduler_db_lease_guard_releases_after_tick(tmp_path: Path) -> None:
+    store = SuperloopStore(tmp_path / "superloops")
+    store.create_compiled_loop(
+        loop_id="sl-test-006",
+        loop_state={
+            "loop_id": "sl-test-006",
+            "status": "running",
+            "current_step": None,
+            "scheduler_auto_advance": True,
+            "taskboard_path": "superloops/loops/sl-test-006/taskboard.json",
+            "waits_path": "superloops/loops/sl-test-006/waits.json",
+        },
+        taskboard=[],
+        issues=[],
+        waits=[],
+        operator_summary="# summary\n",
+    )
+    SuperloopTaskboardService(store).add_task("sl-test-006", title="dispatch worker", owner_agent="zelda", owner_instance="HASHI1")
+    db_path = tmp_path / "enterprise.sqlite"
+    IdentityService.from_path(db_path).create_organization(org_id="ORG-001", name="Acme")
+    leases = EnterpriseLeaseStore.from_path(db_path, org_id="ORG-001")
+
+    stats = advance_superloops_once(
+        tmp_path / "superloops",
+        lease_store=leases,
+        lease_name="superloop-scheduler",
+        lease_holder="pod-a",
+    )
+
+    assert stats["loops_checked"] == 1
+    assert stats["loops_advanced"] == 1
+    assert stats["lease_skipped"] == 0
+    assert leases.get("superloop-scheduler") is None

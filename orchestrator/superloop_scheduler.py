@@ -49,7 +49,32 @@ def _scheduler_auto_advance_enabled(state: dict[str, Any]) -> bool:
     )
 
 
-def advance_superloops_once(superloops_root: Path, now: datetime | None = None) -> dict[str, int]:
+def advance_superloops_once(
+    superloops_root: Path,
+    now: datetime | None = None,
+    *,
+    lease_store: Any | None = None,
+    lease_name: str = "superloop-scheduler",
+    lease_holder: str = "local",
+    lease_ttl_seconds: int = 60,
+) -> dict[str, int]:
+    if lease_store is not None:
+        attempt = lease_store.acquire(lease_name, holder_id=lease_holder, ttl_seconds=lease_ttl_seconds)
+        if not attempt.acquired:
+            return {
+                "loops_checked": 0,
+                "waits_satisfied": 0,
+                "loops_advanced": 0,
+                "lease_skipped": 1,
+            }
+        try:
+            return _advance_superloops_once_unlocked(superloops_root, now=now)
+        finally:
+            lease_store.release(lease_name, holder_id=lease_holder)
+    return _advance_superloops_once_unlocked(superloops_root, now=now)
+
+
+def _advance_superloops_once_unlocked(superloops_root: Path, now: datetime | None = None) -> dict[str, int]:
     now_utc = now or datetime.now(timezone.utc)
     store = SuperloopStore(superloops_root)
     waits = SuperloopWaitsService(store)
@@ -109,4 +134,5 @@ def advance_superloops_once(superloops_root: Path, now: datetime | None = None) 
         "loops_checked": loops_checked,
         "waits_satisfied": waits_satisfied,
         "loops_advanced": loops_advanced,
+        "lease_skipped": 0,
     }
