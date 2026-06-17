@@ -210,9 +210,56 @@ class IdentityService:
                 status=status,
             )
 
+    def upsert_oidc_user(
+        self,
+        *,
+        org_id: str,
+        email: str,
+        display_name: str,
+        default_project_id: str | None = None,
+        default_role: EnterpriseRole | str = EnterpriseRole.INDIVIDUAL_USER,
+    ) -> tuple[User, bool]:
+        with self.store.connect() as con:
+            row = con.execute(
+                "SELECT * FROM users WHERE org_id = ? AND lower(email) = lower(?)",
+                (_require_id(org_id, "org_id"), _normalize_email(email)),
+            ).fetchone()
+            if row:
+                user = _user_from_row(row)
+                if user.status != "active":
+                    raise ValueError("OIDC user is not active")
+                created = False
+            else:
+                user = self._create_user_with_connection(
+                    con,
+                    org_id=org_id,
+                    email=email,
+                    display_name=display_name,
+                    password=secrets.token_urlsafe(32),
+                    user_id=None,
+                    status="active",
+                )
+                created = True
+            if default_project_id:
+                self._assign_membership_with_connection(
+                    con,
+                    user_id=user.id,
+                    project_id=default_project_id,
+                    role=default_role,
+                )
+        return user, created
+
     def get_user(self, user_id: str) -> User | None:
         with self.store.connect() as con:
             row = con.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        return _user_from_row(row) if row else None
+
+    def get_user_by_email(self, *, org_id: str, email: str) -> User | None:
+        with self.store.connect() as con:
+            row = con.execute(
+                "SELECT * FROM users WHERE org_id = ? AND lower(email) = lower(?)",
+                (_require_id(org_id, "org_id"), _normalize_email(email)),
+            ).fetchone()
         return _user_from_row(row) if row else None
 
     def list_users(self, *, org_id: str) -> list[User]:

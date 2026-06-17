@@ -16,6 +16,7 @@ from orchestrator.enterprise.oidc_exchange import (
     map_oidc_claims,
 )
 from orchestrator.enterprise.oidc_flow import OidcAuthorizationStart, build_oidc_authorization_start
+from orchestrator.enterprise.oidc_session import OidcSessionCompletion, complete_oidc_session
 from orchestrator.enterprise.oidc_token import (
     OidcValidatedClaims,
     validate_oidc_id_token_claims,
@@ -111,6 +112,7 @@ __all__ = [
     "OidcMappedIdentity",
     "OidcAuthorizationStart",
     "OidcTokenExchangeRequest",
+    "OidcSessionCompletion",
     "OidcValidatedClaims",
     "Artifact",
     "ArtifactRegistry",
@@ -183,6 +185,7 @@ __all__ = [
     "load_auth_providers",
     "build_oidc_authorization_start",
     "build_oidc_token_exchange_request",
+    "complete_oidc_session",
     "map_oidc_claims",
     "validate_oidc_id_token_claims",
     "verify_oidc_id_token",
