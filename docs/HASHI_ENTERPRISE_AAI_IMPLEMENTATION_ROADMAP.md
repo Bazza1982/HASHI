@@ -843,12 +843,15 @@ Implemented checkpoints:
   - `Dockerfile.enterprise`;
   - `deploy/docker-compose.enterprise.yml`;
   - `deploy/enterprise.env.example`;
+  - `deploy/kubernetes/enterprise/`;
   - `docs/HASHI_ENTERPRISE_DEPLOYMENT.md`.
 - `hashi.py enterprise migrate` initializes or refreshes the enterprise SQLite schema idempotently and reports before/after schema versions.
+- Kubernetes baseline manifests are present for namespace, config, example secrets, persistent data, deployment, service, and `/api/health` probes.
 
 Residual P9 limitations:
 
 - Docker Compose skeleton is present but has not yet been build/run verified in CI.
+- Kubernetes baseline is single-replica and manifest-based; Helm packaging, autoscaling, managed ingress, network policy, external database wiring, and multi-replica HA remain future work.
 - Backup policy and scheduled backups are not yet implemented.
 - Migration runner is a schema initializer, not yet a multi-file versioned migration framework.
 
@@ -865,6 +868,7 @@ Residual P9 limitations:
 **Primary code areas:**
 
 - `deploy/docker-compose.enterprise.yml`;
+- `deploy/kubernetes/enterprise/`;
 - Dockerfile or package metadata;
 - `orchestrator/enterprise/migrations/`;
 - `hashi.py enterprise backup|restore|migrate`;
@@ -876,8 +880,9 @@ Residual P9 limitations:
 - `ENT-111` Add enterprise volume layout. Done for state, workspaces, logs, and backups named volumes.
 - `ENT-112` Add migration runner command. Done for idempotent schema initialization and schema version reporting.
 - `ENT-113` Add backup/restore command. Done for backup, restore, and manifest inspection CLI.
-- `ENT-114` Add enterprise health checks.
+- `ENT-114` Add enterprise health checks. Done for Workbench `/api/health`, Docker healthcheck, and Kubernetes liveness/readiness probe manifests.
 - `ENT-115` Add upgrade and rollback documentation.
+- `ENT-116` Add Kubernetes baseline manifests. Done for namespace, config map, example secret, PVC, single-replica deployment, service, data/secret mounts, and manifest contract tests; HA/Helm remains future work.
 
 **Acceptance:**
 

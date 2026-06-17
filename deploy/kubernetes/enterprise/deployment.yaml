@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hashi-enterprise
+  namespace: hashi-enterprise
+  labels:
+    app.kubernetes.io/name: hashi
+    app.kubernetes.io/component: enterprise
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hashi
+      app.kubernetes.io/component: enterprise
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: hashi
+        app.kubernetes.io/component: enterprise
+    spec:
+      containers:
+        - name: hashi
+          image: ghcr.io/example/hashi-enterprise:replace-me
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: workbench
+              containerPort: 18800
+          envFrom:
+            - configMapRef:
+                name: hashi-enterprise-config
+            - secretRef:
+                name: hashi-enterprise-secrets
+          volumeMounts:
+            - name: hashi-data
+              mountPath: /data
+            - name: hashi-secrets
+              mountPath: /var/run/secrets/hashi/connectors
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: workbench
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: workbench
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+      volumes:
+        - name: hashi-data
+          persistentVolumeClaim:
+            claimName: hashi-enterprise-data
+        - name: hashi-secrets
+          secret:
+            secretName: hashi-enterprise-secrets

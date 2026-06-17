@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hashi-enterprise-config
+  namespace: hashi-enterprise
+  labels:
+    app.kubernetes.io/name: hashi
+    app.kubernetes.io/component: enterprise
+data:
+  HASHI_DEPLOYMENT_PROFILE: enterprise
+  HASHI_BRIDGE_HOME: /data
+  HASHI_WORKBENCH_PORT: "18800"
+  HASHI_ORGANIZATION_ID: ORG-001
