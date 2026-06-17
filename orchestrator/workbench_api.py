@@ -151,6 +151,10 @@ class WorkbenchApiServer:
         self.app.router.add_post("/api/enterprise/scim/v2/Users", self.handle_enterprise_scim_v2_users_create)
         self.app.router.add_get("/api/enterprise/scim/v2/Users/{user_id}", self.handle_enterprise_scim_v2_users_get)
         self.app.router.add_patch("/api/enterprise/scim/v2/Users/{user_id}", self.handle_enterprise_scim_v2_users_patch)
+        self.app.router.add_get("/scim/v2/Users", self.handle_public_scim_v2_users_list)
+        self.app.router.add_post("/scim/v2/Users", self.handle_public_scim_v2_users_create)
+        self.app.router.add_get("/scim/v2/Users/{user_id}", self.handle_public_scim_v2_users_get)
+        self.app.router.add_patch("/scim/v2/Users/{user_id}", self.handle_public_scim_v2_users_patch)
         self.app.router.add_get("/api/enterprise/api-tokens", self.handle_enterprise_api_tokens)
         self.app.router.add_post("/api/enterprise/api-tokens", self.handle_enterprise_api_tokens_create)
         self.app.router.add_post(
@@ -408,6 +412,44 @@ class WorkbenchApiServer:
         }
         memberships = self.identity_service.list_project_memberships(user_id=user_id)
         return any(row.get("role") in audit_roles for row in memberships)
+
+    def _enterprise_api_token_with_scope(self, request, *, required_scope: str):
+        if self.identity_service is None:
+            return None, None
+        token_text = self._bearer_token_from_request(request)
+        if not token_text:
+            return None, None
+        api_token = self.identity_service.validate_api_token(token_text)
+        if api_token is None:
+            return None, None
+        scopes = set(api_token.scopes)
+        implied = {"scim:write"} if required_scope == "scim:read" else set()
+        if required_scope not in scopes and "scim:*" not in scopes and not scopes.intersection(implied):
+            return None, api_token
+        user = self.identity_service.get_user(api_token.user_id)
+        if user is None or user.status != "active":
+            return None, api_token
+        return api_token, user
+
+    def _enterprise_scim_scope_error_response(self, request, *, required_scope: str):
+        if not self._is_governed_profile():
+            return web.json_response({"schemas": [], "detail": "SCIM requires governed profile"}, status=404)
+        if self.identity_service is None:
+            return web.json_response({"schemas": [], "detail": "identity service unavailable"}, status=503)
+        api_token, user = self._enterprise_api_token_with_scope(request, required_scope=required_scope)
+        if api_token is None or user is None:
+            self._append_enterprise_audit(
+                event_type="auth",
+                action="scim_token_auth",
+                status="denied",
+                actor_id=getattr(api_token, "user_id", None),
+                context={"path": getattr(request, "path", ""), "required_scope": required_scope},
+            )
+            return web.json_response({"schemas": [], "detail": "SCIM token auth failed"}, status=403)
+        return None
+
+    def _enterprise_scim_actor_from_request(self, request, *, required_scope: str):
+        return self._enterprise_api_token_with_scope(request, required_scope=required_scope)
 
     def _enterprise_visible_project_ids(self, user_id: str) -> set[str]:
         if self.identity_service is None:
@@ -1243,6 +1285,112 @@ class WorkbenchApiServer:
             status="success",
             actor_id=actor.id if actor else None,
             context={"target_user_id": result.user.id, "provisioning_action": result.action},
+        )
+        return web.json_response(scim_user_resource(result.user))
+
+    async def handle_public_scim_v2_users_list(self, request):
+        error = self._enterprise_scim_scope_error_response(request, required_scope="scim:read")
+        if error is not None:
+            return error
+        _, actor = self._enterprise_scim_actor_from_request(request, required_scope="scim:read")
+        query = getattr(request, "query", {}) or {}
+        filter_expression = str(query.get("filter") or "").strip() or None
+        try:
+            start_index = max(1, int(str(query.get("startIndex") or "1")))
+            count = max(0, min(500, int(str(query.get("count") or "100"))))
+            payload = ScimProvisioningService(self.identity_service).list_user_resources(
+                org_id=actor.org_id,
+                filter_expression=filter_expression,
+                start_index=start_index,
+                count=count,
+            )
+        except Exception as exc:
+            return web.json_response({"schemas": [], "detail": str(exc)}, status=400)
+        return web.json_response(payload)
+
+    async def handle_public_scim_v2_users_create(self, request):
+        error = self._enterprise_scim_scope_error_response(request, required_scope="scim:write")
+        if error is not None:
+            return error
+        api_token, actor = self._enterprise_scim_actor_from_request(request, required_scope="scim:write")
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"schemas": [], "detail": "invalid JSON body"}, status=400)
+        try:
+            result = ScimProvisioningService(self.identity_service).upsert_user(org_id=actor.org_id, payload=payload)
+        except Exception as exc:
+            self._append_enterprise_audit(
+                event_type="scim",
+                action="scim_v2_user_create",
+                status="failed",
+                actor_id=actor.id,
+                context={"error": str(exc), "api_token_id": getattr(api_token, "id", None)},
+            )
+            return web.json_response({"schemas": [], "detail": str(exc)}, status=400)
+        self._append_enterprise_audit(
+            event_type="scim",
+            action="scim_v2_user_create",
+            status="success",
+            actor_id=actor.id,
+            context={
+                "target_user_id": result.user.id,
+                "created": result.created,
+                "provisioning_action": result.action,
+                "api_token_id": getattr(api_token, "id", None),
+            },
+        )
+        return web.json_response(scim_user_resource(result.user), status=201 if result.created else 200)
+
+    async def handle_public_scim_v2_users_get(self, request):
+        error = self._enterprise_scim_scope_error_response(request, required_scope="scim:read")
+        if error is not None:
+            return error
+        _, actor = self._enterprise_scim_actor_from_request(request, required_scope="scim:read")
+        user_id = str(getattr(request, "match_info", {}).get("user_id") or "").strip()
+        try:
+            target = self.identity_service.get_user(user_id)
+            if target is None or target.org_id != actor.org_id:
+                raise ValueError(f"SCIM user not found: {user_id!r}")
+            payload = ScimProvisioningService(self.identity_service).get_user_resource(user_id=user_id)
+        except Exception as exc:
+            return web.json_response({"schemas": [], "detail": str(exc)}, status=404)
+        return web.json_response(payload)
+
+    async def handle_public_scim_v2_users_patch(self, request):
+        error = self._enterprise_scim_scope_error_response(request, required_scope="scim:write")
+        if error is not None:
+            return error
+        api_token, actor = self._enterprise_scim_actor_from_request(request, required_scope="scim:write")
+        user_id = str(getattr(request, "match_info", {}).get("user_id") or "").strip()
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"schemas": [], "detail": "invalid JSON body"}, status=400)
+        try:
+            target = self.identity_service.get_user(user_id)
+            if target is None or target.org_id != actor.org_id:
+                raise ValueError(f"SCIM user not found: {user_id!r}")
+            result = ScimProvisioningService(self.identity_service).patch_user(user_id=user_id, payload=payload)
+        except Exception as exc:
+            self._append_enterprise_audit(
+                event_type="scim",
+                action="scim_v2_user_patch",
+                status="failed",
+                actor_id=actor.id,
+                context={"error": str(exc), "target_user_id": user_id, "api_token_id": getattr(api_token, "id", None)},
+            )
+            return web.json_response({"schemas": [], "detail": str(exc)}, status=400)
+        self._append_enterprise_audit(
+            event_type="scim",
+            action="scim_v2_user_patch",
+            status="success",
+            actor_id=actor.id,
+            context={
+                "target_user_id": result.user.id,
+                "provisioning_action": result.action,
+                "api_token_id": getattr(api_token, "id", None),
+            },
         )
         return web.json_response(scim_user_resource(result.user))
 

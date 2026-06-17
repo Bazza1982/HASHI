@@ -211,7 +211,8 @@ Deferred:
 - `ENT-024a` Add SAML metadata and assertion validation skeleton. Done for IdP metadata parsing, SSO binding selection, signing certificate discovery, preverified assertion issuer/audience/time validation, email/display-name extraction, and DTD/entity rejection; XML Signature verification and full HTTP login flow remain future work.
 - `ENT-025` Add SCIM provisioning primitive. Done for user create/update/deactivate/reactivate, standard `userName`/`emails` extraction, default project membership, session/API token revocation on deactivation, and deterministic result payloads; full SCIM HTTP endpoints, filters, groups, and IdP schema negotiation remain future work.
 - `ENT-026` Add admin-gated SCIM provisioning API. Done for `/api/enterprise/scim/users` upsert and `/api/enterprise/scim/users/deactivate`, admin auth, audit events, default project assignment, and session/API token revocation on deactivation.
-- `ENT-027` Add SCIM 2.0 Users compatibility surface. Done for admin-gated `/api/enterprise/scim/v2/Users` list/create/get/PATCH, SCIM User/ListResponse payloads, `userName`, `emails.value`, and `active` filters, pagination, PATCH `active`/`displayName`, audit for write paths, and token/session revocation on deactivation; public IdP-facing `/scim/v2`, Groups, advanced filters, schema negotiation, and bulk operations remain future work.
+- `ENT-027` Add SCIM 2.0 Users compatibility surface. Done for admin-gated `/api/enterprise/scim/v2/Users` list/create/get/PATCH, SCIM User/ListResponse payloads, `userName`, `emails.value`, and `active` filters, pagination, PATCH `active`/`displayName`, audit for write paths, and token/session revocation on deactivation.
+- `ENT-028` Add IdP-facing SCIM Users service-token surface. Done for `/scim/v2/Users` list/create/get/PATCH with API-token scope gates (`scim:read`, `scim:write`, `scim:*`), org boundary checks, write-path SCIM audit events, token redaction, and fail-closed rejection of session tokens or unscoped API tokens; Groups, advanced filters, schema negotiation, and bulk operations remain future work.
 
 **Acceptance:**
 
@@ -225,7 +226,7 @@ Deferred:
 - OIDC token endpoint and JWKS calls can be tested with injected transports and do not expose token material in public payloads.
 - OIDC callback can complete full login when explicitly enabled, while prepared-mode remains available for deployments that have not configured live SSO.
 - SAML metadata can be parsed safely and preverified SAML assertion claims can be validated for issuer, audience, validity window, subject, email, and display name.
-- SCIM-style provisioning can sync enterprise users through service, admin API, and baseline SCIM 2.0 Users paths without restoring old sessions or API tokens after deactivation.
+- SCIM-style provisioning can sync enterprise users through service, admin API, and IdP-facing SCIM 2.0 Users paths without restoring old sessions or API tokens after deactivation.
 
 ### Enterprise Secret Providers
 
