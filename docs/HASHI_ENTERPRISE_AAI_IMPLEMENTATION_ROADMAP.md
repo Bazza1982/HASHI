@@ -94,7 +94,7 @@ Deferred:
 
 - IdP-specific SAML/SCIM setup guides beyond the generic deployment runbook, and SCIM 2.0 compatibility beyond baseline Users, read-only Groups, discovery, and bounded Bulk surfaces;
 - full ABAC policy simulation;
-- live SIEM/OpenTelemetry exporter daemon mode and vendor auth presets beyond the CLI checkpoint/retry runner and baseline Compose/Kubernetes/Helm scheduling;
+- live SIEM/OpenTelemetry exporter daemon mode, dashboards, transforms, and secret-manager-native vendor wiring beyond the CLI checkpoint/retry runner, baseline Compose/Kubernetes/Helm scheduling, and generic preset runbook;
 - cloud/object-store WORM adapters beyond local filesystem sink;
 - Vault hardening beyond token-auth read provider, such as AppRole/Kubernetes auth and lease renewal;
 - Helm/HA hardening beyond the baseline chart;
@@ -519,6 +519,11 @@ Implemented checkpoints:
   - Docker Compose `audit-export` profile for one-shot scheduled runs;
   - raw Kubernetes CronJob with `concurrencyPolicy: Forbid`;
   - Helm `auditExport.enabled` CronJob template with persistent `/data/state` checkpoint path;
+- live audit export operator presets:
+  - generic NDJSON HTTP collector preset;
+  - Splunk HEC raw/collector-fronted preset with HEC event-envelope warning;
+  - Elastic/Logstash HTTP input preset with `_bulk` compatibility warning;
+  - OpenTelemetry Collector HTTP logs preset;
 - slash command audit JSONL adapter:
   - imports legacy `slash_command_audit.jsonl` records as `slash_command` ledger events;
   - preserves legacy timestamp, actor, command, status, channel, handler, duration, error, blocked reason, and side effects;
@@ -556,7 +561,7 @@ Residual P4 limitations:
 - auditor read-only role semantics are not yet separated from broader admin access;
 - generic shell/file tool execution now has a canonical JSONL event source and ingest adapter;
 - generic object-store WORM sink is present, but cloud-specific SDK wiring and deployment runbooks remain future work;
-- retention, long-running daemon orchestration, and deployment-specific SIEM auth presets remain future P4 work.
+- retention, long-running daemon orchestration, vendor-specific transforms/dashboards, and secret-manager-native SIEM auth wiring remain future P4 work.
 
 **Scope:**
 
@@ -596,6 +601,7 @@ Residual P4 limitations:
 - `ENT-069b` Add live audit export checkpoint and retry cycle. Done for file-backed checkpoint load/save, corrupt checkpoint fail-fast, retry/backoff, no checkpoint advancement on failed attempts, and checkpoint advancement only after successful delivery.
 - `ENT-069c` Add live audit export CLI runner. Done for `hashi enterprise audit-export-live` with HTTP POST transport, ledger/SIEM/OTLP format selection, operator headers, timeout, retry, batch-size, and checkpoint controls; long-running daemon orchestration and deployment-specific auth presets remain future work.
 - `ENT-069d` Add live audit export deployment scheduling. Done for Docker Compose `audit-export` one-shot profile, raw Kubernetes CronJob, Helm `auditExport.enabled` CronJob template, checkpoint persistence under `/data/state`, and operator documentation; vendor-specific SIEM auth presets and long-running daemon mode remain future work.
+- `ENT-069e` Add live audit export operator presets. Done for generic NDJSON, Splunk HEC raw/collector-fronted, Elastic/Logstash HTTP input, and OpenTelemetry Collector HTTP logs preset examples plus an operator runbook with compatibility warnings and acceptance checks; managed daemon mode, transforms, dashboards, and secret-manager-native Helm wiring remain future work.
 
 **Acceptance:**
 
@@ -608,6 +614,7 @@ Residual P4 limitations:
 - Live export cycle persists delivery checkpoints and retries transient failures without skipping undelivered events.
 - Operators can run a one-shot live export cycle from the HASHI CLI and schedule it externally through cron, systemd, or Kubernetes CronJob.
 - Raw Kubernetes and Helm deployments include baseline CronJob scheduling for the live exporter, and Compose deployments include an `audit-export` profile suitable for cron/systemd wrappers.
+- Operators have preset guidance for generic NDJSON, Splunk, Elastic/Logstash, and OTLP collectors, including explicit warnings where a collector transform is required.
 
 ---
 
