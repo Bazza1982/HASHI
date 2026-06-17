@@ -92,7 +92,7 @@ Required:
 
 Deferred:
 
-- complete SAML/OIDC/SCIM login flows;
+- complete SAML/SCIM login flows and OIDC callback/token validation;
 - full ABAC policy simulation;
 - SIEM/OpenTelemetry;
 - WORM storage;
@@ -161,6 +161,7 @@ Deferred:
 - role enum;
 - local password/session auth;
 - enterprise auth provider metadata contract for OIDC readiness;
+- OIDC authorization-code start with server-side PKCE verifier storage;
 - Workbench login endpoint;
 - audit events for login/logout/admin bootstrap;
 - personal profile maps current owner behavior to implicit top admin.
@@ -169,6 +170,7 @@ Deferred:
 
 - `orchestrator/enterprise/identity.py`;
 - `orchestrator/enterprise/auth_providers.py`;
+- `orchestrator/enterprise/oidc_flow.py`;
 - `orchestrator/enterprise/auth_session.py`;
 - `orchestrator/enterprise/store.py`;
 - `orchestrator/workbench_api.py`;
@@ -183,11 +185,13 @@ Deferred:
 - `ENT-014` Add Workbench login/logout endpoints.
 - `ENT-015` Emit audit events for auth and bootstrap.
 - `ENT-016` Add OIDC provider metadata skeleton. Done for config parsing, provider readiness checks, public metadata, and secret redaction; full authorization-code flow remains future work.
+- `ENT-017` Add OIDC authorization start with PKCE. Done for authorization URL generation, state/nonce, server-side code verifier storage, and start audit; callback token exchange remains future work.
 
 **Acceptance:**
 
 - `org_admin` can log in.
 - Workbench can discover configured login providers without exposing provider secrets.
+- OIDC start does not expose `code_verifier`; the browser receives the authorization URL while HASHI keeps verifier and nonce state for callback validation.
 - `individual_user` exists as a role but cannot access admin APIs.
 - Personal profile does not require login migration.
 

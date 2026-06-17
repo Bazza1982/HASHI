@@ -31,6 +31,7 @@ from orchestrator.enterprise.connectors import (
 )
 from orchestrator.enterprise.credentials import ConnectorCredentialStore
 from orchestrator.enterprise.identity import EnterpriseRole, IdentityService
+from orchestrator.enterprise.oidc_flow import build_oidc_authorization_start
 from orchestrator.enterprise.policy import PolicyEvaluator
 from orchestrator.enterprise.policy_templates import install_default_connector_policy
 from orchestrator.enterprise.routing import agent_project_ids
@@ -112,6 +113,7 @@ class WorkbenchApiServer:
         self.audit_ledger = self._build_audit_ledger()
         self.connector_credentials = self._build_connector_credentials()
         self.connector_secret_resolver = ConnectorSecretResolver(secrets=self.secrets)
+        self._pending_oidc_flows: dict[str, object] = {}
         self.connector_registry_errors: list[dict] = []
         self.connector_registry = self._build_connector_registry()
         self.bridge_router = ConversationRouter(
@@ -126,6 +128,7 @@ class WorkbenchApiServer:
         self.app.router.add_post("/api/auth/logout", self.handle_auth_logout)
         self.app.router.add_get("/api/auth/me", self.handle_auth_me)
         self.app.router.add_get("/api/auth/providers", self.handle_auth_providers)
+        self.app.router.add_get("/api/auth/oidc/{provider_id}/start", self.handle_auth_oidc_start)
         self.app.router.add_get("/api/enterprise/users", self.handle_enterprise_users)
         self.app.router.add_post("/api/enterprise/users", self.handle_enterprise_users_create)
         self.app.router.add_get("/api/enterprise/api-tokens", self.handle_enterprise_api_tokens)
@@ -642,6 +645,43 @@ class WorkbenchApiServer:
                 "providers": [provider.public_payload() for provider in providers],
             }
         )
+
+    async def handle_auth_oidc_start(self, request):
+        if not self._is_governed_profile():
+            return web.json_response({"ok": False, "error": "OIDC login is only enabled for governed profiles"}, status=404)
+        provider_id = str(request.match_info.get("provider_id") or "").strip()
+        redirect_uri = str((getattr(request, "query", {}) or {}).get("redirect_uri") or "").strip()
+        providers = load_auth_providers(getattr(self.global_config, "enterprise_auth_providers", []) or [])
+        provider = next((item for item in providers if item.id == provider_id), None)
+        if provider is None:
+            self._append_enterprise_audit(
+                event_type="auth",
+                action="oidc_start",
+                status="failed",
+                actor_id=provider_id,
+                context={"error": "provider not found"},
+            )
+            return web.json_response({"ok": False, "error": "OIDC provider not found"}, status=404)
+        try:
+            start = build_oidc_authorization_start(provider, redirect_uri=redirect_uri)
+        except Exception as exc:
+            self._append_enterprise_audit(
+                event_type="auth",
+                action="oidc_start",
+                status="failed",
+                actor_id=provider_id,
+                context={"provider_id": provider_id, "error": str(exc)},
+            )
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        self._pending_oidc_flows[start.state] = start
+        self._append_enterprise_audit(
+            event_type="auth",
+            action="oidc_start",
+            status="success",
+            actor_id=provider_id,
+            context={"provider_id": provider_id, "expires_at": start.expires_at},
+        )
+        return web.json_response({"ok": True, "oidc": start.public_payload()})
 
     def _enterprise_user_payload(self, user) -> dict:
         memberships = (

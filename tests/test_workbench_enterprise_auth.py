@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -144,6 +145,69 @@ async def test_auth_providers_exposes_local_and_oidc_metadata_without_secret(tmp
     assert payload["providers"][1]["client_id"] == "hashi-client"
     assert "client_secret" not in json.dumps(payload)
     assert "do-not-return" not in json.dumps(payload)
+
+
+@pytest.mark.asyncio
+async def test_oidc_start_returns_authorization_url_and_stores_private_flow(tmp_path):
+    server = _server(tmp_path)
+    server.global_config.enterprise_auth_providers = [
+        {
+            "type": "oidc",
+            "id": "entra",
+            "display_name": "Microsoft Entra ID",
+            "enabled": True,
+            "issuer": "https://login.microsoftonline.com/tenant/v2.0",
+            "client_id": "hashi-client",
+            "authorization_endpoint": "https://login.microsoftonline.com/tenant/oauth2/v2.0/authorize",
+            "token_endpoint": "https://login.microsoftonline.com/tenant/oauth2/v2.0/token",
+            "jwks_uri": "https://login.microsoftonline.com/tenant/discovery/v2.0/keys",
+        }
+    ]
+
+    response = await server.handle_auth_oidc_start(
+        _FakeRequest(
+            query={"redirect_uri": "https://hashi.example.com/api/auth/oidc/entra/callback"},
+            match_info={"provider_id": "entra"},
+        )
+    )
+    payload = json.loads(response.text)
+    state = payload["oidc"]["state"]
+    stored = server._pending_oidc_flows[state]
+
+    assert response.status == 200
+    assert payload["oidc"]["provider_id"] == "entra"
+    assert "code_challenge=" in payload["oidc"]["authorization_url"]
+    assert "code_verifier" not in json.dumps(payload)
+    query = parse_qs(urlparse(payload["oidc"]["authorization_url"]).query)
+    assert query["nonce"] == [stored.nonce]
+    assert stored.code_verifier
+    assert stored.nonce
+    assert _audit_events(tmp_path)[-1]["action"] == "oidc_start"
+
+
+@pytest.mark.asyncio
+async def test_oidc_start_rejects_unready_provider(tmp_path):
+    server = _server(tmp_path)
+    server.global_config.enterprise_auth_providers = [
+        {
+            "type": "oidc",
+            "id": "broken",
+            "enabled": True,
+            "issuer": "https://issuer.example.com",
+            "client_id": "hashi-client",
+        }
+    ]
+
+    response = await server.handle_auth_oidc_start(
+        _FakeRequest(
+            query={"redirect_uri": "https://hashi.example.com/callback"},
+            match_info={"provider_id": "broken"},
+        )
+    )
+
+    assert response.status == 400
+    assert json.loads(response.text)["error"] == "OIDC provider is not ready"
+    assert _audit_events(tmp_path)[-1]["status"] == "failed"
 
 
 def test_enterprise_admin_auth_requires_admin_project_role(tmp_path):
