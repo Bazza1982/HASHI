@@ -15,6 +15,7 @@ from orchestrator.enterprise.audit_anchor import (
     verify_audit_ledger_anchor,
 )
 from orchestrator.enterprise.audit_ledger import AuditChainVerification, EnterpriseAuditLedger, LedgerEvent
+from orchestrator.enterprise.audit_live_export import AuditLiveExportEndpoint, AuditLiveExportResult, AuditLiveExporter
 from orchestrator.enterprise.audit_object_worm import (
     ObjectStoreAuditAnchorSink,
     ObjectStoreAuditClient,
@@ -153,6 +154,9 @@ __all__ = [
     "AuditAnchorVerification",
     "AuditAnchorReceipt",
     "EnterpriseAuditLedger",
+    "AuditLiveExportEndpoint",
+    "AuditLiveExportResult",
+    "AuditLiveExporter",
     "FilesystemAuditAnchorSink",
     "ObjectStoreAuditAnchorSink",
     "ObjectStoreAuditClient",
