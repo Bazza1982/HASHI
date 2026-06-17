@@ -283,7 +283,10 @@
           }
         }
       ],
-      "active_backend": "openrouter-api"
+      "active_backend": "openrouter-api",
+      "extra": {
+        "answer_stream_preview": false
+      }
     },
     {
       "name": "xiao_tian",

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import tempfile
 from datetime import datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 import sys
 import types
@@ -10,6 +13,7 @@ import pytest
 from telegram.error import RetryAfter
 
 from orchestrator import runtime_pipeline
+from orchestrator import telegram_delivery_failover as failover
 from adapters.stream_events import KIND_PROGRESS, KIND_TEXT_DELTA, StreamEvent
 
 
@@ -97,13 +101,16 @@ class _ProjectChatLogger:
 
 
 class _Bot:
-    def __init__(self, *, edit_error=None):
+    def __init__(self, *, edit_error=None, send_error=None):
         self.sent = []
         self.edits = []
         self.deleted = []
         self.edit_error = edit_error
+        self.send_error = send_error
 
     async def send_message(self, **kwargs):
+        if self.send_error is not None:
+            raise self.send_error
         self.sent.append(kwargs)
         return SimpleNamespace(message_id=77)
 
@@ -137,6 +144,8 @@ def _runtime():
     runtime = SimpleNamespace()
     runtime.config = SimpleNamespace(active_backend="codex-cli", extra={})
     runtime.name = "zelda"
+    runtime.config.telegram_token_key = runtime.name
+    runtime.global_config = SimpleNamespace(project_root=Path(tempfile.mkdtemp(prefix="hashi-pipeline-test-")))
     runtime.workspace_dir = "/tmp/hashi-test"
     runtime.session_id_dt = "session-1"
     runtime.logger = _Logger()
@@ -465,6 +474,116 @@ async def test_setup_interactive_feedback_creates_placeholder_and_cleanup_tasks(
 
 
 @pytest.mark.asyncio
+async def test_setup_interactive_feedback_placeholder_retry_after_records_failover(tmp_path):
+    runtime = _runtime()
+    runtime.name = "kasumi"
+    runtime.workspace_dir = tmp_path / "workspaces" / "kasumi"
+    runtime.workspace_dir.mkdir(parents=True, exist_ok=True)
+    runtime.global_config = SimpleNamespace(project_root=tmp_path)
+    runtime.config.telegram_token_key = "kasumi"
+    runtime.telegram_connected = True
+    runtime.startup_success = True
+    runtime.token = "token-kasumi"
+    runtime.app.bot = _Bot(send_error=RetryAfter(60))
+
+    failover_runtime = SimpleNamespace(
+        name="lin_yueru",
+        workspace_dir=tmp_path / "workspaces" / "lin_yueru",
+        config=SimpleNamespace(extra={}, telegram_token_key="lin_yueru"),
+        global_config=SimpleNamespace(project_root=tmp_path),
+        app=SimpleNamespace(bot=_Bot()),
+        telegram_connected=True,
+        startup_success=True,
+        token="token-lin-yueru",
+    )
+    failover_runtime.workspace_dir.mkdir(parents=True, exist_ok=True)
+    orchestrator = SimpleNamespace(runtimes=[runtime, failover_runtime], raw_config={})
+    runtime.orchestrator = orchestrator
+    failover_runtime.orchestrator = orchestrator
+
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(),
+        audit_active=False,
+        audit_collector=None,
+    )
+
+    feedback.stop_typing.set()
+    await feedback.typing_task
+
+    saved = failover.load_health_state(runtime)
+    record = saved["agents"]["kasumi"]
+    assert record["status"] == "blocked"
+    assert record["retry_after_s"] == 60
+    assert failover_runtime.app.bot.sent
+    assert feedback.placeholder is None
+    assert feedback.answer_preview_task is None
+
+
+@pytest.mark.asyncio
+async def test_setup_interactive_feedback_skips_placeholder_when_delivery_blocked(tmp_path):
+    runtime = _runtime()
+    runtime.name = "kasumi"
+    runtime.workspace_dir = tmp_path / "workspaces" / "kasumi"
+    runtime.workspace_dir.mkdir(parents=True, exist_ok=True)
+    runtime.global_config = SimpleNamespace(project_root=tmp_path)
+    runtime.config.telegram_token_key = "kasumi"
+    runtime.telegram_connected = True
+    runtime.startup_success = True
+    runtime.token = "token-kasumi"
+    runtime.app.bot = _Bot()
+
+    failover_runtime = SimpleNamespace(
+        name="lin_yueru",
+        workspace_dir=tmp_path / "workspaces" / "lin_yueru",
+        config=SimpleNamespace(extra={}, telegram_token_key="lin_yueru"),
+        global_config=SimpleNamespace(project_root=tmp_path),
+        app=SimpleNamespace(bot=_Bot()),
+        telegram_connected=True,
+        startup_success=True,
+        token="token-lin-yueru",
+    )
+    failover_runtime.workspace_dir.mkdir(parents=True, exist_ok=True)
+    orchestrator = SimpleNamespace(runtimes=[runtime, failover_runtime], raw_config={})
+    runtime.orchestrator = orchestrator
+    failover_runtime.orchestrator = orchestrator
+
+    state_path = tmp_path / "state" / "telegram_delivery_health.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "agents": {
+                    "kasumi": {
+                        "token_key": "telegram:kasumi",
+                        "status": "blocked",
+                        "blocked_until": "2030-01-01T00:00:00+10:00",
+                        "retry_after_s": 60,
+                        "incident_id": "tg-kasumi-test",
+                        "per_chat": {},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(),
+        audit_active=False,
+        audit_collector=None,
+    )
+
+    feedback.stop_typing.set()
+    await feedback.typing_task
+
+    assert not runtime.app.bot.sent
+    assert feedback.placeholder is None
+
+
+@pytest.mark.asyncio
 async def test_setup_interactive_feedback_creates_stream_state_only_when_capability_and_flag_enabled():
     runtime = _runtime()
     runtime.config.extra = {"answer_stream_final_delivery": True}
@@ -604,6 +723,55 @@ async def test_answer_preview_disables_after_retry_after():
     assert stream_state.failed is True
     assert "Flood control exceeded" in stream_state.failure_reason
     assert any("Answer stream preview disabled" in message for message in runtime.telegram_logger.messages)
+
+
+@pytest.mark.asyncio
+async def test_answer_preview_skips_edits_when_delivery_blocked(tmp_path):
+    runtime = _runtime()
+    runtime.global_config = SimpleNamespace(project_root=tmp_path)
+    runtime.config.extra = {
+        "answer_stream_edit_interval_s": 0.01,
+        "answer_stream_min_chars": 1,
+    }
+    state_path = tmp_path / "state" / "telegram_delivery_health.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "agents": {
+                    "zelda": {
+                        "token_key": "telegram:zelda",
+                        "status": "blocked",
+                        "blocked_until": "2030-01-01T00:00:00+10:00",
+                        "retry_after_s": 60,
+                        "incident_id": "tg-zelda-test",
+                        "per_chat": {},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    event_queue = asyncio.Queue()
+    stop_event = asyncio.Event()
+    task = asyncio.create_task(
+        runtime_pipeline.answer_preview_loop(
+            runtime,
+            _item(),
+            placeholder=SimpleNamespace(message_id=77),
+            stop_event=stop_event,
+            event_queue=event_queue,
+        )
+    )
+
+    await event_queue.put(StreamEvent(kind=KIND_TEXT_DELTA, summary="Hello"))
+    await asyncio.sleep(0.05)
+
+    stop_event.set()
+    await task
+
+    assert runtime.app.bot.edits == []
 
 
 @pytest.mark.asyncio
@@ -1030,6 +1198,58 @@ async def test_finalize_streamed_answer_promotes_placeholder_to_final_text():
     assert stream_state.final_promoted is True
     assert runtime.app.bot.edits[-1]["text"] == "wrapped final text"
     assert not hasattr(runtime, "sent_message")
+
+
+@pytest.mark.asyncio
+async def test_finalize_streamed_answer_skips_promotion_when_delivery_blocked(tmp_path):
+    runtime = _runtime()
+    runtime.global_config = SimpleNamespace(project_root=tmp_path)
+    runtime.workspace_dir = tmp_path / "workspaces" / "zelda"
+    runtime.workspace_dir.mkdir(parents=True, exist_ok=True)
+    item = _item()
+    stream_state = runtime_pipeline.StreamedAnswerState(
+        request_id=item.request_id,
+        chat_id=item.chat_id,
+        placeholder=SimpleNamespace(message_id=77),
+        buffer=["raw ", "preview"],
+        started_at=datetime.now(),
+        delta_count=2,
+        char_count=len("raw preview"),
+        edit_count=1,
+    )
+    state_path = tmp_path / "state" / "telegram_delivery_health.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "agents": {
+                    "zelda": {
+                        "token_key": "telegram:zelda",
+                        "status": "blocked",
+                        "blocked_until": "2030-01-01T00:00:00+10:00",
+                        "retry_after_s": 60,
+                        "incident_id": "tg-zelda-test",
+                        "per_chat": {},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = await runtime_pipeline.finalize_streamed_answer(
+        runtime,
+        item,
+        stream_state=stream_state,
+        final_text="wrapped final text",
+    )
+
+    assert result.final_delivered is False
+    assert result.fallback_required is False
+    assert result.error == "delivery blocked"
+    assert runtime.app.bot.edits == []
+    assert (tmp_path / "workspaces" / "zelda" / "undelivered" / f"{item.request_id}.md").exists()
 
 
 @pytest.mark.asyncio

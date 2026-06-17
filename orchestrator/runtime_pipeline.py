@@ -376,6 +376,10 @@ async def answer_preview_loop(
         if preview_disabled:
             dirty = False
             return
+        if telegram_delivery_failover.is_delivery_blocked(runtime):
+            preview_disabled = True
+            dirty = False
+            return
         text = _preview_text()
         if len(text.strip()) < min_chars:
             return
@@ -465,18 +469,37 @@ async def setup_interactive_feedback(
         stop_typing = asyncio.Event()
         typing_task = asyncio.create_task(runtime.typing_loop(item.chat_id, stop_typing))
         try:
-            placeholder_started = datetime.now()
-            placeholder = await runtime.app.bot.send_message(
+            if await telegram_delivery_failover.handle_blocked_send(
+                runtime,
                 chat_id=item.chat_id,
-                text=placeholder_text,
-                parse_mode=placeholder_parse_mode,
-                disable_notification=disable_notification(runtime),
+                request_id=item.request_id,
+                purpose="placeholder",
+            ):
+                runtime.telegram_logger.warning(
+                    f"Skipping placeholder for {item.request_id} — delivery blocked"
+                )
+            else:
+                placeholder_started = datetime.now()
+                placeholder = await runtime.app.bot.send_message(
+                    chat_id=item.chat_id,
+                    text=placeholder_text,
+                    parse_mode=placeholder_parse_mode,
+                    disable_notification=disable_notification(runtime),
+                )
+                placeholder_elapsed_s = (datetime.now() - placeholder_started).total_seconds()
+                runtime.telegram_logger.info(
+                    f"Sent placeholder for {item.request_id} "
+                    f"(elapsed_s={placeholder_elapsed_s:.2f})"
+                )
+        except RetryAfter as e:
+            await telegram_delivery_failover.handle_retry_after(
+                runtime,
+                exc=e,
+                chat_id=item.chat_id,
+                request_id=item.request_id,
+                purpose="placeholder",
             )
-            placeholder_elapsed_s = (datetime.now() - placeholder_started).total_seconds()
-            runtime.telegram_logger.info(
-                f"Sent placeholder for {item.request_id} "
-                f"(elapsed_s={placeholder_elapsed_s:.2f})"
-            )
+            runtime.telegram_logger.warning(f"Failed to send placeholder due to flood control: {e}")
         except Exception as e:
             runtime.telegram_logger.warning(f"Failed to send placeholder: {e}")
 
@@ -612,6 +635,23 @@ async def finalize_streamed_answer(
             final_delivered=False,
             fallback_required=True,
             error=stream_state.failure_reason,
+        )
+
+    if await telegram_delivery_failover.handle_blocked_send(
+        runtime,
+        chat_id=item.chat_id,
+        request_id=item.request_id,
+        purpose="response",
+        text=final_text,
+    ):
+        runtime.telegram_logger.warning(
+            f"Answer stream final promotion skipped for {item.request_id} — delivery blocked"
+        )
+        return StreamFinalization(
+            streamed=True,
+            final_delivered=False,
+            fallback_required=False,
+            error="delivery blocked",
         )
 
     extra = getattr(getattr(runtime, "config", None), "extra", {}) or {}

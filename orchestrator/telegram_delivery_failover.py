@@ -247,8 +247,22 @@ def _eligible_failover_runtime(source_runtime: Any, candidate: Any, *, blocked_t
 
 
 def _select_failover_runtime(source_runtime: Any, *, preferred_name: str | None = None, exclude_names: set[str] | None = None) -> Any | None:
+    return _select_failover_runtime_from_state(
+        source_runtime,
+        load_health_state(source_runtime),
+        preferred_name=preferred_name,
+        exclude_names=exclude_names,
+    )
+
+
+def _select_failover_runtime_from_state(
+    source_runtime: Any,
+    state: dict[str, Any],
+    *,
+    preferred_name: str | None = None,
+    exclude_names: set[str] | None = None,
+) -> Any | None:
     exclude_names = exclude_names or set()
-    state = load_health_state(source_runtime)
     blocked_tokens = {
         str(record.get("token_key") or "")
         for record in (state.get("agents") or {}).values()
@@ -312,6 +326,84 @@ async def _send_direct(runtime: Any, *, chat_id: int, text: str) -> None:
     await runtime.app.bot.send_message(chat_id=chat_id, text=text)
 
 
+async def _prepare_warning(
+    source_runtime: Any,
+    *,
+    chat_id: int | None,
+    request_id: str | None,
+    response_path: Path | None,
+    exclude_names: set[str] | None = None,
+) -> tuple[Any, str] | None:
+    if chat_id is None:
+        return None
+    async with _HEALTH_STATE_LOCK:
+        path = delivery_state_path(source_runtime)
+        state = _load_health_state_sync(path)
+        _agent_name, record = _find_record_by_token(state, runtime_token_key(source_runtime))
+        if not record or str(record.get("status") or "") not in {"blocked", "recovery_due"}:
+            return None
+        chat_key = str(chat_id)
+        per_chat = record.setdefault("per_chat", {})
+        entry = per_chat.setdefault(chat_key, {})
+        now = _now()
+        last_warned_at = _parse_iso(entry.get("last_warned_at"))
+        if last_warned_at is not None:
+            if (now - last_warned_at).total_seconds() < warning_reminder_seconds(source_runtime):
+                return None
+        preferred_name = str(record.get("active_failover_agent") or configured_default_failover_agent(source_runtime))
+        chosen = _select_failover_runtime_from_state(
+            source_runtime,
+            state,
+            preferred_name=preferred_name,
+            exclude_names=exclude_names,
+        )
+        if chosen is None:
+            record["failover_failed"] = True
+            record["last_failover_error"] = "no eligible failover runtime"
+            _save_health_state_sync(path, state)
+            return None
+        warning_text = _warn_text(
+            source_agent=source_runtime.name,
+            request_id=request_id,
+            retry_after_s=record.get("retry_after_s"),
+            blocked_until=record.get("blocked_until"),
+            response_path=response_path,
+            failover_agent=chosen.name,
+        )
+        return chosen, warning_text
+
+
+async def _record_warning_result(
+    source_runtime: Any,
+    *,
+    chat_id: int,
+    request_id: str | None,
+    failover_agent: str | None,
+    success: bool,
+    error: Exception | None = None,
+) -> None:
+    async with _HEALTH_STATE_LOCK:
+        path = delivery_state_path(source_runtime)
+        state = _load_health_state_sync(path)
+        _agent_name, record = _find_record_by_token(state, runtime_token_key(source_runtime))
+        if not record:
+            return
+        entry = record.setdefault("per_chat", {}).setdefault(str(chat_id), {})
+        if success:
+            now = _now()
+            record["active_failover_agent"] = failover_agent
+            record["failover_failed"] = False
+            record.pop("last_failover_error", None)
+            entry.setdefault("first_warned_at", _iso(now))
+            entry["last_warned_at"] = _iso(now)
+            entry["last_warning_request_id"] = request_id
+        else:
+            record["failover_failed"] = True
+            if error is not None:
+                record["last_failover_error"] = f"{type(error).__name__}: {error}"
+        _save_health_state_sync(path, state)
+
+
 async def _maybe_send_warning(
     source_runtime: Any,
     *,
@@ -322,51 +414,70 @@ async def _maybe_send_warning(
 ) -> None:
     if chat_id is None:
         return
-    chat_key = str(chat_id)
-    per_chat = record.setdefault("per_chat", {})
-    entry = per_chat.setdefault(chat_key, {})
-    now = _now()
-    last_warned_at = _parse_iso(entry.get("last_warned_at"))
-    if last_warned_at is not None:
-        if (now - last_warned_at).total_seconds() < warning_reminder_seconds(source_runtime):
-            return
-    preferred_name = str(record.get("active_failover_agent") or configured_default_failover_agent(source_runtime))
-    chosen = _select_failover_runtime(source_runtime, preferred_name=preferred_name)
-    if chosen is None:
-        record["failover_failed"] = True
-        return
-    warning_text = _warn_text(
-        source_agent=source_runtime.name,
+    prepared = await _prepare_warning(
+        source_runtime,
+        chat_id=chat_id,
         request_id=request_id,
-        retry_after_s=record.get("retry_after_s"),
-        blocked_until=record.get("blocked_until"),
         response_path=response_path,
-        failover_agent=chosen.name,
     )
+    if prepared is None:
+        return
+    chosen, warning_text = prepared
     try:
         await _send_direct(chosen, chat_id=chat_id, text=warning_text)
-        record["active_failover_agent"] = chosen.name
-        record["failover_failed"] = False
-        entry.setdefault("first_warned_at", _iso(now))
-        entry["last_warned_at"] = _iso(now)
-        entry["last_warning_request_id"] = request_id
-    except RetryAfter:
-        alternate = _select_failover_runtime(
+        await _record_warning_result(
             source_runtime,
+            chat_id=chat_id,
+            request_id=request_id,
+            failover_agent=chosen.name,
+            success=True,
+        )
+    except RetryAfter:
+        alternate_prepared = await _prepare_warning(
+            source_runtime,
+            chat_id=chat_id,
+            request_id=request_id,
+            response_path=response_path,
             exclude_names={chosen.name},
         )
-        if alternate is None:
-            record["failover_failed"] = True
+        if alternate_prepared is None:
+            await _record_warning_result(
+                source_runtime,
+                chat_id=chat_id,
+                request_id=request_id,
+                failover_agent=None,
+                success=False,
+                error=RuntimeError("failover runtime flood-limited and no alternate runtime available"),
+            )
             return
+        alternate, alternate_warning_text = alternate_prepared
         try:
-            await _send_direct(alternate, chat_id=chat_id, text=warning_text.replace(chosen.name, alternate.name))
-            record["active_failover_agent"] = alternate.name
-            record["failover_failed"] = False
-            entry.setdefault("first_warned_at", _iso(now))
-            entry["last_warned_at"] = _iso(now)
-            entry["last_warning_request_id"] = request_id
-        except RetryAfter:
-            record["failover_failed"] = True
+            await _send_direct(alternate, chat_id=chat_id, text=alternate_warning_text)
+            await _record_warning_result(
+                source_runtime,
+                chat_id=chat_id,
+                request_id=request_id,
+                failover_agent=alternate.name,
+                success=True,
+            )
+        except Exception as exc:
+            await _record_warning_result(
+                source_runtime,
+                chat_id=chat_id,
+                request_id=request_id,
+                failover_agent=alternate.name,
+                success=False,
+                error=exc,
+            )
+    except Exception as exc:
+        await _record_warning_result(
+            source_runtime,
+            chat_id=chat_id,
+            request_id=request_id,
+            failover_agent=chosen.name,
+            success=False,
+            error=exc,
+        )
 
 
 async def handle_blocked_send(
@@ -377,13 +488,14 @@ async def handle_blocked_send(
     purpose: str,
     text: str | None = None,
 ) -> bool:
+    response_path = None
+    blocked_record = None
     async with _HEALTH_STATE_LOCK:
         path = delivery_state_path(runtime)
         state = _load_health_state_sync(path)
         _agent_name, record = _find_record_by_token(state, runtime_token_key(runtime))
         if not record or str(record.get("status") or "") not in {"blocked", "recovery_due"}:
             return False
-        response_path = None
         if text:
             response_path = persist_undelivered_response(
                 runtime,
@@ -401,9 +513,12 @@ async def handle_blocked_send(
                 requests = per_chat.setdefault("undelivered_request_ids", [])
                 if request_id and request_id not in requests:
                     requests.append(request_id)
-        await _maybe_send_warning(runtime, chat_id=chat_id, record=record, request_id=request_id, response_path=response_path)
+        blocked_record = dict(record)
         _save_health_state_sync(path, state)
+    if blocked_record is not None:
+        await _maybe_send_warning(runtime, chat_id=chat_id, record=blocked_record, request_id=request_id, response_path=response_path)
         return True
+    return False
 
 
 async def handle_retry_after(
@@ -419,6 +534,8 @@ async def handle_retry_after(
     blocked_until_dt = _now() + timedelta(seconds=max(retry_after_s, 1))
     runtime_name = getattr(runtime, "name", "unknown")
     incident_id = f"tg-{runtime_name}-{_now().strftime('%Y%m%dT%H%M%S')}"
+    response_path = None
+    saved_record: dict[str, Any]
     async with _HEALTH_STATE_LOCK:
         path = delivery_state_path(runtime)
         state = _load_health_state_sync(path)
@@ -432,7 +549,6 @@ async def handle_retry_after(
         record["incident_id"] = incident_id
         record["last_incident_at"] = _iso(_now())
         record["last_request_id"] = request_id
-        response_path = None
         if text:
             response_path = persist_undelivered_response(
                 runtime,
@@ -450,9 +566,10 @@ async def handle_retry_after(
             requests = per_chat.setdefault("undelivered_request_ids", [])
             if request_id and request_id not in requests:
                 requests.append(request_id)
-        await _maybe_send_warning(runtime, chat_id=chat_id, record=record, request_id=request_id, response_path=response_path)
+        saved_record = dict(record)
         _save_health_state_sync(path, state)
-        return record
+    await _maybe_send_warning(runtime, chat_id=chat_id, record=saved_record, request_id=request_id, response_path=response_path)
+    return saved_record
 
 
 async def delivery_health_watcher(kernel: Any) -> None:
@@ -467,6 +584,7 @@ async def delivery_health_watcher(kernel: Any) -> None:
 
 
 async def _tick_recovery(kernel: Any) -> None:
+    notices: list[tuple[str, Any, int]] = []
     async with _HEALTH_STATE_LOCK:
         path = delivery_state_path(kernel)
         state = _load_health_state_sync(path)
@@ -483,26 +601,63 @@ async def _tick_recovery(kernel: Any) -> None:
             if runtime is None or not getattr(runtime, "telegram_connected", False):
                 continue
             record["status"] = "recovery_due"
-            recovery_sent = True
             for chat_key, chat_state in (record.get("per_chat") or {}).items():
                 if chat_state.get("recovery_notice_sent_at"):
                     continue
-                try:
-                    await _send_direct(runtime, chat_id=int(chat_key), text=_recovery_text(agent_name))
-                    chat_state["recovery_notice_sent_at"] = _iso(_now())
-                except RetryAfter as exc:
-                    retry_after_s = int(getattr(exc, "retry_after", 0) or 0)
-                    record["status"] = "blocked"
-                    record["retry_after_s"] = retry_after_s
-                    record["blocked_until"] = _iso(_now() + timedelta(seconds=max(retry_after_s, 1)))
-                    recovery_sent = False
-                    break
-            if recovery_sent:
+                notices.append((agent_name, runtime, int(chat_key)))
+            if not record.get("per_chat"):
                 record["status"] = "healthy"
                 record["active_failover_agent"] = None
                 record["failover_failed"] = False
+            changed = True
+        if changed:
+            _save_health_state_sync(path, state)
+    if not notices:
+        return
+    results: list[tuple[str, int, str, int | None, Exception | None]] = []
+    for agent_name, runtime, chat_id in notices:
+        try:
+            await _send_direct(runtime, chat_id=chat_id, text=_recovery_text(agent_name))
+            results.append((agent_name, chat_id, "sent", None, None))
+        except RetryAfter as exc:
+            retry_after_s = int(getattr(exc, "retry_after", 0) or 0)
+            results.append((agent_name, chat_id, "retry_after", retry_after_s, exc))
+        except Exception as exc:
+            results.append((agent_name, chat_id, "error", None, exc))
+    async with _HEALTH_STATE_LOCK:
+        path = delivery_state_path(kernel)
+        state = _load_health_state_sync(path)
+        changed = False
+        for agent_name, chat_id, status, retry_after_s, error in results:
+            record = (state.get("agents") or {}).get(agent_name)
+            if not record:
+                continue
+            chat_state = record.setdefault("per_chat", {}).setdefault(str(chat_id), {})
+            if status == "sent":
+                chat_state["recovery_notice_sent_at"] = _iso(_now())
+            elif status == "retry_after":
+                record["status"] = "blocked"
+                record["retry_after_s"] = retry_after_s
+                record["blocked_until"] = _iso(_now() + timedelta(seconds=max(int(retry_after_s or 0), 1)))
                 changed = True
+                continue
             else:
+                record["status"] = "recovery_due"
+                record["recovery_failed"] = True
+                record["last_recovery_error"] = f"{type(error).__name__}: {error}"
                 changed = True
+                continue
+            pending = [
+                key
+                for key, value in (record.get("per_chat") or {}).items()
+                if not value.get("recovery_notice_sent_at")
+            ]
+            if not pending:
+                record["status"] = "healthy"
+                record["active_failover_agent"] = None
+                record["failover_failed"] = False
+                record.pop("recovery_failed", None)
+                record.pop("last_recovery_error", None)
+            changed = True
         if changed:
             _save_health_state_sync(path, state)
