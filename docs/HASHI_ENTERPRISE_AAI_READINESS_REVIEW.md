@@ -69,7 +69,7 @@ This is **not** the end state of the enterprise product. It is the first reviewa
 - Object-store audit anchor sink can write hash-named anchor objects through an SDK-neutral client protocol with no-overwrite semantics, idempotent conflict handling, receipt verification, and object-lock metadata forwarding.
 - Audit export and Workbench timeline views exist for review and handoff.
 - Audit export supports default ledger NDJSON plus SIEM/ECS-style and OpenTelemetry log-style NDJSON mappings.
-- Live audit export service primitive can push ledger/SIEM NDJSON or OTLP JSON log payloads from a hash-chain checkpoint through an injectable enterprise transport.
+- Live audit export service primitive can push ledger/SIEM NDJSON or OTLP JSON log payloads from a hash-chain checkpoint through an injectable enterprise transport, persist file-backed checkpoints, and retry transient failures without advancing the checkpoint before delivery succeeds.
 - Sensitive connector parameters are redacted in connector audit records.
 
 ### Work And Evidence
@@ -139,7 +139,7 @@ These are not blockers for Enterprise MVP review, but they are not complete:
 - full ABAC simulator and policy preview tooling;
 - cloud-specific object-store WORM client packages and deployment runbooks for S3/GCS/Azure immutable storage;
 - Vault AppRole/Kubernetes auth, lease renewal, and policy bootstrap;
-- live SIEM/OTLP exporter daemon hardening, including persistent checkpoints, retries/backoff, deployment-specific transports, and background scheduling;
+- live SIEM/OTLP exporter daemon hardening, including deployment-specific transports, background scheduling, and operator runbooks;
 - Kubernetes HA deployment beyond the baseline manifests/chart, including external database wiring, validated production ingress/network policies, autoscaling runbooks, and multi-replica coordination;
 - Slack OAuth/Bot API, channel discovery, and user mapping;
 - Microsoft Teams and Feishu connectors;

@@ -94,7 +94,7 @@ Deferred:
 
 - production SAML XML Signature verification wiring and SCIM 2.0 compatibility beyond the baseline Users surface;
 - full ABAC policy simulation;
-- live SIEM/OpenTelemetry exporter daemon hardening beyond the service primitive;
+- live SIEM/OpenTelemetry exporter daemon scheduling beyond the checkpoint/retry primitive;
 - cloud/object-store WORM adapters beyond local filesystem sink;
 - Vault hardening beyond token-auth read provider, such as AppRole/Kubernetes auth and lease renewal;
 - Helm/HA hardening beyond the baseline chart;
@@ -501,6 +501,8 @@ Implemented checkpoints:
   - OTLP JSON log push body;
   - chain-index checkpoint support;
   - injectable transport for enterprise deployment adapters;
+  - file-backed checkpoint persistence with atomic saves;
+  - retry/backoff export cycle that advances checkpoint only after successful delivery;
 - slash command audit JSONL adapter:
   - imports legacy `slash_command_audit.jsonl` records as `slash_command` ledger events;
   - preserves legacy timestamp, actor, command, status, channel, handler, duration, error, blocked reason, and side effects;
@@ -538,7 +540,7 @@ Residual P4 limitations:
 - auditor read-only role semantics are not yet separated from broader admin access;
 - generic shell/file tool execution now has a canonical JSONL event source and ingest adapter;
 - generic object-store WORM sink is present, but cloud-specific SDK wiring and deployment runbooks remain future work;
-- retention, persistent live-export checkpoints, retry/backoff, background worker scheduling, and deployment-specific SIEM/OTLP transports remain future P4 work.
+- retention, background worker scheduling, deployment-specific SIEM/OTLP transports, and operator runbooks remain future P4 work.
 
 **Scope:**
 
@@ -574,7 +576,8 @@ Residual P4 limitations:
 - `ENT-068b` Add filesystem WORM-style audit anchor sink. Done for hash-named append-only anchor writes, read-only local files, idempotent receipt handling, and receipt verification.
 - `ENT-068c` Add object-store WORM-style audit anchor sink. Done for SDK-neutral no-overwrite object writes, hash-named keys, receipt verification, idempotent conflict handling, and object-lock metadata forwarding; cloud-specific client packages and deployment runbooks remain future work.
 - `ENT-069` Add SIEM/OpenTelemetry audit export mappings. Done for admin-gated NDJSON export formats.
-- `ENT-069a` Add live audit export service primitive. Done for SIEM/ECS NDJSON, ledger NDJSON, OTLP JSON log payloads, chain-index checkpoints, injectable transport, no-op current checkpoint behavior, and fail-closed HTTP status handling; persistent checkpoints, retries, and background worker orchestration remain future work.
+- `ENT-069a` Add live audit export service primitive. Done for SIEM/ECS NDJSON, ledger NDJSON, OTLP JSON log payloads, chain-index checkpoints, injectable transport, no-op current checkpoint behavior, and fail-closed HTTP status handling.
+- `ENT-069b` Add live audit export checkpoint and retry cycle. Done for file-backed checkpoint load/save, corrupt checkpoint fail-fast, retry/backoff, no checkpoint advancement on failed attempts, and checkpoint advancement only after successful delivery; background worker orchestration and deployment-specific transports remain future work.
 
 **Acceptance:**
 
@@ -584,6 +587,7 @@ Residual P4 limitations:
 - New ledger events carry hash-chain fields and fail verification if event content is modified.
 - SIEM and OpenTelemetry export formats include event identity, actor, org, correlation, hash-chain metadata, and sanitized context.
 - Live export service can push audit batches from a chain-index checkpoint without embedding external SDK dependencies.
+- Live export cycle persists delivery checkpoints and retries transient failures without skipping undelivered events.
 
 ---
 

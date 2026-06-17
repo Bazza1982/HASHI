@@ -8,6 +8,7 @@ from orchestrator.enterprise import (
     AuditLiveExportEndpoint,
     AuditLiveExporter,
     EnterpriseAuditLedger,
+    FileAuditLiveExportCheckpoint,
     IdentityService,
 )
 
@@ -122,3 +123,71 @@ def test_live_export_fails_closed_without_transport_or_on_bad_status(tmp_path):
         AuditLiveExporter(ledger, transport=transport).export_since(
             AuditLiveExportEndpoint(url="https://siem.example.com/ingest")
         )
+
+
+def test_live_export_with_checkpoint_persists_after_success(tmp_path):
+    ledger = _ledger(tmp_path)
+    first = ledger.append(event_type="auth", action="login", status="success")
+    second = ledger.append(event_type="policy", action="allow", status="success")
+    checkpoint = FileAuditLiveExportCheckpoint(tmp_path / "state" / "audit-live-export.json")
+    calls = []
+
+    def transport(url, body, headers, timeout):
+        calls.append(body)
+        return 200, "ok"
+
+    cycle = AuditLiveExporter(ledger, transport=transport).export_with_checkpoint(
+        AuditLiveExportEndpoint(url="https://siem.example.com/ingest", batch_size=10),
+        checkpoint,
+        max_attempts=1,
+    )
+    noop = AuditLiveExporter(ledger, transport=transport).export_with_checkpoint(
+        AuditLiveExportEndpoint(url="https://siem.example.com/ingest", batch_size=10),
+        checkpoint,
+        max_attempts=1,
+    )
+
+    assert cycle.result.sent == 2
+    assert cycle.result.last_chain_index == second.chain_index
+    assert cycle.attempts == 1
+    assert checkpoint.load() == second.chain_index
+    assert noop.result.sent == 0
+    assert len(calls) == 1
+    assert str(first.id) in calls[0].decode("utf-8")
+
+
+def test_live_export_with_checkpoint_retries_without_advancing_on_failure(tmp_path):
+    ledger = _ledger(tmp_path)
+    event = ledger.append(event_type="auth", action="login", status="success")
+    checkpoint = FileAuditLiveExportCheckpoint(tmp_path / "state" / "audit-live-export.json")
+    attempts = []
+    sleeps = []
+
+    def transport(url, body, headers, timeout):
+        attempts.append(body)
+        if len(attempts) == 1:
+            return 503, "temporary"
+        return 200, "ok"
+
+    cycle = AuditLiveExporter(ledger, transport=transport).export_with_checkpoint(
+        AuditLiveExportEndpoint(url="https://siem.example.com/ingest"),
+        checkpoint,
+        max_attempts=2,
+        backoff_seconds=0.25,
+        sleeper=sleeps.append,
+    )
+
+    assert cycle.result.sent == 1
+    assert cycle.attempts == 2
+    assert checkpoint.load() == event.chain_index
+    assert sleeps == [0.25]
+    assert len(attempts) == 2
+
+
+def test_live_export_checkpoint_rejects_corrupt_state(tmp_path):
+    checkpoint = FileAuditLiveExportCheckpoint(tmp_path / "state" / "audit-live-export.json")
+    checkpoint.path.parent.mkdir(parents=True)
+    checkpoint.path.write_text("not json", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="checkpoint is invalid"):
+        checkpoint.load()
