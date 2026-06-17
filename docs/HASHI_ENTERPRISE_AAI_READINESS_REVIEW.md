@@ -26,7 +26,7 @@ HASHI Enterprise AAI has reached an **MVP review-ready** state for the governed 
 - unified audit ledger and adapters for existing HASHI audit streams;
 - task, artifact, evidence bundle, verification, and escalation primitives;
 - Workbench admin surfaces for users, channels, policies, audit, approvals, health, and connectors;
-- Docker/ops skeleton with backup, restore, migration, and health checks;
+- Docker/Kubernetes ops skeleton with backup, restore, migration, and health checks;
 - P10 connector MVP with GitHub, Slack, and Google Chat, scoped credentials, secret refs, policy gates, health, dry-run, audit, and admin UI.
 
 This is **not** the end state of the enterprise product. It is the first reviewable implementation slice.
@@ -82,6 +82,13 @@ This is **not** the end state of the enterprise product. It is the first reviewa
 - Workbench connector execution API rejects webhook `message.send` actions without non-empty `text` before execution.
 - Workbench Enterprise console supports connector credentials, health, policy defaults, and dry-run/test-run execution.
 
+### Deployment And Operations
+
+- Docker Compose enterprise profile mirrors the production process model with `/api/health` health checks.
+- Kubernetes baseline manifests exist for namespace, config map, example secret, PVC, single-replica deployment, service, and `/api/health` liveness/readiness probes.
+- Kubernetes baseline mounts `/data` for state/workspaces/logs/backups and mounts connector secrets as read-only files for provider-based secret resolution.
+- The Kubernetes baseline is a deployment starting point, not a full HA release.
+
 ---
 
 ## 3. Verification Evidence
@@ -125,8 +132,7 @@ These are not blockers for Enterprise MVP review, but they are not complete:
 - cloud/object-store WORM storage destination adapters for audit anchors;
 - Vault AppRole/Kubernetes auth, lease renewal, and policy bootstrap;
 - live SIEM push or OTLP network export;
-- Kubernetes/HA deployment;
-- Vault/Kubernetes secret resolver implementations;
+- Kubernetes HA deployment beyond the baseline manifests, including Helm, autoscaling, managed ingress, network policy, external database wiring, and multi-replica coordination;
 - Slack OAuth/Bot API, channel discovery, and user mapping;
 - Microsoft Teams and Feishu connectors;
 - Google Chat OAuth, space discovery, and user mapping;

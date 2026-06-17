@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hashi-enterprise-data
+  namespace: hashi-enterprise
+  labels:
+    app.kubernetes.io/name: hashi
+    app.kubernetes.io/component: enterprise
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
