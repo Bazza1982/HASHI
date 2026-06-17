@@ -96,7 +96,7 @@ Deferred:
 - full ABAC policy simulation;
 - SIEM/OpenTelemetry;
 - cloud/object-store WORM adapters beyond local filesystem sink;
-- live Vault API provider beyond pluggable secret provider interface;
+- Vault hardening beyond token-auth read provider, such as AppRole/Kubernetes auth and lease renewal;
 - Kubernetes/HA;
 - multiple enterprise connectors;
 - DLP/classification.
@@ -234,7 +234,7 @@ Deferred:
 - `ENT-110` Add pluggable secret provider interface. Done.
 - `ENT-111` Add file mounted secret provider. Done.
 - `ENT-112` Add Kubernetes mounted secret provider. Done.
-- `ENT-113` Add live Vault API provider. Future.
+- `ENT-113` Add live Vault API provider. Done for token-auth read path, injectable client tests, KV v1/v2 field extraction, and fail-closed missing-field handling; AppRole/Kubernetes auth, lease renewal, and policy bootstrap remain future work.
 
 **Acceptance:**
 

@@ -74,6 +74,7 @@ This is **not** the end state of the enterprise product. It is the first reviewa
 
 - Connector interface, registry, credential store, secret resolver, execution gate, execution service, health API, and factory exist.
 - Secret resolution supports provider plugins, default env/HASHI secret refs, root-confined file mounted secrets, and Kubernetes-style mounted secret refs.
+- Vault secret resolution supports token-auth read paths with injectable clients and KV v1/v2 field extraction.
 - GitHub connector supports repository metadata and issue creation with dry-run behavior.
 - Slack incoming webhook connector supports governed `message.send` with dry-run behavior.
 - Google Chat incoming webhook connector supports governed `message.send` with dry-run behavior.
@@ -122,7 +123,7 @@ These are not blockers for Enterprise MVP review, but they are not complete:
 - complete SAML/SCIM login flows;
 - full ABAC simulator and policy preview tooling;
 - cloud/object-store WORM storage destination adapters for audit anchors;
-- live Vault API secret provider;
+- Vault AppRole/Kubernetes auth, lease renewal, and policy bootstrap;
 - live SIEM push or OTLP network export;
 - Kubernetes/HA deployment;
 - Vault/Kubernetes secret resolver implementations;
