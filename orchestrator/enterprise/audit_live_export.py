@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 import time
@@ -81,6 +82,38 @@ class FileAuditLiveExportCheckpoint:
         tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
         tmp_path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
         tmp_path.replace(self.path)
+
+
+class FileAuditLiveExportLock:
+    def __init__(self, path: Path | str):
+        self.path = Path(path)
+
+    def acquire(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "pid": os.getpid(),
+            "created_at": int(time.time()),
+        }
+        try:
+            fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError as exc:
+            raise ValueError(f"audit live export lock is already held: {self.path}") from exc
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True)
+            handle.write("\n")
+
+    def release(self) -> None:
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
+
+    def __enter__(self) -> "FileAuditLiveExportLock":
+        self.acquire()
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb) -> None:
+        self.release()
 
 
 class AuditLiveExporter:

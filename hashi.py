@@ -419,6 +419,7 @@ def cmd_enterprise_audit_export_live(args) -> int:
         AuditLiveExporter,
         EnterpriseAuditLedger,
         FileAuditLiveExportCheckpoint,
+        FileAuditLiveExportLock,
     )
 
     db_path = Path(args.db).expanduser() if args.db else ROOT_DIR / "state" / "enterprise.sqlite"
@@ -437,6 +438,13 @@ def cmd_enterprise_audit_export_live(args) -> int:
     )
     exporter = AuditLiveExporter(ledger, transport=_http_post_transport)
     checkpoint = FileAuditLiveExportCheckpoint(checkpoint_path)
+    lock_path = (
+        Path(args.lock_path).expanduser()
+        if getattr(args, "lock_path", None)
+        else checkpoint_path.with_suffix(checkpoint_path.suffix + ".lock")
+    )
+    if lock_path == checkpoint_path:
+        raise ValueError("audit live export lock path must differ from checkpoint path")
 
     def run_cycle():
         return exporter.export_with_checkpoint(
@@ -450,27 +458,30 @@ def cmd_enterprise_audit_export_live(args) -> int:
         interval = max(0.1, float(getattr(args, "interval", 60.0) or 60.0))
         max_cycles = max(0, int(getattr(args, "max_cycles", 0) or 0))
         cycles = 0
-        print(_g("✓ Enterprise audit live export daemon started"))
-        print(f"  Interval        : {interval:g}s")
-        print(f"  Checkpoint      : {checkpoint_path}")
-        try:
-            while True:
-                cycle = run_cycle()
-                cycles += 1
-                print(
-                    "  Cycle "
-                    f"{cycles}: sent={cycle.result.sent} attempted={cycle.result.attempted} "
-                    f"last_chain_index={cycle.result.last_chain_index} attempts={cycle.attempts}"
-                )
-                if max_cycles and cycles >= max_cycles:
-                    print(_g("✓ Enterprise audit live export daemon completed max cycles"))
-                    return 0
-                time.sleep(interval)
-        except KeyboardInterrupt:
-            print(_y("Enterprise audit live export daemon stopped"))
-            return 0
+        with FileAuditLiveExportLock(lock_path):
+            print(_g("✓ Enterprise audit live export daemon started"))
+            print(f"  Interval        : {interval:g}s")
+            print(f"  Checkpoint      : {checkpoint_path}")
+            print(f"  Lock            : {lock_path}")
+            try:
+                while True:
+                    cycle = run_cycle()
+                    cycles += 1
+                    print(
+                        "  Cycle "
+                        f"{cycles}: sent={cycle.result.sent} attempted={cycle.result.attempted} "
+                        f"last_chain_index={cycle.result.last_chain_index} attempts={cycle.attempts}"
+                    )
+                    if max_cycles and cycles >= max_cycles:
+                        print(_g("✓ Enterprise audit live export daemon completed max cycles"))
+                        return 0
+                    time.sleep(interval)
+            except KeyboardInterrupt:
+                print(_y("Enterprise audit live export daemon stopped"))
+                return 0
 
-    cycle = run_cycle()
+    with FileAuditLiveExportLock(lock_path):
+        cycle = run_cycle()
     print(_g("✓ Enterprise audit live export completed"))
     print(f"  Attempted       : {cycle.result.attempted}")
     print(f"  Sent            : {cycle.result.sent}")
@@ -478,6 +489,7 @@ def cmd_enterprise_audit_export_live(args) -> int:
     print(f"  Last chain index: {cycle.result.last_chain_index}")
     print(f"  Status code     : {cycle.result.status_code if cycle.result.status_code is not None else '(no-op)'}")
     print(f"  Checkpoint      : {cycle.checkpoint_path}")
+    print(f"  Lock            : {lock_path}")
     return 0
 
 
@@ -544,6 +556,7 @@ def main():
         "--checkpoint",
         help="Checkpoint JSON path. Defaults to state/audit_live_export_checkpoint.json",
     )
+    enterprise_audit_live.add_argument("--lock-path", help="Singleton lock path. Defaults to <checkpoint>.lock")
     enterprise_audit_live.add_argument("--batch-size", type=int, default=100, help="Events to send per cycle")
     enterprise_audit_live.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
     enterprise_audit_live.add_argument("--max-attempts", type=int, default=3, help="Retry attempts before failing")

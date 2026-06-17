@@ -21,6 +21,7 @@ from orchestrator.enterprise.audit_live_export import (
     AuditLiveExportResult,
     AuditLiveExporter,
     FileAuditLiveExportCheckpoint,
+    FileAuditLiveExportLock,
 )
 from orchestrator.enterprise.audit_object_worm import (
     ObjectStoreAuditAnchorSink,
@@ -171,6 +172,7 @@ __all__ = [
     "AuditLiveExportResult",
     "AuditLiveExporter",
     "FileAuditLiveExportCheckpoint",
+    "FileAuditLiveExportLock",
     "FilesystemAuditAnchorSink",
     "ObjectStoreAuditAnchorSink",
     "ObjectStoreAuditClient",

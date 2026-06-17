@@ -9,6 +9,7 @@ from orchestrator.enterprise import (
     AuditLiveExporter,
     EnterpriseAuditLedger,
     FileAuditLiveExportCheckpoint,
+    FileAuditLiveExportLock,
     IdentityService,
 )
 
@@ -232,3 +233,23 @@ def test_live_export_checkpoint_rejects_corrupt_state(tmp_path):
 
     with pytest.raises(ValueError, match="checkpoint is invalid"):
         checkpoint.load()
+
+
+def test_live_export_lock_acquires_and_releases_file(tmp_path):
+    lock_path = tmp_path / "state" / "audit-live-export.lock"
+
+    with FileAuditLiveExportLock(lock_path):
+        assert lock_path.exists()
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        assert payload["pid"] > 0
+        assert payload["created_at"] > 0
+
+    assert not lock_path.exists()
+
+
+def test_live_export_lock_fails_closed_when_already_held(tmp_path):
+    lock_path = tmp_path / "state" / "audit-live-export.lock"
+
+    with FileAuditLiveExportLock(lock_path):
+        with pytest.raises(ValueError, match="lock is already held"):
+            FileAuditLiveExportLock(lock_path).acquire()
