@@ -10,6 +10,7 @@ Related documents:
 - [HASHI_ENTERPRISE_AAI_PRD.md](HASHI_ENTERPRISE_AAI_PRD.md)
 - [HASHI_ENTERPRISE_AAI_VALUE_PROPOSITION.md](HASHI_ENTERPRISE_AAI_VALUE_PROPOSITION.md)
 - [HASHI_ENTERPRISE_PROFILE_ADR.md](HASHI_ENTERPRISE_PROFILE_ADR.md)
+- [HASHI_ENTERPRISE_AUDIT_EXPORT_RUNBOOK.md](HASHI_ENTERPRISE_AUDIT_EXPORT_RUNBOOK.md)
 - [HASHI_ENTERPRISE_SSO_SCIM_DEPLOYMENT_RUNBOOK.md](HASHI_ENTERPRISE_SSO_SCIM_DEPLOYMENT_RUNBOOK.md)
 
 ---
@@ -78,6 +79,7 @@ This is **not** the end state of the enterprise product. It is the first reviewa
 - Live audit export service primitive can push ledger/SIEM NDJSON or OTLP JSON log payloads from a hash-chain checkpoint through an injectable enterprise transport, persist file-backed checkpoints, and retry transient failures without advancing the checkpoint before delivery succeeds.
 - `hashi enterprise audit-export-live` provides a one-shot operator runner for HTTP SIEM/ledger/OTLP pushes with checkpoint, retry, timeout, batch-size, and custom header controls, so deployments can schedule live export through cron, systemd, or Kubernetes CronJob without embedding vendor SDKs.
 - Deployment assets now include a Docker Compose `audit-export` profile, a raw Kubernetes CronJob, and a Helm-gated CronJob template for scheduled live audit export with persistent checkpoints.
+- The live audit export runbook and preset env example cover generic NDJSON, Splunk HEC raw/collector-fronted, Elastic/Logstash HTTP input, and OpenTelemetry Collector HTTP logs deployment paths.
 - Sensitive connector parameters are redacted in connector audit records.
 
 ### Work And Evidence
@@ -149,7 +151,7 @@ These are not blockers for Enterprise MVP review, but they are not complete:
 - full ABAC simulator and policy preview tooling;
 - cloud-specific object-store WORM client packages and deployment runbooks for S3/GCS/Azure immutable storage;
 - Vault AppRole/Kubernetes auth, lease renewal, and policy bootstrap;
-- live SIEM/OTLP exporter hardening beyond the CLI runner and baseline Compose/Kubernetes/Helm scheduling, including vendor-specific auth presets, managed long-running daemon mode, and SIEM-specific operator runbooks;
+- live SIEM/OTLP exporter hardening beyond the CLI runner, baseline Compose/Kubernetes/Helm scheduling, and generic vendor preset runbook, including managed long-running daemon mode, vendor-specific transforms, dashboards, alerts, and secret-manager-native Helm wiring;
 - Kubernetes HA deployment beyond the baseline manifests/chart, including external database wiring, validated production ingress/network policies, autoscaling runbooks, and multi-replica coordination;
 - Slack OAuth/Bot API, channel discovery, and user mapping;
 - Microsoft Teams and Feishu connectors;
