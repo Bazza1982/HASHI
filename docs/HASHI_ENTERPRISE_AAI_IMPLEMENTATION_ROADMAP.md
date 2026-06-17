@@ -176,6 +176,7 @@ Deferred:
 - admin-gated SCIM provisioning HTTP API for user upsert and deactivation;
 - admin-gated SCIM 2.0 Users compatibility surface for list, create, get, and PATCH replace flows;
 - read-only SCIM 2.0 Groups compatibility surface that maps HASHI projects to groups and active project memberships to group members;
+- SCIM 2.0 discovery surface for ServiceProviderConfig, ResourceTypes, and Schemas;
 - Workbench login endpoint;
 - audit events for login/logout/admin bootstrap;
 - personal profile maps current owner behavior to implicit top admin.
@@ -218,7 +219,8 @@ Deferred:
 - `ENT-026` Add admin-gated SCIM provisioning API. Done for `/api/enterprise/scim/users` upsert and `/api/enterprise/scim/users/deactivate`, admin auth, audit events, default project assignment, and session/API token revocation on deactivation.
 - `ENT-027` Add SCIM 2.0 Users compatibility surface. Done for admin-gated `/api/enterprise/scim/v2/Users` list/create/get/PATCH, SCIM User/ListResponse payloads, `userName`, `emails.value`, and `active` filters, pagination, PATCH `active`/`displayName`, audit for write paths, and token/session revocation on deactivation.
 - `ENT-028` Add IdP-facing SCIM Users service-token surface. Done for `/scim/v2/Users` list/create/get/PATCH with API-token scope gates (`scim:read`, `scim:write`, `scim:*`), org boundary checks, write-path SCIM audit events, token redaction, and fail-closed rejection of session tokens or unscoped API tokens.
-- `ENT-029` Add read-only SCIM Groups compatibility surface. Done for admin-gated and IdP-facing `/scim/v2/Groups` list/get, `displayName eq` and `id eq` filters, project-to-group mapping, active project members, scoped `scim:read` token gates, and org boundary checks; group mutation, advanced filters, schema negotiation, and bulk operations remain future work.
+- `ENT-029` Add read-only SCIM Groups compatibility surface. Done for admin-gated and IdP-facing `/scim/v2/Groups` list/get, `displayName eq` and `id eq` filters, project-to-group mapping, active project members, scoped `scim:read` token gates, and org boundary checks; group mutation, advanced filters, and bulk operations remain future work.
+- `ENT-030` Add SCIM discovery endpoints. Done for admin-gated and IdP-facing `/scim/v2/ServiceProviderConfig`, `/ResourceTypes`, `/ResourceTypes/{type}`, `/Schemas`, and `/Schemas/{schema}` with Users/Groups capability metadata and scoped `scim:read` token gates; deeper schema extension negotiation remains future work.
 
 **Acceptance:**
 
@@ -233,7 +235,7 @@ Deferred:
 - OIDC callback can complete full login when explicitly enabled, while prepared-mode remains available for deployments that have not configured live SSO.
 - SAML metadata can be parsed safely and preverified SAML assertion claims can be validated for issuer, audience, validity window, subject, email, and display name.
 - SAML login can complete through HTTP start/callback when a deployment supplies `xmlsec1`, a custom verifier hook, or explicitly enables preverified assertion handoff; unsigned or unverified assertions fail closed by default.
-- SCIM-style provisioning can sync enterprise users through service, admin API, and IdP-facing SCIM 2.0 Users paths without restoring old sessions or API tokens after deactivation, and can expose HASHI projects as read-only SCIM Groups for IdP discovery.
+- SCIM-style provisioning can sync enterprise users through service, admin API, and IdP-facing SCIM 2.0 Users paths without restoring old sessions or API tokens after deactivation, expose HASHI projects as read-only SCIM Groups for IdP discovery, and publish SCIM ServiceProviderConfig/ResourceTypes/Schemas metadata for IdP compatibility.
 
 ### Enterprise Secret Providers
 

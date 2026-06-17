@@ -4,9 +4,17 @@ from orchestrator.enterprise import EnterpriseRole, IdentityService, ScimProvisi
 from orchestrator.enterprise.scim import (
     SCIM_GROUP_SCHEMA,
     SCIM_LIST_RESPONSE_SCHEMA,
+    SCIM_RESOURCE_TYPE_SCHEMA,
+    SCIM_SCHEMA_SCHEMA,
+    SCIM_SERVICE_PROVIDER_CONFIG_SCHEMA,
     SCIM_USER_SCHEMA,
     filter_scim_groups,
     filter_scim_users,
+    scim_resource_type,
+    scim_resource_types,
+    scim_schema,
+    scim_schemas,
+    scim_service_provider_config,
 )
 
 
@@ -219,3 +227,23 @@ def test_scim_v2_groups_support_filter_and_reject_unknown_filter(tmp_path):
         assert "unsupported SCIM group filter" in str(exc)
     else:
         raise AssertionError("expected unsupported group filter to fail")
+
+
+def test_scim_discovery_describes_supported_users_and_groups_surface():
+    service_config = scim_service_provider_config()
+    resource_types = scim_resource_types()
+    user_type = scim_resource_type("User")
+    group_schema = scim_schema(SCIM_GROUP_SCHEMA)
+    schemas = scim_schemas()
+
+    assert service_config["schemas"] == [SCIM_SERVICE_PROVIDER_CONFIG_SCHEMA]
+    assert service_config["patch"]["supported"] is True
+    assert service_config["bulk"]["supported"] is False
+    assert service_config["filter"]["maxResults"] == 500
+    assert resource_types["schemas"] == [SCIM_LIST_RESPONSE_SCHEMA]
+    assert {resource["id"] for resource in resource_types["Resources"]} == {"User", "Group"}
+    assert user_type["schemas"] == [SCIM_RESOURCE_TYPE_SCHEMA]
+    assert user_type["endpoint"] == "/Users"
+    assert group_schema["schemas"] == [SCIM_SCHEMA_SCHEMA]
+    assert group_schema["id"] == SCIM_GROUP_SCHEMA
+    assert {schema["id"] for schema in schemas["Resources"]} == {SCIM_USER_SCHEMA, SCIM_GROUP_SCHEMA}

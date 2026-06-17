@@ -830,6 +830,38 @@ async def test_enterprise_admin_can_use_scim_v2_groups_surface(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_enterprise_admin_can_use_scim_v2_discovery_surface(tmp_path):
+    server = _server(tmp_path)
+    admin = server.identity_service.bootstrap_org_admin(
+        org_id="ORG-001",
+        org_name="Acme",
+        email="admin@example.com",
+        display_name="Admin",
+        password="secret-password",
+        user_id="usr-admin",
+    )
+    session = server.identity_service.create_session(user_id=admin.id)
+    headers = {"Authorization": f"Bearer {session.token}"}
+
+    config_response = await server.handle_enterprise_scim_v2_service_provider_config(_FakeRequest(headers=headers))
+    resource_types_response = await server.handle_enterprise_scim_v2_resource_types(_FakeRequest(headers=headers))
+    group_type_response = await server.handle_enterprise_scim_v2_resource_type_get(
+        _FakeRequest(headers=headers, match_info={"resource_type": "Group"})
+    )
+    schemas_response = await server.handle_enterprise_scim_v2_schemas(_FakeRequest(headers=headers))
+    user_schema_response = await server.handle_enterprise_scim_v2_schema_get(
+        _FakeRequest(headers=headers, match_info={"schema_id": "urn:ietf:params:scim:schemas:core:2.0:User"})
+    )
+
+    assert config_response.status == 200
+    assert json.loads(config_response.text)["filter"]["supported"] is True
+    assert {item["id"] for item in json.loads(resource_types_response.text)["Resources"]} == {"User", "Group"}
+    assert json.loads(group_type_response.text)["endpoint"] == "/Groups"
+    assert json.loads(schemas_response.text)["totalResults"] == 2
+    assert json.loads(user_schema_response.text)["name"] == "User"
+
+
+@pytest.mark.asyncio
 async def test_enterprise_admin_can_scim_v2_patch_user_and_revoke_tokens(tmp_path):
     server = _server(tmp_path)
     admin = server.identity_service.bootstrap_org_admin(
@@ -979,6 +1011,36 @@ async def test_public_scim_v2_groups_supports_service_token_read(tmp_path):
     assert listed["totalResults"] == 1
     assert group["displayName"] == "Research"
     assert group["members"][0]["value"] == "usr-user"
+
+
+@pytest.mark.asyncio
+async def test_public_scim_v2_discovery_requires_scoped_service_token(tmp_path):
+    server = _server(tmp_path)
+    admin = server.identity_service.bootstrap_org_admin(
+        org_id="ORG-001",
+        org_name="Acme",
+        email="admin@example.com",
+        display_name="Admin",
+        password="secret-password",
+        user_id="usr-admin",
+    )
+    scim_token = server.identity_service.create_api_token(user_id=admin.id, scopes=["scim:read"])
+    headers = {"Authorization": f"Bearer {scim_token.token}"}
+
+    denied = await server.handle_public_scim_v2_service_provider_config(_FakeRequest(path="/scim/v2/ServiceProviderConfig"))
+    config_response = await server.handle_public_scim_v2_service_provider_config(_FakeRequest(headers=headers))
+    resource_type_response = await server.handle_public_scim_v2_resource_type_get(
+        _FakeRequest(headers=headers, match_info={"resource_type": "User"})
+    )
+    schema_response = await server.handle_public_scim_v2_schema_get(
+        _FakeRequest(headers=headers, match_info={"schema_id": "urn:ietf:params:scim:schemas:core:2.0:Group"})
+    )
+
+    assert denied.status == 403
+    assert config_response.status == 200
+    assert json.loads(config_response.text)["authenticationSchemes"][0]["type"] == "oauthbearertoken"
+    assert json.loads(resource_type_response.text)["schema"] == "urn:ietf:params:scim:schemas:core:2.0:User"
+    assert json.loads(schema_response.text)["name"] == "Group"
 
 
 @pytest.mark.asyncio

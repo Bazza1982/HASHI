@@ -46,7 +46,15 @@ from orchestrator.enterprise.policy import PolicyEvaluator
 from orchestrator.enterprise.policy_templates import install_default_connector_policy
 from orchestrator.enterprise.routing import agent_project_ids
 from orchestrator.enterprise.secret_refs import ConnectorSecretResolver
-from orchestrator.enterprise.scim import ScimProvisioningService, scim_user_resource
+from orchestrator.enterprise.scim import (
+    ScimProvisioningService,
+    scim_resource_type,
+    scim_resource_types,
+    scim_schema,
+    scim_schemas,
+    scim_service_provider_config,
+    scim_user_resource,
+)
 from orchestrator.enterprise.saml import (
     build_saml_authn_start,
     validate_saml_assertion,
@@ -176,12 +184,28 @@ class WorkbenchApiServer:
         self.app.router.add_patch("/api/enterprise/scim/v2/Users/{user_id}", self.handle_enterprise_scim_v2_users_patch)
         self.app.router.add_get("/api/enterprise/scim/v2/Groups", self.handle_enterprise_scim_v2_groups_list)
         self.app.router.add_get("/api/enterprise/scim/v2/Groups/{group_id}", self.handle_enterprise_scim_v2_groups_get)
+        self.app.router.add_get(
+            "/api/enterprise/scim/v2/ServiceProviderConfig",
+            self.handle_enterprise_scim_v2_service_provider_config,
+        )
+        self.app.router.add_get("/api/enterprise/scim/v2/ResourceTypes", self.handle_enterprise_scim_v2_resource_types)
+        self.app.router.add_get(
+            "/api/enterprise/scim/v2/ResourceTypes/{resource_type}",
+            self.handle_enterprise_scim_v2_resource_type_get,
+        )
+        self.app.router.add_get("/api/enterprise/scim/v2/Schemas", self.handle_enterprise_scim_v2_schemas)
+        self.app.router.add_get("/api/enterprise/scim/v2/Schemas/{schema_id:.+}", self.handle_enterprise_scim_v2_schema_get)
         self.app.router.add_get("/scim/v2/Users", self.handle_public_scim_v2_users_list)
         self.app.router.add_post("/scim/v2/Users", self.handle_public_scim_v2_users_create)
         self.app.router.add_get("/scim/v2/Users/{user_id}", self.handle_public_scim_v2_users_get)
         self.app.router.add_patch("/scim/v2/Users/{user_id}", self.handle_public_scim_v2_users_patch)
         self.app.router.add_get("/scim/v2/Groups", self.handle_public_scim_v2_groups_list)
         self.app.router.add_get("/scim/v2/Groups/{group_id}", self.handle_public_scim_v2_groups_get)
+        self.app.router.add_get("/scim/v2/ServiceProviderConfig", self.handle_public_scim_v2_service_provider_config)
+        self.app.router.add_get("/scim/v2/ResourceTypes", self.handle_public_scim_v2_resource_types)
+        self.app.router.add_get("/scim/v2/ResourceTypes/{resource_type}", self.handle_public_scim_v2_resource_type_get)
+        self.app.router.add_get("/scim/v2/Schemas", self.handle_public_scim_v2_schemas)
+        self.app.router.add_get("/scim/v2/Schemas/{schema_id:.+}", self.handle_public_scim_v2_schema_get)
         self.app.router.add_get("/api/enterprise/api-tokens", self.handle_enterprise_api_tokens)
         self.app.router.add_post("/api/enterprise/api-tokens", self.handle_enterprise_api_tokens_create)
         self.app.router.add_post(
@@ -1485,6 +1509,46 @@ class WorkbenchApiServer:
             return web.json_response({"ok": False, "error": str(exc)}, status=404)
         return web.json_response(payload)
 
+    async def handle_enterprise_scim_v2_service_provider_config(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        return web.json_response(scim_service_provider_config())
+
+    async def handle_enterprise_scim_v2_resource_types(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        return web.json_response(scim_resource_types())
+
+    async def handle_enterprise_scim_v2_resource_type_get(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        resource_type = str(getattr(request, "match_info", {}).get("resource_type") or "").strip()
+        try:
+            payload = scim_resource_type(resource_type)
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=404)
+        return web.json_response(payload)
+
+    async def handle_enterprise_scim_v2_schemas(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        return web.json_response(scim_schemas())
+
+    async def handle_enterprise_scim_v2_schema_get(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        schema_id = str(getattr(request, "match_info", {}).get("schema_id") or "").strip()
+        try:
+            payload = scim_schema(schema_id)
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=404)
+        return web.json_response(payload)
+
     async def handle_public_scim_v2_users_list(self, request):
         error = self._enterprise_scim_scope_error_response(request, required_scope="scim:read")
         if error is not None:
@@ -1622,6 +1686,46 @@ class WorkbenchApiServer:
                 org_id=actor.org_id,
                 group_id=group_id,
             )
+        except Exception as exc:
+            return web.json_response({"schemas": [], "detail": str(exc)}, status=404)
+        return web.json_response(payload)
+
+    async def handle_public_scim_v2_service_provider_config(self, request):
+        error = self._enterprise_scim_scope_error_response(request, required_scope="scim:read")
+        if error is not None:
+            return error
+        return web.json_response(scim_service_provider_config())
+
+    async def handle_public_scim_v2_resource_types(self, request):
+        error = self._enterprise_scim_scope_error_response(request, required_scope="scim:read")
+        if error is not None:
+            return error
+        return web.json_response(scim_resource_types())
+
+    async def handle_public_scim_v2_resource_type_get(self, request):
+        error = self._enterprise_scim_scope_error_response(request, required_scope="scim:read")
+        if error is not None:
+            return error
+        resource_type = str(getattr(request, "match_info", {}).get("resource_type") or "").strip()
+        try:
+            payload = scim_resource_type(resource_type)
+        except Exception as exc:
+            return web.json_response({"schemas": [], "detail": str(exc)}, status=404)
+        return web.json_response(payload)
+
+    async def handle_public_scim_v2_schemas(self, request):
+        error = self._enterprise_scim_scope_error_response(request, required_scope="scim:read")
+        if error is not None:
+            return error
+        return web.json_response(scim_schemas())
+
+    async def handle_public_scim_v2_schema_get(self, request):
+        error = self._enterprise_scim_scope_error_response(request, required_scope="scim:read")
+        if error is not None:
+            return error
+        schema_id = str(getattr(request, "match_info", {}).get("schema_id") or "").strip()
+        try:
+            payload = scim_schema(schema_id)
         except Exception as exc:
             return web.json_response({"schemas": [], "detail": str(exc)}, status=404)
         return web.json_response(payload)
