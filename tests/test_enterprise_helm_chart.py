@@ -23,6 +23,7 @@ def test_enterprise_helm_chart_files_exist():
         "templates/hpa.yaml",
         "templates/ingress.yaml",
         "templates/networkpolicy.yaml",
+        "templates/pdb.yaml",
         "templates/pvc.yaml",
         "templates/secret.example.yaml",
         "templates/service.yaml",
@@ -52,6 +53,8 @@ def test_enterprise_helm_values_default_to_governed_single_replica():
     assert "autoscaling:" in text
     assert "externalDatabase:" in text
     assert "secretKey: HASHI_ENTERPRISE_DATABASE_URL" in text
+    assert "podDisruptionBudget:" in text
+    assert "minAvailable: 1" in text
 
 
 def test_enterprise_helm_deployment_keeps_health_and_secret_contracts():
@@ -107,3 +110,13 @@ def test_enterprise_helm_chart_includes_optional_ingress_network_policy_and_hpa(
     assert "policyTypes:" in network_policy
     assert "{{- if .Values.autoscaling.enabled -}}" in hpa
     assert "kind: HorizontalPodAutoscaler" in hpa
+
+
+def test_enterprise_helm_chart_includes_optional_pod_disruption_budget():
+    pdb = _read(TEMPLATES_DIR / "pdb.yaml")
+
+    assert "{{- if .Values.podDisruptionBudget.enabled -}}" in pdb
+    assert "kind: PodDisruptionBudget" in pdb
+    assert "minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}" in pdb
+    assert "app.kubernetes.io/name: {{ include \"hashi-enterprise.name\" . }}" in pdb
+    assert "app.kubernetes.io/instance: {{ .Release.Name }}" in pdb

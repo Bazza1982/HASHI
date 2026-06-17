@@ -12,6 +12,7 @@ The chart provides:
 - optional ingress;
 - optional NetworkPolicy;
 - optional HPA skeleton.
+- optional PodDisruptionBudget for multi-replica maintenance windows.
 - optional live audit export CronJob that runs `hashi enterprise
   audit-export-live` with a persistent checkpoint under `/data/state`.
 - optional external database SecretRef wiring for multi-replica staging.
@@ -57,7 +58,8 @@ helm upgrade --install hashi-enterprise deploy/helm/hashi-enterprise \
   --namespace hashi-enterprise --create-namespace \
   --set replicaCount=2 \
   --set externalDatabase.enabled=true \
-  --set externalDatabase.secretName=hashi-enterprise-database
+  --set externalDatabase.secretName=hashi-enterprise-database \
+  --set podDisruptionBudget.enabled=true
 ```
 
 This only wires `HASHI_ENTERPRISE_DATABASE_URL` into the control-plane pods.

@@ -1,0 +1,14 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: hashi-enterprise
+  namespace: hashi-enterprise
+  labels:
+    app.kubernetes.io/name: hashi
+    app.kubernetes.io/component: enterprise
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hashi
+      app.kubernetes.io/component: enterprise

@@ -16,6 +16,8 @@ This directory contains a minimal Kubernetes baseline for running HASHI in
   alternative to the CronJob. Do not enable both for the same ledger.
 - `external-postgres-secret.example.yaml` shows the `HASHI_ENTERPRISE_DATABASE_URL`
   contract for managed database staging.
+- `pod-disruption-budget.example.yaml` is an optional availability guard for
+  multi-replica staging and production maintenance windows.
 
 This is not a full HA release. A Helm baseline is available at
 `deploy/helm/hashi-enterprise`; autoscaling, multi-replica coordination,
@@ -39,6 +41,8 @@ Before applying in a real environment:
    your secret manager before enabling the audit export CronJob.
 6. For multi-replica staging, replace the local SQLite URL with a managed
    database URL secret based on `external-postgres-secret.example.yaml`.
+7. If running two or more control-plane replicas, apply and tune
+   `pod-disruption-budget.example.yaml` for voluntary disruption protection.
 
 ## External Database Secret
 
