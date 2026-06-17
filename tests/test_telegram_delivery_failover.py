@@ -13,10 +13,13 @@ from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 
 
 class _Bot:
-    def __init__(self):
+    def __init__(self, *, send_error=None):
         self.messages = []
+        self.send_error = send_error
 
     async def send_message(self, **kwargs):
+        if self.send_error is not None:
+            raise self.send_error
         self.messages.append(kwargs)
         return SimpleNamespace(message_id=len(self.messages))
 
@@ -95,6 +98,31 @@ async def test_handle_blocked_send_dedupes_warning(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_failover_warning_generic_error_is_recorded_not_raised(tmp_path):
+    source = _runtime(tmp_path, "kasumi")
+    fail = _runtime(tmp_path, "lin_yueru")
+    fail.app.bot = _Bot(send_error=RuntimeError("telegram network down"))
+    orchestrator = SimpleNamespace(runtimes=[source, fail], raw_config={})
+    source.orchestrator = orchestrator
+    fail.orchestrator = orchestrator
+
+    await failover.handle_retry_after(
+        source,
+        exc=RetryAfter(60),
+        chat_id=321,
+        request_id="req-1",
+        purpose="response",
+        text="answer",
+    )
+
+    saved = json.loads((tmp_path / "state" / "telegram_delivery_health.json").read_text(encoding="utf-8"))
+    record = saved["agents"]["kasumi"]
+    assert record["status"] == "blocked"
+    assert record["failover_failed"] is True
+    assert "RuntimeError: telegram network down" in record["last_failover_error"]
+
+
+@pytest.mark.asyncio
 async def test_tick_recovery_clears_block_and_sends_notice(tmp_path):
     source = _runtime(tmp_path, "kasumi")
     orchestrator = SimpleNamespace(runtimes=[source], raw_config={}, global_cfg=SimpleNamespace(project_root=tmp_path))
@@ -126,6 +154,43 @@ async def test_tick_recovery_clears_block_and_sends_notice(tmp_path):
     assert saved["agents"]["kasumi"]["status"] == "healthy"
     assert source.app.bot.messages
     assert "Delivery recovered" in source.app.bot.messages[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_tick_recovery_retry_after_reextends_block(tmp_path):
+    source = _runtime(tmp_path, "kasumi")
+    source.app.bot = _Bot(send_error=RetryAfter(90))
+    orchestrator = SimpleNamespace(runtimes=[source], raw_config={}, global_cfg=SimpleNamespace(project_root=tmp_path))
+    source.orchestrator = orchestrator
+    path = tmp_path / "state" / "telegram_delivery_health.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "agents": {
+                    "kasumi": {
+                        "token_key": "telegram:kasumi",
+                        "status": "blocked",
+                        "blocked_until": "2000-01-01T00:00:00+00:00",
+                        "retry_after_s": 60,
+                        "incident_id": "tg-kasumi-test",
+                        "per_chat": {"321": {"first_warned_at": "2000-01-01T00:00:00+00:00"}},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    await failover._tick_recovery(orchestrator)
+
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    record = saved["agents"]["kasumi"]
+    assert record["status"] == "blocked"
+    assert record["retry_after_s"] == 90
+    assert record["blocked_until"] is not None
+    assert not source.app.bot.messages
 
 
 def test_preview_preference_persists_and_overrides_config(tmp_path):
