@@ -174,10 +174,14 @@ class WorkbenchApiServer:
         self.app.router.add_post("/api/enterprise/scim/v2/Users", self.handle_enterprise_scim_v2_users_create)
         self.app.router.add_get("/api/enterprise/scim/v2/Users/{user_id}", self.handle_enterprise_scim_v2_users_get)
         self.app.router.add_patch("/api/enterprise/scim/v2/Users/{user_id}", self.handle_enterprise_scim_v2_users_patch)
+        self.app.router.add_get("/api/enterprise/scim/v2/Groups", self.handle_enterprise_scim_v2_groups_list)
+        self.app.router.add_get("/api/enterprise/scim/v2/Groups/{group_id}", self.handle_enterprise_scim_v2_groups_get)
         self.app.router.add_get("/scim/v2/Users", self.handle_public_scim_v2_users_list)
         self.app.router.add_post("/scim/v2/Users", self.handle_public_scim_v2_users_create)
         self.app.router.add_get("/scim/v2/Users/{user_id}", self.handle_public_scim_v2_users_get)
         self.app.router.add_patch("/scim/v2/Users/{user_id}", self.handle_public_scim_v2_users_patch)
+        self.app.router.add_get("/scim/v2/Groups", self.handle_public_scim_v2_groups_list)
+        self.app.router.add_get("/scim/v2/Groups/{group_id}", self.handle_public_scim_v2_groups_get)
         self.app.router.add_get("/api/enterprise/api-tokens", self.handle_enterprise_api_tokens)
         self.app.router.add_post("/api/enterprise/api-tokens", self.handle_enterprise_api_tokens_create)
         self.app.router.add_post(
@@ -1445,6 +1449,42 @@ class WorkbenchApiServer:
         )
         return web.json_response(scim_user_resource(result.user))
 
+    async def handle_enterprise_scim_v2_groups_list(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        query = getattr(request, "query", {}) or {}
+        org_id = str(query.get("org_id") or getattr(self.global_config, "organization_id", "") or "").strip()
+        filter_expression = str(query.get("filter") or "").strip() or None
+        try:
+            start_index = max(1, int(str(query.get("startIndex") or "1")))
+            count = max(0, min(500, int(str(query.get("count") or "100"))))
+            payload = ScimProvisioningService(self.identity_service).list_group_resources(
+                org_id=org_id,
+                filter_expression=filter_expression,
+                start_index=start_index,
+                count=count,
+            )
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        return web.json_response(payload)
+
+    async def handle_enterprise_scim_v2_groups_get(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        query = getattr(request, "query", {}) or {}
+        org_id = str(query.get("org_id") or getattr(self.global_config, "organization_id", "") or "").strip()
+        group_id = str(getattr(request, "match_info", {}).get("group_id") or "").strip()
+        try:
+            payload = ScimProvisioningService(self.identity_service).get_group_resource(
+                org_id=org_id,
+                group_id=group_id,
+            )
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=404)
+        return web.json_response(payload)
+
     async def handle_public_scim_v2_users_list(self, request):
         error = self._enterprise_scim_scope_error_response(request, required_scope="scim:read")
         if error is not None:
@@ -1550,6 +1590,41 @@ class WorkbenchApiServer:
             },
         )
         return web.json_response(scim_user_resource(result.user))
+
+    async def handle_public_scim_v2_groups_list(self, request):
+        error = self._enterprise_scim_scope_error_response(request, required_scope="scim:read")
+        if error is not None:
+            return error
+        _, actor = self._enterprise_scim_actor_from_request(request, required_scope="scim:read")
+        query = getattr(request, "query", {}) or {}
+        filter_expression = str(query.get("filter") or "").strip() or None
+        try:
+            start_index = max(1, int(str(query.get("startIndex") or "1")))
+            count = max(0, min(500, int(str(query.get("count") or "100"))))
+            payload = ScimProvisioningService(self.identity_service).list_group_resources(
+                org_id=actor.org_id,
+                filter_expression=filter_expression,
+                start_index=start_index,
+                count=count,
+            )
+        except Exception as exc:
+            return web.json_response({"schemas": [], "detail": str(exc)}, status=400)
+        return web.json_response(payload)
+
+    async def handle_public_scim_v2_groups_get(self, request):
+        error = self._enterprise_scim_scope_error_response(request, required_scope="scim:read")
+        if error is not None:
+            return error
+        _, actor = self._enterprise_scim_actor_from_request(request, required_scope="scim:read")
+        group_id = str(getattr(request, "match_info", {}).get("group_id") or "").strip()
+        try:
+            payload = ScimProvisioningService(self.identity_service).get_group_resource(
+                org_id=actor.org_id,
+                group_id=group_id,
+            )
+        except Exception as exc:
+            return web.json_response({"schemas": [], "detail": str(exc)}, status=404)
+        return web.json_response(payload)
 
     async def handle_enterprise_api_tokens(self, request):
         error = self._enterprise_admin_error_response(request)

@@ -786,6 +786,50 @@ async def test_enterprise_admin_can_use_scim_v2_users_surface(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_enterprise_admin_can_use_scim_v2_groups_surface(tmp_path):
+    server = _server(tmp_path)
+    admin = server.identity_service.bootstrap_org_admin(
+        org_id="ORG-001",
+        org_name="Acme",
+        email="admin@example.com",
+        display_name="Admin",
+        password="secret-password",
+        user_id="usr-admin",
+    )
+    project = server.identity_service.create_project(org_id="ORG-001", name="Research", project_id="prj-research")
+    user = server.identity_service.create_user(
+        org_id="ORG-001",
+        email="user@example.com",
+        display_name="User",
+        password="secret-password",
+        user_id="usr-user",
+    )
+    server.identity_service.assign_project_role(
+        user_id=user.id,
+        project_id=project.id,
+        role=EnterpriseRole.INDIVIDUAL_USER,
+    )
+    session = server.identity_service.create_session(user_id=admin.id)
+    headers = {"Authorization": f"Bearer {session.token}"}
+
+    list_response = await server.handle_enterprise_scim_v2_groups_list(
+        _FakeRequest(headers=headers, query={"filter": 'displayName eq "Research"'})
+    )
+    get_response = await server.handle_enterprise_scim_v2_groups_get(
+        _FakeRequest(headers=headers, match_info={"group_id": project.id})
+    )
+    listed = json.loads(list_response.text)
+    group = json.loads(get_response.text)
+
+    assert list_response.status == 200
+    assert listed["schemas"] == ["urn:ietf:params:scim:api:messages:2.0:ListResponse"]
+    assert listed["totalResults"] == 1
+    assert listed["Resources"][0]["id"] == "prj-research"
+    assert group["schemas"] == ["urn:ietf:params:scim:schemas:core:2.0:Group"]
+    assert group["members"][0]["value"] == "usr-user"
+
+
+@pytest.mark.asyncio
 async def test_enterprise_admin_can_scim_v2_patch_user_and_revoke_tokens(tmp_path):
     server = _server(tmp_path)
     admin = server.identity_service.bootstrap_org_admin(
@@ -892,6 +936,49 @@ async def test_public_scim_v2_users_supports_service_token_create_list_and_patch
     assert event["action"] == "scim_v2_user_patch"
     assert event["context"]["api_token_id"] == scim_token.id
     assert scim_token.token not in json.dumps(_audit_events(tmp_path))
+
+
+@pytest.mark.asyncio
+async def test_public_scim_v2_groups_supports_service_token_read(tmp_path):
+    server = _server(tmp_path)
+    admin = server.identity_service.bootstrap_org_admin(
+        org_id="ORG-001",
+        org_name="Acme",
+        email="admin@example.com",
+        display_name="Admin",
+        password="secret-password",
+        user_id="usr-admin",
+    )
+    project = server.identity_service.create_project(org_id="ORG-001", name="Research", project_id="prj-research")
+    user = server.identity_service.create_user(
+        org_id="ORG-001",
+        email="user@example.com",
+        display_name="User",
+        password="secret-password",
+        user_id="usr-user",
+    )
+    server.identity_service.assign_project_role(
+        user_id=user.id,
+        project_id=project.id,
+        role=EnterpriseRole.INDIVIDUAL_USER,
+    )
+    scim_token = server.identity_service.create_api_token(user_id=admin.id, scopes=["scim:read"])
+    headers = {"Authorization": f"Bearer {scim_token.token}"}
+
+    list_response = await server.handle_public_scim_v2_groups_list(
+        _FakeRequest(headers=headers, query={"filter": 'id eq "prj-research"'}, path="/scim/v2/Groups")
+    )
+    get_response = await server.handle_public_scim_v2_groups_get(
+        _FakeRequest(headers=headers, match_info={"group_id": project.id}, path=f"/scim/v2/Groups/{project.id}")
+    )
+    listed = json.loads(list_response.text)
+    group = json.loads(get_response.text)
+
+    assert list_response.status == 200
+    assert get_response.status == 200
+    assert listed["totalResults"] == 1
+    assert group["displayName"] == "Research"
+    assert group["members"][0]["value"] == "usr-user"
 
 
 @pytest.mark.asyncio

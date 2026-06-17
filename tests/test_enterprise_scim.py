@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 from orchestrator.enterprise import EnterpriseRole, IdentityService, ScimProvisioningService
-from orchestrator.enterprise.scim import SCIM_LIST_RESPONSE_SCHEMA, SCIM_USER_SCHEMA, filter_scim_users
+from orchestrator.enterprise.scim import (
+    SCIM_GROUP_SCHEMA,
+    SCIM_LIST_RESPONSE_SCHEMA,
+    SCIM_USER_SCHEMA,
+    filter_scim_groups,
+    filter_scim_users,
+)
 
 
 def _services(tmp_path):
@@ -168,3 +174,48 @@ def test_scim_v2_patch_updates_display_name_and_deactivates(tmp_path):
     assert deactivated.action == "deactivated"
     assert deactivated.user.status == "disabled"
     assert identity.validate_api_token(token.token) is None
+
+
+def test_scim_v2_groups_map_projects_to_groups_with_active_members(tmp_path):
+    identity, scim, project = _services(tmp_path)
+    active = scim.upsert_user(
+        org_id="ORG-001",
+        payload={"userName": "active@example.com", "displayName": "Active User"},
+        default_project_id=project.id,
+    )
+    disabled = scim.upsert_user(
+        org_id="ORG-001",
+        payload={"userName": "disabled@example.com", "displayName": "Disabled User"},
+        default_project_id=project.id,
+    )
+    identity.deactivate_user(user_id=disabled.user.id)
+
+    groups = scim.list_group_resources(org_id="ORG-001")
+    group = scim.get_group_resource(org_id="ORG-001", group_id=project.id)
+
+    assert groups["schemas"] == [SCIM_LIST_RESPONSE_SCHEMA]
+    assert groups["totalResults"] == 1
+    assert group["schemas"] == [SCIM_GROUP_SCHEMA]
+    assert group["id"] == "prj-default"
+    assert group["displayName"] == "Default"
+    assert group["members"] == [
+        {"value": active.user.id, "display": "Active User", "$ref": f"/scim/v2/Users/{active.user.id}"}
+    ]
+
+
+def test_scim_v2_groups_support_filter_and_reject_unknown_filter(tmp_path):
+    identity, scim, project = _services(tmp_path)
+    identity.create_project(org_id="ORG-001", name="Research", project_id="prj-research")
+
+    by_name = scim.list_group_resources(org_id="ORG-001", filter_expression='displayName eq "Research"')
+    by_id = filter_scim_groups(identity.list_projects(org_id="ORG-001"), 'id eq "prj-default"')
+
+    assert by_name["totalResults"] == 1
+    assert by_name["Resources"][0]["id"] == "prj-research"
+    assert [group.id for group in by_id] == [project.id]
+    try:
+        filter_scim_groups(identity.list_projects(org_id="ORG-001"), 'displayName co "Def"')
+    except ValueError as exc:
+        assert "unsupported SCIM group filter" in str(exc)
+    else:
+        raise AssertionError("expected unsupported group filter to fail")

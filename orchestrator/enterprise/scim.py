@@ -5,10 +5,11 @@ from dataclasses import dataclass
 import re
 from typing import Any
 
-from orchestrator.enterprise.identity import EnterpriseRole, IdentityService, User
+from orchestrator.enterprise.identity import EnterpriseRole, IdentityService, Project, User
 
 
 SCIM_USER_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:User"
+SCIM_GROUP_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:Group"
 SCIM_LIST_RESPONSE_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:ListResponse"
 SCIM_PATCH_OP_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:PatchOp"
 
@@ -114,6 +115,29 @@ class ScimProvisioningService:
             raise ValueError(f"SCIM user not found: {user_id!r}")
         return scim_user_resource(user)
 
+    def list_group_resources(
+        self,
+        *,
+        org_id: str,
+        filter_expression: str | None = None,
+        start_index: int = 1,
+        count: int = 100,
+    ) -> dict[str, Any]:
+        projects = self.identity.list_projects(org_id=org_id)
+        filtered = filter_scim_groups(projects, filter_expression)
+        return scim_group_list_response(
+            filtered,
+            self._users_by_project(org_id=org_id),
+            start_index=start_index,
+            count=count,
+        )
+
+    def get_group_resource(self, *, org_id: str, group_id: str) -> dict[str, Any]:
+        project = self.identity.get_project(group_id)
+        if project is None or project.org_id != org_id:
+            raise ValueError(f"SCIM group not found: {group_id!r}")
+        return scim_group_resource(project, self._users_by_project(org_id=org_id).get(project.id, []))
+
     def patch_user(
         self,
         *,
@@ -137,6 +161,15 @@ class ScimProvisioningService:
         )
         return ScimProvisioningResult(user=user, created=False, action=action)
 
+    def _users_by_project(self, *, org_id: str) -> dict[str, list[User]]:
+        result: dict[str, list[User]] = {}
+        for user in self.identity.list_users(org_id=org_id):
+            for membership in self.identity.list_project_memberships(user_id=user.id):
+                project_id = str(membership.get("project_id") or "").strip()
+                if project_id:
+                    result.setdefault(project_id, []).append(user)
+        return result
+
 
 def scim_user_resource(user: User) -> dict[str, Any]:
     return {
@@ -151,6 +184,28 @@ def scim_user_resource(user: User) -> dict[str, Any]:
             "resourceType": "User",
             "created": user.created_at,
             "location": f"/scim/v2/Users/{user.id}",
+        },
+    }
+
+
+def scim_group_resource(project: Project, members: list[User] | tuple[User, ...] | None = None) -> dict[str, Any]:
+    return {
+        "schemas": [SCIM_GROUP_SCHEMA],
+        "id": project.id,
+        "displayName": project.name,
+        "members": [
+            {
+                "value": user.id,
+                "display": user.display_name,
+                "$ref": f"/scim/v2/Users/{user.id}",
+            }
+            for user in sorted(members or [], key=lambda item: item.email)
+            if user.status == "active"
+        ],
+        "meta": {
+            "resourceType": "Group",
+            "created": project.created_at,
+            "location": f"/scim/v2/Groups/{project.id}",
         },
     }
 
@@ -174,6 +229,26 @@ def scim_list_response(
     }
 
 
+def scim_group_list_response(
+    projects: list[Project],
+    users_by_project: dict[str, list[User]],
+    *,
+    start_index: int = 1,
+    count: int = 100,
+) -> dict[str, Any]:
+    start = max(1, int(start_index or 1))
+    page_size = max(0, int(count if count is not None else 100))
+    offset = start - 1
+    resources = projects[offset : offset + page_size] if page_size else []
+    return {
+        "schemas": [SCIM_LIST_RESPONSE_SCHEMA],
+        "totalResults": len(projects),
+        "startIndex": start,
+        "itemsPerPage": len(resources),
+        "Resources": [scim_group_resource(project, users_by_project.get(project.id, [])) for project in resources],
+    }
+
+
 def filter_scim_users(users: list[User], filter_expression: str | None) -> list[User]:
     expression = str(filter_expression or "").strip()
     if not expression:
@@ -187,6 +262,20 @@ def filter_scim_users(users: list[User], filter_expression: str | None) -> list[
         expected_active = match.group(1).lower() == "true"
         return [user for user in users if (user.status == "active") is expected_active]
     raise ValueError(f"unsupported SCIM filter: {expression!r}")
+
+
+def filter_scim_groups(projects: list[Project], filter_expression: str | None) -> list[Project]:
+    expression = str(filter_expression or "").strip()
+    if not expression:
+        return projects
+    match = re.fullmatch(r'(?i)\s*(id|displayName)\s+eq\s+"([^"]+)"\s*', expression)
+    if match:
+        field = match.group(1).lower()
+        expected = match.group(2).strip().lower()
+        if field == "id":
+            return [project for project in projects if project.id.lower() == expected]
+        return [project for project in projects if project.name.lower() == expected]
+    raise ValueError(f"unsupported SCIM group filter: {expression!r}")
 
 
 def extract_patch_updates(payload: dict[str, Any]) -> dict[str, Any]:
