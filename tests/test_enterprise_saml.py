@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import subprocess
 from datetime import datetime, timezone
 
 import pytest
 
-from orchestrator.enterprise import build_saml_authn_start, parse_saml_idp_metadata, validate_saml_assertion
+from orchestrator.enterprise import (
+    build_saml_authn_start,
+    parse_saml_idp_metadata,
+    validate_saml_assertion,
+    verify_saml_assertion_signature,
+)
 from orchestrator.enterprise.auth_providers import load_auth_providers
 
 
@@ -56,6 +62,27 @@ ASSERTION = """\
 """
 
 
+SIGNED_ASSERTION = """\
+<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"
+    xmlns:ds="http://www.w3.org/2000/09/xmldsig#"
+    ID="_assertion-1">
+  <saml:Issuer>https://idp.example.com/metadata</saml:Issuer>
+  <ds:Signature>
+    <ds:SignedInfo/>
+    <ds:SignatureValue>fake</ds:SignatureValue>
+  </ds:Signature>
+  <saml:Subject>
+    <saml:NameID>user@example.com</saml:NameID>
+  </saml:Subject>
+  <saml:Conditions NotBefore="2026-06-17T00:00:00Z" NotOnOrAfter="2026-06-17T01:00:00Z">
+    <saml:AudienceRestriction>
+      <saml:Audience>hashi-enterprise</saml:Audience>
+    </saml:AudienceRestriction>
+  </saml:Conditions>
+</saml:Assertion>
+"""
+
+
 def test_parse_saml_idp_metadata_prefers_redirect_binding_and_redacts_cert_payload():
     metadata = parse_saml_idp_metadata(IDP_METADATA)
 
@@ -77,6 +104,8 @@ def test_build_saml_authn_start_builds_redirect_payload_without_metadata_leak():
                 "metadata_xml": IDP_METADATA,
                 "sp_entity_id": "hashi-enterprise",
                 "acs_url": "https://hashi.example.com/api/auth/saml/okta-saml/callback",
+                "xmlsec1_path": "/opt/xmlsec1",
+                "xmlsec1_timeout_seconds": "3.5",
             }
         ]
     )[1]
@@ -161,3 +190,62 @@ def test_saml_xml_rejects_dtd_and_entity_declarations():
             expected_audience="audience",
             signature_verified=True,
         )
+
+
+def test_verify_saml_assertion_signature_invokes_xmlsec_with_metadata_certificate(monkeypatch):
+    provider = load_auth_providers(
+        [
+            {
+                "type": "saml",
+                "id": "okta-saml",
+                "enabled": True,
+                "metadata_xml": IDP_METADATA,
+                "sp_entity_id": "hashi-enterprise",
+                "acs_url": "https://hashi.example.com/api/auth/saml/okta-saml/callback",
+                "xmlsec1_path": "/opt/xmlsec1",
+                "xmlsec1_timeout_seconds": "3.5",
+            }
+        ]
+    )[1]
+    calls = []
+
+    def fake_run(command, capture_output, text, timeout, check):
+        calls.append(command)
+        cert_path = command[command.index("--pubkey-cert-pem") + 1]
+        with open(cert_path, encoding="utf-8") as handle:
+            cert_text = handle.read()
+        assert "-----BEGIN CERTIFICATE-----" in cert_text
+        assert "MIICFAKECERT" in cert_text.replace("\n", "")
+        assert capture_output is True
+        assert text is True
+        assert check is False
+        assert timeout == 3.5
+        return subprocess.CompletedProcess(command, 0, stdout="OK", stderr="")
+
+    monkeypatch.setattr("orchestrator.enterprise.saml.subprocess.run", fake_run)
+
+    assert verify_saml_assertion_signature(SIGNED_ASSERTION, provider) is True
+    assert calls[0][:2] == ["/opt/xmlsec1", "--verify"]
+    assert "--id-attr:ID" in calls[0]
+    assert "Assertion" in calls[0]
+
+
+def test_verify_saml_assertion_signature_fails_closed_without_signature_or_xmlsec():
+    provider = load_auth_providers(
+        [
+            {
+                "type": "saml",
+                "id": "okta-saml",
+                "enabled": True,
+                "metadata_xml": IDP_METADATA,
+                "sp_entity_id": "hashi-enterprise",
+                "acs_url": "https://hashi.example.com/api/auth/saml/okta-saml/callback",
+            }
+        ]
+    )[1]
+
+    with pytest.raises(ValueError, match="XML Signature is required"):
+        verify_saml_assertion_signature(ASSERTION, provider, xmlsec1_path="/usr/bin/xmlsec1")
+
+    with pytest.raises(ValueError, match="requires xmlsec1"):
+        verify_saml_assertion_signature(SIGNED_ASSERTION, provider, xmlsec1_path="/missing/xmlsec1")

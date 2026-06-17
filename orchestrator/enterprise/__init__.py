@@ -131,6 +131,7 @@ from orchestrator.enterprise.saml import (
     build_saml_authn_start,
     parse_saml_idp_metadata,
     validate_saml_assertion,
+    verify_saml_assertion_signature,
 )
 from orchestrator.enterprise.store import EnterpriseStore
 from orchestrator.enterprise.evidence import EvidenceBundle, EvidenceBundleRegistry
@@ -283,6 +284,7 @@ __all__ = [
     "parse_saml_idp_metadata",
     "validate_oidc_id_token_claims",
     "validate_saml_assertion",
+    "verify_saml_assertion_signature",
     "verify_oidc_id_token",
     "record_failed_task_escalation",
     "record_connector_event",

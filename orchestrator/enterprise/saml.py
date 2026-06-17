@@ -4,7 +4,11 @@ import xml.etree.ElementTree as ET
 import base64
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import os
 import secrets
+import shutil
+import subprocess
+import tempfile
 from typing import Any
 from urllib.parse import urlencode
 import zlib
@@ -194,6 +198,66 @@ def validate_saml_assertion(
     )
 
 
+def verify_saml_assertion_signature(
+    assertion_xml: str,
+    provider: AuthProvider,
+    *,
+    xmlsec1_path: str | None = None,
+    timeout_seconds: float = 10.0,
+) -> bool:
+    if provider.type != AuthProviderType.SAML:
+        raise ValueError("provider is not SAML")
+    metadata = parse_saml_idp_metadata(provider.config.get("metadata_xml") or "")
+    root = _parse_xml(assertion_xml)
+    if _find_first(root, f".//{DS_NS}Signature") is None:
+        raise ValueError("SAML XML Signature is required")
+    verifier_path = (
+        _compact_text(xmlsec1_path)
+        or _compact_text(provider.config.get("xmlsec1_path"))
+        or _compact_text(os.environ.get("HASHI_SAML_XMLSEC1"))
+        or shutil.which("xmlsec1")
+    )
+    if not verifier_path:
+        raise ValueError("SAML XML signature verification requires xmlsec1")
+    timeout = _positive_float(provider.config.get("xmlsec1_timeout_seconds"), default=timeout_seconds)
+    last_error = ""
+    with tempfile.TemporaryDirectory(prefix="hashi-saml-") as tmp_dir:
+        xml_path = f"{tmp_dir}/assertion.xml"
+        with open(xml_path, "w", encoding="utf-8") as handle:
+            handle.write(str(assertion_xml or "").strip())
+        for index, certificate in enumerate(metadata.x509_certificates):
+            cert_path = f"{tmp_dir}/idp-{index}.pem"
+            with open(cert_path, "w", encoding="utf-8") as handle:
+                handle.write(_certificate_pem(certificate))
+            command = [
+                verifier_path,
+                "--verify",
+                "--id-attr:ID",
+                "Assertion",
+                "--id-attr:ID",
+                "Response",
+                "--pubkey-cert-pem",
+                cert_path,
+                xml_path,
+            ]
+            try:
+                completed = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    check=False,
+                )
+            except FileNotFoundError as exc:
+                raise ValueError("SAML XML signature verification requires xmlsec1") from exc
+            except subprocess.TimeoutExpired as exc:
+                raise ValueError("SAML XML signature verification timed out") from exc
+            if completed.returncode == 0:
+                return True
+            last_error = completed.stderr or completed.stdout or f"xmlsec1 exited {completed.returncode}"
+    raise ValueError(f"SAML XML signature verification failed: {_redact_xmlsec_output(last_error)}")
+
+
 def _authn_request_xml(*, request_id: str, sp_entity_id: str, acs_url: str, destination: str) -> str:
     return (
         '<samlp:AuthnRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" '
@@ -316,6 +380,29 @@ def _compact_text(value: object) -> str:
 
 def _compact_certificate(value: object) -> str:
     return "".join(str(value or "").split())
+
+
+def _certificate_pem(value: str) -> str:
+    compact = _compact_certificate(value)
+    if "BEGINCERTIFICATE" in compact.replace("-", ""):
+        return str(value).strip() + "\n"
+    lines = [compact[index : index + 64] for index in range(0, len(compact), 64)]
+    return "-----BEGIN CERTIFICATE-----\n" + "\n".join(lines) + "\n-----END CERTIFICATE-----\n"
+
+
+def _redact_xmlsec_output(value: object) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) > 160:
+        return text[:157] + "..."
+    return text
+
+
+def _positive_float(value: object, *, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = float(default)
+    return max(1.0, parsed)
 
 
 def _local_name(tag: str) -> str:

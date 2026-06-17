@@ -47,7 +47,11 @@ from orchestrator.enterprise.policy_templates import install_default_connector_p
 from orchestrator.enterprise.routing import agent_project_ids
 from orchestrator.enterprise.secret_refs import ConnectorSecretResolver
 from orchestrator.enterprise.scim import ScimProvisioningService, scim_user_resource
-from orchestrator.enterprise.saml import build_saml_authn_start, validate_saml_assertion
+from orchestrator.enterprise.saml import (
+    build_saml_authn_start,
+    validate_saml_assertion,
+    verify_saml_assertion_signature,
+)
 from orchestrator.pathing import resolve_path_value
 from orchestrator.transfer_store import TransferStore
 
@@ -1014,10 +1018,12 @@ class WorkbenchApiServer:
                     assertion_xml, signature_verified = verified
                 else:
                     signature_verified = bool(verified)
-            else:
+            elif getattr(self.global_config, "enterprise_saml_allow_preverified_assertions", False):
                 signature_verified = bool(payload.get("signature_verified")) and bool(
                     getattr(self.global_config, "enterprise_saml_allow_preverified_assertions", False)
                 )
+            else:
+                signature_verified = verify_saml_assertion_signature(assertion_xml, provider)
             claims = validate_saml_assertion(
                 assertion_xml,
                 expected_issuer=flow.idp_entity_id,

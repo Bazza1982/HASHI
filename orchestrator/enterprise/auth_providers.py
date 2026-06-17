@@ -127,6 +127,8 @@ def _saml_provider(record: dict[str, Any]) -> AuthProvider:
         "acs_url": _text(record.get("acs_url")),
         "default_project_id": _text(record.get("default_project_id")),
         "sso_binding": _text(record.get("sso_binding")),
+        "xmlsec1_path": _text(record.get("xmlsec1_path")),
+        "xmlsec1_timeout_seconds": _text(record.get("xmlsec1_timeout_seconds")),
     }
     errors = []
     if enabled:

@@ -473,6 +473,46 @@ async def test_saml_callback_can_complete_preverified_login_flow(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_saml_callback_uses_builtin_signature_verifier_by_default(tmp_path, monkeypatch):
+    server = _server(tmp_path)
+    server.global_config.enterprise_auth_providers = [
+        {
+            "type": "saml",
+            "id": "okta-saml",
+            "enabled": True,
+            "metadata_xml": SAML_METADATA,
+            "sp_entity_id": "hashi-enterprise",
+            "acs_url": "https://hashi.example.com/api/auth/saml/okta-saml/callback",
+        }
+    ]
+    server.identity_service.create_organization(org_id="ORG-001", name="Acme")
+    server.identity_service.create_project(org_id="ORG-001", name="Default", project_id="ORG-001-default")
+    start_response = await server.handle_auth_saml_start(_FakeRequest(match_info={"provider_id": "okta-saml"}))
+    state = json.loads(start_response.text)["saml"]["state"]
+    encoded_assertion = base64.b64encode(SAML_ASSERTION.encode("utf-8")).decode("ascii")
+    calls = []
+
+    def fake_verify(assertion_xml, provider):
+        calls.append((provider.id, assertion_xml))
+        return True
+
+    monkeypatch.setattr("orchestrator.workbench_api.verify_saml_assertion_signature", fake_verify)
+
+    response = await server.handle_auth_saml_callback(
+        _FakeRequest(
+            {"RelayState": state, "SAMLResponse": encoded_assertion},
+            match_info={"provider_id": "okta-saml"},
+        )
+    )
+    payload = json.loads(response.text)
+
+    assert response.status == 200
+    assert calls[0][0] == "okta-saml"
+    assert payload["saml"]["signature_verified"] is True
+    assert payload["user"]["email"] == "saml@example.com"
+
+
+@pytest.mark.asyncio
 async def test_saml_callback_rejects_unverified_assertion(tmp_path):
     server = _server(tmp_path)
     server.global_config.enterprise_auth_providers = [
@@ -496,7 +536,7 @@ async def test_saml_callback_rejects_unverified_assertion(tmp_path):
     )
 
     assert response.status == 400
-    assert "signature must be verified" in json.loads(response.text)["error"]
+    assert "XML Signature is required" in json.loads(response.text)["error"]
     assert _audit_events(tmp_path)[-1]["action"] == "saml_callback"
 
 
