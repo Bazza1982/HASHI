@@ -8,6 +8,7 @@ from typing import Any
 class AuthProviderType(str, Enum):
     LOCAL = "local"
     OIDC = "oidc"
+    SAML = "saml"
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,11 @@ class AuthProvider:
             payload["client_id"] = self.config.get("client_id")
             payload["scopes"] = list(self.config.get("scopes") or ["openid", "email", "profile"])
             payload["authorization_endpoint"] = self.config.get("authorization_endpoint")
+        if self.type == AuthProviderType.SAML:
+            payload["idp_entity_id"] = self.config.get("idp_entity_id")
+            payload["sp_entity_id"] = self.config.get("sp_entity_id")
+            payload["acs_url"] = self.config.get("acs_url")
+            payload["sso_binding"] = self.config.get("sso_binding")
         return payload
 
 
@@ -58,6 +64,8 @@ def load_auth_providers(records: list[dict] | tuple[dict, ...] | None) -> list[A
         provider_type = str(record.get("type") or "").strip().lower()
         if provider_type == AuthProviderType.OIDC.value:
             providers.append(_oidc_provider(record))
+        elif provider_type == AuthProviderType.SAML.value:
+            providers.append(_saml_provider(record))
         elif provider_type and provider_type != AuthProviderType.LOCAL.value:
             providers.append(
                 AuthProvider(
@@ -102,6 +110,32 @@ def _oidc_provider(record: dict[str, Any]) -> AuthProvider:
     return AuthProvider(
         id=provider_id,
         type=AuthProviderType.OIDC,
+        display_name=_text(record.get("display_name")) or provider_id,
+        enabled=enabled,
+        config=config,
+        errors=tuple(errors),
+    )
+
+
+def _saml_provider(record: dict[str, Any]) -> AuthProvider:
+    provider_id = _text(record.get("id")) or "saml"
+    enabled = bool(record.get("enabled", False))
+    config = {
+        "metadata_xml": _text(record.get("metadata_xml")),
+        "idp_entity_id": _text(record.get("idp_entity_id")) or _text(record.get("issuer")),
+        "sp_entity_id": _text(record.get("sp_entity_id")) or _text(record.get("audience")),
+        "acs_url": _text(record.get("acs_url")),
+        "default_project_id": _text(record.get("default_project_id")),
+        "sso_binding": _text(record.get("sso_binding")),
+    }
+    errors = []
+    if enabled:
+        for key in ("metadata_xml", "sp_entity_id", "acs_url"):
+            if not config.get(key):
+                errors.append(f"{key} is required for enabled SAML provider")
+    return AuthProvider(
+        id=provider_id,
+        type=AuthProviderType.SAML,
         display_name=_text(record.get("display_name")) or provider_id,
         enabled=enabled,
         config=config,

@@ -118,8 +118,10 @@ from orchestrator.enterprise.secret_refs import (
 )
 from orchestrator.enterprise.scim import ScimProvisioningResult, ScimProvisioningService
 from orchestrator.enterprise.saml import (
+    SamlAuthnStart,
     SamlAssertionClaims,
     SamlIdentityProviderMetadata,
+    build_saml_authn_start,
     parse_saml_idp_metadata,
     validate_saml_assertion,
 )
@@ -241,6 +243,7 @@ __all__ = [
     "SecretProvider",
     "ScimProvisioningResult",
     "ScimProvisioningService",
+    "SamlAuthnStart",
     "SamlAssertionClaims",
     "SamlIdentityProviderMetadata",
     "VaultSecretProvider",
@@ -260,6 +263,7 @@ __all__ = [
     "load_auth_providers",
     "build_oidc_authorization_start",
     "build_oidc_token_exchange_request",
+    "build_saml_authn_start",
     "complete_oidc_session",
     "exchange_oidc_authorization_code",
     "fetch_oidc_jwks",

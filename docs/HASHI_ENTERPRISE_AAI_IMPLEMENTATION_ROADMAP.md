@@ -92,7 +92,7 @@ Required:
 
 Deferred:
 
-- complete SAML login flow with XML signature verifier and SCIM 2.0 compatibility beyond the baseline Users surface;
+- production SAML XML Signature verification wiring and SCIM 2.0 compatibility beyond the baseline Users surface;
 - full ABAC policy simulation;
 - SIEM/OpenTelemetry;
 - cloud/object-store WORM adapters beyond local filesystem sink;
@@ -170,6 +170,7 @@ Deferred:
 - OIDC token endpoint exchange and JWKS fetch/cache services;
 - configurable OIDC callback full login completion;
 - SAML IdP metadata parser and preverified assertion claims validator;
+- SAML auth provider metadata, AuthnRequest start, callback state validation, verifier-hook/preverified assertion callback, user upsert, and session completion;
 - SCIM-style user provisioning primitive for create, update, deactivate, and reactivate lifecycle sync;
 - admin-gated SCIM provisioning HTTP API for user upsert and deactivation;
 - admin-gated SCIM 2.0 Users compatibility surface for list, create, get, and PATCH replace flows;
@@ -208,7 +209,8 @@ Deferred:
 - `ENT-022` Add OIDC verified identity session completion. Done for active-user reuse, new `individual_user` creation, optional default-project membership, session issuance, and random non-OIDC password material for OIDC-created users; live token exchange/JWKS fetch/callback wiring remains future work.
 - `ENT-023` Add OIDC HTTP token exchange and JWKS cache services. Done for injectable token endpoint calls, private token response handling, JWKS response validation, and TTL cache.
 - `ENT-024` Wire OIDC callback full login completion. Done behind `enterprise_oidc_complete_login`, preserving default prepared-mode compatibility while enabling token exchange, JWKS fetch/cache, ID token verification, claim mapping, user/session completion, and no-token audit/response redaction.
-- `ENT-024a` Add SAML metadata and assertion validation skeleton. Done for IdP metadata parsing, SSO binding selection, signing certificate discovery, preverified assertion issuer/audience/time validation, email/display-name extraction, and DTD/entity rejection; XML Signature verification and full HTTP login flow remain future work.
+- `ENT-024a` Add SAML metadata and assertion validation skeleton. Done for IdP metadata parsing, SSO binding selection, signing certificate discovery, preverified assertion issuer/audience/time validation, email/display-name extraction, and DTD/entity rejection.
+- `ENT-024b` Add SAML HTTP login baseline. Done for SAML auth provider config/redaction, AuthnRequest start with RelayState, pending state tracking, callback state/provider validation, base64 `SAMLResponse` decoding, verifier-hook or explicitly enabled preverified assertion validation, enterprise user upsert, session issuance, default project membership, and no assertion/token material in audit logs; production XML Signature verification wiring remains future work.
 - `ENT-025` Add SCIM provisioning primitive. Done for user create/update/deactivate/reactivate, standard `userName`/`emails` extraction, default project membership, session/API token revocation on deactivation, and deterministic result payloads; full SCIM HTTP endpoints, filters, groups, and IdP schema negotiation remain future work.
 - `ENT-026` Add admin-gated SCIM provisioning API. Done for `/api/enterprise/scim/users` upsert and `/api/enterprise/scim/users/deactivate`, admin auth, audit events, default project assignment, and session/API token revocation on deactivation.
 - `ENT-027` Add SCIM 2.0 Users compatibility surface. Done for admin-gated `/api/enterprise/scim/v2/Users` list/create/get/PATCH, SCIM User/ListResponse payloads, `userName`, `emails.value`, and `active` filters, pagination, PATCH `active`/`displayName`, audit for write paths, and token/session revocation on deactivation.
@@ -226,6 +228,7 @@ Deferred:
 - OIDC token endpoint and JWKS calls can be tested with injected transports and do not expose token material in public payloads.
 - OIDC callback can complete full login when explicitly enabled, while prepared-mode remains available for deployments that have not configured live SSO.
 - SAML metadata can be parsed safely and preverified SAML assertion claims can be validated for issuer, audience, validity window, subject, email, and display name.
+- SAML login can complete through HTTP start/callback when a deployment supplies a verifier hook or explicitly enables preverified assertion handoff; unsigned or unverified assertions fail closed.
 - SCIM-style provisioning can sync enterprise users through service, admin API, and IdP-facing SCIM 2.0 Users paths without restoring old sessions or API tokens after deactivation.
 
 ### Enterprise Secret Providers

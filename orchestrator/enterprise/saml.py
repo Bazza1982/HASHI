@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
+import base64
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import secrets
 from typing import Any
+from urllib.parse import urlencode
+import zlib
+
+from orchestrator.enterprise.auth_providers import AuthProvider, AuthProviderType
 
 
 MD_NS = "{urn:oasis:names:tc:SAML:2.0:metadata}"
@@ -49,6 +55,39 @@ class SamlAssertionClaims:
         }
 
 
+@dataclass(frozen=True)
+class SamlAuthnStart:
+    provider_id: str
+    state: str
+    request_id: str
+    acs_url: str
+    sp_entity_id: str
+    idp_entity_id: str
+    binding: str
+    sso_url: str
+    redirect_url: str | None = None
+    post_url: str | None = None
+    saml_request: str | None = None
+
+    def public_payload(self) -> dict[str, Any]:
+        payload = {
+            "provider_id": self.provider_id,
+            "state": self.state,
+            "request_id": self.request_id,
+            "binding": self.binding,
+            "sso_url": self.sso_url,
+            "acs_url": self.acs_url,
+            "sp_entity_id": self.sp_entity_id,
+            "idp_entity_id": self.idp_entity_id,
+        }
+        if self.redirect_url:
+            payload["redirect_url"] = self.redirect_url
+        if self.post_url:
+            payload["post_url"] = self.post_url
+            payload["SAMLRequest"] = self.saml_request
+        return payload
+
+
 def parse_saml_idp_metadata(xml_text: str) -> SamlIdentityProviderMetadata:
     root = _parse_xml(xml_text)
     entity_id = _required_text(root.attrib.get("entityID"), "entityID")
@@ -69,6 +108,53 @@ def parse_saml_idp_metadata(xml_text: str) -> SamlIdentityProviderMetadata:
         sso_url=_required_text(service.attrib.get("Location"), "SingleSignOnService Location"),
         binding=_required_text(service.attrib.get("Binding"), "SingleSignOnService Binding"),
         x509_certificates=certificates,
+    )
+
+
+def build_saml_authn_start(provider: AuthProvider) -> SamlAuthnStart:
+    if provider.type != AuthProviderType.SAML:
+        raise ValueError("provider is not SAML")
+    if not provider.ready:
+        raise ValueError("SAML provider is not ready")
+    metadata = parse_saml_idp_metadata(provider.config.get("metadata_xml") or "")
+    sp_entity_id = _required_text(provider.config.get("sp_entity_id"), "SP entity ID")
+    acs_url = _required_text(provider.config.get("acs_url"), "ACS URL")
+    state = "saml_" + secrets.token_urlsafe(24)
+    request_id = "_" + secrets.token_urlsafe(18)
+    request_xml = _authn_request_xml(
+        request_id=request_id,
+        sp_entity_id=sp_entity_id,
+        acs_url=acs_url,
+        destination=metadata.sso_url,
+    )
+    binding = provider.config.get("sso_binding") or metadata.binding
+    if binding == HTTP_REDIRECT_BINDING:
+        encoded_request = _deflated_base64(request_xml)
+        query = urlencode({"SAMLRequest": encoded_request, "RelayState": state})
+        separator = "&" if "?" in metadata.sso_url else "?"
+        return SamlAuthnStart(
+            provider_id=provider.id,
+            state=state,
+            request_id=request_id,
+            acs_url=acs_url,
+            sp_entity_id=sp_entity_id,
+            idp_entity_id=metadata.entity_id,
+            binding=binding,
+            sso_url=metadata.sso_url,
+            redirect_url=f"{metadata.sso_url}{separator}{query}",
+        )
+    encoded_request = base64.b64encode(request_xml.encode("utf-8")).decode("ascii")
+    return SamlAuthnStart(
+        provider_id=provider.id,
+        state=state,
+        request_id=request_id,
+        acs_url=acs_url,
+        sp_entity_id=sp_entity_id,
+        idp_entity_id=metadata.entity_id,
+        binding=HTTP_POST_BINDING,
+        sso_url=metadata.sso_url,
+        post_url=metadata.sso_url,
+        saml_request=encoded_request,
     )
 
 
@@ -105,6 +191,35 @@ def validate_saml_assertion(
         email=email,
         display_name=display_name,
         attributes=attributes,
+    )
+
+
+def _authn_request_xml(*, request_id: str, sp_entity_id: str, acs_url: str, destination: str) -> str:
+    return (
+        '<samlp:AuthnRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" '
+        'xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" '
+        f'ID="{request_id}" Version="2.0" '
+        f'IssueInstant="{datetime.now(tz=timezone.utc).isoformat()}" '
+        f'Destination="{_xml_escape(destination)}" '
+        f'AssertionConsumerServiceURL="{_xml_escape(acs_url)}">'
+        f"<saml:Issuer>{_xml_escape(sp_entity_id)}</saml:Issuer>"
+        "</samlp:AuthnRequest>"
+    )
+
+
+def _deflated_base64(xml_text: str) -> str:
+    compressor = zlib.compressobj(wbits=-15)
+    compressed = compressor.compress(xml_text.encode("utf-8")) + compressor.flush()
+    return base64.b64encode(compressed).decode("ascii")
+
+
+def _xml_escape(value: str) -> str:
+    return (
+        str(value)
+        .replace("&", "&amp;")
+        .replace('"', "&quot;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
     )
 
 

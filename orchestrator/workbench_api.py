@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import base64
 import json
 import mimetypes
 import socket
@@ -46,6 +47,7 @@ from orchestrator.enterprise.policy_templates import install_default_connector_p
 from orchestrator.enterprise.routing import agent_project_ids
 from orchestrator.enterprise.secret_refs import ConnectorSecretResolver
 from orchestrator.enterprise.scim import ScimProvisioningService, scim_user_resource
+from orchestrator.enterprise.saml import build_saml_authn_start, validate_saml_assertion
 from orchestrator.pathing import resolve_path_value
 from orchestrator.transfer_store import TransferStore
 
@@ -97,6 +99,19 @@ def _read_jsonl_increment(file_path: Path, offset: int = 0) -> dict:
     return {"messages": messages, "offset": size}
 
 
+def _saml_assertion_xml_from_payload(payload: dict) -> str:
+    assertion_xml = str(payload.get("assertion_xml") or "").strip()
+    if assertion_xml:
+        return assertion_xml
+    saml_response = str(payload.get("SAMLResponse") or "").strip()
+    if not saml_response:
+        raise ValueError("SAMLResponse or assertion_xml is required")
+    try:
+        return base64.b64decode(saml_response.encode("ascii"), validate=True).decode("utf-8")
+    except Exception as exc:
+        raise ValueError("SAMLResponse must be base64 encoded XML") from exc
+
+
 class WorkbenchApiServer:
     TRANSFER_ACCEPT_PREFIX = "TRANSFER_ACCEPTED "
     FORK_ACCEPT_PREFIX = "FORK_ACCEPTED "
@@ -124,9 +139,11 @@ class WorkbenchApiServer:
         self.connector_credentials = self._build_connector_credentials()
         self.connector_secret_resolver = ConnectorSecretResolver(secrets=self.secrets)
         self._pending_oidc_flows: dict[str, object] = {}
+        self._pending_saml_flows: dict[str, object] = {}
         self._oidc_jwks_cache = OidcJwksCache()
         self._oidc_token_transport = None
         self._oidc_jwks_transport = None
+        self._saml_assertion_verifier = None
         self.connector_registry_errors: list[dict] = []
         self.connector_registry = self._build_connector_registry()
         self.bridge_router = ConversationRouter(
@@ -143,6 +160,8 @@ class WorkbenchApiServer:
         self.app.router.add_get("/api/auth/providers", self.handle_auth_providers)
         self.app.router.add_get("/api/auth/oidc/{provider_id}/start", self.handle_auth_oidc_start)
         self.app.router.add_get("/api/auth/oidc/{provider_id}/callback", self.handle_auth_oidc_callback)
+        self.app.router.add_get("/api/auth/saml/{provider_id}/start", self.handle_auth_saml_start)
+        self.app.router.add_post("/api/auth/saml/{provider_id}/callback", self.handle_auth_saml_callback)
         self.app.router.add_get("/api/enterprise/users", self.handle_enterprise_users)
         self.app.router.add_post("/api/enterprise/users", self.handle_enterprise_users_create)
         self.app.router.add_post("/api/enterprise/scim/users", self.handle_enterprise_scim_users_upsert)
@@ -915,6 +934,138 @@ class WorkbenchApiServer:
                     "token_exchange": "prepared",
                     "token_exchange_request": exchange_payload,
                 },
+            }
+        )
+
+    async def handle_auth_saml_start(self, request):
+        if not self._is_governed_profile():
+            return web.json_response({"ok": False, "error": "SAML login is only enabled for governed profiles"}, status=404)
+        provider_id = str(getattr(request, "match_info", {}).get("provider_id") or "").strip()
+        providers = load_auth_providers(getattr(self.global_config, "enterprise_auth_providers", []) or [])
+        provider = next((item for item in providers if item.id == provider_id), None)
+        if provider is None:
+            self._append_enterprise_audit(
+                event_type="auth",
+                action="saml_start",
+                status="failed",
+                actor_id=provider_id,
+                context={"error": "provider_not_found"},
+            )
+            return web.json_response({"ok": False, "error": "SAML provider not found"}, status=404)
+        try:
+            start = build_saml_authn_start(provider)
+        except Exception as exc:
+            self._append_enterprise_audit(
+                event_type="auth",
+                action="saml_start",
+                status="failed",
+                actor_id=provider_id,
+                context={"error": str(exc)},
+            )
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        self._pending_saml_flows[start.state] = start
+        self._append_enterprise_audit(
+            event_type="auth",
+            action="saml_start",
+            status="success",
+            actor_id=provider_id,
+            context={"provider_id": provider_id, "binding": start.binding, "request_id": start.request_id},
+        )
+        return web.json_response({"ok": True, "saml": start.public_payload()})
+
+    async def handle_auth_saml_callback(self, request):
+        if not self._is_governed_profile():
+            return web.json_response({"ok": False, "error": "SAML login is only enabled for governed profiles"}, status=404)
+        provider_id = str(getattr(request, "match_info", {}).get("provider_id") or "").strip()
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
+        state = str(payload.get("RelayState") or payload.get("state") or "").strip()
+        flow = self._pending_saml_flows.get(state)
+        if flow is None:
+            self._append_enterprise_audit(
+                event_type="auth",
+                action="saml_callback",
+                status="failed",
+                actor_id=provider_id,
+                context={"error": "invalid_state"},
+            )
+            return web.json_response({"ok": False, "error": "invalid SAML state"}, status=400)
+        if getattr(flow, "provider_id", None) != provider_id:
+            self._append_enterprise_audit(
+                event_type="auth",
+                action="saml_callback",
+                status="failed",
+                actor_id=provider_id,
+                context={"error": "provider_mismatch"},
+            )
+            return web.json_response({"ok": False, "error": "SAML provider mismatch"}, status=400)
+        providers = load_auth_providers(getattr(self.global_config, "enterprise_auth_providers", []) or [])
+        provider = next((item for item in providers if item.id == provider_id), None)
+        if provider is None:
+            return web.json_response({"ok": False, "error": "SAML provider not found"}, status=404)
+        assertion_xml = _saml_assertion_xml_from_payload(payload)
+        signature_verified = False
+        try:
+            if self._saml_assertion_verifier is not None:
+                verified = self._saml_assertion_verifier(provider, assertion_xml, payload)
+                if isinstance(verified, tuple):
+                    assertion_xml, signature_verified = verified
+                else:
+                    signature_verified = bool(verified)
+            else:
+                signature_verified = bool(payload.get("signature_verified")) and bool(
+                    getattr(self.global_config, "enterprise_saml_allow_preverified_assertions", False)
+                )
+            claims = validate_saml_assertion(
+                assertion_xml,
+                expected_issuer=flow.idp_entity_id,
+                expected_audience=flow.sp_entity_id,
+                signature_verified=signature_verified,
+            )
+            org_id = str(getattr(self.global_config, "organization_id", "") or "").strip()
+            default_project_id = str(provider.config.get("default_project_id") or f"{org_id}-default").strip() or None
+            user, created = self.identity_service.upsert_oidc_user(
+                org_id=org_id,
+                email=claims.email,
+                display_name=claims.display_name,
+                default_project_id=default_project_id,
+            )
+            session = self.identity_service.create_session(user_id=user.id)
+        except Exception as exc:
+            self._append_enterprise_audit(
+                event_type="auth",
+                action="saml_callback",
+                status="failed",
+                actor_id=provider_id,
+                context={"error": str(exc), "state_validated": True},
+            )
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        self._pending_saml_flows.pop(state, None)
+        self._append_enterprise_audit(
+            event_type="auth",
+            action="saml_callback",
+            status="success",
+            actor_id=user.id,
+            context={
+                "provider_id": provider_id,
+                "request_id": flow.request_id,
+                "user_created": created,
+                "signature_verified": signature_verified,
+            },
+        )
+        return web.json_response(
+            {
+                "ok": True,
+                "saml": {
+                    "provider_id": provider_id,
+                    "state": state,
+                    "request_id": flow.request_id,
+                    "signature_verified": signature_verified,
+                },
+                "user": self._enterprise_user_payload(user),
+                "session": {"token": session.token, "expires_at": session.expires_at},
             }
         )
 
