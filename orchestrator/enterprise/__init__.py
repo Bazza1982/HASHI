@@ -9,6 +9,7 @@ from orchestrator.enterprise.audit_schema import AuditEvent, AuditEventWriter
 from orchestrator.enterprise.audit_ledger import AuditChainVerification, EnterpriseAuditLedger, LedgerEvent
 from orchestrator.enterprise.audit_export import format_otel_log, format_siem_event
 from orchestrator.enterprise.auth_providers import AuthProvider, AuthProviderType, load_auth_providers
+from orchestrator.enterprise.oidc_flow import OidcAuthorizationStart, build_oidc_authorization_start
 from orchestrator.enterprise.artifacts import Artifact, ArtifactRegistry
 from orchestrator.enterprise.audit_adapters import (
     BrowserAuditIngestResult,
@@ -96,6 +97,7 @@ __all__ = [
     "format_siem_event",
     "AuthProvider",
     "AuthProviderType",
+    "OidcAuthorizationStart",
     "Artifact",
     "ArtifactRegistry",
     "BrowserAuditIngestResult",
@@ -165,6 +167,7 @@ __all__ = [
     "fail_task_if_promised_artifacts_missing",
     "install_default_connector_policy",
     "load_auth_providers",
+    "build_oidc_authorization_start",
     "record_failed_task_escalation",
     "record_connector_event",
     "validate_connector_action",
