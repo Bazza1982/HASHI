@@ -617,7 +617,8 @@ Residual P4 limitations:
 - `ENT-069j` Add live audit export supervisor manifests. Done for systemd service template, raw Kubernetes daemon Deployment example, Helm daemon Deployment template, and operator guidance to avoid enabling multiple exporters for the same checkpoint.
 - `ENT-069k` Add SIEM starter field mapping and alert packs. Done for canonical HASHI audit field mapping, Splunk saved searches and dashboard XML, Elasticsearch index template, Kibana starter detection rules, OpenTelemetry Collector routing example, and static asset validation tests; real tenant import validation and organization-specific alert tuning remain future work.
 - `ENT-070` Add external database deployment wiring. Done for raw Kubernetes and Helm managed database secret examples plus Helm `externalDatabase` SecretRef override wiring for `HASHI_ENTERPRISE_DATABASE_URL`; schema migration rehearsal, connection pooling, and multi-replica coordination remain future work.
-- `ENT-071` Add Kubernetes disruption budget assets. Done for optional raw Kubernetes PodDisruptionBudget example, Helm `podDisruptionBudget` values, and a conditional PDB template for multi-replica maintenance windows; leader election, singleton jobs, and queue coordination remain future work.
+- `ENT-070a` Add Kubernetes disruption budget assets. Done for optional raw Kubernetes PodDisruptionBudget example, Helm `podDisruptionBudget` values, and a conditional PDB template for multi-replica maintenance windows; leader election, singleton jobs, and queue coordination remain future work.
+- `ENT-070b` Add live audit export singleton lock. Done for default checkpoint-adjacent lock files, configurable `--lock-path`, fail-closed concurrent exporter detection, and lock cleanup on normal one-shot/daemon exit; Kubernetes Lease leader election and broader queue coordination remain future work.
 
 **Acceptance:**
 
@@ -636,6 +637,7 @@ Residual P4 limitations:
 - Operators have cloud/Vault SecretStore templates to adapt for AWS, GCP, Azure, and Vault-based secret delivery.
 - Operators can run live audit export as a supervised daemon process without changing the delivery/checkpoint contract.
 - Operators can choose one of CronJob, scheduled one-shot, or daemon deployment patterns and avoid duplicate exporters against the same checkpoint.
+- Live audit exporters fail closed when another process already holds the checkpoint lock.
 - Operators have starter SIEM assets under `deploy/siem/` for field mappings, Splunk alerts/dashboard, Elastic index/rules, and OpenTelemetry Collector routing.
 
 ---

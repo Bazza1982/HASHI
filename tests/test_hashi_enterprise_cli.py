@@ -117,6 +117,8 @@ def test_enterprise_audit_live_export_cli_sends_events_and_updates_checkpoint(tm
     output = capsys.readouterr().out
     assert "Enterprise audit live export completed" in output
     assert "Sent            : 1" in output
+    assert "Lock            :" in output
+    assert not (tmp_path / "state" / "audit_live_export_checkpoint.json.lock").exists()
 
 
 def test_enterprise_audit_live_export_daemon_runs_bounded_cycles(tmp_path, monkeypatch, capsys):
@@ -165,6 +167,64 @@ def test_enterprise_audit_live_export_daemon_runs_bounded_cycles(tmp_path, monke
     assert "Cycle 1: sent=1" in output
     assert "Cycle 2: sent=0" in output
     assert "completed max cycles" in output
+    assert "Lock            :" in output
+    assert not (tmp_path / "state" / "audit_live_export_checkpoint.json.lock").exists()
+
+
+def test_enterprise_audit_live_export_cli_rejects_concurrent_lock(tmp_path, monkeypatch):
+    monkeypatch.setattr(hashi, "ROOT_DIR", tmp_path)
+    db_path = tmp_path / "state" / "enterprise.sqlite"
+    identity = IdentityService.from_path(db_path)
+    identity.create_organization(org_id="ORG-001", name="Acme")
+    ledger = EnterpriseAuditLedger.from_path(db_path, org_id="ORG-001")
+    ledger.append(event_type="auth", action="login", status="success", actor_id="usr-1")
+    checkpoint = tmp_path / "state" / "audit_live_export_checkpoint.json"
+    lock_path = checkpoint.with_suffix(checkpoint.suffix + ".lock")
+    lock_path.write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="lock is already held"):
+        hashi.cmd_enterprise_audit_export_live(
+            SimpleNamespace(
+                endpoint="https://siem.example.com/ingest",
+                format="ledger",
+                db=None,
+                org_id="ORG-001",
+                checkpoint=None,
+                lock_path=None,
+                batch_size=10,
+                timeout=5.0,
+                max_attempts=1,
+                backoff=0.0,
+                header=[],
+                daemon=False,
+            )
+        )
+
+
+def test_enterprise_audit_live_export_cli_rejects_lock_path_matching_checkpoint(tmp_path, monkeypatch):
+    monkeypatch.setattr(hashi, "ROOT_DIR", tmp_path)
+    db_path = tmp_path / "state" / "enterprise.sqlite"
+    identity = IdentityService.from_path(db_path)
+    identity.create_organization(org_id="ORG-001", name="Acme")
+    checkpoint = tmp_path / "state" / "audit_live_export_checkpoint.json"
+
+    with pytest.raises(ValueError, match="lock path must differ"):
+        hashi.cmd_enterprise_audit_export_live(
+            SimpleNamespace(
+                endpoint="https://siem.example.com/ingest",
+                format="ledger",
+                db=None,
+                org_id="ORG-001",
+                checkpoint=str(checkpoint),
+                lock_path=str(checkpoint),
+                batch_size=10,
+                timeout=5.0,
+                max_attempts=1,
+                backoff=0.0,
+                header=[],
+                daemon=False,
+            )
+        )
 
 
 def test_enterprise_audit_live_export_cli_accepts_vendor_formats():
