@@ -1,0 +1,71 @@
+{
+  "index_patterns": ["hashi-audit-*"],
+  "template": {
+    "settings": {
+      "index.lifecycle.name": "hashi-audit-default",
+      "index.mapping.total_fields.limit": 2000
+    },
+    "mappings": {
+      "dynamic": true,
+      "properties": {
+        "@timestamp": {"type": "date"},
+        "event": {
+          "properties": {
+            "id": {"type": "keyword"},
+            "kind": {"type": "keyword"},
+            "category": {"type": "keyword"},
+            "type": {"type": "keyword"},
+            "action": {"type": "keyword"},
+            "outcome": {"type": "keyword"}
+          }
+        },
+        "organization": {
+          "properties": {
+            "id": {"type": "keyword"}
+          }
+        },
+        "user": {
+          "properties": {
+            "id": {"type": "keyword"}
+          }
+        },
+        "trace": {
+          "properties": {
+            "id": {"type": "keyword"}
+          }
+        },
+        "labels": {
+          "properties": {
+            "hashi.audit.schema_version": {"type": "keyword"},
+            "hashi.audit.event_type": {"type": "keyword"},
+            "hashi.audit.status": {"type": "keyword"},
+            "hashi.audit.project_id": {"type": "keyword"},
+            "hashi.audit.task_id": {"type": "keyword"},
+            "hashi.audit.request_id": {"type": "keyword"},
+            "hashi.audit.parent_event_id": {"type": "keyword"},
+            "hashi.audit.chain_index": {"type": "long"},
+            "hashi.audit.prev_hash": {"type": "keyword"},
+            "hashi.audit.event_hash": {"type": "keyword"}
+          }
+        },
+        "hashi": {
+          "properties": {
+            "audit": {
+              "properties": {
+                "context": {
+                  "type": "object",
+                  "enabled": true
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "priority": 500,
+  "_meta": {
+    "description": "Starter index template for HASHI Enterprise audit export events."
+  }
+}
+

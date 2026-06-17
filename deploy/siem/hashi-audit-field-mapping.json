@@ -1,0 +1,106 @@
+{
+  "version": 1,
+  "source": "hashi.enterprise.audit",
+  "formats": ["siem", "elastic-bulk", "splunk-hec", "otel"],
+  "required_fields": [
+    "@timestamp",
+    "event.id",
+    "event.kind",
+    "event.category",
+    "event.type",
+    "event.action",
+    "event.outcome",
+    "organization.id",
+    "labels.hashi.audit.schema_version",
+    "labels.hashi.audit.event_type",
+    "labels.hashi.audit.status",
+    "labels.hashi.audit.chain_index",
+    "labels.hashi.audit.event_hash"
+  ],
+  "recommended_fields": [
+    "user.id",
+    "trace.id",
+    "labels.hashi.audit.project_id",
+    "labels.hashi.audit.task_id",
+    "labels.hashi.audit.request_id",
+    "labels.hashi.audit.parent_event_id",
+    "labels.hashi.audit.prev_hash",
+    "hashi.audit.context"
+  ],
+  "field_mappings": [
+    {
+      "hashi_field": "event.id",
+      "ecs_field": "event.id",
+      "splunk_field": "hashi_audit_id",
+      "otel_attribute": "hashi.audit.id",
+      "type": "keyword",
+      "description": "Stable audit event identifier"
+    },
+    {
+      "hashi_field": "organization.id",
+      "ecs_field": "organization.id",
+      "splunk_field": "hashi_org_id",
+      "otel_attribute": "hashi.audit.org_id",
+      "type": "keyword",
+      "description": "Enterprise organization identifier"
+    },
+    {
+      "hashi_field": "labels.hashi.audit.event_type",
+      "ecs_field": "labels.hashi.audit.event_type",
+      "splunk_field": "hashi_event_type",
+      "otel_attribute": "hashi.audit.event_type",
+      "type": "keyword",
+      "description": "Canonical HASHI audit event family"
+    },
+    {
+      "hashi_field": "event.action",
+      "ecs_field": "event.action",
+      "splunk_field": "hashi_action",
+      "otel_attribute": "hashi.audit.action",
+      "type": "keyword",
+      "description": "Action attempted or observed"
+    },
+    {
+      "hashi_field": "labels.hashi.audit.status",
+      "ecs_field": "labels.hashi.audit.status",
+      "splunk_field": "hashi_status",
+      "otel_attribute": "hashi.audit.status",
+      "type": "keyword",
+      "description": "HASHI status such as success, denied, blocked, or approval_required"
+    },
+    {
+      "hashi_field": "labels.hashi.audit.chain_index",
+      "ecs_field": "labels.hashi.audit.chain_index",
+      "splunk_field": "hashi_chain_index",
+      "otel_attribute": "hashi.audit.chain_index",
+      "type": "long",
+      "description": "Monotonic ledger chain position"
+    },
+    {
+      "hashi_field": "labels.hashi.audit.prev_hash",
+      "ecs_field": "labels.hashi.audit.prev_hash",
+      "splunk_field": "hashi_prev_hash",
+      "otel_attribute": "hashi.audit.prev_hash",
+      "type": "keyword",
+      "description": "Previous audit hash-chain value"
+    },
+    {
+      "hashi_field": "labels.hashi.audit.event_hash",
+      "ecs_field": "labels.hashi.audit.event_hash",
+      "splunk_field": "hashi_event_hash",
+      "otel_attribute": "hashi.audit.event_hash",
+      "type": "keyword",
+      "description": "Current audit hash-chain value"
+    }
+  ],
+  "alert_dimensions": [
+    "organization.id",
+    "user.id",
+    "trace.id",
+    "labels.hashi.audit.project_id",
+    "labels.hashi.audit.event_type",
+    "event.action",
+    "event.outcome"
+  ]
+}
+

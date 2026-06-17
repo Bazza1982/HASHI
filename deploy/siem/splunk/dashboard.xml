@@ -1,0 +1,49 @@
+<form version="1.1" theme="light">
+  <label>HASHI Enterprise Audit Overview</label>
+  <fieldset submitButton="false">
+    <input type="time" token="time_range">
+      <label>Time Range</label>
+      <default>
+        <earliest>-24h</earliest>
+        <latest>now</latest>
+      </default>
+    </input>
+  </fieldset>
+  <row>
+    <panel>
+      <title>Audit Events By Outcome</title>
+      <chart>
+        <search>
+          <query>index=hashi sourcetype=_json source=hashi.enterprise.audit | stats count by event.event.outcome</query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+        <option name="charting.chart">pie</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Events By Type</title>
+      <chart>
+        <search>
+          <query>index=hashi sourcetype=_json source=hashi.enterprise.audit | stats count by hashi_event_type | sort - count</query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+        <option name="charting.chart">bar</option>
+      </chart>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Denied / Blocked Actions</title>
+      <table>
+        <search>
+          <query>index=hashi sourcetype=_json source=hashi.enterprise.audit (hashi_status=denied OR hashi_status=blocked OR event.event.outcome=failure) | stats count values(hashi_action) as actions by hashi_org_id, event.user.id, hashi_event_type | sort - count</query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+      </table>
+    </panel>
+  </row>
+</form>
+

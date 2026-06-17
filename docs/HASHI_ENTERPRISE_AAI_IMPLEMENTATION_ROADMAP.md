@@ -94,7 +94,7 @@ Deferred:
 
 - IdP-specific SAML/SCIM setup guides beyond the generic deployment runbook, and SCIM 2.0 compatibility beyond baseline Users, read-only Groups, discovery, and bounded Bulk surfaces;
 - full ABAC policy simulation;
-- live SIEM/OpenTelemetry exporter dashboards, deeper transforms, and production validation for each cloud identity model beyond the CLI checkpoint/retry runner, daemon loop, supervised daemon deployment manifests, baseline Compose/Kubernetes/Helm scheduling, generic preset runbook, Kubernetes `secretKeyRef` support, and cloud/Vault SecretStore examples;
+- live SIEM/OpenTelemetry exporter hardening beyond the CLI checkpoint/retry runner, daemon loop, supervised daemon deployment manifests, baseline Compose/Kubernetes/Helm scheduling, generic preset runbook, Kubernetes `secretKeyRef` support, cloud/Vault SecretStore examples, and starter SIEM field mapping/dashboard/alert packs;
 - cloud/object-store WORM adapters beyond local filesystem sink;
 - Vault hardening beyond token-auth read provider, such as AppRole/Kubernetes auth and lease renewal;
 - Helm/HA hardening beyond the baseline chart;
@@ -569,7 +569,7 @@ Residual P4 limitations:
 - auditor read-only role semantics are not yet separated from broader admin access;
 - generic shell/file tool execution now has a canonical JSONL event source and ingest adapter;
 - generic object-store WORM sink is present, but cloud-specific SDK wiring and deployment runbooks remain future work;
-- retention, deeper vendor transforms/dashboards, and production validation for each cloud identity model remain future P4 work.
+- retention, deeper vendor transforms, import-validated vendor dashboards, and production validation for each cloud identity model remain future P4 work.
 
 **Scope:**
 
@@ -615,6 +615,7 @@ Residual P4 limitations:
 - `ENT-069h` Add cloud SecretStore examples. Done for External Secrets Operator `ClusterSecretStore` examples covering AWS Secrets Manager, GCP Secret Manager, Azure Key Vault, and HashiCorp Vault; production identity validation remains future work.
 - `ENT-069i` Add live audit export daemon mode. Done for `--daemon`, `--interval`, bounded `--max-cycles`, checkpoint-safe loop behavior, and runbook guidance; systemd/Kubernetes supervised daemon manifests remain future work.
 - `ENT-069j` Add live audit export supervisor manifests. Done for systemd service template, raw Kubernetes daemon Deployment example, Helm daemon Deployment template, and operator guidance to avoid enabling multiple exporters for the same checkpoint.
+- `ENT-069k` Add SIEM starter field mapping and alert packs. Done for canonical HASHI audit field mapping, Splunk saved searches and dashboard XML, Elasticsearch index template, Kibana starter detection rules, OpenTelemetry Collector routing example, and static asset validation tests; real tenant import validation and organization-specific alert tuning remain future work.
 
 **Acceptance:**
 
@@ -633,6 +634,7 @@ Residual P4 limitations:
 - Operators have cloud/Vault SecretStore templates to adapt for AWS, GCP, Azure, and Vault-based secret delivery.
 - Operators can run live audit export as a supervised daemon process without changing the delivery/checkpoint contract.
 - Operators can choose one of CronJob, scheduled one-shot, or daemon deployment patterns and avoid duplicate exporters against the same checkpoint.
+- Operators have starter SIEM assets under `deploy/siem/` for field mappings, Splunk alerts/dashboard, Elastic index/rules, and OpenTelemetry Collector routing.
 
 ---
 
