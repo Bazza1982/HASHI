@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -116,6 +117,54 @@ def test_enterprise_audit_live_export_cli_sends_events_and_updates_checkpoint(tm
     output = capsys.readouterr().out
     assert "Enterprise audit live export completed" in output
     assert "Sent            : 1" in output
+
+
+def test_enterprise_audit_live_export_cli_accepts_vendor_formats():
+    seen = []
+
+    def fake_export(args):
+        seen.append(args.format)
+        return 0
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(hashi, "cmd_enterprise_audit_export_live", fake_export)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "hashi",
+                "enterprise",
+                "audit-export-live",
+                "--endpoint",
+                "https://splunk.example.com/services/collector/event",
+                "--format",
+                "splunk-hec",
+            ],
+        )
+        with pytest.raises(SystemExit) as splunk_exit:
+            hashi.main()
+        assert splunk_exit.value.code == 0
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "hashi",
+                "enterprise",
+                "audit-export-live",
+                "--endpoint",
+                "https://elastic.example.com/hashi-audit/_bulk",
+                "--format",
+                "elastic-bulk",
+            ],
+        )
+        with pytest.raises(SystemExit) as elastic_exit:
+            hashi.main()
+        assert elastic_exit.value.code == 0
+    finally:
+        monkeypatch.undo()
+
+    assert seen == ["splunk-hec", "elastic-bulk"]
 
 
 def test_enterprise_audit_live_export_cli_rejects_malformed_header():

@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from orchestrator.enterprise import EnterpriseAuditLedger, IdentityService, format_otel_log, format_siem_event
+from orchestrator.enterprise import (
+    EnterpriseAuditLedger,
+    IdentityService,
+    format_elastic_bulk_action,
+    format_otel_log,
+    format_siem_event,
+    format_splunk_hec_event,
+)
 
 
 def _ledger(tmp_path) -> EnterpriseAuditLedger:
@@ -55,3 +62,27 @@ def test_formats_audit_event_for_opentelemetry_log_ingestion(tmp_path):
     assert payload["attributes"]["hashi.audit.id"] == event.id
     assert payload["attributes"]["hashi.audit.event_hash"] == event.event_hash
     assert payload["attributes"]["hashi.audit.context"]["connector_type"] == "slack"
+
+
+def test_formats_audit_event_for_splunk_hec_envelope(tmp_path):
+    ledger = _ledger(tmp_path)
+    event = ledger.append(event_type="policy", action="shell.exec", status="denied", actor_id="usr-1")
+
+    payload = format_splunk_hec_event(event)
+
+    assert payload["time"] > 0
+    assert payload["host"] == "hashi"
+    assert payload["source"] == "hashi.enterprise.audit"
+    assert payload["sourcetype"] == "_json"
+    assert payload["event"]["event"]["id"] == event.id
+    assert payload["fields"]["hashi_audit_id"] == event.id
+    assert payload["fields"]["hashi_event_hash"] == event.event_hash
+
+
+def test_formats_elastic_bulk_create_action(tmp_path):
+    ledger = _ledger(tmp_path)
+    event = ledger.append(event_type="auth", action="login", status="success")
+
+    payload = format_elastic_bulk_action(event)
+
+    assert payload == {"create": {"_id": event.id}}

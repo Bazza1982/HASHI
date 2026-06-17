@@ -503,7 +503,7 @@ def main():
     enterprise_audit_live.add_argument("--endpoint", required=True, help="HTTP endpoint that accepts audit export payloads")
     enterprise_audit_live.add_argument(
         "--format",
-        choices=["ledger", "siem", "otel"],
+        choices=["ledger", "siem", "otel", "splunk-hec", "elastic-bulk"],
         default="siem",
         help="Export payload format. Defaults to siem.",
     )

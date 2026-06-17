@@ -92,6 +92,47 @@ def test_live_export_builds_otlp_json_payload(tmp_path):
     assert log_record["body"] == "auth.login success"
 
 
+def test_live_export_builds_splunk_hec_json_lines(tmp_path):
+    ledger = _ledger(tmp_path)
+    event = ledger.append(event_type="policy", action="file.write", status="denied", actor_id="usr-1")
+    calls = []
+
+    def transport(url, body, headers, timeout):
+        calls.append((body, headers))
+        return 200, "ok"
+
+    result = AuditLiveExporter(ledger, transport=transport).export_since(
+        AuditLiveExportEndpoint(url="https://splunk.example.com/services/collector/event", format="splunk-hec")
+    )
+
+    rows = [json.loads(line) for line in calls[0][0].decode("utf-8").splitlines()]
+    assert result.sent == 1
+    assert calls[0][1]["content-type"] == "application/json"
+    assert rows[0]["event"]["event"]["id"] == event.id
+    assert rows[0]["fields"]["hashi_chain_index"] == event.chain_index
+
+
+def test_live_export_builds_elastic_bulk_ndjson(tmp_path):
+    ledger = _ledger(tmp_path)
+    event = ledger.append(event_type="connector", action="message.send", status="success", actor_id="usr-1")
+    calls = []
+
+    def transport(url, body, headers, timeout):
+        calls.append((body, headers))
+        return 200, "ok"
+
+    result = AuditLiveExporter(ledger, transport=transport).export_since(
+        AuditLiveExportEndpoint(url="https://elastic.example.com/hashi-audit/_bulk", format="elastic-bulk")
+    )
+
+    rows = [json.loads(line) for line in calls[0][0].decode("utf-8").splitlines()]
+    assert result.sent == 1
+    assert calls[0][1]["content-type"] == "application/x-ndjson"
+    assert rows[0] == {"create": {"_id": event.id}}
+    assert rows[1]["event"]["id"] == event.id
+    assert rows[1]["labels"]["hashi.audit.event_hash"] == event.event_hash
+
+
 def test_live_export_noops_when_checkpoint_is_current(tmp_path):
     ledger = _ledger(tmp_path)
     event = ledger.append(event_type="auth", action="login", status="success")

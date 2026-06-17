@@ -17,6 +17,8 @@ Supported export formats:
 | `siem` | ECS-style NDJSON | `application/x-ndjson` | SIEM/log collector that accepts newline-delimited JSON |
 | `ledger` | raw ledger NDJSON | `application/x-ndjson` | HASHI-compatible archive or custom collector |
 | `otel` | OTLP JSON logs body | `application/json` | OpenTelemetry Collector HTTP logs endpoint |
+| `splunk-hec` | newline-delimited Splunk HEC event envelopes | `application/json` | Splunk HEC event endpoint or compatible collector |
+| `elastic-bulk` | Elasticsearch `_bulk` create action/document lines | `application/x-ndjson` | index-scoped Elasticsearch `_bulk` endpoint |
 
 The exporter advances its checkpoint only after a successful 2xx response. Failed attempts do not skip undelivered events.
 
@@ -73,27 +75,37 @@ HASHI_AUDIT_EXPORT_HEADER=Authorization: Bearer replace-me
 
 ### Splunk
 
-Use a Splunk HEC raw endpoint or a collector/transformation layer that accepts NDJSON lines:
+Use a Splunk HEC event endpoint or a compatible collector that accepts newline-delimited HEC event envelopes:
 
 ```env
-HASHI_AUDIT_EXPORT_ENDPOINT=https://splunk.example.com:8088/services/collector/raw
-HASHI_AUDIT_EXPORT_FORMAT=siem
+HASHI_AUDIT_EXPORT_ENDPOINT=https://splunk.example.com:8088/services/collector/event
+HASHI_AUDIT_EXPORT_FORMAT=splunk-hec
 HASHI_AUDIT_EXPORT_HEADER=Authorization: Splunk replace-me
 ```
 
-Do not assume the standard HEC event endpoint will accept HASHI NDJSON directly. If your Splunk deployment requires HEC event envelopes, put a small transform in front of Splunk or use a collector that wraps each line.
+HASHI wraps each audit event in a HEC-style envelope with `time`, `host`, `source`, `sourcetype`, `event`, and `fields`. Validate whether your Splunk deployment accepts newline-delimited HEC event envelopes; otherwise place a collector in front of Splunk to split and forward each envelope.
 
-### Elastic / Logstash
+### Elasticsearch `_bulk`
 
-Use Elastic Agent, Logstash HTTP input, or another HTTP collector that accepts NDJSON:
+Use an index-scoped `_bulk` endpoint:
+
+```env
+HASHI_AUDIT_EXPORT_ENDPOINT=https://elastic.example.com/hashi-audit/_bulk
+HASHI_AUDIT_EXPORT_FORMAT=elastic-bulk
+HASHI_AUDIT_EXPORT_HEADER=Authorization: ApiKey replace-me
+```
+
+HASHI emits alternating `_bulk` create action lines and ECS-style document lines. Use an endpoint that already scopes the target index, such as `/hashi-audit/_bulk`, because the MVP action metadata does not set `_index`.
+
+### Elastic Agent / Logstash HTTP Input
+
+If you prefer a generic collector instead of `_bulk`, use the `siem` format:
 
 ```env
 HASHI_AUDIT_EXPORT_ENDPOINT=https://logstash.example.com/hashi-audit
 HASHI_AUDIT_EXPORT_FORMAT=siem
 HASHI_AUDIT_EXPORT_HEADER=Authorization: ApiKey replace-me
 ```
-
-This is not the Elasticsearch `_bulk` API format. Do not send the current `siem` output directly to `_bulk` unless a transform adds bulk action metadata lines.
 
 ### OpenTelemetry Collector
 
@@ -166,6 +178,6 @@ For production, avoid putting long-lived tokens in shell history or Helm release
 ## 8. Current Deferred Work
 
 - Managed long-running daemon mode.
-- Vendor-specific transforms for Splunk HEC event envelopes and Elasticsearch `_bulk`.
+- Deeper vendor transforms for multi-index Elasticsearch routing and strict Splunk deployments that require one HEC event per request.
 - Secret-manager-native Helm wiring for every target platform.
 - SIEM-specific dashboards, alerts, and field mappings beyond the baseline ECS-style event shape.
