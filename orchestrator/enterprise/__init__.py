@@ -15,6 +15,11 @@ from orchestrator.enterprise.audit_anchor import (
     verify_audit_ledger_anchor,
 )
 from orchestrator.enterprise.audit_ledger import AuditChainVerification, EnterpriseAuditLedger, LedgerEvent
+from orchestrator.enterprise.audit_object_worm import (
+    ObjectStoreAuditAnchorSink,
+    ObjectStoreAuditClient,
+    ObjectStoreObjectExists,
+)
 from orchestrator.enterprise.audit_worm import AuditAnchorReceipt, FilesystemAuditAnchorSink
 from orchestrator.enterprise.audit_export import format_otel_log, format_siem_event
 from orchestrator.enterprise.auth_providers import AuthProvider, AuthProviderType, load_auth_providers
@@ -131,6 +136,9 @@ __all__ = [
     "AuditAnchorReceipt",
     "EnterpriseAuditLedger",
     "FilesystemAuditAnchorSink",
+    "ObjectStoreAuditAnchorSink",
+    "ObjectStoreAuditClient",
+    "ObjectStoreObjectExists",
     "AuditChainVerification",
     "LedgerEvent",
     "format_otel_log",

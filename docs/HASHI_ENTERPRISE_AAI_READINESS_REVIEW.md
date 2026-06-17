@@ -61,6 +61,7 @@ This is **not** the end state of the enterprise product. It is the first reviewa
 - New ledger events include tamper-evident hash-chain fields and can be verified for in-database modification, deletion, or reordering.
 - Audit anchors can export a chain-range manifest with start/end hash, count, and anchor hash for later storage in WORM-capable systems.
 - Filesystem audit anchor sink can write hash-named read-only anchor objects with receipts and verification, providing a local WORM-style adapter for early deployments.
+- Object-store audit anchor sink can write hash-named anchor objects through an SDK-neutral client protocol with no-overwrite semantics, idempotent conflict handling, receipt verification, and object-lock metadata forwarding.
 - Audit export and Workbench timeline views exist for review and handoff.
 - Audit export supports default ledger NDJSON plus SIEM/ECS-style and OpenTelemetry log-style NDJSON mappings.
 - Sensitive connector parameters are redacted in connector audit records.
@@ -129,7 +130,7 @@ These are not blockers for Enterprise MVP review, but they are not complete:
 
 - complete SAML/SCIM login flows;
 - full ABAC simulator and policy preview tooling;
-- cloud/object-store WORM storage destination adapters for audit anchors;
+- cloud-specific object-store WORM client packages and deployment runbooks for S3/GCS/Azure immutable storage;
 - Vault AppRole/Kubernetes auth, lease renewal, and policy bootstrap;
 - live SIEM push or OTLP network export;
 - Kubernetes HA deployment beyond the baseline manifests, including Helm, autoscaling, managed ingress, network policy, external database wiring, and multi-replica coordination;
