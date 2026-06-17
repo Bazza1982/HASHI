@@ -47,6 +47,7 @@ This is **not** the end state of the enterprise product. It is the first reviewa
 - OIDC ID token verification enforces compact JWT shape, `alg=RS256`, matching `kid`, RSA JWKS signing keys, signature validity, and issuer/audience/expiry/not-before/issued-at/subject/nonce claims.
 - OIDC verified identities can create or reuse active enterprise users, issue sessions, and assign only `individual_user` default project membership unless an administrator changes policy.
 - OIDC token endpoint and JWKS network calls are isolated behind injectable services; public token response payloads expose token presence metadata only, not token values.
+- OIDC callback supports an explicitly enabled full login path from authorization code to session, while preserving default prepared mode for deployments that have not enabled live SSO completion.
 
 ### Control Plane
 
@@ -115,7 +116,7 @@ The connector readiness tests cover:
 
 These are not blockers for Enterprise MVP review, but they are not complete:
 
-- complete SAML/SCIM login flows and OIDC callback wiring across token exchange, JWKS fetch/cache, ID token verification, and session completion;
+- complete SAML/SCIM login flows;
 - full ABAC simulator and policy preview tooling;
 - WORM audit storage or external ledger anchoring;
 - live SIEM push or OTLP network export;

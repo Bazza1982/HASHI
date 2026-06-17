@@ -263,6 +263,85 @@ async def test_oidc_callback_validates_state_and_consumes_pending_flow(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_oidc_callback_can_complete_verified_login_flow(tmp_path, monkeypatch):
+    server = _server(tmp_path)
+    server.global_config.enterprise_oidc_complete_login = True
+    server.global_config.enterprise_auth_providers = [
+        {
+            "type": "oidc",
+            "id": "entra",
+            "enabled": True,
+            "issuer": "https://login.microsoftonline.com/tenant/v2.0",
+            "client_id": "hashi-client",
+            "client_secret": "do-not-return",
+            "authorization_endpoint": "https://login.microsoftonline.com/tenant/oauth2/v2.0/authorize",
+            "token_endpoint": "https://login.microsoftonline.com/tenant/oauth2/v2.0/token",
+            "jwks_uri": "https://login.microsoftonline.com/tenant/discovery/v2.0/keys",
+        }
+    ]
+    server.identity_service.create_organization(org_id="ORG-001", name="Acme")
+    server.identity_service.create_project(org_id="ORG-001", name="Default", project_id="ORG-001-default")
+
+    def token_transport(_url, _body, _headers, _timeout):
+        return 200, {
+            "id_token": "id.jwt.token",
+            "access_token": "access-secret",
+            "refresh_token": "refresh-secret",
+            "token_type": "Bearer",
+            "expires_in": 3600,
+        }
+
+    def jwks_transport(_url, _body, _headers, _timeout):
+        return 200, {"keys": [{"kid": "key-1", "kty": "RSA"}]}
+
+    def fake_verify(_provider, flow, id_token, jwks):
+        assert id_token == "id.jwt.token"
+        assert jwks["keys"][0]["kid"] == "key-1"
+        return SimpleNamespace(
+            claims={
+                "sub": "subject-123",
+                "email": "Admin@Example.com",
+                "name": "Admin User",
+                "nonce": flow.nonce,
+            }
+        )
+
+    server._oidc_token_transport = token_transport
+    server._oidc_jwks_transport = jwks_transport
+    monkeypatch.setattr("orchestrator.workbench_api.verify_oidc_id_token", fake_verify)
+
+    start_response = await server.handle_auth_oidc_start(
+        _FakeRequest(
+            query={"redirect_uri": "https://hashi.example.com/api/auth/oidc/entra/callback"},
+            match_info={"provider_id": "entra"},
+        )
+    )
+    state = json.loads(start_response.text)["oidc"]["state"]
+
+    response = await server.handle_auth_oidc_callback(
+        _FakeRequest(query={"state": state, "code": "auth-code"}, match_info={"provider_id": "entra"})
+    )
+    payload = json.loads(response.text)
+
+    assert response.status == 200
+    assert payload["oidc"]["token_exchange"] == "completed"
+    assert payload["user"]["email"] == "admin@example.com"
+    assert payload["session"]["token"].startswith("hs_sess_")
+    assert server.identity_service.get_session_user(payload["session"]["token"]).email == "admin@example.com"
+    memberships = server.identity_service.list_project_memberships(user_id=payload["user"]["id"])
+    assert memberships[0]["project_id"] == "ORG-001-default"
+    assert memberships[0]["role"] == EnterpriseRole.INDIVIDUAL_USER.value
+    response_text = json.dumps(payload)
+    events_text = json.dumps(_audit_events(tmp_path))
+    assert "id.jwt.token" not in response_text
+    assert "access-secret" not in response_text
+    assert "refresh-secret" not in response_text
+    assert "auth-code" not in events_text
+    assert "id.jwt.token" not in events_text
+    assert _audit_events(tmp_path)[-1]["context"]["token_exchange"] == "completed"
+
+
+@pytest.mark.asyncio
 async def test_oidc_callback_rejects_invalid_state(tmp_path):
     server = _server(tmp_path)
 
