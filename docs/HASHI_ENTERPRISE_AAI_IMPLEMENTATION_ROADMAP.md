@@ -92,7 +92,7 @@ Required:
 
 Deferred:
 
-- complete SAML/SCIM login flows and OIDC callback/token validation;
+- complete SAML/SCIM login flows and OIDC token exchange/ID token validation;
 - full ABAC policy simulation;
 - SIEM/OpenTelemetry;
 - WORM storage;
@@ -162,6 +162,7 @@ Deferred:
 - local password/session auth;
 - enterprise auth provider metadata contract for OIDC readiness;
 - OIDC authorization-code start with server-side PKCE verifier storage;
+- OIDC callback state/code validation before future token exchange;
 - Workbench login endpoint;
 - audit events for login/logout/admin bootstrap;
 - personal profile maps current owner behavior to implicit top admin.
@@ -186,12 +187,14 @@ Deferred:
 - `ENT-015` Emit audit events for auth and bootstrap.
 - `ENT-016` Add OIDC provider metadata skeleton. Done for config parsing, provider readiness checks, public metadata, and secret redaction; full authorization-code flow remains future work.
 - `ENT-017` Add OIDC authorization start with PKCE. Done for authorization URL generation, state/nonce, server-side code verifier storage, and start audit; callback token exchange remains future work.
+- `ENT-018` Add OIDC callback validation skeleton. Done for provider error handling, state validation, code presence checks, pending-flow consumption, and callback audit; token exchange and session creation remain future work.
 
 **Acceptance:**
 
 - `org_admin` can log in.
 - Workbench can discover configured login providers without exposing provider secrets.
 - OIDC start does not expose `code_verifier`; the browser receives the authorization URL while HASHI keeps verifier and nonce state for callback validation.
+- OIDC callback validates state before token exchange and does not write authorization codes into audit logs.
 - `individual_user` exists as a role but cannot access admin APIs.
 - Personal profile does not require login migration.
 

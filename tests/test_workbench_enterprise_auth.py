@@ -210,6 +210,73 @@ async def test_oidc_start_rejects_unready_provider(tmp_path):
     assert _audit_events(tmp_path)[-1]["status"] == "failed"
 
 
+@pytest.mark.asyncio
+async def test_oidc_callback_validates_state_and_consumes_pending_flow(tmp_path):
+    server = _server(tmp_path)
+    server.global_config.enterprise_auth_providers = [
+        {
+            "type": "oidc",
+            "id": "entra",
+            "enabled": True,
+            "issuer": "https://login.microsoftonline.com/tenant/v2.0",
+            "client_id": "hashi-client",
+            "authorization_endpoint": "https://login.microsoftonline.com/tenant/oauth2/v2.0/authorize",
+            "token_endpoint": "https://login.microsoftonline.com/tenant/oauth2/v2.0/token",
+            "jwks_uri": "https://login.microsoftonline.com/tenant/discovery/v2.0/keys",
+        }
+    ]
+    start_response = await server.handle_auth_oidc_start(
+        _FakeRequest(
+            query={"redirect_uri": "https://hashi.example.com/api/auth/oidc/entra/callback"},
+            match_info={"provider_id": "entra"},
+        )
+    )
+    state = json.loads(start_response.text)["oidc"]["state"]
+
+    response = await server.handle_auth_oidc_callback(
+        _FakeRequest(query={"state": state, "code": "auth-code"}, match_info={"provider_id": "entra"})
+    )
+    payload = json.loads(response.text)
+
+    assert response.status == 200
+    assert payload["oidc"]["code_received"] is True
+    assert payload["oidc"]["token_exchange"] == "deferred"
+    assert state not in server._pending_oidc_flows
+    assert "auth-code" not in json.dumps(_audit_events(tmp_path))
+    assert _audit_events(tmp_path)[-1]["status"] == "validated"
+
+
+@pytest.mark.asyncio
+async def test_oidc_callback_rejects_invalid_state(tmp_path):
+    server = _server(tmp_path)
+
+    response = await server.handle_auth_oidc_callback(
+        _FakeRequest(query={"state": "missing", "code": "auth-code"}, match_info={"provider_id": "entra"})
+    )
+
+    assert response.status == 400
+    assert json.loads(response.text)["error"] == "invalid OIDC state"
+    assert _audit_events(tmp_path)[-1]["context"]["error"] == "invalid state"
+
+
+@pytest.mark.asyncio
+async def test_oidc_callback_reports_provider_error(tmp_path):
+    server = _server(tmp_path)
+
+    response = await server.handle_auth_oidc_callback(
+        _FakeRequest(
+            query={"error": "access_denied", "error_description": "User denied"},
+            match_info={"provider_id": "entra"},
+        )
+    )
+
+    assert response.status == 400
+    assert json.loads(response.text)["error"] == "access_denied"
+    event = _audit_events(tmp_path)[-1]
+    assert event["status"] == "failed"
+    assert event["context"]["error"] == "access_denied"
+
+
 def test_enterprise_admin_auth_requires_admin_project_role(tmp_path):
     server = _server(tmp_path)
     admin = server.identity_service.bootstrap_org_admin(

@@ -129,6 +129,7 @@ class WorkbenchApiServer:
         self.app.router.add_get("/api/auth/me", self.handle_auth_me)
         self.app.router.add_get("/api/auth/providers", self.handle_auth_providers)
         self.app.router.add_get("/api/auth/oidc/{provider_id}/start", self.handle_auth_oidc_start)
+        self.app.router.add_get("/api/auth/oidc/{provider_id}/callback", self.handle_auth_oidc_callback)
         self.app.router.add_get("/api/enterprise/users", self.handle_enterprise_users)
         self.app.router.add_post("/api/enterprise/users", self.handle_enterprise_users_create)
         self.app.router.add_get("/api/enterprise/api-tokens", self.handle_enterprise_api_tokens)
@@ -682,6 +683,92 @@ class WorkbenchApiServer:
             context={"provider_id": provider_id, "expires_at": start.expires_at},
         )
         return web.json_response({"ok": True, "oidc": start.public_payload()})
+
+    async def handle_auth_oidc_callback(self, request):
+        if not self._is_governed_profile():
+            return web.json_response({"ok": False, "error": "OIDC login is only enabled for governed profiles"}, status=404)
+        provider_id = str(request.match_info.get("provider_id") or "").strip()
+        query = getattr(request, "query", {}) or {}
+        state = str(query.get("state") or "").strip()
+        code = str(query.get("code") or "").strip()
+        provider_error = str(query.get("error") or "").strip()
+        if provider_error:
+            self._append_enterprise_audit(
+                event_type="auth",
+                action="oidc_callback",
+                status="failed",
+                actor_id=provider_id,
+                context={
+                    "provider_id": provider_id,
+                    "error": provider_error,
+                    "error_description": str(query.get("error_description") or "").strip() or None,
+                },
+            )
+            return web.json_response({"ok": False, "error": provider_error}, status=400)
+        if not state:
+            self._append_enterprise_audit(
+                event_type="auth",
+                action="oidc_callback",
+                status="failed",
+                actor_id=provider_id,
+                context={"provider_id": provider_id, "error": "missing state"},
+            )
+            return web.json_response({"ok": False, "error": "state is required"}, status=400)
+        flow = self._pending_oidc_flows.get(state)
+        if flow is None:
+            self._append_enterprise_audit(
+                event_type="auth",
+                action="oidc_callback",
+                status="failed",
+                actor_id=provider_id,
+                context={"provider_id": provider_id, "error": "invalid state"},
+            )
+            return web.json_response({"ok": False, "error": "invalid OIDC state"}, status=400)
+        if getattr(flow, "provider_id", None) != provider_id:
+            self._append_enterprise_audit(
+                event_type="auth",
+                action="oidc_callback",
+                status="failed",
+                actor_id=provider_id,
+                context={
+                    "provider_id": provider_id,
+                    "expected_provider_id": getattr(flow, "provider_id", None),
+                    "error": "provider mismatch",
+                },
+            )
+            return web.json_response({"ok": False, "error": "OIDC provider mismatch"}, status=400)
+        if not code:
+            self._append_enterprise_audit(
+                event_type="auth",
+                action="oidc_callback",
+                status="failed",
+                actor_id=provider_id,
+                context={"provider_id": provider_id, "error": "missing code"},
+            )
+            return web.json_response({"ok": False, "error": "authorization code is required"}, status=400)
+        self._pending_oidc_flows.pop(state, None)
+        self._append_enterprise_audit(
+            event_type="auth",
+            action="oidc_callback",
+            status="validated",
+            actor_id=provider_id,
+            context={
+                "provider_id": provider_id,
+                "state_validated": True,
+                "token_exchange": "deferred",
+            },
+        )
+        return web.json_response(
+            {
+                "ok": True,
+                "oidc": {
+                    "provider_id": provider_id,
+                    "state": state,
+                    "code_received": True,
+                    "token_exchange": "deferred",
+                },
+            }
+        )
 
     def _enterprise_user_payload(self, user) -> dict:
         memberships = (
