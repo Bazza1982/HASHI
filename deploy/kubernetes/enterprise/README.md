@@ -43,6 +43,8 @@ Before applying in a real environment:
    database URL secret based on `external-postgres-secret.example.yaml`.
 7. If running two or more control-plane replicas, apply and tune
    `pod-disruption-budget.example.yaml` for voluntary disruption protection.
+8. Enable `HASHI_ENTERPRISE_SCHEDULER_LEASE_ENABLED` only after validating the
+   enterprise schema and lease backend used by your runtime.
 
 ## External Database Secret
 
@@ -57,6 +59,14 @@ kubectl apply -f deploy/kubernetes/enterprise/external-postgres-secret.example.y
 Then either copy that key into `hashi-enterprise-secrets` for this raw-manifest
 baseline, or use the Helm chart's `externalDatabase.enabled=true` override to
 mount a dedicated database secret.
+
+## Scheduler Lease Guard
+
+Control-plane pods include pod-name holder wiring for scheduler leases. The raw
+baseline keeps `HASHI_ENTERPRISE_SCHEDULER_LEASE_ENABLED` set to `"false"` by
+default; set it to `"true"` only after the enterprise database schema is
+initialized and the runtime lease backend has been validated. The current Python
+lease store supports SQLite paths and `sqlite:///` URLs.
 
 ## Live Audit Export Daemon
 

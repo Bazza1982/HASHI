@@ -67,6 +67,20 @@ Treat production rollout as blocked until schema migrations, backup/restore,
 connection pooling, and multi-replica coordination have been rehearsed against
 the target database.
 
+Scheduler lease settings are exposed under `schedulerLease`. They default to
+disabled and use the pod name as holder identity when enabled:
+
+```bash
+helm upgrade --install hashi-enterprise deploy/helm/hashi-enterprise \
+  --namespace hashi-enterprise --create-namespace \
+  --set schedulerLease.enabled=true \
+  --set schedulerLease.name=superloop-scheduler
+```
+
+Enable this only after the enterprise schema is initialized and the runtime
+lease backend has been validated. The current Python lease store supports
+SQLite paths and `sqlite:///` URLs.
+
 ## Live Audit Export
 
 Enable the one-shot exporter as a Kubernetes CronJob after configuring a real

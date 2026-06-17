@@ -10,3 +10,6 @@ data:
   HASHI_ORGANIZATION_ID: {{ .Values.enterprise.organizationId | quote }}
   HASHI_BRIDGE_HOME: {{ .Values.enterprise.bridgeHome | quote }}
   HASHI_WORKBENCH_PORT: {{ .Values.enterprise.workbenchPort | quote }}
+  HASHI_ENTERPRISE_SCHEDULER_LEASE_ENABLED: {{ .Values.schedulerLease.enabled | quote }}
+  HASHI_ENTERPRISE_SCHEDULER_LEASE_NAME: {{ .Values.schedulerLease.name | quote }}
+  HASHI_ENTERPRISE_SCHEDULER_LEASE_TTL_SECONDS: {{ .Values.schedulerLease.ttl | quote }}
