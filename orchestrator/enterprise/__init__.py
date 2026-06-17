@@ -92,7 +92,15 @@ from orchestrator.enterprise.policy import (
 )
 from orchestrator.enterprise.policy_templates import install_default_connector_policy
 from orchestrator.enterprise.routing import ProjectRouteDecision, agent_project_ids, evaluate_project_route
-from orchestrator.enterprise.secret_refs import ConnectorSecretResolver, ResolvedSecret
+from orchestrator.enterprise.secret_refs import (
+    ConnectorSecretResolver,
+    EnvSecretProvider,
+    FileSecretProvider,
+    HashiSecretProvider,
+    KubernetesMountedSecretProvider,
+    ResolvedSecret,
+    SecretProvider,
+)
 from orchestrator.enterprise.store import EnterpriseStore
 from orchestrator.enterprise.evidence import EvidenceBundle, EvidenceBundleRegistry
 from orchestrator.enterprise.escalation import (
@@ -175,6 +183,10 @@ __all__ = [
     "ConnectorRegistry",
     "ConnectorResult",
     "ConnectorSecretResolver",
+    "EnvSecretProvider",
+    "FileSecretProvider",
+    "HashiSecretProvider",
+    "KubernetesMountedSecretProvider",
     "ConnectorCredential",
     "ConnectorCredentialStore",
     "EnterpriseConnector",
@@ -196,6 +208,7 @@ __all__ = [
     "PolicyRule",
     "ProjectRouteDecision",
     "ResolvedSecret",
+    "SecretProvider",
     "ApprovalRequest",
     "ArtifactVerificationResult",
     "TaskRegistry",
