@@ -96,6 +96,7 @@ Deferred:
 - full ABAC policy simulation;
 - SIEM/OpenTelemetry;
 - cloud/object-store WORM adapters beyond local filesystem sink;
+- live Vault API provider beyond pluggable secret provider interface;
 - Kubernetes/HA;
 - multiple enterprise connectors;
 - DLP/classification.
@@ -215,6 +216,31 @@ Deferred:
 - OIDC verified identities can be completed into enterprise users and sessions without granting admin roles by default.
 - OIDC token endpoint and JWKS calls can be tested with injected transports and do not expose token material in public payloads.
 - OIDC callback can complete full login when explicitly enabled, while prepared-mode remains available for deployments that have not configured live SSO.
+
+### Enterprise Secret Providers
+
+**Goal:** move from ad hoc in-memory secrets toward a provider-based secret resolution layer.
+
+**Scope implemented:**
+
+- provider interface for connector/auth secret references;
+- default `env://` and `secrets://` compatibility;
+- root-confined `file://` mounted secret provider;
+- `k8s://namespace/name/key` mounted secret provider for Kubernetes-style volume secrets;
+- fail-closed `vault://` behavior until a real Vault provider is configured.
+
+**Tickets:**
+
+- `ENT-110` Add pluggable secret provider interface. Done.
+- `ENT-111` Add file mounted secret provider. Done.
+- `ENT-112` Add Kubernetes mounted secret provider. Done.
+- `ENT-113` Add live Vault API provider. Future.
+
+**Acceptance:**
+
+- Existing HASHI secret refs continue to work.
+- File and Kubernetes mounted secrets cannot escape their configured roots.
+- Unconfigured Vault/Kubernetes references fail closed.
 - `individual_user` exists as a role but cannot access admin APIs.
 - Personal profile does not require login migration.
 
