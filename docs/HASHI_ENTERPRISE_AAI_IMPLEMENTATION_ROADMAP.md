@@ -517,6 +517,7 @@ Residual P4 limitations:
 - HASHI-controlled tool execution now writes `tool_action_audit.jsonl`, but direct live ledger dual-write is still pending;
 - auditor read-only role semantics are not yet separated from broader admin access;
 - generic shell/file tool execution now has a canonical JSONL event source and ingest adapter;
+- generic object-store WORM sink is present, but cloud-specific SDK wiring and deployment runbooks remain future work;
 - retention, live SIEM push, and OTLP network export remain future P4 work.
 
 **Scope:**
@@ -550,7 +551,8 @@ Residual P4 limitations:
 - `ENT-067` Add audit schema contract tests. Done for required ledger keys, canonical event types, export shape, and JSON-safe context.
 - `ENT-068` Add tamper-evident audit hash chain. Done for new ledger events and verification API.
 - `ENT-068a` Add external audit anchor manifest. Done for chain-range anchor records, anchor hash, JSON export, historical anchor verification, and tamper detection.
-- `ENT-068b` Add filesystem WORM-style audit anchor sink. Done for hash-named append-only anchor writes, read-only local files, idempotent receipt handling, and receipt verification; cloud/object-store WORM adapters remain future work.
+- `ENT-068b` Add filesystem WORM-style audit anchor sink. Done for hash-named append-only anchor writes, read-only local files, idempotent receipt handling, and receipt verification.
+- `ENT-068c` Add object-store WORM-style audit anchor sink. Done for SDK-neutral no-overwrite object writes, hash-named keys, receipt verification, idempotent conflict handling, and object-lock metadata forwarding; cloud-specific client packages and deployment runbooks remain future work.
 - `ENT-069` Add SIEM/OpenTelemetry audit export mappings. Done for admin-gated NDJSON export formats; live push/exporter agents remain future work.
 
 **Acceptance:**
