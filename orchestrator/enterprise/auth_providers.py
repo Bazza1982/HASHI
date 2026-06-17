@@ -88,6 +88,7 @@ def _oidc_provider(record: dict[str, Any]) -> AuthProvider:
     config = {
         "issuer": _text(record.get("issuer")),
         "client_id": _text(record.get("client_id")),
+        "client_secret": _text(record.get("client_secret")),
         "authorization_endpoint": _text(record.get("authorization_endpoint")),
         "token_endpoint": _text(record.get("token_endpoint")),
         "jwks_uri": _text(record.get("jwks_uri")),
