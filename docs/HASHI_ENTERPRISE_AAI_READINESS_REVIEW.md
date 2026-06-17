@@ -54,6 +54,7 @@ This is **not** the end state of the enterprise product. It is the first reviewa
 - Channels are modeled as administratively controlled capabilities.
 - Commands, channels, tools, execution scopes, backends, and connectors can be routed through central policy decisions.
 - Approval-required flows create approval records instead of silently executing high-risk actions.
+- Data governance primitives can classify baseline sensitive content and produce egress decisions from approval thresholds and destination-region allowlists.
 
 ### Auditability
 
@@ -138,7 +139,7 @@ These are not blockers for Enterprise MVP review, but they are not complete:
 - Microsoft Teams and Feishu connectors;
 - Google Chat OAuth, space discovery, and user mapping;
 - GitHub PR create/merge actions;
-- DLP/classification and data residency controls;
+- full DLP/data residency enforcement across every runtime, connector, channel, artifact export, and backend path;
 - browser-level UI screenshot regression tests for the Workbench Enterprise console.
 
 ---

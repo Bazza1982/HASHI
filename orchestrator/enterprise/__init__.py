@@ -86,6 +86,15 @@ from orchestrator.enterprise.connectors import (
     validate_connector_action,
 )
 from orchestrator.enterprise.credentials import ConnectorCredential, ConnectorCredentialStore
+from orchestrator.enterprise.data_governance import (
+    DataClassification,
+    DataEgressDecision,
+    DataFinding,
+    DataGovernanceAssessment,
+    DataGovernancePolicy,
+    assess_data_egress,
+    classify_text,
+)
 from orchestrator.enterprise.identity import EnterpriseRole, IdentityService
 from orchestrator.enterprise.policy import (
     ApprovalRequest,
@@ -198,6 +207,11 @@ __all__ = [
     "KubernetesMountedSecretProvider",
     "ConnectorCredential",
     "ConnectorCredentialStore",
+    "DataClassification",
+    "DataEgressDecision",
+    "DataFinding",
+    "DataGovernanceAssessment",
+    "DataGovernancePolicy",
     "EnterpriseConnector",
     "GitHubConnector",
     "GoogleChatWebhookConnector",
@@ -224,7 +238,9 @@ __all__ = [
     "TaskRegistry",
     "TaskStatus",
     "complete_task_with_artifact_verification",
+    "assess_data_egress",
     "agent_project_ids",
+    "classify_text",
     "evaluate_governance_policy",
     "evaluate_project_route",
     "evaluate_connector_action",
