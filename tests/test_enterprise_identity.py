@@ -90,6 +90,31 @@ def test_sessions_can_be_created_validated_and_revoked(tmp_path):
     assert service.revoke_session(session.token) is False
 
 
+def test_oidc_user_upsert_creates_and_reuses_active_user(tmp_path):
+    service = _service(tmp_path)
+    service.create_organization(org_id="ORG-001", name="Acme")
+    project = service.create_project(org_id="ORG-001", name="Default", project_id="ORG-001-default")
+
+    user, created = service.upsert_oidc_user(
+        org_id="ORG-001",
+        email="User@Example.com",
+        display_name="OIDC User",
+        default_project_id=project.id,
+    )
+    same_user, created_again = service.upsert_oidc_user(
+        org_id="ORG-001",
+        email="user@example.com",
+        display_name="New Name",
+        default_project_id=project.id,
+    )
+
+    assert created is True
+    assert created_again is False
+    assert same_user == user
+    assert service.get_user_by_email(org_id="ORG-001", email="USER@example.com") == user
+    assert service.list_project_memberships(user_id=user.id)[0]["role"] == EnterpriseRole.INDIVIDUAL_USER.value
+
+
 def test_project_membership_role_assignment_is_upserted(tmp_path):
     service = _service(tmp_path)
     service.create_organization(org_id="ORG-001", name="Acme")
