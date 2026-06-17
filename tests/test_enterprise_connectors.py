@@ -15,6 +15,8 @@ from orchestrator.enterprise import (
     IdentityService,
     PolicyEvaluator,
     ConnectorSecretResolver,
+    DataClassification,
+    DataGovernancePolicy,
     SlackWebhookConnector,
     GoogleChatWebhookConnector,
 )
@@ -706,6 +708,30 @@ def _connector_execution_services(tmp_path, *, connector=None):
     return service, credentials, policy, ledger
 
 
+def _slack_execution_services(tmp_path, *, connector=None, data_governance_policy=None):
+    db_path = tmp_path / "enterprise.sqlite"
+    IdentityService.from_path(db_path).create_organization(org_id="ORG-001", name="Acme")
+    credentials = ConnectorCredentialStore.from_path(db_path)
+    policy = PolicyEvaluator.from_path(db_path, org_id="ORG-001")
+    credentials.create_credential(
+        org_id="ORG-001",
+        connector_type="slack",
+        display_name="Slack Webhook",
+        secret_ref="env://SLACK_WEBHOOK_URL",
+        scopes=["message.send"],
+        credential_id="cred-slack",
+    )
+    ledger = EnterpriseAuditLedger.from_path(db_path, org_id="ORG-001")
+    service = ConnectorExecutionService(
+        registry=ConnectorRegistry([connector or SlackWebhookConnector("https://hooks.slack.test/services/abc")]),
+        credential_store=credentials,
+        policy_evaluator=policy,
+        ledger=ledger,
+        data_governance_policy=data_governance_policy,
+    )
+    return service, credentials, policy, ledger
+
+
 def test_evaluate_connector_action_allows_active_credential_without_policy_rule(tmp_path):
     credentials, policy, _ = _connector_gate_services(tmp_path)
     action = ConnectorAction(connector_type="github", action="repo.read", actor_id="usr-1")
@@ -882,6 +908,89 @@ def test_connector_execution_service_records_approval_required_without_calling_c
     events = ledger.query(event_type="connector")
     assert len(events) == 1
     assert events[0].context["approval_request_id"] == execution.gate.approval_request_id
+
+
+def test_connector_execution_service_requires_data_egress_approval_without_calling_connector(tmp_path):
+    class FailingSlack(SlackWebhookConnector):
+        def execute(self, action: ConnectorAction):
+            raise AssertionError("connector should not execute")
+
+    service, _, policy, ledger = _slack_execution_services(
+        tmp_path,
+        connector=FailingSlack(webhook_url="https://hooks.slack.test/services/abc"),
+    )
+    action = ConnectorAction(
+        connector_type="slack",
+        action="message.send",
+        actor_id="usr-1",
+        project_id="prj-research",
+        parameters={"text": "Contact alice@example.com"},
+    )
+
+    execution = service.execute(action, credential_id="cred-slack")
+
+    assert execution.gate.allowed is True
+    assert execution.result.ok is False
+    assert execution.result.status == "data_egress_requires_approval"
+    assert execution.data_governance.classification == DataClassification.CONFIDENTIAL
+    approval = policy.list_approval_requests(status="pending")[0]
+    assert approval.action == "data.egress"
+    assert approval.context["data_governance"]["classification"] == "confidential"
+    assert "alice@example.com" not in str(approval.context)
+    events = ledger.query(event_type="connector")
+    assert events[0].status == "data_egress_requires_approval"
+    assert events[0].context["parameters"]["text"] == "[REDACTED_TEXT]"
+    assert "alice@example.com" not in str(events[0].context)
+
+
+def test_connector_execution_service_denies_restricted_data_egress_without_approval(tmp_path):
+    class FailingSlack(SlackWebhookConnector):
+        def execute(self, action: ConnectorAction):
+            raise AssertionError("connector should not execute")
+
+    service, _, policy, ledger = _slack_execution_services(
+        tmp_path,
+        connector=FailingSlack(webhook_url="https://hooks.slack.test/services/abc"),
+    )
+    action = ConnectorAction(
+        connector_type="slack",
+        action="message.send",
+        parameters={"text": "token=super-secret-token"},
+    )
+
+    execution = service.execute(action, credential_id="cred-slack")
+
+    assert execution.result.ok is False
+    assert execution.result.status == "data_egress_denied"
+    assert policy.list_approval_requests() == []
+    events = ledger.query(event_type="connector")
+    assert events[0].context["data_governance"]["classification"] == "restricted"
+    assert events[0].context["parameters"]["text"] == "[REDACTED_TEXT]"
+    assert "super-secret-token" not in str(events[0].context)
+
+
+def test_connector_execution_service_records_redacted_data_governance_for_allowed_message(tmp_path):
+    transport = _FakeSlackTransport()
+    service, _, _, ledger = _slack_execution_services(
+        tmp_path,
+        connector=SlackWebhookConnector(webhook_url="https://hooks.slack.test/services/abc", transport=transport),
+        data_governance_policy=DataGovernancePolicy(max_auto_egress=DataClassification.CONFIDENTIAL),
+    )
+    action = ConnectorAction(
+        connector_type="slack",
+        action="message.send",
+        parameters={"text": "Contact alice@example.com"},
+    )
+
+    execution = service.execute(action, credential_id="cred-slack")
+
+    assert execution.result.ok is True
+    assert transport.calls
+    events = ledger.query(event_type="connector")
+    assert events[0].context["data_governance"]["decision"] == "allow"
+    assert events[0].context["parameters"]["text"] == "[REDACTED_TEXT]"
+    assert events[0].context["data"]["text"] == "[REDACTED_TEXT]"
+    assert "alice@example.com" not in str(events[0].context)
 
 
 def test_connector_execution_service_fails_closed_when_connector_not_registered(tmp_path):
