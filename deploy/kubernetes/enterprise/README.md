@@ -11,9 +11,10 @@ This directory contains a minimal Kubernetes baseline for running HASHI in
 - Connector and deployment secrets are mounted as files, not embedded in the
   manifests.
 
-This is not a full HA release. Helm packaging, autoscaling, multi-replica
-coordination, managed ingress, network policy, and external database wiring are
-future hardening steps.
+This is not a full HA release. A Helm baseline is available at
+`deploy/helm/hashi-enterprise`; autoscaling, multi-replica coordination,
+managed ingress policy, cluster-validated network policy, and external database
+wiring are future hardening steps.
 
 ## Apply
 

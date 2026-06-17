@@ -1,0 +1,106 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/example/hashi-enterprise
+  tag: replace-me
+  pullPolicy: IfNotPresent
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: false
+
+service:
+  type: ClusterIP
+  port: 18800
+
+enterprise:
+  deploymentProfile: enterprise
+  instanceId: HASHI-ENTERPRISE-001
+  organizationId: ORG-001
+  bridgeHome: /data
+  workbenchPort: "18800"
+
+secrets:
+  adminToken: change-me
+  databaseUrl: sqlite:////data/state/enterprise.sqlite
+  connectorSecretName: hashi-enterprise-secrets
+
+persistence:
+  enabled: true
+  existingClaim: ""
+  storageClass: ""
+  size: 20Gi
+  accessModes:
+    - ReadWriteOnce
+
+connectorSecrets:
+  mountPath: /var/run/secrets/hashi/connectors
+  readOnly: true
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: hashi-enterprise.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+networkPolicy:
+  enabled: false
+  ingressNamespaceSelector: {}
+  egress:
+    allowDns: true
+    allowAll: false
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: "2"
+    memory: 2Gi
+
+livenessProbe:
+  path: /api/health
+  initialDelaySeconds: 30
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  path: /api/health
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
