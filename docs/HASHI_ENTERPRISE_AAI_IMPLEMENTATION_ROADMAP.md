@@ -92,7 +92,7 @@ Required:
 
 Deferred:
 
-- complete SAML/SCIM login flows;
+- complete SAML login and full SCIM 2.0 HTTP flows;
 - full ABAC policy simulation;
 - SIEM/OpenTelemetry;
 - cloud/object-store WORM adapters beyond local filesystem sink;
@@ -169,6 +169,7 @@ Deferred:
 - OIDC verified identity user upsert and session completion service;
 - OIDC token endpoint exchange and JWKS fetch/cache services;
 - configurable OIDC callback full login completion;
+- SCIM-style user provisioning primitive for create, update, deactivate, and reactivate lifecycle sync;
 - Workbench login endpoint;
 - audit events for login/logout/admin bootstrap;
 - personal profile maps current owner behavior to implicit top admin.
@@ -204,6 +205,7 @@ Deferred:
 - `ENT-022` Add OIDC verified identity session completion. Done for active-user reuse, new `individual_user` creation, optional default-project membership, session issuance, and random non-OIDC password material for OIDC-created users; live token exchange/JWKS fetch/callback wiring remains future work.
 - `ENT-023` Add OIDC HTTP token exchange and JWKS cache services. Done for injectable token endpoint calls, private token response handling, JWKS response validation, and TTL cache.
 - `ENT-024` Wire OIDC callback full login completion. Done behind `enterprise_oidc_complete_login`, preserving default prepared-mode compatibility while enabling token exchange, JWKS fetch/cache, ID token verification, claim mapping, user/session completion, and no-token audit/response redaction.
+- `ENT-025` Add SCIM provisioning primitive. Done for user create/update/deactivate/reactivate, standard `userName`/`emails` extraction, default project membership, session/API token revocation on deactivation, and deterministic result payloads; full SCIM HTTP endpoints, filters, groups, and IdP schema negotiation remain future work.
 
 **Acceptance:**
 
@@ -216,6 +218,7 @@ Deferred:
 - OIDC verified identities can be completed into enterprise users and sessions without granting admin roles by default.
 - OIDC token endpoint and JWKS calls can be tested with injected transports and do not expose token material in public payloads.
 - OIDC callback can complete full login when explicitly enabled, while prepared-mode remains available for deployments that have not configured live SSO.
+- SCIM-style provisioning can sync enterprise users without restoring old sessions or API tokens after deactivation.
 
 ### Enterprise Secret Providers
 

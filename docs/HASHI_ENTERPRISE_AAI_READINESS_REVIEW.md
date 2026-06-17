@@ -48,6 +48,7 @@ This is **not** the end state of the enterprise product. It is the first reviewa
 - OIDC verified identities can create or reuse active enterprise users, issue sessions, and assign only `individual_user` default project membership unless an administrator changes policy.
 - OIDC token endpoint and JWKS network calls are isolated behind injectable services; public token response payloads expose token presence metadata only, not token values.
 - OIDC callback supports an explicitly enabled full login path from authorization code to session, while preserving default prepared mode for deployments that have not enabled live SSO completion.
+- SCIM-style provisioning primitives can create, update, deactivate, and reactivate users, assign default project membership, and revoke sessions/API tokens on deactivation.
 
 ### Control Plane
 
@@ -130,7 +131,7 @@ The connector readiness tests cover:
 
 These are not blockers for Enterprise MVP review, but they are not complete:
 
-- complete SAML/SCIM login flows;
+- complete SAML login and full SCIM 2.0 HTTP flows, including groups, filters, pagination, and IdP schema negotiation;
 - full ABAC simulator and policy preview tooling;
 - cloud-specific object-store WORM client packages and deployment runbooks for S3/GCS/Azure immutable storage;
 - Vault AppRole/Kubernetes auth, lease renewal, and policy bootstrap;

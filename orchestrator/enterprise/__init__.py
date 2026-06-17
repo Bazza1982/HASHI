@@ -116,6 +116,7 @@ from orchestrator.enterprise.secret_refs import (
     SecretProvider,
     VaultSecretProvider,
 )
+from orchestrator.enterprise.scim import ScimProvisioningResult, ScimProvisioningService
 from orchestrator.enterprise.store import EnterpriseStore
 from orchestrator.enterprise.evidence import EvidenceBundle, EvidenceBundleRegistry
 from orchestrator.enterprise.escalation import (
@@ -232,6 +233,8 @@ __all__ = [
     "ProjectRouteDecision",
     "ResolvedSecret",
     "SecretProvider",
+    "ScimProvisioningResult",
+    "ScimProvisioningService",
     "VaultSecretProvider",
     "ApprovalRequest",
     "ArtifactVerificationResult",

@@ -270,6 +270,50 @@ class IdentityService:
             ).fetchall()
         return [_user_from_row(row) for row in rows]
 
+    def update_user_profile(
+        self,
+        *,
+        user_id: str,
+        display_name: str | None = None,
+        status: str | None = None,
+    ) -> User:
+        updates: list[str] = []
+        params: list[str] = []
+        if display_name is not None:
+            updates.append("display_name = ?")
+            params.append(_require_text(display_name, "display_name"))
+        if status is not None:
+            updates.append("status = ?")
+            params.append(_normalize_user_status(status))
+        if not updates:
+            user = self.get_user(user_id)
+            if user is None:
+                raise ValueError(f"user not found: {user_id!r}")
+            return user
+        params.append(_require_id(user_id, "user_id"))
+        with self.store.connect() as con:
+            cur = con.execute(f"UPDATE users SET {', '.join(updates)} WHERE id = ?", tuple(params))
+            if cur.rowcount == 0:
+                raise ValueError(f"user not found: {user_id!r}")
+        return self.get_user(user_id)
+
+    def deactivate_user(self, *, user_id: str) -> User:
+        user_id = _require_id(user_id, "user_id")
+        now = _utc_now_iso()
+        with self.store.connect() as con:
+            cur = con.execute("UPDATE users SET status = 'disabled' WHERE id = ?", (user_id,))
+            if cur.rowcount == 0:
+                raise ValueError(f"user not found: {user_id!r}")
+            con.execute(
+                "UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+                (now, user_id),
+            )
+            con.execute(
+                "UPDATE api_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+                (now, user_id),
+            )
+        return self.get_user(user_id)
+
     def authenticate_user(self, *, org_id: str, email: str, password: str) -> User | None:
         with self.store.connect() as con:
             row = con.execute(
@@ -575,6 +619,13 @@ def _normalize_email(value: str) -> str:
     if "@" not in email:
         raise ValueError("email must contain @")
     return email
+
+
+def _normalize_user_status(value: str) -> str:
+    status = _require_text(value, "status").lower()
+    if status not in {"active", "disabled"}:
+        raise ValueError(f"unsupported user status: {value!r}")
+    return status
 
 
 def _organization_from_row(row) -> Organization:
