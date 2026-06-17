@@ -117,6 +117,35 @@ async def test_enterprise_login_rejects_bad_credentials(tmp_path):
     assert "wrong" not in json.dumps(event)
 
 
+@pytest.mark.asyncio
+async def test_auth_providers_exposes_local_and_oidc_metadata_without_secret(tmp_path):
+    server = _server(tmp_path)
+    server.global_config.enterprise_auth_providers = [
+        {
+            "type": "oidc",
+            "id": "entra",
+            "display_name": "Microsoft Entra ID",
+            "enabled": True,
+            "issuer": "https://login.microsoftonline.com/tenant/v2.0",
+            "client_id": "hashi-client",
+            "client_secret": "do-not-return",
+            "authorization_endpoint": "https://login.microsoftonline.com/tenant/oauth2/v2.0/authorize",
+            "token_endpoint": "https://login.microsoftonline.com/tenant/oauth2/v2.0/token",
+            "jwks_uri": "https://login.microsoftonline.com/tenant/discovery/v2.0/keys",
+        }
+    ]
+
+    response = await server.handle_auth_providers(_FakeRequest())
+    payload = json.loads(response.text)
+
+    assert response.status == 200
+    assert [provider["id"] for provider in payload["providers"]] == ["local", "entra"]
+    assert payload["providers"][1]["ready"] is True
+    assert payload["providers"][1]["client_id"] == "hashi-client"
+    assert "client_secret" not in json.dumps(payload)
+    assert "do-not-return" not in json.dumps(payload)
+
+
 def test_enterprise_admin_auth_requires_admin_project_role(tmp_path):
     server = _server(tmp_path)
     admin = server.identity_service.bootstrap_org_admin(

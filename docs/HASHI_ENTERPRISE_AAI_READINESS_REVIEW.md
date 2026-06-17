@@ -19,6 +19,7 @@ HASHI Enterprise AAI has reached an **MVP review-ready** state for the governed 
 
 - one codebase with `personal`, `team`, and `enterprise` profiles;
 - enterprise identity, sessions, roles, projects, memberships, service accounts, and API tokens;
+- OIDC provider metadata skeleton for enterprise SSO readiness, with secret redaction and fail-closed readiness checks;
 - default-disabled governed channels and channel gates;
 - central policy decisions for commands, channels, backends, tools, execution, and connectors;
 - unified audit ledger and adapters for existing HASHI audit streams;
@@ -40,6 +41,7 @@ This is **not** the end state of the enterprise product. It is the first reviewa
 - Identity and role primitives distinguish `individual_user` from personal owner/admin mode.
 - Admin APIs and Workbench surfaces use governed session/admin checks.
 - Scoped API tokens can be created, listed as metadata without secret material, and revoked through admin-gated APIs with audit events.
+- Workbench can discover configured local/OIDC login providers without exposing client secrets.
 
 ### Control Plane
 
@@ -107,7 +109,7 @@ The connector readiness tests cover:
 
 These are not blockers for Enterprise MVP review, but they are not complete:
 
-- SAML/OIDC/SCIM;
+- complete SAML/OIDC/SCIM authorization-code login flows;
 - full ABAC simulator and policy preview tooling;
 - WORM audit storage or external ledger anchoring;
 - SIEM/OpenTelemetry export;

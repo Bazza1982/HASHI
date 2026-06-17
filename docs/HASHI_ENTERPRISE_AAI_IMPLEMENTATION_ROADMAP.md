@@ -92,7 +92,7 @@ Required:
 
 Deferred:
 
-- SAML/OIDC/SCIM;
+- complete SAML/OIDC/SCIM login flows;
 - full ABAC policy simulation;
 - SIEM/OpenTelemetry;
 - WORM storage;
@@ -160,6 +160,7 @@ Deferred:
 - users;
 - role enum;
 - local password/session auth;
+- enterprise auth provider metadata contract for OIDC readiness;
 - Workbench login endpoint;
 - audit events for login/logout/admin bootstrap;
 - personal profile maps current owner behavior to implicit top admin.
@@ -167,6 +168,7 @@ Deferred:
 **Primary code areas:**
 
 - `orchestrator/enterprise/identity.py`;
+- `orchestrator/enterprise/auth_providers.py`;
 - `orchestrator/enterprise/auth_session.py`;
 - `orchestrator/enterprise/store.py`;
 - `orchestrator/workbench_api.py`;
@@ -180,10 +182,12 @@ Deferred:
 - `ENT-013` Add password hashing and session tokens.
 - `ENT-014` Add Workbench login/logout endpoints.
 - `ENT-015` Emit audit events for auth and bootstrap.
+- `ENT-016` Add OIDC provider metadata skeleton. Done for config parsing, provider readiness checks, public metadata, and secret redaction; full authorization-code flow remains future work.
 
 **Acceptance:**
 
 - `org_admin` can log in.
+- Workbench can discover configured login providers without exposing provider secrets.
 - `individual_user` exists as a role but cannot access admin APIs.
 - Personal profile does not require login migration.
 
