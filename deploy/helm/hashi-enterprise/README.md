@@ -66,6 +66,12 @@ cycle.
 If your cluster uses External Secrets Operator, adapt and apply:
 
 ```bash
+# Choose one SecretStore template and adjust its provider-specific fields.
+kubectl apply -f deploy/helm/hashi-enterprise/examples/secretstore-aws-secrets-manager.example.yaml
+# kubectl apply -f deploy/helm/hashi-enterprise/examples/secretstore-gcp-secret-manager.example.yaml
+# kubectl apply -f deploy/helm/hashi-enterprise/examples/secretstore-azure-key-vault.example.yaml
+# kubectl apply -f deploy/helm/hashi-enterprise/examples/secretstore-vault.example.yaml
+
 kubectl apply -f deploy/helm/hashi-enterprise/examples/audit-export-secret.external-secrets.yaml
 ```
 

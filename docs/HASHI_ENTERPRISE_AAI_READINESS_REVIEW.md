@@ -82,6 +82,7 @@ This is **not** the end state of the enterprise product. It is the first reviewa
 - The live audit export runbook and preset env example cover generic NDJSON, Splunk HEC event envelopes, Elasticsearch `_bulk`, Elastic/Logstash HTTP input, and OpenTelemetry Collector HTTP logs deployment paths.
 - The Helm audit export CronJob can read endpoint and authorization header values through Kubernetes `secretKeyRef`, avoiding long-lived tokens in chart values.
 - Helm examples include a plain Kubernetes Secret and an External Secrets Operator `ExternalSecret` for audit export endpoint/header delivery.
+- External Secrets Operator examples include AWS Secrets Manager, GCP Secret Manager, Azure Key Vault, and HashiCorp Vault `ClusterSecretStore` templates.
 - Sensitive connector parameters are redacted in connector audit records.
 
 ### Work And Evidence
@@ -153,7 +154,7 @@ These are not blockers for Enterprise MVP review, but they are not complete:
 - full ABAC simulator and policy preview tooling;
 - cloud-specific object-store WORM client packages and deployment runbooks for S3/GCS/Azure immutable storage;
 - Vault AppRole/Kubernetes auth, lease renewal, and policy bootstrap;
-- live SIEM/OTLP exporter hardening beyond the CLI runner, baseline Compose/Kubernetes/Helm scheduling, generic vendor preset runbook, Kubernetes `secretKeyRef` wiring, and a generic ExternalSecret example, including managed long-running daemon mode, deeper vendor transforms, dashboards, alerts, and cloud-specific SecretStore manifests;
+- live SIEM/OTLP exporter hardening beyond the CLI runner, baseline Compose/Kubernetes/Helm scheduling, generic vendor preset runbook, Kubernetes `secretKeyRef` wiring, and External Secrets examples, including managed long-running daemon mode, deeper vendor transforms, dashboards, alerts, and production validation for each cloud identity model;
 - Kubernetes HA deployment beyond the baseline manifests/chart, including external database wiring, validated production ingress/network policies, autoscaling runbooks, and multi-replica coordination;
 - Slack OAuth/Bot API, channel discovery, and user mapping;
 - Microsoft Teams and Feishu connectors;

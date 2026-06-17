@@ -166,10 +166,25 @@ For production, avoid putting long-lived tokens in shell history or Helm release
 External Secrets Operator example:
 
 ```bash
+# Choose one SecretStore template and adapt it to your cloud identity model.
+kubectl apply -f deploy/helm/hashi-enterprise/examples/secretstore-aws-secrets-manager.example.yaml
+# kubectl apply -f deploy/helm/hashi-enterprise/examples/secretstore-gcp-secret-manager.example.yaml
+# kubectl apply -f deploy/helm/hashi-enterprise/examples/secretstore-azure-key-vault.example.yaml
+# kubectl apply -f deploy/helm/hashi-enterprise/examples/secretstore-vault.example.yaml
+
 kubectl apply -f deploy/helm/hashi-enterprise/examples/audit-export-secret.external-secrets.yaml
 ```
 
 The ExternalSecret manifest is intentionally an example, not part of the chart, because each enterprise cluster has its own `SecretStore` or `ClusterSecretStore` and cloud-provider mapping.
+
+Available `ClusterSecretStore` templates:
+
+| Provider | Example |
+| --- | --- |
+| AWS Secrets Manager | `deploy/helm/hashi-enterprise/examples/secretstore-aws-secrets-manager.example.yaml` |
+| GCP Secret Manager | `deploy/helm/hashi-enterprise/examples/secretstore-gcp-secret-manager.example.yaml` |
+| Azure Key Vault | `deploy/helm/hashi-enterprise/examples/secretstore-azure-key-vault.example.yaml` |
+| HashiCorp Vault | `deploy/helm/hashi-enterprise/examples/secretstore-vault.example.yaml` |
 
 ---
 
@@ -184,6 +199,7 @@ The ExternalSecret manifest is intentionally an example, not part of the chart, 
 - [ ] No raw connector secrets, SAML assertions, OIDC tokens, or SCIM tokens appear in exported events.
 - [ ] Helm deployments use `secretKeyRef` for endpoint/header values instead of storing tokens in chart values.
 - [ ] If using External Secrets Operator, `hashi-audit-export` is reconciled before enabling the CronJob.
+- [ ] If using a cloud/Vault SecretStore example, provider identity and least-privilege secret access have been reviewed by the platform/security team.
 
 ---
 
@@ -191,5 +207,5 @@ The ExternalSecret manifest is intentionally an example, not part of the chart, 
 
 - Managed long-running daemon mode.
 - Deeper vendor transforms for multi-index Elasticsearch routing and strict Splunk deployments that require one HEC event per request.
-- Cloud-provider-specific `SecretStore` manifests for AWS Secrets Manager, GCP Secret Manager, Azure Key Vault, and Vault.
+- Provider-specific dashboards, alert packs, and managed daemon deployment patterns.
 - SIEM-specific dashboards, alerts, and field mappings beyond the baseline ECS-style event shape.

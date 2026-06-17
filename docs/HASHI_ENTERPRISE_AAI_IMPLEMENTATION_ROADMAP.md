@@ -94,7 +94,7 @@ Deferred:
 
 - IdP-specific SAML/SCIM setup guides beyond the generic deployment runbook, and SCIM 2.0 compatibility beyond baseline Users, read-only Groups, discovery, and bounded Bulk surfaces;
 - full ABAC policy simulation;
-- live SIEM/OpenTelemetry exporter daemon mode, dashboards, deeper transforms, and cloud-specific SecretStore manifests beyond the CLI checkpoint/retry runner, baseline Compose/Kubernetes/Helm scheduling, generic preset runbook, Kubernetes `secretKeyRef` support, and generic ExternalSecret example;
+- live SIEM/OpenTelemetry exporter daemon mode, dashboards, deeper transforms, and production validation for each cloud identity model beyond the CLI checkpoint/retry runner, baseline Compose/Kubernetes/Helm scheduling, generic preset runbook, Kubernetes `secretKeyRef` support, and cloud/Vault SecretStore examples;
 - cloud/object-store WORM adapters beyond local filesystem sink;
 - Vault hardening beyond token-auth read provider, such as AppRole/Kubernetes auth and lease renewal;
 - Helm/HA hardening beyond the baseline chart;
@@ -527,6 +527,7 @@ Implemented checkpoints:
   - OpenTelemetry Collector HTTP logs preset;
   - Helm CronJob endpoint/header `secretKeyRef` support;
   - Helm examples for plain Kubernetes Secret and External Secrets Operator `ExternalSecret`;
+  - External Secrets Operator `ClusterSecretStore` examples for AWS Secrets Manager, GCP Secret Manager, Azure Key Vault, and HashiCorp Vault;
 - slash command audit JSONL adapter:
   - imports legacy `slash_command_audit.jsonl` records as `slash_command` ledger events;
   - preserves legacy timestamp, actor, command, status, channel, handler, duration, error, blocked reason, and side effects;
@@ -564,7 +565,7 @@ Residual P4 limitations:
 - auditor read-only role semantics are not yet separated from broader admin access;
 - generic shell/file tool execution now has a canonical JSONL event source and ingest adapter;
 - generic object-store WORM sink is present, but cloud-specific SDK wiring and deployment runbooks remain future work;
-- retention, long-running daemon orchestration, deeper vendor transforms/dashboards, and cloud-specific SecretStore manifests remain future P4 work.
+- retention, long-running daemon orchestration, deeper vendor transforms/dashboards, and production validation for each cloud identity model remain future P4 work.
 
 **Scope:**
 
@@ -607,6 +608,7 @@ Residual P4 limitations:
 - `ENT-069e` Add live audit export operator presets. Done for generic NDJSON, Splunk HEC event-envelope, Elasticsearch `_bulk`, Elastic/Logstash HTTP input, and OpenTelemetry Collector HTTP logs preset examples plus an operator runbook with compatibility warnings and acceptance checks; managed daemon mode, deeper transforms, dashboards, and secret-manager-native Helm wiring remain future work.
 - `ENT-069f` Add Helm secret refs for audit export. Done for endpoint/header `secretKeyRef` values in the audit export CronJob, example secret keys, and operator documentation; External Secrets Operator and cloud-provider secret-store examples remain future work.
 - `ENT-069g` Add audit export secret delivery examples. Done for plain Kubernetes Secret and generic External Secrets Operator `ExternalSecret` examples for audit export endpoint/header delivery; cloud-specific `SecretStore` manifests remain future work.
+- `ENT-069h` Add cloud SecretStore examples. Done for External Secrets Operator `ClusterSecretStore` examples covering AWS Secrets Manager, GCP Secret Manager, Azure Key Vault, and HashiCorp Vault; production identity validation remains future work.
 
 **Acceptance:**
 
@@ -622,6 +624,7 @@ Residual P4 limitations:
 - Operators have preset guidance and exporter formats for generic NDJSON, Splunk HEC, Elasticsearch `_bulk`, Elastic/Logstash, and OTLP collectors, including explicit warnings where collector behavior must be validated.
 - Helm operators can keep audit export endpoint/header values in Kubernetes Secrets and reference them through `auditExport.endpointSecretRef` and `auditExport.headerSecretRef`.
 - Operators have example manifests for both direct Kubernetes Secret delivery and External Secrets Operator reconciliation of the same audit export secret keys.
+- Operators have cloud/Vault SecretStore templates to adapt for AWS, GCP, Azure, and Vault-based secret delivery.
 
 ---
 
