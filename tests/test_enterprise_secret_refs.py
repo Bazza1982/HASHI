@@ -6,6 +6,7 @@ from orchestrator.enterprise import (
     ConnectorSecretResolver,
     FileSecretProvider,
     KubernetesMountedSecretProvider,
+    VaultSecretProvider,
 )
 
 
@@ -57,3 +58,44 @@ def test_unconfigured_vault_and_k8s_fail_closed():
         resolver.resolve("vault://github/app")
     with pytest.raises(ValueError, match="kubernetes secret resolver is not configured"):
         resolver.resolve("k8s://prod/github/token")
+
+
+def test_vault_secret_provider_reads_kv_v2_field_without_leaking_token():
+    calls = []
+
+    def client(path, token):
+        calls.append((path, token))
+        return {"data": {"data": {"token": "ghp-vault"}}}
+
+    provider = VaultSecretProvider(address="https://vault.example.com", token="vault-token", client=client)
+    resolver = ConnectorSecretResolver(providers=[provider])
+
+    secret = resolver.resolve("vault://secret/data/github/app#token")
+
+    assert secret.value == "ghp-vault"
+    assert secret.source == "vault"
+    assert calls == [("secret/data/github/app", "vault-token")]
+    assert "vault-token" not in repr(secret.redacted())
+
+
+def test_vault_secret_provider_defaults_to_value_field_for_kv_v1():
+    provider = VaultSecretProvider(
+        address="https://vault.example.com",
+        token="vault-token",
+        client=lambda _path, _token: {"data": {"value": "plain-secret"}},
+    )
+    resolver = ConnectorSecretResolver(providers=[provider])
+
+    assert resolver.resolve("vault://secret/github").value == "plain-secret"
+
+
+def test_vault_secret_provider_rejects_missing_field_without_secret_value():
+    provider = VaultSecretProvider(
+        address="https://vault.example.com",
+        token="vault-token",
+        client=lambda _path, _token: {"data": {"data": {"other": "secret"}}},
+    )
+    resolver = ConnectorSecretResolver(providers=[provider])
+
+    with pytest.raises(ValueError, match="field is not set"):
+        resolver.resolve("vault://secret/data/github/app#token")

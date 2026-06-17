@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Callable, Mapping
+from urllib import request as urllib_request
 
 
 @dataclass(frozen=True)
@@ -99,6 +101,50 @@ class KubernetesMountedSecretProvider(SecretProvider):
         return ResolvedSecret(ref=ref, value=value, source="k8s")
 
 
+VaultClient = Callable[[str, str], dict[str, Any]]
+
+
+class VaultSecretProvider(SecretProvider):
+    schemes = ("vault",)
+
+    def __init__(
+        self,
+        *,
+        address: str,
+        token: str,
+        client: VaultClient | None = None,
+        timeout: float = 10.0,
+    ):
+        self.address = str(address or "").strip().rstrip("/")
+        self.token = str(token or "").strip()
+        self.client = client
+        self.timeout = float(timeout)
+        if not self.address:
+            raise ValueError("vault address is required")
+        if not self.token:
+            raise ValueError("vault token is required")
+
+    def resolve(self, ref: str) -> ResolvedSecret:
+        path, field = _split_vault_ref(ref.removeprefix("vault://"))
+        payload = (self.client or self._default_client)(path, self.token)
+        value = _extract_vault_value(payload, field)
+        if value == "":
+            raise ValueError(f"vault secret field is empty: {path}#{field}")
+        return ResolvedSecret(ref=ref, value=value, source="vault")
+
+    def _default_client(self, path: str, token: str) -> dict[str, Any]:
+        url = f"{self.address}/v1/{path}"
+        req = urllib_request.Request(url, headers={"X-Vault-Token": token}, method="GET")
+        with urllib_request.urlopen(req, timeout=self.timeout) as response:
+            try:
+                payload = json.loads(response.read().decode("utf-8"))
+            except Exception as exc:
+                raise ValueError("vault response is invalid JSON") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("vault response must be a JSON object")
+        return payload
+
+
 class ConnectorSecretResolver:
     def __init__(
         self,
@@ -134,3 +180,24 @@ def _require_ref_key(value: str, label: str) -> str:
     if not normalized:
         raise ValueError(f"{label} reference is required")
     return normalized
+
+
+def _split_vault_ref(value: str) -> tuple[str, str]:
+    raw = _require_ref_key(value, "vault secret")
+    if "#" in raw:
+        path, field = raw.rsplit("#", 1)
+    else:
+        path, field = raw, "value"
+    return _require_ref_key(path, "vault path"), _require_ref_key(field, "vault field")
+
+
+def _extract_vault_value(payload: dict[str, Any], field: str) -> str:
+    data = payload.get("data")
+    if isinstance(data, dict) and isinstance(data.get("data"), dict):
+        data = data["data"]
+    if not isinstance(data, dict):
+        raise ValueError("vault response missing data object")
+    value = data.get(field)
+    if value is None:
+        raise ValueError(f"vault secret field is not set: {field}")
+    return str(value)

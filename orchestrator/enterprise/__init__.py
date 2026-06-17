@@ -100,6 +100,7 @@ from orchestrator.enterprise.secret_refs import (
     KubernetesMountedSecretProvider,
     ResolvedSecret,
     SecretProvider,
+    VaultSecretProvider,
 )
 from orchestrator.enterprise.store import EnterpriseStore
 from orchestrator.enterprise.evidence import EvidenceBundle, EvidenceBundleRegistry
@@ -209,6 +210,7 @@ __all__ = [
     "ProjectRouteDecision",
     "ResolvedSecret",
     "SecretProvider",
+    "VaultSecretProvider",
     "ApprovalRequest",
     "ArtifactVerificationResult",
     "TaskRegistry",
