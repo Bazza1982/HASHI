@@ -10,6 +10,7 @@ Related documents:
 - [HASHI_ENTERPRISE_AAI_PRD.md](HASHI_ENTERPRISE_AAI_PRD.md)
 - [HASHI_ENTERPRISE_AAI_VALUE_PROPOSITION.md](HASHI_ENTERPRISE_AAI_VALUE_PROPOSITION.md)
 - [HASHI_ENTERPRISE_PROFILE_ADR.md](HASHI_ENTERPRISE_PROFILE_ADR.md)
+- [HASHI_ENTERPRISE_SSO_SCIM_DEPLOYMENT_RUNBOOK.md](HASHI_ENTERPRISE_SSO_SCIM_DEPLOYMENT_RUNBOOK.md)
 
 ---
 
@@ -55,6 +56,7 @@ This is **not** the end state of the enterprise product. It is the first reviewa
 - Read-only SCIM 2.0 Groups routes can expose HASHI projects as groups with active project members through admin-gated and IdP-facing `/scim/v2/Groups` surfaces protected by scoped `scim:read` service tokens.
 - SCIM 2.0 discovery routes expose ServiceProviderConfig, ResourceTypes, and Schemas metadata for Users and Groups through admin-gated and IdP-facing surfaces.
 - SCIM 2.0 Bulk routes support bounded Users create/get/patch batches with `failOnErrors`, org boundary checks, scoped `scim:write` token gates, and write-path audit events.
+- The SSO/SCIM deployment runbook documents `xmlsec1` prerequisites, SAML fail-closed readiness checks, SCIM service token scopes, endpoint coverage, Bulk limits, acceptance checks, and rollback steps for current deployments.
 
 ### Control Plane
 
@@ -100,6 +102,7 @@ This is **not** the end state of the enterprise product. It is the first reviewa
 - Kubernetes baseline manifests exist for namespace, config map, example secret, PVC, single-replica deployment, service, and `/api/health` liveness/readiness probes.
 - Kubernetes baseline mounts `/data` for state/workspaces/logs/backups and mounts connector secrets as read-only files for provider-based secret resolution.
 - Helm baseline chart packages the same enterprise deployment contract with configurable image, service, resources, probes, persistence, connector secret mount, optional ingress, optional NetworkPolicy, and optional HPA skeleton.
+- The SSO/SCIM deployment runbook gives operators a concrete path for wiring current SAML XML Signature verification and SCIM 2.0 compatibility surfaces into an enterprise IdP.
 - The Kubernetes and Helm baselines are deployment starting points, not a full HA release.
 
 ---
@@ -140,7 +143,7 @@ The connector readiness tests cover:
 
 These are not blockers for Enterprise MVP review, but they are not complete:
 
-- SAML IdP compatibility/deployment runbooks beyond the `xmlsec1` verification wiring, plus SCIM 2.0 compatibility beyond baseline Users/read-only Groups/discovery/Bulk surfaces, including group mutation, advanced filters, schema extension negotiation, and non-User bulk operations;
+- IdP-specific SAML/SCIM setup guides for Okta, Entra ID, OneLogin, and Ping beyond the generic SSO/SCIM deployment runbook, plus SCIM 2.0 compatibility beyond baseline Users/read-only Groups/discovery/Bulk surfaces, including group mutation, advanced filters, schema extension negotiation, and non-User bulk operations;
 - full ABAC simulator and policy preview tooling;
 - cloud-specific object-store WORM client packages and deployment runbooks for S3/GCS/Azure immutable storage;
 - Vault AppRole/Kubernetes auth, lease renewal, and policy bootstrap;

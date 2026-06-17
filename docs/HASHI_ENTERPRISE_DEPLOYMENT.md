@@ -7,6 +7,7 @@ This is the first deployable skeleton for the Enterprise AAI profile. It is inte
 - `Dockerfile.enterprise` builds the Python runtime image.
 - `deploy/docker-compose.enterprise.yml` runs the enterprise Workbench/API service.
 - `deploy/enterprise.env.example` documents the minimum environment variables.
+- `docs/HASHI_ENTERPRISE_SSO_SCIM_DEPLOYMENT_RUNBOOK.md` documents SAML `xmlsec1` verification and SCIM 2.0 operator setup.
 
 ## Local Compose Trial
 
@@ -31,9 +32,9 @@ curl http://127.0.0.1:18800/api/health
 ## Current Limitations
 
 - This skeleton does not yet perform first-run admin bootstrap.
-- It does not yet wire secrets from Vault/Kubernetes secrets.
 - It does not yet include a migration entrypoint.
 - It is not an HA/Kubernetes deployment.
+- SSO/SCIM can be configured with the deployment runbook, but IdP-specific setup guides and HA/external-database validation are still future work.
 
 ## Operator Backup
 
