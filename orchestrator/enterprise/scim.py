@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import secrets
 from dataclasses import dataclass
+import re
 from typing import Any
 
 from orchestrator.enterprise.identity import EnterpriseRole, IdentityService, User
+
+
+SCIM_USER_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:User"
+SCIM_LIST_RESPONSE_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:ListResponse"
+SCIM_PATCH_OP_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:PatchOp"
 
 
 @dataclass(frozen=True)
@@ -85,6 +91,151 @@ class ScimProvisioningService:
             raise ValueError(f"SCIM user not found: {user_name!r}")
         user = self.identity.deactivate_user(user_id=user.id)
         return ScimProvisioningResult(user=user, created=False, action="deactivated")
+
+    def list_user_resources(
+        self,
+        *,
+        org_id: str,
+        filter_expression: str | None = None,
+        start_index: int = 1,
+        count: int = 100,
+    ) -> dict[str, Any]:
+        users = self.identity.list_users(org_id=org_id)
+        filtered = filter_scim_users(users, filter_expression)
+        return scim_list_response(
+            filtered,
+            start_index=start_index,
+            count=count,
+        )
+
+    def get_user_resource(self, *, user_id: str) -> dict[str, Any]:
+        user = self.identity.get_user(user_id)
+        if user is None:
+            raise ValueError(f"SCIM user not found: {user_id!r}")
+        return scim_user_resource(user)
+
+    def patch_user(
+        self,
+        *,
+        user_id: str,
+        payload: dict[str, Any],
+    ) -> ScimProvisioningResult:
+        user = self.identity.get_user(user_id)
+        if user is None:
+            raise ValueError(f"SCIM user not found: {user_id!r}")
+        updates = extract_patch_updates(payload)
+        action = "updated"
+        if updates.get("active") is False:
+            user = self.identity.deactivate_user(user_id=user.id)
+            return ScimProvisioningResult(user=user, created=False, action="deactivated")
+        display_name = updates.get("displayName")
+        status = "active" if updates.get("active") is True else None
+        user = self.identity.update_user_profile(
+            user_id=user.id,
+            display_name=display_name if isinstance(display_name, str) else None,
+            status=status,
+        )
+        return ScimProvisioningResult(user=user, created=False, action=action)
+
+
+def scim_user_resource(user: User) -> dict[str, Any]:
+    return {
+        "schemas": [SCIM_USER_SCHEMA],
+        "id": user.id,
+        "userName": user.email,
+        "displayName": user.display_name,
+        "name": {"formatted": user.display_name},
+        "active": user.status == "active",
+        "emails": [{"value": user.email, "primary": True}],
+        "meta": {
+            "resourceType": "User",
+            "created": user.created_at,
+            "location": f"/scim/v2/Users/{user.id}",
+        },
+    }
+
+
+def scim_list_response(
+    users: list[User],
+    *,
+    start_index: int = 1,
+    count: int = 100,
+) -> dict[str, Any]:
+    start = max(1, int(start_index or 1))
+    page_size = max(0, int(count if count is not None else 100))
+    offset = start - 1
+    resources = users[offset : offset + page_size] if page_size else []
+    return {
+        "schemas": [SCIM_LIST_RESPONSE_SCHEMA],
+        "totalResults": len(users),
+        "startIndex": start,
+        "itemsPerPage": len(resources),
+        "Resources": [scim_user_resource(user) for user in resources],
+    }
+
+
+def filter_scim_users(users: list[User], filter_expression: str | None) -> list[User]:
+    expression = str(filter_expression or "").strip()
+    if not expression:
+        return users
+    match = re.fullmatch(r'(?i)\s*(userName|emails\.value)\s+eq\s+"([^"]+)"\s*', expression)
+    if match:
+        expected = match.group(2).strip().lower()
+        return [user for user in users if user.email.lower() == expected]
+    match = re.fullmatch(r"(?i)\s*active\s+eq\s+(true|false)\s*", expression)
+    if match:
+        expected_active = match.group(1).lower() == "true"
+        return [user for user in users if (user.status == "active") is expected_active]
+    raise ValueError(f"unsupported SCIM filter: {expression!r}")
+
+
+def extract_patch_updates(payload: dict[str, Any]) -> dict[str, Any]:
+    operations = payload.get("Operations")
+    if not isinstance(operations, list) or not operations:
+        raise ValueError("SCIM PATCH Operations are required")
+    updates: dict[str, Any] = {}
+    for operation in operations:
+        if not isinstance(operation, dict):
+            raise ValueError("SCIM PATCH operation must be an object")
+        op = str(operation.get("op") or "").strip().lower()
+        if op != "replace":
+            raise ValueError(f"unsupported SCIM PATCH op: {op!r}")
+        path = str(operation.get("path") or "").strip()
+        value = operation.get("value")
+        if path:
+            _apply_patch_value(updates, path, value)
+        elif isinstance(value, dict):
+            for key, nested_value in value.items():
+                _apply_patch_value(updates, str(key), nested_value)
+        else:
+            raise ValueError("SCIM PATCH replace requires path or object value")
+    return updates
+
+
+def _apply_patch_value(updates: dict[str, Any], path: str, value: Any) -> None:
+    normalized = path.strip()
+    key = normalized.lower()
+    if key == "active":
+        updates["active"] = _parse_bool(value, field="active")
+        return
+    if key in {"displayname", "name.formatted"}:
+        text = _optional_text(value)
+        if text:
+            updates["displayName"] = text
+        return
+    raise ValueError(f"unsupported SCIM PATCH path: {path!r}")
+
+
+def _parse_bool(value: Any, *, field: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes"}:
+            return True
+        if normalized in {"false", "0", "no"}:
+            return False
+    raise ValueError(f"SCIM {field} must be a boolean")
 
 
 def _extract_email(payload: dict[str, Any]) -> str:

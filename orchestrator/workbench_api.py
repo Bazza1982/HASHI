@@ -45,7 +45,7 @@ from orchestrator.enterprise.policy import PolicyEvaluator
 from orchestrator.enterprise.policy_templates import install_default_connector_policy
 from orchestrator.enterprise.routing import agent_project_ids
 from orchestrator.enterprise.secret_refs import ConnectorSecretResolver
-from orchestrator.enterprise.scim import ScimProvisioningService
+from orchestrator.enterprise.scim import ScimProvisioningService, scim_user_resource
 from orchestrator.pathing import resolve_path_value
 from orchestrator.transfer_store import TransferStore
 
@@ -147,6 +147,10 @@ class WorkbenchApiServer:
         self.app.router.add_post("/api/enterprise/users", self.handle_enterprise_users_create)
         self.app.router.add_post("/api/enterprise/scim/users", self.handle_enterprise_scim_users_upsert)
         self.app.router.add_post("/api/enterprise/scim/users/deactivate", self.handle_enterprise_scim_users_deactivate)
+        self.app.router.add_get("/api/enterprise/scim/v2/Users", self.handle_enterprise_scim_v2_users_list)
+        self.app.router.add_post("/api/enterprise/scim/v2/Users", self.handle_enterprise_scim_v2_users_create)
+        self.app.router.add_get("/api/enterprise/scim/v2/Users/{user_id}", self.handle_enterprise_scim_v2_users_get)
+        self.app.router.add_patch("/api/enterprise/scim/v2/Users/{user_id}", self.handle_enterprise_scim_v2_users_patch)
         self.app.router.add_get("/api/enterprise/api-tokens", self.handle_enterprise_api_tokens)
         self.app.router.add_post("/api/enterprise/api-tokens", self.handle_enterprise_api_tokens_create)
         self.app.router.add_post(
@@ -1145,6 +1149,102 @@ class WorkbenchApiServer:
             context={"target_user_id": result.user.id, "org_id": org_id},
         )
         return web.json_response({"ok": True, "scim": result.to_dict(), "user": self._enterprise_user_payload(result.user)})
+
+    async def handle_enterprise_scim_v2_users_list(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        query = getattr(request, "query", {}) or {}
+        org_id = str(query.get("org_id") or getattr(self.global_config, "organization_id", "") or "").strip()
+        filter_expression = str(query.get("filter") or "").strip() or None
+        try:
+            start_index = max(1, int(str(query.get("startIndex") or "1")))
+            count = max(0, min(500, int(str(query.get("count") or "100"))))
+            payload = ScimProvisioningService(self.identity_service).list_user_resources(
+                org_id=org_id,
+                filter_expression=filter_expression,
+                start_index=start_index,
+                count=count,
+            )
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        return web.json_response(payload)
+
+    async def handle_enterprise_scim_v2_users_create(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        actor = self._enterprise_user_from_request(request)
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
+        org_id = str(payload.get("org_id") or getattr(self.global_config, "organization_id", "") or "").strip()
+        try:
+            result = ScimProvisioningService(self.identity_service).upsert_user(org_id=org_id, payload=payload)
+        except Exception as exc:
+            self._append_enterprise_audit(
+                event_type="admin_api",
+                action="scim_v2_user_create",
+                status="failed",
+                actor_id=actor.id if actor else None,
+                context={"error": str(exc), "org_id": org_id},
+            )
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        self._append_enterprise_audit(
+            event_type="admin_api",
+            action="scim_v2_user_create",
+            status="success",
+            actor_id=actor.id if actor else None,
+            context={
+                "target_user_id": result.user.id,
+                "org_id": org_id,
+                "created": result.created,
+                "provisioning_action": result.action,
+            },
+        )
+        return web.json_response(scim_user_resource(result.user), status=201 if result.created else 200)
+
+    async def handle_enterprise_scim_v2_users_get(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        user_id = str(getattr(request, "match_info", {}).get("user_id") or "").strip()
+        try:
+            payload = ScimProvisioningService(self.identity_service).get_user_resource(user_id=user_id)
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=404)
+        return web.json_response(payload)
+
+    async def handle_enterprise_scim_v2_users_patch(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        actor = self._enterprise_user_from_request(request)
+        user_id = str(getattr(request, "match_info", {}).get("user_id") or "").strip()
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
+        try:
+            result = ScimProvisioningService(self.identity_service).patch_user(user_id=user_id, payload=payload)
+        except Exception as exc:
+            self._append_enterprise_audit(
+                event_type="admin_api",
+                action="scim_v2_user_patch",
+                status="failed",
+                actor_id=actor.id if actor else None,
+                context={"error": str(exc), "target_user_id": user_id},
+            )
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        self._append_enterprise_audit(
+            event_type="admin_api",
+            action="scim_v2_user_patch",
+            status="success",
+            actor_id=actor.id if actor else None,
+            context={"target_user_id": result.user.id, "provisioning_action": result.action},
+        )
+        return web.json_response(scim_user_resource(result.user))
 
     async def handle_enterprise_api_tokens(self, request):
         error = self._enterprise_admin_error_response(request)
