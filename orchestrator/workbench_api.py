@@ -17,6 +17,7 @@ from orchestrator.admin_local_testing import (
 from orchestrator.conversation_router import ConversationRouter
 from orchestrator.enterprise.audit_ledger import EnterpriseAuditLedger
 from orchestrator.enterprise.audit_schema import AuditEvent, AuditEventWriter
+from orchestrator.enterprise.auth_providers import load_auth_providers
 from orchestrator.enterprise.capabilities import AgentCapabilityRegistry
 from orchestrator.enterprise.channel_gate import EnterpriseChannelGate
 from orchestrator.enterprise.channels import ChannelRegistry
@@ -123,6 +124,7 @@ class WorkbenchApiServer:
         self.app.router.add_post("/api/auth/login", self.handle_auth_login)
         self.app.router.add_post("/api/auth/logout", self.handle_auth_logout)
         self.app.router.add_get("/api/auth/me", self.handle_auth_me)
+        self.app.router.add_get("/api/auth/providers", self.handle_auth_providers)
         self.app.router.add_get("/api/enterprise/users", self.handle_enterprise_users)
         self.app.router.add_post("/api/enterprise/users", self.handle_enterprise_users_create)
         self.app.router.add_get("/api/enterprise/api-tokens", self.handle_enterprise_api_tokens)
@@ -628,6 +630,17 @@ class WorkbenchApiServer:
         if user is None:
             return web.json_response({"ok": False, "error": "not authenticated"}, status=401)
         return web.json_response({"ok": True, "profile": "enterprise", "user": self._enterprise_user_payload(user)})
+
+    async def handle_auth_providers(self, request):
+        configured = getattr(self.global_config, "enterprise_auth_providers", []) or []
+        providers = load_auth_providers(configured if self._is_governed_profile() else [])
+        return web.json_response(
+            {
+                "ok": True,
+                "profile": str(getattr(self.global_config, "deployment_profile", "personal") or "personal"),
+                "providers": [provider.public_payload() for provider in providers],
+            }
+        )
 
     def _enterprise_user_payload(self, user) -> dict:
         memberships = (

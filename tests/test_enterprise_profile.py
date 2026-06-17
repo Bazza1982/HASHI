@@ -110,3 +110,27 @@ def test_governed_profiles_allow_valid_bootstrap(tmp_path, profile):
     global_cfg, _, _ = ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
     assert global_cfg.deployment_profile == profile
     assert global_cfg.organization_id == "ORG-001"
+
+
+def test_enterprise_auth_provider_config_is_loaded(tmp_path):
+    config_path, secrets_path = _write_config(
+        tmp_path,
+        profile="enterprise",
+        bootstrap_complete=True,
+        global_extra={
+            "enterprise_auth_providers": [
+                {
+                    "type": "oidc",
+                    "id": "entra",
+                    "enabled": True,
+                    "issuer": "https://login.microsoftonline.com/tenant/v2.0",
+                    "client_id": "hashi-client",
+                }
+            ]
+        },
+    )
+
+    global_cfg, _, _ = ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
+
+    assert global_cfg.enterprise_auth_providers[0]["id"] == "entra"
+    assert global_cfg.enterprise_auth_providers[0]["client_id"] == "hashi-client"

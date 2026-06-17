@@ -7,6 +7,7 @@ from orchestrator.enterprise.profile import (
 )
 from orchestrator.enterprise.audit_schema import AuditEvent, AuditEventWriter
 from orchestrator.enterprise.audit_ledger import AuditChainVerification, EnterpriseAuditLedger, LedgerEvent
+from orchestrator.enterprise.auth_providers import AuthProvider, AuthProviderType, load_auth_providers
 from orchestrator.enterprise.artifacts import Artifact, ArtifactRegistry
 from orchestrator.enterprise.audit_adapters import (
     BrowserAuditIngestResult,
@@ -90,6 +91,8 @@ __all__ = [
     "EnterpriseAuditLedger",
     "AuditChainVerification",
     "LedgerEvent",
+    "AuthProvider",
+    "AuthProviderType",
     "Artifact",
     "ArtifactRegistry",
     "BrowserAuditIngestResult",
@@ -158,6 +161,7 @@ __all__ = [
     "evaluate_connector_action",
     "fail_task_if_promised_artifacts_missing",
     "install_default_connector_policy",
+    "load_auth_providers",
     "record_failed_task_escalation",
     "record_connector_event",
     "validate_connector_action",
