@@ -1044,6 +1044,50 @@ async def test_public_scim_v2_discovery_requires_scoped_service_token(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_public_scim_v2_bulk_supports_scoped_service_token(tmp_path):
+    server = _server(tmp_path)
+    admin = server.identity_service.bootstrap_org_admin(
+        org_id="ORG-001",
+        org_name="Acme",
+        email="admin@example.com",
+        display_name="Admin",
+        password="secret-password",
+        user_id="usr-admin",
+    )
+    scim_token = server.identity_service.create_api_token(user_id=admin.id, scopes=["scim:write"])
+    headers = {"Authorization": f"Bearer {scim_token.token}"}
+
+    response = await server.handle_public_scim_v2_bulk(
+        _FakeRequest(
+            {
+                "failOnErrors": 1,
+                "Operations": [
+                    {
+                        "method": "POST",
+                        "path": "/Users",
+                        "bulkId": "user-1",
+                        "data": {"userName": "bulk@example.com", "displayName": "Bulk User"},
+                    }
+                ],
+            },
+            headers=headers,
+            path="/scim/v2/Bulk",
+        )
+    )
+    payload = json.loads(response.text)
+
+    assert response.status == 200
+    assert payload["schemas"] == ["urn:ietf:params:scim:api:messages:2.0:BulkResponse"]
+    assert payload["Operations"][0]["status"] == "201"
+    assert payload["Operations"][0]["bulkId"] == "user-1"
+    assert server.identity_service.get_user_by_email(org_id="ORG-001", email="bulk@example.com") is not None
+    event = _audit_events(tmp_path)[-1]
+    assert event["action"] == "scim_v2_bulk"
+    assert event["context"]["operation_count"] == 1
+    assert scim_token.token not in json.dumps(_audit_events(tmp_path))
+
+
+@pytest.mark.asyncio
 async def test_public_scim_v2_rejects_cross_org_target_user(tmp_path):
     server = _server(tmp_path)
     admin = server.identity_service.bootstrap_org_admin(

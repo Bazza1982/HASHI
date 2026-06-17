@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from orchestrator.enterprise import EnterpriseRole, IdentityService, ScimProvisioningService
 from orchestrator.enterprise.scim import (
+    SCIM_BULK_REQUEST_SCHEMA,
+    SCIM_BULK_RESPONSE_SCHEMA,
     SCIM_GROUP_SCHEMA,
     SCIM_LIST_RESPONSE_SCHEMA,
     SCIM_RESOURCE_TYPE_SCHEMA,
@@ -238,7 +240,7 @@ def test_scim_discovery_describes_supported_users_and_groups_surface():
 
     assert service_config["schemas"] == [SCIM_SERVICE_PROVIDER_CONFIG_SCHEMA]
     assert service_config["patch"]["supported"] is True
-    assert service_config["bulk"]["supported"] is False
+    assert service_config["bulk"]["supported"] is True
     assert service_config["filter"]["maxResults"] == 500
     assert resource_types["schemas"] == [SCIM_LIST_RESPONSE_SCHEMA]
     assert {resource["id"] for resource in resource_types["Resources"]} == {"User", "Group"}
@@ -247,3 +249,72 @@ def test_scim_discovery_describes_supported_users_and_groups_surface():
     assert group_schema["schemas"] == [SCIM_SCHEMA_SCHEMA]
     assert group_schema["id"] == SCIM_GROUP_SCHEMA
     assert {schema["id"] for schema in schemas["Resources"]} == {SCIM_USER_SCHEMA, SCIM_GROUP_SCHEMA}
+
+
+def test_scim_bulk_supports_user_create_get_and_patch(tmp_path):
+    identity, scim, _ = _services(tmp_path)
+
+    created = scim.bulk(
+        org_id="ORG-001",
+        payload={
+            "schemas": [SCIM_BULK_REQUEST_SCHEMA],
+            "Operations": [
+                {
+                    "method": "POST",
+                    "path": "/Users",
+                    "bulkId": "create-1",
+                    "data": {"userName": "bulk@example.com", "displayName": "Bulk User"},
+                }
+            ],
+        },
+    )
+    user_id = created["Operations"][0]["response"]["id"]
+    patched = scim.bulk(
+        org_id="ORG-001",
+        payload={
+            "Operations": [
+                {"method": "GET", "path": f"/Users/{user_id}"},
+                {
+                    "method": "PATCH",
+                    "path": f"/Users/{user_id}",
+                    "data": {"Operations": [{"op": "replace", "path": "displayName", "value": "Renamed Bulk"}]},
+                },
+            ]
+        },
+    )
+
+    assert created["schemas"] == [SCIM_BULK_RESPONSE_SCHEMA]
+    assert created["Operations"][0]["status"] == "201"
+    assert created["Operations"][0]["bulkId"] == "create-1"
+    assert patched["Operations"][0]["status"] == "200"
+    assert patched["Operations"][1]["response"]["displayName"] == "Renamed Bulk"
+    assert identity.get_user(user_id).display_name == "Renamed Bulk"
+
+
+def test_scim_bulk_enforces_operation_limit_and_fail_on_errors(tmp_path):
+    _, scim, _ = _services(tmp_path)
+
+    try:
+        scim.bulk(
+            org_id="ORG-001",
+            payload={"Operations": [{"method": "GET", "path": "/Users/missing"}] * 2},
+            max_operations=1,
+        )
+    except ValueError as exc:
+        assert "operation limit exceeded" in str(exc)
+    else:
+        raise AssertionError("expected bulk limit failure")
+
+    result = scim.bulk(
+        org_id="ORG-001",
+        payload={
+            "failOnErrors": 1,
+            "Operations": [
+                {"method": "GET", "path": "/Users/missing"},
+                {"method": "POST", "path": "/Users", "data": {"userName": "skipped@example.com"}},
+            ],
+        },
+    )
+
+    assert len(result["Operations"]) == 1
+    assert result["Operations"][0]["status"] == "400"
