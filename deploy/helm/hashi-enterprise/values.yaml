@@ -121,6 +121,10 @@ auditExport:
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
   backoffLimit: 1
+  daemon:
+    enabled: false
+    interval: "60"
+    replicaCount: 1
 
 nodeSelector: {}
 tolerations: []

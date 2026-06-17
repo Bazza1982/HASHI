@@ -63,6 +63,20 @@ The CronJob uses `concurrencyPolicy: Forbid` and advances
 `/data/state/audit_live_export_checkpoint.json` only after a successful export
 cycle.
 
+For a long-running daemon instead of a CronJob:
+
+```bash
+helm upgrade --install hashi-enterprise deploy/helm/hashi-enterprise \
+  --namespace hashi-enterprise --create-namespace \
+  --set auditExport.daemon.enabled=true \
+  --set auditExport.endpointSecretRef.name=hashi-audit-export \
+  --set auditExport.headerSecretRef.name=hashi-audit-export
+```
+
+Use either `auditExport.enabled=true` for the CronJob or
+`auditExport.daemon.enabled=true` for the daemon Deployment. Do not enable both
+against the same ledger/checkpoint.
+
 If your cluster uses External Secrets Operator, adapt and apply:
 
 ```bash

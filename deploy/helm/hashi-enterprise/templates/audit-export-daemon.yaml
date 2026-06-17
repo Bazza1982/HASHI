@@ -1,0 +1,100 @@
+{{- if .Values.auditExport.daemon.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "hashi-enterprise.fullname" . }}-audit-export
+  labels:
+    {{- include "hashi-enterprise.labels" . | nindent 4 }}
+    app.kubernetes.io/component: audit-export-daemon
+spec:
+  replicas: {{ .Values.auditExport.daemon.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "hashi-enterprise.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: audit-export-daemon
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "hashi-enterprise.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: audit-export-daemon
+    spec:
+      serviceAccountName: {{ include "hashi-enterprise.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: audit-export
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "hashi-enterprise.fullname" . }}-config
+            - secretRef:
+                name: {{ .Values.secrets.connectorSecretName }}
+          env:
+            - name: HASHI_AUDIT_EXPORT_ENDPOINT
+              {{ if .Values.auditExport.endpointSecretRef.name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auditExport.endpointSecretRef.name | quote }}
+                  key: {{ .Values.auditExport.endpointSecretRef.key | quote }}
+              {{ else }}
+              value: {{ .Values.auditExport.endpoint | quote }}
+              {{ end }}
+            - name: HASHI_AUDIT_EXPORT_HEADER
+              {{ if .Values.auditExport.headerSecretRef.name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auditExport.headerSecretRef.name | quote }}
+                  key: {{ .Values.auditExport.headerSecretRef.key | quote }}
+              {{ else }}
+              value: {{ .Values.auditExport.header | quote }}
+              {{ end }}
+          command:
+            - python
+            - hashi.py
+            - enterprise
+            - audit-export-live
+          args:
+            - --endpoint
+            - $(HASHI_AUDIT_EXPORT_ENDPOINT)
+            - --format
+            - {{ .Values.auditExport.format | quote }}
+            - --db
+            - {{ printf "%s/state/enterprise.sqlite" .Values.enterprise.bridgeHome | quote }}
+            - --org-id
+            - {{ .Values.enterprise.organizationId | quote }}
+            - --checkpoint
+            - {{ .Values.auditExport.checkpoint | quote }}
+            - --batch-size
+            - {{ .Values.auditExport.batchSize | quote }}
+            - --timeout
+            - {{ .Values.auditExport.timeout | quote }}
+            - --max-attempts
+            - {{ .Values.auditExport.maxAttempts | quote }}
+            - --backoff
+            - {{ .Values.auditExport.backoff | quote }}
+            - --header
+            - $(HASHI_AUDIT_EXPORT_HEADER)
+            - --daemon
+            - --interval
+            - {{ .Values.auditExport.daemon.interval | quote }}
+          volumeMounts:
+            - name: hashi-data
+              mountPath: {{ .Values.enterprise.bridgeHome }}
+      volumes:
+        - name: hashi-data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-data" (include "hashi-enterprise.fullname" .)) .Values.persistence.existingClaim }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+{{- end }}

@@ -1,0 +1,30 @@
+[Unit]
+Description=HASHI Enterprise live audit export daemon
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%HASHI_ROOT%
+Environment=PYTHONUTF8=1
+Environment=PYTHONIOENCODING=utf-8
+EnvironmentFile=%HASHI_ROOT%/deploy/enterprise.env
+ExecStart=/bin/sh -lc 'exec %PYTHON% hashi.py enterprise audit-export-live \
+  --endpoint "$HASHI_AUDIT_EXPORT_ENDPOINT" \
+  --format "$HASHI_AUDIT_EXPORT_FORMAT" \
+  --db "%HASHI_ROOT%/state/enterprise.sqlite" \
+  --org-id "$HASHI_ORGANIZATION_ID" \
+  --checkpoint "%HASHI_ROOT%/state/audit_live_export_checkpoint.json" \
+  --batch-size "$HASHI_AUDIT_EXPORT_BATCH_SIZE" \
+  --timeout "$HASHI_AUDIT_EXPORT_TIMEOUT" \
+  --max-attempts "$HASHI_AUDIT_EXPORT_MAX_ATTEMPTS" \
+  --backoff "$HASHI_AUDIT_EXPORT_BACKOFF" \
+  --header "$HASHI_AUDIT_EXPORT_HEADER" \
+  --daemon \
+  --interval "$HASHI_AUDIT_EXPORT_DAEMON_INTERVAL"'
+Restart=always
+RestartSec=10
+StandardOutput=append:%HASHI_ROOT%/logs/hashi-enterprise-audit-export.log
+StandardError=append:%HASHI_ROOT%/logs/hashi-enterprise-audit-export.log
+
+[Install]
+WantedBy=multi-user.target
