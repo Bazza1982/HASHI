@@ -117,6 +117,12 @@ from orchestrator.enterprise.secret_refs import (
     VaultSecretProvider,
 )
 from orchestrator.enterprise.scim import ScimProvisioningResult, ScimProvisioningService
+from orchestrator.enterprise.saml import (
+    SamlAssertionClaims,
+    SamlIdentityProviderMetadata,
+    parse_saml_idp_metadata,
+    validate_saml_assertion,
+)
 from orchestrator.enterprise.store import EnterpriseStore
 from orchestrator.enterprise.evidence import EvidenceBundle, EvidenceBundleRegistry
 from orchestrator.enterprise.escalation import (
@@ -235,6 +241,8 @@ __all__ = [
     "SecretProvider",
     "ScimProvisioningResult",
     "ScimProvisioningService",
+    "SamlAssertionClaims",
+    "SamlIdentityProviderMetadata",
     "VaultSecretProvider",
     "ApprovalRequest",
     "ArtifactVerificationResult",
@@ -256,7 +264,9 @@ __all__ = [
     "exchange_oidc_authorization_code",
     "fetch_oidc_jwks",
     "map_oidc_claims",
+    "parse_saml_idp_metadata",
     "validate_oidc_id_token_claims",
+    "validate_saml_assertion",
     "verify_oidc_id_token",
     "record_failed_task_escalation",
     "record_connector_event",
