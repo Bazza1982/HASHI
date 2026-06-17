@@ -95,7 +95,7 @@ Deferred:
 - complete SAML/SCIM login flows;
 - full ABAC policy simulation;
 - SIEM/OpenTelemetry;
-- WORM storage;
+- external audit anchoring to WORM-capable storage;
 - Kubernetes/HA;
 - multiple enterprise connectors;
 - DLP/classification.
@@ -522,7 +522,8 @@ Residual P4 limitations:
 - `ENT-065` Add HChat/Remote adapter. Done for legacy Remote audit JSONL ingest with idempotent event IDs; live dual-write pending.
 - `ENT-066` Add tool/file event adapters. Browser action legacy JSONL ingest done; HASHI-controlled tool action JSONL source and ingest adapter done; live ledger dual-write pending.
 - `ENT-067` Add audit schema contract tests. Done for required ledger keys, canonical event types, export shape, and JSON-safe context.
-- `ENT-068` Add tamper-evident audit hash chain. Done for new ledger events and verification API; external WORM anchoring remains future work.
+- `ENT-068` Add tamper-evident audit hash chain. Done for new ledger events and verification API.
+- `ENT-068a` Add external audit anchor manifest. Done for chain-range anchor records, anchor hash, JSON export, historical anchor verification, and tamper detection; external WORM destination adapters remain future work.
 - `ENT-069` Add SIEM/OpenTelemetry audit export mappings. Done for admin-gated NDJSON export formats; live push/exporter agents remain future work.
 
 **Acceptance:**

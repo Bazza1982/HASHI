@@ -6,6 +6,14 @@ from orchestrator.enterprise.profile import (
     validate_profile_context,
 )
 from orchestrator.enterprise.audit_schema import AuditEvent, AuditEventWriter
+from orchestrator.enterprise.audit_anchor import (
+    AuditAnchorVerification,
+    AuditLedgerAnchor,
+    create_audit_ledger_anchor,
+    export_audit_ledger_anchor,
+    load_audit_ledger_anchor,
+    verify_audit_ledger_anchor,
+)
 from orchestrator.enterprise.audit_ledger import AuditChainVerification, EnterpriseAuditLedger, LedgerEvent
 from orchestrator.enterprise.audit_export import format_otel_log, format_siem_event
 from orchestrator.enterprise.auth_providers import AuthProvider, AuthProviderType, load_auth_providers
@@ -108,11 +116,17 @@ __all__ = [
     "validate_profile_context",
     "AuditEvent",
     "AuditEventWriter",
+    "AuditLedgerAnchor",
+    "AuditAnchorVerification",
     "EnterpriseAuditLedger",
     "AuditChainVerification",
     "LedgerEvent",
     "format_otel_log",
     "format_siem_event",
+    "create_audit_ledger_anchor",
+    "export_audit_ledger_anchor",
+    "load_audit_ledger_anchor",
+    "verify_audit_ledger_anchor",
     "AuthProvider",
     "AuthProviderType",
     "OidcMappedIdentity",
