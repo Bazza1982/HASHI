@@ -80,6 +80,7 @@ This is **not** the end state of the enterprise product. It is the first reviewa
 - `hashi enterprise audit-export-live` provides a one-shot operator runner for HTTP SIEM/ledger/OTLP pushes with checkpoint, retry, timeout, batch-size, and custom header controls, so deployments can schedule live export through cron, systemd, or Kubernetes CronJob without embedding vendor SDKs.
 - Deployment assets now include a Docker Compose `audit-export` profile, a raw Kubernetes CronJob, and a Helm-gated CronJob template for scheduled live audit export with persistent checkpoints.
 - The live audit export runbook and preset env example cover generic NDJSON, Splunk HEC event envelopes, Elasticsearch `_bulk`, Elastic/Logstash HTTP input, and OpenTelemetry Collector HTTP logs deployment paths.
+- The Helm audit export CronJob can read endpoint and authorization header values through Kubernetes `secretKeyRef`, avoiding long-lived tokens in chart values.
 - Sensitive connector parameters are redacted in connector audit records.
 
 ### Work And Evidence
@@ -151,7 +152,7 @@ These are not blockers for Enterprise MVP review, but they are not complete:
 - full ABAC simulator and policy preview tooling;
 - cloud-specific object-store WORM client packages and deployment runbooks for S3/GCS/Azure immutable storage;
 - Vault AppRole/Kubernetes auth, lease renewal, and policy bootstrap;
-- live SIEM/OTLP exporter hardening beyond the CLI runner, baseline Compose/Kubernetes/Helm scheduling, and generic vendor preset runbook, including managed long-running daemon mode, deeper vendor transforms, dashboards, alerts, and secret-manager-native Helm wiring;
+- live SIEM/OTLP exporter hardening beyond the CLI runner, baseline Compose/Kubernetes/Helm scheduling, generic vendor preset runbook, and Kubernetes `secretKeyRef` wiring, including managed long-running daemon mode, deeper vendor transforms, dashboards, alerts, and External Secrets/cloud secret integrations;
 - Kubernetes HA deployment beyond the baseline manifests/chart, including external database wiring, validated production ingress/network policies, autoscaling runbooks, and multi-replica coordination;
 - Slack OAuth/Bot API, channel discovery, and user mapping;
 - Microsoft Teams and Feishu connectors;

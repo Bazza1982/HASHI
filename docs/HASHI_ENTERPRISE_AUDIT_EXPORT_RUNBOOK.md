@@ -151,15 +151,20 @@ Before enabling production export:
 Helm:
 
 ```bash
+kubectl create secret generic hashi-audit-export \
+  --namespace hashi-enterprise \
+  --from-literal=HASHI_AUDIT_EXPORT_ENDPOINT=https://otel-collector.example.com/v1/logs \
+  --from-literal=HASHI_AUDIT_EXPORT_HEADER='Authorization: Bearer replace-me'
+
 helm upgrade --install hashi-enterprise deploy/helm/hashi-enterprise \
   --namespace hashi-enterprise --create-namespace \
   --set auditExport.enabled=true \
-  --set auditExport.endpoint=https://otel-collector.example.com/v1/logs \
   --set auditExport.format=otel \
-  --set-string auditExport.header='Authorization: Bearer replace-me'
+  --set auditExport.endpointSecretRef.name=hashi-audit-export \
+  --set auditExport.headerSecretRef.name=hashi-audit-export
 ```
 
-For production, avoid putting long-lived tokens in shell history or Helm release values. Prefer external secret injection where available.
+For production, avoid putting long-lived tokens in shell history or Helm release values. The chart supports `auditExport.endpointSecretRef` and `auditExport.headerSecretRef` so the CronJob can read endpoint/header values from a Kubernetes Secret.
 
 ---
 
@@ -169,9 +174,10 @@ For production, avoid putting long-lived tokens in shell history or Helm release
 - [ ] A first run sends at least one event or reports `attempted=0` without error.
 - [ ] Checkpoint file is created under `/data/state`.
 - [ ] A second run does not resend already checkpointed events.
-- [ ] Collector receives the expected format (`siem`, `ledger`, or `otel`).
+- [ ] Collector receives the expected format (`siem`, `ledger`, `otel`, `splunk-hec`, or `elastic-bulk`).
 - [ ] Collector rejects bad credentials and HASHI does not advance the checkpoint.
 - [ ] No raw connector secrets, SAML assertions, OIDC tokens, or SCIM tokens appear in exported events.
+- [ ] Helm deployments use `secretKeyRef` for endpoint/header values instead of storing tokens in chart values.
 
 ---
 
@@ -179,5 +185,5 @@ For production, avoid putting long-lived tokens in shell history or Helm release
 
 - Managed long-running daemon mode.
 - Deeper vendor transforms for multi-index Elasticsearch routing and strict Splunk deployments that require one HEC event per request.
-- Secret-manager-native Helm wiring for every target platform.
+- Secret-manager-native wiring beyond Kubernetes `secretKeyRef`, such as External Secrets Operator or cloud-provider secret stores.
 - SIEM-specific dashboards, alerts, and field mappings beyond the baseline ECS-style event shape.
