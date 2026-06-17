@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from orchestrator.enterprise import EnterpriseRole, IdentityService, ScimProvisioningService
+from orchestrator.enterprise.scim import SCIM_LIST_RESPONSE_SCHEMA, SCIM_USER_SCHEMA, filter_scim_users
 
 
 def _services(tmp_path):
@@ -108,3 +109,62 @@ def test_scim_requires_identity_email():
         assert "SCIM userName" in str(exc)
     else:
         raise AssertionError("expected missing SCIM identity to fail")
+
+
+def test_scim_v2_list_response_supports_filter_and_pagination(tmp_path):
+    identity, scim, _ = _services(tmp_path)
+    scim.upsert_user(org_id="ORG-001", payload={"userName": "alpha@example.com", "displayName": "Alpha"})
+    scim.upsert_user(org_id="ORG-001", payload={"userName": "beta@example.com", "displayName": "Beta"})
+
+    page = scim.list_user_resources(org_id="ORG-001", start_index=2, count=1)
+    filtered = scim.list_user_resources(
+        org_id="ORG-001",
+        filter_expression='userName eq "beta@example.com"',
+    )
+
+    assert page["schemas"] == [SCIM_LIST_RESPONSE_SCHEMA]
+    assert page["totalResults"] == 2
+    assert page["itemsPerPage"] == 1
+    assert page["Resources"][0]["schemas"] == [SCIM_USER_SCHEMA]
+    assert page["Resources"][0]["userName"] == "beta@example.com"
+    assert filtered["totalResults"] == 1
+    assert filtered["Resources"][0]["displayName"] == "Beta"
+
+
+def test_scim_v2_filter_supports_active_and_rejects_unknown_filter(tmp_path):
+    identity, scim, _ = _services(tmp_path)
+    active = scim.upsert_user(org_id="ORG-001", payload={"userName": "active@example.com"})
+    disabled = scim.upsert_user(org_id="ORG-001", payload={"userName": "disabled@example.com", "active": False})
+
+    active_only = filter_scim_users([active.user, disabled.user], "active eq true")
+
+    assert [user.email for user in active_only] == ["active@example.com"]
+    try:
+        filter_scim_users([active.user], 'displayName co "Active"')
+    except ValueError as exc:
+        assert "unsupported SCIM filter" in str(exc)
+    else:
+        raise AssertionError("expected unsupported filter to fail")
+
+
+def test_scim_v2_patch_updates_display_name_and_deactivates(tmp_path):
+    identity, scim, _ = _services(tmp_path)
+    result = scim.upsert_user(org_id="ORG-001", payload={"userName": "user@example.com", "displayName": "Old"})
+    token = identity.create_api_token(user_id=result.user.id, scopes=["audit:read"])
+
+    updated = scim.patch_user(
+        user_id=result.user.id,
+        payload={
+            "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+            "Operations": [{"op": "replace", "path": "displayName", "value": "New"}],
+        },
+    )
+    deactivated = scim.patch_user(
+        user_id=result.user.id,
+        payload={"Operations": [{"op": "replace", "path": "active", "value": "false"}]},
+    )
+
+    assert updated.user.display_name == "New"
+    assert deactivated.action == "deactivated"
+    assert deactivated.user.status == "disabled"
+    assert identity.validate_api_token(token.token) is None

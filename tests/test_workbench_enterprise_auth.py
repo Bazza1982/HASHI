@@ -575,6 +575,88 @@ async def test_enterprise_admin_can_scim_deactivate_user_and_revoke_tokens(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_enterprise_admin_can_use_scim_v2_users_surface(tmp_path):
+    server = _server(tmp_path)
+    admin = server.identity_service.bootstrap_org_admin(
+        org_id="ORG-001",
+        org_name="Acme",
+        email="admin@example.com",
+        display_name="Admin",
+        password="secret-password",
+        user_id="usr-admin",
+    )
+    session = server.identity_service.create_session(user_id=admin.id)
+    headers = {"Authorization": f"Bearer {session.token}"}
+
+    create_response = await server.handle_enterprise_scim_v2_users_create(
+        _FakeRequest(
+            {
+                "userName": "SCIM2@Example.com",
+                "displayName": "SCIM Two",
+                "active": True,
+            },
+            headers=headers,
+        )
+    )
+    created = json.loads(create_response.text)
+    list_response = await server.handle_enterprise_scim_v2_users_list(
+        _FakeRequest(headers=headers, query={"filter": 'userName eq "scim2@example.com"'})
+    )
+    listed = json.loads(list_response.text)
+    get_response = await server.handle_enterprise_scim_v2_users_get(
+        _FakeRequest(headers=headers, match_info={"user_id": created["id"]})
+    )
+
+    assert create_response.status == 201
+    assert created["schemas"] == ["urn:ietf:params:scim:schemas:core:2.0:User"]
+    assert created["userName"] == "scim2@example.com"
+    assert listed["schemas"] == ["urn:ietf:params:scim:api:messages:2.0:ListResponse"]
+    assert listed["totalResults"] == 1
+    assert listed["Resources"][0]["id"] == created["id"]
+    assert json.loads(get_response.text)["displayName"] == "SCIM Two"
+    assert _audit_events(tmp_path)[-1]["action"] == "scim_v2_user_create"
+
+
+@pytest.mark.asyncio
+async def test_enterprise_admin_can_scim_v2_patch_user_and_revoke_tokens(tmp_path):
+    server = _server(tmp_path)
+    admin = server.identity_service.bootstrap_org_admin(
+        org_id="ORG-001",
+        org_name="Acme",
+        email="admin@example.com",
+        display_name="Admin",
+        password="secret-password",
+        user_id="usr-admin",
+    )
+    user = server.identity_service.create_user(
+        org_id="ORG-001",
+        email="user@example.com",
+        display_name="User",
+        password="secret-password",
+        user_id="usr-user",
+    )
+    api_token = server.identity_service.create_api_token(user_id=user.id, scopes=["audit:read"])
+    session = server.identity_service.create_session(user_id=admin.id)
+    headers = {"Authorization": f"Bearer {session.token}"}
+
+    patch_response = await server.handle_enterprise_scim_v2_users_patch(
+        _FakeRequest(
+            {"Operations": [{"op": "replace", "path": "active", "value": False}]},
+            headers=headers,
+            match_info={"user_id": "usr-user"},
+        )
+    )
+
+    assert patch_response.status == 200
+    payload = json.loads(patch_response.text)
+    assert payload["active"] is False
+    assert server.identity_service.validate_api_token(api_token.token) is None
+    event = _audit_events(tmp_path)[-1]
+    assert event["action"] == "scim_v2_user_patch"
+    assert event["context"]["provisioning_action"] == "deactivated"
+
+
+@pytest.mark.asyncio
 async def test_enterprise_admin_can_create_list_and_revoke_api_tokens(tmp_path):
     server = _server(tmp_path)
     admin = server.identity_service.bootstrap_org_admin(
