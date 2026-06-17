@@ -33,6 +33,14 @@ from orchestrator.enterprise.credentials import ConnectorCredentialStore
 from orchestrator.enterprise.identity import EnterpriseRole, IdentityService
 from orchestrator.enterprise.oidc_flow import build_oidc_authorization_start
 from orchestrator.enterprise.oidc_exchange import build_oidc_token_exchange_request
+from orchestrator.enterprise.oidc_http import (
+    OidcJwksCache,
+    exchange_oidc_authorization_code,
+    fetch_oidc_jwks,
+)
+from orchestrator.enterprise.oidc_session import complete_oidc_session
+from orchestrator.enterprise.oidc_token import verify_oidc_id_token
+from orchestrator.enterprise.oidc_exchange import map_oidc_claims
 from orchestrator.enterprise.policy import PolicyEvaluator
 from orchestrator.enterprise.policy_templates import install_default_connector_policy
 from orchestrator.enterprise.routing import agent_project_ids
@@ -115,6 +123,9 @@ class WorkbenchApiServer:
         self.connector_credentials = self._build_connector_credentials()
         self.connector_secret_resolver = ConnectorSecretResolver(secrets=self.secrets)
         self._pending_oidc_flows: dict[str, object] = {}
+        self._oidc_jwks_cache = OidcJwksCache()
+        self._oidc_token_transport = None
+        self._oidc_jwks_transport = None
         self.connector_registry_errors: list[dict] = []
         self.connector_registry = self._build_connector_registry()
         self.bridge_router = ConversationRouter(
@@ -771,6 +782,68 @@ class WorkbenchApiServer:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
         self._pending_oidc_flows.pop(state, None)
         exchange_payload = exchange.public_payload()
+        if bool(getattr(self.global_config, "enterprise_oidc_complete_login", False)):
+            try:
+                token_response = exchange_oidc_authorization_code(
+                    exchange,
+                    transport=self._oidc_token_transport,
+                )
+                jwks = self._oidc_jwks_cache.get(
+                    provider,
+                    fetcher=lambda selected_provider: fetch_oidc_jwks(
+                        selected_provider,
+                        transport=self._oidc_jwks_transport,
+                    ),
+                )
+                validated = verify_oidc_id_token(provider, flow, token_response.id_token, jwks)
+                org_id = str(getattr(self.global_config, "organization_id", "") or "").strip()
+                mapped = map_oidc_claims(provider_id=provider.id, org_id=org_id, claims=validated.claims)
+                default_project_id = f"{org_id}-default" if org_id and self.identity_service.get_project(f"{org_id}-default") else None
+                completion = complete_oidc_session(
+                    identity_service=self.identity_service,
+                    mapped_identity=mapped,
+                    default_project_id=default_project_id,
+                )
+            except Exception as exc:
+                self._append_enterprise_audit(
+                    event_type="auth",
+                    action="oidc_callback",
+                    status="failed",
+                    actor_id=provider_id,
+                    context={
+                        "provider_id": provider_id,
+                        "state_validated": True,
+                        "token_exchange": "failed",
+                        "error": str(exc),
+                    },
+                )
+                return web.json_response({"ok": False, "error": str(exc)}, status=400)
+            self._append_enterprise_audit(
+                event_type="auth",
+                action="oidc_callback",
+                status="success",
+                actor_id=completion.user.id,
+                context={
+                    "provider_id": provider_id,
+                    "state_validated": True,
+                    "token_exchange": "completed",
+                    "user_created": completion.user_created,
+                    "default_project_id": completion.default_project_id,
+                },
+            )
+            return web.json_response(
+                {
+                    "ok": True,
+                    "oidc": {
+                        "provider_id": provider_id,
+                        "state": state,
+                        "code_received": True,
+                        "token_exchange": "completed",
+                        "token_response": token_response.public_payload(),
+                    },
+                    **completion.public_payload(),
+                }
+            )
         self._append_enterprise_audit(
             event_type="auth",
             action="oidc_callback",
