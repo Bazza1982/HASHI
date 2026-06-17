@@ -44,15 +44,22 @@ Before production use:
 ## Live Audit Export
 
 Enable the one-shot exporter as a Kubernetes CronJob after configuring a real
-SIEM/OTLP endpoint and authorization header through your secret-management
-workflow:
+SIEM/OTLP endpoint and authorization header. For production, store those values
+in a Kubernetes Secret:
+
+```bash
+kubectl create secret generic hashi-audit-export \
+  --namespace hashi-enterprise \
+  --from-literal=HASHI_AUDIT_EXPORT_ENDPOINT=https://siem.example.com/ingest \
+  --from-literal=HASHI_AUDIT_EXPORT_HEADER='Authorization: Bearer replace-me'
+```
 
 ```bash
 helm upgrade --install hashi-enterprise deploy/helm/hashi-enterprise \
   --namespace hashi-enterprise --create-namespace \
   --set auditExport.enabled=true \
-  --set auditExport.endpoint=https://siem.example.com/ingest \
-  --set-string auditExport.header='Authorization: Bearer replace-me'
+  --set auditExport.endpointSecretRef.name=hashi-audit-export \
+  --set auditExport.headerSecretRef.name=hashi-audit-export
 ```
 
 The CronJob uses `concurrencyPolicy: Forbid` and advances

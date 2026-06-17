@@ -40,6 +40,25 @@ spec:
                     name: {{ include "hashi-enterprise.fullname" . }}-config
                 - secretRef:
                     name: {{ .Values.secrets.connectorSecretName }}
+              env:
+                - name: HASHI_AUDIT_EXPORT_ENDPOINT
+                  {{ if .Values.auditExport.endpointSecretRef.name }}
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.auditExport.endpointSecretRef.name | quote }}
+                      key: {{ .Values.auditExport.endpointSecretRef.key | quote }}
+                  {{ else }}
+                  value: {{ .Values.auditExport.endpoint | quote }}
+                  {{ end }}
+                - name: HASHI_AUDIT_EXPORT_HEADER
+                  {{ if .Values.auditExport.headerSecretRef.name }}
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.auditExport.headerSecretRef.name | quote }}
+                      key: {{ .Values.auditExport.headerSecretRef.key | quote }}
+                  {{ else }}
+                  value: {{ .Values.auditExport.header | quote }}
+                  {{ end }}
               command:
                 - python
                 - hashi.py
@@ -47,7 +66,7 @@ spec:
                 - audit-export-live
               args:
                 - --endpoint
-                - {{ .Values.auditExport.endpoint | quote }}
+                - $(HASHI_AUDIT_EXPORT_ENDPOINT)
                 - --format
                 - {{ .Values.auditExport.format | quote }}
                 - --db
@@ -65,7 +84,7 @@ spec:
                 - --backoff
                 - {{ .Values.auditExport.backoff | quote }}
                 - --header
-                - {{ .Values.auditExport.header | quote }}
+                - $(HASHI_AUDIT_EXPORT_HEADER)
               volumeMounts:
                 - name: hashi-data
                   mountPath: {{ .Values.enterprise.bridgeHome }}

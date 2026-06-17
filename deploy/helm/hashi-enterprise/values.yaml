@@ -107,6 +107,12 @@ auditExport:
   format: siem
   endpoint: https://siem.example.com/ingest
   header: "Authorization: Bearer change-me"
+  endpointSecretRef:
+    name: ""
+    key: HASHI_AUDIT_EXPORT_ENDPOINT
+  headerSecretRef:
+    name: ""
+    key: HASHI_AUDIT_EXPORT_HEADER
   batchSize: "100"
   timeout: "10"
   maxAttempts: "3"
