@@ -119,6 +119,54 @@ def test_enterprise_audit_live_export_cli_sends_events_and_updates_checkpoint(tm
     assert "Sent            : 1" in output
 
 
+def test_enterprise_audit_live_export_daemon_runs_bounded_cycles(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(hashi, "ROOT_DIR", tmp_path)
+    db_path = tmp_path / "state" / "enterprise.sqlite"
+    identity = IdentityService.from_path(db_path)
+    identity.create_organization(org_id="ORG-001", name="Acme")
+    ledger = EnterpriseAuditLedger.from_path(db_path, org_id="ORG-001")
+    event = ledger.append(event_type="auth", action="login", status="success", actor_id="usr-1")
+    calls = []
+    sleeps = []
+
+    def transport(url, body, headers, timeout):
+        calls.append((url, body, headers, timeout))
+        return 202, "accepted"
+
+    monkeypatch.setattr(hashi, "_http_post_transport", transport)
+    monkeypatch.setattr(hashi.time, "sleep", sleeps.append)
+
+    rc = hashi.cmd_enterprise_audit_export_live(
+        SimpleNamespace(
+            endpoint="https://siem.example.com/ingest",
+            format="ledger",
+            db=None,
+            org_id="ORG-001",
+            checkpoint=None,
+            batch_size=10,
+            timeout=5.0,
+            max_attempts=1,
+            backoff=0.0,
+            header=["Authorization: Bearer test"],
+            daemon=True,
+            interval=0.5,
+            max_cycles=2,
+        )
+    )
+
+    assert rc == 0
+    assert len(calls) == 1
+    assert event.id in calls[0][1].decode("utf-8")
+    assert sleeps == [0.5]
+    checkpoint = tmp_path / "state" / "audit_live_export_checkpoint.json"
+    assert json.loads(checkpoint.read_text(encoding="utf-8"))["last_chain_index"] == event.chain_index
+    output = capsys.readouterr().out
+    assert "Enterprise audit live export daemon started" in output
+    assert "Cycle 1: sent=1" in output
+    assert "Cycle 2: sent=0" in output
+    assert "completed max cycles" in output
+
+
 def test_enterprise_audit_live_export_cli_accepts_vendor_formats():
     seen = []
 
