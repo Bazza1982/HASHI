@@ -99,7 +99,7 @@ Deferred:
 - Vault hardening beyond token-auth read provider, such as AppRole/Kubernetes auth and lease renewal;
 - Kubernetes/HA;
 - multiple enterprise connectors;
-- DLP/classification.
+- full DLP enforcement across every runtime and connector path.
 
 ---
 
@@ -642,6 +642,7 @@ Residual P5 limitations:
 - project workspace boundary;
 - shell and file operation enforcement;
 - network egress allowlist stub;
+- data classification and egress assessment primitive;
 - browser automation policy flag;
 - completion verification hook for file-producing tasks;
 - explicit failure report when verification fails.
@@ -662,6 +663,8 @@ Implemented checkpoints:
 - governed shell execution defaults closed and requires explicit `enterprise_shell_enabled` or `bash.enterprise_enabled`.
 - `ToolRegistry.execute()` applies an enterprise network egress gate before `http_request`, `web_fetch`, and `web_search`;
 - governed network egress defaults closed and supports exact hosts, `*.example.com` suffix patterns, or `*` via `enterprise_network_allow_hosts` / `network.allow_hosts`.
+- `classify_text()` detects baseline enterprise-sensitive content classes, including email addresses, secret assignments, private keys, and Luhn-valid payment cards;
+- `assess_data_egress()` returns allow, approval-required, or deny decisions from classification thresholds and destination-region allowlists.
 - `ToolRegistry.execute()` applies an enterprise browser automation gate before all `browser_*` tools;
 - governed browser automation defaults closed and requires explicit `enterprise_browser_enabled` or `browser.enterprise_enabled`.
 - `complete_task_with_artifact_verification()` provides an enterprise completion path that marks a task `completed` only when promised artifacts are present, otherwise marks it `failed` with a clear missing-artifact reason.
@@ -671,6 +674,7 @@ Residual P6 limitations:
 - workspace boundary is wired into HASHI-controlled file tools;
 - shell execution has an explicit governed enable gate; command allow/deny pattern policy still uses the existing bash `blocked_patterns`;
 - network egress has a host allowlist stub for HASHI-controlled network tools;
+- data governance is available as a reusable primitive but is not yet automatically enforced across every connector, channel, artifact export, or backend path;
 - browser automation has an explicit governed enable gate;
 - the verification hook is available as an enterprise completion helper but is not yet automatically invoked by every runtime path;
 - CLI backend internal writes still need tool-event mapping or post-run artifact discovery.
@@ -690,6 +694,7 @@ Residual P6 limitations:
 - `ENT-082a` Wire workspace boundary into HASHI-controlled file tools. Done for `file_read`, `file_write`, `file_list`, and `apply_patch`.
 - `ENT-082` Add shell command policy checks. Done for default-deny governed shell gate; command pattern policies remain configured through existing `bash.blocked_patterns`.
 - `ENT-083` Add network egress allowlist stub. Done for `http_request`, `web_fetch`, and `web_search`.
+- `ENT-083a` Add data classification and egress assessment. Done for baseline sensitive-data findings, redacted snippets, classification thresholds, approval/deny decisions, and destination-region allowlists.
 - `ENT-084` Add browser automation policy flag. Done for all `browser_*` tools.
 - `ENT-085` Add completion verification hook. Done with complete-or-fail task helper for promised artifact checks.
 
