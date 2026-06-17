@@ -49,7 +49,7 @@ This is **not** the end state of the enterprise product. It is the first reviewa
 - OIDC token endpoint and JWKS network calls are isolated behind injectable services; public token response payloads expose token presence metadata only, not token values.
 - OIDC callback supports an explicitly enabled full login path from authorization code to session, while preserving default prepared mode for deployments that have not enabled live SSO completion.
 - SAML IdP metadata can be parsed safely, and preverified SAML assertion claims can be checked for issuer, audience, time window, subject, email, and display name.
-- SCIM-style provisioning primitives, admin-gated HTTP handlers, and a baseline SCIM 2.0 Users surface can create, update, list, fetch, deactivate, and reactivate users, assign default project membership, and revoke sessions/API tokens on deactivation.
+- SCIM-style provisioning primitives, admin-gated HTTP handlers, and IdP-facing SCIM 2.0 Users routes can create, update, list, fetch, deactivate, and reactivate users, assign default project membership, revoke sessions/API tokens on deactivation, and require scoped SCIM API tokens for `/scim/v2/Users`.
 
 ### Control Plane
 
@@ -133,7 +133,7 @@ The connector readiness tests cover:
 
 These are not blockers for Enterprise MVP review, but they are not complete:
 
-- complete SAML login flow with XML Signature verification and SCIM 2.0 compatibility beyond the baseline Users surface, including public IdP-facing routes, groups, advanced filters, schema negotiation, and bulk operations;
+- complete SAML login flow with XML Signature verification and SCIM 2.0 compatibility beyond the baseline Users surface, including groups, advanced filters, schema negotiation, and bulk operations;
 - full ABAC simulator and policy preview tooling;
 - cloud-specific object-store WORM client packages and deployment runbooks for S3/GCS/Azure immutable storage;
 - Vault AppRole/Kubernetes auth, lease renewal, and policy bootstrap;

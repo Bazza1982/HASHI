@@ -657,6 +657,105 @@ async def test_enterprise_admin_can_scim_v2_patch_user_and_revoke_tokens(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_public_scim_v2_users_requires_scoped_api_token(tmp_path):
+    server = _server(tmp_path)
+    admin = server.identity_service.bootstrap_org_admin(
+        org_id="ORG-001",
+        org_name="Acme",
+        email="admin@example.com",
+        display_name="Admin",
+        password="secret-password",
+        user_id="usr-admin",
+    )
+    session = server.identity_service.create_session(user_id=admin.id)
+    unscoped = server.identity_service.create_api_token(user_id=admin.id, scopes=["audit:read"])
+
+    session_response = await server.handle_public_scim_v2_users_list(
+        _FakeRequest(headers={"Authorization": f"Bearer {session.token}"}, path="/scim/v2/Users")
+    )
+    unscoped_response = await server.handle_public_scim_v2_users_list(
+        _FakeRequest(headers={"Authorization": f"Bearer {unscoped.token}"}, path="/scim/v2/Users")
+    )
+
+    assert session_response.status == 403
+    assert unscoped_response.status == 403
+    events = _audit_events(tmp_path)
+    assert events[-1]["action"] == "scim_token_auth"
+    assert events[-1]["status"] == "denied"
+    assert unscoped.token not in json.dumps(events)
+
+
+@pytest.mark.asyncio
+async def test_public_scim_v2_users_supports_service_token_create_list_and_patch(tmp_path):
+    server = _server(tmp_path)
+    admin = server.identity_service.bootstrap_org_admin(
+        org_id="ORG-001",
+        org_name="Acme",
+        email="admin@example.com",
+        display_name="Admin",
+        password="secret-password",
+        user_id="usr-admin",
+    )
+    scim_token = server.identity_service.create_api_token(user_id=admin.id, scopes=["scim:write"])
+    headers = {"Authorization": f"Bearer {scim_token.token}"}
+
+    create_response = await server.handle_public_scim_v2_users_create(
+        _FakeRequest({"userName": "PublicSCIM@Example.com", "displayName": "Public SCIM"}, headers=headers)
+    )
+    created = json.loads(create_response.text)
+    list_response = await server.handle_public_scim_v2_users_list(
+        _FakeRequest(headers=headers, query={"filter": 'emails.value eq "publicscim@example.com"'})
+    )
+    patch_response = await server.handle_public_scim_v2_users_patch(
+        _FakeRequest(
+            {"Operations": [{"op": "replace", "path": "active", "value": False}]},
+            headers=headers,
+            match_info={"user_id": created["id"]},
+        )
+    )
+
+    assert create_response.status == 201
+    assert created["userName"] == "publicscim@example.com"
+    assert json.loads(list_response.text)["totalResults"] == 1
+    assert json.loads(patch_response.text)["active"] is False
+    assert server.identity_service.get_user(created["id"]).status == "disabled"
+    event = _audit_events(tmp_path)[-1]
+    assert event["event_type"] == "scim"
+    assert event["action"] == "scim_v2_user_patch"
+    assert event["context"]["api_token_id"] == scim_token.id
+    assert scim_token.token not in json.dumps(_audit_events(tmp_path))
+
+
+@pytest.mark.asyncio
+async def test_public_scim_v2_rejects_cross_org_target_user(tmp_path):
+    server = _server(tmp_path)
+    admin = server.identity_service.bootstrap_org_admin(
+        org_id="ORG-001",
+        org_name="Acme",
+        email="admin@example.com",
+        display_name="Admin",
+        password="secret-password",
+        user_id="usr-admin",
+    )
+    server.identity_service.create_organization(org_id="ORG-002", name="Other")
+    other = server.identity_service.create_user(
+        org_id="ORG-002",
+        email="other@example.com",
+        display_name="Other",
+        password="secret-password",
+        user_id="usr-other",
+    )
+    scim_token = server.identity_service.create_api_token(user_id=admin.id, scopes=["scim:read"])
+
+    response = await server.handle_public_scim_v2_users_get(
+        _FakeRequest(headers={"Authorization": f"Bearer {scim_token.token}"}, match_info={"user_id": other.id})
+    )
+
+    assert response.status == 404
+    assert "usr-other" in json.loads(response.text)["detail"]
+
+
+@pytest.mark.asyncio
 async def test_enterprise_admin_can_create_list_and_revoke_api_tokens(tmp_path):
     server = _server(tmp_path)
     admin = server.identity_service.bootstrap_org_admin(
