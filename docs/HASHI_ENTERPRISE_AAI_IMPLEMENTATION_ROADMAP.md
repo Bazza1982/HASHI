@@ -628,6 +628,7 @@ Residual P4 limitations:
 - `ENT-070i` Add PostgreSQL enterprise lease backend. Done for optional `psycopg`-backed lease store, `EnterpriseLeaseStore.from_url()` dispatch for SQLite/PostgreSQL URLs, PostgreSQL advisory transaction locks around lease rows, and fake-driver acquire/renew/release tests; real PostgreSQL migration/concurrency rehearsal and connection pooling remain future work.
 - `ENT-070j` Add enterprise lease rehearsal harness. Done for `run_enterprise_lease_rehearsal()` and `hashi enterprise lease-rehearse`, validating exactly-one concurrent acquisition, renew, release, and blocked-holder takeover against the configured lease store; automated real PostgreSQL CI remains future work.
 - `ENT-070k` Add optional PostgreSQL lease integration rehearsal. Done for `tests/test_enterprise_postgres_integration.py`, gated by `HASHI_ENTERPRISE_POSTGRES_TEST_URL`, plus a PostgreSQL lease rehearsal runbook; always-on PostgreSQL CI and Kubernetes multi-replica rehearsal remain future work.
+- `ENT-070l` Add PostgreSQL lease connection lifecycle controls. Done for optional `psycopg_pool` connection provider, scheduler lease pool config/env wiring, raw Kubernetes/Helm pool values, and best-effort lease store close on scheduler stop; real pool load testing remains future work.
 
 **Acceptance:**
 
@@ -656,6 +657,7 @@ Residual P4 limitations:
 - Enterprise lease stores can be constructed from SQLite paths/URLs or PostgreSQL URLs, with PostgreSQL support gated by the optional `psycopg` package.
 - Operators can run `hashi enterprise lease-rehearse` against a target database before enabling multi-replica scheduler leases.
 - PostgreSQL lease rehearsal can be run as an opt-in pytest integration using a staging DSN.
+- PostgreSQL scheduler leases can opt into a bounded `psycopg_pool` provider and close it during scheduler shutdown.
 - Operators have starter SIEM assets under `deploy/siem/` for field mappings, Splunk alerts/dashboard, Elastic index/rules, and OpenTelemetry Collector routing.
 
 ---

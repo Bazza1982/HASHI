@@ -12,6 +12,12 @@ database before enabling multi-replica scheduler leases.
 python -m pip install "psycopg[binary]"
 ```
 
+If you enable scheduler lease pooling, also install:
+
+```bash
+python -m pip install psycopg_pool
+```
+
 ## One-Shot Rehearsal
 
 Use a staging database URL, not production:
@@ -55,3 +61,7 @@ pytest -q tests/test_enterprise_postgres_integration.py
   foreign keys, ensure `HASHI_ENTERPRISE_POSTGRES_TEST_ORG_ID` exists first.
 - Passing this rehearsal does not replace full multi-replica Kubernetes
   rollout testing; it only validates lease backend behavior.
+- Scheduler lease pooling is optional and controlled by
+  `HASHI_ENTERPRISE_SCHEDULER_LEASE_POOL_ENABLED`,
+  `HASHI_ENTERPRISE_SCHEDULER_LEASE_POOL_MIN_SIZE`, and
+  `HASHI_ENTERPRISE_SCHEDULER_LEASE_POOL_MAX_SIZE`.

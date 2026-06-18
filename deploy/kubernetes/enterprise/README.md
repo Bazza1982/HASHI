@@ -68,6 +68,9 @@ default; set it to `"true"` only after the enterprise database schema is
 initialized and the runtime lease backend has been validated. The Python lease
 store supports SQLite paths, `sqlite:///` URLs, and PostgreSQL URLs when the
 optional `psycopg` package is installed.
+PostgreSQL scheduler lease pooling is available through the
+`HASHI_ENTERPRISE_SCHEDULER_LEASE_POOL_*` settings and requires optional
+`psycopg_pool`.
 
 Before enabling scheduler leases against a staging database, run:
 

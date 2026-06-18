@@ -114,6 +114,7 @@ from orchestrator.enterprise.leases import (
     EnterpriseLeaseAttempt,
     EnterpriseLeaseStore,
     PostgresEnterpriseLeaseStore,
+    PostgresLeaseConnectionPool,
 )
 from orchestrator.enterprise.lease_rehearsal import LeaseRehearsalResult, run_enterprise_lease_rehearsal
 from orchestrator.enterprise.policy import (
@@ -266,6 +267,7 @@ __all__ = [
     "EnterpriseLeaseAttempt",
     "EnterpriseLeaseStore",
     "PostgresEnterpriseLeaseStore",
+    "PostgresLeaseConnectionPool",
     "LeaseRehearsalResult",
     "IdentityService",
     "PolicyDecision",

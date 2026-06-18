@@ -43,13 +43,28 @@ class EnterpriseLeaseStore:
         return cls(EnterpriseStore(db_path), org_id=org_id)
 
     @classmethod
-    def from_url(cls, database_url: str | Path | None, *, org_id: str):
+    def from_url(
+        cls,
+        database_url: str | Path | None,
+        *,
+        org_id: str,
+        postgres_pool: bool = False,
+        postgres_pool_min_size: int = 1,
+        postgres_pool_max_size: int = 4,
+    ):
         value = str(database_url or "").strip()
         if not value:
             raise ValueError("enterprise database URL is required")
         parsed = urlparse(value)
         if parsed.scheme in {"postgres", "postgresql"}:
-            return PostgresEnterpriseLeaseStore(value, org_id=org_id)
+            connect = None
+            if postgres_pool:
+                connect = PostgresLeaseConnectionPool(
+                    value,
+                    min_size=postgres_pool_min_size,
+                    max_size=postgres_pool_max_size,
+                )
+            return PostgresEnterpriseLeaseStore(value, org_id=org_id, connect=connect)
         if parsed.scheme == "sqlite":
             if not value.startswith("sqlite:///"):
                 raise ValueError(f"unsupported SQLite enterprise database URL: {value}")
@@ -238,6 +253,11 @@ class PostgresEnterpriseLeaseStore:
     def connect(self):
         return self._connect(self.dsn)
 
+    def close(self) -> None:
+        close = getattr(self._connect, "close", None)
+        if callable(close):
+            close()
+
     def init_schema(self) -> None:
         with self.connect() as con:
             with con.cursor() as cur:
@@ -409,6 +429,35 @@ class PostgresEnterpriseLeaseStore:
             with con.cursor() as cur:
                 row = _postgres_fetch_lease(cur, self.org_id, lease_name, for_update=False)
         return _postgres_row_to_lease(row) if row is not None else None
+
+
+class PostgresLeaseConnectionPool:
+    def __init__(self, dsn: str, *, min_size: int = 1, max_size: int = 4, pool=None):
+        self.dsn = _require_text(dsn, "PostgreSQL DSN")
+        self.min_size = max(1, int(min_size or 1))
+        self.max_size = max(self.min_size, int(max_size or self.min_size))
+        if pool is None:
+            try:
+                from psycopg_pool import ConnectionPool
+            except ImportError as exc:
+                raise RuntimeError(
+                    "PostgreSQL enterprise lease pooling requires the optional 'psycopg_pool' package"
+                ) from exc
+            pool = ConnectionPool(
+                conninfo=self.dsn,
+                min_size=self.min_size,
+                max_size=self.max_size,
+                open=True,
+            )
+        self.pool = pool
+
+    def __call__(self, _dsn: str):
+        return self.pool.connection()
+
+    def close(self) -> None:
+        close = getattr(self.pool, "close", None)
+        if callable(close):
+            close()
 
 
 def _postgres_lock_lease_key(cur, org_id: str, lease_name: str) -> None:

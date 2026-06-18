@@ -158,6 +158,9 @@ def test_enterprise_scheduler_lease_config_is_loaded(tmp_path):
                     "enterprise_scheduler_lease_name": "scheduler-main",
                     "enterprise_scheduler_lease_holder": "pod-a",
                     "enterprise_scheduler_lease_ttl_seconds": 90,
+                    "enterprise_scheduler_lease_pool_enabled": True,
+                    "enterprise_scheduler_lease_pool_min_size": 2,
+                    "enterprise_scheduler_lease_pool_max_size": 6,
                 },
                 "agents": [
                     {
@@ -182,6 +185,9 @@ def test_enterprise_scheduler_lease_config_is_loaded(tmp_path):
     assert global_cfg.enterprise_scheduler_lease_name == "scheduler-main"
     assert global_cfg.enterprise_scheduler_lease_holder == "pod-a"
     assert global_cfg.enterprise_scheduler_lease_ttl_seconds == 90
+    assert global_cfg.enterprise_scheduler_lease_pool_enabled is True
+    assert global_cfg.enterprise_scheduler_lease_pool_min_size == 2
+    assert global_cfg.enterprise_scheduler_lease_pool_max_size == 6
 
 
 def test_enterprise_scheduler_lease_env_overrides_config(tmp_path, monkeypatch):
@@ -190,6 +196,9 @@ def test_enterprise_scheduler_lease_env_overrides_config(tmp_path, monkeypatch):
     monkeypatch.setenv("HASHI_ENTERPRISE_SCHEDULER_LEASE_NAME", "scheduler-env")
     monkeypatch.setenv("HASHI_ENTERPRISE_SCHEDULER_LEASE_HOLDER", "pod-env")
     monkeypatch.setenv("HASHI_ENTERPRISE_SCHEDULER_LEASE_TTL_SECONDS", "120")
+    monkeypatch.setenv("HASHI_ENTERPRISE_SCHEDULER_LEASE_POOL_ENABLED", "true")
+    monkeypatch.setenv("HASHI_ENTERPRISE_SCHEDULER_LEASE_POOL_MIN_SIZE", "3")
+    monkeypatch.setenv("HASHI_ENTERPRISE_SCHEDULER_LEASE_POOL_MAX_SIZE", "7")
     config_path, secrets_path = _write_base_files(
         tmp_path,
         {
@@ -209,3 +218,6 @@ def test_enterprise_scheduler_lease_env_overrides_config(tmp_path, monkeypatch):
     assert global_cfg.enterprise_scheduler_lease_name == "scheduler-env"
     assert global_cfg.enterprise_scheduler_lease_holder == "pod-env"
     assert global_cfg.enterprise_scheduler_lease_ttl_seconds == 120
+    assert global_cfg.enterprise_scheduler_lease_pool_enabled is True
+    assert global_cfg.enterprise_scheduler_lease_pool_min_size == 3
+    assert global_cfg.enterprise_scheduler_lease_pool_max_size == 7

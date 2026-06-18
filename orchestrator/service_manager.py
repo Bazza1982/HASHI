@@ -222,7 +222,19 @@ class ServiceManager:
                 or os.environ.get("HASHI_ENTERPRISE_ORG_ID")
                 or "ORG-001"
             )
-            lease_store = EnterpriseLeaseStore.from_url(database_url, org_id=org_id)
+            lease_store = EnterpriseLeaseStore.from_url(
+                database_url,
+                org_id=org_id,
+                postgres_pool=bool(getattr(global_cfg, "enterprise_scheduler_lease_pool_enabled", False)),
+                postgres_pool_min_size=max(
+                    1,
+                    int(getattr(global_cfg, "enterprise_scheduler_lease_pool_min_size", 1) or 1),
+                ),
+                postgres_pool_max_size=max(
+                    1,
+                    int(getattr(global_cfg, "enterprise_scheduler_lease_pool_max_size", 4) or 4),
+                ),
+            )
         except Exception as exc:
             main_logger.warning("Enterprise scheduler DB lease disabled: %s", exc)
             bridge_logger.warning("Enterprise scheduler DB lease disabled: %s", exc)
@@ -265,6 +277,7 @@ class ServiceManager:
     async def stop_scheduler(self, timeout: float = 5.0):
         if self.kernel.scheduler_task is None:
             return
+        scheduler = self.kernel.scheduler
         bridge_logger.info("Stopping scheduler task")
         self.kernel.scheduler_task.cancel()
         try:
@@ -272,6 +285,13 @@ class ServiceManager:
         except (asyncio.CancelledError, asyncio.TimeoutError):
             bridge_logger.warning("Scheduler task stop timed out or was cancelled")
         finally:
+            lease_store = getattr(scheduler, "enterprise_lease_store", None)
+            close = getattr(lease_store, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception as e:
+                    bridge_logger.warning("Enterprise scheduler lease store close failed: %s", e)
             self.kernel.scheduler_task = None
             self.kernel.scheduler = None
 

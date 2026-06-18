@@ -1,8 +1,9 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 
-from orchestrator.enterprise import IdentityService
+from orchestrator.enterprise import EnterpriseLeaseStore, IdentityService
 from orchestrator.service_manager import ServiceManager
 
 
@@ -94,3 +95,61 @@ def test_scheduler_enterprise_database_path_resolution(tmp_path, raw_url, expect
     manager = _manager(tmp_path)
 
     assert str(manager._resolve_enterprise_database_path(raw_url)) == expected
+
+
+def test_scheduler_enterprise_lease_kwargs_passes_postgres_pool_options(tmp_path, monkeypatch):
+    manager = _manager(tmp_path)
+    calls = {}
+    fake_store = SimpleNamespace()
+
+    def fake_from_url(database_url, **kwargs):
+        calls["database_url"] = database_url
+        calls.update(kwargs)
+        return fake_store
+
+    monkeypatch.setattr(EnterpriseLeaseStore, "from_url", staticmethod(fake_from_url))
+    global_cfg = SimpleNamespace(
+        enterprise_scheduler_lease_enabled=True,
+        enterprise_database_url="postgresql://hashi@example.invalid/hashi",
+        organization_id="ORG-001",
+        instance_id="HASHI1",
+        enterprise_scheduler_lease_name="scheduler-main",
+        enterprise_scheduler_lease_holder="pod-a",
+        enterprise_scheduler_lease_ttl_seconds=45,
+        enterprise_scheduler_lease_pool_enabled=True,
+        enterprise_scheduler_lease_pool_min_size=2,
+        enterprise_scheduler_lease_pool_max_size=8,
+    )
+
+    kwargs = manager._scheduler_enterprise_lease_kwargs(global_cfg)
+
+    assert kwargs["enterprise_lease_store"] is fake_store
+    assert calls == {
+        "database_url": "postgresql://hashi@example.invalid/hashi",
+        "org_id": "ORG-001",
+        "postgres_pool": True,
+        "postgres_pool_min_size": 2,
+        "postgres_pool_max_size": 8,
+    }
+
+
+@pytest.mark.asyncio
+async def test_stop_scheduler_closes_enterprise_lease_store(tmp_path):
+    manager = _manager(tmp_path)
+    closed = {"value": False}
+
+    class _Store:
+        def close(self):
+            closed["value"] = True
+
+    async def _sleep_forever():
+        await asyncio.sleep(60)
+
+    manager.kernel.scheduler = SimpleNamespace(enterprise_lease_store=_Store())
+    manager.kernel.scheduler_task = asyncio.create_task(_sleep_forever())
+
+    await manager.stop_scheduler(timeout=0.1)
+
+    assert closed["value"] is True
+    assert manager.kernel.scheduler is None
+    assert manager.kernel.scheduler_task is None
