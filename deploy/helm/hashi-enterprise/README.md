@@ -78,8 +78,9 @@ helm upgrade --install hashi-enterprise deploy/helm/hashi-enterprise \
 ```
 
 Enable this only after the enterprise schema is initialized and the runtime
-lease backend has been validated. The current Python lease store supports
-SQLite paths and `sqlite:///` URLs.
+lease backend has been validated. The Python lease store supports SQLite paths,
+`sqlite:///` URLs, and PostgreSQL URLs when the optional `psycopg` package is
+installed.
 
 ## Live Audit Export
 

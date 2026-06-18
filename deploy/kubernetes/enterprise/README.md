@@ -65,8 +65,9 @@ mount a dedicated database secret.
 Control-plane pods include pod-name holder wiring for scheduler leases. The raw
 baseline keeps `HASHI_ENTERPRISE_SCHEDULER_LEASE_ENABLED` set to `"false"` by
 default; set it to `"true"` only after the enterprise database schema is
-initialized and the runtime lease backend has been validated. The current Python
-lease store supports SQLite paths and `sqlite:///` URLs.
+initialized and the runtime lease backend has been validated. The Python lease
+store supports SQLite paths, `sqlite:///` URLs, and PostgreSQL URLs when the
+optional `psycopg` package is installed.
 
 ## Live Audit Export Daemon
 

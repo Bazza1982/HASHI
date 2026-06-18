@@ -201,20 +201,28 @@ class ServiceManager:
             raise ValueError(f"unsupported enterprise scheduler lease database URL: {value}")
         return Path(value).expanduser()
 
+    def _scheduler_enterprise_database_url(self, raw_url: str | None) -> str:
+        value = str(raw_url or "").strip()
+        if value:
+            return value
+        return str(self.kernel.paths.bridge_home / "state" / "enterprise.sqlite")
+
     def _scheduler_enterprise_lease_kwargs(self, global_cfg) -> dict:
         if not bool(getattr(global_cfg, "enterprise_scheduler_lease_enabled", False)):
             return {}
         try:
             from orchestrator.enterprise import EnterpriseLeaseStore
 
-            db_path = self._resolve_enterprise_database_path(getattr(global_cfg, "enterprise_database_url", None))
+            database_url = self._scheduler_enterprise_database_url(
+                getattr(global_cfg, "enterprise_database_url", None)
+            )
             org_id = (
                 getattr(global_cfg, "organization_id", None)
                 or os.environ.get("HASHI_ORGANIZATION_ID")
                 or os.environ.get("HASHI_ENTERPRISE_ORG_ID")
                 or "ORG-001"
             )
-            lease_store = EnterpriseLeaseStore.from_path(db_path, org_id=org_id)
+            lease_store = EnterpriseLeaseStore.from_url(database_url, org_id=org_id)
         except Exception as exc:
             main_logger.warning("Enterprise scheduler DB lease disabled: %s", exc)
             bridge_logger.warning("Enterprise scheduler DB lease disabled: %s", exc)
