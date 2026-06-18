@@ -11,7 +11,23 @@ def test_enterprise_dockerfile_declares_enterprise_runtime():
 
     assert "FROM python:3.12-slim" in text
     assert "HASHI_DEPLOYMENT_PROFILE=enterprise" in text
+    assert 'ARG HASHI_ENTERPRISE_EXTRAS=""' in text
+    assert 'pip install --no-cache-dir ".[${HASHI_ENTERPRISE_EXTRAS}]"' in text
     assert 'CMD ["python", "main.py"]' in text
+
+
+def test_enterprise_kubernetes_backend_has_optional_package_extra():
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert 'kubernetes = ["kubernetes>=29.0.0,<32.0.0"]' in text
+
+
+def test_enterprise_raw_kubernetes_docs_cover_kubernetes_backend_extra():
+    text = (ROOT / "deploy" / "kubernetes" / "enterprise" / "README.md").read_text(encoding="utf-8")
+
+    assert "HASHI_ENTERPRISE_EXTRAS=kubernetes" in text
+    assert "hashi-bridge[kubernetes]" in text
+    assert "HASHI_ENTERPRISE_SCHEDULER_LEASE_BACKEND" in text
 
 
 def test_enterprise_compose_mounts_governed_volumes_and_healthcheck():

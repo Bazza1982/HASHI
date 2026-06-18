@@ -36,6 +36,7 @@ dependencies = [
 test = ["pytest>=9.0.3,<10.0.0"]
 whatsapp = ["neonize>=1.0.0"]
 voice = ["edge-tts>=6.0.0"]
+kubernetes = ["kubernetes>=29.0.0,<32.0.0"]
 vector = [
     "sqlite-vec>=0.1.6",
     "onnxruntime>=1.18.0",

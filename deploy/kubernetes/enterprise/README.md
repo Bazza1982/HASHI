@@ -46,6 +46,15 @@ Before applying in a real environment:
 8. Enable `HASHI_ENTERPRISE_SCHEDULER_LEASE_ENABLED` only after validating the
    enterprise schema and lease backend used by your runtime.
 
+To build an image that can use the native Kubernetes Lease scheduler backend,
+install the optional Kubernetes client extra explicitly:
+
+```bash
+docker build -f Dockerfile.enterprise \
+  --build-arg HASHI_ENTERPRISE_EXTRAS=kubernetes \
+  -t ghcr.io/your-org/hashi-enterprise:k8s-lease .
+```
+
 ## External Database Secret
 
 The deployment consumes `HASHI_ENTERPRISE_DATABASE_URL` through
@@ -72,6 +81,12 @@ PostgreSQL scheduler lease pooling is available through the
 `HASHI_ENTERPRISE_SCHEDULER_LEASE_POOL_*` settings and requires optional
 `psycopg_pool`.
 
+For the Kubernetes Lease backend, install `hashi-bridge[kubernetes]` or build
+the enterprise image with `HASHI_ENTERPRISE_EXTRAS=kubernetes`, apply
+`lease-rbac.example.yaml`, set `HASHI_ENTERPRISE_SCHEDULER_LEASE_BACKEND` to
+`kubernetes`, and confirm the service account can read and update
+`coordination.k8s.io/v1` Lease objects in the target namespace.
+
 Before enabling scheduler leases against a staging database, run:
 
 ```bash
@@ -85,7 +100,7 @@ For a full PostgreSQL rehearsal checklist, see
 For a full multi-replica staging rehearsal, see
 `docs/HASHI_ENTERPRISE_K8S_HA_REHEARSAL.md`.
 `lease-rbac.example.yaml` documents optional `coordination.k8s.io/leases`
-permissions for future native Kubernetes leader election.
+permissions for native Kubernetes scheduler lease election.
 
 ## Live Audit Export Daemon
 

@@ -634,6 +634,7 @@ Residual P4 limitations:
 - `ENT-070o` Add Kubernetes Lease coordinator abstraction. Done for injectable Kubernetes Lease client protocol, acquire/renew/release semantics, TTL expiry takeover, resourceVersion conflict handling, and fake-client tests; real Kubernetes API adapter and scheduler wiring remain future work.
 - `ENT-070p` Add Kubernetes Lease API adapter. Done for optional `kubernetes` package loading, `CustomObjectsApi` Lease get/create/replace/delete mapping, `resourceVersion` writes, 404/409 handling, and fake API tests; scheduler wiring and live cluster rehearsal remain future work.
 - `ENT-070q` Wire scheduler lease backend selection. Done for `db`/`kubernetes` scheduler lease backend config/env parsing, ServiceManager Kubernetes lease store construction, raw Kubernetes/Helm env wiring, and tests; live cluster rehearsal and production rollout validation remain future work.
+- `ENT-070r` Add Kubernetes Lease packaging guard. Done for `hashi-bridge[kubernetes]` optional extra, enterprise Docker image build arg for extras, raw Kubernetes/Helm operator docs, and static packaging tests; live cluster image validation remains future work.
 
 **Acceptance:**
 
@@ -668,6 +669,7 @@ Residual P4 limitations:
 - Runtime code now has a Kubernetes Lease coordinator abstraction that can be connected to a real Kubernetes API adapter later.
 - Runtime code now has an optional Kubernetes API adapter for `coordination.k8s.io/v1` Lease objects without making ordinary CI depend on the Kubernetes Python package.
 - Scheduler lease configuration can select the database backend or the Kubernetes Lease backend without changing scheduler loop code.
+- Operators have an explicit optional dependency and image build path for Kubernetes Lease backend support.
 - Operators have starter SIEM assets under `deploy/siem/` for field mappings, Splunk alerts/dashboard, Elastic index/rules, and OpenTelemetry Collector routing.
 
 ---
