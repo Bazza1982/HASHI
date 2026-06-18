@@ -145,3 +145,47 @@ def connector_action_schema(connector_type: str, action: str) -> dict[str, Any] 
         if schema["connector_type"] == connector_type and schema["action"] == action:
             return deepcopy(schema)
     return None
+
+
+def validate_connector_action_parameters(connector_type: str, action: str, parameters: dict[str, Any]) -> str | None:
+    schema = connector_action_schema(connector_type, action)
+    if schema is None:
+        return None
+    parameters = parameters if isinstance(parameters, dict) else {}
+    for parameter in schema.get("parameters", []):
+        name = str(parameter.get("name") or "").strip()
+        value = parameters.get(name)
+        value_missing = name not in parameters or _schema_value_missing(value, str(parameter.get("type") or ""))
+        if parameter.get("required") and value_missing:
+            return f"{schema['connector_type']}.{schema['action']} requires parameter {name}"
+        if value_missing:
+            continue
+        parameter_type = str(parameter.get("type") or "").strip()
+        if not _schema_value_matches_type(value, parameter_type):
+            return f"{name} must be {parameter_type}"
+        enum_values = parameter.get("enum")
+        if isinstance(enum_values, list) and value not in enum_values:
+            return f"{name} must be one of {', '.join(str(item) for item in enum_values)}"
+    return None
+
+
+def _schema_value_missing(value: Any, parameter_type: str) -> bool:
+    if value is None:
+        return True
+    if parameter_type == "string":
+        return str(value).strip() == ""
+    if parameter_type == "array":
+        return not isinstance(value, list) or not value
+    return False
+
+
+def _schema_value_matches_type(value: Any, parameter_type: str) -> bool:
+    if parameter_type == "string":
+        return isinstance(value, str)
+    if parameter_type == "array":
+        return isinstance(value, list)
+    if parameter_type == "boolean":
+        return isinstance(value, bool)
+    if parameter_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    return True
