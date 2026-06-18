@@ -5,6 +5,7 @@ ENV PYTHONUNBUFFERED=1
 ENV HASHI_DEPLOYMENT_PROFILE=enterprise
 
 WORKDIR /app
+ARG HASHI_ENTERPRISE_EXTRAS=""
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git curl ca-certificates \
@@ -14,6 +15,9 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
+RUN if [ -n "$HASHI_ENTERPRISE_EXTRAS" ]; then \
+        pip install --no-cache-dir ".[${HASHI_ENTERPRISE_EXTRAS}]"; \
+    fi
 
 RUN mkdir -p /data/state /data/workspaces /data/logs /data/backups
 

@@ -15,6 +15,9 @@ leases in a real environment.
 
 - Published HASHI enterprise image that includes optional `psycopg` and, if
   pool mode is enabled, `psycopg_pool`.
+- If `schedulerLease.backend=kubernetes` is enabled, the image must include
+  `hashi-bridge[kubernetes]` or be built with
+  `--build-arg HASHI_ENTERPRISE_EXTRAS=kubernetes`.
 - Kubernetes namespace for the rehearsal.
 - `hashi-enterprise-database` Secret containing
   `HASHI_ENTERPRISE_DATABASE_URL`.

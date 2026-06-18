@@ -42,6 +42,9 @@ Before production use:
 2. Set ingress TLS and NetworkPolicy rules for your cluster.
 3. Use external state services before increasing `replicaCount`.
 4. Run backup/restore and migration rehearsals against the target environment.
+5. If using `schedulerLease.backend=kubernetes`, build the image with
+   `--build-arg HASHI_ENTERPRISE_EXTRAS=kubernetes` or otherwise install
+   `hashi-bridge[kubernetes]`.
 
 ## External Database Wiring
 
@@ -103,6 +106,22 @@ Optional Kubernetes Lease RBAC can be enabled with
 `db`; set `schedulerLease.backend=kubernetes` only when the runtime image
 includes the optional Kubernetes Python package and the service account has
 Lease permissions.
+
+Example Kubernetes Lease backend install:
+
+```bash
+docker build -f Dockerfile.enterprise \
+  --build-arg HASHI_ENTERPRISE_EXTRAS=kubernetes \
+  -t ghcr.io/your-org/hashi-enterprise:k8s-lease .
+
+helm upgrade --install hashi-enterprise deploy/helm/hashi-enterprise \
+  --namespace hashi-enterprise --create-namespace \
+  --set image.repository=ghcr.io/your-org/hashi-enterprise \
+  --set image.tag=k8s-lease \
+  --set schedulerLease.enabled=true \
+  --set schedulerLease.backend=kubernetes \
+  --set leaderElection.rbac.enabled=true
+```
 
 ## Live Audit Export
 

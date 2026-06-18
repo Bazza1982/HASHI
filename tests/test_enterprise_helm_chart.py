@@ -123,6 +123,14 @@ def test_enterprise_helm_configmap_sets_enterprise_environment():
     assert "HASHI_ENTERPRISE_SCHEDULER_LEASE_POOL_MAX_SIZE:" in text
 
 
+def test_enterprise_helm_readme_documents_kubernetes_backend_extra():
+    text = _read(CHART_DIR / "README.md")
+
+    assert "HASHI_ENTERPRISE_EXTRAS=kubernetes" in text
+    assert "hashi-bridge[kubernetes]" in text
+    assert "schedulerLease.backend=kubernetes" in text
+
+
 def test_enterprise_helm_chart_includes_optional_ingress_network_policy_and_hpa():
     ingress = _read(TEMPLATES_DIR / "ingress.yaml")
     network_policy = _read(TEMPLATES_DIR / "networkpolicy.yaml")
