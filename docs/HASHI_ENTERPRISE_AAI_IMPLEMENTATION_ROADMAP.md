@@ -626,6 +626,7 @@ Residual P4 limitations:
 - `ENT-070g` Wire scheduler DB lease runtime configuration. Done for global/env scheduler lease controls, service-manager construction of the enterprise lease store, raw Kubernetes pod-name holder env wiring, and Helm `schedulerLease` values; whole-tick enforcement is covered by `ENT-070h`, and live multi-replica rehearsal remains future work.
 - `ENT-070h` Guard scheduler trigger ticks with DB leases. Done for fail-closed whole-tick lease acquisition covering heartbeat, nudge, cron, parked follow-up, and superloop advancement paths, plus release-on-exit tests; real database concurrency rehearsal remains future work.
 - `ENT-070i` Add PostgreSQL enterprise lease backend. Done for optional `psycopg`-backed lease store, `EnterpriseLeaseStore.from_url()` dispatch for SQLite/PostgreSQL URLs, PostgreSQL advisory transaction locks around lease rows, and fake-driver acquire/renew/release tests; real PostgreSQL migration/concurrency rehearsal and connection pooling remain future work.
+- `ENT-070j` Add enterprise lease rehearsal harness. Done for `run_enterprise_lease_rehearsal()` and `hashi enterprise lease-rehearse`, validating exactly-one concurrent acquisition, renew, release, and blocked-holder takeover against the configured lease store; automated real PostgreSQL CI remains future work.
 
 **Acceptance:**
 
@@ -652,6 +653,7 @@ Residual P4 limitations:
 - Operators can enable scheduler DB leases through global config or environment variables without patching scheduler code.
 - Scheduler ticks skip heartbeat, nudge, cron, parked follow-up, and superloop trigger work when another replica holds the configured DB lease.
 - Enterprise lease stores can be constructed from SQLite paths/URLs or PostgreSQL URLs, with PostgreSQL support gated by the optional `psycopg` package.
+- Operators can run `hashi enterprise lease-rehearse` against a target database before enabling multi-replica scheduler leases.
 - Operators have starter SIEM assets under `deploy/siem/` for field mappings, Splunk alerts/dashboard, Elastic index/rules, and OpenTelemetry Collector routing.
 
 ---
