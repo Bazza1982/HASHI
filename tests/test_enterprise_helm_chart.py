@@ -22,6 +22,7 @@ def test_enterprise_helm_chart_files_exist():
         "templates/deployment.yaml",
         "templates/hpa.yaml",
         "templates/ingress.yaml",
+        "templates/lease-load-rehearsal-job.yaml",
         "templates/lease-rbac.yaml",
         "templates/networkpolicy.yaml",
         "templates/pdb.yaml",
@@ -57,6 +58,9 @@ def test_enterprise_helm_values_default_to_governed_single_replica():
     assert "externalDatabase:" in text
     assert "secretKey: HASHI_ENTERPRISE_DATABASE_URL" in text
     assert "schedulerLease:" in text
+    assert "leaseLoadRehearsal:" in text
+    assert "leaseCount: \"16\"" in text
+    assert "maxWorkers: \"4\"" in text
     assert "name: superloop-scheduler" in text
     assert 'holder: "$(HASHI_POD_NAME)"' in text
     assert "minSize: \"1\"" in text
@@ -185,3 +189,18 @@ def test_enterprise_helm_audit_export_daemon_supports_optional_db_lease():
     assert "{{ .Values.auditExport.daemon.dbLease.holder | quote }}" in text
     assert "- --db-lease-ttl" in text
     assert "{{ .Values.auditExport.daemon.dbLease.ttl | quote }}" in text
+
+
+def test_enterprise_helm_includes_optional_lease_load_rehearsal_job():
+    text = _read(TEMPLATES_DIR / "lease-load-rehearsal-job.yaml")
+
+    assert "{{- if .Values.leaseLoadRehearsal.enabled }}" in text
+    assert "kind: Job" in text
+    assert "lease-load-rehearsal" in text
+    assert "name: HASHI_ENTERPRISE_DATABASE_URL" in text
+    assert "name: {{ .Values.externalDatabase.secretName }}" in text
+    assert "key: {{ .Values.externalDatabase.secretKey }}" in text
+    assert "- lease-load-rehearse" in text
+    assert "{{ .Values.leaseLoadRehearsal.leaseCount | quote }}" in text
+    assert "{{ .Values.leaseLoadRehearsal.maxWorkers | quote }}" in text
+    assert "- --no-ensure-org" in text

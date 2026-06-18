@@ -29,6 +29,12 @@ python hashi.py enterprise lease-rehearse \
   --db-url "$HASHI_ENTERPRISE_DATABASE_URL" \
   --org-id ORG-001
 ```
+- Optional in-cluster lease load rehearsal has passed:
+
+```bash
+kubectl apply -f deploy/kubernetes/enterprise/lease-load-rehearsal-job.example.yaml
+kubectl -n hashi-enterprise logs job/hashi-enterprise-lease-load-rehearsal
+```
 
 ## Install Or Upgrade
 
@@ -68,6 +74,19 @@ Check lease-related environment on a pod:
 
 ```bash
 kubectl -n hashi-enterprise exec deploy/hashi-enterprise -- env | grep HASHI_ENTERPRISE_SCHEDULER_LEASE
+```
+
+If using Helm, run the bounded in-cluster database lease load rehearsal before
+scaling scheduler replicas:
+
+```bash
+helm upgrade hashi-enterprise deploy/helm/hashi-enterprise \
+  --namespace hashi-enterprise \
+  --set externalDatabase.enabled=true \
+  --set leaseLoadRehearsal.enabled=true \
+  --set leaseLoadRehearsal.leaseCount=16 \
+  --set leaseLoadRehearsal.maxWorkers=4
+kubectl -n hashi-enterprise logs job/hashi-enterprise-lease-load-rehearsal
 ```
 
 For a Kubernetes Lease backend smoke rehearsal, run the CLI check before
