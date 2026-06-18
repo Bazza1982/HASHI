@@ -623,8 +623,9 @@ Residual P4 limitations:
 - `ENT-070d` Wire live audit export to DB leases. Done for optional `--db-lease-name`, `--db-lease-holder`, and `--db-lease-ttl` CLI controls, fail-closed held-lease behavior, daemon renewals, and release on normal exit; broader scheduler integration and Kubernetes Lease support remain future work.
 - `ENT-070e` Wire audit export DB lease deployment args. Done for raw Kubernetes daemon pod-name lease holder wiring and Helm `auditExport.daemon.dbLease` values/template controls; rendered Helm validation and live cluster rehearsal remain future work.
 - `ENT-070f` Add superloop scheduler DB lease guard. Done for optional lease-guarded `advance_superloops_once` ticks and `TaskScheduler` lease injection points; heartbeat/cron/nudge lease coverage and deployment wiring remain future work.
-- `ENT-070g` Wire scheduler DB lease runtime configuration. Done for global/env scheduler lease controls, service-manager construction of the enterprise lease store, raw Kubernetes pod-name holder env wiring, and Helm `schedulerLease` values; PostgreSQL-backed runtime lease support, heartbeat/cron/nudge lease coverage, and live multi-replica rehearsal remain future work.
-- `ENT-070h` Guard scheduler trigger ticks with DB leases. Done for fail-closed whole-tick lease acquisition covering heartbeat, nudge, cron, parked follow-up, and superloop advancement paths, plus release-on-exit tests; PostgreSQL-backed runtime lease support and live multi-replica rehearsal remain future work.
+- `ENT-070g` Wire scheduler DB lease runtime configuration. Done for global/env scheduler lease controls, service-manager construction of the enterprise lease store, raw Kubernetes pod-name holder env wiring, and Helm `schedulerLease` values; whole-tick enforcement is covered by `ENT-070h`, and live multi-replica rehearsal remains future work.
+- `ENT-070h` Guard scheduler trigger ticks with DB leases. Done for fail-closed whole-tick lease acquisition covering heartbeat, nudge, cron, parked follow-up, and superloop advancement paths, plus release-on-exit tests; real database concurrency rehearsal remains future work.
+- `ENT-070i` Add PostgreSQL enterprise lease backend. Done for optional `psycopg`-backed lease store, `EnterpriseLeaseStore.from_url()` dispatch for SQLite/PostgreSQL URLs, PostgreSQL advisory transaction locks around lease rows, and fake-driver acquire/renew/release tests; real PostgreSQL migration/concurrency rehearsal and connection pooling remain future work.
 
 **Acceptance:**
 
@@ -650,6 +651,7 @@ Residual P4 limitations:
 - Superloop scheduler ticks can opt into enterprise DB leases to avoid duplicate advancement in multi-replica runs.
 - Operators can enable scheduler DB leases through global config or environment variables without patching scheduler code.
 - Scheduler ticks skip heartbeat, nudge, cron, parked follow-up, and superloop trigger work when another replica holds the configured DB lease.
+- Enterprise lease stores can be constructed from SQLite paths/URLs or PostgreSQL URLs, with PostgreSQL support gated by the optional `psycopg` package.
 - Operators have starter SIEM assets under `deploy/siem/` for field mappings, Splunk alerts/dashboard, Elastic index/rules, and OpenTelemetry Collector routing.
 
 ---
