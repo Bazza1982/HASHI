@@ -1061,6 +1061,40 @@ const CONNECTOR_PRESETS = {
   },
 };
 
+const schemaValueMissing = (value, type) => {
+  if (value === undefined || value === null) return true;
+  if (type === 'string') return String(value).trim() === '';
+  if (type === 'array') return !Array.isArray(value) || value.length === 0;
+  return false;
+};
+
+const schemaValueMatchesType = (value, type) => {
+  if (type === 'string') return typeof value === 'string';
+  if (type === 'array') return Array.isArray(value);
+  if (type === 'boolean') return typeof value === 'boolean';
+  if (type === 'integer') return Number.isInteger(value);
+  return true;
+};
+
+const validateConnectorParameters = (parameters, schema) => {
+  if (!schema) return '';
+  for (const parameter of schema.parameters || []) {
+    const hasValue = Object.prototype.hasOwnProperty.call(parameters, parameter.name);
+    const value = parameters[parameter.name];
+    if (parameter.required && (!hasValue || schemaValueMissing(value, parameter.type))) {
+      return `${schema.connector_type}.${schema.action} requires parameter ${parameter.name}`;
+    }
+    if (!hasValue || schemaValueMissing(value, parameter.type)) continue;
+    if (!schemaValueMatchesType(value, parameter.type)) {
+      return `${parameter.name} must be ${parameter.type}`;
+    }
+    if (parameter.enum && !parameter.enum.includes(value)) {
+      return `${parameter.name} must be one of ${parameter.enum.join(', ')}`;
+    }
+  }
+  return '';
+};
+
 function EnterpriseAdminPanel() {
   const [authToken, setAuthToken] = useState(() => localStorage.getItem(STORAGE_KEY_ENTERPRISE_AUTH) || '');
   const [credentials, setCredentials] = useState([]);
@@ -1205,6 +1239,12 @@ function EnterpriseAdminPanel() {
       const parameters = executionForm.parameters.trim()
         ? JSON.parse(executionForm.parameters)
         : {};
+      const schemaError = validateConnectorParameters(parameters, selectedActionSchema);
+      if (schemaError) {
+        setParametersError(schemaError);
+        setStatus('Connector parameters failed schema validation.');
+        return;
+      }
       const payload = await api('/api/enterprise/connectors/execute', {
         method: 'POST',
         body: JSON.stringify({
