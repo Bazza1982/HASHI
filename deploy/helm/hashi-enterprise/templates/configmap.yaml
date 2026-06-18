@@ -13,3 +13,6 @@ data:
   HASHI_ENTERPRISE_SCHEDULER_LEASE_ENABLED: {{ .Values.schedulerLease.enabled | quote }}
   HASHI_ENTERPRISE_SCHEDULER_LEASE_NAME: {{ .Values.schedulerLease.name | quote }}
   HASHI_ENTERPRISE_SCHEDULER_LEASE_TTL_SECONDS: {{ .Values.schedulerLease.ttl | quote }}
+  HASHI_ENTERPRISE_SCHEDULER_LEASE_POOL_ENABLED: {{ .Values.schedulerLease.pool.enabled | quote }}
+  HASHI_ENTERPRISE_SCHEDULER_LEASE_POOL_MIN_SIZE: {{ .Values.schedulerLease.pool.minSize | quote }}
+  HASHI_ENTERPRISE_SCHEDULER_LEASE_POOL_MAX_SIZE: {{ .Values.schedulerLease.pool.maxSize | quote }}

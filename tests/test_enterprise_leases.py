@@ -4,7 +4,12 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from orchestrator.enterprise import EnterpriseLeaseStore, IdentityService, PostgresEnterpriseLeaseStore
+from orchestrator.enterprise import (
+    EnterpriseLeaseStore,
+    IdentityService,
+    PostgresEnterpriseLeaseStore,
+    PostgresLeaseConnectionPool,
+)
 
 
 def _lease_store(tmp_path) -> EnterpriseLeaseStore:
@@ -134,6 +139,31 @@ def test_postgres_enterprise_lease_store_renews_and_releases_current_holder():
     assert leases.get("audit-export") is None
 
 
+def test_postgres_enterprise_lease_store_can_use_connection_pool_provider():
+    state = {}
+    pool = _FakePgPool(state)
+    provider = PostgresLeaseConnectionPool(
+        "postgresql://hashi@example.invalid/hashi",
+        min_size=2,
+        max_size=5,
+        pool=pool,
+    )
+    leases = PostgresEnterpriseLeaseStore(
+        "postgresql://hashi@example.invalid/hashi",
+        org_id="ORG-001",
+        connect=provider,
+    )
+
+    acquired = leases.acquire("scheduler", holder_id="pod-a")
+    leases.close()
+
+    assert acquired.acquired is True
+    assert provider.min_size == 2
+    assert provider.max_size == 5
+    assert pool.connection_count >= 1
+    assert pool.closed is True
+
+
 def _fake_pg_connect(state: dict):
     def connect(_dsn: str):
         return _FakePgConnection(state)
@@ -153,6 +183,20 @@ class _FakePgConnection:
 
     def cursor(self):
         return _FakePgCursor(self.state)
+
+
+class _FakePgPool:
+    def __init__(self, state: dict):
+        self.state = state
+        self.closed = False
+        self.connection_count = 0
+
+    def connection(self):
+        self.connection_count += 1
+        return _FakePgConnection(self.state)
+
+    def close(self):
+        self.closed = True
 
 
 class _FakePgCursor:

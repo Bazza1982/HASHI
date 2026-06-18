@@ -69,6 +69,9 @@ class GlobalConfig:
     enterprise_scheduler_lease_name: str = "superloop-scheduler"
     enterprise_scheduler_lease_holder: str | None = None
     enterprise_scheduler_lease_ttl_seconds: int = 60
+    enterprise_scheduler_lease_pool_enabled: bool = False
+    enterprise_scheduler_lease_pool_min_size: int = 1
+    enterprise_scheduler_lease_pool_max_size: int = 4
 
 @dataclass
 class AgentConfig:
@@ -166,6 +169,32 @@ class ConfigManager:
                 or 60
             ),
         )
+        enterprise_scheduler_lease_pool_enabled = _truthy(
+            os.environ.get(
+                "HASHI_ENTERPRISE_SCHEDULER_LEASE_POOL_ENABLED",
+                g_raw.get("enterprise_scheduler_lease_pool_enabled", False),
+            )
+        )
+        enterprise_scheduler_lease_pool_min_size = max(
+            1,
+            int(
+                os.environ.get(
+                    "HASHI_ENTERPRISE_SCHEDULER_LEASE_POOL_MIN_SIZE",
+                    g_raw.get("enterprise_scheduler_lease_pool_min_size", 1),
+                )
+                or 1
+            ),
+        )
+        enterprise_scheduler_lease_pool_max_size = max(
+            enterprise_scheduler_lease_pool_min_size,
+            int(
+                os.environ.get(
+                    "HASHI_ENTERPRISE_SCHEDULER_LEASE_POOL_MAX_SIZE",
+                    g_raw.get("enterprise_scheduler_lease_pool_max_size", 4),
+                )
+                or 4
+            ),
+        )
 
         global_cfg = GlobalConfig(
             authorized_id=_auth_id,
@@ -224,6 +253,9 @@ class ConfigManager:
             enterprise_scheduler_lease_name=enterprise_scheduler_lease_name,
             enterprise_scheduler_lease_holder=enterprise_scheduler_lease_holder,
             enterprise_scheduler_lease_ttl_seconds=enterprise_scheduler_lease_ttl_seconds,
+            enterprise_scheduler_lease_pool_enabled=enterprise_scheduler_lease_pool_enabled,
+            enterprise_scheduler_lease_pool_min_size=enterprise_scheduler_lease_pool_min_size,
+            enterprise_scheduler_lease_pool_max_size=enterprise_scheduler_lease_pool_max_size,
         )
 
         agents = []

@@ -78,6 +78,9 @@ def test_configmap_sets_enterprise_profile_and_bridge_home():
     assert 'HASHI_ENTERPRISE_SCHEDULER_LEASE_ENABLED: "false"' in text
     assert "HASHI_ENTERPRISE_SCHEDULER_LEASE_NAME: superloop-scheduler" in text
     assert 'HASHI_ENTERPRISE_SCHEDULER_LEASE_TTL_SECONDS: "60"' in text
+    assert 'HASHI_ENTERPRISE_SCHEDULER_LEASE_POOL_ENABLED: "false"' in text
+    assert 'HASHI_ENTERPRISE_SCHEDULER_LEASE_POOL_MIN_SIZE: "1"' in text
+    assert 'HASHI_ENTERPRISE_SCHEDULER_LEASE_POOL_MAX_SIZE: "4"' in text
 
 
 def test_secret_example_does_not_contain_real_values():

@@ -56,6 +56,8 @@ def test_enterprise_helm_values_default_to_governed_single_replica():
     assert "schedulerLease:" in text
     assert "name: superloop-scheduler" in text
     assert 'holder: "$(HASHI_POD_NAME)"' in text
+    assert "minSize: \"1\"" in text
+    assert "maxSize: \"4\"" in text
     assert "podDisruptionBudget:" in text
     assert "minAvailable: 1" in text
     assert "dbLease:" in text
@@ -107,6 +109,9 @@ def test_enterprise_helm_configmap_sets_enterprise_environment():
     assert "HASHI_ENTERPRISE_SCHEDULER_LEASE_ENABLED:" in text
     assert "HASHI_ENTERPRISE_SCHEDULER_LEASE_NAME:" in text
     assert "HASHI_ENTERPRISE_SCHEDULER_LEASE_TTL_SECONDS:" in text
+    assert "HASHI_ENTERPRISE_SCHEDULER_LEASE_POOL_ENABLED:" in text
+    assert "HASHI_ENTERPRISE_SCHEDULER_LEASE_POOL_MIN_SIZE:" in text
+    assert "HASHI_ENTERPRISE_SCHEDULER_LEASE_POOL_MAX_SIZE:" in text
 
 
 def test_enterprise_helm_chart_includes_optional_ingress_network_policy_and_hpa():

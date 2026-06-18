@@ -43,6 +43,10 @@ schedulerLease:
   name: superloop-scheduler
   holder: "$(HASHI_POD_NAME)"
   ttl: "60"
+  pool:
+    enabled: false
+    minSize: "1"
+    maxSize: "4"
 
 secrets:
   adminToken: change-me
