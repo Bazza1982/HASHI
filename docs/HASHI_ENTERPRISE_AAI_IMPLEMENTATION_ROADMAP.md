@@ -794,7 +794,7 @@ Implemented checkpoints:
 - governed network egress defaults closed and supports exact hosts, `*.example.com` suffix patterns, or `*` via `enterprise_network_allow_hosts` / `network.allow_hosts`.
 - `classify_text()` detects baseline enterprise-sensitive content classes, including email addresses, secret assignments, private keys, and Luhn-valid payment cards;
 - `assess_data_egress()` returns allow, approval-required, or deny decisions from classification thresholds and destination-region allowlists.
-- `ConnectorExecutionService` applies data-governance checks before Slack and Google Chat `message.send`; confidential content creates a `data.egress` approval request, restricted content is denied, and connector audit records redact outbound message text.
+- `ConnectorExecutionService` applies data-governance checks before Slack, Google Chat, and Teams `message.send`; confidential content creates a `data.egress` approval request, restricted content is denied, and connector audit records redact outbound message text.
 - `ToolRegistry.execute()` applies an enterprise browser automation gate before all `browser_*` tools;
 - governed browser automation defaults closed and requires explicit `enterprise_browser_enabled` or `browser.enterprise_enabled`.
 - `complete_task_with_artifact_verification()` provides an enterprise completion path that marks a task `completed` only when promised artifacts are present, otherwise marks it `failed` with a clear missing-artifact reason.
@@ -804,7 +804,7 @@ Residual P6 limitations:
 - workspace boundary is wired into HASHI-controlled file tools;
 - shell execution has an explicit governed enable gate; command allow/deny pattern policy still uses the existing bash `blocked_patterns`;
 - network egress has a host allowlist stub for HASHI-controlled network tools;
-- data governance is enforced for Slack/Google Chat webhook `message.send`, but is not yet automatically enforced across every connector, channel, artifact export, or backend path;
+- data governance is enforced for Slack/Google Chat/Teams webhook `message.send`, but is not yet automatically enforced across every connector, channel, artifact export, or backend path;
 - browser automation has an explicit governed enable gate;
 - the verification hook is available as an enterprise completion helper but is not yet automatically invoked by every runtime path;
 - CLI backend internal writes still need tool-event mapping or post-run artifact discovery.
@@ -825,7 +825,7 @@ Residual P6 limitations:
 - `ENT-082` Add shell command policy checks. Done for default-deny governed shell gate; command pattern policies remain configured through existing `bash.blocked_patterns`.
 - `ENT-083` Add network egress allowlist stub. Done for `http_request`, `web_fetch`, and `web_search`.
 - `ENT-083a` Add data classification and egress assessment. Done for baseline sensitive-data findings, redacted snippets, classification thresholds, approval/deny decisions, and destination-region allowlists.
-- `ENT-083b` Wire data-governance checks into outbound connector messages. Done for Slack and Google Chat `message.send`, approval requests for confidential data, fail-closed denial for restricted data, and audit redaction of message text/result payloads.
+- `ENT-083b` Wire data-governance checks into outbound connector messages. Done for Slack, Google Chat, and Teams `message.send`, approval requests for confidential data, fail-closed denial for restricted data, and audit redaction of message text/result payloads.
 - `ENT-084` Add browser automation policy flag. Done for all `browser_*` tools.
 - `ENT-085` Add completion verification hook. Done with complete-or-fail task helper for promised artifact checks.
 
@@ -1151,14 +1151,14 @@ Residual P10 limitations:
 
 - GitHub has repository metadata, issue creation, PR creation, and PR merge actions.
 - Slack exists as an incoming webhook MVP only; Slack OAuth, Bot API, channel discovery, and user mapping are not implemented yet.
-- Google Chat exists as an incoming webhook MVP only; Google Chat OAuth, space discovery, and user mapping are not implemented yet.
-- No Teams or Feishu connector is implemented yet.
+- Google Chat and Teams exist as incoming webhook MVPs only; OAuth/Graph API, space/team/channel discovery, and user mapping are not implemented yet.
+- No Feishu connector is implemented yet.
 - Credential store records secret references only; environment and HASHI secrets can now be resolved through a dedicated resolver, while Vault/Kubernetes secret resolution remains pending.
-- Connector factory currently supports GitHub, Slack, and Google Chat; Teams and Feishu factory support remains pending.
+- Connector factory currently supports GitHub, Slack, Google Chat, and Teams; Feishu factory support remains pending.
 - Workbench registry refresh is in-process; multi-node registry synchronization remains future work.
-- Default connector policy covers GitHub reads, GitHub writes, Slack outbound message approval, and Google Chat outbound message approval; silent auto-install remains intentionally avoided to prevent overwriting administrator policy edits.
+- Default connector policy covers GitHub reads, GitHub writes, Slack outbound message approval, Google Chat outbound message approval, and Teams outbound message approval; silent auto-install remains intentionally avoided to prevent overwriting administrator policy edits.
 - Workbench/admin connector execution API now uses the gated execution service.
-- Connector health API exists for registered in-process connectors; built-in GitHub, Slack, and Google Chat connectors can now be constructed from credential references.
+- Connector health API exists for registered in-process connectors; built-in GitHub, Slack, Google Chat, and Teams connectors can now be constructed from credential references.
 - Connector admin UI exists as a Workbench MVP; richer guided setup, OAuth flows, and broader connector-specific server-side validation remain pending.
 
 **Scope:**
@@ -1182,6 +1182,7 @@ Residual P10 limitations:
 - `ENT-122` Add connector execution gate. Done for credential existence, org isolation, revoke fail-closed, type match, policy deny, and approval-required decisions.
 - `ENT-126` Add first enterprise channel connector. Done for Slack incoming webhook health, dry-run, `message.send`, injectable transport, and factory construction from secret refs.
 - `ENT-136` Add second enterprise channel connector. Done for Google Chat incoming webhook health, dry-run, `message.send`, injectable transport, factory construction from secret refs, default approval-required policy, Workbench presets, and server-side `message.send` text validation.
+- `ENT-136a` Add Microsoft Teams webhook connector. Done for Teams incoming webhook health, dry-run, `message.send`, injectable transport, factory construction from secret refs, server-side text validation, data-governance checks, audit redaction, default approval-required policy, and Workbench dry-run execution.
 - `ENT-123` Add GitHub connector with audit. Done for health, repository metadata, issue creation, PR creation, and PR merge actions.
 - `ENT-124` Add connector health checks. Done for in-process registry, normalized health summaries, ledger health events, and Workbench admin health API.
 - `ENT-125` Add credential revoke tests. Done for gate-level fail-closed behavior.

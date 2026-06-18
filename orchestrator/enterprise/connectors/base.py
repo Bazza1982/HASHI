@@ -115,7 +115,7 @@ def _redact_message_text_values(action: ConnectorAction, value):
 
 def _is_message_text(action: ConnectorAction, key: str) -> bool:
     return (
-        str(action.connector_type or "").strip().lower() in {"slack", "google_chat"}
+        str(action.connector_type or "").strip().lower() in {"slack", "google_chat", "teams"}
         and str(action.action or "").strip().lower() == "message.send"
         and key.lower() == "text"
     )
