@@ -561,7 +561,8 @@ h1 { margin: 0; font-size: 20px; }
   font-size: 0.78rem;
 }
 .connector-parameter-control input,
-.connector-parameter-control select {
+.connector-parameter-control select,
+.connector-parameter-control textarea {
   height: 34px;
   border: 1px solid var(--border);
   border-radius: 7px;
@@ -569,6 +570,13 @@ h1 { margin: 0; font-size: 20px; }
   color: var(--text);
   padding: 6px 8px;
   min-width: 0;
+}
+.connector-parameter-control textarea {
+  height: auto;
+  min-height: 86px;
+  resize: vertical;
+  font-family: "Consolas", "Courier New", monospace;
+  font-size: 12px;
 }
 .connector-form input,
 .connector-form select,

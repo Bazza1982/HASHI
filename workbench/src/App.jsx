@@ -1106,6 +1106,12 @@ const parseConnectorParameterDraft = (text) => {
 
 const formatConnectorParameterDraft = (parameters) => JSON.stringify(parameters, null, 2);
 
+const formatParameterControlValue = (value, type) => {
+  if (value === undefined || value === null) return '';
+  if (type === 'array') return Array.isArray(value) ? JSON.stringify(value, null, 2) : String(value);
+  return String(value);
+};
+
 function EnterpriseAdminPanel() {
   const [authToken, setAuthToken] = useState(() => localStorage.getItem(STORAGE_KEY_ENTERPRISE_AUTH) || '');
   const [credentials, setCredentials] = useState([]);
@@ -1326,6 +1332,13 @@ function EnterpriseAdminPanel() {
       } else if (parameter.type === 'integer') {
         const numericValue = Number(rawValue);
         nextParameters[parameter.name] = Number.isFinite(numericValue) ? numericValue : rawValue;
+      } else if (parameter.type === 'array') {
+        try {
+          const parsedValue = rawValue.trim() ? JSON.parse(rawValue) : [];
+          nextParameters[parameter.name] = Array.isArray(parsedValue) ? parsedValue : rawValue;
+        } catch {
+          nextParameters[parameter.name] = rawValue;
+        }
       } else {
         nextParameters[parameter.name] = rawValue;
       }
@@ -1337,9 +1350,7 @@ function EnterpriseAdminPanel() {
     schema.connector_type === executionForm.connector_type && schema.action === executionForm.action
   ));
   const connectorParameterDraft = parseConnectorParameterDraft(executionForm.parameters);
-  const editableSchemaParameters = (selectedActionSchema?.parameters || []).filter(
-    (parameter) => parameter.type !== 'array',
-  );
+  const editableSchemaParameters = selectedActionSchema?.parameters || [];
 
   return (
     <main className="enterprise-layout">
@@ -1499,11 +1510,17 @@ function EnterpriseAdminPanel() {
             <div className="connector-parameter-controls">
               {editableSchemaParameters.map((parameter) => {
                 const value = connectorParameterDraft[parameter.name];
-                const inputValue = value === undefined || value === null ? '' : String(value);
+                const inputValue = formatParameterControlValue(value, parameter.type);
                 return (
                   <label key={parameter.name} className="connector-parameter-control">
                     <span>{parameter.name}</span>
-                    {parameter.enum ? (
+                    {parameter.type === 'array' ? (
+                      <textarea
+                        value={inputValue}
+                        onChange={(e) => updateExecutionParameter(parameter, e.target.value)}
+                        rows={4}
+                      />
+                    ) : parameter.enum ? (
                       <select
                         value={inputValue}
                         onChange={(e) => updateExecutionParameter(parameter, e.target.value)}
