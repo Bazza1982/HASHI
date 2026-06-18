@@ -1,0 +1,32 @@
+replicaCount: 2
+
+externalDatabase:
+  enabled: true
+  secretName: hashi-enterprise-database
+  secretKey: HASHI_ENTERPRISE_DATABASE_URL
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+schedulerLease:
+  enabled: true
+  name: superloop-scheduler
+  holder: "$(HASHI_POD_NAME)"
+  ttl: "60"
+  pool:
+    enabled: true
+    minSize: "1"
+    maxSize: "4"
+
+auditExport:
+  enabled: false
+  daemon:
+    enabled: true
+    replicaCount: 1
+    interval: "60"
+    dbLease:
+      enabled: true
+      name: audit-export
+      holder: "$(HASHI_POD_NAME)"
+      ttl: "180"

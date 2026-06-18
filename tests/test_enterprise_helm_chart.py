@@ -29,6 +29,7 @@ def test_enterprise_helm_chart_files_exist():
         "templates/service.yaml",
         "templates/serviceaccount.yaml",
         "examples/external-postgres-secret.kubernetes.yaml",
+        "examples/multi-replica-rehearsal.values.yaml",
     }
 
     actual = {
