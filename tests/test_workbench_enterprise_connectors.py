@@ -113,6 +113,8 @@ def test_workbench_connector_ui_includes_channel_presets():
     assert '<option value="feishu">Feishu</option>' in app_source
     assert "api('/api/enterprise/connectors/action-schemas')" in app_source
     assert "connector-schema-panel" in app_source
+    assert "validateConnectorParameters" in app_source
+    assert "Connector parameters failed schema validation." in app_source
 
 
 @pytest.mark.asyncio
