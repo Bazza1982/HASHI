@@ -50,6 +50,10 @@ python tools/enterprise_production_validation_plan.py \
   --output /tmp/hashi-enterprise-production-validation-plan.json
 ```
 
+The `enterprise-production-validation-plan` GitHub Actions workflow generates
+and uploads the same JSON plan as an artifact without running Helm, kubectl, or
+curl.
+
 ## Apply
 
 Apply only after render review and secret validation:
