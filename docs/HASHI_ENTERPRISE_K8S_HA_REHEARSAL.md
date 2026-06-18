@@ -74,6 +74,8 @@ For a Kubernetes Lease backend smoke rehearsal, run the CLI check before
 enabling multiple scheduler replicas:
 
 ```bash
+python tools/enterprise_k8s_backend_doctor.py --require-installed
+
 python hashi.py enterprise k8s-lease-rehearse \
   --namespace hashi-enterprise \
   --lease-name superloop-scheduler-smoke

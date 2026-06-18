@@ -110,6 +110,8 @@ Lease permissions.
 Example Kubernetes Lease backend install:
 
 ```bash
+python tools/enterprise_k8s_backend_doctor.py --json
+
 docker build -f Dockerfile.enterprise \
   --build-arg HASHI_ENTERPRISE_EXTRAS=kubernetes \
   -t ghcr.io/your-org/hashi-enterprise:k8s-lease .
