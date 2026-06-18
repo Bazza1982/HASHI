@@ -50,6 +50,8 @@ Before production use:
    production ingress, NetworkPolicy, HPA, and PDB controls.
    `tools/enterprise_production_validation_plan.py` can generate the
    post-render kubectl/curl validation command plan.
+   The `enterprise-production-validation-plan` GitHub Actions workflow uploads
+   that JSON plan without running Helm, kubectl, or curl.
 
 ## External Database Wiring
 

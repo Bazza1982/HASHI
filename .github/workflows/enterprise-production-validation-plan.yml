@@ -1,0 +1,44 @@
+name: enterprise-production-validation-plan
+
+on:
+  push:
+    paths:
+      - "tools/enterprise_production_validation_plan.py"
+      - "deploy/helm/hashi-enterprise/**"
+      - "docs/HASHI_ENTERPRISE_PRODUCTION_HARDENING_RUNBOOK.md"
+      - ".github/workflows/enterprise-production-validation-plan.yml"
+  pull_request:
+    paths:
+      - "tools/enterprise_production_validation_plan.py"
+      - "deploy/helm/hashi-enterprise/**"
+      - "docs/HASHI_ENTERPRISE_PRODUCTION_HARDENING_RUNBOOK.md"
+      - ".github/workflows/enterprise-production-validation-plan.yml"
+
+jobs:
+  generate-plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Generate production validation command plan
+        run: |
+          python tools/enterprise_production_validation_plan.py \
+            --image-repository ghcr.io/example/hashi-enterprise \
+            --image-tag production-validation \
+            --namespace hashi-enterprise \
+            --host hashi-enterprise.example.com \
+            --ingress-namespace ingress-nginx \
+            --output hashi-production-validation-plan.json
+
+      - name: Validate plan JSON
+        run: python -m json.tool hashi-production-validation-plan.json >/dev/null
+
+      - name: Upload production validation plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: hashi-production-validation-plan
+          path: hashi-production-validation-plan.json
