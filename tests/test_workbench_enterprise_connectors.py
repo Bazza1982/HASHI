@@ -233,6 +233,94 @@ async def test_enterprise_admin_can_create_list_and_revoke_connector_credentials
 
 
 @pytest.mark.asyncio
+async def test_enterprise_connector_credential_create_rejects_unsupported_type(tmp_path):
+    server = _server(tmp_path)
+    headers = _admin_headers(server)
+
+    response = await server.handle_enterprise_connector_credentials_create(
+        _FakeRequest(
+            headers=headers,
+            path="/api/enterprise/connectors/credentials",
+            body={
+                "connector_type": "jira",
+                "display_name": "Jira",
+                "secret_ref": "env://JIRA_TOKEN",
+                "scopes": ["issue.read"],
+            },
+        )
+    )
+
+    payload = json.loads(response.text)
+    assert response.status == 400
+    assert payload["ok"] is False
+    assert "unsupported connector_type" in payload["error"]
+    assert server.connector_credentials.list_credentials(org_id="ORG-001") == []
+
+
+@pytest.mark.asyncio
+async def test_enterprise_connector_credential_create_validates_scope_and_secret_ref(tmp_path):
+    server = _server(tmp_path)
+    headers = _admin_headers(server)
+
+    missing_scope = await server.handle_enterprise_connector_credentials_create(
+        _FakeRequest(
+            headers=headers,
+            path="/api/enterprise/connectors/credentials",
+            body={
+                "connector_type": "slack",
+                "display_name": "Slack Webhook",
+                "secret_ref": "env://SLACK_WEBHOOK_URL",
+                "scopes": ["chat:write"],
+            },
+        )
+    )
+    bad_secret_ref = await server.handle_enterprise_connector_credentials_create(
+        _FakeRequest(
+            headers=headers,
+            path="/api/enterprise/connectors/credentials",
+            body={
+                "connector_type": "slack",
+                "display_name": "Slack Webhook",
+                "secret_ref": "plain-secret-name",
+                "scopes": ["message.send"],
+            },
+        )
+    )
+
+    missing_scope_payload = json.loads(missing_scope.text)
+    bad_secret_ref_payload = json.loads(bad_secret_ref.text)
+    assert missing_scope.status == 400
+    assert "slack credentials require scope message.send" == missing_scope_payload["error"]
+    assert bad_secret_ref.status == 400
+    assert "secret_ref must use env://" in bad_secret_ref_payload["error"]
+    assert server.connector_credentials.list_credentials(org_id="ORG-001") == []
+
+
+@pytest.mark.asyncio
+async def test_enterprise_connector_credential_create_accepts_comma_separated_scopes(tmp_path):
+    server = _server(tmp_path)
+    headers = _admin_headers(server)
+
+    response = await server.handle_enterprise_connector_credentials_create(
+        _FakeRequest(
+            headers=headers,
+            path="/api/enterprise/connectors/credentials",
+            body={
+                "connector_type": "teams",
+                "display_name": "Teams Webhook",
+                "secret_ref": "env://TEAMS_WEBHOOK_URL",
+                "scopes": "message.send, extra.scope",
+                "credential_id": "cred-teams",
+            },
+        )
+    )
+
+    payload = json.loads(response.text)
+    assert response.status == 201
+    assert payload["credential"]["scopes"] == ["extra.scope", "message.send"]
+
+
+@pytest.mark.asyncio
 async def test_enterprise_connector_credential_create_refreshes_registry_from_secret_ref(tmp_path):
     server = _server(tmp_path, secrets={"github_token": "ghp-test"})
     headers = _admin_headers(server)

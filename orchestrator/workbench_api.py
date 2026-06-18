@@ -64,6 +64,52 @@ from orchestrator.pathing import resolve_path_value
 from orchestrator.transfer_store import TransferStore
 
 
+_SUPPORTED_CONNECTOR_TYPES = frozenset({"github", "slack", "google_chat", "teams", "feishu"})
+_CONNECTOR_REQUIRED_SCOPES = {
+    "github": frozenset({"repo:read", "repo:write"}),
+    "slack": frozenset({"message.send"}),
+    "google_chat": frozenset({"message.send"}),
+    "teams": frozenset({"message.send"}),
+    "feishu": frozenset({"message.send"}),
+}
+_CONNECTOR_SECRET_REF_PREFIXES = (
+    "env://",
+    "env:",
+    "secrets://",
+    "hashi://",
+    "file://",
+    "k8s://",
+    "vault://",
+)
+
+
+def _connector_scopes_from_payload(value) -> list[str]:
+    if isinstance(value, str):
+        raw_items = value.split(",")
+    elif isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = []
+    return sorted({str(item).strip() for item in raw_items if str(item).strip()})
+
+
+def _validate_connector_credential_payload(payload: dict, scopes: list[str]) -> str | None:
+    connector_type = str(payload.get("connector_type") or "").strip().lower()
+    if connector_type not in _SUPPORTED_CONNECTOR_TYPES:
+        supported = ", ".join(sorted(_SUPPORTED_CONNECTOR_TYPES))
+        return f"unsupported connector_type: {connector_type or '<empty>'}; supported: {supported}"
+    secret_ref = str(payload.get("secret_ref") or "").strip()
+    if not secret_ref:
+        return "secret_ref is required"
+    if not secret_ref.startswith(_CONNECTOR_SECRET_REF_PREFIXES):
+        return "secret_ref must use env://, secrets://, hashi://, file://, k8s://, or vault://"
+    required_scopes = _CONNECTOR_REQUIRED_SCOPES[connector_type]
+    if not required_scopes.intersection(scopes):
+        required = " or ".join(sorted(required_scopes))
+        return f"{connector_type} credentials require scope {required}"
+    return None
+
+
 def _read_jsonl_recent(file_path: Path, limit: int = 50) -> dict:
     if not file_path.exists():
         return {"messages": [], "offset": 0}
@@ -2316,7 +2362,17 @@ class WorkbenchApiServer:
             payload = await request.json()
         except Exception:
             return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
-        scopes = payload.get("scopes") if isinstance(payload.get("scopes"), list) else []
+        scopes = _connector_scopes_from_payload(payload.get("scopes"))
+        validation_error = _validate_connector_credential_payload(payload, scopes)
+        if validation_error:
+            self._append_enterprise_audit(
+                event_type="admin_api",
+                action="connector_credential_create",
+                status="failed",
+                actor_id=actor.id if actor else None,
+                context={"error": validation_error},
+            )
+            return web.json_response({"ok": False, "error": validation_error}, status=400)
         try:
             credential = self.connector_credentials.create_credential(
                 org_id=org_id,
