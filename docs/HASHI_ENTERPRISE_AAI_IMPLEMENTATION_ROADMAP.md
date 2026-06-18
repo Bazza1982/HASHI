@@ -1159,7 +1159,7 @@ Residual P10 limitations:
 - Workbench/admin connector execution API now uses the gated execution service.
 - Workbench/admin connector action schema API exposes supported parameter metadata for GitHub and webhook connector test runs.
 - Workbench Connector Test Run consumes connector action schemas and renders parameter metadata beside the JSON parameter editor.
-- Workbench Connector Test Run renders schema-driven controls for string, integer, boolean, and enum parameters while retaining raw JSON editing for complex values.
+- Workbench Connector Test Run renders schema-driven controls for string, integer, boolean, enum, and array parameters while retaining raw JSON editing as an escape hatch.
 - Workbench Connector Test Run validates schema-required parameters, JSON value types, and enum values before submitting connector execution requests.
 - Workbench/admin connector execution API applies the same schema-required parameter, type, and enum validation before policy-gated execution.
 - Connector health API exists for registered in-process connectors; built-in GitHub, Slack, Google Chat, Teams, and Feishu connectors can now be constructed from credential references.
@@ -1193,7 +1193,7 @@ Residual P10 limitations:
 - `ENT-125` Add credential revoke tests. Done for gate-level fail-closed behavior.
 - `ENT-127` Add gated connector execution service. Done for credential gate, policy gate, connector invocation, fail-closed missing connector handling, and ledger events.
 - `ENT-128` Add Workbench connector execution API. Done for admin-gated execution through `ConnectorExecutionService` with result and gate metadata.
-- `ENT-128a` Add connector action schema catalog. Done for admin-gated Workbench schema metadata covering GitHub repo/issue/PR actions and Slack, Google Chat, Teams, and Feishu `message.send`, plus schema-driven parameter hints, scalar/enum controls, pre-submit UI validation, and Workbench execution API validation.
+- `ENT-128a` Add connector action schema catalog. Done for admin-gated Workbench schema metadata covering GitHub repo/issue/PR actions and Slack, Google Chat, Teams, and Feishu `message.send`, plus schema-driven parameter hints, scalar/enum/array controls, pre-submit UI validation, and Workbench execution API validation.
 - `ENT-129` Add Workbench connector credential API. Done for admin-gated list, create, revoke, active-only listing, include-revoked listing, connector type/secret-ref/scope validation, and audit events.
 - `ENT-130` Add connector secret reference resolver. Done for env/HASHI secret refs, redacted metadata, unsupported scheme failures, and unconfigured vault fail-closed behavior.
 - `ENT-131` Add connector factory. Done for GitHub connector construction from credential refs, secret resolution, revoked credential skipping, and unsupported type fail-closed behavior.
