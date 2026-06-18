@@ -122,6 +122,35 @@ def test_enterprise_lease_rehearse_cli_runs_sqlite_rehearsal(tmp_path, monkeypat
     assert payload["lease_name"] == "cli-rehearsal"
 
 
+def test_enterprise_lease_load_rehearse_cli_runs_sqlite_rehearsal(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(hashi, "ROOT_DIR", tmp_path)
+    db_path = tmp_path / "state" / "enterprise.sqlite"
+
+    rc = hashi.cmd_enterprise_lease_load_rehearse(
+        SimpleNamespace(
+            db_url=f"sqlite:///{db_path}",
+            org_id="ORG-001",
+            lease_prefix="cli-load",
+            lease_count=4,
+            max_workers=2,
+            holder_a="pod-a",
+            holder_b="pod-b",
+            ttl=30,
+            no_ensure_org=False,
+        )
+    )
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "Enterprise lease load rehearsal completed" in output
+    payload = json.loads(output[output.index("{"):])
+    assert payload["passed"] is True
+    assert payload["lease_prefix"] == "cli-load"
+    assert payload["lease_count"] == 4
+    assert payload["passed_count"] == 4
+    assert payload["failed_count"] == 0
+
+
 def test_enterprise_k8s_lease_rehearse_cli_runs_fake_rehearsal(monkeypatch, capsys):
     calls = {}
 

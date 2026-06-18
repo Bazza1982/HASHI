@@ -75,6 +75,18 @@ lifecycle and repeated concurrent acquisitions. It is not a database performance
 benchmark; validate real pool sizing separately in staging with your target
 database, network, and scheduler replica count.
 
+Run the operator CLI against a staging database URL when you want a bounded
+load rehearsal:
+
+```bash
+python hashi.py enterprise lease-load-rehearse \
+  --db-url "$HASHI_ENTERPRISE_POSTGRES_TEST_URL" \
+  --org-id "$HASHI_ENTERPRISE_POSTGRES_TEST_ORG_ID" \
+  --lease-prefix staging-pool-load \
+  --lease-count 16 \
+  --max-workers 4
+```
+
 ## Notes
 
 - The rehearsal creates the `enterprise_leases` table if it does not exist.
