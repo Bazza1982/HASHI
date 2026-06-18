@@ -99,6 +99,20 @@ def _create_github_credential(server: WorkbenchApiServer):
     )
 
 
+def test_workbench_connector_ui_includes_channel_presets():
+    app_source = (Path(__file__).resolve().parents[1] / "workbench" / "src" / "App.jsx").read_text()
+
+    assert "teams: {" in app_source
+    assert "displayName: 'Teams Webhook'" in app_source
+    assert "secretRef: 'env://TEAMS_WEBHOOK_URL'" in app_source
+    assert '<option value="teams">Teams</option>' in app_source
+
+    assert "feishu: {" in app_source
+    assert "displayName: 'Feishu Webhook'" in app_source
+    assert "secretRef: 'env://FEISHU_WEBHOOK_URL'" in app_source
+    assert '<option value="feishu">Feishu</option>' in app_source
+
+
 @pytest.mark.asyncio
 async def test_enterprise_admin_can_read_connector_health(tmp_path):
     server = _server(tmp_path, connectors=[_FakeConnector()])

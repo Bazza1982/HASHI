@@ -1145,7 +1145,7 @@ Implemented checkpoints:
   - admins can refresh connector health and see registry secret-resolution errors;
   - admins can install the default connector policy template from the Workbench;
   - admins can run gated connector test actions, with dry-run enabled by default, and inspect the execution result and policy gate metadata;
-  - Slack, Google Chat, and GitHub setup/test forms include safe presets and JSON parameter validation.
+  - Slack, Google Chat, Teams, Feishu, and GitHub setup/test forms include safe presets and JSON parameter validation.
 
 Residual P10 limitations:
 
@@ -1181,8 +1181,8 @@ Residual P10 limitations:
 - `ENT-122` Add connector execution gate. Done for credential existence, org isolation, revoke fail-closed, type match, policy deny, and approval-required decisions.
 - `ENT-126` Add first enterprise channel connector. Done for Slack incoming webhook health, dry-run, `message.send`, injectable transport, and factory construction from secret refs.
 - `ENT-136` Add second enterprise channel connector. Done for Google Chat incoming webhook health, dry-run, `message.send`, injectable transport, factory construction from secret refs, default approval-required policy, Workbench presets, and server-side `message.send` text validation.
-- `ENT-136a` Add Microsoft Teams webhook connector. Done for Teams incoming webhook health, dry-run, `message.send`, injectable transport, factory construction from secret refs, server-side text validation, data-governance checks, audit redaction, default approval-required policy, and Workbench dry-run execution.
-- `ENT-136b` Add Feishu/Lark webhook connector. Done for Feishu incoming webhook health, dry-run, `message.send`, injectable transport, factory construction from secret refs, server-side text validation, data-governance checks, audit redaction, default approval-required policy, and Workbench dry-run execution.
+- `ENT-136a` Add Microsoft Teams webhook connector. Done for Teams incoming webhook health, dry-run, `message.send`, injectable transport, factory construction from secret refs, server-side text validation, data-governance checks, audit redaction, default approval-required policy, Workbench safe presets, and Workbench dry-run execution.
+- `ENT-136b` Add Feishu/Lark webhook connector. Done for Feishu incoming webhook health, dry-run, `message.send`, injectable transport, factory construction from secret refs, server-side text validation, data-governance checks, audit redaction, default approval-required policy, Workbench safe presets, and Workbench dry-run execution.
 - `ENT-123` Add GitHub connector with audit. Done for health, repository metadata, issue creation, PR creation, and PR merge actions.
 - `ENT-124` Add connector health checks. Done for in-process registry, normalized health summaries, ledger health events, and Workbench admin health API.
 - `ENT-125` Add credential revoke tests. Done for gate-level fail-closed behavior.
@@ -1194,7 +1194,7 @@ Residual P10 limitations:
 - `ENT-132` Add Workbench connector registry refresh. Done for startup refresh, create/revoke refresh, static connector precedence, and fail-soft registry errors.
 - `ENT-133` Add default connector policy template. Done for GitHub read allow, GitHub write approval-required, Slack outbound message approval-required, and idempotent install.
 - `ENT-134` Add default connector policy install API. Done for admin-gated install, idempotent responses, and audit event emission.
-- `ENT-135` Add connector admin UI. Done for Workbench MVP covering credential create/list/revoke, health refresh, registry errors, default policy installation, gated connector dry-run/test-run execution, Slack/GitHub presets, and JSON parameter validation.
+- `ENT-135` Add connector admin UI. Done for Workbench MVP covering credential create/list/revoke, health refresh, registry errors, default policy installation, gated connector dry-run/test-run execution, Slack, Google Chat, Teams, Feishu, and GitHub presets, and JSON parameter validation.
 
 **Acceptance:**
 
