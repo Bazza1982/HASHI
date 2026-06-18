@@ -653,6 +653,20 @@ def test_validate_connector_action_requires_text_for_webhook_message_send():
     assert validate_connector_action(action) == "message.send requires non-empty text in parameters"
 
 
+@pytest.mark.parametrize(
+    ("parameters", "message"),
+    [
+        ({}, "github.pr.merge requires parameter pull_number"),
+        ({"pull_number": "1"}, "pull_number must be integer"),
+        ({"pull_number": 1, "merge_method": "fast-forward"}, "merge_method must be one of merge, squash, rebase"),
+    ],
+)
+def test_validate_connector_action_uses_action_schema(parameters, message):
+    action = ConnectorAction(connector_type="github", action="pr.merge", parameters=parameters)
+
+    assert validate_connector_action(action) == message
+
+
 def test_connector_factory_builds_github_connector_from_env_secret(tmp_path):
     credentials, _, credential = _connector_gate_services(tmp_path)
     credentials.revoke_credential(credential.id)

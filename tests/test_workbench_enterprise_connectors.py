@@ -744,6 +744,33 @@ async def test_enterprise_connector_execute_rejects_message_send_without_text(tm
 
 
 @pytest.mark.asyncio
+async def test_enterprise_connector_execute_rejects_schema_invalid_parameters(tmp_path):
+    server = _server(tmp_path)
+    headers = _admin_headers(server)
+    _create_github_credential(server)
+
+    response = await server.handle_enterprise_connector_execute(
+        _FakeRequest(
+            headers=headers,
+            path="/api/enterprise/connectors/execute",
+            body={
+                "connector_type": "github",
+                "action": "issue.create",
+                "credential_id": "cred-github",
+                "resource": "repo:Bazza1982/hashi",
+                "dry_run": True,
+                "parameters": {},
+            },
+        )
+    )
+
+    payload = json.loads(response.text)
+    assert response.status == 400
+    assert payload["ok"] is False
+    assert payload["error"] == "github.issue.create requires parameter title"
+
+
+@pytest.mark.asyncio
 async def test_enterprise_admin_can_execute_connector_through_gate(tmp_path):
     connector = _RecordingConnector()
     server = _server(tmp_path, connectors=[connector])
