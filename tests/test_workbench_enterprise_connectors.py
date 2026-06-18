@@ -111,6 +111,8 @@ def test_workbench_connector_ui_includes_channel_presets():
     assert "displayName: 'Feishu Webhook'" in app_source
     assert "secretRef: 'env://FEISHU_WEBHOOK_URL'" in app_source
     assert '<option value="feishu">Feishu</option>' in app_source
+    assert "api('/api/enterprise/connectors/action-schemas')" in app_source
+    assert "connector-schema-panel" in app_source
 
 
 @pytest.mark.asyncio

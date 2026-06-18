@@ -519,6 +519,35 @@ h1 { margin: 0; font-size: 20px; }
   font-family: "Consolas", "Courier New", monospace;
   font-size: 12px;
 }
+.connector-schema-panel {
+  margin-top: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.connector-schema-title,
+.connector-schema-row {
+  display: grid;
+  grid-template-columns: 1.2fr 0.8fr 0.8fr 1fr;
+  gap: 8px;
+  align-items: center;
+}
+.connector-schema-title {
+  padding: 9px 10px;
+  background: rgba(15, 23, 42, 0.4);
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+.connector-schema-grid {
+  display: grid;
+}
+.connector-schema-row {
+  padding: 8px 10px;
+  border-top: 1px solid rgba(148, 163, 184, 0.16);
+  color: var(--muted);
+  font-size: 0.78rem;
+}
 .connector-form input,
 .connector-form select,
 .connector-execute-form input,
