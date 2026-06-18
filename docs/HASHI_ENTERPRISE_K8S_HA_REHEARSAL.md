@@ -38,6 +38,17 @@ kubectl -n hashi-enterprise logs job/hashi-enterprise-lease-load-rehearsal
 
 ## Install Or Upgrade
 
+Generate a JSON command plan if you want an operator-reviewed checklist before
+touching the cluster:
+
+```bash
+python tools/enterprise_k8s_ha_rehearsal_plan.py \
+  --image-repository ghcr.io/example/hashi-enterprise \
+  --image-tag replace-me \
+  --namespace hashi-enterprise \
+  --output /tmp/hashi-k8s-ha-rehearsal-plan.json
+```
+
 Use the rehearsal values file:
 
 ```bash
@@ -147,6 +158,8 @@ Then inspect pod status and logs before reattempting the rehearsal.
 ## Known Limits
 
 - This does not replace always-on PostgreSQL CI.
+- The generated HA rehearsal plan does not execute Helm or kubectl; it is an
+  operator-reviewed command artifact.
 - This does not validate cloud-specific ingress or NetworkPolicy.
 - The audit export daemon uses a singleton deployment plus DB lease controls;
   it does not move the audit ledger itself to PostgreSQL.

@@ -63,6 +63,11 @@ Before building or promoting the image, run the packaging doctor:
 ```bash
 python tools/enterprise_k8s_backend_doctor.py --json
 python tools/enterprise_k8s_backend_doctor.py --require-installed
+python tools/enterprise_k8s_ha_rehearsal_plan.py \
+  --image-repository ghcr.io/your-org/hashi-enterprise \
+  --image-tag k8s-ha \
+  --namespace hashi-enterprise \
+  --output /tmp/hashi-k8s-ha-rehearsal-plan.json
 python tools/enterprise_k8s_image_smoke_plan.py \
   --image-tag ghcr.io/your-org/hashi-enterprise:k8s-lease \
   --namespace hashi-enterprise \
