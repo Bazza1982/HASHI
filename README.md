@@ -10,13 +10,37 @@
 
 ## About
 
-**HASHI** is a privacy-first, universal AI agent orchestration platform. It connects multiple LLM backends through a single interface, enabling multi-agent collaboration with persistent memory, automated scheduling, voice interaction, and self-improving behavior — all running locally on your machine.
+**HASHI** is an open-source AI agent orchestration project growing from a
+personal, vibe-coded local agent system into **HASHI AAI**: a professional,
+enterprise-grade Agent as Interface control plane for governed human-AI work.
+
+The original HASHI experience is still first-class: a privacy-first local
+platform for one owner to run multiple AI agents, backends, skills, memory,
+scheduling, voice, Workbench, and automation from their own machine. The
+Enterprise AAI line adds the governance layer organizations need: profiles,
+identity, SSO/SCIM readiness, policy, approvals, audit, evidence, connectors,
+and deployment artifacts.
+
+HASHI is therefore intentionally one codebase with two compatible promises:
+**smooth personal/local use** and an **open-source path toward enterprise-grade
+agentic AI orchestration**. The current Enterprise AAI release is an alpha
+testing artifact, not a production certification.
+
+In short:
+- **What HASHI was:** a personal, local, vibe-coded AI agent project.
+- **What HASHI is:** an open-source multi-agent orchestration platform with
+  local-first operation and an emerging governed AAI control plane.
+- **What HASHI aims to become:** a professional enterprise-grade agentic AI
+  orchestrator that organizations can inspect, self-host, extend, and govern.
 
 Key principles:
 - **No Token Storage** — CLI backends use local authentication; no OAuth tokens stored
 - **Multi-Agent, Single Interface** — Chat with multiple specialized agents through one Telegram, WhatsApp, or Workbench session
 - **Self-Improving Agents** — Habit system learns from `/good` and `/bad` feedback, with nightly dream reflection
-- **Built to Evolve** — Modular skills, tools, and backends can be added without touching core code
+- **Open Source And Self-Hostable** — The control plane is designed to be
+  inspectable and extensible rather than a closed hosted black box
+- **Built to Evolve** — Modular skills, tools, connectors, policies, and
+  backends can be added without touching core code
 
 ## Project History & Name Origin
 
@@ -56,7 +80,7 @@ Throughout the codebase, you'll see references to **`bridge-u-f`** — this was 
 
 ## Quick Technical Overview
 
-HASHI is a **universal multi-agent orchestration platform** that runs entirely locally. It routes user requests to AI backends through a flexible adapter system, eliminating the need to store sensitive OAuth tokens.
+HASHI is a **universal multi-agent orchestration platform** that runs entirely locally by default. It routes user requests to AI backends through a flexible adapter system, eliminating the need to store sensitive OAuth tokens. HASHI AAI extends that foundation into a governed enterprise control plane while preserving the same personal/local default path.
 
 **Core Components:**
 - **Onboarding** — Multi-language guided setup to create your first agent
@@ -96,12 +120,15 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
 
 ## Project Status
 
-- **Enterprise AAI v0.1.0-alpha.1** *(current enterprise alpha)* — governed
+- **Enterprise AAI v0.1.0-alpha.1** *(current enterprise alpha line)* — governed
   AAI control plane, identity/SSO/SCIM primitives, policy/approval/audit,
   connector MVPs, Workbench enterprise surfaces, and deployment artifacts for
   alpha operator review. Production enterprise-server validation remains
   pending.
-- **v4.0.0-alpha.1** *(current alpha release)* — Claw mode foundation, packaged Claw runtime discovery, provider smoke probe, live momo repo-root read/write/edit validation, and Superloop operational contract
+- **v4.0.0-alpha.1** *(current v4 foundation alpha)* — Claw mode foundation,
+  packaged Claw runtime discovery, provider smoke probe, live momo repo-root
+  read/write/edit validation, and Superloop operational contract. This is the
+  broader platform foundation line, not the enterprise package version line.
 - **v3.2.1** — Workbench API self-repair on `/reboot`, HChat tool hot reload, and cross-instance route fallback hardening for multi-instance deployments
 - **v3.2.0** — Slim core architecture, Wrapper Agent Mode, Audit Agent Mode, Anatta controls, EXP guidebooks, `/browser` route dashboard, Hashi Remote file transfer, per-instance API Gateway ports, OLL HASHI Chrome extension integration, Workzone support, runtime/backend hardening
 - **v3.1** — Claude Opus 4.7, GPT-5.5, Codex CLI 0.125.0, `xhigh`/`max` effort levels, HASHI Remote remediation
@@ -113,6 +140,20 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
 ---
 
 ## What's New Since v2
+
+### Version Lines At A Glance
+
+HASHI currently has two active alpha narratives:
+
+- **Enterprise AAI `v0.1.0-alpha.1` / package `0.1.0a1`** — the reset
+  enterprise-grade update line for governed AAI deployment artifacts and alpha
+  operator review.
+- **HASHI `v4.0.0-alpha.1`** — the broader platform foundation line for Claw
+  mode, Superloop operations, and local orchestration evolution.
+
+Both lines share one repository and one codebase. Personal/local mode remains
+the default smooth path; enterprise features are activated through explicit
+profiles and bootstrap state.
 
 HASHI 2.x proved that local agents could execute tools, browse, switch backends, run from a TUI, and orchestrate Nagare workflows. HASHI 3.2 turns that foundation into a much broader local agent platform:
 

@@ -4,6 +4,36 @@
 
 ---
 
+## Strategic Direction
+
+HASHI is moving through three connected stages:
+
+1. **Personal local agent project** — HASHI started as a vibe-coded,
+   human-directed AI agent system for one owner running local agents, backends,
+   voice, memory, scheduling, tools, and Workbench.
+2. **Open-source orchestration platform** — HASHI now provides a broader
+   multi-agent runtime with backend adapters, Nagare workflows, Claw mode,
+   Superloop operations, HChat, Remote, EXP guidebooks, and local-first
+   automation.
+3. **Enterprise-grade HASHI AAI** — the enterprise line turns the same codebase
+   into an Agent as Interface control plane: governed profiles, identity,
+   policy, approvals, audit, evidence, connectors, admin surfaces, and
+   deployment artifacts for organizations that want self-hostable, inspectable,
+   open-source agentic AI orchestration.
+
+The goal is not to abandon the personal project roots. The goal is to preserve
+smooth personal/local use while adding the governance and operational controls
+needed for professional enterprise adoption.
+
+Current version-line interpretation:
+
+- **Enterprise AAI `v0.1.0-alpha.1` / package `0.1.0a1`** is the current
+  enterprise alpha artifact-freeze line.
+- **HASHI `v4.0.0-alpha.1`** is the broader platform foundation alpha line for
+  Claw mode, Superloop, and local orchestration evolution.
+
+---
+
 ## Enterprise AAI v0.1.0-alpha.1 (Current Enterprise Alpha)
 
 HASHI AAI Enterprise `v0.1.0-alpha.1` is the current enterprise artifact-freeze
@@ -21,7 +51,7 @@ SIEM, and Kubernetes/cloud validation remain post-alpha.
 
 ## v4.0.0-alpha.1
 
-HASHI v4 alpha is focused on two foundations:
+HASHI v4 alpha is the broader platform foundation line. It is focused on:
 
 - **Claw mode foundation** — `claw-cli` is integrated as a scoped backend with
   provider routing, packaged runtime discovery, checksum-checked manifest

@@ -10,6 +10,34 @@ This directory contains developer documentation and operational notes for HASHI.
 
 ---
 
+## Start Here
+
+HASHI began as a personal, local, vibe-coded AI agent project and is now
+evolving into **HASHI AAI**: an open-source Agent as Interface control plane for
+professional, governed human-AI work orchestration.
+
+Use these docs by intent:
+
+- **Understand the product direction:** start with
+  [HASHI_ENTERPRISE_AAI_VALUE_PROPOSITION.md](HASHI_ENTERPRISE_AAI_VALUE_PROPOSITION.md)
+  and [HASHI_ENTERPRISE_AAI_PRD.md](HASHI_ENTERPRISE_AAI_PRD.md).
+- **Understand the current alpha boundary:** read
+  [HASHI_ENTERPRISE_AAI_READINESS_REVIEW.md](HASHI_ENTERPRISE_AAI_READINESS_REVIEW.md)
+  and
+  [RELEASE_NOTES_HASHI_AAI_ENTERPRISE_v0.1.0-alpha.1.md](RELEASE_NOTES_HASHI_AAI_ENTERPRISE_v0.1.0-alpha.1.md).
+- **Understand the long-term route:** read [ROADMAP.md](ROADMAP.md) and
+  [HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md](HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md).
+- **Operate the current alpha artifacts:** read
+  [HASHI_ENTERPRISE_DEPLOYMENT.md](HASHI_ENTERPRISE_DEPLOYMENT.md) and the
+  enterprise runbooks linked from the readiness review.
+
+The documentation should be read with one important boundary: Enterprise AAI
+`v0.1.0-alpha.1` is artifact-ready for alpha testing, not production-certified.
+Personal/local HASHI use remains the stable default path while enterprise
+deployment validation continues.
+
+---
+
 ## Active (keep these current)
 
 ### Core references
