@@ -4,7 +4,22 @@
 
 ---
 
-## v4.0.0-alpha.1 (Current)
+## Enterprise AAI v0.1.0-alpha.1 (Current Enterprise Alpha)
+
+HASHI AAI Enterprise `v0.1.0-alpha.1` is the current enterprise artifact-freeze
+line. It resets the enterprise-grade package version to `0.1.0a1` while the
+broader HASHI 4 alpha line remains the historical Claw/Superloop foundation
+line.
+
+This enterprise alpha includes governed profiles, identity/SSO/SCIM primitives,
+policy/approval/audit, connector MVPs, Workbench enterprise surfaces, and
+Compose/Kubernetes/Helm/systemd/SIEM deployment artifacts for alpha operator
+review. It is not production-certified; customer-like enterprise server, IdP,
+SIEM, and Kubernetes/cloud validation remain post-alpha.
+
+---
+
+## v4.0.0-alpha.1
 
 HASHI v4 alpha is focused on two foundations:
 

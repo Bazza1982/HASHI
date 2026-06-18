@@ -39,6 +39,7 @@ enterprise:
   deploymentProfile: enterprise
   instanceId: HASHI-ENTERPRISE-001
   organizationId: ORG-001
+  bootstrapComplete: "false"
   bridgeHome: /data
   workbenchPort: "18800"
 

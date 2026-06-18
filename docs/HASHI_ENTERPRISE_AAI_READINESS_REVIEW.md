@@ -1,9 +1,9 @@
 # HASHI Enterprise AAI Readiness Review
 
-**Date:** 2026-06-16
+**Date:** 2026-06-18
 
-**Status:** Enterprise AAI `0.1 Alpha` is ready to close once the final local
-smoke and release checklist pass. The broader future roadmap is not complete.
+**Status:** Enterprise AAI `0.1 Alpha` is closed at the local release candidate
+cut. The broader future roadmap is not complete.
 
 Related documents:
 
@@ -322,8 +322,7 @@ Recommended review order:
 
 For nudge/task tracking, the correct completion boundary is:
 
-- **Enterprise AAI 0.1 Alpha:** yes, once final local smoke, release notes, and
-  version metadata pass.
+- **Enterprise AAI 0.1 Alpha:** yes; closed at the release candidate cut.
 - **Enterprise MVP review-ready:** yes, once final review passes.
 - **Whole future-facing Enterprise AAI roadmap complete:** no.
 

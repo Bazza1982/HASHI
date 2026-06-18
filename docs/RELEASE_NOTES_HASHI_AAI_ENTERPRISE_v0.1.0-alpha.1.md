@@ -86,11 +86,12 @@ The local tag candidate is:
 v0.1.0-alpha.1
 ```
 
-No release tag is created by this document update.
+The local annotated release tag has been created and should point at the final
+alpha evidence commit before pushing.
 
 ## Alpha Acceptance Checklist
 
-Before tagging this release:
+Before pushing this release:
 
 ```text
 python3 -m py_compile hashi.py setup.py

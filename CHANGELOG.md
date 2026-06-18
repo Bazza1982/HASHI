@@ -26,6 +26,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added regression coverage for a transient Telegram media `get_file()` timeout that succeeds on retry.
 - Added focused coverage for `/notify` persistence and Telegram `disable_notification` defaults.
 
+## [0.1.0a1] - 2026-06-18
+
+### Added
+
+- **Enterprise AAI alpha artifact freeze** — introduced the `v0.1.0-alpha.1`
+  enterprise release line with a reset package version of `0.1.0a1`.
+- Added Enterprise AAI alpha release notes, readiness evidence, release gates,
+  deployment skeleton documentation, and post-alpha known limitations.
+- Recorded Phase 1 local smoke, Phase 2 enterprise control-plane validation,
+  Phase 3 deployment package freeze, and Phase 4 release candidate evidence.
+
+### Changed
+
+- Restored `GlobalConfig` personal-safe defaults for direct test/runtime
+  construction paths while keeping `ConfigManager.load()` governed profile
+  validation intact.
+- Marked package metadata as alpha and aligned the enterprise Helm chart
+  metadata with `v0.1.0-alpha.1` / `0.1.0a1`.
+- Clarified that Enterprise AAI alpha deployment artifacts are ready for
+  operator review, not production-certified rollout.
+
+### Known Limitations
+
+- Compose, Kubernetes, and Helm enterprise startup fail closed until the
+  organization/admin bootstrap state exists and
+  `HASHI_ENTERPRISE_BOOTSTRAP_COMPLETE=true` is explicitly set.
+- First-run enterprise bootstrap automation, production HA validation,
+  IdP-specific certification, SIEM import validation, and full DLP/data
+  residency enforcement remain post-alpha.
+
 ## [4.0.0-alpha.1] - 2026-05-23
 
 ### ✨ Added
