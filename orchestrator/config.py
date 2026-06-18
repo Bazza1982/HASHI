@@ -42,10 +42,10 @@ def resolve_access_root(scope: str, workspace_dir: Path, project_root: Path) -> 
 @dataclass
 class GlobalConfig:
     authorized_id: int
-    deployment_profile: str
-    organization_id: str | None
-    base_logs_dir: Path
-    base_media_dir: Path
+    deployment_profile: str = "personal"
+    organization_id: str | None = None
+    base_logs_dir: Path | None = None
+    base_media_dir: Path | None = None
     instance_id: str = "HASHI"
     display_name: str = "HASHI Instance"
     api_host: str = "127.0.0.1"
