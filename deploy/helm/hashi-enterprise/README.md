@@ -117,6 +117,8 @@ fast before cluster rehearsal.
 For a full multi-replica staging rehearsal, start from
 `examples/multi-replica-rehearsal.values.yaml` and follow
 `docs/HASHI_ENTERPRISE_K8S_HA_REHEARSAL.md`.
+`tools/enterprise_k8s_ha_rehearsal_plan.py` can generate the Helm/kubectl
+command plan for operator review before touching the cluster.
 Optional Kubernetes Lease RBAC can be enabled with
 `leaderElection.rbac.enabled=true`. The scheduler lease backend defaults to
 `db`; set `schedulerLease.backend=kubernetes` only when the runtime image

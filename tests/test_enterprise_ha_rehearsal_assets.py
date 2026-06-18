@@ -29,6 +29,7 @@ def test_multi_replica_rehearsal_values_enable_ha_guards():
 def test_kubernetes_ha_rehearsal_runbook_covers_rollout_failure_and_rollback():
     text = RUNBOOK.read_text(encoding="utf-8")
 
+    assert "enterprise_k8s_ha_rehearsal_plan.py" in text
     assert "lease-rehearse" in text
     assert "multi-replica-rehearsal.values.yaml" in text
     assert "rollout status deploy/hashi-enterprise" in text
