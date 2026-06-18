@@ -643,6 +643,7 @@ Residual P4 limitations:
 - `ENT-070x` Add PostgreSQL lease pool load harness. Done for `run_enterprise_lease_load_rehearsal()` with bounded concurrent multi-lease rehearsal and fake pool-provider test coverage; real staging pool sizing/load validation remains future work.
 - `ENT-070y` Add PostgreSQL lease load rehearsal CLI. Done for `hashi enterprise lease-load-rehearse` with database URL, lease-count, worker-count, TTL, and holder-prefix controls plus SQLite CLI coverage; real staging execution remains future work.
 - `ENT-070z` Add in-cluster lease load rehearsal assets. Done for a raw Kubernetes Job example, optional Helm Job template, values wiring, docs, and static tests for bounded `lease-load-rehearse` execution; live cluster execution remains future work.
+- `ENT-071` Add enterprise Helm render CI. Done for `.github/workflows/enterprise-helm-render.yml` with Helm setup, chart lint, `leaseLoadRehearsal.enabled=true` render, and rendered Job grep checks; live cluster execution remains future work.
 
 **Acceptance:**
 
