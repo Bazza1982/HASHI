@@ -632,6 +632,7 @@ Residual P4 limitations:
 - `ENT-070m` Add Kubernetes HA rehearsal assets. Done for Helm multi-replica rehearsal values, a Kubernetes HA rehearsal runbook, and static asset tests covering external DB, scheduler lease pool, PDB, and audit-export singleton lease controls; live cluster rehearsal remains future work.
 - `ENT-070n` Add Kubernetes Lease RBAC assets. Done for optional Helm Role/RoleBinding, raw Kubernetes example RBAC, and rehearsal values wiring for `coordination.k8s.io/leases`; runtime Kubernetes Lease client remains future work.
 - `ENT-070o` Add Kubernetes Lease coordinator abstraction. Done for injectable Kubernetes Lease client protocol, acquire/renew/release semantics, TTL expiry takeover, resourceVersion conflict handling, and fake-client tests; real Kubernetes API adapter and scheduler wiring remain future work.
+- `ENT-070p` Add Kubernetes Lease API adapter. Done for optional `kubernetes` package loading, `CustomObjectsApi` Lease get/create/replace/delete mapping, `resourceVersion` writes, 404/409 handling, and fake API tests; scheduler wiring and live cluster rehearsal remain future work.
 
 **Acceptance:**
 
@@ -664,6 +665,7 @@ Residual P4 limitations:
 - Operators have a Helm values file and runbook for staging multi-replica HA rehearsal before production rollout.
 - Operators have optional Kubernetes Lease RBAC assets ready for a future native leader-election runtime.
 - Runtime code now has a Kubernetes Lease coordinator abstraction that can be connected to a real Kubernetes API adapter later.
+- Runtime code now has an optional Kubernetes API adapter for `coordination.k8s.io/v1` Lease objects without making ordinary CI depend on the Kubernetes Python package.
 - Operators have starter SIEM assets under `deploy/siem/` for field mappings, Splunk alerts/dashboard, Elastic index/rules, and OpenTelemetry Collector routing.
 
 ---

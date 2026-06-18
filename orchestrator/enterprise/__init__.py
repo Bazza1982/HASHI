@@ -118,6 +118,7 @@ from orchestrator.enterprise.leases import (
 )
 from orchestrator.enterprise.lease_rehearsal import LeaseRehearsalResult, run_enterprise_lease_rehearsal
 from orchestrator.enterprise.kubernetes_leases import (
+    KubernetesApiLeaseClient,
     KubernetesLease,
     KubernetesLeaseAttempt,
     KubernetesLeaseClient,
@@ -276,6 +277,7 @@ __all__ = [
     "PostgresEnterpriseLeaseStore",
     "PostgresLeaseConnectionPool",
     "LeaseRehearsalResult",
+    "KubernetesApiLeaseClient",
     "KubernetesLease",
     "KubernetesLeaseAttempt",
     "KubernetesLeaseClient",
