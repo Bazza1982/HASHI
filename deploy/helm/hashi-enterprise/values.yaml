@@ -57,6 +57,14 @@ schedulerLease:
     minSize: "1"
     maxSize: "4"
 
+leaseLoadRehearsal:
+  enabled: false
+  leasePrefix: staging-pool-load
+  leaseCount: "16"
+  maxWorkers: "4"
+  ttl: "30"
+  backoffLimit: 0
+
 secrets:
   adminToken: change-me
   databaseUrl: sqlite:////data/state/enterprise.sqlite

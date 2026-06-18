@@ -16,6 +16,9 @@ This directory contains a minimal Kubernetes baseline for running HASHI in
   alternative to the CronJob. Do not enable both for the same ledger.
 - `external-postgres-secret.example.yaml` shows the `HASHI_ENTERPRISE_DATABASE_URL`
   contract for managed database staging.
+- `lease-load-rehearsal-job.example.yaml` runs a bounded
+  `hashi enterprise lease-load-rehearse` Job against the managed database
+  Secret before enabling multi-replica scheduler leases.
 - `pod-disruption-budget.example.yaml` is an optional availability guard for
   multi-replica staging and production maintenance windows.
 
@@ -122,6 +125,14 @@ python hashi.py enterprise lease-rehearse \
 
 For a full PostgreSQL rehearsal checklist, see
 `docs/HASHI_ENTERPRISE_POSTGRES_LEASE_REHEARSAL.md`.
+To run the bounded in-cluster load rehearsal from this raw baseline, apply and
+watch the example Job after replacing the image and database Secret:
+
+```bash
+kubectl apply -f deploy/kubernetes/enterprise/lease-load-rehearsal-job.example.yaml
+kubectl -n hashi-enterprise logs job/hashi-enterprise-lease-load-rehearsal
+```
+
 For a full multi-replica staging rehearsal, see
 `docs/HASHI_ENTERPRISE_K8S_HA_REHEARSAL.md`.
 `lease-rbac.example.yaml` documents optional `coordination.k8s.io/leases`

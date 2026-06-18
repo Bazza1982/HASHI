@@ -98,6 +98,18 @@ python hashi.py enterprise lease-rehearse \
 For a full PostgreSQL rehearsal checklist, see
 `docs/HASHI_ENTERPRISE_POSTGRES_LEASE_REHEARSAL.md`.
 
+For in-cluster staging rehearsal, enable the one-shot lease load Job after the
+external database Secret is configured:
+
+```bash
+helm upgrade --install hashi-enterprise deploy/helm/hashi-enterprise \
+  --namespace hashi-enterprise --create-namespace \
+  --set externalDatabase.enabled=true \
+  --set leaseLoadRehearsal.enabled=true \
+  --set leaseLoadRehearsal.leaseCount=16 \
+  --set leaseLoadRehearsal.maxWorkers=4
+```
+
 For a full multi-replica staging rehearsal, start from
 `examples/multi-replica-rehearsal.values.yaml` and follow
 `docs/HASHI_ENTERPRISE_K8S_HA_REHEARSAL.md`.

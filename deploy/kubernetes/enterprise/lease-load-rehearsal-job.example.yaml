@@ -1,0 +1,46 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: hashi-enterprise-lease-load-rehearsal
+  namespace: hashi-enterprise
+  labels:
+    app.kubernetes.io/name: hashi
+    app.kubernetes.io/component: lease-load-rehearsal
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: hashi
+        app.kubernetes.io/component: lease-load-rehearsal
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: lease-load-rehearsal
+          image: ghcr.io/example/hashi-enterprise:replace-me
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: HASHI_ENTERPRISE_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: hashi-enterprise-database
+                  key: HASHI_ENTERPRISE_DATABASE_URL
+          command:
+            - python
+            - hashi.py
+            - enterprise
+            - lease-load-rehearse
+          args:
+            - --db-url
+            - $(HASHI_ENTERPRISE_DATABASE_URL)
+            - --org-id
+            - ORG-001
+            - --lease-prefix
+            - staging-pool-load
+            - --lease-count
+            - "16"
+            - --max-workers
+            - "4"
+            - --ttl
+            - "30"
+            - --no-ensure-org

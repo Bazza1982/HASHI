@@ -1,0 +1,62 @@
+{{- if .Values.leaseLoadRehearsal.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "hashi-enterprise.fullname" . }}-lease-load-rehearsal
+  labels:
+    {{- include "hashi-enterprise.labels" . | nindent 4 }}
+    app.kubernetes.io/component: lease-load-rehearsal
+spec:
+  backoffLimit: {{ .Values.leaseLoadRehearsal.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "hashi-enterprise.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: lease-load-rehearsal
+    spec:
+      serviceAccountName: {{ include "hashi-enterprise.serviceAccountName" . }}
+      restartPolicy: Never
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: lease-load-rehearsal
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "hashi-enterprise.fullname" . }}-config
+            - secretRef:
+                name: {{ .Values.secrets.connectorSecretName }}
+          env:
+            - name: HASHI_ENTERPRISE_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.externalDatabase.secretName }}
+                  key: {{ .Values.externalDatabase.secretKey }}
+          command:
+            - python
+            - hashi.py
+            - enterprise
+            - lease-load-rehearse
+          args:
+            - --db-url
+            - $(HASHI_ENTERPRISE_DATABASE_URL)
+            - --org-id
+            - {{ .Values.enterprise.organizationId | quote }}
+            - --lease-prefix
+            - {{ .Values.leaseLoadRehearsal.leasePrefix | quote }}
+            - --lease-count
+            - {{ .Values.leaseLoadRehearsal.leaseCount | quote }}
+            - --max-workers
+            - {{ .Values.leaseLoadRehearsal.maxWorkers | quote }}
+            - --ttl
+            - {{ .Values.leaseLoadRehearsal.ttl | quote }}
+            - --no-ensure-org
+{{- end }}

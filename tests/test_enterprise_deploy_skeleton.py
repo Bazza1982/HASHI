@@ -33,6 +33,21 @@ def test_enterprise_raw_kubernetes_docs_cover_kubernetes_backend_extra():
     assert "enterprise_k8s_image_smoke_plan.py" in text
 
 
+def test_enterprise_raw_kubernetes_includes_lease_load_rehearsal_job_example():
+    text = (ROOT / "deploy" / "kubernetes" / "enterprise" / "lease-load-rehearsal-job.example.yaml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "kind: Job" in text
+    assert "lease-load-rehearsal" in text
+    assert "HASHI_ENTERPRISE_DATABASE_URL" in text
+    assert "hashi-enterprise-database" in text
+    assert "lease-load-rehearse" in text
+    assert "--lease-count" in text
+    assert "--max-workers" in text
+    assert "--no-ensure-org" in text
+
+
 def test_enterprise_kubernetes_image_smoke_workflow_generates_artifact_only():
     text = (ROOT / ".github" / "workflows" / "enterprise-k8s-image-smoke-plan.yml").read_text(
         encoding="utf-8"
