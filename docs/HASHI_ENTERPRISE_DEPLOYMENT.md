@@ -12,6 +12,7 @@ This is the first deployable skeleton for the Enterprise AAI profile. It is inte
 - `deploy/helm/hashi-enterprise/templates/audit-export-cronjob.yaml` provides the same exporter scheduling path for Helm deployments.
 - `docs/HASHI_ENTERPRISE_AUDIT_EXPORT_RUNBOOK.md` documents live audit export deployment, vendor presets, and acceptance checks.
 - `docs/HASHI_ENTERPRISE_SSO_SCIM_DEPLOYMENT_RUNBOOK.md` documents SAML `xmlsec1` verification and SCIM 2.0 operator setup.
+- `docs/HASHI_ENTERPRISE_PRODUCTION_HARDENING_RUNBOOK.md` documents Helm ingress TLS, NetworkPolicy, HPA, and PDB rollout checks.
 
 ## Local Compose Trial
 

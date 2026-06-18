@@ -111,3 +111,17 @@ def test_enterprise_env_example_uses_placeholder_secret():
 
     assert "HASHI_DEPLOYMENT_PROFILE=enterprise" in text
     assert "HASHI_WORKBENCH_ADMIN_TOKEN=change-me" in text
+
+
+def test_enterprise_production_hardening_runbook_covers_ingress_policy_and_scaling():
+    text = (ROOT / "docs" / "HASHI_ENTERPRISE_PRODUCTION_HARDENING_RUNBOOK.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "production-hardening.values.yaml" in text
+    assert "Ingress" in text
+    assert "NetworkPolicy" in text
+    assert "HorizontalPodAutoscaler" in text
+    assert "PodDisruptionBudget" in text
+    assert "curl -fsS https://hashi-enterprise.example.com/api/health" in text
+    assert "metrics-server" in text

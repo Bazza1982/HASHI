@@ -32,6 +32,7 @@ def test_enterprise_helm_chart_files_exist():
         "templates/serviceaccount.yaml",
         "examples/external-postgres-secret.kubernetes.yaml",
         "examples/multi-replica-rehearsal.values.yaml",
+        "examples/production-hardening.values.yaml",
     }
 
     actual = {
@@ -105,6 +106,24 @@ def test_enterprise_helm_external_database_example_uses_postgres_secret_contract
     assert "HASHI_ENTERPRISE_DATABASE_URL:" in text
     assert "postgresql://hashi:replace-me@" in text
     assert "sslmode=require" in text
+
+
+def test_enterprise_helm_production_hardening_values_enable_ingress_policy_and_hpa():
+    text = _read(CHART_DIR / "examples" / "production-hardening.values.yaml")
+
+    assert "replicaCount: 2" in text
+    assert "ingress:" in text
+    assert "enabled: true" in text
+    assert "cert-manager.io/cluster-issuer" in text
+    assert "hashi-enterprise.example.com" in text
+    assert "hashi-enterprise-tls" in text
+    assert "networkPolicy:" in text
+    assert "kubernetes.io/metadata.name: ingress-nginx" in text
+    assert "allowAll: false" in text
+    assert "autoscaling:" in text
+    assert "maxReplicas: 6" in text
+    assert "podDisruptionBudget:" in text
+    assert "resources:" in text
 
 
 def test_enterprise_helm_configmap_sets_enterprise_environment():
