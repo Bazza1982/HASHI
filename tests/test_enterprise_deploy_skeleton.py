@@ -127,6 +127,7 @@ def test_enterprise_production_hardening_runbook_covers_ingress_policy_and_scali
     )
 
     assert "production-hardening.values.yaml" in text
+    assert "enterprise_production_validation_plan.py" in text
     assert "Ingress" in text
     assert "NetworkPolicy" in text
     assert "HorizontalPodAutoscaler" in text

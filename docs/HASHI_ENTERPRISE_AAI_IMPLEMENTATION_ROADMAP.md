@@ -648,6 +648,7 @@ Residual P4 limitations:
 - `ENT-071b` Add Kubernetes HA rehearsal plan artifact workflow. Done for `.github/workflows/enterprise-k8s-ha-rehearsal-plan.yml`, JSON validation, artifact upload, and static tests confirming the workflow does not run Helm or kubectl; executing the generated plan remains future work.
 - `ENT-071c` Add production hardening runbook. Done for Helm production hardening values covering TLS ingress, NetworkPolicy, HPA, PDB, resource sizing, render review, rollout checks, and rollback guidance; cloud-specific validation remains future work.
 - `ENT-071d` Add production hardening Helm render CI. Done for `enterprise-helm-render` production hardening render coverage and grep checks for Ingress, NetworkPolicy, HPA, PDB, TLS host, TLS Secret, and ingress namespace selector; live cluster validation remains future work.
+- `ENT-071e` Add production validation command plan. Done for `tools/enterprise_production_validation_plan.py`, tests, and docs covering render review, ingress namespace label check, Helm apply, rollout, resource inventory, HPA/NetworkPolicy inspection, HTTPS health check, and rollback commands; executing it in production-like staging remains future work.
 
 **Acceptance:**
 

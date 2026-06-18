@@ -39,6 +39,17 @@ grep -E "hashi-enterprise.example.com|hashi-enterprise-tls|ingress-nginx" \
   /tmp/hashi-enterprise-production-render.yaml
 ```
 
+To generate the full operator-reviewed validation command plan:
+
+```bash
+python tools/enterprise_production_validation_plan.py \
+  --image-repository ghcr.io/your-org/hashi-enterprise \
+  --image-tag replace-me \
+  --host hashi-enterprise.example.com \
+  --ingress-namespace ingress-nginx \
+  --output /tmp/hashi-enterprise-production-validation-plan.json
+```
+
 ## Apply
 
 Apply only after render review and secret validation:
