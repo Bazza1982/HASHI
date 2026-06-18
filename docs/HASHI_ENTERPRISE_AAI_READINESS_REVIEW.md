@@ -239,6 +239,39 @@ pytest -q tests/test_enterprise_audit_contracts.py \
 # 42 passed
 ```
 
+Phase 3 Deployment Package Freeze checks passed:
+
+```text
+python3 -m py_compile hashi.py tools/enterprise_production_validation_plan.py \
+  tools/enterprise_k8s_backend_doctor.py tools/enterprise_k8s_image_smoke_plan.py
+
+pytest -q tests/test_enterprise_deploy_skeleton.py \
+  tests/test_enterprise_helm_chart.py tests/test_enterprise_kubernetes_manifests.py \
+  tests/test_enterprise_ha_rehearsal_assets.py \
+  tests/test_enterprise_k8s_ha_rehearsal_plan.py \
+  tests/test_enterprise_production_validation_plan.py
+# 40 passed
+
+pytest -q tests/test_enterprise_backup.py tests/test_hashi_enterprise_cli.py \
+  tests/test_enterprise_leases.py tests/test_enterprise_kubernetes_leases.py \
+  tests/test_enterprise_k8s_backend_doctor.py \
+  tests/test_enterprise_k8s_image_smoke_plan.py tests/test_enterprise_siem_assets.py
+# 50 passed
+```
+
+The deployment package freeze verified that these alpha assets are present for
+operator review:
+
+- `Dockerfile.enterprise`;
+- `deploy/docker-compose.enterprise.yml`;
+- `deploy/enterprise.env.example`;
+- `deploy/audit-export-presets.env.example`;
+- raw Kubernetes enterprise manifests under `deploy/kubernetes/enterprise/`;
+- Helm chart and examples under `deploy/helm/hashi-enterprise/`;
+- SIEM starter assets under `deploy/siem/`;
+- deployment, audit export, production hardening, Kubernetes HA rehearsal, and
+  PostgreSQL lease rehearsal runbooks.
+
 The connector readiness tests cover:
 
 - Slack credential creation through Workbench API;
