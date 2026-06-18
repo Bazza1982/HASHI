@@ -1,6 +1,6 @@
 # HASHI Enterprise AAI Implementation Roadmap
 
-**Status:** ready-to-implement roadmap.
+**Status:** Enterprise AAI `0.1 Alpha` scope frozen; full production roadmap continues after alpha.
 
 **Date:** 2026-06-15.
 
@@ -52,6 +52,41 @@ This prevents identity, channel, policy, and execution features from creating in
 ---
 
 ## 3. MVP Cut Lines
+
+### HASHI AAI Enterprise 0.1 Alpha
+
+`0.1 Alpha` is the first enterprise-grade deployment-ready testing cut. It
+resets the enterprise update version line to `0.1.0a1` and intentionally favors
+a coherent, locally smooth, deployment-artifact-complete alpha over full
+external production certification.
+
+Alpha is ready when:
+
+- existing personal/single-user flows remain smooth and do not require
+  enterprise bootstrap;
+- the enterprise profile can expose the governed control plane for identity,
+  channels, policy, approvals, audit, connectors, evidence, and deployment
+  review;
+- connector registry, credential setup, action schemas, policy gates, dry-run
+  execution, health checks, audit redaction, and Workbench controls are present
+  for the current GitHub and webhook connector set;
+- audit ledger, hash-chain verification, anchor adapters, live export runner,
+  daemon mode, SIEM starter assets, and deployment examples are present and
+  locally or statically verifiable;
+- Docker Compose, raw Kubernetes, Helm, systemd, production hardening plans,
+  lease rehearsal plans, and secret reference examples are available as
+  deployment starting points;
+- release notes and readiness docs clearly mark production validation,
+  external tenant setup, cloud-specific HA, and full DLP/data residency
+  enforcement as post-alpha work.
+
+Alpha does not require:
+
+- real customer IdP, SIEM, cloud WORM, or Kubernetes staging validation;
+- OAuth/Bot/Graph integrations beyond the current webhook and GitHub MVPs;
+- import-validated vendor dashboards or production autoscaling validation;
+- a production-certified HA release;
+- full browser screenshot regression coverage.
 
 ### Internal Enterprise Alpha
 

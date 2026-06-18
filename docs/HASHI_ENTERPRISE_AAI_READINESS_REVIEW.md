@@ -2,7 +2,8 @@
 
 **Date:** 2026-06-16
 
-**Status:** Enterprise MVP implementation is ready for review. The broader future roadmap is not complete.
+**Status:** Enterprise AAI `0.1 Alpha` is ready to close once the final local
+smoke and release checklist pass. The broader future roadmap is not complete.
 
 Related documents:
 
@@ -19,6 +20,12 @@ Related documents:
 
 ## 1. Readiness Decision
 
+HASHI AAI Enterprise is now scoped to a **0.1 Alpha** testing cut. This is an
+enterprise deployment-ready alpha in the precise sense that the code paths,
+control-plane surfaces, connector scaffolding, audit/export mechanisms, and
+deployment artifacts exist for operator review and local/static validation.
+Actual enterprise-server deployment validation remains pending.
+
 HASHI Enterprise AAI has reached an **MVP review-ready** state for the governed AAI control plane:
 
 - one codebase with `personal`, `team`, and `enterprise` profiles;
@@ -33,7 +40,18 @@ HASHI Enterprise AAI has reached an **MVP review-ready** state for the governed 
 - Docker/Kubernetes ops skeleton with backup, restore, migration, and health checks;
 - P10 connector MVP with GitHub, Slack, Google Chat, Teams, and Feishu, scoped credentials, secret refs, policy gates, health, dry-run, audit, and admin UI.
 
-This is **not** the end state of the enterprise product. It is the first reviewable implementation slice.
+This is **not** the end state of the enterprise product. It is the first
+reviewable and alpha-testable implementation slice.
+
+Alpha acceptance requires:
+
+- personal profile smoke stays smooth for local individual use;
+- enterprise APIs and Workbench surfaces import/build and pass targeted smoke;
+- enterprise connector dry-run, health, policy, and audit paths remain runnable;
+- deployment artifacts are present for Compose, Kubernetes, Helm, systemd,
+  audit export, secret refs, HA rehearsal, and production validation planning;
+- release notes clearly mark production validation and external environment
+  testing as pending.
 
 ---
 
@@ -228,7 +246,12 @@ Recommended review order:
 
 For nudge/task tracking, the correct completion boundary is:
 
+- **Enterprise AAI 0.1 Alpha:** yes, once final local smoke, release notes, and
+  version metadata pass.
 - **Enterprise MVP review-ready:** yes, once final review passes.
 - **Whole future-facing Enterprise AAI roadmap complete:** no.
 
-The roadmap intentionally keeps future enterprise capabilities deferred. The completion marker should only be emitted if the active task is explicitly scoped to the MVP review-ready cut line, or if all deferred enterprise roadmap items are also implemented.
+The roadmap intentionally keeps future enterprise capabilities deferred. The
+completion marker should only be emitted if the active task is explicitly scoped
+to the `0.1 Alpha`/MVP review-ready cut line, or if all deferred enterprise
+roadmap items are also implemented.
