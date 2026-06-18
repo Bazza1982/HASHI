@@ -196,6 +196,49 @@ Recent Workbench build checks passed:
 cd workbench && npm run build
 ```
 
+Phase 2 Enterprise Control Plane Alpha Lock checks passed:
+
+```text
+python3 -m py_compile orchestrator/enterprise/*.py \
+  orchestrator/enterprise/connectors/*.py orchestrator/workbench_api.py hashi.py
+
+pytest -q tests/test_enterprise_policy.py \
+  tests/test_workbench_enterprise_policies.py \
+  tests/test_workbench_enterprise_approvals.py
+# 20 passed
+
+pytest -q tests/test_enterprise_identity.py \
+  tests/test_workbench_enterprise_auth.py \
+  tests/test_workbench_enterprise_channels.py \
+  tests/test_workbench_enterprise_capabilities.py \
+  tests/test_workbench_enterprise_health.py
+# 55 passed
+
+pytest -q tests/test_enterprise_profile.py tests/test_enterprise_store.py \
+  tests/test_enterprise_identity.py tests/test_enterprise_auth_providers.py \
+  tests/test_enterprise_oidc_flow.py tests/test_enterprise_oidc_exchange.py \
+  tests/test_enterprise_oidc_http.py tests/test_enterprise_oidc_session.py \
+  tests/test_enterprise_oidc_token.py tests/test_enterprise_saml.py \
+  tests/test_enterprise_scim.py
+# 78 passed
+
+pytest -q tests/test_enterprise_channels.py tests/test_enterprise_channel_gate.py \
+  tests/test_enterprise_routing.py tests/test_enterprise_capabilities.py \
+  tests/test_enterprise_credentials.py tests/test_enterprise_secret_refs.py \
+  tests/test_enterprise_data_governance.py
+# 45 passed
+
+pytest -q tests/test_enterprise_connectors.py \
+  tests/test_workbench_enterprise_connectors.py
+# 78 passed
+
+pytest -q tests/test_enterprise_audit_contracts.py \
+  tests/test_enterprise_audit_ledger.py tests/test_enterprise_audit_adapters.py \
+  tests/test_enterprise_audit_export.py tests/test_enterprise_audit_live_export.py \
+  tests/test_workbench_enterprise_audit.py
+# 42 passed
+```
+
 The connector readiness tests cover:
 
 - Slack credential creation through Workbench API;
