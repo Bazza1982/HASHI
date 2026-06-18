@@ -115,6 +115,8 @@ def test_workbench_connector_ui_includes_channel_presets():
     assert "connector-schema-panel" in app_source
     assert "validateConnectorParameters" in app_source
     assert "Connector parameters failed schema validation." in app_source
+    assert "connector-parameter-controls" in app_source
+    assert "updateExecutionParameter" in app_source
 
 
 @pytest.mark.asyncio

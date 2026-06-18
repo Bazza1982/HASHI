@@ -548,6 +548,28 @@ h1 { margin: 0; font-size: 20px; }
   color: var(--muted);
   font-size: 0.78rem;
 }
+.connector-parameter-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(180px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+.connector-parameter-control {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+.connector-parameter-control input,
+.connector-parameter-control select {
+  height: 34px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: rgba(10, 12, 18, 0.9);
+  color: var(--text);
+  padding: 6px 8px;
+  min-width: 0;
+}
 .connector-form input,
 .connector-form select,
 .connector-execute-form input,
