@@ -45,6 +45,9 @@ Before production use:
 5. If using `schedulerLease.backend=kubernetes`, build the image with
    `--build-arg HASHI_ENTERPRISE_EXTRAS=kubernetes` or otherwise install
    `hashi-bridge[kubernetes]`.
+6. Review `examples/production-hardening.values.yaml` and
+   `docs/HASHI_ENTERPRISE_PRODUCTION_HARDENING_RUNBOOK.md` before enabling
+   production ingress, NetworkPolicy, HPA, and PDB controls.
 
 ## External Database Wiring
 
