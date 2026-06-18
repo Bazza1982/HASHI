@@ -117,6 +117,13 @@ from orchestrator.enterprise.leases import (
     PostgresLeaseConnectionPool,
 )
 from orchestrator.enterprise.lease_rehearsal import LeaseRehearsalResult, run_enterprise_lease_rehearsal
+from orchestrator.enterprise.kubernetes_leases import (
+    KubernetesLease,
+    KubernetesLeaseAttempt,
+    KubernetesLeaseClient,
+    KubernetesLeaseConflict,
+    KubernetesLeaseCoordinator,
+)
 from orchestrator.enterprise.policy import (
     ApprovalRequest,
     PolicyDecision,
@@ -269,6 +276,11 @@ __all__ = [
     "PostgresEnterpriseLeaseStore",
     "PostgresLeaseConnectionPool",
     "LeaseRehearsalResult",
+    "KubernetesLease",
+    "KubernetesLeaseAttempt",
+    "KubernetesLeaseClient",
+    "KubernetesLeaseConflict",
+    "KubernetesLeaseCoordinator",
     "IdentityService",
     "PolicyDecision",
     "PolicyEvaluation",
