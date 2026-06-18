@@ -22,6 +22,7 @@ def test_enterprise_helm_chart_files_exist():
         "templates/deployment.yaml",
         "templates/hpa.yaml",
         "templates/ingress.yaml",
+        "templates/lease-rbac.yaml",
         "templates/networkpolicy.yaml",
         "templates/pdb.yaml",
         "templates/pvc.yaml",
@@ -51,6 +52,7 @@ def test_enterprise_helm_values_default_to_governed_single_replica():
     assert 'workbenchPort: "18800"' in text
     assert "enabled: false" in text
     assert "networkPolicy:" in text
+    assert "leaderElection:" in text
     assert "autoscaling:" in text
     assert "externalDatabase:" in text
     assert "secretKey: HASHI_ENTERPRISE_DATABASE_URL" in text
@@ -138,6 +140,20 @@ def test_enterprise_helm_chart_includes_optional_pod_disruption_budget():
     assert "minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}" in pdb
     assert "app.kubernetes.io/name: {{ include \"hashi-enterprise.name\" . }}" in pdb
     assert "app.kubernetes.io/instance: {{ .Release.Name }}" in pdb
+
+
+def test_enterprise_helm_chart_includes_optional_lease_rbac():
+    text = _read(TEMPLATES_DIR / "lease-rbac.yaml")
+
+    assert "{{- if .Values.leaderElection.rbac.enabled }}" in text
+    assert "kind: Role" in text
+    assert "kind: RoleBinding" in text
+    assert "coordination.k8s.io" in text
+    assert "leases" in text
+    assert "create" in text
+    assert "update" in text
+    assert "patch" in text
+    assert "name: {{ include \"hashi-enterprise.serviceAccountName\" . }}" in text
 
 
 def test_enterprise_helm_audit_export_daemon_supports_optional_db_lease():

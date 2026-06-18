@@ -84,6 +84,8 @@ For a full PostgreSQL rehearsal checklist, see
 `docs/HASHI_ENTERPRISE_POSTGRES_LEASE_REHEARSAL.md`.
 For a full multi-replica staging rehearsal, see
 `docs/HASHI_ENTERPRISE_K8S_HA_REHEARSAL.md`.
+`lease-rbac.example.yaml` documents optional `coordination.k8s.io/leases`
+permissions for future native Kubernetes leader election.
 
 ## Live Audit Export Daemon
 

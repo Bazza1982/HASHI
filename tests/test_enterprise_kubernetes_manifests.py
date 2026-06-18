@@ -22,6 +22,7 @@ def test_kubernetes_baseline_files_exist():
         "deployment.yaml",
         "service.yaml",
         "external-postgres-secret.example.yaml",
+        "lease-rbac.example.yaml",
         "pod-disruption-budget.example.yaml",
     }
 
@@ -109,6 +110,19 @@ def test_pod_disruption_budget_example_documents_multi_replica_guard():
     assert "minAvailable: 1" in text
     assert "app.kubernetes.io/name: hashi" in text
     assert "app.kubernetes.io/component: enterprise" in text
+
+
+def test_lease_rbac_example_documents_native_kubernetes_lease_permissions():
+    text = _read("lease-rbac.example.yaml")
+
+    assert "kind: Role" in text
+    assert "kind: RoleBinding" in text
+    assert "coordination.k8s.io" in text
+    assert "leases" in text
+    assert "create" in text
+    assert "update" in text
+    assert "patch" in text
+    assert "name: default" in text
 
 
 def test_audit_export_daemon_uses_pod_name_db_lease():
