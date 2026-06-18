@@ -48,6 +48,8 @@ Before production use:
 6. Review `examples/production-hardening.values.yaml` and
    `docs/HASHI_ENTERPRISE_PRODUCTION_HARDENING_RUNBOOK.md` before enabling
    production ingress, NetworkPolicy, HPA, and PDB controls.
+   `tools/enterprise_production_validation_plan.py` can generate the
+   post-render kubectl/curl validation command plan.
 
 ## External Database Wiring
 
