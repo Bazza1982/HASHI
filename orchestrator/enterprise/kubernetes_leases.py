@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Protocol
+from typing import Any, Protocol
 
 
 class KubernetesLeaseConflict(Exception):
@@ -146,6 +146,92 @@ class KubernetesLeaseCoordinator:
         return self.client.delete_lease(self.namespace, lease_name, holder_identity=holder)
 
 
+class KubernetesApiLeaseClient:
+    group = "coordination.k8s.io"
+    version = "v1"
+    plural = "leases"
+
+    def __init__(self, api: Any):
+        self.api = api
+
+    @classmethod
+    def from_config(cls, *, in_cluster: bool = True, kubeconfig_path: str | None = None) -> "KubernetesApiLeaseClient":
+        try:
+            from kubernetes import client, config
+        except ImportError as exc:
+            raise RuntimeError("kubernetes package is required for KubernetesApiLeaseClient.from_config()") from exc
+
+        if in_cluster:
+            config.load_incluster_config()
+        else:
+            config.load_kube_config(config_file=kubeconfig_path)
+        return cls(client.CustomObjectsApi())
+
+    def get_lease(self, namespace: str, name: str) -> KubernetesLease | None:
+        try:
+            body = self.api.get_namespaced_custom_object(
+                self.group,
+                self.version,
+                _require_text(namespace, "namespace"),
+                self.plural,
+                _require_text(name, "lease name"),
+            )
+        except Exception as exc:
+            if _api_status(exc) == 404:
+                return None
+            raise
+        return _lease_from_body(body)
+
+    def create_lease(self, lease: KubernetesLease) -> KubernetesLease:
+        try:
+            body = self.api.create_namespaced_custom_object(
+                self.group,
+                self.version,
+                lease.namespace,
+                self.plural,
+                _lease_to_body(lease, include_resource_version=False),
+            )
+        except Exception as exc:
+            if _api_status(exc) == 409:
+                raise KubernetesLeaseConflict() from exc
+            raise
+        return _lease_from_body(body)
+
+    def replace_lease(self, lease: KubernetesLease) -> KubernetesLease:
+        try:
+            body = self.api.replace_namespaced_custom_object(
+                self.group,
+                self.version,
+                lease.namespace,
+                self.plural,
+                lease.name,
+                _lease_to_body(lease, include_resource_version=True),
+            )
+        except Exception as exc:
+            if _api_status(exc) == 409:
+                raise KubernetesLeaseConflict() from exc
+            raise
+        return _lease_from_body(body)
+
+    def delete_lease(self, namespace: str, name: str, *, holder_identity: str) -> bool:
+        lease = self.get_lease(namespace, name)
+        if lease is None or lease.holder_identity != _require_text(holder_identity, "holder identity"):
+            return False
+        try:
+            self.api.delete_namespaced_custom_object(
+                self.group,
+                self.version,
+                _require_text(namespace, "namespace"),
+                self.plural,
+                _require_text(name, "lease name"),
+            )
+        except Exception as exc:
+            if _api_status(exc) == 404:
+                return False
+            raise
+        return True
+
+
 def _require_text(value: str, label: str) -> str:
     text = str(value or "").strip()
     if not text:
@@ -167,3 +253,47 @@ def _format_ts(value: datetime) -> str:
 
 def _parse_ts(value: str) -> datetime:
     return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
+
+
+def _lease_to_body(lease: KubernetesLease, *, include_resource_version: bool) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "name": lease.name,
+        "namespace": lease.namespace,
+    }
+    if include_resource_version and lease.resource_version:
+        metadata["resourceVersion"] = lease.resource_version
+    return {
+        "apiVersion": f"{KubernetesApiLeaseClient.group}/{KubernetesApiLeaseClient.version}",
+        "kind": "Lease",
+        "metadata": metadata,
+        "spec": {
+            "holderIdentity": lease.holder_identity,
+            "leaseDurationSeconds": max(1, int(lease.lease_duration_seconds)),
+            "acquireTime": lease.acquire_time,
+            "renewTime": lease.renew_time,
+        },
+    }
+
+
+def _lease_from_body(body: dict[str, Any]) -> KubernetesLease:
+    metadata = body.get("metadata") or {}
+    spec = body.get("spec") or {}
+    return KubernetesLease(
+        namespace=_require_text(metadata.get("namespace"), "namespace"),
+        name=_require_text(metadata.get("name"), "lease name"),
+        holder_identity=_require_text(spec.get("holderIdentity"), "holder identity"),
+        lease_duration_seconds=max(1, int(spec.get("leaseDurationSeconds") or 1)),
+        acquire_time=_require_text(spec.get("acquireTime"), "acquire time"),
+        renew_time=_require_text(spec.get("renewTime"), "renew time"),
+        resource_version=metadata.get("resourceVersion"),
+    )
+
+
+def _api_status(exc: Exception) -> int | None:
+    status = getattr(exc, "status", None)
+    if status is None:
+        return None
+    try:
+        return int(status)
+    except (TypeError, ValueError):
+        return None
