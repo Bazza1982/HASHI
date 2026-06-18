@@ -75,6 +75,10 @@ enabling multiple scheduler replicas:
 
 ```bash
 python tools/enterprise_k8s_backend_doctor.py --require-installed
+python tools/enterprise_k8s_image_smoke_plan.py \
+  --image-tag ghcr.io/your-org/hashi-enterprise:k8s-lease \
+  --namespace hashi-enterprise \
+  --lease-name superloop-scheduler-smoke
 
 python hashi.py enterprise k8s-lease-rehearse \
   --namespace hashi-enterprise \

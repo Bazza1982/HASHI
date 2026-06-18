@@ -30,6 +30,7 @@ def test_enterprise_raw_kubernetes_docs_cover_kubernetes_backend_extra():
     assert "HASHI_ENTERPRISE_SCHEDULER_LEASE_BACKEND" in text
     assert "k8s-lease-rehearse" in text
     assert "enterprise_k8s_backend_doctor.py" in text
+    assert "enterprise_k8s_image_smoke_plan.py" in text
 
 
 def test_enterprise_compose_mounts_governed_volumes_and_healthcheck():

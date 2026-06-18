@@ -111,6 +111,10 @@ Example Kubernetes Lease backend install:
 
 ```bash
 python tools/enterprise_k8s_backend_doctor.py --json
+python tools/enterprise_k8s_image_smoke_plan.py \
+  --image-tag ghcr.io/your-org/hashi-enterprise:k8s-lease \
+  --namespace hashi-enterprise \
+  --lease-name superloop-scheduler-smoke
 
 docker build -f Dockerfile.enterprise \
   --build-arg HASHI_ENTERPRISE_EXTRAS=kubernetes \

@@ -131,6 +131,7 @@ def test_enterprise_helm_readme_documents_kubernetes_backend_extra():
     assert "schedulerLease.backend=kubernetes" in text
     assert "k8s-lease-rehearse" in text
     assert "enterprise_k8s_backend_doctor.py" in text
+    assert "enterprise_k8s_image_smoke_plan.py" in text
 
 
 def test_enterprise_helm_chart_includes_optional_ingress_network_policy_and_hpa():
