@@ -99,8 +99,10 @@ For a full multi-replica staging rehearsal, start from
 `examples/multi-replica-rehearsal.values.yaml` and follow
 `docs/HASHI_ENTERPRISE_K8S_HA_REHEARSAL.md`.
 Optional Kubernetes Lease RBAC can be enabled with
-`leaderElection.rbac.enabled=true`; the runtime leader-election client is still
-future work.
+`leaderElection.rbac.enabled=true`. The scheduler lease backend defaults to
+`db`; set `schedulerLease.backend=kubernetes` only when the runtime image
+includes the optional Kubernetes Python package and the service account has
+Lease permissions.
 
 ## Live Audit Export
 

@@ -49,6 +49,8 @@ def test_deployment_uses_enterprise_health_probes_and_port():
     assert "containerPort: 18800" in text
     assert "name: HASHI_POD_NAME" in text
     assert "fieldPath: metadata.name" in text
+    assert "name: POD_NAMESPACE" in text
+    assert "fieldPath: metadata.namespace" in text
     assert "name: HASHI_ENTERPRISE_SCHEDULER_LEASE_HOLDER" in text
     assert 'value: "$(HASHI_POD_NAME)"' in text
     assert "livenessProbe:" in text
@@ -77,8 +79,11 @@ def test_configmap_sets_enterprise_profile_and_bridge_home():
     assert 'HASHI_WORKBENCH_PORT: "18800"' in text
     assert "HASHI_ORGANIZATION_ID: ORG-001" in text
     assert 'HASHI_ENTERPRISE_SCHEDULER_LEASE_ENABLED: "false"' in text
+    assert "HASHI_ENTERPRISE_SCHEDULER_LEASE_BACKEND: db" in text
     assert "HASHI_ENTERPRISE_SCHEDULER_LEASE_NAME: superloop-scheduler" in text
     assert 'HASHI_ENTERPRISE_SCHEDULER_LEASE_TTL_SECONDS: "60"' in text
+    assert "HASHI_ENTERPRISE_SCHEDULER_LEASE_K8S_NAMESPACE: hashi-enterprise" in text
+    assert 'HASHI_ENTERPRISE_SCHEDULER_LEASE_K8S_IN_CLUSTER: "true"' in text
     assert 'HASHI_ENTERPRISE_SCHEDULER_LEASE_POOL_ENABLED: "false"' in text
     assert 'HASHI_ENTERPRISE_SCHEDULER_LEASE_POOL_MIN_SIZE: "1"' in text
     assert 'HASHI_ENTERPRISE_SCHEDULER_LEASE_POOL_MAX_SIZE: "4"' in text

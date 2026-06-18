@@ -124,6 +124,7 @@ from orchestrator.enterprise.kubernetes_leases import (
     KubernetesLeaseClient,
     KubernetesLeaseConflict,
     KubernetesLeaseCoordinator,
+    KubernetesSchedulerLeaseStore,
 )
 from orchestrator.enterprise.policy import (
     ApprovalRequest,
@@ -283,6 +284,7 @@ __all__ = [
     "KubernetesLeaseClient",
     "KubernetesLeaseConflict",
     "KubernetesLeaseCoordinator",
+    "KubernetesSchedulerLeaseStore",
     "IdentityService",
     "PolicyDecision",
     "PolicyEvaluation",

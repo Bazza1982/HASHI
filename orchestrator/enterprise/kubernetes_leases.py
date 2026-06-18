@@ -146,6 +146,33 @@ class KubernetesLeaseCoordinator:
         return self.client.delete_lease(self.namespace, lease_name, holder_identity=holder)
 
 
+class KubernetesSchedulerLeaseStore:
+    def __init__(self, coordinator: KubernetesLeaseCoordinator):
+        self.coordinator = coordinator
+
+    def acquire(
+        self,
+        name: str,
+        *,
+        holder_id: str,
+        ttl_seconds: int | float = 60,
+        metadata: dict[str, Any] | None = None,
+    ) -> KubernetesLeaseAttempt:
+        return self.coordinator.acquire(name, holder_identity=holder_id, ttl_seconds=ttl_seconds)
+
+    def renew(
+        self,
+        name: str,
+        *,
+        holder_id: str,
+        ttl_seconds: int | float = 60,
+    ) -> KubernetesLeaseAttempt:
+        return self.coordinator.renew(name, holder_identity=holder_id, ttl_seconds=ttl_seconds)
+
+    def release(self, name: str, *, holder_id: str) -> bool:
+        return self.coordinator.release(name, holder_identity=holder_id)
+
+
 class KubernetesApiLeaseClient:
     group = "coordination.k8s.io"
     version = "v1"

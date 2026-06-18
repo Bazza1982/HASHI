@@ -66,9 +66,13 @@ class GlobalConfig:
     enterprise_auth_providers: List[Dict[str, Any]] = field(default_factory=list)
     enterprise_database_url: str | None = None
     enterprise_scheduler_lease_enabled: bool = False
+    enterprise_scheduler_lease_backend: str = "db"
     enterprise_scheduler_lease_name: str = "superloop-scheduler"
     enterprise_scheduler_lease_holder: str | None = None
     enterprise_scheduler_lease_ttl_seconds: int = 60
+    enterprise_scheduler_lease_kubernetes_namespace: str | None = None
+    enterprise_scheduler_lease_kubernetes_in_cluster: bool = True
+    enterprise_scheduler_lease_kubeconfig_path: str | None = None
     enterprise_scheduler_lease_pool_enabled: bool = False
     enterprise_scheduler_lease_pool_min_size: int = 1
     enterprise_scheduler_lease_pool_max_size: int = 4
@@ -147,6 +151,13 @@ class ConfigManager:
                 g_raw.get("enterprise_scheduler_lease_enabled", False),
             )
         )
+        enterprise_scheduler_lease_backend = str(
+            os.environ.get(
+                "HASHI_ENTERPRISE_SCHEDULER_LEASE_BACKEND",
+                g_raw.get("enterprise_scheduler_lease_backend", "db"),
+            )
+            or "db"
+        ).strip().lower()
         enterprise_scheduler_lease_name = str(
             os.environ.get(
                 "HASHI_ENTERPRISE_SCHEDULER_LEASE_NAME",
@@ -168,6 +179,23 @@ class ConfigManager:
                 )
                 or 60
             ),
+        )
+        enterprise_scheduler_lease_kubernetes_namespace = (
+            os.environ.get("HASHI_ENTERPRISE_SCHEDULER_LEASE_K8S_NAMESPACE")
+            or os.environ.get("POD_NAMESPACE")
+            or g_raw.get("enterprise_scheduler_lease_kubernetes_namespace")
+            or None
+        )
+        enterprise_scheduler_lease_kubernetes_in_cluster = _truthy(
+            os.environ.get(
+                "HASHI_ENTERPRISE_SCHEDULER_LEASE_K8S_IN_CLUSTER",
+                g_raw.get("enterprise_scheduler_lease_kubernetes_in_cluster", True),
+            )
+        )
+        enterprise_scheduler_lease_kubeconfig_path = (
+            os.environ.get("HASHI_ENTERPRISE_SCHEDULER_LEASE_KUBECONFIG")
+            or g_raw.get("enterprise_scheduler_lease_kubeconfig_path")
+            or None
         )
         enterprise_scheduler_lease_pool_enabled = _truthy(
             os.environ.get(
@@ -250,9 +278,13 @@ class ConfigManager:
             enterprise_auth_providers=list(g_raw.get("enterprise_auth_providers") or []),
             enterprise_database_url=enterprise_database_url,
             enterprise_scheduler_lease_enabled=enterprise_scheduler_lease_enabled,
+            enterprise_scheduler_lease_backend=enterprise_scheduler_lease_backend,
             enterprise_scheduler_lease_name=enterprise_scheduler_lease_name,
             enterprise_scheduler_lease_holder=enterprise_scheduler_lease_holder,
             enterprise_scheduler_lease_ttl_seconds=enterprise_scheduler_lease_ttl_seconds,
+            enterprise_scheduler_lease_kubernetes_namespace=enterprise_scheduler_lease_kubernetes_namespace,
+            enterprise_scheduler_lease_kubernetes_in_cluster=enterprise_scheduler_lease_kubernetes_in_cluster,
+            enterprise_scheduler_lease_kubeconfig_path=enterprise_scheduler_lease_kubeconfig_path,
             enterprise_scheduler_lease_pool_enabled=enterprise_scheduler_lease_pool_enabled,
             enterprise_scheduler_lease_pool_min_size=enterprise_scheduler_lease_pool_min_size,
             enterprise_scheduler_lease_pool_max_size=enterprise_scheduler_lease_pool_max_size,
