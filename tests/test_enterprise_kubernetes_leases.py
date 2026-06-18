@@ -11,6 +11,7 @@ from orchestrator.enterprise.kubernetes_leases import (
     KubernetesLeaseConflict,
     KubernetesLeaseCoordinator,
     KubernetesSchedulerLeaseStore,
+    run_kubernetes_lease_rehearsal,
 )
 
 
@@ -117,6 +118,23 @@ def test_kubernetes_scheduler_lease_store_matches_db_lease_interface():
     assert renewed.acquired is True
     assert released is True
     assert client.get_lease("hashi-enterprise", "scheduler") is None
+
+
+def test_run_kubernetes_lease_rehearsal_passes_with_fake_client():
+    client = _FakeKubernetesLeaseClient()
+
+    result = run_kubernetes_lease_rehearsal(
+        client,
+        namespace="hashi-enterprise",
+        lease_name="scheduler-smoke",
+        ttl_seconds=30,
+    )
+
+    assert result.passed is True
+    assert result.first_acquired_holder in {"rehearsal-a", "rehearsal-b"}
+    assert result.blocked_holder in {"rehearsal-a", "rehearsal-b"}
+    assert result.blocked_holder != result.first_acquired_holder
+    assert client.get_lease("hashi-enterprise", "scheduler-smoke") is None
 
 
 def test_kubernetes_api_lease_client_maps_get_create_replace_and_delete():

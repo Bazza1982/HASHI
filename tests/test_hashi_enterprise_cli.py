@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from threading import Lock
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +12,8 @@ from orchestrator.enterprise import (
     EnterpriseAuditLedger,
     EnterpriseLeaseStore,
     IdentityService,
+    KubernetesApiLeaseClient,
+    KubernetesLeaseConflict,
     run_enterprise_lease_rehearsal,
 )
 from orchestrator.enterprise.store import SCHEMA_VERSION
@@ -119,6 +122,39 @@ def test_enterprise_lease_rehearse_cli_runs_sqlite_rehearsal(tmp_path, monkeypat
     assert payload["lease_name"] == "cli-rehearsal"
 
 
+def test_enterprise_k8s_lease_rehearse_cli_runs_fake_rehearsal(monkeypatch, capsys):
+    calls = {}
+
+    def fake_from_config(*, in_cluster, kubeconfig_path):
+        calls["in_cluster"] = in_cluster
+        calls["kubeconfig_path"] = kubeconfig_path
+        return _FakeKubernetesLeaseClient()
+
+    monkeypatch.setattr(KubernetesApiLeaseClient, "from_config", staticmethod(fake_from_config))
+
+    rc = hashi.cmd_enterprise_k8s_lease_rehearse(
+        SimpleNamespace(
+            namespace="hashi-enterprise",
+            lease_name="k8s-cli-rehearsal",
+            holder_a="pod-a",
+            holder_b="pod-b",
+            ttl=30,
+            kubeconfig="/tmp/kubeconfig",
+            in_cluster=None,
+        )
+    )
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "Kubernetes lease rehearsal completed" in output
+    payload = json.loads(output[output.index("{"):])
+    assert payload["passed"] is True
+    assert payload["namespace"] == "hashi-enterprise"
+    assert payload["in_cluster"] is False
+    assert payload["lease_name"] == "k8s-cli-rehearsal"
+    assert calls == {"in_cluster": False, "kubeconfig_path": "/tmp/kubeconfig"}
+
+
 def test_enterprise_audit_live_export_cli_sends_events_and_updates_checkpoint(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(hashi, "ROOT_DIR", tmp_path)
     db_path = tmp_path / "state" / "enterprise.sqlite"
@@ -163,6 +199,41 @@ def test_enterprise_audit_live_export_cli_sends_events_and_updates_checkpoint(tm
     assert "Sent            : 1" in output
     assert "Lock            :" in output
     assert not (tmp_path / "state" / "audit_live_export_checkpoint.json.lock").exists()
+
+
+class _FakeKubernetesLeaseClient:
+    def __init__(self):
+        self.leases = {}
+        self.lock = Lock()
+
+    def get_lease(self, namespace, name):
+        with self.lock:
+            return self.leases.get((namespace, name))
+
+    def create_lease(self, lease):
+        with self.lock:
+            key = (lease.namespace, lease.name)
+            if key in self.leases:
+                raise KubernetesLeaseConflict()
+            self.leases[key] = lease
+            return lease
+
+    def replace_lease(self, lease):
+        with self.lock:
+            key = (lease.namespace, lease.name)
+            if key not in self.leases:
+                raise KubernetesLeaseConflict()
+            self.leases[key] = lease
+            return lease
+
+    def delete_lease(self, namespace, name, *, holder_identity):
+        with self.lock:
+            key = (namespace, name)
+            lease = self.leases.get(key)
+            if lease is None or lease.holder_identity != holder_identity:
+                return False
+            del self.leases[key]
+            return True
 
 
 def test_enterprise_audit_live_export_cli_uses_db_lease_when_configured(tmp_path, monkeypatch, capsys):

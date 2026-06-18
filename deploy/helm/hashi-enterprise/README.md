@@ -123,6 +123,14 @@ helm upgrade --install hashi-enterprise deploy/helm/hashi-enterprise \
   --set leaderElection.rbac.enabled=true
 ```
 
+Before enabling multiple scheduler replicas with this backend, run:
+
+```bash
+python hashi.py enterprise k8s-lease-rehearse \
+  --namespace hashi-enterprise \
+  --lease-name superloop-scheduler-smoke
+```
+
 ## Live Audit Export
 
 Enable the one-shot exporter as a Kubernetes CronJob after configuring a real

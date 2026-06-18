@@ -129,6 +129,7 @@ def test_enterprise_helm_readme_documents_kubernetes_backend_extra():
     assert "HASHI_ENTERPRISE_EXTRAS=kubernetes" in text
     assert "hashi-bridge[kubernetes]" in text
     assert "schedulerLease.backend=kubernetes" in text
+    assert "k8s-lease-rehearse" in text
 
 
 def test_enterprise_helm_chart_includes_optional_ingress_network_policy_and_hpa():

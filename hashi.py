@@ -429,6 +429,31 @@ def cmd_enterprise_lease_rehearse(args) -> int:
     return 0 if result.passed else 2
 
 
+def cmd_enterprise_k8s_lease_rehearse(args) -> int:
+    from orchestrator.enterprise import (
+        KubernetesApiLeaseClient,
+        run_kubernetes_lease_rehearsal,
+    )
+
+    namespace = str(args.namespace or os.environ.get("POD_NAMESPACE") or "hashi-enterprise")
+    in_cluster = bool(args.in_cluster) if args.in_cluster is not None else not bool(args.kubeconfig)
+    client = KubernetesApiLeaseClient.from_config(
+        in_cluster=in_cluster,
+        kubeconfig_path=args.kubeconfig,
+    )
+    result = run_kubernetes_lease_rehearsal(
+        client,
+        namespace=namespace,
+        lease_name=args.lease_name,
+        holder_a=args.holder_a,
+        holder_b=args.holder_b,
+        ttl_seconds=max(1, int(args.ttl or 30)),
+    )
+    print(_g("✓ Kubernetes lease rehearsal completed") if result.passed else _r("✗ Kubernetes lease rehearsal failed"))
+    print(json.dumps({**result.as_dict(), "namespace": namespace, "in_cluster": in_cluster}, indent=2, sort_keys=True))
+    return 0 if result.passed else 2
+
+
 def _parse_http_headers(raw_headers: list[str] | None) -> dict[str, str]:
     headers: dict[str, str] = {}
     for raw in raw_headers or []:
@@ -650,6 +675,28 @@ def main():
         help="Do not create the organization automatically for SQLite rehearsal databases.",
     )
     enterprise_lease_rehearse.set_defaults(func=cmd_enterprise_lease_rehearse)
+
+    enterprise_k8s_lease_rehearse = enterprise_sub.add_parser(
+        "k8s-lease-rehearse",
+        help="Run a Kubernetes Lease backend smoke rehearsal",
+    )
+    enterprise_k8s_lease_rehearse.add_argument(
+        "--namespace",
+        default=None,
+        help="Kubernetes namespace for the Lease. Defaults to POD_NAMESPACE or hashi-enterprise.",
+    )
+    enterprise_k8s_lease_rehearse.add_argument("--lease-name", help="Lease name. Defaults to a unique rehearsal lease")
+    enterprise_k8s_lease_rehearse.add_argument("--holder-a", default="rehearsal-a", help="First holder identity")
+    enterprise_k8s_lease_rehearse.add_argument("--holder-b", default="rehearsal-b", help="Second holder identity")
+    enterprise_k8s_lease_rehearse.add_argument("--ttl", type=int, default=30, help="Lease TTL seconds")
+    enterprise_k8s_lease_rehearse.add_argument("--kubeconfig", help="Optional kubeconfig path for out-of-cluster rehearsal")
+    enterprise_k8s_lease_rehearse.add_argument(
+        "--in-cluster",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Load in-cluster Kubernetes config. Defaults to true unless --kubeconfig is set.",
+    )
+    enterprise_k8s_lease_rehearse.set_defaults(func=cmd_enterprise_k8s_lease_rehearse)
 
     enterprise_audit_live = enterprise_sub.add_parser(
         "audit-export-live",

@@ -70,8 +70,16 @@ Check lease-related environment on a pod:
 kubectl -n hashi-enterprise exec deploy/hashi-enterprise -- env | grep HASHI_ENTERPRISE_SCHEDULER_LEASE
 ```
 
-For a Kubernetes Lease backend smoke rehearsal, also inspect the namespace and
-Lease object:
+For a Kubernetes Lease backend smoke rehearsal, run the CLI check before
+enabling multiple scheduler replicas:
+
+```bash
+python hashi.py enterprise k8s-lease-rehearse \
+  --namespace hashi-enterprise \
+  --lease-name superloop-scheduler-smoke
+```
+
+After enabling the scheduler backend, inspect the live Lease object:
 
 ```bash
 kubectl -n hashi-enterprise get lease superloop-scheduler -o yaml
