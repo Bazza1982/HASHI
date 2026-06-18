@@ -31,7 +31,7 @@ HASHI Enterprise AAI has reached an **MVP review-ready** state for the governed 
 - task, artifact, evidence bundle, verification, and escalation primitives;
 - Workbench admin surfaces for users, channels, policies, audit, approvals, health, and connectors;
 - Docker/Kubernetes ops skeleton with backup, restore, migration, and health checks;
-- P10 connector MVP with GitHub, Slack, Google Chat, and Teams, scoped credentials, secret refs, policy gates, health, dry-run, audit, and admin UI.
+- P10 connector MVP with GitHub, Slack, Google Chat, Teams, and Feishu, scoped credentials, secret refs, policy gates, health, dry-run, audit, and admin UI.
 
 This is **not** the end state of the enterprise product. It is the first reviewable implementation slice.
 
@@ -67,7 +67,7 @@ This is **not** the end state of the enterprise product. It is the first reviewa
 - Commands, channels, tools, execution scopes, backends, and connectors can be routed through central policy decisions.
 - Approval-required flows create approval records instead of silently executing high-risk actions.
 - Data governance primitives can classify baseline sensitive content and produce egress decisions from approval thresholds and destination-region allowlists.
-- Slack, Google Chat, and Teams webhook `message.send` actions are checked before connector execution; confidential outbound text requires approval, restricted outbound text is denied, and connector audit records redact message text.
+- Slack, Google Chat, Teams, and Feishu webhook `message.send` actions are checked before connector execution; confidential outbound text requires approval, restricted outbound text is denied, and connector audit records redact message text.
 
 ### Auditability
 
@@ -134,8 +134,8 @@ This is **not** the end state of the enterprise product. It is the first reviewa
 - Vault secret resolution supports token-auth read paths with injectable clients and KV v1/v2 field extraction.
 - GitHub connector supports repository metadata and issue creation with dry-run behavior.
 - Slack incoming webhook connector supports governed `message.send` with dry-run behavior.
-- Google Chat and Teams incoming webhook connectors support governed `message.send` with dry-run behavior.
-- Default connector policy allows GitHub reads, requires approval for GitHub writes, and requires approval for Slack, Google Chat, and Teams outbound messages.
+- Google Chat, Teams, and Feishu incoming webhook connectors support governed `message.send` with dry-run behavior.
+- Default connector policy allows GitHub reads, requires approval for GitHub writes, and requires approval for Slack, Google Chat, Teams, and Feishu outbound messages.
 - Workbench connector execution API rejects webhook `message.send` actions without non-empty `text` before execution.
 - Workbench Enterprise console supports connector credentials, health, policy defaults, and dry-run/test-run execution.
 
@@ -178,7 +178,7 @@ The connector readiness tests cover:
 - Slack dry-run execution through the Workbench connector execution API;
 - policy allow path for Slack dry-run;
 - default approval-required gate for Slack outbound messages;
-- Google Chat and Teams credential creation, registry refresh, dry-run execution, and default approval-required gate;
+- Google Chat, Teams, and Feishu credential creation, registry refresh, dry-run execution, and default approval-required gate;
 - server-side rejection of webhook `message.send` without `text`.
 
 ---
@@ -194,7 +194,7 @@ These are not blockers for Enterprise MVP review, but they are not complete:
 - live SIEM/OTLP exporter hardening beyond the CLI runner, daemon loop, baseline Compose/Kubernetes/Helm scheduling, supervised daemon manifests, generic vendor preset runbook, Kubernetes `secretKeyRef` wiring, External Secrets examples, and starter SIEM assets, including deeper vendor transforms, import-validated dashboards/alerts, and production validation for each cloud identity model;
 - Kubernetes HA deployment beyond the baseline manifests/chart, managed database URL wiring, optional PodDisruptionBudget assets, file-lock guarded audit export, DB lease primitive, audit-export DB lease wiring, superloop lease guard, scheduler lease environment wiring, whole-tick scheduler lease enforcement, optional PostgreSQL lease backend, operator lease rehearsal CLI, staging PostgreSQL rehearsal runbook, PostgreSQL lease CI, optional lease pool wiring, Kubernetes HA rehearsal assets, Kubernetes Lease RBAC assets, Kubernetes Lease coordinator abstraction, Kubernetes Lease API adapter, scheduler backend selection wiring, Kubernetes Lease packaging guard, Kubernetes Lease smoke rehearsal CLI, Kubernetes Lease packaging doctor, Kubernetes Lease image smoke plan, Kubernetes Lease image smoke plan artifact workflow, CI-friendly pool load harness, lease load rehearsal CLI, in-cluster lease load rehearsal assets, Helm render CI, HA rehearsal command plan, HA rehearsal plan artifact workflow, production hardening runbook, production hardening render CI, production validation command plan, and production validation plan artifact workflow, including real staging pool sizing, validated production ingress/network policies, cloud-specific autoscaling validation, and live multi-replica rehearsal;
 - Slack OAuth/Bot API, channel discovery, and user mapping;
-- Feishu connector;
+- Feishu OAuth, group discovery, and user mapping;
 - Google Chat OAuth, space discovery, and user mapping;
 - GitHub PR create/merge actions;
 - full DLP/data residency enforcement across every runtime, non-webhook connector, channel, artifact export, and backend path;

@@ -125,7 +125,7 @@ async def test_enterprise_admin_can_install_default_connector_policies(tmp_path)
     listed = json.loads(list_response.text)
     assert response.status == 200
     assert payload["ok"] is True
-    assert payload["count"] == 8
+    assert payload["count"] == 9
     assert {policy["id"] for policy in payload["policies"]} == {
         "tpl-connector-github-repo-read-allow",
         "tpl-connector-github-repo-get-allow",
@@ -135,9 +135,10 @@ async def test_enterprise_admin_can_install_default_connector_policies(tmp_path)
         "tpl-connector-slack-message-send-approval",
         "tpl-connector-google-chat-message-send-approval",
         "tpl-connector-teams-message-send-approval",
+        "tpl-connector-feishu-message-send-approval",
     }
-    assert second_payload["count"] == 8
-    assert listed["count"] == 8
+    assert second_payload["count"] == 9
+    assert listed["count"] == 9
 
 
 @pytest.mark.asyncio
