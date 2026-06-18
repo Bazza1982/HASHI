@@ -55,6 +55,13 @@ docker build -f Dockerfile.enterprise \
   -t ghcr.io/your-org/hashi-enterprise:k8s-lease .
 ```
 
+Before building or promoting the image, run the packaging doctor:
+
+```bash
+python tools/enterprise_k8s_backend_doctor.py --json
+python tools/enterprise_k8s_backend_doctor.py --require-installed
+```
+
 ## External Database Secret
 
 The deployment consumes `HASHI_ENTERPRISE_DATABASE_URL` through

@@ -636,6 +636,7 @@ Residual P4 limitations:
 - `ENT-070q` Wire scheduler lease backend selection. Done for `db`/`kubernetes` scheduler lease backend config/env parsing, ServiceManager Kubernetes lease store construction, raw Kubernetes/Helm env wiring, and tests; live cluster rehearsal and production rollout validation remain future work.
 - `ENT-070r` Add Kubernetes Lease packaging guard. Done for `hashi-bridge[kubernetes]` optional extra, enterprise Docker image build arg for extras, raw Kubernetes/Helm operator docs, and static packaging tests; live cluster image validation remains future work.
 - `ENT-070s` Add Kubernetes Lease smoke rehearsal CLI. Done for `hashi enterprise k8s-lease-rehearse`, reusable Kubernetes rehearsal helper, fake-client CLI tests, and operator docs; live cluster execution remains future work.
+- `ENT-070t` Add Kubernetes Lease packaging doctor. Done for `tools/enterprise_k8s_backend_doctor.py`, static extra/Dockerfile/import checks, JSON output, tests, and operator docs; real image build and cluster execution remain future work.
 
 **Acceptance:**
 
@@ -672,6 +673,7 @@ Residual P4 limitations:
 - Scheduler lease configuration can select the database backend or the Kubernetes Lease backend without changing scheduler loop code.
 - Operators have an explicit optional dependency and image build path for Kubernetes Lease backend support.
 - Operators can run a Kubernetes Lease smoke rehearsal from the HASHI CLI before enabling the backend on scheduler replicas.
+- Operators can run a local packaging doctor before promoting a Kubernetes Lease backend image.
 - Operators have starter SIEM assets under `deploy/siem/` for field mappings, Splunk alerts/dashboard, Elastic index/rules, and OpenTelemetry Collector routing.
 
 ---
