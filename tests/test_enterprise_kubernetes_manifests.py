@@ -78,6 +78,7 @@ def test_configmap_sets_enterprise_profile_and_bridge_home():
     assert "HASHI_BRIDGE_HOME: /data" in text
     assert 'HASHI_WORKBENCH_PORT: "18800"' in text
     assert "HASHI_ORGANIZATION_ID: ORG-001" in text
+    assert 'HASHI_ENTERPRISE_BOOTSTRAP_COMPLETE: "false"' in text
     assert 'HASHI_ENTERPRISE_SCHEDULER_LEASE_ENABLED: "false"' in text
     assert "HASHI_ENTERPRISE_SCHEDULER_LEASE_BACKEND: db" in text
     assert "HASHI_ENTERPRISE_SCHEDULER_LEASE_NAME: superloop-scheduler" in text

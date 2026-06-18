@@ -50,6 +50,7 @@ def test_enterprise_helm_values_default_to_governed_single_replica():
     assert "replicaCount: 1" in text
     assert "deploymentProfile: enterprise" in text
     assert "organizationId: ORG-001" in text
+    assert 'bootstrapComplete: "false"' in text
     assert "bridgeHome: /data" in text
     assert 'workbenchPort: "18800"' in text
     assert "enabled: false" in text
@@ -132,6 +133,7 @@ def test_enterprise_helm_configmap_sets_enterprise_environment():
     assert "HASHI_DEPLOYMENT_PROFILE:" in text
     assert "HASHI_INSTANCE_ID:" in text
     assert "HASHI_ORGANIZATION_ID:" in text
+    assert "HASHI_ENTERPRISE_BOOTSTRAP_COMPLETE:" in text
     assert "HASHI_BRIDGE_HOME:" in text
     assert "HASHI_WORKBENCH_PORT:" in text
     assert "HASHI_ENTERPRISE_SCHEDULER_LEASE_ENABLED:" in text

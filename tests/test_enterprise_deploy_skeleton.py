@@ -132,7 +132,17 @@ def test_enterprise_env_example_uses_placeholder_secret():
     text = (ROOT / "deploy" / "enterprise.env.example").read_text(encoding="utf-8")
 
     assert "HASHI_DEPLOYMENT_PROFILE=enterprise" in text
+    assert "HASHI_ENTERPRISE_BOOTSTRAP_COMPLETE=false" in text
+    assert "Set this to true only after creating the organization/admin bootstrap state" in text
     assert "HASHI_WORKBENCH_ADMIN_TOKEN=change-me" in text
+
+
+def test_enterprise_deployment_docs_explain_bootstrap_gate():
+    text = (ROOT / "docs" / "HASHI_ENTERPRISE_DEPLOYMENT.md").read_text(encoding="utf-8")
+
+    assert "hard bootstrap gate" in text
+    assert "HASHI_ENTERPRISE_BOOTSTRAP_COMPLETE=true" in text
+    assert "startup fails closed" in text
 
 
 def test_enterprise_production_hardening_runbook_covers_ingress_policy_and_scaling():

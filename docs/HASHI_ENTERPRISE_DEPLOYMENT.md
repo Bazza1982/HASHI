@@ -24,8 +24,22 @@ already passed full production validation.
 
 ## Local Compose Trial
 
+Enterprise alpha startup has a hard bootstrap gate. The example deployment is
+for an environment whose organization/admin bootstrap state already exists. If
+`HASHI_ENTERPRISE_BOOTSTRAP_COMPLETE` is not set to `true`, startup fails closed
+before serving Workbench.
+
+For this alpha skeleton:
+
+1. create or preload the enterprise organization/admin state;
+2. copy `deploy/enterprise.env.example` to `deploy/enterprise.env`;
+3. set `HASHI_ENTERPRISE_BOOTSTRAP_COMPLETE=true` only after that bootstrap
+   state exists;
+4. then start Compose.
+
 ```bash
 cp deploy/enterprise.env.example deploy/enterprise.env
+# edit deploy/enterprise.env and set HASHI_ENTERPRISE_BOOTSTRAP_COMPLETE=true
 docker compose -f deploy/docker-compose.enterprise.yml up --build
 ```
 
@@ -52,6 +66,8 @@ docker compose -f deploy/docker-compose.enterprise.yml --profile audit-export ru
 
 - This skeleton does not yet perform first-run admin bootstrap.
 - It does not yet include a migration entrypoint.
+- `HASHI_ENTERPRISE_BOOTSTRAP_COMPLETE=true` is a required operator assertion
+  after bootstrap; leaving it false intentionally blocks governed startup.
 - It is not a production-certified HA/Kubernetes deployment.
 - SSO/SCIM can be configured with the deployment runbook, but IdP-specific setup guides and HA/external-database validation are still future work.
 - Live audit export scheduling and baseline vendor presets are provided for Compose, raw Kubernetes, and Helm, but vendor-specific transforms and dashboards remain future work.

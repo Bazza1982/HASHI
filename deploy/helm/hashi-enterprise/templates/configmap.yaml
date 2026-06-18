@@ -8,6 +8,7 @@ data:
   HASHI_DEPLOYMENT_PROFILE: {{ .Values.enterprise.deploymentProfile | quote }}
   HASHI_INSTANCE_ID: {{ .Values.enterprise.instanceId | quote }}
   HASHI_ORGANIZATION_ID: {{ .Values.enterprise.organizationId | quote }}
+  HASHI_ENTERPRISE_BOOTSTRAP_COMPLETE: {{ .Values.enterprise.bootstrapComplete | quote }}
   HASHI_BRIDGE_HOME: {{ .Values.enterprise.bridgeHome | quote }}
   HASHI_WORKBENCH_PORT: {{ .Values.enterprise.workbenchPort | quote }}
   HASHI_ENTERPRISE_SCHEDULER_LEASE_ENABLED: {{ .Values.schedulerLease.enabled | quote }}

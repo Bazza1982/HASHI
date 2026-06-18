@@ -1,6 +1,10 @@
 # HASHI
 
-> **Status (v4.0.0-alpha.1):** HASHI 4 alpha introduces the Claw mode foundation and Superloop operational foundation on top of the v3.2.1 hotfix line. Claw mode adds a scoped `claw-cli` backend, provider routing, packaged runtime discovery, and live repo-root read/write/edit validation. Grok CLI is now available as a CLI-authenticated flex backend with streaming JSON parsing, guarded empty-answer retry, and support-ecosystem audit coverage. Superloop alpha documents the runnable controller contract for taskboards, waits, HChat replies, evidence, and closeout barriers.
+> **Status:** HASHI AAI Enterprise `v0.1.0-alpha.1` is the current enterprise
+> alpha artifact-freeze line. The broader HASHI 4 alpha line continues to cover
+> Claw mode and Superloop foundations on top of the v3.2.1 hotfix line.
+> Enterprise `0.1.0a1` resets the enterprise-grade package version line for
+> alpha testing; it is not a production-certified deployment claim.
 >
 > **Changelog:** see [`CHANGELOG.md`](CHANGELOG.md) · **Roadmap:** see [`docs/ROADMAP.md`](docs/ROADMAP.md) · **Nagare Docs:** see [`docs/NAGARE_FLOW_SYSTEM.md`](docs/NAGARE_FLOW_SYSTEM.md).
 
@@ -92,6 +96,11 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
 
 ## Project Status
 
+- **Enterprise AAI v0.1.0-alpha.1** *(current enterprise alpha)* — governed
+  AAI control plane, identity/SSO/SCIM primitives, policy/approval/audit,
+  connector MVPs, Workbench enterprise surfaces, and deployment artifacts for
+  alpha operator review. Production enterprise-server validation remains
+  pending.
 - **v4.0.0-alpha.1** *(current alpha release)* — Claw mode foundation, packaged Claw runtime discovery, provider smoke probe, live momo repo-root read/write/edit validation, and Superloop operational contract
 - **v3.2.1** — Workbench API self-repair on `/reboot`, HChat tool hot reload, and cross-instance route fallback hardening for multi-instance deployments
 - **v3.2.0** — Slim core architecture, Wrapper Agent Mode, Audit Agent Mode, Anatta controls, EXP guidebooks, `/browser` route dashboard, Hashi Remote file transfer, per-instance API Gateway ports, OLL HASHI Chrome extension integration, Workzone support, runtime/backend hardening
@@ -1177,9 +1186,14 @@ python tui.py
 
 ## Warnings
 
-### This is Version v4.0.0-alpha.1
+### Current Enterprise Alpha
 
-HASHI v4.0.0-alpha.1 is an **alpha release** for the v4 line. It introduces the Claw mode foundation and Superloop operational foundation while preserving the v3.2.1 hotfix behavior for Workbench API recovery, HChat reloadability, and cross-instance route fallback.
+HASHI AAI Enterprise v0.1.0-alpha.1 is the current **enterprise alpha** line.
+It packages the governed control-plane work for alpha operator review while
+keeping production enterprise-server validation pending.
+
+HASHI v4.0.0-alpha.1 remains the historical **v4 line alpha** for Claw mode and
+Superloop foundations.
 
 **Known Limitations:**
 - **Stability** — Expect edge cases and unexpected behavior
@@ -1204,7 +1218,22 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
 
 ## Release History
 
-### v4.0.0-alpha.1 *(current alpha release)* — Claw Mode And Superloop Foundation (May 2026)
+### Enterprise AAI v0.1.0-alpha.1 *(current enterprise alpha)* — Governed AAI Control Plane (June 2026)
+
+- **Enterprise control plane** — governed `personal`/`team`/`enterprise`
+  profile model with identity, SSO/SCIM primitives, projects, roles, API tokens,
+  policy, approvals, and audit surfaces
+- **Enterprise connectors** — GitHub, Slack, Google Chat, Teams, and Feishu MVP
+  connectors with credential validation, health/dry-run execution, action
+  schemas, policy gates, and audit redaction
+- **Deployment artifacts** — Docker Compose, raw Kubernetes, Helm, systemd audit
+  export daemon, SIEM starter packs, HA rehearsal plans, and production
+  validation command plans for alpha operator review
+- **Alpha limits** — first-run bootstrap automation, production HA validation,
+  IdP-specific certification, SIEM import validation, OAuth/Bot/Graph
+  integrations, and full DLP/data residency enforcement remain post-alpha
+
+### v4.0.0-alpha.1 — Claw Mode And Superloop Foundation (May 2026)
 
 - **Claw mode foundation** — `claw-cli` is available as a scoped backend with provider routing, packaged runtime discovery, checksum-checked manifest metadata, and clear `ClawBinaryNotFound` diagnostics while release binaries are absent
 - **Live Claw agent validation** — momo validated repo-root read/write/edit through `claw-cli / deepseek/deepseek-v4-flash`, with runtime audit evidence and workzone routing
