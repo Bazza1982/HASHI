@@ -87,6 +87,15 @@ the enterprise image with `HASHI_ENTERPRISE_EXTRAS=kubernetes`, apply
 `kubernetes`, and confirm the service account can read and update
 `coordination.k8s.io/v1` Lease objects in the target namespace.
 
+Before enabling it on scheduler pods, run a smoke rehearsal from an environment
+with the same Kubernetes credentials:
+
+```bash
+python hashi.py enterprise k8s-lease-rehearse \
+  --namespace hashi-enterprise \
+  --lease-name superloop-scheduler-smoke
+```
+
 Before enabling scheduler leases against a staging database, run:
 
 ```bash

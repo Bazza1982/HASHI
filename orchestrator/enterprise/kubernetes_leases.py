@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
+from orchestrator.enterprise.lease_rehearsal import LeaseRehearsalResult, run_enterprise_lease_rehearsal
+
 
 class KubernetesLeaseConflict(Exception):
     """Raised by clients when a Kubernetes Lease write loses a resourceVersion race."""
@@ -171,6 +173,27 @@ class KubernetesSchedulerLeaseStore:
 
     def release(self, name: str, *, holder_id: str) -> bool:
         return self.coordinator.release(name, holder_identity=holder_id)
+
+
+def run_kubernetes_lease_rehearsal(
+    client: KubernetesLeaseClient,
+    *,
+    namespace: str,
+    lease_name: str | None = None,
+    holder_a: str = "rehearsal-a",
+    holder_b: str = "rehearsal-b",
+    ttl_seconds: int = 30,
+) -> LeaseRehearsalResult:
+    lease_store = KubernetesSchedulerLeaseStore(
+        KubernetesLeaseCoordinator(client, namespace=namespace)
+    )
+    return run_enterprise_lease_rehearsal(
+        lease_store,
+        lease_name=lease_name,
+        holder_a=holder_a,
+        holder_b=holder_b,
+        ttl_seconds=ttl_seconds,
+    )
 
 
 class KubernetesApiLeaseClient:
