@@ -1,6 +1,13 @@
-# HASHI Enterprise Deployment Skeleton
+# HASHI AAI Enterprise 0.1 Alpha Deployment Skeleton
 
-This is the first deployable skeleton for the Enterprise AAI profile. It is intentionally conservative: governance state is mounted into named volumes, channels are not enabled by default, and production secrets should come from the deployment platform rather than committed files.
+This is the first deployable alpha skeleton for the Enterprise AAI profile. It
+is intentionally conservative: governance state is mounted into named volumes,
+channels are not enabled by default, and production secrets should come from the
+deployment platform rather than committed files.
+
+`0.1 Alpha` means the deployment contract and artifacts are ready for operator
+review and alpha testing. It does not mean a customer enterprise server has
+already passed full production validation.
 
 ## Files
 
@@ -45,7 +52,7 @@ docker compose -f deploy/docker-compose.enterprise.yml --profile audit-export ru
 
 - This skeleton does not yet perform first-run admin bootstrap.
 - It does not yet include a migration entrypoint.
-- It is not an HA/Kubernetes deployment.
+- It is not a production-certified HA/Kubernetes deployment.
 - SSO/SCIM can be configured with the deployment runbook, but IdP-specific setup guides and HA/external-database validation are still future work.
 - Live audit export scheduling and baseline vendor presets are provided for Compose, raw Kubernetes, and Helm, but vendor-specific transforms and dashboards remain future work.
 
