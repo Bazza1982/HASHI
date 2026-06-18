@@ -62,6 +62,19 @@ lease-related changes. It installs `psycopg[binary]`, sets
 `HASHI_ENTERPRISE_POSTGRES_TEST_URL`, and exercises the acquire/block/renew/
 release/takeover rehearsal path.
 
+## Pool Load Harness
+
+`run_enterprise_lease_load_rehearsal()` repeats the exactly-one lease rehearsal
+across multiple unique lease names with bounded worker concurrency. The default
+test path uses the fake PostgreSQL pool provider, so ordinary CI can exercise
+pool-backed acquire/block/renew/release/takeover behavior without needing a
+live database or `psycopg_pool`.
+
+Use this harness to catch lease-store regressions around pooled connection
+lifecycle and repeated concurrent acquisitions. It is not a database performance
+benchmark; validate real pool sizing separately in staging with your target
+database, network, and scheduler replica count.
+
 ## Notes
 
 - The rehearsal creates the `enterprise_leases` table if it does not exist.

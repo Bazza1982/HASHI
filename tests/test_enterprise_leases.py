@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from threading import Lock
 
 import pytest
 
@@ -9,6 +10,7 @@ from orchestrator.enterprise import (
     IdentityService,
     PostgresEnterpriseLeaseStore,
     PostgresLeaseConnectionPool,
+    run_enterprise_lease_load_rehearsal,
 )
 
 
@@ -164,6 +166,41 @@ def test_postgres_enterprise_lease_store_can_use_connection_pool_provider():
     assert pool.closed is True
 
 
+def test_postgres_enterprise_lease_pool_load_rehearsal_uses_pool_provider():
+    state = {}
+    pool = _FakePgPool(state)
+    provider = PostgresLeaseConnectionPool(
+        "postgresql://hashi@example.invalid/hashi",
+        min_size=2,
+        max_size=5,
+        pool=pool,
+    )
+    leases = PostgresEnterpriseLeaseStore(
+        "postgresql://hashi@example.invalid/hashi",
+        org_id="ORG-001",
+        connect=provider,
+    )
+
+    result = run_enterprise_lease_load_rehearsal(
+        leases,
+        lease_prefix="pytest-pool-load",
+        lease_count=6,
+        max_workers=3,
+        ttl_seconds=30,
+    )
+    leases.close()
+
+    assert result.passed is True
+    assert result.lease_count == 6
+    assert result.passed_count == 6
+    assert result.failed_count == 0
+    assert [item.lease_name for item in result.results] == [
+        f"pytest-pool-load-{index}" for index in range(6)
+    ]
+    assert pool.connection_count >= 18
+    assert pool.closed is True
+
+
 def _fake_pg_connect(state: dict):
     def connect(_dsn: str):
         return _FakePgConnection(state)
@@ -190,9 +227,11 @@ class _FakePgPool:
         self.state = state
         self.closed = False
         self.connection_count = 0
+        self._lock = Lock()
 
     def connection(self):
-        self.connection_count += 1
+        with self._lock:
+            self.connection_count += 1
         return _FakePgConnection(self.state)
 
     def close(self):

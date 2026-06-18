@@ -640,6 +640,7 @@ Residual P4 limitations:
 - `ENT-070u` Add Kubernetes Lease image smoke plan. Done for `tools/enterprise_k8s_image_smoke_plan.py`, JSON command plan generation for Docker build/import/CLI/cluster smoke, tests, and operator docs; executing the plan in CI or a live cluster remains future work.
 - `ENT-070v` Add Kubernetes Lease image smoke plan artifact workflow. Done for a GitHub Actions workflow that validates the packaging contract, generates the JSON image smoke command plan, validates JSON, uploads it as an artifact, and does not run Docker; executing the generated plan remains future work.
 - `ENT-070w` Add PostgreSQL lease always-on CI. Done for a GitHub Actions workflow using a `postgres:16` service container, `psycopg[binary]`, and `tests/test_enterprise_postgres_integration.py`; full HA rollout testing remains future work.
+- `ENT-070x` Add PostgreSQL lease pool load harness. Done for `run_enterprise_lease_load_rehearsal()` with bounded concurrent multi-lease rehearsal and fake pool-provider test coverage; real staging pool sizing/load validation remains future work.
 
 **Acceptance:**
 

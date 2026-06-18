@@ -116,7 +116,12 @@ from orchestrator.enterprise.leases import (
     PostgresEnterpriseLeaseStore,
     PostgresLeaseConnectionPool,
 )
-from orchestrator.enterprise.lease_rehearsal import LeaseRehearsalResult, run_enterprise_lease_rehearsal
+from orchestrator.enterprise.lease_rehearsal import (
+    LeaseLoadRehearsalResult,
+    LeaseRehearsalResult,
+    run_enterprise_lease_load_rehearsal,
+    run_enterprise_lease_rehearsal,
+)
 from orchestrator.enterprise.kubernetes_leases import (
     KubernetesApiLeaseClient,
     KubernetesLease,
@@ -278,6 +283,7 @@ __all__ = [
     "EnterpriseLeaseStore",
     "PostgresEnterpriseLeaseStore",
     "PostgresLeaseConnectionPool",
+    "LeaseLoadRehearsalResult",
     "LeaseRehearsalResult",
     "KubernetesApiLeaseClient",
     "KubernetesLease",
@@ -330,6 +336,7 @@ __all__ = [
     "record_failed_task_escalation",
     "record_connector_event",
     "run_enterprise_lease_rehearsal",
+    "run_enterprise_lease_load_rehearsal",
     "validate_connector_action",
     "transition_task_with_failure_escalation",
     "verify_promised_artifacts",
