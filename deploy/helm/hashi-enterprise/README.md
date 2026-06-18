@@ -115,7 +115,9 @@ helm upgrade --install hashi-enterprise deploy/helm/hashi-enterprise \
 
 The `enterprise-helm-render` GitHub Actions workflow runs `helm lint` and
 renders this Job with `leaseLoadRehearsal.enabled=true` so chart changes fail
-fast before cluster rehearsal.
+fast before cluster rehearsal. It also renders
+`examples/production-hardening.values.yaml` and checks that Ingress,
+NetworkPolicy, HPA, and PDB resources are present.
 
 For a full multi-replica staging rehearsal, start from
 `examples/multi-replica-rehearsal.values.yaml` and follow

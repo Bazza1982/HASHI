@@ -86,6 +86,14 @@ def test_enterprise_helm_render_workflow_validates_lease_load_job():
     assert "HASHI_ENTERPRISE_DATABASE_URL" in text
     assert "--lease-count" in text
     assert "--max-workers" in text
+    assert "production-hardening.values.yaml" in text
+    assert "rendered-hashi-enterprise-production.yaml" in text
+    assert "kind: Ingress" in text
+    assert "kind: NetworkPolicy" in text
+    assert "kind: HorizontalPodAutoscaler" in text
+    assert "kind: PodDisruptionBudget" in text
+    assert "hashi-enterprise-tls" in text
+    assert "ingress-nginx" in text
 
 
 def test_enterprise_postgres_lease_workflow_runs_real_integration_test():
