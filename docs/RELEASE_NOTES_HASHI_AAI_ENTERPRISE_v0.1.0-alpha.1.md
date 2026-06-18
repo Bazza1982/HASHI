@@ -80,18 +80,18 @@ cd workbench && npm run build
 git diff --check
 ```
 
-The local tag candidate is:
+The annotated alpha tag is:
 
 ```text
 v0.1.0-alpha.1
 ```
 
-The local annotated release tag has been created and should point at the final
-alpha evidence commit before pushing.
+It should point at the final alpha evidence and documentation consistency commit
+for the Enterprise AAI `0.1 Alpha` artifact freeze.
 
 ## Alpha Acceptance Checklist
 
-Before pushing this release:
+Before publishing or re-cutting this release:
 
 ```text
 python3 -m py_compile hashi.py setup.py

@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Telegram `/notify` preference** — added a functional-layer `/notify [on|off]` command. Telegram notifications default to `off`, which still delivers messages but sends them with Telegram `disable_notification=true`; `/notify on` restores audible notifications and persists per agent workspace.
+- **HASHI AAI positioning docs** — clarified the project narrative across the
+  root README, documentation index, and roadmap: HASHI started as a personal
+  local vibe-coded AI agent project and is evolving into an open-source,
+  enterprise-grade Agent as Interface orchestration system while preserving
+  smooth personal/local use.
 
 ### Fixed
 
