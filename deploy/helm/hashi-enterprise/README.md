@@ -90,6 +90,9 @@ python hashi.py enterprise lease-rehearse \
   --org-id ORG-001
 ```
 
+For a full PostgreSQL rehearsal checklist, see
+`docs/HASHI_ENTERPRISE_POSTGRES_LEASE_REHEARSAL.md`.
+
 ## Live Audit Export
 
 Enable the one-shot exporter as a Kubernetes CronJob after configuring a real
