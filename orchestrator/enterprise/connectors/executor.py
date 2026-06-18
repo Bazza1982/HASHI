@@ -126,7 +126,7 @@ class ConnectorExecutionService:
     def _assess_data_governance(self, action: ConnectorAction) -> DataGovernanceAssessment | None:
         connector_type = str(action.connector_type or "").strip().lower()
         action_name = str(action.action or "").strip().lower()
-        if connector_type not in {"slack", "google_chat", "teams"} or action_name != "message.send":
+        if connector_type not in {"slack", "google_chat", "teams", "feishu"} or action_name != "message.send":
             return None
         parameters = action.parameters if isinstance(action.parameters, dict) else {}
         return assess_data_egress(

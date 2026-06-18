@@ -57,13 +57,14 @@ def test_default_connector_policy_allows_github_reads_and_requires_write_or_egre
 
     rules = install_default_connector_policy(evaluator)
 
-    assert len(rules) == 8
+    assert len(rules) == 9
     read = evaluator.evaluate("connector.execute", resource="connector:github:repo.read")
     issue = evaluator.evaluate("connector.execute", resource="connector:github:issue.create")
     merge = evaluator.evaluate("connector.execute", resource="connector:github:pr.merge")
     slack_send = evaluator.evaluate("connector.execute", resource="connector:slack:message.send")
     google_chat_send = evaluator.evaluate("connector.execute", resource="connector:google_chat:message.send")
     teams_send = evaluator.evaluate("connector.execute", resource="connector:teams:message.send")
+    feishu_send = evaluator.evaluate("connector.execute", resource="connector:feishu:message.send")
     assert read.allowed is True
     assert read.rule_id == "tpl-connector-github-repo-read-allow"
     assert issue.allowed is False
@@ -80,6 +81,9 @@ def test_default_connector_policy_allows_github_reads_and_requires_write_or_egre
     assert teams_send.allowed is False
     assert teams_send.decision == PolicyDecision.APPROVAL_REQUIRED
     assert teams_send.rule_id == "tpl-connector-teams-message-send-approval"
+    assert feishu_send.allowed is False
+    assert feishu_send.decision == PolicyDecision.APPROVAL_REQUIRED
+    assert feishu_send.rule_id == "tpl-connector-feishu-message-send-approval"
 
 
 def test_default_connector_policy_install_is_idempotent(tmp_path):
@@ -89,7 +93,7 @@ def test_default_connector_policy_install_is_idempotent(tmp_path):
     install_default_connector_policy(evaluator)
     install_default_connector_policy(evaluator)
 
-    assert len(evaluator.list_rules()) == 8
+    assert len(evaluator.list_rules()) == 9
 
 
 def test_policy_evaluator_denies_matching_command_rule(tmp_path):

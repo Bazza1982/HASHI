@@ -11,6 +11,7 @@ from orchestrator.enterprise import (
     ConnectorRegistry,
     ConnectorResult,
     EnterpriseAuditLedger,
+    FeishuWebhookConnector,
     GitHubConnector,
     IdentityService,
     PolicyEvaluator,
@@ -101,6 +102,15 @@ class _FakeTeamsTransport:
     def __call__(self, webhook_url, payload):
         self.calls.append({"webhook_url": webhook_url, "payload": dict(payload)})
         return {"status_code": 200, "text": "1"}
+
+
+class _FakeFeishuTransport:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, webhook_url, payload):
+        self.calls.append({"webhook_url": webhook_url, "payload": dict(payload)})
+        return {"status_code": 200, "code": 0}
 
 
 def test_connector_interface_can_execute_and_report_health():
@@ -557,6 +567,59 @@ def test_teams_webhook_connector_requires_text():
     assert result.status == "invalid_parameters"
 
 
+def test_feishu_webhook_connector_health_and_dry_run():
+    connector = FeishuWebhookConnector(webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/abc")
+    action = ConnectorAction(
+        connector_type="feishu",
+        action="message.send",
+        dry_run=True,
+        parameters={"text": "Hello enterprise"},
+    )
+
+    health = connector.health_check()
+    result = connector.execute(action)
+
+    assert health.ok is True
+    assert result.ok is True
+    assert result.status == "dry_run"
+    assert result.data == {"payload": {"msg_type": "text", "content": {"text": "Hello enterprise"}}}
+
+
+def test_feishu_webhook_connector_posts_message_payload():
+    transport = _FakeFeishuTransport()
+    connector = FeishuWebhookConnector(
+        webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/abc",
+        transport=transport,
+    )
+    action = ConnectorAction(
+        connector_type="feishu",
+        action="message.send",
+        parameters={"text": "Hello enterprise"},
+    )
+
+    result = connector.execute(action)
+
+    assert result.ok is True
+    assert result.status == "success"
+    assert result.data == {"status_code": 200, "code": 0}
+    assert transport.calls == [
+        {
+            "webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/abc",
+            "payload": {"msg_type": "text", "content": {"text": "Hello enterprise"}},
+        }
+    ]
+
+
+def test_feishu_webhook_connector_requires_text():
+    connector = FeishuWebhookConnector(webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/abc")
+    action = ConnectorAction(connector_type="feishu", action="message.send")
+
+    result = connector.execute(action)
+
+    assert result.ok is False
+    assert result.status == "invalid_parameters"
+
+
 def test_connector_factory_builds_google_chat_connector_from_secret_ref(tmp_path):
     credentials, _, _ = _connector_gate_services(tmp_path)
     credential = credentials.create_credential(
@@ -585,7 +648,7 @@ def test_connector_factory_builds_google_chat_connector_from_secret_ref(tmp_path
 
 
 def test_validate_connector_action_requires_text_for_webhook_message_send():
-    action = ConnectorAction(connector_type="teams", action="message.send", parameters={})
+    action = ConnectorAction(connector_type="feishu", action="message.send", parameters={})
 
     assert validate_connector_action(action) == "message.send requires non-empty text in parameters"
 
@@ -688,6 +751,33 @@ def test_connector_factory_builds_teams_connector_from_secret_ref(tmp_path):
 
     assert result.ok is True
     assert transport.calls[0]["webhook_url"] == "https://outlook.office.com/webhook/abc"
+
+
+def test_connector_factory_builds_feishu_connector_from_secret_ref(tmp_path):
+    credentials, _, _ = _connector_gate_services(tmp_path)
+    credential = credentials.create_credential(
+        org_id="ORG-001",
+        connector_type="feishu",
+        display_name="Feishu Webhook",
+        secret_ref="secrets://feishu_webhook",
+        scopes=["message.send"],
+        credential_id="cred-feishu",
+    )
+    transport = _FakeFeishuTransport()
+    factory = ConnectorFactory(
+        secret_resolver=ConnectorSecretResolver(
+            secrets={"feishu_webhook": "https://open.feishu.cn/open-apis/bot/v2/hook/abc"}
+        ),
+        transports={"feishu": transport},
+    )
+
+    connector = factory.build(credential)
+    result = connector.execute(
+        ConnectorAction(connector_type="feishu", action="message.send", parameters={"text": "Hello"})
+    )
+
+    assert result.ok is True
+    assert transport.calls[0]["webhook_url"] == "https://open.feishu.cn/open-apis/bot/v2/hook/abc"
 
 
 def test_connector_factory_fails_closed_when_secret_ref_cannot_resolve(tmp_path):

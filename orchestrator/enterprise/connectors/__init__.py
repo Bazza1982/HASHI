@@ -7,6 +7,7 @@ from orchestrator.enterprise.connectors.base import (
 )
 from orchestrator.enterprise.connectors.executor import ConnectorExecution, ConnectorExecutionService
 from orchestrator.enterprise.connectors.factory import ConnectorFactory
+from orchestrator.enterprise.connectors.feishu import FeishuWebhookConnector
 from orchestrator.enterprise.connectors.gate import ConnectorGateResult, evaluate_connector_action
 from orchestrator.enterprise.connectors.github import GitHubConnector
 from orchestrator.enterprise.connectors.google_chat import GoogleChatWebhookConnector
@@ -26,6 +27,7 @@ __all__ = [
     "ConnectorResult",
     "EnterpriseConnector",
     "ConnectorGateResult",
+    "FeishuWebhookConnector",
     "GitHubConnector",
     "GoogleChatWebhookConnector",
     "SlackWebhookConnector",
