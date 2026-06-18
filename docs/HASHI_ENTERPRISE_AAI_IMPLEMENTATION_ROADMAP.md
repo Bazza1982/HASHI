@@ -631,6 +631,7 @@ Residual P4 limitations:
 - `ENT-070l` Add PostgreSQL lease connection lifecycle controls. Done for optional `psycopg_pool` connection provider, scheduler lease pool config/env wiring, raw Kubernetes/Helm pool values, and best-effort lease store close on scheduler stop; real pool load testing remains future work.
 - `ENT-070m` Add Kubernetes HA rehearsal assets. Done for Helm multi-replica rehearsal values, a Kubernetes HA rehearsal runbook, and static asset tests covering external DB, scheduler lease pool, PDB, and audit-export singleton lease controls; live cluster rehearsal remains future work.
 - `ENT-070n` Add Kubernetes Lease RBAC assets. Done for optional Helm Role/RoleBinding, raw Kubernetes example RBAC, and rehearsal values wiring for `coordination.k8s.io/leases`; runtime Kubernetes Lease client remains future work.
+- `ENT-070o` Add Kubernetes Lease coordinator abstraction. Done for injectable Kubernetes Lease client protocol, acquire/renew/release semantics, TTL expiry takeover, resourceVersion conflict handling, and fake-client tests; real Kubernetes API adapter and scheduler wiring remain future work.
 
 **Acceptance:**
 
@@ -662,6 +663,7 @@ Residual P4 limitations:
 - PostgreSQL scheduler leases can opt into a bounded `psycopg_pool` provider and close it during scheduler shutdown.
 - Operators have a Helm values file and runbook for staging multi-replica HA rehearsal before production rollout.
 - Operators have optional Kubernetes Lease RBAC assets ready for a future native leader-election runtime.
+- Runtime code now has a Kubernetes Lease coordinator abstraction that can be connected to a real Kubernetes API adapter later.
 - Operators have starter SIEM assets under `deploy/siem/` for field mappings, Splunk alerts/dashboard, Elastic index/rules, and OpenTelemetry Collector routing.
 
 ---
