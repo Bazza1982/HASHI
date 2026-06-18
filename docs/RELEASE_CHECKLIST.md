@@ -29,6 +29,38 @@
   - Closeout includes an inbox-drain barrier and records stale/contradictory/late replies
   - At least one template dry-run or live controller loop records taskboard, waits, issues, evidence, and final closeout state before claiming superloop functionality
 
+## HASHI AAI Enterprise 0.1 Alpha
+
+This gate is for `HASHI AAI Enterprise v0.1.0-alpha.1`. It confirms that the
+enterprise control plane and deployment artifacts are coherent for alpha
+testing. It does not certify a production enterprise-server rollout.
+
+- Version metadata:
+  - `pyproject.toml` uses `0.1.0a1`
+  - `setup.py` uses `0.1.0a1`
+- Scope docs:
+  - `docs/HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md` includes the
+    `HASHI AAI Enterprise 0.1 Alpha` cut line
+  - `docs/HASHI_ENTERPRISE_AAI_READINESS_REVIEW.md` marks production validation
+    as pending
+  - `docs/RELEASE_NOTES_HASHI_AAI_ENTERPRISE_v0.1.0-alpha.1.md` records known
+    alpha limits
+- Static compile:
+  - `python3 -m py_compile hashi.py setup.py`
+- Connector and policy smoke:
+  - `pytest -q tests/test_enterprise_connectors.py tests/test_workbench_enterprise_connectors.py tests/test_enterprise_policy.py`
+- Approval, audit, and export smoke:
+  - `pytest -q tests/test_workbench_enterprise_policies.py tests/test_workbench_enterprise_audit.py tests/test_enterprise_audit_ledger.py tests/test_enterprise_audit_export.py tests/test_enterprise_audit_live_export.py`
+- Deployment artifact smoke:
+  - `pytest -q tests/test_enterprise_deploy_skeleton.py tests/test_enterprise_helm_chart.py tests/test_enterprise_production_validation_plan.py tests/test_enterprise_siem_assets.py`
+- CLI smoke:
+  - `python3 hashi.py --help`
+  - `python3 hashi.py enterprise --help`
+- Workbench build:
+  - `cd workbench && npm run build`
+- Final hygiene:
+  - `git diff --check`
+
 ## Nagare
 
 ### Package

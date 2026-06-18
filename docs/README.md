@@ -2,7 +2,9 @@
 
 This directory contains developer documentation and operational notes for HASHI.
 
-> **Status:** v4.0.0-alpha.1 current alpha release — Claw mode foundation and Superloop operational foundation on top of the v3.2.1 hotfix line. This is an alpha release, not a stable unattended automation claim.
+> **Status:** HASHI AAI Enterprise v0.1.0-alpha.1 is the current enterprise
+> alpha target. It is deployment-artifact-ready for alpha testing, with full
+> enterprise-server production validation pending.
 >
 > **Changelog:** see [`../CHANGELOG.md`](../CHANGELOG.md) · **Roadmap:** see [ROADMAP.md](ROADMAP.md).
 
@@ -18,7 +20,9 @@ This directory contains developer documentation and operational notes for HASHI.
 - [HASHI_ENTERPRISE_AAI_VALUE_PROPOSITION.md](HASHI_ENTERPRISE_AAI_VALUE_PROPOSITION.md) — Agent as Interface value proposition and enterprise positioning
 - [HASHI_ENTERPRISE_AAI_PRD.md](HASHI_ENTERPRISE_AAI_PRD.md) — Enterprise AAI product requirements and development plan
 - [HASHI_ENTERPRISE_PROFILE_ADR.md](HASHI_ENTERPRISE_PROFILE_ADR.md) — accepted decision for one codebase, `personal`/`team`/`enterprise` profiles, and enterprise identity roles
-- [HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md](HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md) — ready-to-implement Enterprise AAI phase plan, MVP cut lines, tickets, dependencies, and migration matrix
+- [HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md](HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md) — Enterprise AAI phase plan, `0.1 Alpha` cut line, tickets, dependencies, and migration matrix
+- [HASHI_ENTERPRISE_AAI_READINESS_REVIEW.md](HASHI_ENTERPRISE_AAI_READINESS_REVIEW.md) — Enterprise AAI `0.1 Alpha` readiness decision, evidence, deferred work, and completion boundary
+- [HASHI_ENTERPRISE_DEPLOYMENT.md](HASHI_ENTERPRISE_DEPLOYMENT.md) — Enterprise `0.1 Alpha` deployment skeleton and current limits
 - [HASHI_SLIM_CORE_ARCHITECTURE.md](HASHI_SLIM_CORE_ARCHITECTURE.md) — v3.2 slim core architecture and hot manager rebuild contract
 - [HASHI_LAYERED_RUNTIME_BOUNDARIES.md](HASHI_LAYERED_RUNTIME_BOUNDARIES.md) — four-layer HASHI boundary: protected core, hot-reloadable functions, platform config, and instance config
 - [HASHI_CORE_SLIMMING_PLAN.md](HASHI_CORE_SLIMMING_PLAN.md) — implementation plan and acceptance record for the slim core migration
@@ -63,6 +67,7 @@ This directory contains developer documentation and operational notes for HASHI.
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — Troubleshooting guide
 
 ### Release Notes
+- [RELEASE_NOTES_HASHI_AAI_ENTERPRISE_v0.1.0-alpha.1.md](RELEASE_NOTES_HASHI_AAI_ENTERPRISE_v0.1.0-alpha.1.md) — Enterprise AAI v0.1 alpha release notes and known limits
 - [RELEASE_NOTES_v4.0.0-alpha.1.md](RELEASE_NOTES_v4.0.0-alpha.1.md) — v4 alpha release notes for Claw mode and Superloop foundation
 - [RELEASE_NOTES_v1.1.md](RELEASE_NOTES_v1.1.md) — v1.1 release notes
 
