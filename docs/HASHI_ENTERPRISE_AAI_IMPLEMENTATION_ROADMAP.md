@@ -626,8 +626,8 @@ Residual P4 limitations:
 - `ENT-070g` Wire scheduler DB lease runtime configuration. Done for global/env scheduler lease controls, service-manager construction of the enterprise lease store, raw Kubernetes pod-name holder env wiring, and Helm `schedulerLease` values; whole-tick enforcement is covered by `ENT-070h`, and live multi-replica rehearsal remains future work.
 - `ENT-070h` Guard scheduler trigger ticks with DB leases. Done for fail-closed whole-tick lease acquisition covering heartbeat, nudge, cron, parked follow-up, and superloop advancement paths, plus release-on-exit tests; real database concurrency rehearsal remains future work.
 - `ENT-070i` Add PostgreSQL enterprise lease backend. Done for optional `psycopg`-backed lease store, `EnterpriseLeaseStore.from_url()` dispatch for SQLite/PostgreSQL URLs, PostgreSQL advisory transaction locks around lease rows, and fake-driver acquire/renew/release tests; real PostgreSQL migration/concurrency rehearsal and connection pooling remain future work.
-- `ENT-070j` Add enterprise lease rehearsal harness. Done for `run_enterprise_lease_rehearsal()` and `hashi enterprise lease-rehearse`, validating exactly-one concurrent acquisition, renew, release, and blocked-holder takeover against the configured lease store; automated real PostgreSQL CI remains future work.
-- `ENT-070k` Add optional PostgreSQL lease integration rehearsal. Done for `tests/test_enterprise_postgres_integration.py`, gated by `HASHI_ENTERPRISE_POSTGRES_TEST_URL`, plus a PostgreSQL lease rehearsal runbook; always-on PostgreSQL CI and Kubernetes multi-replica rehearsal remain future work.
+- `ENT-070j` Add enterprise lease rehearsal harness. Done for `run_enterprise_lease_rehearsal()` and `hashi enterprise lease-rehearse`, validating exactly-one concurrent acquisition, renew, release, and blocked-holder takeover against the configured lease store; broader HA rehearsal remains future work.
+- `ENT-070k` Add optional PostgreSQL lease integration rehearsal. Done for `tests/test_enterprise_postgres_integration.py`, gated by `HASHI_ENTERPRISE_POSTGRES_TEST_URL`, plus a PostgreSQL lease rehearsal runbook; Kubernetes multi-replica rehearsal remains future work.
 - `ENT-070l` Add PostgreSQL lease connection lifecycle controls. Done for optional `psycopg_pool` connection provider, scheduler lease pool config/env wiring, raw Kubernetes/Helm pool values, and best-effort lease store close on scheduler stop; real pool load testing remains future work.
 - `ENT-070m` Add Kubernetes HA rehearsal assets. Done for Helm multi-replica rehearsal values, a Kubernetes HA rehearsal runbook, and static asset tests covering external DB, scheduler lease pool, PDB, and audit-export singleton lease controls; live cluster rehearsal remains future work.
 - `ENT-070n` Add Kubernetes Lease RBAC assets. Done for optional Helm Role/RoleBinding, raw Kubernetes example RBAC, and rehearsal values wiring for `coordination.k8s.io/leases`; runtime Kubernetes Lease client remains future work.
@@ -639,6 +639,7 @@ Residual P4 limitations:
 - `ENT-070t` Add Kubernetes Lease packaging doctor. Done for `tools/enterprise_k8s_backend_doctor.py`, static extra/Dockerfile/import checks, JSON output, tests, and operator docs; real image build and cluster execution remain future work.
 - `ENT-070u` Add Kubernetes Lease image smoke plan. Done for `tools/enterprise_k8s_image_smoke_plan.py`, JSON command plan generation for Docker build/import/CLI/cluster smoke, tests, and operator docs; executing the plan in CI or a live cluster remains future work.
 - `ENT-070v` Add Kubernetes Lease image smoke plan artifact workflow. Done for a GitHub Actions workflow that validates the packaging contract, generates the JSON image smoke command plan, validates JSON, uploads it as an artifact, and does not run Docker; executing the generated plan remains future work.
+- `ENT-070w` Add PostgreSQL lease always-on CI. Done for a GitHub Actions workflow using a `postgres:16` service container, `psycopg[binary]`, and `tests/test_enterprise_postgres_integration.py`; full HA rollout testing remains future work.
 
 **Acceptance:**
 
@@ -667,6 +668,7 @@ Residual P4 limitations:
 - Enterprise lease stores can be constructed from SQLite paths/URLs or PostgreSQL URLs, with PostgreSQL support gated by the optional `psycopg` package.
 - Operators can run `hashi enterprise lease-rehearse` against a target database before enabling multi-replica scheduler leases.
 - PostgreSQL lease rehearsal can be run as an opt-in pytest integration using a staging DSN.
+- PostgreSQL lease rehearsal now also runs in CI against a PostgreSQL service container for lease-related changes.
 - PostgreSQL scheduler leases can opt into a bounded `psycopg_pool` provider and close it during scheduler shutdown.
 - Operators have a Helm values file and runbook for staging multi-replica HA rehearsal before production rollout.
 - Operators have optional Kubernetes Lease RBAC assets ready for a future native leader-election runtime.

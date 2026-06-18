@@ -45,6 +45,15 @@ def test_enterprise_kubernetes_image_smoke_workflow_generates_artifact_only():
     assert "docker build" not in text
 
 
+def test_enterprise_postgres_lease_workflow_runs_real_integration_test():
+    text = (ROOT / ".github" / "workflows" / "enterprise-postgres-lease.yml").read_text(encoding="utf-8")
+
+    assert "postgres:16" in text
+    assert "HASHI_ENTERPRISE_POSTGRES_TEST_URL" in text
+    assert 'python -m pip install pytest "psycopg[binary]"' in text
+    assert "pytest -q tests/test_enterprise_postgres_integration.py" in text
+
+
 def test_enterprise_compose_mounts_governed_volumes_and_healthcheck():
     text = (ROOT / "deploy" / "docker-compose.enterprise.yml").read_text(encoding="utf-8")
 
