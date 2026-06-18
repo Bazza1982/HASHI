@@ -129,6 +129,9 @@ helm upgrade --install hashi-enterprise deploy/helm/hashi-enterprise \
   --set leaderElection.rbac.enabled=true
 ```
 
+The `enterprise-k8s-image-smoke-plan` GitHub Actions workflow uploads the same
+JSON command plan as an artifact without running Docker in ordinary CI.
+
 Before enabling multiple scheduler replicas with this backend, run:
 
 ```bash

@@ -33,6 +33,18 @@ def test_enterprise_raw_kubernetes_docs_cover_kubernetes_backend_extra():
     assert "enterprise_k8s_image_smoke_plan.py" in text
 
 
+def test_enterprise_kubernetes_image_smoke_workflow_generates_artifact_only():
+    text = (ROOT / ".github" / "workflows" / "enterprise-k8s-image-smoke-plan.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "python tools/enterprise_k8s_backend_doctor.py --json" in text
+    assert "python tools/enterprise_k8s_image_smoke_plan.py" in text
+    assert "actions/upload-artifact@v4" in text
+    assert "hashi-k8s-image-smoke-plan.json" in text
+    assert "docker build" not in text
+
+
 def test_enterprise_compose_mounts_governed_volumes_and_healthcheck():
     text = (ROOT / "deploy" / "docker-compose.enterprise.yml").read_text(encoding="utf-8")
 
