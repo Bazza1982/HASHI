@@ -1067,6 +1067,7 @@ function EnterpriseAdminPanel() {
   const [health, setHealth] = useState([]);
   const [registryErrors, setRegistryErrors] = useState([]);
   const [policies, setPolicies] = useState([]);
+  const [actionSchemas, setActionSchemas] = useState([]);
   const [status, setStatus] = useState('');
   const [loading, setLoading] = useState(false);
   const [includeRevoked, setIncludeRevoked] = useState(false);
@@ -1121,15 +1122,17 @@ function EnterpriseAdminPanel() {
     setLoading(true);
     setStatus('');
     try {
-      const [credentialPayload, healthPayload, policyPayload] = await Promise.all([
+      const [credentialPayload, healthPayload, policyPayload, schemaPayload] = await Promise.all([
         api(`/api/enterprise/connectors/credentials${includeRevoked ? '?include_revoked=true' : ''}`),
         api('/api/enterprise/connectors/health'),
         api('/api/enterprise/policies'),
+        api('/api/enterprise/connectors/action-schemas'),
       ]);
       setCredentials(credentialPayload.credentials || []);
       setHealth(healthPayload.connectors || []);
       setRegistryErrors(healthPayload.registry_errors || []);
       setPolicies(policyPayload.policies || []);
+      setActionSchemas(schemaPayload.schemas || []);
       setStatus('Loaded enterprise connector state.');
     } catch (error) {
       setStatus(error.message || 'Failed to load enterprise connector state.');
@@ -1261,6 +1264,10 @@ function EnterpriseAdminPanel() {
       parameters: preset.parameters || prev.parameters,
     }));
   };
+
+  const selectedActionSchema = actionSchemas.find((schema) => (
+    schema.connector_type === executionForm.connector_type && schema.action === executionForm.action
+  ));
 
   return (
     <main className="enterprise-layout">
@@ -1416,6 +1423,26 @@ function EnterpriseAdminPanel() {
               {executionForm.dry_run ? 'Dry run' : 'Execute'}
             </button>
           </form>
+          {selectedActionSchema && (
+            <div className="connector-schema-panel">
+              <div className="connector-schema-title">
+                <span>Parameter Schema</span>
+                <span>Type</span>
+                <span>Required</span>
+                <span>{selectedActionSchema.resource?.format || '*'}</span>
+              </div>
+              <div className="connector-schema-grid">
+                {(selectedActionSchema.parameters || []).map((parameter) => (
+                  <div key={parameter.name} className="connector-schema-row">
+                    <span>{parameter.name}</span>
+                    <span>{parameter.type}</span>
+                    <span>{parameter.required ? 'Required' : 'Optional'}</span>
+                    <span>{parameter.enum ? parameter.enum.join(', ') : parameter.default || '-'}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           {parametersError && <div className="enterprise-errors">{parametersError}</div>}
           {executionResult && (
             <pre className="enterprise-result">{JSON.stringify(executionResult, null, 2)}</pre>
