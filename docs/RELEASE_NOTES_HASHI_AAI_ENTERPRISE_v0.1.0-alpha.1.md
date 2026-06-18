@@ -86,8 +86,8 @@ The annotated alpha tag is:
 v0.1.0-alpha.1
 ```
 
-It should point at the final alpha evidence and documentation consistency commit
-for the Enterprise AAI `0.1 Alpha` artifact freeze.
+It points at the final alpha evidence and documentation consistency commit for
+the Enterprise AAI `0.1 Alpha` artifact freeze.
 
 ## Alpha Acceptance Checklist
 
