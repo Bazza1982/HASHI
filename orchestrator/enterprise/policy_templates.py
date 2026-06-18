@@ -7,9 +7,9 @@ def install_default_connector_policy(evaluator: PolicyEvaluator) -> list[PolicyR
     """Install conservative connector defaults.
 
     Read-only GitHub metadata actions are explicitly allowed. GitHub write
-    actions and outbound Slack messages require approval by default so adding
-    connector support does not silently expand enterprise write or data egress
-    capability.
+    actions and outbound chat webhook messages require approval by default so
+    adding connector support does not silently expand enterprise write or data
+    egress capability.
     """
 
     existing_ids = {rule.id for rule in evaluator.list_rules()}
@@ -54,6 +54,15 @@ def install_default_connector_policy(evaluator: PolicyEvaluator) -> list[PolicyR
             "rule_id": "tpl-connector-google-chat-message-send-approval",
             "action": "connector.execute",
             "resource": "connector:google_chat:message.send",
+            "effect": "approval_required",
+            "priority": 100,
+        }
+    )
+    specs.append(
+        {
+            "rule_id": "tpl-connector-teams-message-send-approval",
+            "action": "connector.execute",
+            "resource": "connector:teams:message.send",
             "effect": "approval_required",
             "priority": 100,
         }

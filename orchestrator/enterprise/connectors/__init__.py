@@ -12,6 +12,7 @@ from orchestrator.enterprise.connectors.github import GitHubConnector
 from orchestrator.enterprise.connectors.google_chat import GoogleChatWebhookConnector
 from orchestrator.enterprise.connectors.registry import ConnectorHealthSummary, ConnectorRegistry
 from orchestrator.enterprise.connectors.slack import SlackWebhookConnector
+from orchestrator.enterprise.connectors.teams import TeamsWebhookConnector
 from orchestrator.enterprise.connectors.validation import validate_connector_action
 
 __all__ = [
@@ -28,6 +29,7 @@ __all__ = [
     "GitHubConnector",
     "GoogleChatWebhookConnector",
     "SlackWebhookConnector",
+    "TeamsWebhookConnector",
     "evaluate_connector_action",
     "record_connector_event",
     "validate_connector_action",

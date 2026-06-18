@@ -19,6 +19,7 @@ from orchestrator.enterprise import (
     DataGovernancePolicy,
     SlackWebhookConnector,
     GoogleChatWebhookConnector,
+    TeamsWebhookConnector,
 )
 from orchestrator.enterprise.connectors import evaluate_connector_action, record_connector_event, validate_connector_action
 
@@ -91,6 +92,15 @@ class _FakeGoogleChatTransport:
     def __call__(self, webhook_url, payload):
         self.calls.append({"webhook_url": webhook_url, "payload": dict(payload)})
         return {"status_code": 200, "text": "ok"}
+
+
+class _FakeTeamsTransport:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, webhook_url, payload):
+        self.calls.append({"webhook_url": webhook_url, "payload": dict(payload)})
+        return {"status_code": 200, "text": "1"}
 
 
 def test_connector_interface_can_execute_and_report_health():
@@ -497,6 +507,56 @@ def test_google_chat_webhook_connector_requires_text():
     assert result.status == "invalid_parameters"
 
 
+def test_teams_webhook_connector_health_and_dry_run():
+    connector = TeamsWebhookConnector(webhook_url="https://outlook.office.com/webhook/abc")
+    action = ConnectorAction(
+        connector_type="teams",
+        action="message.send",
+        dry_run=True,
+        parameters={"text": "Hello enterprise", "title": "HASHI"},
+    )
+
+    health = connector.health_check()
+    result = connector.execute(action)
+
+    assert health.ok is True
+    assert result.ok is True
+    assert result.status == "dry_run"
+    assert result.data == {"payload": {"text": "Hello enterprise", "title": "HASHI"}}
+
+
+def test_teams_webhook_connector_posts_message_payload():
+    transport = _FakeTeamsTransport()
+    connector = TeamsWebhookConnector(webhook_url="https://outlook.office.com/webhook/abc", transport=transport)
+    action = ConnectorAction(
+        connector_type="teams",
+        action="message.send",
+        parameters={"text": "Hello enterprise", "sections": [{"activityTitle": "HASHI"}]},
+    )
+
+    result = connector.execute(action)
+
+    assert result.ok is True
+    assert result.status == "success"
+    assert result.data == {"status_code": 200, "text": "1"}
+    assert transport.calls == [
+        {
+            "webhook_url": "https://outlook.office.com/webhook/abc",
+            "payload": {"text": "Hello enterprise", "sections": [{"activityTitle": "HASHI"}]},
+        }
+    ]
+
+
+def test_teams_webhook_connector_requires_text():
+    connector = TeamsWebhookConnector(webhook_url="https://outlook.office.com/webhook/abc")
+    action = ConnectorAction(connector_type="teams", action="message.send")
+
+    result = connector.execute(action)
+
+    assert result.ok is False
+    assert result.status == "invalid_parameters"
+
+
 def test_connector_factory_builds_google_chat_connector_from_secret_ref(tmp_path):
     credentials, _, _ = _connector_gate_services(tmp_path)
     credential = credentials.create_credential(
@@ -525,7 +585,7 @@ def test_connector_factory_builds_google_chat_connector_from_secret_ref(tmp_path
 
 
 def test_validate_connector_action_requires_text_for_webhook_message_send():
-    action = ConnectorAction(connector_type="google_chat", action="message.send", parameters={})
+    action = ConnectorAction(connector_type="teams", action="message.send", parameters={})
 
     assert validate_connector_action(action) == "message.send requires non-empty text in parameters"
 
@@ -568,13 +628,13 @@ def test_connector_factory_fails_closed_for_unsupported_connector_type(tmp_path)
     credentials, _, _ = _connector_gate_services(tmp_path)
     credential = credentials.create_credential(
         org_id="ORG-001",
-        connector_type="teams",
-        display_name="Teams Bot",
-        secret_ref="secrets://teams_token",
+        connector_type="jira",
+        display_name="Jira Bot",
+        secret_ref="secrets://jira_token",
         scopes=["chat:write"],
-        credential_id="cred-teams",
+        credential_id="cred-jira",
     )
-    factory = ConnectorFactory(secret_resolver=ConnectorSecretResolver(secrets={"teams_token": "token"}))
+    factory = ConnectorFactory(secret_resolver=ConnectorSecretResolver(secrets={"jira_token": "token"}))
 
     with pytest.raises(ValueError, match="unsupported connector type"):
         factory.build(credential)
@@ -603,6 +663,31 @@ def test_connector_factory_builds_slack_connector_from_secret_ref(tmp_path):
 
     assert result.ok is True
     assert transport.calls[0]["webhook_url"] == "https://hooks.slack.test/services/abc"
+
+
+def test_connector_factory_builds_teams_connector_from_secret_ref(tmp_path):
+    credentials, _, _ = _connector_gate_services(tmp_path)
+    credential = credentials.create_credential(
+        org_id="ORG-001",
+        connector_type="teams",
+        display_name="Teams Webhook",
+        secret_ref="secrets://teams_webhook",
+        scopes=["message.send"],
+        credential_id="cred-teams",
+    )
+    transport = _FakeTeamsTransport()
+    factory = ConnectorFactory(
+        secret_resolver=ConnectorSecretResolver(secrets={"teams_webhook": "https://outlook.office.com/webhook/abc"}),
+        transports={"teams": transport},
+    )
+
+    connector = factory.build(credential)
+    result = connector.execute(
+        ConnectorAction(connector_type="teams", action="message.send", parameters={"text": "Hello"})
+    )
+
+    assert result.ok is True
+    assert transport.calls[0]["webhook_url"] == "https://outlook.office.com/webhook/abc"
 
 
 def test_connector_factory_fails_closed_when_secret_ref_cannot_resolve(tmp_path):

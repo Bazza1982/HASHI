@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from orchestrator.enterprise.connectors.base import ConnectorAction
 
-_WEBHOOK_MESSAGE_CONNECTORS = frozenset({"slack", "google_chat"})
+_WEBHOOK_MESSAGE_CONNECTORS = frozenset({"slack", "google_chat", "teams"})
 
 
 def validate_connector_action(action: ConnectorAction) -> str | None:

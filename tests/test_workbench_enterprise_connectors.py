@@ -423,6 +423,54 @@ async def test_enterprise_admin_can_execute_google_chat_dry_run_from_secret_ref(
 
 
 @pytest.mark.asyncio
+async def test_enterprise_admin_can_execute_teams_dry_run_from_secret_ref(tmp_path):
+    server = _server(tmp_path, secrets={"teams_webhook": "https://outlook.office.com/webhook/abc"})
+    headers = _admin_headers(server)
+    create_response = await server.handle_enterprise_connector_credentials_create(
+        _FakeRequest(
+            headers=headers,
+            path="/api/enterprise/connectors/credentials",
+            body={
+                "connector_type": "teams",
+                "display_name": "Teams Webhook",
+                "secret_ref": "secrets://teams_webhook",
+                "scopes": ["message.send"],
+                "credential_id": "cred-teams",
+            },
+        )
+    )
+    PolicyEvaluator.from_path(tmp_path / "state" / "enterprise.sqlite", org_id="ORG-001").add_rule(
+        action="connector.execute",
+        resource="connector:teams:message.send",
+        effect="allow",
+        rule_id="pol-allow-teams-message",
+    )
+
+    response = await server.handle_enterprise_connector_execute(
+        _FakeRequest(
+            headers=headers,
+            path="/api/enterprise/connectors/execute",
+            body={
+                "connector_type": "teams",
+                "action": "message.send",
+                "credential_id": "cred-teams",
+                "dry_run": True,
+                "parameters": {"text": "Hello from HASHI", "title": "HASHI"},
+            },
+        )
+    )
+
+    payload = json.loads(response.text)
+    assert create_response.status == 201
+    assert server.connector_registry.list_types() == ["teams"]
+    assert response.status == 200
+    assert payload["ok"] is True
+    assert payload["gate"]["allowed"] is True
+    assert payload["result"]["status"] == "dry_run"
+    assert payload["result"]["data"]["payload"] == {"text": "Hello from HASHI", "title": "HASHI"}
+
+
+@pytest.mark.asyncio
 async def test_default_connector_policy_requires_approval_for_google_chat_messages(tmp_path):
     server = _server(tmp_path, secrets={"google_chat_webhook": "https://chat.googleapis.com/v1/spaces/abc/messages?key=test"})
     headers = _admin_headers(server)
