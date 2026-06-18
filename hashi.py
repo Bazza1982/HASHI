@@ -429,6 +429,41 @@ def cmd_enterprise_lease_rehearse(args) -> int:
     return 0 if result.passed else 2
 
 
+def cmd_enterprise_lease_load_rehearse(args) -> int:
+    from orchestrator.enterprise import (
+        EnterpriseLeaseStore,
+        IdentityService,
+        run_enterprise_lease_load_rehearsal,
+    )
+
+    database_url = str(args.db_url or (ROOT_DIR / "state" / "enterprise.sqlite"))
+    sqlite_path = _sqlite_path_from_enterprise_url(database_url)
+    if sqlite_path is not None and not getattr(args, "no_ensure_org", False):
+        identity = IdentityService.from_path(sqlite_path)
+        if identity.get_organization(args.org_id) is None:
+            identity.create_organization(org_id=args.org_id, name="Lease Load Rehearsal")
+
+    lease_store = EnterpriseLeaseStore.from_url(database_url, org_id=args.org_id)
+    try:
+        result = run_enterprise_lease_load_rehearsal(
+            lease_store,
+            lease_prefix=args.lease_prefix,
+            lease_count=max(1, int(args.lease_count or 8)),
+            holder_a=args.holder_a,
+            holder_b=args.holder_b,
+            ttl_seconds=max(1, int(args.ttl or 30)),
+            max_workers=max(1, int(args.max_workers or 4)),
+        )
+    finally:
+        close = getattr(lease_store, "close", None)
+        if callable(close):
+            close()
+
+    print(_g("✓ Enterprise lease load rehearsal completed") if result.passed else _r("✗ Enterprise lease load rehearsal failed"))
+    print(json.dumps(result.as_dict(), indent=2, sort_keys=True))
+    return 0 if result.passed else 2
+
+
 def cmd_enterprise_k8s_lease_rehearse(args) -> int:
     from orchestrator.enterprise import (
         KubernetesApiLeaseClient,
@@ -675,6 +710,31 @@ def main():
         help="Do not create the organization automatically for SQLite rehearsal databases.",
     )
     enterprise_lease_rehearse.set_defaults(func=cmd_enterprise_lease_rehearse)
+
+    enterprise_lease_load_rehearse = enterprise_sub.add_parser(
+        "lease-load-rehearse",
+        help="Run repeated enterprise DB lease rehearsals with bounded concurrency",
+    )
+    enterprise_lease_load_rehearse.add_argument(
+        "--db-url",
+        help="Enterprise database URL/path. Supports SQLite paths, sqlite:/// URLs, and PostgreSQL URLs.",
+    )
+    enterprise_lease_load_rehearse.add_argument("--org-id", default="ORG-001", help="Enterprise organization id")
+    enterprise_lease_load_rehearse.add_argument(
+        "--lease-prefix",
+        help="Lease name prefix. Defaults to a unique load rehearsal prefix.",
+    )
+    enterprise_lease_load_rehearse.add_argument("--lease-count", type=int, default=8, help="Number of unique leases")
+    enterprise_lease_load_rehearse.add_argument("--max-workers", type=int, default=4, help="Maximum concurrent rehearsals")
+    enterprise_lease_load_rehearse.add_argument("--holder-a", default="load-a", help="First holder id prefix")
+    enterprise_lease_load_rehearse.add_argument("--holder-b", default="load-b", help="Second holder id prefix")
+    enterprise_lease_load_rehearse.add_argument("--ttl", type=int, default=30, help="Lease TTL seconds")
+    enterprise_lease_load_rehearse.add_argument(
+        "--no-ensure-org",
+        action="store_true",
+        help="Do not create the organization automatically for SQLite rehearsal databases.",
+    )
+    enterprise_lease_load_rehearse.set_defaults(func=cmd_enterprise_lease_load_rehearse)
 
     enterprise_k8s_lease_rehearse = enterprise_sub.add_parser(
         "k8s-lease-rehearse",
