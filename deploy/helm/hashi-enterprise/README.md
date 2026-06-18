@@ -95,6 +95,10 @@ python hashi.py enterprise lease-rehearse \
 For a full PostgreSQL rehearsal checklist, see
 `docs/HASHI_ENTERPRISE_POSTGRES_LEASE_REHEARSAL.md`.
 
+For a full multi-replica staging rehearsal, start from
+`examples/multi-replica-rehearsal.values.yaml` and follow
+`docs/HASHI_ENTERPRISE_K8S_HA_REHEARSAL.md`.
+
 ## Live Audit Export
 
 Enable the one-shot exporter as a Kubernetes CronJob after configuring a real
