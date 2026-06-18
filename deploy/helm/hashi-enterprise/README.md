@@ -98,6 +98,9 @@ For a full PostgreSQL rehearsal checklist, see
 For a full multi-replica staging rehearsal, start from
 `examples/multi-replica-rehearsal.values.yaml` and follow
 `docs/HASHI_ENTERPRISE_K8S_HA_REHEARSAL.md`.
+Optional Kubernetes Lease RBAC can be enabled with
+`leaderElection.rbac.enabled=true`; the runtime leader-election client is still
+future work.
 
 ## Live Audit Export
 

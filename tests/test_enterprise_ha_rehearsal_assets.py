@@ -13,6 +13,8 @@ def test_multi_replica_rehearsal_values_enable_ha_guards():
     assert "externalDatabase:" in text
     assert "enabled: true" in text
     assert "secretName: hashi-enterprise-database" in text
+    assert "leaderElection:" in text
+    assert "rbac:" in text
     assert "podDisruptionBudget:" in text
     assert "minAvailable: 1" in text
     assert "schedulerLease:" in text

@@ -13,6 +13,10 @@ serviceAccount:
   annotations: {}
   name: ""
 
+leaderElection:
+  rbac:
+    enabled: false
+
 podAnnotations: {}
 
 podSecurityContext:

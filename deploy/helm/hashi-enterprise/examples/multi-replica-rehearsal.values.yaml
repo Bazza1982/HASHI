@@ -5,6 +5,10 @@ externalDatabase:
   secretName: hashi-enterprise-database
   secretKey: HASHI_ENTERPRISE_DATABASE_URL
 
+leaderElection:
+  rbac:
+    enabled: true
+
 podDisruptionBudget:
   enabled: true
   minAvailable: 1

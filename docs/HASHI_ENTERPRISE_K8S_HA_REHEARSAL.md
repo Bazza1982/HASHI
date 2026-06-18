@@ -39,6 +39,10 @@ helm upgrade --install hashi-enterprise deploy/helm/hashi-enterprise \
   --set image.tag=replace-me
 ```
 
+The rehearsal values also enable Kubernetes Lease RBAC so the service account
+has `coordination.k8s.io/leases` permissions ready for future native leader
+election. The current scheduler still uses the enterprise DB lease path.
+
 ## Checks
 
 Confirm the control-plane rollout:
@@ -100,3 +104,5 @@ Then inspect pod status and logs before reattempting the rehearsal.
 - This does not validate cloud-specific ingress or NetworkPolicy.
 - The audit export daemon uses a singleton deployment plus DB lease controls;
   it does not move the audit ledger itself to PostgreSQL.
+- Kubernetes Lease RBAC is only an asset in this checkpoint; the runtime
+  Kubernetes Lease leader-election client remains future work.
