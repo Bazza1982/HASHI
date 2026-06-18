@@ -69,6 +69,14 @@ initialized and the runtime lease backend has been validated. The Python lease
 store supports SQLite paths, `sqlite:///` URLs, and PostgreSQL URLs when the
 optional `psycopg` package is installed.
 
+Before enabling scheduler leases against a staging database, run:
+
+```bash
+python hashi.py enterprise lease-rehearse \
+  --db-url "$HASHI_ENTERPRISE_DATABASE_URL" \
+  --org-id ORG-001
+```
+
 ## Live Audit Export Daemon
 
 For continuous export instead of scheduled one-shot jobs:

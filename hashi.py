@@ -17,6 +17,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 ROOT_DIR = Path(__file__).resolve().parent
 if str(ROOT_DIR) not in sys.path:
@@ -387,6 +388,47 @@ def cmd_enterprise_migrate(args) -> int:
     return 0
 
 
+def _sqlite_path_from_enterprise_url(database_url: str) -> Path | None:
+    value = str(database_url or "").strip()
+    parsed = urlparse(value)
+    if parsed.scheme in {"postgres", "postgresql"}:
+        return None
+    if parsed.scheme == "sqlite":
+        if not value.startswith("sqlite:///"):
+            raise ValueError(f"unsupported SQLite enterprise database URL: {value}")
+        return Path(value[len("sqlite:///"):]).expanduser()
+    if parsed.scheme:
+        raise ValueError(f"unsupported enterprise database URL: {value}")
+    return Path(value).expanduser()
+
+
+def cmd_enterprise_lease_rehearse(args) -> int:
+    from orchestrator.enterprise import (
+        EnterpriseLeaseStore,
+        IdentityService,
+        run_enterprise_lease_rehearsal,
+    )
+
+    database_url = str(args.db_url or (ROOT_DIR / "state" / "enterprise.sqlite"))
+    sqlite_path = _sqlite_path_from_enterprise_url(database_url)
+    if sqlite_path is not None and not getattr(args, "no_ensure_org", False):
+        identity = IdentityService.from_path(sqlite_path)
+        if identity.get_organization(args.org_id) is None:
+            identity.create_organization(org_id=args.org_id, name="Lease Rehearsal")
+
+    lease_store = EnterpriseLeaseStore.from_url(database_url, org_id=args.org_id)
+    result = run_enterprise_lease_rehearsal(
+        lease_store,
+        lease_name=args.lease_name,
+        holder_a=args.holder_a,
+        holder_b=args.holder_b,
+        ttl_seconds=max(1, int(args.ttl or 30)),
+    )
+    print(_g("✓ Enterprise lease rehearsal completed") if result.passed else _r("✗ Enterprise lease rehearsal failed"))
+    print(json.dumps(result.as_dict(), indent=2, sort_keys=True))
+    return 0 if result.passed else 2
+
+
 def _parse_http_headers(raw_headers: list[str] | None) -> dict[str, str]:
     headers: dict[str, str] = {}
     for raw in raw_headers or []:
@@ -588,6 +630,26 @@ def main():
     enterprise_migrate = enterprise_sub.add_parser("migrate", help="Initialize or migrate the enterprise SQLite schema")
     enterprise_migrate.add_argument("--db", help="Enterprise SQLite path. Defaults to state/enterprise.sqlite")
     enterprise_migrate.set_defaults(func=cmd_enterprise_migrate)
+
+    enterprise_lease_rehearse = enterprise_sub.add_parser(
+        "lease-rehearse",
+        help="Run an enterprise DB lease concurrency rehearsal",
+    )
+    enterprise_lease_rehearse.add_argument(
+        "--db-url",
+        help="Enterprise database URL/path. Supports SQLite paths, sqlite:/// URLs, and PostgreSQL URLs.",
+    )
+    enterprise_lease_rehearse.add_argument("--org-id", default="ORG-001", help="Enterprise organization id")
+    enterprise_lease_rehearse.add_argument("--lease-name", help="Lease name. Defaults to a unique rehearsal lease")
+    enterprise_lease_rehearse.add_argument("--holder-a", default="rehearsal-a", help="First holder id")
+    enterprise_lease_rehearse.add_argument("--holder-b", default="rehearsal-b", help="Second holder id")
+    enterprise_lease_rehearse.add_argument("--ttl", type=int, default=30, help="Lease TTL seconds")
+    enterprise_lease_rehearse.add_argument(
+        "--no-ensure-org",
+        action="store_true",
+        help="Do not create the organization automatically for SQLite rehearsal databases.",
+    )
+    enterprise_lease_rehearse.set_defaults(func=cmd_enterprise_lease_rehearse)
 
     enterprise_audit_live = enterprise_sub.add_parser(
         "audit-export-live",

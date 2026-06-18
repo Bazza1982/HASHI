@@ -7,7 +7,12 @@ from types import SimpleNamespace
 import pytest
 
 import hashi
-from orchestrator.enterprise import EnterpriseAuditLedger, EnterpriseLeaseStore, IdentityService
+from orchestrator.enterprise import (
+    EnterpriseAuditLedger,
+    EnterpriseLeaseStore,
+    IdentityService,
+    run_enterprise_lease_rehearsal,
+)
 from orchestrator.enterprise.store import SCHEMA_VERSION
 
 
@@ -73,6 +78,45 @@ def test_enterprise_migrate_cli_initializes_schema(tmp_path, monkeypatch, capsys
     assert "Enterprise schema migrated" in output
     assert "Before: (none)" in output
     assert f"After : {SCHEMA_VERSION}" in output
+
+
+def test_enterprise_lease_rehearsal_service_passes_with_sqlite(tmp_path):
+    db_path = tmp_path / "enterprise.sqlite"
+    IdentityService.from_path(db_path).create_organization(org_id="ORG-001", name="Acme")
+    leases = EnterpriseLeaseStore.from_url(f"sqlite:///{db_path}", org_id="ORG-001")
+
+    result = run_enterprise_lease_rehearsal(leases, lease_name="rehearsal-test", ttl_seconds=30)
+
+    assert result.passed is True
+    assert result.first_acquired_holder in {"rehearsal-a", "rehearsal-b"}
+    assert result.blocked_holder in {"rehearsal-a", "rehearsal-b"}
+    assert result.blocked_holder != result.first_acquired_holder
+    assert result.takeover_succeeded is True
+    assert leases.get("rehearsal-test") is None
+
+
+def test_enterprise_lease_rehearse_cli_runs_sqlite_rehearsal(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(hashi, "ROOT_DIR", tmp_path)
+    db_path = tmp_path / "state" / "enterprise.sqlite"
+
+    rc = hashi.cmd_enterprise_lease_rehearse(
+        SimpleNamespace(
+            db_url=f"sqlite:///{db_path}",
+            org_id="ORG-001",
+            lease_name="cli-rehearsal",
+            holder_a="pod-a",
+            holder_b="pod-b",
+            ttl=30,
+            no_ensure_org=False,
+        )
+    )
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "Enterprise lease rehearsal completed" in output
+    payload = json.loads(output[output.index("{"):])
+    assert payload["passed"] is True
+    assert payload["lease_name"] == "cli-rehearsal"
 
 
 def test_enterprise_audit_live_export_cli_sends_events_and_updates_checkpoint(tmp_path, monkeypatch, capsys):

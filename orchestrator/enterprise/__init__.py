@@ -115,6 +115,7 @@ from orchestrator.enterprise.leases import (
     EnterpriseLeaseStore,
     PostgresEnterpriseLeaseStore,
 )
+from orchestrator.enterprise.lease_rehearsal import LeaseRehearsalResult, run_enterprise_lease_rehearsal
 from orchestrator.enterprise.policy import (
     ApprovalRequest,
     PolicyDecision,
@@ -265,6 +266,7 @@ __all__ = [
     "EnterpriseLeaseAttempt",
     "EnterpriseLeaseStore",
     "PostgresEnterpriseLeaseStore",
+    "LeaseRehearsalResult",
     "IdentityService",
     "PolicyDecision",
     "PolicyEvaluation",
@@ -307,6 +309,7 @@ __all__ = [
     "verify_oidc_id_token",
     "record_failed_task_escalation",
     "record_connector_event",
+    "run_enterprise_lease_rehearsal",
     "validate_connector_action",
     "transition_task_with_failure_escalation",
     "verify_promised_artifacts",
