@@ -1,0 +1,53 @@
+name: enterprise-k8s-image-smoke-plan
+
+on:
+  push:
+    paths:
+      - "Dockerfile.enterprise"
+      - "pyproject.toml"
+      - "requirements.txt"
+      - "tools/enterprise_k8s_backend_doctor.py"
+      - "tools/enterprise_k8s_image_smoke_plan.py"
+      - "deploy/kubernetes/enterprise/**"
+      - "deploy/helm/hashi-enterprise/**"
+      - ".github/workflows/enterprise-k8s-image-smoke-plan.yml"
+  pull_request:
+    paths:
+      - "Dockerfile.enterprise"
+      - "pyproject.toml"
+      - "requirements.txt"
+      - "tools/enterprise_k8s_backend_doctor.py"
+      - "tools/enterprise_k8s_image_smoke_plan.py"
+      - "deploy/kubernetes/enterprise/**"
+      - "deploy/helm/hashi-enterprise/**"
+      - ".github/workflows/enterprise-k8s-image-smoke-plan.yml"
+
+jobs:
+  generate-plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate Kubernetes backend packaging contract
+        run: python tools/enterprise_k8s_backend_doctor.py --json
+
+      - name: Generate image smoke plan
+        run: |
+          python tools/enterprise_k8s_image_smoke_plan.py \
+            --image-tag hashi-enterprise:k8s-lease-smoke \
+            --namespace hashi-enterprise \
+            --lease-name superloop-scheduler-smoke \
+            --output hashi-k8s-image-smoke-plan.json
+
+      - name: Validate plan JSON
+        run: python -m json.tool hashi-k8s-image-smoke-plan.json >/dev/null
+
+      - name: Upload image smoke plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: hashi-k8s-image-smoke-plan
+          path: hashi-k8s-image-smoke-plan.json

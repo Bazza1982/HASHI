@@ -67,6 +67,10 @@ python tools/enterprise_k8s_image_smoke_plan.py \
   --output /tmp/hashi-k8s-image-smoke-plan.json
 ```
 
+The GitHub Actions workflow
+`.github/workflows/enterprise-k8s-image-smoke-plan.yml` generates and uploads
+the same plan as an artifact without running Docker.
+
 ## External Database Secret
 
 The deployment consumes `HASHI_ENTERPRISE_DATABASE_URL` through
