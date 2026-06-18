@@ -42,3 +42,22 @@ jobs:
           grep -q "HASHI_ENTERPRISE_DATABASE_URL" rendered-hashi-enterprise.yaml
           grep -q -- "--lease-count" rendered-hashi-enterprise.yaml
           grep -q -- "--max-workers" rendered-hashi-enterprise.yaml
+
+      - name: Render production hardening chart
+        run: |
+          helm template hashi-enterprise deploy/helm/hashi-enterprise \
+            --values deploy/helm/hashi-enterprise/examples/multi-replica-rehearsal.values.yaml \
+            --values deploy/helm/hashi-enterprise/examples/production-hardening.values.yaml \
+            --set image.repository=ghcr.io/example/hashi-enterprise \
+            --set image.tag=production-render \
+            > rendered-hashi-enterprise-production.yaml
+
+      - name: Validate rendered production hardening resources
+        run: |
+          grep -q "kind: Ingress" rendered-hashi-enterprise-production.yaml
+          grep -q "kind: NetworkPolicy" rendered-hashi-enterprise-production.yaml
+          grep -q "kind: HorizontalPodAutoscaler" rendered-hashi-enterprise-production.yaml
+          grep -q "kind: PodDisruptionBudget" rendered-hashi-enterprise-production.yaml
+          grep -q "hashi-enterprise.example.com" rendered-hashi-enterprise-production.yaml
+          grep -q "hashi-enterprise-tls" rendered-hashi-enterprise-production.yaml
+          grep -q "ingress-nginx" rendered-hashi-enterprise-production.yaml
