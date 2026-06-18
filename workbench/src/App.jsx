@@ -1095,6 +1095,17 @@ const validateConnectorParameters = (parameters, schema) => {
   return '';
 };
 
+const parseConnectorParameterDraft = (text) => {
+  try {
+    const parsed = text?.trim() ? JSON.parse(text) : {};
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+};
+
+const formatConnectorParameterDraft = (parameters) => JSON.stringify(parameters, null, 2);
+
 function EnterpriseAdminPanel() {
   const [authToken, setAuthToken] = useState(() => localStorage.getItem(STORAGE_KEY_ENTERPRISE_AUTH) || '');
   const [credentials, setCredentials] = useState([]);
@@ -1305,9 +1316,30 @@ function EnterpriseAdminPanel() {
     }));
   };
 
+  const updateExecutionParameter = (parameter, rawValue) => {
+    setExecutionForm((prev) => {
+      const nextParameters = { ...parseConnectorParameterDraft(prev.parameters) };
+      if (rawValue === '' && !parameter.required) {
+        delete nextParameters[parameter.name];
+      } else if (parameter.type === 'boolean') {
+        nextParameters[parameter.name] = rawValue === 'true';
+      } else if (parameter.type === 'integer') {
+        const numericValue = Number(rawValue);
+        nextParameters[parameter.name] = Number.isFinite(numericValue) ? numericValue : rawValue;
+      } else {
+        nextParameters[parameter.name] = rawValue;
+      }
+      return { ...prev, parameters: formatConnectorParameterDraft(nextParameters) };
+    });
+  };
+
   const selectedActionSchema = actionSchemas.find((schema) => (
     schema.connector_type === executionForm.connector_type && schema.action === executionForm.action
   ));
+  const connectorParameterDraft = parseConnectorParameterDraft(executionForm.parameters);
+  const editableSchemaParameters = (selectedActionSchema?.parameters || []).filter(
+    (parameter) => parameter.type !== 'array',
+  );
 
   return (
     <main className="enterprise-layout">
@@ -1463,6 +1495,43 @@ function EnterpriseAdminPanel() {
               {executionForm.dry_run ? 'Dry run' : 'Execute'}
             </button>
           </form>
+          {!!editableSchemaParameters.length && (
+            <div className="connector-parameter-controls">
+              {editableSchemaParameters.map((parameter) => {
+                const value = connectorParameterDraft[parameter.name];
+                const inputValue = value === undefined || value === null ? '' : String(value);
+                return (
+                  <label key={parameter.name} className="connector-parameter-control">
+                    <span>{parameter.name}</span>
+                    {parameter.enum ? (
+                      <select
+                        value={inputValue}
+                        onChange={(e) => updateExecutionParameter(parameter, e.target.value)}
+                      >
+                        {!parameter.required && <option value="">Optional</option>}
+                        {parameter.enum.map((item) => <option key={item} value={item}>{item}</option>)}
+                      </select>
+                    ) : parameter.type === 'boolean' ? (
+                      <select
+                        value={inputValue}
+                        onChange={(e) => updateExecutionParameter(parameter, e.target.value)}
+                      >
+                        {!parameter.required && <option value="">Optional</option>}
+                        <option value="true">true</option>
+                        <option value="false">false</option>
+                      </select>
+                    ) : (
+                      <input
+                        type={parameter.type === 'integer' ? 'number' : 'text'}
+                        value={inputValue}
+                        onChange={(e) => updateExecutionParameter(parameter, e.target.value)}
+                      />
+                    )}
+                  </label>
+                );
+              })}
+            </div>
+          )}
           {selectedActionSchema && (
             <div className="connector-schema-panel">
               <div className="connector-schema-title">
