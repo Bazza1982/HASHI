@@ -5,6 +5,7 @@ from orchestrator.enterprise.connectors.base import (
     EnterpriseConnector,
     record_connector_event,
 )
+from orchestrator.enterprise.connectors.action_schemas import connector_action_schema, connector_action_schemas
 from orchestrator.enterprise.connectors.executor import ConnectorExecution, ConnectorExecutionService
 from orchestrator.enterprise.connectors.factory import ConnectorFactory
 from orchestrator.enterprise.connectors.feishu import FeishuWebhookConnector
@@ -32,6 +33,8 @@ __all__ = [
     "GoogleChatWebhookConnector",
     "SlackWebhookConnector",
     "TeamsWebhookConnector",
+    "connector_action_schema",
+    "connector_action_schemas",
     "evaluate_connector_action",
     "record_connector_event",
     "validate_connector_action",

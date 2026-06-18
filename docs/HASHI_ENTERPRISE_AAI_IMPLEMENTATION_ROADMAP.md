@@ -1157,6 +1157,7 @@ Residual P10 limitations:
 - Workbench registry refresh is in-process; multi-node registry synchronization remains future work.
 - Default connector policy covers GitHub reads, GitHub writes, Slack outbound message approval, Google Chat outbound message approval, Teams outbound message approval, and Feishu outbound message approval; silent auto-install remains intentionally avoided to prevent overwriting administrator policy edits.
 - Workbench/admin connector execution API now uses the gated execution service.
+- Workbench/admin connector action schema API exposes supported parameter metadata for GitHub and webhook connector test runs.
 - Connector health API exists for registered in-process connectors; built-in GitHub, Slack, Google Chat, Teams, and Feishu connectors can now be constructed from credential references.
 - Connector admin UI exists as a Workbench MVP; credential creation now has built-in connector type, secret-ref scheme, and minimum-scope validation, while richer guided setup and OAuth flows remain pending.
 
@@ -1188,6 +1189,7 @@ Residual P10 limitations:
 - `ENT-125` Add credential revoke tests. Done for gate-level fail-closed behavior.
 - `ENT-127` Add gated connector execution service. Done for credential gate, policy gate, connector invocation, fail-closed missing connector handling, and ledger events.
 - `ENT-128` Add Workbench connector execution API. Done for admin-gated execution through `ConnectorExecutionService` with result and gate metadata.
+- `ENT-128a` Add connector action schema catalog. Done for admin-gated Workbench schema metadata covering GitHub repo/issue/PR actions and Slack, Google Chat, Teams, and Feishu `message.send`.
 - `ENT-129` Add Workbench connector credential API. Done for admin-gated list, create, revoke, active-only listing, include-revoked listing, connector type/secret-ref/scope validation, and audit events.
 - `ENT-130` Add connector secret reference resolver. Done for env/HASHI secret refs, redacted metadata, unsupported scheme failures, and unconfigured vault fail-closed behavior.
 - `ENT-131` Add connector factory. Done for GitHub connector construction from credential refs, secret resolution, revoked credential skipping, and unsupported type fail-closed behavior.
