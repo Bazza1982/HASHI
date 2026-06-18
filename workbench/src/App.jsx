@@ -1035,6 +1035,22 @@ const CONNECTOR_PRESETS = {
     resource: '*',
     parameters: '{\n  "text": "HASHI connector dry run"\n}',
   },
+  teams: {
+    displayName: 'Teams Webhook',
+    secretRef: 'env://TEAMS_WEBHOOK_URL',
+    scopes: 'message.send',
+    action: 'message.send',
+    resource: '*',
+    parameters: '{\n  "text": "HASHI connector dry run"\n}',
+  },
+  feishu: {
+    displayName: 'Feishu Webhook',
+    secretRef: 'env://FEISHU_WEBHOOK_URL',
+    scopes: 'message.send',
+    action: 'message.send',
+    resource: '*',
+    parameters: '{\n  "text": "HASHI connector dry run"\n}',
+  },
   github: {
     displayName: 'GitHub Token',
     secretRef: 'env://GITHUB_TOKEN',
@@ -1281,6 +1297,8 @@ function EnterpriseAdminPanel() {
             <select value={form.connector_type} onChange={(e) => applyCredentialPreset(e.target.value)}>
               <option value="slack">Slack</option>
               <option value="google_chat">Google Chat</option>
+              <option value="teams">Teams</option>
+              <option value="feishu">Feishu</option>
               <option value="github">GitHub</option>
             </select>
             <input value={form.display_name} onChange={(e) => setForm((prev) => ({ ...prev, display_name: e.target.value }))} placeholder="Display name" />
@@ -1373,6 +1391,8 @@ function EnterpriseAdminPanel() {
             >
               <option value="slack">Slack</option>
               <option value="google_chat">Google Chat</option>
+              <option value="teams">Teams</option>
+              <option value="feishu">Feishu</option>
               <option value="github">GitHub</option>
             </select>
             <input
