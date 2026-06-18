@@ -1,0 +1,44 @@
+name: enterprise-helm-render
+
+on:
+  push:
+    paths:
+      - "deploy/helm/hashi-enterprise/**"
+      - "tests/test_enterprise_deploy_skeleton.py"
+      - "tests/test_enterprise_helm_chart.py"
+      - ".github/workflows/enterprise-helm-render.yml"
+  pull_request:
+    paths:
+      - "deploy/helm/hashi-enterprise/**"
+      - "tests/test_enterprise_deploy_skeleton.py"
+      - "tests/test_enterprise_helm_chart.py"
+      - ".github/workflows/enterprise-helm-render.yml"
+
+jobs:
+  render-chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+
+      - name: Lint enterprise Helm chart
+        run: helm lint deploy/helm/hashi-enterprise
+
+      - name: Render lease load rehearsal chart
+        run: |
+          helm template hashi-enterprise deploy/helm/hashi-enterprise \
+            --set externalDatabase.enabled=true \
+            --set leaseLoadRehearsal.enabled=true \
+            --set leaseLoadRehearsal.leaseCount=16 \
+            --set leaseLoadRehearsal.maxWorkers=4 \
+            > rendered-hashi-enterprise.yaml
+
+      - name: Validate rendered lease load rehearsal job
+        run: |
+          grep -q "kind: Job" rendered-hashi-enterprise.yaml
+          grep -q "lease-load-rehearsal" rendered-hashi-enterprise.yaml
+          grep -q "lease-load-rehearse" rendered-hashi-enterprise.yaml
+          grep -q "HASHI_ENTERPRISE_DATABASE_URL" rendered-hashi-enterprise.yaml
+          grep -q -- "--lease-count" rendered-hashi-enterprise.yaml
+          grep -q -- "--max-workers" rendered-hashi-enterprise.yaml

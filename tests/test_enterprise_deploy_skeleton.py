@@ -60,6 +60,20 @@ def test_enterprise_kubernetes_image_smoke_workflow_generates_artifact_only():
     assert "docker build" not in text
 
 
+def test_enterprise_helm_render_workflow_validates_lease_load_job():
+    text = (ROOT / ".github" / "workflows" / "enterprise-helm-render.yml").read_text(encoding="utf-8")
+
+    assert "azure/setup-helm@v4" in text
+    assert "helm lint deploy/helm/hashi-enterprise" in text
+    assert "helm template hashi-enterprise deploy/helm/hashi-enterprise" in text
+    assert "leaseLoadRehearsal.enabled=true" in text
+    assert "externalDatabase.enabled=true" in text
+    assert "lease-load-rehearse" in text
+    assert "HASHI_ENTERPRISE_DATABASE_URL" in text
+    assert "--lease-count" in text
+    assert "--max-workers" in text
+
+
 def test_enterprise_postgres_lease_workflow_runs_real_integration_test():
     text = (ROOT / ".github" / "workflows" / "enterprise-postgres-lease.yml").read_text(encoding="utf-8")
 

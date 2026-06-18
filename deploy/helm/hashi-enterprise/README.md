@@ -110,6 +110,10 @@ helm upgrade --install hashi-enterprise deploy/helm/hashi-enterprise \
   --set leaseLoadRehearsal.maxWorkers=4
 ```
 
+The `enterprise-helm-render` GitHub Actions workflow runs `helm lint` and
+renders this Job with `leaseLoadRehearsal.enabled=true` so chart changes fail
+fast before cluster rehearsal.
+
 For a full multi-replica staging rehearsal, start from
 `examples/multi-replica-rehearsal.values.yaml` and follow
 `docs/HASHI_ENTERPRISE_K8S_HA_REHEARSAL.md`.
