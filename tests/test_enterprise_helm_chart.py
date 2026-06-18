@@ -83,6 +83,8 @@ def test_enterprise_helm_deployment_keeps_health_and_secret_contracts():
     assert "path: {{ .Values.readinessProbe.path }}" in text
     assert "name: HASHI_POD_NAME" in text
     assert "fieldPath: metadata.name" in text
+    assert "name: POD_NAMESPACE" in text
+    assert "fieldPath: metadata.namespace" in text
     assert "name: HASHI_ENTERPRISE_SCHEDULER_LEASE_HOLDER" in text
     assert "value: {{ .Values.schedulerLease.holder | quote }}" in text
     assert "{{- if .Values.externalDatabase.enabled }}" in text
@@ -110,8 +112,12 @@ def test_enterprise_helm_configmap_sets_enterprise_environment():
     assert "HASHI_BRIDGE_HOME:" in text
     assert "HASHI_WORKBENCH_PORT:" in text
     assert "HASHI_ENTERPRISE_SCHEDULER_LEASE_ENABLED:" in text
+    assert "HASHI_ENTERPRISE_SCHEDULER_LEASE_BACKEND:" in text
     assert "HASHI_ENTERPRISE_SCHEDULER_LEASE_NAME:" in text
     assert "HASHI_ENTERPRISE_SCHEDULER_LEASE_TTL_SECONDS:" in text
+    assert "HASHI_ENTERPRISE_SCHEDULER_LEASE_K8S_NAMESPACE:" in text
+    assert "HASHI_ENTERPRISE_SCHEDULER_LEASE_K8S_IN_CLUSTER:" in text
+    assert "HASHI_ENTERPRISE_SCHEDULER_LEASE_KUBECONFIG:" in text
     assert "HASHI_ENTERPRISE_SCHEDULER_LEASE_POOL_ENABLED:" in text
     assert "HASHI_ENTERPRISE_SCHEDULER_LEASE_POOL_MIN_SIZE:" in text
     assert "HASHI_ENTERPRISE_SCHEDULER_LEASE_POOL_MAX_SIZE:" in text

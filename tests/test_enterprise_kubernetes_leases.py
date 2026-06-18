@@ -10,6 +10,7 @@ from orchestrator.enterprise.kubernetes_leases import (
     KubernetesLease,
     KubernetesLeaseConflict,
     KubernetesLeaseCoordinator,
+    KubernetesSchedulerLeaseStore,
 )
 
 
@@ -96,6 +97,26 @@ def test_kubernetes_lease_rejects_empty_inputs():
         coordinator.acquire("", holder_identity="pod-a")
     with pytest.raises(ValueError, match="holder identity is required"):
         coordinator.acquire("scheduler", holder_identity="")
+
+
+def test_kubernetes_scheduler_lease_store_matches_db_lease_interface():
+    client = _FakeKubernetesLeaseClient()
+    coordinator = KubernetesLeaseCoordinator(client, namespace="hashi-enterprise")
+    store = KubernetesSchedulerLeaseStore(coordinator)
+
+    acquired = store.acquire(
+        "scheduler",
+        holder_id="pod-a",
+        ttl_seconds=30,
+        metadata={"component": "task-scheduler"},
+    )
+    renewed = store.renew("scheduler", holder_id="pod-a", ttl_seconds=60)
+    released = store.release("scheduler", holder_id="pod-a")
+
+    assert acquired.acquired is True
+    assert renewed.acquired is True
+    assert released is True
+    assert client.get_lease("hashi-enterprise", "scheduler") is None
 
 
 def test_kubernetes_api_lease_client_maps_get_create_replace_and_delete():

@@ -210,6 +210,51 @@ class ServiceManager:
     def _scheduler_enterprise_lease_kwargs(self, global_cfg) -> dict:
         if not bool(getattr(global_cfg, "enterprise_scheduler_lease_enabled", False)):
             return {}
+        holder = (
+            getattr(global_cfg, "enterprise_scheduler_lease_holder", None)
+            or os.environ.get("POD_NAME")
+            or f"{getattr(global_cfg, 'instance_id', 'HASHI')}:{socket.gethostname()}:{os.getpid()}"
+        )
+        lease_name = str(getattr(global_cfg, "enterprise_scheduler_lease_name", None) or "superloop-scheduler")
+        lease_ttl_seconds = max(1, int(getattr(global_cfg, "enterprise_scheduler_lease_ttl_seconds", 60) or 60))
+        backend = str(getattr(global_cfg, "enterprise_scheduler_lease_backend", "db") or "db").strip().lower()
+
+        if backend in {"k8s", "kubernetes"}:
+            try:
+                from orchestrator.enterprise import (
+                    KubernetesApiLeaseClient,
+                    KubernetesLeaseCoordinator,
+                    KubernetesSchedulerLeaseStore,
+                )
+
+                namespace = (
+                    getattr(global_cfg, "enterprise_scheduler_lease_kubernetes_namespace", None)
+                    or os.environ.get("POD_NAMESPACE")
+                    or "hashi-enterprise"
+                )
+                client = KubernetesApiLeaseClient.from_config(
+                    in_cluster=bool(getattr(global_cfg, "enterprise_scheduler_lease_kubernetes_in_cluster", True)),
+                    kubeconfig_path=getattr(global_cfg, "enterprise_scheduler_lease_kubeconfig_path", None),
+                )
+                lease_store = KubernetesSchedulerLeaseStore(
+                    KubernetesLeaseCoordinator(client, namespace=str(namespace))
+                )
+            except Exception as exc:
+                main_logger.warning("Enterprise scheduler Kubernetes lease disabled: %s", exc)
+                bridge_logger.warning("Enterprise scheduler Kubernetes lease disabled: %s", exc)
+                return {}
+            return {
+                "enterprise_lease_store": lease_store,
+                "enterprise_lease_name": lease_name,
+                "enterprise_lease_holder": str(holder),
+                "enterprise_lease_ttl_seconds": lease_ttl_seconds,
+            }
+
+        if backend != "db":
+            main_logger.warning("Enterprise scheduler lease disabled: unsupported backend %s", backend)
+            bridge_logger.warning("Enterprise scheduler lease disabled: unsupported backend %s", backend)
+            return {}
+
         try:
             from orchestrator.enterprise import EnterpriseLeaseStore
 
@@ -240,20 +285,11 @@ class ServiceManager:
             bridge_logger.warning("Enterprise scheduler DB lease disabled: %s", exc)
             return {}
 
-        holder = (
-            getattr(global_cfg, "enterprise_scheduler_lease_holder", None)
-            or os.environ.get("POD_NAME")
-            or f"{getattr(global_cfg, 'instance_id', 'HASHI')}:{socket.gethostname()}:{os.getpid()}"
-        )
         return {
             "enterprise_lease_store": lease_store,
-            "enterprise_lease_name": str(
-                getattr(global_cfg, "enterprise_scheduler_lease_name", None) or "superloop-scheduler"
-            ),
+            "enterprise_lease_name": lease_name,
             "enterprise_lease_holder": str(holder),
-            "enterprise_lease_ttl_seconds": max(
-                1, int(getattr(global_cfg, "enterprise_scheduler_lease_ttl_seconds", 60) or 60)
-            ),
+            "enterprise_lease_ttl_seconds": lease_ttl_seconds,
         }
 
     def start_scheduler(self, global_cfg):

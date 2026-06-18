@@ -44,9 +44,14 @@ enterprise:
 
 schedulerLease:
   enabled: false
+  backend: db
   name: superloop-scheduler
   holder: "$(HASHI_POD_NAME)"
   ttl: "60"
+  kubernetes:
+    namespace: hashi-enterprise
+    inCluster: "true"
+    kubeconfigPath: ""
   pool:
     enabled: false
     minSize: "1"

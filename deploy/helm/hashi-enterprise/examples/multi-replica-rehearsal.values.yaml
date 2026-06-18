@@ -15,6 +15,7 @@ podDisruptionBudget:
 
 schedulerLease:
   enabled: true
+  backend: db
   name: superloop-scheduler
   holder: "$(HASHI_POD_NAME)"
   ttl: "60"

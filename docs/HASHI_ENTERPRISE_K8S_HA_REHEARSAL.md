@@ -42,8 +42,9 @@ helm upgrade --install hashi-enterprise deploy/helm/hashi-enterprise \
 The rehearsal values also enable Kubernetes Lease RBAC so the service account
 has `coordination.k8s.io/leases` permissions ready for future native leader
 election. Runtime code includes an injectable Kubernetes Lease coordinator and
-an optional Kubernetes API adapter, but the current scheduler still uses the
-enterprise DB lease path until scheduler wiring is added.
+an optional Kubernetes API adapter. The rehearsal defaults keep the scheduler
+on the enterprise DB lease path; set `schedulerLease.backend=kubernetes` only
+after installing the optional Kubernetes Python package in the runtime image.
 
 ## Checks
 
@@ -64,6 +65,13 @@ Check lease-related environment on a pod:
 
 ```bash
 kubectl -n hashi-enterprise exec deploy/hashi-enterprise -- env | grep HASHI_ENTERPRISE_SCHEDULER_LEASE
+```
+
+For a Kubernetes Lease backend smoke rehearsal, also inspect the namespace and
+Lease object:
+
+```bash
+kubectl -n hashi-enterprise get lease superloop-scheduler -o yaml
 ```
 
 ## Failure Rehearsal
@@ -106,5 +114,6 @@ Then inspect pod status and logs before reattempting the rehearsal.
 - This does not validate cloud-specific ingress or NetworkPolicy.
 - The audit export daemon uses a singleton deployment plus DB lease controls;
   it does not move the audit ledger itself to PostgreSQL.
-- Kubernetes Lease RBAC, coordinator primitives, and the optional API adapter
-  exist, but scheduler wiring and live cluster rehearsal remain future work.
+- Kubernetes Lease RBAC, coordinator primitives, optional API adapter, and
+  scheduler backend selection wiring exist, but live cluster rehearsal remains
+  future work.

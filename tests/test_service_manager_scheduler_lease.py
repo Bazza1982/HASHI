@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from orchestrator.enterprise import EnterpriseLeaseStore, IdentityService
+from orchestrator.enterprise import EnterpriseLeaseStore, IdentityService, KubernetesApiLeaseClient
 from orchestrator.service_manager import ServiceManager
 
 
@@ -131,6 +131,75 @@ def test_scheduler_enterprise_lease_kwargs_passes_postgres_pool_options(tmp_path
         "postgres_pool_min_size": 2,
         "postgres_pool_max_size": 8,
     }
+
+
+def test_scheduler_enterprise_lease_kwargs_builds_kubernetes_store(tmp_path, monkeypatch):
+    manager = _manager(tmp_path)
+    calls = {}
+
+    class _Client:
+        def __init__(self):
+            self.leases = {}
+
+        def get_lease(self, namespace, name):
+            return self.leases.get((namespace, name))
+
+        def create_lease(self, lease):
+            self.leases[(lease.namespace, lease.name)] = lease
+            return lease
+
+        def replace_lease(self, lease):
+            self.leases[(lease.namespace, lease.name)] = lease
+            return lease
+
+        def delete_lease(self, namespace, name, *, holder_identity):
+            lease = self.leases.get((namespace, name))
+            if lease is None or lease.holder_identity != holder_identity:
+                return False
+            del self.leases[(namespace, name)]
+            return True
+
+    def fake_from_config(*, in_cluster, kubeconfig_path):
+        calls["in_cluster"] = in_cluster
+        calls["kubeconfig_path"] = kubeconfig_path
+        return _Client()
+
+    monkeypatch.setattr(KubernetesApiLeaseClient, "from_config", staticmethod(fake_from_config))
+    global_cfg = SimpleNamespace(
+        enterprise_scheduler_lease_enabled=True,
+        enterprise_scheduler_lease_backend="kubernetes",
+        enterprise_scheduler_lease_name="scheduler-main",
+        enterprise_scheduler_lease_holder="pod-a",
+        enterprise_scheduler_lease_ttl_seconds=45,
+        enterprise_scheduler_lease_kubernetes_namespace="hashi-enterprise",
+        enterprise_scheduler_lease_kubernetes_in_cluster=False,
+        enterprise_scheduler_lease_kubeconfig_path="/tmp/kubeconfig",
+        instance_id="HASHI1",
+    )
+
+    kwargs = manager._scheduler_enterprise_lease_kwargs(global_cfg)
+    attempt = kwargs["enterprise_lease_store"].acquire(
+        "scheduler-main",
+        holder_id="pod-a",
+        ttl_seconds=45,
+        metadata={"component": "task-scheduler"},
+    )
+
+    assert kwargs["enterprise_lease_name"] == "scheduler-main"
+    assert kwargs["enterprise_lease_holder"] == "pod-a"
+    assert kwargs["enterprise_lease_ttl_seconds"] == 45
+    assert attempt.acquired is True
+    assert calls == {"in_cluster": False, "kubeconfig_path": "/tmp/kubeconfig"}
+
+
+def test_scheduler_enterprise_lease_kwargs_rejects_unknown_backend(tmp_path):
+    manager = _manager(tmp_path)
+    global_cfg = SimpleNamespace(
+        enterprise_scheduler_lease_enabled=True,
+        enterprise_scheduler_lease_backend="zookeeper",
+    )
+
+    assert manager._scheduler_enterprise_lease_kwargs(global_cfg) == {}
 
 
 @pytest.mark.asyncio
