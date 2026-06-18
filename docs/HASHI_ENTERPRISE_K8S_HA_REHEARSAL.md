@@ -49,6 +49,9 @@ python tools/enterprise_k8s_ha_rehearsal_plan.py \
   --output /tmp/hashi-k8s-ha-rehearsal-plan.json
 ```
 
+The `enterprise-k8s-ha-rehearsal-plan` GitHub Actions workflow generates and
+uploads the same JSON plan as an artifact without running Helm or kubectl.
+
 Use the rehearsal values file:
 
 ```bash

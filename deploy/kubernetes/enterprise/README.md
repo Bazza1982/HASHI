@@ -78,6 +78,9 @@ python tools/enterprise_k8s_image_smoke_plan.py \
 The GitHub Actions workflow
 `.github/workflows/enterprise-k8s-image-smoke-plan.yml` generates and uploads
 the same plan as an artifact without running Docker.
+The workflow `.github/workflows/enterprise-k8s-ha-rehearsal-plan.yml`
+generates and uploads the HA rehearsal command plan without running Helm or
+kubectl.
 
 ## External Database Secret
 

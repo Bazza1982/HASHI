@@ -1,0 +1,46 @@
+name: enterprise-k8s-ha-rehearsal-plan
+
+on:
+  push:
+    paths:
+      - "tools/enterprise_k8s_ha_rehearsal_plan.py"
+      - "deploy/kubernetes/enterprise/**"
+      - "deploy/helm/hashi-enterprise/**"
+      - "docs/HASHI_ENTERPRISE_K8S_HA_REHEARSAL.md"
+      - ".github/workflows/enterprise-k8s-ha-rehearsal-plan.yml"
+  pull_request:
+    paths:
+      - "tools/enterprise_k8s_ha_rehearsal_plan.py"
+      - "deploy/kubernetes/enterprise/**"
+      - "deploy/helm/hashi-enterprise/**"
+      - "docs/HASHI_ENTERPRISE_K8S_HA_REHEARSAL.md"
+      - ".github/workflows/enterprise-k8s-ha-rehearsal-plan.yml"
+
+jobs:
+  generate-plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Generate HA rehearsal command plan
+        run: |
+          python tools/enterprise_k8s_ha_rehearsal_plan.py \
+            --image-repository ghcr.io/example/hashi-enterprise \
+            --image-tag staging-rehearsal \
+            --namespace hashi-enterprise \
+            --lease-load-count 16 \
+            --lease-load-workers 4 \
+            --output hashi-k8s-ha-rehearsal-plan.json
+
+      - name: Validate plan JSON
+        run: python -m json.tool hashi-k8s-ha-rehearsal-plan.json >/dev/null
+
+      - name: Upload HA rehearsal plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: hashi-k8s-ha-rehearsal-plan
+          path: hashi-k8s-ha-rehearsal-plan.json

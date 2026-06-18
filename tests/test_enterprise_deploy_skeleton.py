@@ -61,6 +61,19 @@ def test_enterprise_kubernetes_image_smoke_workflow_generates_artifact_only():
     assert "docker build" not in text
 
 
+def test_enterprise_kubernetes_ha_rehearsal_plan_workflow_generates_artifact_only():
+    text = (ROOT / ".github" / "workflows" / "enterprise-k8s-ha-rehearsal-plan.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "python tools/enterprise_k8s_ha_rehearsal_plan.py" in text
+    assert "python -m json.tool hashi-k8s-ha-rehearsal-plan.json" in text
+    assert "actions/upload-artifact@v4" in text
+    assert "hashi-k8s-ha-rehearsal-plan.json" in text
+    assert "helm upgrade" not in text
+    assert "kubectl" not in text
+
+
 def test_enterprise_helm_render_workflow_validates_lease_load_job():
     text = (ROOT / ".github" / "workflows" / "enterprise-helm-render.yml").read_text(encoding="utf-8")
 

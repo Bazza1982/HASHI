@@ -645,6 +645,7 @@ Residual P4 limitations:
 - `ENT-070z` Add in-cluster lease load rehearsal assets. Done for a raw Kubernetes Job example, optional Helm Job template, values wiring, docs, and static tests for bounded `lease-load-rehearse` execution; live cluster execution remains future work.
 - `ENT-071` Add enterprise Helm render CI. Done for `.github/workflows/enterprise-helm-render.yml` with Helm setup, chart lint, `leaseLoadRehearsal.enabled=true` render, and rendered Job grep checks; live cluster execution remains future work.
 - `ENT-071a` Add Kubernetes HA rehearsal command plan. Done for `tools/enterprise_k8s_ha_rehearsal_plan.py`, JSON command plan generation, tests, and operator docs covering secret checks, Helm render/install, lease load Job, rollout, failover log review, and rollback commands; executing it in a live cluster remains future work.
+- `ENT-071b` Add Kubernetes HA rehearsal plan artifact workflow. Done for `.github/workflows/enterprise-k8s-ha-rehearsal-plan.yml`, JSON validation, artifact upload, and static tests confirming the workflow does not run Helm or kubectl; executing the generated plan remains future work.
 
 **Acceptance:**
 
