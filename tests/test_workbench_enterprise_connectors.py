@@ -175,6 +175,41 @@ async def test_enterprise_connector_health_requires_admin(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_enterprise_admin_can_read_connector_action_schemas(tmp_path):
+    server = _server(tmp_path)
+    headers = _admin_headers(server)
+
+    response = await server.handle_enterprise_connector_schemas(
+        _FakeRequest(headers=headers, path="/api/enterprise/connectors/action-schemas")
+    )
+
+    payload = json.loads(response.text)
+    schemas = {(item["connector_type"], item["action"]): item for item in payload["schemas"]}
+    assert response.status == 200
+    assert payload["ok"] is True
+    assert payload["count"] == len(payload["schemas"])
+    assert ("feishu", "message.send") in schemas
+    assert ("github", "pr.merge") in schemas
+    pull_number = [
+        item for item in schemas[("github", "pr.merge")]["parameters"] if item["name"] == "pull_number"
+    ][0]
+    assert pull_number["required"] is True
+    assert pull_number["type"] == "integer"
+
+
+@pytest.mark.asyncio
+async def test_enterprise_connector_action_schemas_require_admin(tmp_path):
+    server = _server(tmp_path)
+
+    response = await server.handle_enterprise_connector_schemas(
+        _FakeRequest(headers={}, path="/api/enterprise/connectors/action-schemas")
+    )
+
+    assert response.status == 403
+    assert json.loads(response.text)["ok"] is False
+
+
+@pytest.mark.asyncio
 async def test_enterprise_admin_can_create_list_and_revoke_connector_credentials(tmp_path):
     server = _server(tmp_path)
     headers = _admin_headers(server)

@@ -28,6 +28,7 @@ from orchestrator.enterprise.connectors import (
     ConnectorExecutionService,
     ConnectorFactory,
     ConnectorRegistry,
+    connector_action_schemas,
     validate_connector_action,
 )
 from orchestrator.enterprise.credentials import ConnectorCredentialStore
@@ -275,6 +276,7 @@ class WorkbenchApiServer:
         self.app.router.add_post("/api/enterprise/approvals/{request_id}/deny", self.handle_enterprise_approval_deny)
         self.app.router.add_get("/api/enterprise/agent-capabilities", self.handle_enterprise_agent_capabilities)
         self.app.router.add_get("/api/enterprise/connectors/health", self.handle_enterprise_connector_health)
+        self.app.router.add_get("/api/enterprise/connectors/action-schemas", self.handle_enterprise_connector_schemas)
         self.app.router.add_post("/api/enterprise/connectors/execute", self.handle_enterprise_connector_execute)
         self.app.router.add_get("/api/enterprise/connectors/credentials", self.handle_enterprise_connector_credentials)
         self.app.router.add_post("/api/enterprise/connectors/credentials", self.handle_enterprise_connector_credentials_create)
@@ -2449,6 +2451,13 @@ class WorkbenchApiServer:
                 "count": len(health),
             }
         )
+
+    async def handle_enterprise_connector_schemas(self, request):
+        error = self._enterprise_admin_error_response(request)
+        if error is not None:
+            return error
+        schemas = connector_action_schemas()
+        return web.json_response({"ok": True, "schemas": schemas, "count": len(schemas)})
 
     async def handle_enterprise_connector_execute(self, request):
         error = self._enterprise_admin_error_response(request)

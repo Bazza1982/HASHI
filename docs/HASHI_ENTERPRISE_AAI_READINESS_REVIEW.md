@@ -137,6 +137,7 @@ This is **not** the end state of the enterprise product. It is the first reviewa
 - Google Chat, Teams, and Feishu incoming webhook connectors support governed `message.send` with dry-run behavior.
 - Default connector policy allows GitHub reads, requires approval for GitHub writes, and requires approval for Slack, Google Chat, Teams, and Feishu outbound messages.
 - Workbench connector credential creation rejects unsupported connector types, unsupported secret-ref schemes, and connector credentials missing their minimum internal scope.
+- Workbench exposes an admin-gated connector action schema catalog for supported GitHub and webhook connector actions.
 - Workbench connector execution API rejects webhook `message.send` actions without non-empty `text` before execution.
 - Workbench Enterprise console supports connector credentials, health, policy defaults, and dry-run/test-run execution.
 
