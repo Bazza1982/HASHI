@@ -1061,6 +1061,37 @@ const CONNECTOR_PRESETS = {
   },
 };
 
+const CONNECTOR_PARAMETER_PRESETS = {
+  'slack.message.send.blocks': [
+    {
+      label: 'Section',
+      value: [{ type: 'section', text: { type: 'mrkdwn', text: 'HASHI connector dry run' } }],
+    },
+  ],
+  'google_chat.message.send.cards': [
+    {
+      label: 'Text card',
+      value: [{ sections: [{ widgets: [{ textParagraph: { text: 'HASHI connector dry run' } }] }] }],
+    },
+  ],
+  'teams.message.send.sections': [
+    {
+      label: 'Section',
+      value: [{ activityTitle: 'HASHI connector dry run', text: 'Connector dry run' }],
+    },
+  ],
+  'github.issue.create.labels': [
+    {
+      label: 'HASHI labels',
+      value: ['hashi', 'dry-run'],
+    },
+  ],
+};
+
+const connectorParameterPresetKey = (schema, parameter) => (
+  `${schema?.connector_type || ''}.${schema?.action || ''}.${parameter.name}`
+);
+
 const schemaValueMissing = (value, type) => {
   if (value === undefined || value === null) return true;
   if (type === 'string') return String(value).trim() === '';
@@ -1511,6 +1542,9 @@ function EnterpriseAdminPanel() {
               {editableSchemaParameters.map((parameter) => {
                 const value = connectorParameterDraft[parameter.name];
                 const inputValue = formatParameterControlValue(value, parameter.type);
+                const parameterPresets = CONNECTOR_PARAMETER_PRESETS[
+                  connectorParameterPresetKey(selectedActionSchema, parameter)
+                ] || [];
                 return (
                   <label key={parameter.name} className="connector-parameter-control">
                     <span>{parameter.name}</span>
@@ -1543,6 +1577,22 @@ function EnterpriseAdminPanel() {
                         value={inputValue}
                         onChange={(e) => updateExecutionParameter(parameter, e.target.value)}
                       />
+                    )}
+                    {!!parameterPresets.length && (
+                      <div className="connector-parameter-presets">
+                        {parameterPresets.map((preset) => (
+                          <button
+                            key={preset.label}
+                            type="button"
+                            onClick={() => updateExecutionParameter(
+                              parameter,
+                              JSON.stringify(preset.value, null, 2),
+                            )}
+                          >
+                            {preset.label}
+                          </button>
+                        ))}
+                      </div>
                     )}
                   </label>
                 );

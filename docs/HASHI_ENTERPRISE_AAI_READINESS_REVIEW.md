@@ -140,6 +140,7 @@ This is **not** the end state of the enterprise product. It is the first reviewa
 - Workbench exposes an admin-gated connector action schema catalog for supported GitHub and webhook connector actions.
 - Workbench Connector Test Run consumes the schema catalog to show parameter names, types, required flags, enum/default hints, and resource format.
 - Workbench Connector Test Run renders schema-driven controls for scalar, enum, and array parameters while keeping the raw JSON editor as an escape hatch.
+- Workbench Connector Test Run includes starter parameter presets for Slack blocks, Google Chat cards, Teams sections, and GitHub issue labels.
 - Workbench Connector Test Run validates required parameters, parameter types, and enum values before submitting connector execution requests.
 - Workbench connector execution API also validates schema-required parameters, parameter types, and enum values before invoking policy-gated connector execution.
 - Workbench connector execution API rejects webhook `message.send` actions without non-empty `text` before execution.

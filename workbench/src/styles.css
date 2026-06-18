@@ -578,6 +578,20 @@ h1 { margin: 0; font-size: 20px; }
   font-family: "Consolas", "Courier New", monospace;
   font-size: 12px;
 }
+.connector-parameter-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.connector-parameter-presets button {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: rgba(148, 163, 184, 0.1);
+  color: var(--text);
+  padding: 5px 8px;
+  cursor: pointer;
+  font-size: 0.74rem;
+}
 .connector-form input,
 .connector-form select,
 .connector-execute-form input,
