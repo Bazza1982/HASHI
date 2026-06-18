@@ -50,6 +50,44 @@ validation remains pending.
 - SIEM dashboards and alerts are starter assets; vendor import validation is
   post-alpha.
 
+## Final Alpha Validation Snapshot
+
+The release candidate cut used this local/static validation snapshot:
+
+```text
+python3 -m py_compile hashi.py setup.py orchestrator/config.py \
+  orchestrator/workbench_api.py
+
+pytest -q tests/test_enterprise_connectors.py \
+  tests/test_workbench_enterprise_connectors.py tests/test_enterprise_policy.py
+# 91 passed
+
+pytest -q tests/test_workbench_enterprise_policies.py \
+  tests/test_workbench_enterprise_approvals.py \
+  tests/test_workbench_enterprise_audit.py tests/test_enterprise_audit_ledger.py \
+  tests/test_enterprise_audit_export.py tests/test_enterprise_audit_live_export.py
+# 35 passed
+
+pytest -q tests/test_enterprise_deploy_skeleton.py \
+  tests/test_enterprise_helm_chart.py \
+  tests/test_enterprise_production_validation_plan.py \
+  tests/test_enterprise_siem_assets.py tests/test_hashi_enterprise_cli.py
+# 48 passed
+
+python3 hashi.py --help
+python3 hashi.py enterprise --help
+cd workbench && npm run build
+git diff --check
+```
+
+The local tag candidate is:
+
+```text
+v0.1.0-alpha.1
+```
+
+No release tag is created by this document update.
+
 ## Alpha Acceptance Checklist
 
 Before tagging this release:
