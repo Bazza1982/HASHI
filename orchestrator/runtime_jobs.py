@@ -428,6 +428,10 @@ async def handle_skill_job_callback(runtime, query, data: str) -> bool:
         if not job:
             await query.answer("Unknown job", show_alert=True)
             return True
+        mismatch = ownership_mismatch_label(job)
+        if mismatch:
+            await query.answer(f"Refusing to run: {mismatch}.", show_alert=True)
+            return True
         await query.answer("Running job now")
         await runtime._run_job_now(job)
         return True
