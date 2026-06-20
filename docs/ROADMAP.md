@@ -172,6 +172,50 @@ Design and acceptance record:
 - `docs/WRAPPER_AGENT_MODE_PLAN.md`
 - `docs/HCHAT_DELIVERY_BOUNDARY_PLAN.md`
 
+### Background Jobs
+
+Status: **planned / design accepted with revisions**.
+
+Background Jobs will become HASHI's durable, session-aware execution primitive
+for long-running operating-system work. It is planned as a future function-layer
+upgrade, not a core rewrite and not a scheduler shortcut.
+
+The design goal is to let agents and operators start long-running local or
+remote jobs, receive a durable job id immediately, monitor stdout/stderr, cancel
+safely, and receive completion notifications without blocking the conversation.
+
+Key product boundaries:
+
+- **Not cron/heartbeat/nudge** — scheduled triggers may launch a job, but the
+  process instance is owned by Background Jobs.
+- **Not LLM `background_mode`** — detached model generation remains separate
+  from OS process supervision.
+- **Not `/terminal/exec background=true`** — Remote background work requires a
+  dedicated `background_jobs_v1` capability and target-instance policy.
+- **Not generic `bash` with longer timeout** — jobs need durable state, bounded
+  logs, ownership, cancellation, recovery, and audit.
+
+Planned implementation shape:
+
+- Layer 2 `BackgroundJobManager` as a function-layer service with a minimal
+  kernel handle.
+- SQLite-backed local job store for Phase 1.
+- Per-agent partitions with cross-agent admin visibility.
+- Explicit `/reboot` and full-restart recovery semantics.
+- Workbench read-only job APIs early, alongside a thin `/bg` Telegram adapter.
+- Remote support later through `background_jobs_v1`, using the target
+  instance's policy and durable notification retry.
+- Enterprise hardening later for project scoping, approval, audit, retention,
+  quotas, and SIEM/webhook export.
+
+This capability supports the broader HASHI AAI direction by turning HASHI from a
+chat-driven agent runtime into a more reliable work orchestration control plane
+while preserving personal/local use.
+
+Design record:
+
+- `docs/HASHI_BACKGROUND_JOBS_DESIGN.md`
+
 ---
 
 ## Deferred Research Items
@@ -289,4 +333,4 @@ Revisit when:
 
 ## Notes
 - This roadmap is outcome-based; implementation details live in dedicated design docs.
-- Design docs: `docs/V2.2_TOOL_EXECUTION_PLAN.md`, `docs/HASHI_VOICE_BRIDGE_PLAN.md`, `docs/WRAPPER_AGENT_MODE_PLAN.md`
+- Design docs: `docs/V2.2_TOOL_EXECUTION_PLAN.md`, `docs/HASHI_VOICE_BRIDGE_PLAN.md`, `docs/WRAPPER_AGENT_MODE_PLAN.md`, `docs/HASHI_BACKGROUND_JOBS_DESIGN.md`
