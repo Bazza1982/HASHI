@@ -5,6 +5,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from orchestrator.job_ownership import ownership_mismatch_label
 from orchestrator.superloop_scheduler import advance_superloops_once
 
 scheduler_logger = logging.getLogger("BridgeU.Scheduler")
@@ -344,6 +345,19 @@ class TaskScheduler:
         except Exception as e:
             scheduler_logger.error("Enterprise scheduler lease release failed: %s", e, exc_info=True)
 
+    def _job_owner_mismatch(self, job: dict, *, task_kind: str, task_id: str, agent_name: str) -> str | None:
+        label = ownership_mismatch_label(job)
+        if not label:
+            return None
+        scheduler_logger.error(
+            "Blocking %s %s for %s: %s. Review the task owner before enabling it.",
+            task_kind,
+            task_id,
+            agent_name,
+            label,
+        )
+        return label
+
     async def run(self):
         scheduler_logger.info("Task Scheduler started%s.", " (croniter available)" if HAS_CRONITER else " (croniter NOT available, fallback mode)")
         while True:
@@ -382,6 +396,10 @@ class TaskScheduler:
 
                     last_run = self.state["heartbeats"].get(task_id, 0)
                     if now - last_run >= interval:
+                        if self._job_owner_mismatch(hb, task_kind="Heartbeat", task_id=task_id, agent_name=agent_name):
+                            self.state["heartbeats"][task_id] = now
+                            state_changed = True
+                            continue
                         scheduler_logger.info(f"Triggering heartbeat {task_id} for {agent_name}")
                         rt = runtime_map[agent_name]
                         if action.startswith("skill:"):
@@ -433,6 +451,11 @@ class TaskScheduler:
 
                     last_run = self.state.setdefault("nudges", {}).get(task_id, 0)
                     if now - last_run < interval:
+                        continue
+
+                    if self._job_owner_mismatch(nudge, task_kind="Nudge", task_id=task_id, agent_name=agent_name):
+                        self.state["nudges"][task_id] = now
+                        state_changed = True
                         continue
 
                     rt = runtime_map[agent_name]
@@ -535,6 +558,10 @@ class TaskScheduler:
                         continue
 
                     if missed_by is not None:
+                        if self._job_owner_mismatch(cron, task_kind="Cron", task_id=task_id, agent_name=agent_name):
+                            self.state["crons"][task_id] = now
+                            state_changed = True
+                            continue
                         # --- Loop safety net: count iterations, auto-disable at max ---
                         loop_meta = cron.get("loop_meta")
                         if loop_meta is not None:

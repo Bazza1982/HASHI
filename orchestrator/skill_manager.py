@@ -10,6 +10,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from orchestrator.job_ownership import ownership_mismatch_label
+
 
 @dataclass
 class SkillDefinition:
@@ -376,6 +378,10 @@ class SkillManager:
             for job in jobs:
                 if job.get("id") != task_id:
                     continue
+                if enabled:
+                    mismatch = ownership_mismatch_label(job)
+                    if mismatch:
+                        return False, f"Refusing to enable {task_id}: {mismatch}."
                 job["enabled"] = enabled
                 self._save_active_heartbeats(jobs)
                 return True, f"{task_id} is now {'ON' if enabled else 'OFF'}."
@@ -384,6 +390,10 @@ class SkillManager:
         for job in tasks.get(key, []):
             if job.get("id") != task_id:
                 continue
+            if enabled:
+                mismatch = ownership_mismatch_label(job)
+                if mismatch:
+                    return False, f"Refusing to enable {task_id}: {mismatch}."
             job["enabled"] = enabled
             self._save_tasks(tasks)
             return True, f"{task_id} is now {'ON' if enabled else 'OFF'}."
@@ -461,6 +471,9 @@ class SkillManager:
         new_job["agent"] = new_agent
         new_job["enabled"] = False
         new_job["note"] = (job.get("note") or job["id"]) + f" [transferred from {job.get('agent', '?')}]"
+        mismatch = ownership_mismatch_label(new_job)
+        if mismatch:
+            new_job["note"] += f" [{mismatch}; review before enabling]"
 
         tasks = self._load_tasks()
         key = self._task_key_for_kind(kind)
@@ -472,11 +485,17 @@ class SkillManager:
         """Import a job dict into local tasks.json (used for cross-instance transfer)."""
         tasks = self._load_tasks()
         key = self._task_key_for_kind(kind)
+        job = dict(job)
+        mismatch = ownership_mismatch_label(job)
+        if mismatch:
+            job["enabled"] = False
+            note = job.get("note") or job.get("id") or ""
+            suffix = f"[{mismatch}; imported disabled]"
+            job["note"] = f"{note} {suffix}".strip()
         # Avoid duplicate IDs
         existing_ids = {j.get("id") for j in tasks.get(key, [])}
         if job.get("id") in existing_ids:
             from uuid import uuid4
-            job = dict(job)
             job["id"] = f"{job.get('agent', 'imported')}-{uuid4().hex[:8]}"
         tasks.setdefault(key, []).append(job)
         self._save_tasks(tasks)
