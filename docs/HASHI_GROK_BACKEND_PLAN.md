@@ -48,6 +48,31 @@ Completed on 2026-06-14:
   - Prompt D: safety refusal prompt passed.
 - The real empty-answer retry path is covered by unit tests; the post-reboot live probe did not trigger an empty-answer retry, so that remains a residual live-observability note rather than a blocker.
 
+Additional model availability probe on 2026-06-20:
+
+- Logged-in Grok CLI version: `grok 0.2.51`.
+- `grok models` reported only:
+  - `grok-composer-2.5-fast` as default.
+  - `grok-build` as the additional available model.
+- Both available models passed a HASHI-compatible `streaming-json` smoke probe
+  with `Reply exactly: OK`.
+- The following candidate IDs returned `unknown model id` through the local
+  authenticated Grok CLI and must not be added to the current text backend
+  registry:
+  - `grok-4.3`
+  - `grok-4.20-0309-reasoning`
+  - `grok-4.20-0309-non-reasoning`
+  - `grok-4.20-multi-agent-0309`
+  - `grok-build-0.1`
+  - `grok-imagine-image`
+  - `grok-imagine-image-quality`
+  - `grok-imagine-video`
+
+The `grok-build-0.1` candidate appears to be a different or stale identifier;
+the CLI-exposed model id is `grok-build`, which HASHI already has registered.
+The imagine image/video IDs may belong to a different product/API surface, but
+they are not available through the current `grok` CLI text backend.
+
 ### Operational Status
 
 Grok CLI can now be selected for flex agents that include `grok-cli` in `allowed_backends`:
