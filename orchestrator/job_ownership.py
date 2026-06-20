@@ -7,7 +7,9 @@ from collections.abc import Mapping
 from typing import Any
 
 
-_WORKSPACE_REF_RE = re.compile(r"(?:^|[\"'`\s:=,(])(?:/[^\"'`\s]*)?workspaces/([A-Za-z0-9_.-]+)(?:/|\b)")
+_WORKSPACE_REF_RE = re.compile(
+    r"(?:^|[\"'`\s:=,(])(?:[/\\][^\"'`\s]*)?workspaces[/\\]([A-Za-z0-9_.-]+)(?:[/\\]|\b)"
+)
 
 
 def referenced_workspace_owners(text: str) -> set[str]:

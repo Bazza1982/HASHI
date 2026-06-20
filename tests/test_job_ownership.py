@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -34,6 +33,16 @@ def test_resource_owner_mismatch_allows_own_workspace_path():
 
     assert resource_owner_mismatches(job) == []
     assert ownership_mismatch_label(job) is None
+
+
+def test_resource_owner_mismatch_detects_windows_workspace_path():
+    job = {
+        "id": "zelda-loop-9ada33",
+        "agent": "zelda",
+        "prompt": r"Read C:\Users\lily\projects\hashi\workspaces\lily\wiki_state.sqlite",
+    }
+
+    assert resource_owner_mismatches(job) == ["lily"]
 
 
 def test_scheduler_blocks_owner_mismatch_before_enqueue(tmp_path, caplog):
