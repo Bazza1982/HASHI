@@ -8,6 +8,8 @@ from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from orchestrator.job_ownership import ownership_mismatch_label
+
 CALLBACK_DATA_LIMIT = 64
 CALLBACK_TOKEN_TTL_SECONDS = 30 * 60
 MAX_CALLBACK_TOKENS = 256
@@ -129,6 +131,9 @@ def _build_jobs_with_buttons(runtime, agent_name: str, skill_manager, filter_age
         note = h.get("note", "")
         if note and note != h["id"]:
             lines.append(f"   {note}")
+        mismatch = ownership_mismatch_label(h)
+        if mismatch:
+            lines.append(f"   ⚠️ {mismatch}")
         all_jobs.append(("heartbeat", h))
 
     for c in data.get("crons", []):
@@ -165,6 +170,9 @@ def _build_jobs_with_buttons(runtime, agent_name: str, skill_manager, filter_age
         note = c.get("note", "")
         if note and note != c["id"]:
             lines.append(f"   {note}")
+        mismatch = ownership_mismatch_label(c)
+        if mismatch:
+            lines.append(f"   ⚠️ {mismatch}")
         all_jobs.append(("cron", c))
 
     for kind, job in all_jobs:
@@ -242,6 +250,9 @@ def _build_jobs_text(agent_name: str, skill_manager) -> str:
                 lines.append(f"      action: {action}")
             if note and note != h["id"]:
                 lines.append(f"      {note}")
+            mismatch = ownership_mismatch_label(h)
+            if mismatch:
+                lines.append(f"      ⚠️ {mismatch}")
         lines.append("")
         found = True
 
@@ -258,6 +269,9 @@ def _build_jobs_text(agent_name: str, skill_manager) -> str:
                 lines.append(f"      action: {action}")
             if note and note != c["id"]:
                 lines.append(f"      {note}")
+            mismatch = ownership_mismatch_label(c)
+            if mismatch:
+                lines.append(f"      ⚠️ {mismatch}")
         lines.append("")
         found = True
 
