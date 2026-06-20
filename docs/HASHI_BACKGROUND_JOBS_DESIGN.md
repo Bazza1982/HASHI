@@ -1,6 +1,6 @@
 # HASHI Background Jobs Design
 
-Status: draft
+Status: draft, revised after independent design review
 Date: 2026-06-20
 Scope: HASHI runtime, HASHI Remote, Workbench, governed tool execution
 
@@ -30,6 +30,19 @@ as a thin wrapper around `subprocess.Popen` hidden inside one command handler.
 It should be a managed runtime service with durable state, explicit lifecycle
 transitions, bounded logs, security policy, and clean API surfaces.
 
+The design must also follow HASHI's layered-runtime principle:
+
+- keep the immutable core minimal;
+- land feature behavior in Layer 2 function services;
+- let the kernel hold only a service handle, not job business logic;
+- keep local job state in Layer 4 state paths;
+- make `/reboot` reload function-layer code and re-run manager recovery without
+  requiring a full process restart.
+
+This means "kernel singleton" in this document means a single function-layer
+service instance owned through a kernel handle. It does not mean moving process
+supervision logic into protected core files.
+
 ## Existing Code Review
 
 This design is based on a review of the current HASHI code paths that overlap
@@ -41,6 +54,8 @@ Relevant files:
 
 - `orchestrator/flexible_agent_runtime.py`
 - `orchestrator/runtime_pipeline.py`
+- `orchestrator/runtime_lifecycle.py`
+- `legacy/bridge_agent_runtime.py`
 - `tests/test_runtime_pipeline.py`
 - `tests/test_wrapper_commands.py`
 
@@ -60,6 +75,9 @@ Current strengths:
 - `register_request_listener()` and `_notify_request_listeners()` provide a
   useful completion callback pattern. Late listeners are handled through
   `_pending_request_results`.
+- The effective LLM detach call chain is:
+  `runtime_lifecycle` -> `run_backend_generation()` ->
+  `_register_background_task()` -> `_on_background_complete()`.
 
 Current gaps:
 
@@ -71,6 +89,10 @@ Current gaps:
 - `_background_tasks` is an `asyncio.Task` set, not a process registry.
 - The existing notification path can be reused, but it is not sufficient as the
   persistence or supervision layer.
+- `legacy/bridge_agent_runtime.py` still has a parallel background-task shape.
+  The canonical implementation for new Background Jobs is
+  `FlexibleAgentRuntime`; legacy bridge behavior is out of scope unless a later
+  compatibility pass explicitly adopts the new manager.
 
 Design implication:
 
@@ -104,6 +126,10 @@ Current gaps:
   "track this OS process until completion".
 - Scheduler action execution has short operational timeouts for the scheduling
   action itself. It should not directly own a long-running child process.
+- Scheduler skill actions may run much longer than ordinary scheduler actions.
+  A scheduler skill must not spawn an unregistered long-running OS subprocess;
+  long OS work must be registered through `BackgroundJobManager.start()` and the
+  scheduler action should return after job creation.
 
 Design implication:
 
@@ -146,9 +172,11 @@ Current gaps:
 Design implication:
 
 Remote should gain a separate capability such as `background_jobs_v1`, not
-mutate `/terminal/exec` semantics in a backward-incompatible way. A compatibility
-extension can allow `/terminal/exec` to accept `background=true`, but the
-canonical API should be explicit.
+mutate `/terminal/exec` semantics in a backward-incompatible way.
+`/terminal/exec?background=true` is explicitly rejected for this design because
+it would blur synchronous command semantics, create client compatibility risk,
+and bypass the stronger job policy surface. Background jobs require a dedicated
+capability and endpoint family.
 
 ### Workbench And Notification Surfaces
 
@@ -192,6 +220,10 @@ Current strengths:
 
 - `ToolRegistry` already controls allowed tools and enterprise governance
   gates.
+- Existing enterprise gates already use context fields such as
+  `enterprise_workspace_root`, project workspace roots, and shell/network/browser
+  enablement checks. Background Job policy should reuse these fields instead of
+  inventing a parallel enterprise switch model.
 - `execute_bash()` runs shell commands under the agent workspace and enforces
   a timeout.
 - `execute_process_list()` and `execute_process_kill()` exist for process
@@ -204,6 +236,9 @@ Current gaps:
 - Existing process tools act on system processes, not HASHI-owned job records.
 - There is no job-scoped permission model, log redaction policy, or job owner
   model.
+- Remote audit currently records terminal exec attempts. Background Jobs need
+  symmetric audit events for start, cancel, completion, timeout, and policy
+  denial.
 
 Design implication:
 
@@ -297,9 +332,22 @@ BackgroundJobManager
 ├── BackgroundProcessRunner
 ├── BackgroundJobMonitor
 ├── BackgroundJobNotifier
-├── BackgroundJobPolicy
-└── BackgroundJobApiAdapter
+└── BackgroundJobPolicy
 ```
+
+Phase 1 should implement these as a compact function-layer module rather than
+as a framework. A practical first cut can be one module with four concrete
+classes:
+
+- `BackgroundJobManager`
+- `BackgroundJobStore`
+- `BackgroundProcessRunner`
+- `BackgroundJobMonitor`
+
+Policy can start as a focused helper owned by the manager. Workbench and Remote
+route handlers should call the manager directly; they should not introduce a
+pass-through `ApiAdapter` layer until there is real cross-transport complexity
+that justifies it.
 
 ### Component Responsibilities
 
@@ -309,13 +357,17 @@ BackgroundJobManager
   tools;
 - coordinates validation, persistence, process start, status transitions,
   monitor registration, and notifications.
+- runs as a single function-layer service instance per HASHI process, exposed as
+  `kernel.background_job_manager`;
+- owns per-agent partitions rather than creating separate process supervisors
+  per runtime.
 
 `BackgroundJobStore`
 
-- durable JSON or SQLite-backed store;
+- durable SQLite-backed store for Phase 1 local/personal usage;
 - records job metadata, lifecycle state, timestamps, return code, pid, paths,
   owner, origin, and notification policy;
-- writes atomically;
+- serializes writes through one manager-owned writer path;
 - supports startup recovery.
 
 `BackgroundProcessRunner`
@@ -326,6 +378,9 @@ BackgroundJobManager
 - handles environment filtering;
 - avoids shell when argv mode is available;
 - supports shell mode only when policy allows it.
+- performs process start and wait operations without blocking the runtime event
+  loop; blocking platform calls must run through executor-safe helpers.
+- enforces stdout/stderr byte caps while writing, not only when tailing logs.
 
 `BackgroundJobMonitor`
 
@@ -335,6 +390,8 @@ BackgroundJobManager
 - enforces timeout and idle-timeout rules;
 - marks jobs abandoned on restart when rebind is unsafe;
 - handles log rollover and last-output snapshots.
+- records orphan information when cancellation cannot terminate the process
+  group.
 
 `BackgroundJobNotifier`
 
@@ -348,12 +405,32 @@ BackgroundJobManager
 - validates command, cwd, environment, actor, auth level, source, and profile;
 - enforces personal vs enterprise behavior;
 - owns concurrency limits and dangerous-command blocks.
+- reuses `ToolRegistry`/enterprise execution context where possible, including
+  workspace scope and shell enablement checks.
 
-`BackgroundJobApiAdapter`
+### Service Ownership
 
-- exposes Workbench and Remote APIs;
-- converts HTTP payloads into manager calls;
-- never starts processes directly.
+`BackgroundJobManager` should be a kernel-owned function-layer service:
+
+```text
+kernel.background_job_manager
+service_manager.start_background_jobs()
+service_manager.stop_background_jobs()
+service_manager.restart_background_jobs()
+```
+
+The kernel handle exists so Workbench, runtimes, scheduler, Remote hooks, and
+commands can address one manager consistently. The implementation remains in
+Layer 2 and must avoid protected core business logic.
+
+This is important for:
+
+- cross-agent job listing;
+- admin/operator cancellation;
+- per-agent and per-instance concurrency quotas;
+- `/reboot` behavior;
+- Workbench read-only dashboards;
+- future enterprise audit and project scoping.
 
 ### Layer Placement
 
@@ -367,8 +444,10 @@ Following `docs/HASHI_LAYERED_RUNTIME_BOUNDARIES.md`:
 - local job state under workspace or `~/.hashi/background-jobs`: Layer 4 state.
 - enterprise governance integration: enterprise function layer.
 
-No protected core change should be required for the first implementation unless
-the kernel service lifecycle needs a new owned service handle.
+Protected core should stay minimal. The only acceptable core-facing change is a
+service handle and lifecycle wiring through existing service-manager/reboot
+patterns. Process supervision, policy, storage, notification, and API behavior
+belong in function-layer modules.
 
 ## State Model
 
@@ -398,7 +477,6 @@ abandoned_after_restart
 adoption_failed
 policy_denied
 start_failed
-notification_failed
 ```
 
 Terminal states:
@@ -414,9 +492,8 @@ policy_denied
 start_failed
 ```
 
-`notification_failed` should usually be a secondary flag, not the primary
-terminal state, because the process may have succeeded even if notification
-delivery failed.
+Notification failure is recorded under `notification.delivery_errors[]` and
+does not change the primary process terminal state.
 
 ### Metadata Schema
 
@@ -461,8 +538,9 @@ delivery failed.
   "logs": {
     "stdout_path": "background_jobs/job_.../stdout.log",
     "stderr_path": "background_jobs/job_.../stderr.log",
-    "combined_path": "background_jobs/job_.../combined.log",
-    "last_output_excerpt": ""
+    "last_output_excerpt": "",
+    "stdout_truncated_bytes": 0,
+    "stderr_truncated_bytes": 0
   },
   "notification": {
     "notify_on_start": false,
@@ -481,19 +559,31 @@ delivery failed.
 Personal/local default:
 
 ```text
-workspaces/<agent>/background_jobs/
-  index.json
-  job_<id>/
-    meta.json
-    stdout.log
-    stderr.log
-    combined.log
+~/.hashi/background_jobs/
+  jobs.db
+  logs/
+    <agent>/
+      job_<id>/
+        stdout.log
+        stderr.log
 ```
+
+The Phase 1 store should be SQLite, not JSON. SQLite is still local,
+dependency-light, and compatible with personal HASHI, but it gives better
+concurrency safety, idempotency, Workbench query support, and future migration
+paths than an `index.json` file.
+
+JSON may be added later as an export/backup format. If a future local profile
+uses JSON for portability, it must use a single writer, per-job metadata files,
+atomic rename, fsync where practical, and tests for partial-write recovery.
 
 Remote sidecar default:
 
 ```text
 ~/.hashi-remote/background_jobs/<instance_id>/
+  jobs.db
+  pending_notifications.db
+  logs/
 ```
 
 Enterprise future:
@@ -533,8 +623,11 @@ Enterprise future:
 2. Store writes `cancel_requested`.
 3. Runner sends SIGTERM or platform equivalent to process group.
 4. If still alive after grace period, runner sends SIGKILL when policy allows.
-5. Store writes `cancelled` or `failed` if termination fails.
-6. Notifier sends cancellation summary.
+5. Store writes `cancelled` only after termination is confirmed.
+6. If termination fails or a child process appears orphaned, store writes
+   `failed` with `orphan_pid` / `orphan_pgid` metadata instead of silently
+   claiming cancellation succeeded.
+7. Notifier sends cancellation summary.
 
 ### Restart Recovery Flow
 
@@ -559,6 +652,36 @@ The conservative Phase 1 rule may be:
 This is less magical than Hermes-style in-memory monitoring, but it is safer and
 more trustworthy.
 
+### Reboot Recovery Flow
+
+HASHI `/reboot` is not the same event as a full process restart.
+
+For `/reboot`:
+
+1. `ServiceManager.restart_background_jobs()` stops the monitor loop without
+   killing child processes.
+2. The function-layer module is reloaded through the existing hot-reload path.
+3. A new `BackgroundJobManager` instance opens the same SQLite store.
+4. Recovery runs immediately.
+5. Jobs from the same still-running HASHI process may be re-associated only if
+   the manager can verify identity safely.
+6. Jobs that cannot be verified are marked `abandoned_after_restart` with a
+   user-visible explanation, pid, and log path.
+
+For full process restart:
+
+- Phase 1 should conservatively mark previously running jobs as
+  `abandoned_after_restart` unless platform-specific process adoption has been
+  implemented and tested.
+
+User-facing text must be honest:
+
+```text
+HASHI restarted while this background job was running. The OS process may still
+exist, but HASHI supervision is no longer attached. Check pid/log path before
+manual cleanup.
+```
+
 ## Public Surfaces
 
 ### Telegram Commands
@@ -569,7 +692,7 @@ Suggested commands:
 /bg run <command>
 /bg list [running|recent|failed|all]
 /bg status <job_id>
-/bg tail <job_id> [stdout|stderr|combined]
+/bg tail <job_id> [stdout|stderr]
 /bg cancel <job_id>
 /bg notify <job_id> on|off
 ```
@@ -588,13 +711,25 @@ Suggested endpoints:
 POST /api/background-jobs
 GET  /api/background-jobs?agent=zelda&state=running
 GET  /api/background-jobs/{job_id}
-GET  /api/background-jobs/{job_id}/tail?stream=combined&lines=80
+GET  /api/background-jobs/{job_id}/tail?stream=stdout&lines=80
 POST /api/background-jobs/{job_id}/cancel
 POST /api/background-jobs/{job_id}/notify
 ```
 
 Workbench should treat the job store as the source of truth and should render
 structured job metadata, not parse chat notifications.
+
+Phase 1b should include read-only Workbench endpoints even before the full
+operator UI is polished:
+
+```text
+GET /api/background-jobs
+GET /api/background-jobs/{job_id}
+GET /api/background-jobs/{job_id}/tail
+```
+
+These endpoints give integration tests, cross-agent visibility, and future
+enterprise controls a structured surface that Telegram commands cannot provide.
 
 ### Remote API
 
@@ -633,6 +768,16 @@ Remote payload should include:
 Remote must not silently map background jobs onto `/terminal/exec`. The old
 endpoint remains for short commands.
 
+Remote execution policy is owned by the target instance. If HASHI1 asks HERMES
+to run a job, HERMES must evaluate the command using HERMES' workspace roots,
+AuthLevel limits, environment policy, and enterprise profile. The initiating
+instance may request intent; it does not lend its local permissions to the
+target.
+
+Remote notification retry must be durable. A Remote sidecar that completes a
+job while the local HASHI core or Workbench is offline should persist a pending
+notification record and retry later with idempotency keys.
+
 ### Tool Surface
 
 Only after the manager exists, add tool schemas:
@@ -648,6 +793,22 @@ background_job_list
 Model-facing tools should return compact structured summaries. Raw logs should
 be bounded and redacted.
 
+### Scheduler Internal API
+
+Scheduler integration should use explicit manager methods rather than spawning
+subprocesses inside scheduler or skill code:
+
+```text
+BackgroundJobManager.start_from_scheduler(...)
+BackgroundJobManager.start_from_runtime_command(...)
+BackgroundJobManager.start_from_workbench(...)
+BackgroundJobManager.start_from_remote(...)
+BackgroundJobManager.start_from_tool(...)
+```
+
+The source-specific methods may share one internal validator, but separate
+entrypoints make audit, policy, and attribution clear.
+
 ## Security And Governance
 
 ### Command Policy
@@ -660,16 +821,45 @@ Personal profile:
 - default allowed under configured workspace;
 - shell mode allowed if the agent already has shell/builtin permission;
 - dangerous patterns blocked by existing and new policy rules;
-- max concurrent jobs per agent defaults to 2.
+- max concurrent jobs per agent defaults to 2, but must be configurable in
+  Layer 4 instance configuration;
+- remote-originated jobs count against a separate remote quota as well as the
+  owning agent quota.
 
 Enterprise profile:
 
 - disabled by default until explicitly enabled;
 - requires project workspace scope;
 - command cwd must pass `ExecutionScope`;
-- environment allowlist required;
+- must reuse existing enterprise execution context fields such as
+  `enterprise_workspace_root`, project workspace roots, shell enablement, and
+  audit context rather than creating a parallel policy stack;
+- environment allowlist required; default should be empty or minimal;
 - audit event required for start, cancel, completion, and failure;
 - L3/L4 actions require explicit approval or remain blocked.
+
+### Environment Policy
+
+API, Remote, and model-facing tool calls should default to argv mode and a
+minimal environment. Shell mode must be explicit and require stronger policy
+approval.
+
+Personal profile may inherit a small safe environment, but should strip obvious
+secret patterns by default:
+
+```text
+*_TOKEN
+*_KEY
+*_SECRET
+OPENAI_*
+ANTHROPIC_*
+GITHUB_TOKEN
+HASHI_REMOTE_TOKEN
+```
+
+Enterprise profile should use an allowlist. Credentials should be injected
+through governed connector/secret mechanisms rather than ambient process
+environment inheritance.
 
 ### Process Groups
 
@@ -682,17 +872,22 @@ On POSIX:
 On Windows:
 
 - use Windows-specific job object or process-tree termination when available;
-- otherwise mark cancellation semantics as best-effort.
+- otherwise mark cancellation semantics as best-effort;
+- Remote Phase 3 must include a Windows smoke gate before advertising
+  production-quality cancellation semantics.
 
 ### Log Policy
 
 Logs must be bounded:
 
 - max bytes per stream;
+- write-side enforcement of stdout/stderr caps;
 - tail excerpts in notifications;
 - no unlimited Telegram output;
 - optional redaction hooks for secrets;
-- log paths scoped under job-owned directories.
+- log paths scoped under job-owned directories;
+- retention policy with `retention_days`, `max_jobs_per_agent`, and optional
+  `max_log_bytes_per_agent`.
 
 ### Ownership
 
@@ -705,6 +900,13 @@ A job has:
 - optional remote correlation.
 
 Cancellation should require the same actor class or an operator/admin channel.
+
+Cross-agent cancellation policy:
+
+- owning agent may cancel its own jobs;
+- authorized local operator may cancel any local personal-profile job;
+- enterprise project admins may cancel jobs in their project scope;
+- non-owner agents may only cancel when policy explicitly grants delegation.
 
 ## Notification Design
 
@@ -784,6 +986,8 @@ Policy:
 
 - Remote stores terminal state locally;
 - retry notification when Workbench becomes reachable;
+- persist retry intent in `pending_notifications.db` or an equivalent durable
+  queue, not only in memory;
 - expose status via Remote API.
 
 ### Log Explosion
@@ -795,6 +999,7 @@ Risk:
 Policy:
 
 - use bounded log files or rotation;
+- enforce the cap while writing logs, not only when reading tails;
 - track truncation in metadata;
 - notification includes only bounded tail.
 
@@ -808,6 +1013,9 @@ Policy:
 
 - store notification delivery idempotency keys;
 - completion delivery should check `notification.delivered` and delivery target.
+- Remote-originated jobs should reuse protocol outbound correlation concepts
+  where possible so completion events do not become a second, incompatible
+  reply-tracking system.
 
 ### PID Reuse
 
@@ -820,6 +1028,21 @@ Policy:
 - adoption requires command/start-time verification;
 - cancellation after restart must be blocked unless adoption confidence is high.
 
+### Scheduler Skill Escape Hatch
+
+Risk:
+
+- scheduler skills can run long enough to hide direct subprocess launches inside
+  skill code.
+
+Policy:
+
+- scheduler and skill code must not spawn unregistered long-running OS
+  subprocesses;
+- long OS jobs must be created through `BackgroundJobManager`;
+- tests should cover that scheduler integration returns a `job_id` instead of
+  waiting for process completion.
+
 ## Implementation Roadmap
 
 This is not the shortest path. It is the serious, durable path.
@@ -828,35 +1051,61 @@ This is not the shortest path. It is the serious, durable path.
 
 - Land this design document.
 - Add test plan documents or failing/xfail design tests if desired.
-- Decide store format: JSON first for personal, SQLite/Postgres later for
-  enterprise.
+- Lock the Phase 1 SQLite schema and manager public API before writing feature
+  code.
+- Define `/reboot` recovery expectations before adding Telegram commands.
 
-### Phase 1: Local Manager, Store, And Commands
+### Phase 1: Local Manager, SQLite Store, Monitor, And Lifecycle
 
 - Add `orchestrator/background_jobs.py`.
-- Add unit tests for state transitions, atomic writes, log tailing, policy
-  denial, cancellation, restart recovery marking.
-- Add `/bg` command module.
-- Add local runtime service initialization in the function/service layer.
+- Add a SQLite-backed local store.
+- Add a kernel-owned function-layer service handle:
+  `kernel.background_job_manager`.
+- Add `service_manager.start_background_jobs()`,
+  `stop_background_jobs()`, and `restart_background_jobs()`.
+- Add unit tests for state transitions, store writes, log tailing, write-side
+  log caps, policy denial, cancellation, orphan handling, restart/reboot
+  recovery marking, and notification idempotency.
+- Add local runtime service initialization in the function/service layer without
+  moving supervision logic into protected core.
 - Keep Remote and model tools out of scope.
 
 Acceptance:
 
 - start a local job;
 - receive job id immediately;
-- list/status/tail/cancel work;
+- manager list/status/tail/cancel work through direct service tests;
 - completion notification is sent;
-- restart marks unsafe running jobs explicitly.
+- `/reboot` recovery is explicit;
+- full restart marks unsafe running jobs explicitly.
 
-### Phase 2: Workbench API
+### Phase 1b: Workbench Read-Only API And Telegram Adapter
 
-- Add structured Workbench endpoints.
-- Add tests for auth, agent scoping, status, tail bounds, cancellation.
+- Add structured read-only Workbench endpoints:
+  - `GET /api/background-jobs`
+  - `GET /api/background-jobs/{job_id}`
+  - `GET /api/background-jobs/{job_id}/tail`
+- Add tests for auth, agent scoping, status, and tail bounds.
+- Add `/bg` Telegram command module as a thin adapter over the manager.
 - Keep Telegram notification as a channel, not the source of truth.
 
 Acceptance:
 
 - Workbench can render a jobs dashboard without scraping transcripts.
+- Telegram can start/list/status/tail/cancel without owning job semantics.
+
+### Phase 2: Write APIs, Cancellation, Retention, And Quotas
+
+- Add Workbench cancellation and notification preference endpoints.
+- Add retention cleanup.
+- Add per-agent and per-instance quotas in Layer 4 config.
+- Add cross-agent/admin cancellation policy tests.
+
+Acceptance:
+
+- operator surfaces can cancel jobs safely;
+- retention prevents unbounded workspace growth;
+- quota enforcement is deterministic.
 
 ### Phase 3: Remote Background Jobs
 
@@ -865,11 +1114,15 @@ Acceptance:
 - Reuse `AuthLevel` classification but apply stricter long-running policy.
 - Persist remote-side jobs under `~/.hashi-remote/background_jobs`.
 - Add hchat/protocol completion delivery.
+- Add durable remote pending-notification retry storage.
+- Add Windows/WSL smoke gates before advertising reliable cancellation.
 
 Acceptance:
 
 - one HASHI instance can start a background job on another instance;
 - completion can be observed even if the initiating chat turn ended.
+- Remote execution uses the target instance's policy, not the initiator's
+  policy.
 
 ### Phase 4: Tool Surface
 
@@ -884,7 +1137,8 @@ Acceptance:
 
 ### Phase 5: Enterprise Hardening
 
-- DB-backed job metadata.
+- Enterprise DB-backed job metadata if local SQLite is insufficient for the
+  deployment profile.
 - Org/project scoping.
 - immutable audit records.
 - per-project concurrency and quota.
@@ -897,11 +1151,14 @@ Unit tests:
 
 - job id generation;
 - state transition legality;
-- atomic store writes;
+- SQLite schema migration and idempotent writes;
 - stdout/stderr tail bounds;
+- write-side stdout/stderr byte caps;
 - cancellation state changes;
+- orphan process metadata when cancellation fails;
 - timeout state changes;
 - restart recovery marking;
+- `/reboot` recovery semantics;
 - notification idempotency;
 - policy denial.
 
@@ -912,13 +1169,17 @@ Integration tests:
 - cancel long command;
 - verify logs are written;
 - verify Telegram/Workbench notification hooks are called through fakes;
+- verify Workbench read-only API can query jobs without transcript scraping;
 - verify Remote API refuses background jobs without capability/auth.
 
 Regression tests:
 
 - existing `background_mode` LLM tests still pass;
 - existing `/terminal/exec` remains synchronous and short-lived;
+- `/terminal/exec` does not accept background job semantics;
 - scheduler tests still treat cron/heartbeat as trigger definitions;
+- scheduler integration creates a job id instead of waiting for long OS process
+  completion;
 - Workbench `/api/admin/notify` remains compatible.
 
 Manual smoke:
@@ -941,10 +1202,11 @@ GET /background/jobs/{job_id}/tail
 ## Open Decisions
 
 1. Store format for Phase 1:
-   - JSON is simpler and matches current local state patterns.
-   - SQLite is safer for concurrent updates and future Workbench queries.
-   - Recommendation: JSON for first personal/local implementation only if all
-     writes are atomic and manager serializes updates; SQLite for enterprise.
+   - Decision: use SQLite for Phase 1 local/personal.
+   - Rationale: concurrent-safe enough for this service, simple to query from
+     Workbench, better for idempotent notification/cancel tracking, and still
+     local-first.
+   - JSON remains an export/backup format, not the authoritative live store.
 
 2. Whether to support process adoption after restart in Phase 1:
    - Recommendation: mark as `abandoned_after_restart` first. Add adoption only
@@ -963,6 +1225,15 @@ GET /background/jobs/{job_id}/tail
    Remote service:
    - Recommendation: separate manager/service, protocol manager only handles
      correlation and delivery events.
+
+6. Whether manager ownership violates minimal core:
+   - Decision: no, if implemented as a function-layer service handle.
+   - The kernel may own `background_job_manager` as a handle, but protected core
+     should not contain process supervision, policy, or storage behavior.
+
+7. Whether `/terminal/exec` should get `background=true`:
+   - Decision: no. Keep `/terminal/exec` synchronous and short-lived. Use
+     `background_jobs_v1` instead.
 
 ## Recommendation
 
