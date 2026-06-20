@@ -3301,6 +3301,18 @@ class FlexibleAgentRuntime:
             return False, f"Connection failed ({host}:{wb_port}): {e}"
 
     async def _run_job_now(self, job: dict[str, Any]) -> tuple[bool, str]:
+        from orchestrator.job_ownership import ownership_mismatch_label
+
+        mismatch = ownership_mismatch_label(job)
+        if mismatch:
+            message = f"Refusing to run job {job.get('id')}: {mismatch}."
+            await self.send_long_message(
+                chat_id=self._primary_chat_id(),
+                text=message,
+                request_id=f"job-{job.get('id')}",
+                purpose="skill-job-run",
+            )
+            return False, message
         action = job.get("action", "enqueue_prompt")
         if action == "export_transcript":
             await self.send_long_message(

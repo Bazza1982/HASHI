@@ -4,6 +4,10 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from orchestrator import runtime_jobs
+from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.job_ownership import ownership_mismatch_label, resource_owner_mismatches
 from orchestrator.runtime_jobs import _build_jobs_text, _build_jobs_with_buttons
 from orchestrator.scheduler import TaskScheduler
@@ -193,3 +197,57 @@ def test_jobs_with_buttons_displays_owner_mismatch(tmp_path):
 
     assert "resource owner mismatch: workspaces/lily" in text
     assert markup is not None
+
+
+@pytest.mark.asyncio
+async def test_runtime_run_job_now_refuses_owner_mismatch():
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.sent = []
+    runtime._primary_chat_id = lambda: 1
+
+    async def _send_long_message(**kwargs):
+        runtime.sent.append(kwargs)
+
+    runtime.send_long_message = _send_long_message
+    job = {
+        "id": "zelda-loop-9ada33",
+        "agent": "zelda",
+        "prompt": "Check /home/lily/projects/hashi/workspaces/lily/wiki_state.sqlite",
+    }
+
+    ok, message = await FlexibleAgentRuntime._run_job_now(runtime, job)
+
+    assert ok is False
+    assert "resource owner mismatch: workspaces/lily" in message
+    assert "Refusing to run job zelda-loop-9ada33" in runtime.sent[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_jobs_run_callback_refuses_owner_mismatch():
+    class _SkillManager:
+        def get_job(self, kind, task_id):
+            return {
+                "id": task_id,
+                "agent": "zelda",
+                "prompt": "Check /home/lily/projects/hashi/workspaces/lily/wiki_state.sqlite",
+            }
+
+    class _Query:
+        def __init__(self):
+            self.answers = []
+
+        async def answer(self, text=None, **kwargs):
+            self.answers.append({"text": text, **kwargs})
+
+    runtime = SimpleNamespace(skill_manager=_SkillManager())
+    query = _Query()
+
+    handled = await runtime_jobs.handle_skill_job_callback(
+        runtime,
+        query,
+        "skilljob:heartbeat:run:zelda-loop-9ada33:go",
+    )
+
+    assert handled is True
+    assert query.answers[-1]["show_alert"] is True
+    assert "resource owner mismatch: workspaces/lily" in query.answers[-1]["text"]
