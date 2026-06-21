@@ -8,6 +8,13 @@ from .package import (
     read_transfer_package,
     verify_package_checksums,
 )
+from .hashi_exporter import (
+    HashiExportError,
+    HashiExportOptions,
+    HashiExportPlan,
+    export_hashi_agent,
+    plan_hashi_export,
+)
 from .schema import (
     PACKAGE_EXT,
     PACKAGE_TYPE,
@@ -27,6 +34,9 @@ __all__ = [
     "PACKAGE_TYPE",
     "SCHEMA_VERSION",
     "DryRunReport",
+    "HashiExportError",
+    "HashiExportOptions",
+    "HashiExportPlan",
     "PackageBuildResult",
     "PlannedWrite",
     "TransferPackage",
@@ -35,7 +45,9 @@ __all__ = [
     "create_transfer_package",
     "default_profile_policy",
     "default_secrets_policy",
+    "export_hashi_agent",
     "new_manifest",
+    "plan_hashi_export",
     "read_transfer_package",
     "validate_manifest",
     "validate_normalized_agent",
