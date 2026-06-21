@@ -29,6 +29,13 @@ from .hermes_exporter import (
     export_hermes_agent,
     plan_hermes_export,
 )
+from .hermes_importer import (
+    HermesImportError,
+    HermesImportOptions,
+    HermesImportPlan,
+    import_hermes_agent,
+    plan_hermes_import,
+)
 from .schema import (
     PACKAGE_EXT,
     PACKAGE_TYPE,
@@ -57,6 +64,9 @@ __all__ = [
     "HermesExportError",
     "HermesExportOptions",
     "HermesExportPlan",
+    "HermesImportError",
+    "HermesImportOptions",
+    "HermesImportPlan",
     "PackageBuildResult",
     "PlannedWrite",
     "TransferPackage",
@@ -68,10 +78,12 @@ __all__ = [
     "export_hashi_agent",
     "export_hermes_agent",
     "import_hashi_agent",
+    "import_hermes_agent",
     "new_manifest",
     "plan_hashi_export",
     "plan_hashi_import",
     "plan_hermes_export",
+    "plan_hermes_import",
     "read_transfer_package",
     "validate_manifest",
     "validate_normalized_agent",
