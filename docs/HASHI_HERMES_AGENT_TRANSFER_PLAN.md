@@ -107,6 +107,113 @@ Hermes connector state is usually distributed across:
   approval.
 - Do not assume Hermes internal memory/session schemas are stable unless they
   are confirmed by adapter tests.
+- Do not migrate Hermes profile directories wholesale.
+- Do not migrate active Hermes sessions, live cron execution state, runtime
+  caches, or messaging delivery credentials by default.
+
+## Hermes Runtime Review Findings
+
+These findings come from a live Hermes-side review by `xiaoye@HERMES`. They
+should be treated as design constraints until the Hermes runtime adapter proves a
+more precise behavior through tests.
+
+### Profile isolation
+
+Hermes profiles are isolated under a profile root such as:
+
+```text
+~/.hermes/profiles/<name>/
+```
+
+Important subdirectories can include:
+
+- `skills/`
+- `plugins/`
+- `cron/`
+- `memories/`
+- session/runtime state such as SQLite session stores
+
+The importer must not copy the whole profile directory. It must use an explicit
+profile subdirectory whitelist. Unknown profile files should be preserved only
+inside the transfer package as source evidence or skipped with a warning.
+
+### Hermes memory constraints
+
+Hermes memory is profile-scoped and constrained. The current practical limit
+reported by the Hermes-side reviewer is approximately 2,200 characters per
+memory item, with time-scope and freshness constraints.
+
+Therefore:
+
+- Memory import must validate item size and age.
+- Oversized or stale entries must be skipped or converted to portable notes.
+- Memory import must report accepted, skipped, and truncated counts.
+- Direct writes into Hermes `memories/` require a tested Hermes adapter.
+
+### Session state is not portable memory
+
+Hermes session stores can contain transient conversation state, tool-call
+chains, operator instructions, and runtime details. Session SQLite files or
+equivalent session stores must not be migrated as durable identity or memory.
+
+Allowed handling:
+
+- Include session metadata in audit only when explicitly requested.
+- Never replay active sessions into HASHI or Hermes automatically.
+- Use a post-import self-check prompt instead of session replay.
+
+### Cron state is runtime-bound
+
+Hermes cron entries can include runtime-bound fields such as:
+
+- `deliver`
+- `profile`
+- `context_from`
+
+These fields can point to the wrong target after migration or cause duplicate
+execution. All Hermes cron jobs must export as paused review drafts. They must
+not be resumed automatically on either runtime.
+
+### Plugins can contain local machine state
+
+Some Hermes plugins can embed local paths, caches, OAuth state, voice models, or
+media generation state. Examples called out by the Hermes-side review include
+voice/TTS and media generation plugins.
+
+Plugin import policy:
+
+- Copy only explicitly whitelisted plugins.
+- Treat plugin config as environment-specific.
+- Do not migrate plugin caches.
+- Do not migrate OAuth or local credential material.
+- Generate review warnings for path-like values.
+
+### Messaging delivery configuration is excluded
+
+All `send_message` delivery configuration is excluded by default, including:
+
+- Telegram tokens
+- chat IDs
+- webhooks
+- gateway delivery targets
+
+Target delivery configuration must be recreated or explicitly approved by the
+operator after import.
+
+### Credentials are excluded by default
+
+Hermes-side feedback recommends excluding credential files even when encrypted.
+HASHI may still support encrypted secret packaging for local trusted moves, but
+the default policy for Hermes transfers is:
+
+- no credentials
+- no `.shared_token`
+- no Telegram tokens
+- no OAuth material
+- no voice/media provider keys
+
+Any exception must be represented in `secrets.policy` and require an explicit
+CLI flag.
 
 ## Terminology
 
@@ -160,12 +267,16 @@ Recommended archive layout:
 ├── schedules/
 │   ├── tasks.json
 │   └── schedule_notes.json
+├── profile_policy.json
+├── secrets.policy.json
 ├── secrets.json
 ├── secrets.bin
 └── audit/
     ├── checksums.json
     ├── dry_run_plan.json
     ├── transfer_report.md
+    ├── migration_report.md
+    ├── post_migration_self_check.md
     └── warnings.json
 ```
 
@@ -194,6 +305,11 @@ Required fields:
   "contains_workspace": true,
   "source_disable_policy": "never",
   "target_enable_policy": "manual_review",
+  "profile_directory_policy": "whitelist_only",
+  "cron_import_policy": "paused_review_drafts",
+  "memory_import_policy": "validate_size_age",
+  "session_import_policy": "never",
+  "secrets_policy_file": "secrets.policy.json",
   "checksums_file": "audit/checksums.json"
 }
 ```
@@ -205,8 +321,82 @@ Allowed values:
 - `transfer_mode`: `copy`, `move`
 - `source_disable_policy`: `never`, `after_verified_import`
 - `target_enable_policy`: `manual_review`, `enable_after_import`
+- `profile_directory_policy`: `whitelist_only`
+- `cron_import_policy`: `paused_review_drafts`, `skip`
+- `memory_import_policy`: `portable_notes_only`, `validate_size_age`
+- `session_import_policy`: `never`
 
 `enable_after_import` must require an explicit CLI flag.
+
+### `profile_policy.json`
+
+This file records which Hermes profile subdirectories are allowed to migrate.
+It is mandatory for any transfer involving Hermes.
+
+Example:
+
+```json
+{
+  "schema_version": 1,
+  "runtime": "hermes",
+  "allowed_profile_subdirs": [
+    "skills",
+    "memories"
+  ],
+  "blocked_profile_subdirs": [
+    "sessions",
+    "cron/runtime",
+    "plugins/cache"
+  ],
+  "plugin_policy": {
+    "mode": "explicit_allowlist",
+    "allowed_plugins": [
+      "hashi_hchat"
+    ],
+    "blocked_reason": "plugins may contain local paths, caches, OAuth state, or provider credentials"
+  },
+  "memory_policy": {
+    "max_chars_per_item": 2200,
+    "stale_item_action": "skip_with_warning",
+    "oversize_item_action": "convert_to_portable_note"
+  },
+  "cron_policy": {
+    "default_state": "paused",
+    "blocked_fields": ["deliver", "profile", "context_from"]
+  }
+}
+```
+
+### `secrets.policy.json`
+
+This file is mandatory even when no secrets are included.
+
+Example:
+
+```json
+{
+  "schema_version": 1,
+  "default": "exclude",
+  "included": false,
+  "encryption": "none",
+  "allowed_secret_classes": [],
+  "blocked_secret_classes": [
+    "telegram_token",
+    "telegram_chat_id",
+    "webhook",
+    "oauth_token",
+    "voice_model_key",
+    "media_generation_key",
+    "hashi_remote_shared_token"
+  ],
+  "target_decryption_allowed": false,
+  "operator_approval_required": true
+}
+```
+
+If encrypted secrets are explicitly included, `encryption` must describe the
+scheme and `target_decryption_allowed` must be explicit. Hermes transfers should
+still default to `included: false`.
 
 ### `normalized_agent.json`
 
@@ -231,7 +421,9 @@ This is the runtime-independent core record:
   },
   "memory": {
     "strategy": "portable_files_first",
-    "notes_path": "memory/import_notes.json"
+    "notes_path": "memory/import_notes.json",
+    "max_chars_per_item": 2200,
+    "session_state_included": false
   },
   "skills": [],
   "schedules": [],
@@ -313,12 +505,27 @@ Default target state:
 - Added to `agents.yaml` with review metadata.
 - Hermes profile not assumed live until the operator restarts Hermes or runs an
   explicit reload command.
+- Target profile remains in disabled or review mode until the operator approves
+  the import report and post-migration self-check.
+- HASHI agent ID to Hermes profile name mapping must be written explicitly in
+  the dry-run plan and migration report.
 
 Open issue:
 
 - Hermes internal memory/session schema is not fully represented in the local
   connector repository. First implementation should preserve memory as portable
   files plus import notes. Direct memory injection should be a later adapter.
+
+Hermes-specific import rules:
+
+- Create or update only whitelisted profile subdirectories.
+- Do not import session databases.
+- Do not import active runtime state.
+- Do not import delivery credentials.
+- Convert schedules into paused review drafts.
+- Validate memory item size and age before writing to Hermes memory.
+- Generate review warnings for plugin config values that look like local paths,
+  caches, OAuth state, or provider credentials.
 
 ## Direction B: Hermes to HASHI
 
@@ -335,6 +542,8 @@ Read:
 - Hermes profile `config.yaml`.
 - Hermes profile `skills/`.
 - Hermes profile `platforms/`.
+- Hermes profile `memories/`, subject to item size and age validation.
+- Hermes profile `cron/`, exported as paused review drafts only.
 - bridge `agents.yaml`.
 - bridge `peers.yaml`.
 - connector queue state only for audit, not as durable memory.
@@ -349,6 +558,9 @@ Write package:
 - `identity/hermes_instructions.md`
 - skills and profile files that are safe to copy
 - memory import notes
+- profile whitelist policy
+- secrets policy
+- paused schedule drafts
 - checksums and dry-run plan
 
 Default behavior:
@@ -356,6 +568,13 @@ Default behavior:
 - Do not include `.shared_token` unless explicitly requested.
 - Do not export transient `message_queue.json` as memory.
 - Do not claim full memory migration unless Hermes memory files are identified.
+- Do not export `sessions.db` or equivalent active session state.
+- Do not export `send_message` delivery config, Telegram tokens, chat IDs, or
+  webhooks.
+- Do not export plugin caches, OAuth state, voice model files, or media provider
+  credentials.
+- Source Hermes profile must enter a disabled state for `move` mode after the
+  HASHI import is verified. A marker alone is not sufficient.
 
 ### Import into HASHI
 
@@ -373,6 +592,8 @@ Write:
 - `agents.json` entry with `is_active: false` by default
 - optional `secrets.json` entries only after decrypting package secrets
 - optional `tasks.json` drafts disabled by default
+- `workspaces/<agent>/hermes_import/migration_report.md`
+- `workspaces/<agent>/hermes_import/post_migration_self_check.md`
 
 Recommended HASHI agent config:
 
@@ -453,6 +674,14 @@ or integrated into `/move` after the CLI and schema are stable.
 10. Package checksums must be validated before import.
 11. Import reports must list every file that will be written.
 12. Rollback information must be generated before modifying target config files.
+13. Hermes profile imports must use a subdirectory whitelist.
+14. Hermes memory imports must enforce size and age checks.
+15. Hermes cron imports must create paused review drafts only.
+16. Active sessions and runtime state must never be imported.
+17. Messaging delivery configuration is excluded unless an explicit adapter and
+    operator approval exist.
+18. Every successful import must produce a migration report and a
+    post-migration self-check prompt.
 
 ## Validation Gates
 
@@ -465,6 +694,10 @@ or integrated into `/move` after the CLI and schema are stable.
 - Package manifest validates against schema.
 - Checksums match package content.
 - Secret mode is explicit.
+- For Hermes export, profile whitelist policy exists.
+- For Hermes export, memory entries are counted, size-checked, and age-checked.
+- For Hermes export, cron entries are marked paused.
+- For Hermes export, session stores and delivery credentials are excluded.
 
 ### Import validation
 
@@ -475,6 +708,28 @@ or integrated into `/move` after the CLI and schema are stable.
 - Checksums pass.
 - Planned writes are inside the approved target root/profile/bridge home.
 - Imported schedules are disabled unless explicitly enabled.
+- Hermes target profile name is explicitly mapped from the source agent ID.
+- Migration report is generated before enabling the target.
+- Post-migration self-check instructions are written before enabling the target.
+
+### Post-migration verification
+
+After import, the target runtime must perform a self-check before the operator
+enables the transferred agent/profile.
+
+Minimum self-check:
+
+- Confirm target runtime and agent/profile name.
+- Confirm imported identity file path.
+- Confirm skills copied or skipped.
+- Confirm memory accepted/skipped counts.
+- Confirm schedules are disabled or paused.
+- Confirm no secrets were imported unless explicitly approved.
+- Confirm HChat/Remote bridge status if enabled.
+
+For Hermes targets, the self-check should run inside the target Hermes profile
+after restart or reload. For HASHI targets, it can be run as a disabled-agent
+review command or a one-shot validation prompt before activation.
 
 ## Test Plan
 
@@ -486,11 +741,20 @@ Initial tests:
 - Hermes exporter reads fixture `config.yaml`, `agents.yaml`, and `skills/`.
 - Hermes importer updates fixture `agents.yaml` and profile config through a
   merge plan.
+- Hermes importer refuses non-whitelisted profile subdirectories.
+- Hermes memory importer skips or converts entries above the configured
+  character limit.
+- Hermes cron importer marks every imported cron entry paused.
+- Hermes exporter excludes sessions and delivery credentials.
+- `secrets.policy.json` is required and defaults to excluding all secrets.
 - Existing target conflict defaults to failure or skip.
 - Secret package encryption/decryption round trips.
 - Plain secret export requires explicit flag.
 - Checksums catch corrupted package entries.
 - Dry-run performs no writes.
+- Migration report includes source/target profile, skill list, cron states,
+  memory counts, and secrets status.
+- Post-migration self-check file is generated.
 - Round trip:
   - HASHI fixture to package.
   - package to Hermes fixture.
