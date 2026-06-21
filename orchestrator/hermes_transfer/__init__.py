@@ -15,6 +15,13 @@ from .hashi_exporter import (
     export_hashi_agent,
     plan_hashi_export,
 )
+from .hashi_importer import (
+    HashiImportError,
+    HashiImportOptions,
+    HashiImportPlan,
+    import_hashi_agent,
+    plan_hashi_import,
+)
 from .schema import (
     PACKAGE_EXT,
     PACKAGE_TYPE,
@@ -37,6 +44,9 @@ __all__ = [
     "HashiExportError",
     "HashiExportOptions",
     "HashiExportPlan",
+    "HashiImportError",
+    "HashiImportOptions",
+    "HashiImportPlan",
     "PackageBuildResult",
     "PlannedWrite",
     "TransferPackage",
@@ -46,8 +56,10 @@ __all__ = [
     "default_profile_policy",
     "default_secrets_policy",
     "export_hashi_agent",
+    "import_hashi_agent",
     "new_manifest",
     "plan_hashi_export",
+    "plan_hashi_import",
     "read_transfer_package",
     "validate_manifest",
     "validate_normalized_agent",
