@@ -15,7 +15,7 @@ File type is auto-detected from extension:
     .mp3/.ogg/.flac/.wav/.m4a → audio
     everything else       → document
 
-Override with --type photo|document|video|audio
+Override with --type photo|document|video|audio|voice
 """
 
 import argparse
@@ -113,12 +113,14 @@ def send_file(file_path: Path, caption: str | None, file_type: str,
         "photo": "sendPhoto",
         "video": "sendVideo",
         "audio": "sendAudio",
+        "voice": "sendVoice",
         "document": "sendDocument",
     }
     field_map = {
         "photo": "photo",
         "video": "video",
         "audio": "audio",
+        "voice": "voice",
         "document": "document",
     }
 
@@ -181,7 +183,7 @@ def main():
     parser.add_argument("--path", required=True, help="Path to the file to send")
     parser.add_argument("--caption", default=None, help="Optional caption")
     parser.add_argument("--type", dest="file_type", default="auto",
-                        choices=["auto", "photo", "document", "video", "audio"],
+                        choices=["auto", "photo", "document", "video", "audio", "voice"],
                         help="File type (default: auto-detect)")
     parser.add_argument("--chat-id", default=None, help="Override chat ID")
     args = parser.parse_args()
