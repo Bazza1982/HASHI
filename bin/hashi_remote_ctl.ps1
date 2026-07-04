@@ -30,6 +30,7 @@ if (-not $Python) {
 $LogDir = Join-Path $HashiRoot "logs"
 $LogPath = Join-Path $LogDir "hashi-remote-supervisor.log"
 $ArgsList = @("-m", "remote", "--hashi-root", "`"$HashiRoot`"", "--supervised")
+$TaskRunner = Join-Path $PSScriptRoot "hashi_remote_task_runner.ps1"
 
 if ($NoTls -or $env:HASHI_REMOTE_NO_TLS -eq "1") {
     $ArgsList += "--no-tls"
@@ -53,7 +54,19 @@ function Ensure-LogDir {
 
 function Install-HashiRemoteTask {
     Ensure-LogDir
-    $Action = New-ScheduledTaskAction -Execute $Python -Argument $ArgumentString -WorkingDirectory $HashiRoot
+    $RunnerArgs = @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-WindowStyle", "Hidden",
+        "-File", "`"$TaskRunner`"",
+        "-Python", "`"$Python`"",
+        "-HashiRoot", "`"$HashiRoot`"",
+        "-LogPath", "`"$LogPath`""
+    )
+    if ($ArgsList.Count -gt 0) {
+        $RunnerArgs += @("-PythonArgs", "`"$($ArgsList -join " ")`"")
+    }
+    $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument ($RunnerArgs -join " ") -WorkingDirectory $HashiRoot
     $Trigger = New-ScheduledTaskTrigger -AtLogOn
     $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
     $Principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
