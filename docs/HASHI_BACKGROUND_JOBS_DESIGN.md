@@ -1,7 +1,7 @@
 # HASHI Background Jobs Design
 
-Status: draft, revised after independent design review
-Date: 2026-06-20
+Status: draft, revised after independent design review and Akane review acceptance
+Date: 2026-07-06
 Scope: HASHI runtime, HASHI Remote, Workbench, governed tool execution
 
 ## Summary
@@ -42,6 +42,44 @@ The design must also follow HASHI's layered-runtime principle:
 This means "kernel singleton" in this document means a single function-layer
 service instance owned through a kernel handle. It does not mean moving process
 supervision logic into protected core files.
+
+## Review Acceptance
+
+This revision critically accepts Akane's review of the design and sharpens the
+implementation order.
+
+Accepted:
+
+- implement Background Jobs as a function-layer service owned through
+  `ServiceManager`, not as an optional cron/watchdog pattern that agents must
+  remember to create;
+- use SQLite as the Phase 1 authoritative store. JSON/JSONL may remain useful
+  for trigger audit logs and export, but not for live lifecycle state;
+- keep OS/process jobs separate from LLM `background_mode`. Do not overload
+  `FlexibleAgentRuntime._background_tasks`;
+- make registration a side effect of launch: `persist -> spawn -> monitor`
+  must happen inside `BackgroundJobManager.start(...)`;
+- defer model-facing tools until the manager, store, monitor, and `/reboot`
+  recovery semantics are stable;
+- preserve synchronous `/terminal/exec`; introduce a separate
+  `background_jobs_v1` capability for Remote.
+
+Accepted with staging:
+
+- Long-running OS work should eventually have one legitimate launch path:
+  `BackgroundJobManager`. However, Phase 1 should not break existing shell,
+  scheduler, or Nagare flows before the manager has production smoke coverage.
+  Phase 1.5 should add guardrails for common bypasses such as `nohup`, trailing
+  `&`, detached shell patterns, or explicit zero-wait process launch requests.
+
+Rejected for now:
+
+- automatic process adoption after full HASHI restart. Phase 1 will mark
+  unsafe running jobs as `abandoned_after_restart` unless identity can be
+  verified by a platform-specific implementation and tests.
+- exposing model-facing `background_job_*` tools before operator/API surfaces
+  prove that the manager can safely start, observe, tail, cancel, and recover
+  jobs.
 
 ## Existing Code Review
 
@@ -239,6 +277,9 @@ Current gaps:
 - Remote audit currently records terminal exec attempts. Background Jobs need
   symmetric audit events for start, cancel, completion, timeout, and policy
   denial.
+- There is no guardrail that prevents agents or scheduler skills from launching
+  long-running detached shell work through ad hoc patterns such as `nohup`, `&`,
+  or direct `subprocess.Popen`.
 
 Design implication:
 
@@ -252,6 +293,10 @@ Add explicit tool functions only after the manager exists:
 
 Do not add `background=true` to generic `bash` first; that would blur security,
 audit, and ownership boundaries.
+
+After the manager is stable, `bash` and scheduler skill paths should detect or
+reject common detached-process bypasses and point callers to Background Jobs.
+This guardrail is a second step, not the initial implementation surface.
 
 ## Design Goals
 
@@ -1043,6 +1088,25 @@ Policy:
 - tests should cover that scheduler integration returns a `job_id` instead of
   waiting for process completion.
 
+### Shell Bypass
+
+Risk:
+
+- agents can still launch unmanaged long-running processes with `nohup`,
+  trailing `&`, `setsid`, `disown`, `start`, or equivalent platform-specific
+  detached-process patterns.
+
+Policy:
+
+- Phase 1 does not block these paths globally, because doing so before the
+  manager is stable would create operator risk;
+- Phase 1.5 should add detection in shell-facing paths and either reject the
+  command or redirect the caller to `BackgroundJobManager.start(...)`;
+- bypass detection must be conservative and explain the replacement command or
+  API clearly;
+- tests should cover at least `nohup`, trailing `&`, and scheduler-skill
+  direct `Popen` examples.
+
 ## Implementation Roadmap
 
 This is not the shortest path. It is the serious, durable path.
@@ -1068,7 +1132,9 @@ This is not the shortest path. It is the serious, durable path.
   recovery marking, and notification idempotency.
 - Add local runtime service initialization in the function/service layer without
   moving supervision logic into protected core.
-- Keep Remote and model tools out of scope.
+- Keep Remote, Workbench write APIs, and model-facing tools out of scope.
+- Keep `/bg` command routing out of scope unless it is needed only as a thin
+  manual smoke adapter; the manager API and tests are the source of truth.
 
 Acceptance:
 
@@ -1078,6 +1144,26 @@ Acceptance:
 - completion notification is sent;
 - `/reboot` recovery is explicit;
 - full restart marks unsafe running jobs explicitly.
+
+### Phase 1.5: Launch Guardrails And Nagare Migration Plan
+
+- Add conservative detection for unmanaged detached shell patterns such as
+  `nohup`, trailing `&`, `setsid`, `disown`, and zero-wait process launch
+  requests where those surfaces exist.
+- Add tests that scheduler and skill code do not start unregistered
+  long-running OS subprocesses.
+- Define the migration path for `flow_trigger.py` so Nagare workflows can move
+  from `_trigger_registry.jsonl` as lifecycle state to
+  `BackgroundJobManager.start_from_flow(...)`.
+- Keep existing Nagare JSONL as an audit/compatibility log during migration,
+  not as the authoritative job lifecycle store.
+
+Acceptance:
+
+- common detached-process bypasses are either rejected with a clear message or
+  redirected to Background Jobs;
+- `flow_trigger.py` has an explicit migration contract;
+- no model-facing tools are required for these guardrails.
 
 ### Phase 1b: Workbench Read-Only API And Telegram Adapter
 
