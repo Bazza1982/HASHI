@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Mapping
 
 from orchestrator.audit_mode import load_audit_config, visible_audit_criteria
@@ -15,6 +16,53 @@ def compute_status_string(runtime) -> str:
     if runtime.telegram_connected:
         return "online"
     return "local"
+
+
+def _format_duration(seconds: float | int) -> str:
+    total = max(0, int(seconds))
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def _delivery_line(delivery: Mapping[str, Any] | None) -> str:
+    if not delivery:
+        return "📨 Delivery: healthy"
+
+    blocked_until_raw = delivery.get("blocked_until")
+    failover_agent = delivery.get("active_failover_agent") or "failover"
+    status = str(delivery.get("status") or "blocked")
+    remaining_text = "remaining unknown"
+
+    if blocked_until_raw:
+        try:
+            blocked_until = datetime.fromisoformat(str(blocked_until_raw))
+            now = datetime.now().astimezone()
+            if blocked_until.tzinfo is None:
+                blocked_until = blocked_until.replace(tzinfo=now.tzinfo)
+            remaining = (blocked_until.astimezone() - now).total_seconds()
+            if remaining > 0:
+                remaining_text = f"~{_format_duration(remaining)} remaining"
+            else:
+                remaining_text = "recovery due now"
+        except Exception:
+            remaining_text = "remaining unknown"
+    elif status == "recovery_due":
+        remaining_text = "recovery due now"
+
+    if blocked_until_raw:
+        return (
+            f"📨 Delivery: {status} • {remaining_text} • until {blocked_until_raw} "
+            f"• via {failover_agent}"
+        )
+    return f"📨 Delivery: {status} • {remaining_text} • via {failover_agent}"
 
 
 def job_counts(runtime) -> tuple[int, int]:
@@ -148,12 +196,7 @@ def build_status_text(runtime, detailed: bool = False) -> str:
     lines.extend(
         [
             f"📶 Channels: {channel_line}",
-            (
-                f"📨 Delivery: blocked until {delivery.get('blocked_until')} via "
-                f"{delivery.get('active_failover_agent') or 'failover'}"
-                if delivery
-                else "📨 Delivery: healthy"
-            ),
+            _delivery_line(delivery),
             f"📡 Runtime: {'busy' if runtime.is_generating else 'idle'} • queue {runtime.queue.qsize()} • process {runtime._process_info()}",
             f"🧾 Current: {current_line}",
             f"🧠 Memory: skills {', '.join(active_skills) if active_skills else 'none'} • recall {'ON' if recall_on else 'OFF'} • FYI {'armed' if runtime._pending_session_primer else 'clear'}",
