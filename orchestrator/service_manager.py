@@ -13,6 +13,7 @@ from pathlib import Path
 
 from orchestrator.agent_directory import AgentDirectory
 from orchestrator.api_gateway import APIGatewayServer, available_gateway_models, default_gateway_model
+from orchestrator.background_jobs import BackgroundJobManager
 from orchestrator.scheduler import TaskScheduler
 from orchestrator.telegram_delivery_failover import delivery_health_watcher
 from orchestrator.workbench_api import WorkbenchApiServer
@@ -330,12 +331,50 @@ class ServiceManager:
         main_logger.info("Hot restart: delivery health watcher recreated with reloaded code.")
         bridge_logger.info("Hot restart: delivery health watcher recreated with reloaded code")
 
+    async def start_background_jobs(self):
+        existing = getattr(self.kernel, "background_job_manager", None)
+        if existing is not None:
+            return existing
+        manager = BackgroundJobManager(
+            self.kernel.paths.bridge_home / "state" / "background_jobs",
+            kernel=self.kernel,
+        )
+        await manager.start()
+        self.kernel.background_job_manager = manager
+        main_logger.info("Background job manager started.")
+        bridge_logger.info("Background job manager started")
+        return manager
+
+    async def stop_background_jobs(self):
+        manager = getattr(self.kernel, "background_job_manager", None)
+        if manager is None:
+            return
+        await manager.stop()
+        self.kernel.background_job_manager = None
+        main_logger.info("Background job manager stopped.")
+        bridge_logger.info("Background job manager stopped")
+
+    async def restart_background_jobs(self):
+        await self.stop_background_jobs()
+        module = sys.modules.get("orchestrator.background_jobs")
+        manager_cls = BackgroundJobManager if module is None else module.BackgroundJobManager
+        manager = manager_cls(
+            self.kernel.paths.bridge_home / "state" / "background_jobs",
+            kernel=self.kernel,
+        )
+        await manager.start()
+        self.kernel.background_job_manager = manager
+        main_logger.info("Hot restart: background job manager recreated with reloaded code.")
+        bridge_logger.info("Hot restart: background job manager recreated with reloaded code")
+        return manager
+
     async def start_runtime_services(self, global_cfg, secrets):
         self.build_agent_directory()
         await self.start_workbench_api(global_cfg, secrets)
         await self.start_api_gateway(global_cfg, secrets)
         self.start_scheduler(global_cfg)
         self.start_delivery_health_watcher()
+        await self.start_background_jobs()
 
     async def stop_scheduler(self, timeout: float = 5.0):
         if self.kernel.scheduler_task is None:
@@ -380,6 +419,7 @@ class ServiceManager:
         main_logger.info("Hot restart: scheduler recreated with reloaded code.")
         bridge_logger.info("Hot restart: scheduler recreated with reloaded code")
         await self.restart_delivery_health_watcher()
+        await self.restart_background_jobs()
 
     async def repair_workbench_api_if_needed(self):
         global_cfg = self.kernel.global_cfg
@@ -445,5 +485,6 @@ class ServiceManager:
     async def stop_runtime_services(self):
         await self.stop_scheduler()
         await self.stop_delivery_health_watcher()
+        await self.stop_background_jobs()
         await self.stop_workbench_api()
         await self.stop_api_gateway()

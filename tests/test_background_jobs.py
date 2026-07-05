@@ -1,0 +1,120 @@
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from orchestrator.background_jobs import BackgroundJobManager, BackgroundJobStore, NONTERMINAL_STATES
+from orchestrator.service_manager import ServiceManager
+
+
+@pytest.mark.asyncio
+async def test_background_job_records_success_and_logs(tmp_path: Path):
+    manager = BackgroundJobManager(tmp_path / "background_jobs")
+    await manager.start()
+
+    record = await manager.start_job(
+        agent="zelda",
+        cwd=tmp_path,
+        argv=[sys.executable, "-c", "print('hello background')"],
+        origin={"chat_id": 1, "request_id": "req-test"},
+    )
+    task = manager._monitor_tasks[record.job_id]
+    await task
+
+    saved = manager.get(record.job_id)
+    assert saved is not None
+    assert saved.state == "succeeded"
+    assert saved.returncode == 0
+    assert "hello background" in manager.tail(record.job_id)
+    assert Path(saved.logs["stdout_path"]).exists()
+
+
+@pytest.mark.asyncio
+async def test_background_job_records_failure(tmp_path: Path):
+    manager = BackgroundJobManager(tmp_path / "background_jobs")
+    await manager.start()
+
+    record = await manager.start_job(
+        agent="zelda",
+        cwd=tmp_path,
+        argv=[sys.executable, "-c", "import sys; print('bad'); sys.exit(7)"],
+        notify_on_failure=False,
+    )
+    await manager._monitor_tasks[record.job_id]
+
+    saved = manager.get(record.job_id)
+    assert saved is not None
+    assert saved.state == "failed"
+    assert saved.returncode == 7
+    assert saved.error == "process exited with 7"
+
+
+@pytest.mark.asyncio
+async def test_background_job_cancel_terminates_process(tmp_path: Path):
+    manager = BackgroundJobManager(tmp_path / "background_jobs")
+    await manager.start()
+
+    record = await manager.start_job(
+        agent="zelda",
+        cwd=tmp_path,
+        argv=[sys.executable, "-c", "import time; time.sleep(30)"],
+        notify_on_failure=False,
+    )
+
+    cancelled = await manager.cancel(record.job_id, grace_seconds=0.1)
+
+    assert cancelled.state == "cancelled"
+    assert manager.get(record.job_id).state == "cancelled"
+
+
+def test_background_job_store_recovery_marks_nonterminal_abandoned(tmp_path: Path):
+    store = BackgroundJobStore(tmp_path / "jobs.db")
+    now = "2026-07-06T00:00:00+00:00"
+    for state in sorted(NONTERMINAL_STATES):
+        store.create(
+            SimpleNamespace(
+                job_id=f"job-{state}",
+                state=state,
+                agent="zelda",
+                command={},
+                origin={},
+                policy={},
+                process={"pid": 123},
+                logs={},
+                notification={},
+                created_at=now,
+                updated_at=now,
+                ended_at=None,
+                returncode=None,
+                error=None,
+            )
+        )
+
+    recovered = store.recover_nonterminal(reason="test_recovery")
+
+    assert len(recovered) == len(NONTERMINAL_STATES)
+    assert all(item.state == "abandoned_after_restart" for item in recovered)
+    assert all(item.error == "test_recovery" for item in recovered)
+
+
+@pytest.mark.asyncio
+async def test_service_manager_starts_and_restarts_background_jobs(tmp_path: Path):
+    kernel = SimpleNamespace(
+        paths=SimpleNamespace(bridge_home=tmp_path),
+        background_job_manager=None,
+    )
+    manager = ServiceManager(kernel)
+
+    first = await manager.start_background_jobs()
+    assert kernel.background_job_manager is first
+    assert (tmp_path / "state" / "background_jobs" / "jobs.db").exists()
+
+    second = await manager.restart_background_jobs()
+    assert kernel.background_job_manager is second
+    assert second is not first
+
+    await manager.stop_background_jobs()
+    assert kernel.background_job_manager is None
