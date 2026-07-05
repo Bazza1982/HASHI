@@ -315,6 +315,21 @@ class ServiceManager:
             name="telegram-delivery-health",
         )
 
+    async def stop_delivery_health_watcher(self):
+        task = getattr(self.kernel, "delivery_health_task", None)
+        if task is None:
+            return
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        self.kernel.delivery_health_task = None
+
+    async def restart_delivery_health_watcher(self):
+        await self.stop_delivery_health_watcher()
+        self.start_delivery_health_watcher()
+        main_logger.info("Hot restart: delivery health watcher recreated with reloaded code.")
+        bridge_logger.info("Hot restart: delivery health watcher recreated with reloaded code")
+
     async def start_runtime_services(self, global_cfg, secrets):
         self.build_agent_directory()
         await self.start_workbench_api(global_cfg, secrets)
@@ -364,6 +379,7 @@ class ServiceManager:
         self.kernel.scheduler_task = asyncio.create_task(self.kernel.scheduler.run(), name="scheduler")
         main_logger.info("Hot restart: scheduler recreated with reloaded code.")
         bridge_logger.info("Hot restart: scheduler recreated with reloaded code")
+        await self.restart_delivery_health_watcher()
 
     async def repair_workbench_api_if_needed(self):
         global_cfg = self.kernel.global_cfg
@@ -428,11 +444,6 @@ class ServiceManager:
 
     async def stop_runtime_services(self):
         await self.stop_scheduler()
-        task = getattr(self.kernel, "delivery_health_task", None)
-        if task is not None:
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
-            self.kernel.delivery_health_task = None
+        await self.stop_delivery_health_watcher()
         await self.stop_workbench_api()
         await self.stop_api_gateway()
