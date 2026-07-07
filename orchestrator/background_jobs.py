@@ -603,7 +603,7 @@ class BackgroundJobManager:
                 request_id = await enqueue_api_text(
                     self.format_agent_event(record),
                     source="background-job-event",
-                    deliver_to_telegram=False,
+                    deliver_to_telegram=True,
                 )
                 notification["agent_event_enqueued"] = request_id is not None
                 notification["agent_event_request_id"] = request_id
@@ -646,8 +646,9 @@ class BackgroundJobManager:
         return (
             "[background-job-event]\n"
             "This is an internal one-shot event from HASHI BackgroundJobManager.\n"
-            "Inspect the finished background job, then decide the next responsible action: "
+            "Use the included terminal status, paths, and last output to decide the next responsible action: "
             "summarize for the user, continue the workflow, ask for confirmation, or report failure. "
+            "Only run extra inspection tools if the included evidence is insufficient or inconsistent. "
             "Do not restart the same background job unless the user explicitly requested that behavior.\n\n"
             f"event: {record.state}\n"
             f"job_id: {record.job_id}\n"
