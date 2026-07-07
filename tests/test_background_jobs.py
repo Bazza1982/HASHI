@@ -245,10 +245,11 @@ async def test_background_job_completion_enqueues_agent_event_once(tmp_path: Pat
     assert saved.notification["agent_event_request_id"] == "queued-1"
     assert len(queued) == 1
     assert queued[0]["source"] == "background-job-event"
-    assert queued[0]["deliver_to_telegram"] is False
+    assert queued[0]["deliver_to_telegram"] is True
     assert f"job_id: {record.job_id}" in queued[0]["text"]
     assert "event: succeeded" in queued[0]["text"]
     assert "background event smoke" in queued[0]["text"]
+    assert "Only run extra inspection tools if the included evidence is insufficient" in queued[0]["text"]
 
     await manager._enqueue_agent_event(saved)
     assert len(queued) == 1
