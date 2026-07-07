@@ -3298,7 +3298,12 @@ class WorkbenchApiServer:
             return self._background_job_not_running_response()
         payload = await request.json()
         argv = payload.get("argv")
-        command = str(payload.get("command") or "").strip() or None
+        raw_command = payload.get("command")
+        if argv is None and isinstance(raw_command, list):
+            argv = raw_command
+            command = None
+        else:
+            command = str(raw_command or "").strip() or None
         if argv is not None:
             if not isinstance(argv, list) or not all(isinstance(item, str) and item for item in argv):
                 return web.json_response({"ok": False, "error": "argv must be a non-empty string array"}, status=400)
