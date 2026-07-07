@@ -3338,6 +3338,8 @@ class WorkbenchApiServer:
                 origin=origin,
                 notify_on_complete=bool(payload.get("notify_on_complete", True)),
                 notify_on_failure=bool(payload.get("notify_on_failure", True)),
+                trigger_agent_on_complete=bool(payload.get("trigger_agent_on_complete", True)),
+                trigger_agent_on_failure=bool(payload.get("trigger_agent_on_failure", True)),
                 max_runtime_seconds=int(payload.get("max_runtime_seconds") or 3600),
             )
         except FileNotFoundError as exc:

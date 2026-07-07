@@ -206,3 +206,81 @@ async def test_background_job_tool_uses_live_manager_and_notifies(tmp_path: Path
     assert sent and sent[0]["chat_id"] == 123
     assert sent[0]["request_id"] == "req-bg-tool"
     assert "tool background done" in manager.tail(job_id)
+
+
+@pytest.mark.asyncio
+async def test_background_job_completion_enqueues_agent_event_once(tmp_path: Path):
+    queued: list[dict] = []
+
+    async def enqueue_api_text(text: str, source: str = "api", deliver_to_telegram: bool = True):
+        request_id = f"queued-{len(queued) + 1}"
+        queued.append(
+            {
+                "request_id": request_id,
+                "text": text,
+                "source": source,
+                "deliver_to_telegram": deliver_to_telegram,
+            }
+        )
+        return request_id
+
+    runtime = SimpleNamespace(name="zelda", enqueue_api_text=enqueue_api_text)
+    kernel = SimpleNamespace(runtimes=[runtime])
+    manager = BackgroundJobManager(tmp_path / "background_jobs", kernel=kernel)
+    await manager.start()
+
+    record = await manager.start_job(
+        agent="zelda",
+        cwd=tmp_path,
+        argv=[sys.executable, "-c", "print('agent event done')"],
+        origin={"summary": "background event smoke"},
+        notify_on_complete=False,
+    )
+    await manager._monitor_tasks[record.job_id]
+
+    saved = manager.get(record.job_id)
+    assert saved is not None
+    assert saved.state == "succeeded"
+    assert saved.notification["agent_event_enqueued"] is True
+    assert saved.notification["agent_event_request_id"] == "queued-1"
+    assert len(queued) == 1
+    assert queued[0]["source"] == "background-job-event"
+    assert queued[0]["deliver_to_telegram"] is False
+    assert f"job_id: {record.job_id}" in queued[0]["text"]
+    assert "event: succeeded" in queued[0]["text"]
+    assert "background event smoke" in queued[0]["text"]
+
+    await manager._enqueue_agent_event(saved)
+    assert len(queued) == 1
+
+
+@pytest.mark.asyncio
+async def test_background_job_failure_enqueues_agent_event(tmp_path: Path):
+    queued: list[str] = []
+
+    async def enqueue_api_text(text: str, source: str = "api", deliver_to_telegram: bool = True):
+        queued.append(text)
+        return "queued-failure"
+
+    runtime = SimpleNamespace(name="zelda", enqueue_api_text=enqueue_api_text)
+    kernel = SimpleNamespace(runtimes=[runtime])
+    manager = BackgroundJobManager(tmp_path / "background_jobs", kernel=kernel)
+    await manager.start()
+
+    record = await manager.start_job(
+        agent="zelda",
+        cwd=tmp_path,
+        argv=[sys.executable, "-c", "import sys; print('agent event failed'); sys.exit(3)"],
+        notify_on_failure=False,
+    )
+    await manager._monitor_tasks[record.job_id]
+
+    saved = manager.get(record.job_id)
+    assert saved is not None
+    assert saved.state == "failed"
+    assert saved.notification["agent_event_enqueued"] is True
+    assert saved.notification["agent_event_request_id"] == "queued-failure"
+    assert len(queued) == 1
+    assert "event: failed" in queued[0]
+    assert "returncode: 3" in queued[0]
+    assert "agent event failed" in queued[0]

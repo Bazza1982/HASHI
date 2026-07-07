@@ -306,6 +306,8 @@ class BackgroundJobManager:
         origin: dict[str, Any] | None = None,
         notify_on_complete: bool = True,
         notify_on_failure: bool = True,
+        trigger_agent_on_complete: bool = True,
+        trigger_agent_on_failure: bool = True,
         max_runtime_seconds: int = DEFAULT_MAX_RUNTIME_SECONDS,
         max_stdout_bytes: int = DEFAULT_MAX_STREAM_BYTES,
         max_stderr_bytes: int = DEFAULT_MAX_STREAM_BYTES,
@@ -346,8 +348,13 @@ class BackgroundJobManager:
         notification = {
             "notify_on_complete": bool(notify_on_complete),
             "notify_on_failure": bool(notify_on_failure),
+            "trigger_agent_on_complete": bool(trigger_agent_on_complete),
+            "trigger_agent_on_failure": bool(trigger_agent_on_failure),
             "delivered": False,
             "delivery_errors": [],
+            "agent_event_enqueued": False,
+            "agent_event_request_id": None,
+            "agent_event_errors": [],
         }
         record = self.store.create(
             BackgroundJobRecord(
@@ -474,6 +481,7 @@ class BackgroundJobManager:
                 error=error,
             )
             await self._notify(final)
+            await self._enqueue_agent_event(final)
         except asyncio.CancelledError:
             raise
         finally:
@@ -575,6 +583,40 @@ class BackgroundJobManager:
         notification["delivery_errors"] = errors
         self.store.update(record.job_id, notification=notification)
 
+    async def _enqueue_agent_event(self, record: BackgroundJobRecord) -> None:
+        record = self.store.get(record.job_id) or record
+        notification = dict(record.notification)
+        if notification.get("agent_event_enqueued"):
+            return
+        should_trigger = (
+            (record.state == "succeeded" and notification.get("trigger_agent_on_complete"))
+            or (record.state != "succeeded" and notification.get("trigger_agent_on_failure"))
+        )
+        if not should_trigger:
+            return
+
+        errors: list[str] = []
+        runtime = self._runtime_for_agent(record.agent)
+        enqueue_api_text = getattr(runtime, "enqueue_api_text", None) if runtime is not None else None
+        if callable(enqueue_api_text):
+            try:
+                request_id = await enqueue_api_text(
+                    self.format_agent_event(record),
+                    source="background-job-event",
+                    deliver_to_telegram=False,
+                )
+                notification["agent_event_enqueued"] = request_id is not None
+                notification["agent_event_request_id"] = request_id
+                if request_id is None:
+                    errors.append("runtime_declined_background_job_event")
+            except Exception as exc:
+                errors.append(str(exc))
+        else:
+            errors.append("no_runtime_agent_event_target")
+
+        notification["agent_event_errors"] = errors
+        self.store.update(record.job_id, notification=notification)
+
     def _runtime_for_agent(self, agent: str) -> Any | None:
         for runtime in getattr(self.kernel, "runtimes", []) if self.kernel is not None else []:
             if getattr(runtime, "name", None) == agent:
@@ -596,4 +638,26 @@ class BackgroundJobManager:
             f"CWD: {record.command.get('cwd')}"
             f"{duration}\n\n"
             f"Last output:\n{record.logs.get('last_output_excerpt') or '(no output)'}"
+        )
+
+    def format_agent_event(self, record: BackgroundJobRecord) -> str:
+        original_task = record.origin.get("summary") or record.origin.get("original_task") or ""
+        last_output = record.logs.get("last_output_excerpt") or "(no output)"
+        return (
+            "[background-job-event]\n"
+            "This is an internal one-shot event from HASHI BackgroundJobManager.\n"
+            "Inspect the finished background job, then decide the next responsible action: "
+            "summarize for the user, continue the workflow, ask for confirmation, or report failure. "
+            "Do not restart the same background job unless the user explicitly requested that behavior.\n\n"
+            f"event: {record.state}\n"
+            f"job_id: {record.job_id}\n"
+            f"agent: {record.agent}\n"
+            f"returncode: {record.returncode}\n"
+            f"error: {record.error or ''}\n"
+            f"original_task: {original_task}\n"
+            f"command: {record.command.get('display')}\n"
+            f"cwd: {record.command.get('cwd')}\n"
+            f"stdout_path: {record.logs.get('stdout_path')}\n"
+            f"stderr_path: {record.logs.get('stderr_path')}\n\n"
+            f"last_output:\n{last_output}"
         )
