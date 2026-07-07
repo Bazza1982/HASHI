@@ -34,7 +34,7 @@ class _FakeBackgroundJobManager:
         self.records = [_FakeRecord()]
         self.cancelled = []
 
-    async def start(self, **kwargs):
+    async def start_job(self, **kwargs):
         self.started.append(kwargs)
         return self.records[0]
 

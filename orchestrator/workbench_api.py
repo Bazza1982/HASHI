@@ -3305,7 +3305,7 @@ class WorkbenchApiServer:
         origin.setdefault("source", "workbench_api:background_jobs")
         origin.setdefault("api_path", "/api/background-jobs")
         try:
-            record = await manager.start(
+            record = await manager.start_job(
                 agent=agent,
                 cwd=cwd,
                 argv=argv,
