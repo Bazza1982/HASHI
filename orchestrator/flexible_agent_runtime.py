@@ -362,7 +362,7 @@ class FlexibleAgentRuntime:
                 }
             )
             # explicitly allowed convenience commands for conversational agents
-            self._enabled_commands.update({"jobs", "verbose", "think", "voice", "say", "whisper"})
+            self._enabled_commands.update({"bg", "jobs", "verbose", "think", "voice", "say", "whisper"})
 
         # Optional overrides (per-agent): extra.limited_policy
         policy = extra.get("limited_policy") if isinstance(extra, dict) else None
@@ -378,7 +378,7 @@ class FlexibleAgentRuntime:
                     self._enabled_commands.add(name.strip().lstrip("/").lower())
 
         # help/status/new/fresh/wipe/clear/model/effort/mode should always be available
-        self._enabled_commands.update({"help", "status", "new", "fresh", "wipe", "reset", "clear", "memory", "notepad", "model", "effort", "mode", "wrapper", "audit", "brain", "core", "wrap", "jobs", "verbose", "think", "voice", "say", "whisper", "transfer", "fork", "cos", "long", "end", "oll", "browser", "exp"})
+        self._enabled_commands.update({"help", "status", "new", "fresh", "wipe", "reset", "clear", "memory", "notepad", "model", "effort", "mode", "wrapper", "audit", "brain", "core", "wrap", "bg", "jobs", "verbose", "think", "voice", "say", "whisper", "transfer", "fork", "cos", "long", "end", "oll", "browser", "exp"})
 
     def _is_command_allowed(self, cmd: str) -> bool:
         cmd = (cmd or "").lstrip("/").lower()

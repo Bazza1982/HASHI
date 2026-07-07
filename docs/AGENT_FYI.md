@@ -24,6 +24,8 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - `/fresh`: clean API context for non-CLI backends (`openrouter-api`, `deepseek-api`, `ollama-api`). Clears recent turns and stops saved memories from being auto-injected without deleting them.
 - `/handoff`: fresh continuity restore from recent chat history.
 - `/fyi [prompt]`: explicit bridge environment awareness refresh.
+- `/bg <task>`: queue a background-capable task. Treat `/bg <task>` as `/bg run <task>`; preserve the user's task text exactly and use HASHI BackgroundJobManager for long OS/process work instead of blocking the chat.
+- `/bg status [job_id]`, `/bg tail <job_id>`, `/bg cancel <job_id>`, `/bg list`: inspect or manage recorded background jobs.
 - `/active [on|off] [minutes]`: toggle proactive follow-up heartbeat; default is 10 minutes.
 - `/voice [status|on|off|provider|providers|voices|use <alias>]`: control native bridge-owned voice replies.
 - `/say`: read the last assistant reply as a voice message. This forces one TTS attempt even when `/voice off`, as long as a usable voice provider and voice choice are configured.
@@ -76,6 +78,7 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - `/fresh` starts a clean API context. It clears recent turns, preserves saved memories, and disables saved-memory auto-injection until `/memory saved on` or `/memory on` restores it.
 - `/handoff` restores recent continuity from bridge transcript, not CLI resume state.
 - `/fyi` explicitly refreshes awareness of this bridge environment and can carry a follow-up prompt.
+- `/bg` is an explicit manual background-work entry point, not an automatic hook. If a `/bg` task needs long shell/process execution, start it through the managed background job path, report the job id and notification behavior, and use `/bg status`, `/bg tail`, or `/bg cancel` for follow-up.
 
 ## Skills System
 - Skills live under `skills/`.

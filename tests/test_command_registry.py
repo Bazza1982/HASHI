@@ -26,6 +26,38 @@ class _FakeRuntime:
         return "req-test"
 
 
+class _FakeBackgroundJobRecord:
+    job_id = "job-test"
+    state = "succeeded"
+    returncode = 0
+    created_at = "2026-07-07T00:00:00+00:00"
+    updated_at = "2026-07-07T00:00:01+00:00"
+    error = None
+    command = {"display": "python smoke.py"}
+
+
+class _FakeBackgroundJobManager:
+    def __init__(self):
+        self.records = [_FakeBackgroundJobRecord()]
+
+    def list(self, **kwargs):
+        return list(self.records)
+
+    def get(self, job_id):
+        return self.records[0] if job_id == "job-test" else None
+
+    def tail(self, job_id, **kwargs):
+        if job_id != "job-test":
+            raise KeyError(job_id)
+        return "smoke-ok"
+
+    async def cancel(self, job_id):
+        if job_id != "job-test":
+            raise KeyError(job_id)
+        self.records[0].state = "cancelled"
+        return self.records[0]
+
+
 class _RuntimeWithNativeCommands:
     def __init__(self):
         self.global_config = SimpleNamespace(authorized_id=1)
@@ -115,6 +147,57 @@ async def test_admin_local_command_exposes_message_text_to_handlers(monkeypatch,
 
     assert result["ok"] is True
     assert result["messages"][0]["text"] == "text: /read_text validate sl-demo"
+
+
+@pytest.mark.asyncio
+async def test_bg_command_defaults_to_run_and_preserves_task_text():
+    runtime = _FakeRuntime()
+
+    result = await execute_local_command(runtime, "/bg full citalio service for paper 3", chat_id=123)
+
+    assert result["ok"] is True
+    assert result["command"] == "bg"
+    assert result["messages"][0]["text"].startswith("Background-capable task queued.")
+    assert runtime.queued[0]["chat_id"] == 123
+    assert runtime.queued[0]["source"] == "background:prompt"
+    assert runtime.queued[0]["summary"] == "Background task: full citalio service for paper 3"
+    assert "--- USER TASK ---\nfull citalio service for paper 3" in runtime.queued[0]["prompt"]
+    assert "BackgroundJobManager" in runtime.queued[0]["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_bg_command_run_alias_matches_default_run():
+    runtime = _FakeRuntime()
+
+    result = await execute_local_command(runtime, "/bg run quoted task", chat_id=123)
+
+    assert result["ok"] is True
+    assert runtime.queued[0]["source"] == "background:prompt"
+    assert "--- USER TASK ---\nquoted task" in runtime.queued[0]["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_bg_command_reserved_status_is_not_treated_as_task():
+    runtime = _FakeRuntime()
+    runtime.background_job_manager = _FakeBackgroundJobManager()
+
+    result = await execute_local_command(runtime, "/bg status", chat_id=123)
+
+    assert result["ok"] is True
+    assert runtime.queued == []
+    assert "Background job status" in result["messages"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_bg_command_tail_uses_background_job_manager():
+    runtime = _FakeRuntime()
+    runtime.background_job_manager = _FakeBackgroundJobManager()
+
+    result = await execute_local_command(runtime, "/bg tail job-test", chat_id=123)
+
+    assert result["ok"] is True
+    assert runtime.queued == []
+    assert "smoke-ok" in result["messages"][0]["text"]
 
 
 def test_admin_supported_commands_include_runtime_bound_native_commands():
