@@ -90,6 +90,10 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
 - **Transports** — Connect via Telegram, WhatsApp, or Workbench
 - **Skills** — Modular capabilities (prompts, toggles, actions) that extend agents
 - **Jobs** — Automated scheduling (heartbeats + cron) for periodic agent tasks
+- **Background Jobs** — Managed `/bg` long-running OS/process work with durable
+  job ids, bounded logs, Workbench status/tail/cancel APIs, completion/failure
+  notifications, and terminal events that can wake the responsible agent to
+  summarize or continue the workflow
 - **Habit System** — Self-improving behavior through feedback and nightly reflection
 - **HChat** — Cross-instance agent-to-agent messaging
 - **API Gateway** — Optional OpenAI-compatible localhost gateway with per-instance ports and Grok/xAI chat, image, and video routes
@@ -112,9 +116,13 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
 15. **Hashi Remote File Transfer** — move release artifacts, EXP packs, and other files directly between HASHI instances
 16. **Audit Agent Mode** — run a core model plus a separate auditor that emits follow-up findings without rewriting the core answer
 17. **Pack & Go** — Build a self-contained USB for Windows or macOS; recipients just plug in and double-click
-18. **Vibe-Coded** — Every line written by AI, reviewed by AI, directed by human vision
-19. **Claw Mode Foundation** — `claw-cli` can run as a scoped backend with provider routing, packaged runtime discovery, checksum-checked manifest metadata, and repo workzone read/write/edit validation
-20. **Superloop Operational Foundation** — Long-running controller loops use explicit taskboards, waits, issue registers, HChat reply classification, and inbox-drain closeout barriers
+18. **Managed Background Jobs** — `/bg` starts long OS/process tasks without
+   blocking chat, records status and logs, notifies on terminal outcomes, and
+   can wake the responsible agent after completion to report or decide the next
+   step
+19. **Vibe-Coded** — Every line written by AI, reviewed by AI, directed by human vision
+20. **Claw Mode Foundation** — `claw-cli` can run as a scoped backend with provider routing, packaged runtime discovery, checksum-checked manifest metadata, and repo workzone read/write/edit validation
+21. **Superloop Operational Foundation** — Long-running controller loops use explicit taskboards, waits, issue registers, HChat reply classification, and inbox-drain closeout barriers
 
 ---
 

@@ -1,6 +1,6 @@
 # HASHI Background Jobs Design
 
-Status: draft, revised after independent design review and Akane review acceptance
+Status: design plus Phase 1/Workbench implementation notes
 Date: 2026-07-06
 Scope: HASHI runtime, HASHI Remote, Workbench, governed tool execution
 
@@ -42,6 +42,52 @@ The design must also follow HASHI's layered-runtime principle:
 This means "kernel singleton" in this document means a single function-layer
 service instance owned through a kernel handle. It does not mean moving process
 supervision logic into protected core files.
+
+## Current Implementation Status
+
+As of 2026-07-07, the local managed-background-job path is live for personal
+HASHI operation:
+
+- `BackgroundJobManager` can start managed local OS/process jobs and return a
+  durable `job_id` immediately.
+- Job state includes command metadata, cwd, owner agent, origin metadata,
+  process pid/pgid, stdout/stderr paths, terminal return code, bounded last
+  output, notification flags, and terminal event metadata.
+- Workbench exposes structured job APIs for start, list/detail, tail, and
+  cancellation:
+
+```text
+POST /api/background-jobs
+GET  /api/background-jobs
+GET  /api/background-jobs/{job_id}
+GET  /api/background-jobs/{job_id}/tail
+POST /api/background-jobs/{job_id}/cancel
+```
+
+- Workbench job starts accept both shell strings and argv arrays.
+- `/reboot` hot reload recreates the Workbench API service so changed route
+  handlers are loaded without requiring a full process restart.
+- Terminal success/failure notifications can be delivered back to the user.
+- Terminal success/failure can also enqueue a one-shot
+  `background-job-event` to the responsible agent. The event includes the
+  terminal status, job id, command, cwd, log paths, return code, error, and a
+  last-output excerpt so the agent can summarize or take the next responsible
+  action without blocking the original chat turn.
+
+Validated smoke coverage includes:
+
+- short argv job start through Workbench API;
+- subprocess completion and notification delivery;
+- command-array handling through Workbench API;
+- one-shot completion event enqueue;
+- user-visible agent report delivery from a completion event;
+- a live 3-minute sleep job that completed, woke Zelda through
+  `background-job-event`, and produced a user-facing summary.
+
+Current boundary: the manager owns terminal completion/failure notification and
+agent wake-up. Periodic progress notifications during a still-running job are
+not yet a built-in manager heartbeat; a job that needs live progress must emit
+progress itself or call an approved notification surface intentionally.
 
 ## Review Acceptance
 
@@ -443,6 +489,8 @@ that justifies it.
 - emits structured completion events;
 - sends Telegram/chat text through runtime delivery helpers;
 - emits Workbench events;
+- can enqueue one-shot `background-job-event` requests to the responsible
+  agent for terminal success/failure follow-up;
 - optionally sends hchat/protocol replies when a job was remote-originated.
 
 `BackgroundJobPolicy`
@@ -750,22 +798,26 @@ Telegram output must be concise. Full logs should not be dumped into chat.
 
 ### Workbench API
 
-Suggested endpoints:
+Implemented endpoints:
 
 ```text
 POST /api/background-jobs
 GET  /api/background-jobs?agent=zelda&state=running
 GET  /api/background-jobs/{job_id}
-GET  /api/background-jobs/{job_id}/tail?stream=stdout&lines=80
+GET  /api/background-jobs/{job_id}/tail
 POST /api/background-jobs/{job_id}/cancel
+```
+
+Planned endpoint:
+
+```text
 POST /api/background-jobs/{job_id}/notify
 ```
 
 Workbench should treat the job store as the source of truth and should render
 structured job metadata, not parse chat notifications.
 
-Phase 1b should include read-only Workbench endpoints even before the full
-operator UI is polished:
+Read-only Workbench endpoints are now available:
 
 ```text
 GET /api/background-jobs
@@ -1165,24 +1217,31 @@ Acceptance:
 - `flow_trigger.py` has an explicit migration contract;
 - no model-facing tools are required for these guardrails.
 
-### Phase 1b: Workbench Read-Only API And Telegram Adapter
+### Phase 1b: Workbench API, Telegram Adapter, And Agent Terminal Events
 
-- Add structured read-only Workbench endpoints:
+- Add structured Workbench endpoints:
+  - `POST /api/background-jobs`
   - `GET /api/background-jobs`
   - `GET /api/background-jobs/{job_id}`
   - `GET /api/background-jobs/{job_id}/tail`
+  - `POST /api/background-jobs/{job_id}/cancel`
 - Add tests for auth, agent scoping, status, and tail bounds.
 - Add `/bg` Telegram command module as a thin adapter over the manager.
 - Keep Telegram notification as a channel, not the source of truth.
+- Add one-shot completion/failure event routing back to the responsible agent
+  so terminal jobs can be summarized or continued after the original turn has
+  ended.
 
 Acceptance:
 
 - Workbench can render a jobs dashboard without scraping transcripts.
 - Telegram can start/list/status/tail/cancel without owning job semantics.
+- terminal success/failure can wake the responsible agent once and produce a
+  user-visible report without exposing the internal event payload.
 
 ### Phase 2: Write APIs, Cancellation, Retention, And Quotas
 
-- Add Workbench cancellation and notification preference endpoints.
+- Add Workbench notification preference endpoints.
 - Add retention cleanup.
 - Add per-agent and per-instance quotas in Layer 4 config.
 - Add cross-agent/admin cancellation policy tests.
