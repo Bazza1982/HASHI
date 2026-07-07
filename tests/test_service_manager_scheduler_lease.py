@@ -1,4 +1,5 @@
 import asyncio
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -16,6 +17,101 @@ def _manager(tmp_path):
         )
     )
     return ServiceManager(kernel)
+
+
+@pytest.mark.asyncio
+async def test_start_workbench_api_uses_reloaded_module_class(tmp_path, monkeypatch):
+    created = []
+
+    class _ReloadedWorkbenchApiServer:
+        def __init__(self, config_path, global_cfg, runtimes, *, secrets=None, orchestrator=None):
+            created.append(
+                {
+                    "config_path": config_path,
+                    "global_cfg": global_cfg,
+                    "runtimes": runtimes,
+                    "secrets": secrets,
+                    "orchestrator": orchestrator,
+                }
+            )
+            self.bind_host = "127.0.0.1"
+
+        async def start(self):
+            created[-1]["started"] = True
+
+    fake_module = SimpleNamespace(WorkbenchApiServer=_ReloadedWorkbenchApiServer)
+    monkeypatch.setitem(sys.modules, "orchestrator.workbench_api", fake_module)
+    global_cfg = SimpleNamespace(workbench_port=18800)
+    kernel = SimpleNamespace(
+        paths=SimpleNamespace(config_path=tmp_path / "config.yaml"),
+        runtimes=[SimpleNamespace(name="zelda")],
+        workbench_api=None,
+    )
+    manager = ServiceManager(kernel)
+
+    await manager.start_workbench_api(global_cfg, {"token": "secret"})
+
+    assert isinstance(kernel.workbench_api, _ReloadedWorkbenchApiServer)
+    assert created == [
+        {
+            "config_path": tmp_path / "config.yaml",
+            "global_cfg": global_cfg,
+            "runtimes": kernel.runtimes,
+            "secrets": {"token": "secret"},
+            "orchestrator": kernel,
+            "started": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_restart_scheduler_recreates_workbench_before_scheduler(tmp_path, monkeypatch):
+    events = []
+    manager = _manager(tmp_path)
+    manager.kernel.global_cfg = SimpleNamespace(
+        authorized_id=123,
+        enterprise_scheduler_lease_enabled=False,
+    )
+    manager.kernel.secrets = {"workbench_admin_token": "secret"}
+    manager.kernel.runtimes = []
+    manager.kernel.skill_manager = object()
+    manager.kernel.workbench_api = object()
+    manager.kernel.delivery_health_task = None
+    manager.kernel.background_job_manager = None
+
+    async def fake_restart_workbench_api():
+        events.append("workbench")
+
+    async def fake_stop_scheduler():
+        events.append("stop_scheduler")
+        manager.kernel.scheduler_task = None
+        manager.kernel.scheduler = None
+
+    async def fake_restart_delivery_health_watcher():
+        events.append("delivery")
+
+    async def fake_restart_background_jobs():
+        events.append("background")
+
+    class _Scheduler:
+        def __init__(self, *args, **kwargs):
+            events.append("scheduler_init")
+
+        async def run(self):
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(manager, "restart_workbench_api", fake_restart_workbench_api)
+    monkeypatch.setattr(manager, "stop_scheduler", fake_stop_scheduler)
+    monkeypatch.setattr(manager, "restart_delivery_health_watcher", fake_restart_delivery_health_watcher)
+    monkeypatch.setattr(manager, "restart_background_jobs", fake_restart_background_jobs)
+    monkeypatch.setitem(sys.modules, "orchestrator.scheduler", SimpleNamespace(TaskScheduler=_Scheduler))
+
+    await manager.restart_scheduler()
+
+    assert events == ["workbench", "stop_scheduler", "scheduler_init", "delivery", "background"]
+    manager.kernel.scheduler_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await manager.kernel.scheduler_task
 
 
 def test_scheduler_enterprise_lease_kwargs_disabled_by_default(tmp_path):

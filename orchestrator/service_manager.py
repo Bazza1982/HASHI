@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import http.client
+import importlib
 import json
 import logging
 import os
@@ -16,7 +17,6 @@ from orchestrator.api_gateway import APIGatewayServer, available_gateway_models,
 from orchestrator.background_jobs import BackgroundJobManager
 from orchestrator.scheduler import TaskScheduler
 from orchestrator.telegram_delivery_failover import delivery_health_watcher
-from orchestrator.workbench_api import WorkbenchApiServer
 
 main_logger = logging.getLogger("BridgeU.Orchestrator")
 bridge_logger = logging.getLogger("BridgeU.Bridge")
@@ -75,6 +75,12 @@ class ServiceManager:
         path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return state
 
+    def _workbench_api_server_cls(self):
+        module = sys.modules.get("orchestrator.workbench_api")
+        if module is None:
+            module = importlib.import_module("orchestrator.workbench_api")
+        return module.WorkbenchApiServer
+
     def api_gateway_base_url(self) -> str | None:
         global_cfg = self.kernel.global_cfg
         if global_cfg is None:
@@ -98,7 +104,8 @@ class ServiceManager:
 
     async def start_workbench_api(self, global_cfg, secrets):
         try:
-            self.kernel.workbench_api = WorkbenchApiServer(
+            server_cls = self._workbench_api_server_cls()
+            self.kernel.workbench_api = server_cls(
                 self.kernel.paths.config_path,
                 global_cfg,
                 self.kernel.runtimes,
@@ -398,7 +405,7 @@ class ServiceManager:
             self.kernel.scheduler = None
 
     async def restart_scheduler(self):
-        await self.repair_workbench_api_if_needed()
+        await self.restart_workbench_api()
         await self.stop_scheduler()
         reloaded_scheduler = sys.modules["orchestrator.scheduler"].TaskScheduler
         lease_kwargs = (
@@ -420,6 +427,15 @@ class ServiceManager:
         bridge_logger.info("Hot restart: scheduler recreated with reloaded code")
         await self.restart_delivery_health_watcher()
         await self.restart_background_jobs()
+
+    async def restart_workbench_api(self):
+        if self.kernel.global_cfg is None:
+            bridge_logger.warning("Hot restart: Workbench API restart skipped because global config is unavailable")
+            return
+        await self.stop_workbench_api(timeout=2.0)
+        await self.start_workbench_api(self.kernel.global_cfg, self.kernel.secrets)
+        if self.kernel.workbench_api is not None:
+            bridge_logger.info("Hot restart: Workbench API recreated with reloaded code")
 
     async def repair_workbench_api_if_needed(self):
         global_cfg = self.kernel.global_cfg
