@@ -3282,6 +3282,16 @@ class WorkbenchApiServer:
     def _background_job_not_running_response(self):
         return web.json_response({"ok": False, "error": "BackgroundJobManager is not running"}, status=503)
 
+    def _runtime_for_background_job_agent(self, manager, agent: str):
+        runtime = self._runtime_map().get(agent)
+        if runtime is not None:
+            return runtime
+        kernel = getattr(manager, "kernel", None)
+        for candidate in getattr(kernel, "runtimes", []) if kernel is not None else []:
+            if getattr(candidate, "name", None) == agent:
+                return candidate
+        return None
+
     async def handle_background_jobs_start(self, request):
         manager = self._background_job_manager()
         if manager is None:
@@ -3304,6 +3314,21 @@ class WorkbenchApiServer:
         origin = payload.get("origin") if isinstance(payload.get("origin"), dict) else {}
         origin.setdefault("source", "workbench_api:background_jobs")
         origin.setdefault("api_path", "/api/background-jobs")
+        runtime = self._runtime_for_background_job_agent(manager, agent)
+        meta = getattr(runtime, "current_request_meta", None) or {}
+        if origin.get("chat_id") is None and meta.get("chat_id") is not None:
+            origin["chat_id"] = meta.get("chat_id")
+        if origin.get("chat_id") is None and runtime is not None:
+            primary_chat_id = getattr(runtime, "_primary_chat_id", None)
+            if callable(primary_chat_id):
+                try:
+                    origin["chat_id"] = primary_chat_id()
+                except Exception:
+                    pass
+        if not origin.get("request_id") and meta.get("request_id"):
+            origin["request_id"] = meta.get("request_id")
+        if not origin.get("summary") and meta.get("summary"):
+            origin["summary"] = meta.get("summary")
         try:
             record = await manager.start_job(
                 agent=agent,

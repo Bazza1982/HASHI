@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from orchestrator.background_jobs import BackgroundJobManager
 from orchestrator.workbench_api import WorkbenchApiServer
 
 
@@ -97,6 +99,55 @@ async def test_background_jobs_start_uses_live_manager(tmp_path):
     assert manager.started[0]["agent"] == "zelda"
     assert manager.started[0]["argv"] == ["python3", "-c", "print('heartbeat')"]
     assert manager.started[0]["origin"]["api_path"] == "/api/background-jobs"
+
+
+@pytest.mark.asyncio
+async def test_background_jobs_start_with_real_manager_completes_and_notifies(tmp_path):
+    sent = []
+
+    async def send_long_message(**kwargs):
+        sent.append(kwargs)
+        return 0.0, 1
+
+    runtime = SimpleNamespace(
+        name="zelda",
+        current_request_meta={
+            "chat_id": 123,
+            "request_id": "req-workbench-bg",
+            "summary": "Workbench background smoke",
+        },
+        send_long_message=send_long_message,
+    )
+    kernel = SimpleNamespace(runtimes=[runtime], background_job_manager=None)
+    manager = BackgroundJobManager(tmp_path / "background_jobs", kernel=kernel)
+    await manager.start()
+    kernel.background_job_manager = manager
+    server = _server(tmp_path, manager=manager)
+
+    response = await server.handle_background_jobs_start(
+        _FakeRequest(
+            {
+                "agent": "zelda",
+                "argv": [sys.executable, "-c", "print('workbench background done')"],
+                "cwd": str(tmp_path),
+                "origin": {"source": "test"},
+            }
+        )
+    )
+
+    payload = json.loads(response.text)
+    assert response.status == 201
+    assert payload["ok"] is True
+    job_id = payload["job"]["job_id"]
+
+    await manager._monitor_tasks[job_id]
+    saved = manager.get(job_id)
+    assert saved is not None
+    assert saved.state == "succeeded"
+    assert saved.notification["delivered"] is True
+    assert sent and sent[0]["chat_id"] == 123
+    assert sent[0]["request_id"] == "req-workbench-bg"
+    assert "workbench background done" in manager.tail(job_id)
 
 
 @pytest.mark.asyncio
