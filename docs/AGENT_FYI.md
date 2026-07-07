@@ -24,8 +24,9 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - `/fresh`: clean API context for non-CLI backends (`openrouter-api`, `deepseek-api`, `ollama-api`). Clears recent turns and stops saved memories from being auto-injected without deleting them.
 - `/handoff`: fresh continuity restore from recent chat history.
 - `/fyi [prompt]`: explicit bridge environment awareness refresh.
-- `/bg <task>`: queue a background-capable task. Treat `/bg <task>` as `/bg run <task>`; preserve the user's task text exactly and use HASHI BackgroundJobManager for long OS/process work instead of blocking the chat. If model-facing `background_job_*` tools are unavailable, use the live local Workbench `/api/background-jobs` endpoints instead of starting a temporary standalone manager.
+- `/bg <task>`: queue a background-capable task. Treat `/bg <task>` as `/bg run <task>`; preserve the user's task text exactly and use HASHI BackgroundJobManager for long OS/process work instead of blocking the chat. If model-facing `background_job_*` tools are unavailable, use the live local Workbench `/api/background-jobs` endpoints instead of starting a temporary standalone manager. Start managed jobs with success/failure notification and completion/failure agent-event routing enabled when possible.
 - `/bg status [job_id]`, `/bg tail <job_id>`, `/bg cancel <job_id>`, `/bg list`: inspect or manage recorded background jobs.
+- `background-job-event`: internal one-shot event delivered when a managed background job reaches a terminal state. Use the included `job_id`, `event`, `returncode`, paths, and `last_output` to summarize, continue the workflow, ask for confirmation, or report failure. Only run extra inspection when the event evidence is missing or inconsistent, and do not restart the same job unless the user explicitly asked for that behavior.
 - `/active [on|off] [minutes]`: toggle proactive follow-up heartbeat; default is 10 minutes.
 - `/voice [status|on|off|provider|providers|voices|use <alias>]`: control native bridge-owned voice replies.
 - `/say`: read the last assistant reply as a voice message. This forces one TTS attempt even when `/voice off`, as long as a usable voice provider and voice choice are configured.
@@ -78,7 +79,9 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - `/fresh` starts a clean API context. It clears recent turns, preserves saved memories, and disables saved-memory auto-injection until `/memory saved on` or `/memory on` restores it.
 - `/handoff` restores recent continuity from bridge transcript, not CLI resume state.
 - `/fyi` explicitly refreshes awareness of this bridge environment and can carry a follow-up prompt.
-- `/bg` is an explicit manual background-work entry point, not an automatic hook. If a `/bg` task needs long shell/process execution, start it through the managed background job path, report the job id and notification behavior, and use `/bg status`, `/bg tail`, or `/bg cancel` for follow-up.
+- `/bg` is an explicit manual background-work entry point. If a `/bg` task needs long shell/process execution, start it through the managed background job path, report the job id and notification/event behavior, and use `/bg status`, `/bg tail`, or `/bg cancel` for follow-up.
+- Terminal success/failure notifications can enqueue a `background-job-event` back to the responsible agent. The agent's job is to make the terminal outcome useful to the user: summarize the result, continue the workflow if that is clearly the next responsible step, ask for confirmation when intent is ambiguous, or report failure with the relevant tail excerpt.
+- Progress updates during a running job are not yet a built-in manager heartbeat. If a task needs periodic progress messages, the task command must emit them or call an approved notification surface intentionally; normal terminal completion/failure routing remains managed by BackgroundJobManager.
 
 ## Skills System
 - Skills live under `skills/`.

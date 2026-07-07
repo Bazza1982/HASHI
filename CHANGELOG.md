@@ -12,9 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Telegram `/notify` preference** — added a functional-layer `/notify [on|off]` command. Telegram notifications default to `off`, which still delivers messages but sends them with Telegram `disable_notification=true`; `/notify on` restores audible notifications and persists per agent workspace.
+- **Managed `/bg` background jobs** — added a Workbench-backed BackgroundJobManager path for long OS/process work with durable job ids, status/tail/cancel APIs, bounded stdout/stderr logs, terminal success/failure notifications, and one-shot `background-job-event` routing that can wake the responsible agent to summarize the completed job.
 
 ### Fixed
 
+- **Background job hot-reload and delivery path** — fixed Workbench API background-job start routing, `/reboot` hot reload of Workbench API handlers, command-array handling for Workbench job starts, notification context preservation, and Telegram delivery of agent reports produced from completion/failure events.
 - **Telegram `/nudge` inline actions** — routed `nudgejob:` callback data through the existing skill callback handler so Trigger, Pause/Resume, and Delete buttons are dispatched instead of being ignored by the Telegram callback pattern.
 - **Telegram `/say` command visibility** — restored `/say` to the bot command menu and default limited-agent allowlist so conversational agents can expose the command again.
 - **Flexible runtime `/say` execution** — restored transcript lookup in `FlexibleAgentRuntime` so `/say` can read the last assistant reply before forcing TTS generation. Forced `/say` generation bypasses `/voice off`, but still requires a configured and working voice provider/voice selection.
@@ -22,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
+- Added focused BackgroundJobManager and Workbench API coverage for subprocess completion, notifications, command-array starts, completion/failure agent event routing, and user-facing delivery from background-job events. Live smoke validation covered short argv jobs and a 3-minute sleep job whose completion woke Zelda and produced a user-visible report.
 - Added focused regression coverage for tokenized nudge delete callbacks, `/say` bot menu metadata, limited-agent allowlist behavior, forced `/say` voice generation with voice replies disabled, and flexible-runtime transcript lookup.
 - Added regression coverage for a transient Telegram media `get_file()` timeout that succeeds on retry.
 - Added focused coverage for `/notify` persistence and Telegram `disable_notification` defaults.
