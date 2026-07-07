@@ -3,6 +3,11 @@ from __future__ import annotations
 import logging
 import shutil
 
+from adapters.xai_oauth_credentials import (
+    find_hermes_auth_path,
+    hermes_oauth_available,
+    xai_api_credentials_available,
+)
 from orchestrator.flexible_backend_registry import get_secret_lookup_order
 
 main_logger = logging.getLogger("BridgeU.Orchestrator")
@@ -10,6 +15,16 @@ main_logger = logging.getLogger("BridgeU.Orchestrator")
 
 class BackendPreflight:
     """Determine which configured backends are available for startup."""
+
+    def has_xai_api_credentials(self, global_cfg, agent_configs, secrets) -> bool:
+        hermes_home = str(getattr(global_cfg, "hermes_home", "") or "").strip() or None
+        if xai_api_credentials_available(hermes_home=hermes_home, secrets=secrets):
+            return True
+        for cfg in agent_configs:
+            for secret_key in get_secret_lookup_order("xai-api", getattr(cfg, "name", "")):
+                if secrets.get(secret_key):
+                    return True
+        return False
 
     def has_openrouter_api_key(self, agent_configs, secrets) -> bool:
         for cfg in agent_configs:
@@ -48,6 +63,20 @@ class BackendPreflight:
                     result[engine] = (True, found)
                 else:
                     result[engine] = (False, f"'{cmd}' not found on PATH")
+            elif engine == "xai-api":
+                if self.has_xai_api_credentials(global_cfg, agent_configs, secrets):
+                    auth_path = find_hermes_auth_path(
+                        str(getattr(global_cfg, "hermes_home", "") or "").strip() or None
+                    )
+                    if auth_path is not None:
+                        result[engine] = (True, f"Hermes OAuth available ({auth_path})")
+                    else:
+                        result[engine] = (True, "xAI API key present")
+                else:
+                    result[engine] = (
+                        False,
+                        "no Hermes xai-oauth and no xai_api_key in secrets.json",
+                    )
             elif engine == "openrouter-api":
                 if self.has_openrouter_api_key(agent_configs, secrets):
                     result[engine] = (True, "API key present")

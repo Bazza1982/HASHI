@@ -103,6 +103,26 @@ BACKEND_REGISTRY: dict[str, dict] = {
         "default_effort": None,
         "secret_keys": [],
     },
+    "xai-api": {
+        "label": "xai",
+        "models": [
+            "grok-4.3",
+            "grok-build-0.1",
+            "grok-4.20-0309-reasoning",
+            "grok-4.20-0309-non-reasoning",
+            "grok-4.20-multi-agent-0309",
+            "grok-imagine-image",
+            "grok-imagine-image-quality",
+        ],
+        "default_model": "grok-4.3",
+        "efforts": [],
+        "default_effort": None,
+        "secret_keys": [
+            "xai_oauth_refresh_token",
+            "xai_api_key",
+            "XAI_API_KEY",
+        ],
+    },
     "openrouter-api": {
         "label": "openrouter",
         "models": [

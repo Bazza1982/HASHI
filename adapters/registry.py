@@ -25,5 +25,8 @@ def get_backend_class(engine_name: str):
     elif engine_name == "ollama-api":
         from adapters.ollama_api import OllamaAdapter
         return OllamaAdapter
+    elif engine_name == "xai-api":
+        from adapters.xai_api import XaiApiAdapter
+        return XaiApiAdapter
     else:
         raise ValueError(f"Unknown engine: {engine_name}")

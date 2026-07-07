@@ -131,6 +131,44 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "xai_imagine",
+            "description": (
+                "Generate an image from a text prompt using xAI Grok Imagine models. "
+                "Returns temporary image URLs."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "Image description prompt.",
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": (
+                            "Imagine model id (default grok-imagine-image-quality)."
+                        ),
+                    },
+                    "aspect_ratio": {
+                        "type": "string",
+                        "description": "Optional aspect ratio, e.g. 16:9 or 1:1.",
+                    },
+                    "resolution": {
+                        "type": "string",
+                        "description": "Optional resolution: 1k or 2k.",
+                    },
+                    "n": {
+                        "type": "integer",
+                        "description": "Number of images to generate (default 1).",
+                    },
+                },
+                "required": ["prompt"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "file_list",
             "description": (
                 "List files and directories at a given path. "

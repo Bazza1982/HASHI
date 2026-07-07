@@ -6,7 +6,8 @@ Exposes:
   POST /v1/chat/completions
   GET  /v1/models
 
-Routes requests to local CLI backends (gemini-cli, claude-cli, codex-cli).
+Routes requests to local CLI backends (gemini-cli, claude-cli, codex-cli) and
+xAI HTTP backend (xai-api).
 Runs on its own port (default 18801), independent from Telegram and workbench.
 
 Adapter instances are separate from Telegram runtimes — no shared queue.
@@ -26,13 +27,24 @@ from typing import Any
 
 from aiohttp import web
 
+from adapters.xai_imagine import (
+    DEFAULT_IMAGINE_MODEL,
+    DEFAULT_IMAGINE_VIDEO_MODEL,
+    XaiOAuthCredentialError,
+    generate_xai_image,
+    generate_xai_video,
+    is_imagine_image_model,
+    is_imagine_video_model,
+)
 from adapters.registry import get_backend_class
 from orchestrator.model_catalog import (
     AVAILABLE_CLAUDE_MODELS,
     AVAILABLE_CODEX_MODELS,
     AVAILABLE_GEMINI_MODELS,
+    AVAILABLE_XAI_API_MODELS,
 )
 from orchestrator.api_gateway_config import load_api_gateway_config
+from orchestrator.api_gateway_preflight import check_gateway_engines
 from adapters.stream_events import StreamEvent, KIND_TEXT_DELTA
 
 logger = logging.getLogger("BridgeU.APIGateway")
@@ -48,9 +60,16 @@ for _m in AVAILABLE_CLAUDE_MODELS:
     _ENGINE_FOR_MODEL[_m] = "claude-cli"
 for _m in AVAILABLE_CODEX_MODELS:
     _ENGINE_FOR_MODEL[_m] = "codex-cli"
+for _m in AVAILABLE_XAI_API_MODELS:
+    _ENGINE_FOR_MODEL[_m] = "xai-api"
 
 _ALL_MODELS = list(_ENGINE_FOR_MODEL.keys())
+_GATEWAY_ENGINES = sorted(set(_ENGINE_FOR_MODEL.values()))
 DEFAULT_API_MODEL = AVAILABLE_CODEX_MODELS[0] if AVAILABLE_CODEX_MODELS else (_ALL_MODELS[0] if _ALL_MODELS else "")
+
+
+def _engine_owned_by(engine: str) -> str:
+    return engine.replace("-cli", "").replace("-api", "")
 
 
 def available_gateway_models() -> list[str]:
@@ -222,6 +241,7 @@ class _AdapterPool:
 class APIGatewayServer:
     def __init__(self, global_config, secrets: dict, workspace_root: Path, default_model: str | None = None):
         self.global_config = global_config
+        self._secrets = secrets
         self.port: int = getattr(global_config, "api_gateway_port", 18801)
         self.bind_host: str | None = None
         gateway_config = load_api_gateway_config(global_config)
@@ -230,22 +250,55 @@ class APIGatewayServer:
         self.default_model = selected_default if selected_default in _ENGINE_FOR_MODEL else DEFAULT_API_MODEL
         self._pool = _AdapterPool(global_config, secrets, workspace_root)
         self._sessions = _SessionCache()
+        self._engine_status: dict[str, dict] = {}
         self._runner = None
         self._site = None
+        self.refresh_engine_status()
 
         self.app = web.Application(client_max_size=8 * 1024 * 1024)
         self.app.router.add_get("/v1/models", self.handle_models)
         self.app.router.add_post("/v1/chat/completions", self.handle_chat_completions)
+        self.app.router.add_post("/v1/images/generations", self.handle_image_generations)
+        self.app.router.add_post("/v1/videos/generations", self.handle_video_generations)
         self.app.router.add_get("/health", self.handle_health)
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
+    def refresh_engine_status(self) -> dict[str, dict]:
+        self._engine_status = check_gateway_engines(
+            self.global_config,
+            self._secrets,
+            _GATEWAY_ENGINES,
+        )
+        return self._engine_status
+
+    def _available_models(self) -> list[str]:
+        models: list[str] = []
+        for model in _ALL_MODELS:
+            engine = _ENGINE_FOR_MODEL[model]
+            status = self._engine_status.get(engine) or {}
+            if status.get("available", True):
+                models.append(model)
+        return models
+
+    def _engine_available(self, engine: str) -> tuple[bool, str]:
+        status = self._engine_status.get(engine) or {}
+        return bool(status.get("available", True)), str(status.get("reason") or "")
+
     async def start(self):
+        self.refresh_engine_status()
         self._runner = web.AppRunner(self.app)
         await self._runner.setup()
         self.bind_host = self._select_bind_host()
         self._site = web.TCPSite(self._runner, self.bind_host, self.port)
         await self._site.start()
+        available = [e for e, s in self._engine_status.items() if s.get("available")]
+        unavailable = [e for e, s in self._engine_status.items() if not s.get("available")]
+        logger.info(
+            "API Gateway preflight: available=%s unavailable=%s",
+            available,
+            unavailable,
+        )
 
     async def stop(self):
         await self._pool.shutdown()
@@ -287,21 +340,30 @@ class APIGatewayServer:
                 "id": model,
                 "object": "model",
                 "created": now,
-                "owned_by": _ENGINE_FOR_MODEL[model].replace("-cli", ""),
+                "owned_by": _engine_owned_by(_ENGINE_FOR_MODEL[model]),
             }
-            for model in _ALL_MODELS
+            for model in self._available_models()
         ]
         return web.json_response({"object": "list", "data": data})
 
     # ── Route: GET /health ────────────────────────────────────────────────────
 
     async def handle_health(self, request: web.Request) -> web.Response:
+        initialized = sorted(self._pool._adapters.keys())
+        available_engines = [
+            engine for engine, status in self._engine_status.items() if status.get("available")
+        ]
+        overall = "ok" if available_engines else "degraded"
         return web.json_response(
             {
-                "status": "ok",
+                "status": overall,
                 "enabled": self.enabled,
-                "engines": list(self._pool._adapters.keys()),
+                "engines": initialized,
+                "engine_status": self._engine_status,
+                "available_engines": available_engines,
+                "available_models": self._available_models(),
                 "default_model": self.default_model,
+                "default_model_available": self.default_model in self._available_models(),
                 "bind_host": self.bind_host,
                 "port": self.port,
             }
@@ -322,6 +384,13 @@ class APIGatewayServer:
             return web.json_response(
                 {"error": f"unknown model '{model}'. Use GET /v1/models to list available models."},
                 status=400,
+            )
+
+        engine_ok, engine_reason = self._engine_available(engine)
+        if not engine_ok:
+            return web.json_response(
+                {"error": f"backend unavailable for '{model}': {engine_reason}"},
+                status=503,
             )
 
         messages: list[dict] = body.get("messages") or []
@@ -381,6 +450,125 @@ class APIGatewayServer:
             return await self._handle_sync(
                 adapter, prompt, request_id, model, session_id, messages, t_start
             )
+
+    def _xai_base_url(self) -> str:
+        return str(getattr(self.global_config, "xai_api_base_url", "") or "").strip()
+
+    def _hermes_home(self) -> str | None:
+        return str(getattr(self.global_config, "hermes_home", "") or "").strip() or None
+
+    def _xai_static_key(self) -> str | None:
+        return str(
+            self._secrets.get("xai_api_key")
+            or self._secrets.get("XAI_API_KEY")
+            or ""
+        ).strip() or None
+
+    def _xai_refresh_token(self) -> str | None:
+        return str(self._secrets.get("xai_oauth_refresh_token") or "").strip() or None
+
+    def _validate_xai_media_model(self, model: str, *, kind: str) -> web.Response | None:
+        engine = _ENGINE_FOR_MODEL.get(model)
+        if engine != "xai-api":
+            return web.json_response(
+                {"error": f"unknown {kind} model '{model}'. Use GET /v1/models to list available models."},
+                status=400,
+            )
+        engine_ok, engine_reason = self._engine_available(engine)
+        if not engine_ok:
+            return web.json_response(
+                {"error": f"backend unavailable for '{model}': {engine_reason}"},
+                status=503,
+            )
+        return None
+
+    # ── Route: POST /v1/images/generations ───────────────────────────────────
+
+    async def handle_image_generations(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+
+        model = str(body.get("model") or DEFAULT_IMAGINE_MODEL).strip()
+        if not is_imagine_image_model(model):
+            return web.json_response({"error": f"model '{model}' is not an image model"}, status=400)
+        model_error = self._validate_xai_media_model(model, kind="image")
+        if model_error is not None:
+            return model_error
+
+        prompt = str(body.get("prompt") or "").strip()
+        if not prompt:
+            return web.json_response({"error": "prompt is required"}, status=400)
+
+        try:
+            result = await generate_xai_image(
+                prompt=prompt,
+                model=model,
+                bearer_token=self._xai_static_key(),
+                oauth_refresh_token=self._xai_refresh_token(),
+                hermes_home=self._hermes_home(),
+                base_url=self._xai_base_url(),
+                aspect_ratio=body.get("aspect_ratio"),
+                resolution=body.get("resolution"),
+                n=int(body.get("n") or 1),
+                response_format=str(body.get("response_format") or "url"),
+            )
+        except XaiOAuthCredentialError as exc:
+            return web.json_response({"error": str(exc)}, status=503)
+        except Exception as exc:
+            logger.error("xAI image generation failed: %s", exc)
+            return web.json_response({"error": str(exc)}, status=500)
+
+        return web.json_response(
+            {
+                "created": int(time.time()),
+                "model": result.model,
+                "data": [{"url": url} for url in result.urls],
+            }
+        )
+
+    # ── Route: POST /v1/videos/generations ───────────────────────────────────
+
+    async def handle_video_generations(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+
+        model = str(body.get("model") or DEFAULT_IMAGINE_VIDEO_MODEL).strip()
+        if not is_imagine_video_model(model):
+            return web.json_response({"error": f"model '{model}' is not a video model"}, status=400)
+        model_error = self._validate_xai_media_model(model, kind="video")
+        if model_error is not None:
+            return model_error
+
+        prompt = str(body.get("prompt") or "").strip()
+        if not prompt:
+            return web.json_response({"error": "prompt is required"}, status=400)
+
+        try:
+            result = await generate_xai_video(
+                prompt=prompt,
+                model=model,
+                bearer_token=self._xai_static_key(),
+                oauth_refresh_token=self._xai_refresh_token(),
+                hermes_home=self._hermes_home(),
+                base_url=self._xai_base_url(),
+                image_url=body.get("image_url"),
+            )
+        except XaiOAuthCredentialError as exc:
+            return web.json_response({"error": str(exc)}, status=503)
+        except Exception as exc:
+            logger.error("xAI video generation failed: %s", exc)
+            return web.json_response({"error": str(exc)}, status=500)
+
+        payload = dict(result.raw)
+        payload.setdefault("id", result.request_id)
+        payload.setdefault("request_id", result.request_id)
+        payload.setdefault("model", result.model)
+        payload.setdefault("object", "video.generation")
+        return web.json_response(payload)
 
     # ── Sync response ─────────────────────────────────────────────────────────
 

@@ -25,7 +25,7 @@ TOOL_TIERS: dict[str, list[str]] = {
         "background_job_start", "background_job_status", "background_job_tail",
         "background_job_cancel", "background_job_list",
     ],
-    "web": ["web_search", "web_fetch", "http_request"],
+    "web": ["web_search", "web_fetch", "http_request", "xai_imagine"],
     "communication": ["telegram_send"],
     "browser": [
         "browser_session", "browser_screenshot", "browser_get_text",
@@ -416,6 +416,7 @@ class ToolRegistry:
             execute_http_request,
             execute_web_search,
             execute_web_fetch,
+            execute_xai_imagine,
         )
 
         opts = self.tool_options
@@ -500,6 +501,13 @@ class ToolRegistry:
 
         if tool_name == "http_request":
             return await execute_http_request(arguments)
+
+        if tool_name == "xai_imagine":
+            return await execute_xai_imagine(
+                arguments,
+                secrets=self.secrets,
+                global_config=(self.audit_context or {}).get("global_config"),
+            )
 
         if tool_name == "web_search":
             brave_key = self.secrets.get("brave_api_key")

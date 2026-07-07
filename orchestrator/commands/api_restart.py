@@ -41,6 +41,8 @@ def _gateway_status_text(runtime: Any) -> str:
             f"{state_icon} <b>API Gateway</b>",
             f"Address: <code>{html.escape(base_url)}</code>",
             f"Chat endpoint: <code>{html.escape(base_url)}/v1/chat/completions</code>",
+            f"Images endpoint: <code>{html.escape(base_url)}/v1/images/generations</code>",
+            f"Videos endpoint: <code>{html.escape(base_url)}/v1/videos/generations</code>",
             f"Models endpoint: <code>{html.escape(base_url)}/v1/models</code>",
             f"Runtime: <code>{'running' if snapshot['running'] else 'stopped'}</code>",
             f"Enabled on restart: <code>{'yes' if snapshot['enabled'] else 'no'}</code>",
@@ -72,6 +74,7 @@ def _gateway_model_keyboard(runtime: Any) -> InlineKeyboardMarkup:
         [model for model in snapshot["available_models"] if model.startswith("gpt-")],
         [model for model in snapshot["available_models"] if model.startswith("claude-")],
         [model for model in snapshot["available_models"] if model.startswith("gemini-")],
+        [model for model in snapshot["available_models"] if model.startswith("grok-")],
     ]
     rows: list[list[InlineKeyboardButton]] = []
     for group in groups:

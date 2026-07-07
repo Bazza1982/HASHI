@@ -740,3 +740,44 @@ async def execute_web_fetch(
 
     except Exception as e:
         return f"Error fetching URL: {e}"
+
+
+# ---------------------------------------------------------------------------
+# xai_imagine
+# ---------------------------------------------------------------------------
+
+async def execute_xai_imagine(args: dict, secrets: dict, global_config: Any = None) -> str:
+    prompt = str(args.get("prompt") or "").strip()
+    if not prompt:
+        return "Error: no prompt provided"
+
+    from adapters.xai_imagine import DEFAULT_IMAGINE_MODEL, generate_xai_image
+
+    hermes_home = None
+    base_url = "https://api.x.ai/v1"
+    if global_config is not None:
+        hermes_home = str(getattr(global_config, "hermes_home", "") or "").strip() or None
+        base_url = str(getattr(global_config, "xai_api_base_url", "") or "").strip() or base_url
+
+    bearer_token = str(secrets.get("xai_api_key") or secrets.get("XAI_API_KEY") or "").strip() or None
+    oauth_refresh = str(secrets.get("xai_oauth_refresh_token") or "").strip() or None
+    model = str(args.get("model") or DEFAULT_IMAGINE_MODEL).strip() or DEFAULT_IMAGINE_MODEL
+
+    try:
+        result = await generate_xai_image(
+            prompt=prompt,
+            model=model,
+            bearer_token=bearer_token,
+            oauth_refresh_token=oauth_refresh,
+            hermes_home=hermes_home,
+            base_url=base_url,
+            aspect_ratio=str(args.get("aspect_ratio") or "").strip() or None,
+            resolution=str(args.get("resolution") or "").strip() or None,
+            n=int(args.get("n") or 1),
+        )
+    except Exception as exc:
+        return f"Error: xAI Imagine failed: {exc}"
+
+    lines = [f"Generated {len(result.urls)} image(s) with {result.model}:"]
+    lines.extend(result.urls)
+    return "\n".join(lines)

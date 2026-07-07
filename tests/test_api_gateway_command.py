@@ -8,6 +8,7 @@ import pytest
 
 from orchestrator.api_gateway import APIGatewayServer
 from orchestrator.api_gateway_config import (
+    available_api_models,
     config_path_for,
     load_api_gateway_config,
     save_api_gateway_config,
@@ -45,6 +46,14 @@ def test_api_gateway_config_defaults_and_persistence(tmp_path):
     assert saved["enabled"] is True
     assert saved["default_model"] == "gpt-5.5"
     assert json.loads(config_path_for(cfg).read_text(encoding="utf-8"))["updated_by"] == "telegram:123"
+
+
+def test_api_gateway_default_model_list_includes_grok_models():
+    models = available_api_models()
+    assert "grok-4.3" in models
+    assert "grok-build-0.1" in models
+    assert "grok-imagine-image" in models
+    assert "grok-imagine-video" in models
 
 
 def test_api_command_module_is_registered():

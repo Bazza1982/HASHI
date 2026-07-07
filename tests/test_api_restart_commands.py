@@ -14,7 +14,13 @@ class _FakeServiceManager:
             "enabled": False,
             "running": False,
             "default_model": "gpt-5.5",
-            "available_models": ["gpt-5.5", "claude-sonnet-4-6", "gemini-2.5-flash"],
+            "available_models": [
+                "gpt-5.5",
+                "claude-sonnet-4-6",
+                "gemini-2.5-flash",
+                "grok-4.3",
+                "grok-imagine-video",
+            ],
             "base_url": "http://127.0.0.1:18801",
             "port": 18801,
         }
@@ -93,6 +99,8 @@ async def test_api_command_status_includes_address_and_default_model():
 
     text, kwargs = runtime.messages[-1]
     assert "Address: <code>http://127.0.0.1:18801</code>" in text
+    assert "Images endpoint: <code>http://127.0.0.1:18801/v1/images/generations</code>" in text
+    assert "Videos endpoint: <code>http://127.0.0.1:18801/v1/videos/generations</code>" in text
     assert "Default model: <code>gpt-5.5</code>" in text
     assert kwargs["parse_mode"] == "HTML"
 
@@ -107,6 +115,36 @@ async def test_api_callback_updates_default_model():
 
     assert runtime.service_manager.models == ["claude-sonnet-4-6"]
     assert "claude-sonnet-4-6" in query.edits[-1][0]
+
+
+@pytest.mark.asyncio
+async def test_api_model_menu_includes_grok_models():
+    runtime = _FakeRuntime()
+    query = _FakeCallbackQuery("apigw:menu:model")
+    update = SimpleNamespace(callback_query=query)
+
+    await api_restart.api_callback(runtime, update, SimpleNamespace())
+
+    markup = query.edits[-1][1]["reply_markup"]
+    labels = [
+        button.text
+        for row in markup.inline_keyboard
+        for button in row
+    ]
+    assert "grok-4.3" in labels
+    assert "grok-imagine-video" in labels
+
+
+@pytest.mark.asyncio
+async def test_api_callback_updates_default_model_to_grok():
+    runtime = _FakeRuntime()
+    query = _FakeCallbackQuery("apigw:model:grok-4.3")
+    update = SimpleNamespace(callback_query=query)
+
+    await api_restart.api_callback(runtime, update, SimpleNamespace())
+
+    assert runtime.service_manager.models == ["grok-4.3"]
+    assert "grok-4.3" in query.edits[-1][0]
 
 
 @pytest.mark.asyncio

@@ -102,6 +102,8 @@ def _status_text(runtime: Any, *, prefix: str = "") -> str:
             f"Address: <code>{html.escape(address)}</code>",
             f"Models: <code>{html.escape(address)}/v1/models</code>",
             f"Chat: <code>{html.escape(address)}/v1/chat/completions</code>",
+            f"Images: <code>{html.escape(address)}/v1/images/generations</code>",
+            f"Videos: <code>{html.escape(address)}/v1/videos/generations</code>",
             f"Default API model: <code>{html.escape(cfg['default_model'])}</code>",
             "",
             "API callers may override this default by sending a request-level <code>model</code>.",

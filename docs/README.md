@@ -56,6 +56,7 @@ deployment validation continues.
 - [HASHI_CORE_SLIMMING_PLAN.md](HASHI_CORE_SLIMMING_PLAN.md) — implementation plan and acceptance record for the slim core migration
 - [WRAPPER_AGENT_MODE_PLAN.md](WRAPPER_AGENT_MODE_PLAN.md) — implemented v3.2 wrapper agent mode design, command model, state contract, and acceptance record
 - [API_GUIDE.md](API_GUIDE.md) — OpenAI-compatible API Gateway guide, including per-instance gateway port rules
+- [HASHI_XAI_API_BACKEND_PLAN.md](HASHI_XAI_API_BACKEND_PLAN.md) — xAI/Grok API backend design using Hermes-managed OAuth refresh and OpenAI-compatible gateway routes
 - [ANATTA_MIGRATION_PLAN.md](ANATTA_MIGRATION_PLAN.md) — Anatta live self-assembly architecture and validation plan
 - [HASHI_REMOTE_FILE_TRANSFER.md](HASHI_REMOTE_FILE_TRANSFER.md) — direct cross-PC file push support for release artifacts and EXP transfer
 - [HASHI_REMOTE_FILE_TRANSFER_AND_ATTACHMENTS_PLAN.md](HASHI_REMOTE_FILE_TRANSFER_AND_ATTACHMENTS_PLAN.md) — planned shared-token file transfer upgrade and message attachment design
