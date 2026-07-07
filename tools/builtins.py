@@ -10,7 +10,7 @@ import asyncio
 import json
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -383,6 +383,156 @@ async def execute_process_kill(args: dict) -> str:
         return f"Error: process {pid} not found"
     except Exception as e:
         return f"Error: {e}"
+
+
+# ---------------------------------------------------------------------------
+# background jobs
+# ---------------------------------------------------------------------------
+
+def _background_manager_from_context(audit_context: dict | None):
+    context = audit_context or {}
+    runtime = context.get("_runtime")
+    kernel = (
+        getattr(runtime, "orchestrator", None)
+        or getattr(runtime, "kernel", None)
+        or context.get("_kernel")
+    )
+    manager = getattr(kernel, "background_job_manager", None) if kernel is not None else None
+    return manager or getattr(runtime, "background_job_manager", None)
+
+
+def _coerce_chat_id(value: Any) -> Any:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return value
+
+
+def _job_summary(record: Any) -> dict[str, Any]:
+    return {
+        "job_id": getattr(record, "job_id", None),
+        "state": getattr(record, "state", None),
+        "returncode": getattr(record, "returncode", None),
+        "created_at": getattr(record, "created_at", None),
+        "updated_at": getattr(record, "updated_at", None),
+        "ended_at": getattr(record, "ended_at", None),
+        "error": getattr(record, "error", None),
+        "command": (getattr(record, "command", {}) or {}).get("display"),
+        "stdout_path": (getattr(record, "logs", {}) or {}).get("stdout_path"),
+        "stderr_path": (getattr(record, "logs", {}) or {}).get("stderr_path"),
+        "notification": getattr(record, "notification", None),
+    }
+
+
+async def execute_background_job_start(
+    args: dict,
+    access_root: Path,
+    workspace_dir: Path,
+    audit_context: dict | None = None,
+) -> str:
+    manager = _background_manager_from_context(audit_context)
+    if manager is None:
+        return "Error: BackgroundJobManager is not running in this runtime"
+
+    command = str(args.get("command") or "").strip()
+    argv = args.get("argv")
+    if argv is not None:
+        if not isinstance(argv, list) or not all(isinstance(item, str) and item for item in argv):
+            return "Error: argv must be a non-empty list of strings"
+    if not command and not argv:
+        return "Error: command or argv is required"
+    if command and argv:
+        return "Error: provide command or argv, not both"
+
+    raw_cwd = str(args.get("cwd") or ".").strip() or "."
+    try:
+        cwd = _resolve_path(raw_cwd, access_root, workspace_dir)
+    except ValueError as exc:
+        return f"Error: {exc}"
+    if not cwd.exists() or not cwd.is_dir():
+        return f"Error: cwd is not a directory: {cwd}"
+
+    context = audit_context or {}
+    origin = {
+        "chat_id": _coerce_chat_id(context.get("chat_id")),
+        "request_id": context.get("request_id"),
+        "source": context.get("request_source") or "tool:background_job_start",
+        "summary": context.get("request_summary"),
+        "tool": "background_job_start",
+    }
+    max_runtime = int(args.get("max_runtime_seconds") or 4 * 60 * 60)
+    record = await manager.start_job(
+        agent=str(args.get("agent") or context.get("agent_name") or "unknown"),
+        cwd=cwd,
+        argv=argv,
+        command=command or None,
+        origin=origin,
+        notify_on_complete=bool(args.get("notify_on_complete", True)),
+        notify_on_failure=bool(args.get("notify_on_failure", True)),
+        max_runtime_seconds=max(1, max_runtime),
+    )
+    payload = _job_summary(record)
+    payload["follow_up"] = {
+        "status": f"/bg status {record.job_id}",
+        "tail": f"/bg tail {record.job_id}",
+        "cancel": f"/bg cancel {record.job_id}",
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+async def execute_background_job_status(args: dict, audit_context: dict | None = None) -> str:
+    manager = _background_manager_from_context(audit_context)
+    if manager is None:
+        return "Error: BackgroundJobManager is not running in this runtime"
+    job_id = str(args.get("job_id") or "").strip()
+    if not job_id:
+        return await execute_background_job_list(args, audit_context=audit_context)
+    record = manager.get(job_id)
+    if record is None:
+        return f"Error: background job not found: {job_id}"
+    return json.dumps(_job_summary(record), ensure_ascii=False, indent=2)
+
+
+async def execute_background_job_tail(args: dict, audit_context: dict | None = None) -> str:
+    manager = _background_manager_from_context(audit_context)
+    if manager is None:
+        return "Error: BackgroundJobManager is not running in this runtime"
+    job_id = str(args.get("job_id") or "").strip()
+    if not job_id:
+        return "Error: job_id is required"
+    stream = str(args.get("stream") or "stdout").strip().lower()
+    lines = int(args.get("lines") or 80)
+    try:
+        text = manager.tail(job_id, stream=stream, lines=max(1, lines))
+    except KeyError:
+        return f"Error: background job not found: {job_id}"
+    return text or "(no output yet)"
+
+
+async def execute_background_job_cancel(args: dict, audit_context: dict | None = None) -> str:
+    manager = _background_manager_from_context(audit_context)
+    if manager is None:
+        return "Error: BackgroundJobManager is not running in this runtime"
+    job_id = str(args.get("job_id") or "").strip()
+    if not job_id:
+        return "Error: job_id is required"
+    try:
+        record = await manager.cancel(job_id)
+    except KeyError:
+        return f"Error: background job not found: {job_id}"
+    return json.dumps(_job_summary(record), ensure_ascii=False, indent=2)
+
+
+async def execute_background_job_list(args: dict, audit_context: dict | None = None) -> str:
+    manager = _background_manager_from_context(audit_context)
+    if manager is None:
+        return "Error: BackgroundJobManager is not running in this runtime"
+    agent = args.get("agent")
+    limit = int(args.get("limit") or 20)
+    records = manager.list(agent=str(agent) if agent else None, limit=max(1, min(limit, 100)))
+    return json.dumps([_job_summary(record) for record in records], ensure_ascii=False, indent=2)
 
 
 async def execute_telegram_send(

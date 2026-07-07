@@ -21,6 +21,10 @@ from tools.schemas import TOOL_SCHEMA_MAP, ALL_TOOL_NAMES
 TOOL_TIERS: dict[str, list[str]] = {
     "core": ["bash", "file_read", "file_write", "file_list"],
     "system": ["process_list", "process_kill", "apply_patch"],
+    "background": [
+        "background_job_start", "background_job_status", "background_job_tail",
+        "background_job_cancel", "background_job_list",
+    ],
     "web": ["web_search", "web_fetch", "http_request"],
     "communication": ["telegram_send"],
     "browser": [
@@ -239,7 +243,7 @@ class ToolRegistry:
         )
 
     def _check_enterprise_shell_gate(self, tool_name: str, *, tool_call_id: str) -> ToolResult | None:
-        if tool_name != "bash":
+        if tool_name not in {"bash", "background_job_start"}:
             return None
         context = self.audit_context or {}
         org_id = str(context.get("org_id") or "").strip()
@@ -402,6 +406,11 @@ class ToolRegistry:
             execute_apply_patch,
             execute_process_list,
             execute_process_kill,
+            execute_background_job_start,
+            execute_background_job_status,
+            execute_background_job_tail,
+            execute_background_job_cancel,
+            execute_background_job_list,
             execute_telegram_send,
             execute_telegram_send_file,
             execute_http_request,
@@ -455,6 +464,26 @@ class ToolRegistry:
 
         if tool_name == "process_kill":
             return await execute_process_kill(arguments)
+
+        if tool_name == "background_job_start":
+            return await execute_background_job_start(
+                arguments,
+                access_root=self.access_root,
+                workspace_dir=self.workspace_dir,
+                audit_context=self.audit_context,
+            )
+
+        if tool_name == "background_job_status":
+            return await execute_background_job_status(arguments, audit_context=self.audit_context)
+
+        if tool_name == "background_job_tail":
+            return await execute_background_job_tail(arguments, audit_context=self.audit_context)
+
+        if tool_name == "background_job_cancel":
+            return await execute_background_job_cancel(arguments, audit_context=self.audit_context)
+
+        if tool_name == "background_job_list":
+            return await execute_background_job_list(arguments, audit_context=self.audit_context)
 
         if tool_name == "telegram_send":
             return await execute_telegram_send(

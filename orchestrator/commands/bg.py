@@ -20,7 +20,7 @@ USAGE = (
 
 BG_INSTRUCTION = """This request was sent with /bg, meaning the user wants background-safe handling.
 
-Keep the user's task text exact. If you need to run long OS/process work, use HASHI BackgroundJobManager rather than blocking the chat on a foreground shell command. Start managed background jobs with success/failure notification enabled when possible. Report the job id, current state, where logs can be tailed, and how the user can follow up with /bg status, /bg tail, or /bg cancel. If no long OS process is needed, proceed normally but keep the response concise and explain that no managed background job was required."""
+Keep the user's task text exact. If you need to run long OS/process work, use HASHI BackgroundJobManager rather than blocking the chat on a foreground shell command. When tool calls are available, start work with background_job_start and inspect it with background_job_status, background_job_tail, background_job_cancel, or background_job_list. Start managed background jobs with success/failure notification enabled when possible. Report the job id, current state, where logs can be tailed, and how the user can follow up with /bg status, /bg tail, or /bg cancel. If no long OS process is needed, proceed normally but keep the response concise and explain that no managed background job was required."""
 
 
 def _is_authorized(runtime: Any, update: Any) -> bool:
