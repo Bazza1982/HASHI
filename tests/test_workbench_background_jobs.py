@@ -102,6 +102,29 @@ async def test_background_jobs_start_uses_live_manager(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_background_jobs_start_accepts_command_array_as_argv(tmp_path):
+    manager = _FakeBackgroundJobManager()
+    server = _server(tmp_path, manager=manager)
+
+    response = await server.handle_background_jobs_start(
+        _FakeRequest(
+            {
+                "agent": "zelda",
+                "command": ["python3", "-c", "print('heartbeat')"],
+                "cwd": str(tmp_path),
+                "origin": {"source": "test"},
+            }
+        )
+    )
+
+    payload = json.loads(response.text)
+    assert response.status == 201
+    assert payload["ok"] is True
+    assert manager.started[0]["argv"] == ["python3", "-c", "print('heartbeat')"]
+    assert manager.started[0]["command"] is None
+
+
+@pytest.mark.asyncio
 async def test_background_jobs_start_with_real_manager_completes_and_notifies(tmp_path):
     sent = []
 
@@ -148,6 +171,46 @@ async def test_background_jobs_start_with_real_manager_completes_and_notifies(tm
     assert sent and sent[0]["chat_id"] == 123
     assert sent[0]["request_id"] == "req-workbench-bg"
     assert "workbench background done" in manager.tail(job_id)
+
+
+@pytest.mark.asyncio
+async def test_background_jobs_start_command_array_executes_with_real_manager(tmp_path):
+    async def send_long_message(**kwargs):
+        return 0.0, 1
+
+    runtime = SimpleNamespace(
+        name="zelda",
+        current_request_meta={"chat_id": 123, "request_id": "req-workbench-bg-array"},
+        send_long_message=send_long_message,
+    )
+    kernel = SimpleNamespace(runtimes=[runtime], background_job_manager=None)
+    manager = BackgroundJobManager(tmp_path / "background_jobs", kernel=kernel)
+    await manager.start()
+    kernel.background_job_manager = manager
+    server = _server(tmp_path, manager=manager)
+
+    response = await server.handle_background_jobs_start(
+        _FakeRequest(
+            {
+                "agent": "zelda",
+                "command": [sys.executable, "-c", "print('command array ok')"],
+                "cwd": str(tmp_path),
+                "origin": {"source": "test"},
+            }
+        )
+    )
+
+    payload = json.loads(response.text)
+    assert response.status == 201
+    assert payload["ok"] is True
+    job_id = payload["job"]["job_id"]
+
+    await manager._monitor_tasks[job_id]
+    saved = manager.get(job_id)
+    assert saved is not None
+    assert saved.state == "succeeded"
+    assert saved.returncode == 0
+    assert "command array ok" in manager.tail(job_id)
 
 
 @pytest.mark.asyncio
