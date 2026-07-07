@@ -32,6 +32,31 @@ def test_check_gateway_engine_xai_api_with_hermes_oauth(tmp_path: Path):
     assert "Hermes OAuth" in status["reason"]
 
 
+def test_check_gateway_engine_xai_api_relogin_required_not_available(tmp_path: Path):
+    auth = tmp_path / "auth.json"
+    auth.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "xai-oauth": {
+                        "last_auth_error": {
+                            "relogin_required": True,
+                            "message": "Refresh token has been revoked",
+                        }
+                    }
+                },
+                "credential_pool": {"xai-oauth": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = SimpleNamespace(hermes_home=str(tmp_path))
+    status = check_gateway_engine(cfg, {}, "xai-api")
+    assert status["available"] is False
+    assert "relogin required" in status["reason"]
+    assert "revoked" in status["reason"]
+
+
 def test_check_gateway_engine_xai_api_with_secrets_refresh_token():
     cfg = SimpleNamespace(hermes_home="/nonexistent/hermes")
     with patch("orchestrator.api_gateway_preflight.hermes_oauth_available", return_value=False):

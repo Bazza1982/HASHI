@@ -27,6 +27,7 @@ IMAGINE_VIDEO_MODELS = frozenset(
 
 DEFAULT_IMAGINE_MODEL = "grok-imagine-image-quality"
 DEFAULT_IMAGINE_VIDEO_MODEL = "grok-imagine-video"
+_AUTH_RETRY_STATUSES = {401, 403}
 
 
 @dataclass
@@ -93,7 +94,7 @@ async def generate_xai_image(
 
     async with httpx.AsyncClient(timeout=120.0) as client:
         response = await client.post(url, json=payload, headers=headers)
-        if response.status_code == 401:
+        if response.status_code in _AUTH_RETRY_STATUSES:
             creds = await asyncio.to_thread(
                 resolve_xai_credentials,
                 static_api_key=bearer_token,
@@ -154,7 +155,7 @@ async def generate_xai_video(
 
     async with httpx.AsyncClient(timeout=120.0) as client:
         response = await client.post(url, json=payload, headers=headers)
-        if response.status_code == 401:
+        if response.status_code in _AUTH_RETRY_STATUSES:
             creds = await asyncio.to_thread(
                 resolve_xai_credentials,
                 static_api_key=bearer_token,

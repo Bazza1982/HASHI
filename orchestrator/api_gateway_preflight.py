@@ -6,6 +6,7 @@ from typing import Any
 from adapters.xai_oauth_credentials import (
     find_hermes_auth_path,
     hermes_oauth_available,
+    hermes_oauth_relogin_required,
     secrets_oauth_refresh_available,
     xai_api_credentials_available,
 )
@@ -36,6 +37,17 @@ def check_gateway_engine(global_config: Any, secrets: dict, engine: str) -> dict
 
     if engine == "xai-api":
         hermes_home = str(getattr(global_config, "hermes_home", "") or "").strip() or None
+        relogin_required, relogin_reason = hermes_oauth_relogin_required(hermes_home)
+        if relogin_required:
+            auth_path = find_hermes_auth_path(hermes_home)
+            return {
+                "available": False,
+                "reason": (
+                    f"Hermes OAuth relogin required ({auth_path}): {relogin_reason}"
+                    if auth_path
+                    else f"Hermes OAuth relogin required: {relogin_reason}"
+                ),
+            }
         if hermes_oauth_available(hermes_home):
             auth_path = find_hermes_auth_path(hermes_home)
             return {

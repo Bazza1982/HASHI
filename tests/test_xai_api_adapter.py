@@ -128,6 +128,60 @@ def test_xai_api_adapter_parse_responses_body():
 
 
 @pytest.mark.asyncio
+async def test_xai_api_adapter_retries_403_with_force_refresh(tmp_path):
+    cfg = SimpleNamespace(
+        name="test-agent",
+        workspace_dir=tmp_path,
+        system_md=None,
+        model="grok-4.3",
+    )
+    global_cfg = SimpleNamespace(
+        hermes_home=None,
+        xai_api_base_url="https://api.x.ai/v1",
+        xai_use_responses_api=False,
+    )
+    adapter = XaiApiAdapter(cfg, global_cfg, api_key="stale")
+    adapter._bearer_token = "stale"
+    adapter._base_url = "https://api.x.ai/v1"
+
+    class _FakeResponse:
+        def __init__(self, status_code, body=None):
+            self.status_code = status_code
+            self._body = body or {}
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise AssertionError(f"unexpected status {self.status_code}")
+
+        def json(self):
+            return self._body
+
+    ok_body = {
+        "choices": [
+            {
+                "message": {"content": "OK"},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+    }
+    adapter.client = SimpleNamespace(
+        post=AsyncMock(side_effect=[_FakeResponse(403), _FakeResponse(200, ok_body)])
+    )
+
+    async def _refresh(*, force_refresh=False):
+        assert force_refresh is True
+        adapter._bearer_token = "fresh"
+
+    with patch.object(adapter, "_resolve_bearer", new=AsyncMock(side_effect=_refresh)) as refresh:
+        result = await adapter._call_api_once({"model": "grok-4.3"}, adapter._xai_headers(), None)
+
+    assert result.text == "OK"
+    assert refresh.await_count == 1
+    assert adapter.client.post.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_xai_api_adapter_generate_response_via_responses_api(tmp_path):
     cfg = SimpleNamespace(
         name="test-agent",
