@@ -107,6 +107,7 @@ def _load_hermes_oauth_state(auth_path: Path) -> dict[str, Any]:
         "pool_index": pool_index,
         "pool_entry": pool_entry,
         "discovery": discovery,
+        "last_auth_error": provider.get("last_auth_error") if isinstance(provider.get("last_auth_error"), dict) else {},
     }
 
 
@@ -200,6 +201,7 @@ def _save_hermes_refreshed_token(auth_path: Path, refreshed: dict[str, Any]) -> 
         tokens.setdefault("token_type", "Bearer")
         last_refresh = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         provider["last_refresh"] = last_refresh
+        provider.pop("last_auth_error", None)
 
         pool = data.setdefault("credential_pool", {}).get("xai-oauth")
         if isinstance(pool, list):
@@ -420,6 +422,25 @@ def hermes_oauth_available(hermes_home: str | None = None) -> bool:
         return bool(str(state.get("refresh_token") or "").strip())
     except Exception:
         return False
+
+
+def hermes_oauth_relogin_required(hermes_home: str | None = None) -> tuple[bool, str]:
+    auth_path = find_hermes_auth_path(hermes_home)
+    if auth_path is None:
+        return False, ""
+    try:
+        state = _load_hermes_oauth_state(auth_path)
+    except Exception as exc:
+        return False, f"could not read Hermes OAuth state: {exc}"
+
+    if str(state.get("refresh_token") or "").strip():
+        return False, ""
+
+    last_error = state.get("last_auth_error") or {}
+    if bool(last_error.get("relogin_required")):
+        message = str(last_error.get("message") or last_error.get("reason") or "relogin required").strip()
+        return True, message
+    return False, ""
 
 
 def secrets_oauth_refresh_available(secrets: dict | None) -> bool:

@@ -16,6 +16,7 @@ from adapters.xai_oauth_credentials import (
 )
 
 _RESPONSES_MODEL_PREFIXES = ("grok-build",)
+_AUTH_RETRY_STATUSES = {401, 403}
 
 
 class XaiApiAdapter(OpenRouterAdapter):
@@ -203,7 +204,7 @@ class XaiApiAdapter(OpenRouterAdapter):
 
     async def _call_api_once(self, payload, headers, on_stream_event) -> _APIResult:
         response = await self.client.post(self._api_url(), json=payload, headers=headers)
-        if response.status_code == 401:
+        if response.status_code in _AUTH_RETRY_STATUSES:
             await self._resolve_bearer(force_refresh=True)
             headers = self._xai_headers()
             response = await self.client.post(self._api_url(), json=payload, headers=headers)
@@ -297,7 +298,7 @@ class XaiApiAdapter(OpenRouterAdapter):
         async with self.client.stream(
             "POST", self._api_url(), json=payload, headers=headers
         ) as response:
-            if response.status_code == 401:
+            if response.status_code in _AUTH_RETRY_STATUSES:
                 await self._resolve_bearer(force_refresh=True)
                 async with self.client.stream(
                     "POST",
