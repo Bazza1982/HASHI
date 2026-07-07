@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,6 +31,28 @@ async def test_background_job_records_success_and_logs(tmp_path: Path):
     assert saved.returncode == 0
     assert "hello background" in manager.tail(record.job_id)
     assert Path(saved.logs["stdout_path"]).exists()
+
+
+@pytest.mark.asyncio
+async def test_background_job_tail_streams_while_running(tmp_path: Path):
+    manager = BackgroundJobManager(tmp_path / "background_jobs")
+    await manager.start()
+
+    record = await manager.start_job(
+        agent="zelda",
+        cwd=tmp_path,
+        argv=[sys.executable, "-c", "import time; print('live heartbeat', flush=True); time.sleep(30)"],
+        notify_on_failure=False,
+    )
+
+    try:
+        for _ in range(30):
+            if "live heartbeat" in manager.tail(record.job_id):
+                break
+            await asyncio.sleep(0.1)
+        assert "live heartbeat" in manager.tail(record.job_id)
+    finally:
+        await manager.cancel(record.job_id, grace_seconds=0.1)
 
 
 @pytest.mark.asyncio

@@ -495,6 +495,7 @@ class BackgroundJobManager:
                 if remaining:
                     clipped = chunk[:remaining]
                     fh.write(clipped)
+                    fh.flush()
                     written += len(clipped)
                 if written >= max_bytes:
                     # Drain to let the child exit, but do not write beyond cap.
