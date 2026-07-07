@@ -471,6 +471,8 @@ async def execute_background_job_start(
         origin=origin,
         notify_on_complete=bool(args.get("notify_on_complete", True)),
         notify_on_failure=bool(args.get("notify_on_failure", True)),
+        trigger_agent_on_complete=bool(args.get("trigger_agent_on_complete", True)),
+        trigger_agent_on_failure=bool(args.get("trigger_agent_on_failure", True)),
         max_runtime_seconds=max(1, max_runtime),
     )
     payload = _job_summary(record)

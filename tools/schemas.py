@@ -1326,6 +1326,14 @@ BACKGROUND_JOB_TOOL_SCHEMAS = [
                         "type": "boolean",
                         "description": "Whether to notify the originating chat on failure/timeout. Default true.",
                     },
+                    "trigger_agent_on_complete": {
+                        "type": "boolean",
+                        "description": "Whether to enqueue a one-shot background-job-event for the responsible agent on success. Default true.",
+                    },
+                    "trigger_agent_on_failure": {
+                        "type": "boolean",
+                        "description": "Whether to enqueue a one-shot background-job-event for the responsible agent on failure/timeout. Default true.",
+                    },
                 },
             },
         },
