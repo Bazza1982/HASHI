@@ -1250,6 +1250,113 @@ WINDOWS_USE_TOOL_SCHEMAS = [
     },
 ]
 
+BACKGROUND_JOB_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "background_job_start",
+            "description": (
+                "Start a long-running local OS command through HASHI BackgroundJobManager. "
+                "Use instead of bash for tasks that may outlive the chat turn. The manager "
+                "records stdout/stderr and sends completion/failure notifications when possible."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "Shell command to run in the background. Do not provide with argv.",
+                    },
+                    "argv": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Argument vector to execute without a shell. Do not provide with command.",
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Working directory, absolute or workspace-relative. Default is workspace.",
+                    },
+                    "max_runtime_seconds": {
+                        "type": "integer",
+                        "description": "Maximum runtime before timeout. Default is 14400 seconds.",
+                    },
+                    "notify_on_complete": {
+                        "type": "boolean",
+                        "description": "Whether to notify the originating chat on success. Default true.",
+                    },
+                    "notify_on_failure": {
+                        "type": "boolean",
+                        "description": "Whether to notify the originating chat on failure/timeout. Default true.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "background_job_status",
+            "description": "Show status for one managed background job, or recent jobs when job_id is omitted.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string", "description": "Background job id."},
+                    "limit": {"type": "integer", "description": "Recent jobs to return when job_id is omitted."},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "background_job_tail",
+            "description": "Return recent stdout or stderr from a managed background job.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string", "description": "Background job id."},
+                    "stream": {
+                        "type": "string",
+                        "enum": ["stdout", "stderr"],
+                        "description": "Stream to read. Default stdout.",
+                    },
+                    "lines": {"type": "integer", "description": "Number of lines to return. Default 80."},
+                },
+                "required": ["job_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "background_job_cancel",
+            "description": "Cancel a managed background job.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string", "description": "Background job id."},
+                },
+                "required": ["job_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "background_job_list",
+            "description": "List recent managed background jobs.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "agent": {"type": "string", "description": "Optional agent name filter."},
+                    "limit": {"type": "integer", "description": "Maximum jobs to return. Default 20."},
+                },
+            },
+        },
+    },
+]
+
+TOOL_SCHEMAS.extend(BACKGROUND_JOB_TOOL_SCHEMAS)
 TOOL_SCHEMAS.extend(WINDOWS_USE_TOOL_SCHEMAS)
 TOOL_SCHEMAS.extend(DESKTOP_TOOL_SCHEMAS)
 

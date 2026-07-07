@@ -14,6 +14,7 @@ class FlexibleBackendManager:
         self.secrets = secrets
         self.logger = logging.getLogger(f"BackendMgr.{config.name}")
         self.current_backend = None
+        self.runtime = None
         self.state_file = self.config.workspace_dir / "state.json"
         self._agents_json_global = self._load_agents_json_global()
         self._load_state()
@@ -303,6 +304,7 @@ class FlexibleBackendManager:
                     "agent_name": getattr(adapter_cfg, "name", workspace_dir.name),
                     "workspace_dir": str(workspace_dir),
                     "safety_mode": "read_write",
+                    "_runtime": getattr(self, "runtime", None),
                 },
             )
             self.current_backend.tool_registry = registry
@@ -358,6 +360,7 @@ class FlexibleBackendManager:
     ):
         if not self.current_backend:
             raise RuntimeError("No active backend initialized.")
+        self._refresh_tool_runtime_context(request_id)
         return await self.current_backend.generate_response(
             prompt,
             request_id,
@@ -365,3 +368,22 @@ class FlexibleBackendManager:
             silent=silent,
             on_stream_event=on_stream_event,
         )
+
+    def _refresh_tool_runtime_context(self, request_id: str) -> None:
+        registry = getattr(self.current_backend, "tool_registry", None)
+        if registry is None:
+            return
+        context = dict(getattr(registry, "audit_context", {}) or {})
+        runtime = getattr(self, "runtime", None)
+        request_meta = dict(getattr(runtime, "current_request_meta", None) or {})
+        context.update(
+            {
+                "_runtime": runtime,
+                "agent_name": getattr(runtime, "name", context.get("agent_name")),
+                "request_id": request_meta.get("request_id") or request_id,
+                "chat_id": request_meta.get("chat_id"),
+                "request_source": request_meta.get("source"),
+                "request_summary": request_meta.get("summary"),
+            }
+        )
+        registry.audit_context = context

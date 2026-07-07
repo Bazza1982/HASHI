@@ -272,6 +272,7 @@ class FlexibleAgentRuntime:
 
         # Initialize FlexibleBackendManager
         self.backend_manager = FlexibleBackendManager(config, global_config, secrets)
+        self.backend_manager.runtime = self
         self._sidecar_invoker, self._sidecar_context_getter = make_backend_sidecar_invoker(
             self.backend_manager,
             session_id_getter=lambda: self.session_id_dt,

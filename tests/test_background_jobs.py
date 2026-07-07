@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ import pytest
 
 from orchestrator.background_jobs import BackgroundJobManager, BackgroundJobStore, NONTERMINAL_STATES
 from orchestrator.service_manager import ServiceManager
+from tools.registry import ToolRegistry
 
 
 @pytest.mark.asyncio
@@ -141,3 +143,66 @@ async def test_service_manager_starts_and_restarts_background_jobs(tmp_path: Pat
 
     await manager.stop_background_jobs()
     assert kernel.background_job_manager is None
+
+
+@pytest.mark.asyncio
+async def test_background_job_tool_uses_live_manager_and_notifies(tmp_path: Path):
+    sent: list[dict] = []
+
+    async def send_long_message(**kwargs):
+        sent.append(kwargs)
+        return 0.0, 1
+
+    runtime = SimpleNamespace(
+        name="zelda",
+        current_request_meta={
+            "request_id": "req-bg-tool",
+            "chat_id": 123,
+            "source": "background:prompt",
+            "summary": "Background smoke",
+        },
+        send_long_message=send_long_message,
+    )
+    kernel = SimpleNamespace(runtimes=[runtime], background_job_manager=None)
+    runtime.orchestrator = kernel
+    manager = BackgroundJobManager(tmp_path / "background_jobs", kernel=kernel)
+    await manager.start()
+    kernel.background_job_manager = manager
+
+    registry = ToolRegistry(
+        allowed_tools=["background_job_start", "background_job_status", "background_job_tail"],
+        access_root=tmp_path,
+        workspace_dir=tmp_path,
+        secrets={},
+        audit_context={
+            "agent_name": "zelda",
+            "workspace_dir": str(tmp_path),
+            "safety_mode": "read_write",
+            "_runtime": runtime,
+            "request_id": "req-bg-tool",
+            "chat_id": 123,
+            "request_source": "background:prompt",
+            "request_summary": "Background smoke",
+        },
+    )
+
+    result = await registry.execute(
+        "background_job_start",
+        {"argv": [sys.executable, "-c", "print('tool background done')"], "cwd": "."},
+        tool_call_id="call-bg-start",
+    )
+
+    assert result.is_error is False
+    payload = json.loads(result.output)
+    job_id = payload["job_id"]
+    assert payload["state"] == "running"
+    assert payload["follow_up"]["status"] == f"/bg status {job_id}"
+
+    await manager._monitor_tasks[job_id]
+    saved = manager.get(job_id)
+    assert saved is not None
+    assert saved.state == "succeeded"
+    assert saved.notification["delivered"] is True
+    assert sent and sent[0]["chat_id"] == 123
+    assert sent[0]["request_id"] == "req-bg-tool"
+    assert "tool background done" in manager.tail(job_id)
