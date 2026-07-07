@@ -549,6 +549,8 @@ HASHI agents respond to both natural language and structured commands:
 | `/anatta [status\|off\|shadow\|on]` | Inspect or switch Anatta live self-assembly mode for the current agent |
 | `/effort` | View/change effort level (Claude/Codex only) |
 | `/fyi [prompt]` | Refresh bridge environment awareness |
+| `/bg <task>` | Queue a background-capable task; the agent receives `/bg` instructions and should use managed background jobs for long OS work |
+| `/bg status\|tail\|cancel\|list` | Inspect or manage recorded background jobs |
 | `/usecomputer [on\|off\|status\|examples\|task]` | Load managed GUI-aware computer-use guidance; prefers non-GUI methods first |
 | `/browser [status\|examples\|1-4 task]` | Direct an internet task through a selected browser/search route |
 | `/retry` | Resend last response or re-run last prompt |
