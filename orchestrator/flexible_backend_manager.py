@@ -192,7 +192,31 @@ class FlexibleBackendManager:
         finally:
             await backend.shutdown()
 
+    def _resolve_xai_api_credentials(self) -> dict[str, str] | None:
+        api_key = None
+        oauth_refresh = None
+        for secret_key in get_secret_lookup_order("xai-api", self.config.name):
+            value = str(self.secrets.get(secret_key) or "").strip()
+            if not value:
+                continue
+            if secret_key == "xai_oauth_refresh_token":
+                oauth_refresh = value
+            elif secret_key in ("xai_api_key", "XAI_API_KEY") and not api_key:
+                api_key = value
+        if api_key or oauth_refresh:
+            return {
+                "api_key": api_key or "",
+                "oauth_refresh_token": oauth_refresh or "",
+            }
+        return None
+
     def _resolve_api_key(self, engine: str) -> Optional[Any]:
+        if engine == "xai-api":
+            creds = self._resolve_xai_api_credentials()
+            if creds:
+                self.logger.info("Resolved xAI API credentials from secrets.json")
+                return creds
+            return None
         for secret_key in get_secret_lookup_order(engine, self.config.name):
             api_key = self.secrets.get(secret_key)
             if api_key:
@@ -225,7 +249,7 @@ class FlexibleBackendManager:
             self.current_backend = BackendClass(adapter_cfg, self.global_config, api_key)
 
             # V2.2+: inject ToolRegistry for API backends that support tool calls
-            if engine in ("openrouter-api", "deepseek-api", "ollama-api"):
+            if engine in ("openrouter-api", "deepseek-api", "ollama-api", "xai-api"):
                 tools_cfg = self._resolve_tools_config(backend_cfg_raw)
                 if tools_cfg:
                     self._attach_tool_registry(tools_cfg, adapter_cfg)
@@ -304,6 +328,7 @@ class FlexibleBackendManager:
                     "agent_name": getattr(adapter_cfg, "name", workspace_dir.name),
                     "workspace_dir": str(workspace_dir),
                     "safety_mode": "read_write",
+                    "global_config": self.global_config,
                     "_runtime": getattr(self, "runtime", None),
                 },
             )

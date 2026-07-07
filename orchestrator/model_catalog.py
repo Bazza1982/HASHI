@@ -41,3 +41,15 @@ AVAILABLE_CODEX_MODELS = [
 ]
 
 AVAILABLE_CODEX_EFFORTS = ["low", "medium", "high", "xhigh"]
+
+AVAILABLE_XAI_API_MODELS = [
+    "grok-4.3",
+    "grok-build-0.1",
+    "grok-4.20-0309-reasoning",
+    "grok-4.20-0309-non-reasoning",
+    "grok-4.20-multi-agent-0309",
+    "grok-imagine-image",
+    "grok-imagine-image-quality",
+    "grok-imagine-video",
+    "grok-imagine-video-1.5-preview",
+]

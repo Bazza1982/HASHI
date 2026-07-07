@@ -564,7 +564,7 @@ class BridgeAgentRuntime:
 
     def _remote_backend_block_reason(self, source: str) -> str | None:
         engine = (self.config.engine or "").strip().lower()
-        if engine not in {"openrouter-api", "deepseek-api"}:
+        if engine not in {"openrouter-api", "deepseek-api", "xai-api"}:
             return None
         if not self._source_requires_manual_permission(source):
             return None

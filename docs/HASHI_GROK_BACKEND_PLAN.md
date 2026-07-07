@@ -8,6 +8,9 @@
 
 **Non-goal:** install Grok Build, authenticate to xAI, or require `XAI_API_KEY` for normal HASHI use. The operator authenticates the CLI out-of-band, like Codex and Claude.
 
+**Related:** for the broader xAI HTTP surface (`grok-4.3`, Imagine, API Gateway) via Hermes
+OAuth auto-refresh, see [HASHI_XAI_API_BACKEND_PLAN.md](HASHI_XAI_API_BACKEND_PLAN.md).
+
 ---
 
 ## 0. Current Implementation Summary

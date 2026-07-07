@@ -11,6 +11,7 @@ from orchestrator.model_catalog import (
     AVAILABLE_CLAUDE_MODELS,
     AVAILABLE_CODEX_MODELS,
     AVAILABLE_GEMINI_MODELS,
+    AVAILABLE_XAI_API_MODELS,
 )
 
 
@@ -24,6 +25,7 @@ def available_api_models() -> list[str]:
         *AVAILABLE_GEMINI_MODELS,
         *AVAILABLE_CLAUDE_MODELS,
         *AVAILABLE_CODEX_MODELS,
+        *AVAILABLE_XAI_API_MODELS,
     ]
 
 

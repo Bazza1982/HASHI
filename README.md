@@ -92,11 +92,11 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
 - **Jobs** — Automated scheduling (heartbeats + cron) for periodic agent tasks
 - **Habit System** — Self-improving behavior through feedback and nightly reflection
 - **HChat** — Cross-instance agent-to-agent messaging
-- **API Gateway** — Optional OpenAI-compatible localhost gateway with per-instance ports
+- **API Gateway** — Optional OpenAI-compatible localhost gateway with per-instance ports and Grok/xAI chat, image, and video routes
 
 **What makes HASHI different:**
 1. **No Token Storage** — Uses CLI backends with local authentication, not stored tokens
-2. **7 Backend Adapters** — Claude CLI, Gemini CLI, Codex CLI, OpenRouter API, DeepSeek API, Ollama (local LLM), and Claw CLI
+2. **8 Backend Adapters** — Claude CLI, Gemini CLI, Codex CLI, Grok CLI, xAI API, OpenRouter API, DeepSeek API, Ollama (local LLM), and Claw CLI
 3. **Multi-Agent, Single Interface** — Chat with multiple specialized agents through one account
 4. **Nagare Flow System** — Describe a task in natural language; Nagare designs, executes, and improves a multi-agent workflow automatically
 5. **Self-Improving Agents** — Habit system with `/good` and `/bad` feedback, nightly dream reflection, and cross-agent habit governance
@@ -493,6 +493,13 @@ HASHI supports multiple communication channels:
 - If `global.api_gateway_port` is omitted, HASHI derives it as `workbench_port + 1`.
 - Common local layout: HASHI1 `18800/18801`, HASHI2 `18802/18803`, HASHI9 `18819/18820`.
 - `GET /api/health` reports instance, Workbench port, API Gateway port, gateway enabled state, and online agents after restart.
+- The gateway exposes OpenAI-compatible `/v1/chat/completions`, `/v1/models`,
+  `/v1/images/generations`, and `/v1/videos/generations` endpoints.
+- Grok/xAI models are available through the `xai-api` backend, including
+  `grok-4.3`, `grok-build-0.1`, `grok-imagine-image`, and
+  `grok-imagine-video`.
+- `xai-api` can use Hermes-managed SuperGrok OAuth credentials with automatic
+  refresh; see [`docs/API_GUIDE.md`](docs/API_GUIDE.md).
 
 #### WatchTower Rescue & Cold Restart
 - HASHI WatchTower is an always-on side service used for LAN rescue and cold
@@ -683,13 +690,14 @@ HASHI's **adapter system** provides a unified interface to multiple AI backends:
 | Claude Code | `claude-cli` | `claude` CLI installed | Local auth |
 | Codex CLI | `codex-cli` | `codex` CLI installed | Local auth |
 | Grok CLI | `grok-cli` | `grok` CLI installed and logged in | Local auth, streaming JSON |
+| xAI API | `xai-api` | Hermes xAI OAuth profile or `xai_api_key` | Grok chat, responses, Imagine image/video |
 | OpenRouter API | `openrouter-api` | API key in `secrets.json` | Multi-model access |
 | DeepSeek API | `deepseek-api` | API key in `secrets.json` | Direct API, cost-effective |
 | Ollama | `ollama-api` | Ollama installed locally | Free, no API key needed |
 
 #### Remote Backend Policy
 
-API backends (OpenRouter, DeepSeek) are protected by an automatic cost-control policy:
+API backends (OpenRouter, DeepSeek, xAI API) are protected by an automatic cost-control policy:
 - **User-initiated requests** → allowed on any backend
 - **Automated requests** (scheduler, HChat, transfers) → blocked on remote API backends, must use CLI or local backends
 
@@ -702,11 +710,14 @@ This prevents runaway API costs from automated workflows.
 - Conversation memory managed by CLI
 - Grok CLI uses `--output-format streaming-json`; HASHI treats zero-exit empty answers as failures, retries once only for side-effect-free `thought`/`end` empty output, and refuses retry after side-effect events.
 
-#### API Backends (OpenRouter, DeepSeek)
+#### API Backends (OpenRouter, DeepSeek, xAI API)
 - HTTP API with streaming support
 - Supports tool calls (function calling)
 - Stateless (HASHI manages conversation history)
 - Per-agent API key overrides supported
+- xAI API supports Hermes-managed OAuth refresh, `grok-4.3` chat,
+  `grok-build-*` responses, and Imagine image/video generation through the API
+  Gateway.
 
 #### Ollama Backend
 - Connects to locally-hosted LLMs
@@ -1247,6 +1258,8 @@ Superloop foundations.
 **Best Practices:**
 - Keep backups of `agents.json`, `secrets.json`, and `workspaces/` directories
 - Do not expose API Gateway to public internet without proper authentication
+- Treat Hermes OAuth profiles and `secrets.json` credentials as local-only
+  secrets; do not commit live tokens.
 - Test scheduled jobs before relying on them for critical tasks
 - Review agent outputs for sensitive information before sharing
 
@@ -1310,6 +1323,9 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
 - **EXP guidebook corpus imported** — `/exp <task>` consults context-specific guidebooks under `exp/`, including playbooks, validators, failure memory, templates, evidence, and training records
 - **Runtime slimming continued** — runtime session, workspace, control, remote command, lifecycle, queue processor, and pipeline responsibilities moved out of the main flex runtime file into focused modules
 - **Per-instance API Gateway ports** — API Gateway defaults to `workbench_port + 1`, launcher status uses configured ports, and HASHI API health reports gateway ownership/status
+- **Grok/xAI API Gateway support** — `/v1/chat/completions`,
+  `/v1/images/generations`, `/v1/videos/generations`, and `/v1/models` can
+  serve xAI models through Hermes-managed OAuth or an xAI API key
 - **Live reboot validation passed** — cold restart, `/reboot min`, `/reboot max`, Workbench health, API Gateway health, and `pytest` all passed on 2026-05-02
 - **Browser routing dashboard** — `/browser` and `/browser status` show route availability for headless browser tools, CLI-native browsing, Brave Search, and the logged-in Chrome extension bridge
 - **Hashi Remote file transfer** — direct cross-PC file push support for moving artifacts and EXP packages between HASHI instances

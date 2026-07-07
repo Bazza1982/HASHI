@@ -21,6 +21,7 @@ You can also control the gateway at runtime from Telegram:
 /api off              # stop the gateway and persist disabled-on-restart
 /api model            # open default-model buttons
 /api model <model>    # set the default model for requests without model
+/api model grok-4.3   # example: make Grok 4.3 the default chat model
 ```
 
 `/api` only controls the OpenAI-compatible API Gateway. It does not change an
@@ -56,9 +57,11 @@ serve aiohttp traffic reliably. Confirm the live address with Workbench
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/health` | Health check — returns `{"status": "ok", "engines": [...]}` |
-| GET | `/v1/models` | List all available models |
+| GET | `/health` | Health check — gateway status, engine preflight, available models |
+| GET | `/v1/models` | List models whose backends passed preflight |
 | POST | `/v1/chat/completions` | Chat completion (sync & streaming) |
+| POST | `/v1/images/generations` | xAI Imagine image generation |
+| POST | `/v1/videos/generations` | xAI Imagine video generation request |
 
 The HASHI API itself is separate from the API Gateway and listens on
 `global.workbench_port`. Use `GET /api/health` on the HASHI API port to confirm
@@ -69,6 +72,8 @@ including:
 
 - `Address`
 - `/v1/chat/completions`
+- `/v1/images/generations`
+- `/v1/videos/generations`
 - `/v1/models`
 - runtime state
 - enabled-on-restart state
@@ -85,8 +90,90 @@ The gateway exposes models from all configured backends:
 | Gemini CLI | `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `gemini-3.1-pro-preview`, `gemini-3-flash-preview` |
 | Claude CLI | `claude-opus-4-6`, `claude-sonnet-4-6`, `claude-haiku-4-5` |
 | Codex CLI | `gpt-5.5`, `gpt-5.3-codex-spark`, `gpt-5.4`, `gpt-5.3-codex`, `gpt-5.2-codex`, `gpt-5.2`, `gpt-5.1-codex-max`, `gpt-5.1-codex-mini` |
+| xAI API (`xai-api`) | `grok-4.3`, `grok-build-0.1`, `grok-4.20-0309-reasoning`, `grok-4.20-0309-non-reasoning`, `grok-4.20-multi-agent-0309`, `grok-imagine-image`, `grok-imagine-image-quality`, `grok-imagine-video`, `grok-imagine-video-1.5-preview` |
 
-Run `GET /v1/models` to see the current list.
+Run `GET /v1/models` to see the current list. Models whose backend failed
+preflight (missing CLI binary, no Hermes OAuth, etc.) are omitted until the
+backend becomes available.
+
+### xAI OAuth setup
+
+`xai-api` uses Hermes-managed SuperGrok OAuth with automatic token refresh.
+Configure in `agents.json`:
+
+```json
+{
+  "global": {
+    "hermes_home": "/mnt/c/Users/<you>/AppData/Local/hermes/profiles/<profile>",
+    "xai_api_base_url": "https://api.x.ai/v1"
+  }
+}
+```
+
+On native Windows, `hermes_home` is typically
+`C:\\Users\\<you>\\AppData\\Local\\hermes\\profiles\\<profile>` when the
+working xAI OAuth credential belongs to a Hermes profile. Use the global Hermes
+root only when that root owns the valid `xai-oauth` credential.
+
+Fallback options in `secrets.json`:
+
+- `xai_oauth_refresh_token` — standalone OAuth refresh (no Hermes install)
+- `xai_api_key` — static console API key
+
+HASHI prefers Hermes' own xAI OAuth resolver when the local `hermes-agent`
+package is available, so Hermes keeps ownership of credential-pool refresh and
+rotated refresh-token persistence. HASHI only falls back to direct token reading
+when the resolver cannot be imported.
+
+`grok-build-0.1` routes to xAI `/v1/responses`. Set global
+`xai_use_responses_api: true` to force all `xai-api` models through responses.
+
+Imagine image models (`grok-imagine-image*`) are exposed through both
+`/v1/chat/completions` and `/v1/images/generations`. Imagine video models
+(`grok-imagine-video*`) are exposed through `/v1/videos/generations`. Agents
+with tools enabled can also use the `xai_imagine` tool from the `web` tier.
+
+Example:
+
+```python
+client = OpenAI(
+    base_url="http://10.255.255.254:18801/v1",
+    api_key="EMPTY",
+)
+response = client.chat.completions.create(
+    model="grok-4.3",
+    messages=[{"role": "user", "content": "Hello"}],
+)
+```
+
+Standard media routes use the same gateway host, without the `/v1` suffix in
+the configured base URL when using raw HTTP:
+
+```bash
+curl http://10.255.255.254:18801/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "grok-imagine-image",
+    "prompt": "small red cube on a white background",
+    "n": 1
+  }'
+
+curl http://10.255.255.254:18801/v1/videos/generations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "grok-imagine-video",
+    "prompt": "small red cube rotating on a white background"
+  }'
+```
+
+### Health preflight
+
+`GET /health` returns:
+
+- `status`: `ok` when at least one engine is available, otherwise `degraded`
+- `engine_status`: per-engine `{available, reason}` from startup preflight
+- `available_engines` / `available_models`: callable backends right now
+- `default_model_available`: whether the configured default can be used
 
 ---
 
@@ -158,6 +245,32 @@ curl http://127.0.0.1:18801/v1/chat/completions \
     "model": "gemini-2.5-flash",
     "messages": [{"role": "user", "content": "Hello"}],
     "stream": false
+  }'
+
+# Grok 4.3 chat completion
+curl http://127.0.0.1:18801/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "grok-4.3",
+    "messages": [{"role": "user", "content": "Hello from HASHI"}],
+    "stream": false
+  }'
+
+# xAI Imagine image generation
+curl http://127.0.0.1:18801/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "grok-imagine-image",
+    "prompt": "small red cube on a white background",
+    "n": 1
+  }'
+
+# xAI Imagine video generation request
+curl http://127.0.0.1:18801/v1/videos/generations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "grok-imagine-video",
+    "prompt": "small red cube rotating on a white background"
   }'
 ```
 

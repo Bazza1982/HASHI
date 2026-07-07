@@ -61,6 +61,9 @@ class GlobalConfig:
     codex_cmd: str = "codex"
     grok_cmd: str = "grok"
     gh_copilot_cmd: str = "gh copilot"
+    hermes_home: str | None = None
+    xai_api_base_url: str = "https://api.x.ai/v1"
+    xai_use_responses_api: bool = False
     openrouter_url: str = "https://openrouter.ai/api/v1/chat/completions"
     claw_providers: Dict[str, Any] = field(default_factory=dict)
     enterprise_auth_providers: List[Dict[str, Any]] = field(default_factory=list)
@@ -273,6 +276,9 @@ class ConfigManager:
                 config_dir=config_dir,
                 bridge_home=bridge_home,
             ),
+            hermes_home=g_raw.get("hermes_home"),
+            xai_api_base_url=g_raw.get("xai_api_base_url", "https://api.x.ai/v1"),
+            xai_use_responses_api=_truthy(g_raw.get("xai_use_responses_api", False)),
             openrouter_url=g_raw.get("openrouter_url", "https://openrouter.ai/api/v1/chat/completions"),
             claw_providers=dict(g_raw.get("claw_providers") or {}),
             enterprise_auth_providers=list(g_raw.get("enterprise_auth_providers") or []),
