@@ -24,7 +24,7 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - `/fresh`: clean API context for non-CLI backends (`openrouter-api`, `deepseek-api`, `ollama-api`). Clears recent turns and stops saved memories from being auto-injected without deleting them.
 - `/handoff`: fresh continuity restore from recent chat history.
 - `/fyi [prompt]`: explicit bridge environment awareness refresh.
-- `/bg <task>`: queue a background-capable task. Treat `/bg <task>` as `/bg run <task>`; preserve the user's task text exactly and use HASHI BackgroundJobManager for long OS/process work instead of blocking the chat.
+- `/bg <task>`: queue a background-capable task. Treat `/bg <task>` as `/bg run <task>`; preserve the user's task text exactly and use HASHI BackgroundJobManager for long OS/process work instead of blocking the chat. If model-facing `background_job_*` tools are unavailable, use the live local Workbench `/api/background-jobs` endpoints instead of starting a temporary standalone manager.
 - `/bg status [job_id]`, `/bg tail <job_id>`, `/bg cancel <job_id>`, `/bg list`: inspect or manage recorded background jobs.
 - `/active [on|off] [minutes]`: toggle proactive follow-up heartbeat; default is 10 minutes.
 - `/voice [status|on|off|provider|providers|voices|use <alias>]`: control native bridge-owned voice replies.

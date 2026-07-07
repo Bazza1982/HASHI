@@ -305,6 +305,11 @@ class WorkbenchApiServer:
         self.app.router.add_post("/api/admin/command", self.handle_admin_command)
         self.app.router.add_post("/api/agents/{name}/command", self.handle_agent_command)
         self.app.router.add_post("/api/agents/{name}/jobs/run", self.handle_agent_run_job)
+        self.app.router.add_post("/api/background-jobs", self.handle_background_jobs_start)
+        self.app.router.add_get("/api/background-jobs", self.handle_background_jobs_list)
+        self.app.router.add_get("/api/background-jobs/{job_id}", self.handle_background_jobs_get)
+        self.app.router.add_get("/api/background-jobs/{job_id}/tail", self.handle_background_jobs_tail)
+        self.app.router.add_post("/api/background-jobs/{job_id}/cancel", self.handle_background_jobs_cancel)
         self.app.router.add_post("/api/admin/smoke", self.handle_admin_smoke)
         self.app.router.add_post("/api/admin/start-agent", self.handle_admin_start_agent)
         self.app.router.add_post("/api/admin/stop-agent", self.handle_admin_stop_agent)
@@ -3269,6 +3274,108 @@ class WorkbenchApiServer:
             },
             status=status_code,
         )
+
+    def _background_job_manager(self):
+        kernel = getattr(self.orchestrator, "kernel", None)
+        return getattr(kernel, "background_job_manager", None) or getattr(self.orchestrator, "background_job_manager", None)
+
+    def _background_job_not_running_response(self):
+        return web.json_response({"ok": False, "error": "BackgroundJobManager is not running"}, status=503)
+
+    async def handle_background_jobs_start(self, request):
+        manager = self._background_job_manager()
+        if manager is None:
+            return self._background_job_not_running_response()
+        payload = await request.json()
+        argv = payload.get("argv")
+        command = str(payload.get("command") or "").strip() or None
+        if argv is not None:
+            if not isinstance(argv, list) or not all(isinstance(item, str) and item for item in argv):
+                return web.json_response({"ok": False, "error": "argv must be a non-empty string array"}, status=400)
+            if not argv:
+                return web.json_response({"ok": False, "error": "argv must not be empty"}, status=400)
+        if not argv and not command:
+            return web.json_response({"ok": False, "error": "argv or command is required"}, status=400)
+        if argv and command:
+            return web.json_response({"ok": False, "error": "provide argv or command, not both"}, status=400)
+
+        cwd = str(payload.get("cwd") or getattr(self.global_config, "project_root", "") or self.config_path.parent).strip()
+        agent = str(payload.get("agent") or "unknown").strip() or "unknown"
+        origin = payload.get("origin") if isinstance(payload.get("origin"), dict) else {}
+        origin.setdefault("source", "workbench_api:background_jobs")
+        origin.setdefault("api_path", "/api/background-jobs")
+        try:
+            record = await manager.start(
+                agent=agent,
+                cwd=cwd,
+                argv=argv,
+                command=command,
+                origin=origin,
+                notify_on_complete=bool(payload.get("notify_on_complete", True)),
+                notify_on_failure=bool(payload.get("notify_on_failure", True)),
+                max_runtime_seconds=int(payload.get("max_runtime_seconds") or 3600),
+            )
+        except FileNotFoundError as exc:
+            return web.json_response({"ok": False, "error": f"cwd not found: {exc}"}, status=400)
+        except ValueError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": f"{type(exc).__name__}: {exc}"}, status=500)
+        return web.json_response({"ok": True, "job": record.to_dict()}, status=201)
+
+    async def handle_background_jobs_list(self, request):
+        manager = self._background_job_manager()
+        if manager is None:
+            return self._background_job_not_running_response()
+        query = getattr(request, "query", {}) or {}
+        agent = str(query.get("agent") or "").strip() or None
+        state = str(query.get("state") or "").strip()
+        states = {item.strip() for item in state.split(",") if item.strip()} or None
+        try:
+            limit = max(1, min(int(query.get("limit") or 50), 200))
+        except Exception:
+            limit = 50
+        jobs = [record.to_dict() for record in manager.list(agent=agent, states=states, limit=limit)]
+        return web.json_response({"ok": True, "jobs": jobs})
+
+    async def handle_background_jobs_get(self, request):
+        manager = self._background_job_manager()
+        if manager is None:
+            return self._background_job_not_running_response()
+        job_id = str(request.match_info.get("job_id") or "").strip()
+        record = manager.get(job_id)
+        if record is None:
+            return web.json_response({"ok": False, "error": "job not found"}, status=404)
+        return web.json_response({"ok": True, "job": record.to_dict()})
+
+    async def handle_background_jobs_tail(self, request):
+        manager = self._background_job_manager()
+        if manager is None:
+            return self._background_job_not_running_response()
+        query = getattr(request, "query", {}) or {}
+        job_id = str(request.match_info.get("job_id") or "").strip()
+        stream = str(query.get("stream") or "stdout").strip().lower()
+        if stream not in {"stdout", "stderr"}:
+            return web.json_response({"ok": False, "error": "stream must be stdout or stderr"}, status=400)
+        try:
+            lines = max(1, min(int(query.get("lines") or 80), 1000))
+            text = manager.tail(job_id, stream=stream, lines=lines)
+        except KeyError:
+            return web.json_response({"ok": False, "error": "job not found"}, status=404)
+        return web.json_response({"ok": True, "job_id": job_id, "stream": stream, "tail": text})
+
+    async def handle_background_jobs_cancel(self, request):
+        manager = self._background_job_manager()
+        if manager is None:
+            return self._background_job_not_running_response()
+        job_id = str(request.match_info.get("job_id") or "").strip()
+        try:
+            record = await manager.cancel(job_id)
+        except KeyError:
+            return web.json_response({"ok": False, "error": "job not found"}, status=404)
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": f"{type(exc).__name__}: {exc}"}, status=500)
+        return web.json_response({"ok": True, "job": record.to_dict()})
 
     async def handle_admin_smoke(self, request):
         if not self._check_admin_auth(request):
