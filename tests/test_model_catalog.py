@@ -1,4 +1,9 @@
-from orchestrator.flexible_backend_registry import get_available_models, is_cli_backend
+from orchestrator.flexible_backend_registry import (
+    get_available_efforts,
+    get_available_models,
+    is_cli_backend,
+    normalize_effort,
+)
 from orchestrator.model_catalog import AVAILABLE_CODEX_MODELS, AVAILABLE_XAI_API_MODELS
 
 
@@ -16,6 +21,14 @@ def test_codex_gpt56_variants_are_available_without_unsupported_alias():
     assert expected.issubset(set(get_available_models("codex-cli")))
     assert "gpt-5.6" not in AVAILABLE_CODEX_MODELS
     assert "gpt-5.6" not in get_available_models("codex-cli")
+
+
+def test_codex_gpt56_sol_exposes_max_effort_without_offering_it_to_other_variants():
+    assert get_available_efforts("codex-cli", "gpt-5.6-sol") == ["low", "medium", "high", "xhigh", "max"]
+    assert get_available_efforts("codex-cli", "gpt-5.6-terra") == ["low", "medium", "high", "xhigh"]
+    assert get_available_efforts("codex-cli", "gpt-5.6-luna") == ["low", "medium", "high", "xhigh"]
+    assert normalize_effort("codex-cli", "max", "gpt-5.6-sol") == "max"
+    assert normalize_effort("codex-cli", "max", "gpt-5.6-terra") == "medium"
 
 
 def test_grok_build_model_is_available_to_flex_backend_registry():

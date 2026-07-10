@@ -35,11 +35,9 @@ from orchestrator.source_policy import source_requires_manual_remote_api_permiss
 from orchestrator.voice_manager import VoiceManager
 from orchestrator.private_wol import describe_wol_targets, private_wol_available, run_private_wol
 from orchestrator.workzone import access_root_for_workzone, build_workzone_prompt, clear_workzone, load_workzone, resolve_workzone_input, save_workzone
-from orchestrator.flexible_backend_registry import is_cli_backend
+from orchestrator.flexible_backend_registry import get_available_efforts, is_cli_backend, normalize_effort
 from orchestrator.model_catalog import (
-    AVAILABLE_CLAUDE_EFFORTS,
     AVAILABLE_CLAUDE_MODELS,
-    AVAILABLE_CODEX_EFFORTS,
     AVAILABLE_CODEX_MODELS,
     AVAILABLE_GEMINI_MODELS,
     AVAILABLE_OPENROUTER_MODELS,
@@ -4430,6 +4428,7 @@ class BridgeAgentRuntime:
                 )
                 return
             self.config.model = requested
+            self._normalize_effort_after_model_change()
             await update.message.reply_text(f"Model switched to: {self.config.model}")
             return
 
@@ -4454,11 +4453,16 @@ class BridgeAgentRuntime:
         return InlineKeyboardMarkup(buttons)
 
     def _get_available_efforts(self) -> list[str]:
-        if self.config.engine == "claude-cli":
-            return AVAILABLE_CLAUDE_EFFORTS
-        if self.config.engine == "codex-cli":
-            return AVAILABLE_CODEX_EFFORTS
-        return []
+        return get_available_efforts(self.config.engine, self.config.model)
+
+    def _normalize_effort_after_model_change(self):
+        normalized = normalize_effort(
+            self.config.engine,
+            self._get_current_effort(),
+            self.config.model,
+        )
+        if normalized:
+            self._set_effort(normalized)
 
     def _get_current_effort(self) -> str:
         return getattr(self.backend, "effort", ((self.config.extra or {}).get("effort") or "medium"))
@@ -4510,6 +4514,7 @@ class BridgeAgentRuntime:
             available = self._get_available_models()
             if not available or model in available:
                 self.config.model = model
+                self._normalize_effort_after_model_change()
                 await query.edit_message_text(
                     f"Model switched to: {self.config.model}",
                     reply_markup=self._model_keyboard(),

@@ -4727,10 +4727,10 @@ class FlexibleAgentRuntime:
         return get_available_models(engine)
 
     def _get_available_efforts(self) -> list[str]:
-        return get_available_efforts(self.config.active_backend)
+        return get_available_efforts(self.config.active_backend, self.get_current_model())
 
-    def _get_available_efforts_for(self, engine: str) -> list[str]:
-        return get_available_efforts(engine)
+    def _get_available_efforts_for(self, engine: str, model: str | None = None) -> list[str]:
+        return get_available_efforts(engine, model)
 
     def _get_backend_cfg(self, engine: str) -> dict | None:
         return next((b for b in self.config.allowed_backends if b["engine"] == engine), None)
@@ -4757,10 +4757,20 @@ class FlexibleAgentRuntime:
             backend_cfg["model"] = normalized
         if engine == self.config.active_backend and self.backend_manager.current_backend:
             self.backend_manager.current_backend.config.model = normalized
+            current_effort = getattr(self.backend_manager.current_backend, "effort", None)
+            normalized_effort = normalize_effort(engine, current_effort, normalized)
+            if normalized_effort:
+                self.backend_manager.current_backend.effort = normalized_effort
+                if backend_cfg is not None:
+                    backend_cfg["effort"] = normalized_effort
         self.backend_manager.persist_state()
 
     def _set_active_effort(self, requested: str):
-        normalized = normalize_effort(self.config.active_backend, requested)
+        normalized = normalize_effort(
+            self.config.active_backend,
+            requested,
+            self.get_current_model(),
+        )
         if not normalized:
             return
         if self.backend_manager.current_backend and hasattr(self.backend_manager.current_backend, "effort"):

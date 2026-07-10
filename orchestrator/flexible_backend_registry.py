@@ -47,6 +47,12 @@ BACKEND_REGISTRY: dict[str, dict] = {
         ],
         "default_model": "gpt-5.4",
         "efforts": ["low", "medium", "high", "xhigh"],
+        # GPT-5.6 Sol is the only Codex model currently documented with the
+        # deeper `max` reasoning tier. Keep this model-specific so the UI
+        # never offers an unverified effort to Terra or Luna.
+        "model_efforts": {
+            "gpt-5.6-sol": ["low", "medium", "high", "xhigh", "max"],
+        },
         "default_effort": "medium",
         "secret_keys": ["codex-cli_key"],
     },
@@ -199,29 +205,34 @@ def normalize_model(engine: str, model: str | None) -> str | None:
     return model
 
 
-def get_available_efforts(engine: str) -> list[str]:
-    return list(get_backend_entry(engine).get("efforts") or [])
+def get_available_efforts(engine: str, model: str | None = None) -> list[str]:
+    entry = get_backend_entry(engine)
+    if model:
+        model_efforts = entry.get("model_efforts") or {}
+        if model in model_efforts:
+            return list(model_efforts[model] or [])
+    return list(entry.get("efforts") or [])
 
 
-def get_default_effort(engine: str) -> str | None:
+def get_default_effort(engine: str, model: str | None = None) -> str | None:
     default_effort = get_backend_entry(engine).get("default_effort")
     if default_effort:
         return str(default_effort)
-    efforts = get_available_efforts(engine)
+    efforts = get_available_efforts(engine, model)
     return efforts[0] if efforts else None
 
 
-def normalize_effort(engine: str, effort: str | None) -> str | None:
+def normalize_effort(engine: str, effort: str | None, model: str | None = None) -> str | None:
     if effort in ("extra", "extra_high"):
         effort = "xhigh"
-    efforts = get_available_efforts(engine)
+    efforts = get_available_efforts(engine, model)
     if not efforts:
         return None
     if not effort:
-        return get_default_effort(engine)
+        return get_default_effort(engine, model)
     effort = effort.lower()
     if effort not in efforts:
-        return get_default_effort(engine)
+        return get_default_effort(engine, model)
     return effort
 
 
