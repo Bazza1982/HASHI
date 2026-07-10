@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Grok 4.5 API Gateway support** — added smoke-tested `grok-4.5` to the `xai-api` and `/v1/models` catalogs, routing it through xAI's Responses API. The existing tested Codex GPT-5.6 variants remain available through the API Gateway.
 - **Grok 4.5 CLI support** — upgraded the local stable Grok CLI to `0.2.93`, added smoke-tested `grok-4.5` as the `grok-cli` default, and retained `grok-composer-2.5-fast` as the other currently CLI-advertised model. The stale `grok-build` CLI model id is no longer advertised by HASHI.
 - **GPT-5.6 Codex support** — upgraded local Codex CLI to `0.144.1` and added the smoke-tested ChatGPT-account Codex variants `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` to HASHI model catalogs. The OpenAI API alias `gpt-5.6` is intentionally not exposed through `codex-cli` because Codex CLI rejected it for the current ChatGPT account.
 - **Model-aware Codex `/effort`** — `gpt-5.6-sol` now exposes its documented `max` reasoning tier; Terra and Luna retain the verified `low` through `xhigh` tiers. Switching away from Sol automatically normalizes an incompatible `max` selection.

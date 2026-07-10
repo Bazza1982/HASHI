@@ -504,7 +504,7 @@ HASHI supports multiple communication channels:
 - The gateway exposes OpenAI-compatible `/v1/chat/completions`, `/v1/models`,
   `/v1/images/generations`, and `/v1/videos/generations` endpoints.
 - Grok/xAI models are available through the `xai-api` backend, including
-  `grok-4.3`, `grok-build-0.1`, `grok-imagine-image`, and
+  `grok-4.5`, `grok-4.3`, `grok-build-0.1`, `grok-imagine-image`, and
   `grok-imagine-video`.
 - The separately authenticated `grok-cli` backend uses Grok CLI `0.2.93` and
   exposes `grok-4.5` (default) plus `grok-composer-2.5-fast`, with native

@@ -15,7 +15,7 @@ from adapters.xai_oauth_credentials import (
     resolve_xai_credentials,
 )
 
-_RESPONSES_MODEL_PREFIXES = ("grok-build",)
+_RESPONSES_MODEL_PREFIXES = ("grok-build", "grok-4.5")
 _AUTH_RETRY_STATUSES = {401, 403}
 
 

@@ -50,10 +50,16 @@ def test_api_gateway_config_defaults_and_persistence(tmp_path):
 
 def test_api_gateway_default_model_list_includes_grok_models():
     models = available_api_models()
+    assert "grok-4.5" in models
     assert "grok-4.3" in models
     assert "grok-build-0.1" in models
     assert "grok-imagine-image" in models
     assert "grok-imagine-video" in models
+
+
+def test_api_gateway_model_list_includes_smoke_tested_gpt56_variants():
+    models = available_api_models()
+    assert {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}.issubset(models)
 
 
 def test_api_command_module_is_registered():
