@@ -31,9 +31,10 @@ def test_codex_gpt56_sol_exposes_max_effort_without_offering_it_to_other_variant
     assert normalize_effort("codex-cli", "max", "gpt-5.6-terra") == "medium"
 
 
-def test_grok_build_model_is_available_to_flex_backend_registry():
+def test_current_grok_cli_models_are_available_to_flex_backend_registry():
+    assert "grok-4.5" in get_available_models("grok-cli")
     assert "grok-composer-2.5-fast" in get_available_models("grok-cli")
-    assert "grok-build" in get_available_models("grok-cli")
+    assert "grok-build" not in get_available_models("grok-cli")
     assert is_cli_backend("grok-cli") is True
 
 

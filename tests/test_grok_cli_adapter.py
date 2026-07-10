@@ -13,7 +13,7 @@ from adapters.stream_events import KIND_FILE_EDIT, KIND_FILE_READ, KIND_SHELL_EX
 def _agent_config(tmp_path: Path):
     return SimpleNamespace(
         name="test",
-        model="grok-composer-2.5-fast",
+        model="grok-4.5",
         workspace_dir=tmp_path,
         system_md=None,
         extra={},

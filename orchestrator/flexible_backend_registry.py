@@ -76,10 +76,10 @@ BACKEND_REGISTRY: dict[str, dict] = {
     "grok-cli": {
         "label": "grok",
         "models": [
+            "grok-4.5",
             "grok-composer-2.5-fast",
-            "grok-build",
         ],
-        "default_model": "grok-composer-2.5-fast",
+        "default_model": "grok-4.5",
         "efforts": [],
         "default_effort": None,
         "secret_keys": [],
