@@ -96,6 +96,25 @@ Run `GET /v1/models` to see the current list. Models whose backend failed
 preflight (missing CLI binary, no Hermes OAuth, etc.) are omitted until the
 backend becomes available.
 
+### GPT-5.6 through Codex CLI
+
+HASHI supports the smoke-tested Codex CLI variants below. The bare `gpt-5.6`
+alias is deliberately not advertised because it was rejected by the configured
+ChatGPT-account Codex access path.
+
+| Model | HASHI use | `/effort` choices |
+|---|---|---|
+| `gpt-5.6-sol` | Highest-capability tier for difficult, long-horizon work | `low`, `medium`, `high`, `xhigh`, `max` |
+| `gpt-5.6-terra` | Balanced daily-use tier | `low`, `medium`, `high`, `xhigh` |
+| `gpt-5.6-luna` | Fast, cost-efficient tier | `low`, `medium`, `high`, `xhigh` |
+
+The Telegram `/effort` command follows the currently selected model rather
+than exposing one unsafe backend-wide list. If an agent switches from Sol with
+`max` selected to Terra or Luna, HASHI automatically normalizes effort to
+`medium` before the next Codex invocation. See OpenAI's
+[GPT-5.6 preview announcement](https://openai.com/index/previewing-gpt-5-6-sol/)
+for the model-family positioning.
+
 ### xAI OAuth setup
 
 `xai-api` uses Hermes-managed SuperGrok OAuth with automatic token refresh.
