@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **GPT-5.6 Codex support** — upgraded local Codex CLI to `0.144.1` and added the smoke-tested ChatGPT-account Codex variants `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` to HASHI model catalogs. The OpenAI API alias `gpt-5.6` is intentionally not exposed through `codex-cli` because Codex CLI rejected it for the current ChatGPT account.
 - **Telegram `/notify` preference** — added a functional-layer `/notify [on|off]` command. Telegram notifications default to `off`, which still delivers messages but sends them with Telegram `disable_notification=true`; `/notify on` restores audible notifications and persists per agent workspace.
 - **Managed `/bg` background jobs** — added a Workbench-backed BackgroundJobManager path for long OS/process work with durable job ids, status/tail/cancel APIs, bounded stdout/stderr logs, terminal success/failure notifications, and one-shot `background-job-event` routing that can wake the responsible agent to summarize the completed job.
 

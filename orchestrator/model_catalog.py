@@ -30,6 +30,9 @@ CLAUDE_MODEL_ALIASES = {
 AVAILABLE_CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"]
 
 AVAILABLE_CODEX_MODELS = [
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
     "gpt-5.5",
     "gpt-5.3-codex-spark",
     "gpt-5.3-codex",
