@@ -19,8 +19,8 @@ Grok CLI is now part of HASHI's supported backend ecosystem:
 
 - Engine ID: `grok-cli`.
 - Adapter: `adapters/grok_cli.py`.
-- Default model: `grok-composer-2.5-fast`.
-- Additional model: `grok-build`.
+- Default model: `grok-4.5`.
+- Additional model: `grok-composer-2.5-fast`.
 - Config command: `global.grok_cmd`, defaulting to `grok`.
 - Backend picker: registered in `orchestrator/flexible_backend_registry.py`.
 - Adapter registry: registered in `adapters/registry.py`.
@@ -51,7 +51,7 @@ Completed on 2026-06-14:
   - Prompt D: safety refusal prompt passed.
 - The real empty-answer retry path is covered by unit tests; the post-reboot live probe did not trigger an empty-answer retry, so that remains a residual live-observability note rather than a blocker.
 
-Additional model availability probe on 2026-06-20:
+Historical model availability probe on 2026-06-20:
 
 - Logged-in Grok CLI version: `grok 0.2.51`.
 - `grok models` reported only:
@@ -71,10 +71,19 @@ Additional model availability probe on 2026-06-20:
   - `grok-imagine-image-quality`
   - `grok-imagine-video`
 
-The `grok-build-0.1` candidate appears to be a different or stale identifier;
-the CLI-exposed model id is `grok-build`, which HASHI already has registered.
+The `grok-build-0.1` candidate appears to be a different or stale identifier.
 The imagine image/video IDs may belong to a different product/API surface, but
 they are not available through the current `grok` CLI text backend.
+
+Current model availability probe on 2026-07-10:
+
+- Logged-in stable Grok CLI upgraded from `0.2.51` to `0.2.93`.
+- `grok models` now reports `grok-4.5` as default and
+  `grok-composer-2.5-fast` as the other available model.
+- `grok-build` is no longer advertised by the CLI and is intentionally removed
+  from HASHI's `grok-cli` catalog.
+- A HASHI-compatible `streaming-json` smoke invocation of `grok-4.5` returned
+  `HASHI_GROK45_OK` through text-delta events.
 
 ### Operational Status
 
@@ -82,7 +91,7 @@ Grok CLI can now be selected for flex agents that include `grok-cli` in `allowed
 
 ```text
 /backend grok-cli
-/model grok-composer-2.5-fast
+/model grok-4.5
 ```
 
 Use Grok for controlled human or reviewed agent work first. Because Grok Build is still young and can expose tool/file/shell events, agents using it should keep conservative workspace access scopes until a project-specific smoke test is complete.
@@ -137,9 +146,9 @@ Key facts from official docs and announcements:
   ```
 
   In ACP, assistant text arrives through `session/update` chunks where `sessionUpdate == "agent_message_chunk"` and `content.text` contains the chunk.
-- Logged-in Grok CLI `0.2.51` currently reports:
-  - `grok-composer-2.5-fast`: default model.
-  - `grok-build`: available coding model.
+- Logged-in Grok CLI `0.2.93` currently reports:
+  - `grok-4.5`: default model.
+  - `grok-composer-2.5-fast`: available alternate model.
 - Current `--output-format streaming-json` emits direct events such as `{"type":"thought","data":"..."}`, `{"type":"text","data":"..."}`, and `{"type":"end","sessionId":"..."}`.
 
 Sources:
@@ -200,8 +209,8 @@ Core backend registration:
     ```python
     "grok-cli": {
         "label": "grok",
-        "models": ["grok-composer-2.5-fast", "grok-build"],
-        "default_model": "grok-composer-2.5-fast",
+        "models": ["grok-4.5", "grok-composer-2.5-fast"],
+        "default_model": "grok-4.5",
         "efforts": [],
         "default_effort": None,
         "secret_keys": [],
@@ -254,7 +263,7 @@ Tests:
 - `tests/test_answer_stream_capabilities.py`
   - assert `grok-cli` advertises `supports_answer_stream` only when parser path is enabled.
 - registry/model tests:
-  - `get_available_models("grok-cli")` includes `grok-composer-2.5-fast` and `grok-build`.
+  - `get_available_models("grok-cli")` includes `grok-4.5` and `grok-composer-2.5-fast`.
   - `is_cli_backend("grok-cli")` is true.
 
 Docs:
@@ -331,7 +340,7 @@ Preconditions:
 Smoke:
 
 ```text
-/backend grok-cli model=grok-composer-2.5-fast
+/backend grok-cli model=grok-4.5
 Write a concise but multi-paragraph explanation of this repository.
 ```
 
