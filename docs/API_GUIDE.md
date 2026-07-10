@@ -21,7 +21,7 @@ You can also control the gateway at runtime from Telegram:
 /api off              # stop the gateway and persist disabled-on-restart
 /api model            # open default-model buttons
 /api model <model>    # set the default model for requests without model
-/api model grok-4.3   # example: make Grok 4.3 the default chat model
+/api model grok-4.5   # example: make Grok 4.5 the default chat model
 ```
 
 `/api` only controls the OpenAI-compatible API Gateway. It does not change an
@@ -172,7 +172,7 @@ client = OpenAI(
     api_key="EMPTY",
 )
 response = client.chat.completions.create(
-    model="grok-4.3",
+    model="grok-4.5",
     messages=[{"role": "user", "content": "Hello"}],
 )
 ```
@@ -282,7 +282,7 @@ curl http://127.0.0.1:18801/v1/chat/completions \
 curl http://127.0.0.1:18801/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "grok-4.3",
+    "model": "grok-4.5",
     "messages": [{"role": "user", "content": "Hello from HASHI"}],
     "stream": false
   }'
