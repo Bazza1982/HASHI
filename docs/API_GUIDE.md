@@ -91,7 +91,7 @@ The gateway exposes models from all configured backends:
 | Claude CLI | `claude-opus-4-6`, `claude-sonnet-4-6`, `claude-haiku-4-5` |
 | Codex CLI | `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.3-codex-spark`, `gpt-5.4`, `gpt-5.3-codex`, `gpt-5.2-codex`, `gpt-5.2`, `gpt-5.1-codex-max`, `gpt-5.1-codex-mini` |
 | Grok CLI | `grok-4.5`, `grok-composer-2.5-fast` |
-| xAI API (`xai-api`) | `grok-4.3`, `grok-build-0.1`, `grok-4.20-0309-reasoning`, `grok-4.20-0309-non-reasoning`, `grok-4.20-multi-agent-0309`, `grok-imagine-image`, `grok-imagine-image-quality`, `grok-imagine-video`, `grok-imagine-video-1.5-preview` |
+| xAI API (`xai-api`) | `grok-4.5`, `grok-4.3`, `grok-build-0.1`, `grok-4.20-0309-reasoning`, `grok-4.20-0309-non-reasoning`, `grok-4.20-multi-agent-0309`, `grok-imagine-image`, `grok-imagine-image-quality`, `grok-imagine-video`, `grok-imagine-video-1.5-preview` |
 
 Run `GET /v1/models` to see the current list. Models whose backend failed
 preflight (missing CLI binary, no Hermes OAuth, etc.) are omitted until the
@@ -102,6 +102,11 @@ CLI catalog follows the logged-in CLI's advertised model list; at Grok CLI
 `0.2.93`, `grok-4.5` is the default and `grok-composer-2.5-fast` remains
 available. Existing agents with an explicit Composer selection keep it until a
 user changes their model.
+
+`grok-4.5` is also available through the API Gateway's `xai-api` backend. It
+uses xAI's Responses API route and was smoke-tested through HASHI's xAI OAuth
+adapter. The three Codex API Gateway variants `gpt-5.6-sol`,
+`gpt-5.6-terra`, and `gpt-5.6-luna` remain the tested GPT-5.6 choices.
 
 ### GPT-5.6 through Codex CLI
 

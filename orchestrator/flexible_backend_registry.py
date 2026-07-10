@@ -115,6 +115,7 @@ BACKEND_REGISTRY: dict[str, dict] = {
     "xai-api": {
         "label": "xai",
         "models": [
+            "grok-4.5",
             "grok-4.3",
             "grok-build-0.1",
             "grok-4.20-0309-reasoning",
@@ -123,7 +124,7 @@ BACKEND_REGISTRY: dict[str, dict] = {
             "grok-imagine-image",
             "grok-imagine-image-quality",
         ],
-        "default_model": "grok-4.3",
+        "default_model": "grok-4.5",
         "efforts": [],
         "default_effort": None,
         "secret_keys": [

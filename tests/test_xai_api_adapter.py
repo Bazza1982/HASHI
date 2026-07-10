@@ -12,6 +12,9 @@ from orchestrator.model_catalog import AVAILABLE_XAI_API_MODELS
 
 
 def test_xai_api_models_registered_in_gateway_and_registry():
+    assert "grok-4.5" in AVAILABLE_XAI_API_MODELS
+    assert _ENGINE_FOR_MODEL["grok-4.5"] == "xai-api"
+    assert "grok-4.5" in get_available_models("xai-api")
     assert "grok-4.3" in AVAILABLE_XAI_API_MODELS
     assert _ENGINE_FOR_MODEL["grok-4.3"] == "xai-api"
     assert "grok-4.3" in get_available_models("xai-api")
@@ -85,12 +88,12 @@ async def test_xai_api_adapter_generate_response_success(tmp_path):
     assert response.text == "OK"
 
 
-def test_xai_api_adapter_uses_responses_api_for_grok_build_model(tmp_path):
+def test_xai_api_adapter_uses_responses_api_for_grok45(tmp_path):
     cfg = SimpleNamespace(
         name="test-agent",
         workspace_dir=tmp_path,
         system_md=None,
-        model="grok-build-0.1",
+        model="grok-4.5",
     )
     global_cfg = SimpleNamespace(
         hermes_home=None,
@@ -105,7 +108,7 @@ def test_xai_api_adapter_uses_responses_api_for_grok_build_model(tmp_path):
             {"role": "user", "content": "hello"},
         ]
     )
-    assert payload["model"] == "grok-build-0.1"
+    assert payload["model"] == "grok-4.5"
     assert payload["input"] == "System: system\n\nhello"
 
 
