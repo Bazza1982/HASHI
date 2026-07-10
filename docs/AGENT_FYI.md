@@ -54,7 +54,7 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - `/backend`: open backend picker, then model picker, then commit the switch.
 - backend `+`: same flow, but rebuild handoff context after model confirmation.
 - `/model`: inspect or switch the model for the current active backend only.
-- `/effort`: available when active backend supports effort levels, currently Claude or Codex.
+- `/effort [level]`: available when the active backend supports effort levels, currently Claude or Codex. Codex choices follow the active model: `gpt-5.6-sol` includes `max`; `gpt-5.6-terra` and `gpt-5.6-luna` expose `low`, `medium`, `high`, and `xhigh`.
 
 ## Flex Backend Behavior
 - Flex backend switching is atomic: backend choice is not committed until a valid model is selected.
@@ -66,6 +66,9 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
   - `active_backend`
   - per-backend selected `model`
   - per-backend selected `effort` where supported
+- When switching a Codex model, HASHI normalizes an effort unsupported by the
+  destination model before it invokes Codex (for example, Sol `max` becomes
+  `medium` on Terra or Luna).
 - OpenRouter key lookup order for flex agents is:
   - `<agent_name>_openrouter_key`
   - `openrouter-api_key`

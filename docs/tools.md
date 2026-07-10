@@ -57,7 +57,7 @@ Three operating modes:
 
 **Flex-only:**
 - `/backend` — switch active backend (inline keyboard; `+` variant carries continuity handoff)
-- `/effort` — reasoning effort (when active backend is Claude or Codex)
+- `/effort [low|medium|high|xhigh|max]` — reasoning effort (when active backend is Claude or Codex). The keyboard and accepted values are model-aware: `max` is currently offered for `gpt-5.6-sol`; `gpt-5.6-terra` and `gpt-5.6-luna` offer up to `xhigh`.
 
 **Wrapper-mode:**
 - `/mode wrapper` — switch a flex-capable agent into wrapper mode.
