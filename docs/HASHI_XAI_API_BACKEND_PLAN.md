@@ -4,7 +4,7 @@
 
 **Date:** 2026-07-07.
 
-**Goal:** expose the full xAI model surface (`grok-4.3`, `grok-build-0.1`, Imagine, and related
+**Goal:** expose the full xAI model surface (`grok-4.5`, `grok-4.3`, `grok-build-0.1`, Imagine, and related
 chat models) through HASHI as a native HTTP backend (`xai-api`), using SuperGrok subscription
 OAuth credentials managed by Hermes, with automatic token refresh.
 
@@ -23,7 +23,7 @@ HASHI already ships `grok-cli` for agent runtime use. Two gaps remain:
 | Gap | `grok-cli` today | `xai-api` target |
 | --- | --- | --- |
 | API Gateway (`18801`) | not in model catalog | OpenAI-compatible routing |
-| Model breadth | `grok-composer-2.5-fast`, `grok-build` | `grok-4.3`, `grok-4.20-*`, `grok-build-0.1`, Imagine, … |
+| Model breadth | `grok-composer-2.5-fast`, `grok-build` | `grok-4.5`, `grok-4.3`, `grok-4.20-*`, `grok-build-0.1`, Imagine, … |
 | Transport | subprocess → Grok CLI | `httpx` → `https://api.x.ai/v1` |
 | Auth | CLI browser login (`~/.grok/auth.json`) | Hermes OAuth with auto-refresh |
 | Side effects | real shell/file tools via CLI | none unless HASHI `ToolRegistry` is attached |
@@ -162,9 +162,10 @@ Default base URL: `https://api.x.ai/v1`.
 
 ### Initial model catalog
 
-Chat (OAuth-verified 2026-07-07):
+Current API Gateway text models (OAuth-verified):
 
-- `grok-4.3` (default)
+- `grok-4.5` (default; Responses API, smoke-tested 2026-07-10)
+- `grok-4.3`
 - `grok-build-0.1`
 - `grok-4.20-0309-reasoning`
 - `grok-4.20-0309-non-reasoning`
@@ -251,7 +252,7 @@ Prefer Hermes-managed OAuth on developer machines. Use `xai_api_key` only when O
 ```json
 {
   "engine": "xai-api",
-  "model": "grok-4.3"
+  "model": "grok-4.5"
 }
 ```
 
@@ -292,7 +293,7 @@ Prefer Hermes-managed OAuth on developer machines. Use `xai_api_key` only when O
 
 ```bash
 # Hermes path still healthy
-hermes chat --provider xai-oauth --model grok-4.3 -q "Reply exactly: OK"
+hermes chat --provider xai-oauth --model grok-4.5 -q "Reply exactly: OK"
 ```
 
 ### HASHI adapter (after implementation)
@@ -305,7 +306,7 @@ curl -s http://10.255.255.254:18801/v1/models | jq '.data[].id' | grep grok-4
 
 curl -s -X POST http://10.255.255.254:18801/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"grok-4.3","messages":[{"role":"user","content":"Reply exactly: OK"}]}'
+  -d '{"model":"grok-4.5","messages":[{"role":"user","content":"Reply exactly: OK"}]}'
 ```
 
 ### Negative test

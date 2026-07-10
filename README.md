@@ -732,9 +732,9 @@ This prevents runaway API costs from automated workflows.
 - Supports tool calls (function calling)
 - Stateless (HASHI manages conversation history)
 - Per-agent API key overrides supported
-- xAI API supports Hermes-managed OAuth refresh, `grok-4.3` chat,
-  `grok-build-*` responses, and Imagine image/video generation through the API
-  Gateway.
+- xAI API supports Hermes-managed OAuth refresh, `grok-4.5` via the Responses
+  API, `grok-4.3` chat, `grok-build-*` responses, and Imagine image/video
+  generation through the API Gateway.
 
 #### Ollama Backend
 - Connects to locally-hosted LLMs
