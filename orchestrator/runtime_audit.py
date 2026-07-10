@@ -34,6 +34,9 @@ def audit_timeout_s(runtime: Any) -> float:
 def audit_core_model_choices(runtime: Any) -> list[tuple[str, str, str, str]]:
     return runtime._filter_allowed_model_choices(
         [
+            ("codex_gpt56_sol", "Codex GPT-5.6 Sol", "codex-cli", "gpt-5.6-sol"),
+            ("codex_gpt56_terra", "Codex GPT-5.6 Terra", "codex-cli", "gpt-5.6-terra"),
+            ("codex_gpt56_luna", "Codex GPT-5.6 Luna", "codex-cli", "gpt-5.6-luna"),
             ("codex_gpt55", "Codex GPT-5.5", "codex-cli", "gpt-5.5"),
             ("codex_gpt54", "Codex GPT-5.4", "codex-cli", "gpt-5.4"),
             ("codex_gpt53", "Codex GPT-5.3", "codex-cli", "gpt-5.3-codex"),
@@ -61,6 +64,7 @@ def audit_auditor_model_choices(runtime: Any) -> list[tuple[str, str, str, str]]
             ("claude_sonnet", "Claude Sonnet 4.6", "claude-cli", "claude-sonnet-4-6"),
             ("or_sonnet", "OR Sonnet 4.6", "openrouter-api", "anthropic/claude-sonnet-4.6"),
             ("or_opus", "OR Opus 4.6", "openrouter-api", "anthropic/claude-opus-4.6"),
+            ("codex_gpt56_sol", "Codex GPT-5.6 Sol", "codex-cli", "gpt-5.6-sol"),
             ("codex_gpt55", "Codex GPT-5.5", "codex-cli", "gpt-5.5"),
             ("codex_gpt54", "Codex GPT-5.4", "codex-cli", "gpt-5.4"),
             ("deepseek_pro", "DeepSeek Pro", "deepseek-api", "deepseek-v4-pro"),
@@ -112,7 +116,7 @@ def audit_core_text(cfg: Any) -> str:
         f"• Model: `{cfg.core_model}`\n\n"
         "This is the model that does the actual work. Tap a provider/model button below, or type:\n"
         "`/core backend=claude-cli model=claude-sonnet-4-6`\n"
-        "`/core backend=codex-cli model=gpt-5.5`\n"
+        "`/core backend=codex-cli model=gpt-5.6-sol`\n"
         "`/core backend=deepseek-api model=deepseek-v4-pro`"
     )
 
