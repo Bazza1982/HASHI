@@ -506,6 +506,9 @@ HASHI supports multiple communication channels:
 - Grok/xAI models are available through the `xai-api` backend, including
   `grok-4.3`, `grok-build-0.1`, `grok-imagine-image`, and
   `grok-imagine-video`.
+- The separately authenticated `grok-cli` backend uses Grok CLI `0.2.93` and
+  exposes `grok-4.5` (default) plus `grok-composer-2.5-fast`, with native
+  `streaming-json` answer delivery.
 - `xai-api` can use Hermes-managed SuperGrok OAuth credentials with automatic
   refresh; see [`docs/API_GUIDE.md`](docs/API_GUIDE.md).
 

@@ -55,6 +55,9 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - backend `+`: same flow, but rebuild handoff context after model confirmation.
 - `/model`: inspect or switch the model for the current active backend only.
 - `/effort [level]`: available when the active backend supports effort levels, currently Claude or Codex. Codex choices follow the active model: `gpt-5.6-sol` includes `max`; `gpt-5.6-terra` and `gpt-5.6-luna` expose `low`, `medium`, `high`, and `xhigh`.
+- Grok CLI `0.2.93` offers `grok-4.5` as the default model and
+  `grok-composer-2.5-fast` as an alternate. An agent explicitly configured for
+  Composer keeps that choice until `/model grok-4.5` is selected.
 
 ## Flex Backend Behavior
 - Flex backend switching is atomic: backend choice is not committed until a valid model is selected.
