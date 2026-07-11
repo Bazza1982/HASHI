@@ -56,15 +56,22 @@ class RebootManager:
     def reload_project_modules(self):
         """Reload project Python modules so hot restart picks up code changes."""
         prefixes = ("adapters.", "tools.", "orchestrator.")
+        foundation_modules = {
+            "orchestrator.model_catalog",
+            "orchestrator.flexible_backend_registry",
+        }
 
         def _reload_key(name: str):
-            if name.startswith("adapters."):
+            # Reload shared model/capability data before every consumer. This
+            # guarantees that /reboot alone picks up catalog and effort changes
+            # before adapters, managers, and agent runtimes re-import them.
+            if name in foundation_modules:
                 return (0, name)
-            if name.startswith("tools."):
-                return (0, name)
+            if name.startswith(("adapters.", "tools.")):
+                return (1, name)
             if "_runtime" in name:
-                return (2, name)
-            return (1, name)
+                return (3, name)
+            return (2, name)
 
         to_reload = sorted(
             (name for name in list(sys.modules) if any(name.startswith(prefix) for prefix in prefixes)),
