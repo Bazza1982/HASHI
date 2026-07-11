@@ -46,6 +46,38 @@ def test_reload_project_modules_includes_tools(monkeypatch):
     assert "external.module" not in reloaded
 
 
+def test_reload_project_modules_loads_model_foundations_before_consumers(monkeypatch):
+    manager = RebootManager(kernel=object(), console_handler=None)
+    module_names = [
+        "orchestrator.flexible_agent_runtime",
+        "adapters.codex_cli",
+        "orchestrator.flexible_backend_registry",
+        "orchestrator.model_catalog",
+        "orchestrator.flexible_backend_manager",
+    ]
+    reloaded = []
+
+    for name in module_names:
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+
+    def fake_reload(module):
+        reloaded.append(module.__name__)
+        return module
+
+    monkeypatch.setattr("orchestrator.reboot_manager.importlib.reload", fake_reload)
+
+    manager.reload_project_modules()
+
+    catalog_idx = reloaded.index("orchestrator.model_catalog")
+    registry_idx = reloaded.index("orchestrator.flexible_backend_registry")
+    adapter_idx = reloaded.index("adapters.codex_cli")
+    manager_idx = reloaded.index("orchestrator.flexible_backend_manager")
+    runtime_idx = reloaded.index("orchestrator.flexible_agent_runtime")
+
+    assert catalog_idx < adapter_idx < manager_idx < runtime_idx
+    assert registry_idx < adapter_idx < manager_idx < runtime_idx
+
+
 @pytest.mark.asyncio
 async def test_restart_delivery_health_watcher_replaces_existing_task(monkeypatch):
     started = []
