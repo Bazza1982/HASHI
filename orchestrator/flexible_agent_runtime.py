@@ -4763,7 +4763,7 @@ class FlexibleAgentRuntime:
                 self.backend_manager.current_backend.effort = normalized_effort
                 if backend_cfg is not None:
                     backend_cfg["effort"] = normalized_effort
-        self.backend_manager.persist_state()
+        self.backend_manager.persist_state(active_model=normalized)
 
     def _set_active_effort(self, requested: str):
         normalized = normalize_effort(

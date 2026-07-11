@@ -865,6 +865,20 @@ async def test_backend_and_model_commands_guide_wrapper_mode(tmp_path):
     assert "/wrap" in messages[-1]
 
 
+def test_set_backend_model_persists_new_active_model_over_existing_override(tmp_path):
+    manager = _make_manager(tmp_path / "agent")
+    manager._active_model_override = "gpt-5.4"
+    manager.current_backend = SimpleNamespace(config=SimpleNamespace(model="gpt-5.4"))
+    runtime, _ = _make_runtime(manager)
+
+    FlexibleAgentRuntime._set_backend_model(runtime, "codex-cli", "gpt-5.5")
+
+    state = _read_state(tmp_path / "agent")
+    assert manager.current_backend.config.model == "gpt-5.5"
+    assert manager._active_model_override == "gpt-5.5"
+    assert state["active_model"] == "gpt-5.5"
+
+
 @pytest.mark.asyncio
 async def test_cmd_core_updates_wrapper_core_state(tmp_path):
     manager = _make_manager(tmp_path / "agent")
