@@ -144,8 +144,11 @@ async def test_stream_command_does_not_change_verbose_or_think_preferences(tmp_p
     assert "Telegram header typing indicator" in replies[-1][0]
     keyboard = replies[-1][1]["reply_markup"].inline_keyboard
     button_labels = [button.text for row in keyboard for button in row]
-    assert any('Start "is typing" bubble' in label for label in button_labels)
-    assert any("Telegram typing indicator" in label for label in button_labels)
+    assert any("💬 Start Bubble" in label for label in button_labels)
+    assert any("⌨️ Typing" in label for label in button_labels)
+    assert any("⏱ Progress" in label for label in button_labels)
+    assert any("📝 Live Preview" in label for label in button_labels)
+    assert any("✅ Finalize" in label for label in button_labels)
 
     await FlexibleAgentRuntime.cmd_stream(
         runtime,
