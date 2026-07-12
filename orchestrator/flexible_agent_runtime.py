@@ -3587,14 +3587,14 @@ class FlexibleAgentRuntime:
                 ),
             ]
 
-        rows = [row("enabled", "Streaming master", policy.enabled)]
+        rows = [row("enabled", "Stream", policy.enabled)]
         rows.extend(
             [
-                row("placeholder", 'Start "is typing" bubble', policy.placeholder),
-                row("typing", "Telegram typing indicator", policy.typing),
-                row("progress", "Elapsed-time updates", policy.progress),
-                row("preview", "Live answer edits", policy.preview),
-                row("promote", "Bubble becomes final answer", policy.promote),
+                row("placeholder", "💬 Start Bubble", policy.placeholder),
+                row("typing", "⌨️ Typing", policy.typing),
+                row("progress", "⏱ Progress", policy.progress),
+                row("preview", "📝 Live Preview", policy.preview),
+                row("promote", "✅ Finalize", policy.promote),
                 [InlineKeyboardButton("Reset to default OFF", callback_data="tgl:stream:reset:off")],
             ]
         )
