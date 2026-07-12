@@ -140,6 +140,12 @@ async def test_stream_command_does_not_change_verbose_or_think_preferences(tmp_p
     assert (runtime.workspace_dir / ".verbose_off").exists()
     assert (runtime.workspace_dir / ".think_off").exists()
     assert "Telegram streaming: ON" in replies[-1][0]
+    assert 'Start message bubble ("Agent is typing...")' in replies[-1][0]
+    assert "Telegram header typing indicator" in replies[-1][0]
+    keyboard = replies[-1][1]["reply_markup"].inline_keyboard
+    button_labels = [button.text for row in keyboard for button in row]
+    assert any('Start "is typing" bubble' in label for label in button_labels)
+    assert any("Telegram typing indicator" in label for label in button_labels)
 
     await FlexibleAgentRuntime.cmd_stream(
         runtime,
