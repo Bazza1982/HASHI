@@ -19,6 +19,7 @@ from orchestrator.memory_plus_mode import (
     write_memory_plus_update,
 )
 from orchestrator.telegram_notifications import disable_notification
+from orchestrator import telegram_stream_policy
 
 
 def wrapper_enabled(runtime: Any) -> bool:
@@ -128,6 +129,8 @@ def append_core_transcript(
 async def send_wrapper_polishing_placeholder(runtime: Any, item: Any):
     if item.silent or not item.deliver_to_telegram or not runtime.telegram_connected:
         return None
+    if not telegram_stream_policy.get_policy(runtime).placeholder_enabled:
+        return None
     if not should_wrap_source(item.source):
         return None
     bot = getattr(getattr(runtime, "app", None), "bot", None)
@@ -221,8 +224,14 @@ async def apply_wrapper_to_visible_text(runtime: Any, item: Any, visible_text: s
 
     stop_wrapper_typing = None
     wrapper_typing_task = None
+    stream_policy = telegram_stream_policy.get_policy(runtime)
     wrapper_placeholder = await runtime._send_wrapper_polishing_placeholder(item)
-    if not item.silent and item.deliver_to_telegram and runtime.telegram_connected:
+    if (
+        not item.silent
+        and item.deliver_to_telegram
+        and runtime.telegram_connected
+        and stream_policy.typing_enabled
+    ):
         stop_wrapper_typing = asyncio.Event()
         wrapper_typing_task = asyncio.create_task(runtime.typing_loop(item.chat_id, stop_wrapper_typing))
     try:

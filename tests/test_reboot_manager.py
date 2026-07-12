@@ -21,6 +21,7 @@ def test_reload_project_modules_includes_tools(monkeypatch):
         "orchestrator.runtime_pipeline",
         "orchestrator.runtime_status",
         "orchestrator.telegram_delivery_failover",
+        "orchestrator.telegram_stream_policy",
         "external.module",
     ]
     modules = {name: types.ModuleType(name) for name in module_names}
@@ -43,6 +44,7 @@ def test_reload_project_modules_includes_tools(monkeypatch):
     assert "orchestrator.runtime_pipeline" in reloaded
     assert "orchestrator.runtime_status" in reloaded
     assert "orchestrator.telegram_delivery_failover" in reloaded
+    assert "orchestrator.telegram_stream_policy" in reloaded
     assert "external.module" not in reloaded
 
 
@@ -76,6 +78,36 @@ def test_reload_project_modules_loads_model_foundations_before_consumers(monkeyp
 
     assert catalog_idx < adapter_idx < manager_idx < runtime_idx
     assert registry_idx < adapter_idx < manager_idx < runtime_idx
+
+
+def test_reload_project_modules_loads_stream_policy_before_flexible_runtime(monkeypatch):
+    manager = RebootManager(kernel=object(), console_handler=None)
+    module_names = [
+        "orchestrator.flexible_agent_runtime",
+        "orchestrator.runtime_pipeline",
+        "orchestrator.runtime_status",
+        "orchestrator.telegram_stream_policy",
+    ]
+    reloaded = []
+
+    for name in module_names:
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+
+    def fake_reload(module):
+        reloaded.append(module.__name__)
+        return module
+
+    monkeypatch.setattr("orchestrator.reboot_manager.importlib.reload", fake_reload)
+
+    manager.reload_project_modules()
+
+    policy_idx = reloaded.index("orchestrator.telegram_stream_policy")
+    pipeline_idx = reloaded.index("orchestrator.runtime_pipeline")
+    status_idx = reloaded.index("orchestrator.runtime_status")
+    runtime_idx = reloaded.index("orchestrator.flexible_agent_runtime")
+    assert policy_idx < runtime_idx
+    assert pipeline_idx < runtime_idx
+    assert status_idx < runtime_idx
 
 
 @pytest.mark.asyncio

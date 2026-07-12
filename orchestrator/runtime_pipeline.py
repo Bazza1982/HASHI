@@ -10,6 +10,7 @@ from telegram.error import RetryAfter
 
 from orchestrator.runtime_common import _print_final_response, _safe_excerpt
 from orchestrator import telegram_delivery_failover
+from orchestrator import telegram_stream_policy
 from orchestrator.telegram_notifications import disable_notification
 
 EMPTY_SUCCESS_TOOL_FAILURE_MESSAGE = (
@@ -282,19 +283,20 @@ async def cleanup_interactive_feedback(
     placeholder,
     delete_placeholder: bool = True,
 ) -> None:
-    if stop_typing and typing_task:
+    if stop_typing:
         stop_typing.set()
+    if typing_task:
         await typing_task
-        if escalation_task is not None:
-            try:
-                await escalation_task
-            except asyncio.CancelledError:
-                pass
-        if answer_preview_task is not None:
-            try:
-                await answer_preview_task
-            except asyncio.CancelledError:
-                pass
+    if escalation_task is not None:
+        try:
+            await escalation_task
+        except asyncio.CancelledError:
+            pass
+    if answer_preview_task is not None:
+        try:
+            await answer_preview_task
+        except asyncio.CancelledError:
+            pass
 
     if think_flush_task is not None:
         think_flush_task.cancel()
@@ -341,12 +343,17 @@ async def answer_preview_loop(
         KIND_TOOL_START,
     )
 
+    policy = telegram_stream_policy.get_policy(runtime)
     extra = getattr(getattr(runtime, "config", None), "extra", {}) or {}
-    min_edit_interval = float(extra.get("answer_stream_edit_interval_s", 1.0))
+    min_edit_interval = policy.edit_interval_s
+    heartbeat_interval = policy.heartbeat_interval_s
+    max_edits = policy.max_edits_per_request
     min_chars = int(extra.get("answer_stream_min_chars", 24))
     max_chars = int(extra.get("answer_stream_max_chars", 3400))
     started = datetime.now()
-    last_edit_at = 0.0
+    last_edit_at = asyncio.get_running_loop().time()
+    last_rendered_text = ""
+    edit_attempts = 0
     chunks: list[str] = []
     latest_status = "Still working..."
     dirty = False
@@ -372,7 +379,7 @@ async def answer_preview_loop(
         return header + latest_status
 
     async def _edit() -> None:
-        nonlocal dirty, last_edit_at, preview_disabled
+        nonlocal dirty, last_edit_at, last_rendered_text, edit_attempts, preview_disabled
         if preview_disabled:
             dirty = False
             return
@@ -383,6 +390,18 @@ async def answer_preview_loop(
         text = _preview_text()
         if len(text.strip()) < min_chars:
             return
+        if text == last_rendered_text:
+            dirty = False
+            return
+        if max_edits <= 0 or edit_attempts >= max_edits:
+            preview_disabled = True
+            dirty = False
+            runtime.telegram_logger.info(
+                f"Answer stream preview budget exhausted for {item.request_id} "
+                f"(attempts={edit_attempts}, max_edits={max_edits})"
+            )
+            return
+        edit_attempts += 1
         try:
             await runtime.app.bot.edit_message_text(
                 chat_id=item.chat_id,
@@ -392,6 +411,7 @@ async def answer_preview_loop(
             if stream_state is not None:
                 stream_state.edit_count += 1
             last_edit_at = asyncio.get_running_loop().time()
+            last_rendered_text = text
             dirty = False
         except Exception as exc:
             retry_after = getattr(exc, "retry_after", None) if isinstance(exc, RetryAfter) else None
@@ -413,8 +433,12 @@ async def answer_preview_loop(
                     f"Answer stream preview disabled for {item.request_id}: {exc}"
                 )
             elif "message is not modified" in str(exc).lower():
+                last_edit_at = asyncio.get_running_loop().time()
+                last_rendered_text = text
                 dirty = False
             else:
+                last_edit_at = asyncio.get_running_loop().time()
+                dirty = False
                 if stream_state is not None:
                     stream_state.failed = True
                     stream_state.failure_reason = str(exc)
@@ -439,7 +463,9 @@ async def answer_preview_loop(
                 latest_status = summary[:240]
                 dirty = True
         except asyncio.TimeoutError:
-            dirty = True
+            now = asyncio.get_running_loop().time()
+            if policy.progress_enabled and not chunks and (now - last_edit_at) >= heartbeat_interval:
+                dirty = True
 
         now = asyncio.get_running_loop().time()
         if dirty and (now - last_edit_at) >= min_edit_interval:
@@ -464,12 +490,28 @@ async def setup_interactive_feedback(
     think_flush_task = None
     answer_preview_task = None
     answer_stream_state = None
-    if not item.silent and item.deliver_to_telegram:
-        placeholder_text, placeholder_parse_mode = runtime.get_typing_placeholder()
+    delivery_requested = not item.silent and item.deliver_to_telegram
+    policy = telegram_stream_policy.get_policy(runtime)
+    delivery_blocked = telegram_delivery_failover.is_delivery_blocked(runtime)
+    stream_delivery_enabled = delivery_requested and policy.enabled and not delivery_blocked
+    think_delivery_enabled = delivery_requested and runtime._think and not delivery_blocked
+
+    if delivery_requested:
+        runtime.logger.info(
+            f"Telegram stream policy {item.request_id}: enabled={policy.enabled}, "
+            f"source={policy.source}, placeholder={policy.placeholder_enabled}, "
+            f"typing={policy.typing_enabled}, progress={policy.progress_enabled}, "
+            f"preview={policy.preview_enabled}, promote={policy.promote_enabled}, "
+            f"blocked={delivery_blocked}"
+        )
+
+    if stream_delivery_enabled or think_delivery_enabled:
         stop_typing = asyncio.Event()
-        typing_task = asyncio.create_task(runtime.typing_loop(item.chat_id, stop_typing))
+
+    if stream_delivery_enabled:
+        placeholder_text, placeholder_parse_mode = runtime.get_typing_placeholder()
         try:
-            if await telegram_delivery_failover.handle_blocked_send(
+            if policy.placeholder_enabled and await telegram_delivery_failover.handle_blocked_send(
                 runtime,
                 chat_id=item.chat_id,
                 request_id=item.request_id,
@@ -478,7 +520,7 @@ async def setup_interactive_feedback(
                 runtime.telegram_logger.warning(
                     f"Skipping placeholder for {item.request_id} — delivery blocked"
                 )
-            else:
+            elif policy.placeholder_enabled:
                 placeholder_started = datetime.now()
                 placeholder = await runtime.app.bot.send_message(
                     chat_id=item.chat_id,
@@ -503,14 +545,19 @@ async def setup_interactive_feedback(
         except Exception as e:
             runtime.telegram_logger.warning(f"Failed to send placeholder: {e}")
 
+        delivery_blocked = telegram_delivery_failover.is_delivery_blocked(runtime)
+        think_delivery_enabled = think_delivery_enabled and not delivery_blocked
+        if not delivery_blocked and policy.typing_enabled and stop_typing is not None:
+            typing_task = asyncio.create_task(runtime.typing_loop(item.chat_id, stop_typing))
+
         backend = runtime.backend_manager.current_backend
         capabilities = getattr(backend, "capabilities", None)
         supports_stream_display = bool(getattr(capabilities, "supports_thinking_stream", False))
         stream_queue = None
         answer_preview_queue = None
-        preview_enabled = telegram_delivery_failover.effective_preview_enabled(runtime)
-        preview_enabled = preview_enabled and placeholder is not None
-        final_stream_enabled = bool((getattr(runtime.config, "extra", {}) or {}).get("answer_stream_final_delivery", False))
+        preview_enabled = policy.preview_enabled and placeholder is not None and not delivery_blocked
+        progress_enabled = policy.progress_enabled and placeholder is not None and not delivery_blocked
+        final_stream_enabled = policy.promote_enabled and preview_enabled
         supports_answer_stream = bool(getattr(capabilities, "supports_answer_stream", False))
         if final_stream_enabled and supports_answer_stream and placeholder is not None:
             answer_stream_state = StreamedAnswerState(
@@ -526,15 +573,20 @@ async def setup_interactive_feedback(
             f"backend={getattr(runtime.config, 'active_backend', 'unknown')}, "
             f"supports_answer_stream={supports_answer_stream}"
         )
-        use_stream = runtime._verbose or runtime._think or audit_active or preview_enabled
+        use_stream = (
+            think_delivery_enabled
+            or audit_active
+            or preview_enabled
+            or (progress_enabled and runtime._verbose and supports_stream_display)
+        )
         if use_stream:
-            if runtime._verbose and supports_stream_display and not preview_enabled:
+            if progress_enabled and runtime._verbose and supports_stream_display and not preview_enabled:
                 stream_queue = asyncio.Queue(maxsize=200)
             if preview_enabled:
                 answer_preview_queue = asyncio.Queue(maxsize=300)
             base_stream_callback = runtime._make_stream_callback(
                 event_queue=stream_queue,
-                think_buffer=runtime._think_buffer if runtime._think else None,
+                think_buffer=runtime._think_buffer if think_delivery_enabled else None,
                 audit_collector=audit_collector,
             )
 
@@ -560,7 +612,7 @@ async def setup_interactive_feedback(
                     stream_state=answer_stream_state,
                 )
             )
-        elif runtime._verbose and supports_stream_display:
+        elif progress_enabled and runtime._verbose and supports_stream_display:
             escalation_task = asyncio.create_task(
                 runtime._streaming_display_loop(
                     item.chat_id,
@@ -571,7 +623,7 @@ async def setup_interactive_feedback(
                     backend=backend,
                 )
             )
-        else:
+        elif progress_enabled:
             escalation_task = asyncio.create_task(
                 runtime._escalating_placeholder_loop(
                     item.chat_id,
@@ -581,13 +633,19 @@ async def setup_interactive_feedback(
                     backend=backend,
                 )
             )
-        if runtime._think:
-            runtime._think_buffer.clear()
-            runtime._openrouter_think_chunk = ""
-            runtime._last_openrouter_think_snippet = None
-            think_flush_task = asyncio.create_task(
-                runtime._thinking_flush_loop(item.chat_id, stop_typing)
+
+    if think_delivery_enabled and stop_typing is not None:
+        runtime._think_buffer.clear()
+        runtime._openrouter_think_chunk = ""
+        runtime._last_openrouter_think_snippet = None
+        if stream_callback is None:
+            stream_callback = runtime._make_stream_callback(
+                think_buffer=runtime._think_buffer,
+                audit_collector=audit_collector,
             )
+        think_flush_task = asyncio.create_task(
+            runtime._thinking_flush_loop(item.chat_id, stop_typing)
+        )
 
     if stream_callback is None and audit_active:
         stream_callback = runtime._make_stream_callback(audit_collector=audit_collector)

@@ -5,6 +5,7 @@ from typing import Any, Mapping
 
 from orchestrator.audit_mode import load_audit_config, visible_audit_criteria
 from orchestrator import telegram_delivery_failover
+from orchestrator import telegram_stream_policy
 from orchestrator.wrapper_mode import load_wrapper_config, visible_wrapper_slots
 
 
@@ -172,7 +173,7 @@ def build_status_text(runtime, detailed: bool = False) -> str:
         else "✅ healthy"
     )
     delivery = telegram_delivery_failover.delivery_status_summary(runtime)
-    preview_enabled, preview_source = telegram_delivery_failover.preview_status(runtime)
+    stream_policy = telegram_stream_policy.get_policy(runtime)
     tg_status = "✓" if runtime.telegram_connected else "✗"
     wa_status = "✓" if runtime._get_whatsapp_connected() else "✗"
     channel_line = f"Telegram {tg_status} • WhatsApp {wa_status} • Workbench ✓"
@@ -197,6 +198,7 @@ def build_status_text(runtime, detailed: bool = False) -> str:
         [
             f"📶 Channels: {channel_line}",
             _delivery_line(delivery),
+            f"📡 Telegram Stream: {'ON' if stream_policy.enabled else 'OFF'} ({stream_policy.source})",
             f"📡 Runtime: {'busy' if runtime.is_generating else 'idle'} • queue {runtime.queue.qsize()} • process {runtime._process_info()}",
             f"🧾 Current: {current_line}",
             f"🧠 Memory: skills {', '.join(active_skills) if active_skills else 'none'} • recall {'ON' if recall_on else 'OFF'} • FYI {'armed' if runtime._pending_session_primer else 'clear'}",
@@ -228,7 +230,8 @@ def build_status_text(runtime, detailed: bool = False) -> str:
                 f"📘 Handoff Files: recent {'yes' if runtime.recent_context_path.exists() else 'no'} • handoff {'yes' if runtime.handoff_path.exists() else 'no'}",
                 f"🔍 Verbose: {'ON' if runtime._verbose else 'OFF'}",
                 f"💭 Think: {'ON' if runtime._think else 'OFF'}",
-                f"👁 Preview: {'ON' if preview_enabled else 'OFF'} ({preview_source})",
+                f"👁 Preview: {'ON' if stream_policy.preview_enabled else 'OFF'} "
+                f"({stream_policy.component_sources['preview']})",
                 f"🕓 Last Switch: {runtime._format_age(runtime.last_backend_switch_at)}",
             ]
         )

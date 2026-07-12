@@ -1,5 +1,11 @@
 # Telegram Delivery Failover And Preview Control Plan
 
+> Runtime update (2026-07-12): Telegram intermediate streaming is now governed
+> by the independent `/stream` policy and defaults to OFF for every agent.
+> `/preview` remains a compatibility sub-switch and cannot activate streaming
+> while the master switch is OFF. Historical preview-default examples below
+> describe the earlier implementation.
+
 ## Problem
 
 When an agent's Telegram bot hits flood control, HASHI currently treats the

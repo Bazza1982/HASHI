@@ -587,6 +587,8 @@ model that does not support it safely resets effort to `medium`.
 |---------|-------------|
 | `/verbose [on\|off]` | Toggle detailed status; in wrapper mode, `on` also shows core raw output and wrapper final output |
 | `/think [on\|off]` | Toggle thinking trace display |
+| `/stream [on\|off\|status]` | Control Telegram intermediate streaming; default OFF for final-only delivery |
+| `/preview [on\|off\|status]` | Compatibility switch for the answer-preview subfeature; requires `/stream on` |
 | `/safevoice [on\|off]` | Toggle voice confirmation (default: ON) |
 | `/active [on\|off\|minutes]` | Toggle proactive heartbeat |
 | `/whisper [small\|medium\|large]` | Set local voice transcription model |

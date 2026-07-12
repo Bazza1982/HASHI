@@ -142,7 +142,10 @@ def _item(**overrides):
 
 def _runtime():
     runtime = SimpleNamespace()
-    runtime.config = SimpleNamespace(active_backend="codex-cli", extra={})
+    runtime.config = SimpleNamespace(
+        active_backend="codex-cli",
+        extra={"telegram_stream_enabled": True},
+    )
     runtime.name = "zelda"
     runtime.config.telegram_token_key = runtime.name
     runtime.global_config = SimpleNamespace(project_root=Path(tempfile.mkdtemp(prefix="hashi-pipeline-test-")))
@@ -509,7 +512,7 @@ async def test_setup_interactive_feedback_placeholder_retry_after_records_failov
     )
 
     feedback.stop_typing.set()
-    await feedback.typing_task
+    assert feedback.typing_task is None
 
     saved = failover.load_health_state(runtime)
     record = saved["agents"]["kasumi"]
@@ -576,17 +579,105 @@ async def test_setup_interactive_feedback_skips_placeholder_when_delivery_blocke
         audit_collector=None,
     )
 
-    feedback.stop_typing.set()
-    await feedback.typing_task
-
     assert not runtime.app.bot.sent
+    assert feedback.stop_typing is None
+    assert feedback.typing_task is None
     assert feedback.placeholder is None
+
+
+@pytest.mark.asyncio
+async def test_stream_default_off_skips_intermediate_telegram_and_uses_final_delivery_once():
+    runtime = _runtime()
+    runtime.config.extra = {}
+    runtime._verbose = False
+    runtime._think = False
+    sends = []
+
+    async def _send_long_message(**kwargs):
+        sends.append(kwargs)
+        return 0.1, 1
+
+    runtime.send_long_message = _send_long_message
+    item = _item(prompt="user text")
+
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        item,
+        audit_active=False,
+        audit_collector=None,
+    )
+
+    assert feedback.stop_typing is None
+    assert feedback.typing_task is None
+    assert feedback.escalation_task is None
+    assert feedback.answer_preview_task is None
+    assert feedback.placeholder is None
+    assert feedback.on_stream_event is None
+    assert runtime.app.bot.sent == []
+    assert runtime.app.bot.edits == []
+
+    await runtime_pipeline.handle_success_delivery(
+        runtime,
+        item,
+        SimpleNamespace(text="final answer"),
+        visible_text="final answer",
+        wrapper_result=None,
+        is_bridge_request=False,
+        session_reset_source="session_reset",
+        queued_at=datetime.now(),
+        queue_wait_s=0,
+        backend_elapsed_s=0,
+        audit_collector=None,
+    )
+
+    assert len(sends) == 1
+    assert sends[0]["purpose"] == "response"
+    assert sends[0]["text"] == "final answer"
+
+
+@pytest.mark.asyncio
+async def test_stream_off_keeps_thinking_delivery_independent_without_placeholder():
+    runtime = _runtime()
+    runtime.config.extra = {}
+    runtime._think = True
+
+    async def _flush_thinking(_chat_id):
+        return None
+
+    runtime._flush_thinking = _flush_thinking
+
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(),
+        audit_active=False,
+        audit_collector=None,
+    )
+
+    assert feedback.placeholder is None
+    assert feedback.typing_task is None
+    assert feedback.answer_preview_task is None
+    assert feedback.think_flush_task is not None
+    assert feedback.on_stream_event is not None
+
+    await runtime_pipeline.cleanup_interactive_feedback(
+        runtime,
+        _item(),
+        stop_typing=feedback.stop_typing,
+        typing_task=feedback.typing_task,
+        escalation_task=feedback.escalation_task,
+        answer_preview_task=feedback.answer_preview_task,
+        think_flush_task=feedback.think_flush_task,
+        placeholder=feedback.placeholder,
+    )
 
 
 @pytest.mark.asyncio
 async def test_setup_interactive_feedback_creates_stream_state_only_when_capability_and_flag_enabled():
     runtime = _runtime()
-    runtime.config.extra = {"answer_stream_final_delivery": True}
+    runtime.config.extra = {
+        "telegram_stream_enabled": True,
+        "answer_stream_final_delivery": True,
+    }
     runtime.backend_manager.current_backend.capabilities.supports_answer_stream = True
 
     feedback = await runtime_pipeline.setup_interactive_feedback(
@@ -607,6 +698,7 @@ async def test_setup_interactive_feedback_creates_stream_state_only_when_capabil
 async def test_answer_preview_stream_edits_placeholder():
     runtime = _runtime()
     runtime.config.extra = {
+        "telegram_stream_enabled": True,
         "answer_stream_edit_interval_s": 0.01,
         "answer_stream_min_chars": 1,
     }
@@ -643,6 +735,7 @@ async def test_answer_preview_stream_edits_placeholder():
 async def test_answer_preview_records_stream_state_deltas_and_edits():
     runtime = _runtime()
     runtime.config.extra = {
+        "telegram_stream_enabled": True,
         "answer_stream_edit_interval_s": 0.01,
         "answer_stream_min_chars": 1,
     }
@@ -683,9 +776,46 @@ async def test_answer_preview_records_stream_state_deltas_and_edits():
 
 
 @pytest.mark.asyncio
+async def test_answer_preview_stops_after_per_request_edit_budget():
+    runtime = _runtime()
+    runtime.config.extra = {
+        "telegram_stream_enabled": True,
+        "answer_stream_edit_interval_s": 0.01,
+        "answer_stream_min_chars": 1,
+        "answer_stream_max_edits": 2,
+    }
+    event_queue = asyncio.Queue()
+    stop_event = asyncio.Event()
+    task = asyncio.create_task(
+        runtime_pipeline.answer_preview_loop(
+            runtime,
+            _item(),
+            placeholder=SimpleNamespace(message_id=77),
+            stop_event=stop_event,
+            event_queue=event_queue,
+        )
+    )
+
+    for index, text in enumerate(("one", "two", "three"), start=1):
+        await event_queue.put(StreamEvent(kind=KIND_TEXT_DELTA, summary=text))
+        for _ in range(20):
+            if len(runtime.app.bot.edits) >= min(index, 2):
+                break
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.02)
+
+    stop_event.set()
+    await task
+
+    assert len(runtime.app.bot.edits) == 2
+    assert any("preview budget exhausted" in message for message in runtime.telegram_logger.messages)
+
+
+@pytest.mark.asyncio
 async def test_answer_preview_disables_after_retry_after():
     runtime = _runtime()
     runtime.config.extra = {
+        "telegram_stream_enabled": True,
         "answer_stream_edit_interval_s": 0.01,
         "answer_stream_min_chars": 1,
     }
@@ -730,6 +860,7 @@ async def test_answer_preview_skips_edits_when_delivery_blocked(tmp_path):
     runtime = _runtime()
     runtime.global_config = SimpleNamespace(project_root=tmp_path)
     runtime.config.extra = {
+        "telegram_stream_enabled": True,
         "answer_stream_edit_interval_s": 0.01,
         "answer_stream_min_chars": 1,
     }
@@ -775,9 +906,10 @@ async def test_answer_preview_skips_edits_when_delivery_blocked(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_answer_preview_heartbeat_edits_without_text_delta():
+async def test_answer_preview_does_not_edit_without_event_before_heartbeat():
     runtime = _runtime()
     runtime.config.extra = {
+        "telegram_stream_enabled": True,
         "answer_stream_edit_interval_s": 0.01,
         "answer_stream_min_chars": 1,
     }
@@ -802,14 +934,14 @@ async def test_answer_preview_heartbeat_edits_without_text_delta():
     stop_event.set()
     await task
 
-    assert runtime.app.bot.edits
-    assert "Still working..." in runtime.app.bot.edits[-1]["text"]
+    assert runtime.app.bot.edits == []
 
 
 @pytest.mark.asyncio
 async def test_answer_preview_shows_progress_when_text_delta_absent():
     runtime = _runtime()
     runtime.config.extra = {
+        "telegram_stream_enabled": True,
         "answer_stream_edit_interval_s": 0.01,
         "answer_stream_min_chars": 1,
     }
@@ -884,7 +1016,10 @@ async def test_answer_preview_takes_precedence_over_verbose_display():
 async def test_verbose_non_streaming_backend_uses_escalating_placeholder():
     runtime = _runtime()
     runtime._verbose = True
-    runtime.config.extra = {"answer_stream_preview": False}
+    runtime.config.extra = {
+        "telegram_stream_enabled": True,
+        "answer_stream_preview": False,
+    }
     runtime.backend_manager.current_backend.capabilities.supports_thinking_stream = False
 
     feedback = await runtime_pipeline.setup_interactive_feedback(
@@ -894,10 +1029,8 @@ async def test_verbose_non_streaming_backend_uses_escalating_placeholder():
         audit_collector=None,
     )
 
-    assert feedback.on_stream_event[0] == "stream"
-    assert runtime.stream_callbacks == [
-        {"event_queue": None, "think_buffer": None, "audit_collector": None}
-    ]
+    assert feedback.on_stream_event is None
+    assert runtime.stream_callbacks == []
     assert runtime.streaming_loops == []
     feedback.stop_typing.set()
     await feedback.typing_task
@@ -909,7 +1042,10 @@ async def test_verbose_non_streaming_backend_uses_escalating_placeholder():
 async def test_verbose_streaming_backend_uses_streaming_display():
     runtime = _runtime()
     runtime._verbose = True
-    runtime.config.extra = {"answer_stream_preview": False}
+    runtime.config.extra = {
+        "telegram_stream_enabled": True,
+        "answer_stream_preview": False,
+    }
 
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
