@@ -21,6 +21,7 @@ from orchestrator.config import FlexibleAgentConfig, GlobalConfig
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
 from orchestrator.runtime_common import QueuedRequest
+from orchestrator import telegram_stream_policy
 from orchestrator.wrapper_mode import DEFAULT_WRAPPER_STYLE_SLOT_TEXT, SESSION_RESET_SOURCE
 
 
@@ -1411,7 +1412,16 @@ async def test_foreground_wrapper_verbose_shows_core_and_final_outputs(tmp_path)
 async def test_wrapper_polishing_placeholder_bridges_after_core_output(tmp_path):
     runtime, sent, voices, hchat_replies = _make_foreground_runtime(tmp_path)
     runtime.telegram_connected = True
-    runtime.config.extra["telegram_stream_enabled"] = True
+    runtime.config.extra["telegram_stream"] = {
+        "enabled": True,
+        "placeholder": True,
+        "typing": True,
+        "progress": True,
+        "preview": True,
+        "promote": True,
+    }
+    for switch in ("enabled", "placeholder", "typing", "progress", "preview", "promote"):
+        telegram_stream_policy.set_policy_value(runtime, switch, True)
     item = _queued_request()
     await runtime.queue.put(item)
 
