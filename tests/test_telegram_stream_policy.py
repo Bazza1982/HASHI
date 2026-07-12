@@ -148,7 +148,9 @@ async def test_stream_command_does_not_change_verbose_or_think_preferences(tmp_p
     assert any("⌨️ Typing" in label for label in button_labels)
     assert any("⏱ Progress" in label for label in button_labels)
     assert any("📝 Live Preview" in label for label in button_labels)
-    assert any("✅ Finalize" in label for label in button_labels)
+    assert "✅ 🏁 Finalize ON" in button_labels
+    assert "🏁 Finalize OFF" in button_labels
+    assert "✅ 🏁 Finalize OFF" not in button_labels
 
     await FlexibleAgentRuntime.cmd_stream(
         runtime,
