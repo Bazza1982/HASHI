@@ -39,6 +39,7 @@ from orchestrator import runtime_nudge
 from orchestrator import runtime_pipeline
 from orchestrator import runtime_remote
 from orchestrator import telegram_delivery_failover
+from orchestrator import telegram_stream_policy
 from orchestrator.source_policy import source_requires_manual_remote_api_permission
 from remote.local_http import local_http_hosts
 from remote.runtime_identity import read_runtime_claim
@@ -363,7 +364,9 @@ class FlexibleAgentRuntime:
                 }
             )
             # explicitly allowed convenience commands for conversational agents
-            self._enabled_commands.update({"bg", "jobs", "verbose", "think", "voice", "say", "whisper"})
+            self._enabled_commands.update(
+                {"bg", "jobs", "verbose", "think", "stream", "preview", "voice", "say", "whisper"}
+            )
 
         # Optional overrides (per-agent): extra.limited_policy
         policy = extra.get("limited_policy") if isinstance(extra, dict) else None
@@ -379,7 +382,7 @@ class FlexibleAgentRuntime:
                     self._enabled_commands.add(name.strip().lstrip("/").lower())
 
         # help/status/new/fresh/wipe/clear/model/effort/mode should always be available
-        self._enabled_commands.update({"help", "status", "new", "fresh", "wipe", "reset", "clear", "memory", "notepad", "model", "effort", "mode", "wrapper", "audit", "brain", "core", "wrap", "bg", "jobs", "verbose", "think", "voice", "say", "whisper", "transfer", "fork", "cos", "long", "end", "oll", "browser", "exp"})
+        self._enabled_commands.update({"help", "status", "new", "fresh", "wipe", "reset", "clear", "memory", "notepad", "model", "effort", "mode", "wrapper", "audit", "brain", "core", "wrap", "bg", "jobs", "verbose", "think", "stream", "preview", "voice", "say", "whisper", "transfer", "fork", "cos", "long", "end", "oll", "browser", "exp"})
 
     def _is_command_allowed(self, cmd: str) -> bool:
         cmd = (cmd or "").lstrip("/").lower()
@@ -908,7 +911,7 @@ class FlexibleAgentRuntime:
 
     def get_runtime_metadata(self) -> dict:
         delivery = telegram_delivery_failover.delivery_status_summary(self)
-        preview_enabled, preview_source = telegram_delivery_failover.preview_status(self)
+        stream_policy = telegram_stream_policy.get_policy(self)
         return {
             "id": self.name,
             "name": self.name,
@@ -927,8 +930,17 @@ class FlexibleAgentRuntime:
             "telegram_delivery_blocked": bool(delivery),
             "telegram_delivery_blocked_until": delivery.get("blocked_until") if delivery else None,
             "telegram_delivery_failover_agent": delivery.get("active_failover_agent") if delivery else None,
-            "answer_stream_preview": preview_enabled,
-            "answer_stream_preview_source": preview_source,
+            "telegram_stream_enabled": stream_policy.enabled,
+            "telegram_stream_source": stream_policy.source,
+            "telegram_stream_components": {
+                "placeholder": stream_policy.placeholder_enabled,
+                "typing": stream_policy.typing_enabled,
+                "progress": stream_policy.progress_enabled,
+                "preview": stream_policy.preview_enabled,
+                "promote": stream_policy.promote_enabled,
+            },
+            "answer_stream_preview": stream_policy.preview_enabled,
+            "answer_stream_preview_source": stream_policy.component_sources["preview"],
             "channels": {
                 "telegram": self.telegram_connected,
                 "workbench": True,
@@ -2011,7 +2023,8 @@ class FlexibleAgentRuntime:
         await query.answer()
 
     # ── toggle callback ──────────────────────────────────────────────────────────
-    # Handles: tgl:verbose:on/off, tgl:think:on/off, tgl:mode:fixed/flex,
+    # Handles: tgl:verbose:on/off, tgl:think:on/off, tgl:stream:<switch>:on/off,
+    #          tgl:mode:fixed/flex,
     #          tgl:retry:response/prompt, tgl:whisper:small/medium/large,
     #          tgl:active:on/off/<minutes>, tgl:reboot:min/max/same/<name>
     async def callback_toggle(self, update: Update, context: Any):
@@ -2054,6 +2067,26 @@ class FlexibleAgentRuntime:
             ]])
             await query.edit_message_text(f"Thinking display: {state}", reply_markup=markup)
             await query.answer(f"Think {state}")
+
+        elif target == "stream":
+            try:
+                switch, action = value.split(":", 1)
+                if switch == "reset":
+                    telegram_stream_policy.reset_policy(self)
+                    notice = "Telegram stream reset to functional default OFF"
+                else:
+                    if action not in {"on", "off"}:
+                        raise ValueError("Stream action must be on or off")
+                    telegram_stream_policy.set_policy_value(self, switch, action == "on")
+                    notice = f"{switch} {action.upper()}"
+            except ValueError as exc:
+                await query.answer(str(exc), show_alert=True)
+                return
+            await query.edit_message_text(
+                self._stream_status_text(),
+                reply_markup=self._stream_keyboard(),
+            )
+            await query.answer(notice)
 
         elif target == "mode":
             await runtime_mode.callback_mode_toggle(self, query, value)
@@ -3459,7 +3492,8 @@ class FlexibleAgentRuntime:
         await self._reply_text(
             update,
             f"Verbose mode: {state}\n"
-            f"{'Long-task placeholders will show engine, elapsed, idle time and output events.' if self._verbose else 'Placeholders will show concise status only.'}",
+            f"{'When /stream is ON, progress can show engine, elapsed, idle time and output events.' if self._verbose else 'Verbose detail and completion traces are disabled.'}\n"
+            "Telegram streaming is controlled independently with /stream.",
             reply_markup=markup,
         )
 
@@ -3491,19 +3525,125 @@ class FlexibleAgentRuntime:
             reply_markup=markup,
         )
 
+    def _stream_status_text(self) -> str:
+        policy = telegram_stream_policy.get_policy(self)
+        effective_mode = "LIVE STREAM" if policy.enabled else "FINAL ONLY"
+        lines = [
+            f"Telegram streaming: {'ON 📡' if policy.enabled else 'OFF'}",
+            f"Mode: {effective_mode}",
+            f"Source: {policy.source}",
+            "",
+        ]
+        labels = {
+            "placeholder": "Placeholder",
+            "typing": "Typing action",
+            "progress": "Progress status",
+            "preview": "Answer preview",
+            "promote": "Final promotion",
+        }
+        for name, label in labels.items():
+            configured = bool(getattr(policy, name))
+            effective = bool(getattr(policy, f"{name}_enabled"))
+            if effective:
+                state = "ON"
+            elif configured:
+                state = "ARMED (inactive)"
+            else:
+                state = "OFF"
+            lines.append(f"• {label}: {state}")
+        lines.extend(
+            [
+                "",
+                f"Safety: {policy.edit_interval_s:g}s min edit • "
+                f"{policy.heartbeat_interval_s:g}s heartbeat • "
+                f"{policy.max_edits_per_request} edits/request",
+                f"Independent: verbose {'ON' if self._verbose else 'OFF'} • "
+                f"think {'ON' if self._think else 'OFF'}",
+            ]
+        )
+        if not policy.enabled:
+            lines.append("Future normal replies skip all stream traffic and send only the final answer.")
+        return "\n".join(lines)
+
+    def _stream_keyboard(self) -> InlineKeyboardMarkup:
+        policy = telegram_stream_policy.get_policy(self)
+
+        def row(name: str, label: str, enabled: bool):
+            return [
+                InlineKeyboardButton(
+                    f"✅ {label} ON" if enabled else f"{label} ON",
+                    callback_data=f"tgl:stream:{name}:on",
+                ),
+                InlineKeyboardButton(
+                    f"✅ {label} OFF" if not enabled else f"{label} OFF",
+                    callback_data=f"tgl:stream:{name}:off",
+                ),
+            ]
+
+        rows = [row("enabled", "Master", policy.enabled)]
+        rows.extend(
+            [
+                row("placeholder", "Placeholder", policy.placeholder),
+                row("typing", "Typing", policy.typing),
+                row("progress", "Progress", policy.progress),
+                row("preview", "Preview", policy.preview),
+                row("promote", "Promote", policy.promote),
+                [InlineKeyboardButton("Reset to default OFF", callback_data="tgl:stream:reset:off")],
+            ]
+        )
+        return InlineKeyboardMarkup(rows)
+
+    async def cmd_stream(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        args = [a.strip().lower() for a in (context.args or []) if a.strip()]
+        if not args or args[0] == "status":
+            await self._reply_text(
+                update,
+                self._stream_status_text(),
+                reply_markup=self._stream_keyboard(),
+            )
+            return
+
+        aliases = {"final": "promote", "answer": "preview", "master": "enabled"}
+        action = args[0]
+        try:
+            if action == "reset":
+                telegram_stream_policy.reset_policy(self)
+            elif action in {"on", "off"}:
+                telegram_stream_policy.set_policy_value(self, "enabled", action == "on")
+            else:
+                switch = aliases.get(action, action)
+                if switch not in telegram_stream_policy.COMPONENT_NAMES and switch != "enabled":
+                    raise ValueError(f"Unknown stream switch: {action}")
+                if len(args) < 2 or args[1] not in {"on", "off"}:
+                    raise ValueError(f"Usage: /stream {action} on|off")
+                telegram_stream_policy.set_policy_value(self, switch, args[1] == "on")
+        except ValueError as exc:
+            await self._reply_text(update, str(exc))
+            return
+
+        await self._reply_text(
+            update,
+            self._stream_status_text(),
+            reply_markup=self._stream_keyboard(),
+        )
+
     async def cmd_preview(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
         args = [a.strip().lower() for a in (context.args or []) if a.strip()]
         action = args[0] if args else "toggle"
-        current, source = telegram_delivery_failover.preview_status(self)
+        policy = telegram_stream_policy.get_policy(self)
+        configured = policy.preview
         if action == "status":
-            recommended = "Recommended OFF for long-task Grok agents like kasumi." if current else "Preview already minimized for long-task Telegram runs."
             await self._reply_text(
                 update,
-                f"Answer stream preview: {'ON 👁️' if current else 'OFF'}\n"
-                f"Source: {source}\n"
-                f"{recommended}",
+                f"Answer stream preview preference: {'ON 👁️' if configured else 'OFF'}\n"
+                f"Effective: {'ON' if policy.preview_enabled else 'OFF'}\n"
+                f"Preference source: {policy.component_sources['preview']}\n"
+                f"Master stream: {'ON' if policy.enabled else 'OFF'} ({policy.source})\n"
+                "Use /stream for the complete Telegram streaming controls.",
             )
             return
 
@@ -3512,11 +3652,14 @@ class FlexibleAgentRuntime:
         elif action in {"off", "false", "0"}:
             new_value = False
         else:
-            new_value = not current
+            new_value = not configured
         telegram_delivery_failover.set_preview_enabled(self, new_value)
+        policy = telegram_stream_policy.get_policy(self)
         state = "ON 👁️" if new_value else "OFF"
         advice = (
-            "Preview edits may add Telegram noise during long tasks."
+            "Preference saved but inactive until /stream on."
+            if new_value and not policy.enabled
+            else "Preview edits may add Telegram traffic during long tasks."
             if new_value
             else "Future long tasks will skip answer preview edits."
         )
@@ -7130,7 +7273,8 @@ class FlexibleAgentRuntime:
         """
         Real-time streaming display for verbose mode.  Consumes StreamEvent
         objects from event_queue and edits the placeholder message with a
-        rolling activity buffer.  Rate-limited to ~1 edit per 2.5s.
+        rolling activity buffer. Telegram stream policy supplies the edit
+        interval and per-request edit budget.
         """
         if placeholder is None or not self.telegram_connected:
             return
@@ -7140,10 +7284,14 @@ class FlexibleAgentRuntime:
         buffer: list[str] = []
         MAX_LINES = 10
         MAX_MSG_LEN = 3800
-        MIN_EDIT_INTERVAL = 2.5
+        stream_policy = telegram_stream_policy.get_policy(self)
+        MIN_EDIT_INTERVAL = stream_policy.edit_interval_s
+        MAX_EDITS = stream_policy.max_edits_per_request
         last_edit_at = 0.0
         started = time.time()
         dirty = False
+        edit_attempts = 0
+        display_disabled = False
         engine = getattr(self.config, "active_backend", "unknown")
 
         ICONS = {
@@ -7169,8 +7317,20 @@ class FlexibleAgentRuntime:
             return text
 
         async def _edit_placeholder():
-            nonlocal last_edit_at, dirty
+            nonlocal last_edit_at, dirty, edit_attempts, display_disabled
+            if display_disabled:
+                dirty = False
+                return
+            if MAX_EDITS <= 0 or edit_attempts >= MAX_EDITS:
+                display_disabled = True
+                dirty = False
+                self.telegram_logger.info(
+                    f"Streaming display budget exhausted for {request_id} "
+                    f"(attempts={edit_attempts}, max_edits={MAX_EDITS})"
+                )
+                return
             text = _build_display()
+            edit_attempts += 1
             try:
                 await self.app.bot.edit_message_text(
                     chat_id=chat_id,
@@ -7182,6 +7342,7 @@ class FlexibleAgentRuntime:
                 dirty = False
             except Exception as exc:
                 if isinstance(exc, RetryAfter):
+                    display_disabled = True
                     await telegram_delivery_failover.handle_retry_after(
                         self,
                         exc=exc,
@@ -7192,10 +7353,17 @@ class FlexibleAgentRuntime:
                     dirty = False
                     return
                 if "429" in str(exc) or "RetryAfter" in str(exc):
-                    await asyncio.sleep(3)
+                    display_disabled = True
+                    dirty = False
+                    self.telegram_logger.warning(
+                        f"Streaming display disabled for {request_id}: {exc}"
+                    )
                 elif "message to edit not found" in str(exc).lower() or "message is not modified" in str(exc).lower():
-                    pass
+                    last_edit_at = time.time()
+                    dirty = False
                 else:
+                    last_edit_at = time.time()
+                    dirty = False
                     self.telegram_logger.warning(
                         f"Streaming display edit failed for {request_id}: {exc}"
                     )

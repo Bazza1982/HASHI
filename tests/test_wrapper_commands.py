@@ -1411,6 +1411,7 @@ async def test_foreground_wrapper_verbose_shows_core_and_final_outputs(tmp_path)
 async def test_wrapper_polishing_placeholder_bridges_after_core_output(tmp_path):
     runtime, sent, voices, hchat_replies = _make_foreground_runtime(tmp_path)
     runtime.telegram_connected = True
+    runtime.config.extra["telegram_stream_enabled"] = True
     item = _queued_request()
     await runtime.queue.put(item)
 
@@ -1424,6 +1425,29 @@ async def test_wrapper_polishing_placeholder_bridges_after_core_output(tmp_path)
         assert runtime.app.bot.messages[1]["text"] == "✨ Polishing the final voice..."
         assert runtime.app.bot.deleted[-1]["message_id"] == 2
         assert sent[-1]["text"] == "wrapped visible"
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_wrapper_final_only_skips_polishing_placeholder_and_typing(tmp_path):
+    runtime, sent, voices, hchat_replies = _make_foreground_runtime(tmp_path)
+    runtime.telegram_connected = True
+    item = _queued_request()
+    await runtime.queue.put(item)
+
+    task = asyncio.create_task(runtime.process_queue())
+    try:
+        for _ in range(50):
+            if sent and voices and hchat_replies:
+                break
+            await asyncio.sleep(0.01)
+        assert runtime.app.bot.messages == []
+        assert runtime.app.bot.deleted == []
+        assert len(sent) == 1
+        assert sent[0]["text"] == "wrapped visible"
     finally:
         task.cancel()
         with suppress(asyncio.CancelledError):

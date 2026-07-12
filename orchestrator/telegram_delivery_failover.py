@@ -9,6 +9,8 @@ from typing import Any
 
 from telegram.error import RetryAfter
 
+from orchestrator import telegram_stream_policy
+
 DEFAULT_FAILOVER_AGENT = "lin_yueru"
 DEFAULT_WARNING_REMINDER_SECONDS = 600
 DEFAULT_WATCHER_POLL_SECONDS = 60
@@ -36,46 +38,35 @@ def _parse_iso(value: str | None) -> datetime | None:
 
 
 def preview_preferences_path(runtime: Any) -> Path:
-    return Path(runtime.workspace_dir) / "state" / "runtime_preferences.json"
+    return telegram_stream_policy.preferences_path(runtime)
 
 
 def preview_override(runtime: Any) -> bool | None:
-    path = preview_preferences_path(runtime)
-    if not path.exists():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-    value = payload.get("answer_stream_preview")
+    payload = telegram_stream_policy.load_preferences(runtime)
+    stream = payload.get("telegram_stream")
+    value = stream.get("preview") if isinstance(stream, dict) else None
+    if not isinstance(value, bool):
+        value = payload.get("answer_stream_preview")
     if isinstance(value, bool):
         return value
     return None
 
 
 def effective_preview_enabled(runtime: Any) -> bool:
-    override = preview_override(runtime)
-    if override is not None:
-        return override
-    extra = getattr(getattr(runtime, "config", None), "extra", {}) or {}
-    return bool(extra.get("answer_stream_preview", True))
+    return telegram_stream_policy.get_policy(runtime).preview_enabled
 
 
 def preview_status(runtime: Any) -> tuple[bool, str]:
-    override = preview_override(runtime)
-    if override is not None:
-        return override, "persisted override"
-    extra = getattr(getattr(runtime, "config", None), "extra", {}) or {}
-    return bool(extra.get("answer_stream_preview", True)), "config default"
+    policy = telegram_stream_policy.get_policy(runtime)
+    if not policy.enabled:
+        return False, f"stream disabled ({policy.source})"
+    if not policy.placeholder_enabled:
+        return False, "placeholder disabled"
+    return policy.preview_enabled, policy.component_sources["preview"]
 
 
 def set_preview_enabled(runtime: Any, enabled: bool) -> None:
-    path = preview_preferences_path(runtime)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({"version": 1, "answer_stream_preview": bool(enabled)}, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    telegram_stream_policy.set_policy_value(runtime, "preview", enabled)
 
 
 def delivery_state_path(runtime_or_kernel: Any) -> Path:

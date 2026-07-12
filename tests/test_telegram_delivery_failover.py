@@ -30,7 +30,13 @@ def _runtime(tmp_path: Path, name: str, *, preview_default: bool = True):
     runtime = SimpleNamespace(
         name=name,
         workspace_dir=workspace,
-        config=SimpleNamespace(extra={"answer_stream_preview": preview_default}, telegram_token_key=name),
+        config=SimpleNamespace(
+            extra={
+                "telegram_stream_enabled": True,
+                "answer_stream_preview": preview_default,
+            },
+            telegram_token_key=name,
+        ),
         global_config=SimpleNamespace(project_root=tmp_path),
         app=SimpleNamespace(bot=_Bot()),
         telegram_connected=True,
@@ -217,7 +223,12 @@ async def test_cmd_preview_updates_persisted_preference_and_reports_status(tmp_p
 
     runtime = SimpleNamespace(
         workspace_dir=tmp_path / "workspaces" / "kasumi",
-        config=SimpleNamespace(extra={"answer_stream_preview": True}),
+        config=SimpleNamespace(
+            extra={
+                "telegram_stream_enabled": True,
+                "answer_stream_preview": True,
+            }
+        ),
         _reply_text=_reply_text,
         _is_authorized_user=lambda _user_id: True,
     )
