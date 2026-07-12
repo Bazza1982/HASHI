@@ -7,14 +7,15 @@ from typing import Any
 from uuid import uuid4
 
 
-DEFAULT_STREAM_ENABLED = False
+DEFAULT_STREAM_ENABLED = True
 DEFAULT_COMPONENTS = {
-    "placeholder": True,
+    "placeholder": False,
     "typing": True,
-    "progress": True,
-    "preview": True,
-    "promote": True,
+    "progress": False,
+    "preview": False,
+    "promote": False,
 }
+STREAM_PREFERENCES_VERSION = 3
 DEFAULT_EDIT_INTERVAL_S = 10.0
 DEFAULT_HEARTBEAT_INTERVAL_S = 60.0
 DEFAULT_MAX_EDITS_PER_REQUEST = 20
@@ -67,12 +68,27 @@ def preferences_path(runtime: Any) -> Path:
 def load_preferences(runtime: Any) -> dict[str, Any]:
     path = preferences_path(runtime)
     if not path.exists():
-        return {}
+        return _write_preferences(
+            runtime,
+            {"telegram_stream": {"enabled": DEFAULT_STREAM_ENABLED, **DEFAULT_COMPONENTS}},
+        )
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {}
-    return payload if isinstance(payload, dict) else {}
+    if not isinstance(payload, dict):
+        return {}
+    try:
+        version = int(payload.get("version") or 0)
+    except (TypeError, ValueError):
+        version = 0
+    if version < STREAM_PREFERENCES_VERSION:
+        payload["telegram_stream"] = {
+            "enabled": DEFAULT_STREAM_ENABLED,
+            **DEFAULT_COMPONENTS,
+        }
+        return _write_preferences(runtime, payload)
+    return payload
 
 
 def _stream_config(runtime: Any) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -191,14 +207,14 @@ def get_policy(runtime: Any) -> TelegramStreamPolicy:
     )
 
 
-def _write_preferences(runtime: Any, payload: dict[str, Any]) -> Path:
+def _write_preferences(runtime: Any, payload: dict[str, Any]) -> dict[str, Any]:
     path = preferences_path(runtime)
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         current_version = int(payload.get("version") or 0)
     except (TypeError, ValueError):
         current_version = 0
-    payload["version"] = max(2, current_version)
+    payload["version"] = max(STREAM_PREFERENCES_VERSION, current_version)
     temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     try:
         temporary.write_text(
@@ -208,7 +224,7 @@ def _write_preferences(runtime: Any, payload: dict[str, Any]) -> Path:
         temporary.replace(path)
     finally:
         temporary.unlink(missing_ok=True)
-    return path
+    return payload
 
 
 def set_policy_value(runtime: Any, name: str, enabled: bool) -> Path:
@@ -220,14 +236,19 @@ def set_policy_value(runtime: Any, name: str, enabled: bool) -> Path:
         stream = {}
     stream[name] = bool(enabled)
     payload["telegram_stream"] = stream
-    return _write_preferences(runtime, payload)
+    _write_preferences(runtime, payload)
+    return preferences_path(runtime)
 
 
 def reset_policy(runtime: Any) -> Path:
     payload = load_preferences(runtime)
-    payload.pop("telegram_stream", None)
+    payload["telegram_stream"] = {
+        "enabled": DEFAULT_STREAM_ENABLED,
+        **DEFAULT_COMPONENTS,
+    }
     payload.pop("answer_stream_preview", None)
-    return _write_preferences(runtime, payload)
+    _write_preferences(runtime, payload)
+    return preferences_path(runtime)
 
 
 def component_status(runtime: Any, name: str) -> tuple[bool, bool, str]:

@@ -20,16 +20,20 @@ def _runtime(tmp_path, *, extra=None):
     )
 
 
-def test_stream_policy_defaults_off_even_with_legacy_preview_enabled(tmp_path):
+def test_stream_policy_migrates_to_live_typing_only_persisted_default(tmp_path):
     runtime = _runtime(tmp_path, extra={"answer_stream_preview": True})
 
     policy = telegram_stream_policy.get_policy(runtime)
 
-    assert policy.enabled is False
-    assert policy.source == "functional default"
-    assert policy.preview is True
+    assert policy.enabled is True
+    assert policy.source == "persisted override"
+    assert policy.placeholder is False
+    assert policy.typing is True
+    assert policy.progress is False
+    assert policy.preview is False
+    assert policy.promote is False
     assert policy.preview_enabled is False
-    assert policy.final_only is True
+    assert policy.final_only is False
 
 
 def test_stream_policy_persists_components_without_clobbering_other_preferences(tmp_path):
@@ -47,8 +51,15 @@ def test_stream_policy_persists_components_without_clobbering_other_preferences(
     payload = json.loads(path.read_text(encoding="utf-8"))
     policy = telegram_stream_policy.get_policy(runtime)
     assert payload["unrelated"] == {"keep": True}
-    assert payload["version"] == 2
-    assert payload["telegram_stream"] == {"enabled": True, "preview": False}
+    assert payload["version"] == 3
+    assert payload["telegram_stream"] == {
+        "enabled": True,
+        "placeholder": False,
+        "typing": True,
+        "progress": False,
+        "preview": False,
+        "promote": False,
+    }
     assert policy.enabled is True
     assert policy.preview_enabled is False
 
@@ -62,11 +73,11 @@ def test_stream_policy_repairs_invalid_preference_version(tmp_path):
     telegram_stream_policy.set_policy_value(runtime, "enabled", True)
 
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["version"] == 2
+    assert payload["version"] == 3
     assert payload["keep"] == 1
 
 
-def test_stream_policy_reset_preserves_unrelated_preferences_and_returns_default_off(tmp_path):
+def test_stream_policy_reset_preserves_unrelated_preferences_and_returns_live_default(tmp_path):
     runtime = _runtime(tmp_path)
     path = telegram_stream_policy.preferences_path(runtime)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -87,10 +98,17 @@ def test_stream_policy_reset_preserves_unrelated_preferences_and_returns_default
     payload = json.loads(path.read_text(encoding="utf-8"))
     policy = telegram_stream_policy.get_policy(runtime)
     assert payload["unrelated"] == "keep"
-    assert "telegram_stream" not in payload
+    assert payload["telegram_stream"] == {
+        "enabled": True,
+        "placeholder": False,
+        "typing": True,
+        "progress": False,
+        "preview": False,
+        "promote": False,
+    }
     assert "answer_stream_preview" not in payload
-    assert policy.enabled is False
-    assert policy.source == "functional default"
+    assert policy.enabled is True
+    assert policy.source == "persisted override"
 
 
 def test_stream_subswitches_require_master_and_placeholder_dependencies(tmp_path):
@@ -148,9 +166,8 @@ async def test_stream_command_does_not_change_verbose_or_think_preferences(tmp_p
     assert any("⌨️ Typing" in label for label in button_labels)
     assert any("⏱ Progress" in label for label in button_labels)
     assert any("📝 Live Preview" in label for label in button_labels)
-    assert "✅ 🏁 Finalize ON" in button_labels
-    assert "🏁 Finalize OFF" in button_labels
-    assert "✅ 🏁 Finalize OFF" not in button_labels
+    assert "🏁 Finalize ON" in button_labels
+    assert "✅ 🏁 Finalize OFF" in button_labels
 
     await FlexibleAgentRuntime.cmd_stream(
         runtime,
@@ -163,7 +180,7 @@ async def test_stream_command_does_not_change_verbose_or_think_preferences(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_preview_alias_does_not_enable_stream_master(tmp_path):
+async def test_preview_alias_does_not_change_stream_master(tmp_path):
     runtime = object.__new__(FlexibleAgentRuntime)
     runtime.workspace_dir = tmp_path / "workspaces" / "zelda"
     runtime.workspace_dir.mkdir(parents=True, exist_ok=True)
@@ -186,8 +203,8 @@ async def test_preview_alias_does_not_enable_stream_master(tmp_path):
     policy = telegram_stream_policy.get_policy(runtime)
     assert policy.preview is True
     assert policy.preview_enabled is False
-    assert policy.enabled is False
-    assert "inactive until /stream on" in replies[-1]
+    assert policy.enabled is True
+    assert "Answer stream preview: ON" in replies[-1]
 
 
 @pytest.mark.asyncio
