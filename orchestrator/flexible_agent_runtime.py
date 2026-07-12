@@ -3533,13 +3533,14 @@ class FlexibleAgentRuntime:
             f"Mode: {effective_mode}",
             f"Source: {policy.source}",
             "",
+            "What each switch shows in Telegram:",
         ]
         labels = {
-            "placeholder": "Placeholder",
-            "typing": "Typing action",
-            "progress": "Progress status",
-            "preview": "Answer preview",
-            "promote": "Final promotion",
+            "placeholder": 'Start message bubble ("Agent is typing...")',
+            "typing": "Telegram header typing indicator",
+            "progress": "Elapsed-time updates in the message bubble",
+            "preview": "Live answer edits in the message bubble",
+            "promote": "Turn the message bubble into the final answer",
         }
         for name, label in labels.items():
             configured = bool(getattr(policy, name))
@@ -3562,7 +3563,13 @@ class FlexibleAgentRuntime:
             ]
         )
         if not policy.enabled:
-            lines.append("Future normal replies skip all stream traffic and send only the final answer.")
+            lines.extend(
+                [
+                    "",
+                    "Master is OFF: all ARMED switches are saved choices but inactive.",
+                    "Future normal replies skip all stream traffic and send only the final answer.",
+                ]
+            )
         return "\n".join(lines)
 
     def _stream_keyboard(self) -> InlineKeyboardMarkup:
@@ -3580,14 +3587,14 @@ class FlexibleAgentRuntime:
                 ),
             ]
 
-        rows = [row("enabled", "Master", policy.enabled)]
+        rows = [row("enabled", "Streaming master", policy.enabled)]
         rows.extend(
             [
-                row("placeholder", "Placeholder", policy.placeholder),
-                row("typing", "Typing", policy.typing),
-                row("progress", "Progress", policy.progress),
-                row("preview", "Preview", policy.preview),
-                row("promote", "Promote", policy.promote),
+                row("placeholder", 'Start "is typing" bubble', policy.placeholder),
+                row("typing", "Telegram typing indicator", policy.typing),
+                row("progress", "Elapsed-time updates", policy.progress),
+                row("preview", "Live answer edits", policy.preview),
+                row("promote", "Bubble becomes final answer", policy.promote),
                 [InlineKeyboardButton("Reset to default OFF", callback_data="tgl:stream:reset:off")],
             ]
         )
