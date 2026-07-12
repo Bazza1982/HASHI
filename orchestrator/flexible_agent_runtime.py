@@ -3594,7 +3594,7 @@ class FlexibleAgentRuntime:
                 row("typing", "⌨️ Typing", policy.typing),
                 row("progress", "⏱ Progress", policy.progress),
                 row("preview", "📝 Live Preview", policy.preview),
-                row("promote", "✅ Finalize", policy.promote),
+                row("promote", "🏁 Finalize", policy.promote),
                 [InlineKeyboardButton("Reset to default OFF", callback_data="tgl:stream:reset:off")],
             ]
         )
