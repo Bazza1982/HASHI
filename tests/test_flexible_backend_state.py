@@ -104,6 +104,19 @@ def test_save_state_writes_active_model_when_override_exists(tmp_path):
     assert state["active_model"] == "gpt-5.5"
 
 
+def test_backend_effort_survives_manager_reload(tmp_path):
+    workspace = tmp_path / "agent"
+    manager = _make_manager(workspace)
+    manager.config.allowed_backends[0]["effort"] = "high"
+
+    manager.persist_state()
+
+    state = _read_state(workspace)
+    assert state["backend_efforts"] == {"codex-cli": "high"}
+    reloaded = _make_manager(workspace)
+    assert reloaded.config.allowed_backends[0]["effort"] == "high"
+
+
 def test_provider_prefixed_model_is_preserved_for_adapter_resolution(tmp_path):
     workspace = tmp_path / "agent"
     workspace.mkdir()

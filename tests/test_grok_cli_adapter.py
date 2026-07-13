@@ -106,6 +106,8 @@ def test_grok_build_cmd_defaults_to_execution_ready_flags(tmp_path):
 
     cmd = adapter._build_cmd("do work")
 
+    assert adapter.effort == "medium"
+    assert cmd[cmd.index("--reasoning-effort") + 1] == "medium"
     assert "--permission-mode" in cmd
     assert cmd[cmd.index("--permission-mode") + 1] == "bypassPermissions"
     assert "--always-approve" in cmd
@@ -142,6 +144,34 @@ def test_grok_build_cmd_allows_agent_overrides(tmp_path):
     assert "--check" not in cmd
     assert cmd[cmd.index("--tools") + 1] == "Read,Write"
     assert cmd[cmd.index("--deny") + 1] == "Shell(*)"
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        ("low", "low"),
+        ("high", "high"),
+        ("xhigh", "medium"),
+    ],
+)
+def test_grok_build_cmd_validates_reasoning_effort(tmp_path, configured, expected):
+    cfg = _agent_config(tmp_path)
+    cfg.extra = {"effort": configured}
+    adapter = GrokCLIAdapter(cfg, SimpleNamespace(grok_cmd="grok"))
+
+    cmd = adapter._build_cmd("do work")
+
+    assert adapter.effort == expected
+    assert cmd[cmd.index("--reasoning-effort") + 1] == expected
+
+
+def test_grok_build_cmd_uses_runtime_effort_change(tmp_path):
+    adapter = GrokCLIAdapter(_agent_config(tmp_path), SimpleNamespace(grok_cmd="grok"))
+    adapter.effort = "low"
+
+    cmd = adapter._build_cmd("do work")
+
+    assert cmd[cmd.index("--reasoning-effort") + 1] == "low"
 
 
 @pytest.mark.asyncio

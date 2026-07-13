@@ -5131,7 +5131,7 @@ class FlexibleAgentRuntime:
 
         available = self._get_available_efforts()
         if not available:
-            await self._reply_text(update, "Effort control is only available when the active backend is Claude or Codex.")
+            await self._reply_text(update, "Effort control is not available for the active backend/model.")
             return
 
         args = context.args

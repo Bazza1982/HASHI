@@ -38,6 +38,14 @@ def test_current_grok_cli_models_are_available_to_flex_backend_registry():
     assert is_cli_backend("grok-cli") is True
 
 
+def test_grok_cli_exposes_reasoning_effort_with_medium_default():
+    expected = ["low", "medium", "high"]
+    assert get_available_efforts("grok-cli", "grok-4.5") == expected
+    assert normalize_effort("grok-cli", None, "grok-4.5") == "medium"
+    assert normalize_effort("grok-cli", "high", "grok-4.5") == "high"
+    assert normalize_effort("grok-cli", "xhigh", "grok-4.5") == "medium"
+
+
 def test_xai_api_models_are_available_to_gateway_catalog():
     assert "grok-4.3" in AVAILABLE_XAI_API_MODELS
     assert "grok-4.3" in get_available_models("xai-api")
