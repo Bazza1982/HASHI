@@ -57,7 +57,7 @@ Three operating modes:
 
 **Flex-only:**
 - `/backend` — switch active backend (inline keyboard; `+` variant carries continuity handoff)
-- `/effort [low|medium|high|xhigh|max]` — reasoning effort (when active backend is Claude or Codex). The keyboard and accepted values are model-aware: `max` is currently offered for `gpt-5.6-sol`; `gpt-5.6-terra` and `gpt-5.6-luna` offer up to `xhigh`.
+- `/effort [level]` — reasoning effort for Claude, Codex, and Grok CLI. The keyboard and accepted values are model-aware: Grok offers `low`, `medium`, and `high` (default `medium`); `max` is currently offered for `gpt-5.6-sol`; `gpt-5.6-terra` and `gpt-5.6-luna` offer up to `xhigh`.
 
 **Wrapper-mode:**
 - `/mode wrapper` — switch a flex-capable agent into wrapper mode.
@@ -72,7 +72,7 @@ Three operating modes:
 Wrapper model picker buttons currently group recommended choices by provider: Claude Haiku/Sonnet, Gemini Flash/Lite, DeepSeek Flash/Chat, and OpenRouter DeepSeek/Gemini. Claude Opus is intentionally omitted from the picker because it is too expensive for routine wrapping.
 
 **Backend-specific (fixed):**
-- `/effort` — Claude, Codex
+- `/effort` — Claude, Codex, Grok CLI
 - `/credit` — OpenRouter
 
 ## Skills System

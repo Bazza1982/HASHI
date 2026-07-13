@@ -28,6 +28,8 @@ class GrokCLIAdapter(BaseBackend):
     MAX_PROMPT_ARG_CHARS = 24000
     DEFAULT_IDLE_TIMEOUT_SEC = 300
     DEFAULT_HARD_TIMEOUT_SEC = 1800
+    SUPPORTED_REASONING_EFFORTS = frozenset({"low", "medium", "high"})
+    DEFAULT_REASONING_EFFORT = "medium"
 
     def _define_capabilities(self) -> BackendCapabilities:
         capabilities = BackendCapabilities(
@@ -50,6 +52,12 @@ class GrokCLIAdapter(BaseBackend):
             self.cmd_base = f"{self.cmd_base}.cmd"
         self.access_root = str(self.config.resolve_access_root())
         self._session_id: str | None = None
+        requested_effort = self._extra_str("effort", self.DEFAULT_REASONING_EFFORT).lower()
+        self.effort = (
+            requested_effort
+            if requested_effort in self.SUPPORTED_REASONING_EFFORTS
+            else self.DEFAULT_REASONING_EFFORT
+        )
 
     def _extra_bool(self, key: str, default: bool) -> bool:
         extra = getattr(self.config, "extra", {}) or {}
@@ -118,6 +126,8 @@ class GrokCLIAdapter(BaseBackend):
             self.config.model,
             "--output-format",
             "streaming-json",
+            "--reasoning-effort",
+            self.effort,
         ]
         if permission_mode:
             cmd.extend(["--permission-mode", permission_mode])

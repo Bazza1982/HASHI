@@ -80,8 +80,8 @@ BACKEND_REGISTRY: dict[str, dict] = {
             "grok-composer-2.5-fast",
         ],
         "default_model": "grok-4.5",
-        "efforts": [],
-        "default_effort": None,
+        "efforts": ["low", "medium", "high"],
+        "default_effort": "medium",
         "secret_keys": [],
     },
     "deepseek-api": {

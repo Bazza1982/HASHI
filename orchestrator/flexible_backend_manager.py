@@ -42,6 +42,13 @@ class FlexibleBackendManager:
                     self._active_model_override = state["active_model"]
                 if "agent_mode" in state:
                     self.agent_mode = state["agent_mode"]
+                backend_efforts = state.get("backend_efforts")
+                if isinstance(backend_efforts, dict):
+                    for backend_cfg in self.config.allowed_backends:
+                        engine = backend_cfg.get("engine")
+                        effort = backend_efforts.get(engine)
+                        if isinstance(effort, str) and effort.strip():
+                            backend_cfg["effort"] = effort.strip().lower()
             except Exception as e:
                 self.logger.error(f"Failed to load state.json: {e}")
 
@@ -63,6 +70,15 @@ class FlexibleBackendManager:
             state["active_model"] = self._active_model_override
         else:
             state.pop("active_model", None)
+        backend_efforts = {
+            backend_cfg["engine"]: backend_cfg["effort"]
+            for backend_cfg in self.config.allowed_backends
+            if backend_cfg.get("engine") and backend_cfg.get("effort")
+        }
+        if backend_efforts:
+            state["backend_efforts"] = backend_efforts
+        else:
+            state.pop("backend_efforts", None)
 
     def _write_state_dict(self, state: dict[str, Any]) -> None:
         self._apply_managed_state_fields(state)

@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Grok CLI reasoning effort control** — added `low`, `medium`, and `high` support to Telegram `/effort` for `grok-cli`, with HASHI defaulting Grok sessions to `medium`, passing the selection through `--reasoning-effort`, and persisting per-backend choices across agent reloads.
 - **Grok 4.5 API Gateway support** — added smoke-tested `grok-4.5` to the `xai-api` and `/v1/models` catalogs, routing it through xAI's Responses API. The existing tested Codex GPT-5.6 variants remain available through the API Gateway.
 - **Default-off Telegram streaming controls** — added independent `/stream` master and placeholder, typing, progress, preview, and final-promotion switches. All current and future agents default to final-only Telegram delivery until streaming is explicitly enabled.
 
@@ -34,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
+- Added focused coverage for Grok CLI effort defaults, validation, command construction, Telegram effort buttons, runtime switching, and per-backend effort persistence.
 - Added regression coverage for final-only default delivery, independent `/stream`/`/verbose`/`/think` state, legacy `/preview` compatibility, edit budgets, preference preservation, command binding, and `/reboot` reload ordering.
 - Added focused BackgroundJobManager and Workbench API coverage for subprocess completion, notifications, command-array starts, completion/failure agent event routing, and user-facing delivery from background-job events. Live smoke validation covered short argv jobs and a 3-minute sleep job whose completion woke Zelda and produced a user-visible report.
 - Added focused regression coverage for tokenized nudge delete callbacks, `/say` bot menu metadata, limited-agent allowlist behavior, forced `/say` voice generation with voice replies disabled, and flexible-runtime transcript lookup.
