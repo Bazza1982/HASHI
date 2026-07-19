@@ -40,8 +40,8 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - `/superloop`: recording-first long-running workflow orchestration.
 - `/verbose [on|off]`: toggle richer long-task status display.
 - `/think [on|off]`: toggle thinking trace display — periodic italic messages showing model reasoning (~60s intervals). Independent from `/verbose`.
-- `/stop`: cancel current processing.
-- `/steer <direction>`: when busy, stop the current turn immediately (all backends), keep interim thinking/progress/artefacts, then continue with a mid-task wrapper. When idle, send the direction as a plain new request (no steer wrapper). Example: `/steer also include unit tests`.
+- `/stop`: cancel current processing. The intentional process kill is not reported as a Backend error.
+- `/steer <direction>`: when busy, stop the current turn immediately (all backends), keep interim thinking/progress/artefacts, then continue with a mid-task wrapper. When idle, send the direction as a plain new request (no steer wrapper). Example: `/steer also include unit tests`. The intentional kill (e.g. exit `-9`) is suppressed — you should see the steer ack, not `❌ Backend error`.
 - `/start`: start another stopped agent.
 - `/reboot`: hot restart agents with live Python code reload. Modes:
   - `/reboot` — restart all running agents (same selection), picks up code + config changes.

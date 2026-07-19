@@ -206,13 +206,21 @@ async def process_queue(runtime: Any) -> None:
                         answer_stream_state=feedback.answer_stream_state,
                     )
             else:
-                runtime._notify_right_brain_interrupted(
-                    item,
-                    effective_prompt,
-                    is_bridge_request=is_bridge_request,
-                    reason="backend_error",
-                    error=response.error or "Unknown error",
+                from orchestrator.runtime_control import consume_user_interrupt
+
+                # /stop and /steer already notified with user_* reason; do not
+                # re-label the intentional kill as backend_error or show ❌.
+                interrupt_reason = consume_user_interrupt(
+                    runtime, getattr(item, "request_id", None)
                 )
+                if not interrupt_reason:
+                    runtime._notify_right_brain_interrupted(
+                        item,
+                        effective_prompt,
+                        is_bridge_request=is_bridge_request,
+                        reason="backend_error",
+                        error=response.error or "Unknown error",
+                    )
                 await runtime_pipeline.handle_backend_error(
                     runtime,
                     item,
@@ -220,6 +228,7 @@ async def process_queue(runtime: Any) -> None:
                     queued_at=queued_at,
                     queue_wait_s=queue_wait_s,
                     backend_elapsed_s=backend_elapsed,
+                    user_interrupt_reason=interrupt_reason,
                 )
 
         except asyncio.CancelledError:

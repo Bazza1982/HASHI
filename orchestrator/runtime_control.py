@@ -3,12 +3,58 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from typing import Any
 from types import SimpleNamespace
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 _STEER_CMD_RE = re.compile(r"^/steer(?:@\w+)?\s*(.*)$", re.IGNORECASE | re.DOTALL)
+
+# Intentional user-driven interrupts that kill the active backend process.
+# Exit codes such as -9 (SIGKILL) are expected and must not surface as Backend errors.
+_USER_INTERRUPT_REASONS = frozenset({"user_stop", "user_steer"})
+
+
+def mark_user_interrupt(runtime: Any, reason: str) -> None:
+    """Record that the active turn is being intentionally stopped by the user."""
+    reason = str(reason or "").strip()
+    if reason not in _USER_INTERRUPT_REASONS:
+        return
+    meta = getattr(runtime, "current_request_meta", None)
+    request_id = None
+    if isinstance(meta, dict):
+        rid = meta.get("request_id")
+        if rid:
+            request_id = str(rid)
+    runtime._user_interrupt = {
+        "reason": reason,
+        "request_id": request_id,
+        "at": time.time(),
+    }
+
+
+def peek_user_interrupt(runtime: Any, request_id: str | None = None) -> str | None:
+    """Return interrupt reason if one is pending for this turn, without consuming it."""
+    data = getattr(runtime, "_user_interrupt", None)
+    if not isinstance(data, dict):
+        return None
+    reason = str(data.get("reason") or "").strip()
+    if reason not in _USER_INTERRUPT_REASONS:
+        return None
+    marked_id = data.get("request_id")
+    if request_id and marked_id and str(request_id) != str(marked_id):
+        return None
+    return reason
+
+
+def consume_user_interrupt(runtime: Any, request_id: str | None = None) -> str | None:
+    """Consume a matching intentional user interrupt; return reason or None."""
+    reason = peek_user_interrupt(runtime, request_id)
+    if reason is None:
+        return None
+    runtime._user_interrupt = None
+    return reason
 
 
 def extract_steer_direction(update: Any, context: Any) -> str:
@@ -145,6 +191,10 @@ async def cmd_stop(runtime: Any, update: Any, context: Any) -> None:
         f"Manual stop requested for agent {runtime.name} "
         f"(queue_size={runtime.queue.qsize()}, backend={active})"
     )
+    # Mark before kill so the pipeline can suppress the expected non-zero exit
+    # (e.g. Grok CLI code -9 / SIGKILL) instead of showing ❌ Backend error.
+    if _agent_is_busy(runtime):
+        mark_user_interrupt(runtime, "user_stop")
     await _shutdown_active_backend(runtime)
     await _notify_interrupted(
         runtime,
@@ -264,6 +314,8 @@ async def cmd_steer(runtime: Any, update: Any, context: Any) -> None:
         )
         return
 
+    # Mark before kill so exit -9 / SIGKILL is not reported as ❌ Backend error.
+    mark_user_interrupt(runtime, "user_steer")
     await _shutdown_active_backend(runtime)
     await _notify_interrupted(
         runtime,
