@@ -714,6 +714,7 @@ HASHI's **adapter system** provides a unified interface to multiple AI backends:
 | Codex CLI | `codex-cli` | `codex` CLI installed | Local auth |
 | Grok CLI | `grok-cli` | `grok` CLI installed and logged in | Local auth, streaming JSON |
 | xAI API | `xai-api` | Hermes xAI OAuth profile or `xai_api_key` | Grok chat, responses, Imagine image/video |
+| Claw + direct Grok OAuth | `claw-cli` + `provider=xai` | **Coming soon** — HASHI OAuth `client_id` from xAI | No `grok-cli`/Hermes; see [docs/HASHI_XAI_CLAW_OAUTH.md](docs/HASHI_XAI_CLAW_OAUTH.md) |
 | OpenRouter API | `openrouter-api` | API key in `secrets.json` | Multi-model access |
 | DeepSeek API | `deepseek-api` | API key in `secrets.json` | Direct API, cost-effective |
 | Ollama | `ollama-api` | Ollama installed locally | Free, no API key needed |
