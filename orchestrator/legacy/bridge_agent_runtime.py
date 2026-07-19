@@ -2473,6 +2473,39 @@ class BridgeAgentRuntime:
                     )
                     self._request_audit_meta.pop(item.request_id, None)
                     err_msg = response.error or "Unknown error"
+                    from orchestrator.runtime_control import consume_user_interrupt
+
+                    # /stop and /steer intentionally kill the process (e.g. exit -9).
+                    interrupt_reason = consume_user_interrupt(self, getattr(item, "request_id", None))
+                    if interrupt_reason:
+                        soft_msg = f"Interrupted by {interrupt_reason}"
+                        self.logger.info(
+                            f"Suppressed backend exit for {item.request_id} "
+                            f"(reason={interrupt_reason}, engine={self.config.engine}, "
+                            f"source={item.source}): {err_msg}"
+                        )
+                        self._record_habit_outcome(item, success=False, error_text=soft_msg)
+                        await self._notify_request_listeners(
+                            item.request_id,
+                            {
+                                "request_id": item.request_id,
+                                "success": False,
+                                "text": None,
+                                "error": soft_msg,
+                                "source": item.source,
+                                "summary": item.summary,
+                                "interrupted": True,
+                                "interrupt_reason": interrupt_reason,
+                            },
+                        )
+                        self._log_maintenance(
+                            item,
+                            "user_interrupt",
+                            reason=interrupt_reason,
+                            error_excerpt=_safe_excerpt(err_msg, 200),
+                        )
+                        continue
+
                     self._mark_error(err_msg)
                     self._record_habit_outcome(item, success=False, error_text=err_msg)
                     await self._notify_request_listeners(

@@ -142,6 +142,12 @@ async def test_cmd_steer_stops_clears_queue_and_enqueues_continuation():
     assert "KEEP all interim progress" in prompt
     assert replies and "Steered" in replies[0]
     assert "req-steer-1" in replies[0]
+    # Intentional kill marker so exit -9 is not shown as ❌ Backend error
+    assert getattr(runtime, "_user_interrupt", None) is not None
+    assert runtime._user_interrupt["reason"] == "user_steer"
+    assert runtime._user_interrupt["request_id"] == "req-old"
+    assert runtime_control.consume_user_interrupt(runtime, "req-old") == "user_steer"
+    assert runtime_control.consume_user_interrupt(runtime, "req-old") is None
 
 
 @pytest.mark.asyncio
@@ -198,3 +204,73 @@ async def test_cmd_steer_idle_sends_plain_direction_without_wrapper():
     assert "Previous finished task" not in prompt
     assert replies and "idle" in replies[0].lower()
     assert "no steer wrapper" in replies[0].lower()
+    # Idle path must not mark a user interrupt (nothing was killed).
+    assert getattr(runtime, "_user_interrupt", None) is None
+
+
+def test_mark_and_consume_user_interrupt_matches_request():
+    runtime = SimpleNamespace(current_request_meta={"request_id": "req-1"})
+    runtime_control.mark_user_interrupt(runtime, "user_stop")
+    assert runtime_control.peek_user_interrupt(runtime, "req-1") == "user_stop"
+    assert runtime_control.peek_user_interrupt(runtime, "req-other") is None
+    assert runtime_control.consume_user_interrupt(runtime, "req-1") == "user_stop"
+    assert runtime_control.consume_user_interrupt(runtime, "req-1") is None
+
+
+@pytest.mark.asyncio
+async def test_handle_backend_error_suppresses_telegram_on_user_steer():
+    """Exit -9 after /steer must not deliver ❌ Backend error to Telegram."""
+    from datetime import datetime
+
+    from orchestrator import runtime_pipeline
+
+    sent: list[dict] = []
+    logs: list[str] = []
+    maintenance: list[tuple] = []
+    listeners: list[dict] = []
+
+    async def _send_long_message(**kwargs):
+        sent.append(kwargs)
+        return 0.0, 1
+
+    runtime = SimpleNamespace(
+        config=SimpleNamespace(active_backend="grok-cli"),
+        logger=SimpleNamespace(info=lambda msg, *a, **k: logs.append(str(msg))),
+        error_logger=SimpleNamespace(error=lambda msg, *a, **k: logs.append(f"ERR:{msg}")),
+        _mark_error=lambda err: setattr(runtime, "marked_error", err),
+        _record_habit_outcome=lambda item, **kw: setattr(runtime, "habit", kw),
+        _should_buffer_during_transfer=lambda _rid: False,
+        _record_suppressed_transfer_result=lambda *a, **k: None,
+        _notify_request_listeners=AsyncMock(side_effect=lambda _rid, payload: listeners.append(payload)),
+        _should_retry_codex_scheduler_failure=lambda *a, **k: False,
+        send_long_message=_send_long_message,
+        _log_maintenance=lambda item, event, **fields: maintenance.append((event, fields)),
+        _user_interrupt={"reason": "user_steer", "request_id": "req-0001", "at": 0.0},
+    )
+    item = SimpleNamespace(
+        request_id="req-0001",
+        chat_id=42,
+        source="text",
+        summary="Test",
+        silent=False,
+        deliver_to_telegram=True,
+    )
+    response = SimpleNamespace(error="Grok CLI exited with code -9")
+
+    await runtime_pipeline.handle_backend_error(
+        runtime,
+        item,
+        response,
+        queued_at=datetime.now(),
+        queue_wait_s=0.1,
+        backend_elapsed_s=1.0,
+    )
+
+    assert sent == [], "Telegram ❌ Backend error must be suppressed for /steer"
+    assert not hasattr(runtime, "marked_error"), "must not mark real error state"
+    assert maintenance and maintenance[0][0] == "user_interrupt"
+    assert listeners and listeners[0].get("interrupted") is True
+    assert listeners[0].get("interrupt_reason") == "user_steer"
+    assert any("Suppressed backend exit" in m for m in logs)
+    assert not any(m.startswith("ERR:") for m in logs)
+    assert getattr(runtime, "_user_interrupt", None) is None

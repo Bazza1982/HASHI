@@ -981,8 +981,49 @@ async def handle_backend_error(
     queued_at: datetime,
     queue_wait_s: float,
     backend_elapsed_s: float,
+    user_interrupt_reason: str | None = None,
 ) -> None:
     err_msg = response.error or "Unknown error"
+    # /stop and /steer intentionally kill the backend process (e.g. exit -9 / SIGKILL).
+    # That is expected course-correction, not a backend failure — never show ❌ Backend error.
+    if not user_interrupt_reason:
+        from orchestrator.runtime_control import consume_user_interrupt
+
+        user_interrupt_reason = consume_user_interrupt(runtime, getattr(item, "request_id", None))
+
+    if user_interrupt_reason:
+        soft_msg = f"Interrupted by {user_interrupt_reason}"
+        runtime.logger.info(
+            f"Suppressed backend exit for {item.request_id} "
+            f"(reason={user_interrupt_reason}, backend={runtime.config.active_backend}, "
+            f"source={item.source}): {err_msg}"
+        )
+        runtime._record_habit_outcome(item, success=False, error_text=soft_msg)
+        if runtime._should_buffer_during_transfer(item.request_id):
+            runtime._record_suppressed_transfer_result(item, success=False, error=soft_msg)
+        await runtime._notify_request_listeners(
+            item.request_id,
+            {
+                "request_id": item.request_id,
+                "success": False,
+                "text": None,
+                "error": soft_msg,
+                "source": item.source,
+                "summary": item.summary,
+                "interrupted": True,
+                "interrupt_reason": user_interrupt_reason,
+            },
+        )
+        runtime._log_maintenance(
+            item,
+            "user_interrupt",
+            reason=user_interrupt_reason,
+            error_excerpt=_safe_excerpt(err_msg, 200),
+            queue_wait_s=queue_wait_s,
+            backend_elapsed_s=backend_elapsed_s,
+        )
+        return
+
     runtime._mark_error(err_msg)
     runtime._record_habit_outcome(item, success=False, error_text=err_msg)
     if runtime._should_buffer_during_transfer(item.request_id):

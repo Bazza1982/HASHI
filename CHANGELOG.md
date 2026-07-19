@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`/steer` and `/stop` false Backend error** — intentional backend kills (e.g. Grok CLI exit code `-9` / SIGKILL) no longer surface as `❌ Backend error` in Telegram. The pipeline marks `user_steer` / `user_stop` before shutdown and suppresses error delivery for that turn while still recording a soft interrupt.
 - **Telegram long-task flood control** — removed idle one-second answer-preview edits, added configurable edit intervals, heartbeat pacing, per-request edit budgets, and stream-display `RetryAfter` shutdown so long-running tasks cannot continuously edit a placeholder by default.
 - **Background job hot-reload and delivery path** — fixed Workbench API background-job start routing, `/reboot` hot reload of Workbench API handlers, command-array handling for Workbench job starts, notification context preservation, and Telegram delivery of agent reports produced from completion/failure events.
 - **Telegram `/nudge` inline actions** — routed `nudgejob:` callback data through the existing skill callback handler so Trigger, Pause/Resume, and Delete buttons are dispatched instead of being ignored by the Telegram callback pattern.
