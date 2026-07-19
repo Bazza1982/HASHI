@@ -41,6 +41,7 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - `/verbose [on|off]`: toggle richer long-task status display.
 - `/think [on|off]`: toggle thinking trace display — periodic italic messages showing model reasoning (~60s intervals). Independent from `/verbose`.
 - `/stop`: cancel current processing.
+- `/steer <direction>`: stop the current turn immediately (all backends), keep interim thinking/progress/artefacts, then continue with the additional direction (like `/stop` + a continuity-preserving follow-up). Example: `/steer also include unit tests`.
 - `/start`: start another stopped agent.
 - `/reboot`: hot restart agents with live Python code reload. Modes:
   - `/reboot` — restart all running agents (same selection), picks up code + config changes.

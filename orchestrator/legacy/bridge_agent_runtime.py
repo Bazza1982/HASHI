@@ -4555,6 +4555,14 @@ class BridgeAgentRuntime:
         else:
             await update.message.reply_text(f"Stopped task. Cleared {dropped} queued messages and killed active backend process tree.")
 
+    async def cmd_steer(self, update, context):
+        """Fixed-runtime /steer: stop active work, keep artefacts, continue with new direction."""
+        from orchestrator import runtime_control
+
+        if update.effective_user.id != self.global_config.authorized_id:
+            return
+        await runtime_control.cmd_steer(self, update, context)
+
     def _load_last_text_from_transcript(self, role: str) -> str | None:
         """Read the last message of the given role from conversation_log.jsonl."""
         try:
@@ -5000,6 +5008,7 @@ class BridgeAgentRuntime:
             BotCommand("memory", "Control memory injection"),
             BotCommand("clear", "Clear media/history"),
             BotCommand("stop", "Stop execution"),
+            BotCommand("steer", "Stop and continue with new direction"),
             BotCommand("reboot", "Hot restart agents"),
             BotCommand("terminate", "Shut down this agent"),
             BotCommand("retry", "Resend response or rerun prompt"),
@@ -5059,6 +5068,7 @@ class BridgeAgentRuntime:
         self.app.add_handler(CommandHandler("memory", self.cmd_memory))
         self.app.add_handler(CommandHandler("clear", self.cmd_clear))
         self.app.add_handler(CommandHandler("stop", self.cmd_stop))
+        self.app.add_handler(CommandHandler("steer", self.cmd_steer))
         self.app.add_handler(CommandHandler("terminate", self.cmd_terminate))
         self.app.add_handler(CommandHandler("reboot", self.cmd_reboot))
         self.app.add_handler(CommandHandler("retry", self.cmd_retry))

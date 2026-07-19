@@ -6653,6 +6653,9 @@ class FlexibleAgentRuntime:
     async def cmd_stop(self, update: Update, context: Any):
         await runtime_control.cmd_stop(self, update, context)
 
+    async def cmd_steer(self, update: Update, context: Any):
+        await runtime_control.cmd_steer(self, update, context)
+
     async def cmd_retry(self, update: Update, context: Any):
         await runtime_control.cmd_retry(self, update, context)
 

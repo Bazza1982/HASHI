@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Telegram `/steer`** — global mid-task course correction for all backends: immediately stops the active generation (like `/stop`), keeps interim thinking/progress/artefacts and session state, then queues a continuity-preserving follow-up with the user's new direction. Registered in flex and fixed runtimes and the Telegram bot command menu.
 - **Direct Grok OAuth → Claw (coming soon)** — landed HASHI-native xAI device-code OAuth scaffolding that stores tokens under the bridge home and injects `XAI_API_KEY` into Claw without Hermes or `grok-cli`. Live login remains blocked until HASHI receives its own xAI OAuth `client_id`. See [docs/HASHI_XAI_CLAW_OAUTH.md](docs/HASHI_XAI_CLAW_OAUTH.md).
 - **Grok CLI reasoning effort control** — added `low`, `medium`, and `high` support to Telegram `/effort` for `grok-cli`, with HASHI defaulting Grok sessions to `medium`, passing the selection through `--reasoning-effort`, and persisting per-backend choices across agent reloads.
 - **Grok 4.5 API Gateway support** — added smoke-tested `grok-4.5` to the `xai-api` and `/v1/models` catalogs, routing it through xAI's Responses API. The existing tested Codex GPT-5.6 variants remain available through the API Gateway.
