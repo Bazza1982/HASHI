@@ -142,3 +142,59 @@ async def test_cmd_steer_stops_clears_queue_and_enqueues_continuation():
     assert "KEEP all interim progress" in prompt
     assert replies and "Steered" in replies[0]
     assert "req-steer-1" in replies[0]
+
+
+@pytest.mark.asyncio
+async def test_cmd_steer_idle_sends_plain_direction_without_wrapper():
+    replies: list[str] = []
+    enqueued: list[tuple] = []
+    shutdown = AsyncMock()
+
+    async def _reply(_update, text, **_kwargs):
+        replies.append(text)
+
+    async def _enqueue(chat_id, prompt, source, summary, **_kwargs):
+        enqueued.append((chat_id, prompt, source, summary))
+        return "req-idle-1"
+
+    runtime = SimpleNamespace(
+        name="xishi",
+        logger=SimpleNamespace(warning=lambda *a, **k: None),
+        config=SimpleNamespace(active_backend="codex-cli", engine="codex-cli"),
+        queue=asyncio.Queue(),
+        backend_manager=SimpleNamespace(
+            current_backend=SimpleNamespace(shutdown=shutdown),
+            initialize_active_backend=AsyncMock(return_value=True),
+        ),
+        current_request_meta=None,
+        last_prompt=SimpleNamespace(prompt="Previous finished task", chat_id=42),
+        is_generating=False,
+        _is_authorized_user=lambda _uid: True,
+        _reply_text=_reply,
+        _notify_right_brain_interrupted=lambda *a, **k: None,
+        enqueue_request=_enqueue,
+    )
+    text = "/steer also include unit tests"
+    msg = SimpleNamespace(text=text, chat=SimpleNamespace(id=42))
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=1),
+        effective_chat=SimpleNamespace(id=42),
+        effective_message=msg,
+        message=msg,
+    )
+    await runtime_control.cmd_steer(
+        runtime,
+        update,
+        SimpleNamespace(args=["also", "include", "unit", "tests"]),
+    )
+
+    shutdown.assert_not_awaited()
+    assert len(enqueued) == 1
+    chat_id, prompt, source, summary = enqueued[0]
+    assert chat_id == 42
+    assert prompt == "also include unit tests"
+    assert source == "text"
+    assert "[HASHI /steer" not in prompt
+    assert "Previous finished task" not in prompt
+    assert replies and "idle" in replies[0].lower()
+    assert "no steer wrapper" in replies[0].lower()
