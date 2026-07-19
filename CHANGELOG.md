@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Browser Bridge extension `hover` (v0.1.2)** — CDP `Input.dispatchMouseEvent` (`mouseMoved`) on the Option D Chrome extension path for hover-triggered UI (e.g. LinkedIn reaction flyouts). Supports `timeout_ms`, `wait_ms`, `x_ratio`, and `y_ratio`; native host treats `hover` as mutating; tool schema, Playwright fallback, and CLI flags wired. See [docs/BROWSER_BRIDGE_HOVER_NOTE.md](docs/BROWSER_BRIDGE_HOVER_NOTE.md) and [docs/OPTION_D_BROWSER_BRIDGE.md](docs/OPTION_D_BROWSER_BRIDGE.md).
 - **Telegram `/steer`** — global mid-task course correction for all backends: when **busy**, immediately stops the active generation (like `/stop`), keeps interim thinking/progress/artefacts and session state, then queues a continuity-preserving mid-task wrapper with the user's new direction; when **idle**, enqueues the direction text only (no steer wrapper, `source=text`). Registered in flex and fixed runtimes and the Telegram bot command menu. See [docs/STEER_COMMAND.md](docs/STEER_COMMAND.md).
 - **Direct Grok OAuth → Claw (coming soon)** — landed HASHI-native xAI device-code OAuth scaffolding that stores tokens under the bridge home and injects `XAI_API_KEY` into Claw without Hermes or `grok-cli`. Live login remains blocked until HASHI receives its own xAI OAuth `client_id`. See [docs/HASHI_XAI_CLAW_OAUTH.md](docs/HASHI_XAI_CLAW_OAUTH.md).
 - **Grok CLI reasoning effort control** — added `low`, `medium`, and `high` support to Telegram `/effort` for `grok-cli`, with HASHI defaulting Grok sessions to `medium`, passing the selection through `--reasoning-effort`, and persisting per-backend choices across agent reloads.
@@ -38,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
+- Added Browser Bridge hover coverage: extension source asserts for CDP `actionHover`, and Python path tests that timing/position args reach the extension bridge.
 - Added focused coverage for Grok CLI effort defaults, validation, command construction, Telegram effort buttons, runtime switching, and per-backend effort persistence.
 - Added regression coverage for final-only default delivery, independent `/stream`/`/verbose`/`/think` state, legacy `/preview` compatibility, edit budgets, preference preservation, command binding, and `/reboot` reload ordering.
 - Added focused BackgroundJobManager and Workbench API coverage for subprocess completion, notifications, command-array starts, completion/failure agent event routing, and user-facing delivery from background-job events. Live smoke validation covered short argv jobs and a 3-minute sleep job whose completion woke Zelda and produced a user-visible report.

@@ -59,6 +59,8 @@ deployment validation continues.
 - [API_GUIDE.md](API_GUIDE.md) — OpenAI-compatible API Gateway guide, including per-instance gateway port rules
 - [HASHI_XAI_API_BACKEND_PLAN.md](HASHI_XAI_API_BACKEND_PLAN.md) — xAI/Grok API backend design using Hermes-managed OAuth refresh and OpenAI-compatible gateway routes
 - [HASHI_XAI_CLAW_OAUTH.md](HASHI_XAI_CLAW_OAUTH.md) — **Coming soon:** direct Grok OAuth (HASHI device login → Claw; no Hermes, no grok-cli). Code landed; live use needs HASHI's own xAI `client_id`
+- [OPTION_D_BROWSER_BRIDGE.md](OPTION_D_BROWSER_BRIDGE.md) — Option D Chrome extension browser bridge (actions, native host, logging)
+- [BROWSER_BRIDGE_HOVER_NOTE.md](BROWSER_BRIDGE_HOVER_NOTE.md) — Extension `hover` (CDP mouseMoved) for flyouts such as LinkedIn reactions
 - [ANATTA_MIGRATION_PLAN.md](ANATTA_MIGRATION_PLAN.md) — Anatta live self-assembly architecture and validation plan
 - [HASHI_REMOTE_FILE_TRANSFER.md](HASHI_REMOTE_FILE_TRANSFER.md) — direct cross-PC file push support for release artifacts and EXP transfer
 - [HASHI_REMOTE_FILE_TRANSFER_AND_ATTACHMENTS_PLAN.md](HASHI_REMOTE_FILE_TRANSFER_AND_ATTACHMENTS_PLAN.md) — planned shared-token file transfer upgrade and message attachment design

@@ -485,6 +485,7 @@ async def execute_browser_hover(args: dict) -> str:
 
     cdp_url = args.get("cdp_url")
     headed = bool(args.get("headed", False))
+    wait_ms = int(args.get("wait_ms", 500))
 
     bridge_result = await _maybe_execute_extension_bridge("hover", args)
     if bridge_result is not None:
@@ -495,7 +496,8 @@ async def execute_browser_hover(args: dict) -> str:
         pw, browser, context, page = await _get_page(cdp_url=cdp_url, headed=headed)
         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
         await page.hover(selector, timeout=10000)
-        await asyncio.sleep(0.3)
+        if wait_ms > 0:
+            await asyncio.sleep(wait_ms / 1000)
         return f"OK: hovered over '{selector}' on {url}"
 
     except Exception as e:

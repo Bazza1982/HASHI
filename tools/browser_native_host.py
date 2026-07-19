@@ -35,6 +35,7 @@ DEFAULT_REQUEST_TIMEOUT_S = float(
 MUTATING_ACTIONS = {
     "click",
     "fill",
+    "hover",
     "type_text",
     "key",
     "select",

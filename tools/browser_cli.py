@@ -141,7 +141,14 @@ async def _run(args: argparse.Namespace) -> int:
     elif cmd == "hover":
         if not args.selector:
             print("Error: --selector is required for hover"); return 1
-        result = await execute_browser_hover({**base, "selector": args.selector})
+        result = await execute_browser_hover({
+            **base,
+            "selector": args.selector,
+            "timeout_ms": args.timeout_ms,
+            "wait_ms": args.wait_ms,
+            "x_ratio": args.x_ratio,
+            "y_ratio": args.y_ratio,
+        })
 
     # ------------------------------------------------------------------ key
     elif cmd == "key":
@@ -296,6 +303,10 @@ def main() -> None:
 
     # Wait
     parser.add_argument("--timeout-ms", dest="timeout_ms", type=int, default=10000)
+    parser.add_argument("--x-ratio", dest="x_ratio", type=float, default=0.5,
+                        help="Horizontal hover point within the element (0 to 1; default 0.5)")
+    parser.add_argument("--y-ratio", dest="y_ratio", type=float, default=0.5,
+                        help="Vertical hover point within the element (0 to 1; default 0.5)")
 
     # Drag
     parser.add_argument("--source", default=None, help="CSS selector of drag source")
