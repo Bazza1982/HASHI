@@ -187,12 +187,24 @@ async def _reply(runtime: Any, update: Any, text: str) -> None:
         await runtime.send_long_message(chat_id, text, purpose="steer-command")
 
 
-async def cmd_steer(runtime: Any, update: Any, context: Any) -> None:
-    """Stop the active turn immediately, keep progress/artefacts, then queue new direction.
+def _agent_is_busy(runtime: Any) -> bool:
+    """True when a generation is active or work is already queued."""
+    meta = getattr(runtime, "current_request_meta", None)
+    if isinstance(meta, dict) and meta.get("request_id"):
+        return True
+    if getattr(runtime, "is_generating", False):
+        return True
+    queue = getattr(runtime, "queue", None)
+    if queue is not None and not queue.empty():
+        return True
+    return False
 
-    Works for all agent backends/models: kills the active adapter process or HTTP
-    generation, preserves workspace/session/transcript state, and enqueues a
-    continuity-preserving prompt with the user's additional requirements.
+
+async def cmd_steer(runtime: Any, update: Any, context: Any) -> None:
+    """Course-correct mid-task, or send a plain new request when idle.
+
+    Busy: stop immediately, keep progress/artefacts, enqueue the steer wrapper.
+    Idle: do not wrap — enqueue the direction text only as a new request.
     """
     if not _user_is_authorized(runtime, update):
         return
@@ -204,8 +216,9 @@ async def cmd_steer(runtime: Any, update: Any, context: Any) -> None:
             update,
             "Usage: /steer <additional direction or requirement>\n"
             "Example: /steer also include unit tests for the auth module\n\n"
-            "Stops the current turn immediately (like /stop), keeps interim thinking, "
-            "progress, and artefacts, then continues with your new direction.",
+            "When busy: stops the current turn (like /stop), keeps interim thinking, "
+            "progress, and artefacts, then continues with your new direction.\n"
+            "When idle: sends your text as a new request without the mid-task wrapper.",
         )
         return
 
@@ -214,19 +227,42 @@ async def cmd_steer(runtime: Any, update: Any, context: Any) -> None:
         or getattr(runtime.config, "engine", "")
         or ""
     )
-    original_prompt = _capture_original_prompt(runtime)
-    was_running = bool(
-        (isinstance(getattr(runtime, "current_request_meta", None), dict)
-         and getattr(runtime, "current_request_meta", {}).get("request_id"))
-        or getattr(runtime, "is_generating", False)
-        or (getattr(runtime, "queue", None) is not None and not runtime.queue.empty())
-    )
+    busy = _agent_is_busy(runtime)
+    original_prompt = _capture_original_prompt(runtime) if busy else ""
 
     runtime.logger.warning(
         f"Manual steer requested for agent {runtime.name} "
-        f"(queue_size={runtime.queue.qsize()}, backend={active}, "
+        f"(busy={busy}, queue_size={runtime.queue.qsize()}, backend={active}, "
         f"direction_len={len(direction)}, had_original={bool(original_prompt)})"
     )
+
+    chat = getattr(update, "effective_chat", None)
+    chat_id = getattr(chat, "id", None)
+    if chat_id is None:
+        message = getattr(update, "effective_message", None) or getattr(update, "message", None)
+        chat_id = getattr(getattr(message, "chat", None), "id", None)
+    if chat_id is None:
+        await _reply(runtime, update, "Steer aborted: could not resolve chat id.")
+        return
+
+    if not busy:
+        # Idle: plain new direction — no mid-task wrapper, no interrupt path.
+        if not hasattr(runtime, "enqueue_request"):
+            await _reply(runtime, update, "Steer aborted: runtime has no enqueue_request path.")
+            return
+        request_id = await runtime.enqueue_request(
+            int(chat_id),
+            direction,
+            "text",
+            direction[:80],
+        )
+        await _reply(
+            runtime,
+            update,
+            f"🧭 Agent was idle — queued your text as a new request"
+            f"{f' ({request_id})' if request_id else ''} (no steer wrapper).",
+        )
+        return
 
     await _shutdown_active_backend(runtime)
     await _notify_interrupted(
@@ -250,36 +286,23 @@ async def cmd_steer(runtime: Any, update: Any, context: Any) -> None:
         original_prompt=original_prompt,
         backend=active,
     )
-    chat = getattr(update, "effective_chat", None)
-    chat_id = getattr(chat, "id", None)
-    if chat_id is None:
-        message = getattr(update, "effective_message", None) or getattr(update, "message", None)
-        chat_id = getattr(getattr(message, "chat", None), "id", None)
-    if chat_id is None:
-        await _reply(runtime, update, "Steer aborted: could not resolve chat id.")
-        return
-
     summary = f"Steer: {direction[:80]}"
-    request_id = None
-    if hasattr(runtime, "enqueue_request"):
-        request_id = await runtime.enqueue_request(
-            int(chat_id),
-            steer_prompt,
-            "steer",
-            summary,
-        )
-    else:
+    if not hasattr(runtime, "enqueue_request"):
         await _reply(runtime, update, "Steer aborted: runtime has no enqueue_request path.")
         return
+    request_id = await runtime.enqueue_request(
+        int(chat_id),
+        steer_prompt,
+        "steer",
+        summary,
+    )
 
-    kept = "Kept interim progress, thinking, and workspace artefacts."
-    state = "Interrupted active work" if was_running else "No active generation"
     await _reply(
         runtime,
         update,
         f"🧭 Steered.\n"
-        f"{state}; cleared {dropped} queued message(s).\n"
-        f"{kept}\n"
+        f"Interrupted active work; cleared {dropped} queued message(s).\n"
+        f"Kept interim progress, thinking, and workspace artefacts.\n"
         f"Queued continuation with your new direction"
         f"{f' (request {request_id})' if request_id else ''}.",
     )
