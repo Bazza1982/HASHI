@@ -108,6 +108,11 @@ uses xAI's Responses API route and was smoke-tested through HASHI's xAI OAuth
 adapter. The three Codex API Gateway variants `gpt-5.6-sol`,
 `gpt-5.6-terra`, and `gpt-5.6-luna` remain the tested GPT-5.6 choices.
 
+**Coming soon:** direct Grok OAuth for agent runtimes via Claw (`claw-cli` +
+HASHI-owned device login, no Hermes and no `grok-cli`). Code is in tree;
+production login waits on HASHI's own xAI OAuth `client_id`. See
+[HASHI_XAI_CLAW_OAUTH.md](HASHI_XAI_CLAW_OAUTH.md).
+
 ### GPT-5.6 through Codex CLI
 
 HASHI supports the smoke-tested Codex CLI variants below. The bare `gpt-5.6`
