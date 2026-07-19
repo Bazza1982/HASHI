@@ -42,6 +42,7 @@ deployment validation continues.
 
 ### Core references
 - [AGENT_FYI.md](AGENT_FYI.md) — Bridge environment FYI (operational reference)
+- [STEER_COMMAND.md](STEER_COMMAND.md) — Telegram `/steer` mid-task course correction (busy wrapper vs idle plain text, error suppression)
 - [initial.md](initial.md) — Onboarding prompt template (onboarding-only)
 - [tools.md](tools.md) — Tools & operations reference
 - [WORKBENCH_NOTES.md](WORKBENCH_NOTES.md) — Workbench/runtime semantics
