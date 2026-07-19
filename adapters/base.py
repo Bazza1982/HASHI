@@ -46,8 +46,8 @@ class BackendResponse:
 
 
 class BaseBackend(ABC):
-    DEFAULT_IDLE_TIMEOUT_SEC = 120
-    DEFAULT_HARD_TIMEOUT_SEC = 600
+    DEFAULT_IDLE_TIMEOUT_SEC = 1800
+    DEFAULT_HARD_TIMEOUT_SEC = 36000
 
     def __init__(self, agent_config, global_config, api_key: str = None):
         self.config = agent_config

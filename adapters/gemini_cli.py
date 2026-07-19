@@ -19,8 +19,8 @@ from adapters.stream_events import (
 
 class GeminiCLIAdapter(BaseBackend):
     MAX_PROMPT_ARG_CHARS = 24000
-    DEFAULT_IDLE_TIMEOUT_SEC = 300
-    DEFAULT_HARD_TIMEOUT_SEC = 1800
+    DEFAULT_IDLE_TIMEOUT_SEC = 1800
+    DEFAULT_HARD_TIMEOUT_SEC = 36000
 
     # Heuristic patterns to detect tool/file activity from Gemini CLI stderr.
     # Gemini CLI doesn't emit structured events, but it does log to stderr.
