@@ -62,7 +62,13 @@ class ClawThinkingStreamUsage:
             "thinking_redacted_count": self.thinking_redacted_count,
             "thinking_sources": sorted(self.thinking_sources),
         }
-CLAW_ENV_ALLOWLIST = ("OPENAI_BASE_URL", "OPENAI_API_KEY", *OS_ENV_ALLOWLIST)
+CLAW_ENV_ALLOWLIST = (
+    "OPENAI_BASE_URL",
+    "OPENAI_API_KEY",
+    "XAI_API_KEY",
+    "XAI_BASE_URL",
+    *OS_ENV_ALLOWLIST,
+)
 
 
 class ClawError(RuntimeError):
@@ -991,6 +997,46 @@ class ClawCLIAdapter(BaseBackend):
             env_source["OPENAI_BASE_URL"] = self._legacy_openai_base_url()
         return build_claw_env(env_source)
 
+    def _provider_auth_mode(self, provider: Mapping[str, Any]) -> str:
+        return str(provider.get("auth_mode") or "").strip().lower()
+
+    def _env_from_hashi_xai_oauth(self, provider_name: str, provider: Mapping[str, Any]) -> dict[str, str]:
+        """Inject HASHI-native xAI OAuth access token into Claw (no Hermes, no grok-cli)."""
+        from adapters.hashi_xai_oauth import (
+            HashiXaiOAuthError,
+            resolve_base_url,
+            resolve_hashi_xai_credentials,
+        )
+
+        try:
+            creds = resolve_hashi_xai_credentials(
+                global_config=self.global_config,
+                provider_cfg=provider,
+                force_refresh=False,
+            )
+        except HashiXaiOAuthError as exc:
+            raise ClawProviderConfigError(
+                f"Claw provider {provider_name} HASHI xAI OAuth unavailable: {exc}"
+            ) from exc
+
+        env_api_key = str(provider.get("env_api_key") or "XAI_API_KEY").strip() or "XAI_API_KEY"
+        env_base_url = str(provider.get("env_base_url") or "XAI_BASE_URL").strip() or "XAI_BASE_URL"
+        base_url = str(provider.get("base_url") or creds.base_url or resolve_base_url(self.global_config)).strip()
+
+        env_source = dict(os.environ)
+        env_source[env_api_key] = creds.access_token
+        if base_url:
+            env_source[env_base_url] = base_url
+            # Some OpenAI-compat paths also honor OPENAI_*; keep XAI_* primary for Claw xAI routing.
+            if env_api_key == "OPENAI_API_KEY":
+                env_source["OPENAI_BASE_URL"] = base_url
+        self.logger.info(
+            "Claw provider %s using HASHI xAI OAuth (source=%s).",
+            provider_name,
+            creds.source,
+        )
+        return build_claw_env(env_source)
+
     def _env_from_provider(self, provider_name: str) -> dict[str, str]:
         providers = self._provider_configs()
         provider = providers.get(provider_name)
@@ -1002,6 +1048,10 @@ class ClawCLIAdapter(BaseBackend):
             raise ClawProviderConfigError(f"Claw provider is disabled: {provider_name}")
         if status == "provisional":
             self.logger.warning("Claw provider %s is provisional; running with warning diagnostics.", provider_name)
+
+        auth_mode = self._provider_auth_mode(provider)
+        if auth_mode in {"hashi_oauth", "hashi-xai-oauth", "xai_oauth"}:
+            return self._env_from_hashi_xai_oauth(provider_name, provider)
 
         base_url = str(provider.get("base_url") or "").strip()
         if not base_url:

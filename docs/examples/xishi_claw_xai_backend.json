@@ -1,0 +1,9 @@
+{
+  "engine": "claw-cli",
+  "provider": "xai",
+  "model": "grok-4.5",
+  "permission_mode": "workspace-write",
+  "allowed_tools": ["read", "glob", "grep"],
+  "hard_timeout_sec": 36000,
+  "process_timeout": 300
+}
