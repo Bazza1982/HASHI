@@ -171,8 +171,45 @@ class FlexibleBackendManager:
     def _attach_runtime_context(self, adapter_cfg: AgentConfig) -> None:
         setattr(adapter_cfg, "_hashi_secrets", self.secrets)
 
+    def _select_backend_cfg(self, engine: str, target_model: str | None = None) -> dict | None:
+        """Pick allowed backend entry for engine, preferring model/provider match.
+
+        Multiple claw-cli rows (e.g. openrouter vs xai) share the same engine name;
+        first-match alone would always bind the wrong provider.
+        """
+        candidates = [b for b in self.config.allowed_backends if b.get("engine") == engine]
+        if not candidates:
+            return None
+        model = str(target_model or "").strip()
+        if not model:
+            return candidates[0]
+
+        for backend in candidates:
+            if str(backend.get("model") or "").strip() == model:
+                return backend
+
+        if ":" in model:
+            provider_name, bare_model = model.split(":", 1)
+            provider_name = provider_name.strip()
+            bare_model = bare_model.strip()
+            for backend in candidates:
+                if str(backend.get("provider") or "").strip() != provider_name:
+                    continue
+                if not bare_model or str(backend.get("model") or "").strip() == bare_model:
+                    return backend
+                return backend
+
+        # Grok models on claw should prefer the HASHI xAI OAuth provider when present.
+        lowered = model.lower()
+        if lowered.startswith("grok") or lowered.startswith("xai/"):
+            for backend in candidates:
+                if str(backend.get("provider") or "").strip() == "xai":
+                    return backend
+
+        return candidates[0]
+
     def create_ephemeral_backend(self, engine: str, target_model: str | None = None):
-        backend_cfg_raw = next((b for b in self.config.allowed_backends if b["engine"] == engine), None)
+        backend_cfg_raw = self._select_backend_cfg(engine, target_model=target_model)
         if not backend_cfg_raw:
             raise ValueError(f"Backend {engine} not allowed for {self.config.name}.")
 
@@ -243,9 +280,9 @@ class FlexibleBackendManager:
     async def initialize_active_backend(self, target_model: str | None = None) -> bool:
         engine = self.config.active_backend
         self.logger.info(f"Initializing active backend: {engine}")
-        
-        # Find backend config in allowed_backends
-        backend_cfg_raw = next((b for b in self.config.allowed_backends if b["engine"] == engine), None)
+
+        resolved_model = target_model or getattr(self, "_active_model_override", None)
+        backend_cfg_raw = self._select_backend_cfg(engine, target_model=resolved_model)
         if not backend_cfg_raw:
             self.logger.error(f"Active backend {engine} not found in allowed_backends.")
             return False
@@ -253,7 +290,7 @@ class FlexibleBackendManager:
         adapter_cfg = self._build_adapter_config(
             engine,
             backend_cfg_raw,
-            target_model=target_model or getattr(self, "_active_model_override", None),
+            target_model=resolved_model,
         )
 
         try:
@@ -357,7 +394,7 @@ class FlexibleBackendManager:
 
     async def switch_backend(self, target_engine: str, target_model: str | None = None) -> bool:
         self.logger.info(f"Switching backend to {target_engine}" + (f" model={target_model}" if target_model else ""))
-        backend_cfg_raw = next((b for b in self.config.allowed_backends if b["engine"] == target_engine), None)
+        backend_cfg_raw = self._select_backend_cfg(target_engine, target_model=target_model)
         if not backend_cfg_raw:
             self.logger.error(f"Target backend {target_engine} not allowed.")
             return False

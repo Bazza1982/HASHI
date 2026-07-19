@@ -6,6 +6,9 @@ Usage:
     python hashi.py whatsapp        — interactive WhatsApp setup wizard
     python hashi.py whatsapp status — show current WhatsApp config & session state
     python hashi.py whatsapp reset  — clear saved session (force re-link)
+    python hashi.py auth xai status — HASHI-native xAI OAuth status
+    python hashi.py auth xai login  — device-code login (no Hermes)
+    python hashi.py auth xai logout — clear HASHI xAI OAuth tokens
 """
 from __future__ import annotations
 
@@ -45,6 +48,76 @@ def _hr(): print(_CYAN + "─" * 55 + _RESET)
 # ──────────────────────────────────────────────
 # Config helpers
 # ──────────────────────────────────────────────
+
+def _global_config_for_xai_oauth():
+    """Minimal global config object for HASHI-native xAI OAuth helpers."""
+    from types import SimpleNamespace
+
+    data, path = _load_agents_json()
+    global_raw = data.get("global") if isinstance(data.get("global"), dict) else {}
+    return SimpleNamespace(
+        bridge_home=path.parent,
+        project_root=ROOT_DIR,
+        xai_oauth=dict(global_raw.get("xai_oauth") or {}),
+        claw_providers=dict(global_raw.get("claw_providers") or {}),
+        xai_api_base_url=str(global_raw.get("xai_api_base_url") or "https://api.x.ai/v1"),
+    )
+
+
+def cmd_auth_xai(action: str | None) -> int:
+    """HASHI-native xAI OAuth login/status/logout (no Hermes, no xai-api engine)."""
+    from adapters.hashi_xai_oauth import (
+        HashiXaiOAuthError,
+        clear_tokens,
+        login_with_device_code,
+        oauth_status,
+        resolve_client_id,
+    )
+
+    global_config = _global_config_for_xai_oauth()
+    action = (action or "status").strip().lower()
+
+    if action in {"status", "show"}:
+        status = oauth_status(global_config=global_config)
+        print(_b("HASHI xAI OAuth status"))
+        _hr()
+        print(f"  logged_in:            {status.get('logged_in')}")
+        print(f"  relogin_required:     {status.get('relogin_required')}")
+        print(f"  client_id_configured: {status.get('client_id_configured')}")
+        print(f"  auth_store:           {status.get('auth_store')}")
+        print(f"  message:              {status.get('message')}")
+        if not status.get("client_id_configured"):
+            print()
+            print(_y("Set global.xai_oauth.client_id or HASHI_XAI_OAUTH_CLIENT_ID (HASHI's own client)."))
+        return 0
+
+    if action in {"logout", "clear", "reset"}:
+        path = clear_tokens(global_config=global_config)
+        print(_g(f"Cleared HASHI xAI OAuth store: {path}"))
+        return 0
+
+    if action in {"login", "device", "device-login"}:
+        client_id = resolve_client_id(global_config=global_config)
+        if not client_id:
+            print(_r("HASHI xAI OAuth client_id is not configured."))
+            print("Set agents.json global.xai_oauth.client_id to HASHI's registered OAuth client,")
+            print("or export HASHI_XAI_OAUTH_CLIENT_ID.")
+            return 2
+        try:
+            creds = login_with_device_code(global_config=global_config)
+        except HashiXaiOAuthError as exc:
+            print(_r(f"Login failed: {exc}"))
+            return 1
+        print(_g("Login succeeded."))
+        print(f"  source: {creds.source}")
+        print(f"  base_url: {creds.base_url}")
+        print("  access_token: [redacted]")
+        return 0
+
+    print(_r(f"Unknown auth xai action: {action}"))
+    print("Usage: python hashi.py auth xai [status|login|logout]")
+    return 2
+
 
 def _load_agents_json() -> tuple[dict, Path]:
     path = ROOT_DIR / "agents.json"
@@ -665,6 +738,17 @@ def main():
         help="status = show config | reset = clear saved session | (none) = full wizard",
     )
 
+    auth_parser = sub.add_parser("auth", help="HASHI credential login helpers")
+    auth_sub = auth_parser.add_subparsers(dest="auth_provider")
+    auth_xai = auth_sub.add_parser("xai", help="HASHI-native xAI OAuth (device code; no Hermes)")
+    auth_xai.add_argument(
+        "action",
+        nargs="?",
+        choices=["status", "login", "logout"],
+        default="status",
+        help="status | login (device code) | logout",
+    )
+
     enterprise_parser = sub.add_parser("enterprise", help="Enterprise mode operations")
     enterprise_sub = enterprise_parser.add_subparsers(dest="enterprise_cmd")
 
@@ -810,6 +894,11 @@ def main():
             cmd_whatsapp_reset(data)
         else:
             cmd_whatsapp_wizard()
+    elif args.cmd == "auth":
+        if getattr(args, "auth_provider", None) == "xai":
+            raise SystemExit(cmd_auth_xai(getattr(args, "action", "status")))
+        auth_parser.print_help()
+        raise SystemExit(2)
     elif args.cmd == "enterprise":
         if hasattr(args, "func"):
             raise SystemExit(args.func(args))
