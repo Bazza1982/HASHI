@@ -436,6 +436,10 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "url": {"type": "string", "description": "URL to navigate to."},
                     "selector": {"type": "string", "description": "CSS selector of element to hover."},
+                    "timeout_ms": {"type": "integer", "description": "Max wait for the element to appear. Default 10000."},
+                    "wait_ms": {"type": "integer", "description": "Pause after hover so flyouts can render. Default 500."},
+                    "x_ratio": {"type": "number", "minimum": 0, "maximum": 1, "description": "Horizontal point within the element. Default 0.5."},
+                    "y_ratio": {"type": "number", "minimum": 0, "maximum": 1, "description": "Vertical point within the element. Default 0.5."},
                     "cdp_url": {"type": "string", "description": "CDP endpoint."},
                     "headed": {"type": "boolean", "description": "Visible browser. Default false."},
                 },

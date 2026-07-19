@@ -99,17 +99,19 @@ Implemented:
 - fill
 - type_text  (CDP Input.insertText — for React/contenteditable editors; use instead of fill on LinkedIn etc.)
 - evaluate
+- hover  (CDP `Input.dispatchMouseEvent` / `mouseMoved`; supports `timeout_ms`, `wait_ms`, `x_ratio`, `y_ratio` — see [BROWSER_BRIDGE_HOVER_NOTE.md](BROWSER_BRIDGE_HOVER_NOTE.md))
+- active_tab
+- session
+
+Extension package version: **0.1.2** (`tools/chrome_extension/hashi_browser_bridge/`).
+
+Not yet implemented in the extension path:
+
 - scroll
-- hover
 - key
 - select
 - wait_for
 - get_attribute
-- active_tab
-- session
-
-Not yet implemented in the extension path:
-
 - drag
 - upload
 

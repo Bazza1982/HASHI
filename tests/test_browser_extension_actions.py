@@ -78,6 +78,34 @@ async def test_execute_browser_fill_prefers_extension_bridge(monkeypatch: pytest
 
 
 @pytest.mark.asyncio
+async def test_execute_browser_hover_passes_timing_and_position_to_extension(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_bridge(action: str, args: dict) -> str | None:
+        assert action == "hover"
+        assert args["selector"] == "button.reaction"
+        assert args["timeout_ms"] == 8000
+        assert args["wait_ms"] == 650
+        assert args["x_ratio"] == 0.4
+        assert args["y_ratio"] == 0.6
+        return "OK: hovered 'button.reaction'"
+
+    monkeypatch.setattr(browser, "_maybe_execute_extension_bridge", fake_bridge)
+    result = await browser.execute_browser_hover(
+        {
+            "url": "https://www.linkedin.com/feed/",
+            "selector": "button.reaction",
+            "timeout_ms": 8000,
+            "wait_ms": 650,
+            "x_ratio": 0.4,
+            "y_ratio": 0.6,
+            "bridge_backend": "extension",
+        }
+    )
+    assert result == "OK: hovered 'button.reaction'"
+
+
+@pytest.mark.asyncio
 async def test_execute_browser_evaluate_prefers_extension_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_bridge(action: str, args: dict) -> str | None:
         assert action == "evaluate"

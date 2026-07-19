@@ -1,5 +1,5 @@
 const HOST_NAME = "com.hashi.browser_bridge";
-const BRIDGE_VERSION = "0.1.0";
+const BRIDGE_VERSION = "0.1.2";
 const RECONNECT_DELAY_MS = 5000;
 const HEARTBEAT_INTERVAL_MS = 10000;
 const DEBUGGER_VERSION = "1.3";
@@ -295,6 +295,123 @@ async function actionClick(args) {
   };
 }
 
+async function actionHover(args) {
+  // wait_ms belongs after the mouse move for hover-triggered UI, so do not let
+  // resolveTab consume it before the element is located.
+  const tab = await resolveTab({ ...args, wait_ms: 0 });
+  assertScriptableTab(tab);
+  const selector = String(args.selector || "").trim();
+  const timeoutMs = Number(args.timeout_ms ?? 10000);
+  const waitMs = Number(args.wait_ms ?? 500);
+  const xRatio = Number(args.x_ratio ?? 0.5);
+  const yRatio = Number(args.y_ratio ?? 0.5);
+  if (!selector) {
+    throw new Error("selector is required");
+  }
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+    throw new Error("timeout_ms must be a non-negative number");
+  }
+  if (!Number.isFinite(waitMs) || waitMs < 0) {
+    throw new Error("wait_ms must be a non-negative number");
+  }
+  if (!Number.isFinite(xRatio) || xRatio < 0 || xRatio > 1) {
+    throw new Error("x_ratio must be between 0 and 1");
+  }
+  if (!Number.isFinite(yRatio) || yRatio < 0 || yRatio > 1) {
+    throw new Error("y_ratio must be between 0 and 1");
+  }
+
+  await chrome.tabs.update(tab.id, { active: true });
+  if (tab.windowId) {
+    try {
+      await chrome.windows.update(tab.windowId, { focused: true });
+    } catch (error) {
+      log("warn", "failed to focus Chrome window before hover", {
+        tabId: tab.id,
+        windowId: tab.windowId,
+        error: String(error)
+      });
+    }
+  }
+
+  let details = null;
+  await withDebugger(tab.id, async (target) => {
+    // Resolve coordinates through CDP as well. Some React-heavy pages execute
+    // chrome.scripting callbacks but omit their return value, which made the
+    // previous mixed scripting/CDP implementation unable to recover x/y.
+    const expression = `(async () => {
+      const selector = ${JSON.stringify(selector)};
+      const timeoutMs = ${JSON.stringify(timeoutMs)};
+      const xRatio = ${JSON.stringify(xRatio)};
+      const yRatio = ${JSON.stringify(yRatio)};
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const started = Date.now();
+      let element = null;
+      while (Date.now() - started <= timeoutMs) {
+        element = document.querySelector(selector);
+        if (element) break;
+        await sleep(100);
+      }
+      if (!element) throw new Error(\`selector not found: \${selector}\`);
+      element.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+      await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+      const rect = element.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) {
+        throw new Error(\`selector is not visible: \${selector}\`);
+      }
+      const x = rect.left + rect.width * xRatio;
+      const y = rect.top + rect.height * yRatio;
+      if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) {
+        throw new Error(\`selector is outside the viewport: \${selector}\`);
+      }
+      return {
+        selector, x, y, xRatio, yRatio,
+        tagName: element.tagName,
+        text: String(element.innerText || element.textContent || "").slice(0, 200),
+        rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height }
+      };
+    })()`;
+    const evaluated = await chrome.debugger.sendCommand(target, "Runtime.evaluate", {
+      expression,
+      awaitPromise: true,
+      returnByValue: true,
+      userGesture: true
+    });
+    if (evaluated?.exceptionDetails) {
+      const message = evaluated.exceptionDetails.exception?.description
+        || evaluated.exceptionDetails.text
+        || `failed to resolve hover coordinates: ${selector}`;
+      throw new Error(message);
+    }
+    details = evaluated?.result?.value || null;
+    if (!details || !Number.isFinite(details.x) || !Number.isFinite(details.y)) {
+      throw new Error(`failed to resolve hover coordinates: ${selector}`);
+    }
+    await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: details.x,
+      y: details.y,
+      button: "none",
+      buttons: 0,
+      modifiers: 0,
+      pointerType: "mouse"
+    });
+  });
+  if (waitMs > 0) {
+    await sleep(waitMs);
+  }
+  const updatedTab = await chrome.tabs.get(tab.id);
+  return {
+    output: `OK: hovered '${selector}'`,
+    meta: {
+      ...tabMeta(updatedTab),
+      action: "hover",
+      selector,
+      details
+    }
+  };
+}
+
 async function actionFill(args) {
   const tab = await resolveTab(args);
   assertScriptableTab(tab);
@@ -511,6 +628,9 @@ async function executeAction(action, args) {
   }
   if (action === "click") {
     return actionClick(args);
+  }
+  if (action === "hover") {
+    return actionHover(args);
   }
   if (action === "fill") {
     return actionFill(args);
