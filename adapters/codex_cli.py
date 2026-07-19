@@ -16,8 +16,8 @@ from adapters.stream_events import (
 
 class CodexCLIAdapter(BaseBackend):
     MAX_PROMPT_CHARS = 24000
-    DEFAULT_IDLE_TIMEOUT_SEC = 300
-    DEFAULT_HARD_TIMEOUT_SEC = 3600
+    DEFAULT_IDLE_TIMEOUT_SEC = 1800
+    DEFAULT_HARD_TIMEOUT_SEC = 36000
     POST_TURN_COMPLETION_GRACE_SEC = 15
 
     def _define_capabilities(self) -> BackendCapabilities:

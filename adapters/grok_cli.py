@@ -26,8 +26,8 @@ from adapters.stream_events import (
 
 class GrokCLIAdapter(BaseBackend):
     MAX_PROMPT_ARG_CHARS = 24000
-    DEFAULT_IDLE_TIMEOUT_SEC = 300
-    DEFAULT_HARD_TIMEOUT_SEC = 1800
+    DEFAULT_IDLE_TIMEOUT_SEC = 1800
+    DEFAULT_HARD_TIMEOUT_SEC = 36000
     SUPPORTED_REASONING_EFFORTS = frozenset({"low", "medium", "high"})
     DEFAULT_REASONING_EFFORT = "medium"
 

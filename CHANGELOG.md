@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **CLI backend default timeouts** — raised shared and CLI adapter defaults to idle **1800s** (30 min) and hard **36000s** (10 h) so long interactive or browser-assisted turns are less likely to be cut off mid-task (`BaseBackend`, Claude/Codex/Gemini/Grok CLI adapters).
 - **API Gateway documentation** — updated the API control, Python, curl, and xAI backend examples to use the verified `grok-4.5` default while documenting its Responses API route.
 - **Grok 4.5 CLI support** — upgraded the local stable Grok CLI to `0.2.93`, added smoke-tested `grok-4.5` as the `grok-cli` default, and retained `grok-composer-2.5-fast` as the other currently CLI-advertised model. The stale `grok-build` CLI model id is no longer advertised by HASHI.
 - **GPT-5.6 Codex support** — upgraded local Codex CLI to `0.144.1` and added the smoke-tested ChatGPT-account Codex variants `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` to HASHI model catalogs. The OpenAI API alias `gpt-5.6` is intentionally not exposed through `codex-cli` because Codex CLI rejected it for the current ChatGPT account.
