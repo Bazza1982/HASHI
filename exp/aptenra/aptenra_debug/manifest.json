@@ -1,0 +1,64 @@
+{
+  "id": "aptenra/aptenra_debug",
+  "type": "exp",
+  "version": 1,
+  "owner": "aptenra",
+  "domain": "aptenra_debug",
+  "status": "candidate",
+  "summary": "Dual-channel onsite debug and support (KVM visual/HID + HASHI remote terminal) for co-located or same-LAN/VPN operator and target devices. Lab sample (APT-HW-0001) and client-facing onsite service; not limited to Personal SKU.",
+  "context": {
+    "user": "Aptenra founder / field operator",
+    "operator_machine": "HASHI control plane (e.g. mother A9_Max)",
+    "sample_target": "APT-HW-0001 (HP Client Zero)",
+    "deployment_modes": [
+      "lab_sample",
+      "client_onsite_lan",
+      "future_same_vpn"
+    ],
+    "network_adjacency": ["lan", "vpn"],
+    "product_tiers": ["any_single_device_on_adjacent_network"],
+    "channels": ["kvm_visual_hid", "hashi_remote_terminal"],
+    "toolchain": [
+      "PiKVM or equivalent HDMI+HID",
+      "SSH / HASHI remote shell",
+      "Git over adjacent-network bare remote",
+      "PowerShell short scripts"
+    ],
+    "non_dependencies": ["mega", "onedrive", "public_inbound_rescue_plane"],
+    "lab_paths": {
+      "target_host": "192.168.0.41",
+      "target_user": "apten",
+      "pikvm_mgmt": "10.0.0.3",
+      "repo": "C:\\AptenraDebug\\src\\Aptenra",
+      "bare_remote": "C:\\AptenraDebug\\remotes\\Aptenra.git",
+      "launcher": "%LOCALAPPDATA%\\Aptenra\\Launch-Aptenra.ps1",
+      "logs": "%LOCALAPPDATA%\\Aptenra\\debug\\logs",
+      "evidence": "C:\\AptenraDebug\\evidence"
+    }
+  },
+  "playbooks": {
+    "preflight_and_channel_select": "playbooks/00_preflight_and_channel_select.exp.md",
+    "kvm_visual_session": "playbooks/01_kvm_visual_session.exp.md",
+    "hashi_remote_terminal": "playbooks/02_hashi_remote_terminal.exp.md",
+    "dual_channel_debug_loop": "playbooks/03_dual_channel_debug_loop.exp.md",
+    "start_aptenra_smoke": "playbooks/04_start_aptenra_smoke.exp.md",
+    "git_sync_adjacent": "playbooks/05_git_sync_adjacent.exp.md",
+    "evidence_pack": "playbooks/06_evidence_pack.exp.md",
+    "handoff_and_escalation": "playbooks/07_handoff_and_escalation.exp.md"
+  },
+  "validators": [
+    "validators/dual_channel_validators.md"
+  ],
+  "failure_memory": "failures/failure_memory.jsonl",
+  "evidence": "evidence",
+  "training_runs": {},
+  "scope_limits": [
+    "Requires operator control plane and target device on the same LAN (or later same VPN). Not a public-internet always-on rescue control plane.",
+    "Applies to any product tier (Personal, vertical role appliance, enterprise single device) when network adjacency holds; do not hard-code Personal-only rescue.",
+    "Does not replace PiKVM product Web UI; agents use APIs/helpers as operators would.",
+    "Never store or request customer PIN/password material into EXP, logs, or evidence.",
+    "Source-of-truth code sync is Git over adjacent network (e.g. hp-test bare). MEGA and OneDrive are non-dependencies for this EXP.",
+    "Lab paths (APT-HW-0001, 192.168.0.41, 10.0.0.3) are concrete instances; generalise host/user/paths for other onsite targets.",
+    "Candidate EXP: promote toward stable only after repeated live dual-channel runs and founder confirmation."
+  ]
+}
