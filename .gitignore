@@ -185,3 +185,6 @@ tests/test_wiki_pipeline.py
 # Aptenra debug EXP operator helpers are machine-local. Keep the shared EXP
 # specification, playbooks, validators, and failure memory under version control.
 exp/aptenra/aptenra_debug/scripts/
+
+# Barry's private Audit Office KVM EXP (machine-local; may contain workplace context)
+exp/barry/aonsw/
