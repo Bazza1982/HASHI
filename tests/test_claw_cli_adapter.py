@@ -540,6 +540,7 @@ async def test_claw_adapter_generate_response_with_fake_binary(tmp_path):
         if sys.argv[1] == "version":
             print(json.dumps({"kind": "version", "version": "0.1.0", "git_sha": "fake"}))
         else:
+            assert "--resume" not in sys.argv
             print(json.dumps({
               "message": "adapter done",
               "model": "deepseek/test",
@@ -554,13 +555,18 @@ async def test_claw_adapter_generate_response_with_fake_binary(tmp_path):
         name="test",
         workspace_dir=tmp_path,
         model="deepseek/test",
-        extra={"claw_binary_path": str(fake), "permission_mode": "read-only"},
+        extra={
+            "claw_binary_path": str(fake),
+            "permission_mode": "read-only",
+            "resume": "latest",
+        },
         resolve_access_root=lambda: tmp_path,
     )
     global_cfg = SimpleNamespace()
     adapter = ClawCLIAdapter(cfg, global_cfg, api_key="test-key")
 
     assert await adapter.initialize() is True
+    assert adapter.capabilities.supports_sessions is False
     response = await adapter.generate_response("hello", "req-1")
 
     assert response.is_success is True

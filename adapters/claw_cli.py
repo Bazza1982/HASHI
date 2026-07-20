@@ -910,7 +910,7 @@ class ClawCLIAdapter(BaseBackend):
 
     def _define_capabilities(self) -> BackendCapabilities:
         capabilities = BackendCapabilities(
-            supports_sessions=True,
+            supports_sessions=False,
             supports_files=True,
             supports_tool_use=True,
             supports_thinking_stream=False,
@@ -926,7 +926,6 @@ class ClawCLIAdapter(BaseBackend):
         self._binary: Path | None = None
         self._binary_resolution: ClawBinaryResolution | None = None
         self._supports_stream_json = False
-        self._fresh_next = False
 
     @property
     def _extra(self) -> dict[str, Any]:
@@ -1094,20 +1093,6 @@ class ClawCLIAdapter(BaseBackend):
     def _task_env(self) -> dict[str, str]:
         return self._resolve_task_env()
 
-    def _has_saved_session(self) -> bool:
-        sessions_dir = self.effective_workdir / ".claw" / "sessions"
-        return sessions_dir.is_dir() and any(sessions_dir.glob("*.jsonl"))
-
-    def _resume_target(self) -> str | None:
-        if self._fresh_next:
-            return None
-        configured = self._extra.get("resume")
-        if configured is False or configured == "none":
-            return None
-        if configured:
-            return str(configured)
-        return "latest" if self._has_saved_session() else None
-
     async def initialize(self) -> bool:
         self.logger.info("Initializing Claw CLI backend...")
         self.config.workspace_dir.mkdir(parents=True, exist_ok=True)
@@ -1141,6 +1126,12 @@ class ClawCLIAdapter(BaseBackend):
             )
             self.capabilities.supports_thinking_stream = self._supports_stream_json
             self.capabilities.supports_answer_stream = self._supports_stream_json
+            configured_resume = self._extra.get("resume")
+            if configured_resume not in (None, False, "none"):
+                self.logger.warning(
+                    "Ignoring Claw resume=%r: HASHI owns conversation continuity and runs Claw stateless per turn.",
+                    configured_resume,
+                )
             if not self._supports_stream_json:
                 self.logger.warning("Claw binary does not advertise stream-json; verbose mode will use JSON fallback.")
             return True
@@ -1154,8 +1145,7 @@ class ClawCLIAdapter(BaseBackend):
             return False
 
     async def handle_new_session(self) -> bool:
-        self._fresh_next = True
-        self.logger.info("Claw handle_new_session: next request will start without --resume.")
+        self.logger.info("Claw handle_new_session: backend is already stateless per turn.")
         return True
 
     async def shutdown(self):
@@ -1188,12 +1178,10 @@ class ClawCLIAdapter(BaseBackend):
             await on_stream_event(StreamEvent(kind=KIND_PROGRESS, summary="Claw task started"))
 
         started = time.perf_counter()
-        resume = self._resume_target()
-        self._fresh_next = False
         try:
             result = await self._run_task_async(
                 prompt,
-                resume=resume,
+                resume=None,
                 on_stream_event=on_stream_event,
             )
         except asyncio.CancelledError:
