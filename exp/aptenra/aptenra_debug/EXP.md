@@ -6,6 +6,10 @@ This EXP captures how HASHI operators debug and support an Aptenra target
 device when the **operator machine and the target device share network
 adjacency** (same LAN now; same VPN later).
 
+This is a HASHI operator-knowledge asset, not Aptenra application source code
+and not an embedded Aptenra HASHI runtime. Loading or publishing this EXP does
+not modify an Aptenra binary, installation, service, or debug candidate.
+
 It is **not** Personal-SKU-only rescue. It is a stable short/mid-term pattern
 for:
 
@@ -38,7 +42,7 @@ Operator (HASHI + this EXP)
    Target device
 ```
 
-**Rule:** *KVM sees and clicks; Remote executes and proves.*  
+**Rule:** *KVM sees and clicks; Remote executes and proves.*
 At most one channel may perform a destructive action at a time.
 
 ## When to load
@@ -99,6 +103,16 @@ Documented defaults for the first sample device (override on other targets):
 
 - Validators: `validators/dual_channel_validators.md`
 - Failures: `failures/failure_memory.jsonl`
+
+## Local operator helpers
+
+The `scripts/` directory is intentionally machine-local and is ignored by Git.
+It may contain operator-specific collection or recovery helpers whose paths,
+assumptions, and credentials boundary have only been validated on one machine.
+
+The portable EXP contract remains in the tracked manifest, playbooks, validators,
+and failure memory. A helper script must be reviewed, generalized, tested, and
+deliberately promoted to a shared tools location before it becomes part of HASHI.
 
 ## Scope limit
 

@@ -181,3 +181,7 @@ private/
 # Local wiki experiments (machine-specific, not part of shared HASHI)
 scripts/wiki/
 tests/test_wiki_pipeline.py
+
+# Aptenra debug EXP operator helpers are machine-local. Keep the shared EXP
+# specification, playbooks, validators, and failure memory under version control.
+exp/aptenra/aptenra_debug/scripts/

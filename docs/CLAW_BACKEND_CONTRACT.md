@@ -2,6 +2,17 @@
 
 Status: active for `0.1.3-hashi.1`
 
+## Deployment scope
+
+This contract and packaged Linux binary belong to the standalone HASHI runtime,
+currently certified on HASHI1. They do not update Aptenra's embedded HASHI runtime,
+Windows `aptenra_hashi.exe`, debug candidate, or installation package.
+
+Aptenra adoption is a separate release task: explicitly integrate the selected HASHI
+changes, build the Windows artifact, record its provenance and SHA-256, and run the
+Aptenra product certification suite. No change in this document or package propagates
+to Aptenra automatically.
+
 ## Ownership boundary
 
 HASHI owns conversation continuity, memory injection, handoff context, authorization,
