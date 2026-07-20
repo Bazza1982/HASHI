@@ -12,7 +12,7 @@ import types
 import pytest
 from telegram.error import RetryAfter
 
-from orchestrator import runtime_pipeline
+from orchestrator import runtime_pipeline, telegram_stream_policy
 from orchestrator import telegram_delivery_failover as failover
 from adapters.stream_events import KIND_PROGRESS, KIND_TEXT_DELTA, StreamEvent
 
@@ -149,7 +149,8 @@ def _runtime():
     runtime.name = "zelda"
     runtime.config.telegram_token_key = runtime.name
     runtime.global_config = SimpleNamespace(project_root=Path(tempfile.mkdtemp(prefix="hashi-pipeline-test-")))
-    runtime.workspace_dir = "/tmp/hashi-test"
+    runtime.workspace_dir = runtime.global_config.project_root / "workspaces" / runtime.name
+    runtime.workspace_dir.mkdir(parents=True, exist_ok=True)
     runtime.session_id_dt = "session-1"
     runtime.logger = _Logger()
     runtime.telegram_logger = _Logger()
@@ -290,6 +291,11 @@ def _runtime():
 
     runtime._notify_request_listeners = _notify_request_listeners
     return runtime
+
+
+def _set_stream_policy(runtime, **values):
+    for name, enabled in values.items():
+        telegram_stream_policy.set_policy_value(runtime, name, enabled)
 
 
 def test_begin_queue_item_records_processing_metadata():
@@ -455,6 +461,7 @@ async def test_cleanup_interactive_feedback_can_leave_stream_owned_placeholder()
 @pytest.mark.asyncio
 async def test_setup_interactive_feedback_creates_placeholder_and_cleanup_tasks():
     runtime = _runtime()
+    _set_stream_policy(runtime, placeholder=True, preview=True)
 
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
@@ -488,6 +495,7 @@ async def test_setup_interactive_feedback_placeholder_retry_after_records_failov
     runtime.startup_success = True
     runtime.token = "token-kasumi"
     runtime.app.bot = _Bot(send_error=RetryAfter(60))
+    _set_stream_policy(runtime, placeholder=True)
 
     failover_runtime = SimpleNamespace(
         name="lin_yueru",
@@ -586,11 +594,12 @@ async def test_setup_interactive_feedback_skips_placeholder_when_delivery_blocke
 
 
 @pytest.mark.asyncio
-async def test_stream_default_off_skips_intermediate_telegram_and_uses_final_delivery_once():
+async def test_stream_off_skips_intermediate_telegram_and_uses_final_delivery_once():
     runtime = _runtime()
     runtime.config.extra = {}
     runtime._verbose = False
     runtime._think = False
+    _set_stream_policy(runtime, enabled=False)
     sends = []
 
     async def _send_long_message(**kwargs):
@@ -640,6 +649,7 @@ async def test_stream_off_keeps_thinking_delivery_independent_without_placeholde
     runtime = _runtime()
     runtime.config.extra = {}
     runtime._think = True
+    _set_stream_policy(runtime, enabled=False)
 
     async def _flush_thinking(_chat_id):
         return None
@@ -679,6 +689,7 @@ async def test_setup_interactive_feedback_creates_stream_state_only_when_capabil
         "answer_stream_final_delivery": True,
     }
     runtime.backend_manager.current_backend.capabilities.supports_answer_stream = True
+    _set_stream_policy(runtime, placeholder=True, preview=True, promote=True)
 
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
@@ -702,6 +713,7 @@ async def test_answer_preview_stream_edits_placeholder():
         "answer_stream_edit_interval_s": 0.01,
         "answer_stream_min_chars": 1,
     }
+    _set_stream_policy(runtime, placeholder=True, preview=True)
 
     async def _noop_stream_callback(_event):
         return None
@@ -975,6 +987,7 @@ async def test_answer_preview_shows_progress_when_text_delta_absent():
 async def test_answer_preview_does_not_require_verbose_stream_capability():
     runtime = _runtime()
     runtime.backend_manager.current_backend.capabilities.supports_thinking_stream = False
+    _set_stream_policy(runtime, placeholder=True, preview=True)
 
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
@@ -995,6 +1008,7 @@ async def test_answer_preview_does_not_require_verbose_stream_capability():
 async def test_answer_preview_takes_precedence_over_verbose_display():
     runtime = _runtime()
     runtime._verbose = True
+    _set_stream_policy(runtime, placeholder=True, preview=True)
 
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
@@ -1021,6 +1035,7 @@ async def test_verbose_non_streaming_backend_uses_escalating_placeholder():
         "answer_stream_preview": False,
     }
     runtime.backend_manager.current_backend.capabilities.supports_thinking_stream = False
+    _set_stream_policy(runtime, placeholder=True, progress=True, preview=False)
 
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
@@ -1046,6 +1061,7 @@ async def test_verbose_streaming_backend_uses_streaming_display():
         "telegram_stream_enabled": True,
         "answer_stream_preview": False,
     }
+    _set_stream_policy(runtime, placeholder=True, progress=True, preview=False)
 
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,

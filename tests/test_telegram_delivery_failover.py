@@ -8,7 +8,7 @@ import pytest
 from telegram.error import RetryAfter
 
 from orchestrator import telegram_delivery_failover as failover
-from orchestrator import runtime_status
+from orchestrator import runtime_status, telegram_stream_policy
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 
 
@@ -199,12 +199,19 @@ async def test_tick_recovery_retry_after_reextends_block(tmp_path):
     assert not source.app.bot.messages
 
 
-def test_preview_preference_persists_and_overrides_config(tmp_path):
+def test_persisted_typing_only_defaults_override_legacy_preview_config(tmp_path):
     runtime = _runtime(tmp_path, "kasumi", preview_default=True)
+    telegram_stream_policy.set_policy_value(runtime, "placeholder", True)
+
+    enabled, source = failover.preview_status(runtime)
+    assert enabled is False
+    assert source == "persisted override"
+
+    failover.set_preview_enabled(runtime, True)
 
     enabled, source = failover.preview_status(runtime)
     assert enabled is True
-    assert source == "config default"
+    assert source == "persisted override"
 
     failover.set_preview_enabled(runtime, False)
 
@@ -308,4 +315,4 @@ def test_status_summary_reports_delivery_block_and_preview(tmp_path):
     assert "remaining" in text
     assert "until 2030-01-01T00:00:00+10:00" in text
     assert "via lin_yueru" in text
-    assert "👁 Preview: OFF (config default)" in text
+    assert "👁 Preview: OFF (persisted override)" in text
