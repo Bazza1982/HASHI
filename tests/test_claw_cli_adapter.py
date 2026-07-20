@@ -168,6 +168,30 @@ def test_find_claw_binary_require_packaged_fails_closed(tmp_path):
         find_claw_binary(global_config=global_cfg, agent_config=agent_cfg, env={"PATH": ""})
 
 
+def test_find_claw_binary_require_packaged_does_not_bypass_manifest(tmp_path):
+    root = tmp_path / "hashi_assets" / "claw"
+    packaged = _write_packaged_claw(root)
+    configured = _write_exe(
+        tmp_path / "configured-claw",
+        """
+        #!/usr/bin/env python3
+        print("configured")
+        """,
+    )
+    global_cfg = SimpleNamespace(
+        project_root=tmp_path,
+        claw_providers={
+            "binary_path": str(configured),
+            "runtime_policy": "require-packaged",
+        },
+    )
+
+    resolved = discover_claw_binary(global_config=global_cfg, env={"PATH": ""})
+
+    assert resolved.path == packaged.resolve()
+    assert resolved.source == "packaged"
+
+
 def test_find_claw_binary_reports_missing_configured_path(tmp_path):
     with pytest.raises(ClawBinaryNotFound):
         find_claw_binary(tmp_path / "missing", env={"PATH": ""})

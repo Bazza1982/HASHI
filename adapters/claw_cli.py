@@ -269,11 +269,11 @@ def detect_hashi_claw_platform(
 
 
 def _packaged_claw_roots(global_config: Any | None = None) -> list[Path]:
-    roots: list[Path] = []
     project_root = getattr(global_config, "project_root", None)
     if project_root:
-        roots.append(Path(project_root).expanduser() / "hashi_assets" / "claw")
-    roots.append(Path(__file__).resolve().parent.parent / "hashi_assets" / "claw")
+        roots = [Path(project_root).expanduser() / "hashi_assets" / "claw"]
+    else:
+        roots = [Path(__file__).resolve().parent.parent / "hashi_assets" / "claw"]
     unique: list[Path] = []
     seen: set[str] = set()
     for root in roots:
@@ -445,12 +445,16 @@ def discover_claw_binary(
                 early_candidates.append((f"global.claw_providers:{key}", value))
 
     failures: list[str] = []
-    for source, candidate in early_candidates:
-        path, failure = _resolve_executable_candidate(candidate)
-        if path is not None:
-            return ClawBinaryResolution(path=path, source=source)
-        if failure:
-            failures.append(failure)
+    if policy != "require-packaged":
+        for source, candidate in early_candidates:
+            path, failure = _resolve_executable_candidate(candidate)
+            if path is not None:
+                return ClawBinaryResolution(path=path, source=source)
+            if failure:
+                failures.append(failure)
+        if early_candidates:
+            detail = "; ".join(failures) if failures else "configured Claw runtime is unavailable"
+            raise ClawBinaryNotFound(f"Configured Claw binary not found ({detail})")
 
     packaged_errors: list[str] = []
     if policy != "system-only":
