@@ -287,6 +287,10 @@ class WorkbenchApiServer:
         self.app.router.add_get("/api/agents", self.handle_agents)
         self.app.router.add_get("/api/transcript/{name}", self.handle_transcript_recent)
         self.app.router.add_get("/api/transcript/{name}/poll", self.handle_transcript_poll)
+        self.app.router.add_get(
+            "/api/agents/{name}/requests/{request_id}/activity",
+            self.handle_request_activity,
+        )
         self.app.router.add_get("/api/project-chat/{name}/{project}", self.handle_project_chat_log)
         self.app.router.add_post("/api/chat", self.handle_chat)
         self.app.router.add_post("/api/browser/chat/send", self.handle_browser_chat_send)
@@ -2556,6 +2560,39 @@ class WorkbenchApiServer:
             return web.json_response({"error": "agent not found"}, status=404)
         transcript_path = self._resolve_transcript_path(agent_row, runtime_map.get(name))
         return web.json_response(_read_jsonl_increment(transcript_path, offset=offset))
+
+    async def handle_request_activity(self, request):
+        """Return a bounded, presentation-only stream for one live request."""
+
+        name = str(request.match_info.get("name") or "").strip()
+        request_id = str(request.match_info.get("request_id") or "").strip()
+        runtime = self._runtime_map().get(name)
+        if runtime is None:
+            return web.json_response(
+                {"ok": False, "error": "agent not found", "error_code": "agent_not_found"},
+                status=404,
+            )
+        store = getattr(runtime, "request_activity", None)
+        if store is None:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "request activity unavailable",
+                    "error_code": "request_activity_unavailable",
+                },
+                status=501,
+            )
+        try:
+            after_sequence = max(0, int(request.query.get("after_sequence", 0)))
+            limit = max(1, min(int(request.query.get("limit", 100)), 256))
+        except (TypeError, ValueError):
+            return web.json_response(
+                {"ok": False, "error": "invalid activity cursor", "error_code": "invalid_activity_cursor"},
+                status=400,
+            )
+        result = store.poll(request_id, after_sequence=after_sequence, limit=limit)
+        status = 200 if result.get("ok") else 404
+        return web.json_response(result, status=status)
 
     async def handle_project_chat_log(self, request):
         name = request.match_info["name"]

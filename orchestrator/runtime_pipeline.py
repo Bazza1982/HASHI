@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -113,6 +114,9 @@ def begin_queue_item(runtime, item) -> QueueItemStart:
         "started_at": datetime.now().isoformat(),
     }
     runtime._mark_activity()
+    activity_store = getattr(runtime, "request_activity", None)
+    if activity_store is not None:
+        activity_store.mark_running(item.request_id)
     runtime._log_maintenance(
         item,
         "processing",
@@ -650,7 +654,23 @@ async def setup_interactive_feedback(
     if stream_callback is None and audit_active:
         stream_callback = runtime._make_stream_callback(audit_collector=audit_collector)
 
-    on_stream_event = stream_callback if (not item.silent or audit_active) else None
+    # Local clients can observe the exact verbose/thinking events intentionally
+    # emitted by the backend even when Telegram presentation is disabled.  The
+    # activity store is bounded and credential-redacted by construction.
+    activity_store = getattr(runtime, "request_activity", None)
+    if activity_store is not None:
+        presentation_callback = stream_callback
+
+        async def _activity_callback(event):
+            activity_store.publish_stream(item.request_id, event)
+            if presentation_callback is not None:
+                result = presentation_callback(event)
+                if inspect.isawaitable(result):
+                    await result
+
+        stream_callback = _activity_callback
+
+    on_stream_event = stream_callback if (not item.silent or audit_active or activity_store is not None) else None
     return InteractiveFeedback(
         stop_typing=stop_typing,
         typing_task=typing_task,
