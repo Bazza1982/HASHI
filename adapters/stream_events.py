@@ -32,6 +32,9 @@ class StreamEvent:
     detail: str = ""                # optional longer content (truncated before display)
     tool_name: str = ""             # e.g. "Read", "Grep", "Bash"
     file_path: str = ""             # relevant file path, if any
+    current: float | None = None     # optional real progress numerator
+    total: float | None = None       # optional real progress denominator
+    unit: str = ""                   # e.g. pages, files, images
 
 
 # Callback signature accepted by generate_response().

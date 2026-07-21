@@ -66,6 +66,7 @@ from orchestrator.runtime_common import (
     _safe_excerpt,
     resolve_authorized_telegram_ids,
 )
+from orchestrator.request_activity import RequestActivityStore
 from orchestrator.agent_fyi import build_agent_fyi_primer
 from orchestrator.bridge_memory import BridgeMemoryStore, BridgeContextAssembler, SysPromptManager
 from orchestrator.ephemeral_invoker import make_backend_sidecar_invoker
@@ -159,6 +160,10 @@ class FlexibleAgentRuntime:
         self.error_logger = logging.getLogger(f"FlexRuntime.{self.name}.errors")
         self.maintenance_logger = logging.getLogger(f"FlexRuntime.{self.name}.maintenance")
         self._setup_logging()
+
+        # Presentation-only, bounded request activity.  This is intentionally
+        # independent from transcripts, durable jobs and audit ledgers.
+        self.request_activity = RequestActivityStore(logger=self.logger)
 
         self.startup_success = False
         self.backend_ready = False
@@ -654,6 +659,11 @@ class FlexibleAgentRuntime:
             deliver_to_telegram=deliver_to_telegram,
             skip_memory_injection=skip_memory_injection,
         )
+        self.request_activity.start(
+            item.request_id,
+            source=item.source,
+            created_at=datetime.fromisoformat(item.created_at).timestamp(),
+        )
         await self.queue.put(item)
         self.message_logger.info(f"Queued {item.request_id} from {source} (summary={summary!r})")
         return item.request_id
@@ -667,6 +677,18 @@ class FlexibleAgentRuntime:
                 asyncio.create_task(result)
 
     async def _notify_request_listeners(self, request_id: str, payload: dict):
+        try:
+            self.request_activity.complete(
+                request_id,
+                success=bool(payload.get("success")),
+                error=payload.get("error") or "",
+            )
+        except Exception as exc:  # display telemetry must never block delivery
+            self.logger.warning(
+                "Request activity completion failed for %s (%s)",
+                request_id,
+                type(exc).__name__,
+            )
         callbacks = self._request_listeners.pop(request_id, [])
         if not callbacks:
             self._pending_request_results[request_id] = payload
