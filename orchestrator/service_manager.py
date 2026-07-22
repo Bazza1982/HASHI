@@ -13,7 +13,7 @@ from contextlib import suppress
 from pathlib import Path
 
 from orchestrator.agent_directory import AgentDirectory
-from orchestrator.api_gateway import APIGatewayServer, available_gateway_models, default_gateway_model
+from orchestrator.api_gateway import available_gateway_models, default_gateway_model
 from orchestrator.background_jobs import BackgroundJobManager
 from orchestrator.scheduler import TaskScheduler
 from orchestrator.telegram_delivery_failover import delivery_health_watcher
@@ -81,6 +81,12 @@ class ServiceManager:
             module = importlib.import_module("orchestrator.workbench_api")
         return module.WorkbenchApiServer
 
+    def _api_gateway_server_cls(self):
+        module = sys.modules.get("orchestrator.api_gateway")
+        if module is None:
+            module = importlib.import_module("orchestrator.api_gateway")
+        return module.APIGatewayServer
+
     def api_gateway_base_url(self) -> str | None:
         global_cfg = self.kernel.global_cfg
         if global_cfg is None:
@@ -147,7 +153,8 @@ class ServiceManager:
         if self.kernel.api_gateway is not None:
             return
         try:
-            self.kernel.api_gateway = APIGatewayServer(
+            server_cls = self._api_gateway_server_cls()
+            self.kernel.api_gateway = server_cls(
                 global_cfg,
                 secrets,
                 workspace_root=self.kernel.paths.workspaces_root,
@@ -406,6 +413,7 @@ class ServiceManager:
 
     async def restart_scheduler(self):
         await self.restart_workbench_api()
+        await self.restart_api_gateway()
         await self.stop_scheduler()
         reloaded_scheduler = sys.modules["orchestrator.scheduler"].TaskScheduler
         lease_kwargs = (
@@ -436,6 +444,28 @@ class ServiceManager:
         await self.start_workbench_api(self.kernel.global_cfg, self.kernel.secrets)
         if self.kernel.workbench_api is not None:
             bridge_logger.info("Hot restart: Workbench API recreated with reloaded code")
+
+    async def restart_api_gateway(self):
+        """Recreate an enabled Gateway so one /reboot adopts reloaded code."""
+        if self.kernel.global_cfg is None:
+            bridge_logger.warning("Hot restart: API Gateway restart skipped because global config is unavailable")
+            return
+        state = self._load_api_gateway_state()
+        should_run = bool(
+            self.kernel.api_gateway is not None
+            or getattr(self.kernel, "enable_api_gateway", False)
+            or state.get("enabled")
+        )
+        if not should_run:
+            return
+
+        self.kernel.enable_api_gateway = True
+        await self.stop_api_gateway(timeout=2.0)
+        await self.start_api_gateway(self.kernel.global_cfg, self.kernel.secrets)
+        if self.kernel.api_gateway is not None:
+            bridge_logger.info("Hot restart: API Gateway recreated with reloaded code")
+        else:
+            bridge_logger.warning("Hot restart: API Gateway failed to restart")
 
     async def repair_workbench_api_if_needed(self):
         global_cfg = self.kernel.global_cfg

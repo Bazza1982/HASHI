@@ -52,6 +52,8 @@ logger = logging.getLogger("BridgeU.APIGateway")
 # ── Constants ────────────────────────────────────────────────────────────────
 
 SESSION_TTL_SEC = 1800  # 30 minutes
+MAX_EXTERNAL_TOOLS = 128
+MAX_EXTERNAL_TOOL_BYTES = 1024 * 1024
 
 _ENGINE_FOR_MODEL: dict[str, str] = {}
 for _m in AVAILABLE_GEMINI_MODELS:
@@ -139,6 +141,192 @@ def _messages_to_prompt(messages: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
+def _uses_external_tool_protocol(body: dict[str, Any], messages: list[dict]) -> bool:
+    raw_tools = body.get("tools")
+    if raw_tools not in (None, []):
+        return True
+    tool_choice = body.get("tool_choice")
+    if tool_choice not in (None, "none"):
+        return True
+    return any(
+        str(message.get("role") or "").lower() == "tool"
+        or "tool_calls" in message
+        for message in messages
+    )
+
+
+def _external_tool_error(
+    message: str,
+    *,
+    code: str,
+    param: str | None = None,
+    status: int = 400,
+) -> web.Response:
+    return web.json_response(
+        {
+            "error": {
+                "message": message,
+                "type": "invalid_request_error" if status < 500 else "server_error",
+                "param": param,
+                "code": code,
+            }
+        },
+        status=status,
+    )
+
+
+def _validate_external_tool_request(
+    body: dict[str, Any],
+    messages: list[dict],
+) -> tuple[list[dict] | None, web.Response | None]:
+    if not all(isinstance(message, dict) for message in messages):
+        return None, _external_tool_error(
+            "every messages item must be an object",
+            code="invalid_messages",
+            param="messages",
+        )
+
+    for index, message in enumerate(messages):
+        role = str(message.get("role") or "").strip().lower()
+        if not role:
+            return None, _external_tool_error(
+                f"messages[{index}].role is required",
+                code="invalid_messages",
+                param=f"messages[{index}].role",
+            )
+        if role == "tool" and not str(message.get("tool_call_id") or "").strip():
+            return None, _external_tool_error(
+                f"messages[{index}].tool_call_id is required for tool messages",
+                code="invalid_tool_message",
+                param=f"messages[{index}].tool_call_id",
+            )
+        if "tool_calls" in message and not isinstance(message.get("tool_calls"), list):
+            return None, _external_tool_error(
+                f"messages[{index}].tool_calls must be an array",
+                code="invalid_tool_calls",
+                param=f"messages[{index}].tool_calls",
+            )
+
+    raw_tools = body.get("tools", [])
+    if raw_tools is None:
+        raw_tools = []
+    if not isinstance(raw_tools, list):
+        return None, _external_tool_error(
+            "tools must be an array",
+            code="invalid_tools",
+            param="tools",
+        )
+    if len(raw_tools) > MAX_EXTERNAL_TOOLS:
+        return None, _external_tool_error(
+            f"tools exceeds the limit of {MAX_EXTERNAL_TOOLS}",
+            code="too_many_tools",
+            param="tools",
+        )
+    try:
+        tool_bytes = len(json.dumps(raw_tools, ensure_ascii=False).encode("utf-8"))
+    except (TypeError, ValueError):
+        return None, _external_tool_error(
+            "tools must contain JSON-compatible values",
+            code="invalid_tools",
+            param="tools",
+        )
+    if tool_bytes > MAX_EXTERNAL_TOOL_BYTES:
+        return None, _external_tool_error(
+            "tools payload exceeds the 1 MiB limit",
+            code="tools_too_large",
+            param="tools",
+        )
+
+    tool_names: set[str] = set()
+    for index, tool in enumerate(raw_tools):
+        if not isinstance(tool, dict) or tool.get("type") != "function":
+            return None, _external_tool_error(
+                f"tools[{index}] must be an OpenAI function tool",
+                code="invalid_tool_schema",
+                param=f"tools[{index}]",
+            )
+        function = tool.get("function")
+        if not isinstance(function, dict):
+            return None, _external_tool_error(
+                f"tools[{index}].function must be an object",
+                code="invalid_tool_schema",
+                param=f"tools[{index}].function",
+            )
+        name = str(function.get("name") or "").strip()
+        if not name:
+            return None, _external_tool_error(
+                f"tools[{index}].function.name is required",
+                code="invalid_tool_schema",
+                param=f"tools[{index}].function.name",
+            )
+        if name in tool_names:
+            return None, _external_tool_error(
+                f"duplicate tool name '{name}'",
+                code="duplicate_tool_name",
+                param=f"tools[{index}].function.name",
+            )
+        tool_names.add(name)
+        parameters = function.get("parameters")
+        if parameters is not None and not isinstance(parameters, dict):
+            return None, _external_tool_error(
+                f"tools[{index}].function.parameters must be an object",
+                code="invalid_tool_schema",
+                param=f"tools[{index}].function.parameters",
+            )
+
+    tool_choice = body.get("tool_choice")
+    if tool_choice is not None:
+        if isinstance(tool_choice, str):
+            if tool_choice not in {"auto", "none", "required"}:
+                return None, _external_tool_error(
+                    "tool_choice must be auto, none, required, or a named function",
+                    code="invalid_tool_choice",
+                    param="tool_choice",
+                )
+        elif isinstance(tool_choice, dict):
+            choice_function = tool_choice.get("function")
+            choice_name = (
+                str(choice_function.get("name") or "").strip()
+                if isinstance(choice_function, dict)
+                else ""
+            )
+            if tool_choice.get("type") != "function" or not choice_name:
+                return None, _external_tool_error(
+                    "named tool_choice must identify a function",
+                    code="invalid_tool_choice",
+                    param="tool_choice",
+                )
+            if choice_name not in tool_names:
+                return None, _external_tool_error(
+                    f"tool_choice refers to unknown tool '{choice_name}'",
+                    code="invalid_tool_choice",
+                    param="tool_choice",
+                )
+        else:
+            return None, _external_tool_error(
+                "tool_choice must be a string or object",
+                code="invalid_tool_choice",
+                param="tool_choice",
+            )
+
+    if (
+        body.get("parallel_tool_calls") is not None
+        and not isinstance(body.get("parallel_tool_calls"), bool)
+    ):
+        return None, _external_tool_error(
+            "parallel_tool_calls must be a boolean",
+            code="invalid_parallel_tool_calls",
+            param="parallel_tool_calls",
+        )
+    if body.get("n") not in (None, 1):
+        return None, _external_tool_error(
+            "external tool passthrough currently supports n=1 only",
+            code="unsupported_choice_count",
+            param="n",
+        )
+    return list(raw_tools), None
+
+
 # ── Session cache ─────────────────────────────────────────────────────────────
 
 class _SessionCache:
@@ -212,7 +400,14 @@ class _AdapterPool:
             project_root=self._global_config.project_root,
         )
         BackendClass = get_backend_class(engine)
-        api_key = self._secrets.get(f"{engine}_key")
+        if engine == "xai-api":
+            api_key = {
+                "xai_api_key": self._secrets.get("xai_api_key")
+                or self._secrets.get("XAI_API_KEY"),
+                "xai_oauth_refresh_token": self._secrets.get("xai_oauth_refresh_token"),
+            }
+        else:
+            api_key = self._secrets.get(f"{engine}_key")
         adapter = BackendClass(cfg, self._global_config, api_key)
         ok = await adapter.initialize()
         if not ok:
@@ -376,6 +571,8 @@ class APIGatewayServer:
             body = await request.json()
         except Exception:
             return web.json_response({"error": "invalid JSON"}, status=400)
+        if not isinstance(body, dict):
+            return web.json_response({"error": "request body must be an object"}, status=400)
 
         model = str(body.get("model") or "").strip() or self.default_model
 
@@ -386,6 +583,32 @@ class APIGatewayServer:
                 status=400,
             )
 
+        messages = body.get("messages") or []
+        if not isinstance(messages, list) or not messages:
+            return web.json_response({"error": "messages is required"}, status=400)
+        if not all(isinstance(message, dict) for message in messages):
+            return web.json_response(
+                {"error": "every messages item must be an object"},
+                status=400,
+            )
+
+        stream: bool = bool(body.get("stream", False))
+        external_tool_mode = _uses_external_tool_protocol(body, messages)
+
+        external_tools: list[dict] = []
+        if external_tool_mode:
+            if engine != "xai-api":
+                return _external_tool_error(
+                    f"model '{model}' does not support external tool passthrough; "
+                    "only xAI /chat/completions models are enabled",
+                    code="external_tool_passthrough_unsupported",
+                    param="model",
+                )
+            validated_tools, validation_error = _validate_external_tool_request(body, messages)
+            if validation_error is not None:
+                return validation_error
+            external_tools = validated_tools or []
+
         engine_ok, engine_reason = self._engine_available(engine)
         if not engine_ok:
             return web.json_response(
@@ -393,17 +616,22 @@ class APIGatewayServer:
                 status=503,
             )
 
-        messages: list[dict] = body.get("messages") or []
-        if not messages:
-            return web.json_response({"error": "messages is required"}, status=400)
-
-        stream: bool = bool(body.get("stream", False))
-
         # Session cache support — client may pass session_id in extra_body or top-level
+        extra_body = body.get("extra_body") or {}
+        if not isinstance(extra_body, dict):
+            return web.json_response({"error": "extra_body must be an object"}, status=400)
         session_id: str | None = (
-            (body.get("extra_body") or {}).get("session_id")
+            extra_body.get("session_id")
             or body.get("session_id")
         )
+
+        if external_tool_mode and session_id:
+            return _external_tool_error(
+                "session_id is not supported for external tool passthrough; "
+                "the caller must send the complete tool conversation",
+                code="external_tools_session_unsupported",
+                param="session_id",
+            )
 
         if session_id:
             cached = self._sessions.get(session_id)
@@ -419,14 +647,16 @@ class APIGatewayServer:
                         combined.append(msg)
                 messages = combined
 
-        prompt = _messages_to_prompt(messages)
-        if not prompt.strip():
-            return web.json_response({"error": "empty prompt after assembly"}, status=400)
+        prompt = ""
+        if not external_tool_mode:
+            prompt = _messages_to_prompt(messages)
+            if not prompt.strip():
+                return web.json_response({"error": "empty prompt after assembly"}, status=400)
 
         # Terminal: show incoming
         user_preview = next(
             (str(m.get("content") or "")[:120] for m in reversed(messages) if m.get("role") == "user"),
-            prompt[:120],
+            prompt[:120] or "[external tool request]",
         )
         _print_api_in(model, user_preview)
 
@@ -441,6 +671,35 @@ class APIGatewayServer:
             return web.json_response({"error": f"backend unavailable: {e}"}, status=503)
 
         t_start = time.time()
+
+        if external_tool_mode:
+            supports_passthrough = getattr(adapter, "supports_external_tool_passthrough", None)
+            if not callable(supports_passthrough) or not supports_passthrough(model):
+                return _external_tool_error(
+                    f"model '{model}' does not use xAI /chat/completions",
+                    code="external_tool_passthrough_unsupported",
+                    param="model",
+                )
+            if stream:
+                return await self._handle_external_tool_streaming(
+                    adapter,
+                    messages,
+                    external_tools,
+                    body,
+                    request_id,
+                    model,
+                    t_start,
+                    request,
+                )
+            return await self._handle_external_tool_sync(
+                adapter,
+                messages,
+                external_tools,
+                body,
+                request_id,
+                model,
+                t_start,
+            )
 
         if stream:
             return await self._handle_streaming(
@@ -570,7 +829,225 @@ class APIGatewayServer:
         payload.setdefault("object", "video.generation")
         return web.json_response(payload)
 
-    # ── Sync response ─────────────────────────────────────────────────────────
+    # ── External xAI tool-call passthrough ────────────────────────────────────
+
+    @staticmethod
+    def _external_finish_reason(response) -> str:
+        reason = str(getattr(response, "stop_reason", "") or "").strip()
+        if getattr(response, "tool_calls", None) and reason in {"", "stop"}:
+            return "tool_calls"
+        return reason or "stop"
+
+    @staticmethod
+    def _external_usage(response) -> dict[str, int]:
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        prompt_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+        completion_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+        return {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        }
+
+    async def _handle_external_tool_sync(
+        self,
+        adapter,
+        messages: list[dict],
+        tools: list[dict],
+        body: dict[str, Any],
+        request_id: str,
+        model: str,
+        t_start: float,
+    ) -> web.Response:
+        try:
+            response = await adapter.generate_external_tool_response(
+                messages,
+                tools,
+                request_id,
+                tool_choice=body.get("tool_choice"),
+                parallel_tool_calls=body.get("parallel_tool_calls"),
+                use_streaming=False,
+                request_options=body,
+                model=model,
+            )
+        except Exception as exc:
+            logger.error("External tool backend error for %s: %s", request_id, exc)
+            return _external_tool_error(
+                str(exc),
+                code="external_tool_backend_error",
+                status=500,
+            )
+
+        if not response.is_success:
+            error = response.error or "backend error"
+            logger.error("External tool backend failure %s: %s", request_id, error)
+            return _external_tool_error(
+                error,
+                code="external_tool_backend_error",
+                status=502,
+            )
+
+        text = response.text or ""
+        tool_calls = list(response.tool_calls or [])
+        message: dict[str, Any] = {
+            "role": "assistant",
+            "content": text if text else (None if tool_calls else ""),
+        }
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+
+        elapsed = time.time() - t_start
+        _print_api_out(model, elapsed, len(text), stream=False)
+        return web.json_response(
+            {
+                "id": f"chatcmpl-{uuid.uuid4().hex}",
+                "object": "chat.completion",
+                "created": int(t_start),
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": message,
+                        "finish_reason": self._external_finish_reason(response),
+                    }
+                ],
+                "usage": self._external_usage(response),
+            }
+        )
+
+    async def _handle_external_tool_streaming(
+        self,
+        adapter,
+        messages: list[dict],
+        tools: list[dict],
+        body: dict[str, Any],
+        request_id: str,
+        model: str,
+        t_start: float,
+        request: web.Request,
+    ) -> web.StreamResponse:
+        resp = web.StreamResponse(
+            status=200,
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+        try:
+            await resp.prepare(request)
+        except Exception as exc:
+            logger.debug("External tool stream prepare failed for %s: %s", request_id, exc)
+            return resp
+
+        completion_id = f"chatcmpl-{uuid.uuid4().hex}"
+        collected_text: list[str] = []
+
+        async def write_chunk(delta: dict[str, Any], finish_reason: str | None = None, **extra):
+            chunk: dict[str, Any] = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": int(t_start),
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": delta,
+                        "finish_reason": finish_reason,
+                    }
+                ],
+            }
+            chunk.update(extra)
+            try:
+                await resp.write(f"data: {json.dumps(chunk)}\n\n".encode())
+            except Exception:
+                pass
+
+        await write_chunk({"role": "assistant"})
+
+        async def on_event(event: StreamEvent):
+            if event.kind == KIND_TEXT_DELTA and event.summary:
+                collected_text.append(event.summary)
+                await write_chunk({"content": event.summary})
+
+        try:
+            response = await adapter.generate_external_tool_response(
+                messages,
+                tools,
+                request_id,
+                tool_choice=body.get("tool_choice"),
+                parallel_tool_calls=body.get("parallel_tool_calls"),
+                use_streaming=True,
+                request_options=body,
+                on_stream_event=on_event,
+                model=model,
+            )
+        except Exception as exc:
+            logger.error("External tool streaming backend error for %s: %s", request_id, exc)
+            response = None
+            error = str(exc)
+        else:
+            error = response.error if not response.is_success else None
+
+        if error:
+            try:
+                payload = {
+                    "error": {
+                        "message": error,
+                        "type": "server_error",
+                        "code": "external_tool_backend_error",
+                    }
+                }
+                await resp.write(f"data: {json.dumps(payload)}\n\n".encode())
+                await resp.write(b"data: [DONE]\n\n")
+                await resp.write_eof()
+            except Exception:
+                pass
+            return resp
+
+        full_text = response.text or ""
+        if full_text and not collected_text:
+            collected_text.append(full_text)
+            await write_chunk({"content": full_text})
+
+        tool_call_deltas: list[dict[str, Any]] = []
+        for index, tool_call in enumerate(response.tool_calls or []):
+            function = tool_call.get("function") or {}
+            arguments = function.get("arguments", "")
+            if not isinstance(arguments, str):
+                arguments = json.dumps(arguments, ensure_ascii=False)
+            tool_call_deltas.append(
+                {
+                    "index": index,
+                    "id": str(tool_call.get("id") or ""),
+                    "type": str(tool_call.get("type") or "function"),
+                    "function": {
+                        "name": str(function.get("name") or ""),
+                        "arguments": arguments,
+                    },
+                }
+            )
+        if tool_call_deltas:
+            await write_chunk({"tool_calls": tool_call_deltas})
+
+        elapsed = time.time() - t_start
+        final_text = full_text or "".join(collected_text)
+        _print_api_out(model, elapsed, len(final_text), stream=True)
+        await write_chunk(
+            {},
+            self._external_finish_reason(response),
+            usage=self._external_usage(response),
+        )
+        try:
+            await resp.write(b"data: [DONE]\n\n")
+            await resp.write_eof()
+        except Exception:
+            pass
+        return resp
+
+    # ── Legacy text-only sync response ────────────────────────────────────────
 
     async def _handle_sync(
         self,

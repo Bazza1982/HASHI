@@ -247,6 +247,67 @@ for chunk in stream:
         print(delta, end="", flush=True)
 ```
 
+### External Tool-Call Passthrough
+
+The gateway preserves caller-owned OpenAI function tools for xAI models that use
+the native `/chat/completions` route. The gateway forwards `messages`, `tools`,
+`tool_choice`, and `parallel_tool_calls`, then returns `message.tool_calls` with
+`finish_reason: "tool_calls"`. In streaming mode it emits a complete
+`delta.tool_calls` before the terminal `tool_calls` finish reason.
+
+The gateway never executes these caller-owned tools. The client is responsible
+for executing each function and sending the next request with the assistant
+`tool_calls` message and matching `role: "tool"` / `tool_call_id` result.
+
+Current boundaries:
+
+- Supported only by `xai-api` models using `/chat/completions`, such as
+  `grok-4.3`.
+- CLI-backed models are rejected instead of silently dropping tools.
+- xAI Responses API models, including `grok-4.5` and `grok-build-*`, are rejected
+  until their separate function-call protocol is implemented.
+- Gateway `session_id` caching is disabled for external tool turns; clients must
+  send the complete structured conversation.
+- Empty `tools: []` does not change the legacy text-only route.
+- A request may declare at most 128 tools, with a combined serialized tool
+  payload of at most 1 MiB.
+
+Hot deployment requires only `/reboot`. An enabled in-process API Gateway is
+stopped and recreated from the reloaded modules as part of the normal reboot
+service refresh.
+
+#### Verified Claw Code tool loop
+
+Claw Code identifies Grok as an xAI provider. Point its xAI-compatible client at
+the HASHI Gateway, keep the `/v1` suffix, and use the provider-qualified model
+selector:
+
+```bash
+export XAI_BASE_URL="http://<gateway-host>:18803/v1"
+export XAI_API_KEY="EMPTY"
+
+claw \
+  --model xai/grok-4.3 \
+  --permission-mode read-only \
+  --allowedTools glob \
+  --output-format json \
+  prompt "Use the Glob tool once, then report the result."
+```
+
+Claw requires a non-empty `XAI_API_KEY` value even when the Gateway is on a
+trusted local network and does not validate that placeholder. Claw removes the
+`xai/` provider prefix and sends `model: "grok-4.3"` to HASHI.
+
+This path was live-validated on HASHI2 with both Claw Code 0.1.0 and HASHI Claw
+0.1.3. The model returned one `tool_call`, Claw executed `glob_search` locally,
+Claw sent the matching tool result back through the Gateway, and the model
+produced the requested final answer on iteration two. No Claw tool was executed
+by HASHI's Gateway.
+
+`10.255.255.254` may be a host-virtual address that works only from the HASHI
+host. A Claw instance on another machine must use a Gateway address reachable
+from that machine, with an appropriate firewall, reverse proxy, or tunnel.
+
 ### Python — Multi-turn with Session Cache
 
 ```python
@@ -283,7 +344,7 @@ curl http://127.0.0.1:18801/v1/chat/completions \
     "stream": false
   }'
 
-# Grok 4.3 chat completion
+# Grok 4.5 Responses-backed chat completion
 curl http://127.0.0.1:18801/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
@@ -369,7 +430,8 @@ OpenClaw uses the `vllm` provider type to connect to HASHI.
       "api": "openai-completions",
       "models": [
         { "id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash", ... },
-        { "id": "claude-opus-4-6", "name": "Claude Opus 4.6", ... }
+        { "id": "claude-opus-4-6", "name": "Claude Opus 4.6", ... },
+        { "id": "grok-4.3", "name": "Grok 4.3", ... }
       ]
     }
   }
@@ -385,6 +447,7 @@ The model `id` in `openclaw.json` must match **exactly** what HASHI serves in `G
 "id": "gemini-2.5-flash"
 "id": "claude-opus-4-6"
 "id": "gpt-5.4"
+"id": "grok-4.3"
 ```
 
 **Wrong (will cause "unknown model" errors):**
@@ -402,17 +465,27 @@ OpenClaw sends the model `id` as-is to the API — it does not strip any prefix.
 "model": "vllm/gemini-2.5-flash"
 "model": "vllm/claude-opus-4-6"
 "model": "vllm/gpt-5.4"
+"model": "vllm/grok-4.3"
 ```
 
 ### `api` Field
 
 Use `"openai-completions"` — despite the name, this maps to `/v1/chat/completions` in OpenClaw (not the legacy completions endpoint).
 
+For caller-owned tool use, select `vllm/grok-4.3`. The current Gateway rejects
+tools for CLI-backed models and xAI Responses API models instead of silently
+discarding them. OpenClaw must execute each returned tool locally and include
+the assistant `tool_calls` plus matching `role: "tool"` result in its next
+request.
+
 ---
 
 ## Notes
 
-- **No authentication** — the gateway binds to `127.0.0.1` (localhost only). Use a reverse proxy or firewall if exposing externally.
+- **No request authentication** — depending on the host configuration, the
+  gateway may bind to `127.0.0.1`, a configured address, or the WSL
+  host-virtual address `10.255.255.254`. Use a firewall, authenticated reverse
+  proxy, or private tunnel before exposing it beyond a trusted local boundary.
 - **Session cache** is in-memory only; it resets when HASHI restarts.
 - **Request timeout** is 300 seconds per request.
 - Each backend adapter is lazily initialized on first request.
