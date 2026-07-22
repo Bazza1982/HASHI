@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **xAI external tool-call passthrough** — the OpenAI-compatible API Gateway now
+  preserves caller-owned `messages`, `tools`, `tool_choice`, and
+  `parallel_tool_calls` for xAI `/chat/completions` models. Synchronous and
+  streaming responses retain structured `tool_calls`; HASHI returns each call
+  to the client without executing the client tool locally.
 - **Browser Bridge extension `hover` (v0.1.2)** — CDP `Input.dispatchMouseEvent` (`mouseMoved`) on the Option D Chrome extension path for hover-triggered UI (e.g. LinkedIn reaction flyouts). Supports `timeout_ms`, `wait_ms`, `x_ratio`, and `y_ratio`; native host treats `hover` as mutating; tool schema, Playwright fallback, and CLI flags wired. See [docs/BROWSER_BRIDGE_HOVER_NOTE.md](docs/BROWSER_BRIDGE_HOVER_NOTE.md) and [docs/OPTION_D_BROWSER_BRIDGE.md](docs/OPTION_D_BROWSER_BRIDGE.md).
 - **Telegram `/steer`** — global mid-task course correction for all backends: when **busy**, immediately stops the active generation (like `/stop`), keeps interim thinking/progress/artefacts and session state, then queues a continuity-preserving mid-task wrapper with the user's new direction; when **idle**, enqueues the direction text only (no steer wrapper, `source=text`). Registered in flex and fixed runtimes and the Telegram bot command menu. See [docs/STEER_COMMAND.md](docs/STEER_COMMAND.md).
 - **Direct Grok OAuth → Claw (coming soon)** — landed HASHI-native xAI device-code OAuth scaffolding that stores tokens under the bridge home and injects `XAI_API_KEY` into Claw without Hermes or `grok-cli`. Live login remains blocked until HASHI receives its own xAI OAuth `client_id`. See [docs/HASHI_XAI_CLAW_OAUTH.md](docs/HASHI_XAI_CLAW_OAUTH.md).
@@ -30,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **API Gateway `/reboot` adoption** — an enabled in-process Gateway is now
+  stopped and recreated after module reload, so Gateway code changes take
+  effect through the standard `/reboot` path without `/api off`, `/api on`, or
+  a cold process restart.
 - **`/steer` and `/stop` false Backend error** — intentional backend kills (e.g. Grok CLI exit code `-9` / SIGKILL) no longer surface as `❌ Backend error` in Telegram. The pipeline marks `user_steer` / `user_stop` before shutdown and suppresses error delivery for that turn while still recording a soft interrupt.
 - **Telegram long-task flood control** — removed idle one-second answer-preview edits, added configurable edit intervals, heartbeat pacing, per-request edit budgets, and stream-display `RetryAfter` shutdown so long-running tasks cannot continuously edit a placeholder by default.
 - **Background job hot-reload and delivery path** — fixed Workbench API background-job start routing, `/reboot` hot reload of Workbench API handlers, command-array handling for Workbench job starts, notification context preservation, and Telegram delivery of agent reports produced from completion/failure events.
@@ -40,6 +49,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
+- Added focused xAI external-tool regression coverage for protocol preservation,
+  fragmented streaming calls, multi-tool ordering, follow-up `role: "tool"`
+  turns, unsupported-model rejection, session-cache isolation, and local
+  non-execution. Live validation used both Claw Code 0.1.0 and the HASHI Claw
+  0.1.3 runtime through HASHI2 and `grok-4.3`: Claw executed one read-only
+  `glob_search`, returned its tool result through the Gateway, and completed
+  each two-iteration loop with the requested success marker.
 - Added Browser Bridge hover coverage: extension source asserts for CDP `actionHover`, and Python path tests that timing/position args reach the extension bridge.
 - Added focused coverage for Grok CLI effort defaults, validation, command construction, Telegram effort buttons, runtime switching, and per-backend effort persistence.
 - Added regression coverage for final-only default delivery, independent `/stream`/`/verbose`/`/think` state, legacy `/preview` compatibility, edit budgets, preference preservation, command binding, and `/reboot` reload ordering.

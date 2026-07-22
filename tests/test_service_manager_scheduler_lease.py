@@ -82,6 +82,9 @@ async def test_restart_scheduler_recreates_workbench_before_scheduler(tmp_path, 
     async def fake_restart_workbench_api():
         events.append("workbench")
 
+    async def fake_restart_api_gateway():
+        events.append("api_gateway")
+
     async def fake_stop_scheduler():
         events.append("stop_scheduler")
         manager.kernel.scheduler_task = None
@@ -101,6 +104,7 @@ async def test_restart_scheduler_recreates_workbench_before_scheduler(tmp_path, 
             await asyncio.Event().wait()
 
     monkeypatch.setattr(manager, "restart_workbench_api", fake_restart_workbench_api)
+    monkeypatch.setattr(manager, "restart_api_gateway", fake_restart_api_gateway)
     monkeypatch.setattr(manager, "stop_scheduler", fake_stop_scheduler)
     monkeypatch.setattr(manager, "restart_delivery_health_watcher", fake_restart_delivery_health_watcher)
     monkeypatch.setattr(manager, "restart_background_jobs", fake_restart_background_jobs)
@@ -108,10 +112,72 @@ async def test_restart_scheduler_recreates_workbench_before_scheduler(tmp_path, 
 
     await manager.restart_scheduler()
 
-    assert events == ["workbench", "stop_scheduler", "scheduler_init", "delivery", "background"]
+    assert events == [
+        "workbench",
+        "api_gateway",
+        "stop_scheduler",
+        "scheduler_init",
+        "delivery",
+        "background",
+    ]
     manager.kernel.scheduler_task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await manager.kernel.scheduler_task
+
+
+@pytest.mark.asyncio
+async def test_restart_api_gateway_recreates_enabled_gateway_from_reloaded_module(tmp_path, monkeypatch):
+    events = []
+
+    class _OldGateway:
+        async def stop(self):
+            events.append("old_stop")
+
+    class _ReloadedGateway:
+        def __init__(self, global_cfg, secrets, workspace_root, default_model=None):
+            events.append(("new_init", global_cfg, secrets, workspace_root, default_model))
+            self.bind_host = "127.0.0.1"
+
+        async def start(self):
+            events.append("new_start")
+
+    global_cfg = SimpleNamespace(api_gateway_port=18803)
+    kernel = SimpleNamespace(
+        paths=SimpleNamespace(
+            bridge_home=tmp_path,
+            workspaces_root=tmp_path / "workspaces",
+        ),
+        global_cfg=global_cfg,
+        secrets={"xai_api_key": "secret"},
+        api_gateway=_OldGateway(),
+        enable_api_gateway=True,
+    )
+    manager = ServiceManager(kernel)
+    monkeypatch.setitem(
+        sys.modules,
+        "orchestrator.api_gateway",
+        SimpleNamespace(APIGatewayServer=_ReloadedGateway),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_load_api_gateway_state",
+        lambda: {"enabled": True, "default_model": "grok-4.3"},
+    )
+
+    await manager.restart_api_gateway()
+
+    assert isinstance(kernel.api_gateway, _ReloadedGateway)
+    assert events == [
+        "old_stop",
+        (
+            "new_init",
+            global_cfg,
+            {"xai_api_key": "secret"},
+            tmp_path / "workspaces",
+            "grok-4.3",
+        ),
+        "new_start",
+    ]
 
 
 def test_scheduler_enterprise_lease_kwargs_disabled_by_default(tmp_path):

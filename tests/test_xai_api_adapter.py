@@ -1,6 +1,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+import json
 
 import pytest
 
@@ -86,6 +87,183 @@ async def test_xai_api_adapter_generate_response_success(tmp_path):
 
     assert response.is_success is True
     assert response.text == "OK"
+
+
+@pytest.mark.asyncio
+async def test_xai_external_tool_response_forwards_protocol_without_execution(tmp_path):
+    cfg = SimpleNamespace(
+        name="test-agent",
+        workspace_dir=tmp_path,
+        system_md=None,
+        model="grok-4.3",
+    )
+    global_cfg = SimpleNamespace(
+        hermes_home=None,
+        xai_api_base_url="https://api.x.ai/v1",
+        xai_use_responses_api=False,
+    )
+    adapter = XaiApiAdapter(cfg, global_cfg, api_key="static")
+    adapter._bearer_token = "static"
+    adapter._base_url = "https://api.x.ai/v1"
+    sentinel_registry = SimpleNamespace(execute=AsyncMock(side_effect=AssertionError("must not execute")))
+    adapter.tool_registry = sentinel_registry
+
+    from adapters.openrouter_api import _APIResult
+
+    tool_calls = [
+        {
+            "id": "call-local-1",
+            "type": "function",
+            "function": {"name": "local_read", "arguments": '{"path":"notes.txt"}'},
+        }
+    ]
+    fake_result = _APIResult(
+        text="",
+        tool_calls=tool_calls,
+        finish_reason="tool_calls",
+        prompt_tokens=11,
+        completion_tokens=3,
+    )
+    messages = [
+        {"role": "user", "content": "read it"},
+        {"role": "assistant", "content": None, "tool_calls": tool_calls},
+        {"role": "tool", "tool_call_id": "call-local-1", "content": "local result"},
+    ]
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "local_read",
+                "parameters": {"type": "object"},
+            },
+        }
+    ]
+
+    with patch.object(adapter, "_resolve_bearer", new=AsyncMock()), patch.object(
+        adapter, "_call_api_once", new=AsyncMock(return_value=fake_result)
+    ) as call_api:
+        response = await adapter.generate_external_tool_response(
+            messages,
+            tools,
+            "req-external",
+            tool_choice="required",
+            parallel_tool_calls=False,
+            request_options={"temperature": 0.2, "n": 1},
+            model="grok-4.3",
+        )
+
+    payload = call_api.await_args.args[0]
+    assert payload["messages"] == messages
+    assert payload["tools"] == tools
+    assert payload["tool_choice"] == "required"
+    assert payload["parallel_tool_calls"] is False
+    assert payload["temperature"] == 0.2
+    assert "n" not in payload
+    assert call_api.await_args.kwargs["api_url"] == "https://api.x.ai/v1/chat/completions"
+    assert response.tool_calls == tool_calls
+    assert response.stop_reason == "tool_calls"
+    assert response.tool_loop_count == 0
+    sentinel_registry.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_xai_stream_reassembles_fragmented_tool_calls_in_index_order(tmp_path):
+    cfg = SimpleNamespace(
+        name="test-agent",
+        workspace_dir=tmp_path,
+        system_md=None,
+        model="grok-4.3",
+    )
+    global_cfg = SimpleNamespace(
+        hermes_home=None,
+        xai_api_base_url="https://api.x.ai/v1",
+        xai_use_responses_api=False,
+    )
+    adapter = XaiApiAdapter(cfg, global_cfg, api_key="static")
+
+    chunks = [
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "content": "working ",
+                        "tool_calls": [
+                            {
+                                "index": 1,
+                                "id": "call-2",
+                                "type": "function",
+                                "function": {"name": "local_", "arguments": '{"b":'},
+                            },
+                            {
+                                "index": 0,
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "local_", "arguments": '{"a":'},
+                            },
+                        ],
+                    },
+                    "finish_reason": None,
+                }
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {"index": 0, "function": {"name": "read", "arguments": "1}"}},
+                            {"index": 1, "function": {"name": "write", "arguments": "2}"}},
+                        ]
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 8, "completion_tokens": 2},
+        },
+    ]
+
+    class _Response:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        async def aiter_lines(self):
+            for chunk in chunks:
+                yield f"data: {json.dumps(chunk)}"
+            yield "data: [DONE]"
+
+    class _StreamContext:
+        async def __aenter__(self):
+            return _Response()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    adapter.client = SimpleNamespace(stream=lambda *_args, **_kwargs: _StreamContext())
+    text_events = []
+
+    async def on_event(event):
+        if event.kind == "text_delta":
+            text_events.append(event.summary)
+
+    result = await adapter._stream_api_once({}, adapter._xai_headers(), on_event)
+
+    assert result.text == "working "
+    assert text_events == ["working "]
+    assert result.finish_reason == "tool_calls"
+    assert result.tool_calls == [
+        {
+            "id": "call-1",
+            "type": "function",
+            "function": {"name": "local_read", "arguments": '{"a":1}'},
+        },
+        {
+            "id": "call-2",
+            "type": "function",
+            "function": {"name": "local_write", "arguments": '{"b":2}'},
+        },
+    ]
 
 
 def test_xai_api_adapter_uses_responses_api_for_grok45(tmp_path):

@@ -4,8 +4,7 @@ import asyncio
 import time
 from typing import Any
 
-import httpx
-
+from adapters.base import BackendResponse, TokenUsage
 from adapters.openrouter_api import OpenRouterAdapter, _APIResult
 from adapters.stream_events import KIND_TEXT_DELTA, KIND_THINKING, StreamEvent
 from adapters.xai_imagine import generate_xai_image, is_imagine_image_model
@@ -17,6 +16,19 @@ from adapters.xai_oauth_credentials import (
 
 _RESPONSES_MODEL_PREFIXES = ("grok-build", "grok-4.5")
 _AUTH_RETRY_STATUSES = {401, 403}
+_EXTERNAL_CHAT_OPTION_FIELDS = (
+    "frequency_penalty",
+    "logit_bias",
+    "max_completion_tokens",
+    "max_tokens",
+    "presence_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "temperature",
+    "top_p",
+    "user",
+)
 
 
 class XaiApiAdapter(OpenRouterAdapter):
@@ -51,11 +63,11 @@ class XaiApiAdapter(OpenRouterAdapter):
         configured = str(getattr(self.global_config, "xai_api_base_url", "") or "").strip()
         return configured.rstrip("/") if configured else DEFAULT_XAI_BASE_URL
 
-    def _use_responses_api(self) -> bool:
+    def _use_responses_api(self, model: str | None = None) -> bool:
         if getattr(self.global_config, "xai_use_responses_api", False):
             return True
-        model = str(self.config.model or "")
-        return any(model.startswith(prefix) for prefix in _RESPONSES_MODEL_PREFIXES)
+        selected_model = str(model or self.config.model or "")
+        return any(selected_model.startswith(prefix) for prefix in _RESPONSES_MODEL_PREFIXES)
 
     async def _resolve_bearer(self, *, force_refresh: bool = False) -> None:
         creds = await asyncio.to_thread(
@@ -104,6 +116,56 @@ class XaiApiAdapter(OpenRouterAdapter):
 
     def _api_url(self) -> str:
         return self._responses_url() if self._use_responses_api() else self._chat_url()
+
+    def supports_external_tool_passthrough(self, model: str | None = None) -> bool:
+        """Return whether this model has a native Chat Completions tool path."""
+        selected_model = str(model or self.config.model or "")
+        return not self._use_responses_api(selected_model) and not is_imagine_image_model(selected_model)
+
+    def _build_external_chat_payload(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        *,
+        tool_choice: Any = None,
+        parallel_tool_calls: bool | None = None,
+        use_streaming: bool = False,
+        request_options: dict[str, Any] | None = None,
+        model: str | None = None,
+    ) -> dict[str, Any]:
+        """Build one caller-owned Chat Completions request without HASHI tools."""
+        selected_model = str(model or self.config.model or "")
+        if not self.supports_external_tool_passthrough(selected_model):
+            raise ValueError(
+                f"model '{selected_model}' does not use xAI /chat/completions"
+            )
+
+        payload: dict[str, Any] = {
+            "model": selected_model,
+            "messages": messages,
+        }
+        if tools:
+            payload["tools"] = tools
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
+        if parallel_tool_calls is not None:
+            payload["parallel_tool_calls"] = parallel_tool_calls
+
+        options = request_options or {}
+        for field in _EXTERNAL_CHAT_OPTION_FIELDS:
+            if field in options:
+                payload[field] = options[field]
+
+        if use_streaming:
+            payload["stream"] = True
+            stream_options = options.get("stream_options")
+            if isinstance(stream_options, dict):
+                stream_options = dict(stream_options)
+                stream_options.setdefault("include_usage", True)
+            else:
+                stream_options = {"include_usage": True}
+            payload["stream_options"] = stream_options
+        return payload
 
     def _build_payload(self, messages: list[dict], use_streaming: bool = False,
                        tool_tiers: list[str] | None = ...) -> dict:
@@ -202,12 +264,14 @@ class XaiApiAdapter(OpenRouterAdapter):
         result.reasoning_content = reasoning_content
         return result
 
-    async def _call_api_once(self, payload, headers, on_stream_event) -> _APIResult:
-        response = await self.client.post(self._api_url(), json=payload, headers=headers)
+    async def _call_api_once(self, payload, headers, on_stream_event, *, api_url=None) -> _APIResult:
+        request_url = api_url or self._api_url()
+        response = await self.client.post(request_url, json=payload, headers=headers)
         if response.status_code in _AUTH_RETRY_STATUSES:
             await self._resolve_bearer(force_refresh=True)
             headers = self._xai_headers()
-            response = await self.client.post(self._api_url(), json=payload, headers=headers)
+            retry_url = self._chat_url() if api_url is not None else self._api_url()
+            response = await self.client.post(retry_url, json=payload, headers=headers)
         response.raise_for_status()
         data = response.json()
         result = self._parse_api_body(data)
@@ -221,11 +285,13 @@ class XaiApiAdapter(OpenRouterAdapter):
 
         return result
 
-    async def _stream_api_once(self, payload, headers, on_stream_event) -> _APIResult:
+    async def _stream_api_once(self, payload, headers, on_stream_event, *, api_url=None) -> _APIResult:
         import json
 
-        if self._use_responses_api():
+        if api_url is None and self._use_responses_api():
             return await self._call_api_once(payload, headers, on_stream_event)
+
+        request_url = api_url or self._api_url()
 
         text_chunks: list[str] = []
         reasoning_chunks: list[str] = []
@@ -264,18 +330,16 @@ class XaiApiAdapter(OpenRouterAdapter):
                 if reasoning_delta:
                     reasoning_chunks.append(reasoning_delta)
                     if on_stream_event:
-                        asyncio.create_task(
-                            on_stream_event(
-                                StreamEvent(kind=KIND_THINKING, summary=reasoning_delta[:400])
-                            )
+                        await on_stream_event(
+                            StreamEvent(kind=KIND_THINKING, summary=reasoning_delta[:400])
                         )
 
                 content = delta.get("content", "")
                 if content:
                     text_chunks.append(content)
                     if on_stream_event:
-                        asyncio.create_task(
-                            on_stream_event(StreamEvent(kind=KIND_TEXT_DELTA, summary=content))
+                        await on_stream_event(
+                            StreamEvent(kind=KIND_TEXT_DELTA, summary=content)
                         )
 
                 for tc_delta in (delta.get("tool_calls") or []):
@@ -296,13 +360,14 @@ class XaiApiAdapter(OpenRouterAdapter):
                         acc["function"]["arguments"] += fn_delta["arguments"]
 
         async with self.client.stream(
-            "POST", self._api_url(), json=payload, headers=headers
+            "POST", request_url, json=payload, headers=headers
         ) as response:
             if response.status_code in _AUTH_RETRY_STATUSES:
                 await self._resolve_bearer(force_refresh=True)
+                retry_url = self._chat_url() if api_url is not None else self._api_url()
                 async with self.client.stream(
                     "POST",
-                    self._api_url(),
+                    retry_url,
                     json=payload,
                     headers=self._xai_headers(),
                 ) as retry_response:
@@ -314,7 +379,7 @@ class XaiApiAdapter(OpenRouterAdapter):
 
         full_text = "".join(text_chunks)
         reasoning_content = "".join(reasoning_chunks)
-        tool_calls = list(tool_calls_acc.values()) if tool_calls_acc else None
+        tool_calls = [tool_calls_acc[idx] for idx in sorted(tool_calls_acc)] if tool_calls_acc else None
         comp_details = stream_usage.get("completion_tokens_details") or {}
         result = _APIResult(
             text=full_text,
@@ -326,6 +391,80 @@ class XaiApiAdapter(OpenRouterAdapter):
         )
         result.reasoning_content = reasoning_content
         return result
+
+    async def generate_external_tool_response(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        request_id: str,
+        *,
+        tool_choice: Any = None,
+        parallel_tool_calls: bool | None = None,
+        use_streaming: bool = False,
+        request_options: dict[str, Any] | None = None,
+        on_stream_event=None,
+        model: str | None = None,
+    ) -> BackendResponse:
+        """Forward one external tool-call turn without executing any tool locally."""
+        started = time.perf_counter()
+        self._ensure_client()
+
+        try:
+            await self._resolve_bearer()
+            payload = self._build_external_chat_payload(
+                messages,
+                tools,
+                tool_choice=tool_choice,
+                parallel_tool_calls=parallel_tool_calls,
+                use_streaming=use_streaming,
+                request_options=request_options,
+                model=model,
+            )
+            self._touch_activity()
+            if use_streaming:
+                result = await self._stream_api_once(
+                    payload,
+                    self._xai_headers(),
+                    on_stream_event,
+                    api_url=self._chat_url(),
+                )
+            else:
+                result = await self._call_api_once(
+                    payload,
+                    self._xai_headers(),
+                    on_stream_event,
+                    api_url=self._chat_url(),
+                )
+
+            duration_ms = round((time.perf_counter() - started) * 1000, 2)
+            usage = TokenUsage(
+                input_tokens=result.prompt_tokens,
+                output_tokens=result.completion_tokens,
+                thinking_tokens=result.thinking_tokens,
+            ) if (result.prompt_tokens or result.completion_tokens or result.thinking_tokens) else None
+            stop_reason = result.finish_reason or ("tool_calls" if result.tool_calls else "stop")
+            if result.tool_calls and stop_reason == "stop":
+                stop_reason = "tool_calls"
+            return BackendResponse(
+                text=result.text,
+                duration_ms=duration_ms,
+                is_success=True,
+                tool_calls=result.tool_calls,
+                stop_reason=stop_reason,
+                usage=usage,
+                tool_call_count=len(result.tool_calls or []),
+                tool_loop_count=0,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            duration_ms = round((time.perf_counter() - started) * 1000, 2)
+            return BackendResponse(
+                text="",
+                duration_ms=duration_ms,
+                error=str(exc),
+                is_success=False,
+            )
 
     async def _generate_imagine_response(self, prompt: str, started: float, on_stream_event=None):
         from adapters.base import BackendResponse
