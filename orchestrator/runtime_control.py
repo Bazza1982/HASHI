@@ -13,7 +13,28 @@ _STEER_CMD_RE = re.compile(r"^/steer(?:@\w+)?\s*(.*)$", re.IGNORECASE | re.DOTAL
 
 # Intentional user-driven interrupts that kill the active backend process.
 # Exit codes such as -9 (SIGKILL) are expected and must not surface as Backend errors.
-_USER_INTERRUPT_REASONS = frozenset({"user_stop", "user_steer"})
+_USER_INTERRUPT_REASONS = frozenset({"user_stop", "user_steer", "user_focus"})
+
+_FOCUS_DIRECTION = (
+    "Pause before taking any further action. This is not a new task. Apply this reminder "
+    "once to the current task:\n"
+    "1. Treat the latest user request as the complete source of authority.\n"
+    "2. Identify exactly what outcome the user requested and the boundaries they stated.\n"
+    "3. Stop any work that is not clearly necessary to produce that outcome.\n"
+    "4. Do not treat earlier plans, recommendations, memories, open items, or model "
+    "preferences as user authorization.\n"
+    "5. Preserve all in-scope progress, files, artefacts, tool results, and session state. "
+    "Do not reset, revert, delete, or clean up anything unless the user requested it.\n"
+    "6. If unrequested work has already started, stop extending it. Mention it briefly; "
+    "do not repair or remove it without permission.\n"
+    "7. Continue with the smallest sufficient set of actions. Use only proportionate "
+    "lightweight verification.\n"
+    "8. Do not create extra branches, documents, refactors, audits, deployments, "
+    "synchronisations, or follow-up improvements unless explicitly requested or "
+    "technically unavoidable.\n"
+    "9. If additional authority is genuinely required, ask the user before expanding scope.\n"
+    "10. Once the requested outcome is complete, report concisely and stop."
+)
 
 
 def mark_user_interrupt(runtime: Any, reason: str) -> None:
@@ -97,6 +118,22 @@ def build_steer_prompt(*, direction: str, original_prompt: str = "", backend: st
         "Additional direction / requirement from the user:\n"
         f"{direction}"
         f"{original_block}"
+    )
+
+
+def build_focus_prompt(*, original_prompt: str, backend: str = "") -> str:
+    """Compose a one-off scope correction around the active or most recent task."""
+    original = str(original_prompt or "").strip()
+    backend_note = f"\nActive backend/engine at interrupt: {backend}" if backend else ""
+    clipped = original if len(original) <= 12000 else (original[:12000] + "\n…[original task truncated]")
+    return (
+        "[HASHI /focus — one-off scope correction]\n"
+        "The user invoked /focus."
+        f"{backend_note}\n\n"
+        f"{_FOCUS_DIRECTION}\n\n"
+        "--- Original user task (preserve progress; do not restart from zero) ---\n"
+        f"{clipped}\n"
+        "--- End original user task ---"
     )
 
 
@@ -250,7 +287,13 @@ def _agent_is_busy(runtime: Any) -> bool:
     return False
 
 
-async def cmd_steer(runtime: Any, update: Any, context: Any) -> None:
+async def cmd_steer(
+    runtime: Any,
+    update: Any,
+    context: Any,
+    *,
+    command_name: str = "steer",
+) -> None:
     """Course-correct mid-task, or send a plain new request when idle.
 
     Busy: stop immediately, keep progress/artefacts, enqueue the steer wrapper.
@@ -259,7 +302,8 @@ async def cmd_steer(runtime: Any, update: Any, context: Any) -> None:
     if not _user_is_authorized(runtime, update):
         return
 
-    direction = extract_steer_direction(update, context)
+    focus_mode = command_name == "focus"
+    direction = _FOCUS_DIRECTION if focus_mode else extract_steer_direction(update, context)
     if not direction:
         await _reply(
             runtime,
@@ -278,10 +322,10 @@ async def cmd_steer(runtime: Any, update: Any, context: Any) -> None:
         or ""
     )
     busy = _agent_is_busy(runtime)
-    original_prompt = _capture_original_prompt(runtime) if busy else ""
+    original_prompt = _capture_original_prompt(runtime) if (busy or focus_mode) else ""
 
     runtime.logger.warning(
-        f"Manual steer requested for agent {runtime.name} "
+        f"Manual {command_name} requested for agent {runtime.name} "
         f"(busy={busy}, queue_size={runtime.queue.qsize()}, backend={active}, "
         f"direction_len={len(direction)}, had_original={bool(original_prompt)})"
     )
@@ -295,7 +339,7 @@ async def cmd_steer(runtime: Any, update: Any, context: Any) -> None:
         await _reply(runtime, update, "Steer aborted: could not resolve chat id.")
         return
 
-    if not busy:
+    if not busy and not focus_mode:
         # Idle: plain new direction — no mid-task wrapper, no interrupt path.
         if not hasattr(runtime, "enqueue_request"):
             await _reply(runtime, update, "Steer aborted: runtime has no enqueue_request path.")
@@ -314,14 +358,42 @@ async def cmd_steer(runtime: Any, update: Any, context: Any) -> None:
         )
         return
 
+    if not busy:
+        if not original_prompt:
+            await _reply(
+                runtime,
+                update,
+                "🎯 Agent is already idle and no recent task was found. Nothing was queued.",
+            )
+            return
+        request_id = await runtime.enqueue_request(
+            int(chat_id),
+            build_focus_prompt(original_prompt=original_prompt, backend=active),
+            "focus",
+            "Focus: narrow the most recent task to user intent",
+        )
+        await _reply(
+            runtime,
+            update,
+            "🎯 Focus applied to the most recent task.\n"
+            "No active backend was interrupted; queued a one-off scope correction"
+            f"{f' ({request_id})' if request_id else ''}.",
+        )
+        return
+
     # Mark before kill so exit -9 / SIGKILL is not reported as ❌ Backend error.
-    mark_user_interrupt(runtime, "user_steer")
+    interrupt_reason = "user_focus" if focus_mode else "user_steer"
+    mark_user_interrupt(runtime, interrupt_reason)
     await _shutdown_active_backend(runtime)
     await _notify_interrupted(
         runtime,
-        reason="user_steer",
-        error="/steer received while right brain was running",
-        summary=f"Steer: {direction[:120]}",
+        reason=interrupt_reason,
+        error=f"/{command_name} received while right brain was running",
+        summary=(
+            "Focus: narrow current task to user intent"
+            if focus_mode
+            else f"Steer: {direction[:120]}"
+        ),
     )
     dropped = await _clear_request_queue(runtime)
 
@@ -333,31 +405,55 @@ async def cmd_steer(runtime: Any, update: Any, context: Any) -> None:
         except Exception as exc:
             runtime.logger.warning("Steer re-init of active backend failed: %s", exc)
 
-    steer_prompt = build_steer_prompt(
-        direction=direction,
-        original_prompt=original_prompt,
-        backend=active,
+    continuation_prompt = (
+        build_focus_prompt(original_prompt=original_prompt, backend=active)
+        if focus_mode
+        else build_steer_prompt(
+            direction=direction,
+            original_prompt=original_prompt,
+            backend=active,
+        )
     )
-    summary = f"Steer: {direction[:80]}"
+    summary = (
+        "Focus: narrow current task to user intent"
+        if focus_mode
+        else f"Steer: {direction[:80]}"
+    )
     if not hasattr(runtime, "enqueue_request"):
         await _reply(runtime, update, "Steer aborted: runtime has no enqueue_request path.")
         return
     request_id = await runtime.enqueue_request(
         int(chat_id),
-        steer_prompt,
-        "steer",
+        continuation_prompt,
+        "focus" if focus_mode else "steer",
         summary,
     )
 
-    await _reply(
-        runtime,
-        update,
-        f"🧭 Steered.\n"
-        f"Interrupted active work; cleared {dropped} queued message(s).\n"
-        f"Kept interim progress, thinking, and workspace artefacts.\n"
-        f"Queued continuation with your new direction"
-        f"{f' (request {request_id})' if request_id else ''}.",
-    )
+    if focus_mode:
+        await _reply(
+            runtime,
+            update,
+            "🎯 Focus applied.\n"
+            f"Interrupted active work; cleared {dropped} queued message(s).\n"
+            "Preserved existing progress and queued a one-off continuation restricted "
+            "to the latest user-requested scope"
+            f"{f' (request {request_id})' if request_id else ''}.",
+        )
+    else:
+        await _reply(
+            runtime,
+            update,
+            f"🧭 Steered.\n"
+            f"Interrupted active work; cleared {dropped} queued message(s).\n"
+            f"Kept interim progress, thinking, and workspace artefacts.\n"
+            f"Queued continuation with your new direction"
+            f"{f' (request {request_id})' if request_id else ''}.",
+        )
+
+
+async def cmd_focus(runtime: Any, update: Any, context: Any) -> None:
+    """Apply a predefined one-off scope correction using the /steer control path."""
+    await cmd_steer(runtime, update, context, command_name="focus")
 
 
 async def cmd_retry(runtime: Any, update: Any, context: Any) -> None:
