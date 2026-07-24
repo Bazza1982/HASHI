@@ -16,24 +16,34 @@ _STEER_CMD_RE = re.compile(r"^/steer(?:@\w+)?\s*(.*)$", re.IGNORECASE | re.DOTAL
 _USER_INTERRUPT_REASONS = frozenset({"user_stop", "user_steer", "user_focus"})
 
 _FOCUS_DIRECTION = (
-    "Pause before taking any further action. This is not a new task. Apply this reminder "
-    "once to the current task:\n"
-    "1. Treat the latest user request as the complete source of authority.\n"
-    "2. Identify exactly what outcome the user requested and the boundaries they stated.\n"
-    "3. Stop any work that is not clearly necessary to produce that outcome.\n"
-    "4. Do not treat earlier plans, recommendations, memories, open items, or model "
+    "Continue working on the original user task. /focus is a scope correction, not a "
+    "stop, pause, cancellation, completion signal, or request for a status-only reply. "
+    "Apply this reminder once and keep working:\n"
+    "1. Treat the original user task shown below as the complete source of authority.\n"
+    "2. Preserve its exact requested outcome and stated boundaries. Do not reinterpret "
+    "/focus as a replacement task or permission to reduce the requested outcome.\n"
+    "3. Resume immediately from the progress already made. Take the next concrete, "
+    "in-scope action; do not merely explain a plan, summarize progress, or wrap up unless "
+    "the original task itself requested that.\n"
+    "4. Discontinue only actions that are outside the original scope. If the previous "
+    "approach was too broad, choose a narrower in-scope path and continue the task.\n"
+    "5. Do not treat earlier plans, recommendations, memories, open items, or model "
     "preferences as user authorization.\n"
-    "5. Preserve all in-scope progress, files, artefacts, tool results, and session state. "
+    "6. Preserve all in-scope progress, files, artefacts, tool results, and session state. "
     "Do not reset, revert, delete, or clean up anything unless the user requested it.\n"
-    "6. If unrequested work has already started, stop extending it. Mention it briefly; "
+    "7. If unrequested work has already started, do not extend it. Mention it briefly; "
     "do not repair or remove it without permission.\n"
-    "7. Continue with the smallest sufficient set of actions. Use only proportionate "
-    "lightweight verification.\n"
-    "8. Do not create extra branches, documents, refactors, audits, deployments, "
+    "8. Continue autonomously through the smallest sufficient set of actions and "
+    "proportionate verification until the original requested outcome is genuinely complete.\n"
+    "9. Do not create extra branches, documents, refactors, audits, deployments, "
     "synchronisations, or follow-up improvements unless explicitly requested or "
     "technically unavoidable.\n"
-    "9. If additional authority is genuinely required, ask the user before expanding scope.\n"
-    "10. Once the requested outcome is complete, report concisely and stop."
+    "10. Do not stop merely because the task is difficult, slow, uncertain, or partially "
+    "complete. Stop only when the original outcome is complete or a genuine blocker "
+    "requires new user authority or an external state change.\n"
+    "11. If additional authority is genuinely required, ask the user before expanding scope. "
+    "Otherwise, continue working without asking for confirmation.\n"
+    "12. Once the original requested outcome is complete, report it concisely."
 )
 
 
@@ -121,17 +131,36 @@ def build_steer_prompt(*, direction: str, original_prompt: str = "", backend: st
     )
 
 
+def _unwrap_focus_original(prompt: str) -> str:
+    """Recover the original task when /focus is invoked more than once."""
+    text = str(prompt or "").strip()
+    marker_start = "--- Original user task"
+    marker_end = "\n--- End original user task ---"
+    start = text.rfind(marker_start)
+    if start < 0:
+        return text
+    content_start = text.find("\n", start)
+    if content_start < 0:
+        return text
+    end = text.find(marker_end, content_start)
+    if end < 0:
+        return text
+    return text[content_start + 1 : end].strip()
+
+
 def build_focus_prompt(*, original_prompt: str, backend: str = "") -> str:
     """Compose a one-off scope correction around the active or most recent task."""
-    original = str(original_prompt or "").strip()
+    original = _unwrap_focus_original(original_prompt)
     backend_note = f"\nActive backend/engine at interrupt: {backend}" if backend else ""
     clipped = original if len(original) <= 12000 else (original[:12000] + "\n…[original task truncated]")
     return (
         "[HASHI /focus — one-off scope correction]\n"
-        "The user invoked /focus."
+        "The user invoked /focus to narrow execution without stopping the original task. "
+        "This is not a new task and not a request to pause, cancel, wrap up, or only report "
+        "status. Continue the original task after applying the scope correction."
         f"{backend_note}\n\n"
         f"{_FOCUS_DIRECTION}\n\n"
-        "--- Original user task (preserve progress; do not restart from zero) ---\n"
+        "--- Original user task (continue this task; preserve progress; do not restart) ---\n"
         f"{clipped}\n"
         "--- End original user task ---"
     )
@@ -169,6 +198,30 @@ async def _clear_request_queue(runtime: Any) -> int:
             dropped += 1
         except asyncio.QueueEmpty:
             break
+    return dropped
+
+
+async def _recall_request_queue(runtime: Any, count: int | None = None) -> int:
+    """Remove all or the newest N waiting requests while preserving FIFO order."""
+    if count is None:
+        return await _clear_request_queue(runtime)
+
+    queue = getattr(runtime, "queue", None)
+    if queue is None or count <= 0:
+        return 0
+
+    waiting: list[Any] = []
+    while not queue.empty():
+        try:
+            waiting.append(queue.get_nowait())
+            queue.task_done()
+        except asyncio.QueueEmpty:
+            break
+
+    dropped = min(count, len(waiting))
+    keep_count = len(waiting) - dropped
+    for item in waiting[:keep_count]:
+        queue.put_nowait(item)
     return dropped
 
 
@@ -376,7 +429,8 @@ async def cmd_steer(
             runtime,
             update,
             "🎯 Focus applied to the most recent task.\n"
-            "No active backend was interrupted; queued a one-off scope correction"
+            "Queued a one-off continuation that must keep working on the original outcome "
+            "within its requested scope"
             f"{f' ({request_id})' if request_id else ''}.",
         )
         return
@@ -434,9 +488,10 @@ async def cmd_steer(
             runtime,
             update,
             "🎯 Focus applied.\n"
-            f"Interrupted active work; cleared {dropped} queued message(s).\n"
-            "Preserved existing progress and queued a one-off continuation restricted "
-            "to the latest user-requested scope"
+            f"Re-focused the active task; cleared {dropped} queued message(s).\n"
+            "Preserved existing progress and queued an immediate continuation restricted "
+            "to the original user-requested scope. The task must continue until its "
+            "requested outcome is complete or genuinely blocked"
             f"{f' (request {request_id})' if request_id else ''}.",
         )
     else:
@@ -454,6 +509,61 @@ async def cmd_steer(
 async def cmd_focus(runtime: Any, update: Any, context: Any) -> None:
     """Apply a predefined one-off scope correction using the /steer control path."""
     await cmd_steer(runtime, update, context, command_name="focus")
+
+
+async def cmd_recall(runtime: Any, update: Any, context: Any) -> None:
+    """Remove waiting requests without interrupting the active task."""
+    if not _user_is_authorized(runtime, update):
+        return
+
+    args = [str(arg).strip() for arg in (getattr(context, "args", None) or []) if str(arg).strip()]
+    count: int | None = None
+    if args:
+        if len(args) != 1 or not re.fullmatch(r"[1-9]\d*", args[0]):
+            await _reply(
+                runtime,
+                update,
+                "Usage: /recall [count]\n"
+                "/recall — remove every waiting request\n"
+                "/recall 1 — remove the newest waiting request\n"
+                "/recall 2 — remove the newest two waiting requests\n\n"
+                "The count must be a positive whole number. Nothing was recalled.",
+            )
+            return
+        try:
+            count = int(args[0])
+        except ValueError:
+            # Python limits extremely long decimal-to-int conversions. A syntactically
+            # valid value beyond that limit necessarily exceeds any realizable queue,
+            # so capping it to the current queue size preserves `/recall n` semantics.
+            queue = getattr(runtime, "queue", None)
+            count = max(1, queue.qsize() if queue is not None else 0)
+
+    dropped = await _recall_request_queue(runtime, count)
+    runtime.logger.warning(
+        "Manual recall requested for agent %s (requested=%s, dropped=%s, active_task_continues=%s)",
+        runtime.name,
+        count if count is not None else "all",
+        dropped,
+        bool(getattr(runtime, "current_request_meta", None) or getattr(runtime, "is_generating", False)),
+    )
+
+    if dropped:
+        scope = f"all {dropped}" if count is None else f"the newest {dropped}"
+        await _reply(
+            runtime,
+            update,
+            f"↩️ Recalled {scope} queued request(s).\n"
+            "The current active task was not interrupted and will continue.",
+        )
+        return
+
+    await _reply(
+        runtime,
+        update,
+        "↩️ No queued requests to recall.\n"
+        "The current active task was not interrupted and will continue if one is running.",
+    )
 
 
 async def cmd_retry(runtime: Any, update: Any, context: Any) -> None:

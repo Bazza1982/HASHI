@@ -22,18 +22,38 @@ def _update(chat_id: int = 42) -> SimpleNamespace:
 
 def test_focus_is_registered_and_prompt_enforces_user_scope():
     assert any(b.name == "focus" and b.method_name == "cmd_focus" for b in COMMAND_BINDINGS)
-    assert any(b.name == "focus" for b in BOT_COMMAND_BINDINGS)
+    focus_binding = next(b for b in BOT_COMMAND_BINDINGS if b.name == "focus")
+    assert focus_binding.description == "Narrow scope and continue the original task"
 
     prompt = runtime_control.build_focus_prompt(
         original_prompt="Import the specified update into Aptenra HASHI",
         backend="codex-cli",
     )
     assert "[HASHI /focus" in prompt
-    assert "latest user request as the complete source of authority" in prompt
+    assert "scope correction, not a stop, pause, cancellation" in prompt
+    assert "original user task shown below as the complete source of authority" in prompt
+    assert "Take the next concrete, in-scope action" in prompt
+    assert "until the original requested outcome is genuinely complete" in prompt
+    assert "Do not stop merely because the task is difficult" in prompt
+    assert "Otherwise, continue working without asking for confirmation" in prompt
     assert "memories, open items" in prompt
-    assert "smallest sufficient set of actions" in prompt
     assert "Import the specified update" in prompt
     assert "codex-cli" in prompt
+
+
+def test_repeated_focus_keeps_one_clean_copy_of_the_original_task():
+    first = runtime_control.build_focus_prompt(
+        original_prompt="Implement only the requested parser fix",
+        backend="codex-cli",
+    )
+    second = runtime_control.build_focus_prompt(
+        original_prompt=first,
+        backend="codex-cli",
+    )
+
+    assert second.count("[HASHI /focus") == 1
+    assert second.count("Implement only the requested parser fix") == 1
+    assert second.count("--- Original user task") == 1
 
 
 @pytest.mark.asyncio
@@ -87,6 +107,7 @@ async def test_cmd_focus_busy_interrupts_preserves_context_and_uses_focus_source
     assert "Do not create extra branches" in prompt
     assert "Focus:" in summary
     assert replies and "Focus applied" in replies[0]
+    assert "task must continue until its requested outcome is complete" in replies[0]
     assert runtime._user_interrupt["reason"] == "user_focus"
     assert runtime_control.consume_user_interrupt(runtime, "req-old") == "user_focus"
 
@@ -128,6 +149,7 @@ async def test_cmd_focus_idle_uses_most_recent_task_without_interrupting_backend
     assert enqueued[0][2] == "focus"
     assert "Review this pull request only" in enqueued[0][1]
     assert replies and "most recent task" in replies[0]
+    assert "must keep working on the original outcome" in replies[0]
     assert getattr(runtime, "_user_interrupt", None) is None
 
 

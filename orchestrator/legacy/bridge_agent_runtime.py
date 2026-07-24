@@ -4604,6 +4604,14 @@ class BridgeAgentRuntime:
             return
         await runtime_control.cmd_focus(self, update, context)
 
+    async def cmd_recall(self, update, context):
+        """Fixed-runtime /recall: clear waiting requests without stopping active work."""
+        from orchestrator import runtime_control
+
+        if update.effective_user.id != self.global_config.authorized_id:
+            return
+        await runtime_control.cmd_recall(self, update, context)
+
     def _load_last_text_from_transcript(self, role: str) -> str | None:
         """Read the last message of the given role from conversation_log.jsonl."""
         try:
@@ -5050,7 +5058,8 @@ class BridgeAgentRuntime:
             BotCommand("clear", "Clear media/history"),
             BotCommand("stop", "Stop execution"),
             BotCommand("steer", "Stop and continue with new direction"),
-            BotCommand("focus", "Pause and narrow work to your request"),
+            BotCommand("focus", "Narrow scope and continue the original task"),
+            BotCommand("recall", "Clear queued requests [newest count]"),
             BotCommand("reboot", "Hot restart agents"),
             BotCommand("terminate", "Shut down this agent"),
             BotCommand("retry", "Resend response or rerun prompt"),
@@ -5112,6 +5121,7 @@ class BridgeAgentRuntime:
         self.app.add_handler(CommandHandler("stop", self.cmd_stop))
         self.app.add_handler(CommandHandler("steer", self.cmd_steer))
         self.app.add_handler(CommandHandler("focus", self.cmd_focus))
+        self.app.add_handler(CommandHandler("recall", self.cmd_recall))
         self.app.add_handler(CommandHandler("terminate", self.cmd_terminate))
         self.app.add_handler(CommandHandler("reboot", self.cmd_reboot))
         self.app.add_handler(CommandHandler("retry", self.cmd_retry))
