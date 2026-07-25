@@ -548,7 +548,7 @@ class BridgeAgentRuntime:
         )
         if not primer:
             return request
-        return f"{primer}\n\n--- NEW REQUEST ---\n{request}"
+        return f"{primer}\n\n--- CURRENT USER REQUEST — AUTHORITATIVE ---\n{request}"
 
     def _consume_session_primer(self, item: QueuedRequest) -> str:
         if item.source.startswith("scheduler") or item.source.startswith("bridge:"):

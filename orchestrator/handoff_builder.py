@@ -19,6 +19,8 @@ class HandoffBuilder:
         "Ready. Send the bridge-managed context",
         "No `NEW REQUEST` was included.",
         "Still no `NEW REQUEST`",
+        "No `CURRENT USER REQUEST` was included.",
+        "Still no `CURRENT USER REQUEST`",
         "Understood. I’ll treat `HANDOFF SUMMARY`",
         "Understood. I’ll use that material only as background",
         "Session instructions in effect:",
@@ -238,7 +240,7 @@ class HandoffBuilder:
 
         lines.extend(
             [
-                "--- NEW REQUEST ---",
+                "--- CURRENT USER REQUEST — AUTHORITATIVE ---",
                 "Acknowledge that you have restored recent context from bridge history and are ready for the next instruction.",
             ]
         )

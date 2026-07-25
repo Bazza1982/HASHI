@@ -552,6 +552,8 @@ HASHI agents respond to both natural language and structured commands:
 | `/reboot [min\|max\|#]` | Hot restart agents |
 | `/restart` | Hard restart this HASHI instance through WatchTower supervision |
 | `/status [full]` | Show agent status, backend info |
+| `/memory [status\|on\|pause\|plus on\|plus off]` | Control normal memory injection and the independent Memory+ continuity layer |
+| `/notepad [today\|carryover\|history\|find <query>]` | Inspect the compact Memory+ work card and archived-day pointers |
 | `/privacy [0-5]` | Show privacy details or quickly select a privacy level; Level 1 is the default |
 | `/handoff` | Restore continuity from recent transcript |
 | `/skill` | Browse and run skills (inline keyboard) |
@@ -566,10 +568,10 @@ between `/stop`, `/steer`, `/focus`, and `/recall`, see
 
 | Command | Description |
 |---------|-------------|
-| `/mode [fixed\|flex\|wrapper]` | Switch between fixed CLI session, flex multi-backend mode, and wrapper mode |
-| `/backend [engine]` | Switch backend (flex mode only) |
-| `/model` | View/change active model |
-| `/core` | View/change wrapper-mode functional core backend/model |
+| `/mode [fixed\|flex\|wrapper\|audit\|dual-brain]` | Switch execution mode; `/mode memory+` is a compatibility alias that only enables continuity |
+| `/backend [engine]` | Switch backend in Flex; other modes first offer an explicit switch-to-Flex confirmation |
+| `/model` | View/change active model, followed by optional effort selection when supported |
+| `/core` | View/change the functional core backend/model used by wrapper or audit mode |
 | `/wrap` | View/change wrapper-mode persona wrapper backend/model/context |
 | `/wrapper` | View/edit wrapper-mode persona/style slots |
 | `/anatta [status\|off\|shadow\|on]` | Inspect or switch Anatta live self-assembly mode for the current agent |
@@ -592,6 +594,11 @@ model that does not support it safely resets effort to `medium`.
 For Grok CLI, `/effort` offers `low`, `medium`, and `high`. HASHI defaults
 Grok sessions to `medium`, passes the selection to the CLI explicitly, and
 persists the chosen level for that backend across agent reloads.
+
+The `/backend` and `/model` menus finish as one configuration flow. Models with
+selectable effort levels show an optional effort step; keeping the current value
+leaves it unchanged. Models without selectable effort skip that step and show
+`n/a` in the saved configuration summary.
 
 #### Toggles & Settings
 
@@ -967,9 +974,30 @@ Every agent request includes assembled context:
 --- RECENT CONTEXT ---
 {recent conversation turns}
 
---- NEW REQUEST ---
+--- CURRENT USER REQUEST — AUTHORITATIVE ---
 {user message}
 ```
+
+#### Memory+ Work Continuity
+
+Memory+ is an optional compact continuity layer, independent from execution
+mode and backend:
+
+```text
+/memory plus on
+/memory plus off
+```
+
+It keeps a bounded today card, a short cross-day carryover, and archive
+pointers. It does not inject old prompts or full daily history. Session-based
+CLI backends receive the card once per session and refresh it only when changed;
+stateless API backends receive the compact card plus at most two recent
+exchanges on each request.
+
+`/mode memory+` remains a compatibility alias that turns continuity on without
+changing the current `flex`, `fixed`, `wrapper`, `audit`, or `dual-brain` mode.
+See [Memory+ v2 — Compact Work Continuity](docs/MEMORY_PLUS_V2.md) for storage,
+rollover, migration, and mode ownership details.
 
 ---
 

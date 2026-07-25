@@ -104,8 +104,14 @@ from orchestrator import runtime_observers
 from orchestrator.memory_plus_mode import (
     append_memory_plus_manual_note,
     clear_memory_plus_notepad,
+    compact_memory_plus,
+    extract_memory_plus_update_details,
+    get_memory_plus_status,
+    list_memory_plus_history,
     read_memory_plus_notepad,
     replace_memory_plus_notepad,
+    search_memory_plus_history,
+    set_memory_plus_enabled,
 )
 from orchestrator.usecomputer_mode import (
     build_usecomputer_task_prompt,
@@ -847,12 +853,14 @@ class FlexibleAgentRuntime:
         user_text: str,
         *,
         is_bridge_request: bool,
+        metadata: dict[str, Any] | None = None,
     ) -> list[tuple[str, str]]:
         return await runtime_observers.build_pre_turn_context_sections(
             self,
             item,
             user_text,
             is_bridge_request=is_bridge_request,
+            metadata=metadata,
         )
 
     def _schedule_post_turn_observers(
@@ -1124,7 +1132,7 @@ class FlexibleAgentRuntime:
         )
         if not primer:
             return request
-        return f"{primer}\n\n--- NEW REQUEST ---\n{request}"
+        return f"{primer}\n\n--- CURRENT USER REQUEST — AUTHORITATIVE ---\n{request}"
 
     def _consume_session_primer(self, item: QueuedRequest) -> str:
         if item.source.startswith("scheduler") or item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:"):
@@ -4724,39 +4732,13 @@ class FlexibleAgentRuntime:
     async def cmd_backend(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
-        if self.backend_manager.agent_mode == "fixed":
+        current_mode = self.backend_manager.agent_mode
+        if current_mode != "flex":
             await self._reply_text(
                 update,
-                "Backend switching is disabled in **fixed** mode.\nUse `/mode flex` to re-enable.",
-                parse_mode="Markdown",
-            )
-            return
-        if self.backend_manager.agent_mode == "memory+":
-            await self._reply_text(
-                update,
-                "Backend switching is disabled in **memory+** mode because it behaves like fixed mode with a daily notepad.\nUse `/mode flex` for normal `/backend` switching.",
-                parse_mode="Markdown",
-            )
-            return
-        if self.backend_manager.agent_mode == "wrapper":
-            await self._reply_text(
-                update,
-                "Backend switching is managed by `/core` and `/wrap` in **wrapper** mode.\nUse `/mode flex` for normal `/backend` switching.",
-                parse_mode="Markdown",
-            )
-            return
-        if self.backend_manager.agent_mode == "audit":
-            await self._reply_text(
-                update,
-                "Backend switching is managed by `/core` and `/audit` in **audit** mode.\nUse `/mode flex` for normal `/backend` switching.",
-                parse_mode="Markdown",
-            )
-            return
-        if self.backend_manager.agent_mode == "dual-brain":
-            await self._reply_text(
-                update,
-                "Backend switching is managed by `/brain` in **dual-brain** mode.\nUse `/mode flex` for normal `/backend` switching.",
-                parse_mode="Markdown",
+                self._backend_flex_confirmation_text(current_mode),
+                parse_mode="HTML",
+                reply_markup=self._backend_flex_confirmation_keyboard(current_mode),
             )
             return
 
@@ -4806,7 +4788,11 @@ class FlexibleAgentRuntime:
                 target_model=requested_model,
                 with_context=with_context,
             )
-            await self._reply_text(update, message)
+            if not success:
+                await self._reply_text(update, message)
+                return
+            text, reply_markup = self._configuration_followup("backend")
+            await self._reply_text(update, text, parse_mode="HTML", reply_markup=reply_markup)
             return
 
         await self._reply_text(
@@ -5144,6 +5130,10 @@ class FlexibleAgentRuntime:
                 self.backend_manager.current_backend.effort = normalized_effort
                 if backend_cfg is not None:
                     backend_cfg["effort"] = normalized_effort
+            else:
+                self.backend_manager.current_backend.effort = None
+                if backend_cfg is not None:
+                    backend_cfg.pop("effort", None)
         self.backend_manager.persist_state(active_model=normalized)
 
     def _set_active_effort(self, requested: str):
@@ -5160,6 +5150,44 @@ class FlexibleAgentRuntime:
         if backend_cfg is not None:
             backend_cfg["effort"] = normalized
         self.backend_manager.persist_state()
+
+    def _backend_flex_confirmation_text(self, current_mode: str) -> str:
+        consequences = {
+            "fixed": "The persistent CLI-session behavior will stop. Full context injection resumes.",
+            "memory+": "Legacy Memory+ mode will move to Flex while Memory+ continuity remains enabled.",
+            "wrapper": "The core-and-wrapper response flow will stop, but its configuration is kept.",
+            "audit": "The audit follow-up flow will stop, but its configuration is kept.",
+            "dual-brain": "The left/right-brain flow will stop, but its configuration is kept.",
+        }
+        consequence = consequences.get(
+            current_mode,
+            "The current specialized mode will stop, but its saved configuration is kept.",
+        )
+        continuity = get_memory_plus_status(self.workspace_dir)
+        facts = [f"<b>Backend</b> · <code>{html.escape(self.config.active_backend)}</code>"]
+        if continuity["enabled"] or current_mode == "memory+":
+            facts.append("<b>Memory+</b> · remains <code>ON</code> after switching")
+        return setting_card(
+            "🧠",
+            "Switch backend",
+            current=f"<code>{html.escape(current_mode)}</code>",
+            facts=facts,
+            consequence=f"Backend switching requires Flex mode. {consequence}",
+            action="Switch to Flex and continue to the backend menu, or keep the current mode.",
+        )
+
+    def _backend_flex_confirmation_keyboard(self, current_mode: str) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("Switch to Flex and choose backend", callback_data="backend_mode_confirm")],
+                [
+                    InlineKeyboardButton(
+                        f"← Keep {current_mode}",
+                        callback_data=f"backend_mode_cancel:{current_mode}",
+                    )
+                ],
+            ]
+        )
 
     def _backend_keyboard(self) -> InlineKeyboardMarkup:
         current = self.config.active_backend
@@ -5186,13 +5214,66 @@ class FlexibleAgentRuntime:
             buttons.append([InlineKeyboardButton(label, callback_data=f"model:{model}")])
         return InlineKeyboardMarkup(buttons)
 
-    def _effort_keyboard(self, current_effort: Optional[str] = None) -> InlineKeyboardMarkup:
+    def _effort_keyboard(
+        self,
+        current_effort: Optional[str] = None,
+        *,
+        source: str | None = None,
+    ) -> InlineKeyboardMarkup:
         active = current_effort or self._get_current_effort()
         buttons = []
         for effort in self._get_available_efforts():
             label = selected_label(effort, effort == active)
-            buttons.append([InlineKeyboardButton(label, callback_data=f"effort:{effort}")])
+            callback_data = f"effort:{source}:{effort}" if source else f"effort:{effort}"
+            buttons.append([InlineKeyboardButton(label, callback_data=callback_data)])
+        if source in {"backend", "model"}:
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        f"Keep {active or 'default'}",
+                        callback_data=f"effort:{source}:keep",
+                    )
+                ]
+            )
+            back_callback = "backend_menu" if source == "backend" else "model_menu"
+            buttons.append([InlineKeyboardButton(BACK_LABEL, callback_data=back_callback)])
         return InlineKeyboardMarkup(buttons)
+
+    def _build_effort_followup_text(self) -> str:
+        available = self._get_available_efforts()
+        current = self._get_current_effort() or (available[0] if available else "n/a")
+        return setting_card(
+            "🎛️",
+            "Choose effort",
+            current=f"<code>{html.escape(current)}</code>",
+            facts=[
+                f"<b>Backend</b> · <code>{html.escape(self.config.active_backend)}</code>",
+                f"<b>Model</b> · <code>{html.escape(self.get_current_model())}</code>",
+            ],
+            consequence="This optional step controls reasoning depth. If no selection is made, the current value remains active.",
+            action="Choose an effort level, or keep the current value.",
+        )
+
+    def _build_model_configuration_summary(self) -> str:
+        effort = self._get_current_effort() if self._get_available_efforts() else None
+        return (
+            f"{card_title('✅', 'Model configuration')}\n\n"
+            f"<b>Mode</b> · <code>{html.escape(self.backend_manager.agent_mode)}</code>\n"
+            f"<b>Backend</b> · <code>{html.escape(self.config.active_backend)}</code>\n"
+            f"<b>Model</b> · <code>{html.escape(self.get_current_model())}</code>\n"
+            f"<b>Effort</b> · <code>{html.escape(effort or 'n/a')}</code>\n\n"
+            "Configuration saved and active immediately."
+        )
+
+    def _configuration_followup(self, source: str) -> tuple[str, InlineKeyboardMarkup | None]:
+        available = self._get_available_efforts()
+        if not available:
+            return self._build_model_configuration_summary(), None
+        current = self._get_current_effort()
+        if not current:
+            self._set_active_effort(available[0])
+            current = self._get_current_effort() or available[0]
+        return self._build_effort_followup_text(), self._effort_keyboard(current, source=source)
 
     def _backend_model_keyboard(
         self,
@@ -5277,7 +5358,14 @@ class FlexibleAgentRuntime:
             return False, f"Failed to switch backend to: {target_engine}"
         self._sync_workzone_to_backend_config()
         backend = self.backend_manager.current_backend
-        if backend and getattr(backend.capabilities, "supports_sessions", False):
+        supports_sessions = bool(
+            backend and getattr(getattr(backend, "capabilities", None), "supports_sessions", False)
+        )
+        if backend and hasattr(backend, "set_session_mode"):
+            # Every backend switch is a one-shot/Flex-style transition. Fixed
+            # mode never switches backend in place; it must be left first.
+            backend.set_session_mode(False)
+        if backend and supports_sessions:
             await backend.handle_new_session()
 
         if with_context:
@@ -5342,8 +5430,8 @@ class FlexibleAgentRuntime:
                 return
 
             self._set_backend_model(self.config.active_backend, requested)
-
-            await self._reply_text(update, f"Model switched to: {requested}")
+            text, reply_markup = self._configuration_followup("model")
+            await self._reply_text(update, text, parse_mode="HTML", reply_markup=reply_markup)
             return
 
         available = self._get_available_models()
@@ -6620,14 +6708,57 @@ class FlexibleAgentRuntime:
             return
         data = query.data
         try:
-            if data.startswith("model:"):
+            if data == "backend_mode_confirm":
+                if self.backend_manager.agent_mode == "memory+":
+                    set_memory_plus_enabled(self.workspace_dir, True)
+                runtime_mode.activate_flex_mode(self)
+                await query.edit_message_text(
+                    self._build_backend_menu_text(),
+                    parse_mode="HTML",
+                    reply_markup=self._backend_keyboard(),
+                )
+            elif data.startswith("backend_mode_cancel:"):
+                expected_mode = data.split(":", 1)[1]
+                current_mode = self.backend_manager.agent_mode
+                await query.edit_message_text(
+                    setting_card(
+                        "🧠",
+                        "Backend unchanged",
+                        current=f"<code>{html.escape(current_mode)}</code>",
+                        facts=[f"<b>Backend</b> · <code>{html.escape(self.config.active_backend)}</code>"],
+                        consequence="No mode, backend, model, or saved configuration was changed.",
+                        action=(
+                            "The mode changed elsewhere before this button was used."
+                            if current_mode != expected_mode
+                            else "The current mode remains active."
+                        ),
+                    ),
+                    parse_mode="HTML",
+                )
+            elif data == "model_menu":
+                current_model = self.get_current_model()
+                await query.edit_message_text(
+                    setting_card(
+                        "🧠",
+                        "Hashi model",
+                        current=f"<code>{html.escape(current_model)}</code>",
+                        facts=[f"<b>Backend</b> · <code>{html.escape(self.config.active_backend)}</code>"],
+                        consequence="The selection applies immediately to the next request and persists.",
+                        action="Choose a model.",
+                    ),
+                    parse_mode="HTML",
+                    reply_markup=self._model_keyboard(current_model),
+                )
+            elif data.startswith("model:"):
                 model = data.split(":", 1)[1]
                 available = self._get_available_models()
                 if not available or model in available:
                     self._set_backend_model(self.config.active_backend, model)
+                    text, reply_markup = self._configuration_followup("model")
                     await query.edit_message_text(
-                        f"Model switched to: {model}",
-                        reply_markup=self._model_keyboard(model),
+                        text,
+                        parse_mode="HTML",
+                        reply_markup=reply_markup,
                     )
             elif data == "backend_menu":
                 await query.edit_message_text(
@@ -6663,18 +6794,37 @@ class FlexibleAgentRuntime:
                 if not success and "busy" in message.lower():
                     await query.answer(message, show_alert=True)
                     return
-                await query.edit_message_text(
-                    message,
-                    reply_markup=self._backend_keyboard() if success else self._backend_model_keyboard(target_engine, with_context, model),
-                )
+                if success:
+                    text, reply_markup = self._configuration_followup("backend")
+                    await query.edit_message_text(text, parse_mode="HTML", reply_markup=reply_markup)
+                else:
+                    await query.edit_message_text(
+                        message,
+                        reply_markup=self._backend_model_keyboard(target_engine, with_context, model),
+                    )
             elif data.startswith("effort:"):
-                requested = data.split(":", 1)[1]
+                parts = data.split(":")
+                source = parts[1] if len(parts) == 3 else None
+                requested = parts[2] if len(parts) == 3 else parts[1]
+                if source in {"backend", "model"} and requested == "keep":
+                    await query.edit_message_text(
+                        self._build_model_configuration_summary(),
+                        parse_mode="HTML",
+                    )
+                    await query.answer("Current effort kept")
+                    return
                 if requested in self._get_available_efforts():
                     self._set_active_effort(requested)
-                    await query.edit_message_text(
-                        f"Effort switched to: {requested}",
-                        reply_markup=self._effort_keyboard(requested),
-                    )
+                    if source in {"backend", "model"}:
+                        await query.edit_message_text(
+                            self._build_model_configuration_summary(),
+                            parse_mode="HTML",
+                        )
+                    else:
+                        await query.edit_message_text(
+                            f"Effort switched to: {requested}",
+                            reply_markup=self._effort_keyboard(requested),
+                        )
         except Exception as e:
             self.error_logger.error(f"callback_model error: {e}", exc_info=True)
             await query.answer(f"Error: {e}", show_alert=True)
@@ -6720,11 +6870,46 @@ class FlexibleAgentRuntime:
             return
         args = [str(arg) for arg in (context.args or [])]
         action = (args[0].strip().lower() if args else "show")
-        if action in {"show", "status", "view"}:
+        if action in {"show", "status", "view", "today"}:
             text, markup = self._notepad_view_payload()
             await self._reply_text(
                 update,
                 text,
+                parse_mode="HTML",
+                reply_markup=markup,
+            )
+            return
+
+        if action == "carryover":
+            text, markup = self._notepad_carryover_payload()
+            await self._reply_text(update, text, parse_mode="HTML", reply_markup=markup)
+            return
+
+        if action == "history":
+            text, markup = self._notepad_history_payload()
+            await self._reply_text(update, text, parse_mode="HTML", reply_markup=markup)
+            return
+
+        if action == "find":
+            query_text = self._notepad_command_tail(update, context, action)
+            if not query_text:
+                await self._reply_text(
+                    update,
+                    self._notepad_help_text("find"),
+                    parse_mode="HTML",
+                    reply_markup=self._notepad_back_keyboard(),
+                )
+                return
+            text, markup = self._notepad_find_payload(query_text)
+            await self._reply_text(update, text, parse_mode="HTML", reply_markup=markup)
+            return
+
+        if action == "compact":
+            compact_memory_plus(self.workspace_dir)
+            text, markup = self._notepad_view_payload()
+            await self._reply_text(
+                update,
+                "✅ Memory+ card compacted and de-duplicated.\n\n" + text,
                 parse_mode="HTML",
                 reply_markup=markup,
             )
@@ -6789,12 +6974,20 @@ class FlexibleAgentRuntime:
         return InlineKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton(REFRESH_LABEL, callback_data="npad:refresh"),
-                    InlineKeyboardButton("Add note", callback_data="npad:help_edit"),
+                    InlineKeyboardButton("Today", callback_data="npad:refresh"),
+                    InlineKeyboardButton("Carryover", callback_data="npad:carryover"),
                 ],
                 [
-                    InlineKeyboardButton("Replace body", callback_data="npad:help_replace"),
-                    InlineKeyboardButton("Clear", callback_data="npad:clear_confirm"),
+                    InlineKeyboardButton("History", callback_data="npad:history"),
+                    InlineKeyboardButton("Find", callback_data="npad:help_find"),
+                ],
+                [
+                    InlineKeyboardButton("Add note", callback_data="npad:help_edit"),
+                    InlineKeyboardButton("Compact", callback_data="npad:compact"),
+                ],
+                [
+                    InlineKeyboardButton("Replace today", callback_data="npad:help_replace"),
+                    InlineKeyboardButton("Clear today", callback_data="npad:clear_confirm"),
                 ],
             ]
         )
@@ -6812,25 +7005,81 @@ class FlexibleAgentRuntime:
 
     def _notepad_view_payload(self) -> tuple[str, InlineKeyboardMarkup]:
         view = read_memory_plus_notepad(self.workspace_dir)
+        status = get_memory_plus_status(self.workspace_dir)
         body = view.body.strip()
         if not body:
             body = "(empty)"
-        max_body_chars = 3000
+        max_body_chars = 2400
         truncated = len(body) > max_body_chars
         if truncated:
-            body = body[-max_body_chars:]
+            body = body[:max_body_chars].rstrip() + "\n[clipped]"
         header = [
-            card_title("📝", "Memory+ notepad"),
+            card_title("📝", "Memory+ today"),
             "",
-            f"<b>Current</b> · <code>{'EMPTY' if view.is_empty else 'HAS NOTES'}</code>",
+            f"<b>Continuity</b> · <code>{'ON' if status['enabled'] else 'OFF'}</code>",
+            f"<b>Current</b> · <code>{'EMPTY' if view.is_empty else 'ACTIVE'}</code>",
             f"<b>Agent</b> · <code>{html.escape(self.name)}</code>",
             f"<b>Date</b> · <code>{html.escape(view.date or 'unknown')}</code>",
+            f"<b>Size</b> · <code>{view.today_chars}</code> chars",
+            f"<b>Open items</b> · <code>{view.open_items_count}</code>",
+            f"<b>History</b> · <code>{view.history_count}</code> days",
             "",
-            "Changes apply immediately to today's persistent continuity layer.",
+            "This compact card is read-only background, not a queue of instructions.",
         ]
         if truncated:
-            header.append(f"• Showing last <code>{max_body_chars}</code> chars")
+            header.append(f"• Showing first <code>{max_body_chars}</code> chars")
         return "\n".join(header) + "\n\n<pre>" + html.escape(body) + "</pre>", self._notepad_keyboard()
+
+    def _notepad_carryover_payload(self) -> tuple[str, InlineKeyboardMarkup]:
+        view = read_memory_plus_notepad(self.workspace_dir)
+        body = view.carryover.strip() or "(none)"
+        return (
+            f"{card_title('🌙', 'Memory+ carryover')}\n\n"
+            f"<b>Agent</b> · <code>{html.escape(self.name)}</code>\n"
+            "Only a high-level previous-work passage is carried across midnight.\n\n"
+            f"<pre>{html.escape(body)}</pre>",
+            self._notepad_keyboard(),
+        )
+
+    def _notepad_history_payload(self) -> tuple[str, InlineKeyboardMarkup]:
+        rows = list_memory_plus_history(self.workspace_dir, limit=10)
+        lines = [
+            card_title("🗂️", "Memory+ history"),
+            "",
+            "History is indexed by date. Full archives are loaded only when requested.",
+            "",
+        ]
+        if not rows:
+            lines.append("(no archived days)")
+        for row in rows:
+            summary = " · ".join(str(item) for item in (row.get("summary") or [])[:2])
+            lines.append(
+                f"• <code>{html.escape(str(row.get('date') or 'unknown'))}</code>"
+                + (f" · {html.escape(summary)}" if summary else "")
+            )
+            if row.get("archive"):
+                lines.append(f"  <code>{html.escape(str(row['archive']))}</code>")
+        return "\n".join(lines), self._notepad_keyboard()
+
+    def _notepad_find_payload(self, query_text: str) -> tuple[str, InlineKeyboardMarkup]:
+        rows = search_memory_plus_history(self.workspace_dir, query_text)
+        lines = [
+            card_title("🔎", "Find continuity"),
+            "",
+            f"<b>Query</b> · <code>{html.escape(query_text)}</code>",
+            "",
+        ]
+        if not rows:
+            lines.append("No matching archived continuity was found.")
+        for row in rows:
+            lines.extend(
+                [
+                    f"<b>{html.escape(row['date'])}</b> · {html.escape(row['excerpt'])}",
+                    f"<code>{html.escape(row['path'])}</code>",
+                    "",
+                ]
+            )
+        return "\n".join(lines).rstrip(), self._notepad_keyboard()
 
     def _notepad_help_text(self, action: str) -> str:
         if action == "edit":
@@ -6847,11 +7096,22 @@ class FlexibleAgentRuntime:
                 "<code>/notepad replace - Manual: Dad prefers jasmine rice and avoids eggplant.</code>\n\n"
                 "This replaces today's continuity body, so use it when the current notepad is wrong or noisy."
             )
+        if action == "find":
+            return (
+                "<b>Find archived continuity</b>\n\n"
+                "Send a message like:\n"
+                "<code>/notepad find backend effort menu</code>\n\n"
+                "Only matching daily checkpoints are returned; full history is not injected."
+            )
         return (
             "<b>Memory+ Notepad controls</b>\n\n"
-            "• <code>/notepad</code> — open this panel\n"
+            "• <code>/notepad today</code> — current compact work card\n"
+            "• <code>/notepad carryover</code> — previous-day handover\n"
+            "• <code>/notepad history</code> — archived-day index\n"
+            "• <code>/notepad find &lt;text&gt;</code> — search archived checkpoints\n"
             "• <code>/notepad edit &lt;text&gt;</code> — append a manual note\n"
             "• <code>/notepad replace &lt;text&gt;</code> — replace today's body\n"
+            "• <code>/notepad compact</code> — de-duplicate and enforce limits\n"
             "• <code>/notepad clear</code> — clear today's body"
         )
 
@@ -6875,6 +7135,44 @@ class FlexibleAgentRuntime:
         if action == "refresh":
             text, markup = self._notepad_view_payload()
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+        elif action == "carryover":
+            text, markup = self._notepad_carryover_payload()
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+        elif action == "history":
+            text, markup = self._notepad_history_payload()
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+        elif action == "compact":
+            compact_memory_plus(self.workspace_dir)
+            text, markup = self._notepad_view_payload()
+            await query.edit_message_text(
+                "✅ Compacted.\n\n" + text,
+                parse_mode="HTML",
+                reply_markup=markup,
+            )
+        elif action == "memory_on":
+            set_memory_plus_enabled(self.workspace_dir, True)
+            self.reload_post_turn_observers()
+            text, markup = self._notepad_view_payload()
+            await query.edit_message_text(
+                "✅ Memory+ continuity enabled.\n\n" + text,
+                parse_mode="HTML",
+                reply_markup=markup,
+            )
+        elif action == "memory_off":
+            set_memory_plus_enabled(self.workspace_dir, False)
+            self.reload_post_turn_observers()
+            text, markup = self._notepad_view_payload()
+            await query.edit_message_text(
+                "⏸️ Memory+ continuity paused; all files were preserved.\n\n" + text,
+                parse_mode="HTML",
+                reply_markup=markup,
+            )
+        elif action == "help_find":
+            await query.edit_message_text(
+                self._notepad_help_text("find"),
+                parse_mode="HTML",
+                reply_markup=self._notepad_back_keyboard(),
+            )
         elif action == "help_edit":
             await query.edit_message_text(
                 self._notepad_help_text("edit"),
@@ -8079,9 +8377,10 @@ class FlexibleAgentRuntime:
                 self._mark_success()
                 self._record_habit_outcome(item, success=True, response_text=response.text)
                 visible_text, wrapper_result = await self._apply_wrapper_to_visible_text(item, display_text or response.text)
+                safe_core_raw = extract_memory_plus_update_details(response.text).visible_text
                 self._append_core_transcript(
                     item,
-                    core_raw=response.text,
+                    core_raw=safe_core_raw,
                     visible_text=visible_text,
                     completion_path="background",
                     wrapper_result=wrapper_result,
@@ -8095,7 +8394,7 @@ class FlexibleAgentRuntime:
                         "error": None,
                         "source": item.source,
                         "summary": item.summary,
-                        **self._wrapper_listener_fields(response.text, visible_text, wrapper_result),
+                        **self._wrapper_listener_fields(safe_core_raw, visible_text, wrapper_result),
                     },
                 )
                 is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
@@ -8214,7 +8513,7 @@ class FlexibleAgentRuntime:
                 self.project_chat_logger.log_exchange(item.prompt, visible_text, item.source)
                 _print_final_response(self.name, visible_text)
                 total_s = (datetime.now() - datetime.fromisoformat(item.created_at)).total_seconds()
-                await self._send_wrapper_verbose_trace(item, response.text, visible_text, wrapper_result)
+                await self._send_wrapper_verbose_trace(item, safe_core_raw, visible_text, wrapper_result)
                 send_elapsed_s, chunk_count = await self.send_long_message(
                     chat_id=item.chat_id,
                     text=visible_text,
@@ -8224,7 +8523,7 @@ class FlexibleAgentRuntime:
                 await self._send_voice_reply(item.chat_id, visible_text, item.request_id)
                 self._schedule_audit_followup(
                     item,
-                    core_raw=response.text,
+                    core_raw=safe_core_raw,
                     visible_text=visible_text,
                     response=response,
                     audit_collector=getattr(item, "_audit_collector", None),

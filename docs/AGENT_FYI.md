@@ -14,9 +14,11 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
   5. Configure credentials in `secrets.json`. Use `WORKBENCH_ONLY_NO_TOKEN` if a Telegram token is not yet available.
   6. Ask the user to restart.
 
-## Agent Types
+## Agent Types and Runtime Modes
 - Flex agent: one bot, one workspace, switchable backend via `/backend`.
 - Fixed agent: one bot, one backend, one workspace.
+- Runtime execution modes are `fixed`, `flex`, `wrapper`, `audit`, and
+  `dual-brain`. Memory+ is an independent continuity setting, not a sixth mode.
 
 ## Important Commands
 - `/help`: command list for this agent.
@@ -36,7 +38,15 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - `/browser [status|examples|1-4 task]`: run an internet task with a selected route: HASHI headless browser, CLI-native browsing, Brave search, or the logged-in HASHI browser extension.
 - `/exp <task>`: consult the context-specific EXP guidebooks under `exp/` before running a task.
 - `/skill`: browse built-in and custom skills.
-- `/model`: inspect or switch model where supported.
+- `/mode [fixed|flex|wrapper|audit|dual-brain]`: inspect or switch execution
+  mode. `/mode memory+` is a compatibility alias that enables continuity
+  without changing the current mode.
+- `/memory [status|on|pause|saved on|saved off|plus on|plus off]`: control
+  normal memory injection and Memory+ continuity independently.
+- `/notepad [today|carryover|history|find <query>|edit <text>|replace <text>|compact|clear]`:
+  inspect or maintain the bounded Memory+ work card and archive index.
+- `/model`: inspect or switch model where supported, then optionally choose or
+  keep reasoning effort.
 - `/superloop`: recording-first long-running workflow orchestration.
 - `/verbose [on|off]`: toggle richer long-task status display.
 - `/think [on|off]`: toggle thinking trace display — periodic italic messages showing model reasoning (~60s intervals). Independent from `/verbose`.
@@ -54,10 +64,15 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
   - `/reboot help` — list modes and show all agents with numbers.
 - `/terminate`: shut down this agent.
 
-## Flex-Only Commands
-- `/backend`: open backend picker, then model picker, then commit the switch.
+## Backend and Model Configuration
+- `/backend`: in Flex, open the backend picker, then model picker, then commit
+  the switch. In another execution mode, first ask for confirmation to move to
+  Flex; saved specialized-mode configuration and Memory+ are preserved.
 - backend `+`: same flow, but rebuild handoff context after model confirmation.
 - `/model`: inspect or switch the model for the current active backend only.
+- Backend and model changes continue to an optional effort picker when the
+  selected model supports effort. Keeping the current value leaves it unchanged;
+  models without selectable effort finish with `n/a`.
 - `/effort [level]`: available when the active backend supports effort levels. Grok CLI offers `low`, `medium`, and `high` with a HASHI default of `medium`. Codex choices follow the active model: `gpt-5.6-sol` includes `max`; `gpt-5.6-terra` and `gpt-5.6-luna` expose `low`, `medium`, `high`, and `xhigh`.
 - Grok CLI `0.2.93` offers `grok-4.5` as the default model and
   `grok-composer-2.5-fast` as an alternate. An agent explicitly configured for
@@ -84,12 +99,21 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - Default OpenRouter model is `anthropic/claude-sonnet-4.6`.
 
 ## Core Memory Model
-- Backend CLI/API sessions are treated as stateless by bridge.
-- Bridge owns continuity and context injection.
-- `/new` starts a fresh CLI session and re-primes the agent with this FYI catalog.
+- Fixed mode uses real persistent sessions and incremental prompts with
+  session-capable Codex, Claude, and Grok CLI backends. Other modes invoke those
+  backends as one-shot turns; API, Gemini CLI, and Claw CLI paths remain
+  stateless.
+- Bridge owns normal context assembly. Optional Memory+ adds a canonical bounded
+  today card, short carryover, and archive pointers across every execution mode.
+- `/new` starts a fresh CLI session and re-primes the agent with this FYI
+  catalog. If Memory+ is enabled, its compact card is preserved and reloaded.
 - `/fresh` starts a clean API context. It clears recent turns, preserves saved memories, and disables saved-memory auto-injection until `/memory saved on` or `/memory on` restores it.
 - `/handoff` restores recent continuity from bridge transcript, not CLI resume state.
 - `/fyi` explicitly refreshes awareness of this bridge environment and can carry a follow-up prompt.
+- Memory+ never injects archived prompts or full answers. `/notepad history` and
+  `/notepad find <query>` expose bounded archive pointers only when requested.
+- Full Memory+ behavior is documented in
+  [Memory+ v2 — Compact Work Continuity](MEMORY_PLUS_V2.md).
 - `/bg` is an explicit manual background-work entry point. If a `/bg` task needs long shell/process execution, start it through the managed background job path, report the job id and notification/event behavior, and use `/bg status`, `/bg tail`, or `/bg cancel` for follow-up.
 - Terminal success/failure notifications can enqueue a `background-job-event` back to the responsible agent. The agent's job is to make the terminal outcome useful to the user: summarize the result, continue the workflow if that is clearly the next responsible step, ask for confirmation when intent is ambiguous, or report failure with the relevant tail excerpt.
 - Progress updates during a running job are not yet a built-in manager heartbeat. If a task needs periodic progress messages, the task command must emit them or call an approved notification surface intentionally; normal terminal completion/failure routing remains managed by BackgroundJobManager.

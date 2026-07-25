@@ -33,6 +33,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Memory+ v2 compact continuity** — Memory+ is now independent from execution
+  mode and works across Flex, Fixed, Wrapper, Audit, Dual Brain, CLI sessions,
+  and stateless API backends. It stores a bounded structured today card,
+  carries a short unresolved-work handover across midnight, indexes full daily
+  archives for on-demand lookup, removes legacy prompts from injected context,
+  and gives every assembled turn one authoritative current-request boundary.
+- **Intent-preserving backend/model menus** — `/backend` in a non-Flex mode now
+  offers an inline confirmation to switch to Flex and continues directly to the
+  backend picker. Backend and model selection now continue to an optional
+  model-effort step when supported, with the current/default effort preserved
+  when no new selection is made.
 - **Public/private command boundary** — moved HASHI2's OLL Browser Gateway
   control out of the public runtime and into its local private-command module.
   Private commands now receive their handler and picker metadata only from the
