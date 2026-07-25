@@ -5,6 +5,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from orchestrator.command_ui import BACK_LABEL, REFRESH_LABEL, card_title, selected_label
 from orchestrator.api_gateway_config import (
     available_api_models,
     load_api_gateway_config,
@@ -65,11 +66,11 @@ def _keyboard(runtime: Any) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("🟢 On" if running else "Turn On", callback_data="api:on"),
-                InlineKeyboardButton("🔴 Off" if not running else "Turn Off", callback_data="api:off"),
+                InlineKeyboardButton(selected_label("On", running), callback_data="api:on"),
+                InlineKeyboardButton(selected_label("Off", not running), callback_data="api:off"),
             ],
-            [InlineKeyboardButton("Default Model", callback_data="api:model")],
-            [InlineKeyboardButton("Refresh", callback_data="api:status")],
+            [InlineKeyboardButton("Choose default model", callback_data="api:model")],
+            [InlineKeyboardButton(REFRESH_LABEL, callback_data="api:status")],
         ]
     )
 
@@ -78,10 +79,20 @@ def _model_keyboard(runtime: Any) -> InlineKeyboardMarkup:
     current = load_api_gateway_config(runtime.global_config)["default_model"]
     rows: list[list[InlineKeyboardButton]] = []
     for model in available_api_models():
-        label = f">> {model}" if model == current else model
+        label = selected_label(model, model == current)
         rows.append([InlineKeyboardButton(label, callback_data=f"api:model:{model}")])
-    rows.append([InlineKeyboardButton("Back", callback_data="api:status")])
+    rows.append([InlineKeyboardButton(BACK_LABEL, callback_data="api:status")])
     return InlineKeyboardMarkup(rows)
+
+
+def _model_text(runtime: Any) -> str:
+    current = load_api_gateway_config(runtime.global_config)["default_model"]
+    return (
+        f"{card_title('🔌', 'API default model')}\n\n"
+        f"<b>Current</b> · <code>{html.escape(current)}</code>\n\n"
+        "This persistent default applies when an API request does not provide its own model.\n\n"
+        "Choose a model:"
+    )
 
 
 def _status_text(runtime: Any, *, prefix: str = "") -> str:
@@ -96,15 +107,17 @@ def _status_text(runtime: Any, *, prefix: str = "") -> str:
         lines.append("")
     lines.extend(
         [
-            "<b>Hashi API Gateway</b>",
-            f"Status: <b>{'ON' if running else 'OFF'}</b>",
-            f"Configured switch: <code>{'on' if configured else 'off'}</code>",
-            f"Address: <code>{html.escape(address)}</code>",
-            f"Models: <code>{html.escape(address)}/v1/models</code>",
-            f"Chat: <code>{html.escape(address)}/v1/chat/completions</code>",
-            f"Images: <code>{html.escape(address)}/v1/images/generations</code>",
-            f"Videos: <code>{html.escape(address)}/v1/videos/generations</code>",
-            f"Default API model: <code>{html.escape(cfg['default_model'])}</code>",
+            card_title("🔌", "Hashi API gateway"),
+            "",
+            f"<b>STATUS</b> · {'🟢' if running else '⚪'} <b>{'ON' if running else 'OFF'}</b>",
+            f"<b>Starts after reboot</b> · <code>{'yes' if configured else 'no'}</code>",
+            f"<b>Default model</b> · <code>{html.escape(cfg['default_model'])}</code>",
+            "",
+            f"<b>Address</b> · <code>{html.escape(address)}</code>",
+            f"Models · <code>{html.escape(address)}/v1/models</code>",
+            f"Chat · <code>{html.escape(address)}/v1/chat/completions</code>",
+            f"Images · <code>{html.escape(address)}/v1/images/generations</code>",
+            f"Videos · <code>{html.escape(address)}/v1/videos/generations</code>",
             "",
             "API callers may override this default by sending a request-level <code>model</code>.",
         ]
@@ -131,7 +144,7 @@ async def api_command(runtime: Any, update: Any, context: Any) -> None:
         return
 
     if sub == "on":
-        cfg = save_api_gateway_config(runtime.global_config, enabled=True, updated_by=_updated_by(update))
+        save_api_gateway_config(runtime.global_config, enabled=True, updated_by=_updated_by(update))
         manager = _service_manager(runtime)
         ok, message = (False, "Runtime service manager is unavailable.")
         if manager is not None:
@@ -167,7 +180,7 @@ async def api_command(runtime: Any, update: Any, context: Any) -> None:
             save_api_gateway_config(runtime.global_config, default_model=model, updated_by=_updated_by(update))
             await _send(runtime, update, _status_text(runtime, prefix=f"Default API model set to: {model}"), reply_markup=_keyboard(runtime))
             return
-        await _send(runtime, update, "Select default API model:", reply_markup=_model_keyboard(runtime))
+        await _send(runtime, update, _model_text(runtime), reply_markup=_model_keyboard(runtime))
         return
 
     if sub not in {"status", "show"}:
@@ -200,7 +213,11 @@ async def api_callback(runtime: Any, update: Any, context: Any) -> None:
                 ok, message = await manager.set_api_gateway_enabled(False)
             await query.edit_message_text(_status_text(runtime, prefix=message if ok else f"Failed: {message}"), parse_mode="HTML", reply_markup=_keyboard(runtime))
         elif data == "api:model":
-            await query.edit_message_text("Select default API model:", reply_markup=_model_keyboard(runtime))
+            await query.edit_message_text(
+                _model_text(runtime),
+                parse_mode="HTML",
+                reply_markup=_model_keyboard(runtime),
+            )
         elif data.startswith("api:model:"):
             model = data.split(":", 2)[2]
             normalized = normalize_api_model(model)

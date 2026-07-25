@@ -8,6 +8,7 @@ from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from orchestrator.command_ui import BACK_LABEL, card_title
 from orchestrator.job_ownership import ownership_mismatch_label
 
 CALLBACK_DATA_LIMIT = 64
@@ -106,11 +107,13 @@ def _build_jobs_with_buttons(runtime, agent_name: str, skill_manager, filter_age
     except Exception:
         return "Could not read tasks.json.", None
 
-    if filter_agent:
-        title = f"<b>📋 Jobs — {filter_agent}</b>"
-    else:
-        title = "<b>📋 Jobs — all agents</b>"
-    lines = [title]
+    scope = filter_agent or "all agents"
+    lines = [
+        card_title("📋", "Scheduled jobs"),
+        "",
+        f"<b>Current scope</b> · <code>{scope}</code>",
+        "<b>Changes</b> · immediate and persistent",
+    ]
     buttons: list = []
 
     all_jobs: list[tuple[str, dict]] = []
@@ -179,7 +182,7 @@ def _build_jobs_with_buttons(runtime, agent_name: str, skill_manager, filter_age
         jid = job["id"]
         enabled = job.get("enabled", False)
         toggle_mode = "off" if enabled else "on"
-        toggle_label = "ON" if enabled else "OFF"
+        toggle_label = "Turn off" if enabled else "Turn on"
         icon = "⏱" if kind == "heartbeat" else "📅"
         short_id = jid[:22]
         run_token = mint_callback_token(runtime, "skilljob_action", {"kind": kind, "task_id": jid, "action": "run"}, prefix="j")
@@ -203,10 +206,10 @@ def _build_jobs_with_buttons(runtime, agent_name: str, skill_manager, filter_age
         )
         buttons.append([InlineKeyboardButton(f"{icon} {short_id}", callback_data="noop")])
         buttons.append([
-            InlineKeyboardButton("▶ Run", callback_data=f"skilljob:{kind}:key:{run_token}:run"),
+            InlineKeyboardButton("Run now", callback_data=f"skilljob:{kind}:key:{run_token}:run"),
             InlineKeyboardButton(toggle_label, callback_data=f"skilljob:{kind}:key:{toggle_token}:toggle"),
-            InlineKeyboardButton("📤 Transfer", callback_data=f"skilljob:{kind}:key:{transfer_token}:transfer"),
-            InlineKeyboardButton("🗑 Del", callback_data=f"skilljob:{kind}:key:{delete_token}:delete"),
+            InlineKeyboardButton("Transfer", callback_data=f"skilljob:{kind}:key:{transfer_token}:transfer"),
+            InlineKeyboardButton("Delete", callback_data=f"skilljob:{kind}:key:{delete_token}:delete"),
         ])
 
     if not all_jobs:
@@ -228,7 +231,7 @@ def _build_jobs_text(agent_name: str, skill_manager) -> str:
     except Exception:
         return "Could not read tasks.json."
 
-    lines = [f"<b>Jobs for {agent_name}</b>", ""]
+    lines = [card_title("📋", "Scheduled jobs"), "", f"<b>Current scope</b> · <code>{agent_name}</code>", ""]
     found = False
 
     hbs = [h for h in data.get("heartbeats", []) if h.get("agent") == agent_name]
@@ -352,7 +355,7 @@ def build_job_transfer_keyboard(runtime, kind: str, task_id: str) -> InlineKeybo
         logger = getattr(runtime, "logger", logging.getLogger(__name__))
         logger.warning("Failed to build remote agent transfer buttons: %s", exc)
 
-    buttons.append([InlineKeyboardButton("✖ Cancel", callback_data="noop")])
+    buttons.append([InlineKeyboardButton(BACK_LABEL, callback_data="noop")])
     return InlineKeyboardMarkup(buttons)
 
 

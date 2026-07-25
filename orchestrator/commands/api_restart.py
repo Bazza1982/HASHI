@@ -7,6 +7,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from orchestrator.command_ui import BACK_LABEL, REFRESH_LABEL, card_title, selected_label
 from orchestrator.command_registry import RuntimeCallback, RuntimeCommand
 from orchestrator.human_restart import build_human_restart_proof, human_restart_secret_path, load_human_restart_secret
 from tools import remote_rescue
@@ -38,15 +39,17 @@ def _gateway_status_text(runtime: Any) -> str:
     base_url = snapshot.get("base_url") or "http://127.0.0.1:18801"
     return "\n".join(
         [
-            f"{state_icon} <b>API Gateway</b>",
-            f"Address: <code>{html.escape(base_url)}</code>",
-            f"Chat endpoint: <code>{html.escape(base_url)}/v1/chat/completions</code>",
-            f"Images endpoint: <code>{html.escape(base_url)}/v1/images/generations</code>",
-            f"Videos endpoint: <code>{html.escape(base_url)}/v1/videos/generations</code>",
-            f"Models endpoint: <code>{html.escape(base_url)}/v1/models</code>",
-            f"Runtime: <code>{'running' if snapshot['running'] else 'stopped'}</code>",
-            f"Enabled on restart: <code>{'yes' if snapshot['enabled'] else 'no'}</code>",
-            f"Default model: <code>{html.escape(snapshot['default_model'])}</code>",
+            card_title("🔌", "Hashi API gateway"),
+            "",
+            f"<b>STATUS</b> · {state_icon} <b>{'ON' if snapshot['running'] else 'OFF'}</b>",
+            f"<b>Starts after reboot</b> · <code>{'yes' if snapshot['enabled'] else 'no'}</code>",
+            f"<b>Default model</b> · <code>{html.escape(snapshot['default_model'])}</code>",
+            "",
+            f"<b>Address</b> · <code>{html.escape(base_url)}</code>",
+            f"Chat · <code>{html.escape(base_url)}/v1/chat/completions</code>",
+            f"Images · <code>{html.escape(base_url)}/v1/images/generations</code>",
+            f"Videos · <code>{html.escape(base_url)}/v1/videos/generations</code>",
+            f"Models · <code>{html.escape(base_url)}/v1/models</code>",
         ]
     )
 
@@ -56,12 +59,12 @@ def _gateway_status_keyboard(runtime: Any) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("✅ ON" if snapshot["enabled"] else "ON", callback_data="apigw:on"),
-                InlineKeyboardButton("✅ OFF" if not snapshot["enabled"] else "OFF", callback_data="apigw:off"),
+                InlineKeyboardButton(selected_label("On", snapshot["enabled"]), callback_data="apigw:on"),
+                InlineKeyboardButton(selected_label("Off", not snapshot["enabled"]), callback_data="apigw:off"),
             ],
             [
-                InlineKeyboardButton("Default Model", callback_data="apigw:menu:model"),
-                InlineKeyboardButton("Refresh", callback_data="apigw:refresh"),
+                InlineKeyboardButton("Choose model", callback_data="apigw:menu:model"),
+                InlineKeyboardButton(REFRESH_LABEL, callback_data="apigw:refresh"),
             ],
         ]
     )
@@ -82,14 +85,14 @@ def _gateway_model_keyboard(runtime: Any) -> InlineKeyboardMarkup:
             continue
         row: list[InlineKeyboardButton] = []
         for model in group[:]:
-            label = f"✅ {model}" if model == current else model
+            label = selected_label(model, model == current)
             row.append(InlineKeyboardButton(label, callback_data=f"apigw:model:{model}"))
             if len(row) == 2:
                 rows.append(row)
                 row = []
         if row:
             rows.append(row)
-    rows.append([InlineKeyboardButton("Back", callback_data="apigw:menu:status")])
+    rows.append([InlineKeyboardButton(BACK_LABEL, callback_data="apigw:menu:status")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -202,7 +205,9 @@ def _watchtower_address() -> str:
 
 def _restart_status_text(payload: dict[str, Any] | None = None, *, error: str | None = None) -> str:
     lines = [
-        "🛠️ <b>Hard Restart</b>",
+        card_title("🛠️", "Hard restart"),
+        "",
+        "<b>Current</b> · controlled by WatchTower",
         f"Controller: <code>{WATCHTOWER_INSTANCE}</code>",
         f"WatchTower API: <code>{html.escape(_watchtower_address())}</code>",
     ]
@@ -225,19 +230,17 @@ def _restart_status_keyboard(confirm: bool = False, *, available: bool = True) -
     if confirm:
         return InlineKeyboardMarkup(
             [
-                [
-                    InlineKeyboardButton("Confirm Hard Restart", callback_data="hardrestart:confirm"),
-                    InlineKeyboardButton("Cancel", callback_data="hardrestart:cancel"),
-                ]
+                [InlineKeyboardButton("Restart Hashi", callback_data="hardrestart:confirm")],
+                [InlineKeyboardButton("← Keep Hashi running", callback_data="hardrestart:cancel")],
             ]
         )
     if not available:
-        return InlineKeyboardMarkup([[InlineKeyboardButton("Refresh", callback_data="hardrestart:refresh")]])
+        return InlineKeyboardMarkup([[InlineKeyboardButton(REFRESH_LABEL, callback_data="hardrestart:refresh")]])
     return InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton("Hard Restart", callback_data="hardrestart:arm"),
-                InlineKeyboardButton("Refresh", callback_data="hardrestart:refresh"),
+                InlineKeyboardButton(REFRESH_LABEL, callback_data="hardrestart:refresh"),
             ]
         ]
     )
@@ -382,7 +385,10 @@ async def restart_callback(runtime: Any, update: Any, context: Any) -> None:
             await query.answer("WatchTower unavailable.", show_alert=True)
             return
         await query.edit_message_text(
-            "⚠️ <b>Confirm hard restart</b>\nWatchTower will stop this HASHI process, restart it, and verify health.",
+            f"{card_title('⚠️', 'Confirm hard restart')}\n\n"
+            "<b>Target</b> · <code>HASHI2</code>\n\n"
+            "WatchTower will stop this Hashi2 process, restart it, and verify health.\n\n"
+            "Confirm below, or keep Hashi2 running.",
             parse_mode="HTML",
             reply_markup=_restart_status_keyboard(confirm=True),
         )

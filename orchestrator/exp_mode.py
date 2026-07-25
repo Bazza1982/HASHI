@@ -67,7 +67,11 @@ def get_exp_usage_text(exp_root: str | Path | None = None) -> str:
     store = ExpStore(exp_root)
     catalog = _format_exp_catalog(store)
     return (
-        "Usage:\n"
+        "🧭 EXP GUIDEBOOK\n"
+        "━━━━━━━━━━━━━━━━\n\n"
+        "Current · ready\n"
+        "Scope · context-specific expertise and playbooks\n\n"
+        "Use:\n"
         "/exp <task>\n\n"
         "Example:\n"
         "/exp do a presentation slides for Armidale council using the council presentation template\n\n"

@@ -238,7 +238,7 @@ def test_build_habit_browser_view_renders_local_habits(tmp_path):
 
     text, markup = runtime._build_habit_browser_view(selected_habit_id="habit-1")
 
-    assert "Local Habits" in text
+    assert "<b>LOCAL HABITS</b>" in text
     assert "Verify first" in text
     assert "Verify before answering." in text
     assert markup.inline_keyboard[0][0].callback_data == "skill:habits:view:habit-1:0"

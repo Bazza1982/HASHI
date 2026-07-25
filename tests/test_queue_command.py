@@ -65,7 +65,7 @@ async def test_queue_list_shows_pending_items():
     result = await execute_local_command(runtime, "/queue list", chat_id=123)
 
     text = result["messages"][0]["text"]
-    assert "pending: 1" in text
+    assert "<b>Current</b> · <code>1</code> pending" in text
     assert "req-0001" in text
     assert "summary req-0001" in text
 
@@ -78,7 +78,7 @@ async def test_queue_show_displays_prompt():
     result = await execute_local_command(runtime, "/queue show req-0002", chat_id=123)
 
     text = result["messages"][0]["text"]
-    assert "Queue item" in text
+    assert "<b>QUEUE ITEM</b>" in text
     assert "Full prompt body" in text
 
 

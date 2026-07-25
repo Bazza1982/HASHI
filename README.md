@@ -546,13 +546,21 @@ HASHI agents respond to both natural language and structured commands:
 | `/new` | Start a fresh CLI session |
 | `/fresh` | Start a clean API context without deleting saved memories |
 | `/stop` | Cancel current processing |
+| `/steer <direction>` | Interrupt the current turn, preserve progress, and continue with an added direction |
+| `/focus` | Narrow execution back to the original task and keep working until it is complete or genuinely blocked |
+| `/recall [count]` | Remove all queued requests, or up to the newest positive `count`, without interrupting the active task |
 | `/reboot [min\|max\|#]` | Hot restart agents |
 | `/restart` | Hard restart this HASHI instance through WatchTower supervision |
 | `/status [full]` | Show agent status, backend info |
+| `/privacy [0-5]` | Show privacy details or quickly select a privacy level; Level 1 is the default |
 | `/handoff` | Restore continuity from recent transcript |
 | `/skill` | Browse and run skills (inline keyboard) |
 | `/exp <task>` | Run a task after consulting context-specific EXP guidebooks |
 | `/help` | Show available commands |
+
+For detailed task-control behavior and examples, including the difference
+between `/stop`, `/steer`, `/focus`, and `/recall`, see
+[Task-control commands](docs/FOCUS_RECALL_COMMANDS.md).
 
 #### Session & Mode Commands
 
@@ -1159,6 +1167,15 @@ For inline button handlers, expose `CALLBACKS = [...]` or
 `get_callbacks() -> list[RuntimeCallback]`. HASHI loads these modules when
 runtime handlers are bound; after adding or editing a private command, run
 `/reboot min` for the target agent or cold-restart HASHI.
+
+Private commands are intentionally not registered in the public
+`COMMAND_BINDINGS` or `BOT_COMMAND_BINDINGS` tables. Their implementation and
+picker metadata come from the local module, so publishing the HASHI repository
+does not publish machine-specific operator commands.
+
+On HASHI2, OLL Browser Gateway control is installed locally as the private
+`/oll [on|off|status]` command. Password lookup uses `/pswd`; the misspelled
+duplicate alias `/paswd` has been removed.
 
 ### agents.json
 ```json

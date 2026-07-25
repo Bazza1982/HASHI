@@ -237,8 +237,8 @@ async def handle_voice_or_audio(
                 preview = transcript
             keyboard = InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton("✅ Send", callback_data=f"safevoice:yes:{chat_key}"),
-                    InlineKeyboardButton("❌ Discard", callback_data=f"safevoice:no:{chat_key}"),
+                    InlineKeyboardButton("Send transcript", callback_data=f"safevoice:yes:{chat_key}"),
+                    InlineKeyboardButton("Discard transcript", callback_data=f"safevoice:no:{chat_key}"),
                 ]
             ])
             await runtime._reply_text(

@@ -244,11 +244,13 @@ class VoiceManager:
         else:
             current = state.get("voice_name") or "custom"
         return (
-            "Voice Replies\n"
-            f"Status: {enabled}\n"
-            f"Current: {current}\n"
-            f"Provider: {state.get('provider', 'windows')}\n"
-            "Tap a preset below or use typed commands for advanced options."
+            "🔊 VOICE REPLIES\n"
+            "━━━━━━━━━━━━━━━━\n\n"
+            f"Current · {enabled}\n"
+            f"Voice · {current}\n"
+            f"Provider · {state.get('provider', 'windows')}\n\n"
+            "Changes apply immediately and persist in this workspace.\n"
+            "Choose a state or preset below; typed commands provide advanced options."
         )
 
     def _load(self) -> dict:

@@ -40,7 +40,7 @@ def test_memory_plus_mode_button_is_available() -> None:
     labels = [button.text for row in keyboard.inline_keyboard for button in row]
     callbacks = [button.callback_data for row in keyboard.inline_keyboard for button in row]
 
-    assert "✅ Memory+" in labels
+    assert "✓ Memory+" in labels
     assert "tgl:mode:memory+" in callbacks
 
 

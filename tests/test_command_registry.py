@@ -185,7 +185,7 @@ async def test_bg_command_reserved_status_is_not_treated_as_task():
 
     assert result["ok"] is True
     assert runtime.queued == []
-    assert "Background job status" in result["messages"][0]["text"]
+    assert "<b>BACKGROUND JOB STATUS</b>" in result["messages"][0]["text"]
 
 
 @pytest.mark.asyncio

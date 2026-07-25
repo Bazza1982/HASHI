@@ -98,10 +98,10 @@ async def test_api_command_status_includes_address_and_default_model():
     await api_restart.api_command(runtime, _command_update(), SimpleNamespace(args=[]))
 
     text, kwargs = runtime.messages[-1]
-    assert "Address: <code>http://127.0.0.1:18801</code>" in text
-    assert "Images endpoint: <code>http://127.0.0.1:18801/v1/images/generations</code>" in text
-    assert "Videos endpoint: <code>http://127.0.0.1:18801/v1/videos/generations</code>" in text
-    assert "Default model: <code>gpt-5.5</code>" in text
+    assert "<b>Address</b> · <code>http://127.0.0.1:18801</code>" in text
+    assert "Images · <code>http://127.0.0.1:18801/v1/images/generations</code>" in text
+    assert "Videos · <code>http://127.0.0.1:18801/v1/videos/generations</code>" in text
+    assert "<b>Default model</b> · <code>gpt-5.5</code>" in text
     assert kwargs["parse_mode"] == "HTML"
 
 
@@ -261,7 +261,7 @@ async def test_restart_arm_fails_closed_when_watchtower_status_fails(monkeypatch
     assert query.answers[-1] == ("WatchTower unavailable.", True)
     buttons = query.edits[-1][1]["reply_markup"].inline_keyboard
     assert len(buttons) == 1
-    assert buttons[0][0].text == "Refresh"
+    assert buttons[0][0].text == "↻ Refresh"
 
 
 @pytest.mark.asyncio

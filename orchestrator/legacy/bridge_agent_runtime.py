@@ -7,6 +7,7 @@ import asyncio
 import inspect
 import logging
 import hashlib
+import html
 from contextlib import suppress
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -18,6 +19,14 @@ from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandle
 from adapters.base import BaseBackend
 from orchestrator.agent_fyi import build_agent_fyi_primer
 from orchestrator.bridge_memory import BridgeMemoryStore, BridgeContextAssembler, SysPromptManager
+from orchestrator.command_ui import (
+    REFRESH_LABEL,
+    card_title,
+    help_menu_text,
+    selected_label,
+    setting_card,
+    status_label,
+)
 from orchestrator.command_registry import bind_runtime_commands, runtime_bot_commands
 from orchestrator.exp_mode import build_exp_task_prompt, get_exp_usage_text
 from orchestrator.handoff_builder import HandoffBuilder
@@ -885,10 +894,20 @@ class BridgeAgentRuntime:
         tg_status = "✓" if self.telegram_connected else "✗"
         wa_status = "✓" if self._get_whatsapp_connected() else "✗"
         channel_line = f"Telegram {tg_status} • WhatsApp {wa_status} • Workbench ✓"
+        available_efforts = self._get_available_efforts()
+        current_effort = self._get_current_effort() if available_efforts else "n/a"
         lines = [
-            f"🤖 {self.name}",
+            "📊 HASHI STATUS",
+            "━━━━━━━━━━━━━━━━",
+            "",
+            f"🤖 Agent: {self.name}",
             f"⚙️ Backend: {self.config.engine} • {self.config.model}",
+            f"🎛️ Model effort: {current_effort}",
+            "",
+            "CONNECTIONS",
             f"📶 Channels: {channel_line}",
+            "",
+            "ACTIVITY",
             f"📡 Runtime: {'busy' if self.is_generating else 'idle'} • queue {self.queue.qsize()} • process {self._process_info()}",
             f"🧾 Current: {current_line}",
             f"🧠 Memory: skills {', '.join(active_skills) if active_skills else 'none'} • recall {'ON' if recall_on else 'OFF'} • FYI {'armed' if self._pending_session_primer else 'clear'}",
@@ -899,6 +918,7 @@ class BridgeAgentRuntime:
         if detailed:
             lines.extend([
                 "",
+                "DETAILS",
                 f"📁 Workspace: {self.config.workspace_dir}",
                 f"📝 Transcript: {self.transcript_log_path.name}",
                 f"🚀 Started: {self.session_started_at.isoformat(timespec='seconds')}",
@@ -935,16 +955,16 @@ class BridgeAgentRuntime:
         if skill.type == "toggle":
             buttons.append(
                 [
-                    InlineKeyboardButton("ON", callback_data=f"skill:toggle:{skill.id}:on"),
-                    InlineKeyboardButton("OFF", callback_data=f"skill:toggle:{skill.id}:off"),
+                    InlineKeyboardButton("On", callback_data=f"skill:toggle:{skill.id}:on"),
+                    InlineKeyboardButton("Off", callback_data=f"skill:toggle:{skill.id}:off"),
                 ]
             )
         elif skill.type == "action" and skill.id not in {"cron", "heartbeat"}:
-            buttons.append([InlineKeyboardButton("Run Now", callback_data=f"skill:run:{skill.id}")])
+            buttons.append([InlineKeyboardButton("Run now", callback_data=f"skill:run:{skill.id}")])
         elif skill.type == "prompt":
-            buttons.append([InlineKeyboardButton("Show Usage", callback_data=f"skill:show:{skill.id}")])
+            buttons.append([InlineKeyboardButton("Show usage", callback_data=f"skill:show:{skill.id}")])
         if skill.id in {"cron", "heartbeat"}:
-            buttons.append([InlineKeyboardButton("Refresh Jobs", callback_data=f"skill:jobs:{skill.id}")])
+            buttons.append([InlineKeyboardButton("↻ Refresh jobs", callback_data=f"skill:jobs:{skill.id}")])
         return InlineKeyboardMarkup(buttons) if buttons else None
 
     async def _render_skill_jobs(self, update_or_query, kind: str):
@@ -1007,9 +1027,9 @@ class BridgeAgentRuntime:
 
     def _habit_status_button_label(self, current: str, target: str) -> str:
         return {
-            "active": "✅ Active" if current == "active" else "Active",
-            "paused": "⏸ Pause" if current == "paused" else "Pause",
-            "disabled": "❌ Disable" if current == "disabled" else "Disable",
+            "active": "✓ Active" if current == "active" else "Activate",
+            "paused": "✓ Paused" if current == "paused" else "Pause",
+            "disabled": "✓ Disabled" if current == "disabled" else "Disable",
         }[target]
 
     def _build_habit_browser_view(
@@ -1024,7 +1044,7 @@ class BridgeAgentRuntime:
         counts = self._load_local_habit_counts()
         total, rows = self._load_local_habit_rows(offset=offset)
         lines = [
-            "<b>🧠 Local Habits</b>",
+            card_title("🧠", "Local habits"),
             f"Agent: <code>{_html.escape(self.name)}</code>",
             "",
             (
@@ -1074,12 +1094,12 @@ class BridgeAgentRuntime:
         next_offset = offset + HABIT_BROWSER_PAGE_SIZE
         if offset > 0:
             nav.append(InlineKeyboardButton("◀ Prev", callback_data=f"skill:habits:list:{prev_offset}"))
-        nav.append(InlineKeyboardButton("🔄 Refresh", callback_data=f"skill:habits:list:{offset}"))
+        nav.append(InlineKeyboardButton(REFRESH_LABEL, callback_data=f"skill:habits:list:{offset}"))
         if next_offset < total:
             nav.append(InlineKeyboardButton("Next ▶", callback_data=f"skill:habits:list:{next_offset}"))
         if nav:
             buttons.append(nav)
-        buttons.append([InlineKeyboardButton("📋 Governance Queue", callback_data="skill:habits:queue:0")])
+        buttons.append([InlineKeyboardButton("Governance queue", callback_data="skill:habits:queue:0")])
         return "\n".join(lines).strip(), InlineKeyboardMarkup(buttons)
 
     def _set_local_habit_status(self, habit_id: str, target_status: str) -> tuple[bool, str]:
@@ -2758,8 +2778,8 @@ class BridgeAgentRuntime:
                     preview = transcript
                 keyboard = InlineKeyboardMarkup([
                     [
-                        InlineKeyboardButton("✅ Send", callback_data=f"safevoice:yes:{chat_key}"),
-                        InlineKeyboardButton("❌ Discard", callback_data=f"safevoice:no:{chat_key}"),
+                        InlineKeyboardButton("Send transcript", callback_data=f"safevoice:yes:{chat_key}"),
+                        InlineKeyboardButton("Discard transcript", callback_data=f"safevoice:no:{chat_key}"),
                     ]
                 ])
                 await update.message.reply_text(
@@ -2820,21 +2840,21 @@ class BridgeAgentRuntime:
     def _voice_keyboard(self) -> InlineKeyboardMarkup:
         rows = [
             [
-                InlineKeyboardButton("Voice ON", callback_data="voice:toggle:on"),
-                InlineKeyboardButton("Voice OFF", callback_data="voice:toggle:off"),
+                InlineKeyboardButton("Turn on", callback_data="voice:toggle:on"),
+                InlineKeyboardButton("Turn off", callback_data="voice:toggle:off"),
             ]
         ]
         active_alias = self.voice_manager.get_active_preset_alias()
         preset_buttons = []
         for alias, preset, available in self.voice_manager.get_voice_presets():
             base = preset.get("label") or alias
-            label = f">> {base}" if alias == active_alias else base
+            label = selected_label(base, alias == active_alias)
             if available != "ready":
                 label = f"{base} ({available})"
             preset_buttons.append(InlineKeyboardButton(label, callback_data=f"voice:use:{alias}"))
         for i in range(0, len(preset_buttons), 2):
             rows.append(preset_buttons[i:i + 2])
-        rows.append([InlineKeyboardButton("Refresh", callback_data="voice:refresh:menu")])
+        rows.append([InlineKeyboardButton(REFRESH_LABEL, callback_data="voice:refresh:menu")])
         return InlineKeyboardMarkup(rows)
 
     async def cmd_start(self, update, context):
@@ -2848,7 +2868,17 @@ class BridgeAgentRuntime:
         if keyboard is None:
             await update.message.reply_text("All agents are running.")
             return
-        await update.message.reply_text("Start another agent:", reply_markup=keyboard)
+        await update.message.reply_text(
+            setting_card(
+                "▶️",
+                "Start agents",
+                current=f"<code>{html.escape(self.name)}</code> running",
+                consequence="Starting an agent launches its configured runtime immediately.",
+                action="Choose an agent to start.",
+            ),
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
 
     async def callback_start_agent(self, update, context):
         query = update.callback_query
@@ -2907,13 +2937,14 @@ class BridgeAgentRuntime:
         if arg == "help":
             all_names = orchestrator.configured_agent_names()
             lines = [
-                "<b>/reboot</b> — restart all running agents (same selection)",
-                "<b>/reboot min</b> — restart only this bot",
-                "<b>/reboot max</b> — restart all active agents",
-                "<b>/reboot [number]</b> — restart a specific agent by number",
-                "<b>/reboot help</b> — show this help",
+                card_title("🔄", "Reboot agents"),
                 "",
-                "<b>Agents:</b>",
+                f"<b>Current agent</b> · <code>{html.escape(self.name)}</code>",
+                "<b>Effect</b> · reloads code and runtime state for the selected target",
+                "",
+                "Active requests on restarted agents are interrupted.",
+                "",
+                "<b>AGENTS</b>",
             ]
             for i, name in enumerate(all_names, 1):
                 running = name in {rt.name for rt in orchestrator.runtimes}
@@ -3179,7 +3210,17 @@ class BridgeAgentRuntime:
 
         args = [a.strip().lower() for a in (context.args or []) if a.strip()]
         if not args:
-            await update.message.reply_text(self.skill_manager.describe_active_heartbeat(self.name))
+            await update.message.reply_text(
+                setting_card(
+                    "🫧",
+                    "Active continuation",
+                    current=html.escape(self.skill_manager.describe_active_heartbeat(self.name)),
+                    facts=[f"<b>Agent</b> · <code>{html.escape(self.name)}</code>"],
+                    consequence="Changes take effect immediately and persist in the task manager.",
+                    action="Use <code>/active on [minutes]</code> or <code>/active off</code>.",
+                ),
+                parse_mode="HTML",
+            )
             return
 
         mode = args[0]
@@ -3686,22 +3727,37 @@ class BridgeAgentRuntime:
 
         args = list(context.args or [])
         if not args:
-            await update.message.reply_text("Skills", reply_markup=self._skill_keyboard())
+            grouped = self._skills_by_type()
+            count = sum(len(items) for items in grouped.values())
+            await update.message.reply_text(
+                setting_card(
+                    "🧰",
+                    "Skills",
+                    current=f"<code>{count}</code> available",
+                    facts=[f"<b>Agent</b> · <code>{html.escape(self.name)}</code>"],
+                    consequence="Toggle changes persist in this workspace; actions run immediately.",
+                    action="Choose a skill for its status and available actions.",
+                ),
+                parse_mode="HTML",
+                reply_markup=self._skill_keyboard(),
+            )
             return
 
         sub = args[0].strip().lower()
         if sub == "help":
             grouped = self._skills_by_type()
-            lines = ["Skills", ""]
+            lines = [card_title("🧰", "Skills reference"), ""]
             for skill_type in ("action", "toggle", "prompt"):
                 entries = grouped.get(skill_type, [])
                 if not entries:
                     continue
                 lines.append(skill_type.upper())
                 for skill in entries:
-                    lines.append(f"- {skill.id}: {skill.description}")
+                    lines.append(
+                        f"<code>{html.escape(skill.id)}</code> · {html.escape(skill.description)}"
+                    )
                 lines.append("")
-            await update.message.reply_text("\n".join(lines).strip())
+            await update.message.reply_text("\n".join(lines).strip(), parse_mode="HTML")
             return
 
         skill = self.skill_manager.get_skill(sub)
@@ -4048,7 +4104,7 @@ class BridgeAgentRuntime:
             logger = getattr(self, "logger", logging.getLogger(__name__))
             logger.warning("Failed to build remote agent transfer buttons: %s", exc)
 
-        buttons.append([InlineKeyboardButton("✖ Cancel", callback_data="noop")])
+        buttons.append([InlineKeyboardButton("← Cancel", callback_data="noop")])
         return InlineKeyboardMarkup(buttons)
 
     def _job_transfer_callback(self, kind: str, task_id: str, target_agent: str, *, instance_id: str | None = None) -> str:
@@ -4200,47 +4256,14 @@ class BridgeAgentRuntime:
     async def cmd_help(self, update, context):
         if update.effective_user.id != self.global_config.authorized_id:
             return
-        lines = [
-            f"Agent {self.name} Commands",
-            "",
-            "/help - Show this menu",
-            "/start - Start another stopped agent",
-            "/status [full] - View agent status",
-            "/voice [status|voices|use|on|off] - Native voice replies",
-            "/active [on|off] [minutes] - Proactive follow-up heartbeat",
-            "/handoff - Fresh continuity restore from recent chat",
-            "/park - List parked topics",
-            "/park chat [title] - Park the current topic with summary + reminders",
-            "/park delete <slot> - Delete a parked topic",
-            "/load <slot> - Restore a parked topic into active context",
-            "/fyi [prompt] - Refresh bridge environment awareness",
-            "/model - View or change model",
-            "/new - Start a fresh CLI session",
-            "/fresh - Start a clean API context without deleting saved memories",
-            "/memory [status|on|pause|saved on|saved off] - Control memory injection",
-            "/clear - Clear local media/history and start fresh",
-            "/stop - Stop current execution and clear queued messages",
-            "/terminate - Shut down this agent",
-            "/retry [response|prompt] - Resend last response (default) or rerun last prompt",
-            "/debug <prompt> - Run the task in strict debug mode",
-            "/skill - Browse and run skills",
-            "/exp <task> - Run a task after consulting the EXP guidebook",
-            "/cron [list] | /cron run <job_id> - Run one cron job now",
-            "/heartbeat [list] | /heartbeat run <job_id> - Run one heartbeat now",
-            "/think - Toggle thinking trace display [on|off]",
-            "/verbose [on|off] - Toggle verbose long-task status display",
-            "/wa_on - Start WhatsApp transport and show QR in console if needed",
-            "/wa_off - Stop WhatsApp transport",
-            "/wa_send <number> <message> - Send a WhatsApp message through bridge-u-f",
-            "/usecomputer [on|off|status|examples|task] - Enable or run GUI-aware computer-use mode",
-        ]
-        if self.config.engine == "openrouter-api":
-            lines.append("/credit - Show OpenRouter key balance info")
-        if self.config.engine == "claude-cli":
-            lines.append("/effort - View or change Claude effort level")
-        if self.config.engine == "codex-cli":
-            lines.append("/effort - View or change Codex reasoning level")
-        await update.message.reply_text("\n".join(lines))
+        await update.message.reply_text(
+            help_menu_text(
+                agent_name=self.name,
+                agent_type="fixed",
+                commands=self.get_bot_commands(),
+            ),
+            parse_mode="HTML",
+        )
 
     async def cmd_new(self, update, context):
         if update.effective_user.id != self.global_config.authorized_id:
@@ -4441,7 +4464,7 @@ class BridgeAgentRuntime:
         models = self._get_available_models()
         buttons = []
         for m in models:
-            label = f">> {m}" if m == self.config.model else m
+            label = selected_label(m, m == self.config.model)
             buttons.append([InlineKeyboardButton(label, callback_data=f"model:{m}")])
         return InlineKeyboardMarkup(buttons)
 
@@ -4473,7 +4496,15 @@ class BridgeAgentRuntime:
             return
 
         await update.message.reply_text(
-            f"Current model: {self.config.model}\nSelect:",
+            setting_card(
+                "🧠",
+                "Hashi model",
+                current=f"<code>{html.escape(self.config.model)}</code>",
+                facts=[f"<b>Backend</b> · <code>{html.escape(self.config.engine)}</code>"],
+                consequence="The selection applies immediately to the next request.",
+                action="Choose a model.",
+            ),
+            parse_mode="HTML",
             reply_markup=self._model_keyboard(),
         )
 
@@ -4481,7 +4512,7 @@ class BridgeAgentRuntime:
         buttons = []
         current = self._get_current_effort()
         for level in self._get_available_efforts():
-            label = f">> {level}" if level == current else level
+            label = selected_label(level, level == current)
             buttons.append([InlineKeyboardButton(label, callback_data=f"effort:{level}")])
         return InlineKeyboardMarkup(buttons)
 
@@ -4533,7 +4564,15 @@ class BridgeAgentRuntime:
             return
 
         await update.message.reply_text(
-            f"Current effort: {self._get_current_effort()}\nSelect:",
+            setting_card(
+                "🎛️",
+                "Model effort",
+                current=f"<code>{html.escape(self._get_current_effort())}</code>",
+                facts=[f"<b>Model</b> · <code>{html.escape(self.config.model)}</code>"],
+                consequence="Higher effort may improve difficult work but takes longer and can use more tokens.",
+                action="Choose an effort level.",
+            ),
+            parse_mode="HTML",
             reply_markup=self._effort_keyboard(),
         )
 
@@ -4725,10 +4764,20 @@ class BridgeAgentRuntime:
             _verbose_file.touch()
         else:
             _verbose_file.unlink(missing_ok=True)
-        state = "ON 🔍" if self._verbose else "OFF"
         await update.message.reply_text(
-            f"Verbose mode: {state}\n"
-            f"{'Long-task placeholders will show engine, elapsed, idle time and output events.' if self._verbose else 'Placeholders will show concise status only.'}"
+            setting_card(
+                "🔍",
+                "Verbose display",
+                current=f"<b>{status_label(self._verbose)}</b>",
+                facts=["<b>Saved</b> · workspace setting"],
+                consequence=(
+                    "Long-task placeholders show engine, timing and output events."
+                    if self._verbose
+                    else "Long-task placeholders show concise status only."
+                ),
+                action="Changes apply immediately and persist across reboot.",
+            ),
+            parse_mode="HTML",
         )
 
     async def cmd_think(self, update, context):
@@ -4746,10 +4795,20 @@ class BridgeAgentRuntime:
             _think_file.touch()
         else:
             _think_file.unlink(missing_ok=True)
-        state = "ON 💭" if self._think else "OFF"
         await update.message.reply_text(
-            f"Thinking display: {state}\n"
-            f"{'Thinking traces will be sent as permanent italic messages every ~60s during generation.' if self._think else 'Thinking traces will not be displayed.'}"
+            setting_card(
+                "💭",
+                "Thinking display",
+                current=f"<b>{status_label(self._think)}</b>",
+                facts=["<b>Saved</b> · workspace setting"],
+                consequence=(
+                    "Periodic thinking summaries may appear during long generation."
+                    if self._think
+                    else "Thinking summaries are hidden."
+                ),
+                action="Changes apply immediately and persist across reboot.",
+            ),
+            parse_mode="HTML",
         )
 
     async def cmd_jobs(self, update, context):

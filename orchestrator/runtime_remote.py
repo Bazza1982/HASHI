@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from orchestrator.command_ui import BACK_LABEL, card_title
 from orchestrator import remote_lifecycle
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -45,7 +46,14 @@ async def move_show_agent_picker(runtime: Any, update: Any, instances: dict) -> 
 
     rows = [[InlineKeyboardButton(f"🤖 {name}", callback_data=f"move:agent:{name}")] for name in agent_names]
     markup = InlineKeyboardMarkup(rows)
-    await runtime._reply_text(update, "<b>Move Agent</b> — select agent to move:", parse_mode="HTML", reply_markup=markup)
+    await runtime._reply_text(
+        update,
+        f"{card_title('📦', 'Move agent')}\n\n"
+        "<b>Current</b> · source is this Hashi2 instance\n\n"
+        "Moving transfers configuration and workspace data. Select the exact agent:",
+        parse_mode="HTML",
+        reply_markup=markup,
+    )
 
 
 async def move_show_target_picker(runtime: Any, update: Any, agent_id: str, instances: dict) -> None:
@@ -57,7 +65,9 @@ async def move_show_target_picker(runtime: Any, update: Any, agent_id: str, inst
     markup = InlineKeyboardMarkup(rows)
     await runtime._reply_text(
         update,
-        f"<b>Move <code>{agent_id}</code></b> — select target instance:",
+        f"{card_title('📦', 'Move agent')}\n\n"
+        f"<b>Agent</b> · <code>{html.escape(agent_id)}</code>\n\n"
+        "Select the target instance:",
         parse_mode="HTML",
         reply_markup=markup,
     )
@@ -67,17 +77,20 @@ async def move_show_options(runtime: Any, update: Any, agent_id: str, target: st
     """Step 3: show move options."""
     markup = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🔒 Move + Encrypt", callback_data=f"move:exec:{agent_id}:{target}:enc"),
-            InlineKeyboardButton("📋 Move Plain", callback_data=f"move:exec:{agent_id}:{target}:plain"),
+            InlineKeyboardButton("Move encrypted", callback_data=f"move:exec:{agent_id}:{target}:enc"),
+            InlineKeyboardButton("Move plain", callback_data=f"move:exec:{agent_id}:{target}:plain"),
         ],
         [
-            InlineKeyboardButton("📂 Copy (keep source)", callback_data=f"move:exec:{agent_id}:{target}:keep"),
-            InlineKeyboardButton("🔄 Sync memories", callback_data=f"move:exec:{agent_id}:{target}:sync"),
+            InlineKeyboardButton("Copy; keep source", callback_data=f"move:exec:{agent_id}:{target}:keep"),
+            InlineKeyboardButton("Sync memories", callback_data=f"move:exec:{agent_id}:{target}:sync"),
         ],
-        [InlineKeyboardButton("❌ Cancel", callback_data="move:cancel")],
+        [InlineKeyboardButton("← Keep current location", callback_data="move:cancel")],
     ])
     await update.callback_query.edit_message_text(
-        f"<b>Move <code>{agent_id}</code> → {target}</b>\n\nChoose move mode:",
+        f"{card_title('📦', 'Move agent')}\n\n"
+        f"<b>Agent</b> · <code>{html.escape(agent_id)}</code>\n"
+        f"<b>Target</b> · <code>{html.escape(target)}</code>\n\n"
+        "Choose the transfer mode. Moving can remove the source after a successful transfer.",
         parse_mode="HTML",
         reply_markup=markup,
     )
@@ -155,7 +168,8 @@ def render_remote_peer_lines(runtime: Any, peers: list[dict[str, Any]], *, inclu
         else:
             counts["offline"] += 1
     lines = [
-        "📡 <b>Remote Instances</b>",
+        card_title("📡", "Remote instances"),
+        "",
         f"online: <code>{counts['online']}</code>  ·  attention: <code>{counts['attention']}</code>  ·  offline: <code>{counts['offline']}</code>",
     ]
     if include_refreshed_at:
@@ -195,10 +209,12 @@ async def handle_move_callback(runtime: Any, update: Any, context: Any) -> None:
         for name, inst in instances.items():
             label = inst.get("display_name", name)
             rows.append([InlineKeyboardButton(f"📦 {label}", callback_data=f"move:target:{agent_id}:{name}")])
-        rows.append([InlineKeyboardButton("❌ Cancel", callback_data="move:cancel")])
+        rows.append([InlineKeyboardButton(BACK_LABEL, callback_data="move:cancel")])
         markup = InlineKeyboardMarkup(rows)
         await query.edit_message_text(
-            f"<b>Move <code>{agent_id}</code></b> — select target:",
+            f"{card_title('📦', 'Move agent')}\n\n"
+            f"<b>Agent</b> · <code>{html.escape(agent_id)}</code>\n\n"
+            "Select the target instance:",
             parse_mode="HTML",
             reply_markup=markup,
         )
@@ -209,17 +225,20 @@ async def handle_move_callback(runtime: Any, update: Any, context: Any) -> None:
         target = parts[3]
         markup = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("📋 Move (plain)", callback_data=f"move:exec:{agent_id}:{target}:plain"),
-                InlineKeyboardButton("📂 Copy (keep source)", callback_data=f"move:exec:{agent_id}:{target}:keep"),
+                InlineKeyboardButton("Move plain", callback_data=f"move:exec:{agent_id}:{target}:plain"),
+                InlineKeyboardButton("Copy; keep source", callback_data=f"move:exec:{agent_id}:{target}:keep"),
             ],
             [
-                InlineKeyboardButton("🔄 Sync memories back", callback_data=f"move:exec:{agent_id}:{target}:sync"),
-                InlineKeyboardButton("🔍 Dry run preview", callback_data=f"move:exec:{agent_id}:{target}:dry"),
+                InlineKeyboardButton("Sync memories", callback_data=f"move:exec:{agent_id}:{target}:sync"),
+                InlineKeyboardButton("Preview only", callback_data=f"move:exec:{agent_id}:{target}:dry"),
             ],
-            [InlineKeyboardButton("❌ Cancel", callback_data="move:cancel")],
+            [InlineKeyboardButton("← Keep current location", callback_data="move:cancel")],
         ])
         await query.edit_message_text(
-            f"<b>Move <code>{agent_id}</code> → {target}</b>\n\nChoose mode:",
+            f"{card_title('📦', 'Move agent')}\n\n"
+            f"<b>Agent</b> · <code>{html.escape(agent_id)}</code>\n"
+            f"<b>Target</b> · <code>{html.escape(target)}</code>\n\n"
+            "Choose the transfer mode. Preview makes no changes.",
             parse_mode="HTML",
             reply_markup=markup,
         )
@@ -254,13 +273,19 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
             if alive:
                 await runtime._reply_text(
                     update,
-                    "🟡 Hashi Remote process is running, but the API did not respond.\n"
-                    f"PID: {runtime._remote_process.pid}\n"
-                    f"Expected port: {cfg['port']}  ·  TLS: {'on' if cfg['use_tls'] else 'off'}",
+                    f"{card_title('📡', 'Hashi remote')}\n\n"
+                    "<b>Current</b> · <code>ATTENTION</code>\n"
+                    "The process is running, but its API did not respond.\n\n"
+                    f"<b>PID</b> · <code>{runtime._remote_process.pid}</code>\n"
+                    f"<b>Port</b> · <code>{cfg['port']}</code>\n"
+                    f"<b>TLS</b> · <code>{'ON' if cfg['use_tls'] else 'OFF'}</code>",
+                    parse_mode="HTML",
                 )
             else:
                 lines = [
-                    "⚪ Hashi Remote is not running.",
+                    card_title("📡", "Hashi remote"),
+                    "",
+                    "<b>Current</b> · <code>OFF</code>",
                     f"Lifecycle: <code>{'enabled' if lifecycle.enabled else 'disabled_by_config'}</code>",
                     f"Supervisor: <code>{'requested' if lifecycle.supervised else 'child_fallback'}</code>",
                     f"Disabled state: <code>{'yes' if disabled else 'no'}</code>",
@@ -274,7 +299,9 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
         instance = health.get("instance") or {}
         peers = list((health.get("peers") or []))
         lines = [
-            "🟢 <b>Hashi Remote</b>",
+            card_title("📡", "Hashi remote"),
+            "",
+            "<b>Current</b> · <code>ON</code>",
             f"Instance: <code>{instance.get('instance_id') or runtime.global_config.project_root.name.upper()}</code>",
             f"API: <code>{health_url}</code>",
         ]
@@ -407,54 +434,3 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
         "Usage: /remote [on|off|status]\nDefault: `/remote` shows status and connected instances.\nLegacy: `/remote list` is still supported.",
         parse_mode="Markdown",
     )
-
-
-async def cmd_oll(runtime: Any, update: Any, context: Any) -> None:
-    if not runtime._is_authorized_user(update.effective_user.id):
-        return
-    from browser_gateway.service_control import start as start_oll_service, status as oll_status, stop as stop_oll_service
-
-    arg = (context.args[0].lower() if context.args else "").strip()
-    root = runtime.global_config.project_root
-
-    if arg == "on":
-        state = start_oll_service(root)
-        await runtime._reply_text(
-            update,
-            "🟢 OLL Browser Gateway started.\n"
-            f"PID: {state.get('pid') or 'unknown'}\n"
-            f"Base URL: {state.get('base_url')}\n"
-            f"Log: {state.get('log_file')}",
-        )
-        return
-
-    if arg == "off":
-        was_running = oll_status(root)
-        state = stop_oll_service(root)
-        if was_running.get("running"):
-            await runtime._reply_text(update, "🔴 OLL Browser Gateway stopped.")
-        else:
-            await runtime._reply_text(update, "⚪ OLL Browser Gateway is not running.")
-        return
-
-    if arg == "status" or not arg:
-        state = oll_status(root)
-        if state.get("running"):
-            await runtime._reply_text(
-                update,
-                "🟢 OLL Browser Gateway is running.\n"
-                f"PID: {state.get('pid')}\n"
-                f"Base URL: {state.get('base_url')}\n"
-                f"Log: {state.get('log_file')}\n"
-                f"State DB: {state.get('state_db')}",
-            )
-        else:
-            await runtime._reply_text(
-                update,
-                "⚪ OLL Browser Gateway is not running.\n"
-                f"Base URL: {state.get('base_url')}\n"
-                "Use /oll on to start.",
-            )
-        return
-
-    await runtime._reply_text(update, "Usage: /oll [on|off|status]")

@@ -4,6 +4,7 @@ import html
 from typing import Any
 
 from orchestrator.background_jobs import TERMINAL_STATES
+from orchestrator.command_ui import card_title
 from orchestrator.command_registry import RuntimeCommand
 
 
@@ -145,7 +146,7 @@ async def _list_jobs(runtime: Any, update: Any, _arg: str) -> None:
     if not records:
         await _send(runtime, update, "No background jobs recorded.")
         return
-    lines = ["<b>Background jobs</b>", ""]
+    lines = [card_title("🧵", "Background jobs"), "", f"<b>Current</b> · <code>{len(records)}</code> recent jobs", ""]
     lines.extend(_job_line(record) for record in records)
     await _send(runtime, update, "\n".join(lines))
 
@@ -161,9 +162,10 @@ async def _status(runtime: Any, update: Any, arg: str) -> None:
         running = [record for record in records if getattr(record, "state", "") not in TERMINAL_STATES]
         failed = [record for record in records if getattr(record, "state", "") in {"failed", "timeout", "start_failed"}]
         lines = [
-            "<b>Background job status</b>",
+            card_title("🧵", "Background job status"),
+            "",
+            f"<b>Current</b> · <code>{len(running)}</code> active",
             f"recent: {len(records)}",
-            f"active: {len(running)}",
             f"failed/timeout: {len(failed)}",
         ]
         if records:
@@ -176,9 +178,10 @@ async def _status(runtime: Any, update: Any, arg: str) -> None:
         await _send(runtime, update, f"Background job not found: <code>{html.escape(job_id)}</code>")
         return
     lines = [
-        "<b>Background job</b>",
+        card_title("🧵", "Background job"),
+        "",
+        f"<b>Current</b> · <code>{html.escape(record.state)}</code>",
         f"ID: <code>{html.escape(record.job_id)}</code>",
-        f"State: {html.escape(record.state)}",
         f"Return code: {html.escape(str(record.returncode))}",
         f"Created: {html.escape(str(record.created_at))}",
         f"Updated: {html.escape(str(record.updated_at))}",

@@ -21,6 +21,16 @@ from telegram.error import RetryAfter, TimedOut as TelegramTimedOut
 from telegram.ext import ApplicationBuilder
 
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
+from orchestrator.command_ui import (
+    BACK_LABEL,
+    REFRESH_LABEL,
+    card_title,
+    confirm_card,
+    help_menu_text,
+    selected_label,
+    setting_card,
+    status_label,
+)
 from orchestrator import runtime_audit
 from orchestrator.browser_mode import (
     build_browser_task_prompt,
@@ -35,6 +45,7 @@ from orchestrator import runtime_lifecycle
 from orchestrator import runtime_media
 from orchestrator import runtime_command_binding
 from orchestrator import runtime_mode
+from orchestrator import runtime_privacy
 from orchestrator import runtime_nudge
 from orchestrator import runtime_pipeline
 from orchestrator import runtime_remote
@@ -387,7 +398,7 @@ class FlexibleAgentRuntime:
                     self._enabled_commands.add(name.strip().lstrip("/").lower())
 
         # help/status/new/fresh/wipe/clear/model/effort/mode should always be available
-        self._enabled_commands.update({"help", "status", "new", "fresh", "wipe", "reset", "clear", "memory", "notepad", "model", "effort", "mode", "wrapper", "audit", "brain", "core", "wrap", "bg", "jobs", "verbose", "think", "stream", "preview", "voice", "say", "whisper", "transfer", "fork", "cos", "long", "end", "oll", "browser", "exp"})
+        self._enabled_commands.update({"help", "status", "new", "fresh", "wipe", "reset", "clear", "memory", "notepad", "model", "effort", "mode", "wrapper", "audit", "brain", "core", "wrap", "bg", "jobs", "verbose", "think", "stream", "preview", "voice", "say", "whisper", "transfer", "fork", "cos", "long", "end", "browser", "exp"})
 
     def _is_command_allowed(self, cmd: str) -> bool:
         cmd = (cmd or "").lstrip("/").lower()
@@ -1441,16 +1452,16 @@ class FlexibleAgentRuntime:
         if skill.type == "toggle":
             buttons.append(
                 [
-                    InlineKeyboardButton("ON", callback_data=f"skill:toggle:{skill.id}:on"),
-                    InlineKeyboardButton("OFF", callback_data=f"skill:toggle:{skill.id}:off"),
+                    InlineKeyboardButton("On", callback_data=f"skill:toggle:{skill.id}:on"),
+                    InlineKeyboardButton("Off", callback_data=f"skill:toggle:{skill.id}:off"),
                 ]
             )
         elif skill.type == "action" and skill.id not in {"cron", "heartbeat"}:
-            buttons.append([InlineKeyboardButton("Run Now", callback_data=f"skill:run:{skill.id}")])
+            buttons.append([InlineKeyboardButton("Run now", callback_data=f"skill:run:{skill.id}")])
         elif skill.type == "prompt":
-            buttons.append([InlineKeyboardButton("Show Usage", callback_data=f"skill:show:{skill.id}")])
+            buttons.append([InlineKeyboardButton("Show usage", callback_data=f"skill:show:{skill.id}")])
         if skill.id in {"cron", "heartbeat"}:
-            buttons.append([InlineKeyboardButton("Refresh Jobs", callback_data=f"skill:jobs:{skill.id}")])
+            buttons.append([InlineKeyboardButton("↻ Refresh jobs", callback_data=f"skill:jobs:{skill.id}")])
         return InlineKeyboardMarkup(buttons) if buttons else None
 
     def _habit_db_path(self) -> Path:
@@ -1776,21 +1787,19 @@ class FlexibleAgentRuntime:
     async def cmd_help(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
-        # Build help dynamically from the bot command list, filtered by command policy.
         cmds = self.get_bot_commands()
         enabled = [c for c in cmds if self._is_command_allowed(c.command)]
         disabled = sorted({c.command for c in cmds if not self._is_command_allowed(c.command)})
-
-        lines = [f"Agent {self.name} ({getattr(self.config, 'type', 'flex')}) Commands", ""]
-        for c in enabled:
-            lines.append(f"/{c.command} - {c.description}")
-
-        if disabled:
-            lines.append("")
-            lines.append("Disabled for this agent:")
-            lines.append("  " + ", ".join(f"/{c}" for c in disabled))
-
-        await self._reply_text(update, "\n".join(lines))
+        await self._reply_text(
+            update,
+            help_menu_text(
+                agent_name=self.name,
+                agent_type=getattr(self.config, "type", "flex"),
+                commands=enabled,
+                disabled=disabled,
+            ),
+            parse_mode="HTML",
+        )
 
     def _startable_agent_keyboard(self) -> InlineKeyboardMarkup | None:
         orchestrator = getattr(self, "orchestrator", None)
@@ -1800,27 +1809,27 @@ class FlexibleAgentRuntime:
         if not names:
             return None
         rows = [[InlineKeyboardButton(name, callback_data=f"startagent:{name}")] for name in names]
-        rows.append([InlineKeyboardButton("ALL", callback_data="startagent:__all__")])
+        rows.append([InlineKeyboardButton("Start all", callback_data="startagent:__all__")])
         return InlineKeyboardMarkup(rows)
 
     def _voice_keyboard(self) -> InlineKeyboardMarkup:
         rows = [
             [
-                InlineKeyboardButton("Voice ON", callback_data="voice:toggle:on"),
-                InlineKeyboardButton("Voice OFF", callback_data="voice:toggle:off"),
+                InlineKeyboardButton("Turn on", callback_data="voice:toggle:on"),
+                InlineKeyboardButton("Turn off", callback_data="voice:toggle:off"),
             ]
         ]
         active_alias = self.voice_manager.get_active_preset_alias()
         preset_buttons = []
         for alias, preset, available in self.voice_manager.get_voice_presets():
             base = preset.get("label") or alias
-            label = f">> {base}" if alias == active_alias else base
+            label = selected_label(base, alias == active_alias)
             if available != "ready":
                 label = f"{base} ({available})"
             preset_buttons.append(InlineKeyboardButton(label, callback_data=f"voice:use:{alias}"))
         for i in range(0, len(preset_buttons), 2):
             rows.append(preset_buttons[i:i + 2])
-        rows.append([InlineKeyboardButton("Refresh", callback_data="voice:refresh:menu")])
+        rows.append([InlineKeyboardButton(REFRESH_LABEL, callback_data="voice:refresh:menu")])
         return InlineKeyboardMarkup(rows)
 
     async def cmd_start(self, update: Update, context: Any):
@@ -1846,7 +1855,18 @@ class FlexibleAgentRuntime:
         if keyboard is None:
             await self._reply_text(update, "All agents are running.")
             return
-        await self._reply_text(update, "Start another agent:", reply_markup=keyboard)
+        await self._reply_text(
+            update,
+            setting_card(
+                "▶️",
+                "Start agents",
+                current=f"<code>{html.escape(self.name)}</code> running",
+                consequence="Starting an agent launches its configured runtime immediately.",
+                action="Choose an agent to start.",
+            ),
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
 
     async def callback_start_agent(self, update: Update, context: Any):
         query = update.callback_query
@@ -1874,18 +1894,16 @@ class FlexibleAgentRuntime:
     # ── /agents ────────────────────────────────────────────────────────────────
 
     def _build_agents_view(self, orchestrator) -> tuple[str, "InlineKeyboardMarkup"]:
-        import re as _re
         all_agents = orchestrator.get_all_agents_raw()
         running_names = set(orchestrator._runtime_map().keys())
         starting_names = set(orchestrator._startup_tasks.keys())
 
-        lines = ["<b>📋 HASHI Agents</b>"]
+        lines = [card_title("🤖", "Hashi agents"), ""]
         rows = []
 
         for agent in all_agents:
             name = agent.get("name", "?")
             display = agent.get("display_name", name)
-            emoji = agent.get("emoji", "🤖")
             is_active = agent.get("is_active", True)
 
             if name in starting_names:
@@ -1897,25 +1915,28 @@ class FlexibleAgentRuntime:
             else:
                 status_icon, status_text = "🔴", "inactive"
 
-            lines.append(f"{status_icon} <b>{name}</b> — {display} [{status_text}]")
+            lines.append(
+                f"{status_icon} <b>{html.escape(name)}</b> · "
+                f"{html.escape(str(display))} · <code>{status_text}</code>"
+            )
 
             btn_row = []
             if is_active:
-                btn_row.append(InlineKeyboardButton(f"❌ {name}", callback_data=f"agents:deactivate:{name}"))
+                btn_row.append(InlineKeyboardButton(f"Deactivate {name}", callback_data=f"agents:deactivate:{name}"))
             else:
-                btn_row.append(InlineKeyboardButton(f"✅ {name}", callback_data=f"agents:activate:{name}"))
+                btn_row.append(InlineKeyboardButton(f"Activate {name}", callback_data=f"agents:activate:{name}"))
 
             if name in starting_names:
                 btn_row.append(InlineKeyboardButton("⏳", callback_data="agents:noop"))
             elif name in running_names:
-                btn_row.append(InlineKeyboardButton("⏹ Stop", callback_data=f"agents:stop:{name}"))
+                btn_row.append(InlineKeyboardButton("Stop", callback_data=f"agents:stop:{name}"))
             elif is_active:
-                btn_row.append(InlineKeyboardButton("▶ Start", callback_data=f"agents:start:{name}"))
+                btn_row.append(InlineKeyboardButton("Start", callback_data=f"agents:start:{name}"))
 
-            btn_row.append(InlineKeyboardButton("🗑", callback_data=f"agents:delete:{name}"))
+            btn_row.append(InlineKeyboardButton("Delete", callback_data=f"agents:delete:{name}"))
             rows.append(btn_row)
 
-        rows.append([InlineKeyboardButton("🔄 Refresh", callback_data="agents:refresh")])
+        rows.append([InlineKeyboardButton(REFRESH_LABEL, callback_data="agents:refresh")])
         return "\n".join(lines), InlineKeyboardMarkup(rows)
 
     async def cmd_agents(self, update: Update, context: Any):
@@ -2001,12 +2022,19 @@ class FlexibleAgentRuntime:
                 return
         elif action == "delete":
             await query.answer()
-            confirm_markup = InlineKeyboardMarkup([[
-                InlineKeyboardButton(f"⚠️ Confirm delete {name}", callback_data=f"agents:confirmdelete:{name}"),
-                InlineKeyboardButton("Cancel", callback_data="agents:refresh"),
-            ]])
+            confirm_markup = InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton(f"Delete {name}", callback_data=f"agents:confirmdelete:{name}")],
+                    [InlineKeyboardButton("← Keep agent", callback_data="agents:refresh")],
+                ]
+            )
             await query.edit_message_text(
-                f"⚠️ <b>Delete '{name}'?</b>\n\nRemoves from config only — workspace files are kept.",
+                confirm_card(
+                    "⚠️",
+                    "Delete agent",
+                    target=f"<code>{html.escape(name)}</code>",
+                    consequence="This removes the agent from configuration. Its workspace files are kept.",
+                ),
                 reply_markup=confirm_markup,
                 parse_mode="HTML",
             )
@@ -2067,13 +2095,12 @@ class FlexibleAgentRuntime:
                 _f.unlink(missing_ok=True)
             else:
                 _f.touch()
-            state = "ON 🔍" if self._verbose else "OFF"
-            markup = InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ ON" if self._verbose else "ON", callback_data="tgl:verbose:on"),
-                InlineKeyboardButton("✅ OFF" if not self._verbose else "OFF", callback_data="tgl:verbose:off"),
-            ]])
-            await query.edit_message_text(f"Verbose mode: {state}", reply_markup=markup)
-            await query.answer(f"Verbose {state}")
+            await query.edit_message_text(
+                self._verbose_menu_text(),
+                parse_mode="HTML",
+                reply_markup=self._verbose_keyboard(),
+            )
+            await query.answer(f"Verbose {status_label(self._verbose)}")
 
         elif target == "think":
             self._think = value == "on"
@@ -2082,13 +2109,12 @@ class FlexibleAgentRuntime:
                 _f.unlink(missing_ok=True)
             else:
                 _f.touch()
-            state = "ON 💭" if self._think else "OFF"
-            markup = InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ ON" if self._think else "ON", callback_data="tgl:think:on"),
-                InlineKeyboardButton("✅ OFF" if not self._think else "OFF", callback_data="tgl:think:off"),
-            ]])
-            await query.edit_message_text(f"Thinking display: {state}", reply_markup=markup)
-            await query.answer(f"Think {state}")
+            await query.edit_message_text(
+                self._think_menu_text(),
+                parse_mode="HTML",
+                reply_markup=self._think_keyboard(),
+            )
+            await query.answer(f"Think {status_label(self._think)}")
 
         elif target == "stream":
             try:
@@ -2106,6 +2132,7 @@ class FlexibleAgentRuntime:
                 return
             await query.edit_message_text(
                 self._stream_status_text(),
+                parse_mode="HTML",
                 reply_markup=self._stream_keyboard(),
             )
             await query.answer(notice)
@@ -2126,12 +2153,11 @@ class FlexibleAgentRuntime:
             transcriber = get_transcriber()
             transcriber.model_size = new_size
             transcriber._model = None
-            markup = InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ small" if value == "small" else "small", callback_data="tgl:whisper:small"),
-                InlineKeyboardButton("✅ medium" if value == "medium" else "medium", callback_data="tgl:whisper:medium"),
-                InlineKeyboardButton("✅ large" if value == "large" else "large", callback_data="tgl:whisper:large"),
-            ]])
-            await query.edit_message_text(f"Whisper model: <b>{new_size}</b>", parse_mode="HTML", reply_markup=markup)
+            await query.edit_message_text(
+                self._whisper_menu_text(new_size),
+                parse_mode="HTML",
+                reply_markup=self._whisper_keyboard(new_size),
+            )
             await query.answer(f"Set to {new_size}")
 
         elif target == "active":
@@ -2150,9 +2176,11 @@ class FlexibleAgentRuntime:
                 except ValueError:
                     await query.answer("Invalid value.", show_alert=True)
                     return
-            status = self.skill_manager.describe_active_heartbeat(self.name)
-            markup = self._active_keyboard()
-            await query.edit_message_text(f"{status}\n\n{msg}", reply_markup=markup)
+            await query.edit_message_text(
+                self._active_menu_text(notice=msg),
+                parse_mode="HTML",
+                reply_markup=self._active_keyboard(),
+            )
             await query.answer()
 
         elif target == "reboot":
@@ -2178,11 +2206,12 @@ class FlexibleAgentRuntime:
             await query.answer()
 
     def _active_keyboard(self) -> InlineKeyboardMarkup:
-        default_min = getattr(self.skill_manager, "ACTIVE_HEARTBEAT_DEFAULT_MINUTES", 10) if self.skill_manager else 10
+        status = self.skill_manager.describe_active_heartbeat(self.name) if self.skill_manager else ""
+        enabled = "OFF" not in status.upper() and "DISABLED" not in status.upper()
         return InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("ON", callback_data="tgl:active:on"),
-                InlineKeyboardButton("OFF", callback_data="tgl:active:off"),
+                InlineKeyboardButton(selected_label("On", enabled), callback_data="tgl:active:on"),
+                InlineKeyboardButton(selected_label("Off", not enabled), callback_data="tgl:active:off"),
             ],
             [
                 InlineKeyboardButton("10m", callback_data="tgl:active:10"),
@@ -2190,6 +2219,20 @@ class FlexibleAgentRuntime:
                 InlineKeyboardButton("60m", callback_data="tgl:active:60"),
             ],
         ])
+
+    def _active_menu_text(self, *, notice: str | None = None) -> str:
+        status = self.skill_manager.describe_active_heartbeat(self.name) if self.skill_manager else "Unavailable"
+        facts = [f"<b>Agent</b> · <code>{html.escape(self.name)}</code>"]
+        if notice:
+            facts.append(f"✅ {html.escape(str(notice))}")
+        return setting_card(
+            "🫧",
+            "Active continuation",
+            current=html.escape(status),
+            facts=facts,
+            consequence="Changes take effect immediately and are stored by the task manager.",
+            action="Choose the active state or continuation interval.",
+        )
 
     # ── lifecycle commands ───────────────────────────────────────────────────────
     async def cmd_terminate(self, update: Update, context: Any):
@@ -2212,17 +2255,26 @@ class FlexibleAgentRuntime:
         arg = " ".join(context.args).strip().lower() if context.args else ""
         if not arg or arg == "help":
             all_names = orchestrator.configured_agent_names()
-            lines = ["<b>Reboot</b> — select target:"]
+            lines = [
+                card_title("🔄", "Reboot agents"),
+                "",
+                f"<b>Current agent</b> · <code>{html.escape(self.name)}</code>",
+                "<b>Effect</b> · reloads code and runtime state for the selected target",
+                "",
+                "Active requests on restarted agents are interrupted. Choose the exact target:",
+                "",
+                "<b>AGENTS</b>",
+            ]
             for i, name in enumerate(all_names, 1):
                 running = name in {rt.name for rt in orchestrator.runtimes}
                 marker = "●" if running else "○"
-                lines.append(f"  {i}. {marker} {name}")
+                lines.append(f"{i}. {marker} <code>{html.escape(name)}</code>")
             rows = [
                 [
                     InlineKeyboardButton("This bot", callback_data="tgl:reboot:min"),
                     InlineKeyboardButton("All active", callback_data="tgl:reboot:max"),
-                    InlineKeyboardButton("Running only", callback_data="tgl:reboot:same"),
-                ]
+                ],
+                [InlineKeyboardButton("All running", callback_data="tgl:reboot:same")],
             ]
             for i, name in enumerate(all_names, 1):
                 rows.append([InlineKeyboardButton(f"#{i} {name}", callback_data=f"tgl:reboot:{i}")])
@@ -2694,7 +2746,7 @@ class FlexibleAgentRuntime:
                     brave_configured=bool(secrets.get("brave_api_key")),
                     extension_bridge_configured=extension_bridge_configured,
                 ),
-                parse_mode="Markdown",
+                parse_mode="HTML",
             )
 
         args = [a.strip() for a in (context.args or []) if a.strip()]
@@ -2703,7 +2755,7 @@ class FlexibleAgentRuntime:
             await reply_browser_status()
             return
         if sub == "examples":
-            await self._reply_text(update, get_browser_examples_text(), parse_mode="Markdown")
+            await self._reply_text(update, get_browser_examples_text(), parse_mode="HTML")
             return
 
         task = " ".join(args[1:]).strip()
@@ -2747,8 +2799,22 @@ class FlexibleAgentRuntime:
             return
         args = [a.strip().lower() for a in (context.args or []) if a.strip()]
         if not args:
-            status = "ON 🛡️" if self._safevoice_enabled else "OFF"
-            await self._reply_text(update, f"Safe Voice: {status}\nUsage: /safevoice on | off")
+            await self._reply_text(
+                update,
+                setting_card(
+                    "🛡️",
+                    "Safe voice",
+                    current=f"<b>{status_label(self._safevoice_enabled)}</b>",
+                    facts=["<b>Scope</b> · incoming Telegram voice messages"],
+                    consequence=(
+                        "Voice transcripts require confirmation before being sent to the agent."
+                        if self._safevoice_enabled
+                        else "Voice transcripts are sent directly to the agent."
+                    ),
+                    action="Use <code>/safevoice on</code> or <code>/safevoice off</code>. Changes persist.",
+                ),
+                parse_mode="HTML",
+            )
             return
         if args[0] == "on":
             self._safevoice_enabled = True
@@ -2879,7 +2945,9 @@ class FlexibleAgentRuntime:
         if not args_text:
             await self._reply_text(
                 update,
-                "🔄 <b>Loop — Recurring Task Manager</b>\n\n"
+                f"{card_title('🔄', 'Loop manager')}\n\n"
+                "<b>Current</b> · ready to create or manage recurring tasks\n"
+                "<b>Changes</b> · saved immediately in the task scheduler\n\n"
                 "<code>/loop &lt;task&gt;</code> — create a loop\n"
                 "<code>/loop list</code> — list active loops\n"
                 "<code>/loop stop [id]</code> — stop loop(s)",
@@ -2902,7 +2970,12 @@ class FlexibleAgentRuntime:
             if not loops:
                 await self._reply_text(update, "No active loops for this agent.")
                 return
-            lines = ["🔄 <b>Loops</b>\n"]
+            lines = [
+                card_title("🔄", "Loops"),
+                "",
+                f"<b>Current</b> · <code>{len(loops)}</code> configured",
+                "",
+            ]
             for job_kind, j in loops:
                 meta = j.get("loop_meta", {})
                 status = "🟢 ON" if j.get("enabled") else "🔴 OFF"
@@ -3062,6 +3135,23 @@ class FlexibleAgentRuntime:
         args_text = parts[1].strip() if len(parts) > 1 else ""
         await runtime_superloop.handle_superloop_command(self, update, args_text)
 
+    def _whisper_keyboard(self, current: str) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton(selected_label("Small", current == "small"), callback_data="tgl:whisper:small"),
+            InlineKeyboardButton(selected_label("Medium", current == "medium"), callback_data="tgl:whisper:medium"),
+            InlineKeyboardButton(selected_label("Large", current.startswith("large")), callback_data="tgl:whisper:large"),
+        ]])
+
+    def _whisper_menu_text(self, current: str) -> str:
+        return setting_card(
+            "🎙️",
+            "Whisper transcription",
+            current=f"<code>{html.escape(current)}</code>",
+            facts=["<b>Scope</b> · local Telegram voice transcription"],
+            consequence="Larger models improve accuracy but use more memory and load more slowly.",
+            action="The next transcription loads the selected model. This setting does not require a reboot.",
+        )
+
     async def cmd_whisper(self, update: Update, context: Any):
         """Set the local voice transcription model size.
 
@@ -3085,12 +3175,12 @@ class FlexibleAgentRuntime:
 
         if not args:
             cur = transcriber.model_size
-            markup = InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ small" if cur == "small" else "small", callback_data="tgl:whisper:small"),
-                InlineKeyboardButton("✅ medium" if cur == "medium" else "medium", callback_data="tgl:whisper:medium"),
-                InlineKeyboardButton("✅ large" if cur.startswith("large") else "large", callback_data="tgl:whisper:large"),
-            ]])
-            await self._reply_text(update, f"Whisper model: <b>{cur}</b>", parse_mode="HTML", reply_markup=markup)
+            await self._reply_text(
+                update,
+                self._whisper_menu_text(cur),
+                parse_mode="HTML",
+                reply_markup=self._whisper_keyboard(cur),
+            )
             return
 
         value = args[0]
@@ -3112,7 +3202,9 @@ class FlexibleAgentRuntime:
 
         await self._reply_text(
             update,
-            f"✅ Whisper model set to: {new_size}. It will load on the next voice message.",
+            self._whisper_menu_text(new_size),
+            parse_mode="HTML",
+            reply_markup=self._whisper_keyboard(new_size),
         )
 
     async def _invoke_prompt_skill_from_command(self, update: Update, skill_id: str, args: list[str]):
@@ -3200,22 +3292,41 @@ class FlexibleAgentRuntime:
 
         args = list(context.args or [])
         if not args:
-            await self._reply_text(update, "Skills", reply_markup=self._skill_keyboard())
+            grouped = self._skills_by_type()
+            count = sum(len(items) for items in grouped.values())
+            await self._reply_text(
+                update,
+                setting_card(
+                    "🧰",
+                    "Skills",
+                    current=f"<code>{count}</code> available",
+                    facts=[
+                        f"<b>Agent</b> · <code>{html.escape(self.name)}</code>",
+                        "<b>Scope</b> · action, toggle and prompt skills",
+                    ],
+                    consequence="Toggle changes persist in this workspace; actions run immediately.",
+                    action="Choose a skill for its status and available actions.",
+                ),
+                parse_mode="HTML",
+                reply_markup=self._skill_keyboard(),
+            )
             return
 
         sub = args[0].strip().lower()
         if sub == "help":
             grouped = self._skills_by_type()
-            lines = ["Skills", ""]
+            lines = [card_title("🧰", "Skills reference"), ""]
             for skill_type in ("action", "toggle", "prompt"):
                 entries = grouped.get(skill_type, [])
                 if not entries:
                     continue
                 lines.append(skill_type.upper())
                 for skill in entries:
-                    lines.append(f"- {skill.id}: {skill.description}")
+                    lines.append(
+                        f"<code>{html.escape(skill.id)}</code> · {html.escape(skill.description)}"
+                    )
                 lines.append("")
-            await self._reply_text(update, "\n".join(lines).strip())
+            await self._reply_text(update, "\n".join(lines).strip(), parse_mode="HTML")
             return
 
         skill = self.skill_manager.get_skill(sub)
@@ -3490,6 +3601,29 @@ class FlexibleAgentRuntime:
     async def cmd_status(self, update: Update, context: Any):
         await runtime_status.cmd_status(self, update, context)
 
+    def _verbose_keyboard(self) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton(selected_label("On", self._verbose), callback_data="tgl:verbose:on"),
+            InlineKeyboardButton(selected_label("Off", not self._verbose), callback_data="tgl:verbose:off"),
+        ]])
+
+    def _verbose_menu_text(self) -> str:
+        return setting_card(
+            "🔍",
+            "Verbose display",
+            current=f"<b>{status_label(self._verbose)}</b>",
+            facts=[
+                f"<b>Stream</b> · <code>{status_label(telegram_stream_policy.get_policy(self).enabled)}</code>",
+                "<b>Saved</b> · workspace setting",
+            ],
+            consequence=(
+                "Shows engine, timing and output-event detail while streaming."
+                if self._verbose
+                else "Detailed progress and completion traces are hidden."
+            ),
+            action="Changes apply immediately and persist across reboot.",
+        )
+
     async def cmd_verbose(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
@@ -3506,19 +3640,32 @@ class FlexibleAgentRuntime:
             _verbose_file.unlink(missing_ok=True)
         else:
             _verbose_file.touch()
-        state = "ON 🔍" if self._verbose else "OFF"
-        markup = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ ON" if self._verbose else "ON", callback_data="tgl:verbose:on"),
-            InlineKeyboardButton("✅ OFF" if not self._verbose else "OFF", callback_data="tgl:verbose:off"),
-        ]])
         await self._reply_text(
             update,
-            f"Verbose mode: {state}\n"
-            f"{'When /stream is ON, progress can show engine, elapsed, idle time and output events.' if self._verbose else 'Verbose detail and completion traces are disabled.'}\n"
-            "Telegram streaming is controlled independently with /stream.",
-            reply_markup=markup,
+            self._verbose_menu_text(),
+            parse_mode="HTML",
+            reply_markup=self._verbose_keyboard(),
         )
 
+    def _think_keyboard(self) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton(selected_label("On", self._think), callback_data="tgl:think:on"),
+            InlineKeyboardButton(selected_label("Off", not self._think), callback_data="tgl:think:off"),
+        ]])
+
+    def _think_menu_text(self) -> str:
+        return setting_card(
+            "💭",
+            "Thinking display",
+            current=f"<b>{status_label(self._think)}</b>",
+            facts=["<b>Saved</b> · workspace setting"],
+            consequence=(
+                "Periodic thinking summaries may appear during long generation."
+                if self._think
+                else "Thinking summaries are hidden."
+            ),
+            action="Changes apply immediately and persist across reboot.",
+        )
 
     async def cmd_think(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -3535,27 +3682,24 @@ class FlexibleAgentRuntime:
             _think_file.unlink(missing_ok=True)
         else:
             _think_file.touch()
-        state = "ON 💭" if self._think else "OFF"
-        markup = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ ON" if self._think else "ON", callback_data="tgl:think:on"),
-            InlineKeyboardButton("✅ OFF" if not self._think else "OFF", callback_data="tgl:think:off"),
-        ]])
         await self._reply_text(
             update,
-            f"Thinking display: {state}\n"
-            f"{'Thinking traces will be sent as permanent italic messages every ~60s during generation.' if self._think else 'Thinking traces will not be displayed.'}",
-            reply_markup=markup,
+            self._think_menu_text(),
+            parse_mode="HTML",
+            reply_markup=self._think_keyboard(),
         )
 
     def _stream_status_text(self) -> str:
         policy = telegram_stream_policy.get_policy(self)
         effective_mode = "LIVE STREAM" if policy.enabled else "FINAL ONLY"
         lines = [
-            f"Telegram streaming: {'ON 📡' if policy.enabled else 'OFF'}",
-            f"Mode: {effective_mode}",
-            f"Source: {policy.source}",
+            card_title("📡", "Telegram stream"),
             "",
-            "What each switch shows in Telegram:",
+            f"<b>Current</b> · <b>{status_label(policy.enabled)}</b> · {effective_mode}",
+            f"<b>Source</b> · <code>{html.escape(str(policy.source))}</code>",
+            "<b>Saved</b> · workspace setting; immediate",
+            "",
+            "<b>COMPONENTS</b>",
         ]
         labels = {
             "placeholder": 'Start message bubble ("Agent is typing...")',
@@ -3573,25 +3717,27 @@ class FlexibleAgentRuntime:
                 state = "ARMED (inactive)"
             else:
                 state = "OFF"
-            lines.append(f"• {label}: {state}")
+            lines.append(f"{html.escape(label)} · <code>{state}</code>")
         lines.extend(
             [
                 "",
-                f"Safety: {policy.edit_interval_s:g}s min edit • "
-                f"{policy.heartbeat_interval_s:g}s heartbeat • "
-                f"{policy.max_edits_per_request} edits/request",
-                f"Independent: verbose {'ON' if self._verbose else 'OFF'} • "
-                f"think {'ON' if self._think else 'OFF'}",
+                "",
+                f"<b>Safety</b> · <code>{policy.edit_interval_s:g}s</code> min edit · "
+                f"<code>{policy.heartbeat_interval_s:g}s</code> heartbeat · "
+                f"<code>{policy.max_edits_per_request}</code> edits/request",
+                f"<b>Independent</b> · verbose <code>{status_label(self._verbose)}</code> · "
+                f"think <code>{status_label(self._think)}</code>",
             ]
         )
         if not policy.enabled:
             lines.extend(
                 [
                     "",
-                    "Master is OFF: all ARMED switches are saved choices but inactive.",
-                    "Future normal replies skip all stream traffic and send only the final answer.",
+                    "ℹ️ The master switch is OFF. Armed component choices are saved but inactive; "
+                    "normal replies send only the final answer.",
                 ]
             )
+        lines.extend(["", "Choose a component state below."])
         return "\n".join(lines)
 
     def _stream_keyboard(self) -> InlineKeyboardMarkup:
@@ -3600,11 +3746,11 @@ class FlexibleAgentRuntime:
         def row(name: str, label: str, enabled: bool):
             return [
                 InlineKeyboardButton(
-                    f"✅ {label} ON" if enabled else f"{label} ON",
+                    selected_label(f"{label} on", enabled),
                     callback_data=f"tgl:stream:{name}:on",
                 ),
                 InlineKeyboardButton(
-                    f"✅ {label} OFF" if not enabled else f"{label} OFF",
+                    selected_label(f"{label} off", not enabled),
                     callback_data=f"tgl:stream:{name}:off",
                 ),
             ]
@@ -3612,12 +3758,12 @@ class FlexibleAgentRuntime:
         rows = [row("enabled", "Stream", policy.enabled)]
         rows.extend(
             [
-                row("placeholder", "💬 Start Bubble", policy.placeholder),
-                row("typing", "⌨️ Typing", policy.typing),
-                row("progress", "⏱ Progress", policy.progress),
-                row("preview", "📝 Live Preview", policy.preview),
-                row("promote", "🏁 Finalize", policy.promote),
-                [InlineKeyboardButton("Reset to default OFF", callback_data="tgl:stream:reset:off")],
+                row("placeholder", "Start bubble", policy.placeholder),
+                row("typing", "Typing", policy.typing),
+                row("progress", "Progress", policy.progress),
+                row("preview", "Live preview", policy.preview),
+                row("promote", "Finalize", policy.promote),
+                [InlineKeyboardButton("Reset all to off", callback_data="tgl:stream:reset:off")],
             ]
         )
         return InlineKeyboardMarkup(rows)
@@ -3630,6 +3776,7 @@ class FlexibleAgentRuntime:
             await self._reply_text(
                 update,
                 self._stream_status_text(),
+                parse_mode="HTML",
                 reply_markup=self._stream_keyboard(),
             )
             return
@@ -3655,6 +3802,7 @@ class FlexibleAgentRuntime:
         await self._reply_text(
             update,
             self._stream_status_text(),
+            parse_mode="HTML",
             reply_markup=self._stream_keyboard(),
         )
 
@@ -3668,11 +3816,23 @@ class FlexibleAgentRuntime:
         if action == "status":
             await self._reply_text(
                 update,
-                f"Answer stream preview preference: {'ON 👁️' if configured else 'OFF'}\n"
-                f"Effective: {'ON' if policy.preview_enabled else 'OFF'}\n"
-                f"Preference source: {policy.component_sources['preview']}\n"
-                f"Master stream: {'ON' if policy.enabled else 'OFF'} ({policy.source})\n"
-                "Use /stream for the complete Telegram streaming controls.",
+                setting_card(
+                    "👁️",
+                    "Answer preview",
+                    current=f"<b>{status_label(configured)}</b>",
+                    facts=[
+                        f"<b>Effective</b> · <code>{status_label(policy.preview_enabled)}</code>",
+                        f"<b>Master stream</b> · <code>{status_label(policy.enabled)}</code>",
+                        f"<b>Source</b> · <code>{html.escape(str(policy.component_sources['preview']))}</code>",
+                    ],
+                    consequence="The preference is saved immediately; it is active only while the master stream is on.",
+                    action="Use <code>/stream</code> for all Telegram stream controls.",
+                ),
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(selected_label("On", configured), callback_data="tgl:stream:preview:on"),
+                    InlineKeyboardButton(selected_label("Off", not configured), callback_data="tgl:stream:preview:off"),
+                ]]),
             )
             return
 
@@ -3684,7 +3844,6 @@ class FlexibleAgentRuntime:
             new_value = not configured
         telegram_delivery_failover.set_preview_enabled(self, new_value)
         policy = telegram_stream_policy.get_policy(self)
-        state = "ON 👁️" if new_value else "OFF"
         advice = (
             "Preference saved but inactive until /stream on."
             if new_value and not policy.enabled
@@ -3694,7 +3853,19 @@ class FlexibleAgentRuntime:
         )
         await self._reply_text(
             update,
-            f"Answer stream preview: {state}\n{advice}",
+            setting_card(
+                "👁️",
+                "Answer preview",
+                current=f"<b>{status_label(new_value)}</b>",
+                facts=[f"<b>Effective</b> · <code>{status_label(policy.preview_enabled)}</code>"],
+                consequence=advice,
+                action="Changes apply immediately and persist across reboot.",
+            ),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(selected_label("On", new_value), callback_data="tgl:stream:preview:on"),
+                InlineKeyboardButton(selected_label("Off", not new_value), callback_data="tgl:stream:preview:off"),
+            ]]),
         )
 
     async def cmd_jobs(self, update: Update, context: Any):
@@ -3735,14 +3906,16 @@ class FlexibleAgentRuntime:
             def_idle_min = default_idle // 60
             def_hard_min = default_hard // 60
             text = (
-                f"<b>⏱ Right-brain/backend timeout — {self.name}</b>\n\n"
-                f"  Idle:  <b>{idle_min} min</b>  (default: {def_idle_min} min)\n"
-                f"  Hard:  <b>{hard_min} min</b>  (default: {def_hard_min} min)\n\n"
-                f"Dual-brain note: this controls the active right-brain execution backend, not left-brain sidecar memory passes.\n\n"
-                f"Usage:\n"
-                f"  <code>/timeout 30</code>        — set idle to 30 min\n"
-                f"  <code>/timeout 30 120</code>    — idle=30 min, hard=120 min\n"
-                f"  <code>/timeout reset</code>     — restore defaults"
+                f"{card_title('⏱️', 'Backend timeout')}\n\n"
+                f"<b>Current idle</b> · <code>{idle_min} min</code> · default {def_idle_min} min\n"
+                f"<b>Current hard</b> · <code>{hard_min} min</code> · default {def_hard_min} min\n"
+                f"<b>Agent</b> · <code>{html.escape(self.name)}</code>\n\n"
+                "Changes apply immediately to the active execution backend and persist with its configuration. "
+                "Dual-brain left-side memory passes are unaffected.\n\n"
+                "<b>Use</b>\n"
+                "<code>/timeout 30</code> · set idle to 30 min\n"
+                "<code>/timeout 30 120</code> · set idle and hard limits\n"
+                "<code>/timeout reset</code> · restore defaults"
             )
             await self._reply_text(update, text, parse_mode="HTML")
             return
@@ -4047,14 +4220,15 @@ class FlexibleAgentRuntime:
                 member_display = "  <i>(empty)</i>"
 
         text = (
-            f"<b>📦 Group: {group_name}</b>\n"
-            f"{desc}\n\n"
-            f"Members ({len(directory.resolve_group(group_name))}):\n"
+            f"{card_title('📦', 'Agent group')}\n\n"
+            f"<b>Current</b> · <code>{html.escape(group_name)}</code>\n"
+            f"<b>Description</b> · {html.escape(str(desc or 'None'))}\n\n"
+            f"<b>MEMBERS</b> · {len(directory.resolve_group(group_name))}\n"
             f"{member_display}\n"
         )
 
         if is_dynamic:
-            rows = [[InlineKeyboardButton("✕ Close", callback_data=f"group:back")]]
+            rows = [[InlineKeyboardButton(BACK_LABEL, callback_data="group:back")]]
         else:
             rows = [
                 [
@@ -4064,12 +4238,12 @@ class FlexibleAgentRuntime:
                 ],
                 [
                     InlineKeyboardButton("🗑 Delete", callback_data=f"group:delete:{group_name}"),
-                    InlineKeyboardButton("« Back", callback_data="group:back"),
+                    InlineKeyboardButton(BACK_LABEL, callback_data="group:back"),
                 ],
                 [
-                    InlineKeyboardButton("▶ Start All", callback_data=f"group:start:{group_name}"),
-                    InlineKeyboardButton("⏹ Stop All", callback_data=f"group:stop:{group_name}"),
-                    InlineKeyboardButton("🔄 Reboot All", callback_data=f"group:reboot:{group_name}"),
+                    InlineKeyboardButton("Start all", callback_data=f"group:start:{group_name}"),
+                    InlineKeyboardButton("Stop all", callback_data=f"group:stop:{group_name}"),
+                    InlineKeyboardButton("Reboot all", callback_data=f"group:reboot:{group_name}"),
                 ],
                 [InlineKeyboardButton("💬 Broadcast", callback_data=f"group:broadcast:{group_name}")],
             ]
@@ -4079,7 +4253,7 @@ class FlexibleAgentRuntime:
         """Build the group overview message + inline keyboard."""
         groups = directory.list_groups()
         if groups:
-            lines = ["<b>📦 Agent Groups</b>\n"]
+            lines = [card_title("📦", "Agent groups"), "", f"<b>Current</b> · <code>{len(groups)}</code> groups", ""]
             for name, grp in groups.items():
                 members = grp.get("members", [])
                 is_dynamic = members == "@active"
@@ -4088,10 +4262,16 @@ class FlexibleAgentRuntime:
                 tag = " 🔄" if is_dynamic else ""
                 lines.append(f"• <b>{name}</b>{tag}  ({count} agents) — {desc}")
         else:
-            lines = ["<b>📦 Agent Groups</b>\n", "<i>No groups defined yet.</i>"]
+            lines = [
+                card_title("📦", "Agent groups"),
+                "",
+                "<b>Current</b> · <code>0</code> groups",
+                "",
+                "No groups are defined yet.",
+            ]
 
         rows = [[InlineKeyboardButton(f"📦 {name}", callback_data=f"group:view:{name}")] for name in groups]
-        rows.append([InlineKeyboardButton("＋ New Group", callback_data="group:new")])
+        rows.append([InlineKeyboardButton("New group", callback_data="group:new")])
         return "\n".join(lines), InlineKeyboardMarkup(rows)
 
     async def cmd_group(self, update: Update, context: Any):
@@ -4125,13 +4305,18 @@ class FlexibleAgentRuntime:
                 await self._reply_text(update, "Usage: <code>/group del &lt;name&gt;</code>", parse_mode="HTML")
                 return
             name = args[1].lower()
-            rows = [[
-                InlineKeyboardButton("✅ Confirm Delete", callback_data=f"group:delete_confirm:{name}"),
-                InlineKeyboardButton("✕ Cancel", callback_data="group:back"),
-            ]]
+            rows = [
+                [InlineKeyboardButton(f"Delete {name}", callback_data=f"group:delete_confirm:{name}")],
+                [InlineKeyboardButton("← Keep group", callback_data="group:back")],
+            ]
             await self._reply_text(
                 update,
-                f"⚠️ Delete group <b>{name}</b>?\nThis will NOT affect the agents themselves.",
+                confirm_card(
+                    "⚠️",
+                    "Delete group",
+                    target=f"<code>{html.escape(name)}</code>",
+                    consequence="This deletes only the group definition. The agents themselves are unchanged.",
+                ),
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(rows),
             )
@@ -4191,12 +4376,17 @@ class FlexibleAgentRuntime:
 
         # ── delete (confirm prompt) ──
         if action == "delete":
-            rows = [[
-                InlineKeyboardButton("✅ Confirm Delete", callback_data=f"group:delete_confirm:{group_name}"),
-                InlineKeyboardButton("✕ Cancel", callback_data=f"group:view:{group_name}"),
-            ]]
+            rows = [
+                [InlineKeyboardButton(f"Delete {group_name}", callback_data=f"group:delete_confirm:{group_name}")],
+                [InlineKeyboardButton("← Keep group", callback_data=f"group:view:{group_name}")],
+            ]
             await query.edit_message_text(
-                f"⚠️ Delete group <b>{group_name}</b>?\nThis will NOT affect the agents themselves.",
+                confirm_card(
+                    "⚠️",
+                    "Delete group",
+                    target=f"<code>{html.escape(group_name)}</code>",
+                    consequence="This deletes only the group definition. The agents themselves are unchanged.",
+                ),
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(rows),
             )
@@ -4226,7 +4416,7 @@ class FlexibleAgentRuntime:
                 row = directory.get_agent_row(agent)
                 emoji = row.get("emoji", "🤖") if row else "🤖"
                 rows.append([InlineKeyboardButton(f"{emoji} {agent}", callback_data=f"group:add_confirm:{group_name}:{agent}")])
-            rows.append([InlineKeyboardButton("✕ Cancel", callback_data=f"group:view:{group_name}")])
+            rows.append([InlineKeyboardButton(BACK_LABEL, callback_data=f"group:view:{group_name}")])
             await query.edit_message_text(
                 f"➕ Add to <b>{group_name}</b>\nSelect agents to add:",
                 parse_mode="HTML",
@@ -4255,7 +4445,7 @@ class FlexibleAgentRuntime:
                 row = directory.get_agent_row(agent)
                 emoji = row.get("emoji", "🤖") if row else "🤖"
                 rows.append([InlineKeyboardButton(f"{emoji} {agent}", callback_data=f"group:remove_confirm:{group_name}:{agent}")])
-            rows.append([InlineKeyboardButton("✕ Cancel", callback_data=f"group:view:{group_name}")])
+            rows.append([InlineKeyboardButton(BACK_LABEL, callback_data=f"group:view:{group_name}")])
             await query.edit_message_text(
                 f"➖ Remove from <b>{group_name}</b>\nSelect agents to remove:",
                 parse_mode="HTML",
@@ -4574,7 +4764,12 @@ class FlexibleAgentRuntime:
         allowed_engines = [b["engine"] for b in self.config.allowed_backends]
 
         if not args:
-            await self._reply_text(update, self._build_backend_menu_text(), reply_markup=self._backend_keyboard())
+            await self._reply_text(
+                update,
+                self._build_backend_menu_text(),
+                parse_mode="HTML",
+                reply_markup=self._backend_keyboard(),
+            )
             return
 
         target_engine = args[0].lower()
@@ -4617,6 +4812,7 @@ class FlexibleAgentRuntime:
         await self._reply_text(
             update,
             self._build_backend_model_prompt(target_engine, with_context),
+            parse_mode="HTML",
             reply_markup=self._backend_model_keyboard(target_engine, with_context),
         )
 
@@ -4866,15 +5062,23 @@ class FlexibleAgentRuntime:
 
         args = [a.strip().lower() for a in (context.args or []) if a.strip()]
         if not args:
-            status = self.skill_manager.describe_active_heartbeat(self.name)
-            markup = self._active_keyboard()
-            await self._reply_text(update, status, reply_markup=markup)
+            await self._reply_text(
+                update,
+                self._active_menu_text(),
+                parse_mode="HTML",
+                reply_markup=self._active_keyboard(),
+            )
             return
 
         mode = args[0]
         if mode == "off":
             _, message = self.skill_manager.set_active_heartbeat(self.name, enabled=False)
-            await self._reply_text(update, message)
+            await self._reply_text(
+                update,
+                self._active_menu_text(notice=message),
+                parse_mode="HTML",
+                reply_markup=self._active_keyboard(),
+            )
             return
         if mode != "on":
             await self._reply_text(update, "Usage: /active on [minutes] | /active off")
@@ -4889,7 +5093,12 @@ class FlexibleAgentRuntime:
                 return
 
         _, message = self.skill_manager.set_active_heartbeat(self.name, enabled=True, minutes=minutes)
-        await self._reply_text(update, message)
+        await self._reply_text(
+            update,
+            self._active_menu_text(notice=message),
+            parse_mode="HTML",
+            reply_markup=self._active_keyboard(),
+        )
 
 
     def _get_available_models(self) -> list[str]:
@@ -4958,8 +5167,8 @@ class FlexibleAgentRuntime:
         for backend in self.config.allowed_backends:
             engine = backend["engine"]
             base = get_backend_label(engine)
-            plain_label = f">> {base}" if engine == current else base
-            context_label = f"{base} +"
+            plain_label = selected_label(base, engine == current)
+            context_label = f"{base} · with context"
             buttons.append(
                 [
                     InlineKeyboardButton(plain_label, callback_data=f"backend:{engine}:plain"),
@@ -4973,7 +5182,7 @@ class FlexibleAgentRuntime:
         active = current_model or self.get_current_model()
         buttons = []
         for model in self._get_available_models_for(active_engine):
-            label = f">> {model}" if model == active else model
+            label = selected_label(model, model == active)
             buttons.append([InlineKeyboardButton(label, callback_data=f"model:{model}")])
         return InlineKeyboardMarkup(buttons)
 
@@ -4981,7 +5190,7 @@ class FlexibleAgentRuntime:
         active = current_effort or self._get_current_effort()
         buttons = []
         for effort in self._get_available_efforts():
-            label = f">> {effort}" if effort == active else effort
+            label = selected_label(effort, effort == active)
             buttons.append([InlineKeyboardButton(label, callback_data=f"effort:{effort}")])
         return InlineKeyboardMarkup(buttons)
 
@@ -4998,17 +5207,18 @@ class FlexibleAgentRuntime:
         mode_flag = "c" if with_context else "p"
         buttons = []
         for model in self._get_available_models_for(target_engine):
-            label = f">> {model}" if model == active_model else model
+            label = selected_label(model, model == active_model)
             buttons.append([InlineKeyboardButton(label, callback_data=f"bmodel:{target_engine}:{mode_flag}:{model}")])
-        buttons.append([InlineKeyboardButton("Back", callback_data="backend_menu")])
+        buttons.append([InlineKeyboardButton(BACK_LABEL, callback_data="backend_menu")])
         return InlineKeyboardMarkup(buttons)
 
     def _build_backend_menu_text(self) -> str:
         return (
-            f"Flex Backend Status\n"
-            f"Active: {self.config.active_backend}\n"
-            f"Tap a backend to choose a model and switch.\n"
-            f"Tap a backend + to rebuild handoff, choose a model, and switch."
+            "🧠 <b>HASHI BACKEND</b>\n"
+            "━━━━━━━━━━━━━━━━\n\n"
+            f"<b>ACTIVE</b> · <code>{html.escape(self.config.active_backend)}</code>\n\n"
+            "Choose a backend to select its model and switch.\n"
+            "“With context” first rebuilds a continuity handoff."
         )
 
     def _build_backend_model_prompt(self, target_engine: str, with_context: bool) -> str:
@@ -5018,10 +5228,12 @@ class FlexibleAgentRuntime:
             (self._get_backend_cfg(target_engine) or {}).get("model"),
         )
         return (
-            f"Switch backend to: {target_engine}\n"
-            f"Mode: {mode_text}\n"
-            f"Select a model before committing the switch.\n"
-            f"Current choice: {current_model or 'auto'}"
+            "🧠 <b>CHOOSE MODEL</b>\n"
+            "━━━━━━━━━━━━━━━━\n\n"
+            f"<b>Backend</b> · <code>{html.escape(target_engine)}</code>\n"
+            f"<b>Switch</b> · {html.escape(mode_text)}\n"
+            f"<b>Current</b> · <code>{html.escape(current_model or 'auto')}</code>\n\n"
+            "Select a model to complete the switch."
         )
 
     def _clear_handoff_state(self):
@@ -5141,7 +5353,15 @@ class FlexibleAgentRuntime:
 
         await self._reply_text(
             update,
-            f"Current model: {current_model}\nSelect:",
+            setting_card(
+                "🧠",
+                "Hashi model",
+                current=f"<code>{html.escape(current_model)}</code>",
+                facts=[f"<b>Backend</b> · <code>{html.escape(self.config.active_backend)}</code>"],
+                consequence="The selection applies immediately to the next request and persists.",
+                action="Choose a model.",
+            ),
+            parse_mode="HTML",
             reply_markup=self._model_keyboard(current_model),
         )
 
@@ -5171,7 +5391,15 @@ class FlexibleAgentRuntime:
         current_effort = self._get_current_effort() or available[0]
         await self._reply_text(
             update,
-            f"Current effort: {current_effort}\nSelect:",
+            setting_card(
+                "🎛️",
+                "Model effort",
+                current=f"<code>{html.escape(current_effort)}</code>",
+                facts=[f"<b>Model</b> · <code>{html.escape(self.get_current_model())}</code>"],
+                consequence="Higher effort may improve difficult work but takes longer and can use more tokens.",
+                action="The selection applies immediately and persists.",
+            ),
+            parse_mode="HTML",
             reply_markup=self._effort_keyboard(current_effort),
         )
 
@@ -5250,7 +5478,10 @@ class FlexibleAgentRuntime:
         ]
         rows: list[list[InlineKeyboardButton]] = []
         for model in models:
-            label = f"✅ {model}" if cfg.core_backend == "codex-cli" and cfg.core_model == model else model
+            label = selected_label(
+                model,
+                cfg.core_backend == "codex-cli" and cfg.core_model == model,
+            )
             rows.append([InlineKeyboardButton(label, callback_data=f"wcfg:core:codex-cli:{model}")])
         rows.append([
             InlineKeyboardButton("Wrapper model", callback_data="wcfg:menu:wrap"),
@@ -5289,7 +5520,7 @@ class FlexibleAgentRuntime:
                 active = cfg.wrapper_backend == backend and cfg.wrapper_model == model
                 row.append(
                     InlineKeyboardButton(
-                        f"✅ {label}" if active else label,
+                        selected_label(label, active),
                         callback_data=f"wcfg:wrapid:{choice_id}:{cfg.context_window}",
                     )
                 )
@@ -5314,7 +5545,7 @@ class FlexibleAgentRuntime:
                     InlineKeyboardButton("Core model", callback_data="wcfg:menu:core"),
                     InlineKeyboardButton("Wrapper model", callback_data="wcfg:menu:wrap"),
                 ],
-                [InlineKeyboardButton("Refresh", callback_data="wcfg:menu:wrapper")],
+                [InlineKeyboardButton(REFRESH_LABEL, callback_data="wcfg:menu:wrapper")],
             ]
         )
 
@@ -5759,7 +5990,7 @@ class FlexibleAgentRuntime:
                 ],
                 [
                     InlineKeyboardButton("Prompts", callback_data="bcfg:menu:prompts"),
-                    InlineKeyboardButton("Refresh", callback_data="bcfg:menu:status"),
+                    InlineKeyboardButton(REFRESH_LABEL, callback_data="bcfg:menu:status"),
                 ],
             ]
         )
@@ -5780,10 +6011,10 @@ class FlexibleAgentRuntime:
             for engine in engines[i : i + 2]:
                 label = get_backend_label(engine)
                 if engine == current_backend:
-                    label = f"✅ {label}"
+                    label = selected_label(label, True)
                 row.append(InlineKeyboardButton(label, callback_data=f"bcfg:backend:{target}:{engine}"))
             rows.append(row)
-        rows.append([InlineKeyboardButton("Back", callback_data="bcfg:menu:status")])
+        rows.append([InlineKeyboardButton(BACK_LABEL, callback_data="bcfg:menu:status")])
         return InlineKeyboardMarkup(rows)
 
     def _dual_brain_model_keyboard(self, cfg, *, target: str, backend: str | None = None) -> InlineKeyboardMarkup:
@@ -5794,9 +6025,9 @@ class FlexibleAgentRuntime:
         rows: list[list[InlineKeyboardButton]] = []
         for index, model in enumerate(models):
             active = selected_backend == current_backend and model == current_model
-            label = f"✅ {model}" if active else model
+            label = selected_label(model, active)
             rows.append([InlineKeyboardButton(label, callback_data=f"bcfg:modelidx:{target}:{selected_backend}:{index}")])
-        rows.append([InlineKeyboardButton("Back to backends", callback_data=f"bcfg:menu:{target}")])
+        rows.append([InlineKeyboardButton("← Back to backends", callback_data=f"bcfg:menu:{target}")])
         rows.append([InlineKeyboardButton("Main", callback_data="bcfg:menu:status")])
         return InlineKeyboardMarkup(rows)
 
@@ -5892,7 +6123,7 @@ class FlexibleAgentRuntime:
                 update,
                 self._dual_brain_prompts_text(cfg),
                 parse_mode=None,
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="bcfg:menu:status")]]),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(BACK_LABEL, callback_data="bcfg:menu:status")]]),
             )
             return
 
@@ -6140,7 +6371,7 @@ class FlexibleAgentRuntime:
                 await query.edit_message_text(
                     self._dual_brain_prompts_text(cfg),
                     parse_mode=None,
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="bcfg:menu:status")]]),
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(BACK_LABEL, callback_data="bcfg:menu:status")]]),
                 )
             elif data.startswith("bcfg:backend:"):
                 parts = data.split(":", 3)
@@ -6401,6 +6632,7 @@ class FlexibleAgentRuntime:
             elif data == "backend_menu":
                 await query.edit_message_text(
                     self._build_backend_menu_text(),
+                    parse_mode="HTML",
                     reply_markup=self._backend_keyboard(),
                 )
             elif data.startswith("backend:"):
@@ -6412,6 +6644,7 @@ class FlexibleAgentRuntime:
                 with_context = mode == "context"
                 await query.edit_message_text(
                     self._build_backend_model_prompt(target_engine, with_context),
+                    parse_mode="HTML",
                     reply_markup=self._backend_model_keyboard(target_engine, with_context),
                 )
             elif data.startswith("bmodel:"):
@@ -6450,6 +6683,12 @@ class FlexibleAgentRuntime:
 
     async def cmd_mode(self, update: Update, context: Any):
         await runtime_mode.cmd_mode(self, update, context)
+
+    async def cmd_privacy(self, update: Update, context: Any):
+        await runtime_privacy.cmd_privacy(self, update, context)
+
+    async def callback_privacy(self, update: Update, context: Any):
+        await runtime_privacy.callback_privacy(self, update, context)
 
     async def cmd_workzone(self, update: Update, context: Any):
         await runtime_workzone.cmd_workzone(self, update, context)
@@ -6550,26 +6789,24 @@ class FlexibleAgentRuntime:
         return InlineKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton("🔄 Refresh", callback_data="npad:refresh"),
-                    InlineKeyboardButton("➕ Add note", callback_data="npad:help_edit"),
+                    InlineKeyboardButton(REFRESH_LABEL, callback_data="npad:refresh"),
+                    InlineKeyboardButton("Add note", callback_data="npad:help_edit"),
                 ],
                 [
-                    InlineKeyboardButton("✏️ Replace body", callback_data="npad:help_replace"),
-                    InlineKeyboardButton("🧹 Clear", callback_data="npad:clear_confirm"),
+                    InlineKeyboardButton("Replace body", callback_data="npad:help_replace"),
+                    InlineKeyboardButton("Clear", callback_data="npad:clear_confirm"),
                 ],
             ]
         )
 
     def _notepad_back_keyboard(self) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to notepad", callback_data="npad:refresh")]])
+        return InlineKeyboardMarkup([[InlineKeyboardButton(BACK_LABEL, callback_data="npad:refresh")]])
 
     def _notepad_clear_confirm_keyboard(self) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(
             [
-                [
-                    InlineKeyboardButton("✅ Yes, clear", callback_data="npad:clear_now"),
-                    InlineKeyboardButton("Cancel", callback_data="npad:refresh"),
-                ]
+                [InlineKeyboardButton("Clear today's notepad", callback_data="npad:clear_now")],
+                [InlineKeyboardButton("← Keep notepad", callback_data="npad:refresh")],
             ]
         )
 
@@ -6583,11 +6820,13 @@ class FlexibleAgentRuntime:
         if truncated:
             body = body[-max_body_chars:]
         header = [
-            f"<b>Memory+ Notepad — {html.escape(self.name)}</b>",
-            f"• Date: <code>{html.escape(view.date or 'unknown')}</code>",
-            f"• Empty: <code>{str(view.is_empty).lower()}</code>",
+            card_title("📝", "Memory+ notepad"),
             "",
-            "Use the buttons below to refresh, add a manual note, replace the body, or clear today's layer.",
+            f"<b>Current</b> · <code>{'EMPTY' if view.is_empty else 'HAS NOTES'}</code>",
+            f"<b>Agent</b> · <code>{html.escape(self.name)}</code>",
+            f"<b>Date</b> · <code>{html.escape(view.date or 'unknown')}</code>",
+            "",
+            "Changes apply immediately to today's persistent continuity layer.",
         ]
         if truncated:
             header.append(f"• Showing last <code>{max_body_chars}</code> chars")
@@ -6650,7 +6889,12 @@ class FlexibleAgentRuntime:
             )
         elif action == "clear_confirm":
             await query.edit_message_text(
-                "🧹 <b>Clear today's memory+ notepad?</b>\n\nThis removes only today's context layer for this agent.",
+                confirm_card(
+                    "⚠️",
+                    "Clear notepad",
+                    target=f"<code>{html.escape(self.name)}</code> · today",
+                    consequence="This removes today's Memory+ context layer for this agent.",
+                ),
                 parse_mode="HTML",
                 reply_markup=self._notepad_clear_confirm_keyboard(),
             )
@@ -6992,9 +7236,6 @@ class FlexibleAgentRuntime:
         return [f"addr: <code>{html.escape(route_host)}:{html.escape(route_port)}</code>"]
     async def cmd_remote(self, update: Update, context: Any):
         await runtime_remote.cmd_remote(self, update, context)
-
-    async def cmd_oll(self, update: Update, context: Any):
-        await runtime_remote.cmd_oll(self, update, context)
 
     async def cmd_wol(self, update: Update, context: Any):
         """Private local-only Wake-on-LAN helper. Usage: /wol [target]"""

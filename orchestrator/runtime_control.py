@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from orchestrator.command_ui import card_title
 _STEER_CMD_RE = re.compile(r"^/steer(?:@\w+)?\s*(.*)$", re.IGNORECASE | re.DOTALL)
 
 # Intentional user-driven interrupts that kill the active backend process.
@@ -581,12 +582,20 @@ async def cmd_retry(runtime: Any, update: Any, context: Any) -> None:
     markup = InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("重发回复", callback_data="tgl:retry:response"),
-                InlineKeyboardButton("重跑 Prompt", callback_data="tgl:retry:prompt"),
+                InlineKeyboardButton("Resend response", callback_data="tgl:retry:response"),
+                InlineKeyboardButton("Rerun prompt", callback_data="tgl:retry:prompt"),
             ]
         ]
     )
-    await runtime._reply_text(update, "Retry — choose action:", reply_markup=markup)
+    await runtime._reply_text(
+        update,
+        f"{card_title('↻', 'Retry')}\n\n"
+        "<b>Current</b> · no retry started\n\n"
+        "Resend repeats the last answer without model work. Rerun submits the last prompt again.\n\n"
+        "Choose one action:",
+        parse_mode="HTML",
+        reply_markup=markup,
+    )
 
 
 async def callback_retry_toggle(runtime: Any, query: Any, value: str) -> None:

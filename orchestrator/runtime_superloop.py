@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any
 
 from orchestrator.superloop_compiler import SuperloopCompiler
 from orchestrator.superloop_issues import SuperloopIssuesService
@@ -125,7 +123,10 @@ def _template_list_text(store: SuperloopStore) -> str:
 
 def _help_text() -> str:
     return (
-        "🧭 Superloop 控制台\n\n"
+        "🧭 SUPERLOOP 控制台\n"
+        "━━━━━━━━━━━━━━━━\n\n"
+        "当前 · 等待命令\n"
+        "变更 · 写入本地 Superloop 状态并立即生效\n\n"
         "🚀 快速开始\n"
         "/superloop quickstart <goal>\n"
         "/superloop wizard <goal>\n\n"

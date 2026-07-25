@@ -34,7 +34,7 @@ def test_mode_keyboard_contains_dual_brain_button() -> None:
     labels = [button.text for row in keyboard.inline_keyboard for button in row]
     callbacks = [button.callback_data for row in keyboard.inline_keyboard for button in row]
 
-    assert "✅ Dual Brain" in labels
+    assert "✓ Dual brain" in labels
     assert "tgl:mode:dual-brain" in callbacks
 
 
