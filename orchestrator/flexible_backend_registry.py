@@ -5,6 +5,7 @@ CLI_ENGINES = frozenset({"gemini-cli", "claude-cli", "codex-cli", "claw-cli", "g
 BACKEND_REGISTRY: dict[str, dict] = {
     "gemini-cli": {
         "label": "gemini",
+        "privacy_levels": [0, 1],
         "models": [
             "gemini-3.1-pro-preview",
             "gemini-3-flash-preview",
@@ -19,6 +20,7 @@ BACKEND_REGISTRY: dict[str, dict] = {
     },
     "claude-cli": {
         "label": "claude",
+        "privacy_levels": [0, 1],
         "models": [
             "claude-opus-4-7",
             "claude-sonnet-4-6",
@@ -32,6 +34,7 @@ BACKEND_REGISTRY: dict[str, dict] = {
     },
     "codex-cli": {
         "label": "codex",
+        "privacy_levels": [0, 1],
         "models": [
             "gpt-5.6-sol",
             "gpt-5.6-terra",
@@ -58,6 +61,7 @@ BACKEND_REGISTRY: dict[str, dict] = {
     },
     "claw-cli": {
         "label": "claw",
+        "privacy_levels": [0, 1],
         "allow_custom_models": True,
         "models": [
             "deepseek/deepseek-v4-flash",
@@ -75,6 +79,7 @@ BACKEND_REGISTRY: dict[str, dict] = {
     },
     "grok-cli": {
         "label": "grok",
+        "privacy_levels": [0, 1],
         "models": [
             "grok-4.5",
             "grok-composer-2.5-fast",
@@ -86,6 +91,7 @@ BACKEND_REGISTRY: dict[str, dict] = {
     },
     "deepseek-api": {
         "label": "deepseek",
+        "privacy_levels": [0, 1, 2],
         "models": [
             "deepseek-v4-pro",
             "deepseek-v4-flash",
@@ -102,6 +108,7 @@ BACKEND_REGISTRY: dict[str, dict] = {
     },
     "ollama-api": {
         "label": "ollama",
+        "privacy_levels": [0, 1, 2],
         "models": [
             "gemma4:26b",
             "gemma4:31b",
@@ -114,6 +121,7 @@ BACKEND_REGISTRY: dict[str, dict] = {
     },
     "xai-api": {
         "label": "xai",
+        "privacy_levels": [0, 1, 2],
         "models": [
             "grok-4.5",
             "grok-4.3",
@@ -135,6 +143,7 @@ BACKEND_REGISTRY: dict[str, dict] = {
     },
     "openrouter-api": {
         "label": "openrouter",
+        "privacy_levels": [0, 1, 2],
         "models": [
             "deepseek/deepseek-v3.2-exp",
             "moonshotai/kimi-k2.5",
@@ -173,6 +182,13 @@ def get_backend_entry(engine: str) -> dict:
 
 def is_cli_backend(engine: str | None) -> bool:
     return bool(engine and engine in CLI_ENGINES)
+
+
+def get_supported_privacy_levels(engine: str | None) -> tuple[int, ...]:
+    if not engine:
+        return (0, 1)
+    levels = get_backend_entry(engine).get("privacy_levels") or [0, 1]
+    return tuple(sorted({int(level) for level in levels}))
 
 
 def get_backend_label(engine: str) -> str:

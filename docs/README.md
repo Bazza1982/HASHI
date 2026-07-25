@@ -1,5 +1,7 @@
 # HASHI Documentation
 
+- [HASHI command UI style guide](HASHI_COMMAND_UI_STYLE_GUIDE.md) — display contract for slash commands, Telegram cards, help text, and inline buttons
+
 This directory contains developer documentation and operational notes for HASHI.
 
 > **Status:** HASHI AAI Enterprise v0.1.0-alpha.1 is the current enterprise
@@ -43,6 +45,8 @@ deployment validation continues.
 ### Core references
 - [AGENT_FYI.md](AGENT_FYI.md) — Bridge environment FYI (operational reference)
 - [STEER_COMMAND.md](STEER_COMMAND.md) — Telegram `/steer` mid-task course correction (busy wrapper vs idle plain text, error suppression)
+- [FOCUS_RECALL_COMMANDS.md](FOCUS_RECALL_COMMANDS.md) — Telegram `/focus` scope correction and `/recall [count]` queued-request withdrawal
+- [HASHI_PRIVACY_LEVEL_2_PLAN.md](HASHI_PRIVACY_LEVEL_2_PLAN.md) — Level 2 basic-redaction security contract, API-only backend boundary, local model probe, and implementation sequence
 - [initial.md](initial.md) — Onboarding prompt template (onboarding-only)
 - [tools.md](tools.md) — Tools & operations reference
 - [WORKBENCH_NOTES.md](WORKBENCH_NOTES.md) — Workbench/runtime semantics

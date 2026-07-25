@@ -160,7 +160,7 @@ async def test_cmd_notepad_show_edit_replace_clear(tmp_path):
         for row in runtime._reply_payloads[-1]["reply_markup"].inline_keyboard
         for button in row
     ]
-    assert labels == ["🔄 Refresh", "➕ Add note", "✏️ Replace body", "🧹 Clear"]
+    assert labels == ["↻ Refresh", "Add note", "Replace body", "Clear"]
 
 
 @pytest.mark.asyncio
@@ -189,7 +189,7 @@ async def test_callback_notepad_clear_uses_confirmation(tmp_path):
     )
     await FlexibleAgentRuntime.callback_notepad(runtime, SimpleNamespace(callback_query=query), SimpleNamespace())
 
-    assert "Clear today's memory+ notepad" in edited[-1]["text"]
+    assert "<b>CLEAR NOTEPAD</b>" in edited[-1]["text"]
     assert "keep this" in path.read_text(encoding="utf-8")
 
     query.data = "npad:clear_now"
@@ -339,7 +339,7 @@ def _make_status_runtime(mode: str, state: dict) -> FlexibleAgentRuntime:
     runtime.last_success_at = None
     runtime.last_activity_at = None
     runtime._format_age = lambda value: "never"
-    runtime._get_current_effort = lambda: None
+    runtime._get_current_effort = lambda: "xhigh"
     runtime.transcript_log_path = Path("core_transcript.jsonl")
     runtime.session_started_at = datetime(2026, 5, 4, 21, 47)
     runtime.last_prompt = None
@@ -374,6 +374,7 @@ def test_status_text_shows_audit_model_configuration():
 
     assert "🔀 Mode: audit" in text
     assert "⚙️ Active backend: codex-cli • gpt-5.5" in text
+    assert "🎛️ Model effort: xhigh" in text
     assert "🧪 Audit" in text
     assert "• Core: claude-cli / claude-sonnet-4-6" in text
     assert "• Auditor: claude-cli / claude-opus-4-7" in text
@@ -396,6 +397,7 @@ def test_status_text_shows_wrapper_model_configuration():
 
     assert "🔀 Mode: wrapper" in text
     assert "⚙️ Active backend: codex-cli • gpt-5.5" in text
+    assert "🎛️ Model effort: xhigh" in text
     assert "🎭 Wrapper" in text
     assert "• Core: codex-cli / gpt-5.5" in text
     assert "• Wrapper: claude-cli / claude-haiku-4-5" in text
@@ -465,6 +467,7 @@ def _make_background_runtime(tmp_path: Path, wrapper_response: BackendResponse |
     runtime.is_shutting_down = False
     runtime.name = "zelda"
     runtime.config = SimpleNamespace(active_backend="codex-cli", extra={})
+    runtime.global_config = SimpleNamespace(project_root=tmp_path)
     runtime.workspace_dir = tmp_path
     runtime.core_transcript_log_path = tmp_path / "core_transcript.jsonl"
     runtime.session_id_dt = "session-test"

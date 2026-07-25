@@ -5,6 +5,7 @@ from contextlib import suppress
 from typing import Any
 
 from orchestrator.bridge_memory import BridgeContextAssembler, BridgeMemoryStore
+from orchestrator.command_ui import card_title, confirm_card
 from orchestrator.habits import HabitStore
 from orchestrator.handoff_builder import HandoffBuilder
 from orchestrator.memory_index import MemoryIndex
@@ -30,10 +31,14 @@ async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
         sync_state = "ON 🔄" if sync_on else "OFF ⬜"
         await runtime._reply_text(
             update,
-            f"Memory injection: {state}\n"
-            f"Stored: {turns} turns, {memories} memories\n"
-            f"BGE sync: {sync_state}\n\n"
-            f"Commands: /memory on | pause | saved on | saved off | saved status | wipe | sync on | sync off",
+            f"{card_title('🧠', 'Memory controls')}\n\n"
+            f"<b>Current</b> · {state}\n"
+            f"<b>Stored</b> · <code>{turns}</code> turns · <code>{memories}</code> memories\n"
+            f"<b>BGE sync</b> · <code>{sync_state}</code>\n\n"
+            "Changes apply immediately and preserve stored data unless <code>wipe</code> is explicitly used.\n\n"
+            "<code>/memory on</code> · <code>pause</code> · <code>saved on|off</code> · "
+            "<code>sync on|off</code> · <code>wipe</code>",
+            parse_mode="HTML",
         )
     elif args == "on":
         if assembler:
@@ -114,9 +119,17 @@ async def cmd_wipe(runtime: Any, update: Any, context: Any) -> None:
     if not args or args[0].upper() != "CONFIRM":
         await runtime._reply_text(
             update,
-            "⚠️ /wipe will permanently delete this agent's persisted workspace state (memory, transcript, handoff, backend_state, etc.).\n"
-            "Only agent instructions (agent.md / AGENT.md) will remain.\n\n"
-            "To proceed: /wipe CONFIRM",
+            confirm_card(
+                "⚠️",
+                "Wipe workspace",
+                target=f"<code>{runtime.name}</code>",
+                consequence=(
+                    "This permanently deletes persisted memory, transcript, handoff and backend state. "
+                    "Only agent instructions remain."
+                ),
+            )
+            + "\n\nType <code>/wipe CONFIRM</code> to proceed.",
+            parse_mode="HTML",
         )
         return
 
@@ -147,9 +160,17 @@ async def cmd_reset(runtime: Any, update: Any, context: Any) -> None:
     if not args or args[0].upper() != "CONFIRM":
         await runtime._reply_text(
             update,
-            "⚠️ /reset will clear this agent's memory, transcripts, and session state.\n"
-            "agent.md and /sys prompt slots will be preserved — the agent's identity stays intact.\n\n"
-            "To proceed: /reset CONFIRM",
+            confirm_card(
+                "⚠️",
+                "Reset workspace",
+                target=f"<code>{runtime.name}</code>",
+                consequence=(
+                    "This clears memory, transcripts and session state. Agent instructions and "
+                    "<code>/sys</code> prompt slots are preserved."
+                ),
+            )
+            + "\n\nType <code>/reset CONFIRM</code> to proceed.",
+            parse_mode="HTML",
         )
         return
 

@@ -8,6 +8,7 @@ import pytest
 
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
+from orchestrator.privacy_levels import PrivacyLevel
 from orchestrator.audit_mode import load_audit_config
 from orchestrator.wrapper_mode import load_wrapper_config
 
@@ -102,6 +103,20 @@ def test_save_state_writes_active_model_when_override_exists(tmp_path):
     assert state["active_backend"] == "codex-cli"
     assert state["agent_mode"] == "flex"
     assert state["active_model"] == "gpt-5.5"
+
+
+def test_privacy_defaults_to_level_one_and_persists_level_zero(tmp_path):
+    workspace = tmp_path / "agent"
+    manager = _make_manager(workspace)
+
+    assert manager.privacy_level is PrivacyLevel.PROVIDER_TRUST
+
+    manager.set_privacy_level(PrivacyLevel.OFF)
+
+    state = _read_state(workspace)
+    assert state["privacy_level"] == 0
+    reloaded = _make_manager(workspace)
+    assert reloaded.privacy_level is PrivacyLevel.OFF
 
 
 def test_backend_effort_survives_manager_reload(tmp_path):

@@ -172,7 +172,7 @@ def test_flexible_job_transfer_keyboard_logs_remote_instance_errors(tmp_path):
 
     assert warnings
     assert "Failed to build remote agent transfer buttons" in warnings[0]
-    assert markup.inline_keyboard[-1][0].text == "✖ Cancel"
+    assert markup.inline_keyboard[-1][0].text == "← Back"
 
 
 @pytest.mark.asyncio

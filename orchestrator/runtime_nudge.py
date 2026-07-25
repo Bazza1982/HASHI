@@ -4,6 +4,7 @@ import html
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from orchestrator.command_ui import card_title
 from orchestrator.runtime_jobs import mint_callback_token, resolve_callback_token
 
 
@@ -38,7 +39,12 @@ def build_nudge_with_buttons(skill_manager, agent_name: str, runtime=None):
 
     jobs = [j for j in skill_manager.list_jobs("nudge", agent_name=agent_name) if j.get("nudge_meta")]
 
-    lines = ["🫧 <b>Nudge — Idle Continuation Manager</b>"]
+    lines = [
+        card_title("🫧", "Nudge manager"),
+        "",
+        f"<b>Current agent</b> · <code>{html.escape(agent_name)}</code>",
+        "<b>Changes</b> · immediate and persistent",
+    ]
     buttons: list = []
 
     if not jobs:
@@ -113,9 +119,9 @@ def build_nudge_with_buttons(skill_manager, agent_name: str, runtime=None):
 
         buttons.append([InlineKeyboardButton(f"🫧 {short_id}", callback_data="noop")])
         buttons.append([
-            InlineKeyboardButton("⚡ Trigger", callback_data=trigger_callback),
-            InlineKeyboardButton(toggle_label, callback_data=toggle_callback),
-            InlineKeyboardButton("🗑 Delete", callback_data=delete_callback),
+            InlineKeyboardButton("Trigger now", callback_data=trigger_callback),
+            InlineKeyboardButton(toggle_label.replace("⏸ ", "").replace("▶ ", ""), callback_data=toggle_callback),
+            InlineKeyboardButton("Delete", callback_data=delete_callback),
         ])
         buttons.append([
             InlineKeyboardButton("Max -100", callback_data=max_minus_callback),

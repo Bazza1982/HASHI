@@ -14,7 +14,6 @@ _SENSITIVE_COMMANDS = frozenset(
     {
         "notepad",
         "token",
-        "paswd",
         "pswd",
         "hchat",
         "memory",
@@ -258,4 +257,3 @@ def is_supported_slash_command(runtime: Any, command_name: str) -> bool:
         return command_name in supported_commands(runtime)
     except Exception:
         return False
-

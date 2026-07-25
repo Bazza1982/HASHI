@@ -157,17 +157,17 @@ async def test_stream_command_does_not_change_verbose_or_think_preferences(tmp_p
     assert runtime._think is False
     assert (runtime.workspace_dir / ".verbose_off").exists()
     assert (runtime.workspace_dir / ".think_off").exists()
-    assert "Telegram streaming: ON" in replies[-1][0]
-    assert 'Start message bubble ("Agent is typing...")' in replies[-1][0]
+    assert "<b>Current</b> · <b>ON</b> · LIVE STREAM" in replies[-1][0]
+    assert "Start message bubble" in replies[-1][0]
     assert "Telegram header typing indicator" in replies[-1][0]
     keyboard = replies[-1][1]["reply_markup"].inline_keyboard
     button_labels = [button.text for row in keyboard for button in row]
-    assert any("💬 Start Bubble" in label for label in button_labels)
-    assert any("⌨️ Typing" in label for label in button_labels)
-    assert any("⏱ Progress" in label for label in button_labels)
-    assert any("📝 Live Preview" in label for label in button_labels)
-    assert "🏁 Finalize ON" in button_labels
-    assert "✅ 🏁 Finalize OFF" in button_labels
+    assert any("Start bubble" in label for label in button_labels)
+    assert any("Typing" in label for label in button_labels)
+    assert any("Progress" in label for label in button_labels)
+    assert any("Live preview" in label for label in button_labels)
+    assert "Finalize on" in button_labels
+    assert "✓ Finalize off" in button_labels
 
     await FlexibleAgentRuntime.cmd_stream(
         runtime,
@@ -204,7 +204,8 @@ async def test_preview_alias_does_not_change_stream_master(tmp_path):
     assert policy.preview is True
     assert policy.preview_enabled is False
     assert policy.enabled is True
-    assert "Answer stream preview: ON" in replies[-1]
+    assert "<b>ANSWER PREVIEW</b>" in replies[-1]
+    assert "<b>Current</b> · <b>ON</b>" in replies[-1]
 
 
 @pytest.mark.asyncio
@@ -239,7 +240,7 @@ async def test_stream_inline_callback_updates_master_and_renders_menu(tmp_path):
     )
 
     assert telegram_stream_policy.get_policy(runtime).enabled is True
-    assert "Telegram streaming: ON" in edits[-1][0]
+    assert "<b>Current</b> · <b>ON</b> · LIVE STREAM" in edits[-1][0]
     assert edits[-1][1]["reply_markup"] is not None
     assert answers[-1][0] == "enabled ON"
 

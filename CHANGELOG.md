@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **HASHI command UI standard** — added a shared local/Telegram command display
+  guide and reusable UI helpers for card headings, selected choices, navigation,
+  and grouped help. `/help` is now generated from registered command metadata,
+  while privacy, mode, backend/model, voice, API Gateway, audit, job, habit,
+  remote, and status menus use consistent information order and button wording.
 - **xAI external tool-call passthrough** — the OpenAI-compatible API Gateway now
   preserves caller-owned `messages`, `tools`, `tool_choice`, and
   `parallel_tool_calls` for xAI `/chat/completions` models. Synchronous and
@@ -18,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to the client without executing the client tool locally.
 - **Browser Bridge extension `hover` (v0.1.2)** — CDP `Input.dispatchMouseEvent` (`mouseMoved`) on the Option D Chrome extension path for hover-triggered UI (e.g. LinkedIn reaction flyouts). Supports `timeout_ms`, `wait_ms`, `x_ratio`, and `y_ratio`; native host treats `hover` as mutating; tool schema, Playwright fallback, and CLI flags wired. See [docs/BROWSER_BRIDGE_HOVER_NOTE.md](docs/BROWSER_BRIDGE_HOVER_NOTE.md) and [docs/OPTION_D_BROWSER_BRIDGE.md](docs/OPTION_D_BROWSER_BRIDGE.md).
 - **Telegram `/steer`** — global mid-task course correction for all backends: when **busy**, immediately stops the active generation (like `/stop`), keeps interim thinking/progress/artefacts and session state, then queues a continuity-preserving mid-task wrapper with the user's new direction; when **idle**, enqueues the direction text only (no steer wrapper, `source=text`). Registered in flex and fixed runtimes and the Telegram bot command menu. See [docs/STEER_COMMAND.md](docs/STEER_COMMAND.md).
+- **Telegram `/focus`** — one-off scope correction for flex and fixed runtimes. It preserves in-scope progress, returns execution to the original user task, and requires the continuation to keep working until the requested outcome is complete or genuinely blocked. Repeated `/focus` calls retain one clean copy of the original task instead of nesting wrappers.
+- **Telegram `/recall [count]`** — withdraw requests that are still waiting in the current agent queue without interrupting active work. `/recall` removes all waiting requests; `/recall n` accepts any positive whole number and removes up to the newest `n` while preserving FIFO order for retained requests. See [docs/FOCUS_RECALL_COMMANDS.md](docs/FOCUS_RECALL_COMMANDS.md).
+- **Telegram `/privacy [0-5]` foundation** — added a persisted per-agent privacy setting, backend compatibility declarations, a details menu, quick setting, downgrade confirmation, and the six-level framework. Level 0 fully disables privacy controls; Level 1 remains the default provider-trust mode. Levels 2–5 are reserved until their enforcement is installed and verified.
 - **Direct Grok OAuth → Claw (coming soon)** — landed HASHI-native xAI device-code OAuth scaffolding that stores tokens under the bridge home and injects `XAI_API_KEY` into Claw without Hermes or `grok-cli`. Live login remains blocked until HASHI receives its own xAI OAuth `client_id`. See [docs/HASHI_XAI_CLAW_OAUTH.md](docs/HASHI_XAI_CLAW_OAUTH.md).
 - **Grok CLI reasoning effort control** — added `low`, `medium`, and `high` support to Telegram `/effort` for `grok-cli`, with HASHI defaulting Grok sessions to `medium`, passing the selection through `--reasoning-effort`, and persisting per-backend choices across agent reloads.
 - **Grok 4.5 API Gateway support** — added smoke-tested `grok-4.5` to the `xai-api` and `/v1/models` catalogs, routing it through xAI's Responses API. The existing tested Codex GPT-5.6 variants remain available through the API Gateway.
@@ -25,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Public/private command boundary** — moved HASHI2's OLL Browser Gateway
+  control out of the public runtime and into its local private-command module.
+  Private commands now receive their handler and picker metadata only from the
+  machine-local registry while retaining the shared command UI structure.
 - **CLI backend default timeouts** — raised shared and CLI adapter defaults to idle **1800s** (30 min) and hard **36000s** (10 h) so long interactive or browser-assisted turns are less likely to be cut off mid-task (`BaseBackend`, Claude/Codex/Gemini/Grok CLI adapters).
 - **API Gateway documentation** — updated the API control, Python, curl, and xAI backend examples to use the verified `grok-4.5` default while documenting its Responses API route.
 - **Grok 4.5 CLI support** — upgraded the local stable Grok CLI to `0.2.93`, added smoke-tested `grok-4.5` as the `grok-cli` default, and retained `grok-composer-2.5-fast` as the other currently CLI-advertised model. The stale `grok-build` CLI model id is no longer advertised by HASHI.
@@ -35,6 +47,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Duplicate password command alias** — removed the misspelled private
+  `/paswd` alias; `/pswd` remains the single password lookup command.
 - **API Gateway `/reboot` adoption** — an enabled in-process Gateway is now
   stopped and recreated after module reload, so Gateway code changes take
   effect through the standard `/reboot` path without `/api off`, `/api on`, or
@@ -63,6 +77,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added focused regression coverage for tokenized nudge delete callbacks, `/say` bot menu metadata, limited-agent allowlist behavior, forced `/say` voice generation with voice replies disabled, and flexible-runtime transcript lookup.
 - Added regression coverage for a transient Telegram media `get_file()` timeout that succeeds on retry.
 - Added focused coverage for `/notify` persistence and Telegram `disable_notification` defaults.
+- Added focused `/focus` and `/recall` coverage for continued execution, repeated-focus wrapper cleanup, newest-first queue withdrawal, FIFO preservation, invalid counts, empty queues, authorization, and arbitrarily large positive counts.
 
 ## [0.1.0a1] - 2026-06-18
 

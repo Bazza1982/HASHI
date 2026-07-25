@@ -49,17 +49,26 @@ def get_usecomputer_status(sys_prompt_manager: SysPromptManager) -> str:
     configured = slot.get("text") == USECOMPUTER_SYSTEM_PROMPT
     if active and configured:
         return (
-            f"/usecomputer is ON via /sys {USECOMPUTER_SLOT}.\n"
-            "GUI-aware operating guidance is active for future requests."
+            "🖥️ COMPUTER USE\n"
+            "━━━━━━━━━━━━━━━━\n\n"
+            "Current · ON\n"
+            f"System slot · /sys {USECOMPUTER_SLOT}\n\n"
+            "GUI-aware operating guidance is active for future requests. Changes apply immediately."
         )
     if slot.get("text"):
         return (
-            f"/usecomputer is not fully active.\n"
-            f"/sys {USECOMPUTER_SLOT} contains custom text but not the managed /usecomputer prompt."
+            "🖥️ COMPUTER USE\n"
+            "━━━━━━━━━━━━━━━━\n\n"
+            "Current · CUSTOM\n"
+            f"System slot · /sys {USECOMPUTER_SLOT}\n\n"
+            "The slot contains custom text, not the managed computer-use prompt."
         )
     return (
-        f"/usecomputer is OFF.\n"
-        f"/sys {USECOMPUTER_SLOT} is empty."
+        "🖥️ COMPUTER USE\n"
+        "━━━━━━━━━━━━━━━━\n\n"
+        "Current · OFF\n"
+        f"System slot · /sys {USECOMPUTER_SLOT}\n\n"
+        "The managed guidance is inactive. Use /usecomputer on to enable it immediately."
     )
 
 
@@ -74,7 +83,9 @@ def build_usecomputer_task_prompt(task: str) -> str:
 
 def get_usecomputer_examples_text() -> str:
     return (
-        "Examples:\n"
+        "🖥️ COMPUTER USE EXAMPLES\n"
+        "━━━━━━━━━━━━━━━━\n\n"
+        "Current · reference\n\n"
         "/usecomputer status\n"
         "/usecomputer on\n"
         "/usecomputer Please do some qualitative coding for me in NVivo here. It has no API, so use mouse and keyboard if needed.\n"

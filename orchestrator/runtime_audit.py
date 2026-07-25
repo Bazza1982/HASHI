@@ -19,6 +19,7 @@ from orchestrator.audit_mode import (
 )
 from orchestrator.runtime_common import QueuedRequest
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from orchestrator.command_ui import REFRESH_LABEL, card_title, selected_label
 
 
 def audit_enabled(runtime: Any) -> bool:
@@ -90,7 +91,7 @@ def audit_model_keyboard(runtime: Any, cfg: Any, *, target: str) -> InlineKeyboa
         active = current_backend == backend and current_model == model
         row.append(
             InlineKeyboardButton(
-                f"✅ {label}" if active else label,
+                selected_label(label, active),
                 callback_data=f"acfg:{target}id:{choice_id}",
             )
         )
@@ -139,7 +140,7 @@ def audit_auditor_text(cfg: Any) -> str:
 def audit_config_keyboard(cfg: Any) -> InlineKeyboardMarkup:
     delivery_row = [
         InlineKeyboardButton(
-            f"{'✅ ' if cfg.delivery == value else ''}{label}",
+            selected_label(label, cfg.delivery == value),
             callback_data=f"acfg:delivery:{value}",
         )
         for value, label in (
@@ -150,7 +151,7 @@ def audit_config_keyboard(cfg: Any) -> InlineKeyboardMarkup:
     ]
     threshold_row = [
         InlineKeyboardButton(
-            f"{'✅ ' if cfg.severity_threshold == value else ''}{label}",
+            selected_label(label, cfg.severity_threshold == value),
             callback_data=f"acfg:threshold:{value}",
         )
         for value, label in (
@@ -168,7 +169,7 @@ def audit_config_keyboard(cfg: Any) -> InlineKeyboardMarkup:
                 InlineKeyboardButton("Core model", callback_data="acfg:menu:core"),
                 InlineKeyboardButton("Audit model", callback_data="acfg:menu:auditmodel"),
             ],
-            [InlineKeyboardButton("Refresh", callback_data="acfg:menu:audit")],
+            [InlineKeyboardButton(REFRESH_LABEL, callback_data="acfg:menu:audit")],
         ]
     )
 
@@ -197,7 +198,9 @@ def audit_status_text(state: dict, criteria: dict) -> str:
     cfg = load_audit_config(state)
     visible_criteria = visible_audit_criteria(criteria)
     lines = [
-        "Audit mode configuration:",
+        card_title("🔎", "Hashi audit"),
+        "",
+        f"<b>STATUS</b> · <b>{cfg.delivery.upper()}</b>",
         f"• Core: <code>{html.escape(cfg.core_backend)} / {html.escape(cfg.core_model)}</code>",
         f"• Audit: <code>{html.escape(cfg.audit_backend)} / {html.escape(cfg.audit_model)}</code>",
         f"• Delivery: <code>{cfg.delivery}</code>",

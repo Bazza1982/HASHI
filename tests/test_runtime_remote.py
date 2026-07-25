@@ -54,7 +54,8 @@ async def test_move_show_agent_picker_lists_agents(tmp_path):
 
     await runtime_remote.move_show_agent_picker(runtime, SimpleNamespace(), {})
 
-    assert runtime.replies[-1]["text"] == "<b>Move Agent</b> — select agent to move:"
+    assert "<b>MOVE AGENT</b>" in runtime.replies[-1]["text"]
+    assert "Select the exact agent" in runtime.replies[-1]["text"]
     buttons = [button for row in runtime.replies[-1]["reply_markup"].inline_keyboard for button in row]
     assert [button.callback_data for button in buttons] == ["move:agent:zelda", "move:agent:akane"]
 
@@ -70,7 +71,7 @@ async def test_move_show_target_picker_lists_instances(tmp_path):
         {"hashi2": {"display_name": "HASHI2"}},
     )
 
-    assert "select target instance" in runtime.replies[-1]["text"]
+    assert "Select the target instance" in runtime.replies[-1]["text"]
     button = runtime.replies[-1]["reply_markup"].inline_keyboard[0][0]
     assert button.callback_data == "move:target:zelda:hashi2"
 
@@ -82,7 +83,7 @@ async def test_move_show_options_edits_callback_message(tmp_path):
 
     await runtime_remote.move_show_options(runtime, update, "zelda", "hashi2")
 
-    assert "Choose move mode" in update.callback_query.edits[-1]["text"]
+    assert "Choose the transfer mode" in update.callback_query.edits[-1]["text"]
     callbacks = [
         button.callback_data
         for row in update.callback_query.edits[-1]["reply_markup"].inline_keyboard
@@ -110,7 +111,7 @@ async def test_handle_move_callback_agent_lists_targets(tmp_path):
 
     await runtime_remote.handle_move_callback(runtime, update, SimpleNamespace())
 
-    assert "select target" in update.callback_query.edits[-1]["text"]
+    assert "Select the target instance" in update.callback_query.edits[-1]["text"]
     button = update.callback_query.edits[-1]["reply_markup"].inline_keyboard[0][0]
     assert button.callback_data == "move:target:zelda:hashi2"
 
@@ -220,11 +221,11 @@ async def test_remote_status_includes_peer_list(tmp_path, monkeypatch):
     await runtime_remote.cmd_remote(runtime, update, context)
 
     text = replies[-1]["text"]
-    assert "🟢 <b>Hashi Remote</b>" in text
+    assert "<b>HASHI REMOTE</b>" in text
     assert "Peers:" not in text
     assert "Inflight:" not in text
     assert "Rescue:" not in text
-    assert "📡 <b>Remote Instances</b>" in text
+    assert "📡 <b>REMOTE INSTANCES</b>" in text
     assert "online: <code>1</code>  ·  attention: <code>0</code>  ·  offline: <code>1</code>" in text
     assert "peer:HASHI9" in text
     assert "peer:MSI" in text

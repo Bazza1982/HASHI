@@ -5,6 +5,7 @@ from collections import deque
 from datetime import datetime
 from typing import Any
 
+from orchestrator.command_ui import card_title
 from orchestrator.command_registry import RuntimeCommand
 
 
@@ -120,9 +121,11 @@ def _current_line(runtime: Any) -> str:
 def _build_list(runtime: Any) -> str:
     items = _queue_items(runtime)
     lines = [
-        f"<b>Queue — {html.escape(str(getattr(runtime, 'name', 'agent')))}</b>",
+        card_title("📥", "Request queue"),
+        "",
+        f"<b>Agent</b> · <code>{html.escape(str(getattr(runtime, 'name', 'agent')))}</code>",
         _current_line(runtime),
-        f"pending: {_queue_size(runtime)}",
+        f"<b>Current</b> · <code>{_queue_size(runtime)}</code> pending",
     ]
     if items:
         lines.append("")
@@ -150,8 +153,9 @@ def _format_detail(item: Any) -> str:
     prompt = str(getattr(item, "prompt", "") or "")
     clipped = prompt[:2000]
     lines = [
-        "<b>Queue item</b>",
+        card_title("📥", "Queue item"),
         "",
+        "<b>Current</b> · pending",
         f"ID: <code>{html.escape(_item_id(item))}</code>",
         f"Source: {html.escape(str(getattr(item, 'source', '?') or '?'))}",
         f"Summary: {html.escape(str(getattr(item, 'summary', '') or ''))}",
@@ -200,7 +204,12 @@ async def _clear(runtime: Any, update: Any) -> None:
 def _history(runtime: Any) -> str:
     last_prompt = getattr(runtime, "last_prompt", None)
     last_response = getattr(runtime, "last_response", None)
-    lines = [f"<b>Queue history — {html.escape(str(getattr(runtime, 'name', 'agent')))}</b>", ""]
+    lines = [
+        card_title("📥", "Queue history"),
+        "",
+        f"<b>Agent</b> · <code>{html.escape(str(getattr(runtime, 'name', 'agent')))}</code>",
+        "",
+    ]
     if last_prompt is not None:
         lines.append("<b>Last prompt</b>")
         lines.append(_item_line(1, last_prompt))

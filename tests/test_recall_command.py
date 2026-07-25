@@ -23,7 +23,7 @@ def _update() -> SimpleNamespace:
 def test_recall_is_registered_and_describes_non_interrupting_queue_clear():
     assert any(b.name == "recall" and b.method_name == "cmd_recall" for b in COMMAND_BINDINGS)
     binding = next(b for b in BOT_COMMAND_BINDINGS if b.name == "recall")
-    assert binding.description == "Clear queued requests [newest count]"
+    assert binding.description == "Clear selected queued requests"
 
 
 @pytest.mark.asyncio

@@ -18,6 +18,8 @@ def test_command_binding_names_are_unique_except_declared_aliases():
     assert "workzone" in names
     assert "worzone" in names
     assert "stream" in names
+    assert "paswd" not in names
+    assert "oll" not in names
 
 
 def test_bot_command_metadata_is_unique_and_covers_static_commands():
@@ -25,6 +27,8 @@ def test_bot_command_metadata_is_unique_and_covers_static_commands():
     assert len(metadata_names) == len(set(metadata_names))
     for command in ("help", "status", "reboot", "audit", "wrapper", "remote", "say", "stream"):
         assert command in metadata_names
+    assert "paswd" not in metadata_names
+    assert "oll" not in metadata_names
 
 
 def test_command_binding_method_names_exist_on_flexible_runtime():

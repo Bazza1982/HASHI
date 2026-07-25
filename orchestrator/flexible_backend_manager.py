@@ -5,6 +5,13 @@ from pathlib import Path
 from typing import Optional, Any
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig, AgentConfig
 from orchestrator.flexible_backend_registry import get_secret_lookup_order
+from orchestrator.privacy_levels import (
+    PrivacyLevel,
+    PrivacyPolicyError,
+    parse_privacy_level,
+    require_backend_compatibility,
+    require_level_available,
+)
 from orchestrator.workzone import access_root_for_workzone
 
 class FlexibleBackendManager:
@@ -33,6 +40,7 @@ class FlexibleBackendManager:
     def _load_state(self):
         self._active_model_override = None
         self.agent_mode = "flex"  # default mode
+        self.privacy_level = PrivacyLevel.PROVIDER_TRUST
         if self.state_file.exists():
             try:
                 state = json.loads(self.state_file.read_text(encoding="utf-8"))
@@ -42,6 +50,14 @@ class FlexibleBackendManager:
                     self._active_model_override = state["active_model"]
                 if "agent_mode" in state:
                     self.agent_mode = state["agent_mode"]
+                if "privacy_level" in state:
+                    try:
+                        self.privacy_level = parse_privacy_level(state["privacy_level"])
+                    except PrivacyPolicyError as exc:
+                        self.logger.error(
+                            "Ignoring invalid privacy_level in state.json: %s",
+                            exc,
+                        )
                 backend_efforts = state.get("backend_efforts")
                 if isinstance(backend_efforts, dict):
                     for backend_cfg in self.config.allowed_backends:
@@ -66,6 +82,7 @@ class FlexibleBackendManager:
     def _apply_managed_state_fields(self, state: dict[str, Any]) -> None:
         state["active_backend"] = self.config.active_backend
         state["agent_mode"] = self.agent_mode
+        state["privacy_level"] = int(self.privacy_level)
         if getattr(self, "_active_model_override", None):
             state["active_model"] = self._active_model_override
         else:
@@ -99,6 +116,15 @@ class FlexibleBackendManager:
 
     def persist_state(self, active_model: str | None = None):
         self._save_state(active_model=active_model)
+
+    def set_privacy_level(self, level: int | str | PrivacyLevel) -> PrivacyLevel:
+        parsed = require_level_available(level)
+        require_backend_compatibility(self.config.active_backend, parsed)
+        self.privacy_level = parsed
+        if self.current_backend is not None:
+            self.current_backend.privacy_level = parsed
+        self._save_state()
+        return parsed
 
     def get_state_snapshot(self) -> dict[str, Any]:
         state = self._read_state_dict()
@@ -280,6 +306,12 @@ class FlexibleBackendManager:
     async def initialize_active_backend(self, target_model: str | None = None) -> bool:
         engine = self.config.active_backend
         self.logger.info(f"Initializing active backend: {engine}")
+        try:
+            require_level_available(self.privacy_level)
+            require_backend_compatibility(engine, self.privacy_level)
+        except PrivacyPolicyError as exc:
+            self.logger.error("Backend blocked by privacy policy: %s", exc)
+            return False
 
         resolved_model = target_model or getattr(self, "_active_model_override", None)
         backend_cfg_raw = self._select_backend_cfg(engine, target_model=resolved_model)
@@ -300,6 +332,7 @@ class FlexibleBackendManager:
             self._attach_runtime_context(adapter_cfg)
 
             self.current_backend = BackendClass(adapter_cfg, self.global_config, api_key)
+            self.current_backend.privacy_level = self.privacy_level
 
             # V2.2+: inject ToolRegistry for API backends that support tool calls
             if engine in ("openrouter-api", "deepseek-api", "ollama-api", "xai-api"):
@@ -397,6 +430,11 @@ class FlexibleBackendManager:
         backend_cfg_raw = self._select_backend_cfg(target_engine, target_model=target_model)
         if not backend_cfg_raw:
             self.logger.error(f"Target backend {target_engine} not allowed.")
+            return False
+        try:
+            require_backend_compatibility(target_engine, self.privacy_level)
+        except PrivacyPolicyError as exc:
+            self.logger.error("Target backend blocked by privacy policy: %s", exc)
             return False
 
         previous_engine = self.config.active_backend

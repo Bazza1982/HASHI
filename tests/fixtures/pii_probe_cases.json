@@ -1,0 +1,53 @@
+[
+  {
+    "id": "australia_structured",
+    "text": "Customer Amelia Hart lives at 42 Harbour Street, Sydney NSW 2000. Email amelia.hart@example.com or call +61 412 345 678. Her TFN is 123 456 782 and Medicare number is 2123 45670 1. The business ABN is 51 824 753 556 and ACN is 004 085 616.",
+    "expected": [
+      {"type": "person", "value": "Amelia Hart"},
+      {"type": "address", "value": "42 Harbour Street, Sydney NSW 2000"},
+      {"type": "email", "value": "amelia.hart@example.com"},
+      {"type": "phone", "value": "+61 412 345 678"},
+      {"type": "AU_TFN", "value": "123 456 782"},
+      {"type": "AU_MEDICARE", "value": "2123 45670 1"},
+      {"type": "AU_ABN", "value": "51 824 753 556"},
+      {"type": "AU_ACN", "value": "004 085 616"}
+    ],
+    "unexpected": []
+  },
+  {
+    "id": "credentials_and_finance",
+    "text": "Jordan Lee uses username jlee77, password Winter-River-928!, API key sk-test-4A7B9C2D8E6F, card 4111 1111 1111 1111, and bank account 123456789.",
+    "expected": [
+      {"type": "person", "value": "Jordan Lee"},
+      {"type": "username", "value": "jlee77"},
+      {"type": "password", "value": "Winter-River-928!"},
+      {"type": "API_KEY", "value": "sk-test-4A7B9C2D8E6F"},
+      {"type": "credit_card", "value": "4111 1111 1111 1111"},
+      {"type": "bank_account", "value": "123456789"}
+    ],
+    "unexpected": []
+  },
+  {
+    "id": "mixed_chinese_english",
+    "text": "客户李明住在悉尼海港街42号，邮箱是 liming@example.com，电话是 +61 401 234 567，护照号为 N1234567。",
+    "expected": [
+      {"type": "person", "value": "李明"},
+      {"type": "address", "value": "悉尼海港街42号"},
+      {"type": "email", "value": "liming@example.com"},
+      {"type": "phone", "value": "+61 401 234 567"},
+      {"type": "passport", "value": "N1234567"}
+    ],
+    "unexpected": []
+  },
+  {
+    "id": "benign_numbers",
+    "text": "Release 2026.07 contains 42 tests, listens on port 18801, and uses commit da48df5. No customer information appears here.",
+    "expected": [],
+    "unexpected": [
+      "2026.07",
+      "42",
+      "18801",
+      "da48df5"
+    ]
+  }
+]

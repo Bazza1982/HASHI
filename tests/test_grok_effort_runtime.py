@@ -45,4 +45,4 @@ def test_grok_effort_telegram_keyboard_marks_medium_as_current():
         "effort:medium",
         "effort:high",
     ]
-    assert [button.text for button in buttons] == ["low", ">> medium", "high"]
+    assert [button.text for button in buttons] == ["low", "✓ medium", "high"]

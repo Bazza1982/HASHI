@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from html import escape
+
+from orchestrator.command_ui import card_title
 
 
 BROWSER_MODE_SOURCE_PREFIX = "browser"
@@ -73,15 +76,15 @@ def get_browser_menu_text() -> str:
 
 def get_browser_examples_text() -> str:
     return (
-        "*🌐 HASHI /browser examples*\n\n"
-        "🌐 *1 Headless page work*\n"
-        "`/browser 1 Inspect this public dashboard and summarize the visible table.`\n\n"
-        "🧭 *2 CLI-native browsing*\n"
-        "`/browser 2 Research this topic using the CLI backend's own browsing tools.`\n\n"
-        "🔎 *3 Brave search research*\n"
-        "`/browser 3 Find recent sources about mandatory CSR assurance and cite the strongest ones.`\n\n"
-        "🔐 *4 Logged-in browser work*\n"
-        "`/browser 4 Open the logged-in library page and download the PDF I am entitled to access.`"
+        f"{card_title('🌐', 'Browser examples')}\n\n"
+        "<b>1 · Headless page work</b>\n"
+        "<code>/browser 1 Inspect this public dashboard and summarize the visible table.</code>\n\n"
+        "<b>2 · CLI-native browsing</b>\n"
+        "<code>/browser 2 Research this topic using the CLI backend's own browsing tools.</code>\n\n"
+        "<b>3 · Brave search research</b>\n"
+        "<code>/browser 3 Find recent sources about mandatory CSR assurance and cite the strongest ones.</code>\n\n"
+        "<b>4 · Logged-in browser work</b>\n"
+        "<code>/browser 4 Open the logged-in library page and download the PDF I may access.</code>"
     )
 
 
@@ -113,21 +116,22 @@ def get_browser_status_text(
     headless_status = "available"
 
     return (
-        "*🌐 HASHI /browser*\n"
-        "_Facts first, then route instructions._\n\n"
+        f"{card_title('🌐', 'Browser routes')}\n\n"
+        f"<b>Current backend</b> · <code>{escape(backend)}</code>\n"
+        "<b>Changes</b> · route selection applies to this request only\n\n"
         "🟢 confirmed online • 🟡 not checked / unknown • 🔴 offline or misconfigured\n\n"
-        "*Routes*\n"
-        f"{headless_icon} *1 HEADLESS* - {headless_status}\n"
+        "<b>ROUTES</b>\n"
+        f"{headless_icon} <b>1 · HEADLESS</b> · {headless_status}\n"
         "   Public web, JS pages, screenshots. Uses HASHI standalone Playwright/browser tools.\n"
-        f"{native_icon} *2 NATIVE* - {native_status}\n"
-        f"   Backend-owned browsing/search. Active backend: `{backend}`.\n"
-        f"{brave_icon} *3 SEARCH* - {brave_status}\n"
-        "   Public research with citations. Uses Brave `web_search`, then `web_fetch`/source pages.\n"
-        f"{extension_icon} *4 LOGGED-IN* - {extension_status}\n"
+        f"{native_icon} <b>2 · NATIVE</b> · {native_status}\n"
+        f"   Backend-owned browsing/search. Active backend: <code>{escape(backend)}</code>.\n"
+        f"{brave_icon} <b>3 · SEARCH</b> · {brave_status}\n"
+        "   Public research with citations. Uses Brave search and source pages.\n"
+        f"{extension_icon} <b>4 · LOGGED-IN</b> · {extension_status}\n"
         "   Real Windows browser session via HASHI extension for authenticated pages.\n\n"
-        "*Use*\n"
-        "• `/browser <1-4> <task>`\n"
-        "• `/browser examples`"
+        "<b>Use</b>\n"
+        "<code>/browser &lt;1-4&gt; &lt;task&gt;</code>\n"
+        "<code>/browser examples</code>"
     )
 
 

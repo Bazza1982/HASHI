@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from orchestrator.command_ui import REFRESH_LABEL, card_title
 
 from orchestrator.habits import HabitStore
 from orchestrator.runtime_common import QueuedRequest
@@ -141,9 +142,9 @@ def load_local_habit_rows(
 
 def habit_status_button_label(current: str, target: str) -> str:
     return {
-        "active": "✅ Active" if current == "active" else "Active",
-        "paused": "⏸ Pause" if current == "paused" else "Pause",
-        "disabled": "❌ Disable" if current == "disabled" else "Disable",
+        "active": "✓ Active" if current == "active" else "Activate",
+        "paused": "✓ Paused" if current == "paused" else "Pause",
+        "disabled": "✓ Disabled" if current == "disabled" else "Disable",
     }[target]
 
 
@@ -157,7 +158,7 @@ def build_habit_browser_view(
     counts = runtime._load_local_habit_counts()
     total, rows = runtime._load_local_habit_rows(offset=offset)
     lines = [
-        "<b>🧠 Local Habits</b>",
+        card_title("🧠", "Local habits"),
         f"Agent: <code>{html.escape(runtime.name)}</code>",
         "",
         (
@@ -215,13 +216,13 @@ def build_habit_browser_view(
     prev_offset = max(offset - HABIT_BROWSER_PAGE_SIZE, 0)
     next_offset = offset + HABIT_BROWSER_PAGE_SIZE
     if offset > 0:
-        nav.append(InlineKeyboardButton("◀ Prev", callback_data=f"skill:habits:list:{prev_offset}"))
-    nav.append(InlineKeyboardButton("🔄 Refresh", callback_data=f"skill:habits:list:{offset}"))
+        nav.append(InlineKeyboardButton("← Previous", callback_data=f"skill:habits:list:{prev_offset}"))
+    nav.append(InlineKeyboardButton(REFRESH_LABEL, callback_data=f"skill:habits:list:{offset}"))
     if next_offset < total:
-        nav.append(InlineKeyboardButton("Next ▶", callback_data=f"skill:habits:list:{next_offset}"))
+        nav.append(InlineKeyboardButton("Next →", callback_data=f"skill:habits:list:{next_offset}"))
     if nav:
         buttons.append(nav)
-    buttons.append([InlineKeyboardButton("📋 Governance Queue", callback_data="skill:habits:queue:0")])
+    buttons.append([InlineKeyboardButton("Governance queue", callback_data="skill:habits:queue:0")])
     return "\n".join(lines).strip(), InlineKeyboardMarkup(buttons)
 
 
@@ -262,7 +263,7 @@ def build_habit_governance_view(runtime: Any) -> str:
     for row in rows:
         counts[row.status] = counts.get(row.status, 0) + 1
     lines = [
-        "<b>📋 Habit Governance Queue</b>",
+        card_title("📋", "Habit governance"),
         f"Agent: <code>{html.escape(runtime.name)}</code>",
         "",
         (

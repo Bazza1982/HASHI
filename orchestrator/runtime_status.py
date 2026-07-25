@@ -182,23 +182,32 @@ def build_status_text(runtime, detailed: bool = False) -> str:
         state_snapshot = runtime.backend_manager.get_state_snapshot()
     except Exception:
         state_snapshot = {}
+    current_effort = runtime._get_current_effort() or "n/a"
     session_id_short = "none"
     if mode_str == "fixed" and getattr(runtime.backend_manager, "current_backend", None):
         sid = getattr(runtime.backend_manager.current_backend, "_session_id", None) or "none"
         session_id_short = sid[:8] + "…" if sid != "none" and len(sid) > 8 else sid
     lines = [
-        f"🧠 {runtime.name}",
+        "📊 HASHI STATUS",
+        "━━━━━━━━━━━━━━━━",
+        "",
+        f"🧠 Agent: {runtime.name}",
         f"🔀 Mode: {mode_str}",
         f"⚙️ Active backend: {runtime.config.active_backend} • {runtime.get_current_model()}",
+        f"🎛️ Model effort: {current_effort}",
     ]
     if mode_str == "fixed":
         lines.append(f"🧷 Session: {session_id_short}")
     lines.extend(runtime._format_status_mode_block(mode_str, state_snapshot, detailed))
     lines.extend(
         [
+            "",
+            "CONNECTIONS",
             f"📶 Channels: {channel_line}",
             _delivery_line(delivery),
             f"📡 Telegram Stream: {'ON' if stream_policy.enabled else 'OFF'} ({stream_policy.source})",
+            "",
+            "ACTIVITY",
             f"📡 Runtime: {'busy' if runtime.is_generating else 'idle'} • queue {runtime.queue.qsize()} • process {runtime._process_info()}",
             f"🧾 Current: {current_line}",
             f"🧠 Memory: skills {', '.join(active_skills) if active_skills else 'none'} • recall {'ON' if recall_on else 'OFF'} • FYI {'armed' if runtime._pending_session_primer else 'clear'}",
@@ -209,7 +218,6 @@ def build_status_text(runtime, detailed: bool = False) -> str:
     )
     if detailed:
         allowed = ", ".join(b["engine"] for b in runtime.config.allowed_backends)
-        current_effort = runtime._get_current_effort() or "n/a"
 
         session_id = "none"
         if mode_str == "fixed" and getattr(runtime.backend_manager, "current_backend", None):
@@ -218,11 +226,11 @@ def build_status_text(runtime, detailed: bool = False) -> str:
         lines.extend(
             [
                 "",
+                "DETAILS",
                 f"📁 Workspace: {runtime.workspace_dir}",
                 f"📝 Transcript: {runtime.transcript_log_path.name}",
                 f"🚀 Started: {runtime.session_started_at.isoformat(timespec='seconds')}",
                 f"🧩 Allowed Backends: {allowed}",
-                f"🎛️ Effort: {current_effort}",
                 f"⚙️ Mode: {mode_str} • Session ID: {session_id}",
                 f"🔁 Retry Cache: prompt {'yes' if runtime.last_prompt else 'no'} • response {'yes' if runtime.last_response else 'no'}",
                 f"🧷 Primers: FYI {'armed' if runtime._pending_session_primer else 'clear'} • auto-recall {'armed' if runtime._pending_auto_recall_context else 'clear'}",

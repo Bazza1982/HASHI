@@ -69,18 +69,18 @@ class _BrowserRuntime:
 class BrowserModeTests(unittest.IsolatedAsyncioTestCase):
     def test_menu_and_examples_text(self):
         menu = get_browser_menu_text()
-        self.assertIn("/browser <1-4> <task>", menu)
-        self.assertIn("Routes", menu)
-        self.assertIn("🟢 *1 HEADLESS* - available", menu)
-        self.assertIn("🟡 *3 SEARCH*", menu)
-        self.assertIn("🟡 *4 LOGGED-IN*", menu)
+        self.assertIn("/browser &lt;1-4&gt; &lt;task&gt;", menu)
+        self.assertIn("<b>BROWSER ROUTES</b>", menu)
+        self.assertIn("🟢 <b>1 · HEADLESS</b> · available", menu)
+        self.assertIn("🟡 <b>3 · SEARCH</b>", menu)
+        self.assertIn("🟡 <b>4 · LOGGED-IN</b>", menu)
         self.assertIn("confirmed online", menu)
         self.assertIn("HASHI extension", menu)
 
         examples = get_browser_examples_text()
-        self.assertIn("HASHI /browser examples", examples)
+        self.assertIn("<b>BROWSER EXAMPLES</b>", examples)
         self.assertIn("/browser 3", examples)
-        self.assertIn("🔐 *4 Logged-in browser work*", examples)
+        self.assertIn("<b>4 · Logged-in browser work</b>", examples)
         self.assertNotIn("/broswer", examples)
 
     def test_status_text_labels_backend_and_keys(self):
@@ -90,18 +90,18 @@ class BrowserModeTests(unittest.IsolatedAsyncioTestCase):
             extension_bridge_configured=False,
         )
         self.assertIn("available", text)
-        self.assertIn("🟢 *2 NATIVE*", text)
-        self.assertIn("🟢 *3 SEARCH*", text)
-        self.assertIn("🔴 *4 LOGGED-IN*", text)
+        self.assertIn("🟢 <b>2 · NATIVE</b>", text)
+        self.assertIn("🟢 <b>3 · SEARCH</b>", text)
+        self.assertIn("🔴 <b>4 · LOGGED-IN</b>", text)
         self.assertIn("configured", text)
         self.assertIn("bridge socket not detected", text)
 
     def test_status_text_uses_yellow_for_unknowns(self):
         text = get_browser_status_text()
-        self.assertIn("🟢 *1 HEADLESS* - available", text)
-        self.assertIn("🟡 *2 NATIVE*", text)
-        self.assertIn("🟡 *3 SEARCH* - not checked", text)
-        self.assertIn("🟡 *4 LOGGED-IN* - not checked", text)
+        self.assertIn("🟢 <b>1 · HEADLESS</b> · available", text)
+        self.assertIn("🟡 <b>2 · NATIVE</b>", text)
+        self.assertIn("🟡 <b>3 · SEARCH</b> · not checked", text)
+        self.assertIn("🟡 <b>4 · LOGGED-IN</b> · not checked", text)
 
     def test_build_browser_task_prompt(self):
         prompt, source, summary = build_browser_task_prompt("4", "Open the logged-in library page")
@@ -121,9 +121,9 @@ class BrowserModeTests(unittest.IsolatedAsyncioTestCase):
         update = _FakeUpdate()
 
         await runtime.cmd_browser(update, SimpleNamespace(args=["status"]))
-        self.assertIn("HASHI /browser", update.message.replies[-1])
-        self.assertIn("🟢 *3 SEARCH* - configured", update.message.replies[-1])
-        self.assertEqual(update.message.reply_kwargs[-1].get("parse_mode"), "Markdown")
+        self.assertIn("<b>BROWSER ROUTES</b>", update.message.replies[-1])
+        self.assertIn("🟢 <b>3 · SEARCH</b> · configured", update.message.replies[-1])
+        self.assertEqual(update.message.reply_kwargs[-1].get("parse_mode"), "HTML")
 
         await runtime.cmd_browser(
             update,
@@ -138,10 +138,9 @@ class BrowserModeTests(unittest.IsolatedAsyncioTestCase):
         runtime = _BrowserRuntime()
         update = _FakeUpdate()
         await runtime.cmd_browser(update, SimpleNamespace(args=[]))
-        self.assertIn("HASHI /browser", update.message.replies[-1])
-        self.assertIn("Routes", update.message.replies[-1])
-        self.assertIn("🟢 *3 SEARCH* - configured", update.message.replies[-1])
-        self.assertEqual(update.message.reply_kwargs[-1].get("parse_mode"), "Markdown")
+        self.assertIn("<b>BROWSER ROUTES</b>", update.message.replies[-1])
+        self.assertIn("🟢 <b>3 · SEARCH</b> · configured", update.message.replies[-1])
+        self.assertEqual(update.message.reply_kwargs[-1].get("parse_mode"), "HTML")
 
     async def test_command_status_refreshes_secrets_from_disk(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -155,7 +154,7 @@ class BrowserModeTests(unittest.IsolatedAsyncioTestCase):
 
             await runtime.cmd_browser(update, SimpleNamespace(args=["status"]))
 
-        self.assertIn("🟢 *3 SEARCH* - configured", update.message.replies[-1])
+        self.assertIn("🟢 <b>3 · SEARCH</b> · configured", update.message.replies[-1])
         self.assertEqual(runtime.backend_manager.secrets.get("brave_api_key"), "new-key")
 
     def test_supported_commands_include_browser(self):

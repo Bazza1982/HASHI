@@ -4,6 +4,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from orchestrator.command_ui import card_title, selected_label
 from orchestrator.audit_mode import load_audit_config
 from orchestrator.dual_brain_mode import ensure_dual_brain_observer, load_dual_brain_config
 from orchestrator.memory_plus_mode import ensure_memory_plus_notepad, ensure_memory_plus_observer
@@ -14,16 +15,16 @@ def mode_keyboard(current: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("✅ Fixed" if current == "fixed" else "Fixed", callback_data="tgl:mode:fixed"),
-                InlineKeyboardButton("✅ Flex" if current == "flex" else "Flex", callback_data="tgl:mode:flex"),
+                InlineKeyboardButton(selected_label("Fixed", current == "fixed"), callback_data="tgl:mode:fixed"),
+                InlineKeyboardButton(selected_label("Flex", current == "flex"), callback_data="tgl:mode:flex"),
             ],
             [
-                InlineKeyboardButton("✅ Wrapper" if current == "wrapper" else "Wrapper", callback_data="tgl:mode:wrapper"),
-                InlineKeyboardButton("✅ Audit" if current == "audit" else "Audit", callback_data="tgl:mode:audit"),
+                InlineKeyboardButton(selected_label("Wrapper", current == "wrapper"), callback_data="tgl:mode:wrapper"),
+                InlineKeyboardButton(selected_label("Audit", current == "audit"), callback_data="tgl:mode:audit"),
             ],
             [
-                InlineKeyboardButton("✅ Dual Brain" if current == "dual-brain" else "Dual Brain", callback_data="tgl:mode:dual-brain"),
-                InlineKeyboardButton("✅ Memory+" if current == "memory+" else "Memory+", callback_data="tgl:mode:memory+"),
+                InlineKeyboardButton(selected_label("Dual brain", current == "dual-brain"), callback_data="tgl:mode:dual-brain"),
+                InlineKeyboardButton(selected_label("Memory+", current == "memory+"), callback_data="tgl:mode:memory+"),
             ],
         ]
     )
@@ -43,7 +44,9 @@ async def cmd_mode(runtime: Any, update: Any, context: Any) -> None:
     if not args or args not in ("fixed", "flex", "wrapper", "audit", "dual-brain", "memory+"):
         await runtime._reply_text(
             update,
-            f"Current mode: <b>{current}</b>\n\n"
+            f"{card_title('🧭', 'Hashi mode')}\n\n"
+            f"<b>CURRENT</b> · <code>{current}</code>\n\n"
+            f"<b>CHOOSE A WORKING MODE</b>\n"
             f"• <b>fixed</b> — continuous CLI session, incremental prompts\n"
             f"• <b>flex</b> — multi-backend switching, full context injection\n"
             f"• <b>wrapper</b> — configure core/wrapper model pair with /core and /wrap\n"

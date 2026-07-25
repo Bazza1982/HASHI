@@ -94,7 +94,7 @@ class UsecomputerModeTests(unittest.IsolatedAsyncioTestCase):
             update = _FakeUpdate()
 
             await BridgeAgentRuntime.cmd_usecomputer(runtime, update, SimpleNamespace(args=["status"]))
-            self.assertIn("/usecomputer is OFF", update.message.replies[-1])
+            self.assertIn("Current · OFF", update.message.replies[-1])
 
             await BridgeAgentRuntime.cmd_usecomputer(
                 runtime,
