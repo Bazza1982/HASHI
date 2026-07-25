@@ -13,6 +13,8 @@ from orchestrator.wrapper_mode import (
 )
 from orchestrator.memory_plus_mode import (
     extract_memory_plus_update_details,
+    is_memory_plus_enabled,
+    mark_memory_plus_session_synced,
     memory_plus_should_write,
     memory_plus_write_reason,
     write_memory_plus_diagnostic,
@@ -27,7 +29,16 @@ def wrapper_enabled(runtime: Any) -> bool:
 
 
 def memory_plus_enabled(runtime: Any) -> bool:
-    return getattr(runtime.backend_manager, "agent_mode", "flex") == "memory+"
+    workspace_dir = getattr(runtime, "workspace_dir", None)
+    manager = getattr(runtime, "backend_manager", None)
+    return bool(
+        (workspace_dir and is_memory_plus_enabled(workspace_dir))
+        or getattr(manager, "agent_mode", "flex") == "memory+"
+    )
+
+
+def memory_plus_response_writer_enabled(runtime: Any) -> bool:
+    return memory_plus_enabled(runtime) and getattr(runtime.backend_manager, "agent_mode", "flex") != "dual-brain"
 
 
 def wrapper_timeout_s(runtime: Any) -> float:
@@ -86,6 +97,8 @@ def wrapper_listener_fields(core_raw: str, visible_text: str, wrapper_result) ->
 
 
 def core_memory_assistant_text(runtime: Any, core_raw: str, visible_text: str, wrapper_result) -> str:
+    if memory_plus_enabled(runtime):
+        core_raw = extract_memory_plus_update_details(core_raw).visible_text
     if wrapper_enabled(runtime) and (
         bool(getattr(wrapper_result, "wrapper_used", False))
         or bool(getattr(wrapper_result, "wrapper_failed", False))
@@ -103,6 +116,8 @@ def append_core_transcript(
     completion_path: str,
     wrapper_result,
 ) -> None:
+    if memory_plus_enabled(runtime):
+        core_raw = extract_memory_plus_update_details(core_raw).visible_text
     path = getattr(runtime, "core_transcript_log_path", None) or (runtime.workspace_dir / "core_transcript.jsonl")
     entry = {
         "role": "assistant_core",
@@ -161,16 +176,35 @@ async def delete_wrapper_polishing_placeholder(runtime: Any, item: Any, placehol
 
 
 async def apply_wrapper_to_visible_text(runtime: Any, item: Any, visible_text: str):
-    if memory_plus_enabled(runtime):
+    memory_plus_written = False
+    memory_plus_active = memory_plus_response_writer_enabled(runtime)
+    if memory_plus_active:
         extracted = extract_memory_plus_update_details(visible_text)
-        stripped_text = extracted.visible_text
+        visible_text = extracted.visible_text
         update = extracted.update
         should_write = False
         notes_count = 0
         open_items_count = 0
         if isinstance(update, dict):
             should_write = memory_plus_should_write(update)
-            notes = update.get("notes")
+            note_fields = (
+                "facts",
+                "notes",
+                "decisions",
+                "completed",
+                "state_changes",
+                "resolved_items",
+                "pointers",
+            )
+            notes = [
+                item
+                for field in note_fields
+                for item in (
+                    update.get(field)
+                    if isinstance(update.get(field), list)
+                    else ([update.get(field)] if update.get(field) else [])
+                )
+            ]
             open_items = update.get("open_items")
             notes_count = len(notes) if isinstance(notes, list) else int(bool(notes))
             open_items_count = len(open_items) if isinstance(open_items, list) else int(bool(open_items))
@@ -184,6 +218,7 @@ async def apply_wrapper_to_visible_text(runtime: Any, item: Any, visible_text: s
                 prompt=item.prompt,
                 update=update,
             )
+            memory_plus_written = write_result
             reason = memory_plus_write_reason(update, write_result=write_result, block_present=extracted.block_present)
         except Exception as exc:
             reason = f"exception:{type(exc).__name__}"
@@ -201,15 +236,17 @@ async def apply_wrapper_to_visible_text(runtime: Any, item: Any, visible_text: s
                 write_result=write_result,
                 reason=reason,
                 response_chars=len(visible_text or ""),
-                visible_chars=len(stripped_text or ""),
+                visible_chars=len(visible_text or ""),
                 raw_block_chars=extracted.raw_chars,
             )
         except Exception as exc:
             runtime.logger.warning("Memory+ diagnostic write failed for %s: %s", item.request_id, exc)
-        return stripped_text, passthrough_result(stripped_text, fallback_reason="memory_plus")
+        if memory_plus_written:
+            mark_memory_plus_session_synced(runtime)
 
     if not wrapper_enabled(runtime):
-        return visible_text, passthrough_result(visible_text, fallback_reason="wrapper_mode_disabled")
+        fallback = "memory_plus" if memory_plus_active else "wrapper_mode_disabled"
+        return visible_text, passthrough_result(visible_text, fallback_reason=fallback)
 
     state = runtime.backend_manager.get_state_snapshot()
     cfg = load_wrapper_config(state)

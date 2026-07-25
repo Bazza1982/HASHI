@@ -6,11 +6,18 @@ Owner: HASHI1 implementation.
 
 Related design:
 
+- `docs/MEMORY_PLUS_V2.md`
 - `docs/WRAPPER_AGENT_MODE_PLAN.md`
 - `docs/AUDIT_AGENT_MODE_PLAN.md`
 - `docs/WIKI_REDESIGN_PLAN.md`
 - `docs/WIKI_AI_CURATION_FIX_PLAN.md`
 - `docs/AGENT_FYI.md`
+
+Memory+ v2 integration: when Memory+ is enabled, the Left Brain reads and
+writes the canonical compact `memory_plus_state.json` work card. The legacy
+left-brain JSONL remains an audit/history artefact and is not injected as a
+second continuity source. The Right Brain receives only the Left Brain's
+concise FYI plus the authoritative current user request.
 
 ## 1. Purpose
 

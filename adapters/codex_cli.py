@@ -42,6 +42,7 @@ class CodexCLIAdapter(BaseBackend):
         self.events_log_path = self.config.workspace_dir / "codex_exec_events.jsonl"
         # Persistent session state
         self._session_id: str | None = None
+        self._session_mode: bool = bool((self.config.extra or {}).get("session_mode", False))
         # Real token usage captured from turn.completed events
         self._last_usage: TokenUsage | None = None
 
@@ -88,6 +89,11 @@ class CodexCLIAdapter(BaseBackend):
         else:
             self.logger.info("Codex handle_new_session: no active session, nothing to clear.")
         return True
+
+    def set_session_mode(self, enabled: bool) -> None:
+        self._session_mode = bool(enabled)
+        self._session_id = None
+        self.logger.info("Session mode set to %s", "ON" if enabled else "OFF")
 
     def should_bootstrap_on_startup(self) -> bool:
         return False
@@ -138,6 +144,7 @@ class CodexCLIAdapter(BaseBackend):
             return prompt
 
         separators = [
+            "\n\n--- CURRENT USER REQUEST — AUTHORITATIVE ---\n",
             "\n\n--- NEW REQUEST ---\n",
             "\n\nRespond to the following user request while following that context:\n",
         ]
@@ -288,7 +295,7 @@ class CodexCLIAdapter(BaseBackend):
         if self.effort:
             base_flags += ["-c", f'model_reasoning_effort="{self.effort}"']
 
-        if self._session_id:
+        if self._session_mode and self._session_id:
             # Resume existing session — access root already set in session, no --add-dir needed
             cmd = [self.cmd_base, "exec", "resume", self._session_id] + base_flags
         else:
@@ -544,12 +551,14 @@ class CodexCLIAdapter(BaseBackend):
                 return BackendResponse(text="", duration_ms=duration_ms, error=err_msg, is_success=False)
 
             # Persist the session ID from this turn so the next request can resume it
-            if captured_thread_id and captured_thread_id != self._session_id:
+            if self._session_mode and captured_thread_id and captured_thread_id != self._session_id:
                 self.logger.info(
                     f"Codex session established: {captured_thread_id} "
                     f"(was: {self._session_id or 'none'})"
                 )
                 self._session_id = captured_thread_id
+            elif not self._session_mode:
+                self._session_id = None
 
             if not response:
                 return BackendResponse(

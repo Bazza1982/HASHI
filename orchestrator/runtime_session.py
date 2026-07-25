@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from orchestrator.flexible_backend_registry import is_cli_backend
+from orchestrator.memory_plus_mode import is_memory_plus_enabled
 
 
 async def cmd_new(runtime: Any, update: Any, context: Any) -> None:
@@ -64,7 +65,15 @@ async def cmd_fresh(runtime: Any, update: Any, context: Any) -> None:
         assembler.turns_injection_enabled = True
         assembler.saved_memory_injection_enabled = False
 
+    workspace_dir = getattr(runtime, "workspace_dir", None)
+    continuity_enabled = bool(workspace_dir and is_memory_plus_enabled(workspace_dir))
     await runtime._reply_text(
         update,
-        "Starting a fresh API context. Recent turns were cleared; saved memories are preserved but will not be auto-injected.",
+        "Starting a fresh API context. Recent turns were cleared; saved memories are preserved but will not be auto-injected."
+        + (
+            " Memory+ continuity remains enabled; use `/memory plus off` if a turn must exclude the work card."
+            if continuity_enabled
+            else ""
+        ),
+        parse_mode="Markdown",
     )

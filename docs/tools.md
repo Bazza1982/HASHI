@@ -3,12 +3,15 @@
 ## Universal Multi-Agent Telegram Orchestrator (`bridge-u-f`)
 The `bridge-u-f` project located at `<project_root>` is a local multi-agent bridge that connects Telegram bots (and optionally WhatsApp) to multiple AI backends, with an optional browser workbench.
 
-Three operating modes:
+Five execution modes:
 - **Fixed agents:** one Telegram bot, one backend, one workspace.
 - **Flex agents:** one Telegram bot, one workspace, one shared identity, switchable backend via `/backend`.
 - **Wrapper agents:** one shared identity with a functional core backend/model plus a stateless wrapper backend/model that rewrites only the final user-facing response.
+- **Audit agents:** a functional core response plus a separate auditor pass and findings.
+- **Dual Brain agents:** a left-brain continuity/planning pass plus right-brain execution.
 
-- **Supported backends:** `gemini-cli`, `claude-cli`, `codex-cli`, `openrouter-api`, `deepseek-api`, and `ollama-api`.
+- **Memory+ continuity:** an independent optional layer that can stay enabled in any execution mode.
+- **Supported backends:** `gemini-cli`, `claude-cli`, `codex-cli`, `claw-cli`, `grok-cli`, `openrouter-api`, `deepseek-api`, `ollama-api`, and `xai-api`.
 - **Adding agents:** Add a new block to `<project_root>\agents.json`. Always set `type` explicitly. New agents should normally use `type: "flex"`; omitted `type` is rejected so HASHI cannot accidentally fall back to the retired legacy fixed runtime.
   - Flex required fields: `name`, `type: "flex"`, `workspace_dir`, `system_md`, `allowed_backends`, `active_backend`, `is_active`
   - Legacy fixed emergency fields: `name`, `type: "fixed"`, `engine`, `workspace_dir`, `system_md`, `model`, `is_active`; startup also requires `HASHI_ENABLE_LEGACY_FIXED_RUNTIME=1`
@@ -19,11 +22,7 @@ Three operating modes:
   - `background_detach_after` — seconds before detaching
   - `escalation_thresholds` — array of seconds for placeholder messages (e.g. `[30, 60, 90, 150]`)
 - **Tokens and secrets:** Telegram bot tokens and API keys are stored in `<project_root>\secrets.json`, keyed by agent name. Never put them in `agents.json`.
-- **Memory isolation:** Each agent runs inside its own `workspace_dir`. Session/history state depends on backend:
-  - `gemini-cli`: resumes with `--resume latest`
-  - `claude-cli`: resumes with `--continue`
-  - `codex-cli`: resumes with `resume --last`
-  - `openrouter-api`: bridge-managed local history in workspace
+- **Memory isolation:** Each agent runs inside its own `workspace_dir`. Fixed mode enables persistent sessions only for session-capable Codex, Claude, and Grok CLI backends. Other modes use one-shot backend turns with bridge-managed context.
 - **Per-agent logs and files:** Logs under `<project_root>\logs\<agent>\<session>`. Media under `<project_root>\media\<agent>`.
 
 ## Telegram Commands
@@ -32,7 +31,8 @@ Three operating modes:
 - `/help` — list available commands
 - `/new` — fresh CLI session reset; non-CLI backends should use `/fresh`
 - `/fresh` — clean API context for non-CLI backends; clears recent turns and preserves saved memories without auto-injecting them
-- `/memory [status|on|pause|saved on|saved off|saved status]` — inspect or change bridge memory injection
+- `/memory [status|on|pause|saved on|saved off|plus on|plus off]` — inspect or change normal memory injection and independent Memory+ continuity
+- `/notepad [today|carryover|history|find <query>|edit <text>|replace <text>|compact|clear]` — inspect or maintain the compact Memory+ work card and archive index
 - `/clear` — clear workspace context files
 - `/handoff` — restore recent continuity from bridge transcript into a fresh session
 - `/fyi [prompt]` — refresh bridge environment awareness; optionally append a follow-up prompt
@@ -45,7 +45,8 @@ Three operating modes:
 - `/terminate` — shut down this agent
 - `/stop` — cancel current processing
 - `/retry` — retry last request
-- `/model` — switch model (inline keyboard)
+- `/model` — switch model (inline keyboard), then optionally choose or keep effort when the model supports it
+- `/mode [fixed|flex|wrapper|audit|dual-brain]` — switch execution mode; `/mode memory+` only enables Memory+ and keeps the current mode
 - `/think [on|off]` — toggle thinking trace display (periodic italic messages, ~60s intervals, independent of `/verbose`)
 - `/verbose [on|off]` — toggle real-time streaming display; in wrapper mode, `on` also shows core raw output, wrapper final output, wrapper status, latency, and fallback reason
 - `/skill` — browse, toggle, and run skills (inline keyboard)
@@ -55,8 +56,9 @@ Three operating modes:
 - `/reboot [min|max|number|help]` — hot restart agents with live Python code reload and hot manager rebuild; preserves Workbench/API gateway/WhatsApp handles and recreates the scheduler
 - Alias: `/usercomputer`
 
-**Flex-only:**
-- `/backend` — switch active backend (inline keyboard; `+` variant carries continuity handoff)
+**Backend configuration:**
+- `/backend` — switch active backend in Flex (inline keyboard; `+` variant carries continuity handoff). In another mode it first asks whether to switch to Flex, preserves saved mode configuration and Memory+, then continues directly to the backend picker.
+- Backend and model selection continue to an optional effort step when supported. Keeping the current effort does not change it; unsupported models finish with effort shown as `n/a`.
 - `/effort [level]` — reasoning effort for Claude, Codex, and Grok CLI. The keyboard and accepted values are model-aware: Grok offers `low`, `medium`, and `high` (default `medium`); `max` is currently offered for `gpt-5.6-sol`; `gpt-5.6-terra` and `gpt-5.6-luna` offer up to `xhigh`.
 
 **Wrapper-mode:**
@@ -66,7 +68,7 @@ Three operating modes:
 - `/wrapper` — show wrapper configuration, persona/style slots, and navigation buttons.
 - `/wrapper set <slot> <text>` — set a wrapper persona/style slot.
 - `/wrapper clear <slot>` or `/wrapper clear all` — clear wrapper persona/style slots.
-- `/model` and `/backend` guide wrapper agents to `/core` or `/wrap` instead of changing the active wrapper-mode pair directly.
+- `/model` guides wrapper agents to `/core` or `/wrap`; `/backend` offers the explicit switch-to-Flex confirmation instead of silently changing modes.
 - `/reset CONFIRM` preserves wrapper mode config and wrapper slots; `/wipe CONFIRM` remains a hard workspace clear.
 
 Wrapper model picker buttons currently group recommended choices by provider: Claude Haiku/Sonnet, Gemini Flash/Lite, DeepSeek Flash/Chat, and OpenRouter DeepSeek/Gemini. Claude Opus is intentionally omitted from the picker because it is too expensive for routine wrapping.
@@ -74,6 +76,11 @@ Wrapper model picker buttons currently group recommended choices by provider: Cl
 **Backend-specific (fixed):**
 - `/effort` — Claude, Codex, Grok CLI
 - `/credit` — OpenRouter
+
+Memory+ stores a bounded today card, a short cross-day carryover, and archive
+pointers without injecting old prompts or full answers. Pausing it preserves
+all files. See [Memory+ v2 — Compact Work Continuity](MEMORY_PLUS_V2.md) for
+backend routing, rollover, migration, and writer ownership.
 
 ## Skills System
 - Skills live under `skills/` as `skills/<id>/skill.md` with YAML frontmatter.

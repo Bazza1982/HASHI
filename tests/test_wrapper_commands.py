@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from queue import Queue
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -20,6 +21,12 @@ from orchestrator.audit_mode import AuditTelemetryCollector, DEFAULT_AUDIT_CRITE
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
+from orchestrator.memory_plus_mode import (
+    MEMORY_PLUS_CLOSE,
+    MEMORY_PLUS_OPEN,
+    load_memory_plus_state,
+    set_memory_plus_enabled,
+)
 from orchestrator.runtime_common import QueuedRequest
 from orchestrator import telegram_stream_policy
 from orchestrator.wrapper_mode import DEFAULT_WRAPPER_STYLE_SLOT_TEXT, SESSION_RESET_SOURCE
@@ -58,6 +65,7 @@ def _make_runtime(manager: FlexibleBackendManager) -> tuple[FlexibleAgentRuntime
     runtime.name = manager.config.name
     runtime._post_turn_observers = []
     runtime._pre_turn_context_providers = []
+    runtime.reload_post_turn_observers = lambda: None
     runtime._is_authorized_user = lambda user_id: user_id == 1
     runtime._backend_busy = lambda: False
     runtime._workzone_dir = None
@@ -93,6 +101,26 @@ def _update(args: list[str] | None = None, text: str | None = None):
         ),
         SimpleNamespace(args=args or []),
     )
+
+
+def _callback_update(data: str):
+    edits = []
+    answers = []
+    query = SimpleNamespace(
+        from_user=SimpleNamespace(id=1),
+        data=data,
+        message=SimpleNamespace(chat_id=123),
+    )
+
+    async def edit_message_text(text, **kwargs):
+        edits.append({"text": text, **kwargs})
+
+    async def answer(text=None, **kwargs):
+        answers.append({"text": text, **kwargs})
+
+    query.edit_message_text = edit_message_text
+    query.answer = answer
+    return SimpleNamespace(callback_query=query), edits, answers
 
 
 def _read_state(workspace: Path) -> dict:
@@ -160,7 +188,16 @@ async def test_cmd_notepad_show_edit_replace_clear(tmp_path):
         for row in runtime._reply_payloads[-1]["reply_markup"].inline_keyboard
         for button in row
     ]
-    assert labels == ["↻ Refresh", "Add note", "Replace body", "Clear"]
+    assert labels == [
+        "Today",
+        "Carryover",
+        "History",
+        "Find",
+        "Add note",
+        "Compact",
+        "Replace today",
+        "Clear today",
+    ]
 
 
 @pytest.mark.asyncio
@@ -196,7 +233,10 @@ async def test_callback_notepad_clear_uses_confirmation(tmp_path):
     await FlexibleAgentRuntime.callback_notepad(runtime, SimpleNamespace(callback_query=query), SimpleNamespace())
 
     assert "Cleared" in edited[-1]["text"]
-    assert "keep this" not in path.read_text(encoding="utf-8")
+    rendered = path.read_text(encoding="utf-8")
+    today_section = rendered.split("## Today", 1)[1].split("## Carryover", 1)[0]
+    assert "keep this" not in today_section
+    assert "keep this" in rendered
     assert answered
 
 
@@ -630,6 +670,41 @@ async def _completed_task(response):
     return response
 
 
+@pytest.mark.asyncio
+async def test_wrapper_mode_memory_plus_has_one_core_writer_and_hides_update_block(
+    tmp_path,
+):
+    runtime, _sent, _voices = _make_background_runtime(tmp_path)
+    set_memory_plus_enabled(tmp_path, True)
+    captured: list[dict] = []
+
+    async def wrapper_response(**kwargs):
+        captured.append(kwargs)
+        return BackendResponse(text="polished answer", duration_ms=1.0)
+
+    runtime.backend_manager.generate_ephemeral_response = wrapper_response
+    item = _queued_request()
+    core_raw = (
+        "core answer\n"
+        f"{MEMORY_PLUS_OPEN}\n"
+        '{"write":true,"decisions":["Use one continuity writer"]}\n'
+        f"{MEMORY_PLUS_CLOSE}"
+    )
+
+    visible, result = await runtime._apply_wrapper_to_visible_text(item, core_raw)
+
+    assert visible == "polished answer"
+    assert result.wrapper_used is True
+    assert captured
+    assert MEMORY_PLUS_OPEN not in captured[0]["prompt"]
+    assert "core answer" in captured[0]["prompt"]
+    state = load_memory_plus_state(tmp_path)
+    assert state["today"]["decisions"] == ["Use one continuity writer"]
+    safe_core = runtime._core_memory_assistant_text(core_raw, visible, result)
+    assert safe_core == "core answer"
+    assert MEMORY_PLUS_OPEN not in safe_core
+
+
 def _make_audit_followup_runtime(tmp_path: Path, *, item_silent: bool = False, delivery: str = "always"):
     runtime = object.__new__(FlexibleAgentRuntime)
     runtime.config = SimpleNamespace(active_backend="codex-cli")
@@ -834,6 +909,88 @@ async def test_cmd_mode_wrapper_persists_mode(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_legacy_mode_memory_plus_enables_continuity_without_changing_mode(
+    tmp_path,
+):
+    manager = _make_manager(tmp_path / "agent")
+    manager.agent_mode = "wrapper"
+    manager._save_state()
+    runtime, messages = _make_runtime(manager)
+    update, context = _update(["memory+"])
+
+    await FlexibleAgentRuntime.cmd_mode(runtime, update, context)
+
+    state = _read_state(tmp_path / "agent")
+    assert manager.agent_mode == "wrapper"
+    assert state["agent_mode"] == "wrapper"
+    assert state["memory_plus"]["enabled"] is True
+    assert "Working mode remains **wrapper**" in messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_memory_plus_command_switch_preserves_mode_and_files_when_paused(
+    tmp_path,
+):
+    manager = _make_manager(tmp_path / "agent")
+    manager.agent_mode = "audit"
+    manager._save_state()
+    runtime, messages = _make_runtime(manager)
+
+    update, context = _update(["plus", "on"])
+    await FlexibleAgentRuntime.cmd_memory(runtime, update, context)
+    state = _read_state(tmp_path / "agent")
+    assert state["agent_mode"] == "audit"
+    assert state["memory_plus"]["enabled"] is True
+    card = tmp_path / "agent" / "memory" / "memory_plus_state.json"
+    assert card.exists()
+
+    update, context = _update(["plus", "off"])
+    await FlexibleAgentRuntime.cmd_memory(runtime, update, context)
+    state = _read_state(tmp_path / "agent")
+    assert state["agent_mode"] == "audit"
+    assert state["memory_plus"]["enabled"] is False
+    assert card.exists()
+    assert "files were preserved" in messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_memory_menu_links_continuity_views_and_toggle(tmp_path):
+    manager = _make_manager(tmp_path / "agent")
+    runtime, _messages = _make_runtime(manager)
+    runtime.memory_store = SimpleNamespace(
+        get_stats=lambda: {"turns": 3, "memories": 2}
+    )
+    runtime._get_skill_state = lambda: {"memory_sync": False}
+    set_memory_plus_enabled(tmp_path / "agent", True)
+    update, context = _update([])
+
+    await FlexibleAgentRuntime.cmd_memory(runtime, update, context)
+
+    labels = [
+        button.text
+        for row in runtime._reply_payloads[-1]["reply_markup"].inline_keyboard
+        for button in row
+    ]
+    assert labels == [
+        "View today",
+        "View carryover",
+        "History",
+        "Find",
+        "Pause Memory+",
+        "Compact",
+    ]
+
+    callback, edits, _answers = _callback_update("npad:memory_off")
+    await FlexibleAgentRuntime.callback_notepad(
+        runtime,
+        callback,
+        SimpleNamespace(),
+    )
+    assert _read_state(tmp_path / "agent")["memory_plus"]["enabled"] is False
+    assert "all files were preserved" in edits[-1]["text"]
+
+
+@pytest.mark.asyncio
 async def test_cmd_mode_wrapper_does_not_activate_when_core_switch_fails(tmp_path):
     manager = _make_manager(tmp_path / "agent")
     runtime, messages = _make_runtime(manager)
@@ -853,7 +1010,7 @@ async def test_cmd_mode_wrapper_does_not_activate_when_core_switch_fails(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_backend_and_model_commands_guide_wrapper_mode(tmp_path):
+async def test_backend_confirms_flex_while_model_guides_wrapper_mode(tmp_path):
     manager = _make_manager(tmp_path / "agent")
     manager.agent_mode = "wrapper"
     manager.current_backend = SimpleNamespace(config=SimpleNamespace(model="gpt-5.5"))
@@ -861,12 +1018,248 @@ async def test_backend_and_model_commands_guide_wrapper_mode(tmp_path):
 
     update, context = _update([])
     await FlexibleAgentRuntime.cmd_backend(runtime, update, context)
-    assert "/core" in messages[-1]
-    assert "/wrap" in messages[-1]
+    assert "SWITCH BACKEND" in messages[-1]
+    assert "core-and-wrapper response flow will stop" in messages[-1]
+    assert "backend_mode_confirm" in str(runtime._reply_payloads[-1]["reply_markup"])
+    assert manager.agent_mode == "wrapper"
 
     await FlexibleAgentRuntime.cmd_model(runtime, update, context)
     assert "/core" in messages[-1]
     assert "/wrap" in messages[-1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["fixed", "memory+", "wrapper", "audit", "dual-brain"])
+async def test_backend_non_flex_modes_offer_confirmation_without_mutating(tmp_path, mode):
+    manager = _make_manager(tmp_path / mode.replace("+", "plus"))
+    manager.agent_mode = mode
+    runtime, messages = _make_runtime(manager)
+    update, context = _update([])
+
+    await FlexibleAgentRuntime.cmd_backend(runtime, update, context)
+
+    assert "SWITCH BACKEND" in messages[-1]
+    assert f"<code>{mode}</code>" in messages[-1]
+    assert "Switch to Flex and continue" in messages[-1]
+    markup = str(runtime._reply_payloads[-1]["reply_markup"])
+    assert "backend_mode_confirm" in markup
+    assert f"backend_mode_cancel:{mode}" in markup
+    assert manager.agent_mode == mode
+    assert not (manager.config.workspace_dir / "state.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_backend_confirmation_switches_to_flex_and_opens_backend_menu(tmp_path):
+    manager = _make_manager(tmp_path / "agent")
+    manager.agent_mode = "memory+"
+    set_session_mode = Mock()
+    manager.current_backend = SimpleNamespace(
+        config=SimpleNamespace(model="gpt-5.4"),
+        set_session_mode=set_session_mode,
+    )
+    runtime, _messages = _make_runtime(manager)
+    update, edits, answers = _callback_update("backend_mode_confirm")
+
+    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
+
+    assert manager.agent_mode == "flex"
+    state = _read_state(tmp_path / "agent")
+    assert state["agent_mode"] == "flex"
+    assert state["memory_plus"]["enabled"] is True
+    set_session_mode.assert_called_once_with(False)
+    assert "HASHI BACKEND" in edits[-1]["text"]
+    assert "backend:codex-cli:plain" in str(edits[-1]["reply_markup"])
+    assert answers[-1]["text"] is None
+
+
+@pytest.mark.asyncio
+async def test_backend_confirmation_from_fixed_keeps_memory_plus_enabled(tmp_path):
+    manager = _make_manager(tmp_path / "agent")
+    manager.agent_mode = "fixed"
+    manager._save_state()
+    set_memory_plus_enabled(tmp_path / "agent", True)
+    manager.current_backend = SimpleNamespace(
+        config=SimpleNamespace(model="gpt-5.4"),
+        set_session_mode=Mock(),
+    )
+    runtime, _messages = _make_runtime(manager)
+    update, edits, _answers = _callback_update("backend_mode_confirm")
+
+    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
+
+    state = _read_state(tmp_path / "agent")
+    assert state["agent_mode"] == "flex"
+    assert state["memory_plus"]["enabled"] is True
+    assert "HASHI BACKEND" in edits[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_backend_confirmation_cancel_keeps_mode_and_backend(tmp_path):
+    manager = _make_manager(tmp_path / "agent")
+    manager.agent_mode = "audit"
+    runtime, _messages = _make_runtime(manager)
+    update, edits, _answers = _callback_update("backend_mode_cancel:audit")
+
+    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
+
+    assert manager.agent_mode == "audit"
+    assert manager.config.active_backend == "codex-cli"
+    assert "BACKEND UNCHANGED" in edits[-1]["text"]
+    assert "No mode, backend, model, or saved configuration was changed" in edits[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_backend_text_switch_continues_to_optional_effort(tmp_path):
+    manager = _make_manager(tmp_path / "agent")
+    runtime, messages = _make_runtime(manager)
+    runtime._get_available_efforts = lambda: ["low", "medium", "high"]
+    runtime._get_current_effort = lambda: "medium"
+    runtime.get_current_model = lambda: "gpt-5.6-sol"
+    update, context = _update(["codex-cli", "gpt-5.6-sol"])
+
+    await FlexibleAgentRuntime.cmd_backend(runtime, update, context)
+
+    assert "CHOOSE EFFORT" in messages[-1]
+    markup = str(runtime._reply_payloads[-1]["reply_markup"])
+    assert "effort:backend:high" in markup
+    assert "effort:backend:keep" in markup
+
+
+@pytest.mark.asyncio
+async def test_model_text_switch_continues_to_optional_effort(tmp_path):
+    manager = _make_manager(tmp_path / "agent")
+    manager.current_backend = SimpleNamespace(
+        config=SimpleNamespace(model="gpt-5.4"),
+        effort="medium",
+    )
+    runtime, messages = _make_runtime(manager)
+    runtime.get_current_model = lambda: manager.current_backend.config.model
+    runtime._get_available_models = lambda: ["gpt-5.4", "gpt-5.6-sol"]
+    runtime._get_available_efforts = lambda: ["low", "medium", "high", "max"]
+    update, context = _update(["gpt-5.6-sol"])
+
+    await FlexibleAgentRuntime.cmd_model(runtime, update, context)
+
+    assert manager.current_backend.config.model == "gpt-5.6-sol"
+    assert "CHOOSE EFFORT" in messages[-1]
+    markup = str(runtime._reply_payloads[-1]["reply_markup"])
+    assert "effort:model:max" in markup
+    assert "model_menu" in markup
+
+
+@pytest.mark.asyncio
+async def test_model_without_effort_support_shows_completed_summary(tmp_path):
+    manager = _make_manager(tmp_path / "agent")
+    manager.current_backend = SimpleNamespace(
+        config=SimpleNamespace(model="gpt-5.4"),
+        effort=None,
+    )
+    runtime, messages = _make_runtime(manager)
+    runtime.get_current_model = lambda: manager.current_backend.config.model
+    runtime._get_available_models = lambda: ["gpt-5.4", "plain-model"]
+    runtime._get_available_efforts = lambda: []
+    update, context = _update(["plain-model"])
+
+    await FlexibleAgentRuntime.cmd_model(runtime, update, context)
+
+    assert "MODEL CONFIGURATION" in messages[-1]
+    assert "<code>n/a</code>" in messages[-1]
+    assert runtime._reply_payloads[-1]["reply_markup"] is None
+
+
+@pytest.mark.asyncio
+async def test_followup_effort_selection_finishes_with_configuration_summary(tmp_path):
+    manager = _make_manager(tmp_path / "agent")
+    manager.current_backend = SimpleNamespace(
+        config=SimpleNamespace(model="gpt-5.6-sol"),
+        effort="medium",
+    )
+    runtime, _messages = _make_runtime(manager)
+    runtime.get_current_model = lambda: manager.current_backend.config.model
+    runtime._get_current_effort = lambda: manager.current_backend.effort
+    runtime._get_available_efforts = lambda: ["low", "medium", "high", "max"]
+    update, edits, _answers = _callback_update("effort:model:high")
+
+    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
+
+    assert manager.current_backend.effort == "high"
+    assert "MODEL CONFIGURATION" in edits[-1]["text"]
+    assert "<code>high</code>" in edits[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_model_button_continues_to_optional_effort(tmp_path):
+    manager = _make_manager(tmp_path / "agent")
+    manager.current_backend = SimpleNamespace(
+        config=SimpleNamespace(model="gpt-5.4"),
+        effort="medium",
+    )
+    runtime, _messages = _make_runtime(manager)
+    runtime.get_current_model = lambda: manager.current_backend.config.model
+    runtime._get_current_effort = lambda: manager.current_backend.effort
+    runtime._get_available_models = lambda: ["gpt-5.4", "gpt-5.6-sol"]
+    runtime._get_available_efforts = lambda: ["low", "medium", "high", "max"]
+    update, edits, _answers = _callback_update("model:gpt-5.6-sol")
+
+    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
+
+    assert manager.current_backend.config.model == "gpt-5.6-sol"
+    assert "CHOOSE EFFORT" in edits[-1]["text"]
+    assert "effort:model:max" in str(edits[-1]["reply_markup"])
+
+
+@pytest.mark.asyncio
+async def test_backend_model_button_continues_to_optional_effort(tmp_path):
+    manager = _make_manager(tmp_path / "agent")
+    runtime, _messages = _make_runtime(manager)
+    runtime.get_current_model = lambda: "gpt-5.6-sol"
+    runtime._get_current_effort = lambda: "medium"
+    runtime._get_available_efforts = lambda: ["low", "medium", "high", "max"]
+    update, edits, _answers = _callback_update("bmodel:codex-cli:p:gpt-5.6-sol")
+
+    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
+
+    assert "CHOOSE EFFORT" in edits[-1]["text"]
+    assert "effort:backend:max" in str(edits[-1]["reply_markup"])
+
+
+@pytest.mark.asyncio
+async def test_followup_keep_effort_finishes_without_changing_value(tmp_path):
+    manager = _make_manager(tmp_path / "agent")
+    manager.current_backend = SimpleNamespace(
+        config=SimpleNamespace(model="gpt-5.6-sol"),
+        effort="medium",
+    )
+    runtime, _messages = _make_runtime(manager)
+    runtime.get_current_model = lambda: manager.current_backend.config.model
+    runtime._get_current_effort = lambda: manager.current_backend.effort
+    runtime._get_available_efforts = lambda: ["low", "medium", "high", "max"]
+    update, edits, answers = _callback_update("effort:backend:keep")
+
+    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
+
+    assert manager.current_backend.effort == "medium"
+    assert "MODEL CONFIGURATION" in edits[-1]["text"]
+    assert "<code>medium</code>" in edits[-1]["text"]
+    assert answers[-1]["text"] == "Current effort kept"
+
+
+def test_configuration_followup_persists_default_effort_when_unset(tmp_path):
+    manager = _make_manager(tmp_path / "agent")
+    manager.current_backend = SimpleNamespace(
+        config=SimpleNamespace(model="gpt-5.6-sol"),
+        effort=None,
+    )
+    runtime, _messages = _make_runtime(manager)
+    runtime.get_current_model = lambda: manager.current_backend.config.model
+    runtime._get_current_effort = lambda: manager.current_backend.effort
+    runtime._get_available_efforts = lambda: ["low", "medium", "high", "max"]
+
+    text, markup = runtime._configuration_followup("model")
+
+    assert manager.current_backend.effort == "low"
+    assert "<code>low</code>" in text
+    assert "effort:model:keep" in str(markup)
 
 
 def test_set_backend_model_persists_new_active_model_over_existing_override(tmp_path):

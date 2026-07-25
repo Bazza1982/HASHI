@@ -4,11 +4,40 @@ import shutil
 from contextlib import suppress
 from typing import Any
 
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
 from orchestrator.bridge_memory import BridgeContextAssembler, BridgeMemoryStore
 from orchestrator.command_ui import card_title, confirm_card
 from orchestrator.habits import HabitStore
 from orchestrator.handoff_builder import HandoffBuilder
 from orchestrator.memory_index import MemoryIndex
+from orchestrator.memory_plus_mode import (
+    ensure_memory_plus_notepad,
+    ensure_memory_plus_observer,
+    get_memory_plus_status,
+    set_memory_plus_enabled,
+)
+
+
+def memory_plus_keyboard(enabled: bool) -> InlineKeyboardMarkup:
+    toggle_label = "Pause Memory+" if enabled else "Enable Memory+"
+    toggle_action = "memory_off" if enabled else "memory_on"
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("View today", callback_data="npad:refresh"),
+                InlineKeyboardButton("View carryover", callback_data="npad:carryover"),
+            ],
+            [
+                InlineKeyboardButton("History", callback_data="npad:history"),
+                InlineKeyboardButton("Find", callback_data="npad:help_find"),
+            ],
+            [
+                InlineKeyboardButton(toggle_label, callback_data=f"npad:{toggle_action}"),
+                InlineKeyboardButton("Compact", callback_data="npad:compact"),
+            ],
+        ]
+    )
 
 
 async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
@@ -29,16 +58,43 @@ async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
         memories = stats.get("memories", "?")
         sync_on = runtime._get_skill_state().get("memory_sync", False)
         sync_state = "ON 🔄" if sync_on else "OFF ⬜"
+        continuity = get_memory_plus_status(runtime.workspace_dir)
+        continuity_state = "ON ✅" if continuity["enabled"] else "OFF ⬜"
+        carryover = continuity.get("carryover_from") or "none"
         await runtime._reply_text(
             update,
             f"{card_title('🧠', 'Memory controls')}\n\n"
-            f"<b>Current</b> · {state}\n"
+            f"<b>Continuity</b> · Memory+ {continuity_state}\n"
+            f"<b>Today</b> · <code>{continuity['today_chars']}</code> chars · "
+            f"<code>{continuity['open_items']}</code> open\n"
+            f"<b>Carryover</b> · <code>{carryover}</code>\n"
+            f"<b>Context injection</b> · {state}\n"
             f"<b>Stored</b> · <code>{turns}</code> turns · <code>{memories}</code> memories\n"
             f"<b>BGE sync</b> · <code>{sync_state}</code>\n\n"
             "Changes apply immediately and preserve stored data unless <code>wipe</code> is explicitly used.\n\n"
-            "<code>/memory on</code> · <code>pause</code> · <code>saved on|off</code> · "
+            "<code>/memory plus on|off</code> · <code>on</code> · <code>pause</code> · <code>saved on|off</code> · "
             "<code>sync on|off</code> · <code>wipe</code>",
             parse_mode="HTML",
+            reply_markup=memory_plus_keyboard(bool(continuity["enabled"])),
+        )
+    elif args in {"plus", "plus on", "continuity", "continuity on"}:
+        set_memory_plus_enabled(runtime.workspace_dir, True)
+        ensure_memory_plus_observer(runtime.workspace_dir)
+        ensure_memory_plus_notepad(runtime.workspace_dir)
+        runtime.reload_post_turn_observers()
+        await runtime._reply_text(
+            update,
+            "✅ Memory+ continuity ON.\n"
+            f"Working mode remains `{runtime.backend_manager.agent_mode}`. "
+            "The compact today/carryover card now follows backend and mode changes.",
+            parse_mode="Markdown",
+        )
+    elif args in {"plus off", "continuity off"}:
+        set_memory_plus_enabled(runtime.workspace_dir, False)
+        runtime.reload_post_turn_observers()
+        await runtime._reply_text(
+            update,
+            "⏸️ Memory+ continuity OFF. Today, carryover, and history files were preserved.",
         )
     elif args == "on":
         if assembler:
@@ -105,7 +161,11 @@ async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
             f"Local memories are unaffected. Use /memory sync on to re-enable.",
         )
     else:
-        await runtime._reply_text(update, "Usage: /memory [on | pause | saved on | saved off | saved status | wipe | sync on | sync off | status]")
+        await runtime._reply_text(
+            update,
+            "Usage: /memory [plus on | plus off | on | pause | saved on | saved off | "
+            "saved status | wipe | sync on | sync off | status]",
+        )
 
 
 async def cmd_wipe(runtime: Any, update: Any, context: Any) -> None:

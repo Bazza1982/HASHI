@@ -25,6 +25,12 @@ from orchestrator.dual_brain_mode import (  # noqa: E402
     load_dual_brain_config,
 )
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime  # noqa: E402
+from orchestrator.memory_plus_mode import (  # noqa: E402
+    MemoryPlusObserver,
+    load_memory_plus_state,
+    set_memory_plus_enabled,
+    write_memory_plus_update,
+)
 from orchestrator.post_turn_observer import TurnContextRequest, TurnObservationRequest  # noqa: E402
 from orchestrator.runtime_mode import mode_keyboard  # noqa: E402
 
@@ -549,3 +555,109 @@ def test_dual_brain_after_action_is_not_visible_when_think_and_verbose_disabled(
     )
 
     assert sent == []
+
+
+def test_dual_brain_memory_plus_uses_left_brain_as_single_continuity_writer(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "sakura"
+    workspace.mkdir()
+    (workspace / "state.json").write_text(
+        json.dumps(
+            {
+                "agent_mode": "dual-brain",
+                "memory_plus": {"enabled": True},
+                "dual_brain": {
+                    "left_brain": {"backend": "codex-cli", "model": "gpt-5.4"},
+                    "right_brain": {"backend": "codex-cli", "model": "gpt-5.4"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    set_memory_plus_enabled(workspace, True)
+    write_memory_plus_update(
+        workspace,
+        request_id="seed",
+        source="manual",
+        prompt="not stored",
+        update={"write": True, "facts": ["private continuity seed"]},
+    )
+    prompts: list[str] = []
+
+    class Response:
+        is_success = True
+        error = ""
+
+        def __init__(self, text: str):
+            self.text = text
+
+    async def invoker(**kwargs):
+        prompts.append(kwargs["prompt"])
+        if kwargs["request_id"].endswith(":left-brain-after"):
+            return Response(
+                json.dumps(
+                    {
+                        "should_write": True,
+                        "continuity_summary": "Completed the requested check",
+                        "decisions": ["Keep the compact card"],
+                        "commitments": [],
+                        "state_changes": ["Regression is green"],
+                        "open_items": ["Publish after approval"],
+                    }
+                )
+            )
+        return Response(
+            json.dumps(
+                {
+                    "useful": True,
+                    "wiki_needed": False,
+                    "same_day_context": ["Use the existing decision"],
+                    "open_items": [],
+                    "notes_for_executor": ["Proceed with the current request"],
+                    "sources": ["Memory+ today card"],
+                    "confidence": 1.0,
+                }
+            )
+        )
+
+    observer = DualBrainObserver(
+        workspace_dir=workspace,
+        backend_invoker=invoker,
+        backend_context_getter=lambda: {"engine": "codex-cli", "model": "gpt-5.4"},
+    )
+    memory_observer = MemoryPlusObserver(workspace_dir=workspace)
+    assert memory_observer.should_provide("text", is_bridge_request=False) is False
+
+    sections = asyncio.run(
+        observer.build_context_sections(
+            TurnContextRequest(
+                request_id="dual-1",
+                source="text",
+                user_text="check current state",
+                model_name="gpt-5.4",
+            )
+        )
+    )
+    assert "MEMORY_PLUS_CAPSULE" in prompts[0]
+    assert "private continuity seed" in prompts[0]
+    assert "private continuity seed" not in sections[0][1]
+    assert "Use the existing decision" in sections[0][1]
+
+    asyncio.run(
+        observer._run_after_action(
+            TurnObservationRequest(
+                request_id="dual-1",
+                source="text",
+                user_text="check current state",
+                assistant_text="done",
+                model_name="gpt-5.4",
+            )
+        )
+    )
+    assert "MEMORY_PLUS_CAPSULE" in prompts[-1]
+    state = load_memory_plus_state(workspace)
+    assert "Completed the requested check" in state["today"]["facts"]
+    assert state["today"]["decisions"] == ["Keep the compact card"]
+    assert state["today"]["state_changes"] == ["Regression is green"]
+    assert state["today"]["open_items"] == ["Publish after approval"]
