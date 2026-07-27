@@ -4,6 +4,7 @@ import json
 import asyncio
 import html
 import subprocess
+import sys
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
@@ -46,10 +47,13 @@ async def move_show_agent_picker(runtime: Any, update: Any, instances: dict) -> 
 
     rows = [[InlineKeyboardButton(f"🤖 {name}", callback_data=f"move:agent:{name}")] for name in agent_names]
     markup = InlineKeyboardMarkup(rows)
+    instance_id = str(
+        getattr(getattr(runtime, "global_config", None), "instance_id", None) or "HASHI"
+    )
     await runtime._reply_text(
         update,
         f"{card_title('📦', 'Move agent')}\n\n"
-        "<b>Current</b> · source is this Hashi2 instance\n\n"
+        f"<b>Current</b> · source is <code>{html.escape(instance_id)}</code>\n\n"
         "Moving transfers configuration and workspace data. Select the exact agent:",
         parse_mode="HTML",
         reply_markup=markup,
@@ -111,19 +115,23 @@ async def do_move(
 
     await runtime._send_text(chat_id, f"⏳ Moving <code>{agent_id}</code> → <b>{target}</b>…", parse_mode="HTML")
 
-    project_root = Path(__file__).parent.parent
+    global_config = getattr(runtime, "global_config", None)
+    project_root = Path(
+        getattr(global_config, "project_root", None) or Path(__file__).parent.parent
+    )
+    source_instance = str(getattr(global_config, "instance_id", None) or "HASHI")
     script = project_root / "scripts" / "move_agent.py"
     if not script.exists():
         await runtime._send_text(chat_id, "Error: move_agent.py not found.")
         return
 
     cmd = [
-        "python",
+        sys.executable,
         str(script),
         agent_id,
         target,
         "--source-instance",
-        "hashi2",
+        source_instance,
     ]
     if keep_source:
         cmd.append("--keep-source")

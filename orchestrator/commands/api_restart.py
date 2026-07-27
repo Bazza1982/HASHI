@@ -19,6 +19,13 @@ WATCHTOWER_INSTANCE = "WATCHTOWER"
 ALLOWED_HUMAN_RESTART_SOURCES = {"telegram", "whatsapp", "tui"}
 
 
+def _instance_id(runtime: Any) -> str:
+    global_config = getattr(runtime, "global_config", None)
+    if global_config is None:
+        global_config = getattr(getattr(runtime, "orchestrator", None), "global_cfg", None)
+    return str(getattr(global_config, "instance_id", None) or "HASHI")
+
+
 def _service_manager(runtime: Any):
     orchestrator = getattr(runtime, "orchestrator", None)
     return getattr(orchestrator, "service_manager", None)
@@ -384,11 +391,12 @@ async def restart_callback(runtime: Any, update: Any, context: Any) -> None:
             )
             await query.answer("WatchTower unavailable.", show_alert=True)
             return
+        instance_id = html.escape(_instance_id(runtime))
         await query.edit_message_text(
             f"{card_title('⚠️', 'Confirm hard restart')}\n\n"
-            "<b>Target</b> · <code>HASHI2</code>\n\n"
-            "WatchTower will stop this Hashi2 process, restart it, and verify health.\n\n"
-            "Confirm below, or keep Hashi2 running.",
+            f"<b>Target</b> · <code>{instance_id}</code>\n\n"
+            f"WatchTower will stop this {instance_id} process, restart it, and verify health.\n\n"
+            f"Confirm below, or keep {instance_id} running.",
             parse_mode="HTML",
             reply_markup=_restart_status_keyboard(confirm=True),
         )

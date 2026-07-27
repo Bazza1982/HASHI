@@ -8,6 +8,7 @@ from telegram import BotCommand
 from telegram.ext import CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 from orchestrator.command_registry import bind_runtime_commands, runtime_bot_commands, runtime_command_map
+from orchestrator.command_specs import COMMAND_SPECS
 from orchestrator.private_wol import private_wol_available
 
 logger = logging.getLogger("BridgeU.RuntimeCommandBinding")
@@ -31,152 +32,15 @@ class BotCommandBinding:
     description: str
 
 
-COMMAND_BINDINGS: tuple[CommandBinding, ...] = (
-    CommandBinding("help", "cmd_help"),
-    CommandBinding("start", "cmd_start"),
-    CommandBinding("status", "cmd_status"),
-    CommandBinding("sys", "cmd_sys"),
-    CommandBinding("credit", "cmd_credit"),
-    CommandBinding("voice", "cmd_voice"),
-    CommandBinding("safevoice", "cmd_safevoice"),
-    CommandBinding("say", "cmd_say"),
-    CommandBinding("loop", "cmd_loop"),
-    CommandBinding("superloop", "cmd_superloop"),
-    CommandBinding("nudge", "cmd_nudge"),
-    CommandBinding("whisper", "cmd_whisper"),
-    CommandBinding("active", "cmd_active"),
-    CommandBinding("fyi", "cmd_fyi"),
-    CommandBinding("debug", "cmd_debug"),
-    CommandBinding("skill", "cmd_skill"),
-    CommandBinding("exp", "cmd_exp"),
-    CommandBinding("backend", "cmd_backend"),
-    CommandBinding("handoff", "cmd_handoff"),
-    CommandBinding("ticket", "cmd_ticket"),
-    CommandBinding("park", "cmd_park"),
-    CommandBinding("load", "cmd_load"),
-    CommandBinding("transfer", "cmd_transfer"),
-    CommandBinding("fork", "cmd_fork"),
-    CommandBinding("cos", "cmd_cos"),
-    CommandBinding("model", "cmd_model"),
-    CommandBinding("effort", "cmd_effort"),
-    CommandBinding("agents", "cmd_agents"),
-    CommandBinding("mode", "cmd_mode"),
-    CommandBinding("privacy", "cmd_privacy"),
-    CommandBinding("wrapper", "cmd_wrapper"),
-    CommandBinding("audit", "cmd_audit"),
-    CommandBinding("brain", "cmd_brain"),
-    CommandBinding("core", "cmd_core"),
-    CommandBinding("wrap", "cmd_wrap"),
-    CommandBinding("workzone", "cmd_workzone"),
-    CommandBinding("worzone", "cmd_workzone"),
-    CommandBinding("new", "cmd_new"),
-    CommandBinding("fresh", "cmd_fresh"),
-    CommandBinding("memory", "cmd_memory"),
-    CommandBinding("notepad", "cmd_notepad"),
-    CommandBinding("wipe", "cmd_wipe"),
-    CommandBinding("reset", "cmd_reset"),
-    CommandBinding("clear", "cmd_clear"),
-    CommandBinding("stop", "cmd_stop"),
-    CommandBinding("steer", "cmd_steer"),
-    CommandBinding("focus", "cmd_focus"),
-    CommandBinding("recall", "cmd_recall"),
-    CommandBinding("terminate", "cmd_terminate"),
-    CommandBinding("reboot", "cmd_reboot"),
-    CommandBinding("retry", "cmd_retry"),
-    CommandBinding("verbose", "cmd_verbose"),
-    CommandBinding("think", "cmd_think"),
-    CommandBinding("stream", "cmd_stream"),
-    CommandBinding("preview", "cmd_preview"),
-    CommandBinding("jobs", "cmd_jobs"),
-    CommandBinding("cron", "cmd_cron"),
-    CommandBinding("heartbeat", "cmd_heartbeat"),
-    CommandBinding("timeout", "cmd_timeout"),
-    CommandBinding("hchat", "cmd_hchat"),
-    CommandBinding("group", "cmd_group"),
-    CommandBinding("token", "cmd_token"),
-    CommandBinding("usage", "cmd_usage"),
-    CommandBinding("logo", "cmd_logo"),
-    CommandBinding("move", "cmd_move"),
-    CommandBinding("wa_on", "cmd_wa_on"),
-    CommandBinding("wa_off", "cmd_wa_off"),
-    CommandBinding("wa_send", "cmd_wa_send"),
-    CommandBinding("usecomputer", "cmd_usecomputer"),
-    CommandBinding("usercomputer", "cmd_usercomputer"),
-    CommandBinding("browser", "cmd_browser"),
-    CommandBinding("long", "cmd_long"),
-    CommandBinding("end", "cmd_end"),
-    CommandBinding("remote", "cmd_remote"),
-    CommandBinding("wol", "cmd_wol"),
+# Compatibility views. Handler registration and Telegram menu metadata are
+# both derived from COMMAND_SPECS; neither is an independent fact source.
+COMMAND_BINDINGS: tuple[CommandBinding, ...] = tuple(
+    CommandBinding(spec.name, spec.method_name) for spec in COMMAND_SPECS
 )
-
-
-BOT_COMMAND_BINDINGS: tuple[BotCommandBinding, ...] = (
-    BotCommandBinding("help", "Show help menu"),
-    BotCommandBinding("start", "Start another stopped agent"),
-    BotCommandBinding("agents", "View and manage agents"),
-    BotCommandBinding("status", "View agent status"),
-    BotCommandBinding("voice", "Toggle native voice replies"),
-    BotCommandBinding("say", "Read the last assistant reply as voice"),
-    BotCommandBinding("safevoice", "Toggle voice confirmation safety layer"),
-    BotCommandBinding("whisper", "Choose the Whisper model size"),
-    BotCommandBinding("active", "Toggle proactive heartbeat"),
-    BotCommandBinding("fyi", "Refresh bridge environment awareness"),
-    BotCommandBinding("debug", "Run in strict debug mode"),
-    BotCommandBinding("skill", "Browse and run skills"),
-    BotCommandBinding("exp", "Run a task with the EXP guidebook"),
-    BotCommandBinding("backend", "View or switch model backend"),
-    BotCommandBinding("handoff", "Fresh session with recent continuity"),
-    BotCommandBinding("ticket", "Submit IT support ticket to Arale"),
-    BotCommandBinding("park", "List or save parked topics"),
-    BotCommandBinding("load", "Restore a parked topic"),
-    BotCommandBinding("transfer", "Transfer this session to another agent"),
-    BotCommandBinding("fork", "Fork this session to another agent"),
-    BotCommandBinding("cos", "Control Chief of Staff routing"),
-    BotCommandBinding("long", "Start multi-message input (end with /end)"),
-    BotCommandBinding("end", "Submit collected /long input"),
-    BotCommandBinding("mode", "View or switch working mode"),
-    BotCommandBinding("privacy", "View or set privacy protection"),
-    BotCommandBinding("wrapper", "Configure wrapper persona slots"),
-    BotCommandBinding("audit", "Configure audit model and criteria"),
-    BotCommandBinding("brain", "Configure dual-brain models and prompts"),
-    BotCommandBinding("core", "Configure managed core model"),
-    BotCommandBinding("wrap", "Configure wrapper translator model"),
-    BotCommandBinding("workzone", "View or set the working directory"),
-    BotCommandBinding("model", "View or change model"),
-    BotCommandBinding("effort", "View or change effort"),
-    BotCommandBinding("new", "Start a fresh CLI session"),
-    BotCommandBinding("fresh", "Start a clean API context"),
-    BotCommandBinding("memory", "Control memory and Memory+ continuity"),
-    BotCommandBinding("notepad", "View compact continuity and history"),
-    BotCommandBinding("clear", "Clear media/history"),
-    BotCommandBinding("stop", "Stop execution"),
-    BotCommandBinding("steer", "Stop and continue with new direction"),
-    BotCommandBinding("focus", "Narrow scope and continue the original task"),
-    BotCommandBinding("recall", "Clear selected queued requests"),
-    BotCommandBinding("reboot", "Hot restart agents"),
-    BotCommandBinding("terminate", "Shut down this agent"),
-    BotCommandBinding("retry", "Resend response or rerun prompt"),
-    BotCommandBinding("verbose", "Control detailed task status"),
-    BotCommandBinding("think", "Control thinking trace display"),
-    BotCommandBinding("stream", "Control Telegram streaming"),
-    BotCommandBinding("preview", "Control live answer preview"),
-    BotCommandBinding("loop", "Create/manage recurring loop tasks"),
-    BotCommandBinding("superloop", "Create/manage long-running superloops"),
-    BotCommandBinding("nudge", "Nudge this agent when idle until done"),
-    BotCommandBinding("jobs", "Show cron and heartbeat jobs"),
-    BotCommandBinding("cron", "Run or list cron jobs"),
-    BotCommandBinding("heartbeat", "Run or list heartbeat jobs"),
-    BotCommandBinding("timeout", "View or set request timeout"),
-    BotCommandBinding("hchat", "Message another agent"),
-    BotCommandBinding("logo", "Play startup animation"),
-    BotCommandBinding("remote", "Control Hashi Remote"),
-    BotCommandBinding("wa_on", "Start WhatsApp transport"),
-    BotCommandBinding("wa_off", "Stop WhatsApp transport"),
-    BotCommandBinding("wa_send", "Send a WhatsApp message"),
-    BotCommandBinding("usecomputer", "Enable or run GUI-aware computer-use mode"),
-    BotCommandBinding("browser", "Run an internet task with a selected browser/search route"),
-    BotCommandBinding("sys", "Manage system prompt slots"),
-    BotCommandBinding("credit", "Check API credit/usage"),
+BOT_COMMAND_BINDINGS: tuple[BotCommandBinding, ...] = tuple(
+    BotCommandBinding(spec.name, spec.description)
+    for spec in COMMAND_SPECS
+    if spec.menu_visible
 )
 
 
@@ -262,6 +126,10 @@ def bind_flexible_runtime_handlers(runtime) -> None:
 
 def get_flexible_bot_commands(runtime) -> list[BotCommand]:
     commands = [BotCommand(binding.name, binding.description) for binding in BOT_COMMAND_BINDINGS]
-    if private_wol_available(runtime.global_config.project_root):
-        commands.append(BotCommand("wol", "Send Wake-on-LAN magic packet [pc_name]"))
+    if private_wol_available(
+        runtime.global_config.project_root,
+        getattr(runtime.global_config, "instance_id", None),
+    ):
+        wol_spec = next(spec for spec in COMMAND_SPECS if spec.name == "wol")
+        commands.append(BotCommand(wol_spec.name, wol_spec.description))
     return commands + runtime_bot_commands()

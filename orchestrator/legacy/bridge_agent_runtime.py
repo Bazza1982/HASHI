@@ -11,6 +11,7 @@ import html
 from contextlib import suppress
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update, constants
 from telegram.error import NetworkError as TelegramNetworkError, TimedOut as TelegramTimedOut
@@ -160,6 +161,7 @@ class BridgeAgentRuntime:
             self.global_config.project_root,
             self.name,
             self._get_agent_class(),
+            self.global_config.instance_id,
         )
 
     def get_typing_placeholder(self) -> tuple[str, str | None]:
@@ -4904,7 +4906,7 @@ class BridgeAgentRuntime:
             await update.message.reply_text(
                 "💬 Hchat — Ask this agent to compose & send a message to another agent\n\n"
                 "Usage: /hchat <agent> <intent>  — local instance only\n"
-                "       /hchat <agent>@<INSTANCE> <intent>  — cross-instance via HASHI1 exchange\n"
+                "       /hchat <agent>@<INSTANCE> <intent>  — cross-instance via configured discovery/exchange\n"
                 "       /hchat all <intent>  — broadcast to all local active agents (excludes temp)\n\n"
                 "Example: /hchat lily give her an update on what we've been doing\n"
                 "Example: /hchat rika@HASHI2 ask her for the latest test result\n"
@@ -5059,7 +5061,8 @@ class BridgeAgentRuntime:
             return
 
         project_root = self.config.project_root
-        if not private_wol_available(project_root):
+        instance_id = getattr(self.global_config, "instance_id", None)
+        if not private_wol_available(project_root, instance_id):
             await update.message.reply_text("⚪ /wol is not enabled on this instance.")
             return
 
@@ -5077,7 +5080,14 @@ class BridgeAgentRuntime:
 
         await update.message.reply_text(f"🪄 Sending Wake-on-LAN packet for `{arg}`…")
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(None, lambda: run_private_wol(project_root, arg))
+        result = await loop.run_in_executor(
+            None,
+            lambda: run_private_wol(
+                project_root,
+                arg,
+                configured_instance_id=instance_id,
+            ),
+        )
         if result.get("ok"):
             output = (result.get("stdout") or "").strip()
             if len(output) > 2500:
@@ -5138,7 +5148,10 @@ class BridgeAgentRuntime:
             BotCommand("wa_send", "Send a WhatsApp message"),
             BotCommand("usecomputer", "Enable or run GUI-aware computer-use mode"),
         ]
-        if private_wol_available(self.config.project_root):
+        if private_wol_available(
+            self.config.project_root,
+            getattr(self.global_config, "instance_id", None),
+        ):
             commands.append(BotCommand("wol", "Send Wake-on-LAN magic packet [pc_name]"))
         if self.config.engine == "openrouter-api":
             commands.append(BotCommand("credit", "Show OpenRouter balance"))

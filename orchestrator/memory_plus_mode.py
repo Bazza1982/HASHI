@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from orchestrator.post_turn_observer import PreTurnContextProvider, TurnContextRequest
+from orchestrator.workspace_state import WorkspaceStateStore
 
 try:
     import fcntl
@@ -168,11 +169,11 @@ class MemoryPlusObserver(PreTurnContextProvider):
         return is_memory_plus_enabled(self.workspace_dir)
 
     def _dual_brain_owns_continuity(self) -> bool:
-        state = _read_json_object(self.workspace_dir / "state.json")
+        state = WorkspaceStateStore(self.workspace_dir).read()
         return str(state.get("agent_mode") or "").strip().lower() == "dual-brain"
 
     def _config(self) -> MemoryPlusConfig:
-        state = _read_json_object(self.workspace_dir / "state.json")
+        state = WorkspaceStateStore(self.workspace_dir).read()
         block = state.get("memory_plus") if isinstance(state.get("memory_plus"), Mapping) else {}
         return MemoryPlusConfig(
             context_max_chars=_read_int(block, "context_max_chars", 4000),
@@ -232,7 +233,7 @@ def ensure_memory_plus_observer(workspace_dir: Path) -> bool:
 
 
 def is_memory_plus_enabled(workspace_dir: Path) -> bool:
-    state = _read_json_object(workspace_dir / "state.json")
+    state = WorkspaceStateStore(workspace_dir).read()
     block = state.get("memory_plus") if isinstance(state.get("memory_plus"), Mapping) else {}
     if "enabled" in block:
         return _read_bool(block, "enabled", False)
@@ -240,14 +241,18 @@ def is_memory_plus_enabled(workspace_dir: Path) -> bool:
 
 
 def set_memory_plus_enabled(workspace_dir: Path, enabled: bool) -> bool:
-    state_path = workspace_dir / "state.json"
-    state = _read_json_object(state_path)
-    block = dict(state.get("memory_plus") or {}) if isinstance(state.get("memory_plus"), Mapping) else {}
-    changed = _read_bool(block, "enabled", False) != bool(enabled)
-    block["enabled"] = bool(enabled)
-    block["schema_version"] = MEMORY_PLUS_SCHEMA_VERSION
-    state["memory_plus"] = block
-    _write_json(state_path, state)
+    store = WorkspaceStateStore(workspace_dir)
+    changed = False
+
+    def _update(state: dict[str, Any]) -> None:
+        nonlocal changed
+        block = dict(state.get("memory_plus") or {}) if isinstance(state.get("memory_plus"), Mapping) else {}
+        changed = _read_bool(block, "enabled", False) != bool(enabled)
+        block["enabled"] = bool(enabled)
+        block["schema_version"] = MEMORY_PLUS_SCHEMA_VERSION
+        state["memory_plus"] = block
+
+    store.update(_update)
     if enabled:
         ensure_memory_plus_observer(workspace_dir)
         prepare_memory_plus_store(workspace_dir)
@@ -257,8 +262,8 @@ def set_memory_plus_enabled(workspace_dir: Path, enabled: bool) -> bool:
 def migrate_legacy_memory_plus_runtime(runtime: Any) -> bool:
     """Move legacy `agent_mode=memory+` onto the independent continuity flag."""
     manager = runtime.backend_manager
-    state_path = runtime.workspace_dir / "state.json"
-    state = _read_json_object(state_path)
+    state_store = WorkspaceStateStore(runtime.workspace_dir)
+    state = state_store.read()
     legacy = str(getattr(manager, "agent_mode", "") or "").strip().lower() == "memory+"
     block = dict(state.get("memory_plus") or {}) if isinstance(state.get("memory_plus"), Mapping) else {}
     changed = False
@@ -279,7 +284,7 @@ def migrate_legacy_memory_plus_runtime(runtime: Any) -> bool:
     if changed:
         state["agent_mode"] = manager.agent_mode
         state["memory_plus"] = block
-        _write_json(state_path, state)
+        state_store.replace(state)
         manager._save_state()
     return changed
 

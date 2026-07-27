@@ -26,6 +26,7 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 from tui.app import HASHITuiApp
+from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_PORT
 
 
 def _get_workbench_url() -> str:
@@ -34,10 +35,10 @@ def _get_workbench_url() -> str:
         config_path = os.path.join(_project_root, "agents.json")
         with open(config_path) as f:
             config = json.load(f)
-        port = config.get("global", {}).get("workbench_port", 18800)
+        port = config.get("global", {}).get("workbench_port", DEFAULT_WORKBENCH_PORT)
         return f"http://localhost:{port}"
     except Exception:
-        return "http://localhost:18800"
+        return f"http://localhost:{DEFAULT_WORKBENCH_PORT}"
 
 
 def main():

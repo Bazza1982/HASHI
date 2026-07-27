@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
-# HASHI9 - Start Main Bridge (macOS)
-# Double-click this file in Finder to launch the HASHI9 bridge.
+# HASHI - Start Main Bridge (macOS)
+# Double-click this file in Finder to launch this configured bridge.
 # USB mode: uses portable Python from ./python/ if present.
 # Logs written to: mac/logs/main_<timestamp>.log
 # ============================================================
@@ -19,13 +19,15 @@ elif [ -f "$ROOT/.venv/bin/python3" ]; then
 elif command -v python3 &>/dev/null; then
     PYTHON_EXE="$(command -v python3)"
 else
-    osascript -e 'display alert "HASHI9 Error" message "Python 3 not found.\nPlease run mac/prepare_usb.sh first." as critical'
+    osascript -e 'display alert "HASHI Error" message "Python 3 not found.\nPlease run mac/prepare_usb.sh first." as critical'
     exit 1
 fi
+INSTANCE_ID="$("$PYTHON_EXE" "$ROOT/scripts/resolve_instance_runtime.py" \
+    --code-root "$ROOT" --bridge-home "$ROOT" --field instance-id)"
 
 {
     echo "===================================================="
-    echo "HASHI9 Main Bridge"
+    echo "$INSTANCE_ID Main Bridge"
     echo "Started: $(date)"
     echo "Python:  $PYTHON_EXE"
     echo "Root:    $ROOT"

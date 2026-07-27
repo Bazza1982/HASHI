@@ -62,7 +62,7 @@ def test_browser_gateway_store_pair_and_thread(tmp_path: Path):
     assert authed is not None
     thread = store.create_thread(pair.device_id, "lily", title="Test Thread")
     assert thread["agent_id"] == "lily"
-    assert thread["instance_id"] == "HASHI1"
+    assert thread["instance_id"] == "HASHI"
 
     ok = store.set_device_recovery(pair.device_id, "hash123", json.dumps({"wrapped_key_b64": "abc"}))
     assert ok is True
@@ -85,6 +85,21 @@ def test_browser_gateway_store_pair_and_thread(tmp_path: Path):
     assert attachment is not None
     assert attachment["attachment_id"] == "att-test123"
     assert store.list_attachments(thread["thread_id"], pair.device_id)[0]["filename"] == "hello.txt"
+
+
+def test_browser_gateway_reads_its_instance_identity_from_local_config(tmp_path: Path):
+    (tmp_path / "agents.json").write_text(
+        json.dumps({"global": {"instance_id": "LOCAL-BRIDGE"}}),
+        encoding="utf-8",
+    )
+
+    server = BrowserGatewayServer(
+        project_root=tmp_path,
+        state_db=tmp_path / "browser_gateway.sqlite",
+        audit_log=tmp_path / "oll_gateway.audit.jsonl",
+    )
+
+    assert server.instance_id == "LOCAL-BRIDGE"
 
 
 @pytest.mark.asyncio

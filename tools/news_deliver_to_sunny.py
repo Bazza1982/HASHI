@@ -7,16 +7,16 @@ import argparse
 import io
 import json
 import mimetypes
+import os
 import re
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
 from urllib import request as urllib_request
 from zoneinfo import ZoneInfo
 
 SYDNEY = ZoneInfo("Australia/Sydney")
-CHAT_ID = "7430217666"
-AGENT = "sunny"
+AGENT = os.environ.get("HASHI_NEWS_AGENT", "sunny").strip() or "sunny"
 HASHI_ROOT = Path(__file__).resolve().parent.parent
 
 NEWS_JOBS: dict[str, dict[str, object]] = {
@@ -33,23 +33,31 @@ SKIP_PATTERNS = [
 
 
 def resolve_hermes_home() -> Path:
-    for candidate in (
-        Path("/mnt/c/Users/thene/AppData/Local/hermes/profiles/xiaoye"),
-        Path(r"C:/Users/thene/AppData/Local/hermes/profiles/xiaoye"),
-    ):
-        if (candidate / "cron" / "jobs.json").exists():
-            return candidate
-    raise SystemExit("Hermes xiaoye profile not found")
+    configured = os.environ.get("HASHI_HERMES_HOME", "").strip()
+    if not configured:
+        raise SystemExit("Set HASHI_HERMES_HOME to the Hermes profile directory")
+    candidate = Path(configured).expanduser()
+    if (candidate / "cron" / "jobs.json").exists():
+        return candidate.resolve()
+    raise SystemExit(f"Hermes profile not found at HASHI_HERMES_HOME={candidate}")
 
 
 def load_secrets() -> dict:
-    for candidate in (
-        HASHI_ROOT / "secrets.json",
-        Path("/home/lily/projects/hashi/secrets.json"),
-    ):
+    configured = os.environ.get("HASHI_SECRETS_PATH", "").strip()
+    candidates = [Path(configured).expanduser()] if configured else [HASHI_ROOT / "secrets.json"]
+    for candidate in candidates:
         if candidate.exists():
             return json.loads(candidate.read_text(encoding="utf-8"))
-    raise SystemExit("HASHI secrets.json not found")
+    raise SystemExit(
+        "HASHI secrets.json not found; set HASHI_SECRETS_PATH for an external instance"
+    )
+
+
+def telegram_chat_id() -> str:
+    chat_id = os.environ.get("HASHI_NEWS_CHAT_ID", "").strip()
+    if not chat_id:
+        raise SystemExit("Set HASHI_NEWS_CHAT_ID to the destination Telegram chat")
+    return chat_id
 
 
 def load_state(path: Path) -> dict:
@@ -204,14 +212,20 @@ def send_text(token: str, text: str) -> None:
         return
     chunk_size = 4000
     chunks = [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
+    chat_id = telegram_chat_id()
     for idx, chunk in enumerate(chunks, start=1):
-        result = telegram_post(token, "sendMessage", {"chat_id": CHAT_ID, "text": chunk})
+        result = telegram_post(token, "sendMessage", {"chat_id": chat_id, "text": chunk})
         if not result.get("ok"):
             raise RuntimeError(result.get("description", "sendMessage failed"))
 
 
 def send_voice(token: str, path: Path) -> None:
-    result = telegram_post(token, "sendVoice", {"chat_id": CHAT_ID}, ("voice", path))
+    result = telegram_post(
+        token,
+        "sendVoice",
+        {"chat_id": telegram_chat_id()},
+        ("voice", path),
+    )
     if not result.get("ok"):
         raise RuntimeError(result.get("description", f"sendVoice failed for {path.name}"))
 

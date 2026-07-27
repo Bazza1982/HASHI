@@ -5,9 +5,11 @@ import asyncio
 import json
 import aiohttp
 
+from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_LOCALHOST_URL
+
 
 class TuiApiClient:
-    def __init__(self, base_url: str = "http://localhost:18800"):
+    def __init__(self, base_url: str = DEFAULT_WORKBENCH_LOCALHOST_URL):
         self.base = base_url.rstrip("/")
         self._offsets: dict[str, int] = {}  # per-agent transcript byte offset
 

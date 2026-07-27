@@ -28,14 +28,14 @@ def _json_load(path: Path) -> dict[str, Any]:
     return data
 
 
-def system_actor(name: str, *, instance: str = "HASHI1", reason: str | None = None) -> dict[str, Any]:
+def system_actor(name: str, *, instance: str = "HASHI", reason: str | None = None) -> dict[str, Any]:
     actor = {"kind": "system", "agent": name, "instance": instance}
     if reason:
         actor["reason"] = reason
     return actor
 
 
-def agent_actor(agent: str, *, instance: str = "HASHI1", source: str | None = None) -> dict[str, Any]:
+def agent_actor(agent: str, *, instance: str = "HASHI", source: str | None = None) -> dict[str, Any]:
     actor = {"kind": "agent", "agent": agent, "instance": instance}
     if source:
         actor["source"] = source
@@ -49,7 +49,7 @@ def normalize_event_actor(actor: dict[str, Any] | None) -> dict[str, Any]:
     if not str(normalized.get("agent") or "").strip():
         normalized["agent"] = "superloop_unknown_writer"
     if not str(normalized.get("instance") or "").strip():
-        normalized["instance"] = "HASHI1"
+        normalized["instance"] = "HASHI"
     if not str(normalized.get("kind") or "").strip():
         normalized["kind"] = "agent" if normalized.get("source") else "system"
     return normalized

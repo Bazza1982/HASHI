@@ -1,59 +1,35 @@
+"""Compatibility exports derived from the backend registry SSOT."""
+
 from __future__ import annotations
 
-AVAILABLE_GEMINI_MODELS = [
-    "gemini-3.1-pro-preview",
-    "gemini-3-flash-preview",
-    "gemini-2.5-pro",
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
-]
+from orchestrator.flexible_backend_registry import (
+    CLAUDE_MODEL_ALIASES as _CLAUDE_MODEL_ALIASES,
+    get_all_gateway_models,
+    get_available_efforts,
+    get_available_models,
+    get_default_gateway_model,
+    get_gateway_engine_for_model,
+    get_gateway_models,
+)
 
-AVAILABLE_OPENROUTER_MODELS = [
-    "deepseek/deepseek-v3.2-exp",
-    "moonshotai/kimi-k2.5",
-    "google/gemini-3.1-flash-lite-preview",
-]
 
-AVAILABLE_CLAUDE_MODELS = [
-    "claude-opus-4-7",
-    "claude-sonnet-4-6",
-    "claude-opus-4-6",
-    "claude-haiku-4-5",
-]
+AVAILABLE_GEMINI_MODELS = get_gateway_models("gemini-cli")
+AVAILABLE_OPENROUTER_MODELS = get_available_models("openrouter-api")
+AVAILABLE_CLAUDE_MODELS = get_gateway_models("claude-cli")
+CLAUDE_MODEL_ALIASES = dict(_CLAUDE_MODEL_ALIASES)
+AVAILABLE_CLAUDE_EFFORTS = get_available_efforts("claude-cli")
+AVAILABLE_CODEX_MODELS = get_gateway_models("codex-cli")
+AVAILABLE_CODEX_EFFORTS = get_available_efforts("codex-cli")
+AVAILABLE_XAI_API_MODELS = get_gateway_models("xai-api")
 
-CLAUDE_MODEL_ALIASES = {
-    "sonnet": "claude-sonnet-4-6",
-    "opus": "claude-opus-4-7",
-    "haiku": "claude-haiku-4-5",
-}
 
-AVAILABLE_CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"]
+def available_gateway_models() -> list[str]:
+    return get_all_gateway_models()
 
-AVAILABLE_CODEX_MODELS = [
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-    "gpt-5.6-luna",
-    "gpt-5.5",
-    "gpt-5.3-codex-spark",
-    "gpt-5.3-codex",
-    "gpt-5.4",
-    "gpt-5.2-codex",
-    "gpt-5.1-codex-max",
-    "gpt-5.2",
-    "gpt-5.1-codex-mini",
-]
 
-AVAILABLE_CODEX_EFFORTS = ["low", "medium", "high", "xhigh"]
+def gateway_engine_for_model(model: str) -> str | None:
+    return get_gateway_engine_for_model(model)
 
-AVAILABLE_XAI_API_MODELS = [
-    "grok-4.5",
-    "grok-4.3",
-    "grok-build-0.1",
-    "grok-4.20-0309-reasoning",
-    "grok-4.20-0309-non-reasoning",
-    "grok-4.20-multi-agent-0309",
-    "grok-imagine-image",
-    "grok-imagine-image-quality",
-    "grok-imagine-video",
-    "grok-imagine-video-1.5-preview",
-]
+
+def default_gateway_model() -> str:
+    return str(get_default_gateway_model() or "")

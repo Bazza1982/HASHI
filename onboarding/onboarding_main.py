@@ -332,37 +332,11 @@ def run_onboarding():
         os.chmod(main_sh, 0o755)
         (project_root / ".bridge_u_lang.txt").write_text(l_code, encoding="utf-8")
 
-        # Kill any stale HASHI orchestrator process so bridge-u.sh won't prompt
-        _log("Checking for stale HASHI processes...")
-        my_pid = os.getpid()
-        try:
-            # Only match the bridge orchestrator main.py (has --bridge-home flag)
-            result = subprocess.run(
-                ["pgrep", "-f", "main.py.*--bridge-home"],
-                capture_output=True, text=True
-            )
-            pids = [p for p in result.stdout.strip().split() if p and int(p) != my_pid]
-            for pid in pids:
-                try:
-                    os.kill(int(pid), 15)  # SIGTERM
-                    _log(f"Killed stale HASHI process PID {pid}")
-                except Exception:
-                    pass
-            if pids:
-                time.sleep(1)  # Give it a moment to die
-        except Exception as e:
-            _log(f"Preflight kill attempt: {e}")
-
-        # Clean up stale lock/pid files
-        for f in [project_root / ".bridge_u_f.pid", project_root / ".bridge_u_f.lock"]:
-            try:
-                f.unlink(missing_ok=True)
-            except Exception:
-                pass
-
         # Launch bridge using the most native mechanism for the current OS.
         # - Windows: use bridge-u.bat (no bash expected)
         # - POSIX:   use bridge-u.sh via bash
+        # The launcher owns instance-scoped process validation and --force
+        # shutdown. Onboarding must never scan or kill machine-wide processes.
         if os.name == "nt":
             main_bat = project_root / "bin" / "bridge-u.bat"
             args = ["cmd", "/d", "/c", "call", str(main_bat), "--workbench", "--resume-last", "--force"]

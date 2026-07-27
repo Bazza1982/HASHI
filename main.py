@@ -9,25 +9,16 @@ import traceback
 from pathlib import Path
 from datetime import datetime
 
-from orchestrator.config import ConfigManager
-from orchestrator.skill_manager import SkillManager
 from orchestrator.pathing import BridgePaths, build_bridge_paths
-from orchestrator.agent_lifecycle import AgentLifecycleManager
-from orchestrator.backend_preflight import BackendPreflight
 from orchestrator.bootstrap_logging import (
     emit_bridge_audit,
     setup_bridge_file_logging,
     setup_console_logging,
 )
-from orchestrator.config_admin import ConfigAdmin
 from orchestrator.instance_lock import InstanceLock
 from orchestrator.lifecycle_state import LifecycleState
+from orchestrator.manager_registry import build_hot_manager_bundle, install_hot_manager_bundle
 from orchestrator.onboarding_gate import run_onboarding_gate
-from orchestrator.reboot_manager import RebootManager
-from orchestrator.service_manager import ServiceManager
-from orchestrator.shutdown_manager import ShutdownManager
-from orchestrator.startup_manager import StartupManager
-from orchestrator.whatsapp_manager import WhatsAppManager
 
 # --- Global Orchestrator Setup ---
 CODE_ROOT = Path(__file__).resolve().parent
@@ -50,15 +41,10 @@ class UniversalOrchestrator:
         self.enable_api_gateway = enable_api_gateway
         self.global_cfg = None
         self.secrets = {}
-        self.skill_manager = SkillManager(self.paths.code_root, self.paths.tasks_path)
-        self.config_admin = ConfigAdmin(self.paths)
-        self.backend_preflight = BackendPreflight()
-        self.agent_lifecycle = AgentLifecycleManager(self)
-        self.service_manager = ServiceManager(self)
-        self.reboot_manager = RebootManager(self, _handler)
-        self.shutdown_manager = ShutdownManager(self)
-        self.startup_manager = StartupManager(self, _handler)
-        self.whatsapp_manager = WhatsAppManager(self)
+        install_hot_manager_bundle(
+            self,
+            build_hot_manager_bundle(self, _handler),
+        )
         self.workbench_api = None
         self.api_gateway = None
         self.scheduler = None
@@ -307,18 +293,25 @@ if __name__ == "__main__":
     args = parser.parse_args()
     selected_agents = set(args.agents) if args.agents else None
     paths = build_bridge_paths(CODE_ROOT, bridge_home=args.bridge_home)
+    os.environ["BRIDGE_HOME"] = str(paths.bridge_home)
 
     if run_onboarding_gate(paths, CODE_ROOT):
         sys.exit(0)
 
     orchestrator = UniversalOrchestrator(paths=paths, selected_agents=selected_agents, enable_api_gateway=args.api_gateway)
-    lock = InstanceLock(paths.lock_path)
+    lock = InstanceLock(
+        paths.lock_path,
+        pid_path=paths.pid_path,
+        instance_id=paths.instance_id,
+    )
+    exit_code = 0
     try:
         lock.acquire()
         bootstrap_msg = (
             "Process bootstrap: "
             f"pid={os.getpid()} ppid={os.getppid()} exe={sys.executable} cwd={Path.cwd()} "
-            f"code_root={paths.code_root} bridge_home={paths.bridge_home} config={paths.config_path}"
+            f"instance_id={paths.instance_id} code_root={paths.code_root} "
+            f"bridge_home={paths.bridge_home} config={paths.config_path}"
         )
         main_logger.info(bootstrap_msg)
         _emit_bridge_audit(paths, logging.INFO, bootstrap_msg)
@@ -328,10 +321,11 @@ if __name__ == "__main__":
         main_logger.info(msg)
         _emit_bridge_audit(paths, logging.WARNING, msg)
     except Exception as e:
+        exit_code = 1
         crash_msg = f"Fatal crash: {type(e).__name__}: {e}"
         main_logger.critical(f"{crash_msg}\n{traceback.format_exc()}")
         _emit_bridge_audit(paths, logging.CRITICAL, crash_msg)
     finally:
         lock.release()
     # If asyncio.run() returned but Go runtime threads are still alive, kill them.
-    os._exit(0)
+    os._exit(exit_code)

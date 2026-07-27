@@ -4,13 +4,25 @@
 
 - Static compile: `python3 -m py_compile main.py orchestrator/*.py`
 - Full test suite: `pytest`
+- Architecture boundaries:
+  - `python scripts/check_protected_core_changes.py --validate-manifest`
+  - `python scripts/check_protected_core_changes.py --base main` (or
+    `--authorized` only when the current task explicitly approves core edits)
+  - architecture-boundary CI is green
+  - `tests/test_architecture_boundaries.py` keeps private paths, old global
+    process files, and active-runtime size from regressing
+  - no new model, command, manager, workspace-state, instance-lock, or
+    platform fact source duplicates an existing owner
 - Workbench health: `curl http://127.0.0.1:<workbench_port>/api/health`
 - API Gateway health when enabled: `curl http://127.0.0.1:<api_gateway_port>/health`
 - Live reboot smoke:
   - `/reboot min`
   - `/reboot max`
   - verify agents return to `ONLINE`
-  - verify scheduler is recreated and started
+  - verify Workbench API, enabled API Gateway, scheduler, delivery watcher, and
+    background jobs are recreated and healthy
+  - introduce a syntax error in a disposable fixture and verify preflight
+    rejects `/reboot` without stopping live agents
   - scan bridge logs for post-reboot `ERROR`, `CRITICAL`, `Traceback`, `failed`, and `LOCAL MODE`
 - Slim core docs:
   - `docs/HASHI_SLIM_CORE_ARCHITECTURE.md` reflects current manager boundaries

@@ -76,7 +76,8 @@ GET  /control/hashi/restarts/{restart_id}
 ```
 
 `/control/hashi/status` reports whether local HASHI core is reachable through
-the Workbench health endpoint and whether the `.bridge_u_f.pid` process appears
+the Workbench health endpoint and whether this instance's
+`state/instance/process.pid` process appears
 alive.
 
 The status response should distinguish:

@@ -1,6 +1,5 @@
 import json
 import logging
-import os
 from pathlib import Path
 from typing import Optional, Any
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig, AgentConfig
@@ -13,6 +12,7 @@ from orchestrator.privacy_levels import (
     require_level_available,
 )
 from orchestrator.workzone import access_root_for_workzone
+from orchestrator.workspace_state import WorkspaceStateStore
 
 class FlexibleBackendManager:
     def __init__(self, config: FlexibleAgentConfig, global_config: GlobalConfig, secrets: dict):
@@ -23,6 +23,7 @@ class FlexibleBackendManager:
         self.current_backend = None
         self.runtime = None
         self.state_file = self.config.workspace_dir / "state.json"
+        self.state_store = WorkspaceStateStore(self.config.workspace_dir)
         self._agents_json_global = self._load_agents_json_global()
         self._load_state()
 
@@ -43,7 +44,7 @@ class FlexibleBackendManager:
         self.privacy_level = PrivacyLevel.PROVIDER_TRUST
         if self.state_file.exists():
             try:
-                state = json.loads(self.state_file.read_text(encoding="utf-8"))
+                state = self.state_store.read()
                 if "active_backend" in state:
                     self.config.active_backend = state["active_backend"]
                 if "active_model" in state:
@@ -69,12 +70,8 @@ class FlexibleBackendManager:
                 self.logger.error(f"Failed to load state.json: {e}")
 
     def _read_state_dict(self) -> dict[str, Any]:
-        if not self.state_file.exists():
-            return {}
         try:
-            loaded = json.loads(self.state_file.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                return loaded
+            return self.state_store.read()
         except Exception as e:
             self.logger.error(f"Failed to read state.json: {e}")
         return {}
@@ -100,10 +97,7 @@ class FlexibleBackendManager:
     def _write_state_dict(self, state: dict[str, Any]) -> None:
         self._apply_managed_state_fields(state)
         try:
-            self.state_file.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = self.state_file.with_name(f".{self.state_file.name}.tmp-{os.getpid()}")
-            tmp_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
-            tmp_path.replace(self.state_file)
+            self.state_store.replace(state)
         except Exception as e:
             self.logger.error(f"Failed to save state.json: {e}")
 
