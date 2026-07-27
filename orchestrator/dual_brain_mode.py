@@ -4,6 +4,7 @@ import asyncio
 import heapq
 import json
 import logging
+import os
 import re
 from contextlib import suppress
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ from orchestrator.memory_plus_mode import (
     prepare_memory_plus_store,
     write_memory_plus_update,
 )
+from orchestrator.workspace_state import WorkspaceStateStore
 
 try:
     import fcntl
@@ -594,7 +596,7 @@ class DualBrainObserver(PostTurnObserver, PreTurnContextProvider):
             self.logger.warning("Failed to send visible left-brain %s for %s: %s", stage, request_id, exc)
 
     def _config(self) -> DualBrainConfig:
-        state = _read_json_object(self.workspace_dir / "state.json")
+        state = WorkspaceStateStore(self.workspace_dir).read()
         current = self.backend_context_getter() if callable(self.backend_context_getter) else None
         current = current if isinstance(current, Mapping) else {}
         return load_dual_brain_config(
@@ -604,17 +606,21 @@ class DualBrainObserver(PostTurnObserver, PreTurnContextProvider):
         )
 
     def _enabled(self) -> bool:
-        state = _read_json_object(self.workspace_dir / "state.json")
+        state = WorkspaceStateStore(self.workspace_dir).read()
         return str(state.get("agent_mode") or "").strip() == "dual-brain"
 
     def _wiki_roots(self) -> list[Path]:
         configured = self.options.get("wiki_roots")
         if isinstance(configured, list) and configured:
             return [Path(str(item)).expanduser() for item in configured]
-        return [
-            Path("/mnt/c/Users/thene/Documents/lily_hashi_wiki/10_GENERATED_TOPICS"),
-            Path("/mnt/c/Users/thene/Documents/lily_hashi_wiki/30_GENERATED_INDEXES"),
-        ]
+        env_roots = str(os.environ.get("HASHI_WIKI_ROOTS") or "").strip()
+        if env_roots:
+            return [
+                Path(item).expanduser()
+                for item in env_roots.split(os.pathsep)
+                if item.strip()
+            ]
+        return []
 
     @classmethod
     def _should_bypass_source(cls, source: str, *, is_bridge_request: bool) -> bool:

@@ -69,7 +69,7 @@ class BrowserGatewayStore:
                     thread_id TEXT PRIMARY KEY,
                     device_id TEXT NOT NULL,
                     agent_id TEXT NOT NULL,
-                    instance_id TEXT NOT NULL DEFAULT 'HASHI1',
+                    instance_id TEXT NOT NULL DEFAULT 'HASHI',
                     title TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -206,7 +206,13 @@ class BrowserGatewayStore:
             )
             return cur.rowcount > 0
 
-    def create_thread(self, device_id: str, agent_id: str, title: str = "", instance_id: str = "HASHI1") -> dict[str, Any]:
+    def create_thread(
+        self,
+        device_id: str,
+        agent_id: str,
+        title: str = "",
+        instance_id: str = "HASHI",
+    ) -> dict[str, Any]:
         thread_id = f"thread-{uuid4().hex[:12]}"
         now = _utc_now()
         title = title.strip() or f"{agent_id}@{instance_id}"

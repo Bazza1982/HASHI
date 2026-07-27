@@ -30,32 +30,39 @@ def main():
     
     selected_agents = set(args.agents) if args.agents else None
     paths = build_bridge_paths(hashi_root, bridge_home=args.bridge_home)
+    os.environ["BRIDGE_HOME"] = str(paths.bridge_home)
     
     orchestrator = hashi_main.UniversalOrchestrator(
         paths=paths,
         selected_agents=selected_agents,
         enable_api_gateway=args.api_gateway
     )
-    lock = hashi_main.InstanceLock(paths.lock_path)
+    lock = hashi_main.InstanceLock(
+        paths.lock_path,
+        pid_path=paths.pid_path,
+        instance_id=paths.instance_id,
+    )
+    exit_code = 0
     
     try:
         lock.acquire()
         hashi_main.main_logger.info(
             f"Process bootstrap: pid={os.getpid()} ppid={os.getppid()} "
             f"exe={sys.executable} cwd={Path.cwd()} "
-            f"code_root={paths.code_root} bridge_home={paths.bridge_home} "
+            f"instance_id={paths.instance_id} code_root={paths.code_root} bridge_home={paths.bridge_home} "
             f"config={paths.config_path}"
         )
         asyncio.run(orchestrator.run())
     except KeyboardInterrupt:
         hashi_main.main_logger.info("KeyboardInterrupt received. Exiting.")
     except Exception as e:
+        exit_code = 1
         import traceback
         hashi_main.main_logger.critical(f"Fatal crash: {e}\n{traceback.format_exc()}")
     finally:
         lock.release()
     
-    os._exit(0)
+    os._exit(exit_code)
 
 if __name__ == "__main__":
     main()

@@ -7,26 +7,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from orchestrator.model_catalog import (
-    AVAILABLE_CLAUDE_MODELS,
-    AVAILABLE_CODEX_MODELS,
-    AVAILABLE_GEMINI_MODELS,
-    AVAILABLE_XAI_API_MODELS,
-)
+from orchestrator.model_catalog import available_gateway_models, default_gateway_model
 
 
 API_GATEWAY_CONFIG_NAME = "api_gateway_config.json"
-DEFAULT_API_MODEL = "gpt-5.4"
 logger = logging.getLogger("BridgeU.ApiGatewayConfig")
 
 
 def available_api_models() -> list[str]:
-    return [
-        *AVAILABLE_GEMINI_MODELS,
-        *AVAILABLE_CLAUDE_MODELS,
-        *AVAILABLE_CODEX_MODELS,
-        *AVAILABLE_XAI_API_MODELS,
-    ]
+    return available_gateway_models()
 
 
 def normalize_api_model(value: str | None) -> str | None:
@@ -44,7 +33,9 @@ def normalize_api_model(value: str | None) -> str | None:
 
 
 def default_api_model() -> str:
-    return DEFAULT_API_MODEL if DEFAULT_API_MODEL in available_api_models() else available_api_models()[0]
+    configured_default = default_gateway_model()
+    models = available_api_models()
+    return configured_default if configured_default in models else (models[0] if models else "")
 
 
 def config_path_for(global_config: Any) -> Path:

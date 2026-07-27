@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
-# HASHI9 - Start TUI (macOS)
-# Double-click this file in Finder to launch HASHI9 TUI.
+# HASHI - Start TUI (macOS)
+# Double-click this file in Finder to launch this instance's TUI.
 # Auto-starts the main bridge if not already running.
 # USB mode: uses portable Python from ./python/ if present.
 # Fallback: uses system python3 or .venv.
@@ -12,7 +12,6 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LOG_DIR="$(dirname "$0")/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/tui_$(date '+%Y-%m-%d_%H%M%S').log"
-PID_FILE="$ROOT/.bridge_u_f.pid"
 
 # ── Python detection ─────────────────────────────────────────
 if [ -f "$ROOT/python/bin/python3" ]; then
@@ -22,13 +21,17 @@ elif [ -f "$ROOT/.venv/bin/python3" ]; then
 elif command -v python3 &>/dev/null; then
     PYTHON_EXE="$(command -v python3)"
 else
-    osascript -e 'display alert "HASHI9 Error" message "Python 3 not found.\nPlease run mac/prepare_usb.sh first." as critical'
+    osascript -e 'display alert "HASHI Error" message "Python 3 not found.\nPlease run mac/prepare_usb.sh first." as critical'
     exit 1
 fi
+PID_FILE="$("$PYTHON_EXE" "$ROOT/scripts/resolve_instance_runtime.py" \
+    --code-root "$ROOT" --bridge-home "$ROOT" --field pid-path)"
+INSTANCE_ID="$("$PYTHON_EXE" "$ROOT/scripts/resolve_instance_runtime.py" \
+    --code-root "$ROOT" --bridge-home "$ROOT" --field instance-id)"
 
 {
     echo "===================================================="
-    echo "HASHI9 TUI"
+    echo "$INSTANCE_ID TUI"
     echo "Started: $(date)"
     echo "Python:  $PYTHON_EXE"
     echo "Root:    $ROOT"
@@ -36,7 +39,7 @@ fi
 } >> "$LOG_FILE"
 
 echo "============================================================"
-echo "  HASHI9 TUI"
+echo "  $INSTANCE_ID TUI"
 echo "  Log: $LOG_FILE"
 echo "============================================================"
 echo ""

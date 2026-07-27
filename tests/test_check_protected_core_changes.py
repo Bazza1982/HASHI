@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import subprocess
+from pathlib import Path
 
 from scripts import check_protected_core_changes as checker
 
@@ -46,3 +47,20 @@ def test_main_allows_protected_paths_with_authorization(monkeypatch) -> None:
     monkeypatch.setattr(checker, "_changed_files", lambda args: {"main.py"})
 
     assert checker.main(["--authorized"]) == 0
+
+
+def test_protected_core_manifest_only_names_existing_files() -> None:
+    root = Path(__file__).resolve().parent.parent
+
+    assert checker._missing_manifest_paths(root) == []
+
+
+def test_validate_manifest_fails_for_missing_path(monkeypatch, tmp_path, capsys) -> None:
+    monkeypatch.setattr(checker, "_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(checker.os, "chdir", lambda path: None)
+    monkeypatch.setattr(checker, "_changed_files", lambda args: set())
+
+    result = checker.main(["--validate-manifest"])
+
+    assert result == 3
+    assert "manifest: invalid" in capsys.readouterr().err

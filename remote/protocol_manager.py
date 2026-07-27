@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
 
+from orchestrator.runtime_defaults import DEFAULT_HASHI_REMOTE_PORT, DEFAULT_WORKBENCH_PORT
 from remote.routing import build_route_candidates, same_machine_hint, validate_same_host_port_conflicts
 from remote.local_http import local_http_hosts, local_http_url
 from remote.live_endpoints import read_live_endpoints
@@ -79,7 +80,7 @@ def _pick_best_payload_host(
     return direct or "127.0.0.1"
 
 PROTOCOL_VERSION = "2.0"
-DEFAULT_REMOTE_PORT = 8766
+DEFAULT_REMOTE_PORT = DEFAULT_HASHI_REMOTE_PORT
 DEFAULT_CAPABILITIES = [
     "handshake_v2",
     "agent_directory_v1",
@@ -200,7 +201,7 @@ class ProtocolManager:
             display_name=str(self._instance_info.get("display_name") or self._instance_info.get("instance_id") or "HASHI"),
             host=str(self._instance_info.get("api_host") or "127.0.0.1"),
             port=int(self._instance_info.get("remote_port") or 0),
-            workbench_port=int(self._instance_info.get("workbench_port") or 18800),
+            workbench_port=int(self._instance_info.get("workbench_port") or DEFAULT_WORKBENCH_PORT),
             platform=str(self._instance_info.get("platform") or "unknown"),
             hashi_version=str(self._instance_info.get("hashi_version") or "unknown"),
             display_handle=self.display_handle,
@@ -224,7 +225,11 @@ class ProtocolManager:
         cached_at, cached_value = getattr(self, "_core_health_cache", (0.0, False))
         if now - cached_at <= 5:
             return cached_value
-        port = int((getattr(self, "_instance_info", {}) or {}).get("workbench_port") or getattr(self, "_workbench_port", 18800) or 18800)
+        port = int(
+            (getattr(self, "_instance_info", {}) or {}).get("workbench_port")
+            or getattr(self, "_workbench_port", DEFAULT_WORKBENCH_PORT)
+            or DEFAULT_WORKBENCH_PORT
+        )
         ok = False
         for host in local_http_hosts():
             try:
@@ -406,7 +411,11 @@ class ProtocolManager:
                         display_name=str(live_entry.get("display_name") or entry.get("display_name") or instance_id),
                         host=host,
                         port=selected_port,
-                        workbench_port=int(live_entry.get("workbench_port") or entry.get("workbench_port") or 18800),
+                        workbench_port=int(
+                            live_entry.get("workbench_port")
+                            or entry.get("workbench_port")
+                            or DEFAULT_WORKBENCH_PORT
+                        ),
                         platform=str(live_entry.get("platform") or entry.get("platform") or "unknown"),
                         hashi_version=str(entry.get("hashi_version") or "unknown"),
                         display_handle=f"@{instance_id.lower()}",
@@ -507,7 +516,7 @@ class ProtocolManager:
         remote_port = int(entry.get("remote_port") or 0)
         if remote_port <= 0:
             return None
-        workbench_port = int(entry.get("workbench_port") or 18800)
+        workbench_port = int(entry.get("workbench_port") or DEFAULT_WORKBENCH_PORT)
         primary_host = self._bootstrap_entry_primary_host(entry)
         if not primary_host:
             return None
@@ -593,7 +602,11 @@ class ProtocolManager:
                         continue
                     network_profile = health.get("local_network_profile") or {}
                     remote_port = int(instance.get("remote_port") or peer.port or 0)
-                    workbench_port = int(instance.get("workbench_port") or peer.workbench_port or 18800)
+                    workbench_port = int(
+                        instance.get("workbench_port")
+                        or peer.workbench_port
+                        or DEFAULT_WORKBENCH_PORT
+                    )
                     self._peer_registry.mark_refresh_result(
                         peer.instance_id,
                         ok=True,
@@ -681,7 +694,9 @@ class ProtocolManager:
                 "agents": self.get_local_agents_snapshot(),
                 "agent_directory": self.get_local_agent_directory_state(),
                 "remote_port": self._instance_info.get("remote_port") or 0,
-                "workbench_port": self._instance_info.get("workbench_port") or 18800,
+                "workbench_port": (
+                    self._instance_info.get("workbench_port") or DEFAULT_WORKBENCH_PORT
+                ),
                 "platform": self._instance_info.get("platform") or "unknown",
                 "host_identity": local_profile.get("host_identity"),
                 "environment_kind": local_profile.get("environment_kind"),
@@ -784,7 +799,7 @@ class ProtocolManager:
                 display_name=str(payload.get("display_handle") or from_instance),
                 host=effective_host,
                 port=remote_port,
-                workbench_port=int(payload.get("workbench_port") or 18800),
+                workbench_port=int(payload.get("workbench_port") or DEFAULT_WORKBENCH_PORT),
                 platform=str(payload.get("platform") or "unknown"),
                 hashi_version=str(payload.get("hashi_version") or "unknown"),
                 display_handle=str(payload.get("display_handle") or f"@{from_instance.lower()}"),
@@ -818,7 +833,9 @@ class ProtocolManager:
             "agents": self.get_local_agents_snapshot(),
             "agent_directory": self.get_local_agent_directory_state(),
             "remote_port": self._instance_info.get("remote_port") or 0,
-            "workbench_port": self._instance_info.get("workbench_port") or 18800,
+            "workbench_port": (
+                self._instance_info.get("workbench_port") or DEFAULT_WORKBENCH_PORT
+            ),
             "platform": self._instance_info.get("platform") or "unknown",
             "host_identity": local_profile.get("host_identity"),
             "environment_kind": local_profile.get("environment_kind"),

@@ -325,6 +325,11 @@ python main.py            # Any platform
 
 ### Architecture
 
+The canonical layer boundaries, single-source owners, localized-change rule,
+and `/reboot` contract are documented in
+[`ARCHITECTURE.md`](ARCHITECTURE.md). Contributor checks are in
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
+
 HASHI uses a **Universal Orchestrator** pattern where a single Python process manages multiple concurrent agent runtimes:
 
 ```

@@ -411,7 +411,8 @@ class ServiceManager:
             self.kernel.scheduler_task = None
             self.kernel.scheduler = None
 
-    async def restart_scheduler(self):
+    async def refresh_hot_services(self):
+        """Recreate every warm service after a successful code reload."""
         await self.restart_workbench_api()
         await self.restart_api_gateway()
         await self.stop_scheduler()
@@ -435,6 +436,10 @@ class ServiceManager:
         bridge_logger.info("Hot restart: scheduler recreated with reloaded code")
         await self.restart_delivery_health_watcher()
         await self.restart_background_jobs()
+
+    async def restart_scheduler(self):
+        """Compatibility alias for callers predating the full service refresh."""
+        await self.refresh_hot_services()
 
     async def restart_workbench_api(self):
         if self.kernel.global_cfg is None:

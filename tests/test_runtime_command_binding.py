@@ -9,6 +9,7 @@ import pytest
 sys.modules.setdefault("edge_tts", types.ModuleType("edge_tts"))
 
 from orchestrator import runtime_command_binding
+from orchestrator.command_specs import COMMAND_SPECS
 from orchestrator.command_registry import RuntimeCommand
 
 
@@ -29,6 +30,15 @@ def test_bot_command_metadata_is_unique_and_covers_static_commands():
         assert command in metadata_names
     assert "paswd" not in metadata_names
     assert "oll" not in metadata_names
+
+
+def test_binding_and_menu_views_are_derived_from_command_specs():
+    assert [binding.name for binding in runtime_command_binding.COMMAND_BINDINGS] == [
+        spec.name for spec in COMMAND_SPECS
+    ]
+    assert [binding.name for binding in runtime_command_binding.BOT_COMMAND_BINDINGS] == [
+        spec.name for spec in COMMAND_SPECS if spec.menu_visible
+    ]
 
 
 def test_command_binding_method_names_exist_on_flexible_runtime():
@@ -98,7 +108,11 @@ def test_bind_flexible_runtime_handlers_preserves_static_binding_count(monkeypat
 
 def test_get_flexible_bot_commands_appends_runtime_commands(monkeypatch):
     runtime = SimpleNamespace(global_config=SimpleNamespace(project_root="/tmp/hashi-test"))
-    monkeypatch.setattr(runtime_command_binding, "private_wol_available", lambda project_root: True)
+    monkeypatch.setattr(
+        runtime_command_binding,
+        "private_wol_available",
+        lambda project_root, instance_id=None: True,
+    )
     monkeypatch.setattr(
         runtime_command_binding,
         "runtime_bot_commands",

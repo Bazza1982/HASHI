@@ -271,12 +271,19 @@ class HabitStore:
     MIN_TRIGGERED_FOR_SHARED_PROMOTION = 10
     MIN_CONFIDENCE_FOR_SHARED_PROMOTION = 0.72
 
-    def __init__(self, workspace_dir: Path, project_root: Path, agent_id: str, agent_class: str | None):
+    def __init__(
+        self,
+        workspace_dir: Path,
+        project_root: Path,
+        agent_id: str,
+        agent_class: str | None,
+        instance_id: str | None = None,
+    ):
         self.workspace_dir = workspace_dir
         self.project_root = project_root
         self.agent_id = agent_id
         self.agent_class = (agent_class or "general").strip().lower()
-        self.instance = detect_instance(project_root)
+        self.instance = detect_instance(project_root, instance_id)
         self.db_path = workspace_dir / "habits.sqlite"
         self.eval_db_path = project_root / "workspaces" / "lily" / "habit_evaluation.sqlite"
         self._init_db()
