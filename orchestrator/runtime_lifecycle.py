@@ -229,7 +229,7 @@ async def process_queue(runtime: Any) -> None:
             else:
                 from orchestrator.runtime_control import consume_user_interrupt
 
-                # /stop and /steer already notified with user_* reason; do not
+                # /stop, /steer, and /retry already notified with user_* reason; do not
                 # re-label the intentional kill as backend_error or show ❌.
                 interrupt_reason = consume_user_interrupt(
                     runtime, getattr(item, "request_id", None)

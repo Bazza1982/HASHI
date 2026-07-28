@@ -482,6 +482,7 @@ class APIGatewayServer:
         self.bind_host = self._select_bind_host()
         self._site = web.TCPSite(self._runner, self.bind_host, self.port)
         await self._site.start()
+        self.enabled = True
         available = [e for e, s in self._engine_status.items() if s.get("available")]
         unavailable = [e for e, s in self._engine_status.items() if not s.get("available")]
         logger.info(
@@ -491,9 +492,14 @@ class APIGatewayServer:
         )
 
     async def stop(self):
-        await self._pool.shutdown()
-        if self._runner:
-            await self._runner.cleanup()
+        try:
+            await self._pool.shutdown()
+            if self._runner:
+                await self._runner.cleanup()
+        finally:
+            self.enabled = False
+            self._site = None
+            self._runner = None
 
     def set_default_model(self, model: str) -> None:
         normalized = str(model or "").strip()
@@ -540,6 +546,7 @@ class APIGatewayServer:
 
     async def handle_health(self, request: web.Request) -> web.Response:
         initialized = sorted(self._pool._adapters.keys())
+        configured_enabled = bool(load_api_gateway_config(self.global_config).get("enabled", False))
         available_engines = [
             engine for engine, status in self._engine_status.items() if status.get("available")
         ]
@@ -548,6 +555,8 @@ class APIGatewayServer:
             {
                 "status": overall,
                 "enabled": self.enabled,
+                "running": self._site is not None,
+                "configured_enabled": configured_enabled,
                 "engines": initialized,
                 "engine_status": self._engine_status,
                 "available_engines": available_engines,

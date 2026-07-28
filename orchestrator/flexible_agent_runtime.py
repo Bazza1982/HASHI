@@ -49,6 +49,7 @@ from orchestrator import runtime_privacy
 from orchestrator import runtime_nudge
 from orchestrator import runtime_pipeline
 from orchestrator import runtime_remote
+from orchestrator import runtime_retry
 from orchestrator import telegram_delivery_failover
 from orchestrator import telegram_stream_policy
 from orchestrator.source_policy import source_requires_manual_remote_api_permission
@@ -6741,6 +6742,9 @@ class FlexibleAgentRuntime:
     async def cmd_retry(self, update: Update, context: Any):
         await runtime_control.cmd_retry(self, update, context)
 
+    async def cmd_resend(self, update: Update, context: Any):
+        await runtime_control.cmd_resend(self, update, context)
+
     # ------------------------------------------------------------------
     # /remote — one-click Hashi Remote start/stop
     # ------------------------------------------------------------------
@@ -7623,7 +7627,7 @@ class FlexibleAgentRuntime:
         )
 
     def _load_last_text_from_transcript(self, role: str) -> str | None:
-        """Read the last transcript message for commands like /say and /retry."""
+        """Read the last transcript message for commands such as /say."""
         try:
             path = getattr(self, "transcript_log_path", None)
             if path is None or not path.exists():
@@ -7882,12 +7886,7 @@ class FlexibleAgentRuntime:
                 if self._should_buffer_during_transfer(item.request_id):
                     self._record_suppressed_transfer_result(item, success=True, text=visible_text)
                     return
-                self.last_response = {
-                    "chat_id": item.chat_id,
-                    "text": visible_text,
-                    "request_id": item.request_id,
-                    "responded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-                }
+                runtime_retry.remember_output(self, item, visible_text)
                 try:
                     from tools.token_tracker import estimate_tokens, record_audit_event, record_usage
                     import hashlib as _hashlib
@@ -7982,7 +7981,7 @@ class FlexibleAgentRuntime:
                         is_bridge_request=is_bridge_request,
                     )
                 self.handoff_builder.append_transcript("user", item.prompt, item.source)
-                self.handoff_builder.append_transcript("assistant", visible_text)
+                self.handoff_builder.append_transcript("assistant", visible_text, item.source)
                 self.handoff_builder.refresh_recent_context()
                 self.project_chat_logger.log_exchange(item.prompt, visible_text, item.source)
                 _print_final_response(self.name, visible_text)

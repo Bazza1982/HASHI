@@ -5,10 +5,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Any
 
+from orchestrator.runtime_retry import RETRY_HANDOFF_SOURCE
+
 logger = logging.getLogger("BridgeU.HandoffBuilder")
 
 class HandoffBuilder:
-    EXCLUDED_RECENT_SOURCES = {"startup", "system", "think"}
+    EXCLUDED_RECENT_SOURCES = {
+        "startup",
+        "system",
+        "think",
+        "handoff",
+        RETRY_HANDOFF_SOURCE,
+    }
     EXCLUDED_TEXT_SNIPPETS = (
         "This is a fresh ",
         "Use those files as your operating context",

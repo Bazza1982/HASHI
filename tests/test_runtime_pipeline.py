@@ -1303,7 +1303,7 @@ def test_persist_success_memory_records_human_exchange_and_handoff():
     assert runtime.post_turn_calls == [("user text", "memory:visible text", False)]
     assert runtime.handoff_builder.transcript == [
         ("user", "user text", "text"),
-        ("assistant", "visible text", None),
+        ("assistant", "visible text", "text"),
     ]
     assert runtime.handoff_builder.refreshed is True
     assert runtime.project_chat_logger.exchanges == [("user text", "visible text", "text")]

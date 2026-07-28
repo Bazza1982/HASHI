@@ -172,6 +172,7 @@ def test_dual_brain_bypasses_automation_and_internal_sources(tmp_path: Path) -> 
         "scheduler-skill",
         "loop_skill",
         "retry",
+        "retry-handoff",
         "session_reset",
         "bridge:hchat",
         "bridge-transfer:handoff",

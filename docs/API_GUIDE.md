@@ -57,7 +57,7 @@ serve aiohttp traffic reliably. Confirm the live address with Workbench
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/health` | Health check — gateway status, engine preflight, available models |
+| GET | `/health` | Health check — live listener state, persisted restart choice, engine preflight, available models |
 | GET | `/v1/models` | List models whose backends passed preflight |
 | POST | `/v1/chat/completions` | Chat completion (sync & streaming) |
 | POST | `/v1/images/generations` | xAI Imagine image generation |
@@ -78,6 +78,17 @@ including:
 - runtime state
 - enabled-on-restart state
 - default API model
+
+The Gateway's own `/health` payload keeps runtime and persisted state separate:
+
+| Field | Meaning |
+| --- | --- |
+| `enabled` | Live server flag; set after the listener starts and cleared when it stops |
+| `running` | Whether the Gateway currently owns an active aiohttp site |
+| `configured_enabled` | Persisted choice controlling whether the Gateway should return after restart |
+
+This distinction makes a temporary command-line start visible without silently
+changing the saved `/api on|off` choice.
 
 ---
 
@@ -410,6 +421,19 @@ Runtime `/api on|off|model` choices are persisted separately from `agents.json`
 so they survive a cold restart. This allows an operator to keep the core config
 stable while changing whether the gateway comes back on restart and which
 default model it uses for requests that omit `model`.
+
+The canonical file is:
+
+```text
+<bridge_home>/state/api_gateway_config.json
+```
+
+Older installations may have `<bridge_home>/api_gateway_state.json`. When the
+canonical file does not yet exist, HASHI imports that legacy state once,
+atomically writes the canonical file, and retains the old file as a rollback
+artifact. After migration, only the canonical file is read and updated, so the
+Telegram controls, startup, hot reboot, and Gateway health view share one state
+owner.
 
 ---
 

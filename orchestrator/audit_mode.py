@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 
 from adapters.stream_events import StreamEvent
+from orchestrator.runtime_retry import RETRY_HANDOFF_SOURCE
 
 
 DEFAULT_CORE_BACKEND = "codex-cli"
@@ -54,6 +55,7 @@ AUDIT_BYPASS_SOURCES = frozenset(
         "loop_skill",
         "bridge:hchat",
         "retry",
+        RETRY_HANDOFF_SOURCE,
         SESSION_RESET_SOURCE,
     }
 )
