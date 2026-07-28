@@ -18,6 +18,7 @@ from orchestrator.post_turn_observer import (
     TurnContextRequest,
     TurnObservationRequest,
 )
+from orchestrator.runtime_retry import RETRY_HANDOFF_SOURCE
 from orchestrator.memory_plus_mode import (
     is_memory_plus_enabled,
     prepare_memory_plus_store,
@@ -168,6 +169,7 @@ class DualBrainObserver(PostTurnObserver, PreTurnContextProvider):
         "scheduler-skill",
         "loop_skill",
         "retry",
+        RETRY_HANDOFF_SOURCE,
         "session_reset",
     }
     BYPASS_PREFIXES = (

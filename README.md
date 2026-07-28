@@ -503,9 +503,15 @@ HASHI supports multiple communication channels:
 - API Gateway is the optional OpenAI-compatible gateway enabled with `--api-gateway`.
 - `/api` controls the API Gateway from Telegram with inline buttons:
   status, on, off, and default-model selection.
+- Runtime gateway choices have one canonical owner at
+  `<bridge_home>/state/api_gateway_config.json`. HASHI imports the older
+  root-level `api_gateway_state.json` once when needed and retains it as a
+  rollback artifact.
 - If `global.api_gateway_port` is omitted, HASHI derives it as `workbench_port + 1`.
 - Common local layout: HASHI1 `18800/18801`, HASHI2 `18802/18803`, HASHI9 `18819/18820`.
 - `GET /api/health` reports instance, Workbench port, API Gateway port, gateway enabled state, and online agents after restart.
+- The Gateway's own `GET /health` reports its live listener state separately
+  from the persisted enabled-on-restart choice.
 - The gateway exposes OpenAI-compatible `/v1/chat/completions`, `/v1/models`,
   `/v1/images/generations`, and `/v1/videos/generations` endpoints.
 - Grok/xAI models are available through the `xai-api` backend, including
@@ -586,9 +592,17 @@ between `/stop`, `/steer`, `/focus`, and `/recall`, see
 | `/bg status\|tail\|cancel\|list` | Inspect or manage recorded background jobs |
 | `/usecomputer [on\|off\|status\|examples\|task]` | Load managed GUI-aware computer-use guidance; prefers non-GUI methods first |
 | `/browser [status\|examples\|1-4 task]` | Direct an internet task through a selected browser/search route |
-| `/retry` | Resend last response or re-run last prompt |
+| `/resend` | Replay the previous model or Bridge output exactly, without model work |
+| `/retry` | Stop stale execution, create a clean context, restore recent handoff continuity, and rerun the last prompt |
 | `/long` ... `/end` | Buffer long text across multiple messages, submit as one |
 | `/loop <interval> <task>` | Create recurring automated tasks via skill injection |
+
+`/retry` uses `/new`-equivalent cleanup for CLI backends and `/fresh`-equivalent
+cleanup for API backends. The last retryable prompt and resendable output are
+stored separately, so failed turns and Bridge-only outputs remain recoverable
+after a runtime restart. Use `/resend` when no new inference or context reset is
+wanted. See [Recovery commands](docs/RETRY_RESEND_COMMANDS.md) for the reset
+sequence, persistence, and failure boundaries.
 
 For Codex GPT-5.6, HASHI exposes the smoke-tested `gpt-5.6-sol`,
 `gpt-5.6-terra`, and `gpt-5.6-luna` variants. `/effort` is model-aware:

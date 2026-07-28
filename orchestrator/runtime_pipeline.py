@@ -10,6 +10,7 @@ import hashlib as _hashlib
 from telegram.error import RetryAfter
 
 from orchestrator.runtime_common import _print_final_response, _safe_excerpt
+from orchestrator import runtime_retry
 from orchestrator import telegram_delivery_failover
 from orchestrator import telegram_stream_policy
 from orchestrator.memory_plus_mode import (
@@ -101,6 +102,7 @@ class InteractiveFeedback:
 def begin_queue_item(runtime, item) -> QueueItemStart:
     if not item.silent:
         runtime.last_prompt = item
+        runtime_retry.remember_retryable_prompt(runtime, item)
     is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
     queued_at = datetime.fromisoformat(item.created_at)
     queue_wait_s = (datetime.now() - queued_at).total_seconds()
@@ -1014,7 +1016,7 @@ def persist_success_memory(
         )
     if not is_bridge_request:
         runtime.handoff_builder.append_transcript("user", item.prompt, item.source)
-        runtime.handoff_builder.append_transcript("assistant", visible_text)
+        runtime.handoff_builder.append_transcript("assistant", visible_text, item.source)
         runtime.handoff_builder.refresh_recent_context()
         runtime.project_chat_logger.log_exchange(item.prompt, visible_text, item.source)
 
@@ -1030,7 +1032,8 @@ async def handle_backend_error(
     user_interrupt_reason: str | None = None,
 ) -> None:
     err_msg = response.error or "Unknown error"
-    # /stop and /steer intentionally kill the backend process (e.g. exit -9 / SIGKILL).
+    # /stop, /steer, and /retry intentionally kill the backend process
+    # (e.g. exit -9 / SIGKILL).
     # That is expected course-correction, not a backend failure — never show ❌ Backend error.
     if not user_interrupt_reason:
         from orchestrator.runtime_control import consume_user_interrupt
@@ -1139,12 +1142,7 @@ async def handle_success_delivery(
                 pass
         runtime._record_suppressed_transfer_result(item, success=True, text=visible_text)
         return
-    runtime.last_response = {
-        "chat_id": item.chat_id,
-        "text": visible_text,
-        "request_id": item.request_id,
-        "responded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-    }
+    runtime_retry.remember_output(runtime, item, visible_text)
     persist_success_memory(
         runtime,
         item,

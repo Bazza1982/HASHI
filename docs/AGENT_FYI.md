@@ -32,7 +32,8 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - `/active [on|off] [minutes]`: toggle proactive follow-up heartbeat; default is 10 minutes.
 - `/voice [status|on|off|provider|providers|voices|use <alias>]`: control native bridge-owned voice replies.
 - `/say`: read the last assistant reply as a voice message. This forces one TTS attempt even when `/voice off`, as long as a usable voice provider and voice choice are configured.
-- `/retry`: resend last response or rerun last prompt.
+- `/resend`: replay the previous model or Bridge output exactly, without model work.
+- `/retry`: stop stale execution, reset to a clean CLI/API context, restore recent handoff continuity, and rerun the last prompt. Full reference for both recovery commands: [RETRY_RESEND_COMMANDS.md](RETRY_RESEND_COMMANDS.md).
 - `/debug <prompt>`: strict debug mode with verification-first behavior.
 - `/usecomputer [on|off|status|examples|task]`: load managed GUI-aware operating guidance. This is a unified shortcut for desktop/browser/Windows computer use, but it does not force GUI when a better non-GUI path exists.
 - `/browser [status|examples|1-4 task]`: run an internet task with a selected route: HASHI headless browser, CLI-native browsing, Brave search, or the logged-in HASHI browser extension.

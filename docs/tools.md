@@ -44,7 +44,8 @@ Five execution modes:
 - `/start` — inline keyboard to start a stopped agent
 - `/terminate` — shut down this agent
 - `/stop` — cancel current processing
-- `/retry` — retry last request
+- `/resend` — replay the previous model or Bridge output without model work
+- `/retry` — stop stale execution, reset context, restore recent handoff continuity, and rerun the last request; see [RETRY_RESEND_COMMANDS.md](RETRY_RESEND_COMMANDS.md)
 - `/model` — switch model (inline keyboard), then optionally choose or keep effort when the model supports it
 - `/mode [fixed|flex|wrapper|audit|dual-brain]` — switch execution mode; `/mode memory+` only enables Memory+ and keeps the current mode
 - `/think [on|off]` — toggle thinking trace display (periodic italic messages, ~60s intervals, independent of `/verbose`)

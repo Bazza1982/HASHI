@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from orchestrator.post_turn_observer import PreTurnContextProvider, TurnContextRequest
+from orchestrator.runtime_retry import RETRY_HANDOFF_SOURCE
 from orchestrator.workspace_state import WorkspaceStateStore
 
 try:
@@ -107,6 +108,7 @@ class MemoryPlusObserver(PreTurnContextProvider):
         "scheduler-skill",
         "loop_skill",
         "retry",
+        RETRY_HANDOFF_SOURCE,
         "session_reset",
     }
     BYPASS_PREFIXES = (
