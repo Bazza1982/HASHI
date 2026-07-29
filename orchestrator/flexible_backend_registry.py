@@ -1,18 +1,21 @@
 from __future__ import annotations
 
+from orchestrator.model_catalog import (
+    AVAILABLE_CLAUDE_EFFORTS,
+    AVAILABLE_CLAUDE_MODELS,
+    AVAILABLE_CODEX_EFFORTS,
+    AVAILABLE_CODEX_MODELS,
+    AVAILABLE_CODEX_MODEL_EFFORTS,
+    AVAILABLE_GEMINI_MODELS,
+)
+
 CLI_ENGINES = frozenset({"gemini-cli", "claude-cli", "codex-cli", "claw-cli", "grok-cli"})
 
 BACKEND_REGISTRY: dict[str, dict] = {
     "gemini-cli": {
         "label": "gemini",
         "privacy_levels": [0, 1],
-        "models": [
-            "gemini-3.1-pro-preview",
-            "gemini-3-flash-preview",
-            "gemini-2.5-pro",
-            "gemini-2.5-flash",
-            "gemini-2.5-flash-lite",
-        ],
+        "models": AVAILABLE_GEMINI_MODELS,
         "default_model": "gemini-2.5-flash",
         "efforts": [],
         "default_effort": None,
@@ -21,41 +24,19 @@ BACKEND_REGISTRY: dict[str, dict] = {
     "claude-cli": {
         "label": "claude",
         "privacy_levels": [0, 1],
-        "models": [
-            "claude-opus-4-7",
-            "claude-sonnet-4-6",
-            "claude-opus-4-6",
-            "claude-haiku-4-5",
-        ],
+        "models": AVAILABLE_CLAUDE_MODELS,
         "default_model": "claude-sonnet-4-6",
-        "efforts": ["low", "medium", "high", "xhigh", "max"],
+        "efforts": AVAILABLE_CLAUDE_EFFORTS,
         "default_effort": "medium",
         "secret_keys": ["claude-cli_key"],
     },
     "codex-cli": {
         "label": "codex",
         "privacy_levels": [0, 1],
-        "models": [
-            "gpt-5.6-sol",
-            "gpt-5.6-terra",
-            "gpt-5.6-luna",
-            "gpt-5.5",
-            "gpt-5.3-codex-spark",
-            "gpt-5.4",
-            "gpt-5.3-codex",
-            "gpt-5.2-codex",
-            "gpt-5.2",
-            "gpt-5.1-codex-max",
-            "gpt-5.1-codex-mini",
-        ],
+        "models": AVAILABLE_CODEX_MODELS,
         "default_model": "gpt-5.4",
-        "efforts": ["low", "medium", "high", "xhigh"],
-        # GPT-5.6 Sol is the only Codex model currently documented with the
-        # deeper `max` reasoning tier. Keep this model-specific so the UI
-        # never offers an unverified effort to Terra or Luna.
-        "model_efforts": {
-            "gpt-5.6-sol": ["low", "medium", "high", "xhigh", "max"],
-        },
+        "efforts": AVAILABLE_CODEX_EFFORTS,
+        "model_efforts": AVAILABLE_CODEX_MODEL_EFFORTS,
         "default_effort": "medium",
         "secret_keys": ["codex-cli_key"],
     },

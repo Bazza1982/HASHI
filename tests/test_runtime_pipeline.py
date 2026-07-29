@@ -1277,6 +1277,32 @@ async def test_handle_backend_error_notifies_and_delivers_error():
 
 
 @pytest.mark.asyncio
+async def test_handle_backend_error_delivers_exact_version_gated_backend_failure():
+    runtime = _runtime()
+    item = _item()
+    response = SimpleNamespace(
+        error=(
+            '{"type":"error","status":400,"error":{"type":"invalid_request_error",'
+            '"message":"The \'gpt-5.6-sol\' model requires a newer version of Codex. '
+            'Please upgrade to the latest app or CLI and try again."}}'
+        )
+    )
+
+    await runtime_pipeline.handle_backend_error(
+        runtime,
+        item,
+        response,
+        queued_at=datetime.now() - timedelta(seconds=1),
+        queue_wait_s=0.5,
+        backend_elapsed_s=0.25,
+    )
+
+    assert "Exact backend failure: The 'gpt-5.6-sol' model requires a newer version of Codex." in runtime.sent_message["text"]
+    assert "Upgrade Codex" in runtime.sent_message["text"]
+    assert runtime.listener_payloads[0]["error"] == response.error
+
+
+@pytest.mark.asyncio
 async def test_handle_backend_error_buffers_transfer_without_delivery():
     runtime = _runtime()
     runtime._should_buffer_during_transfer = lambda request_id: True
