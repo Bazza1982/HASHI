@@ -40,7 +40,8 @@
     "PFJ-035",
     "PFJ-036",
     "PFJ-037",
-    "PFJ-038"
+    "PFJ-038",
+    "PFJ-039"
   ],
   "failures": [
     {
@@ -316,6 +317,13 @@
       "block_before": "build",
       "verification_mode": "compiled_child_failure_observability",
       "required_evidence": "A deliberate failure of the exact compiled HASHI launcher preserves full redirected stdout and stderr plus structured phase, start time, finish time, exit code and log paths."
+    },
+    {
+      "pfj_id": "PFJ-039",
+      "signature": "observed_child_evidence_filename_exhausts_windows_path_headroom",
+      "block_before": "build",
+      "verification_mode": "long_root_native_failure_observability",
+      "required_evidence": "A failing child beneath a deliberately long state root retains full stderr, non-zero exit and atomic structured output with bounded short filenames."
     }
   ]
 }
