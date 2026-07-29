@@ -38,7 +38,9 @@
     "PFJ-033",
     "PFJ-034",
     "PFJ-035",
-    "PFJ-036"
+    "PFJ-036",
+    "PFJ-037",
+    "PFJ-038"
   ],
   "failures": [
     {
@@ -300,6 +302,20 @@
       "block_before": "build",
       "verification_mode": "frozen_runtime_inventory_and_real_completion",
       "required_evidence": "The exact frozen payload contains the pinned model shards, llama-server and DLL set, resolves them from its own root, and completes one real installed Offline Assist reply."
+    },
+    {
+      "pfj_id": "PFJ-037",
+      "signature": "test_harness_hardcodes_state_subpath_and_misreads_evidence",
+      "block_before": "build",
+      "verification_mode": "contract_derived_observer_identity",
+      "required_evidence": "Every observer derives state, profile and runtime identity from the exact frozen release contract; a mismatch fixture proves that duplicated path literals are rejected."
+    },
+    {
+      "pfj_id": "PFJ-038",
+      "signature": "native_child_stderr_truncated_before_exit_capture",
+      "block_before": "build",
+      "verification_mode": "compiled_child_failure_observability",
+      "required_evidence": "A deliberate failure of the exact compiled HASHI launcher preserves full redirected stdout and stderr plus structured phase, start time, finish time, exit code and log paths."
     }
   ]
 }

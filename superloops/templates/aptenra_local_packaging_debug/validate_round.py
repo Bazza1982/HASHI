@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 
-EXPECTED_PFJ_IDS = [f"PFJ-{index:03d}" for index in range(1, 37)]
+EXPECTED_PFJ_IDS = [f"PFJ-{index:03d}" for index in range(1, 39)]
 EXPECTED_QUESTION = (
     "What mistake did I make last time, and how will I avoid it in the most straightforward way this round?"
 )
@@ -86,13 +86,13 @@ def validate_round(loop_dir: Path, phase: str) -> dict[str, Any]:
     required_ids = registry.get("required_ids")
     failure_entries = registry.get("failures")
     if required_ids != EXPECTED_PFJ_IDS:
-        error("registry_required_ids", "Registry must list PFJ-001 through PFJ-036 exactly once and in order.")
+        error("registry_required_ids", "Registry must list PFJ-001 through PFJ-038 exactly once and in order.")
     if not isinstance(failure_entries, list):
         error("registry_failures", "Registry failures must be a list.")
         failure_entries = []
     failure_ids = [entry.get("pfj_id") for entry in failure_entries if isinstance(entry, dict)]
     if failure_ids != EXPECTED_PFJ_IDS:
-        error("registry_entries", "Registry entries must cover PFJ-001 through PFJ-036 exactly once and in order.")
+        error("registry_entries", "Registry entries must cover PFJ-001 through PFJ-038 exactly once and in order.")
     for entry in failure_entries:
         if not isinstance(entry, dict):
             continue
