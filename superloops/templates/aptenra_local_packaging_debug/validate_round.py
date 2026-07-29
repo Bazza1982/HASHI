@@ -6,12 +6,7 @@ from pathlib import Path
 from typing import Any
 
 
-EXPECTED_PFJ_IDS = [f"PFJ-{index:03d}" for index in range(1, 40)]
-EXPECTED_QUESTION = (
-    "What mistake did I make last time, and how will I avoid it in the most straightforward way this round?"
-)
-PHASES = {"structure": 0, "prebuild": 1, "preinstall": 2, "round-close": 3}
-BLOCK_STAGE = {"implementation": 1, "build": 1, "install": 2, "round_close": 3}
+PHASES = ("structure", "prebuild", "preinstall", "round-close")
 
 
 def _load_object(path: Path) -> dict[str, Any]:
@@ -46,166 +41,118 @@ def _nonempty(value: Any) -> bool:
 
 
 def validate_round(loop_dir: Path, phase: str) -> dict[str, Any]:
+    """Audit the four factual rules without authorising Build or Install.
+
+    The structure, prebuild, and preinstall phases intentionally perform no
+    candidate-readiness checks. They exist only for compatibility with older
+    callers. The round-close audit prevents theoretical results from being
+    recorded as installed results and verifies failure cleanup facts.
+    """
+
     findings: list[dict[str, str]] = []
 
-    def error(code: str, message: str) -> None:
+    def finding(code: str, message: str) -> None:
         findings.append({"severity": "error", "code": code, "message": message})
 
     state = _load_object(loop_dir / "state.json")
-    registry_path = _resolve(
-        loop_dir,
-        state.get("known_failure_registry_path"),
-        "known_failure_registry.json",
-    )
     round_path = _resolve(loop_dir, state.get("active_round_path"), "round.json")
-    registry = _load_object(registry_path)
     round_record = _load_object(round_path)
 
     if state.get("max_rounds") != 30:
-        error("max_rounds", "max_rounds must be exactly 30.")
+        finding("max_rounds", "max_rounds must be exactly 30.")
     current_round = state.get("current_round")
     if not isinstance(current_round, int) or not 1 <= current_round <= 30:
-        error("current_round", "current_round must be an integer from 1 through 30.")
+        finding("current_round", "current_round must be an integer from 1 through 30.")
     if state.get("scheduler_auto_advance") is not False:
-        error("scheduler_auto_advance", "Background scheduler auto-advance must be false.")
+        finding("scheduler_auto_advance", "The scheduler must not edit task status.")
 
     policy = state.get("execution_policy") if isinstance(state.get("execution_policy"), dict) else {}
-    if policy.get("mandatory_round_question") != EXPECTED_QUESTION:
-        error("mandatory_question", "The mandatory last-mistake question is missing or altered.")
-    if policy.get("known_failure_recurrence") != "immediate_block":
-        error("recurrence_policy", "Known failure recurrence must immediately block.")
-    if policy.get("actual_install_required_for_candidate_validation") is not True:
-        error("actual_install_policy", "Actual installation must be required for candidate validation.")
-    if policy.get("success_condition") != "installed_aptenra_and_workbench_launch":
-        error("success_condition", "Success must require installed Aptenra and Workbench launches.")
-    if policy.get("provider_credentials_required") is not False:
-        error("provider_credentials", "Provider credentials must not gate installation and dual-launch validation.")
-    if policy.get("failed_candidate_uninstall_before_next_round") is not True:
-        error("uninstall_policy", "Failed candidate Uninstall must be required before the next round.")
+    expected_policy = {
+        "validation_source": "installed_candidate_only",
+        "failure_journal_update": "after_every_failed_install_or_launch",
+        "failed_candidate_cleanup": "uninstall_before_next_round",
+        "environment_boundary": "candidate_only_preserve_user_environment_and_debug_runtime",
+        "prebuild_checks": "advisory_non_blocking",
+        "provider_credentials_required": False,
+        "success_condition": "installed_aptenra_and_workbench_launch",
+    }
+    for key, expected in expected_policy.items():
+        if policy.get(key) != expected:
+            finding("fact_policy", f"execution_policy.{key} must be {expected!r}.")
 
     liveness = state.get("liveness") if isinstance(state.get("liveness"), dict) else {}
-    if liveness.get("mode") != "idle_nudge" or liveness.get("may_mutate_task_status") is not False:
-        error("liveness_policy", "Liveness must use a non-mutating idle nudge.")
+    if liveness.get("mode") != "idle_nudge":
+        finding("liveness_mode", "Liveness must use the idle nudge.")
+    if liveness.get("may_mutate_task_status") is not False:
+        finding("liveness_mutation", "The nudge must not edit task status.")
     if liveness.get("must_continue_until_terminal") is not True:
-        error("liveness_continuation", "The idle nudge must continue until a terminal condition.")
-    if liveness.get("waiting_is_terminal") is not False:
-        error("liveness_waiting", "Waiting must not be treated as a terminal loop result.")
-    if liveness.get("terminal_conditions") != [
-        "installed_aptenra_and_workbench_launch",
-        "round_30_formal_block",
-    ]:
-        error("liveness_terminal_conditions", "The liveness terminal conditions are incorrect.")
+        finding("liveness_continuation", "The nudge must continue until a terminal result.")
 
-    required_ids = registry.get("required_ids")
-    failure_entries = registry.get("failures")
-    if required_ids != EXPECTED_PFJ_IDS:
-        error("registry_required_ids", "Registry must list PFJ-001 through PFJ-039 exactly once and in order.")
-    if not isinstance(failure_entries, list):
-        error("registry_failures", "Registry failures must be a list.")
-        failure_entries = []
-    failure_ids = [entry.get("pfj_id") for entry in failure_entries if isinstance(entry, dict)]
-    if failure_ids != EXPECTED_PFJ_IDS:
-        error("registry_entries", "Registry entries must cover PFJ-001 through PFJ-039 exactly once and in order.")
-    for entry in failure_entries:
-        if not isinstance(entry, dict):
-            continue
-        for key in ("signature", "block_before", "verification_mode", "required_evidence"):
-            if not _nonempty(entry.get(key)):
-                error("registry_entry_incomplete", f"{entry.get('pfj_id')} is missing {key}.")
+    # Nothing before closeout is allowed to block Build or Install.
+    if phase != "round-close":
+        return {
+            "ok": not findings,
+            "mode": "non_blocking_structure_audit",
+            "phase": phase,
+            "loop_dir": str(loop_dir),
+            "finding_count": len(findings),
+            "findings": findings,
+        }
 
-    reflection = (
-        round_record.get("mandatory_reflection")
-        if isinstance(round_record.get("mandatory_reflection"), dict)
+    actual = (
+        round_record.get("actual_validation")
+        if isinstance(round_record.get("actual_validation"), dict)
         else {}
     )
-    if reflection.get("question_1") != "What mistake did I make last time?":
-        error("round_question_1", "Round question 1 is missing.")
-    if reflection.get("question_2") != "How will I avoid it in the most straightforward way this round?":
-        error("round_question_2", "Round question 2 is missing.")
-    for key in ("answer_1", "answer_2", "material_difference_from_prior_round"):
-        if not _nonempty(reflection.get(key)):
-            error("round_reflection_incomplete", f"Mandatory reflection is missing {key}.")
+    if actual.get("actual_install_attempted") is not True:
+        finding("actual_install_missing", "An installed result requires a real installation attempt.")
+    if actual.get("install_mode") != "human_gui_usecomputer":
+        finding("actual_install_mode", "The installed result must use human_gui_usecomputer.")
+    if actual.get("validation_source") != "installed_msi":
+        finding("installed_source_missing", "The validation source must be the installed MSI.")
+    if actual.get("source_or_unpacked_substituted") is not False:
+        finding("theoretical_substitution", "Source or unpacked results cannot replace installed validation.")
+    if actual.get("aptenra_shortcut_launch_attempted") is not True:
+        finding("aptenra_launch_missing", "The installed Aptenra shortcut launch was not attempted.")
+    if actual.get("workbench_shortcut_launch_attempted") is not True:
+        finding("workbench_launch_missing", "The installed Workbench shortcut launch was not attempted.")
 
-    journal_review = (
-        round_record.get("journal_review")
-        if isinstance(round_record.get("journal_review"), dict)
+    boundary = (
+        round_record.get("environment_boundary")
+        if isinstance(round_record.get("environment_boundary"), dict)
         else {}
     )
-    if journal_review.get("missing_registry_ids"):
-        error("journal_registry_gap", "The Journal contains PFJ IDs missing from the registry.")
-    if journal_review.get("known_signatures_detected"):
-        error("known_signature_recurrence", "A known PFJ signature was detected; candidate is blocked immediately.")
+    if boundary.get("user_environment_unchanged") is not True:
+        finding("user_environment_boundary", "The unrelated user environment was not proved unchanged.")
+    if boundary.get("original_debug_runtime_unchanged") is not True:
+        finding("debug_runtime_boundary", "The original Debug Runtime was not proved unchanged.")
 
-    phase_rank = PHASES[phase]
-    gates = round_record.get("gates") if isinstance(round_record.get("gates"), dict) else {}
-    gate_results = (
-        gates.get("known_failure_results")
-        if isinstance(gates.get("known_failure_results"), dict)
-        else {}
-    )
-    if phase_rank >= 1:
-        for entry in failure_entries:
-            if not isinstance(entry, dict):
-                continue
-            if BLOCK_STAGE.get(str(entry.get("block_before")), 3) > phase_rank:
-                continue
-            pfj_id = str(entry.get("pfj_id"))
-            result = gate_results.get(pfj_id)
-            if not isinstance(result, dict) or result.get("status") not in {"passed", "not_applicable"}:
-                error("historical_gate_not_passed", f"{pfj_id} is not passed or evidenced non-applicable.")
-                continue
-            if result.get("status") == "not_applicable" and not _nonempty(result.get("rationale")):
-                error("gate_waiver_without_rationale", f"{pfj_id} is non-applicable without rationale.")
-            if not _nonempty(result.get("evidence")):
-                error("historical_gate_no_evidence", f"{pfj_id} has no retained evidence.")
-
-    if phase_rank >= 2:
-        if gates.get("candidate_build_allowed") is not True:
-            error("candidate_build_not_allowed", "Candidate build gate has not passed.")
-        if gates.get("candidate_install_allowed") is not True:
-            error("candidate_install_not_allowed", "Candidate install gate has not passed.")
-        candidate = round_record.get("candidate") if isinstance(round_record.get("candidate"), dict) else {}
-        for key in (
-            "candidate_id",
-            "product_code",
-            "product_commit",
-            "packaging_commit",
-            "media_directory",
-            "msi_sha256",
-        ):
-            if not _nonempty(candidate.get(key)):
-                error("candidate_identity_incomplete", f"Candidate identity is missing {key}.")
-
-    if phase_rank >= 3:
-        actual = (
-            round_record.get("actual_validation")
-            if isinstance(round_record.get("actual_validation"), dict)
+    outcome = round_record.get("outcome") if isinstance(round_record.get("outcome"), dict) else {}
+    if outcome.get("status") == "install_dual_launch_accepted":
+        if actual.get("aptenra_user_visible_launch_result") != "success":
+            finding("aptenra_launch_not_successful", "Acceptance requires visible installed Aptenra launch.")
+        if actual.get("workbench_user_visible_launch_result") != "success":
+            finding("workbench_launch_not_successful", "Acceptance requires visible installed Workbench launch.")
+        if actual.get("basic_functions_result") != "success":
+            finding("basic_functions_not_successful", "Acceptance requires the recorded basic-function test.")
+    else:
+        failure = (
+            round_record.get("failure_handling")
+            if isinstance(round_record.get("failure_handling"), dict)
             else {}
         )
-        if actual.get("actual_install_attempted") is not True:
-            error("actual_install_missing", "Round close requires an actual installation attempt.")
-        if actual.get("install_mode") != "human_gui_usecomputer":
-            error("actual_install_mode", "Round close requires human_gui_usecomputer installation mode.")
-        if actual.get("aptenra_shortcut_launch_attempted") is not True:
-            error("aptenra_launch_missing", "Round close requires the installed Aptenra shortcut launch.")
-        if actual.get("workbench_shortcut_launch_attempted") is not True:
-            error("workbench_launch_missing", "Round close requires the installed Workbench shortcut launch.")
-        if actual.get("original_debug_runtime_unchanged") is not True:
-            error("debug_runtime_boundary", "Original Debug Runtime preservation is not proved.")
-        outcome = round_record.get("outcome") if isinstance(round_record.get("outcome"), dict) else {}
-        if outcome.get("status") == "install_dual_launch_accepted":
-            if actual.get("aptenra_user_visible_launch_result") != "success":
-                error("aptenra_launch_not_successful", "Acceptance requires a visible installed Aptenra launch.")
-            if actual.get("workbench_user_visible_launch_result") != "success":
-                error("workbench_launch_not_successful", "Acceptance requires a visible installed Workbench launch.")
-        else:
-            if actual.get("uninstall_attempted") is not True:
-                error("failed_candidate_uninstall_missing", "A failed candidate must be uninstalled before round close.")
-            if actual.get("cleanup_passed") is not True:
-                error("failed_candidate_cleanup_not_passed", "A failed candidate requires zero-residue cleanup.")
+        if failure.get("candidate_failed") is not True:
+            finding("failure_not_classified", "A non-successful installed round must classify the candidate as failed.")
+        if failure.get("journal_updated") is not True or not _nonempty(failure.get("journal_entry")):
+            finding("failure_journal_missing", "Every failed installation or launch must update the Failure Journal.")
+        if failure.get("uninstall_completed") is not True:
+            finding("failed_candidate_uninstall_missing", "The failed candidate must be uninstalled.")
+        if failure.get("cleanup_passed") is not True:
+            finding("failed_candidate_cleanup_missing", "Failed-candidate cleanup must be recorded.")
 
     return {
         "ok": not findings,
+        "mode": "post_fact_audit",
         "phase": phase,
         "loop_dir": str(loop_dir),
         "finding_count": len(findings),
@@ -214,9 +161,9 @@ def validate_round(loop_dir: Path, phase: str) -> dict[str, Any]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Validate an Aptenra packaging Superloop round.")
+    parser = argparse.ArgumentParser(description="Audit an Aptenra packaging fast-loop record.")
     parser.add_argument("--loop-dir", type=Path, required=True)
-    parser.add_argument("--phase", choices=tuple(PHASES), default="structure")
+    parser.add_argument("--phase", choices=PHASES, default="structure")
     args = parser.parse_args()
     report = validate_round(args.loop_dir.resolve(), args.phase)
     print(json.dumps(report, ensure_ascii=False, indent=2))

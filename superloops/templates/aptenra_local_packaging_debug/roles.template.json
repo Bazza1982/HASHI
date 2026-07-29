@@ -3,36 +3,32 @@
     "orchestrator": {
       "default_agent": "zelda",
       "responsibilities": [
-        "ask and answer the mandatory last-mistake question at the start of every round",
-        "review the complete Packaging Failure Journal and arm every historical regression gate",
-        "classify the failing responsibility layer",
-        "approve the smallest correct-layer repair",
-        "explicitly advance tasks only after dependency and evidence review",
-        "review actual /usecomputer installation, launch, function, Repair and Uninstall evidence",
-        "make the round and final acceptance decisions"
+        "keep the loop moving through concrete repair, build, install and test actions",
+        "read only the latest relevant Failure Journal lesson before choosing the smallest repair",
+        "record actual installed results without substituting source or unpacked observations",
+        "on failure update the Journal and uninstall the exact candidate before the next round",
+        "protect the user environment and original Debug Runtime"
       ],
       "must_not": [
-        "allow a known failure signature to recur before blocking the candidate",
+        "turn the Failure Journal into a historical checklist",
         "call build, static checks or unpacked proof an installed validation",
-        "let an idle scheduler mark a pending task in progress",
-        "accept worker self-report without inspecting retained evidence",
-        "alter or stop the original Debug Runtime without new authority"
+        "let an idle scheduler edit task status",
+        "request provider credentials for installation and dual-launch testing",
+        "alter or stop another Aptenra instance or the original Debug Runtime"
       ]
     },
     "executor": {
       "default_agent": null,
       "responsibilities": [
-        "perform only the bounded repair approved for the current round",
-        "preserve failed media and evidence",
-        "build one new candidate identity per round",
+        "apply the smallest repair related to the latest observed failure",
+        "build a new MSI/CAB candidate without waiting on unrelated checks",
         "perform visible interactive installation through /usecomputer",
         "perform actual installed launch and basic-function checks",
-        "perform candidate-specific Repair, Uninstall and cleanup"
+        "on failure preserve evidence, update the Journal, and perform candidate-specific Uninstall"
       ],
       "must_not": [
         "copy credentials or state from another Aptenra instance",
         "repair an installed candidate manually and then accept its original media",
-        "repeat an installation without a new discriminating change",
         "touch another Aptenra instance or the original Debug Runtime",
         "claim success from theory, source inspection, process state, ports or health alone"
       ]
@@ -40,14 +36,12 @@
     "reviewer": {
       "default_agent": null,
       "responsibilities": [
-        "review last-mistake answers and historical gate coverage",
-        "review the diagnosed responsibility layer and repair scope",
-        "review final media identity and preinstall evidence",
-        "review actual installed lifecycle evidence",
-        "reject any repeated known signature or overbroad success wording"
+        "review the exact source and media identity when a candidate is produced",
+        "review the actual installed observation",
+        "confirm failed candidates were journaled and uninstalled"
       ],
       "must_not": [
-        "waive a historical gate without evidence and rationale",
+        "delay Build or Install with unrelated historical checks",
         "treat MSI return code zero as whole-package acceptance",
         "substitute static checks for actual installed user-view tests"
       ]
@@ -55,7 +49,7 @@
     "operator": {
       "default_agent": null,
       "responsibilities": [
-        "provide new authority when the loop reaches an explicit await_human boundary"
+        "provide new authority only for work outside the standing local packaging scope"
       ],
       "must_not": [
         "be treated as implicitly approving reboots, other-instance changes or external publication"
