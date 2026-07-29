@@ -1,0 +1,38 @@
+{
+  "loop_id": "{{LOOP_ID}}",
+  "title": "Aptenra local packaging debug",
+  "template": "aptenra_local_packaging_debug",
+  "status": "paused",
+  "owner_agent": "zelda",
+  "owner_instance": "HASHI1",
+  "current_round": 1,
+  "max_rounds": 30,
+  "scheduler_auto_advance": false,
+  "current_step": null,
+  "next_action": {
+    "kind": "await_operator_start"
+  },
+  "execution_policy": {
+    "mandatory_round_question": "What mistake did I make last time, and how will I avoid it in the most straightforward way this round?",
+    "known_failure_recurrence": "immediate_block",
+    "actual_install_required_for_candidate_validation": true,
+    "actual_install_mode": "human_gui_usecomputer",
+    "failed_candidate_uninstall_before_next_round": true,
+    "failed_media_immutable": true,
+    "one_new_candidate_identity_per_round": true
+  },
+  "liveness": {
+    "mode": "idle_nudge",
+    "interval_minutes": 5,
+    "may_mutate_task_status": false,
+    "stale_after_minutes": 15,
+    "on_stale": "open_loop_stalled_issue_and_resume_smallest_safe_action"
+  },
+  "taskboard_path": "superloops/loops/{{LOOP_ID}}/taskboard.json",
+  "issues_path": "superloops/loops/{{LOOP_ID}}/issues.json",
+  "waits_path": "superloops/loops/{{LOOP_ID}}/waits.json",
+  "events_path": "superloops/loops/{{LOOP_ID}}/events.jsonl",
+  "known_failure_registry_path": "superloops/loops/{{LOOP_ID}}/known_failure_registry.json",
+  "active_round_path": "superloops/loops/{{LOOP_ID}}/rounds/round-01/round.json",
+  "operator_summary_path": "superloops/loops/{{LOOP_ID}}/README.md"
+}

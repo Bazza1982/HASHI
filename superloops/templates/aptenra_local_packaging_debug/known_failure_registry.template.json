@@ -1,0 +1,297 @@
+{
+  "schema_version": 1,
+  "source": "docs/aptenra/APTENRA_PACKAGING_FAILURE_JOURNAL.md",
+  "recurrence_policy": "immediate_block",
+  "required_ids": [
+    "PFJ-001",
+    "PFJ-002",
+    "PFJ-003",
+    "PFJ-004",
+    "PFJ-005",
+    "PFJ-006",
+    "PFJ-007",
+    "PFJ-008",
+    "PFJ-009",
+    "PFJ-010",
+    "PFJ-011",
+    "PFJ-012",
+    "PFJ-013",
+    "PFJ-014",
+    "PFJ-015",
+    "PFJ-016",
+    "PFJ-017",
+    "PFJ-018",
+    "PFJ-019",
+    "PFJ-020",
+    "PFJ-021",
+    "PFJ-022",
+    "PFJ-023",
+    "PFJ-024",
+    "PFJ-025",
+    "PFJ-026",
+    "PFJ-027",
+    "PFJ-028",
+    "PFJ-029",
+    "PFJ-030",
+    "PFJ-031",
+    "PFJ-032",
+    "PFJ-033",
+    "PFJ-034",
+    "PFJ-035"
+  ],
+  "failures": [
+    {
+      "pfj_id": "PFJ-001",
+      "signature": "construction_or_admin_extract_reported_as_install_acceptance",
+      "block_before": "round_close",
+      "verification_mode": "actual_gui_install",
+      "required_evidence": "Exact candidate completes visible install and installed launch; lower-layer evidence is labelled separately."
+    },
+    {
+      "pfj_id": "PFJ-002",
+      "signature": "quoted_directory_argument_ends_with_backslash",
+      "block_before": "build",
+      "verification_mode": "compiled_argument_test",
+      "required_evidence": "Exact effective argument vector passes paths with spaces and trailing separators."
+    },
+    {
+      "pfj_id": "PFJ-003",
+      "signature": "first_visible_fix_without_full_compiled_boundary_proof",
+      "block_before": "build",
+      "verification_mode": "compiled_artifact_and_behavior",
+      "required_evidence": "Compiled MSI action and actual execution are checked after the narrow source repair."
+    },
+    {
+      "pfj_id": "PFJ-004",
+      "signature": "scope_or_authority_overstatement",
+      "block_before": "implementation",
+      "verification_mode": "orchestrator_review",
+      "required_evidence": "Scope, authority, in-scope files and out-of-scope actions are stated literally."
+    },
+    {
+      "pfj_id": "PFJ-005",
+      "signature": "expensive_build_before_cheap_executable_gates",
+      "block_before": "build",
+      "verification_mode": "prebuild_gate",
+      "required_evidence": "Parsing, compiled tables, path fixtures, payload inputs and model locks pass first."
+    },
+    {
+      "pfj_id": "PFJ-006",
+      "signature": "real_install_without_full_verbose_logging",
+      "block_before": "install",
+      "verification_mode": "install_plan_review",
+      "required_evidence": "A candidate-specific /L*Vx! log path is armed before the GUI transaction starts."
+    },
+    {
+      "pfj_id": "PFJ-007",
+      "signature": "empty_custom_action_target",
+      "block_before": "build",
+      "verification_mode": "compiled_msi_probe",
+      "required_evidence": "Every effective custom-action target is non-empty; pure-MSI design preferably has no runtime custom action."
+    },
+    {
+      "pfj_id": "PFJ-008",
+      "signature": "failed_upgrade_removes_previous_product",
+      "block_before": "install",
+      "verification_mode": "lifecycle_design_review",
+      "required_evidence": "Side-by-side media does not upgrade another instance; any upgrade path proves rollback."
+    },
+    {
+      "pfj_id": "PFJ-009",
+      "signature": "partial_local_success_reported_as_stable",
+      "block_before": "round_close",
+      "verification_mode": "layered_acceptance",
+      "required_evidence": "All unrun boundaries are reported beside the exact passed boundary."
+    },
+    {
+      "pfj_id": "PFJ-010",
+      "signature": "standard_user_cannot_read_required_runtime_state",
+      "block_before": "build",
+      "verification_mode": "standard_user_clean_state_launch",
+      "required_evidence": "Ordinary-user first launch works without borrowed credential files."
+    },
+    {
+      "pfj_id": "PFJ-011",
+      "signature": "packaging_patch_changes_product_semantics_to_mask_missing_payload",
+      "block_before": "implementation",
+      "verification_mode": "responsibility_layer_review",
+      "required_evidence": "Missing product capability is fixed in product main; packaging remains payload-first."
+    },
+    {
+      "pfj_id": "PFJ-012",
+      "signature": "dirty_target_or_pending_reboot_before_install",
+      "block_before": "install",
+      "verification_mode": "target_preflight",
+      "required_evidence": "Registration, owned processes, reboot state, pending deletes, disk space and media are inventoried."
+    },
+    {
+      "pfj_id": "PFJ-013",
+      "signature": "diagnosis_drifts_to_unrelated_model_or_backend",
+      "block_before": "implementation",
+      "verification_mode": "evidence_boundary_review",
+      "required_evidence": "The proposed investigation starts from the failing process, path, return code and timestamp."
+    },
+    {
+      "pfj_id": "PFJ-014",
+      "signature": "installer_orchestrates_product_runtime",
+      "block_before": "build",
+      "verification_mode": "wix_boundary_scan",
+      "required_evidence": "MSI installs immutable assets only and contains no runtime setup, process selection or health logic."
+    },
+    {
+      "pfj_id": "PFJ-015",
+      "signature": "packaging_launcher_builds_or_provisions_product",
+      "block_before": "build",
+      "verification_mode": "payload_entry_audit",
+      "required_evidence": "Exact unpacked product entries run before WiX consumes the directory."
+    },
+    {
+      "pfj_id": "PFJ-016",
+      "signature": "credential_copy_or_seed_from_another_instance",
+      "block_before": "build",
+      "verification_mode": "credential_absence_and_source_scan",
+      "required_evidence": "Credential directory is absent before launch and no copy/seed path exists."
+    },
+    {
+      "pfj_id": "PFJ-017",
+      "signature": "development_machine_state_reused_as_clean_proof",
+      "block_before": "build",
+      "verification_mode": "state_provenance",
+      "required_evidence": "A newly created state root or clean standard-user profile is recorded and hashed."
+    },
+    {
+      "pfj_id": "PFJ-018",
+      "signature": "entry_failure_loses_child_exit_or_complete_stderr",
+      "block_before": "build",
+      "verification_mode": "failure_observability_test",
+      "required_evidence": "Structured entry log retains complete child stderr, exit code and phase."
+    },
+    {
+      "pfj_id": "PFJ-019",
+      "signature": "uninstall_leaves_program_files_or_pending_delete_residue",
+      "block_before": "round_close",
+      "verification_mode": "actual_uninstall_residue_audit",
+      "required_evidence": "Zero package-owned Program Files files, shortcuts, services and pending operations remain."
+    },
+    {
+      "pfj_id": "PFJ-020",
+      "signature": "documentation_claims_architecture_before_implementation_matches",
+      "block_before": "build",
+      "verification_mode": "docs_implementation_diff",
+      "required_evidence": "Contract and active implementation files are explicitly reconciled."
+    },
+    {
+      "pfj_id": "PFJ-021",
+      "signature": "proof_accepts_self_declared_pass_fields",
+      "block_before": "build",
+      "verification_mode": "proof_producer_audit",
+      "required_evidence": "Every verdict is derived from timestamped, hash-bound observations."
+    },
+    {
+      "pfj_id": "PFJ-022",
+      "signature": "clean_state_has_no_provider_enrolment_or_offline_path",
+      "block_before": "build",
+      "verification_mode": "actual_clean_unpacked_launch",
+      "required_evidence": "With no credential directory, the payload reaches usable UI, enrolment or authorised offline mode."
+    },
+    {
+      "pfj_id": "PFJ-023",
+      "signature": "startup_failure_does_not_rollback_acquired_host",
+      "block_before": "build",
+      "verification_mode": "startup_failure_injection",
+      "required_evidence": "Each acquired process is tracked immediately and rolled back on later-phase failure."
+    },
+    {
+      "pfj_id": "PFJ-024",
+      "signature": "installed_shortcut_file_argument_unquoted",
+      "block_before": "install",
+      "verification_mode": "decompile_and_actual_shortcut_launch",
+      "required_evidence": "Every final MSI shortcut is decompiled, resolved and actually launched."
+    },
+    {
+      "pfj_id": "PFJ-025",
+      "signature": "unpacked_proof_and_installed_acceptance_share_runtime_state",
+      "block_before": "install",
+      "verification_mode": "identity_inventory",
+      "required_evidence": "Proof and installed acceptance use distinct newly created state roots."
+    },
+    {
+      "pfj_id": "PFJ-026",
+      "signature": "lifecycle_fix_has_static_token_test_only",
+      "block_before": "install",
+      "verification_mode": "behavioral_stop_retry_test",
+      "required_evidence": "Stop, process ownership, ledger removal, state preservation and retry run behaviorally."
+    },
+    {
+      "pfj_id": "PFJ-027",
+      "signature": "identity_mismatch_ledger_deleted_without_live_owner_proof",
+      "block_before": "build",
+      "verification_mode": "dead_and_live_identity_test",
+      "required_evidence": "Only proved-dead stale ledger is archived under mutex; live foreign identity remains fail-closed."
+    },
+    {
+      "pfj_id": "PFJ-028",
+      "signature": "workbench_window_without_correct_agents_transcript_and_poll",
+      "block_before": "build",
+      "verification_mode": "actual_workbench_capability",
+      "required_evidence": "Separate Workbench entry has five agents and transcript/poll both return 200."
+    },
+    {
+      "pfj_id": "PFJ-029",
+      "signature": "credentialed_or_reused_state_described_as_fresh",
+      "block_before": "round_close",
+      "verification_mode": "terminology_and_provenance_review",
+      "required_evidence": "New process, cold restart, new state root and new Windows user are reported distinctly."
+    },
+    {
+      "pfj_id": "PFJ-030",
+      "signature": "proof_generator_contains_literal_pass_verdicts",
+      "block_before": "build",
+      "verification_mode": "proof_source_and_failure_test",
+      "required_evidence": "No pass literals; missing or failed observations make proof generation exit non-zero."
+    },
+    {
+      "pfj_id": "PFJ-031",
+      "signature": "candidate_promoted_before_actual_installed_lifecycle",
+      "block_before": "round_close",
+      "verification_mode": "promotion_state_gate",
+      "required_evidence": "Only exact media completing installed lifecycle receives LIFECYCLE-ACCEPTED-INTERNAL."
+    },
+    {
+      "pfj_id": "PFJ-032",
+      "signature": "test_state_cleaned_after_candidate_proof",
+      "block_before": "build",
+      "verification_mode": "clean_precondition_order",
+      "required_evidence": "Clean-state evidence is captured before the first payload proof."
+    },
+    {
+      "pfj_id": "PFJ-033",
+      "signature": "provider_credential_missing_on_actual_empty_state_launch",
+      "block_before": "build",
+      "verification_mode": "actual_clean_unpacked_launch",
+      "log_patterns": [
+        "provider_credential_missing",
+        "missing_providers"
+      ],
+      "required_evidence": "Actual empty-state payload launch reaches the declared usable first-run behavior."
+    },
+    {
+      "pfj_id": "PFJ-034",
+      "signature": "failed_launch_leaves_unledgered_host_or_breaks_retry",
+      "block_before": "build",
+      "verification_mode": "failure_injection_and_retry",
+      "log_patterns": [
+        "another Aptenra Host instance is already running",
+        "InstanceLockError"
+      ],
+      "required_evidence": "Failure leaves zero orphan processes and a subsequent retry succeeds."
+    },
+    {
+      "pfj_id": "PFJ-035",
+      "signature": "msi_transaction_success_conflated_with_package_acceptance",
+      "block_before": "round_close",
+      "verification_mode": "layered_status_report",
+      "required_evidence": "Media, transaction, entries, runtime, Repair and Uninstall are reported independently."
+    }
+  ]
+}

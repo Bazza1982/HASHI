@@ -1,0 +1,65 @@
+{
+  "roles": {
+    "orchestrator": {
+      "default_agent": "zelda",
+      "responsibilities": [
+        "ask and answer the mandatory last-mistake question at the start of every round",
+        "review the complete Packaging Failure Journal and arm every historical regression gate",
+        "classify the failing responsibility layer",
+        "approve the smallest correct-layer repair",
+        "explicitly advance tasks only after dependency and evidence review",
+        "review actual /usecomputer installation, launch, function, Repair and Uninstall evidence",
+        "make the round and final acceptance decisions"
+      ],
+      "must_not": [
+        "allow a known failure signature to recur before blocking the candidate",
+        "call build, static checks or unpacked proof an installed validation",
+        "let an idle scheduler mark a pending task in progress",
+        "accept worker self-report without inspecting retained evidence",
+        "alter or stop the original Debug Runtime without new authority"
+      ]
+    },
+    "executor": {
+      "default_agent": null,
+      "responsibilities": [
+        "perform only the bounded repair approved for the current round",
+        "preserve failed media and evidence",
+        "build one new candidate identity per round",
+        "perform visible interactive installation through /usecomputer",
+        "perform actual installed launch and basic-function checks",
+        "perform candidate-specific Repair, Uninstall and cleanup"
+      ],
+      "must_not": [
+        "copy credentials or state from another Aptenra instance",
+        "repair an installed candidate manually and then accept its original media",
+        "repeat an installation without a new discriminating change",
+        "touch another Aptenra instance or the original Debug Runtime",
+        "claim success from theory, source inspection, process state, ports or health alone"
+      ]
+    },
+    "reviewer": {
+      "default_agent": null,
+      "responsibilities": [
+        "review last-mistake answers and historical gate coverage",
+        "review the diagnosed responsibility layer and repair scope",
+        "review final media identity and preinstall evidence",
+        "review actual installed lifecycle evidence",
+        "reject any repeated known signature or overbroad success wording"
+      ],
+      "must_not": [
+        "waive a historical gate without evidence and rationale",
+        "treat MSI return code zero as whole-package acceptance",
+        "substitute static checks for actual installed user-view tests"
+      ]
+    },
+    "operator": {
+      "default_agent": null,
+      "responsibilities": [
+        "provide new authority when the loop reaches an explicit await_human boundary"
+      ],
+      "must_not": [
+        "be treated as implicitly approving reboots, other-instance changes or external publication"
+      ]
+    }
+  }
+}
