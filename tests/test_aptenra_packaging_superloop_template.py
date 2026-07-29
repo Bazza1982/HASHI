@@ -81,7 +81,7 @@ def test_template_encodes_user_required_round_and_actual_install_policy() -> Non
     assert state["execution_policy"]["known_failure_recurrence"] == "immediate_block"
     assert state["execution_policy"]["actual_install_required_for_candidate_validation"] is True
     assert state["execution_policy"]["failed_candidate_uninstall_before_next_round"] is True
-    assert registry["required_ids"] == [f"PFJ-{index:03d}" for index in range(1, 39)]
+    assert registry["required_ids"] == [f"PFJ-{index:03d}" for index in range(1, 40)]
     assert [item["pfj_id"] for item in registry["failures"]] == registry["required_ids"]
     assert any(task["phase"] == "actual_installed_validation" for task in taskboard)
     assert "actual GUI install" in readme
@@ -117,7 +117,7 @@ def test_round_close_rejects_theoretical_validation_without_install_and_uninstal
     round_record["gates"]["candidate_install_allowed"] = True
     round_record["gates"]["known_failure_results"] = {
         f"PFJ-{index:03d}": {"status": "passed", "evidence": "test-evidence"}
-        for index in range(1, 39)
+        for index in range(1, 40)
     }
     round_record["candidate"] = {
         "candidate_id": "candidate-test",
