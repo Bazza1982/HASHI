@@ -302,7 +302,7 @@
       "signature": "offline_model_present_without_llama_runtime",
       "block_before": "build",
       "verification_mode": "frozen_runtime_inventory_and_real_completion",
-      "required_evidence": "The exact frozen payload contains the pinned model shards, llama-server and DLL set, resolves them from its own root, and completes one real installed Offline Assist reply."
+      "required_evidence": "Before build, the exact frozen payload contains the pinned model shards, llama-server and DLL set, resolves them from its own root, and completes one real unpacked Offline Assist reply; lifecycle acceptance repeats the reply from the actual installed payload."
     },
     {
       "pfj_id": "PFJ-037",
