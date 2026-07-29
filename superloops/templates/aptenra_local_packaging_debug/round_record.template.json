@@ -1,36 +1,12 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "round_id": "R{{ROUND}}",
   "round_number": "{{ROUND_NUMBER}}",
   "status": "planned",
-  "mandatory_reflection": {
-    "question_1": "What mistake did I make last time?",
-    "answer_1": "",
-    "question_2": "How will I avoid it in the most straightforward way this round?",
-    "answer_2": "",
-    "material_difference_from_prior_round": ""
-  },
-  "journal_review": {
-    "journal_path": "",
-    "journal_commit": "",
-    "journal_pfj_ids": [],
-    "registry_pfj_ids": [],
-    "missing_registry_ids": [],
-    "known_signatures_detected": []
-  },
-  "permissions": {
-    "standing_local_packaging_sop": true,
-    "actual_gui_install_authorised": true,
-    "candidate_repair_authorised": true,
-    "candidate_uninstall_authorised": true,
-    "original_debug_runtime_changes_authorised": false,
-    "reboot_authorised": false,
-    "external_publish_authorised": false
-  },
-  "gates": {
-    "candidate_build_allowed": false,
-    "candidate_install_allowed": false,
-    "known_failure_results": {}
+  "round_focus": {
+    "latest_relevant_failure": "",
+    "smallest_direct_avoidance": "",
+    "failure_journal_path": ""
   },
   "candidate": {
     "candidate_id": null,
@@ -43,18 +19,28 @@
   "actual_validation": {
     "actual_install_attempted": false,
     "install_mode": null,
+    "validation_source": null,
+    "source_or_unpacked_substituted": false,
     "aptenra_shortcut_launch_attempted": false,
     "aptenra_user_visible_launch_result": null,
     "workbench_shortcut_launch_attempted": false,
     "workbench_user_visible_launch_result": null,
-    "uninstall_attempted": false,
-    "cleanup_passed": false,
+    "basic_functions_result": null
+  },
+  "failure_handling": {
+    "candidate_failed": null,
+    "journal_updated": false,
+    "journal_entry": null,
+    "uninstall_completed": false,
+    "cleanup_passed": false
+  },
+  "environment_boundary": {
+    "user_environment_unchanged": null,
     "original_debug_runtime_unchanged": null
   },
   "outcome": {
     "status": "pending",
     "candidate_disposition": null,
-    "journal_updated": false,
     "next_round": null
   }
 }
