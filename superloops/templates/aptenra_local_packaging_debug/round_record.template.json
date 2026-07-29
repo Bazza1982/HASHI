@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "round_id": "R{{ROUND}}",
+  "round_number": "{{ROUND_NUMBER}}",
+  "status": "planned",
+  "mandatory_reflection": {
+    "question_1": "What mistake did I make last time?",
+    "answer_1": "",
+    "question_2": "How will I avoid it in the most straightforward way this round?",
+    "answer_2": "",
+    "material_difference_from_prior_round": ""
+  },
+  "journal_review": {
+    "journal_path": "",
+    "journal_commit": "",
+    "journal_pfj_ids": [],
+    "registry_pfj_ids": [],
+    "missing_registry_ids": [],
+    "known_signatures_detected": []
+  },
+  "permissions": {
+    "standing_local_packaging_sop": true,
+    "actual_gui_install_authorised": true,
+    "candidate_repair_authorised": true,
+    "candidate_uninstall_authorised": true,
+    "original_debug_runtime_changes_authorised": false,
+    "reboot_authorised": false,
+    "external_publish_authorised": false
+  },
+  "gates": {
+    "candidate_build_allowed": false,
+    "candidate_install_allowed": false,
+    "known_failure_results": {}
+  },
+  "candidate": {
+    "candidate_id": null,
+    "product_code": null,
+    "product_commit": null,
+    "packaging_commit": null,
+    "media_directory": null,
+    "msi_sha256": null
+  },
+  "actual_validation": {
+    "actual_install_attempted": false,
+    "install_mode": null,
+    "installed_shortcut_launch_attempted": false,
+    "user_visible_launch_result": null,
+    "basic_functions_attempted": false,
+    "repair_attempted": false,
+    "uninstall_attempted": false,
+    "cleanup_passed": false,
+    "original_debug_runtime_unchanged": null
+  },
+  "outcome": {
+    "status": "pending",
+    "candidate_disposition": null,
+    "journal_updated": false,
+    "next_round": null
+  }
+}
