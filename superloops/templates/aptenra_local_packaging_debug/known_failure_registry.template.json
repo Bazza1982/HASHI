@@ -37,7 +37,8 @@
     "PFJ-032",
     "PFJ-033",
     "PFJ-034",
-    "PFJ-035"
+    "PFJ-035",
+    "PFJ-036"
   ],
   "failures": [
     {
@@ -292,6 +293,13 @@
       "block_before": "round_close",
       "verification_mode": "layered_status_report",
       "required_evidence": "Media, transaction, entries, runtime, Repair and Uninstall are reported independently."
+    },
+    {
+      "pfj_id": "PFJ-036",
+      "signature": "offline_model_present_without_llama_runtime",
+      "block_before": "build",
+      "verification_mode": "frozen_runtime_inventory_and_real_completion",
+      "required_evidence": "The exact frozen payload contains the pinned model shards, llama-server and DLL set, resolves them from its own root, and completes one real installed Offline Assist reply."
     }
   ]
 }
