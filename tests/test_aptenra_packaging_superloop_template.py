@@ -44,11 +44,19 @@ def _write_valid_structure(tmp_path: Path) -> Path:
             ),
             "known_failure_recurrence": "immediate_block",
             "actual_install_required_for_candidate_validation": True,
+            "success_condition": "installed_aptenra_and_workbench_launch",
+            "provider_credentials_required": False,
             "failed_candidate_uninstall_before_next_round": True,
         },
         "liveness": {
             "mode": "idle_nudge",
             "may_mutate_task_status": False,
+            "must_continue_until_terminal": True,
+            "waiting_is_terminal": False,
+            "terminal_conditions": [
+                "installed_aptenra_and_workbench_launch",
+                "round_30_formal_block",
+            ],
         },
         "known_failure_registry_path": "superloops/loops/sl-aptenra-test/known_failure_registry.json",
         "active_round_path": "superloops/loops/sl-aptenra-test/rounds/round-01/round.json",
@@ -80,13 +88,19 @@ def test_template_encodes_user_required_round_and_actual_install_policy() -> Non
     assert state["liveness"]["may_mutate_task_status"] is False
     assert state["execution_policy"]["known_failure_recurrence"] == "immediate_block"
     assert state["execution_policy"]["actual_install_required_for_candidate_validation"] is True
+    assert state["execution_policy"]["success_condition"] == "installed_aptenra_and_workbench_launch"
+    assert state["execution_policy"]["provider_credentials_required"] is False
     assert state["execution_policy"]["failed_candidate_uninstall_before_next_round"] is True
+    assert state["liveness"]["must_continue_until_terminal"] is True
+    assert state["liveness"]["waiting_is_terminal"] is False
     assert registry["required_ids"] == [f"PFJ-{index:03d}" for index in range(1, 40)]
     assert [item["pfj_id"] for item in registry["failures"]] == registry["required_ids"]
     assert any(task["phase"] == "actual_installed_validation" for task in taskboard)
     assert "actual GUI install" in readme
     assert "What mistake did I make last time" in liveness
-    assert "Do not mark a pending task `in_progress` merely because the loop was idle." in liveness
+    assert "do not turn it into an invented user-input wait" in liveness
+    assert "Provider secrets are not required" in liveness
+    assert "Do not merely report status" in liveness
 
 
 def test_structure_validator_passes_with_complete_first_round_reflection(tmp_path: Path) -> None:
@@ -109,7 +123,7 @@ def test_known_failure_recurrence_blocks_on_first_detection(tmp_path: Path) -> N
     assert any(item["code"] == "known_signature_recurrence" for item in report["findings"])
 
 
-def test_round_close_rejects_theoretical_validation_without_install_and_uninstall(tmp_path: Path) -> None:
+def test_round_close_rejects_theoretical_validation_without_install_and_dual_launch(tmp_path: Path) -> None:
     loop_dir = _write_valid_structure(tmp_path)
     round_path = loop_dir / "rounds" / "round-01" / "round.json"
     round_record = json.loads(round_path.read_text(encoding="utf-8"))
@@ -134,5 +148,42 @@ def test_round_close_rejects_theoretical_validation_without_install_and_uninstal
     assert report["ok"] is False
     codes = {item["code"] for item in report["findings"]}
     assert "actual_install_missing" in codes
-    assert "actual_launch_missing" in codes
-    assert "actual_uninstall_missing" in codes
+    assert "aptenra_launch_missing" in codes
+    assert "workbench_launch_missing" in codes
+
+
+def test_successful_dual_launch_does_not_require_uninstall(tmp_path: Path) -> None:
+    loop_dir = _write_valid_structure(tmp_path)
+    round_path = loop_dir / "rounds" / "round-01" / "round.json"
+    round_record = json.loads(round_path.read_text(encoding="utf-8"))
+    round_record["gates"]["candidate_build_allowed"] = True
+    round_record["gates"]["candidate_install_allowed"] = True
+    round_record["gates"]["known_failure_results"] = {
+        f"PFJ-{index:03d}": {"status": "passed", "evidence": "test-evidence"}
+        for index in range(1, 40)
+    }
+    round_record["candidate"] = {
+        "candidate_id": "candidate-test",
+        "product_code": "{00000000-0000-0000-0000-000000000001}",
+        "product_commit": "abc",
+        "packaging_commit": "def",
+        "media_directory": "C:\\candidate-test",
+        "msi_sha256": "0" * 64,
+    }
+    round_record["actual_validation"] = {
+        "actual_install_attempted": True,
+        "install_mode": "human_gui_usecomputer",
+        "aptenra_shortcut_launch_attempted": True,
+        "aptenra_user_visible_launch_result": "success",
+        "workbench_shortcut_launch_attempted": True,
+        "workbench_user_visible_launch_result": "success",
+        "uninstall_attempted": False,
+        "cleanup_passed": False,
+        "original_debug_runtime_unchanged": True,
+    }
+    round_record["outcome"]["status"] = "install_dual_launch_accepted"
+    round_path.write_text(json.dumps(round_record, indent=2), encoding="utf-8")
+
+    report = _validator_module().validate_round(loop_dir, "round-close")
+
+    assert report["ok"] is True

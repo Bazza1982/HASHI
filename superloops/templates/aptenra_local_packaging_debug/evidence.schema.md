@@ -178,6 +178,11 @@ apps_features_registration:
 installed_manifest_match:
 installed_shortcut_actual_launch_attempted: true
 launch_started_at:
+aptenra_shortcut_launch_attempted: true
+aptenra_window_visible:
+workbench_shortcut_launch_attempted: true
+workbench_window_visible:
+provider_credentials_used: false
 launch_finished_at:
 user_visible_launch_result: success | failure
 window_or_error_observed:

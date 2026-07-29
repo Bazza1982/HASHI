@@ -110,26 +110,24 @@
   {
     "task_id": "R{{ROUND}}-08",
     "phase": "actual_installed_validation",
-    "title": "Use /usecomputer for actual GUI install, installed launch, basic functions, lifecycle, Uninstall and residue audit",
+    "title": "Use /usecomputer for actual GUI install and user-visible Aptenra plus Workbench shortcut launches",
     "owner_agent": "zelda",
     "status": "pending",
     "depends_on": ["R{{ROUND}}-07"],
     "required_evidence": [
       "usecomputer_gui_install",
       "msi_transaction",
-      "actual_installed_shortcut_launch",
-      "actual_user_visible_result",
-      "basic_function_results",
-      "stop_cold_restart",
-      "repair_post_repair",
-      "uninstall_cleanup",
+      "actual_installed_aptenra_shortcut_launch",
+      "actual_installed_workbench_shortcut_launch",
+      "actual_user_visible_results",
+      "failed_candidate_uninstall_cleanup_if_needed",
       "original_debug_runtime_unchanged"
     ]
   },
   {
     "task_id": "R{{ROUND}}-09",
     "phase": "round_decision",
-    "title": "Classify round outcome: lifecycle accepted, new failure next round, or known-signature gate failure",
+    "title": "Classify round outcome: installed dual-launch accepted, new failure next round, or known-signature gate failure",
     "owner_agent": "zelda",
     "status": "pending",
     "depends_on": ["R{{ROUND}}-08"],

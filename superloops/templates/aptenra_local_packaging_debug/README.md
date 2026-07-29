@@ -25,6 +25,8 @@ scheduler_auto_advance = false
 known_failure_recurrence = immediate_block
 candidate_validation = actual GUI install + actual standard-user launch
 failed_candidate_cleanup = uninstall before the next round
+success = installed Aptenra launch + installed Workbench launch
+provider_credentials_required = false
 ```
 
 Thirty rounds means at most thirty evidence-led
@@ -111,22 +113,21 @@ Each round follows this order:
      icon, paths, target preconditions and verbose logging.
 10. **Actual user-view validation**
     - Use `/usecomputer` to run the visible interactive installer.
-    - Launch the installed shortcut as an ordinary user.
-    - Record whether the real window appears or the real error appears.
-    - Run the basic Aptenra, Host, HASHI, Primary, Workbench and real-response
-      checks when launch succeeds.
+    - Launch both installed shortcuts as an ordinary user.
+    - Record whether the real Aptenra and Workbench windows appear or which
+      real error appears.
+    - Provider credentials are outside this installation-and-dual-launch
+      acceptance scope and must not become a wait or prerequisite.
     - A theory, source check, unit test, extracted payload, process, port or
       health response never substitutes for this installed test.
-11. **Lifecycle and uninstall**
-    - If the candidate remains viable, test Stop, cold restart, Repair,
-      post-Repair launch and a real response.
-    - Whether the candidate passes or fails, test or perform its Uninstall
+11. **Failed-candidate uninstall**
+    - If installation or either installed launch fails, perform Uninstall
       before the next round.
     - Prove the declared state-retention policy and zero installer-owned
       residue.
 12. **Round decision**
     - `pass`: only when the exact installed media reaches
-      `LIFECYCLE-ACCEPTED-INTERNAL`.
+      `INSTALL-DUAL-LAUNCH-ACCEPTED`.
     - `fail-new`: freeze, diagnose, append Journal entry, uninstall, then
       create the next round.
     - `fail-known`: block the candidate immediately and repair the failed
@@ -144,11 +145,10 @@ The exact accepted sequence is:
 ```text
 new candidate media
 -> visible interactive install via /usecomputer
--> installed shortcut launch as standard user
--> basic user-visible functions
--> Stop and cold restart
--> Repair and post-Repair function check
--> Uninstall and residue audit
+-> installed Aptenra shortcut launch as standard user
+-> installed Workbench shortcut launch as standard user
+-> success: leave the accepted installation in place
+-> failure: Uninstall and residue audit before the next round
 ```
 
 If installation, launch or a basic function fails, record the actual failure
@@ -185,14 +185,19 @@ Liveness is provided separately by an idle nudge:
 2. When the orchestrator becomes idle, the nudge queues a continuation prompt.
 3. The prompt makes the orchestrator read `state.json`, `taskboard.json`,
    `issues.json`, `waits.json`, recent events and the active round record.
-4. If a task is already in progress, the orchestrator continues or diagnoses
-   that task.
+4. If a task is already in progress, the orchestrator takes a concrete
+   continuation action; it must not answer with status alone.
 5. If no task is in progress, the orchestrator checks dependency and evidence
-   gates, then explicitly starts the next permitted card.
+   gates, then explicitly starts the next permitted card in the same turn.
 6. The nudge itself never edits task status, never clicks the GUI and never
    waives a gate.
-7. If no evidence changes within the declared stale interval, the orchestrator
-   opens a `loop_stalled` issue and takes the smallest safe recovery action.
+7. A failed internal gate is work for the loop to diagnose and repair. It must
+   not be converted into an invented secrets or user-input wait.
+8. If no evidence changes within the declared stale interval, the orchestrator
+   opens a `loop_stalled` issue and immediately takes the smallest safe
+   recovery action.
+9. Waiting and status reporting are non-terminal. The nudge remains enabled
+   until installed dual-launch succeeds or round 30 is formally blocked.
 
 This separates two powers:
 
@@ -230,13 +235,12 @@ The loop closes successfully only when:
   non-applicable;
 - no known signature recurred;
 - one exact candidate completed a real GUI install;
-- installed launch and basic functions passed from the user perspective;
-- Stop/cold restart and Repair/post-Repair checks passed;
-- Uninstall and residue checks passed;
+- installed Aptenra launched from its shortcut from the user perspective;
+- installed Workbench launched from its shortcut from the user perspective;
 - the original Debug Runtime remained unchanged;
 - the Failure Journal and candidate ledger are current;
 - no blocker issue or open wait remains; and
-- the exact status is `LIFECYCLE-ACCEPTED-INTERNAL`.
+- the exact status is `INSTALL-DUAL-LAUNCH-ACCEPTED`.
 
 At round 30 without closeout, set the loop to `blocked`, preserve all evidence,
 disable the liveness nudge and report the unresolved technical boundary. Never

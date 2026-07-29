@@ -76,12 +76,25 @@ def validate_round(loop_dir: Path, phase: str) -> dict[str, Any]:
         error("recurrence_policy", "Known failure recurrence must immediately block.")
     if policy.get("actual_install_required_for_candidate_validation") is not True:
         error("actual_install_policy", "Actual installation must be required for candidate validation.")
+    if policy.get("success_condition") != "installed_aptenra_and_workbench_launch":
+        error("success_condition", "Success must require installed Aptenra and Workbench launches.")
+    if policy.get("provider_credentials_required") is not False:
+        error("provider_credentials", "Provider credentials must not gate installation and dual-launch validation.")
     if policy.get("failed_candidate_uninstall_before_next_round") is not True:
         error("uninstall_policy", "Failed candidate Uninstall must be required before the next round.")
 
     liveness = state.get("liveness") if isinstance(state.get("liveness"), dict) else {}
     if liveness.get("mode") != "idle_nudge" or liveness.get("may_mutate_task_status") is not False:
         error("liveness_policy", "Liveness must use a non-mutating idle nudge.")
+    if liveness.get("must_continue_until_terminal") is not True:
+        error("liveness_continuation", "The idle nudge must continue until a terminal condition.")
+    if liveness.get("waiting_is_terminal") is not False:
+        error("liveness_waiting", "Waiting must not be treated as a terminal loop result.")
+    if liveness.get("terminal_conditions") != [
+        "installed_aptenra_and_workbench_launch",
+        "round_30_formal_block",
+    ]:
+        error("liveness_terminal_conditions", "The liveness terminal conditions are incorrect.")
 
     required_ids = registry.get("required_ids")
     failure_entries = registry.get("failures")
@@ -173,19 +186,23 @@ def validate_round(loop_dir: Path, phase: str) -> dict[str, Any]:
             error("actual_install_missing", "Round close requires an actual installation attempt.")
         if actual.get("install_mode") != "human_gui_usecomputer":
             error("actual_install_mode", "Round close requires human_gui_usecomputer installation mode.")
-        if actual.get("installed_shortcut_launch_attempted") is not True:
-            error("actual_launch_missing", "Round close requires an actual installed shortcut launch.")
-        if actual.get("uninstall_attempted") is not True:
-            error("actual_uninstall_missing", "Round close requires candidate Uninstall.")
-        if actual.get("cleanup_passed") is not True:
-            error("cleanup_not_passed", "Round close requires a zero-residue cleanup pass.")
+        if actual.get("aptenra_shortcut_launch_attempted") is not True:
+            error("aptenra_launch_missing", "Round close requires the installed Aptenra shortcut launch.")
+        if actual.get("workbench_shortcut_launch_attempted") is not True:
+            error("workbench_launch_missing", "Round close requires the installed Workbench shortcut launch.")
         if actual.get("original_debug_runtime_unchanged") is not True:
             error("debug_runtime_boundary", "Original Debug Runtime preservation is not proved.")
-        if actual.get("user_visible_launch_result") == "success" and actual.get("basic_functions_attempted") is not True:
-            error("basic_functions_missing", "Successful launch requires actual basic-function tests.")
         outcome = round_record.get("outcome") if isinstance(round_record.get("outcome"), dict) else {}
-        if outcome.get("status") == "lifecycle_accepted" and actual.get("repair_attempted") is not True:
-            error("repair_missing", "Lifecycle acceptance requires actual Repair and post-Repair validation.")
+        if outcome.get("status") == "install_dual_launch_accepted":
+            if actual.get("aptenra_user_visible_launch_result") != "success":
+                error("aptenra_launch_not_successful", "Acceptance requires a visible installed Aptenra launch.")
+            if actual.get("workbench_user_visible_launch_result") != "success":
+                error("workbench_launch_not_successful", "Acceptance requires a visible installed Workbench launch.")
+        else:
+            if actual.get("uninstall_attempted") is not True:
+                error("failed_candidate_uninstall_missing", "A failed candidate must be uninstalled before round close.")
+            if actual.get("cleanup_passed") is not True:
+                error("failed_candidate_cleanup_not_passed", "A failed candidate requires zero-residue cleanup.")
 
     return {
         "ok": not findings,

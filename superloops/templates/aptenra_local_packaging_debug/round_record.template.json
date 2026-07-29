@@ -43,10 +43,10 @@
   "actual_validation": {
     "actual_install_attempted": false,
     "install_mode": null,
-    "installed_shortcut_launch_attempted": false,
-    "user_visible_launch_result": null,
-    "basic_functions_attempted": false,
-    "repair_attempted": false,
+    "aptenra_shortcut_launch_attempted": false,
+    "aptenra_user_visible_launch_result": null,
+    "workbench_shortcut_launch_attempted": false,
+    "workbench_user_visible_launch_result": null,
     "uninstall_attempted": false,
     "cleanup_passed": false,
     "original_debug_runtime_unchanged": null
