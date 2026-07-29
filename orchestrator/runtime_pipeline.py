@@ -10,6 +10,7 @@ import hashlib as _hashlib
 from telegram.error import RetryAfter
 
 from orchestrator.runtime_common import _print_final_response, _safe_excerpt
+from orchestrator.runtime_delivery import format_backend_error_for_user
 from orchestrator import telegram_delivery_failover
 from orchestrator import telegram_stream_policy
 from orchestrator.telegram_notifications import disable_notification
@@ -1071,9 +1072,10 @@ async def handle_backend_error(
         return
     if runtime._should_buffer_during_transfer(item.request_id):
         return
+    user_error_text = format_backend_error_for_user(runtime.config.active_backend, err_msg)
     send_elapsed_s, chunk_count = await runtime.send_long_message(
         chat_id=item.chat_id,
-        text=f"Flex Backend Error ({runtime.config.active_backend}): {err_msg}",
+        text=f"Flex Backend Error ({runtime.config.active_backend}): {user_error_text}",
         request_id=item.request_id,
         purpose="error",
     )

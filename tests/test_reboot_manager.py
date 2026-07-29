@@ -76,6 +76,7 @@ def test_reload_project_modules_loads_model_foundations_before_consumers(monkeyp
     manager_idx = reloaded.index("orchestrator.flexible_backend_manager")
     runtime_idx = reloaded.index("orchestrator.flexible_agent_runtime")
 
+    assert catalog_idx < registry_idx
     assert catalog_idx < adapter_idx < manager_idx < runtime_idx
     assert registry_idx < adapter_idx < manager_idx < runtime_idx
 

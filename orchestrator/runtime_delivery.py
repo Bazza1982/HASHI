@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 from datetime import datetime
 from typing import Any
 
@@ -16,6 +18,62 @@ def _retry_after_seconds(exc: Exception) -> int | None:
     if isinstance(exc, RetryAfter):
         return int(getattr(exc, "retry_after", 0) or 0)
     return None
+
+
+def _extract_backend_error_message(text: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        payload = None
+    if isinstance(payload, dict):
+        nested = payload.get("error")
+        if isinstance(nested, dict):
+            message = str(nested.get("message") or "").strip()
+            if message:
+                return message
+        message = str(payload.get("message") or "").strip()
+        if message:
+            return message
+    return raw
+
+
+def _backend_runtime_name(engine: str) -> str:
+    names = {
+        "codex-cli": "Codex",
+        "claude-cli": "Claude CLI",
+        "gemini-cli": "Gemini CLI",
+        "grok-cli": "Grok CLI",
+        "claw-cli": "Claw CLI",
+    }
+    return names.get(str(engine or "").strip().lower(), str(engine or "").strip() or "backend")
+
+
+def format_backend_error_for_user(engine: str, error_text: str) -> str:
+    raw = str(error_text or "").strip() or "Unknown error"
+    exact = _extract_backend_error_message(raw)
+    lines: list[str] = [f"Exact backend failure: {exact}"]
+
+    if "requires a newer version of" in exact:
+        match = re.search(r"requires a newer version of ([^.]+)", exact, re.IGNORECASE)
+        runtime_name = match.group(1).strip() if match else _backend_runtime_name(engine)
+        lines.append(
+            f"Action: this model is not supported by the installed {runtime_name}. "
+            f"Upgrade {runtime_name} or switch this backend to a model your current {runtime_name} supports."
+        )
+    elif re.search(r"\bmodel\b.*\bnot supported\b", exact, re.IGNORECASE):
+        runtime_name = _backend_runtime_name(engine)
+        lines.append(
+            f"Action: this model is not supported by the current {runtime_name}. "
+            f"Upgrade {runtime_name} or switch to a supported model."
+        )
+
+    if exact != raw:
+        lines.append("")
+        lines.append(f"Raw error: {raw}")
+    return "\n".join(lines).strip()
 
 
 async def send_long_message(
@@ -81,7 +139,7 @@ async def send_long_message(
             header += f" | {request_id}"
 
         max_excerpt = 2400
-        s = (text or "").strip()
+        s = format_backend_error_for_user(runtime.config.active_backend, text)
         if len(s) > max_excerpt:
             head = s[:1200]
             tail = s[-800:]

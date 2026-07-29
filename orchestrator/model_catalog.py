@@ -29,7 +29,7 @@ CLAUDE_MODEL_ALIASES = {
 
 AVAILABLE_CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"]
 
-AVAILABLE_CODEX_MODELS = [
+_ALL_CODEX_MODELS = [
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
@@ -44,6 +44,10 @@ AVAILABLE_CODEX_MODELS = [
 ]
 
 AVAILABLE_CODEX_EFFORTS = ["low", "medium", "high", "xhigh"]
+AVAILABLE_CODEX_MODEL_EFFORTS = {
+    "gpt-5.6-sol": ["low", "medium", "high", "xhigh", "max"],
+}
+AVAILABLE_CODEX_MODELS = list(_ALL_CODEX_MODELS)
 
 AVAILABLE_XAI_API_MODELS = [
     "grok-4.5",

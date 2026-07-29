@@ -127,6 +127,20 @@ async def test_send_long_message_error_uses_plain_summary(tmp_path):
     assert "... (truncated) ..." in message["text"]
 
 
+def test_format_backend_error_for_user_adds_upgrade_action_for_version_gated_model():
+    raw = (
+        '{"type":"error","status":400,"error":{"type":"invalid_request_error",'
+        '"message":"The \'gpt-5.6-sol\' model requires a newer version of Codex. '
+        'Please upgrade to the latest app or CLI and try again."}}'
+    )
+
+    text = runtime_delivery.format_backend_error_for_user("codex-cli", raw)
+
+    assert "Exact backend failure: The 'gpt-5.6-sol' model requires a newer version of Codex." in text
+    assert "Action: this model is not supported by the installed Codex." in text
+    assert "Raw error:" in text
+
+
 @pytest.mark.asyncio
 async def test_send_long_message_skips_retry_after_without_raising(tmp_path):
     runtime = _runtime(tmp_path, bot_error=RetryAfter(123))
