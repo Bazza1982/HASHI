@@ -32,11 +32,47 @@ jobs:
           else
             python scripts/check_protected_core_changes.py --base "$BASE_SHA"
           fi
+      - name: Resolve merged PR approval on main
+        if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
+        id: merged_pr_approval
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pulls = await github.paginate(
+              github.rest.repos.listPullRequestsAssociatedWithCommit,
+              {
+                ...context.repo,
+                commit_sha: context.sha,
+              },
+            );
+            const targetBranch = context.ref.replace("refs/heads/", "");
+            const mergedPulls = pulls.filter(
+              (pull) => pull.merged_at && pull.base.ref === targetBranch,
+            );
+            const approvedPull = mergedPulls.find((pull) =>
+              pull.labels.some((label) =>
+                (typeof label === "string" ? label : label.name) === "core-change-approved",
+              ),
+            );
+            core.setOutput("authorized", approvedPull ? "true" : "false");
+            if (approvedPull) {
+              core.info(`Protected-core approval inherited from merged PR #${approvedPull.number}.`);
+            } else if (mergedPulls.length > 0) {
+              core.warning("Associated merged PR lacks the core-change-approved label.");
+            } else {
+              core.info("No associated merged PR; treating this update as a direct push.");
+            }
       - name: Flag protected-core edits pushed directly to main
         if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
         env:
           BASE_SHA: ${{ github.event.before }}
-        run: python scripts/check_protected_core_changes.py --base "$BASE_SHA"
+          CORE_CHANGE_APPROVED: ${{ steps.merged_pr_approval.outputs.authorized }}
+        run: |
+          if [ "$CORE_CHANGE_APPROVED" = "true" ]; then
+            python scripts/check_protected_core_changes.py --base "$BASE_SHA" --authorized
+          else
+            python scripts/check_protected_core_changes.py --base "$BASE_SHA"
+          fi
       - name: Run architecture contract tests
         run: |
           python -m pip install -r requirements.txt pytest
