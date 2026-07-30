@@ -32,6 +32,16 @@ def _runtime_python_sources() -> list[Path]:
     return sources
 
 
+def test_clean_ci_dependencies_cover_runtime_imports_and_async_tests():
+    requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8").lower()
+    project_config = (ROOT / "pyproject.toml").read_text(encoding="utf-8").lower()
+
+    for dependency in ("pyyaml", "pytest-asyncio"):
+        assert dependency in requirements
+    assert "pyyaml" in project_config
+    assert "pytest-asyncio" in project_config
+
+
 def test_active_runtime_size_ratchet():
     runtime_path = ROOT / "orchestrator" / "flexible_agent_runtime.py"
 
