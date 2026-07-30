@@ -1,21 +1,19 @@
 from __future__ import annotations
 
-from orchestrator.model_catalog import (
-    AVAILABLE_CLAUDE_EFFORTS,
-    AVAILABLE_CLAUDE_MODELS,
-    AVAILABLE_CODEX_EFFORTS,
-    AVAILABLE_CODEX_MODELS,
-    AVAILABLE_CODEX_MODEL_EFFORTS,
-    AVAILABLE_GEMINI_MODELS,
-)
-
 CLI_ENGINES = frozenset({"gemini-cli", "claude-cli", "codex-cli", "claw-cli", "grok-cli"})
 
 BACKEND_REGISTRY: dict[str, dict] = {
     "gemini-cli": {
         "label": "gemini",
+        "gateway_enabled": True,
         "privacy_levels": [0, 1],
-        "models": AVAILABLE_GEMINI_MODELS,
+        "models": [
+            "gemini-3.1-pro-preview",
+            "gemini-3-flash-preview",
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+        ],
         "default_model": "gemini-2.5-flash",
         "efforts": [],
         "default_effort": None,
@@ -23,20 +21,45 @@ BACKEND_REGISTRY: dict[str, dict] = {
     },
     "claude-cli": {
         "label": "claude",
+        "gateway_enabled": True,
         "privacy_levels": [0, 1],
-        "models": AVAILABLE_CLAUDE_MODELS,
+        "models": [
+            "claude-opus-4-7",
+            "claude-sonnet-4-6",
+            "claude-opus-4-6",
+            "claude-haiku-4-5",
+        ],
         "default_model": "claude-sonnet-4-6",
-        "efforts": AVAILABLE_CLAUDE_EFFORTS,
+        "efforts": ["low", "medium", "high", "xhigh", "max"],
         "default_effort": "medium",
         "secret_keys": ["claude-cli_key"],
     },
     "codex-cli": {
         "label": "codex",
+        "gateway_enabled": True,
+        "gateway_default_model": "gpt-5.4",
         "privacy_levels": [0, 1],
-        "models": AVAILABLE_CODEX_MODELS,
+        "models": [
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.5",
+            "gpt-5.3-codex-spark",
+            "gpt-5.4",
+            "gpt-5.3-codex",
+            "gpt-5.2-codex",
+            "gpt-5.2",
+            "gpt-5.1-codex-max",
+            "gpt-5.1-codex-mini",
+        ],
         "default_model": "gpt-5.4",
-        "efforts": AVAILABLE_CODEX_EFFORTS,
-        "model_efforts": AVAILABLE_CODEX_MODEL_EFFORTS,
+        "efforts": ["low", "medium", "high", "xhigh"],
+        # GPT-5.6 Sol is the only Codex model currently documented with the
+        # deeper `max` reasoning tier. Keep this model-specific so the UI
+        # never offers an unverified effort to Terra or Luna.
+        "model_efforts": {
+            "gpt-5.6-sol": ["low", "medium", "high", "xhigh", "max"],
+        },
         "default_effort": "medium",
         "secret_keys": ["codex-cli_key"],
     },
@@ -102,6 +125,7 @@ BACKEND_REGISTRY: dict[str, dict] = {
     },
     "xai-api": {
         "label": "xai",
+        "gateway_enabled": True,
         "privacy_levels": [0, 1, 2],
         "models": [
             "grok-4.5",
@@ -112,6 +136,18 @@ BACKEND_REGISTRY: dict[str, dict] = {
             "grok-4.20-multi-agent-0309",
             "grok-imagine-image",
             "grok-imagine-image-quality",
+        ],
+        "gateway_models": [
+            "grok-4.5",
+            "grok-4.3",
+            "grok-build-0.1",
+            "grok-4.20-0309-reasoning",
+            "grok-4.20-0309-non-reasoning",
+            "grok-4.20-multi-agent-0309",
+            "grok-imagine-image",
+            "grok-imagine-image-quality",
+            "grok-imagine-video",
+            "grok-imagine-video-1.5-preview",
         ],
         "default_model": "grok-4.5",
         "efforts": [],
@@ -178,6 +214,38 @@ def get_backend_label(engine: str) -> str:
 
 def get_available_models(engine: str) -> list[str]:
     return list(get_backend_entry(engine).get("models") or [])
+
+
+def get_gateway_models(engine: str) -> list[str]:
+    entry = get_backend_entry(engine)
+    if not entry.get("gateway_enabled"):
+        return []
+    return list(entry.get("gateway_models") or entry.get("models") or [])
+
+
+def get_all_gateway_models() -> list[str]:
+    models: list[str] = []
+    for engine in BACKEND_REGISTRY:
+        for model in get_gateway_models(engine):
+            if model not in models:
+                models.append(model)
+    return models
+
+
+def get_gateway_engine_for_model(model: str) -> str | None:
+    for engine in BACKEND_REGISTRY:
+        if model in get_gateway_models(engine):
+            return engine
+    return None
+
+
+def get_default_gateway_model() -> str | None:
+    for engine, entry in BACKEND_REGISTRY.items():
+        default_model = str(entry.get("gateway_default_model") or "").strip()
+        if default_model and default_model in get_gateway_models(engine):
+            return default_model
+    models = get_all_gateway_models()
+    return models[0] if models else None
 
 
 def allows_custom_models(engine: str) -> bool:

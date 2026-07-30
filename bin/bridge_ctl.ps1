@@ -43,15 +43,30 @@ $ScriptDir = ([System.IO.Path]::GetFullPath($PSScriptRoot)).TrimEnd('\')
 $ProjectDir = [System.IO.Path]::GetFullPath((Join-Path $ScriptDir "..")).TrimEnd('\')
 $BridgeHome = if ($env:BRIDGE_HOME) { $env:BRIDGE_HOME } else { $ProjectDir }
 $BridgeHome = ([System.IO.Path]::GetFullPath($BridgeHome)).TrimEnd('\')
-$LockFile = Join-Path $BridgeHome ".bridge_u_f.lock"
-$PidFile = Join-Path $BridgeHome ".bridge_u_f.pid"
 $LauncherBat = Join-Path $ScriptDir "bridge-u.bat"
-$MainPyPath = Join-Path $ProjectDir "main.py"
 $AgentsJson = Join-Path $BridgeHome "agents.json"
 if (-not (Test-Path $AgentsJson)) { $AgentsJson = Join-Path $ProjectDir "agents.json" }
 $SecretsJson = Join-Path $BridgeHome "secrets.json"
 if (-not (Test-Path $SecretsJson)) { $SecretsJson = Join-Path $ProjectDir "secrets.json" }
 $WorkbenchPort = 18800
+$PythonExe = if (Test-Path (Join-Path $ProjectDir "python\python.exe")) {
+    Join-Path $ProjectDir "python\python.exe"
+} elseif (Test-Path (Join-Path $ProjectDir ".venv\Scripts\python.exe")) {
+    Join-Path $ProjectDir ".venv\Scripts\python.exe"
+} else {
+    "python"
+}
+$PathResolver = Join-Path $ProjectDir "scripts\resolve_instance_runtime.py"
+try {
+    $LockFile = (& $PythonExe $PathResolver --code-root $ProjectDir --bridge-home $BridgeHome --field lock-path).Trim()
+    $PidFile = (& $PythonExe $PathResolver --code-root $ProjectDir --bridge-home $BridgeHome --field pid-path).Trim()
+    $InstanceId = (& $PythonExe $PathResolver --code-root $ProjectDir --bridge-home $BridgeHome --field instance-id).Trim()
+    if (-not $LockFile -or -not $PidFile) {
+        throw "empty instance runtime path"
+    }
+} catch {
+    throw "Could not resolve instance-scoped process paths: $($_.Exception.Message)"
+}
 
 # Read workbench port from config
 try {
@@ -103,26 +118,15 @@ function Test-BridgeCommandLine {
         return $resolved.Equals($BridgeHome, [System.StringComparison]::OrdinalIgnoreCase)
     }
 
-    $mainPattern = '(?i)(^|["\s])' + [Regex]::Escape($MainPyPath) + '("|\s|$)'
-    return [Regex]::IsMatch($cmd, $mainPattern)
-}
-
-function Test-LauncherCommandLine {
-    param([string]$CommandLine)
-
-    if ([string]::IsNullOrWhiteSpace($CommandLine)) {
-        return $false
-    }
-
-    $launcherPattern = '(?i)(^|["\s])' + [Regex]::Escape($LauncherBat) + '("|\s|$)'
-    return [Regex]::IsMatch($CommandLine, $launcherPattern)
+    # A shared code root can host several bridge homes. Without an explicit
+    # bridge-home argument this controller cannot prove process ownership.
+    return $false
 }
 
 function Get-BridgeProcesses {
     <#
     .DESCRIPTION
-        Find all bridge-u-f related processes.
-        Returns processes for: python main.py, cmd bridge-u.bat, and port listeners.
+        Find Python bridge processes belonging to this exact bridge home.
     #>
     $selfPid = $PID
     $parentPid = (Get-CimInstance Win32_Process -Filter "ProcessId = $selfPid" -ErrorAction SilentlyContinue).ParentProcessId
@@ -155,27 +159,6 @@ function Get-BridgeProcesses {
             continue
         }
         
-        # cmd.exe running bridge-u.bat
-        if ($name -ieq 'cmd.exe' -and (Test-LauncherCommandLine $cmd)) {
-            $targets[$procId] = @{ Name = $name; Cmd = $cmd; Type = "launcher" }
-            continue
-        }
-    }
-    
-    # Add port listeners (workbench API)
-    foreach ($port in $WorkbenchPort, 18801) {
-        try {
-            $conns = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
-            foreach ($conn in $conns) {
-                $owner = [int]$conn.OwningProcess
-                if ($owner -ne $selfPid -and $owner -ne $parentPid -and -not $targets.ContainsKey($owner)) {
-                    $p = $allProcs | Where-Object { $_.ProcessId -eq $owner } | Select-Object -First 1
-                    if ($p) {
-                        $targets[$owner] = @{ Name = $p.Name; Cmd = $p.CommandLine; Type = "port-$port" }
-                    }
-                }
-            }
-        } catch {}
     }
     
     # Expand to include all children (recursively)
@@ -193,10 +176,8 @@ function Get-BridgeProcesses {
                         $childCmd = [string]$p.CommandLine
                         $isBridgeChild =
                             ($childName -ieq 'python.exe' -or $childName -ieq 'py.exe') -and (Test-BridgeCommandLine $childCmd)
-                        $isLauncherChild =
-                            ($childName -ieq 'cmd.exe') -and (Test-LauncherCommandLine $childCmd)
                         $isConsoleChild = $childName -ieq 'conhost.exe'
-                        if ($isBridgeChild -or $isLauncherChild -or $isConsoleChild) {
+                        if ($isBridgeChild -or $isConsoleChild) {
                             $targets[$child] = @{ Name = $p.Name; Cmd = $p.CommandLine; Type = "child" }
                             $queue.Enqueue($child)
                         }
@@ -341,7 +322,7 @@ function Stop-BridgeProcesses {
 function Remove-StaleFiles {
     <#
     .DESCRIPTION
-        Remove lock and PID files if no bridge processes are running.
+        Remove this instance's stale PID file if no bridge process is running.
     #>
     $procs = Get-BridgeProcesses
     if ($procs.Count -gt 0) {
@@ -349,14 +330,9 @@ function Remove-StaleFiles {
         return
     }
     
-    if (Test-Path $LockFile) {
-        Remove-Item $LockFile -Force -ErrorAction SilentlyContinue
-        Write-Log "Removed stale lock file"
-    }
-    
     if (Test-Path $PidFile) {
         Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
-        Write-Log "Removed stale PID file"
+        Write-Log "Removed stale PID file for $InstanceId"
     }
 }
 

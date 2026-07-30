@@ -275,6 +275,7 @@ def _select_failover_runtime_from_state(
 
 def _warn_text(
     *,
+    instance_id: str,
     source_agent: str,
     request_id: str | None,
     retry_after_s: int | None,
@@ -283,7 +284,7 @@ def _warn_text(
     failover_agent: str | None,
 ) -> str:
     lines = [
-        "Delivery warning from HASHI2:",
+        f"Delivery warning from {instance_id}:",
         "",
         f"{source_agent} generated a response, but Telegram delivery is flood-limited.",
     ]
@@ -354,6 +355,10 @@ async def _prepare_warning(
             _save_health_state_sync(path, state)
             return None
         warning_text = _warn_text(
+            instance_id=str(
+                getattr(getattr(source_runtime, "global_config", None), "instance_id", None)
+                or "HASHI"
+            ),
             source_agent=source_runtime.name,
             request_id=request_id,
             retry_after_s=record.get("retry_after_s"),

@@ -180,7 +180,8 @@ load_last_state() {
 
 cmdline_matches_bridge_home() {
     local cmdline="$1"
-    [[ "$cmdline" == *"main.py --bridge-home $SCRIPT_DIR "* || "$cmdline" == *"main.py --bridge-home $SCRIPT_DIR" ]]
+    [[ "$cmdline" == *"main.py --bridge-home $BRIDGE_HOME "* ||
+       "$cmdline" == *"main.py --bridge-home $BRIDGE_HOME" ]]
 }
 
 is_in_last() {
@@ -424,9 +425,14 @@ ensure_env() {
 }
 
 preflight_check() {
-    # Check if bridge-u-f is already running using multiple methods
-    local pid_file="$SCRIPT_DIR/.bridge_u_f.pid"
-    local lock_file="$SCRIPT_DIR/.bridge_u_f.lock"
+    # Resolve process files from this instance home. Never inspect or stop
+    # another HASHI instance on the same computer.
+    local pid_file
+    local instance_id
+    pid_file=$(python3 "$SCRIPT_DIR/scripts/resolve_instance_runtime.py" \
+        --code-root "$BRIDGE_CODE_ROOT" --bridge-home "$BRIDGE_HOME" --field pid-path)
+    instance_id=$(python3 "$SCRIPT_DIR/scripts/resolve_instance_runtime.py" \
+        --code-root "$BRIDGE_CODE_ROOT" --bridge-home "$BRIDGE_HOME" --field instance-id)
     local existing_pid=""
     
     # Method 1: Check PID file
@@ -447,8 +453,7 @@ preflight_check() {
     # Method 2: Search for running main.py process
     if [[ -z "$existing_pid" ]]; then
         # Search all python main.py processes and require an exact bridge-home match.
-        # This avoids prefix collisions such as /home/lily/projects/hashi matching
-        # /home/lily/projects/hashi2.
+        # This avoids prefix collisions such as /opt/hashi matching /opt/hashi2.
         for pid in $(pgrep -f "python.*main.py" 2>/dev/null || true); do
             local cmdline
             cmdline=$(ps -p "$pid" -o args= 2>/dev/null || true)
@@ -461,20 +466,20 @@ preflight_check() {
     
     # No running instance found
     if [[ -z "$existing_pid" ]]; then
-        # Clean up stale files if any
-        rm -f "$pid_file" "$lock_file" 2>/dev/null
+        # The lock file stays in place; the OS lock is authoritative.
+        rm -f "$pid_file" 2>/dev/null
         return 0
     fi
     
     # Verify the PID is valid
     if ! kill -0 "$existing_pid" 2>/dev/null; then
-        rm -f "$pid_file" "$lock_file" 2>/dev/null
+        rm -f "$pid_file" 2>/dev/null
         return 0
     fi
     
     # Process is running - ask user (or auto-kill if --force)
     echo ""
-    echo -e "  ${C_WARN}HASHI is already running (PID $existing_pid)${C_RESET}"
+    echo -e "  ${C_WARN}$instance_id is already running (PID $existing_pid)${C_RESET}"
     echo ""
 
     log_launcher_event "preflight: found existing PID=$existing_pid FORCE=$FORCE_LAUNCH cmdline=$(ps -p "$existing_pid" -o args= 2>/dev/null || echo '?')"
@@ -518,10 +523,10 @@ preflight_check() {
     fi
     
     # Clean up files
-    rm -f "$pid_file" "$lock_file" 2>/dev/null
+    rm -f "$pid_file" 2>/dev/null
     
     echo -e "  ${C_OK}Previous instance stopped.${C_RESET}"
-    log_launcher_event "preflight: previous instance PID=$existing_pid stopped; cleaned stale lock files"
+    log_launcher_event "preflight: instance=$instance_id PID=$existing_pid stopped; cleaned its PID file"
     sleep 1
     return 0
 }
@@ -674,8 +679,7 @@ import json, sys
 try:
     data = json.load(open(sys.argv[1]))
     agents = data.get('agents', [])
-    # Consider onboarding complete once the install has at least one configured
-    # agent; HASHI1 intentionally runs a single custom agent without hashiko.
+    # Consider onboarding complete once this instance has a configured agent.
     sys.exit(0 if agents else 1)
 except Exception:
     sys.exit(1)

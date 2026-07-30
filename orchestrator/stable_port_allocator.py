@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from orchestrator.runtime_defaults import DEFAULT_HASHI_REMOTE_PORT
 
 STATE_FILENAME = "runtime_port_assignments.json"
 LOCK_FILENAME = ".runtime_port_assignments.lock"
@@ -19,7 +20,7 @@ DEFAULT_POOL_MAX = 60999
 DEFAULT_POOL_ATTEMPTS = 96
 SERVICE_HASHI_REMOTE = "hashi_remote"
 
-POPULAR_PORTS = {
+POPULAR_PORTS = frozenset({
     22,
     25,
     53,
@@ -49,7 +50,7 @@ POPULAR_PORTS = {
     8080,
     8443,
     8765,
-    8766,
+    DEFAULT_HASHI_REMOTE_PORT,
     8767,
     8768,
     8769,
@@ -58,7 +59,7 @@ POPULAR_PORTS = {
     9200,
     9300,
     27017,
-}
+})
 
 
 class PortAllocationError(RuntimeError):

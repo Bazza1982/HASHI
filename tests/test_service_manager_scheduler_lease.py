@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sys
 from types import SimpleNamespace
 
@@ -17,6 +18,28 @@ def _manager(tmp_path):
         )
     )
     return ServiceManager(kernel)
+
+
+def test_api_gateway_state_uses_canonical_config_after_legacy_migration(tmp_path):
+    manager = _manager(tmp_path)
+    legacy_path = tmp_path / "api_gateway_state.json"
+    legacy_path.write_text(
+        json.dumps({"enabled": True, "default_model": "grok-4.5"}),
+        encoding="utf-8",
+    )
+
+    state = manager._load_api_gateway_state()
+
+    assert state["enabled"] is True
+    assert state["default_model"] == "grok-4.5"
+    assert manager._api_gateway_state_path() == tmp_path / "state" / "api_gateway_config.json"
+
+    manager._save_api_gateway_state(enabled=False)
+
+    canonical = json.loads(manager._api_gateway_state_path().read_text(encoding="utf-8"))
+    legacy = json.loads(legacy_path.read_text(encoding="utf-8"))
+    assert canonical["enabled"] is False
+    assert legacy["enabled"] is True
 
 
 @pytest.mark.asyncio

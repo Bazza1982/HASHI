@@ -6,6 +6,11 @@ import logging
 import sys
 
 from orchestrator.bootstrap_logging import AnimMute
+from orchestrator.hot_reload import (
+    HotReloadError,
+    discover_loaded_project_modules,
+    preflight_module_sources,
+)
 
 main_logger = logging.getLogger("BridgeU.Orchestrator")
 bridge_logger = logging.getLogger("BridgeU.Bridge")
@@ -20,62 +25,27 @@ class RebootManager:
 
     def rebuild_hot_managers(self):
         """Transactionally rebuild hot-reloadable managers after module reload."""
-        config_cls = sys.modules["orchestrator.config_admin"].ConfigAdmin
-        preflight_cls = sys.modules["orchestrator.backend_preflight"].BackendPreflight
-        lifecycle_cls = sys.modules["orchestrator.agent_lifecycle"].AgentLifecycleManager
-        service_cls = sys.modules["orchestrator.service_manager"].ServiceManager
-        reboot_cls = sys.modules["orchestrator.reboot_manager"].RebootManager
-        whatsapp_cls = sys.modules["orchestrator.whatsapp_manager"].WhatsAppManager
-        skill_cls = sys.modules["orchestrator.skill_manager"].SkillManager
-        startup_cls = sys.modules["orchestrator.startup_manager"].StartupManager
-        shutdown_cls = sys.modules["orchestrator.shutdown_manager"].ShutdownManager
-
-        new_skill_manager = skill_cls(self.kernel.paths.code_root, self.kernel.paths.tasks_path)
-        new_config_admin = config_cls(self.kernel.paths)
-        new_backend_preflight = preflight_cls()
-        new_agent_lifecycle = lifecycle_cls(self.kernel)
-        new_service_manager = service_cls(self.kernel)
-        new_reboot_manager = reboot_cls(self.kernel, self.console_handler)
-        new_shutdown_manager = shutdown_cls(self.kernel)
-        new_startup_manager = startup_cls(self.kernel, self.console_handler)
-        new_whatsapp_manager = whatsapp_cls(self.kernel)
-
-        self.kernel.skill_manager = new_skill_manager
-        self.kernel.config_admin = new_config_admin
-        self.kernel.backend_preflight = new_backend_preflight
-        self.kernel.agent_lifecycle = new_agent_lifecycle
-        self.kernel.service_manager = new_service_manager
-        self.kernel.reboot_manager = new_reboot_manager
-        self.kernel.shutdown_manager = new_shutdown_manager
-        self.kernel.startup_manager = new_startup_manager
-        self.kernel.whatsapp_manager = new_whatsapp_manager
+        registry = importlib.import_module("orchestrator.manager_registry")
+        bundle = registry.build_hot_manager_bundle(self.kernel, self.console_handler)
+        registry.install_hot_manager_bundle(self.kernel, bundle)
         main_logger.info(
             "Hot reload: rebuilt skill, config, backend preflight, agent lifecycle, service, reboot, shutdown, startup, and WhatsApp managers."
         )
 
-    def reload_project_modules(self):
+    def preflight_project_modules(self) -> list[str]:
+        code_root = getattr(getattr(self.kernel, "paths", None), "code_root", None)
+        module_names = discover_loaded_project_modules(code_root=code_root)
+        if code_root is not None:
+            checked = preflight_module_sources(module_names, code_root=code_root)
+            main_logger.info("Hot reload preflight: compiled %s source files.", len(checked))
+        return module_names
+
+    def reload_project_modules(self, module_names: list[str] | None = None):
         """Reload project Python modules so hot restart picks up code changes."""
-        prefixes = ("adapters.", "tools.", "orchestrator.")
-        foundation_order = {
-            "orchestrator.model_catalog": 0,
-            "orchestrator.flexible_backend_registry": 1,
-        }
-
-        def _reload_key(name: str):
-            # Reload shared model/capability data before every consumer. This
-            # guarantees that /reboot alone picks up catalog and effort changes
-            # before adapters, managers, and agent runtimes re-import them.
-            if name in foundation_order:
-                return (0, foundation_order[name], name)
-            if name.startswith(("adapters.", "tools.")):
-                return (1, 0, name)
-            if "_runtime" in name:
-                return (3, 0, name)
-            return (2, 0, name)
-
-        to_reload = sorted(
-            (name for name in list(sys.modules) if any(name.startswith(prefix) for prefix in prefixes)),
-            key=_reload_key,
+        to_reload = (
+            module_names
+            if module_names is not None
+            else discover_loaded_project_modules()
         )
         reloaded = []
         for name in to_reload:
@@ -86,7 +56,10 @@ class RebootManager:
                 importlib.reload(module)
                 reloaded.append(name)
             except Exception as e:
-                main_logger.warning("Hot reload failed for %s: %s", name, e)
+                raise HotReloadError(
+                    f"Hot reload failed after {len(reloaded)} modules while reloading {name}: "
+                    f"{type(e).__name__}: {e}"
+                ) from e
         if reloaded:
             main_logger.info("Hot reload: reloaded %s modules.", len(reloaded))
 
@@ -114,6 +87,18 @@ class RebootManager:
         boot_state = {name: "pending" for name in targets}
         boot_reason = {}
 
+        try:
+            module_names = self.preflight_project_modules()
+        except HotReloadError as exc:
+            main_logger.error("%s", exc)
+            bridge_logger.error("Hot restart preflight rejected: %s", exc)
+            print(
+                "\033[38;5;203m  ✗ reboot rejected — source preflight failed; "
+                "running agents were not touched\033[0m\n",
+                flush=True,
+            )
+            return False
+
         main_logger.info("Hot restart: stopping %s agent(s): %s", len(targets), targets)
         bridge_logger.warning(
             "Hot restart begin (mode=%s, requester=%s, number=%s, targets=%s)",
@@ -129,8 +114,20 @@ class RebootManager:
                 main_logger.warning("Hot restart: failed to stop '%s': %s", name, e)
                 bridge_logger.warning("Hot restart failed to stop '%s': %s: %s", name, type(e).__name__, e)
 
-        self.reload_project_modules()
-        self.rebuild_hot_managers()
+        reload_error: HotReloadError | None = None
+        try:
+            self.reload_project_modules(module_names)
+            self.rebuild_hot_managers()
+        except HotReloadError as exc:
+            reload_error = exc
+            main_logger.critical("%s", exc)
+            bridge_logger.critical("Hot restart reload failed: %s", exc)
+        except Exception as exc:
+            reload_error = HotReloadError(
+                f"Hot manager rebuild failed: {type(exc).__name__}: {exc}"
+            )
+            main_logger.critical("%s", reload_error)
+            bridge_logger.critical("Hot manager rebuild failed: %s", reload_error)
 
         main_logger.info("Hot restart: starting agents: %s", targets)
         try:
@@ -192,13 +189,27 @@ class RebootManager:
         finally:
             self.console_handler.removeFilter(mute)
 
-        await self.kernel.service_manager.restart_scheduler()
+        if reload_error is None:
+            await self.kernel.service_manager.refresh_hot_services()
 
+        if reload_error is not None:
+            main_logger.error(
+                "Hot restart failed; stopped agents were restored with the last usable managers. "
+                "A cold process restart is required before another hot reload."
+            )
+            print(
+                "\033[38;5;203m  ✗ reboot failed — agents restored where possible; "
+                "cold restart required\033[0m\n",
+                flush=True,
+            )
+            return False
         if self.kernel.runtimes:
             main_logger.info("Hot restart complete. %s agent(s) running.", len(self.kernel.runtimes))
             bridge_logger.warning("Hot restart complete (%s agent(s) running)", len(self.kernel.runtimes))
             print(f"\033[38;5;108m  ✓ reboot complete — {len(self.kernel.runtimes)} agent(s) online\033[0m\n", flush=True)
+            return True
         else:
             main_logger.critical("Hot restart: no agents running after restart.")
             bridge_logger.critical("Hot restart failed: no agents running after restart")
             print("\033[38;5;203m  ✗ reboot failed — no agents running\033[0m\n", flush=True)
+            return False

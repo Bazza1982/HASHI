@@ -27,8 +27,14 @@ def _load_config(project_root: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _current_instance(project_root: Path) -> str:
-    return str(detect_instance(project_root) or "").upper() or "HASHI1"
+def _current_instance(
+    project_root: Path,
+    configured_instance_id: str | None = None,
+) -> str:
+    return (
+        str(detect_instance(project_root, configured_instance_id) or "").upper()
+        or "HASHI"
+    )
 
 
 def _targets_map(project_root: Path) -> dict[str, dict[str, Any]]:
@@ -43,10 +49,13 @@ def _targets_map(project_root: Path) -> dict[str, dict[str, Any]]:
     return result
 
 
-def private_wol_available(project_root: Path) -> bool:
+def private_wol_available(
+    project_root: Path,
+    configured_instance_id: str | None = None,
+) -> bool:
     data = _load_config(project_root)
     allowed = [str(x).upper() for x in (data.get("allowed_instances") or []) if str(x).strip()]
-    if allowed and _current_instance(project_root) not in allowed:
+    if allowed and _current_instance(project_root, configured_instance_id) not in allowed:
         return False
     return bool(_targets_map(project_root))
 
@@ -114,8 +123,13 @@ def _build_command(target_cfg: dict[str, Any]) -> list[str]:
     raise ValueError(f"unsupported runner: {runner}")
 
 
-def run_private_wol(project_root: Path, target_name: str, timeout_s: int = 45) -> dict[str, Any]:
-    instance = _current_instance(project_root)
+def run_private_wol(
+    project_root: Path,
+    target_name: str,
+    timeout_s: int = 45,
+    configured_instance_id: str | None = None,
+) -> dict[str, Any]:
+    instance = _current_instance(project_root, configured_instance_id)
     data = _load_config(project_root)
     allowed = [str(x).upper() for x in (data.get("allowed_instances") or []) if str(x).strip()]
     if allowed and instance not in allowed:

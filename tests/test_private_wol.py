@@ -7,6 +7,10 @@ def _write_config(root: Path, text: str) -> None:
     private_dir = root / "private"
     private_dir.mkdir(parents=True, exist_ok=True)
     (private_dir / "wol_targets.json").write_text(text, encoding="utf-8")
+    (root / "agents.json").write_text(
+        '{"global": {"instance_id": "HASHI1"}, "agents": []}',
+        encoding="utf-8",
+    )
 
 
 def test_private_wol_available_when_hashi1_and_target_present(tmp_path: Path):

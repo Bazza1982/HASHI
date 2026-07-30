@@ -10,6 +10,7 @@ from orchestrator.api_gateway import APIGatewayServer
 from orchestrator.api_gateway_config import (
     available_api_models,
     config_path_for,
+    legacy_state_path_for,
     load_api_gateway_config,
     save_api_gateway_config,
 )
@@ -46,6 +47,32 @@ def test_api_gateway_config_defaults_and_persistence(tmp_path):
     assert saved["enabled"] is True
     assert saved["default_model"] == "gpt-5.5"
     assert json.loads(config_path_for(cfg).read_text(encoding="utf-8"))["updated_by"] == "telegram:123"
+
+
+def test_api_gateway_config_migrates_legacy_state_once(tmp_path):
+    cfg = _global_config(tmp_path)
+    legacy_path = legacy_state_path_for(cfg)
+    legacy_path.write_text(
+        json.dumps({"enabled": True, "default_model": "grok-4.5"}),
+        encoding="utf-8",
+    )
+
+    loaded = load_api_gateway_config(cfg)
+
+    assert loaded["enabled"] is True
+    assert loaded["default_model"] == "grok-4.5"
+    assert loaded["updated_by"] == "legacy-state-migration"
+    assert config_path_for(cfg).exists()
+    assert legacy_path.exists()
+
+    legacy_path.write_text(
+        json.dumps({"enabled": False, "default_model": "gpt-5.5"}),
+        encoding="utf-8",
+    )
+    loaded_again = load_api_gateway_config(cfg)
+
+    assert loaded_again["enabled"] is True
+    assert loaded_again["default_model"] == "grok-4.5"
 
 
 def test_api_gateway_default_model_list_includes_grok_models():
@@ -146,8 +173,28 @@ async def test_api_gateway_health_reports_default_model(tmp_path):
     assert response.status == 200
     body = json.loads(response.text)
     assert body["enabled"] is True
+    assert body["running"] is False
+    assert body["configured_enabled"] is True
     assert body["default_model"] == "gpt-5.5"
     assert body["port"] == 18801
+
+
+@pytest.mark.asyncio
+async def test_api_gateway_health_reports_live_runtime_separately_from_config(tmp_path):
+    global_config = _global_config(tmp_path, api_gateway_port=0)
+    server = APIGatewayServer(global_config, secrets={}, workspace_root=tmp_path / "workspaces")
+
+    await server.start()
+    try:
+        response = await server.handle_health(_FakeRequest({}))
+        body = json.loads(response.text)
+        assert body["enabled"] is True
+        assert body["running"] is True
+        assert body["configured_enabled"] is False
+    finally:
+        await server.stop()
+
+    assert server.enabled is False
 
 
 @pytest.mark.asyncio

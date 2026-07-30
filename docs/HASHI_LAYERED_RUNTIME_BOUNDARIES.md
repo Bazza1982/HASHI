@@ -19,6 +19,49 @@ The core stays stable across platforms and instances. Feature changes should
 land in hot-reloadable functions or configuration layers. Pulling from `main`
 must not erase local platform or instance configuration.
 
+## Canonical Engineering Rule
+
+> Design for high cohesion, low coupling, a single source of truth, and
+> localized change.
+
+HASHI applies that rule together with DRY, separation of concerns, SRP,
+encapsulation, KISS, and YAGNI:
+
+- One rule or piece of state has one authoritative owner.
+- A normal feature change should have one primary implementation location and
+  focused tests. Compatibility exports may derive from that owner, but must not
+  copy its data.
+- UI, business behavior, persistence, process bootstrap, platform adaptation,
+  and instance adoption stay in separate modules.
+- A module should have one principal reason to change. Related behavior stays
+  together; unrelated behavior crosses a narrow public interface.
+- Callers depend on public contracts, not another module's file layout or
+  private state representation.
+- Add an abstraction only when it removes current duplication or protects an
+  existing boundary. Do not build speculative extension frameworks.
+
+If a small requirement requires synchronized edits across many unrelated
+files, treat it as **Shotgun Surgery**. Stop and first identify the missing
+owner, registry, adapter, or persistence boundary. A compatibility view is
+acceptable only when it is mechanically derived from the authoritative source.
+
+Current authoritative owners include:
+
+| Knowledge or lifecycle rule | Authoritative owner |
+|---|---|
+| backend models, effort, aliases, API-gateway eligibility | `orchestrator/flexible_backend_registry.py` |
+| built-in slash handler, menu, help group, alias, sensitivity | `orchestrator/command_specs.py` |
+| cold/hot manager construction | `orchestrator/manager_registry.py` |
+| hot-reload discovery, ordering, and source preflight | `orchestrator/hot_reload.py` |
+| shared workspace `state.json` persistence | `orchestrator/workspace_state.py` |
+| instance process lock and PID paths | `orchestrator/pathing.py` |
+| compatibility port defaults | `orchestrator/runtime_defaults.py` |
+| stable Remote port candidate/allocation policy | `orchestrator/stable_port_allocator.py` |
+| local instance identity and ports | ignored `agents.json` / `instances.json` |
+
+When adding a fact covered by this table, extend its owner and derive consumer
+views. Do not create another literal list or direct file writer.
+
 ## Layer 1: HASHI Core
 
 Purpose: stable process bootstrap, kernel state, and compatibility contracts.
@@ -56,10 +99,14 @@ is a human-readable copy and must not be treated as the source of truth:
 
 ```yaml
 protected_core_paths:
+  - __main__.py
   - main.py
-  - orchestrator/kernel.py
-  - orchestrator/reboot_manager.py
+  - orchestrator/config.py
   - orchestrator/instance_lock.py
+  - orchestrator/pathing.py
+  - orchestrator/manager_registry.py
+  - orchestrator/hot_reload.py
+  - orchestrator/reboot_manager.py
   - orchestrator/startup_manager.py
   - orchestrator/shutdown_manager.py
   - remote/protocol_manager.py
@@ -95,8 +142,9 @@ If the user explicitly authorizes a core edit, rerun with:
 python scripts/check_protected_core_changes.py --authorized
 ```
 
-or set `HASHI_CORE_EDIT_AUTHORIZED=1` for that check. This guard is intentionally
-non-invasive at first; it can later be wired into CI or pre-commit.
+or set `HASHI_CORE_EDIT_AUTHORIZED=1` for that check. CI validates the manifest
+and requires the `core-change-approved` pull-request label when protected paths
+change.
 
 ## Layer 2: HASHI Functions
 
@@ -181,6 +229,52 @@ Rules:
   preserved.
 - Runtime should fail with actionable diagnostics instead of silently falling
   back to a conflicting default.
+
+### Per-instance process ownership
+
+The process lock is scoped to the instance's local `bridge_home`, under:
+
+```text
+<bridge_home>/state/instance/process.lock
+<bridge_home>/state/instance/process.pid
+```
+
+Only a duplicate process for the same instance may be blocked or stopped.
+HASHI1, HASHI2, HASHI9, and any other configured instances may run concurrently
+on one computer when each has its own `bridge_home`. The path intentionally
+does not change when `instance_id` is renamed, because the same local files
+must never be served by two processes. Launchers and control scripts must
+resolve these paths through `orchestrator.pathing`; they must not scan and kill
+every `main.py` process or assume a repository-wide `.bridge_u_f.pid`.
+
+The lock file is persistent. The operating-system file lock, not file
+existence, is authoritative. This avoids the unlock/delete inode race.
+
+## Hot-change contract
+
+Tracked feature and adoption behavior should be usable after `/reboot` whenever
+the process bootstrap contract itself did not change:
+
+1. Compile all loaded project sources before stopping an agent.
+2. Reject the reboot without touching running agents if preflight fails.
+3. Reload dependencies before consumers and fail fast on the first reload
+   error; never continue into a mixed manager rebuild silently.
+4. Build the complete manager bundle before installing any replacement.
+5. Restart selected agents.
+6. Recreate warm services—Workbench API, enabled API Gateway, scheduler,
+   delivery watcher, and background jobs—only after a successful reload.
+7. Keep the process lock, kernel identity, and live WhatsApp transport outside
+   the warm-service refresh.
+
+Changing process bootstrap, the lock implementation, or native process
+supervision still requires a cold restart. That exception must be explicit in
+the change notes. `orchestrator.hot_reload.COLD_RESTART_MODULES` excludes the
+live process lock and path-identity modules from `/reboot`; pretending to reload
+them would leave the already-held lock unchanged.
+
+Hot reload discovery is also rooted to the checked-out project. A third-party
+module whose name happens to start with `tools.` or `orchestrator.` must never
+be reloaded.
 
 ## Stable Random Port Allocation
 
@@ -303,3 +397,4 @@ Changes that touch these boundaries require focused checks:
 - platform config touched: at least one WSL/Windows/macOS-relevant fixture;
 - instance config touched: migration test preserving existing local values;
 - port allocation touched: collision, persistence, and legacy migration tests.
+- every pull request: `.github/workflows/architecture-boundaries.yml`.

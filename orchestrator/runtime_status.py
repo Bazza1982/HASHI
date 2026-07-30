@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Any, Mapping
 
 from orchestrator.audit_mode import load_audit_config, visible_audit_criteria
+from orchestrator.memory_plus_mode import get_memory_plus_status
 from orchestrator import telegram_delivery_failover
 from orchestrator import telegram_stream_policy
 from orchestrator.wrapper_mode import load_wrapper_config, visible_wrapper_slots
@@ -182,6 +183,7 @@ def build_status_text(runtime, detailed: bool = False) -> str:
         state_snapshot = runtime.backend_manager.get_state_snapshot()
     except Exception:
         state_snapshot = {}
+    memory_plus = get_memory_plus_status(runtime.workspace_dir)
     current_effort = runtime._get_current_effort() or "n/a"
     session_id_short = "none"
     if mode_str == "fixed" and getattr(runtime.backend_manager, "current_backend", None):
@@ -195,6 +197,15 @@ def build_status_text(runtime, detailed: bool = False) -> str:
         f"🔀 Mode: {mode_str}",
         f"⚙️ Active backend: {runtime.config.active_backend} • {runtime.get_current_model()}",
         f"🎛️ Model effort: {current_effort}",
+        (
+            f"🧠 Memory+: {'ON' if memory_plus['enabled'] else 'OFF'}"
+            f" • {memory_plus['open_items']} open"
+            + (
+                f" • carried from {memory_plus['carryover_from']}"
+                if memory_plus["carryover_from"]
+                else ""
+            )
+        ),
     ]
     if mode_str == "fixed":
         lines.append(f"🧷 Session: {session_id_short}")
@@ -235,6 +246,8 @@ def build_status_text(runtime, detailed: bool = False) -> str:
                 f"🔁 Retry Cache: prompt {'yes' if runtime.last_prompt else 'no'} • response {'yes' if runtime.last_response else 'no'}",
                 f"🧷 Primers: FYI {'armed' if runtime._pending_session_primer else 'clear'} • auto-recall {'armed' if runtime._pending_auto_recall_context else 'clear'}",
                 f"📚 Bridge Memory: {runtime.memory_store.get_stats()['turns']} turns • {runtime.memory_store.get_stats()['memories']} memories",
+                f"🧠 Memory+ Card: {memory_plus['today_chars']} chars • "
+                f"{memory_plus['history_days']} archived days • {memory_plus['state_path']}",
                 f"📘 Handoff Files: recent {'yes' if runtime.recent_context_path.exists() else 'no'} • handoff {'yes' if runtime.handoff_path.exists() else 'no'}",
                 f"🔍 Verbose: {'ON' if runtime._verbose else 'OFF'}",
                 f"💭 Think: {'ON' if runtime._think else 'OFF'}",

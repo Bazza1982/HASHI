@@ -37,7 +37,7 @@ def _runtime(tmp_path: Path, name: str, *, preview_default: bool = True):
             },
             telegram_token_key=name,
         ),
-        global_config=SimpleNamespace(project_root=tmp_path),
+        global_config=SimpleNamespace(project_root=tmp_path, instance_id="HASHI2"),
         app=SimpleNamespace(bot=_Bot()),
         telegram_connected=True,
         startup_success=True,

@@ -14,6 +14,8 @@ from aiohttp import ClientSession, web
 
 from browser_gateway.audit import OLLAuditLogger
 from browser_gateway.store import BrowserGatewayStore
+from orchestrator.pathing import resolve_instance_id
+from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_URL
 
 logger = logging.getLogger("hashi.oll_gateway")
 
@@ -64,12 +66,13 @@ class BrowserGatewayServer:
         project_root: Path,
         host: str = "127.0.0.1",
         port: int = 8876,
-        workbench_url: str = "http://127.0.0.1:18800",
+        workbench_url: str = DEFAULT_WORKBENCH_URL,
         state_db: Path,
         audit_log: Path,
         public_base_url: str = "",
     ):
         self.project_root = project_root
+        self.instance_id = resolve_instance_id(project_root / "agents.json").upper()
         self.host = host
         self.port = port
         self.workbench_url = workbench_url.rstrip("/")
@@ -282,7 +285,7 @@ class BrowserGatewayServer:
         if not agent_id:
             return self._json({"ok": False, "error": "agent_id is required"}, status=400)
         title = str(payload.get("title") or "").strip()
-        instance_id = str(payload.get("instance_id") or "HASHI1").strip().upper()
+        instance_id = str(payload.get("instance_id") or self.instance_id).strip().upper()
         thread = self.store.create_thread(device["device_id"], agent_id=agent_id, title=title, instance_id=instance_id)
         self.audit.log("thread_created", device_id=device["device_id"], thread_id=thread["thread_id"], agent_id=agent_id, instance_id=instance_id)
         return self._json({"ok": True, "thread": thread})

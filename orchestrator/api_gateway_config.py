@@ -7,26 +7,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from orchestrator.model_catalog import (
-    AVAILABLE_CLAUDE_MODELS,
-    AVAILABLE_CODEX_MODELS,
-    AVAILABLE_GEMINI_MODELS,
-    AVAILABLE_XAI_API_MODELS,
-)
+from orchestrator.model_catalog import available_gateway_models, default_gateway_model
 
 
 API_GATEWAY_CONFIG_NAME = "api_gateway_config.json"
-DEFAULT_API_MODEL = "gpt-5.4"
+LEGACY_API_GATEWAY_STATE_NAME = "api_gateway_state.json"
 logger = logging.getLogger("BridgeU.ApiGatewayConfig")
 
 
 def available_api_models() -> list[str]:
-    return [
-        *AVAILABLE_GEMINI_MODELS,
-        *AVAILABLE_CLAUDE_MODELS,
-        *AVAILABLE_CODEX_MODELS,
-        *AVAILABLE_XAI_API_MODELS,
-    ]
+    return available_gateway_models()
 
 
 def normalize_api_model(value: str | None) -> str | None:
@@ -44,15 +34,68 @@ def normalize_api_model(value: str | None) -> str | None:
 
 
 def default_api_model() -> str:
-    return DEFAULT_API_MODEL if DEFAULT_API_MODEL in available_api_models() else available_api_models()[0]
+    configured_default = default_gateway_model()
+    models = available_api_models()
+    return configured_default if configured_default in models else (models[0] if models else "")
+
+
+def _bridge_home_for(global_config: Any) -> Path:
+    bridge_home = Path(getattr(global_config, "bridge_home", "") or getattr(global_config, "project_root", "."))
+    return bridge_home
 
 
 def config_path_for(global_config: Any) -> Path:
-    bridge_home = Path(getattr(global_config, "bridge_home", "") or getattr(global_config, "project_root", "."))
-    return bridge_home / "state" / API_GATEWAY_CONFIG_NAME
+    return _bridge_home_for(global_config) / "state" / API_GATEWAY_CONFIG_NAME
+
+
+def legacy_state_path_for(global_config: Any) -> Path:
+    return _bridge_home_for(global_config) / LEGACY_API_GATEWAY_STATE_NAME
+
+
+def _write_config_atomic(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def migrate_legacy_api_gateway_state(global_config: Any) -> bool:
+    """Seed the canonical config from the legacy root-level state once.
+
+    The legacy file is intentionally retained as a rollback artifact, but it
+    stops being a runtime source after the canonical config exists.
+    """
+    path = config_path_for(global_config)
+    legacy_path = legacy_state_path_for(global_config)
+    if path.exists() or not legacy_path.exists():
+        return False
+
+    try:
+        loaded = json.loads(legacy_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("Failed to migrate legacy API Gateway state %s: %s", legacy_path, exc)
+        return False
+    if not isinstance(loaded, dict):
+        logger.warning("Failed to migrate legacy API Gateway state %s: expected an object", legacy_path)
+        return False
+
+    migrated = {
+        "enabled": bool(loaded.get("enabled", False)),
+        "default_model": normalize_api_model(loaded.get("default_model")) or default_api_model(),
+        "updated_at": str(loaded.get("updated_at") or datetime.now(timezone.utc).isoformat()),
+        "updated_by": str(loaded.get("updated_by") or "legacy-state-migration"),
+    }
+    _write_config_atomic(path, migrated)
+    logger.info(
+        "Migrated legacy API Gateway state from %s to %s; legacy file retained for rollback",
+        legacy_path,
+        path,
+    )
+    return True
 
 
 def load_api_gateway_config(global_config: Any) -> dict[str, Any]:
+    migrate_legacy_api_gateway_state(global_config)
     path = config_path_for(global_config)
     data: dict[str, Any] = {}
     if path.exists():
@@ -95,8 +138,5 @@ def save_api_gateway_config(
     current["updated_by"] = updated_by
 
     path = config_path_for(global_config)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
-    tmp.write_text(json.dumps(current, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    _write_config_atomic(path, current)
     return current

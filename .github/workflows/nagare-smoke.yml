@@ -55,7 +55,7 @@ jobs:
           python -m venv .venv-smoke
           . .venv-smoke/bin/activate
           python -m pip install --upgrade pip
-          python -m pip install dist/*.whl
+          python -m pip install dist/*.whl pytest pytest-asyncio
 
       - name: CLI smoke run
         run: |
@@ -70,7 +70,9 @@ jobs:
           PY
 
       - name: Contract tests
-        run: pytest -q tests/contract
+        run: |
+          . .venv-smoke/bin/activate
+          python -m pytest -q tests/contract
 
   viz-smoke:
     runs-on: ubuntu-latest

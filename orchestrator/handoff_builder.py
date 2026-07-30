@@ -5,10 +5,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Any
 
+from orchestrator.runtime_retry import RETRY_HANDOFF_SOURCE
+
 logger = logging.getLogger("BridgeU.HandoffBuilder")
 
 class HandoffBuilder:
-    EXCLUDED_RECENT_SOURCES = {"startup", "system", "think"}
+    EXCLUDED_RECENT_SOURCES = {
+        "startup",
+        "system",
+        "think",
+        "handoff",
+        RETRY_HANDOFF_SOURCE,
+    }
     EXCLUDED_TEXT_SNIPPETS = (
         "This is a fresh ",
         "Use those files as your operating context",
@@ -19,6 +27,8 @@ class HandoffBuilder:
         "Ready. Send the bridge-managed context",
         "No `NEW REQUEST` was included.",
         "Still no `NEW REQUEST`",
+        "No `CURRENT USER REQUEST` was included.",
+        "Still no `CURRENT USER REQUEST`",
         "Understood. I’ll treat `HANDOFF SUMMARY`",
         "Understood. I’ll use that material only as background",
         "Session instructions in effect:",
@@ -238,7 +248,7 @@ class HandoffBuilder:
 
         lines.extend(
             [
-                "--- NEW REQUEST ---",
+                "--- CURRENT USER REQUEST — AUTHORITATIVE ---",
                 "Acknowledge that you have restored recent context from bridge history and are ready for the next instruction.",
             ]
         )

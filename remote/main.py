@@ -33,6 +33,7 @@ import uvicorn
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from orchestrator.remote_lifecycle import read_disabled_state
+from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_PORT
 from orchestrator.stable_port_allocator import (
     PortAllocationError,
     SERVICE_HASHI_REMOTE,
@@ -165,7 +166,9 @@ def _load_instance_info(
     return {
         "instance_id": instance_id or global_cfg.get("instance_id", "HASHI"),
         "display_name": display_name or global_cfg.get("display_name", "HASHI Instance"),
-        "workbench_port": workbench_port or global_cfg.get("workbench_port", 18800),
+        "workbench_port": (
+            workbench_port or global_cfg.get("workbench_port", DEFAULT_WORKBENCH_PORT)
+        ),
         "platform": _detect_platform(),
         "hashi_version": cfg.get("version", "unknown"),
     }

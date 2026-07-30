@@ -16,7 +16,10 @@ Examples:
 - `/new` resets the shared backend session for that agent
 - `/model` changes the active model used by both Telegram and workbench traffic
 - flex backend switches affect the same shared flex runtime
-- `/retry` retries against the same shared runtime state
+- `/resend` replays the last model or Bridge output without changing runtime state
+- `/retry` intentionally replaces stale shared context with a clean `/new` or
+  `/fresh` context, restores bounded handoff continuity, then reruns the last
+  prompt; see [RETRY_RESEND_COMMANDS.md](RETRY_RESEND_COMMANDS.md)
 
 ## Operational Notes
 

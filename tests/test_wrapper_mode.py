@@ -39,7 +39,17 @@ def test_should_wrap_user_sources():
 
 
 def test_should_bypass_automation_sources():
-    for source in ["startup", "system", "scheduler", "scheduler-skill", "loop_skill", "bridge:hchat", "retry", "session_reset"]:
+    for source in [
+        "startup",
+        "system",
+        "scheduler",
+        "scheduler-skill",
+        "loop_skill",
+        "bridge:hchat",
+        "retry",
+        "retry-handoff",
+        "session_reset",
+    ]:
         assert not should_wrap_source(source)
 
 

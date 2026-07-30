@@ -58,6 +58,7 @@ def _build_adapter(tmp_path: Path) -> CodexCLIAdapter:
 
 def test_codex_accepts_completed_turn_even_if_process_needs_forced_exit(tmp_path, monkeypatch: pytest.MonkeyPatch):
     adapter = _build_adapter(tmp_path)
+    adapter.set_session_mode(True)
     adapter.POST_TURN_COMPLETION_GRACE_SEC = 0.01
 
     lines = [
@@ -196,3 +197,19 @@ def test_codex_add_dir_uses_workzone_when_workzone_on(tmp_path):
 
     assert "--add-dir" in cmd
     assert cmd[cmd.index("--add-dir") + 1] == str(workzone.resolve())
+
+
+def test_codex_resume_is_used_only_in_explicit_session_mode(tmp_path):
+    adapter = _build_adapter(tmp_path)
+    adapter._session_id = "thread-existing"
+
+    flex_cmd = adapter._build_cmd("hello", tmp_path / "flex.txt")
+    assert "resume" not in flex_cmd
+
+    adapter.set_session_mode(True)
+    adapter._session_id = "thread-existing"
+    fixed_cmd = adapter._build_cmd("hello", tmp_path / "fixed.txt")
+    assert fixed_cmd[1:4] == ["exec", "resume", "thread-existing"]
+
+    adapter.set_session_mode(False)
+    assert adapter._session_id is None
