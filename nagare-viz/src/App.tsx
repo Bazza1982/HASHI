@@ -132,7 +132,6 @@ export default function App() {
     () => draft.steps.filter((step) => selectedStepIds.has(step.id)),
     [draft.steps, selectedStepIds],
   );
-  const selectedStep = selectedSteps.length === 1 ? selectedSteps[0] : null;
 
   const workers = useMemo<WorkerInfo[]>(() => {
     const agents = isRecord(document.data.agents) ? document.data.agents : {};

@@ -1,6 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import { fileServerPlugin } from "./src/api/fileServerPlugin.ts";
+import { fileServerPlugin } from "./src/api/fileServerPlugin";
 
 export default defineConfig({
   plugins: [react(), fileServerPlugin()],

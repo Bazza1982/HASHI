@@ -297,7 +297,7 @@ Additional operational note:
 Symptom:
 
 - Codex answers the wrapper instructions instead of the user request
-- e.g. `No NEW REQUEST was included`
+- e.g. `No CURRENT USER REQUEST was included`
 
 Root cause:
 

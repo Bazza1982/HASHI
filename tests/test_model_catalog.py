@@ -1,4 +1,5 @@
 from orchestrator.flexible_backend_registry import (
+    get_all_gateway_models,
     get_available_efforts,
     get_available_models,
     is_cli_backend,
@@ -6,7 +7,10 @@ from orchestrator.flexible_backend_registry import (
 )
 from orchestrator.model_catalog import (
     AVAILABLE_CODEX_MODELS,
+    AVAILABLE_OPENROUTER_MODELS,
     AVAILABLE_XAI_API_MODELS,
+    available_gateway_models,
+    default_gateway_model,
 )
 
 
@@ -59,3 +63,10 @@ def test_grok_cli_exposes_reasoning_effort_with_medium_default():
 def test_xai_api_models_are_available_to_gateway_catalog():
     assert "grok-4.3" in AVAILABLE_XAI_API_MODELS
     assert "grok-4.3" in get_available_models("xai-api")
+
+
+def test_compatibility_catalog_is_derived_from_backend_registry():
+    assert available_gateway_models() == get_all_gateway_models()
+    assert default_gateway_model() == "gpt-5.4"
+    assert "anthropic/claude-sonnet-4.6" in AVAILABLE_OPENROUTER_MODELS
+    assert "grok-imagine-video-1.5-preview" in AVAILABLE_XAI_API_MODELS

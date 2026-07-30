@@ -52,6 +52,7 @@ class GrokCLIAdapter(BaseBackend):
             self.cmd_base = f"{self.cmd_base}.cmd"
         self.access_root = str(self.config.resolve_access_root())
         self._session_id: str | None = None
+        self._session_mode: bool = bool((self.config.extra or {}).get("session_mode", False))
         requested_effort = self._extra_str("effort", self.DEFAULT_REASONING_EFFORT).lower()
         self.effort = (
             requested_effort
@@ -101,6 +102,11 @@ class GrokCLIAdapter(BaseBackend):
         self.logger.info(f"Grok session reset (previous session_id={old_id}).")
         return True
 
+    def set_session_mode(self, enabled: bool) -> None:
+        self._session_mode = bool(enabled)
+        self._session_id = None
+        self.logger.info("Session mode set to %s", "ON" if enabled else "OFF")
+
     async def shutdown(self):
         proc = self.current_proc
         if proc and proc.returncode is None:
@@ -148,7 +154,7 @@ class GrokCLIAdapter(BaseBackend):
             option_value = self._extra_str(option_key)
             if option_value:
                 cmd.extend([flag, option_value])
-        if self._session_id:
+        if self._session_mode and self._session_id:
             cmd.extend(["--resume", self._session_id])
         cmd.extend(["-p", prompt])
         return cmd
@@ -319,7 +325,7 @@ class GrokCLIAdapter(BaseBackend):
             return ""
 
         session_id = self._extract_session_id(event)
-        if session_id and self._session_id is None:
+        if self._session_mode and session_id and self._session_id is None:
             self._session_id = session_id
 
         delta = self._extract_delta_text(event)

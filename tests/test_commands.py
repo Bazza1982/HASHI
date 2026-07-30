@@ -149,8 +149,13 @@ class MockAgentRuntime:
         
     async def cmd_retry(self, update, context):
         """Retry last request."""
-        await update.message.reply_text("🔄 Retrying last request...")
+        await update.message.reply_text("🔄 Resetting context and retrying last request...")
         self.command_log.append({"cmd": "retry", "args": context.args})
+
+    async def cmd_resend(self, update, context):
+        """Resend last output."""
+        await update.message.reply_text("↩️ Resending previous output...")
+        self.command_log.append({"cmd": "resend", "args": context.args})
         
     async def cmd_effort(self, update, context):
         """Set effort level."""
@@ -403,6 +408,17 @@ async def test_retry_command():
     return True
 
 
+async def test_resend_command():
+    """Test /resend command."""
+    runtime = MockAgentRuntime()
+    result = await execute_command(runtime, "/resend")
+
+    assert result["ok"]
+    assert "resend" in result["response"].lower()
+    print("✓ /resend command works")
+    return True
+
+
 async def test_effort_command():
     """Test /effort command."""
     runtime = MockAgentRuntime()
@@ -493,6 +509,7 @@ async def run_command_tests():
         ("Verbose Toggle", test_verbose_toggle),
         ("Voice Toggle", test_voice_toggle),
         ("Stop Command", test_stop_command),
+        ("Resend Command", test_resend_command),
         ("Retry Command", test_retry_command),
         ("Effort Command", test_effort_command),
         ("Unknown Command", test_unknown_command),

@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from orchestrator.reboot_manager import RebootManager
+from orchestrator.hot_reload import HotReloadError
 from orchestrator.service_manager import ServiceManager
 
 
@@ -76,9 +77,33 @@ def test_reload_project_modules_loads_model_foundations_before_consumers(monkeyp
     manager_idx = reloaded.index("orchestrator.flexible_backend_manager")
     runtime_idx = reloaded.index("orchestrator.flexible_agent_runtime")
 
-    assert catalog_idx < registry_idx
-    assert catalog_idx < adapter_idx < manager_idx < runtime_idx
-    assert registry_idx < adapter_idx < manager_idx < runtime_idx
+    assert registry_idx < catalog_idx < adapter_idx < manager_idx < runtime_idx
+
+
+def test_reload_project_modules_loads_runtime_defaults_before_consumers(monkeypatch):
+    manager = RebootManager(kernel=object(), console_handler=None)
+    module_names = [
+        "orchestrator.flexible_agent_runtime",
+        "orchestrator.runtime_defaults",
+        "orchestrator.remote_lifecycle",
+    ]
+    reloaded = []
+
+    for name in module_names:
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+
+    def fake_reload(module):
+        reloaded.append(module.__name__)
+        return module
+
+    monkeypatch.setattr("orchestrator.reboot_manager.importlib.reload", fake_reload)
+
+    manager.reload_project_modules()
+
+    defaults_idx = reloaded.index("orchestrator.runtime_defaults")
+    lifecycle_idx = reloaded.index("orchestrator.remote_lifecycle")
+    runtime_idx = reloaded.index("orchestrator.flexible_agent_runtime")
+    assert defaults_idx < lifecycle_idx < runtime_idx
 
 
 def test_reload_project_modules_loads_stream_policy_before_flexible_runtime(monkeypatch):
@@ -109,6 +134,31 @@ def test_reload_project_modules_loads_stream_policy_before_flexible_runtime(monk
     assert policy_idx < runtime_idx
     assert pipeline_idx < runtime_idx
     assert status_idx < runtime_idx
+
+
+def test_reload_project_modules_fails_fast_instead_of_continuing(monkeypatch):
+    manager = RebootManager(kernel=object(), console_handler=None)
+    first = types.ModuleType("orchestrator.first")
+    broken = types.ModuleType("orchestrator.broken")
+    after = types.ModuleType("orchestrator.after")
+    for module in (first, broken, after):
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+    calls = []
+
+    def fake_reload(module):
+        calls.append(module.__name__)
+        if module is broken:
+            raise RuntimeError("boom")
+        return module
+
+    monkeypatch.setattr("orchestrator.reboot_manager.importlib.reload", fake_reload)
+
+    with pytest.raises(HotReloadError, match="orchestrator.broken"):
+        manager.reload_project_modules(
+            ["orchestrator.first", "orchestrator.broken", "orchestrator.after"]
+        )
+
+    assert calls == ["orchestrator.first", "orchestrator.broken"]
 
 
 @pytest.mark.asyncio

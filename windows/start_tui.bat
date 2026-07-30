@@ -3,7 +3,7 @@ chcp 65001 >nul
 setlocal
 
 :: ============================================================
-:: HASHI9 - Start TUI
+:: HASHI - Start TUI
 :: Auto-starts main bridge in a new window if not already running.
 :: USB mode: uses embedded Python from \python\ if present.
 :: Fallback: uses .venv Python for local dev installs.
@@ -14,7 +14,6 @@ set ROOT=%~dp0..
 :: USB mode: prefer embedded Python, fall back to venv
 set PYTHON_EXE=%ROOT%\python\python.exe
 if not exist "%PYTHON_EXE%" set PYTHON_EXE=%ROOT%\.venv\Scripts\python.exe
-set PID_FILE=%ROOT%\.bridge_u_f.pid
 set LOG_DIR=%~dp0logs
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
 
@@ -23,7 +22,7 @@ for /f "tokens=1-3 delims=:." %%a in ("%TIME: =0%") do set T=%%a%%b%%c
 set LOG_FILE=%LOG_DIR%\tui_%D%_%T%.log
 
 echo ==================================================== >> "%LOG_FILE%"
-echo HASHI9 TUI >> "%LOG_FILE%"
+echo HASHI TUI >> "%LOG_FILE%"
 echo Started: %DATE% %TIME% >> "%LOG_FILE%"
 echo Python: %PYTHON_EXE% >> "%LOG_FILE%"
 echo ==================================================== >> "%LOG_FILE%"
@@ -38,6 +37,10 @@ if not exist "%PYTHON_EXE%" (
     pause
     exit /b 1
 )
+set "PID_FILE="
+set "INSTANCE_ID=HASHI"
+for /f "delims=" %%P in ('"%PYTHON_EXE%" "%ROOT%\scripts\resolve_instance_runtime.py" --code-root "%ROOT%" --bridge-home "%ROOT%" --field pid-path') do set "PID_FILE=%%P"
+for /f "delims=" %%P in ('"%PYTHON_EXE%" "%ROOT%\scripts\resolve_instance_runtime.py" --code-root "%ROOT%" --bridge-home "%ROOT%" --field instance-id') do set "INSTANCE_ID=%%P"
 
 :: Check if main bridge is running via PID file
 set BRIDGE_RUNNING=0
@@ -52,12 +55,12 @@ if exist "%PID_FILE%" (
 if "%BRIDGE_RUNNING%"=="0" (
     echo Bridge not running - starting it in a new window...
     echo Bridge not running - starting it in a new window... >> "%LOG_FILE%"
-    start "HASHI9 Main Bridge" /D "%ROOT%" cmd /c "bin\bridge-u.bat --resume-last"
+    start "%INSTANCE_ID% Main Bridge" /D "%ROOT%" cmd /c "bin\bridge-u.bat --resume-last"
     echo Waiting 15 seconds for bridge to initialize...
     timeout /t 15 /nobreak >nul
 )
 
-echo Starting HASHI9 TUI...
+echo Starting %INSTANCE_ID% TUI...
 echo Log file: %LOG_FILE%
 echo.
 

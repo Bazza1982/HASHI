@@ -11,6 +11,7 @@ import html
 from contextlib import suppress
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update, constants
 from telegram.error import NetworkError as TelegramNetworkError, TimedOut as TelegramTimedOut
@@ -62,6 +63,7 @@ from orchestrator.runtime_common import (
     resolve_authorized_telegram_ids,
 )
 from orchestrator import runtime_nudge
+from orchestrator import runtime_retry
 from orchestrator.runtime_display import _show_logo_animation
 from orchestrator.runtime_jobs import _build_jobs_text, _build_jobs_with_buttons
 
@@ -160,6 +162,7 @@ class BridgeAgentRuntime:
             self.global_config.project_root,
             self.name,
             self._get_agent_class(),
+            self.global_config.instance_id,
         )
 
     def get_typing_placeholder(self) -> tuple[str, str | None]:
@@ -548,7 +551,7 @@ class BridgeAgentRuntime:
         )
         if not primer:
             return request
-        return f"{primer}\n\n--- NEW REQUEST ---\n{request}"
+        return f"{primer}\n\n--- CURRENT USER REQUEST — AUTHORITATIVE ---\n{request}"
 
     def _consume_session_primer(self, item: QueuedRequest) -> str:
         if item.source.startswith("scheduler") or item.source.startswith("bridge:"):
@@ -1849,12 +1852,7 @@ class BridgeAgentRuntime:
                     )
                 self._mark_success()
                 self._record_habit_outcome(item, success=True, response_text=response.text)
-                self.last_response = {
-                    "chat_id": item.chat_id,
-                    "text": response.text,
-                    "request_id": item.request_id,
-                    "responded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-                }
+                runtime_retry.remember_output(self, item, response.text)
                 memory_user_text = item.prompt
                 if item.source.lower() in {"document", "photo", "voice", "audio", "video", "sticker"}:
                     memory_user_text = f"[{item.source}] {item.summary}"
@@ -1862,7 +1860,8 @@ class BridgeAgentRuntime:
                     self.memory_store.record_turn("user", item.source, memory_user_text)
                     self.memory_store.record_turn("assistant", self.config.engine, response.text)
                     self.memory_store.record_exchange(memory_user_text, response.text, item.source)
-                self.append_conversation_entry("assistant", response.text, self.config.engine)
+                if item.source != runtime_retry.RETRY_HANDOFF_SOURCE:
+                    self.append_conversation_entry("assistant", response.text, self.config.engine)
                 _print_final_response(self.name, response.text)
                 total_s = (datetime.now() - datetime.fromisoformat(item.created_at)).total_seconds()
                 send_elapsed_s, chunk_count = await self.send_long_message(
@@ -2173,6 +2172,7 @@ class BridgeAgentRuntime:
             try:
                 if not item.silent:
                     self.last_prompt = item
+                    runtime_retry.remember_retryable_prompt(self, item)
                 is_bridge_request = item.source.startswith("bridge:")
                 queued_at = datetime.fromisoformat(item.created_at)
                 queue_wait_s = (datetime.now() - queued_at).total_seconds()
@@ -2445,12 +2445,7 @@ class BridgeAgentRuntime:
                     )
                     if item.silent:
                         continue
-                    self.last_response = {
-                        "chat_id": item.chat_id,
-                        "text": response.text,
-                        "request_id": item.request_id,
-                        "responded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-                    }
+                    runtime_retry.remember_output(self, item, response.text)
                     memory_user_text = item.prompt
                     if item.source.lower() in {"document", "photo", "voice", "audio", "video", "sticker"}:
                         memory_user_text = f"[{item.source}] {item.summary}"
@@ -2458,7 +2453,10 @@ class BridgeAgentRuntime:
                         self.memory_store.record_turn("user", item.source, memory_user_text)
                         self.memory_store.record_turn("assistant", self.config.engine, response.text)
                         self.memory_store.record_exchange(memory_user_text, response.text, item.source)
-                    if not is_bridge_request:
+                    if (
+                        not is_bridge_request
+                        and item.source != runtime_retry.RETRY_HANDOFF_SOURCE
+                    ):
                         self.append_conversation_entry("assistant", response.text, self.config.engine)
                     if not item.deliver_to_telegram:
                         continue
@@ -4673,62 +4671,20 @@ class BridgeAgentRuntime:
             return None
 
     async def cmd_retry(self, update, context):
+        """Reset stale context, restore recent continuity, and rerun the last prompt."""
+        from orchestrator import runtime_control
+
         if update.effective_user.id != self.global_config.authorized_id:
             return
-        args = [a.strip().lower() for a in (context.args or []) if a.strip()]
-        mode = args[0] if args else "response"
-        chat_id = update.effective_chat.id
-        if mode in {"response", "resp"}:
-            if not self.last_response:
-                # Try to restore last response from transcript (survives reboot)
-                transcript_text = self._load_last_text_from_transcript("assistant")
-                if transcript_text:
-                    await update.message.reply_text("Restoring last response from transcript...")
-                    await self.send_long_message(
-                        chat_id=chat_id,
-                        text=transcript_text,
-                        purpose="retry-response",
-                    )
-                    return
-                # Fallback: re-run last prompt
-                if self.last_prompt:
-                    await update.message.reply_text("No cached response — retrying last prompt...")
-                    await self.enqueue_request(
-                        self.last_prompt.chat_id,
-                        self.last_prompt.prompt,
-                        "retry",
-                        "Retry request",
-                    )
-                else:
-                    await update.message.reply_text("Nothing to retry — no previous response or prompt.")
-                return
-            await update.message.reply_text("Resending last response...")
-            await self.send_long_message(
-                chat_id=self.last_response["chat_id"],
-                text=self.last_response["text"],
-                request_id=self.last_response.get("request_id"),
-                purpose="retry-response",
-            )
+        await runtime_control.cmd_retry(self, update, context)
+
+    async def cmd_resend(self, update, context):
+        """Replay the previous model or Bridge output without model work."""
+        from orchestrator import runtime_control
+
+        if update.effective_user.id != self.global_config.authorized_id:
             return
-        if mode in {"prompt", "req", "request"}:
-            if not self.last_prompt:
-                # Try to restore last user prompt from transcript
-                transcript_text = self._load_last_text_from_transcript("user")
-                if transcript_text:
-                    await update.message.reply_text("Restoring last prompt from transcript...")
-                    await self.enqueue_request(chat_id, transcript_text, "retry", "Retry request")
-                else:
-                    await update.message.reply_text("No previous prompt to rerun.")
-                return
-            await update.message.reply_text("Retrying last prompt...")
-            await self.enqueue_request(
-                self.last_prompt.chat_id,
-                self.last_prompt.prompt,
-                "retry",
-                "Retry request",
-            )
-            return
-        await update.message.reply_text("Usage: /retry [response|prompt]")
+        await runtime_control.cmd_resend(self, update, context)
 
     async def cmd_clear(self, update, context):
         if update.effective_user.id != self.global_config.authorized_id:
@@ -4904,7 +4860,7 @@ class BridgeAgentRuntime:
             await update.message.reply_text(
                 "💬 Hchat — Ask this agent to compose & send a message to another agent\n\n"
                 "Usage: /hchat <agent> <intent>  — local instance only\n"
-                "       /hchat <agent>@<INSTANCE> <intent>  — cross-instance via HASHI1 exchange\n"
+                "       /hchat <agent>@<INSTANCE> <intent>  — cross-instance via configured discovery/exchange\n"
                 "       /hchat all <intent>  — broadcast to all local active agents (excludes temp)\n\n"
                 "Example: /hchat lily give her an update on what we've been doing\n"
                 "Example: /hchat rika@HASHI2 ask her for the latest test result\n"
@@ -5059,7 +5015,8 @@ class BridgeAgentRuntime:
             return
 
         project_root = self.config.project_root
-        if not private_wol_available(project_root):
+        instance_id = getattr(self.global_config, "instance_id", None)
+        if not private_wol_available(project_root, instance_id):
             await update.message.reply_text("⚪ /wol is not enabled on this instance.")
             return
 
@@ -5077,7 +5034,14 @@ class BridgeAgentRuntime:
 
         await update.message.reply_text(f"🪄 Sending Wake-on-LAN packet for `{arg}`…")
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(None, lambda: run_private_wol(project_root, arg))
+        result = await loop.run_in_executor(
+            None,
+            lambda: run_private_wol(
+                project_root,
+                arg,
+                configured_instance_id=instance_id,
+            ),
+        )
         if result.get("ok"):
             output = (result.get("stdout") or "").strip()
             if len(output) > 2500:
@@ -5121,7 +5085,8 @@ class BridgeAgentRuntime:
             BotCommand("recall", "Clear queued requests [newest count]"),
             BotCommand("reboot", "Hot restart agents"),
             BotCommand("terminate", "Shut down this agent"),
-            BotCommand("retry", "Resend response or rerun prompt"),
+            BotCommand("resend", "Replay previous model or Bridge output"),
+            BotCommand("retry", "Reset context and rerun last prompt"),
             BotCommand("debug", "Run in strict debug mode"),
             BotCommand("skill", "Browse and run skills"),
             BotCommand("exp", "Run a task with the EXP guidebook"),
@@ -5138,7 +5103,10 @@ class BridgeAgentRuntime:
             BotCommand("wa_send", "Send a WhatsApp message"),
             BotCommand("usecomputer", "Enable or run GUI-aware computer-use mode"),
         ]
-        if private_wol_available(self.config.project_root):
+        if private_wol_available(
+            self.config.project_root,
+            getattr(self.global_config, "instance_id", None),
+        ):
             commands.append(BotCommand("wol", "Send Wake-on-LAN magic packet [pc_name]"))
         if self.config.engine == "openrouter-api":
             commands.append(BotCommand("credit", "Show OpenRouter balance"))
@@ -5183,6 +5151,7 @@ class BridgeAgentRuntime:
         self.app.add_handler(CommandHandler("recall", self.cmd_recall))
         self.app.add_handler(CommandHandler("terminate", self.cmd_terminate))
         self.app.add_handler(CommandHandler("reboot", self.cmd_reboot))
+        self.app.add_handler(CommandHandler("resend", self.cmd_resend))
         self.app.add_handler(CommandHandler("retry", self.cmd_retry))
         self.app.add_handler(CommandHandler("think", self.cmd_think))
         self.app.add_handler(CommandHandler("verbose", self.cmd_verbose))

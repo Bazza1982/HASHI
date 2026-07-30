@@ -16,6 +16,7 @@ from textual.widgets import RichLog, Input, Static
 from textual.message import Message
 from textual import work
 
+from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_LOCALHOST_URL
 from tui.api_client import TuiApiClient
 from tui.onboarding import (
     load_languages, lang_code_from_file, audit_environment,
@@ -326,7 +327,11 @@ class HASHITuiApp(App):
         Binding("ctrl+q", "quit_app", "Quit", show=True),
     ]
 
-    def __init__(self, workbench_url: str = "http://localhost:18800", onboarding_mode: bool = False):
+    def __init__(
+        self,
+        workbench_url: str = DEFAULT_WORKBENCH_LOCALHOST_URL,
+        onboarding_mode: bool = False,
+    ):
         super().__init__()
         self.bridge_home = self._find_bridge_home()
         self.bridge_proc: asyncio.subprocess.Process | None = None

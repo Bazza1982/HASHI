@@ -63,6 +63,8 @@ from ..security.pairing import PairingManager
 from ..terminal.executor import TerminalExecutor, AuthLevel
 from ..audit.logger import get_audit_logger
 from ..local_http import local_http_hosts, local_http_url
+from orchestrator.pathing import instance_runtime_dir
+from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_PORT
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +76,7 @@ _terminal_executor: Optional[TerminalExecutor] = None
 _protocol_manager = None
 _hashi_root: Optional[str] = None
 _control_hashi_root: Optional[str] = None
-_workbench_port: int = 18800
+_workbench_port: int = DEFAULT_WORKBENCH_PORT
 _attachment_store: Optional[AttachmentStore] = None
 _HCHAT_HEADER_RE = re.compile(r"^\[hchat from (?P<agent>\w+)(?:@(?P<instance>[\w-]+))?\]\s*(?P<body>.*)$", re.DOTALL)
 API_PROTOCOL_CAPABILITIES = [
@@ -133,7 +135,7 @@ class HchatPayload(BaseModel):
     from_instance: str          # e.g. "HASHI9"
     to_agent: str               # e.g. "lily"
     text: str                   # The message content (already formatted)
-    to_instance: Optional[str] = None  # Final target instance for HASHI1 exchange
+    to_instance: Optional[str] = None  # Final target when a configured exchange relays
     source_hchat_format: bool = False  # If True, text is raw hchat format
     reply_route: Optional[dict] = None  # Sender's routing info for reply delivery
 
@@ -379,7 +381,7 @@ def _read_hashi_pid_state() -> dict[str, Any]:
     }
     if not _control_hashi_root:
         return state
-    pid_path = Path(_control_hashi_root) / ".bridge_u_f.pid"
+    pid_path = instance_runtime_dir(Path(_control_hashi_root)) / "process.pid"
     state["pid_file_exists"] = pid_path.exists()
     try:
         raw = pid_path.read_text(encoding="utf-8").strip()
@@ -601,7 +603,7 @@ def create_app(
     terminal_executor: TerminalExecutor,
     peer_registry=None,
     protocol_manager=None,
-    workbench_port: int = 18800,
+    workbench_port: int = DEFAULT_WORKBENCH_PORT,
     hashi_root: str = None,
     control_hashi_root: str = None,
 ) -> FastAPI:

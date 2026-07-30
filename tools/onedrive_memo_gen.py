@@ -5,9 +5,8 @@ Scans a directory tree and generates _memo.md in each folder.
 Analyzes file metadata only — never reads file contents.
 """
 
+import argparse
 import os
-import sys
-import hashlib
 from pathlib import Path
 from datetime import datetime, timezone
 from collections import defaultdict
@@ -266,26 +265,41 @@ def process_tree(root: Path, dry_run=False):
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
-    target = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(
-        "/mnt/c/Users/thene/OneDrive - The University Of Newcastle/个人资料/Z. Archive"
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "target",
+        nargs="?",
+        type=Path,
+        help="directory tree to scan (or set HASHI_ONEDRIVE_MEMO_ROOT)",
     )
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
 
-    dry_run = "--dry-run" in sys.argv
+    configured_root = os.environ.get("HASHI_ONEDRIVE_MEMO_ROOT", "").strip()
+    target = args.target or (Path(configured_root) if configured_root else None)
+    if target is None:
+        parser.error("target is required (or set HASHI_ONEDRIVE_MEMO_ROOT)")
+    target = target.expanduser().resolve()
 
-    if not target.exists():
+    if not target.is_dir():
         print(f"❌ 路径不存在: {target}")
-        sys.exit(1)
+        return 1
 
-    mode = "DRY RUN 模式" if dry_run else "写入模式"
+    mode = "DRY RUN 模式" if args.dry_run else "写入模式"
     print(f"\n🔍 OneDrive Memo Generator — {mode}")
     print(f"📁 目标：{target}\n")
 
-    folders, files = process_tree(target, dry_run=dry_run)
+    folders, files = process_tree(target, dry_run=args.dry_run)
 
     print(f"\n✅ 完成！")
     print(f"   扫描文件夹：{folders}")
     print(f"   扫描文件：  {files}")
-    if not dry_run:
+    if not args.dry_run:
         print(f"   已在每个文件夹生成 {MEMO_FILENAME}")
     print()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

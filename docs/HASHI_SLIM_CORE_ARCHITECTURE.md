@@ -83,16 +83,22 @@ This is important because `/reboot` replaces manager instances. Any direct refer
 The accepted flow is:
 
 1. Select restart targets from the requested mode.
-2. Stop selected agents.
-3. Reload project modules.
-4. Build replacement managers into local variables.
-5. Commit the full replacement manager set only if every constructor succeeds.
-6. Reload config and secrets as needed.
-7. Restart selected agents.
-8. Recreate the scheduler through `ServiceManager`.
-9. Leave the long-lived process, Workbench API, and other kernel-owned handles intact.
+2. Compile loaded project sources before stopping any agent.
+3. Stop selected agents only after preflight succeeds.
+4. Reload project modules in the centralized dependency order and fail fast.
+5. Build the manager set from `manager_registry.py` into a temporary bundle.
+6. Commit the full replacement manager set only if every constructor succeeds.
+7. Reload config and secrets as needed.
+8. Restart selected agents.
+9. Refresh warm services through `ServiceManager`: Workbench API, enabled API
+   Gateway, scheduler, delivery watcher, and background jobs.
+10. Keep the long-lived process, instance lock, kernel identity, and WhatsApp
+    transport alive.
 
 The manager rebuild is transaction-style. If any replacement manager fails to initialize, the kernel keeps the old manager set alive and the failure is logged clearly.
+If source preflight fails, no agent is stopped. If a live reload fails after
+agents were stopped, HASHI restores those agents where possible, leaves warm
+services untouched, reports failure, and requires a cold restart.
 
 ## Reboot Modes
 
@@ -100,11 +106,18 @@ The manager rebuild is transaction-style. If any replacement manager fails to in
 
 `/reboot max` restarts all running agents and reloads project code.
 
-Both modes rebuild hot managers. Scheduler code is adopted by recreating the scheduler after module reload. Workbench API and API Gateway are long-lived services and are not restarted unless the process itself restarts.
+Both modes rebuild hot managers. Workbench API and an enabled API Gateway are
+warm-recreated so their request handlers adopt reloaded code; the scheduler,
+delivery watcher, and background jobs are also recreated. Their fields remain
+kernel-owned even though the service objects stored in those fields are
+replaced.
 
 ## Live Handle Boundaries
 
-Workbench API, API Gateway, scheduler task state, WhatsApp transport, and the agent directory are kernel-level handles. Managers can start, stop, recreate, or send through them, but rebuilding a manager must not implicitly destroy the live handle.
+Workbench API, API Gateway, scheduler task state, WhatsApp transport, and the
+agent directory are kernel-level fields. Managers can start, stop, recreate, or
+send through them. Manager construction alone must not destroy a live service;
+the explicit post-reload warm-service refresh owns that lifecycle.
 
 The `runtimes` list is also identity-sensitive. External holders, including the Workbench API and agent directory, may hold a reference to that list. Agent stop logic must mutate the list in place rather than replacing it:
 
@@ -169,4 +182,6 @@ This warning was followed by successful scheduler recreation and startup, so it 
 - `main.py` is intentionally still above the original aspirational 200-line target. The accepted `v3.2.0` shape is a slim kernel wrapper rather than a pure bootstrap-only file.
 - `StartupManager` is rebuilt during hot reboot but only used during cold start. This is harmless and keeps the manager set complete.
 - Transport implementation hot reload for WhatsApp remains explicit-restart-only.
-- Future manager additions must be included in the hot manager rebuild transaction and documented here.
+- Future manager additions must be registered once in
+  `orchestrator/manager_registry.py`; cold construction and hot rebuild derive
+  from that manifest.

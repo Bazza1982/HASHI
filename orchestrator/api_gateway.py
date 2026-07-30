@@ -38,10 +38,9 @@ from adapters.xai_imagine import (
 )
 from adapters.registry import get_backend_class
 from orchestrator.model_catalog import (
-    AVAILABLE_CLAUDE_MODELS,
-    AVAILABLE_CODEX_MODELS,
-    AVAILABLE_GEMINI_MODELS,
-    AVAILABLE_XAI_API_MODELS,
+    available_gateway_models as catalog_gateway_models,
+    default_gateway_model as catalog_default_gateway_model,
+    gateway_engine_for_model,
 )
 from orchestrator.api_gateway_config import load_api_gateway_config
 from orchestrator.api_gateway_preflight import check_gateway_engines
@@ -55,19 +54,15 @@ SESSION_TTL_SEC = 1800  # 30 minutes
 MAX_EXTERNAL_TOOLS = 128
 MAX_EXTERNAL_TOOL_BYTES = 1024 * 1024
 
-_ENGINE_FOR_MODEL: dict[str, str] = {}
-for _m in AVAILABLE_GEMINI_MODELS:
-    _ENGINE_FOR_MODEL[_m] = "gemini-cli"
-for _m in AVAILABLE_CLAUDE_MODELS:
-    _ENGINE_FOR_MODEL[_m] = "claude-cli"
-for _m in AVAILABLE_CODEX_MODELS:
-    _ENGINE_FOR_MODEL[_m] = "codex-cli"
-for _m in AVAILABLE_XAI_API_MODELS:
-    _ENGINE_FOR_MODEL[_m] = "xai-api"
+_ENGINE_FOR_MODEL = {
+    model: engine
+    for model in catalog_gateway_models()
+    if (engine := gateway_engine_for_model(model)) is not None
+}
 
 _ALL_MODELS = list(_ENGINE_FOR_MODEL.keys())
 _GATEWAY_ENGINES = sorted(set(_ENGINE_FOR_MODEL.values()))
-DEFAULT_API_MODEL = AVAILABLE_CODEX_MODELS[0] if AVAILABLE_CODEX_MODELS else (_ALL_MODELS[0] if _ALL_MODELS else "")
+DEFAULT_API_MODEL = catalog_default_gateway_model()
 
 
 def _engine_owned_by(engine: str) -> str:
@@ -487,6 +482,7 @@ class APIGatewayServer:
         self.bind_host = self._select_bind_host()
         self._site = web.TCPSite(self._runner, self.bind_host, self.port)
         await self._site.start()
+        self.enabled = True
         available = [e for e, s in self._engine_status.items() if s.get("available")]
         unavailable = [e for e, s in self._engine_status.items() if not s.get("available")]
         logger.info(
@@ -496,9 +492,14 @@ class APIGatewayServer:
         )
 
     async def stop(self):
-        await self._pool.shutdown()
-        if self._runner:
-            await self._runner.cleanup()
+        try:
+            await self._pool.shutdown()
+            if self._runner:
+                await self._runner.cleanup()
+        finally:
+            self.enabled = False
+            self._site = None
+            self._runner = None
 
     def set_default_model(self, model: str) -> None:
         normalized = str(model or "").strip()
@@ -545,6 +546,7 @@ class APIGatewayServer:
 
     async def handle_health(self, request: web.Request) -> web.Response:
         initialized = sorted(self._pool._adapters.keys())
+        configured_enabled = bool(load_api_gateway_config(self.global_config).get("enabled", False))
         available_engines = [
             engine for engine, status in self._engine_status.items() if status.get("available")
         ]
@@ -553,6 +555,8 @@ class APIGatewayServer:
             {
                 "status": overall,
                 "enabled": self.enabled,
+                "running": self._site is not None,
+                "configured_enabled": configured_enabled,
                 "engines": initialized,
                 "engine_status": self._engine_status,
                 "available_engines": available_engines,
