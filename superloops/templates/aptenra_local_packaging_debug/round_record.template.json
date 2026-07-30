@@ -25,7 +25,18 @@
     "aptenra_user_visible_launch_result": null,
     "workbench_shortcut_launch_attempted": false,
     "workbench_user_visible_launch_result": null,
-    "basic_functions_result": null
+    "basic_functions_result": null,
+    "baseline_agent_count": null,
+    "baseline_session_count": null,
+    "ordered_stop_before_repair": null,
+    "repair_attempted": false,
+    "repair_result": null,
+    "post_repair_dual_launch_result": null,
+    "ordered_stop_before_uninstall": null,
+    "uninstall_attempted": false,
+    "uninstall_result": null,
+    "final_product_state": null,
+    "final_cleanup_result": null
   },
   "failure_handling": {
     "candidate_failed": null,
