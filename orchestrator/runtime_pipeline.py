@@ -1102,7 +1102,7 @@ async def handle_backend_error(
         return
     send_elapsed_s, chunk_count = await runtime.send_long_message(
         chat_id=item.chat_id,
-        text=f"Flex Backend Error ({runtime.config.active_backend}): {err_msg}",
+        text=err_msg,
         request_id=item.request_id,
         purpose="error",
     )

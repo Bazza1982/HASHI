@@ -22,12 +22,19 @@ def test_codex_spark_model_is_available_to_flex_backend_registry():
     assert "gpt-5.3-codex-spark" in get_available_models("codex-cli")
 
 
-def test_codex_gpt56_variants_are_available_without_unsupported_alias():
+def test_codex_gpt56_variants_are_available_in_gateway_catalog():
     expected = {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}
     assert expected.issubset(set(AVAILABLE_CODEX_MODELS))
-    assert expected.issubset(set(get_available_models("codex-cli")))
     assert "gpt-5.6" not in AVAILABLE_CODEX_MODELS
-    assert "gpt-5.6" not in get_available_models("codex-cli")
+
+
+def test_codex_gpt56_variants_are_available_in_flex_backend_registry():
+    models = get_available_models("codex-cli")
+    assert "gpt-5.6-sol" in models
+    assert "gpt-5.6-terra" in models
+    assert "gpt-5.6-luna" in models
+    assert "gpt-5.5" in models
+    assert "gpt-5.6" not in models
 
 
 def test_codex_gpt56_sol_exposes_max_effort_without_offering_it_to_other_variants():
