@@ -14,12 +14,12 @@
   },
   "execution_policy": {
     "validation_source": "installed_candidate_only",
-    "failure_journal_update": "after_every_failed_install_or_launch",
+    "failure_journal_update": "after_every_failure",
     "failed_candidate_cleanup": "uninstall_before_next_round",
     "environment_boundary": "candidate_only_preserve_user_environment_and_debug_runtime",
     "prebuild_checks": "advisory_non_blocking",
     "provider_credentials_required": false,
-    "success_condition": "installed_aptenra_and_workbench_launch"
+    "success_condition": "stable_setup_native_launchers_clean_user_complete_lifecycle"
   },
   "liveness": {
     "mode": "idle_nudge",
@@ -29,7 +29,7 @@
     "waiting_is_terminal": false,
     "on_wake": "take_next_concrete_action_without_rechecking_global_history",
     "terminal_conditions": [
-      "installed_aptenra_and_workbench_launch",
+      "stable_setup_native_launchers_clean_user_complete_lifecycle",
       "round_30_formal_block"
     ]
   },

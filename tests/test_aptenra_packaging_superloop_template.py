@@ -55,12 +55,12 @@ def test_template_encodes_four_facts_without_historical_blockers() -> None:
     assert state["scheduler_auto_advance"] is False
     assert state["execution_policy"] == {
         "validation_source": "installed_candidate_only",
-        "failure_journal_update": "after_every_failed_install_or_launch",
+        "failure_journal_update": "after_every_failure",
         "failed_candidate_cleanup": "uninstall_before_next_round",
         "environment_boundary": "candidate_only_preserve_user_environment_and_debug_runtime",
         "prebuild_checks": "advisory_non_blocking",
         "provider_credentials_required": False,
-        "success_condition": "installed_aptenra_and_workbench_launch",
+        "success_condition": "stable_setup_native_launchers_clean_user_complete_lifecycle",
     }
     assert state["liveness"]["interval_minutes"] == 1
     assert len(taskboard) == 4
@@ -92,6 +92,15 @@ def test_prebuild_and_preinstall_do_not_require_candidate_approval(tmp_path: Pat
 
 def test_round_close_rejects_theoretical_validation_without_install(tmp_path: Path) -> None:
     loop_dir = _write_valid_structure(tmp_path)
+    round_path = loop_dir / "rounds" / "round-01" / "round.json"
+    round_record = json.loads(round_path.read_text(encoding="utf-8"))
+    round_record["environment_boundary"] = {
+        "user_environment_unchanged": True,
+        "original_debug_runtime_unchanged": True,
+    }
+    round_record["outcome"]["status"] = "stable_lifecycle_accepted"
+    round_path.write_text(json.dumps(round_record, indent=2), encoding="utf-8")
+
     report = _validator_module().validate_round(loop_dir, "round-close")
 
     assert report["ok"] is False
@@ -131,7 +140,7 @@ def test_failed_round_requires_journal_update_and_uninstall(tmp_path: Path) -> N
     assert "failed_candidate_uninstall_missing" in codes
 
 
-def test_successful_installed_dual_launch_does_not_require_uninstall(tmp_path: Path) -> None:
+def test_successful_stable_lifecycle_requires_maintenance_and_cleanup(tmp_path: Path) -> None:
     loop_dir = _write_valid_structure(tmp_path)
     round_path = loop_dir / "rounds" / "round-01" / "round.json"
     round_record = json.loads(round_path.read_text(encoding="utf-8"))
@@ -145,12 +154,56 @@ def test_successful_installed_dual_launch_does_not_require_uninstall(tmp_path: P
         "workbench_shortcut_launch_attempted": True,
         "workbench_user_visible_launch_result": "success",
         "basic_functions_result": "success",
+        "baseline_agent_count": 5,
+        "baseline_session_count": 5,
+        "ordered_stop_before_repair": "success",
+        "repair_attempted": True,
+        "repair_result": "success",
+        "post_repair_dual_launch_result": "success",
+        "ordered_stop_before_uninstall": "success",
+        "uninstall_attempted": True,
+        "uninstall_result": "success",
+        "final_product_state": -1,
+        "final_cleanup_result": "success",
     }
     round_record["environment_boundary"] = {
         "user_environment_unchanged": True,
         "original_debug_runtime_unchanged": True,
     }
-    round_record["outcome"]["status"] = "install_dual_launch_accepted"
+    round_record["outcome"]["status"] = "stable_lifecycle_accepted"
+    round_path.write_text(json.dumps(round_record, indent=2), encoding="utf-8")
+
+    report = _validator_module().validate_round(loop_dir, "round-close")
+
+    assert report["ok"] is True
+    assert report["findings"] == []
+
+
+def test_never_installed_build_failure_requires_journal_but_not_uninstall(
+    tmp_path: Path,
+) -> None:
+    loop_dir = _write_valid_structure(tmp_path)
+    round_path = loop_dir / "rounds" / "round-01" / "round.json"
+    round_record = json.loads(round_path.read_text(encoding="utf-8"))
+    round_record["environment_boundary"] = {
+        "user_environment_unchanged": True,
+        "original_debug_runtime_unchanged": True,
+    }
+    round_record["failure_handling"].update(
+        {
+            "candidate_failed": True,
+            "journal_updated": True,
+            "journal_entry": "PFJ-999",
+            "uninstall_completed": False,
+            "cleanup_passed": False,
+        }
+    )
+    round_record["outcome"].update(
+        {
+            "status": "build_failed",
+            "candidate_disposition": "never_installed_no_uninstall_required",
+        }
+    )
     round_path.write_text(json.dumps(round_record, indent=2), encoding="utf-8")
 
     report = _validator_module().validate_round(loop_dir, "round-close")
