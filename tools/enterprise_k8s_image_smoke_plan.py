@@ -6,11 +6,17 @@ import sys
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[1]
+TOOLS_DIR = Path(__file__).resolve().parent
+ROOT = TOOLS_DIR.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tools.enterprise_k8s_backend_doctor import run_doctor
+if __package__:
+    from .enterprise_k8s_backend_doctor import run_doctor
+else:
+    if str(TOOLS_DIR) not in sys.path:
+        sys.path.insert(0, str(TOOLS_DIR))
+    from enterprise_k8s_backend_doctor import run_doctor
 
 
 def build_image_smoke_plan(
