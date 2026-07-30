@@ -94,7 +94,7 @@ async def test_record_and_flush_suppressed_transfer_results(tmp_path):
         {"chat_id": 123, "text": "visible", "request_id": "req-1", "purpose": "transfer-release"},
         {
             "chat_id": 456,
-            "text": "Flex Backend Error (codex-cli): boom",
+            "text": "Flex Backend Error (codex-cli): Exact backend failure: boom",
             "request_id": "req-2",
             "purpose": "transfer-release",
         },

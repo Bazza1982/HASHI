@@ -1348,8 +1348,34 @@ async def test_handle_backend_error_notifies_and_delivers_error():
     assert runtime.listener_payloads[0]["success"] is False
     assert runtime.listener_payloads[0]["error"] == "backend failed"
     assert runtime.sent_message["purpose"] == "error"
-    assert "Flex Backend Error" in runtime.sent_message["text"]
+    assert runtime.sent_message["text"] == "backend failed"
     assert runtime.maintenance_events[0][0] == "send_error"
+
+
+@pytest.mark.asyncio
+async def test_handle_backend_error_passes_raw_failure_to_delivery_boundary():
+    runtime = _runtime()
+    item = _item()
+    response = SimpleNamespace(
+        error=(
+            '{"type":"error","status":400,"error":{"type":"invalid_request_error",'
+            '"message":"The \'gpt-5.6-sol\' model requires a newer version of Codex. '
+            'Please upgrade to the latest app or CLI and try again."}}'
+        )
+    )
+
+    await runtime_pipeline.handle_backend_error(
+        runtime,
+        item,
+        response,
+        queued_at=datetime.now() - timedelta(seconds=1),
+        queue_wait_s=0.5,
+        backend_elapsed_s=0.25,
+    )
+
+    assert runtime.sent_message["text"] == response.error
+    assert runtime.sent_message["purpose"] == "error"
+    assert runtime.listener_payloads[0]["error"] == response.error
 
 
 @pytest.mark.asyncio
