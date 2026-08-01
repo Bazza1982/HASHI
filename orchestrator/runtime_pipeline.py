@@ -9,7 +9,7 @@ import hashlib as _hashlib
 
 from telegram.error import RetryAfter
 
-from orchestrator.runtime_common import _print_final_response, _safe_excerpt
+from orchestrator.runtime_common import _md_to_html, _print_final_response, _safe_excerpt
 from orchestrator import runtime_retry
 from orchestrator import telegram_delivery_failover
 from orchestrator import telegram_stream_policy
@@ -437,7 +437,8 @@ async def answer_preview_loop(
             await runtime.app.bot.edit_message_text(
                 chat_id=item.chat_id,
                 message_id=placeholder.message_id,
-                text=text,
+                text=_md_to_html(text),
+                parse_mode="HTML",
             )
             if stream_state is not None:
                 stream_state.edit_count += 1

@@ -287,7 +287,8 @@ async def test_verbose_stream_display_obeys_shared_edit_budget(tmp_path):
     )
 
     for index in range(3):
-        await event_queue.put(StreamEvent(kind=KIND_PROGRESS, summary=f"step {index}"))
+        summary = "step **zero** with `details`" if index == 0 else f"step {index}"
+        await event_queue.put(StreamEvent(kind=KIND_PROGRESS, summary=summary))
         for _ in range(20):
             if len(edits) >= min(index + 1, 2):
                 break
@@ -298,4 +299,7 @@ async def test_verbose_stream_display_obeys_shared_edit_budget(tmp_path):
     await task
 
     assert len(edits) == 2
+    assert any("<b>zero</b>" in edit["text"] for edit in edits)
+    assert any("<code>details</code>" in edit["text"] for edit in edits)
+    assert all(edit["parse_mode"] == "HTML" for edit in edits)
     assert any("Streaming display budget exhausted" in message for message in log_messages)

@@ -803,8 +803,8 @@ async def test_answer_preview_stream_edits_placeholder():
         audit_collector=None,
     )
 
-    await feedback.on_stream_event(StreamEvent(kind=KIND_TEXT_DELTA, summary="Hello "))
-    await feedback.on_stream_event(StreamEvent(kind=KIND_TEXT_DELTA, summary="world"))
+    await feedback.on_stream_event(StreamEvent(kind=KIND_TEXT_DELTA, summary="**Hello** "))
+    await feedback.on_stream_event(StreamEvent(kind=KIND_TEXT_DELTA, summary="`world`"))
 
     for _ in range(20):
         if runtime.app.bot.edits:
@@ -816,7 +816,8 @@ async def test_answer_preview_stream_edits_placeholder():
     await feedback.answer_preview_task
 
     assert runtime.app.bot.edits
-    assert "Hello world" in runtime.app.bot.edits[-1]["text"]
+    assert "<b>Hello</b> <code>world</code>" in runtime.app.bot.edits[-1]["text"]
+    assert runtime.app.bot.edits[-1]["parse_mode"] == "HTML"
 
 
 @pytest.mark.asyncio
