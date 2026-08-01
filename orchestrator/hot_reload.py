@@ -28,6 +28,7 @@ FOUNDATION_PHASES = {
     "orchestrator.workspace_state": 0,
     "orchestrator.model_catalog": 1,
     "orchestrator.manager_registry": 1,
+    "orchestrator.ticket_manager": 1,
 }
 
 

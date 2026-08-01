@@ -44,3 +44,44 @@ async def test_stop_agent_preserves_runtimes_list_identity():
     assert kernel.runtimes is runtimes
     assert external_holder.runtimes is runtimes
     assert [runtime.name for runtime in external_holder.runtimes] == ["beta"]
+
+
+@pytest.mark.asyncio
+async def test_start_agent_runtime_build_failure_is_logged_to_bridge(monkeypatch):
+    class StartKernel(DummyKernel):
+        def __init__(self):
+            super().__init__([])
+            self._agent_locks = {}
+
+        def _agent_lock(self, name):
+            return self._agent_locks.setdefault(name, asyncio.Lock())
+
+        def _load_config_bundle(self):
+            return (
+                SimpleNamespace(),
+                [SimpleNamespace(name="lily")],
+                {},
+            )
+
+    kernel = StartKernel()
+    manager = AgentLifecycleManager(kernel)
+    bridge_messages = []
+
+    def fail_build(*_args):
+        raise TypeError("detect_instance() takes 1 positional argument but 2 were given")
+
+    monkeypatch.setattr(manager, "build_runtime", fail_build)
+    monkeypatch.setattr(
+        "orchestrator.agent_lifecycle.bridge_logger.exception",
+        bridge_messages.append,
+    )
+
+    ok, message = await manager.start_agent("lily")
+
+    assert ok is False
+    assert message == (
+        "Failed to initialize 'lily': TypeError: "
+        "detect_instance() takes 1 positional argument but 2 were given"
+    )
+    assert bridge_messages == [message]
+    assert kernel._startup_tasks == {}

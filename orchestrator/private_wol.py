@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from orchestrator.ticket_manager import detect_instance
+from orchestrator import ticket_manager
 
 WOL_CONFIG_REL = Path("private/wol_targets.json")
 
@@ -32,7 +32,9 @@ def _current_instance(
     configured_instance_id: str | None = None,
 ) -> str:
     return (
-        str(detect_instance(project_root, configured_instance_id) or "").upper()
+        str(
+            ticket_manager.detect_instance(project_root, configured_instance_id) or ""
+        ).upper()
         or "HASHI"
     )
 
