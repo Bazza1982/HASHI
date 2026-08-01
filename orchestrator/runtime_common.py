@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import re
 from dataclasses import dataclass
 
@@ -55,6 +56,33 @@ def _md_to_html(text: str) -> str:
         safe = code.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         text = text.replace(f"\x00INLINE{i}\x00", f"<code>{safe}</code>")
     return text
+
+
+def _streaming_status_to_html(
+    agent_name: str,
+    engine: str,
+    elapsed_s: int,
+    lines: list[str],
+    *,
+    max_message_len: int = 3800,
+) -> str:
+    """Render a rolling Telegram status message without exposing Markdown markers."""
+    header_text = f"🔍 {agent_name} | {engine} | {elapsed_s}s"
+    body = "\n".join(lines)
+    separator = "\n\n"
+    truncation = "\n..."
+    max_body_len = max(0, max_message_len - len(header_text) - len(separator))
+    if len(body) > max_body_len:
+        keep = max(0, max_body_len - len(truncation))
+        body = body[:keep].rstrip() + truncation
+
+    header = (
+        f"🔍 <b>{html.escape(str(agent_name))}</b> | "
+        f"{html.escape(str(engine))} | {elapsed_s}s"
+    )
+    if not body:
+        return header
+    return header + separator + _md_to_html(body)
 
 
 def _print_user_message(agent_name: str, text: str, media_tag: str = ""):

@@ -61,6 +61,7 @@ from orchestrator.runtime_common import (
     _print_thinking,
     _print_user_message,
     _safe_excerpt,
+    _streaming_status_to_html,
 )
 from orchestrator import runtime_nudge
 from orchestrator import runtime_menu_views
@@ -1540,14 +1541,14 @@ class BridgeAgentRuntime:
         }
 
         def _build_display() -> str:
-            import html as _html
             elapsed = int(time.time() - started)
-            header = f"🔍 <b>{_html.escape(str(self.name))}</b> | {_html.escape(str(engine))} | {elapsed}s\n"
-            body = "\n".join(_html.escape(line) for line in buffer[-MAX_LINES:])
-            text = header + "\n" + body
-            if len(text) > MAX_MSG_LEN:
-                text = text[:MAX_MSG_LEN] + "\n..."
-            return text
+            return _streaming_status_to_html(
+                self.name,
+                engine,
+                elapsed,
+                buffer[-MAX_LINES:],
+                max_message_len=MAX_MSG_LEN,
+            )
 
         async def _edit_placeholder():
             nonlocal last_edit_at, dirty
@@ -1719,7 +1720,6 @@ class BridgeAgentRuntime:
             self._openrouter_think_chunk = ""
         if not self._think_buffer:
             return
-        import html as _html
         lines = self._think_buffer[:]
         self._think_buffer.clear()
         text = "\n".join(lines)
@@ -1732,7 +1732,7 @@ class BridgeAgentRuntime:
         # Telegram — skip if not connected
         if not self.telegram_connected:
             return
-        _think_msg = f"💭 <i>{_html.escape(text)}</i>"
+        _think_msg = f"💭 {_md_to_html(text)}"
         try:
             await self.app.bot.send_message(chat_id=chat_id, text=_think_msg, parse_mode="HTML")
         except Exception as e:
