@@ -52,7 +52,7 @@ def test_privacy_status_explains_level_zero_and_default() -> None:
 
     status = privacy_status_text(runtime)
 
-    assert "<b>LEVEL 0 · Privacy Off</b>" in status
+    assert "<b>Current</b> · <b>LEVEL 0</b> · Privacy Off" in status
     assert "Privacy framework bypassed" in status
     assert "Default: Level 1 — Provider Trust" in status
     assert "🔒 2  Basic · one filter · API only" in status
@@ -83,7 +83,7 @@ async def test_confirming_level_zero_changes_and_reports_full_details() -> None:
     assert runtime.backend_manager.privacy_level is PrivacyLevel.OFF
     message = update.callback_query.edit_message_text.await_args.args[0]
     assert "Privacy changed to Level 0" in message
-    assert "<b>LEVEL 0 · Privacy Off</b>" in message
+    assert "<b>Current</b> · <b>LEVEL 0</b> · Privacy Off" in message
     assert update.callback_query.edit_message_text.await_args.kwargs["parse_mode"] == "HTML"
     update.callback_query.answer.assert_awaited_once_with("Privacy Level 0")
 
@@ -98,7 +98,7 @@ async def test_privacy_menu_uses_compact_two_column_level_buttons() -> None:
     kwargs = runtime._reply_text.await_args.kwargs
     keyboard = kwargs["reply_markup"]
     assert message.startswith("🛡️ <b>HASHI PRIVACY</b>")
-    assert "<b>LEVEL 1 · Provider Trust</b>" in message
+    assert "<b>Current</b> · <b>LEVEL 1</b> · Provider Trust" in message
     assert kwargs["parse_mode"] == "HTML"
     assert [button.text for button in keyboard.inline_keyboard[0]] == ["0 · Off", "✓ 1 · Trust"]
     assert [button.text for button in keyboard.inline_keyboard[1]] == [

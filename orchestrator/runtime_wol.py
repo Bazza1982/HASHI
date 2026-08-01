@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import html
 from typing import Any
 
+from orchestrator import runtime_menu_views
+from orchestrator.command_ui import card_title
 from orchestrator.private_wol import (
     describe_wol_targets,
     private_wol_available,
@@ -18,21 +21,30 @@ async def cmd_wol(runtime: Any, update: Any, context: Any) -> None:
     project_root = runtime.global_config.project_root
     instance_id = getattr(runtime.global_config, "instance_id", None)
     if not private_wol_available(project_root, instance_id):
-        await runtime._reply_text(update, "⚪ /wol is not enabled on this instance.")
+        await runtime._reply_text(
+            update,
+            f"{card_title('🪄', 'Wake-on-LAN')}\n\n"
+            "<b>Current</b> · <b>UNAVAILABLE</b>\n\n"
+            "Wake-on-LAN is not configured for this instance.",
+            parse_mode="HTML",
+        )
         return
 
     arg = context.args[0].strip().lower() if context.args else ""
     if not arg or arg in {"list", "status", "help"}:
         targets = describe_wol_targets(project_root)
-        lines = ["🪄 Private WoL targets on this instance:"]
-        for row in targets:
-            description = f" — {row['description']}" if row["description"] else ""
-            lines.append(f"- {row['name']} ({row['label']}){description}")
-        lines.extend(["", "Usage: /wol <pc_name>"])
-        await runtime._reply_text(update, "\n".join(lines))
+        await runtime._reply_text(
+            update,
+            runtime_menu_views.wol_targets_text(targets, instance_id=instance_id),
+            parse_mode="HTML",
+        )
         return
 
-    await runtime._reply_text(update, f"🪄 Sending Wake-on-LAN packet for `{arg}`…")
+    await runtime._reply_text(
+        update,
+        f"🪄 Sending Wake-on-LAN packet for <code>{html.escape(arg)}</code>…",
+        parse_mode="HTML",
+    )
     result = await asyncio.to_thread(
         run_private_wol,
         project_root,

@@ -58,14 +58,16 @@ async def test_cmd_workzone_status_set_and_off(tmp_path):
     runtime._sync_workzone_to_backend_config = lambda: runtime_workzone.sync_workzone_to_backend_config(runtime)
 
     await runtime_workzone.cmd_workzone(runtime, _update(), SimpleNamespace(args=[]))
-    assert "Workzone is OFF" in runtime.replies[-1]["text"]
+    assert "<b>WORKZONE</b>" in runtime.replies[-1]["text"]
+    assert "<b>Current</b> · <b>OFF</b>" in runtime.replies[-1]["text"]
+    assert runtime.replies[-1]["parse_mode"] == "HTML"
 
     await runtime_workzone.cmd_workzone(runtime, _update(), SimpleNamespace(args=["repo"]))
-    assert "Workzone ON" in runtime.replies[-1]["text"]
+    assert "<b>Current</b> · <b>ON</b>" in runtime.replies[-1]["text"]
     assert runtime._workzone_dir == runtime.zone.resolve()
 
     await runtime_workzone.cmd_workzone(runtime, _update(), SimpleNamespace(args=["off"]))
-    assert "Workzone OFF" in runtime.replies[-1]["text"]
+    assert "<b>Current</b> · <b>OFF</b>" in runtime.replies[-1]["text"]
     assert runtime._workzone_dir is None
 
 

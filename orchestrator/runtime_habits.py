@@ -159,15 +159,13 @@ def build_habit_browser_view(
     total, rows = runtime._load_local_habit_rows(offset=offset)
     lines = [
         card_title("🧠", "Local habits"),
-        f"Agent: <code>{html.escape(runtime.name)}</code>",
         "",
-        (
-            f"📊 Total <b>{counts['total']}</b> • "
-            f"🟢 Active <b>{counts['active']}</b> • "
-            f"🟡 Candidate <b>{counts['candidate']}</b> • "
-            f"⏸ Paused <b>{counts['paused']}</b> • "
-            f"🔴 Disabled <b>{counts['disabled']}</b>"
-        ),
+        f"<b>Current</b> · <code>{counts['total']}</code> habits",
+        f"<b>Agent</b> · <code>{html.escape(runtime.name)}</code>",
+        f"<b>Active</b> · <code>{counts['active']}</code>",
+        f"<b>Candidate</b> · <code>{counts['candidate']}</code>",
+        f"<b>Paused</b> · <code>{counts['paused']}</code>",
+        f"<b>Disabled</b> · <code>{counts['disabled']}</code>",
     ]
     if notice:
         lines.extend(["", f"✨ {html.escape(notice)}"])
@@ -264,14 +262,12 @@ def build_habit_governance_view(runtime: Any) -> str:
         counts[row.status] = counts.get(row.status, 0) + 1
     lines = [
         card_title("📋", "Habit governance"),
-        f"Agent: <code>{html.escape(runtime.name)}</code>",
         "",
-        (
-            f"Pending <b>{counts['pending']}</b> • Approved <b>{counts['approved']}</b> • "
-            f"Applied <b>{counts['applied']}</b> • Rejected <b>{counts['rejected']}</b> • "
-            f"Obsolete <b>{counts['obsolete']}</b>"
-        ),
-        f"🤝 Active shared patterns <b>{len(shared_rows)}</b>",
+        f"<b>Current</b> · <code>{counts['pending']}</code> pending",
+        f"<b>Agent</b> · <code>{html.escape(runtime.name)}</code>",
+        f"<b>Approved</b> · <code>{counts['approved']}</code> · <b>Applied</b> · <code>{counts['applied']}</code>",
+        f"<b>Rejected</b> · <code>{counts['rejected']}</code> · <b>Obsolete</b> · <code>{counts['obsolete']}</code>",
+        f"<b>Shared patterns</b> · <code>{len(shared_rows)}</code> active",
     ]
     pending = [row for row in rows if row.status == "pending"][:5]
     lines.append("")

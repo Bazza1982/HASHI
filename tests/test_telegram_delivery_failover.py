@@ -311,8 +311,8 @@ def test_status_summary_reports_delivery_block_and_preview(tmp_path):
 
     text = runtime_status.build_status_text(runtime, detailed=True)
     assert "delivery-blocked" == runtime_status.compute_status_string(runtime)
-    assert "📨 Delivery: blocked" in text
+    assert "<b>Delivery</b> · <code>BLOCKED</code>" in text
     assert "remaining" in text
-    assert "until 2030-01-01T00:00:00+10:00" in text
-    assert "via lin_yueru" in text
-    assert "👁 Preview: OFF (persisted override)" in text
+    assert "until <code>2030-01-01T00:00:00+10:00</code>" in text
+    assert "via <code>lin_yueru</code>" in text
+    assert "<b>Preview</b> · <code>OFF</code> · persisted override" in text

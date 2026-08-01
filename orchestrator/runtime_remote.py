@@ -158,7 +158,13 @@ async def do_move(
         await runtime._send_text(chat_id, f"Error running migration: {exc}")
 
 
-def render_remote_peer_lines(runtime: Any, peers: list[dict[str, Any]], *, include_refreshed_at: bool = True) -> list[str]:
+def render_remote_peer_lines(
+    runtime: Any,
+    peers: list[dict[str, Any]],
+    *,
+    include_refreshed_at: bool = True,
+    include_title: bool = True,
+) -> list[str]:
     peers = sorted(
         peers,
         key=lambda peer: (
@@ -175,14 +181,19 @@ def render_remote_peer_lines(runtime: Any, peers: list[dict[str, Any]], *, inclu
             counts["attention"] += 1
         else:
             counts["offline"] += 1
-    lines = [
-        card_title("📡", "Remote instances"),
-        "",
-        f"online: <code>{counts['online']}</code>  ·  attention: <code>{counts['attention']}</code>  ·  offline: <code>{counts['offline']}</code>",
-    ]
+    lines = [card_title("📡", "Remote instances"), ""] if include_title else []
+    lines.extend(
+        [
+            f"<b>Current</b> · <code>{counts['online']}</code> online",
+            f"<b>Attention</b> · <code>{counts['attention']}</code>",
+            f"<b>Offline</b> · <code>{counts['offline']}</code>",
+        ]
+    )
     if include_refreshed_at:
-        lines.append(f"refreshed: <code>{datetime.now().strftime('%H:%M:%S')}</code>")
+        lines.append(f"<b>Refreshed</b> · <code>{datetime.now().strftime('%H:%M:%S')}</code>")
     lines.append("")
+    if not peers:
+        lines.append("No remote peers are currently visible.")
     for idx, peer in enumerate(peers):
         lines.extend(runtime._render_remote_peer_block(peer))
         if idx != len(peers) - 1:
@@ -310,8 +321,8 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
             card_title("📡", "Hashi remote"),
             "",
             "<b>Current</b> · <code>ON</code>",
-            f"Instance: <code>{instance.get('instance_id') or runtime.global_config.project_root.name.upper()}</code>",
-            f"API: <code>{health_url}</code>",
+            f"<b>Instance</b> · <code>{html.escape(str(instance.get('instance_id') or runtime.global_config.project_root.name.upper()))}</code>",
+            f"<b>API</b> · <code>{html.escape(str(health_url))}</code>",
         ]
         if disabled:
             lines.append("Remote: <code>disabled</code>")
@@ -328,7 +339,23 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
             if conflicts:
                 lines.append(f"Route warnings: <code>{len(conflicts)}</code> same-host port conflict(s)")
         if peers:
-            lines.extend(["", *render_remote_peer_lines(runtime, peers, include_refreshed_at=False)])
+            lines.extend(
+                [
+                    "",
+                    *render_remote_peer_lines(
+                        runtime,
+                        peers,
+                        include_refreshed_at=False,
+                        include_title=False,
+                    ),
+                ]
+            )
+        lines.extend(
+            [
+                "",
+                "Use <code>/remote on|off</code> to control the service or <code>/remote list</code> to refresh peers.",
+            ]
+        )
         await runtime._reply_text(update, "\n".join(lines), parse_mode="HTML")
         return
 
@@ -439,6 +466,8 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
 
     await runtime._reply_text(
         update,
-        "Usage: /remote [on|off|status]\nDefault: `/remote` shows status and connected instances.\nLegacy: `/remote list` is still supported.",
-        parse_mode="Markdown",
+        f"{card_title('📡', 'Hashi remote')}\n\n"
+        "<b>Current</b> · invalid option\n\n"
+        "Use <code>/remote on|off|status</code>. <code>/remote list</code> remains supported.",
+        parse_mode="HTML",
     )

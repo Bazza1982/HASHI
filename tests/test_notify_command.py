@@ -46,7 +46,12 @@ async def test_notify_defaults_off_and_reports_status(tmp_path):
     await notify_command(runtime, _update(), SimpleNamespace(args=[]))
 
     assert notify_enabled(runtime) is False
-    assert "Telegram notifications: OFF" in runtime.replies[0][0]
+    text, kwargs = runtime.replies[0]
+    assert "<b>TELEGRAM NOTIFICATIONS</b>" in text
+    assert "<b>Current</b> · <b>OFF</b>" in text
+    assert kwargs["parse_mode"] == "HTML"
+    labels = [button.text for row in kwargs["reply_markup"].inline_keyboard for button in row]
+    assert "✓ Off" in labels
 
 
 @pytest.mark.asyncio
@@ -57,7 +62,13 @@ async def test_notify_on_persists_marker(tmp_path):
 
     assert notify_enabled(runtime) is True
     assert (tmp_path / ".notify_on").exists()
-    assert "Telegram notifications: ON" in runtime.replies[0][0]
+    assert "<b>Current</b> · <b>ON</b>" in runtime.replies[0][0]
+    labels = [
+        button.text
+        for row in runtime.replies[0][1]["reply_markup"].inline_keyboard
+        for button in row
+    ]
+    assert "✓ On" in labels
 
 
 @pytest.mark.asyncio
@@ -71,4 +82,4 @@ async def test_notify_off_removes_marker(tmp_path):
 
     assert notify_enabled(runtime) is False
     assert not marker.exists()
-    assert "Telegram notifications: OFF" in runtime.replies[0][0]
+    assert "<b>Current</b> · <b>OFF</b>" in runtime.replies[0][0]

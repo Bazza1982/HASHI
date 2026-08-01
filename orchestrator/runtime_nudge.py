@@ -42,7 +42,8 @@ def build_nudge_with_buttons(skill_manager, agent_name: str, runtime=None):
     lines = [
         card_title("🫧", "Nudge manager"),
         "",
-        f"<b>Current agent</b> · <code>{html.escape(agent_name)}</code>",
+        f"<b>Current</b> · <code>{sum(bool(job.get('enabled')) for job in jobs)}</code> active · <code>{len(jobs)}</code> configured",
+        f"<b>Agent</b> · <code>{html.escape(agent_name)}</code>",
         "<b>Changes</b> · immediate and persistent",
     ]
     buttons: list = []
@@ -56,7 +57,7 @@ def build_nudge_with_buttons(skill_manager, agent_name: str, runtime=None):
     for job in jobs:
         meta = job.get("nudge_meta", {})
         enabled = job.get("enabled", False)
-        status = "🟢" if enabled else "🔴"
+        status = "ON" if enabled else "OFF"
         count = int(meta.get("count", 0) or 0)
         max_count = int(meta.get("max", 0) or 0)
         max_label = "∞" if max_count <= 0 else str(max_count)
@@ -67,12 +68,13 @@ def build_nudge_with_buttons(skill_manager, agent_name: str, runtime=None):
         jid = job["id"]
         short_id = jid[:24]
 
-        lines.append(f"\n{status} <code>{html.escape(jid)}</code>")
-        lines.append(f"   every {minutes} min · fired {count}/{max_label}")
+        lines.append(f"\n<b>{status}</b> · <code>{html.escape(jid)}</code>")
+        lines.append(f"<b>Schedule</b> · every <code>{minutes} min</code>")
+        lines.append(f"<b>Progress</b> · <code>{count}/{max_label}</code>")
         if exit_condition:
-            lines.append(f"   until: {exit_condition}")
+            lines.append(f"<b>Exit</b> · {exit_condition}")
         if reason:
-            lines.append(f"   ⚠️ {html.escape(str(reason))}")
+            lines.append(f"⚠️ {html.escape(str(reason))}")
 
         toggle_mode = "off" if enabled else "on"
         toggle_label = "⏸ Pause" if enabled else "▶ Resume"

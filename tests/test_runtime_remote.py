@@ -226,7 +226,9 @@ async def test_remote_status_includes_peer_list(tmp_path, monkeypatch):
     assert "Peers:" not in text
     assert "Inflight:" not in text
     assert "Rescue:" not in text
-    assert "📡 <b>REMOTE INSTANCES</b>" in text
-    assert "online: <code>1</code>  ·  attention: <code>0</code>  ·  offline: <code>1</code>" in text
+    assert "📡 <b>REMOTE INSTANCES</b>" not in text
+    assert "<b>Current</b> · <code>1</code> online" in text
+    assert "<b>Attention</b> · <code>0</code>" in text
+    assert "<b>Offline</b> · <code>1</code>" in text
     assert "peer:HASHI9" in text
     assert "peer:MSI" in text

@@ -29,7 +29,7 @@ from orchestrator.memory_plus_mode import (
 )
 from orchestrator.runtime_common import QueuedRequest
 from orchestrator import telegram_stream_policy
-from orchestrator.wrapper_mode import DEFAULT_WRAPPER_STYLE_SLOT_TEXT, SESSION_RESET_SOURCE
+from orchestrator.wrapper_mode import DEFAULT_WRAPPER_STYLE_SLOT_TEXT
 
 
 def _make_manager(workspace: Path) -> FlexibleBackendManager:
@@ -412,15 +412,16 @@ def test_status_text_shows_audit_model_configuration():
 
     text = runtime._build_status_text(detailed=False)
 
-    assert "🔀 Mode: audit" in text
-    assert "⚙️ Active backend: codex-cli • gpt-5.5" in text
-    assert "🎛️ Model effort: xhigh" in text
-    assert "🧪 Audit" in text
-    assert "• Core: claude-cli / claude-sonnet-4-6" in text
-    assert "• Auditor: claude-cli / claude-opus-4-7" in text
-    assert "• Delivery: always" in text
-    assert "• Threshold: low" in text
-    assert "• Timeout: 60s" in text
+    assert "<b>Mode</b> · <code>audit</code>" in text
+    assert "<b>Backend</b> · <code>codex-cli</code>" in text
+    assert "<b>Model</b> · <code>gpt-5.5</code>" in text
+    assert "<b>Effort</b> · <code>xhigh</code>" in text
+    assert "🧪 <b>AUDIT</b>" in text
+    assert "<b>Core</b> · <code>claude-cli / claude-sonnet-4-6</code>" in text
+    assert "<b>Auditor</b> · <code>claude-cli / claude-opus-4-7</code>" in text
+    assert "<b>Delivery</b> · <code>always</code>" in text
+    assert "<b>Threshold</b> · <code>low</code>" in text
+    assert "<b>Timeout</b> · <code>60s</code>" in text
 
 
 def test_status_text_shows_wrapper_model_configuration():
@@ -435,14 +436,15 @@ def test_status_text_shows_wrapper_model_configuration():
 
     text = runtime._build_status_text(detailed=False)
 
-    assert "🔀 Mode: wrapper" in text
-    assert "⚙️ Active backend: codex-cli • gpt-5.5" in text
-    assert "🎛️ Model effort: xhigh" in text
-    assert "🎭 Wrapper" in text
-    assert "• Core: codex-cli / gpt-5.5" in text
-    assert "• Wrapper: claude-cli / claude-haiku-4-5" in text
-    assert "• Context window: 3" in text
-    assert "• Slots: 3 configured" in text
+    assert "<b>Mode</b> · <code>wrapper</code>" in text
+    assert "<b>Backend</b> · <code>codex-cli</code>" in text
+    assert "<b>Model</b> · <code>gpt-5.5</code>" in text
+    assert "<b>Effort</b> · <code>xhigh</code>" in text
+    assert "🎭 <b>WRAPPER</b>" in text
+    assert "<b>Core</b> · <code>codex-cli / gpt-5.5</code>" in text
+    assert "<b>Wrapper</b> · <code>claude-cli / claude-haiku-4-5</code>" in text
+    assert "<b>Context window</b> · <code>3</code>" in text
+    assert "<b>Slots</b> · <code>3</code> configured" in text
 
 
 def test_status_full_includes_audit_criteria_and_wrapper_slots():
@@ -460,11 +462,13 @@ def test_status_full_includes_audit_criteria_and_wrapper_slots():
     )
 
     audit_detailed = audit_runtime._build_status_text(detailed=True)
-    assert "🧪 Audit Criteria:\n• 1: Catch tool-risk drift." in audit_detailed
-    assert f"• 9: {DEFAULT_AUDIT_CRITERION_SLOT_TEXT}" in audit_detailed
+    assert "🧪 <b>AUDIT CRITERIA</b>\n<code>1</code> · Catch tool-risk drift." in audit_detailed
+    assert "<code>9</code> ·" in audit_detailed
+    assert DEFAULT_AUDIT_CRITERION_SLOT_TEXT[:40] in audit_detailed
     detailed = wrapper_runtime._build_status_text(detailed=True)
-    assert "🎭 Wrapper Slots:\n• 1: Be concise." in detailed
-    assert f"• 9: {DEFAULT_WRAPPER_STYLE_SLOT_TEXT}" in detailed
+    assert "🎭 <b>WRAPPER SLOTS</b>\n<code>1</code> · Be concise." in detailed
+    assert "<code>9</code> ·" in detailed
+    assert DEFAULT_WRAPPER_STYLE_SLOT_TEXT[:40] in detailed
 
 
 class FakeMemoryStore:
@@ -1320,15 +1324,16 @@ async def test_wrapper_config_status_commands_include_clickable_buttons(tmp_path
     update, context = _update([])
 
     await FlexibleAgentRuntime.cmd_core(runtime, update, context)
-    assert "Tap a button" in messages[-1]
+    assert "<b>WRAPPER CORE MODEL</b>" in messages[-1]
+    assert "Choose a model below" in messages[-1]
+    assert runtime._reply_payloads[-1]["parse_mode"] == "HTML"
     assert runtime._reply_payloads[-1]["reply_markup"] is not None
     assert "wcfg:core:codex-cli:gpt-5.5" in str(runtime._reply_payloads[-1]["reply_markup"])
 
     await FlexibleAgentRuntime.cmd_wrap(runtime, update, context)
-    assert "Tap a provider/model button" in messages[-1]
-    assert "Buttons are grouped by provider" in messages[-1]
-    assert "Each model button changes both wrapper backend and model" in messages[-1]
-    assert "Context buttons only change" in messages[-1]
+    assert "<b>WRAPPER TRANSLATOR MODEL</b>" in messages[-1]
+    assert "Model choices update backend and model together" in messages[-1]
+    assert "context buttons only change visible history" in messages[-1]
     assert runtime._reply_payloads[-1]["reply_markup"] is not None
     wrap_markup = str(runtime._reply_payloads[-1]["reply_markup"])
     assert "wcfg:wrapid:claude_haiku" in wrap_markup
@@ -1338,7 +1343,8 @@ async def test_wrapper_config_status_commands_include_clickable_buttons(tmp_path
     assert "wcfg:wrapctx:3" in wrap_markup
 
     await FlexibleAgentRuntime.cmd_wrapper(runtime, update, context)
-    assert "Tap buttons below" in messages[-1]
+    assert "<b>WRAPPER CONFIGURATION</b>" in messages[-1]
+    assert "Choose a model page below" in messages[-1]
     assert runtime._reply_payloads[-1]["reply_markup"] is not None
     assert "wcfg:menu:core" in str(runtime._reply_payloads[-1]["reply_markup"])
 
@@ -1387,9 +1393,10 @@ async def test_audit_core_status_uses_audit_keyboard(tmp_path):
 
     await FlexibleAgentRuntime.cmd_core(runtime, update, context)
 
-    assert "Audit core model" in messages[-1]
-    assert "Wrapper core model" not in messages[-1]
-    assert "This is the model that does the actual work" in messages[-1]
+    assert "<b>AUDIT CORE MODEL</b>" in messages[-1]
+    assert "<b>WRAPPER CORE MODEL</b>" not in messages[-1]
+    assert "performs the user task before audit review" in messages[-1]
+    assert runtime._reply_payloads[-1]["parse_mode"] == "HTML"
     markup = str(runtime._reply_payloads[-1]["reply_markup"])
     assert "Claude Opus 4.7" in markup
     assert "Claude Opus 4.6" in markup
@@ -1443,8 +1450,8 @@ async def test_audit_model_menu_and_buttons_update_auditor_model(tmp_path):
 
     await FlexibleAgentRuntime.cmd_audit(runtime, update, context)
 
-    assert "Audit model:" in messages[-1]
-    assert "This model reviews the core model" in messages[-1]
+    assert "<b>AUDIT REVIEWER MODEL</b>" in messages[-1]
+    assert "reviews observable core actions and output" in messages[-1]
     markup = str(runtime._reply_payloads[-1]["reply_markup"])
     assert "Claude Opus 4.7" in markup
     assert "Claude Opus 4.6" in markup

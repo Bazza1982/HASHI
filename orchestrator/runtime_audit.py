@@ -19,7 +19,7 @@ from orchestrator.audit_mode import (
 )
 from orchestrator.runtime_common import QueuedRequest
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from orchestrator.command_ui import REFRESH_LABEL, card_title, selected_label
+from orchestrator.command_ui import BACK_LABEL, REFRESH_LABEL, card_title, selected_label, setting_card
 
 
 def audit_enabled(runtime: Any) -> bool:
@@ -106,34 +106,39 @@ def audit_model_keyboard(runtime: Any, cfg: Any, *, target: str) -> InlineKeyboa
             InlineKeyboardButton("Audit model", callback_data="acfg:menu:auditmodel"),
         ]
     )
-    rows.append([InlineKeyboardButton("Audit config", callback_data="acfg:menu:audit")])
+    rows.append([InlineKeyboardButton(BACK_LABEL, callback_data="acfg:menu:audit")])
     return InlineKeyboardMarkup(rows)
 
 
 def audit_core_text(cfg: Any) -> str:
-    return (
-        "Audit core model:\n"
-        f"• Backend: `{cfg.core_backend}`\n"
-        f"• Model: `{cfg.core_model}`\n\n"
-        "This is the model that does the actual work. Tap a provider/model button below, or type:\n"
-        "`/core backend=claude-cli model=claude-sonnet-4-6`\n"
-        "`/core backend=codex-cli model=gpt-5.6-sol`\n"
-        "`/core backend=deepseek-api model=deepseek-v4-pro`"
+    return setting_card(
+        "🧠",
+        "Audit core model",
+        current=f"<code>{html.escape(cfg.core_backend)} / {html.escape(cfg.core_model)}</code>",
+        facts=["<b>Role</b> · performs the user task before audit review"],
+        consequence="Changing this selection updates the active core model used in Audit mode.",
+        action=(
+            "Choose a model below or use "
+            "<code>/core backend=&lt;backend&gt; model=&lt;model&gt;</code>."
+        ),
     )
 
 
 def audit_auditor_text(cfg: Any) -> str:
-    return (
-        "Audit model:\n"
-        f"• Backend: `{cfg.audit_backend}`\n"
-        f"• Model: `{cfg.audit_model}`\n"
-        f"• Delivery: `{cfg.delivery}`\n"
-        f"• Severity threshold: `{cfg.severity_threshold}`\n\n"
-        "This model reviews the core model's observable thinking/actions/output. "
-        "Use a strong reviewer model here. Tap a button below, or type:\n"
-        "`/audit model backend=claude-cli model=claude-opus-4-7`\n"
-        "`/audit model backend=claude-cli model=claude-sonnet-4-6`\n"
-        "`/audit model backend=openrouter-api model=anthropic/claude-sonnet-4.6`"
+    return setting_card(
+        "🔎",
+        "Audit reviewer model",
+        current=f"<code>{html.escape(cfg.audit_backend)} / {html.escape(cfg.audit_model)}</code>",
+        facts=[
+            f"<b>Delivery</b> · <code>{html.escape(cfg.delivery)}</code>",
+            f"<b>Threshold</b> · <code>{html.escape(cfg.severity_threshold)}</code>",
+            "<b>Role</b> · reviews observable core actions and output",
+        ],
+        consequence="A stronger reviewer can improve risk detection but may add latency and cost.",
+        action=(
+            "Choose a model below or use "
+            "<code>/audit model backend=&lt;backend&gt; model=&lt;model&gt;</code>."
+        ),
     )
 
 
@@ -200,7 +205,7 @@ def audit_status_text(state: dict, criteria: dict) -> str:
     lines = [
         card_title("🔎", "Hashi audit"),
         "",
-        f"<b>STATUS</b> · <b>{cfg.delivery.upper()}</b>",
+        f"<b>Current</b> · <b>{cfg.delivery.upper()}</b>",
         f"• Core: <code>{html.escape(cfg.core_backend)} / {html.escape(cfg.core_model)}</code>",
         f"• Audit: <code>{html.escape(cfg.audit_backend)} / {html.escape(cfg.audit_model)}</code>",
         f"• Delivery: <code>{cfg.delivery}</code>",
