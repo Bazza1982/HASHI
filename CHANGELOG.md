@@ -77,6 +77,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Telegram stream Markdown rendering** — think messages, verbose rolling status,
+  and live answer previews now share the final-delivery Markdown-to-HTML renderer.
+  Bold and inline-code markers render correctly instead of appearing literally,
+  while backend-specific stream parsing remains unchanged across runtimes.
 - **Hot restart module consistency** — instance detection consumers now resolve
   the reloaded provider instead of retaining a stale function reference. Hot
   restart also fails when any requested agent does not return online or local,
