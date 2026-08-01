@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from orchestrator.ticket_manager import detect_instance
+from orchestrator import ticket_manager
 
 
 ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
@@ -283,7 +283,7 @@ class HabitStore:
         self.project_root = project_root
         self.agent_id = agent_id
         self.agent_class = (agent_class or "general").strip().lower()
-        self.instance = detect_instance(project_root, instance_id)
+        self.instance = ticket_manager.detect_instance(project_root, instance_id)
         self.db_path = workspace_dir / "habits.sqlite"
         self.eval_db_path = project_root / "workspaces" / "lily" / "habit_evaluation.sqlite"
         self._init_db()
@@ -1556,7 +1556,7 @@ class HabitStore:
         report_dir.mkdir(parents=True, exist_ok=True)
         generated_at = _now_event_iso()
         stamped_name = re.sub(r"[^0-9A-Za-z]+", "-", generated_at).strip("-")
-        instance = detect_instance(project_root)
+        instance = ticket_manager.detect_instance(project_root)
         review_cutoff = datetime.now().astimezone() - timedelta(days=max(1, lookback_days))
 
         eval_db_path = lily_workspace / "habit_evaluation.sqlite"
@@ -2393,7 +2393,12 @@ class HabitStore:
         if not eval_db_path.exists():
             return []
         with cls._connect_eval_db(eval_db_path) as conn:
-            return cls._load_copy_recommendations(conn, detect_instance(project_root), status=status, limit=limit)
+            return cls._load_copy_recommendations(
+                conn,
+                ticket_manager.detect_instance(project_root),
+                status=status,
+                limit=limit,
+            )
 
     @classmethod
     def _load_shared_patterns(
@@ -2471,7 +2476,7 @@ class HabitStore:
         with cls._connect_eval_db(eval_db_path) as conn:
             return cls._load_shared_patterns(
                 conn,
-                detect_instance(project_root),
+                ticket_manager.detect_instance(project_root),
                 status=status,
                 agent_class=agent_class,
                 limit=limit,
@@ -2553,7 +2558,7 @@ class HabitStore:
         )
         resolved_owner = str(owner or reviewer).strip() or reviewer
         eval_db_path = project_root / "workspaces" / "lily" / "habit_evaluation.sqlite"
-        instance = detect_instance(project_root)
+        instance = ticket_manager.detect_instance(project_root)
         with cls._connect_eval_db(eval_db_path) as eval_conn:
             stats = eval_conn.execute(
                 """
@@ -2692,7 +2697,7 @@ class HabitStore:
         note: str | None = None,
     ) -> SharedPattern:
         eval_db_path = project_root / "workspaces" / "lily" / "habit_evaluation.sqlite"
-        instance = detect_instance(project_root)
+        instance = ticket_manager.detect_instance(project_root)
         retired_at = _now_event_iso()
         with cls._connect_eval_db(eval_db_path) as eval_conn:
             row = eval_conn.execute(
@@ -2757,7 +2762,7 @@ class HabitStore:
         eval_db_path = project_root / "workspaces" / "lily" / "habit_evaluation.sqlite"
         if not eval_db_path.exists():
             return []
-        instance = detect_instance(project_root)
+        instance = ticket_manager.detect_instance(project_root)
         reviewed_at = _now_event_iso()
         with cls._connect_eval_db(eval_db_path) as conn:
             params: list[Any] = [cls.COPY_APPROVAL_STATUS_APPROVED, reviewer, reviewed_at, (note or "").strip() or None, instance]
@@ -2789,7 +2794,7 @@ class HabitStore:
         eval_db_path = project_root / "workspaces" / "lily" / "habit_evaluation.sqlite"
         if not eval_db_path.exists():
             return []
-        instance = detect_instance(project_root)
+        instance = ticket_manager.detect_instance(project_root)
         reviewed_at = _now_event_iso()
         with cls._connect_eval_db(eval_db_path) as conn:
             params: list[Any] = [cls.COPY_APPROVAL_STATUS_REJECTED, reviewer, reviewed_at, (note or "").strip() or None, instance]
@@ -2820,7 +2825,7 @@ class HabitStore:
         eval_db_path = project_root / "workspaces" / "lily" / "habit_evaluation.sqlite"
         if not eval_db_path.exists():
             return []
-        instance = detect_instance(project_root)
+        instance = ticket_manager.detect_instance(project_root)
         applied_rows: list[HabitCopyRecommendation] = []
         registry = cls._load_agent_registry(project_root)
         with cls._connect_eval_db(eval_db_path) as eval_conn:

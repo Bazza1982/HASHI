@@ -162,10 +162,20 @@ class RebootManager:
                     boot_state[name] = "failed"
                     boot_reason[name] = msg
                     main_logger.error("Hot restart: %s", msg)
+                    bridge_logger.error(
+                        "Hot restart: failed to start '%s': %s",
+                        name,
+                        msg,
+                    )
             except Exception as e:
                 boot_state[name] = "failed"
                 boot_reason[name] = f"{type(e).__name__}: {e}"
-                main_logger.error("Hot restart: failed to start '%s': %s", name, e)
+                main_logger.exception("Hot restart: failed to start '%s': %s", name, e)
+                bridge_logger.exception(
+                    "Hot restart: failed to start '%s': %s",
+                    name,
+                    e,
+                )
 
         def _run_banner():
             show_startup_banner(
@@ -203,6 +213,32 @@ class RebootManager:
                 flush=True,
             )
             return False
+
+        failed_targets = [
+            name
+            for name in targets
+            if boot_state.get(name) not in {"online", "local"}
+        ]
+        if failed_targets:
+            failure_summary = "; ".join(
+                f"{name}: {boot_reason.get(name) or boot_state.get(name) or 'unknown'}"
+                for name in failed_targets
+            )
+            main_logger.error(
+                "Hot restart failed for target agent(s): %s",
+                failure_summary,
+            )
+            bridge_logger.error(
+                "Hot restart failed for target agent(s): %s",
+                failure_summary,
+            )
+            print(
+                "\033[38;5;203m  ✗ reboot failed — target agent(s) did not restart: "
+                f"{', '.join(failed_targets)}\033[0m\n",
+                flush=True,
+            )
+            return False
+
         if self.kernel.runtimes:
             main_logger.info("Hot restart complete. %s agent(s) running.", len(self.kernel.runtimes))
             bridge_logger.warning("Hot restart complete (%s agent(s) running)", len(self.kernel.runtimes))

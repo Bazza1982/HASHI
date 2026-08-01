@@ -106,6 +106,31 @@ def test_reload_project_modules_loads_runtime_defaults_before_consumers(monkeypa
     assert defaults_idx < lifecycle_idx < runtime_idx
 
 
+def test_reload_project_modules_loads_instance_provider_before_consumers(monkeypatch):
+    manager = RebootManager(kernel=object(), console_handler=None)
+    module_names = [
+        "orchestrator.habits",
+        "orchestrator.private_wol",
+        "orchestrator.ticket_manager",
+    ]
+    reloaded = []
+
+    for name in module_names:
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+
+    def fake_reload(module):
+        reloaded.append(module.__name__)
+        return module
+
+    monkeypatch.setattr("orchestrator.reboot_manager.importlib.reload", fake_reload)
+
+    manager.reload_project_modules()
+
+    provider_idx = reloaded.index("orchestrator.ticket_manager")
+    assert provider_idx < reloaded.index("orchestrator.habits")
+    assert provider_idx < reloaded.index("orchestrator.private_wol")
+
+
 def test_reload_project_modules_loads_stream_policy_before_flexible_runtime(monkeypatch):
     manager = RebootManager(kernel=object(), console_handler=None)
     module_names = [
@@ -159,6 +184,65 @@ def test_reload_project_modules_fails_fast_instead_of_continuing(monkeypatch):
         )
 
     assert calls == ["orchestrator.first", "orchestrator.broken"]
+
+
+@pytest.mark.asyncio
+async def test_hot_restart_fails_when_target_does_not_restart_even_if_others_run(
+    monkeypatch,
+):
+    class ConsoleHandler:
+        def addFilter(self, _filter):
+            pass
+
+        def removeFilter(self, _filter):
+            pass
+
+    class HotServices:
+        def __init__(self):
+            self.refreshed = False
+
+        async def refresh_hot_services(self):
+            self.refreshed = True
+
+    class Kernel:
+        def __init__(self):
+            self.runtimes = [
+                SimpleNamespace(name=f"other-{index}")
+                for index in range(19)
+            ]
+            self.whatsapp = None
+            self.global_cfg = SimpleNamespace(workbench_port=18800)
+            self.api_gateway = None
+            self.service_manager = HotServices()
+
+        async def stop_agent(self, _name, reason):
+            assert reason == "hot-restart:min"
+            return True, "stopped"
+
+        async def start_agent(self, name):
+            assert name == "lily"
+            return False, "detect_instance() takes 1 positional argument but 2 were given"
+
+        def _load_config_bundle(self):
+            return None, [SimpleNamespace(name="lily")], None
+
+    kernel = Kernel()
+    manager = RebootManager(kernel=kernel, console_handler=ConsoleHandler())
+    monkeypatch.setattr(manager, "preflight_project_modules", lambda: [])
+    monkeypatch.setattr(manager, "reload_project_modules", lambda _names: None)
+    monkeypatch.setattr(manager, "rebuild_hot_managers", lambda: None)
+    monkeypatch.setattr(
+        "orchestrator.banner.show_startup_banner",
+        lambda **_kwargs: None,
+    )
+
+    result = await manager.hot_restart(
+        {"mode": "min", "agent_name": "lily", "agent_number": None}
+    )
+
+    assert result is False
+    assert len(kernel.runtimes) == 19
+    assert kernel.service_manager.refreshed is True
 
 
 @pytest.mark.asyncio
