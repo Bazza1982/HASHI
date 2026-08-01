@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import html
 from typing import Any
 
 from orchestrator.command_registry import RuntimeCommand
+from orchestrator.command_ui import card_title
 
 
 def _is_authorized(runtime: Any, update: Any) -> bool:
@@ -20,11 +22,11 @@ def _is_authorized(runtime: Any, update: Any) -> bool:
 
 async def _send(runtime: Any, update: Any, text: str) -> None:
     if hasattr(runtime, "_reply_text"):
-        await runtime._reply_text(update, text)
+        await runtime._reply_text(update, text, parse_mode="HTML")
         return
     message = getattr(update, "message", None)
     if message is not None and hasattr(message, "reply_text"):
-        await message.reply_text(text)
+        await message.reply_text(text, parse_mode="HTML")
         return
     chat = getattr(update, "effective_chat", None)
     chat_id = getattr(chat, "id", None)
@@ -44,16 +46,24 @@ async def xaiauth_command(runtime: Any, update: Any, context: Any) -> None:
 
     if action in {"status", "show"}:
         status = oauth_status(global_config=global_config)
+        logged_in = bool(status.get("logged_in"))
+        relogin_required = bool(status.get("relogin_required"))
+        client_configured = bool(status.get("client_id_configured"))
         lines = [
-            "HASHI xAI OAuth (native, no Hermes)",
-            f"logged_in: {status.get('logged_in')}",
-            f"relogin_required: {status.get('relogin_required')}",
-            f"client_id_configured: {status.get('client_id_configured')}",
-            f"auth_store: {status.get('auth_store')}",
-            f"message: {status.get('message')}",
+            card_title("🔐", "xAI authorization"),
             "",
-            "Login from shell: python hashi.py auth xai login",
-            "Then on Xishi: /backend claw-cli grok-4.5",
+            f"<b>Current</b> · <b>{'SIGNED IN' if logged_in else 'SIGNED OUT'}</b>",
+            f"<b>Relogin required</b> · <code>{'YES' if relogin_required else 'NO'}</code>",
+            f"<b>Client configured</b> · <code>{'YES' if client_configured else 'NO'}</code>",
+            f"<b>Credential store</b> · <code>{html.escape(str(status.get('auth_store') or 'unknown'))}</code>",
+            "",
+            html.escape(str(status.get("message") or "No authorization detail available.")),
+            "",
+            "Login is completed on the host shell; this card is read-only.",
+            "",
+            "<b>Use</b>",
+            "<code>python hashi.py auth xai login</code> · sign in from the host shell",
+            "<code>/backend claw-cli grok-4.5</code> · select xAI after login",
         ]
         await _send(runtime, update, "\n".join(lines))
         return
@@ -61,9 +71,10 @@ async def xaiauth_command(runtime: Any, update: Any, context: Any) -> None:
     await _send(
         runtime,
         update,
-        "Usage: /xaiauth [status]\n"
-        "Device-code login must be completed on the host shell:\n"
-        "  python hashi.py auth xai login",
+        f"{card_title('🔐', 'xAI authorization')}\n\n"
+        "<b>Current</b> · invalid option\n\n"
+        "Use <code>/xaiauth status</code>. Device-code login must be completed on the host shell with "
+        "<code>python hashi.py auth xai login</code>.",
     )
 
 

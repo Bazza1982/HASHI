@@ -9,6 +9,12 @@ set -euo pipefail
 # Navigate to project root (parent of bin/)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$SCRIPT_DIR"
+BRIDGE_HOME="${BRIDGE_HOME:-$SCRIPT_DIR}"
+PYTHON_EXE="${PYTHON_EXE:-python3}"
+PID_FILE="$("$PYTHON_EXE" "$SCRIPT_DIR/scripts/resolve_instance_runtime.py" \
+    --code-root "$SCRIPT_DIR" --bridge-home "$BRIDGE_HOME" --field pid-path)"
+INSTANCE_ID="$("$PYTHON_EXE" "$SCRIPT_DIR/scripts/resolve_instance_runtime.py" \
+    --code-root "$SCRIPT_DIR" --bridge-home "$BRIDGE_HOME" --field instance-id)"
 
 QUIET=0
 [[ "${1:-}" == "--quiet" ]] && QUIET=1
@@ -20,51 +26,47 @@ log "           KILL BRIDGE-U-F REMAINING SESSIONS"
 log "================================================================"
 log ""
 
-# Find and kill bridge-u-f Python processes
+# Stop only the process recorded for this configured instance. Never scan
+# global process names or shared default ports: those can belong to another
+# HASHI instance on the same computer.
 FOUND_ANY=0
+PID=""
 
-# Method 1: Find by PID file
-if [[ -f "$SCRIPT_DIR/.bridge_u_f.pid" ]]; then
-    PID=$(cat "$SCRIPT_DIR/.bridge_u_f.pid" 2>/dev/null || echo "")
-    if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then
-        log "Stopping main process (PID $PID)..."
+cmdline_matches_bridge_home() {
+    local cmdline="$1"
+    [[ "$cmdline" == *"main.py --bridge-home $BRIDGE_HOME "* ||
+       "$cmdline" == *"main.py --bridge-home $BRIDGE_HOME" ]]
+}
+
+if [[ -f "$PID_FILE" ]]; then
+    PID=$(cat "$PID_FILE" 2>/dev/null || echo "")
+    CMDLINE=$(ps -p "$PID" -o args= 2>/dev/null || true)
+    if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null &&
+       cmdline_matches_bridge_home "$CMDLINE"; then
+        log "Stopping $INSTANCE_ID (PID $PID)..."
+        pkill -TERM -P "$PID" 2>/dev/null || true
         kill -TERM "$PID" 2>/dev/null || true
         FOUND_ANY=1
         sleep 1
+    elif [[ -n "$PID" ]]; then
+        log "Ignoring stale or foreign PID $PID for $INSTANCE_ID."
     fi
 fi
 
-# Method 2: Find by process pattern
-while IFS= read -r pid; do
-    if [[ -n "$pid" ]]; then
-        FOUND_ANY=1
-        log "Stopping PID $pid..."
-        kill -TERM "$pid" 2>/dev/null || true
-    fi
-done < <(pgrep -f "python.*main\.py.*bridge" 2>/dev/null || true)
-
-# Method 3: Check ports
-for port in 18800 18801; do
-    pid=$(lsof -ti :"$port" 2>/dev/null || true)
-    if [[ -n "$pid" ]]; then
-        FOUND_ANY=1
-        log "Stopping process on port $port (PID $pid)..."
-        kill -TERM "$pid" 2>/dev/null || true
-    fi
-done
-
 if [[ "$FOUND_ANY" == "0" ]]; then
-    log "No bridge-u-f processes found."
+    log "No running process found for $INSTANCE_ID."
 else
     sleep 2
-    # Force kill any remaining
-    pgrep -f "python.*main\.py.*bridge" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+    if kill -0 "$PID" 2>/dev/null; then
+        pkill -KILL -P "$PID" 2>/dev/null || true
+        kill -KILL "$PID" 2>/dev/null || true
+    fi
     log "Cleanup commands issued."
 fi
 
-# Clean up lock files
-rm -f "$SCRIPT_DIR/.bridge_u_f.lock" "$SCRIPT_DIR/.bridge_u_f.pid" 2>/dev/null || true
-log "Removed stale lock/pid files."
+# Lock files are persistent by design; the OS lock is authoritative.
+rm -f "$PID_FILE" 2>/dev/null || true
+log "Removed $INSTANCE_ID PID file."
 
 log ""
 log "Cleanup complete."

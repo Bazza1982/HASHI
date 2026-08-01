@@ -94,7 +94,8 @@ async def test_anatta_command_can_enable_shadow_mode_and_reload_observers(tmp_pa
         }
     ]
     assert runtime.reload_count == 1
-    assert "Anatta mode set to: shadow" in runtime.sent[0]
+    assert "<b>Current</b> · <code>SHADOW</code>" in runtime.sent[0]
+    assert "Mode set to shadow" in runtime.sent[0]
     assert "mode: shadow" in runtime.sent[0]
 
 
@@ -122,7 +123,8 @@ async def test_anatta_command_preserves_existing_config_when_switching_off(tmp_p
     assert config["mode"] == "off"
     assert config["model_profiles"] == {"default": {"tone_strength": "light"}}
     assert not (tmp_path / "post_turn_observers.json").exists()
-    assert "Anatta mode set to: off" in runtime.sent[0]
+    assert "<b>Current</b> · <code>OFF</code>" in runtime.sent[0]
+    assert "Mode set to off" in runtime.sent[0]
 
 
 def test_anatta_runtime_command_is_registered():

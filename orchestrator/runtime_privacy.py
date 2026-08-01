@@ -42,21 +42,21 @@ def privacy_status_text(runtime: Any, *, notice: str | None = None) -> str:
     backend = str(getattr(runtime.config, "active_backend", "") or "unknown")
     compatible = int(level) in get_supported_privacy_levels(backend)
     if level is PrivacyLevel.OFF:
-        filter_status = "⚫ PII filter: <b>OFF</b>"
+        filter_status = "<b>PII filter</b> · <code>OFF</code>"
         risk_title = "Privacy framework bypassed"
         risk_text = (
             "HASHI performs no privacy checks or local redaction. "
             "All configured backends are allowed."
         )
     elif level is PrivacyLevel.PROVIDER_TRUST:
-        filter_status = "🔓 PII filter: <b>OFF</b>"
+        filter_status = "<b>PII filter</b> · <code>OFF</code>"
         risk_title = "Provider trust mode"
         risk_text = (
             "Raw task context may be sent to the model provider. "
             "Protection depends on that provider's privacy policy."
         )
     else:
-        filter_status = "🔒 PII filter: <b>ON</b>"
+        filter_status = "<b>PII filter</b> · <code>ON</code>"
         risk_title = "Local redaction required"
         risk_text = (
             "Every supported API request must pass the local PII gate. "
@@ -66,10 +66,9 @@ def privacy_status_text(runtime: Any, *, notice: str | None = None) -> str:
     lines = [
         card_title("🛡️", "Hashi privacy"),
         "",
-        f"<b>LEVEL {int(level)} · {LEVEL_NAMES[level]}</b>",
-        f"🧠 Backend: <code>{escape(backend)}</code>",
-        f"{'✅' if compatible else '❌'} Backend compatibility: "
-        f"<b>{'SUPPORTED' if compatible else 'BLOCKED'}</b>",
+        f"<b>Current</b> · <b>LEVEL {int(level)}</b> · {LEVEL_NAMES[level]}",
+        f"<b>Backend</b> · <code>{escape(backend)}</code>",
+        f"<b>Compatibility</b> · <code>{'SUPPORTED' if compatible else 'BLOCKED'}</code>",
         filter_status,
         "",
         f"⚠️ <b>{risk_title}</b>",

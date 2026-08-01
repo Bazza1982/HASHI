@@ -100,7 +100,28 @@ def _job_line(record: Any) -> str:
     job_id = html.escape(str(getattr(record, "job_id", "")))
     code = getattr(record, "returncode", None)
     suffix = f" exit={code}" if code is not None else ""
-    return f"- <code>{job_id}</code> {state}{html.escape(suffix)} {command}"
+    return f"<code>{job_id}</code> · <b>{state.upper()}</b>{html.escape(suffix)} · {command}"
+
+
+def _help_text(runtime: Any) -> str:
+    manager_state = "READY" if _manager(runtime) is not None else "UNAVAILABLE"
+    return "\n".join(
+        [
+            card_title("🧵", "Background jobs"),
+            "",
+            f"<b>Current</b> · <b>{manager_state}</b>",
+            "<b>Scope</b> · background-capable agent tasks and managed OS jobs",
+            "",
+            "A task is queued to the agent first; long OS work uses the managed background-job service when needed.",
+            "",
+            "<b>Use</b>",
+            "<code>/bg &lt;task&gt;</code> · start a background-capable task",
+            "<code>/bg status [job_id]</code> · inspect status",
+            "<code>/bg tail &lt;job_id&gt;</code> · view recent output",
+            "<code>/bg cancel &lt;job_id&gt;</code> · cancel a running job",
+            "<code>/bg list</code> · list recent jobs",
+        ]
+    )
 
 
 async def _run_task(runtime: Any, update: Any, task_text: str) -> None:
@@ -144,9 +165,32 @@ async def _list_jobs(runtime: Any, update: Any, _arg: str) -> None:
         return
     records = manager.list(limit=20)
     if not records:
-        await _send(runtime, update, "No background jobs recorded.")
+        await _send(
+            runtime,
+            update,
+            "\n".join(
+                [
+                    card_title("🧵", "Background jobs"),
+                    "",
+                    "<b>Current</b> · <code>0</code> recorded",
+                    "<b>Scope</b> · managed background processes",
+                    "",
+                    "No background jobs are recorded.",
+                    "",
+                    "Use <code>/bg &lt;task&gt;</code> to start a background-capable task.",
+                ]
+            ),
+        )
         return
-    lines = [card_title("🧵", "Background jobs"), "", f"<b>Current</b> · <code>{len(records)}</code> recent jobs", ""]
+    active = sum(getattr(record, "state", "") not in TERMINAL_STATES for record in records)
+    lines = [
+        card_title("🧵", "Background jobs"),
+        "",
+        f"<b>Current</b> · <code>{active}</code> active · <code>{len(records)}</code> recent",
+        "<b>Scope</b> · managed background processes",
+        "",
+        "<b>JOBS</b>",
+    ]
     lines.extend(_job_line(record) for record in records)
     await _send(runtime, update, "\n".join(lines))
 
@@ -165,8 +209,8 @@ async def _status(runtime: Any, update: Any, arg: str) -> None:
             card_title("🧵", "Background job status"),
             "",
             f"<b>Current</b> · <code>{len(running)}</code> active",
-            f"recent: {len(records)}",
-            f"failed/timeout: {len(failed)}",
+            f"<b>Recent</b> · <code>{len(records)}</code>",
+            f"<b>Failed or timed out</b> · <code>{len(failed)}</code>",
         ]
         if records:
             lines.append("")
@@ -180,15 +224,15 @@ async def _status(runtime: Any, update: Any, arg: str) -> None:
     lines = [
         card_title("🧵", "Background job"),
         "",
-        f"<b>Current</b> · <code>{html.escape(record.state)}</code>",
-        f"ID: <code>{html.escape(record.job_id)}</code>",
-        f"Return code: {html.escape(str(record.returncode))}",
-        f"Created: {html.escape(str(record.created_at))}",
-        f"Updated: {html.escape(str(record.updated_at))}",
-        f"Command: <code>{html.escape(_short(record.command.get('display', ''), 300))}</code>",
+        f"<b>Current</b> · <b>{html.escape(str(record.state).upper())}</b>",
+        f"<b>ID</b> · <code>{html.escape(record.job_id)}</code>",
+        f"<b>Return code</b> · <code>{html.escape(str(record.returncode))}</code>",
+        f"<b>Created</b> · <code>{html.escape(str(record.created_at))}</code>",
+        f"<b>Updated</b> · <code>{html.escape(str(record.updated_at))}</code>",
+        f"<b>Command</b> · <code>{html.escape(_short(record.command.get('display', ''), 300))}</code>",
     ]
     if record.error:
-        lines.append(f"Error: {html.escape(str(record.error))}")
+        lines.append(f"<b>Error</b> · {html.escape(str(record.error))}")
     await _send(runtime, update, "\n".join(lines))
 
 
@@ -208,7 +252,14 @@ async def _tail(runtime: Any, update: Any, arg: str) -> None:
         await _send(runtime, update, f"Background job not found: <code>{html.escape(job_id)}</code>")
         return
     body = html.escape(text[-3500:] if text else "(no stdout yet)")
-    await _send(runtime, update, f"<b>Tail {html.escape(job_id)}</b>\n<pre>{body}</pre>")
+    await _send(
+        runtime,
+        update,
+        f"{card_title('🧵', 'Background job output')}\n\n"
+        f"<b>Current</b> · <code>{html.escape(job_id)}</code>\n"
+        "<b>View</b> · last 80 lines\n\n"
+        f"<pre>{body}</pre>",
+    )
 
 
 async def _cancel(runtime: Any, update: Any, arg: str) -> None:
@@ -234,7 +285,7 @@ async def bg_command(runtime: Any, update: Any, context: Any) -> None:
     args = [str(arg) for arg in (getattr(context, "args", None) or [])]
     action, rest = _split_action(update, args)
     if action == "help":
-        await _send(runtime, update, USAGE)
+        await _send(runtime, update, _help_text(runtime))
         return
     if action == "run":
         await _run_task(runtime, update, rest)

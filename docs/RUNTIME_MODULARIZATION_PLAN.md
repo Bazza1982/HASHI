@@ -1,14 +1,16 @@
 # HASHI Runtime Modularization Plan
 
-Status: planning checkpoint. This document is intentionally non-invasive and
-does not change runtime behavior.
+Status: active incremental migration. Updated 2026-07-27.
 
 ## Goals
 
-HASHI currently has two large runtime implementations:
+HASHI currently has one large active runtime and one quarantined legacy runtime:
 
-- `orchestrator/agent_runtime.py`: legacy fixed-backend runtime, 5,411 lines.
-- `orchestrator/flexible_agent_runtime.py`: current flexible runtime, 9,926 lines.
+- `orchestrator/agent_runtime.py`: 57-line compatibility export shim.
+- `orchestrator/legacy/bridge_agent_runtime.py`: fixed-backend legacy runtime,
+  5,241 lines.
+- `orchestrator/flexible_agent_runtime.py`: current flexible runtime, 8,062
+  lines after the latest extractions.
 
 The live fleet now uses flexible agents. The long-term goal is to retire the
 legacy fixed runtime and split the flexible runtime into smaller, modular,
@@ -25,8 +27,9 @@ existing Telegram command behavior.
 - `agent_cfg.type in {"flex", "limited"}` -> `FlexibleAgentRuntime`
 - any other type -> `BridgeAgentRuntime`
 
-Current `agents.json` contains 18 active agents, all with `type = "flex"`.
-There are no active fixed agents in the current live configuration.
+The local instance configuration is not an architecture fact and must not be
+copied into this tracked plan. Runtime selection tests enforce that new agents
+declare a type explicitly and that the legacy fixed runtime remains opt-in.
 
 ### Legacy runtime is still a dependency
 
@@ -105,6 +108,27 @@ The modularization should not:
 5. Keep logs comprehensive at module boundaries.
 6. Commit in small reversible checkpoints.
 7. Keep legacy compatibility until tests and live config prove it is unused.
+
+The canonical engineering rules and current single-source owners now live in
+`docs/HASHI_LAYERED_RUNTIME_BOUNDARIES.md`.
+
+## Completed incremental boundaries
+
+The following behavior has already left the active runtime or been centralized:
+
+- command binding, Telegram menu metadata, help grouping, aliases, and
+  sensitivity: `orchestrator/command_specs.py`;
+- usage and token-report commands: `orchestrator/runtime_usage.py`;
+- optional instance-aware Wake-on-LAN command: `orchestrator/runtime_wol.py`;
+- agent-group views, commands, and callbacks:
+  `orchestrator/runtime_groups.py`;
+- shared state persistence: `orchestrator/workspace_state.py`;
+- backend/model/effort selection facts:
+  `orchestrator/flexible_backend_registry.py`.
+
+Compatibility methods remain on `FlexibleAgentRuntime`, but each is a narrow
+delegation point. New logic belongs in the extracted owner, not back in the
+runtime wrapper.
 
 ## Phase 0: Baseline and Safety Check
 

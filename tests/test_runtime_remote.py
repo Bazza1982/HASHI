@@ -23,7 +23,7 @@ class _Query:
 def _runtime(tmp_path):
     replies = []
     return SimpleNamespace(
-        global_config=SimpleNamespace(project_root=tmp_path),
+        global_config=SimpleNamespace(project_root=tmp_path, instance_id="HASHI_TEST"),
         _is_authorized_user=lambda user_id: user_id == 1,
         _load_instances=lambda: {"hashi2": {"display_name": "HASHI2"}},
         _do_move=None,
@@ -55,6 +55,7 @@ async def test_move_show_agent_picker_lists_agents(tmp_path):
     await runtime_remote.move_show_agent_picker(runtime, SimpleNamespace(), {})
 
     assert "<b>MOVE AGENT</b>" in runtime.replies[-1]["text"]
+    assert "HASHI_TEST" in runtime.replies[-1]["text"]
     assert "Select the exact agent" in runtime.replies[-1]["text"]
     buttons = [button for row in runtime.replies[-1]["reply_markup"].inline_keyboard for button in row]
     assert [button.callback_data for button in buttons] == ["move:agent:zelda", "move:agent:akane"]
@@ -225,7 +226,9 @@ async def test_remote_status_includes_peer_list(tmp_path, monkeypatch):
     assert "Peers:" not in text
     assert "Inflight:" not in text
     assert "Rescue:" not in text
-    assert "📡 <b>REMOTE INSTANCES</b>" in text
-    assert "online: <code>1</code>  ·  attention: <code>0</code>  ·  offline: <code>1</code>" in text
+    assert "📡 <b>REMOTE INSTANCES</b>" not in text
+    assert "<b>Current</b> · <code>1</code> online" in text
+    assert "<b>Attention</b> · <code>0</code>" in text
+    assert "<b>Offline</b> · <code>1</code>" in text
     assert "peer:HASHI9" in text
     assert "peer:MSI" in text

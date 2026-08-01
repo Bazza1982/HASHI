@@ -7,6 +7,8 @@ import sys
 import time
 from pathlib import Path
 
+from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_URL
+
 DEFAULT_PORT = 8876
 
 
@@ -50,7 +52,13 @@ def status(root: Path, host: str = "127.0.0.1", port: int = DEFAULT_PORT) -> dic
     }
 
 
-def start(root: Path, host: str = "127.0.0.1", port: int = DEFAULT_PORT, workbench_url: str = "http://127.0.0.1:18800", public_base_url: str = "") -> dict:
+def start(
+    root: Path,
+    host: str = "127.0.0.1",
+    port: int = DEFAULT_PORT,
+    workbench_url: str = DEFAULT_WORKBENCH_URL,
+    public_base_url: str = "",
+) -> dict:
     current = status(root, host=host, port=port)
     if current["running"]:
         return current

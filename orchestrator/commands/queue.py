@@ -110,12 +110,12 @@ def _item_line(index: int, item: Any) -> str:
 
 def _current_line(runtime: Any) -> str:
     if not getattr(runtime, "is_generating", False):
-        return "running: 0"
+        return "<b>Running</b> · <code>0</code>"
     current = getattr(runtime, "current_request_meta", None) or {}
     rid = html.escape(str(current.get("request_id") or "current"))
     source = html.escape(str(current.get("source") or "?"))
     summary = html.escape(_short(current.get("summary") or ""))
-    return f"running: 1\n• <code>{rid}</code> [{source}] {summary}"
+    return f"<b>Running</b> · <code>1</code>\n<code>{rid}</code> · {source} · {summary}"
 
 
 def _build_list(runtime: Any) -> str:
@@ -123,9 +123,10 @@ def _build_list(runtime: Any) -> str:
     lines = [
         card_title("📥", "Request queue"),
         "",
-        f"<b>Agent</b> · <code>{html.escape(str(getattr(runtime, 'name', 'agent')))}</code>",
-        _current_line(runtime),
         f"<b>Current</b> · <code>{_queue_size(runtime)}</code> pending",
+        _current_line(runtime),
+        f"<b>Agent</b> · <code>{html.escape(str(getattr(runtime, 'name', 'agent')))}</code>",
+        "<b>Scope</b> · in-memory requests for this agent",
     ]
     if items:
         lines.append("")
@@ -138,7 +139,15 @@ def _build_list(runtime: Any) -> str:
         lines.append("")
         lines.append("Queue is empty.")
     lines.append("")
-    lines.append("<i>Commands: /queue show &lt;id&gt;, /queue cancel &lt;id&gt;, /queue clear, /queue history</i>")
+    lines.extend(
+        [
+            "<b>Use</b>",
+            "<code>/queue show &lt;id&gt;</code> · inspect one request",
+            "<code>/queue cancel &lt;id&gt;</code> · remove one pending request",
+            "<code>/queue clear</code> · remove all pending requests",
+            "<code>/queue history</code> · show recent request caches",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -155,15 +164,15 @@ def _format_detail(item: Any) -> str:
     lines = [
         card_title("📥", "Queue item"),
         "",
-        "<b>Current</b> · pending",
-        f"ID: <code>{html.escape(_item_id(item))}</code>",
-        f"Source: {html.escape(str(getattr(item, 'source', '?') or '?'))}",
-        f"Summary: {html.escape(str(getattr(item, 'summary', '') or ''))}",
-        f"Created: {html.escape(str(getattr(item, 'created_at', '') or ''))}",
-        f"Silent: {'yes' if bool(getattr(item, 'silent', False)) else 'no'}",
-        f"Retry: {'yes' if bool(getattr(item, 'is_retry', False)) else 'no'}",
+        "<b>Current</b> · <b>PENDING</b>",
+        f"<b>ID</b> · <code>{html.escape(_item_id(item))}</code>",
+        f"<b>Source</b> · <code>{html.escape(str(getattr(item, 'source', '?') or '?'))}</code>",
+        f"<b>Summary</b> · {html.escape(str(getattr(item, 'summary', '') or ''))}",
+        f"<b>Created</b> · <code>{html.escape(str(getattr(item, 'created_at', '') or ''))}</code>",
+        f"<b>Silent</b> · <code>{'YES' if bool(getattr(item, 'silent', False)) else 'NO'}</code>",
+        f"<b>Retry</b> · <code>{'YES' if bool(getattr(item, 'is_retry', False)) else 'NO'}</code>",
         "",
-        "Prompt:",
+        "<b>PROMPT</b>",
         f"<pre>{html.escape(clipped)}</pre>",
     ]
     if len(prompt) > len(clipped):
@@ -207,6 +216,7 @@ def _history(runtime: Any) -> str:
     lines = [
         card_title("📥", "Queue history"),
         "",
+        f"<b>Current</b> · prompt <code>{'CACHED' if last_prompt is not None else 'EMPTY'}</code> · response <code>{'CACHED' if last_response else 'EMPTY'}</code>",
         f"<b>Agent</b> · <code>{html.escape(str(getattr(runtime, 'name', 'agent')))}</code>",
         "",
     ]

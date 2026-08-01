@@ -5,6 +5,7 @@ CLI_ENGINES = frozenset({"gemini-cli", "claude-cli", "codex-cli", "claw-cli", "g
 BACKEND_REGISTRY: dict[str, dict] = {
     "gemini-cli": {
         "label": "gemini",
+        "gateway_enabled": True,
         "privacy_levels": [0, 1],
         "models": [
             "gemini-3.1-pro-preview",
@@ -20,6 +21,7 @@ BACKEND_REGISTRY: dict[str, dict] = {
     },
     "claude-cli": {
         "label": "claude",
+        "gateway_enabled": True,
         "privacy_levels": [0, 1],
         "models": [
             "claude-opus-4-7",
@@ -34,6 +36,8 @@ BACKEND_REGISTRY: dict[str, dict] = {
     },
     "codex-cli": {
         "label": "codex",
+        "gateway_enabled": True,
+        "gateway_default_model": "gpt-5.4",
         "privacy_levels": [0, 1],
         "models": [
             "gpt-5.6-sol",
@@ -121,6 +125,7 @@ BACKEND_REGISTRY: dict[str, dict] = {
     },
     "xai-api": {
         "label": "xai",
+        "gateway_enabled": True,
         "privacy_levels": [0, 1, 2],
         "models": [
             "grok-4.5",
@@ -131,6 +136,18 @@ BACKEND_REGISTRY: dict[str, dict] = {
             "grok-4.20-multi-agent-0309",
             "grok-imagine-image",
             "grok-imagine-image-quality",
+        ],
+        "gateway_models": [
+            "grok-4.5",
+            "grok-4.3",
+            "grok-build-0.1",
+            "grok-4.20-0309-reasoning",
+            "grok-4.20-0309-non-reasoning",
+            "grok-4.20-multi-agent-0309",
+            "grok-imagine-image",
+            "grok-imagine-image-quality",
+            "grok-imagine-video",
+            "grok-imagine-video-1.5-preview",
         ],
         "default_model": "grok-4.5",
         "efforts": [],
@@ -197,6 +214,38 @@ def get_backend_label(engine: str) -> str:
 
 def get_available_models(engine: str) -> list[str]:
     return list(get_backend_entry(engine).get("models") or [])
+
+
+def get_gateway_models(engine: str) -> list[str]:
+    entry = get_backend_entry(engine)
+    if not entry.get("gateway_enabled"):
+        return []
+    return list(entry.get("gateway_models") or entry.get("models") or [])
+
+
+def get_all_gateway_models() -> list[str]:
+    models: list[str] = []
+    for engine in BACKEND_REGISTRY:
+        for model in get_gateway_models(engine):
+            if model not in models:
+                models.append(model)
+    return models
+
+
+def get_gateway_engine_for_model(model: str) -> str | None:
+    for engine in BACKEND_REGISTRY:
+        if model in get_gateway_models(engine):
+            return engine
+    return None
+
+
+def get_default_gateway_model() -> str | None:
+    for engine, entry in BACKEND_REGISTRY.items():
+        default_model = str(entry.get("gateway_default_model") or "").strip()
+        if default_model and default_model in get_gateway_models(engine):
+            return default_model
+    models = get_all_gateway_models()
+    return models[0] if models else None
 
 
 def allows_custom_models(engine: str) -> bool:

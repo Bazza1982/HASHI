@@ -4,6 +4,7 @@ from collections.abc import Iterable, Sequence
 from html import escape
 from typing import Any
 
+from orchestrator.command_specs import COMMAND_GROUPS, COMMAND_SPECS
 
 DIVIDER = "━━━━━━━━━━━━━━━━"
 BACK_LABEL = "← Back"
@@ -60,119 +61,13 @@ def confirm_card(icon: str, title: str, *, target: str, consequence: str) -> str
     )
 
 
-HELP_GROUPS: tuple[tuple[str, str, frozenset[str]], ...] = (
+HELP_GROUPS: tuple[tuple[str, str, frozenset[str]], ...] = tuple(
     (
-        "⚡",
-        "Everyday",
-        frozenset(
-            {
-                "help",
-                "status",
-                "start",
-                "agents",
-                "hchat",
-                "group",
-                "ticket",
-                "park",
-                "load",
-                "handoff",
-                "transfer",
-                "fork",
-            }
-        ),
-    ),
-    (
-        "🧠",
-        "Models & modes",
-        frozenset(
-            {
-                "backend",
-                "model",
-                "effort",
-                "mode",
-                "privacy",
-                "wrapper",
-                "audit",
-                "brain",
-                "core",
-                "wrap",
-                "cos",
-            }
-        ),
-    ),
-    (
-        "🎛️",
-        "Session & display",
-        frozenset(
-            {
-                "new",
-                "fresh",
-                "memory",
-                "notepad",
-                "workzone",
-                "verbose",
-                "think",
-                "stream",
-                "preview",
-                "voice",
-                "safevoice",
-                "say",
-                "whisper",
-                "fyi",
-            }
-        ),
-    ),
-    (
-        "🛠️",
-        "Tasks & tools",
-        frozenset(
-            {
-                "skill",
-                "exp",
-                "debug",
-                "loop",
-                "superloop",
-                "nudge",
-                "jobs",
-                "cron",
-                "heartbeat",
-                "timeout",
-                "browser",
-                "usecomputer",
-                "wa_on",
-                "wa_off",
-                "wa_send",
-                "remote",
-                "wol",
-                "credit",
-                "sys",
-                "token",
-                "usage",
-                "logo",
-                "move",
-                "long",
-                "end",
-            }
-        ),
-    ),
-    (
-        "🧭",
-        "Execution control",
-        frozenset(
-            {
-                "stop",
-                "steer",
-                "focus",
-                "recall",
-                "retry",
-                "clear",
-                "wipe",
-                "reset",
-                "reboot",
-                "terminate",
-            }
-        ),
-    ),
+        icon,
+        heading,
+        frozenset(spec.name for spec in COMMAND_SPECS if spec.group == group),
+    )
+    for group, icon, heading in COMMAND_GROUPS
 )
 
 

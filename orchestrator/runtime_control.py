@@ -1,20 +1,19 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import re
 import time
 from typing import Any
 from types import SimpleNamespace
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-
-from orchestrator.command_ui import card_title
+from orchestrator import runtime_retry, runtime_session
 _STEER_CMD_RE = re.compile(r"^/steer(?:@\w+)?\s*(.*)$", re.IGNORECASE | re.DOTALL)
 
 # Intentional user-driven interrupts that kill the active backend process.
 # Exit codes such as -9 (SIGKILL) are expected and must not surface as Backend errors.
-_USER_INTERRUPT_REASONS = frozenset({"user_stop", "user_steer", "user_focus"})
+_USER_INTERRUPT_REASONS = frozenset(
+    {"user_stop", "user_steer", "user_focus", "user_retry"}
+)
 
 _FOCUS_DIRECTION = (
     "Continue working on the original user task. /focus is a scope correction, not a "
@@ -568,134 +567,216 @@ async def cmd_recall(runtime: Any, update: Any, context: Any) -> None:
 
 
 async def cmd_retry(runtime: Any, update: Any, context: Any) -> None:
-    if not runtime._is_authorized_user(update.effective_user.id):
+    if not _user_is_authorized(runtime, update):
         return
     args = [a.strip().lower() for a in (context.args or []) if a.strip()]
-    mode = args[0] if args else "response"
+    if args and args[0] in {"response", "resp"}:
+        await _reply(
+            runtime,
+            update,
+            "Response replay has moved to /resend. Nothing was retried.",
+        )
+        return
+    if args and (len(args) != 1 or args[0] not in {"prompt", "req", "request"}):
+        await _reply(
+            runtime,
+            update,
+            "Usage: /retry\n"
+            "/retry stops the current execution, creates a clean session, restores recent "
+            "handoff context, and reruns the last prompt.\n"
+            "Use /resend to replay the previous output without model work.",
+        )
+        return
+
     chat_id = update.effective_chat.id
-    if mode in {"response", "resp"}:
-        await retry_response(runtime, update, chat_id)
-        return
-    if mode in {"prompt", "req", "request"}:
-        await retry_prompt(runtime, update, chat_id)
-        return
-    markup = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("Resend response", callback_data="tgl:retry:response"),
-                InlineKeyboardButton("Rerun prompt", callback_data="tgl:retry:prompt"),
-            ]
-        ]
+    prompt_snapshot = runtime_retry.capture_retryable_prompt(
+        runtime,
+        fallback_chat_id=chat_id,
     )
-    await runtime._reply_text(
-        update,
-        f"{card_title('↻', 'Retry')}\n\n"
-        "<b>Current</b> · no retry started\n\n"
-        "Resend repeats the last answer without model work. Rerun submits the last prompt again.\n\n"
-        "Choose one action:",
-        parse_mode="HTML",
-        reply_markup=markup,
+    if prompt_snapshot is None:
+        await _reply(
+            runtime,
+            update,
+            "Nothing to retry — no previous user request was found. No session state was changed.",
+        )
+        return
+
+    # Save before shutdown/reset so a stuck or failed turn remains retryable even
+    # if the recovery sequence itself is interrupted.
+    runtime_retry.remember_retryable_prompt(runtime, prompt_snapshot)
+
+    retry_lock = getattr(runtime, "_retry_command_lock", None)
+    if retry_lock is None:
+        retry_lock = asyncio.Lock()
+        runtime._retry_command_lock = retry_lock
+    if retry_lock.locked():
+        await _reply(runtime, update, "A retry recovery is already being prepared.")
+        return
+
+    async with retry_lock:
+        active_meta = getattr(runtime, "current_request_meta", None)
+        has_active_request = bool(
+            getattr(runtime, "is_generating", False)
+            and isinstance(active_meta, dict)
+            and active_meta.get("request_id")
+        )
+        if has_active_request:
+            mark_user_interrupt(runtime, "user_retry")
+        runtime.logger.warning(
+            "Recovery retry requested for agent %s "
+            "(request_id=%s, source=%s, queue_size=%s)",
+            runtime.name,
+            prompt_snapshot.request_id or "unknown",
+            prompt_snapshot.source,
+            runtime.queue.qsize(),
+        )
+
+        await _shutdown_active_backend(runtime)
+        if has_active_request:
+            await _notify_interrupted(
+                runtime,
+                reason="user_retry",
+                error="/retry reset a stuck or stale model context",
+                summary="Recovery retry",
+            )
+        dropped = await _clear_request_queue(runtime)
+
+        try:
+            reset_mode = await runtime_session.reset_for_retry(runtime)
+        except Exception as exc:
+            runtime.logger.exception("Could not reset context for /retry: %s", exc)
+            await _reply(
+                runtime,
+                update,
+                f"Retry recovery stopped because the clean session could not be created: {exc}",
+            )
+            return
+
+        handoff = runtime_retry.build_retry_handoff(runtime)
+        handoff_queued = False
+        if handoff is not None:
+            try:
+                arm_primer = getattr(runtime, "_arm_session_primer", None)
+                if callable(arm_primer):
+                    arm_primer(
+                        "This is an automatic /retry recovery. Restore only the recent bridge "
+                        "history needed for continuity, then process the retried user request."
+                    )
+                enqueue_bootstrap = getattr(runtime, "enqueue_startup_bootstrap", None)
+                backend_manager = getattr(runtime, "backend_manager", None)
+                backend = (
+                    getattr(backend_manager, "current_backend", None)
+                    if backend_manager is not None
+                    else getattr(runtime, "backend", None)
+                )
+                supports_sessions = bool(
+                    getattr(getattr(backend, "capabilities", None), "supports_sessions", False)
+                )
+                if supports_sessions and callable(enqueue_bootstrap):
+                    await enqueue_bootstrap(chat_id)
+                handoff_request_id = await runtime.enqueue_request(
+                    chat_id,
+                    handoff.prompt,
+                    runtime_retry.RETRY_HANDOFF_SOURCE,
+                    f"Retry handoff restore [{handoff.exchange_count} exchanges]",
+                    is_retry=True,
+                    deliver_to_telegram=False,
+                    skip_memory_injection=True,
+                )
+                handoff_queued = bool(handoff_request_id)
+            except Exception as exc:
+                runtime.logger.exception(
+                    "Could not queue handoff context for /retry: %s",
+                    exc,
+                )
+
+        try:
+            request_id = await runtime.enqueue_request(
+                chat_id,
+                prompt_snapshot.prompt,
+                "retry",
+                f"Recovery retry: {prompt_snapshot.summary}",
+                is_retry=True,
+            )
+        except Exception as exc:
+            runtime.logger.exception("Could not requeue the prompt for /retry: %s", exc)
+            request_id = None
+        if not request_id:
+            await _reply(
+                runtime,
+                update,
+                "The context was reset, but the previous request could not be queued again.",
+            )
+            return
+
+        continuity = (
+            f"{handoff.exchange_count} recent exchange(s)"
+            if handoff_queued and handoff is not None
+            else (
+                "handoff restore could not be queued"
+                if handoff is not None
+                else "no recent handoff history"
+            )
+        )
+        await _reply(
+            runtime,
+            update,
+            "↻ Recovery retry started.\n"
+            f"Stopped stale execution and cleared {dropped} waiting request(s).\n"
+            f"Clean context: /{reset_mode} semantics.\n"
+            f"Continuity: {continuity}.\n"
+            f"Requeued the last prompt as {request_id}.",
+        )
+
+
+async def cmd_resend(runtime: Any, update: Any, context: Any) -> None:
+    if not _user_is_authorized(runtime, update):
+        return
+    args = [str(arg).strip() for arg in (getattr(context, "args", None) or []) if str(arg).strip()]
+    if args:
+        await _reply(
+            runtime,
+            update,
+            "Usage: /resend\n"
+            "/resend replays the previous model or Bridge output exactly, without model work.",
+        )
+        return
+    snapshot = runtime_retry.capture_resend_output(runtime)
+    if snapshot is None:
+        await _reply(runtime, update, "Nothing to resend — no previous model or Bridge output was found.")
+        return
+    await runtime.send_long_message(
+        chat_id=update.effective_chat.id,
+        text=snapshot.text,
+        request_id=snapshot.request_id,
+        purpose="resend-output",
     )
 
 
 async def callback_retry_toggle(runtime: Any, query: Any, value: str) -> None:
     chat_id = query.message.chat_id
-    await query.answer(f"Retrying {value}...")
     if value == "response":
-        if runtime.last_response:
-            await runtime.send_long_message(
-                chat_id=runtime.last_response["chat_id"],
-                text=runtime.last_response["text"],
-                request_id=runtime.last_response.get("request_id"),
-                purpose="retry-response",
-            )
+        snapshot = runtime_retry.capture_resend_output(runtime)
+        if snapshot is None:
+            await query.answer("Nothing to resend.", show_alert=True)
             return
-        transcript_text = load_last_text_from_transcript(runtime, "assistant")
-        if transcript_text:
-            await runtime.send_long_message(chat_id=chat_id, text=transcript_text, purpose="retry-response")
-        elif runtime.last_prompt:
-            await runtime.enqueue_request(runtime.last_prompt.chat_id, runtime.last_prompt.prompt, "retry", "Retry request")
-        else:
-            await query.answer("Nothing to retry.", show_alert=True)
+        await query.answer("Resending previous output...")
+        await runtime.send_long_message(
+            chat_id=chat_id,
+            text=snapshot.text,
+            request_id=snapshot.request_id,
+            purpose="resend-output",
+        )
         return
 
-    if runtime.last_prompt:
-        await runtime.enqueue_request(runtime.last_prompt.chat_id, runtime.last_prompt.prompt, "retry", "Retry request")
+    if value not in {"prompt", "req", "request"}:
+        await query.answer("This old retry menu is no longer supported.", show_alert=True)
         return
-    transcript_text = load_last_text_from_transcript(runtime, "user")
-    if transcript_text:
-        await runtime.enqueue_request(chat_id, transcript_text, "retry", "Retry request")
-    else:
-        await query.answer("No previous prompt.", show_alert=True)
-
-
-async def retry_response(runtime: Any, update: Any, chat_id: int) -> None:
-    if not runtime.last_response:
-        transcript_text = load_last_text_from_transcript(runtime, "assistant")
-        if transcript_text:
-            await runtime._reply_text(update, "Restoring last response from transcript...")
-            await runtime.send_long_message(
-                chat_id=chat_id,
-                text=transcript_text,
-                purpose="retry-response",
-            )
-            return
-        if runtime.last_prompt:
-            await runtime._reply_text(update, "No cached response — retrying last prompt...")
-            await runtime.enqueue_request(
-                runtime.last_prompt.chat_id,
-                runtime.last_prompt.prompt,
-                "retry",
-                "Retry request",
-            )
-        else:
-            await runtime._reply_text(update, "Nothing to retry — no previous response or prompt.")
-        return
-
-    await runtime._reply_text(update, "Resending last response...")
-    await runtime.send_long_message(
-        chat_id=runtime.last_response["chat_id"],
-        text=runtime.last_response["text"],
-        request_id=runtime.last_response.get("request_id"),
-        purpose="retry-response",
+    await query.answer("Starting recovery retry...")
+    update = SimpleNamespace(
+        effective_user=query.from_user,
+        effective_chat=SimpleNamespace(id=chat_id),
+        effective_message=query.message,
+        message=query.message,
     )
-
-
-async def retry_prompt(runtime: Any, update: Any, chat_id: int) -> None:
-    if not runtime.last_prompt:
-        transcript_text = load_last_text_from_transcript(runtime, "user")
-        if transcript_text:
-            await runtime._reply_text(update, "Restoring last prompt from transcript...")
-            await runtime.enqueue_request(chat_id, transcript_text, "retry", "Retry request")
-        else:
-            await runtime._reply_text(update, "No previous prompt to rerun.")
-        return
-
-    await runtime._reply_text(update, "Retrying last prompt...")
-    await runtime.enqueue_request(
-        runtime.last_prompt.chat_id,
-        runtime.last_prompt.prompt,
-        "retry",
-        "Retry request",
-    )
-
-
-def load_last_text_from_transcript(runtime: Any, role: str) -> str | None:
-    try:
-        if not runtime.transcript_log_path.exists():
-            return None
-        last_text = None
-        with open(runtime.transcript_log_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                    if entry.get("role") == role and entry.get("text"):
-                        last_text = entry["text"]
-                except Exception:
-                    pass
-        return last_text
-    except Exception:
-        return None
+    await cmd_retry(runtime, update, SimpleNamespace(args=[]))

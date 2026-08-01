@@ -431,6 +431,39 @@ def test_load_instances_ignores_stale_live_endpoint(monkeypatch, tmp_path):
     assert instances["intel"]["remote_port"] == 40050
 
 
+def test_load_instances_keeps_agents_json_authoritative_for_local_instance(
+    monkeypatch,
+    tmp_path,
+):
+    instances_path = tmp_path / "instances.json"
+    instances_path.write_text(
+        json.dumps(
+            {
+                "instances": {
+                    "hashi1": {
+                        "instance_id": "HASHI1",
+                        "display_name": "stale",
+                        "workbench_port": 19999,
+                        "active": False,
+                        "lan_ip": "192.168.0.8",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(hchat_send, "INSTANCES_FILE", instances_path)
+    monkeypatch.setattr(hchat_send, "LIVE_ENDPOINTS_FILE", tmp_path / "missing.json")
+    monkeypatch.setattr(hchat_send, "_load_config", lambda: _local_cfg())
+
+    local = hchat_send._load_instances()["hashi1"]
+
+    assert local["display_name"] == "HASHI1"
+    assert local["workbench_port"] == 18800
+    assert local["active"] is True
+    assert local["lan_ip"] == "192.168.0.8"
+
+
 def test_remote_agent_names_falls_back_to_workbench_agents(monkeypatch):
     payloads = {
         "http://192.168.0.6:40050/protocol/agents": URLError("remote stale"),
@@ -599,6 +632,7 @@ def test_find_exchange_instance_prefers_non_loopback_host(monkeypatch):
         lambda: {
             "hashi1": {
                 "instance_id": "HASHI1",
+                "hchat_exchange": True,
                 "active": True,
                 "api_host": "127.0.0.1",
                 "lan_ip": "172.21.12.144",

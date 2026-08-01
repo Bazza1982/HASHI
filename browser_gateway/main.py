@@ -9,13 +9,14 @@ import sys
 from pathlib import Path
 
 from browser_gateway.server import BrowserGatewayServer
+from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_URL
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="HASHI OLL Browser Gateway")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8876)
-    parser.add_argument("--workbench-url", default="http://127.0.0.1:18800")
+    parser.add_argument("--workbench-url", default=DEFAULT_WORKBENCH_URL)
     parser.add_argument("--state-db", default="")
     parser.add_argument("--audit-log", default="")
     parser.add_argument("--public-base-url", default="")

@@ -1,0 +1,76 @@
+from __future__ import annotations
+
+import importlib
+from dataclasses import dataclass
+from types import ModuleType
+from typing import Callable, Literal
+
+
+ManagerConstructor = Literal["empty", "paths", "kernel", "kernel_console", "skill"]
+
+
+@dataclass(frozen=True)
+class ManagerSpec:
+    """One authoritative construction rule for a kernel-owned manager."""
+
+    attribute: str
+    module: str
+    class_name: str
+    constructor: ManagerConstructor
+
+
+HOT_MANAGER_SPECS: tuple[ManagerSpec, ...] = (
+    ManagerSpec("skill_manager", "orchestrator.skill_manager", "SkillManager", "skill"),
+    ManagerSpec("config_admin", "orchestrator.config_admin", "ConfigAdmin", "paths"),
+    ManagerSpec("backend_preflight", "orchestrator.backend_preflight", "BackendPreflight", "empty"),
+    ManagerSpec("agent_lifecycle", "orchestrator.agent_lifecycle", "AgentLifecycleManager", "kernel"),
+    ManagerSpec("service_manager", "orchestrator.service_manager", "ServiceManager", "kernel"),
+    ManagerSpec("reboot_manager", "orchestrator.reboot_manager", "RebootManager", "kernel_console"),
+    ManagerSpec("shutdown_manager", "orchestrator.shutdown_manager", "ShutdownManager", "kernel"),
+    ManagerSpec("startup_manager", "orchestrator.startup_manager", "StartupManager", "kernel_console"),
+    ManagerSpec("whatsapp_manager", "orchestrator.whatsapp_manager", "WhatsAppManager", "kernel"),
+)
+
+
+def _construct_manager(spec: ManagerSpec, manager_class, kernel, console_handler):
+    if spec.constructor == "empty":
+        return manager_class()
+    if spec.constructor == "skill":
+        return manager_class(kernel.paths.code_root, kernel.paths.tasks_path)
+    if spec.constructor == "paths":
+        return manager_class(kernel.paths)
+    if spec.constructor == "kernel_console":
+        return manager_class(kernel, console_handler)
+    if spec.constructor == "kernel":
+        return manager_class(kernel)
+    raise ValueError(f"Unknown manager constructor rule: {spec.constructor}")
+
+
+def build_hot_manager_bundle(
+    kernel,
+    console_handler,
+    *,
+    module_loader: Callable[[str], ModuleType] = importlib.import_module,
+) -> dict[str, object]:
+    """Build every manager before mutating the live kernel."""
+    bundle: dict[str, object] = {}
+    for spec in HOT_MANAGER_SPECS:
+        module = module_loader(spec.module)
+        manager_class = getattr(module, spec.class_name)
+        bundle[spec.attribute] = _construct_manager(
+            spec,
+            manager_class,
+            kernel,
+            console_handler,
+        )
+    return bundle
+
+
+def install_hot_manager_bundle(kernel, bundle: dict[str, object]) -> None:
+    expected = {spec.attribute for spec in HOT_MANAGER_SPECS}
+    if set(bundle) != expected:
+        missing = sorted(expected - set(bundle))
+        extra = sorted(set(bundle) - expected)
+        raise ValueError(f"Invalid manager bundle; missing={missing}, extra={extra}")
+    for spec in HOT_MANAGER_SPECS:
+        setattr(kernel, spec.attribute, bundle[spec.attribute])

@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from orchestrator.post_turn_observer import PostTurnObserver, PreTurnContextProvider, TurnContextRequest, TurnObservationRequest
+from orchestrator.runtime_retry import RETRY_HANDOFF_SOURCE
 
 from .layer import EmotionalSelfLayer
 from .models import EmergentTurnState, TurnContext
@@ -23,6 +24,7 @@ class AnattaPostTurnObserver(PostTurnObserver, PreTurnContextProvider):
         "scheduler-skill",
         "loop_skill",
         "retry",
+        RETRY_HANDOFF_SOURCE,
         "session_reset",
     }
 

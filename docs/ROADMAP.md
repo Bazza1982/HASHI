@@ -146,8 +146,12 @@ Alpha limitations:
 - `/stop` now kills the entire subprocess tree (not just the main PID) via `os.killpg()`.
 - Prevents zombie child processes from holding stdout/stderr pipes open.
 
-### /retry Persistence
-- `/retry` resends the last prompt or reruns the last response across sessions.
+### Recovery Retry and Resend
+- `/resend` replays the last model or Bridge output without inference.
+- `/retry` persists the last retryable prompt, stops stale execution, creates a
+  clean CLI/API context, restores recent handoff continuity, and reruns that
+  prompt. Retry and resend state survive runtime restarts. See
+  [RETRY_RESEND_COMMANDS.md](RETRY_RESEND_COMMANDS.md).
 
 ---
 
