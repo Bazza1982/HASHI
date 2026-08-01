@@ -1,4 +1,5 @@
 from __future__ import annotations
+import html
 import json
 import importlib.util
 import sys
@@ -7,6 +8,7 @@ from pathlib import Path
 
 from orchestrator.tts_providers import build_provider, list_provider_names
 from orchestrator.voice_synthesizer import VoiceAsset
+from orchestrator.command_ui import setting_card
 
 
 def _default_tts_provider() -> str:
@@ -243,14 +245,16 @@ class VoiceManager:
             current = f"{active_alias} - {preset['label']}"
         else:
             current = state.get("voice_name") or "custom"
-        return (
-            "🔊 VOICE REPLIES\n"
-            "━━━━━━━━━━━━━━━━\n\n"
-            f"Current · {enabled}\n"
-            f"Voice · {current}\n"
-            f"Provider · {state.get('provider', 'windows')}\n\n"
-            "Changes apply immediately and persist in this workspace.\n"
-            "Choose a state or preset below; typed commands provide advanced options."
+        return setting_card(
+            "🔊",
+            "Voice replies",
+            current=f"<b>{enabled}</b>",
+            facts=[
+                f"<b>Voice</b> · <code>{html.escape(str(current))}</code>",
+                f"<b>Provider</b> · <code>{html.escape(str(state.get('provider', 'windows')))}</code>",
+            ],
+            consequence="Changes apply immediately and persist in this workspace.",
+            action="Choose a state or preset below; typed commands provide advanced options.",
         )
 
     def _load(self) -> dict:

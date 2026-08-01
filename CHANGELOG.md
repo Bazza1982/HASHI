@@ -41,6 +41,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Command menu display parity** — presentation-only menu updates now apply the
+  shared HASHI card order, escaped HTML values, active-choice markers, and
+  consistent navigation across parked topics, tickets, system slots, loops,
+  skills, voice controls, workzones, status, browser/remote views, schedulers,
+  queues, background jobs, Wrapper, Audit, Dual Brain, Anatta, xAI auth, and
+  other status panels. Command syntax, stored data, and execution behavior are
+  unchanged.
+- **Superloop command menu** — `/superloop` now opens a compact HASHI-standard
+  HTML status card with live loop, recording, and template counts plus inline
+  navigation for recording, loop, and collaboration commands. `/superloop list`
+  now uses escaped, paginated template cards with Back and Refresh controls.
 - **Memory+ v2 compact continuity** — Memory+ is now independent from execution
   mode and works across Flex, Fixed, Wrapper, Audit, Dual Brain, CLI sessions,
   and stateless API backends. It stores a bounded structured today card,

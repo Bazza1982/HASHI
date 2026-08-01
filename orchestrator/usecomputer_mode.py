@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from orchestrator.bridge_memory import SysPromptManager
+from orchestrator.command_ui import card_title, setting_card
 
 
 USECOMPUTER_SLOT = "10"
@@ -48,27 +49,31 @@ def get_usecomputer_status(sys_prompt_manager: SysPromptManager) -> str:
     active = bool(slot.get("active"))
     configured = slot.get("text") == USECOMPUTER_SYSTEM_PROMPT
     if active and configured:
-        return (
-            "🖥️ COMPUTER USE\n"
-            "━━━━━━━━━━━━━━━━\n\n"
-            "Current · ON\n"
-            f"System slot · /sys {USECOMPUTER_SLOT}\n\n"
-            "GUI-aware operating guidance is active for future requests. Changes apply immediately."
+        current = "<b>ON</b>"
+        consequence = (
+            "GUI-aware guidance is available for future requests, but direct tools remain preferred when more reliable."
         )
-    if slot.get("text"):
-        return (
-            "🖥️ COMPUTER USE\n"
-            "━━━━━━━━━━━━━━━━\n\n"
-            "Current · CUSTOM\n"
-            f"System slot · /sys {USECOMPUTER_SLOT}\n\n"
-            "The slot contains custom text, not the managed computer-use prompt."
+    elif slot.get("text"):
+        current = "<b>CUSTOM</b>"
+        consequence = (
+            "The reserved system slot contains custom text rather than the managed computer-use prompt."
         )
-    return (
-        "🖥️ COMPUTER USE\n"
-        "━━━━━━━━━━━━━━━━\n\n"
-        "Current · OFF\n"
-        f"System slot · /sys {USECOMPUTER_SLOT}\n\n"
-        "The managed guidance is inactive. Use /usecomputer on to enable it immediately."
+    else:
+        current = "<b>OFF</b>"
+        consequence = "Managed GUI-aware guidance is inactive."
+    return setting_card(
+        "🖥️",
+        "Computer use",
+        current=current,
+        facts=[
+            f"<b>System slot</b> · <code>/sys {USECOMPUTER_SLOT}</code>",
+            "<b>Alias</b> · <code>/usercomputer</code>",
+        ],
+        consequence=consequence,
+        action=(
+            "Use <code>/usecomputer on</code>, <code>/usecomputer off</code>, or "
+            "<code>/usecomputer examples</code>. Send <code>/usecomputer &lt;task&gt;</code> to run a task."
+        ),
     )
 
 
@@ -83,14 +88,12 @@ def build_usecomputer_task_prompt(task: str) -> str:
 
 def get_usecomputer_examples_text() -> str:
     return (
-        "🖥️ COMPUTER USE EXAMPLES\n"
-        "━━━━━━━━━━━━━━━━\n\n"
-        "Current · reference\n\n"
-        "/usecomputer status\n"
-        "/usecomputer on\n"
-        "/usecomputer Please do some qualitative coding for me in NVivo here. It has no API, so use mouse and keyboard if needed.\n"
-        "/usecomputer Please use the desktop/browser tools to verify this Chrome extension on the real Windows desktop.\n"
-        "/usecomputer Please finish this form submission in the Linux virtual desktop if there is no reliable API path.\n"
-        "\n"
-        "Alias: /usercomputer also works."
+        f"{card_title('🖥️', 'Computer use examples')}\n\n"
+        "<b>Current</b> · reference\n\n"
+        "<code>/usecomputer status</code>\n"
+        "<code>/usecomputer on</code>\n\n"
+        "<code>/usecomputer Please code this material in NVivo; use mouse and keyboard if needed.</code>\n\n"
+        "<code>/usecomputer Verify this Chrome extension on the real Windows desktop.</code>\n\n"
+        "<code>/usecomputer Finish this form in the Linux virtual desktop when no reliable API exists.</code>\n\n"
+        "Alias · <code>/usercomputer</code>"
     )

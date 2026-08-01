@@ -48,7 +48,7 @@ def _gateway_status_text(runtime: Any) -> str:
         [
             card_title("🔌", "Hashi API gateway"),
             "",
-            f"<b>STATUS</b> · {state_icon} <b>{'ON' if snapshot['running'] else 'OFF'}</b>",
+            f"<b>Current</b> · <b>{'ON' if snapshot['running'] else 'OFF'}</b> · {state_icon}",
             f"<b>Starts after reboot</b> · <code>{'yes' if snapshot['enabled'] else 'no'}</code>",
             f"<b>Default model</b> · <code>{html.escape(snapshot['default_model'])}</code>",
             "",

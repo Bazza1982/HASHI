@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import html
 import json
 from pathlib import Path
 from typing import Any
 
-from orchestrator.command_registry import RuntimeCommand
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+from orchestrator.command_registry import RuntimeCallback, RuntimeCommand
+from orchestrator.command_ui import REFRESH_LABEL, card_title, selected_label
 from tools.anatta_diagnostics import build_report
 
 
@@ -14,6 +18,15 @@ USAGE = (
     "Usage: /anatta [status|full|off|shadow|on]\n"
     "status/full inspect Anatta. off/shadow/on update this workspace's Anatta mode."
 )
+
+
+def _is_authorized(runtime: Any, update: Any) -> bool:
+    checker = getattr(runtime, "_is_authorized_user", None)
+    user_id = getattr(getattr(update, "effective_user", None), "id", None)
+    if callable(checker):
+        return bool(checker(user_id))
+    authorized_id = getattr(getattr(runtime, "global_config", None), "authorized_id", None)
+    return authorized_id is None or user_id == authorized_id
 
 
 async def anatta_command(runtime: Any, update: Any, context: Any) -> None:
@@ -28,21 +41,93 @@ async def anatta_command(runtime: Any, update: Any, context: Any) -> None:
     workspace = Path(getattr(runtime, "workspace_dir"))
     if args and args[0] in ANATTA_MODES:
         mode = args[0]
-        changed = _set_anatta_mode(workspace, mode)
-        reloaded = _reload_observers(runtime)
+        notice = _apply_mode(runtime, workspace, mode)
         report = build_report(workspace, full=False)
-        observer_line = "observer ensured" if changed["observer_ensured"] else "observer unchanged"
-        reload_line = "observers reloaded" if reloaded else "observer reload unavailable"
         await _send(
             runtime,
             update,
-            f"Anatta mode set to: {mode}\n- {observer_line}\n- {reload_line}\n\n{report}",
+            _status_text(workspace, report, notice=notice),
+            reply_markup=_keyboard(workspace),
         )
         return
 
     full = bool(args and args[0] == "full")
     report = build_report(workspace, full=full)
-    await _send(runtime, update, report)
+    await _send(
+        runtime,
+        update,
+        _status_text(workspace, report, full=full),
+        reply_markup=_keyboard(workspace),
+    )
+
+
+def _current_mode(workspace: Path) -> str:
+    return str(_load_json_object(workspace / "anatta_config.json").get("mode") or "off")
+
+
+def _status_text(
+    workspace: Path,
+    report: str,
+    *,
+    notice: str | None = None,
+    full: bool = False,
+) -> str:
+    lines = [
+        card_title("🪷", "Anatta diagnostics"),
+        "",
+        f"<b>Current</b> · <code>{html.escape(_current_mode(workspace).upper())}</code>",
+        f"<b>View</b> · <code>{'FULL' if full else 'SUMMARY'}</code>",
+        "<b>Changes</b> · mode changes persist in this workspace",
+    ]
+    if notice:
+        lines.extend(["", f"✅ {html.escape(notice)}"])
+    lines.extend(["", f"<pre>{html.escape(report)}</pre>"])
+    return "\n".join(lines)
+
+
+def _keyboard(workspace: Path) -> InlineKeyboardMarkup:
+    current = _current_mode(workspace)
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(selected_label("Off", current == "off"), callback_data="anatta:off"),
+                InlineKeyboardButton(selected_label("Shadow", current == "shadow"), callback_data="anatta:shadow"),
+                InlineKeyboardButton(selected_label("On", current == "on"), callback_data="anatta:on"),
+            ],
+            [
+                InlineKeyboardButton("Full report", callback_data="anatta:full"),
+                InlineKeyboardButton(REFRESH_LABEL, callback_data="anatta:status"),
+            ],
+        ]
+    )
+
+
+def _apply_mode(runtime: Any, workspace: Path, mode: str) -> str:
+    changed = _set_anatta_mode(workspace, mode)
+    reloaded = _reload_observers(runtime)
+    observer_line = "observer ensured" if changed["observer_ensured"] else "observer unchanged"
+    reload_line = "observers reloaded" if reloaded else "observer reload unavailable"
+    return f"Mode set to {mode}: {observer_line}; {reload_line}."
+
+
+async def anatta_callback(runtime: Any, update: Any, context: Any) -> None:
+    query = update.callback_query
+    if not _is_authorized(runtime, update):
+        await query.answer()
+        return
+    action = (query.data or "").split(":", 1)[1] if ":" in (query.data or "") else "status"
+    workspace = Path(getattr(runtime, "workspace_dir"))
+    notice = None
+    if action in ANATTA_MODES:
+        notice = _apply_mode(runtime, workspace, action)
+    full = action == "full"
+    report = build_report(workspace, full=full)
+    await query.edit_message_text(
+        _status_text(workspace, report, notice=notice, full=full),
+        parse_mode="HTML",
+        reply_markup=_keyboard(workspace),
+    )
+    await query.answer()
 
 
 def _set_anatta_mode(workspace: Path, mode: str) -> dict[str, bool]:
@@ -112,7 +197,10 @@ def _reload_observers(runtime: Any) -> bool:
     return True
 
 
-async def _send(runtime: Any, update: Any, text: str) -> None:
+async def _send(runtime: Any, update: Any, text: str, *, reply_markup=None) -> None:
+    if hasattr(runtime, "_reply_text"):
+        await runtime._reply_text(update, text, parse_mode="HTML", reply_markup=reply_markup)
+        return
     chat = getattr(update, "effective_chat", None)
     chat_id = getattr(chat, "id", None)
     if chat_id is not None and hasattr(runtime, "send_long_message"):
@@ -125,7 +213,7 @@ async def _send(runtime: Any, update: Any, text: str) -> None:
         return
     message = getattr(update, "message", None)
     if message is not None and hasattr(message, "reply_text"):
-        await message.reply_text(text)
+        await message.reply_text(text, parse_mode="HTML", reply_markup=reply_markup)
 
 
 COMMANDS = [
@@ -135,3 +223,5 @@ COMMANDS = [
         callback=anatta_command,
     )
 ]
+
+CALLBACKS = [RuntimeCallback(pattern=r"^anatta:", callback=anatta_callback)]

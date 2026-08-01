@@ -150,8 +150,8 @@ def test_dual_brain_status_labels_default_prompts_as_default() -> None:
 
     text = runtime._dual_brain_status_text(cfg)
 
-    assert "Memory briefing prompt: `default`" in text
-    assert "Notepad update prompt: `default`" in text
+    assert "<b>Memory briefing prompt</b> · <code>default</code>" in text
+    assert "<b>Notepad update prompt</b> · <code>default</code>" in text
 
 
 def test_dual_brain_bypasses_automation_and_internal_sources(tmp_path: Path) -> None:

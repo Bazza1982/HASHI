@@ -77,6 +77,7 @@ def get_browser_menu_text() -> str:
 def get_browser_examples_text() -> str:
     return (
         f"{card_title('🌐', 'Browser examples')}\n\n"
+        "<b>Current</b> · reference\n\n"
         "<b>1 · Headless page work</b>\n"
         "<code>/browser 1 Inspect this public dashboard and summarize the visible table.</code>\n\n"
         "<b>2 · CLI-native browsing</b>\n"
@@ -117,7 +118,7 @@ def get_browser_status_text(
 
     return (
         f"{card_title('🌐', 'Browser routes')}\n\n"
-        f"<b>Current backend</b> · <code>{escape(backend)}</code>\n"
+        f"<b>Current</b> · backend <code>{escape(backend)}</code>\n"
         "<b>Changes</b> · route selection applies to this request only\n\n"
         "🟢 confirmed online • 🟡 not checked / unknown • 🔴 offline or misconfigured\n\n"
         "<b>ROUTES</b>\n"
@@ -125,9 +126,9 @@ def get_browser_status_text(
         "   Public web, JS pages, screenshots. Uses HASHI standalone Playwright/browser tools.\n"
         f"{native_icon} <b>2 · NATIVE</b> · {native_status}\n"
         f"   Backend-owned browsing/search. Active backend: <code>{escape(backend)}</code>.\n"
-        f"{brave_icon} <b>3 · SEARCH</b> · {brave_status}\n"
+        f"{brave_icon} <b>3 · SEARCH</b> · {escape(brave_status)}\n"
         "   Public research with citations. Uses Brave search and source pages.\n"
-        f"{extension_icon} <b>4 · LOGGED-IN</b> · {extension_status}\n"
+        f"{extension_icon} <b>4 · LOGGED-IN</b> · {escape(extension_status)}\n"
         "   Real Windows browser session via HASHI extension for authenticated pages.\n\n"
         "<b>Use</b>\n"
         "<code>/browser &lt;1-4&gt; &lt;task&gt;</code>\n"

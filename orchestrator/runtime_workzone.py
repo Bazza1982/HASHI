@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 from typing import Any
 
+from orchestrator.command_ui import setting_card
 from orchestrator.workzone import (
     access_root_for_workzone,
     build_workzone_prompt,
@@ -11,6 +12,33 @@ from orchestrator.workzone import (
     resolve_workzone_input,
     save_workzone,
 )
+
+
+def workzone_status_text(
+    *,
+    home_workspace: Any,
+    current: Any | None,
+    notice: str | None = None,
+) -> str:
+    active = current is not None
+    facts = [
+        f"<b>Directory</b> · <code>{html.escape(str(current or home_workspace))}</code>",
+        f"<b>Agent home</b> · <code>{html.escape(str(home_workspace))}</code>",
+    ]
+    if notice:
+        facts.insert(0, f"✅ {html.escape(notice)}")
+    return setting_card(
+        "📁",
+        "Workzone",
+        current=f"<b>{'ON' if active else 'OFF'}</b>",
+        facts=facts,
+        consequence=(
+            "Future file-aware requests run from this directory. Session-capable backends start a fresh session when it changes."
+            if active
+            else "Future requests use the agent home workspace."
+        ),
+        action="Use <code>/workzone &lt;path&gt;</code> to set a directory or <code>/workzone off</code> to return home.",
+    )
 
 
 def sync_workzone_to_backend_config(runtime: Any) -> None:
@@ -62,19 +90,11 @@ async def cmd_workzone(runtime: Any, update: Any, context: Any) -> None:
     args = context.args or []
     current = load_workzone(runtime.workspace_dir)
     if not args:
-        if current:
-            await runtime._reply_text(
-                update,
-                f"Workzone is ON:\n<code>{html.escape(str(current))}</code>\n\n"
-                "Use <code>/workzone off</code> to return to the agent home workspace.",
-                parse_mode="HTML",
-            )
-        else:
-            await runtime._reply_text(
-                update,
-                f"Workzone is OFF. Agent home workspace:\n<code>{html.escape(str(runtime.workspace_dir))}</code>",
-                parse_mode="HTML",
-            )
+        await runtime._reply_text(
+            update,
+            workzone_status_text(home_workspace=runtime.workspace_dir, current=current),
+            parse_mode="HTML",
+        )
         return
     arg_text = " ".join(args).strip()
     if runtime._backend_busy():
@@ -89,7 +109,11 @@ async def cmd_workzone(runtime: Any, update: Any, context: Any) -> None:
             await backend.handle_new_session()
         await runtime._reply_text(
             update,
-            f"Workzone OFF. Working directory reset to agent home workspace:\n<code>{html.escape(str(runtime.workspace_dir))}</code>",
+            workzone_status_text(
+                home_workspace=runtime.workspace_dir,
+                current=None,
+                notice="Workzone returned to the agent home workspace.",
+            ),
             parse_mode="HTML",
         )
         return
@@ -106,7 +130,10 @@ async def cmd_workzone(runtime: Any, update: Any, context: Any) -> None:
         await backend.handle_new_session()
     await runtime._reply_text(
         update,
-        f"Workzone ON:\n<code>{html.escape(str(zone))}</code>\n\n"
-        "Next request will run from this directory and include a workzone prompt.",
+        workzone_status_text(
+            home_workspace=runtime.workspace_dir,
+            current=zone,
+            notice="Workzone updated.",
+        ),
         parse_mode="HTML",
     )

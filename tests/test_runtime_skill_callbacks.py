@@ -67,7 +67,9 @@ async def test_handle_skill_show_callback():
     handled = await runtime_skill_callbacks.handle_skill_callback(runtime, query, query.data)
 
     assert handled is True
-    assert query.edits[-1]["text"] == "Skill demo"
+    assert "<b>DEMO</b>" in query.edits[-1]["text"]
+    assert "<b>Current</b> · <b>READY</b>" in query.edits[-1]["text"]
+    assert query.edits[-1]["parse_mode"] == "HTML"
     assert query.edits[-1]["reply_markup"] == "keyboard"
     assert query.answers[-1]["text"] is None
 
@@ -81,7 +83,9 @@ async def test_handle_skill_toggle_callback():
 
     assert handled is True
     assert runtime.skill_manager.toggles == [("demo", True)]
-    assert query.edits[-1]["text"] == "demo on"
+    assert query.edits[-1]["text"].startswith("✅ demo on\n\n")
+    assert "<b>DEMO</b>" in query.edits[-1]["text"]
+    assert query.edits[-1]["parse_mode"] == "HTML"
 
 
 @pytest.mark.asyncio

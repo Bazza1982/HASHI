@@ -64,7 +64,7 @@ async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
         await runtime._reply_text(
             update,
             f"{card_title('🧠', 'Memory controls')}\n\n"
-            f"<b>Continuity</b> · Memory+ {continuity_state}\n"
+            f"<b>Current</b> · Memory+ {continuity_state}\n"
             f"<b>Today</b> · <code>{continuity['today_chars']}</code> chars · "
             f"<code>{continuity['open_items']}</code> open\n"
             f"<b>Carryover</b> · <code>{carryover}</code>\n"

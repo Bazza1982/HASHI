@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from html import escape
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -81,14 +82,15 @@ async def cmd_mode(runtime: Any, update: Any, context: Any) -> None:
         await runtime._reply_text(
             update,
             f"{card_title('🧭', 'Hashi mode')}\n\n"
-            f"<b>CURRENT</b> · <code>{current}</code>\n\n"
+            f"<b>Current</b> · <code>{escape(str(current))}</code>\n"
+            f"<b>Memory+</b> · <code>{continuity}</code> · independent continuity layer\n\n"
             f"<b>CHOOSE A WORKING MODE</b>\n"
             f"• <b>fixed</b> — continuous CLI session, incremental prompts\n"
             f"• <b>flex</b> — multi-backend switching, full context injection\n"
             f"• <b>wrapper</b> — configure core/wrapper model pair with /core and /wrap\n"
             f"• <b>audit</b> — configure core/audit model pair with /core and /audit\n"
             f"• <b>dual-brain</b> — left-brain memory preflight + right-brain execution; configure with /brain\n\n"
-            f"<b>MEMORY+</b> · <code>{continuity}</code> · independent continuity layer; use <code>/memory plus on|off</code>",
+            "Working-mode changes persist; Memory+ remains independent. Use <code>/memory plus on|off</code>.",
             parse_mode="HTML",
             reply_markup=mode_keyboard(current),
         )

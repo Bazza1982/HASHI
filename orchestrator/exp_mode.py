@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import html
 from pathlib import Path
-from typing import Any
 
 from exp.loader import ExpStore
+from orchestrator.command_ui import card_title
 
 
 def _format_exp_catalog(store: ExpStore) -> str:
@@ -65,16 +66,41 @@ def build_exp_task_prompt(task: str, exp_root: str | Path | None = None) -> str:
 
 def get_exp_usage_text(exp_root: str | Path | None = None) -> str:
     store = ExpStore(exp_root)
-    catalog = _format_exp_catalog(store)
-    return (
-        "🧭 EXP GUIDEBOOK\n"
-        "━━━━━━━━━━━━━━━━\n\n"
-        "Current · ready\n"
-        "Scope · context-specific expertise and playbooks\n\n"
-        "Use:\n"
-        "/exp <task>\n\n"
-        "Example:\n"
-        "/exp do a presentation slides for Armidale council using the council presentation template\n\n"
-        "Available EXP dictionary:\n"
-        f"{catalog}"
+    entries: list[str] = []
+    for exp_id in store.list_ids():
+        try:
+            manifest = store.get_manifest(exp_id)
+        except Exception as exc:
+            entries.append(
+                f"<code>{html.escape(str(exp_id))}</code> · unavailable "
+                f"({html.escape(type(exc).__name__)})"
+            )
+            continue
+        summary = str(manifest.get("summary") or "").strip() or "No summary."
+        playbooks = manifest.get("playbooks", {})
+        playbook_names = ", ".join(sorted(playbooks)) if isinstance(playbooks, dict) else "none"
+        entries.append(
+            f"<code>{html.escape(str(exp_id))}</code> · {html.escape(summary)}\n"
+            f"Playbooks · <code>{html.escape(playbook_names or 'none')}</code>"
+        )
+    if not entries:
+        entries.append("No EXP entries are available.")
+    return "\n".join(
+        [
+            card_title("🧭", "EXP guidebook"),
+            "",
+            "<b>Current</b> · <b>READY</b>",
+            "<b>Scope</b> · context-specific expertise and playbooks",
+            "",
+            "The agent selects the most relevant EXP material for the task; command behavior is unchanged.",
+            "",
+            "<b>Use</b>",
+            "<code>/exp &lt;task&gt;</code>",
+            "",
+            "<b>Example</b>",
+            "<code>/exp prepare council presentation slides using the council template</code>",
+            "",
+            "<b>AVAILABLE EXP</b>",
+            *entries,
+        ]
     )

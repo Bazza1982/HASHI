@@ -15,7 +15,7 @@ def test_exp_prompt_lists_dictionary_and_task():
 def test_exp_usage_mentions_command_and_available_exp():
     text = get_exp_usage_text()
 
-    assert "/exp <task>" in text
+    assert "<code>/exp &lt;task&gt;</code>" in text
     assert "barry/office_desktop" in text
 
 
