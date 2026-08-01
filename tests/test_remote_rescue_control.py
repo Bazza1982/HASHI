@@ -11,6 +11,13 @@ from remote.protocol_manager import ProtocolManager, build_default_capabilities
 from remote.security.pairing import PairingManager
 from remote.security.shared_token import build_auth_headers
 from remote.terminal.executor import AuthLevel, TerminalExecutor
+from orchestrator.pathing import instance_runtime_dir
+
+
+def _write_hashi_pid(root, value: str) -> None:
+    path = instance_runtime_dir(root) / "process.pid"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(value, encoding="utf-8")
 
 
 def _client(tmp_path, *, max_level=AuthLevel.L2_WRITE):
@@ -65,7 +72,7 @@ def test_hashi_rescue_status_accepts_shared_token_hmac_when_lan_mode_off(tmp_pat
 
 def test_hashi_rescue_start_accepts_shared_token_hmac_when_lan_mode_off(tmp_path):
     (tmp_path / "secrets.json").write_text('{"hashi_remote_shared_token":"test-secret"}', encoding="utf-8")
-    (tmp_path / ".bridge_u_f.pid").write_text(str(os.getpid()), encoding="utf-8")
+    _write_hashi_pid(tmp_path, str(os.getpid()))
     app = create_app(
         {"instance_id": "HASHI_TEST"},
         PairingManager(storage_dir=tmp_path / "pairing", lan_mode=False),
@@ -109,7 +116,7 @@ def test_hashi_rescue_status_reports_offline_when_workbench_missing(tmp_path):
 
 
 def test_hashi_rescue_status_distinguishes_stale_pid(tmp_path):
-    (tmp_path / ".bridge_u_f.pid").write_text("99999999", encoding="utf-8")
+    _write_hashi_pid(tmp_path, "99999999")
     client = _client(tmp_path)
 
     response = client.get("/control/hashi/status")
@@ -189,7 +196,7 @@ def test_hashi_rescue_logs_rejects_unknown_log_name(tmp_path):
 
 
 def test_hashi_rescue_start_writes_audit_when_already_running(tmp_path):
-    (tmp_path / ".bridge_u_f.pid").write_text(str(os.getpid()), encoding="utf-8")
+    _write_hashi_pid(tmp_path, str(os.getpid()))
     client = _client(tmp_path, max_level=AuthLevel.L3_RESTART)
 
     response = client.post("/control/hashi/start", json={"reason": "already alive"})
@@ -222,7 +229,7 @@ def test_hashi_rescue_start_failure_writes_structured_audit(tmp_path):
 
 
 def test_hashi_rescue_start_sanitizes_and_truncates_reason_in_audit(tmp_path):
-    (tmp_path / ".bridge_u_f.pid").write_text(str(os.getpid()), encoding="utf-8")
+    _write_hashi_pid(tmp_path, str(os.getpid()))
     client = _client(tmp_path, max_level=AuthLevel.L3_RESTART)
     reason = ("first line\nsecond line\r\n" + ("x" * 600))
 

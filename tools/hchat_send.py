@@ -39,13 +39,13 @@ if __name__ == "__main__":
 
 from remote.delivery_results import format_delivery_result
 from remote.security.client_auth import build_client_auth_headers
+from orchestrator.runtime_defaults import DEFAULT_HASHI_REMOTE_PORT, DEFAULT_WORKBENCH_PORT
 
 CONTACTS_FILE = ROOT / "contacts.json"
 INSTANCES_FILE = ROOT / "instances.json"
 LIVE_ENDPOINTS_FILE = ROOT / "state" / "remote_live_endpoints.json"
 DEFAULT_TTL = 3600
-DEFAULT_REMOTE_PORT = 8766
-DEFAULT_EXCHANGE_INSTANCE = "HASHI1"
+DEFAULT_REMOTE_PORT = DEFAULT_HASHI_REMOTE_PORT
 LIVE_ENDPOINT_TTL_SECONDS = int(os.getenv("HASHI_HCHAT_LIVE_ENDPOINT_TTL", "7200"))
 HCHAT_HEADER_RE = re.compile(r"^\[hchat from (?P<agent>\w+)(?:@(?P<instance>[\w-]+))?\]\s*(?P<body>.*)$", re.DOTALL)
 HCHAT_AUTOREPLY_INSTRUCTION = (
@@ -65,7 +65,7 @@ def _load_json_object_with_salvage(path: Path) -> dict | None:
     try:
         data = json.loads(raw)
         return data if isinstance(data, dict) else None
-    except json.JSONDecodeError as exc:
+    except json.JSONDecodeError:
         decoder = json.JSONDecoder()
         try:
             salvaged, end = decoder.raw_decode(raw.lstrip())
@@ -82,17 +82,6 @@ def _load_json_object_with_salvage(path: Path) -> dict | None:
         return None
 
 
-def _infer_instance_id_from_root() -> str:
-    root_str = str(ROOT).replace("\\", "/").lower()
-    if root_str.endswith("/projects/hashi2"):
-        return "HASHI2"
-    if root_str.endswith("/projects/hashi9"):
-        return "HASHI9"
-    if root_str.endswith("/projects/hashi"):
-        return "HASHI1" if os.name != "nt" else "HASHI9"
-    return "HASHI1"
-
-
 def _linux_root_to_local_path(root: str) -> Path:
     if root.startswith("/home/") and os.name == "nt":
         parts = [p for p in root.strip("/").split("/") if p]
@@ -101,24 +90,6 @@ def _linux_root_to_local_path(root: str) -> Path:
             path /= part
         return path
     return Path(root)
-
-
-def _default_hashi9_paths() -> tuple[str, str]:
-    explicit_windows = os.getenv("HASHI9_ROOT")
-    explicit_wsl = os.getenv("HASHI9_WSL_ROOT")
-    if explicit_windows and explicit_wsl:
-        return explicit_windows, explicit_wsl
-
-    for candidate in Path("/mnt/c/Users").glob("*/projects/HASHI"):
-        if candidate.is_dir():
-            user = candidate.parts[4]
-            windows_root = explicit_windows or f"C:\\Users\\{user}\\projects\\HASHI"
-            return windows_root, explicit_wsl or str(candidate)
-
-    username = os.getenv("USERNAME") or os.getenv("USER") or "<user>"
-    windows_root = explicit_windows or f"C:\\Users\\{username}\\projects\\HASHI"
-    wsl_root = explicit_wsl or f"/mnt/c/Users/{username}/projects/HASHI"
-    return windows_root, wsl_root
 
 
 def _load_config() -> dict:
@@ -133,59 +104,42 @@ def _load_config() -> dict:
     return {}
 
 
-def _temporary_default_instances(cfg: dict) -> dict:
-    local_instance_id = cfg.get("global", {}).get("instance_id") or _infer_instance_id_from_root()
-    local_workbench = cfg.get("global", {}).get("workbench_port", 18819 if local_instance_id == "HASHI9" else 18800)
-    hashi9_root, hashi9_wsl_root = _default_hashi9_paths()
+def _configured_local_instance(cfg: dict) -> dict:
+    global_cfg = cfg.get("global", {}) if isinstance(cfg, dict) else {}
+    instance_id = str(global_cfg.get("instance_id") or "HASHI").strip() or "HASHI"
     return {
-        "hashi1": {
-            "instance_id": "HASHI1",
-            "display_name": "HASHI1",
-            "platform": "wsl",
-            "root": "/home/lily/projects/hashi",
-            "workbench_port": 18800,
-            "api_host": "127.0.0.1",
-            "remote_port": DEFAULT_REMOTE_PORT,
+        instance_id.lower(): {
+            "instance_id": instance_id.upper(),
+            "display_name": global_cfg.get("display_name") or instance_id,
+            "platform": global_cfg.get("platform"),
+            "root": str(global_cfg.get("project_root") or ROOT),
+            "workbench_port": int(
+                global_cfg.get("workbench_port") or DEFAULT_WORKBENCH_PORT
+            ),
+            "api_host": global_cfg.get("api_host") or "127.0.0.1",
+            "remote_port": int(global_cfg.get("remote_port") or DEFAULT_REMOTE_PORT),
             "active": True,
-            "_temporary_default": True,
-        },
-        "hashi2": {
-            "instance_id": "HASHI2",
-            "display_name": "HASHI2",
-            "platform": "wsl",
-            "root": "/home/lily/projects/hashi2",
-            "workbench_port": 18802,
-            "api_host": "127.0.0.1",
-            "remote_port": DEFAULT_REMOTE_PORT,
-            "active": True,
-            "_temporary_default": True,
-        },
-        "hashi9": {
-            "instance_id": "HASHI9",
-            "display_name": "HASHI9",
-            "platform": "windows",
-            "root": hashi9_root,
-            "wsl_root": hashi9_wsl_root,
-            "workbench_port": local_workbench if local_instance_id.upper() == "HASHI9" else 18819,
-            "api_host": "127.0.0.1",
-            "remote_port": DEFAULT_REMOTE_PORT,
-            "active": True,
-            "_temporary_default": True,
-        },
+            "_source": "agents.json",
+        }
     }
 
 
 def _load_instances() -> dict:
     cfg = _load_config()
-    defaults = _temporary_default_instances(cfg)
+    local_instance = _configured_local_instance(cfg)
     if INSTANCES_FILE.exists():
         data = _load_json_object_with_salvage(INSTANCES_FILE)
         if data is not None:
             instances = data.get("instances", {})
-            merged = defaults.copy()
-            merged.update(instances)
+            merged = dict(instances) if isinstance(instances, dict) else {}
+            for key, local_info in local_instance.items():
+                cached = merged.get(key)
+                merged[key] = {
+                    **(cached if isinstance(cached, dict) else {}),
+                    **local_info,
+                }
             return _merge_live_endpoints(merged)
-    return _merge_live_endpoints(defaults)
+    return _merge_live_endpoints(local_instance)
 
 
 def _load_live_endpoints() -> dict:
@@ -246,11 +200,11 @@ def _merge_live_endpoints(instances: dict) -> dict:
 
 
 def _get_workbench_port(cfg: dict) -> int:
-    return cfg.get("global", {}).get("workbench_port", 18800)
+    return cfg.get("global", {}).get("workbench_port", DEFAULT_WORKBENCH_PORT)
 
 
 def _get_instance_id(cfg: dict) -> str:
-    return cfg.get("global", {}).get("instance_id") or _infer_instance_id_from_root()
+    return str(cfg.get("global", {}).get("instance_id") or "HASHI").strip() or "HASHI"
 
 
 def _hchat_channel_egress_allowed(
@@ -765,10 +719,30 @@ def _build_reply_route(cfg: dict) -> dict:
     }
 
 
-def _find_exchange_instance(local_instance_id: str) -> dict | None:
-    instances = _load_instances()
+def _configured_exchange_instance(cfg: dict, instances: dict) -> str | None:
+    global_cfg = cfg.get("global", {}) if isinstance(cfg, dict) else {}
+    explicit = _normalize_instance_id(global_cfg.get("hchat_exchange_instance"))
+    if explicit:
+        return explicit
     for inst_id, inst_info in instances.items():
-        if _normalize_instance_id(inst_info.get("instance_id", inst_id)) != DEFAULT_EXCHANGE_INSTANCE:
+        if isinstance(inst_info, dict) and inst_info.get("hchat_exchange") is True:
+            return _normalize_instance_id(inst_info.get("instance_id") or inst_id)
+    return None
+
+
+def _find_exchange_instance(
+    local_instance_id: str,
+    exchange_instance_id: str | None = None,
+) -> dict | None:
+    instances = _load_instances()
+    exchange_instance_id = (
+        _normalize_instance_id(exchange_instance_id)
+        or _configured_exchange_instance(_load_config(), instances)
+    )
+    if not exchange_instance_id or exchange_instance_id == _normalize_instance_id(local_instance_id):
+        return None
+    for inst_id, inst_info in instances.items():
+        if _normalize_instance_id(inst_info.get("instance_id", inst_id)) != exchange_instance_id:
             continue
         if not inst_info.get("active", False):
             continue
@@ -782,7 +756,7 @@ def _find_exchange_instance(local_instance_id: str) -> dict | None:
             inst_info.get("same_host_loopback"),
         )
         return {
-            "instance_id": DEFAULT_EXCHANGE_INSTANCE,
+            "instance_id": exchange_instance_id,
             "host": exchange_host[0] if exchange_host else _preferred_host(inst_info, for_remote=True),
             "workbench_port": inst_info.get("workbench_port"),
             "remote_port": inst_info.get("remote_port", DEFAULT_REMOTE_PORT),
@@ -968,6 +942,7 @@ def _send_via_exchange(
     source_instance: str,
     reply_route: dict,
 ) -> bool:
+    exchange_instance = str(exchange_route.get("instance_id") or "exchange")
     host = exchange_route.get("host")
     workbench_port = exchange_route.get("workbench_port")
     port = exchange_route.get("remote_port")
@@ -991,10 +966,16 @@ def _send_via_exchange(
             with urllib_request.urlopen(req, timeout=10) as resp:
                 result = json.loads(resp.read().decode("utf-8"))
                 if result.get("ok"):
-                    print(f"✅ Hchat delivered (HASHI1 exchange API, {host}:{workbench_port}): {from_agent} → {to_agent}@{target_instance}")
+                    print(
+                        f"✅ Hchat delivered ({exchange_instance} exchange API, "
+                        f"{host}:{workbench_port}): {from_agent} → {to_agent}@{target_instance}"
+                    )
                     return True
         except Exception as e:
-            print(f"⚠️ HASHI1 exchange API failed ({host}:{workbench_port}): {e}", file=sys.stderr)
+            print(
+                f"⚠️ {exchange_instance} exchange API failed ({host}:{workbench_port}): {e}",
+                file=sys.stderr,
+            )
 
     if host and port:
         return _send_via_remote(
@@ -1071,11 +1052,25 @@ def send_hchat(
     if _send_via_protocol_transport(to_agent, target_instance, from_agent, text):
         return True
 
-    if instance_id.upper() != DEFAULT_EXCHANGE_INSTANCE:
-        exchange_route = _find_exchange_instance(instance_id)
-        if exchange_route and _send_via_exchange(exchange_route, to_agent, target_instance, from_agent, text, source_instance, reply_route):
+    exchange_instances = _load_instances()
+    exchange_instance_id = _configured_exchange_instance(cfg, exchange_instances)
+    if exchange_instance_id and instance_id.upper() != exchange_instance_id:
+        exchange_route = _find_exchange_instance(instance_id, exchange_instance_id)
+        if exchange_route and _send_via_exchange(
+            exchange_route,
+            to_agent,
+            target_instance,
+            from_agent,
+            text,
+            source_instance,
+            reply_route,
+        ):
             return True
-        print(f"⚠️ HASHI1 exchange delivery failed for {to_agent}@{target_instance}, falling back to direct discovery...", file=sys.stderr)
+        print(
+            f"⚠️ {exchange_instance_id} exchange delivery failed for "
+            f"{to_agent}@{target_instance}, falling back to direct discovery...",
+            file=sys.stderr,
+        )
 
     cached = _get_cached_route(to_agent)
     if cached and (not target_instance or cached.get("instance_id", "").upper() == target_instance.upper()):
@@ -1185,8 +1180,10 @@ def check_hchat_route(
             )
             return result
 
-    if instance_id.upper() != DEFAULT_EXCHANGE_INSTANCE:
-        exchange_route = _find_exchange_instance(instance_id)
+    exchange_instances = _load_instances()
+    exchange_instance_id = _configured_exchange_instance(cfg, exchange_instances)
+    if exchange_instance_id and instance_id.upper() != exchange_instance_id:
+        exchange_route = _find_exchange_instance(instance_id, exchange_instance_id)
         if exchange_route:
             host = exchange_route.get("host")
             workbench_port = exchange_route.get("workbench_port")
@@ -1194,7 +1191,8 @@ def check_hchat_route(
             if host and workbench_port and _probe_workbench_health(host, workbench_port):
                 result.update(
                     ok=True,
-                    route_type="hashi1_exchange_workbench",
+                    route_type="exchange_workbench",
+                    exchange_instance=exchange_instance_id,
                     host=host,
                     port=workbench_port,
                     remote_port=remote_port,
@@ -1203,7 +1201,8 @@ def check_hchat_route(
             if host and remote_port and _probe_remote(host, remote_port):
                 result.update(
                     ok=True,
-                    route_type="hashi1_exchange_remote",
+                    route_type="exchange_remote",
+                    exchange_instance=exchange_instance_id,
                     host=host,
                     remote_port=remote_port,
                 )

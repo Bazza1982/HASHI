@@ -43,12 +43,14 @@ from orchestrator import runtime_delivery
 from orchestrator import runtime_habits
 from orchestrator import runtime_lifecycle
 from orchestrator import runtime_media
+from orchestrator import runtime_menu_views
 from orchestrator import runtime_command_binding
 from orchestrator import runtime_mode
 from orchestrator import runtime_privacy
 from orchestrator import runtime_nudge
 from orchestrator import runtime_pipeline
 from orchestrator import runtime_remote
+from orchestrator import runtime_retry
 from orchestrator import telegram_delivery_failover
 from orchestrator import telegram_stream_policy
 from orchestrator.source_policy import source_requires_manual_remote_api_permission
@@ -78,6 +80,7 @@ from orchestrator.runtime_common import (
     resolve_authorized_telegram_ids,
 )
 from orchestrator.request_activity import RequestActivityStore
+from orchestrator.runtime_defaults import DEFAULT_HASHI_REMOTE_PORT
 from orchestrator.agent_fyi import build_agent_fyi_primer
 from orchestrator.bridge_memory import BridgeMemoryStore, BridgeContextAssembler, SysPromptManager
 from orchestrator.ephemeral_invoker import make_backend_sidecar_invoker
@@ -104,8 +107,14 @@ from orchestrator import runtime_observers
 from orchestrator.memory_plus_mode import (
     append_memory_plus_manual_note,
     clear_memory_plus_notepad,
+    compact_memory_plus,
+    extract_memory_plus_update_details,
+    get_memory_plus_status,
+    list_memory_plus_history,
     read_memory_plus_notepad,
     replace_memory_plus_notepad,
+    search_memory_plus_history,
+    set_memory_plus_enabled,
 )
 from orchestrator.usecomputer_mode import (
     build_usecomputer_task_prompt,
@@ -116,14 +125,11 @@ from orchestrator.usecomputer_mode import (
 from orchestrator.skill_manager import SkillDefinition, SkillManager
 from orchestrator.telegram_notifications import apply_disable_notification_default
 from orchestrator.voice_manager import VoiceManager
-from orchestrator.private_wol import describe_wol_targets, private_wol_available, run_private_wol
 from orchestrator.workzone import load_workzone
 from orchestrator.wrapper_mode import SESSION_RESET_SOURCE, load_wrapper_config, visible_wrapper_slots
 from orchestrator.audit_mode import (
     AuditTelemetryCollector,
-    visible_audit_criteria,
     load_audit_config,
-    should_audit_source,
 )
 from orchestrator.dual_brain_mode import (
     DEFAULT_AFTER_ACTION_PROMPT,
@@ -285,6 +291,7 @@ class FlexibleAgentRuntime:
             self.global_config.project_root,
             self.name,
             self._get_agent_class(),
+            self.global_config.instance_id,
         )
 
         # Initialize FlexibleBackendManager
@@ -847,12 +854,14 @@ class FlexibleAgentRuntime:
         user_text: str,
         *,
         is_bridge_request: bool,
+        metadata: dict[str, Any] | None = None,
     ) -> list[tuple[str, str]]:
         return await runtime_observers.build_pre_turn_context_sections(
             self,
             item,
             user_text,
             is_bridge_request=is_bridge_request,
+            metadata=metadata,
         )
 
     def _schedule_post_turn_observers(
@@ -1016,9 +1025,7 @@ class FlexibleAgentRuntime:
         )
 
     def _detect_instance_name(self) -> str:
-        from orchestrator.ticket_manager import detect_instance
-
-        return detect_instance(self.global_config.project_root)
+        return str(getattr(self.global_config, "instance_id", None) or "HASHI").upper()
 
     def _normalize_instance_name(self, value: str | None) -> str:
         raw = str(value or "").strip()
@@ -1124,7 +1131,7 @@ class FlexibleAgentRuntime:
         )
         if not primer:
             return request
-        return f"{primer}\n\n--- NEW REQUEST ---\n{request}"
+        return f"{primer}\n\n--- CURRENT USER REQUEST — AUTHORITATIVE ---\n{request}"
 
     def _consume_session_primer(self, item: QueuedRequest) -> str:
         if item.source.startswith("scheduler") or item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:"):
@@ -1281,31 +1288,7 @@ class FlexibleAgentRuntime:
         }
 
     def _format_parked_topics_text(self) -> str:
-        topics = self.parked_topics.list_topics()
-        if not topics:
-            return (
-                "Parked topics: none.\n\n"
-                "Usage:\n"
-                "/park - list parked topics\n"
-                "/park chat [optional title] - park the current topic\n"
-                "/park delete <slot> - delete a parked topic\n"
-                "/load <slot> - restore a parked topic"
-            )
-        lines = ["Parked topics", ""]
-        for topic in topics:
-            slot_id = int(topic.get("slot_id", 0))
-            title = topic.get("title") or f"Topic {slot_id}"
-            short = topic.get("summary_short") or "(no short summary)"
-            followup = topic.get("followup") or {}
-            status = followup.get("status") or "scheduled"
-            attempts = int(followup.get("attempts", 0))
-            next_at = followup.get("next_at")
-            suffix = f" | next {next_at}" if next_at else ""
-            lines.append(f"[{slot_id}] {title}")
-            lines.append(f"  {short}")
-            lines.append(f"  reminders: {status} ({attempts}/3){suffix}")
-        lines.extend(["", "Use /load <slot> to restore or /park delete <slot> to remove one."])
-        return "\n".join(lines)
+        return runtime_menu_views.parked_topics_text(self.parked_topics.list_topics())
 
     def is_idle_for_proactive_message(self, min_idle_seconds: int = 900) -> bool:
         if self._backend_busy():
@@ -1450,10 +1433,11 @@ class FlexibleAgentRuntime:
     def _skill_action_keyboard(self, skill: SkillDefinition) -> InlineKeyboardMarkup | None:
         buttons = []
         if skill.type == "toggle":
+            enabled = skill.id in self.skill_manager.get_active_toggle_ids(self.workspace_dir)
             buttons.append(
                 [
-                    InlineKeyboardButton("On", callback_data=f"skill:toggle:{skill.id}:on"),
-                    InlineKeyboardButton("Off", callback_data=f"skill:toggle:{skill.id}:off"),
+                    InlineKeyboardButton(selected_label("On", enabled), callback_data=f"skill:toggle:{skill.id}:on"),
+                    InlineKeyboardButton(selected_label("Off", not enabled), callback_data=f"skill:toggle:{skill.id}:off"),
                 ]
             )
         elif skill.type == "action" and skill.id not in {"cron", "heartbeat"}:
@@ -1462,6 +1446,7 @@ class FlexibleAgentRuntime:
             buttons.append([InlineKeyboardButton("Show usage", callback_data=f"skill:show:{skill.id}")])
         if skill.id in {"cron", "heartbeat"}:
             buttons.append([InlineKeyboardButton("↻ Refresh jobs", callback_data=f"skill:jobs:{skill.id}")])
+        buttons.append([InlineKeyboardButton(BACK_LABEL, callback_data="skill:back:menu")])
         return InlineKeyboardMarkup(buttons) if buttons else None
 
     def _habit_db_path(self) -> Path:
@@ -1813,10 +1798,11 @@ class FlexibleAgentRuntime:
         return InlineKeyboardMarkup(rows)
 
     def _voice_keyboard(self) -> InlineKeyboardMarkup:
+        enabled = bool(self.voice_manager.get_state().get("enabled"))
         rows = [
             [
-                InlineKeyboardButton("Turn on", callback_data="voice:toggle:on"),
-                InlineKeyboardButton("Turn off", callback_data="voice:toggle:off"),
+                InlineKeyboardButton(selected_label("On", enabled), callback_data="voice:toggle:on"),
+                InlineKeyboardButton(selected_label("Off", not enabled), callback_data="voice:toggle:off"),
             ]
         ]
         active_alias = self.voice_manager.get_active_preset_alias()
@@ -1825,7 +1811,7 @@ class FlexibleAgentRuntime:
             base = preset.get("label") or alias
             label = selected_label(base, alias == active_alias)
             if available != "ready":
-                label = f"{base} ({available})"
+                label = f"🔒 {base} ({available})"
             preset_buttons.append(InlineKeyboardButton(label, callback_data=f"voice:use:{alias}"))
         for i in range(0, len(preset_buttons), 2):
             rows.append(preset_buttons[i:i + 2])
@@ -1898,7 +1884,14 @@ class FlexibleAgentRuntime:
         running_names = set(orchestrator._runtime_map().keys())
         starting_names = set(orchestrator._startup_tasks.keys())
 
-        lines = [card_title("🤖", "Hashi agents"), ""]
+        lines = [
+            card_title("🤖", "Hashi agents"),
+            "",
+            f"<b>Current</b> · <code>{len(running_names)}</code> running · <code>{len(all_agents)}</code> configured",
+            "<b>Changes</b> · activation state persists; lifecycle actions apply immediately",
+            "",
+            "<b>AGENTS</b>",
+        ]
         rows = []
 
         for agent in all_agents:
@@ -2069,7 +2062,7 @@ class FlexibleAgentRuntime:
         text = self.voice_manager.voice_menu_text()
         if message:
             text = f"{text}\n\n{message}"
-        await query.edit_message_text(text, reply_markup=self._voice_keyboard())
+        await query.edit_message_text(text, reply_markup=self._voice_keyboard(), parse_mode="HTML")
         await query.answer()
 
     # ── toggle callback ──────────────────────────────────────────────────────────
@@ -2255,10 +2248,12 @@ class FlexibleAgentRuntime:
         arg = " ".join(context.args).strip().lower() if context.args else ""
         if not arg or arg == "help":
             all_names = orchestrator.configured_agent_names()
+            running_names = {rt.name for rt in orchestrator.runtimes}
             lines = [
                 card_title("🔄", "Reboot agents"),
                 "",
-                f"<b>Current agent</b> · <code>{html.escape(self.name)}</code>",
+                f"<b>Current</b> · <code>{len(running_names)}</code> running",
+                f"<b>Agent</b> · <code>{html.escape(self.name)}</code>",
                 "<b>Effect</b> · reloads code and runtime state for the selected target",
                 "",
                 "Active requests on restarted agents are interrupted. Choose the exact target:",
@@ -2266,7 +2261,7 @@ class FlexibleAgentRuntime:
                 "<b>AGENTS</b>",
             ]
             for i, name in enumerate(all_names, 1):
-                running = name in {rt.name for rt in orchestrator.runtimes}
+                running = name in running_names
                 marker = "●" if running else "○"
                 lines.append(f"{i}. {marker} <code>{html.escape(name)}</code>")
             rows = [
@@ -2494,8 +2489,11 @@ class FlexibleAgentRuntime:
             return
         args = [a.strip().lower() for a in (context.args or []) if a.strip()]
         if not args:
-            status = "ON ✅" if self._cos_enabled else "OFF"
-            await self._reply_text(update, f"Chief of Staff routing: {status}\nUse /cos on or /cos off to toggle.")
+            await self._reply_text(
+                update,
+                runtime_menu_views.cos_menu_text(enabled=self._cos_enabled),
+                parse_mode="HTML",
+            )
             return
         if args[0] == "on":
             self._cos_enabled = True
@@ -2628,7 +2626,11 @@ class FlexibleAgentRuntime:
         mgr = self.sys_prompt_manager
 
         if not args:
-            await update.message.reply_text(mgr.display_all(), parse_mode="Markdown")
+            await self._reply_text(
+                update,
+                runtime_menu_views.sys_slots_text(mgr),
+                parse_mode="HTML",
+            )
             return
 
         # /sys output <n> — return raw content of slot, no state change
@@ -2647,7 +2649,11 @@ class FlexibleAgentRuntime:
             return
 
         if len(args) == 1:
-            await update.message.reply_text(mgr.display_slot(slot))
+            await self._reply_text(
+                update,
+                runtime_menu_views.sys_slot_text(mgr, slot),
+                parse_mode="HTML",
+            )
             return
 
         sub = args[1].lower()
@@ -2684,12 +2690,8 @@ class FlexibleAgentRuntime:
         if not args:
             await self._reply_text(
                 update,
-                "Usage:\n"
-                "/usecomputer on - enable managed GUI-aware mode\n"
-                "/usecomputer off - disable it and clear the managed /sys slot\n"
-                "/usecomputer status - show current state\n"
-                "/usecomputer examples - show example prompts\n"
-                "/usecomputer <task> - run a task with computer-use guidance loaded",
+                get_usecomputer_status(self.sys_prompt_manager),
+                parse_mode="HTML",
             )
             return
 
@@ -2701,10 +2703,18 @@ class FlexibleAgentRuntime:
             await self._reply_text(update, set_usecomputer_mode(self.sys_prompt_manager, False))
             return
         if sub == "status":
-            await self._reply_text(update, get_usecomputer_status(self.sys_prompt_manager))
+            await self._reply_text(
+                update,
+                get_usecomputer_status(self.sys_prompt_manager),
+                parse_mode="HTML",
+            )
             return
         if sub == "examples":
-            await self._reply_text(update, get_usecomputer_examples_text())
+            await self._reply_text(
+                update,
+                get_usecomputer_examples_text(),
+                parse_mode="HTML",
+            )
             return
 
         task = " ".join(args).strip()
@@ -2780,17 +2790,10 @@ class FlexibleAgentRuntime:
             await update.message.reply_text("Failed to fetch credit info.")
             return
         data = key_info.get("data", {})
-        label = data.get("label", "unknown")
-        usage = data.get("usage", "unknown")
-        limit = data.get("limit", "unknown")
-        limit_remaining = data.get("limit_remaining", "unknown")
-        is_free_tier = data.get("is_free_tier", False)
-        await update.message.reply_text(
-            f"OpenRouter key: {label}\n"
-            f"Usage: {usage}\n"
-            f"Limit: {limit}\n"
-            f"Remaining: {limit_remaining}\n"
-            f"Free tier: {is_free_tier}"
+        await self._reply_text(
+            update,
+            runtime_menu_views.credit_status_text(data),
+            parse_mode="HTML",
         )
 
     # ── /safevoice command ─────────────────────────────────────────────────
@@ -2801,30 +2804,30 @@ class FlexibleAgentRuntime:
         if not args:
             await self._reply_text(
                 update,
-                setting_card(
-                    "🛡️",
-                    "Safe voice",
-                    current=f"<b>{status_label(self._safevoice_enabled)}</b>",
-                    facts=["<b>Scope</b> · incoming Telegram voice messages"],
-                    consequence=(
-                        "Voice transcripts require confirmation before being sent to the agent."
-                        if self._safevoice_enabled
-                        else "Voice transcripts are sent directly to the agent."
-                    ),
-                    action="Use <code>/safevoice on</code> or <code>/safevoice off</code>. Changes persist.",
-                ),
+                runtime_menu_views.safevoice_menu_text(enabled=self._safevoice_enabled),
                 parse_mode="HTML",
+                reply_markup=runtime_menu_views.safevoice_keyboard(enabled=self._safevoice_enabled),
             )
             return
         if args[0] == "on":
             self._safevoice_enabled = True
             self._set_skill_state("safevoice", True)
-            await self._reply_text(update, "🛡️ Safe Voice ON — voice messages will require confirmation before sending to agent.")
+            await self._reply_text(
+                update,
+                runtime_menu_views.safevoice_menu_text(enabled=True),
+                parse_mode="HTML",
+                reply_markup=runtime_menu_views.safevoice_keyboard(enabled=True),
+            )
         elif args[0] == "off":
             self._safevoice_enabled = False
             self._set_skill_state("safevoice", False)
             self._pending_voice.clear()
-            await self._reply_text(update, "Safe Voice OFF — voice messages go directly to agent.")
+            await self._reply_text(
+                update,
+                runtime_menu_views.safevoice_menu_text(enabled=False),
+                parse_mode="HTML",
+                reply_markup=runtime_menu_views.safevoice_keyboard(enabled=False),
+            )
         else:
             await self._reply_text(update, "Usage: /safevoice on | off")
 
@@ -2835,6 +2838,18 @@ class FlexibleAgentRuntime:
         parts = (query.data or "").split(":", 2)
         action = parts[1] if len(parts) > 1 else ""
         chat_key = parts[2] if len(parts) > 2 else ""
+        if action == "set" and chat_key in {"on", "off"}:
+            self._safevoice_enabled = chat_key == "on"
+            self._set_skill_state("safevoice", self._safevoice_enabled)
+            if not self._safevoice_enabled:
+                self._pending_voice.clear()
+            await query.edit_message_text(
+                runtime_menu_views.safevoice_menu_text(enabled=self._safevoice_enabled),
+                parse_mode="HTML",
+                reply_markup=runtime_menu_views.safevoice_keyboard(enabled=self._safevoice_enabled),
+            )
+            await query.answer("Safe Voice updated")
+            return
         pending = self._pending_voice.pop(chat_key, None)
         if action == "yes" and pending:
             await query.edit_message_text(f"✅ Confirmed. Sending to agent:\n\n_{pending['transcript']}_", parse_mode="Markdown")
@@ -2856,6 +2871,7 @@ class FlexibleAgentRuntime:
                 update,
                 self.voice_manager.voice_menu_text(),
                 reply_markup=self._voice_keyboard(),
+                parse_mode="HTML",
             )
             return
         mode = args[0].lower()
@@ -2867,6 +2883,7 @@ class FlexibleAgentRuntime:
                 update,
                 self.voice_manager.voice_menu_text(),
                 reply_markup=self._voice_keyboard(),
+                parse_mode="HTML",
             )
             return
         if mode == "use":
@@ -2945,12 +2962,7 @@ class FlexibleAgentRuntime:
         if not args_text:
             await self._reply_text(
                 update,
-                f"{card_title('🔄', 'Loop manager')}\n\n"
-                "<b>Current</b> · ready to create or manage recurring tasks\n"
-                "<b>Changes</b> · saved immediately in the task scheduler\n\n"
-                "<code>/loop &lt;task&gt;</code> — create a loop\n"
-                "<code>/loop list</code> — list active loops\n"
-                "<code>/loop stop [id]</code> — stop loop(s)",
+                runtime_menu_views.loop_manager_text(),
                 parse_mode="HTML",
             )
             return
@@ -2967,33 +2979,11 @@ class FlexibleAgentRuntime:
                 [("cron", j) for j in self.skill_manager.list_jobs("cron", agent_name=self.name)]
             )
             loops = [(job_kind, j) for job_kind, j in jobs if j.get("loop_meta")]
-            if not loops:
-                await self._reply_text(update, "No active loops for this agent.")
-                return
-            lines = [
-                card_title("🔄", "Loops"),
-                "",
-                f"<b>Current</b> · <code>{len(loops)}</code> configured",
-                "",
-            ]
-            for job_kind, j in loops:
-                meta = j.get("loop_meta", {})
-                status = "🟢 ON" if j.get("enabled") else "🔴 OFF"
-                count = meta.get("count", 0)
-                mx = meta.get("max", 100)
-                reason = meta.get("stopped_reason", "")
-                sched = (
-                    f"every {j.get('interval_seconds')}s"
-                    if job_kind == "heartbeat"
-                    else j.get("schedule", "?")
-                )
-                summary = meta.get("task_summary", j.get("note", ""))[:60]
-                lines.append(f"<code>{j['id']}</code> [{status}] [{job_kind}] {sched} ({count}/{mx})")
-                if summary:
-                    lines.append(f"  {summary}")
-                if reason:
-                    lines.append(f"  ⚠️ {reason}")
-            await self._reply_text(update, "\n".join(lines), parse_mode="HTML")
+            await self._reply_text(
+                update,
+                runtime_menu_views.loop_list_text(loops),
+                parse_mode="HTML",
+            )
             return
 
         # --- /loop stop [id] ---
@@ -3272,7 +3262,12 @@ class FlexibleAgentRuntime:
             return
         prompt_text = " ".join(raw_args).strip()
         if not prompt_text:
-            await self._reply_text(update, "Usage: /debug <prompt> or /debug on|off")
+            enabled = "debug" in self.skill_manager.get_active_toggle_ids(self.workspace_dir)
+            await self._reply_text(
+                update,
+                runtime_menu_views.debug_menu_text(enabled=enabled),
+                parse_mode="HTML",
+            )
             return
         prompt = self.skill_manager.build_prompt_for_skill(skill, prompt_text)
         await self._reply_text(update, f"Running skill {skill.id}...")
@@ -3296,17 +3291,7 @@ class FlexibleAgentRuntime:
             count = sum(len(items) for items in grouped.values())
             await self._reply_text(
                 update,
-                setting_card(
-                    "🧰",
-                    "Skills",
-                    current=f"<code>{count}</code> available",
-                    facts=[
-                        f"<b>Agent</b> · <code>{html.escape(self.name)}</code>",
-                        "<b>Scope</b> · action, toggle and prompt skills",
-                    ],
-                    consequence="Toggle changes persist in this workspace; actions run immediately.",
-                    action="Choose a skill for its status and available actions.",
-                ),
+                runtime_menu_views.skills_menu_text(count=count, agent_name=self.name),
                 parse_mode="HTML",
                 reply_markup=self._skill_keyboard(),
             )
@@ -3315,12 +3300,19 @@ class FlexibleAgentRuntime:
         sub = args[0].strip().lower()
         if sub == "help":
             grouped = self._skills_by_type()
-            lines = [card_title("🧰", "Skills reference"), ""]
+            count = sum(len(items) for items in grouped.values())
+            lines = [
+                card_title("🧰", "Skills reference"),
+                "",
+                f"<b>Current</b> · <code>{count}</code> available",
+                f"<b>Agent</b> · <code>{html.escape(self.name)}</code>",
+                "",
+            ]
             for skill_type in ("action", "toggle", "prompt"):
                 entries = grouped.get(skill_type, [])
                 if not entries:
                     continue
-                lines.append(skill_type.upper())
+                lines.append(f"<b>{skill_type.upper()}</b>")
                 for skill in entries:
                     lines.append(
                         f"<code>{html.escape(skill.id)}</code> · {html.escape(skill.description)}"
@@ -3350,11 +3342,18 @@ class FlexibleAgentRuntime:
                     skill.id,
                     enabled=(rest.lower() == "on"),
                 )
-                await self._reply_text(update, message, reply_markup=self._skill_action_keyboard(skill))
+                await self._reply_text(
+                    update,
+                    f"✅ {html.escape(message)}\n\n"
+                    + runtime_menu_views.skill_detail_text(skill, self.workspace_dir, manager=self.skill_manager),
+                    parse_mode="HTML",
+                    reply_markup=self._skill_action_keyboard(skill),
+                )
                 return
             await self._reply_text(
                 update,
-                self.skill_manager.describe_skill(skill, self.workspace_dir),
+                runtime_menu_views.skill_detail_text(skill, self.workspace_dir, manager=self.skill_manager),
+                parse_mode="HTML",
                 reply_markup=self._skill_action_keyboard(skill),
             )
             return
@@ -3380,7 +3379,8 @@ class FlexibleAgentRuntime:
         if not rest:
             await self._reply_text(
                 update,
-                self.skill_manager.describe_skill(skill, self.workspace_dir),
+                runtime_menu_views.skill_detail_text(skill, self.workspace_dir, manager=self.skill_manager),
+                parse_mode="HTML",
                 reply_markup=self._skill_action_keyboard(skill),
             )
             return
@@ -3417,7 +3417,7 @@ class FlexibleAgentRuntime:
             return
         task = " ".join(context.args or []).strip()
         if not task:
-            await self._reply_text(update, get_exp_usage_text())
+            await self._reply_text(update, get_exp_usage_text(), parse_mode="HTML")
             return
         prompt = build_exp_task_prompt(task)
         await self._reply_text(update, "Running with EXP guidebook...")
@@ -3474,7 +3474,6 @@ class FlexibleAgentRuntime:
         import json as _j
         from urllib import request as _req
         from urllib.error import URLError
-        from pathlib import Path as _P
 
         try:
             instances_path = self.global_config.project_root / "instances.json"
@@ -3905,17 +3904,12 @@ class FlexibleAgentRuntime:
             hard_min = int(hard_s) // 60
             def_idle_min = default_idle // 60
             def_hard_min = default_hard // 60
-            text = (
-                f"{card_title('⏱️', 'Backend timeout')}\n\n"
-                f"<b>Current idle</b> · <code>{idle_min} min</code> · default {def_idle_min} min\n"
-                f"<b>Current hard</b> · <code>{hard_min} min</code> · default {def_hard_min} min\n"
-                f"<b>Agent</b> · <code>{html.escape(self.name)}</code>\n\n"
-                "Changes apply immediately to the active execution backend and persist with its configuration. "
-                "Dual-brain left-side memory passes are unaffected.\n\n"
-                "<b>Use</b>\n"
-                "<code>/timeout 30</code> · set idle to 30 min\n"
-                "<code>/timeout 30 120</code> · set idle and hard limits\n"
-                "<code>/timeout reset</code> · restore defaults"
+            text = runtime_menu_views.timeout_menu_text(
+                agent_name=self.name,
+                idle_minutes=idle_min,
+                hard_minutes=hard_min,
+                default_idle_minutes=def_idle_min,
+                default_hard_minutes=def_hard_min,
             )
             await self._reply_text(update, text, parse_mode="HTML")
             return
@@ -3969,18 +3963,7 @@ class FlexibleAgentRuntime:
         if len(args) < 2:
             await self._reply_text(
                 update,
-                "<b>💬 Hchat — Ask this agent to compose &amp; send a message to another agent</b>\n\n"
-                "Usage: <code>/hchat &lt;agent&gt; &lt;intent&gt;</code> — local instance only\n"
-                "       <code>/hchat &lt;agent&gt;@&lt;INSTANCE&gt; &lt;intent&gt;</code> — cross-instance via HASHI1 exchange\n"
-                "       <code>/hchat all &lt;intent&gt;</code> — broadcast to all local active agents (excludes temp)\n"
-                "       <code>/hchat @&lt;group&gt; &lt;intent&gt;</code> — broadcast to a local group (use /group to manage)\n\n"
-                "Example: <code>/hchat lily give her an update on what we've been doing</code>\n"
-                "Example: <code>/hchat rika@HASHI2 ask her for the latest test result</code>\n"
-                "Example: <code>/hchat hashiko@MSI tell her the route is fixed</code>\n"
-                "Example: <code>/hchat arale 告诉她新功能已完成</code>\n"
-                "Example: <code>/hchat all 告诉大家新功能上线了</code>\n"
-                "Example: <code>/hchat @staff 告诉核心团队系统已重启</code>\n\n"
-                "<i>Note: no @ means local only. Cross-instance targets must be written as agent@INSTANCE.</i>",
+                runtime_menu_views.hchat_help_text(),
                 parse_mode="HTML",
             )
             return
@@ -4197,520 +4180,36 @@ class FlexibleAgentRuntime:
     # ── /group ────────────────────────────────────────────────────────────────
 
     def _group_detail_view(self, directory, group_name: str) -> tuple[str, "InlineKeyboardMarkup"]:
-        """Build the group detail message + inline keyboard."""
-        groups = directory.list_groups()
-        grp = groups.get(group_name, {})
-        desc = grp.get("description", "")
-        members = grp.get("members", [])
-        is_dynamic = members == "@active"
+        from orchestrator import runtime_groups
 
-        if is_dynamic:
-            resolved = directory.resolve_group(group_name)
-            member_display = "🔄 <i>Dynamic — all active agents</i>\n  " + ", ".join(resolved) if resolved else "🔄 <i>Dynamic — (none running)</i>"
-        else:
-            if members:
-                rows_meta = []
-                for m in members:
-                    row = directory.get_agent_row(m)
-                    emoji = row.get("emoji", "🤖") if row else "🤖"
-                    display = row.get("display_name", m) if row else m
-                    rows_meta.append(f"{emoji} {display}")
-                member_display = "  " + "  ·  ".join(rows_meta)
-            else:
-                member_display = "  <i>(empty)</i>"
-
-        text = (
-            f"{card_title('📦', 'Agent group')}\n\n"
-            f"<b>Current</b> · <code>{html.escape(group_name)}</code>\n"
-            f"<b>Description</b> · {html.escape(str(desc or 'None'))}\n\n"
-            f"<b>MEMBERS</b> · {len(directory.resolve_group(group_name))}\n"
-            f"{member_display}\n"
-        )
-
-        if is_dynamic:
-            rows = [[InlineKeyboardButton(BACK_LABEL, callback_data="group:back")]]
-        else:
-            rows = [
-                [
-                    InlineKeyboardButton("＋ Add", callback_data=f"group:add:{group_name}"),
-                    InlineKeyboardButton("－ Remove", callback_data=f"group:remove:{group_name}"),
-                    InlineKeyboardButton("✏️ Rename", callback_data=f"group:rename:{group_name}"),
-                ],
-                [
-                    InlineKeyboardButton("🗑 Delete", callback_data=f"group:delete:{group_name}"),
-                    InlineKeyboardButton(BACK_LABEL, callback_data="group:back"),
-                ],
-                [
-                    InlineKeyboardButton("Start all", callback_data=f"group:start:{group_name}"),
-                    InlineKeyboardButton("Stop all", callback_data=f"group:stop:{group_name}"),
-                    InlineKeyboardButton("Reboot all", callback_data=f"group:reboot:{group_name}"),
-                ],
-                [InlineKeyboardButton("💬 Broadcast", callback_data=f"group:broadcast:{group_name}")],
-            ]
-        return text, InlineKeyboardMarkup(rows)
+        return runtime_groups.group_detail_view(directory, group_name)
 
     def _group_list_view(self, directory) -> tuple[str, "InlineKeyboardMarkup"]:
-        """Build the group overview message + inline keyboard."""
-        groups = directory.list_groups()
-        if groups:
-            lines = [card_title("📦", "Agent groups"), "", f"<b>Current</b> · <code>{len(groups)}</code> groups", ""]
-            for name, grp in groups.items():
-                members = grp.get("members", [])
-                is_dynamic = members == "@active"
-                count = len(directory.resolve_group(name)) if is_dynamic else len(members)
-                desc = grp.get("description", "")
-                tag = " 🔄" if is_dynamic else ""
-                lines.append(f"• <b>{name}</b>{tag}  ({count} agents) — {desc}")
-        else:
-            lines = [
-                card_title("📦", "Agent groups"),
-                "",
-                "<b>Current</b> · <code>0</code> groups",
-                "",
-                "No groups are defined yet.",
-            ]
+        from orchestrator import runtime_groups
 
-        rows = [[InlineKeyboardButton(f"📦 {name}", callback_data=f"group:view:{name}")] for name in groups]
-        rows.append([InlineKeyboardButton("New group", callback_data="group:new")])
-        return "\n".join(lines), InlineKeyboardMarkup(rows)
+        return runtime_groups.group_list_view(directory)
 
     async def cmd_group(self, update: Update, context: Any):
-        if not self._is_authorized_user(update.effective_user.id):
-            return
-        directory = getattr(self, "agent_directory", None)
-        if directory is None:
-            await self._reply_text(update, "❌ Agent directory unavailable.")
-            return
+        from orchestrator import runtime_groups
 
-        args = [a.strip() for a in (context.args or []) if a.strip()]
-
-        # /group new <name>
-        if args and args[0].lower() == "new":
-            if len(args) < 2:
-                await self._reply_text(update, "Usage: <code>/group new &lt;name&gt;</code>", parse_mode="HTML")
-                return
-            name = args[1].lower()
-            desc = " ".join(args[2:]) if len(args) > 2 else ""
-            ok, msg = directory.create_group(name, desc)
-            if ok:
-                text, markup = self._group_detail_view(directory, name)
-                await self._reply_text(update, f"✅ {msg}\n\n" + text, parse_mode="HTML", reply_markup=markup)
-            else:
-                await self._reply_text(update, f"❌ {msg}")
-            return
-
-        # /group del <name>
-        if args and args[0].lower() == "del":
-            if len(args) < 2:
-                await self._reply_text(update, "Usage: <code>/group del &lt;name&gt;</code>", parse_mode="HTML")
-                return
-            name = args[1].lower()
-            rows = [
-                [InlineKeyboardButton(f"Delete {name}", callback_data=f"group:delete_confirm:{name}")],
-                [InlineKeyboardButton("← Keep group", callback_data="group:back")],
-            ]
-            await self._reply_text(
-                update,
-                confirm_card(
-                    "⚠️",
-                    "Delete group",
-                    target=f"<code>{html.escape(name)}</code>",
-                    consequence="This deletes only the group definition. The agents themselves are unchanged.",
-                ),
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(rows),
-            )
-            return
-
-        # /group <name>  — view detail
-        if args:
-            name = args[0].lower()
-            if not directory.group_exists(name):
-                await self._reply_text(update, f"❌ Group '{name}' not found.")
-                return
-            text, markup = self._group_detail_view(directory, name)
-            await self._reply_text(update, text, parse_mode="HTML", reply_markup=markup)
-            return
-
-        # /group  — overview
-        text, markup = self._group_list_view(directory)
-        await self._reply_text(update, text, parse_mode="HTML", reply_markup=markup)
+        await runtime_groups.cmd_group(self, update, context)
 
     async def callback_group(self, update: Update, context: Any):
-        query = update.callback_query
-        if not self._is_authorized_user(query.from_user.id):
-            return
-        directory = getattr(self, "agent_directory", None)
-        if directory is None:
-            await query.answer("Agent directory unavailable", show_alert=True)
-            return
+        from orchestrator import runtime_groups
 
-        data = query.data or ""
-        # data format: group:<action>[:<group_name>[:<agent_name>]]
-        parts = data.split(":", 3)
-        action = parts[1] if len(parts) > 1 else ""
-        group_name = parts[2] if len(parts) > 2 else ""
-        extra = parts[3] if len(parts) > 3 else ""
-
-        await query.answer()
-
-        # ── back → group list ──
-        if action == "back":
-            text, markup = self._group_list_view(directory)
-            await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
-            return
-
-        # ── view group detail ──
-        if action == "view":
-            text, markup = self._group_detail_view(directory, group_name)
-            await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
-            return
-
-        # ── new group (prompt) ──
-        if action == "new":
-            await query.edit_message_text(
-                "To create a new group, send:\n<code>/group new &lt;name&gt; [description]</code>",
-                parse_mode="HTML",
-            )
-            return
-
-        # ── delete (confirm prompt) ──
-        if action == "delete":
-            rows = [
-                [InlineKeyboardButton(f"Delete {group_name}", callback_data=f"group:delete_confirm:{group_name}")],
-                [InlineKeyboardButton("← Keep group", callback_data=f"group:view:{group_name}")],
-            ]
-            await query.edit_message_text(
-                confirm_card(
-                    "⚠️",
-                    "Delete group",
-                    target=f"<code>{html.escape(group_name)}</code>",
-                    consequence="This deletes only the group definition. The agents themselves are unchanged.",
-                ),
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(rows),
-            )
-            return
-
-        # ── delete confirmed ──
-        if action == "delete_confirm":
-            ok, msg = directory.delete_group(group_name)
-            if ok:
-                text, markup = self._group_list_view(directory)
-                await query.edit_message_text(f"🗑 {msg}\n\n" + text, parse_mode="HTML", reply_markup=markup)
-            else:
-                await query.edit_message_text(f"❌ {msg}")
-            return
-
-        # ── add members ──
-        if action == "add":
-            groups = directory.list_groups()
-            current = groups.get(group_name, {}).get("members", [])
-            all_agents = list(directory._agent_rows.keys())
-            available = [n for n in all_agents if n not in current]
-            if not available:
-                await query.edit_message_text(f"All active agents are already in <b>{group_name}</b>.", parse_mode="HTML")
-                return
-            rows = []
-            for agent in available:
-                row = directory.get_agent_row(agent)
-                emoji = row.get("emoji", "🤖") if row else "🤖"
-                rows.append([InlineKeyboardButton(f"{emoji} {agent}", callback_data=f"group:add_confirm:{group_name}:{agent}")])
-            rows.append([InlineKeyboardButton(BACK_LABEL, callback_data=f"group:view:{group_name}")])
-            await query.edit_message_text(
-                f"➕ Add to <b>{group_name}</b>\nSelect agents to add:",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(rows),
-            )
-            return
-
-        # ── add confirmed ──
-        if action == "add_confirm":
-            agent_name = extra
-            ok, msg = directory.group_add_member(group_name, agent_name)
-            text, markup = self._group_detail_view(directory, group_name)
-            prefix = "✅ " if ok else "❌ "
-            await query.edit_message_text(prefix + msg + "\n\n" + text, parse_mode="HTML", reply_markup=markup)
-            return
-
-        # ── remove members ──
-        if action == "remove":
-            groups = directory.list_groups()
-            current = groups.get(group_name, {}).get("members", [])
-            if not current:
-                await query.edit_message_text(f"Group <b>{group_name}</b> is empty.", parse_mode="HTML")
-                return
-            rows = []
-            for agent in current:
-                row = directory.get_agent_row(agent)
-                emoji = row.get("emoji", "🤖") if row else "🤖"
-                rows.append([InlineKeyboardButton(f"{emoji} {agent}", callback_data=f"group:remove_confirm:{group_name}:{agent}")])
-            rows.append([InlineKeyboardButton(BACK_LABEL, callback_data=f"group:view:{group_name}")])
-            await query.edit_message_text(
-                f"➖ Remove from <b>{group_name}</b>\nSelect agents to remove:",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(rows),
-            )
-            return
-
-        # ── remove confirmed ──
-        if action == "remove_confirm":
-            agent_name = extra
-            ok, msg = directory.group_remove_member(group_name, agent_name)
-            text, markup = self._group_detail_view(directory, group_name)
-            prefix = "✅ " if ok else "❌ "
-            await query.edit_message_text(prefix + msg + "\n\n" + text, parse_mode="HTML", reply_markup=markup)
-            return
-
-        # ── rename (prompt) ──
-        if action == "rename":
-            await query.edit_message_text(
-                f"To rename group <b>{group_name}</b>, send:\n<code>/group rename {group_name} &lt;new_name&gt;</code>",
-                parse_mode="HTML",
-            )
-            return
-
-        # ── start/stop/reboot all in group ──
-        if action in ("start", "stop", "reboot"):
-            orchestrator = getattr(self, "orchestrator", None)
-            members = directory.resolve_group(group_name, exclude_self=self.name)
-            if not members:
-                await query.edit_message_text(f"Group <b>{group_name}</b> has no members to act on.", parse_mode="HTML")
-                return
-
-            lines = [f"<b>{'▶ Starting' if action == 'start' else '⏹ Stopping' if action == 'stop' else '🔄 Rebooting'} group {group_name}</b> ({len(members)} agents)\n"]
-
-            if action == "reboot" and orchestrator:
-                for name in members:
-                    all_names = orchestrator.configured_agent_names()
-                    if name in all_names:
-                        num = all_names.index(name) + 1
-                        orchestrator.request_restart(mode="number", agent_name=self.name, agent_number=num)
-                        lines.append(f"  🔄 {name} — reboot queued")
-                    else:
-                        lines.append(f"  ⚠️ {name} — not found")
-            elif action == "start" and orchestrator:
-                for name in members:
-                    ok, msg = await orchestrator.start_agent(name)
-                    lines.append(f"  {'✅' if ok else '❌'} {name} — {msg}")
-            elif action == "stop" and orchestrator:
-                for name in members:
-                    runtime = directory.get_runtime(name)
-                    if runtime and hasattr(runtime, "backend_manager") and runtime.backend_manager.current_backend:
-                        await runtime.backend_manager.current_backend.shutdown()
-                        lines.append(f"  ⏹ {name} — stopped")
-                    else:
-                        lines.append(f"  ⚠️ {name} — not running or unavailable")
-            else:
-                lines.append("⚠️ Orchestrator unavailable.")
-
-            await query.edit_message_text("\n".join(lines), parse_mode="HTML")
-            return
-
-        # ── broadcast message ──
-        if action == "broadcast":
-            members = directory.resolve_group(group_name, exclude_self=self.name)
-            if not members:
-                await query.edit_message_text(f"Group <b>{group_name}</b> has no members to broadcast to.", parse_mode="HTML")
-                return
-            await query.edit_message_text(
-                f"📢 Broadcast to group <b>{group_name}</b> ({len(members)} agents)\n\n"
-                f"Use: <code>/hchat @{group_name} &lt;your intent&gt;</code>",
-                parse_mode="HTML",
-            )
-            return
+        await runtime_groups.callback_group(self, update, context)
 
     # ── /usage ────────────────────────────────────────────────────────────────
 
     async def cmd_usage(self, update: Update, context: Any):
-        if not self._is_authorized_user(update.effective_user.id):
-            return
-        try:
-            from tools.token_tracker import get_summary, format_summary_text
-        except ImportError:
-            await self._reply_text(update, "❌ token_tracker not available.")
-            return
+        from orchestrator import runtime_usage
 
-        args = [a.strip().lower() for a in (context.args or []) if a.strip()]
-        show_all = args and args[0] == "all"
-
-        if show_all:
-            # Collect usage from all agents via orchestrator
-            orchestrator = getattr(self, "orchestrator", None)
-            if orchestrator is None:
-                await self._reply_text(update, "❌ Orchestrator unavailable for all-agents view.")
-                return
-            lines = ["<b>📊 Token Usage — All Agents</b>\n"]
-            total_cost = 0.0
-            for runtime in orchestrator.runtimes:
-                s = get_summary(runtime.workspace_dir, session_id=runtime.session_id_dt)
-                all_t = s.get("all_time", {})
-                if all_t.get("requests", 0) == 0:
-                    continue
-                tokens = all_t["input"] + all_t["output"]
-                cost = all_t["cost_usd"]
-                total_cost += cost
-                sess = s.get("session", {}) or {}
-                sess_tokens = sess.get("input", 0) + sess.get("output", 0)
-                sess_cost = sess.get("cost_usd", 0.0)
-                lines.append(
-                    f"<b>{runtime.name}</b>  {tokens//1000}K tokens  ${cost:.4f}"
-                    + (f"  (session {sess_tokens//1000}K ${sess_cost:.4f})" if sess.get("requests") else "")
-                )
-            lines.append(f"\n<b>Total: ${total_cost:.4f}</b>")
-            await self._reply_text(update, "\n".join(lines), parse_mode="HTML")
-        else:
-            summary = get_summary(self.workspace_dir, session_id=self.session_id_dt)
-            text = format_summary_text(summary, agent_name=self.name)
-            await self._reply_text(update, text, parse_mode="HTML")
+        await runtime_usage.cmd_usage(self, update, context)
 
     async def cmd_token(self, update: Update, context: Any):
-        """System-wide token usage summary grouped by backend type."""
-        if not self._is_authorized_user(update.effective_user.id):
-            return
-        try:
-            from tools.token_tracker import get_summary_extended, fmt_tokens, _week_start_utc, _month_start_utc
-        except ImportError:
-            await self._reply_text(update, "❌ token_tracker not available.")
-            return
+        from orchestrator import runtime_usage
 
-        orchestrator = getattr(self, "orchestrator", None)
-        if orchestrator is None:
-            await self._reply_text(update, "❌ Orchestrator unavailable.")
-            return
-
-        # ── Collect data from all runtimes ────────────────────────────────────
-        groups: dict[str, dict[str, list]] = {}  # category -> backend -> [agent_entry]
-        totals = {k: {"input": 0, "output": 0, "thinking": 0, "cost_usd": 0.0, "requests": 0}
-                  for k in ("all_time", "session", "weekly", "monthly")}
-        total_agents = 0
-
-        for runtime in orchestrator.runtimes:
-            summary = get_summary_extended(runtime.workspace_dir, session_id=runtime.session_id_dt)
-            if summary["all_time"]["requests"] == 0:
-                continue
-            total_agents += 1
-
-            # Current backend
-            bm = getattr(runtime, "backend_manager", None)
-            backend = (getattr(bm, "active_backend", None)
-                       or getattr(getattr(runtime, "config", None), "active_backend", None)
-                       or "unknown")
-
-            # Current model
-            model = "unknown"
-            try:
-                model = runtime.get_current_model() or "unknown"
-            except Exception:
-                pass
-
-            # Categorise
-            if backend.endswith("-cli"):
-                cat = "🖥️ CLI Backends"
-            elif backend.endswith("-api"):
-                cat = "🌐 API Backends"
-            else:
-                cat = "❓ Other"
-
-            groups.setdefault(cat, {}).setdefault(backend, []).append(
-                {"name": runtime.name, "model": model, "summary": summary}
-            )
-
-            # Accumulate grand totals
-            for period in ("all_time", "session", "weekly", "monthly"):
-                src = summary.get(period) or {}
-                for k in ("input", "output", "thinking", "cost_usd", "requests"):
-                    totals[period][k] += src.get(k, 0)
-
-        if total_agents == 0:
-            await self._reply_text(update, "📊 No token usage recorded yet.")
-            return
-
-        # ── Build output ──────────────────────────────────────────────────────
-        lines = ["<b>📊 Token Summary — All Agents</b>"]
-
-        CAT_ORDER = ["🖥️ CLI Backends", "🌐 API Backends", "❓ Other"]
-        for cat in CAT_ORDER:
-            if cat not in groups:
-                continue
-            lines.append(f"\n<b>{cat}</b>")
-            for backend, agents in sorted(groups[cat].items()):
-                lines.append(f"  <b>{backend}</b>")
-                backend_at = {"input": 0, "output": 0, "thinking": 0, "cost_usd": 0.0, "requests": 0}
-                for agent in agents:
-                    at = agent["summary"]["all_time"]
-                    sess = agent["summary"].get("session") or {}
-                    think_part = f"  💭{fmt_tokens(at['thinking'])}" if at["thinking"] > 0 else ""
-                    sess_part  = (f"  <i>(sess ${sess['cost_usd']:.4f})</i>"
-                                  if sess.get("requests", 0) > 0 else "")
-                    lines.append(
-                        f"    {agent['name']:<10} <code>{agent['model']}</code>"
-                        f"  in:{fmt_tokens(at['input'])}"
-                        f"  out:{fmt_tokens(at['output'])}"
-                        f"{think_part}"
-                        f"  <b>${at['cost_usd']:.4f}</b>{sess_part}"
-                    )
-                    for k in ("input", "output", "thinking", "cost_usd", "requests"):
-                        backend_at[k] += at.get(k, 0)
-                if len(agents) > 1:
-                    lines.append(
-                        f"    {'─'*38}\n"
-                        f"    {'Subtotal':<10}  "
-                        f"in:{fmt_tokens(backend_at['input'])}"
-                        f"  out:{fmt_tokens(backend_at['output'])}"
-                        f"  <b>${backend_at['cost_usd']:.4f}</b>"
-                    )
-
-        # ── Grand totals ──────────────────────────────────────────────────────
-        lines.append(f"\n{'═'*44}")
-        at = totals["all_time"]
-        lines.append(
-            f"<b>All-time</b>  {total_agents} agents"
-            f"  in:{fmt_tokens(at['input'])}"
-            f"  out:{fmt_tokens(at['output'])}"
-            + (f"  💭{fmt_tokens(at['thinking'])}" if at["thinking"] > 0 else "")
-            + f"  <b>${at['cost_usd']:.4f}</b>"
-              f"  ({at['requests']} req)"
-        )
-
-        sess = totals["session"]
-        if sess["requests"] > 0:
-            lines.append(
-                f"<b>Session</b>    in:{fmt_tokens(sess['input'])}"
-                f"  out:{fmt_tokens(sess['output'])}"
-                + (f"  💭{fmt_tokens(sess['thinking'])}" if sess["thinking"] > 0 else "")
-                + f"  <b>${sess['cost_usd']:.4f}</b>"
-            )
-
-        weekly = totals["weekly"]
-        if weekly["requests"] > 0:
-            from datetime import timedelta as _td
-            now_utc = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
-            days_ago = (now_utc.weekday() + 1) % 7
-            week_label = (now_utc - _td(days=days_ago)).strftime("%m/%d")
-            lines.append(
-                f"<b>This week</b>  (since {week_label})"
-                f"  in:{fmt_tokens(weekly['input'])}"
-                f"  out:{fmt_tokens(weekly['output'])}"
-                + (f"  💭{fmt_tokens(weekly['thinking'])}" if weekly["thinking"] > 0 else "")
-                + f"  <b>${weekly['cost_usd']:.4f}</b>"
-            )
-
-        monthly = totals["monthly"]
-        if monthly["requests"] > 0:
-            from datetime import timezone as _tz
-            import datetime as _dt
-            now_m = _dt.datetime.now(_tz.utc)
-            month_label = now_m.strftime(f"%b 1–{now_m.day}")
-            lines.append(
-                f"<b>This month</b> ({month_label})"
-                f"  in:{fmt_tokens(monthly['input'])}"
-                f"  out:{fmt_tokens(monthly['output'])}"
-                + (f"  💭{fmt_tokens(monthly['thinking'])}" if monthly["thinking"] > 0 else "")
-                + f"  <b>${monthly['cost_usd']:.4f}</b>"
-            )
-
-        await self._reply_text(update, "\n".join(lines), parse_mode="HTML")
+        await runtime_usage.cmd_token(self, update, context)
 
     async def cmd_logo(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -4724,39 +4223,13 @@ class FlexibleAgentRuntime:
     async def cmd_backend(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
-        if self.backend_manager.agent_mode == "fixed":
+        current_mode = self.backend_manager.agent_mode
+        if current_mode != "flex":
             await self._reply_text(
                 update,
-                "Backend switching is disabled in **fixed** mode.\nUse `/mode flex` to re-enable.",
-                parse_mode="Markdown",
-            )
-            return
-        if self.backend_manager.agent_mode == "memory+":
-            await self._reply_text(
-                update,
-                "Backend switching is disabled in **memory+** mode because it behaves like fixed mode with a daily notepad.\nUse `/mode flex` for normal `/backend` switching.",
-                parse_mode="Markdown",
-            )
-            return
-        if self.backend_manager.agent_mode == "wrapper":
-            await self._reply_text(
-                update,
-                "Backend switching is managed by `/core` and `/wrap` in **wrapper** mode.\nUse `/mode flex` for normal `/backend` switching.",
-                parse_mode="Markdown",
-            )
-            return
-        if self.backend_manager.agent_mode == "audit":
-            await self._reply_text(
-                update,
-                "Backend switching is managed by `/core` and `/audit` in **audit** mode.\nUse `/mode flex` for normal `/backend` switching.",
-                parse_mode="Markdown",
-            )
-            return
-        if self.backend_manager.agent_mode == "dual-brain":
-            await self._reply_text(
-                update,
-                "Backend switching is managed by `/brain` in **dual-brain** mode.\nUse `/mode flex` for normal `/backend` switching.",
-                parse_mode="Markdown",
+                self._backend_flex_confirmation_text(current_mode),
+                parse_mode="HTML",
+                reply_markup=self._backend_flex_confirmation_keyboard(current_mode),
             )
             return
 
@@ -4806,7 +4279,11 @@ class FlexibleAgentRuntime:
                 target_model=requested_model,
                 with_context=with_context,
             )
-            await self._reply_text(update, message)
+            if not success:
+                await self._reply_text(update, message)
+                return
+            text, reply_markup = self._configuration_followup("backend")
+            await self._reply_text(update, text, parse_mode="HTML", reply_markup=reply_markup)
             return
 
         await self._reply_text(
@@ -4857,7 +4334,7 @@ class FlexibleAgentRuntime:
         if not self._is_authorized_user(update.effective_user.id):
             return
         from orchestrator.ticket_manager import (
-            create_ticket, detect_instance, format_ticket_notification,
+            create_ticket, format_ticket_notification,
             list_tickets, _resolve_tickets_dir,
         )
 
@@ -4868,22 +4345,15 @@ class FlexibleAgentRuntime:
             tickets_dir = _resolve_tickets_dir(self.global_config.project_root)
             open_tickets = list_tickets(tickets_dir, "open")
             ip_tickets = list_tickets(tickets_dir, "in_progress")
-            lines = []
-            if open_tickets:
-                lines.append("Open tickets:")
-                for t in open_tickets:
-                    lines.append(f"  [{t['ticket_id']}] {t['source_agent']} — {t['summary'][:60]}")
-            if ip_tickets:
-                lines.append("In progress:")
-                for t in ip_tickets:
-                    lines.append(f"  [{t['ticket_id']}] {t['source_agent']} — {t['summary'][:60]}")
-            if not lines:
-                lines.append("No open tickets.")
-            await self._reply_text(update, "\n".join(lines))
+            await self._reply_text(
+                update,
+                runtime_menu_views.ticket_list_text(open_tickets, ip_tickets),
+                parse_mode="HTML",
+            )
             return
 
         # Create the ticket (program-driven, no LLM needed)
-        instance = detect_instance(self.global_config.project_root)
+        instance = str(getattr(self.global_config, "instance_id", None) or "HASHI").upper()
         ticket = create_ticket(
             project_root=self.global_config.project_root,
             source_agent=self.name,
@@ -4918,7 +4388,7 @@ class FlexibleAgentRuntime:
                         )
                         notified = True
                     except Exception as e:
-                        logger.warning(f"Failed to notify arale via bridge: {e}")
+                        self.logger.warning(f"Failed to notify arale via bridge: {e}")
                     break
 
         if not notified:
@@ -4933,21 +4403,25 @@ class FlexibleAgentRuntime:
                 ok = send_hchat("arale", self.name, hchat_text)
                 if ok:
                     notified = True
-                    logger.info(f"Ticket {ticket['ticket_id']} notified to arale via hchat.")
+                    self.logger.info(f"Ticket {ticket['ticket_id']} notified to arale via hchat.")
                 else:
-                    logger.warning(f"Ticket {ticket['ticket_id']} hchat delivery to arale failed. Arale may be offline.")
+                    self.logger.warning(f"Ticket {ticket['ticket_id']} hchat delivery to arale failed. Arale may be offline.")
             except Exception as e:
-                logger.warning(f"Failed to notify arale via hchat: {e}")
+                self.logger.warning(f"Failed to notify arale via hchat: {e}")
 
         if not notified:
-            logger.warning(f"Ticket {ticket['ticket_id']} created but could not notify arale. She will pick it up on next patrol.")
+            self.logger.warning(f"Ticket {ticket['ticket_id']} created but could not notify arale. She will pick it up on next patrol.")
 
     async def cmd_park(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
         args = [a.strip() for a in (context.args or []) if a.strip()]
         if not args:
-            await self._reply_text(update, self._format_parked_topics_text())
+            await self._reply_text(
+                update,
+                self._format_parked_topics_text(),
+                parse_mode="HTML",
+            )
             return
 
         action = args[0].lower()
@@ -5144,6 +4618,10 @@ class FlexibleAgentRuntime:
                 self.backend_manager.current_backend.effort = normalized_effort
                 if backend_cfg is not None:
                     backend_cfg["effort"] = normalized_effort
+            else:
+                self.backend_manager.current_backend.effort = None
+                if backend_cfg is not None:
+                    backend_cfg.pop("effort", None)
         self.backend_manager.persist_state(active_model=normalized)
 
     def _set_active_effort(self, requested: str):
@@ -5160,6 +4638,44 @@ class FlexibleAgentRuntime:
         if backend_cfg is not None:
             backend_cfg["effort"] = normalized
         self.backend_manager.persist_state()
+
+    def _backend_flex_confirmation_text(self, current_mode: str) -> str:
+        consequences = {
+            "fixed": "The persistent CLI-session behavior will stop. Full context injection resumes.",
+            "memory+": "Legacy Memory+ mode will move to Flex while Memory+ continuity remains enabled.",
+            "wrapper": "The core-and-wrapper response flow will stop, but its configuration is kept.",
+            "audit": "The audit follow-up flow will stop, but its configuration is kept.",
+            "dual-brain": "The left/right-brain flow will stop, but its configuration is kept.",
+        }
+        consequence = consequences.get(
+            current_mode,
+            "The current specialized mode will stop, but its saved configuration is kept.",
+        )
+        continuity = get_memory_plus_status(self.workspace_dir)
+        facts = [f"<b>Backend</b> · <code>{html.escape(self.config.active_backend)}</code>"]
+        if continuity["enabled"] or current_mode == "memory+":
+            facts.append("<b>Memory+</b> · remains <code>ON</code> after switching")
+        return setting_card(
+            "🧠",
+            "Switch backend",
+            current=f"<code>{html.escape(current_mode)}</code>",
+            facts=facts,
+            consequence=f"Backend switching requires Flex mode. {consequence}",
+            action="Switch to Flex and continue to the backend menu, or keep the current mode.",
+        )
+
+    def _backend_flex_confirmation_keyboard(self, current_mode: str) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("Switch to Flex and choose backend", callback_data="backend_mode_confirm")],
+                [
+                    InlineKeyboardButton(
+                        f"← Keep {current_mode}",
+                        callback_data=f"backend_mode_cancel:{current_mode}",
+                    )
+                ],
+            ]
+        )
 
     def _backend_keyboard(self) -> InlineKeyboardMarkup:
         current = self.config.active_backend
@@ -5186,13 +4702,66 @@ class FlexibleAgentRuntime:
             buttons.append([InlineKeyboardButton(label, callback_data=f"model:{model}")])
         return InlineKeyboardMarkup(buttons)
 
-    def _effort_keyboard(self, current_effort: Optional[str] = None) -> InlineKeyboardMarkup:
+    def _effort_keyboard(
+        self,
+        current_effort: Optional[str] = None,
+        *,
+        source: str | None = None,
+    ) -> InlineKeyboardMarkup:
         active = current_effort or self._get_current_effort()
         buttons = []
         for effort in self._get_available_efforts():
             label = selected_label(effort, effort == active)
-            buttons.append([InlineKeyboardButton(label, callback_data=f"effort:{effort}")])
+            callback_data = f"effort:{source}:{effort}" if source else f"effort:{effort}"
+            buttons.append([InlineKeyboardButton(label, callback_data=callback_data)])
+        if source in {"backend", "model"}:
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        f"Keep {active or 'default'}",
+                        callback_data=f"effort:{source}:keep",
+                    )
+                ]
+            )
+            back_callback = "backend_menu" if source == "backend" else "model_menu"
+            buttons.append([InlineKeyboardButton(BACK_LABEL, callback_data=back_callback)])
         return InlineKeyboardMarkup(buttons)
+
+    def _build_effort_followup_text(self) -> str:
+        available = self._get_available_efforts()
+        current = self._get_current_effort() or (available[0] if available else "n/a")
+        return setting_card(
+            "🎛️",
+            "Choose effort",
+            current=f"<code>{html.escape(current)}</code>",
+            facts=[
+                f"<b>Backend</b> · <code>{html.escape(self.config.active_backend)}</code>",
+                f"<b>Model</b> · <code>{html.escape(self.get_current_model())}</code>",
+            ],
+            consequence="This optional step controls reasoning depth. If no selection is made, the current value remains active.",
+            action="Choose an effort level, or keep the current value.",
+        )
+
+    def _build_model_configuration_summary(self) -> str:
+        effort = self._get_current_effort() if self._get_available_efforts() else None
+        return (
+            f"{card_title('✅', 'Model configuration')}\n\n"
+            f"<b>Mode</b> · <code>{html.escape(self.backend_manager.agent_mode)}</code>\n"
+            f"<b>Backend</b> · <code>{html.escape(self.config.active_backend)}</code>\n"
+            f"<b>Model</b> · <code>{html.escape(self.get_current_model())}</code>\n"
+            f"<b>Effort</b> · <code>{html.escape(effort or 'n/a')}</code>\n\n"
+            "Configuration saved and active immediately."
+        )
+
+    def _configuration_followup(self, source: str) -> tuple[str, InlineKeyboardMarkup | None]:
+        available = self._get_available_efforts()
+        if not available:
+            return self._build_model_configuration_summary(), None
+        current = self._get_current_effort()
+        if not current:
+            self._set_active_effort(available[0])
+            current = self._get_current_effort() or available[0]
+        return self._build_effort_followup_text(), self._effort_keyboard(current, source=source)
 
     def _backend_model_keyboard(
         self,
@@ -5213,27 +4782,17 @@ class FlexibleAgentRuntime:
         return InlineKeyboardMarkup(buttons)
 
     def _build_backend_menu_text(self) -> str:
-        return (
-            "🧠 <b>HASHI BACKEND</b>\n"
-            "━━━━━━━━━━━━━━━━\n\n"
-            f"<b>ACTIVE</b> · <code>{html.escape(self.config.active_backend)}</code>\n\n"
-            "Choose a backend to select its model and switch.\n"
-            "“With context” first rebuilds a continuity handoff."
-        )
+        return runtime_menu_views.backend_menu_text(active_backend=self.config.active_backend)
 
     def _build_backend_model_prompt(self, target_engine: str, with_context: bool) -> str:
-        mode_text = "with handoff context" if with_context else "without handoff context"
         current_model = normalize_model(
             target_engine,
             (self._get_backend_cfg(target_engine) or {}).get("model"),
         )
-        return (
-            "🧠 <b>CHOOSE MODEL</b>\n"
-            "━━━━━━━━━━━━━━━━\n\n"
-            f"<b>Backend</b> · <code>{html.escape(target_engine)}</code>\n"
-            f"<b>Switch</b> · {html.escape(mode_text)}\n"
-            f"<b>Current</b> · <code>{html.escape(current_model or 'auto')}</code>\n\n"
-            "Select a model to complete the switch."
+        return runtime_menu_views.backend_model_prompt_text(
+            backend=target_engine,
+            current_model=current_model,
+            with_context=with_context,
         )
 
     def _clear_handoff_state(self):
@@ -5277,7 +4836,14 @@ class FlexibleAgentRuntime:
             return False, f"Failed to switch backend to: {target_engine}"
         self._sync_workzone_to_backend_config()
         backend = self.backend_manager.current_backend
-        if backend and getattr(backend.capabilities, "supports_sessions", False):
+        supports_sessions = bool(
+            backend and getattr(getattr(backend, "capabilities", None), "supports_sessions", False)
+        )
+        if backend and hasattr(backend, "set_session_mode"):
+            # Every backend switch is a one-shot/Flex-style transition. Fixed
+            # mode never switches backend in place; it must be left first.
+            backend.set_session_mode(False)
+        if backend and supports_sessions:
             await backend.handle_new_session()
 
         if with_context:
@@ -5342,24 +4908,31 @@ class FlexibleAgentRuntime:
                 return
 
             self._set_backend_model(self.config.active_backend, requested)
-
-            await self._reply_text(update, f"Model switched to: {requested}")
+            text, reply_markup = self._configuration_followup("model")
+            await self._reply_text(update, text, parse_mode="HTML", reply_markup=reply_markup)
             return
 
         available = self._get_available_models()
         if not available:
-            await self._reply_text(update, f"Current model: {current_model}\nUse /model <name> to switch.")
+            await self._reply_text(
+                update,
+                runtime_menu_views.model_menu_text(
+                    model=current_model,
+                    backend=self.config.active_backend,
+                    has_choices=False,
+                    persists=True,
+                ),
+                parse_mode="HTML",
+            )
             return
 
         await self._reply_text(
             update,
-            setting_card(
-                "🧠",
-                "Hashi model",
-                current=f"<code>{html.escape(current_model)}</code>",
-                facts=[f"<b>Backend</b> · <code>{html.escape(self.config.active_backend)}</code>"],
-                consequence="The selection applies immediately to the next request and persists.",
-                action="Choose a model.",
+            runtime_menu_views.model_menu_text(
+                model=current_model,
+                backend=self.config.active_backend,
+                has_choices=True,
+                persists=True,
             ),
             parse_mode="HTML",
             reply_markup=self._model_keyboard(current_model),
@@ -5485,7 +5058,7 @@ class FlexibleAgentRuntime:
             rows.append([InlineKeyboardButton(label, callback_data=f"wcfg:core:codex-cli:{model}")])
         rows.append([
             InlineKeyboardButton("Wrapper model", callback_data="wcfg:menu:wrap"),
-            InlineKeyboardButton("Slots", callback_data="wcfg:menu:wrapper"),
+            InlineKeyboardButton(BACK_LABEL, callback_data="wcfg:menu:wrapper"),
         ])
         return InlineKeyboardMarkup(rows)
 
@@ -5534,7 +5107,7 @@ class FlexibleAgentRuntime:
         ])
         rows.append([
             InlineKeyboardButton("Core model", callback_data="wcfg:menu:core"),
-            InlineKeyboardButton("Slots", callback_data="wcfg:menu:wrapper"),
+            InlineKeyboardButton(BACK_LABEL, callback_data="wcfg:menu:wrapper"),
         ])
         return InlineKeyboardMarkup(rows)
 
@@ -5550,12 +5123,16 @@ class FlexibleAgentRuntime:
         )
 
     def _wrapper_core_text(self, cfg) -> str:
-        return (
-            "Wrapper core model:\n"
-            f"• Backend: `{cfg.core_backend}`\n"
-            f"• Model: `{cfg.core_model}`\n\n"
-            "Tap a button to change the core model, or type:\n"
-            "`/core backend=codex-cli model=gpt-5.6-sol`"
+        return setting_card(
+            "🧠",
+            "Wrapper core model",
+            current=f"<code>{html.escape(cfg.core_backend)} / {html.escape(cfg.core_model)}</code>",
+            facts=["<b>Role</b> · performs the task before response translation"],
+            consequence="Changing this selection updates the active core model used in Wrapper mode.",
+            action=(
+                "Choose a model below or use "
+                "<code>/core backend=codex-cli model=gpt-5.6-sol</code>."
+            ),
         )
 
     def _audit_core_model_choices(self) -> list[tuple[str, str, str, str]]:
@@ -5619,42 +5196,48 @@ class FlexibleAgentRuntime:
         )
 
     def _wrapper_wrap_text(self, cfg) -> str:
-        return (
-            "Wrapper translator model:\n"
-            f"• Backend: `{cfg.wrapper_backend}`\n"
-            f"• Model: `{cfg.wrapper_model}`\n"
-            f"• Context window: `{cfg.context_window}`\n"
-            f"• Fallback: `{cfg.fallback}`\n\n"
-            "Tap a provider/model button below. Buttons are grouped by provider.\n"
-            "Each model button changes both wrapper backend and model.\n"
-            "Context buttons only change how many recent visible turns the wrapper sees.\n"
-            "Default/recommended: `claude-cli / claude-haiku-4-5`.\n\n"
-            "Or type one of these:\n"
-            "`/wrap backend=claude-cli model=claude-haiku-4-5 context=3`\n"
-            "`/wrap backend=gemini-cli model=gemini-2.5-flash context=3`\n"
-            "`/wrap backend=deepseek-api model=deepseek-chat context=3`\n"
-            "`/wrap backend=openrouter-api model=deepseek/deepseek-v3.2-exp context=3`"
+        return setting_card(
+            "🎭",
+            "Wrapper translator model",
+            current=f"<code>{html.escape(cfg.wrapper_backend)} / {html.escape(cfg.wrapper_model)}</code>",
+            facts=[
+                f"<b>Context window</b> · <code>{cfg.context_window}</code> visible turns",
+                f"<b>Fallback</b> · <code>{html.escape(cfg.fallback)}</code>",
+                "<b>Recommended</b> · <code>claude-cli / claude-haiku-4-5</code>",
+            ],
+            consequence="Model choices update backend and model together; context buttons only change visible history.",
+            action=(
+                "Choose below or use "
+                "<code>/wrap backend=&lt;backend&gt; model=&lt;model&gt; context=3</code>."
+            ),
         )
 
     def _wrapper_status_text(self, state: dict, slots: dict) -> str:
         cfg = load_wrapper_config(state)
         visible_slots = visible_wrapper_slots(slots)
         lines = [
-            "Wrapper mode configuration:",
-            f"• Core: <code>{html.escape(cfg.core_backend)} / {html.escape(cfg.core_model)}</code>",
-            f"• Wrapper: <code>{html.escape(cfg.wrapper_backend)} / {html.escape(cfg.wrapper_model)}</code>",
-            f"• Context window: <code>{cfg.context_window}</code>",
+            card_title("🎭", "Wrapper configuration"),
             "",
-            "Tap buttons below to change core/wrapper models.",
-            "Use <code>/wrapper set &lt;slot&gt; &lt;text&gt;</code> to edit persona/style.",
+            f"<b>Current</b> · core <code>{html.escape(cfg.core_backend)} / {html.escape(cfg.core_model)}</code>",
+            f"<b>Wrapper</b> · <code>{html.escape(cfg.wrapper_backend)} / {html.escape(cfg.wrapper_model)}</code>",
+            f"<b>Context window</b> · <code>{cfg.context_window}</code> visible turns",
+            f"<b>Slots</b> · <code>{len(visible_slots)}</code> configured",
             "",
-            "Persona/style slots:",
+            "Model changes apply immediately in Wrapper mode; persona/style slot changes persist.",
+            "",
+            "<b>PERSONA / STYLE SLOTS</b>",
         ]
         if visible_slots:
             for key in sorted(visible_slots, key=lambda value: (not str(value).isdigit(), int(value) if str(value).isdigit() else str(value))):
                 lines.append(f"• <code>{html.escape(str(key))}</code>: {html.escape(str(visible_slots[key]))}")
         else:
             lines.append("• none")
+        lines.extend(
+            [
+                "",
+                "Choose a model page below or use <code>/wrapper set &lt;slot&gt; &lt;text&gt;</code>.",
+            ]
+        )
         return "\n".join(lines)
 
     async def _activate_wrapper_core_backend(
@@ -5690,7 +5273,7 @@ class FlexibleAgentRuntime:
             await self._reply_text(
                 update,
                 text,
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=keyboard,
             )
             return
@@ -5738,7 +5321,7 @@ class FlexibleAgentRuntime:
             await self._reply_text(
                 update,
                 self._wrapper_wrap_text(cfg),
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=self._wrapper_wrap_keyboard(cfg),
             )
             return
@@ -5877,7 +5460,7 @@ class FlexibleAgentRuntime:
                 await self._reply_text(
                     update,
                     self._audit_auditor_text(cfg),
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                     reply_markup=self._audit_auditor_keyboard(cfg),
                 )
                 return
@@ -6028,38 +5611,37 @@ class FlexibleAgentRuntime:
             label = selected_label(model, active)
             rows.append([InlineKeyboardButton(label, callback_data=f"bcfg:modelidx:{target}:{selected_backend}:{index}")])
         rows.append([InlineKeyboardButton("← Back to backends", callback_data=f"bcfg:menu:{target}")])
-        rows.append([InlineKeyboardButton("Main", callback_data="bcfg:menu:status")])
+        rows.append([InlineKeyboardButton(BACK_LABEL, callback_data="bcfg:menu:status")])
         return InlineKeyboardMarkup(rows)
 
     def _dual_brain_status_text(self, cfg) -> str:
         memory_prompt = "default" if cfg.left_prompt == DEFAULT_LEFT_PROMPT else "custom"
         notepad_prompt = "default" if cfg.after_action_prompt == DEFAULT_AFTER_ACTION_PROMPT else "custom"
-        return (
-            "Dual-brain configuration\n"
-            f"• Mode: `{self.backend_manager.agent_mode}`\n"
-            f"• Left brain: `{cfg.left_backend}` / `{cfg.left_model}`\n"
-            f"• Right brain: `{cfg.right_backend}` / `{cfg.right_model}`\n"
-            f"• Memory briefing prompt: `{memory_prompt}`\n"
-            f"• Notepad update prompt: `{notepad_prompt}`\n\n"
-            "Commands:\n"
-            "• `/mode dual-brain` enable\n"
-            "• `/brain left backend=<backend> model=<model>`\n"
-            "• `/brain right backend=<backend> model=<model>`\n"
-            "• `/brain prompt memory|notepad <text>`\n"
-            "• `/brain prompt memory|notepad clear|show`\n\n"
-            "`/sys` remains normal right-brain system prompt context."
+        return setting_card(
+            "🧠",
+            "Dual-brain configuration",
+            current=f"<b>{html.escape(str(self.backend_manager.agent_mode).upper())}</b>",
+            facts=[
+                f"<b>Left brain</b> · <code>{html.escape(cfg.left_backend)} / {html.escape(cfg.left_model)}</code>",
+                f"<b>Right brain</b> · <code>{html.escape(cfg.right_backend)} / {html.escape(cfg.right_model)}</code>",
+                f"<b>Memory briefing prompt</b> · <code>{memory_prompt}</code>",
+                f"<b>Notepad update prompt</b> · <code>{notepad_prompt}</code>",
+            ],
+            consequence="Left-brain memory work and right-brain execution remain separate; <code>/sys</code> applies to the right brain.",
+            action="Choose a brain or prompt page below. Advanced text control remains available through <code>/brain</code>.",
         )
 
     def _dual_brain_model_text(self, cfg, *, target: str) -> str:
         backend = cfg.left_backend if target == "left" else cfg.right_backend
         model = cfg.left_model if target == "left" else cfg.right_model
         label = "Left brain" if target == "left" else "Right brain"
-        return (
-            f"{label} backend\n"
-            f"• Backend: `{backend}`\n"
-            f"• Model: `{model}`\n"
-            "Choose a backend first. The next screen shows all HASHI models for that backend.\n\n"
-            f"`/brain {target} backend=<backend> model=<model>`"
+        return setting_card(
+            "🧠",
+            f"{label} backend",
+            current=f"<code>{html.escape(backend)} / {html.escape(model)}</code>",
+            facts=[f"<b>Target</b> · <code>{target}</code> brain"],
+            consequence="Choose a backend first; the next page shows its available HASHI models.",
+            action=f"Choose below or use <code>/brain {target} backend=&lt;backend&gt; model=&lt;model&gt;</code>.",
         )
 
     def _dual_brain_backend_model_text(self, cfg, *, target: str, backend: str) -> str:
@@ -6067,38 +5649,40 @@ class FlexibleAgentRuntime:
         current_model = cfg.left_model if target == "left" else cfg.right_model
         label = "Left brain" if target == "left" else "Right brain"
         active = "current" if backend == current_backend else "not current"
-        return (
-            f"{label} model\n"
-            f"• Selected backend: `{backend}` ({active})\n"
-            f"• Current: `{current_backend}` / `{current_model}`\n"
-            "Choose a model below."
+        return setting_card(
+            "🧠",
+            f"{label} model",
+            current=f"<code>{html.escape(current_backend)} / {html.escape(current_model)}</code>",
+            facts=[
+                f"<b>Selected backend</b> · <code>{html.escape(backend)}</code>",
+                f"<b>Backend state</b> · <code>{active.upper()}</code>",
+            ],
+            consequence="Choosing a model saves the backend and model together for this brain.",
+            action="Choose a model below.",
         )
 
     def _dual_brain_prompts_text(self, cfg) -> str:
-        def section(title: str, value: str) -> str:
+        def section(title: str, command_target: str, value: str) -> str:
             text = value or "(empty)"
             max_chars = 1100
             if len(text) > max_chars:
                 text = (
                     text[:max_chars]
-                    + f"\n... [truncated here; use /brain prompt {title.lower().split()[0]} show for full text]"
+                    + f"\n... [truncated; use /brain prompt {command_target} show for full text]"
                 )
-            return f"{title} ({len(value or '')} chars):\n{text}"
+            return f"<b>{title}</b> · <code>{len(value or '')}</code> chars\n<pre>{html.escape(text)}</pre>"
 
         return (
-            "Dual-brain prompt controls\n"
-            "\n"
-            f"{section('Memory briefing prompt', cfg.left_prompt)}\n\n"
-            f"{section('Notepad update prompt', cfg.after_action_prompt)}\n\n"
-            "Meaning:\n"
-            "• memory controls the pre-turn FYI context generator\n"
-            "• notepad controls the post-turn continuity note updater\n\n"
-            "Use:\n"
-            "• /brain prompt memory <text>\n"
-            "• /brain prompt notepad <text>\n"
-            "• /brain prompt memory|notepad show\n"
-            "• /brain prompt memory|notepad clear\n\n"
-            "Aliases still work: left, after."
+            f"{card_title('🧠', 'Dual-brain prompts')}\n\n"
+            "<b>Current</b> · memory briefing and notepad update prompts\n"
+            "<b>Scope</b> · left-brain pre-turn memory and post-turn continuity\n\n"
+            f"{section('Memory briefing prompt', 'memory', cfg.left_prompt)}\n\n"
+            f"{section('Notepad update prompt', 'notepad', cfg.after_action_prompt)}\n\n"
+            "<b>Use</b>\n"
+            "<code>/brain prompt memory &lt;text&gt;</code> · replace the briefing prompt\n"
+            "<code>/brain prompt notepad &lt;text&gt;</code> · replace the update prompt\n"
+            "<code>/brain prompt memory|notepad show|clear</code> · inspect or clear\n\n"
+            "Aliases <code>left</code> and <code>after</code> remain supported."
         )
 
     async def cmd_brain(self, update: Update, context: Any):
@@ -6112,7 +5696,7 @@ class FlexibleAgentRuntime:
             await self._reply_text(
                 update,
                 self._dual_brain_status_text(cfg),
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=self._dual_brain_status_keyboard(cfg),
             )
             return
@@ -6122,7 +5706,7 @@ class FlexibleAgentRuntime:
             await self._reply_text(
                 update,
                 self._dual_brain_prompts_text(cfg),
-                parse_mode=None,
+                parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(BACK_LABEL, callback_data="bcfg:menu:status")]]),
             )
             return
@@ -6218,13 +5802,13 @@ class FlexibleAgentRuntime:
             if data == "acfg:menu:core":
                 await query.edit_message_text(
                     self._audit_core_text(cfg),
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                     reply_markup=self._audit_core_keyboard(cfg),
                 )
             elif data == "acfg:menu:auditmodel":
                 await query.edit_message_text(
                     self._audit_auditor_text(cfg),
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                     reply_markup=self._audit_auditor_keyboard(cfg),
                 )
             elif data == "acfg:menu:audit":
@@ -6352,25 +5936,25 @@ class FlexibleAgentRuntime:
             if data == "bcfg:menu:status":
                 await query.edit_message_text(
                     self._dual_brain_status_text(cfg),
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                     reply_markup=self._dual_brain_status_keyboard(cfg),
                 )
             elif data == "bcfg:menu:left":
                 await query.edit_message_text(
                     self._dual_brain_model_text(cfg, target="left"),
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                     reply_markup=self._dual_brain_backend_keyboard(cfg, target="left"),
                 )
             elif data == "bcfg:menu:right":
                 await query.edit_message_text(
                     self._dual_brain_model_text(cfg, target="right"),
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                     reply_markup=self._dual_brain_backend_keyboard(cfg, target="right"),
                 )
             elif data == "bcfg:menu:prompts":
                 await query.edit_message_text(
                     self._dual_brain_prompts_text(cfg),
-                    parse_mode=None,
+                    parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(BACK_LABEL, callback_data="bcfg:menu:status")]]),
                 )
             elif data.startswith("bcfg:backend:"):
@@ -6391,7 +5975,7 @@ class FlexibleAgentRuntime:
                     return
                 await query.edit_message_text(
                     self._dual_brain_backend_model_text(cfg, target=target, backend=backend),
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                     reply_markup=self._dual_brain_model_keyboard(cfg, target=target, backend=backend),
                 )
             elif data.startswith("bcfg:modelidx:"):
@@ -6430,7 +6014,7 @@ class FlexibleAgentRuntime:
                 refreshed = self._dual_brain_config()
                 await query.edit_message_text(
                     self._dual_brain_backend_model_text(refreshed, target=target, backend=backend),
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                     reply_markup=self._dual_brain_model_keyboard(refreshed, target=target, backend=backend),
                 )
             else:
@@ -6461,13 +6045,13 @@ class FlexibleAgentRuntime:
             if data == "wcfg:menu:core":
                 await query.edit_message_text(
                     self._wrapper_core_text(cfg),
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                     reply_markup=self._wrapper_core_keyboard(cfg),
                 )
             elif data == "wcfg:menu:wrap":
                 await query.edit_message_text(
                     self._wrapper_wrap_text(cfg),
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                     reply_markup=self._wrapper_wrap_keyboard(cfg),
                 )
             elif data == "wcfg:menu:wrapper":
@@ -6620,14 +6204,57 @@ class FlexibleAgentRuntime:
             return
         data = query.data
         try:
-            if data.startswith("model:"):
+            if data == "backend_mode_confirm":
+                if self.backend_manager.agent_mode == "memory+":
+                    set_memory_plus_enabled(self.workspace_dir, True)
+                runtime_mode.activate_flex_mode(self)
+                await query.edit_message_text(
+                    self._build_backend_menu_text(),
+                    parse_mode="HTML",
+                    reply_markup=self._backend_keyboard(),
+                )
+            elif data.startswith("backend_mode_cancel:"):
+                expected_mode = data.split(":", 1)[1]
+                current_mode = self.backend_manager.agent_mode
+                await query.edit_message_text(
+                    setting_card(
+                        "🧠",
+                        "Backend unchanged",
+                        current=f"<code>{html.escape(current_mode)}</code>",
+                        facts=[f"<b>Backend</b> · <code>{html.escape(self.config.active_backend)}</code>"],
+                        consequence="No mode, backend, model, or saved configuration was changed.",
+                        action=(
+                            "The mode changed elsewhere before this button was used."
+                            if current_mode != expected_mode
+                            else "The current mode remains active."
+                        ),
+                    ),
+                    parse_mode="HTML",
+                )
+            elif data == "model_menu":
+                current_model = self.get_current_model()
+                await query.edit_message_text(
+                    setting_card(
+                        "🧠",
+                        "Hashi model",
+                        current=f"<code>{html.escape(current_model)}</code>",
+                        facts=[f"<b>Backend</b> · <code>{html.escape(self.config.active_backend)}</code>"],
+                        consequence="The selection applies immediately to the next request and persists.",
+                        action="Choose a model.",
+                    ),
+                    parse_mode="HTML",
+                    reply_markup=self._model_keyboard(current_model),
+                )
+            elif data.startswith("model:"):
                 model = data.split(":", 1)[1]
                 available = self._get_available_models()
                 if not available or model in available:
                     self._set_backend_model(self.config.active_backend, model)
+                    text, reply_markup = self._configuration_followup("model")
                     await query.edit_message_text(
-                        f"Model switched to: {model}",
-                        reply_markup=self._model_keyboard(model),
+                        text,
+                        parse_mode="HTML",
+                        reply_markup=reply_markup,
                     )
             elif data == "backend_menu":
                 await query.edit_message_text(
@@ -6663,18 +6290,37 @@ class FlexibleAgentRuntime:
                 if not success and "busy" in message.lower():
                     await query.answer(message, show_alert=True)
                     return
-                await query.edit_message_text(
-                    message,
-                    reply_markup=self._backend_keyboard() if success else self._backend_model_keyboard(target_engine, with_context, model),
-                )
+                if success:
+                    text, reply_markup = self._configuration_followup("backend")
+                    await query.edit_message_text(text, parse_mode="HTML", reply_markup=reply_markup)
+                else:
+                    await query.edit_message_text(
+                        message,
+                        reply_markup=self._backend_model_keyboard(target_engine, with_context, model),
+                    )
             elif data.startswith("effort:"):
-                requested = data.split(":", 1)[1]
+                parts = data.split(":")
+                source = parts[1] if len(parts) == 3 else None
+                requested = parts[2] if len(parts) == 3 else parts[1]
+                if source in {"backend", "model"} and requested == "keep":
+                    await query.edit_message_text(
+                        self._build_model_configuration_summary(),
+                        parse_mode="HTML",
+                    )
+                    await query.answer("Current effort kept")
+                    return
                 if requested in self._get_available_efforts():
                     self._set_active_effort(requested)
-                    await query.edit_message_text(
-                        f"Effort switched to: {requested}",
-                        reply_markup=self._effort_keyboard(requested),
-                    )
+                    if source in {"backend", "model"}:
+                        await query.edit_message_text(
+                            self._build_model_configuration_summary(),
+                            parse_mode="HTML",
+                        )
+                    else:
+                        await query.edit_message_text(
+                            f"Effort switched to: {requested}",
+                            reply_markup=self._effort_keyboard(requested),
+                        )
         except Exception as e:
             self.error_logger.error(f"callback_model error: {e}", exc_info=True)
             await query.answer(f"Error: {e}", show_alert=True)
@@ -6720,11 +6366,46 @@ class FlexibleAgentRuntime:
             return
         args = [str(arg) for arg in (context.args or [])]
         action = (args[0].strip().lower() if args else "show")
-        if action in {"show", "status", "view"}:
+        if action in {"show", "status", "view", "today"}:
             text, markup = self._notepad_view_payload()
             await self._reply_text(
                 update,
                 text,
+                parse_mode="HTML",
+                reply_markup=markup,
+            )
+            return
+
+        if action == "carryover":
+            text, markup = self._notepad_carryover_payload()
+            await self._reply_text(update, text, parse_mode="HTML", reply_markup=markup)
+            return
+
+        if action == "history":
+            text, markup = self._notepad_history_payload()
+            await self._reply_text(update, text, parse_mode="HTML", reply_markup=markup)
+            return
+
+        if action == "find":
+            query_text = self._notepad_command_tail(update, context, action)
+            if not query_text:
+                await self._reply_text(
+                    update,
+                    self._notepad_help_text("find"),
+                    parse_mode="HTML",
+                    reply_markup=self._notepad_back_keyboard(),
+                )
+                return
+            text, markup = self._notepad_find_payload(query_text)
+            await self._reply_text(update, text, parse_mode="HTML", reply_markup=markup)
+            return
+
+        if action == "compact":
+            compact_memory_plus(self.workspace_dir)
+            text, markup = self._notepad_view_payload()
+            await self._reply_text(
+                update,
+                "✅ Memory+ card compacted and de-duplicated.\n\n" + text,
                 parse_mode="HTML",
                 reply_markup=markup,
             )
@@ -6789,12 +6470,20 @@ class FlexibleAgentRuntime:
         return InlineKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton(REFRESH_LABEL, callback_data="npad:refresh"),
-                    InlineKeyboardButton("Add note", callback_data="npad:help_edit"),
+                    InlineKeyboardButton("Today", callback_data="npad:refresh"),
+                    InlineKeyboardButton("Carryover", callback_data="npad:carryover"),
                 ],
                 [
-                    InlineKeyboardButton("Replace body", callback_data="npad:help_replace"),
-                    InlineKeyboardButton("Clear", callback_data="npad:clear_confirm"),
+                    InlineKeyboardButton("History", callback_data="npad:history"),
+                    InlineKeyboardButton("Find", callback_data="npad:help_find"),
+                ],
+                [
+                    InlineKeyboardButton("Add note", callback_data="npad:help_edit"),
+                    InlineKeyboardButton("Compact", callback_data="npad:compact"),
+                ],
+                [
+                    InlineKeyboardButton("Replace today", callback_data="npad:help_replace"),
+                    InlineKeyboardButton("Clear today", callback_data="npad:clear_confirm"),
                 ],
             ]
         )
@@ -6812,47 +6501,126 @@ class FlexibleAgentRuntime:
 
     def _notepad_view_payload(self) -> tuple[str, InlineKeyboardMarkup]:
         view = read_memory_plus_notepad(self.workspace_dir)
+        status = get_memory_plus_status(self.workspace_dir)
         body = view.body.strip()
         if not body:
             body = "(empty)"
-        max_body_chars = 3000
+        max_body_chars = 2400
         truncated = len(body) > max_body_chars
         if truncated:
-            body = body[-max_body_chars:]
+            body = body[:max_body_chars].rstrip() + "\n[clipped]"
         header = [
-            card_title("📝", "Memory+ notepad"),
+            card_title("📝", "Memory+ today"),
             "",
-            f"<b>Current</b> · <code>{'EMPTY' if view.is_empty else 'HAS NOTES'}</code>",
+            f"<b>Current</b> · <code>{'EMPTY' if view.is_empty else 'ACTIVE'}</code>",
+            f"<b>Continuity</b> · <code>{'ON' if status['enabled'] else 'OFF'}</code>",
             f"<b>Agent</b> · <code>{html.escape(self.name)}</code>",
             f"<b>Date</b> · <code>{html.escape(view.date or 'unknown')}</code>",
+            f"<b>Size</b> · <code>{view.today_chars}</code> chars",
+            f"<b>Open items</b> · <code>{view.open_items_count}</code>",
+            f"<b>History</b> · <code>{view.history_count}</code> days",
             "",
-            "Changes apply immediately to today's persistent continuity layer.",
+            "This compact card is read-only background, not a queue of instructions.",
         ]
         if truncated:
-            header.append(f"• Showing last <code>{max_body_chars}</code> chars")
+            header.append(f"• Showing first <code>{max_body_chars}</code> chars")
         return "\n".join(header) + "\n\n<pre>" + html.escape(body) + "</pre>", self._notepad_keyboard()
+
+    def _notepad_carryover_payload(self) -> tuple[str, InlineKeyboardMarkup]:
+        view = read_memory_plus_notepad(self.workspace_dir)
+        body = view.carryover.strip() or "(none)"
+        return (
+            f"{card_title('🌙', 'Memory+ carryover')}\n\n"
+            f"<b>Current</b> · <code>{'EMPTY' if body == '(none)' else 'AVAILABLE'}</code>\n"
+            f"<b>Agent</b> · <code>{html.escape(self.name)}</code>\n"
+            "Only a high-level previous-work passage is carried across midnight.\n\n"
+            f"<pre>{html.escape(body)}</pre>",
+            self._notepad_keyboard(),
+        )
+
+    def _notepad_history_payload(self) -> tuple[str, InlineKeyboardMarkup]:
+        rows = list_memory_plus_history(self.workspace_dir, limit=10)
+        lines = [
+            card_title("🗂️", "Memory+ history"),
+            "",
+            f"<b>Current</b> · <code>{len(rows)}</code> archived days",
+            f"<b>Agent</b> · <code>{html.escape(self.name)}</code>",
+            "",
+            "History is indexed by date. Full archives are loaded only when requested.",
+            "",
+        ]
+        if not rows:
+            lines.append("(no archived days)")
+        for row in rows:
+            summary = " · ".join(str(item) for item in (row.get("summary") or [])[:2])
+            lines.append(
+                f"• <code>{html.escape(str(row.get('date') or 'unknown'))}</code>"
+                + (f" · {html.escape(summary)}" if summary else "")
+            )
+            if row.get("archive"):
+                lines.append(f"  <code>{html.escape(str(row['archive']))}</code>")
+        return "\n".join(lines), self._notepad_keyboard()
+
+    def _notepad_find_payload(self, query_text: str) -> tuple[str, InlineKeyboardMarkup]:
+        rows = search_memory_plus_history(self.workspace_dir, query_text)
+        lines = [
+            card_title("🔎", "Find continuity"),
+            "",
+            f"<b>Current</b> · <code>{len(rows)}</code> matches",
+            f"<b>Query</b> · <code>{html.escape(query_text)}</code>",
+            "",
+        ]
+        if not rows:
+            lines.append("No matching archived continuity was found.")
+        for row in rows:
+            lines.extend(
+                [
+                    f"<b>{html.escape(row['date'])}</b> · {html.escape(row['excerpt'])}",
+                    f"<code>{html.escape(row['path'])}</code>",
+                    "",
+                ]
+            )
+        return "\n".join(lines).rstrip(), self._notepad_keyboard()
 
     def _notepad_help_text(self, action: str) -> str:
         if action == "edit":
             return (
-                "<b>Add a manual notepad note</b>\n\n"
-                "Send a message like:\n"
+                f"{card_title('📝', 'Add notepad note')}\n\n"
+                "<b>Current</b> · <b>READY</b>\n\n"
+                "This appends to today's Memory+ notepad without replacing automatic notes.\n\n"
+                "<b>Example</b>\n"
                 "<code>/notepad edit Dad prefers short operational summaries.</code>\n\n"
-                "This appends to today's memory+ notepad without replacing automatic notes."
+                "Use the Back button to return without changing the notepad."
             )
         if action == "replace":
             return (
-                "<b>Replace today's notepad body</b>\n\n"
-                "Send a message like:\n"
+                f"{card_title('📝', 'Replace notepad')}\n\n"
+                "<b>Current</b> · <b>READY</b>\n\n"
+                "This replaces today's continuity body, so use it when the current notepad is wrong or noisy.\n\n"
+                "<b>Example</b>\n"
                 "<code>/notepad replace - Manual: Dad prefers jasmine rice and avoids eggplant.</code>\n\n"
-                "This replaces today's continuity body, so use it when the current notepad is wrong or noisy."
+                "Use the Back button to return without changing the notepad."
+            )
+        if action == "find":
+            return (
+                f"{card_title('🔎', 'Find continuity')}\n\n"
+                "<b>Current</b> · <b>READY</b>\n\n"
+                "Only matching daily checkpoints are returned; full history is not injected.\n\n"
+                "<b>Example</b>\n"
+                "<code>/notepad find backend effort menu</code>\n\n"
+                "Use the Back button to return without searching."
             )
         return (
-            "<b>Memory+ Notepad controls</b>\n\n"
-            "• <code>/notepad</code> — open this panel\n"
-            "• <code>/notepad edit &lt;text&gt;</code> — append a manual note\n"
-            "• <code>/notepad replace &lt;text&gt;</code> — replace today's body\n"
-            "• <code>/notepad clear</code> — clear today's body"
+            f"{card_title('📝', 'Memory+ notepad controls')}\n\n"
+            "<b>Current</b> · <b>READY</b>\n\n"
+            "<code>/notepad today</code> · current compact work card\n"
+            "<code>/notepad carryover</code> · previous-day handover\n"
+            "<code>/notepad history</code> · archived-day index\n"
+            "<code>/notepad find &lt;text&gt;</code> · search archived checkpoints\n"
+            "<code>/notepad edit &lt;text&gt;</code> · append a manual note\n"
+            "<code>/notepad replace &lt;text&gt;</code> · replace today's body\n"
+            "<code>/notepad compact</code> · de-duplicate and enforce limits\n"
+            "<code>/notepad clear</code> · clear today's body"
         )
 
     def _notepad_command_tail(self, update: Update, context: Any, action: str) -> str:
@@ -6875,6 +6643,44 @@ class FlexibleAgentRuntime:
         if action == "refresh":
             text, markup = self._notepad_view_payload()
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+        elif action == "carryover":
+            text, markup = self._notepad_carryover_payload()
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+        elif action == "history":
+            text, markup = self._notepad_history_payload()
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+        elif action == "compact":
+            compact_memory_plus(self.workspace_dir)
+            text, markup = self._notepad_view_payload()
+            await query.edit_message_text(
+                "✅ Compacted.\n\n" + text,
+                parse_mode="HTML",
+                reply_markup=markup,
+            )
+        elif action == "memory_on":
+            set_memory_plus_enabled(self.workspace_dir, True)
+            self.reload_post_turn_observers()
+            text, markup = self._notepad_view_payload()
+            await query.edit_message_text(
+                "✅ Memory+ continuity enabled.\n\n" + text,
+                parse_mode="HTML",
+                reply_markup=markup,
+            )
+        elif action == "memory_off":
+            set_memory_plus_enabled(self.workspace_dir, False)
+            self.reload_post_turn_observers()
+            text, markup = self._notepad_view_payload()
+            await query.edit_message_text(
+                "⏸️ Memory+ continuity paused; all files were preserved.\n\n" + text,
+                parse_mode="HTML",
+                reply_markup=markup,
+            )
+        elif action == "help_find":
+            await query.edit_message_text(
+                self._notepad_help_text("find"),
+                parse_mode="HTML",
+                reply_markup=self._notepad_back_keyboard(),
+            )
         elif action == "help_edit":
             await query.edit_message_text(
                 self._notepad_help_text("edit"),
@@ -6931,6 +6737,9 @@ class FlexibleAgentRuntime:
     async def cmd_retry(self, update: Update, context: Any):
         await runtime_control.cmd_retry(self, update, context)
 
+    async def cmd_resend(self, update: Update, context: Any):
+        await runtime_control.cmd_resend(self, update, context)
+
     # ------------------------------------------------------------------
     # /remote — one-click Hashi Remote start/stop
     # ------------------------------------------------------------------
@@ -6957,7 +6766,7 @@ class FlexibleAgentRuntime:
             data = {}
         server = data.get("server") or {}
         discovery = data.get("discovery") or {}
-        configured_port = server.get("port") or 8766
+        configured_port = server.get("port") or DEFAULT_HASHI_REMOTE_PORT
         try:
             agents = json.loads(agents_path.read_text(encoding="utf-8-sig")) if agents_path.exists() else {}
         except Exception:
@@ -6980,9 +6789,9 @@ class FlexibleAgentRuntime:
             except Exception:
                 pass
         try:
-            ports.append(int(configured_port or 8766))
+            ports.append(int(configured_port or DEFAULT_HASHI_REMOTE_PORT))
         except Exception:
-            ports.append(8766)
+            ports.append(DEFAULT_HASHI_REMOTE_PORT)
         ports = [port for index, port in enumerate(ports) if port > 0 and port not in ports[:index]]
         return {
             "root": root,
@@ -7238,47 +7047,9 @@ class FlexibleAgentRuntime:
         await runtime_remote.cmd_remote(self, update, context)
 
     async def cmd_wol(self, update: Update, context: Any):
-        """Private local-only Wake-on-LAN helper. Usage: /wol [target]"""
-        if not self._is_authorized_user(update.effective_user.id):
-            return
+        from orchestrator import runtime_wol
 
-        project_root = self.global_config.project_root
-        if not private_wol_available(project_root):
-            await self._reply_text(update, "⚪ /wol is not enabled on this instance.")
-            return
-
-        arg = (context.args[0].strip().lower() if context.args else "")
-        if not arg or arg in {"list", "status", "help"}:
-            targets = describe_wol_targets(project_root)
-            lines = ["🪄 Private WoL targets on this instance:"]
-            for row in targets:
-                desc = f" — {row['description']}" if row["description"] else ""
-                lines.append(f"- {row['name']} ({row['label']}){desc}")
-            lines.append("")
-            lines.append("Usage: /wol <pc_name>")
-            await self._reply_text(update, "\n".join(lines))
-            return
-
-        await self._reply_text(update, f"🪄 Sending Wake-on-LAN packet for `{arg}`…")
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(None, lambda: run_private_wol(project_root, arg))
-        if result.get("ok"):
-            output = (result.get("stdout") or "").strip()
-            if len(output) > 2500:
-                output = output[:2500] + "\n...[truncated]"
-            lines = [f"✅ WoL completed for {result.get('label') or arg}."]
-            if output:
-                lines.append("")
-                lines.append(output)
-            await self._reply_text(update, "\n".join(lines))
-            return
-
-        error = result.get("error") or result.get("stderr") or "unknown error"
-        available = result.get("available_targets") or []
-        lines = [f"❌ WoL failed for {arg}: {error}"]
-        if available:
-            lines.append(f"Available targets: {', '.join(available)}")
-        await self._reply_text(update, "\n".join(lines))
+        await runtime_wol.cmd_wol(self, update, context)
 
     # ------------------------------------------------------------------
     # /long ... /end buffering (collect split Telegram messages)
@@ -7851,7 +7622,7 @@ class FlexibleAgentRuntime:
         )
 
     def _load_last_text_from_transcript(self, role: str) -> str | None:
-        """Read the last transcript message for commands like /say and /retry."""
+        """Read the last transcript message for commands such as /say."""
         try:
             path = getattr(self, "transcript_log_path", None)
             if path is None or not path.exists():
@@ -8079,9 +7850,10 @@ class FlexibleAgentRuntime:
                 self._mark_success()
                 self._record_habit_outcome(item, success=True, response_text=response.text)
                 visible_text, wrapper_result = await self._apply_wrapper_to_visible_text(item, display_text or response.text)
+                safe_core_raw = extract_memory_plus_update_details(response.text).visible_text
                 self._append_core_transcript(
                     item,
-                    core_raw=response.text,
+                    core_raw=safe_core_raw,
                     visible_text=visible_text,
                     completion_path="background",
                     wrapper_result=wrapper_result,
@@ -8095,7 +7867,7 @@ class FlexibleAgentRuntime:
                         "error": None,
                         "source": item.source,
                         "summary": item.summary,
-                        **self._wrapper_listener_fields(response.text, visible_text, wrapper_result),
+                        **self._wrapper_listener_fields(safe_core_raw, visible_text, wrapper_result),
                     },
                 )
                 is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
@@ -8109,12 +7881,7 @@ class FlexibleAgentRuntime:
                 if self._should_buffer_during_transfer(item.request_id):
                     self._record_suppressed_transfer_result(item, success=True, text=visible_text)
                     return
-                self.last_response = {
-                    "chat_id": item.chat_id,
-                    "text": visible_text,
-                    "request_id": item.request_id,
-                    "responded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-                }
+                runtime_retry.remember_output(self, item, visible_text)
                 try:
                     from tools.token_tracker import estimate_tokens, record_audit_event, record_usage
                     import hashlib as _hashlib
@@ -8209,12 +7976,12 @@ class FlexibleAgentRuntime:
                         is_bridge_request=is_bridge_request,
                     )
                 self.handoff_builder.append_transcript("user", item.prompt, item.source)
-                self.handoff_builder.append_transcript("assistant", visible_text)
+                self.handoff_builder.append_transcript("assistant", visible_text, item.source)
                 self.handoff_builder.refresh_recent_context()
                 self.project_chat_logger.log_exchange(item.prompt, visible_text, item.source)
                 _print_final_response(self.name, visible_text)
                 total_s = (datetime.now() - datetime.fromisoformat(item.created_at)).total_seconds()
-                await self._send_wrapper_verbose_trace(item, response.text, visible_text, wrapper_result)
+                await self._send_wrapper_verbose_trace(item, safe_core_raw, visible_text, wrapper_result)
                 send_elapsed_s, chunk_count = await self.send_long_message(
                     chat_id=item.chat_id,
                     text=visible_text,
@@ -8224,7 +7991,7 @@ class FlexibleAgentRuntime:
                 await self._send_voice_reply(item.chat_id, visible_text, item.request_id)
                 self._schedule_audit_followup(
                     item,
-                    core_raw=response.text,
+                    core_raw=safe_core_raw,
                     visible_text=visible_text,
                     response=response,
                     audit_collector=getattr(item, "_audit_collector", None),

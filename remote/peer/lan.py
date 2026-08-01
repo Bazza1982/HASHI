@@ -16,6 +16,7 @@ from typing import Optional, Callable
 
 from zeroconf import IPVersion, InterfaceChoice, ServiceBrowser, ServiceInfo, ServiceListener, Zeroconf
 
+from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_PORT
 from .base import PeerDiscovery, PeerInfo, is_valid_instance_id, normalize_instance_id
 
 logger = logging.getLogger(__name__)
@@ -284,7 +285,7 @@ def _service_info_to_peer(info: ServiceInfo, self_instance_id: str) -> Optional[
             display_name=props.get("display_name", instance_id),
             host=host,
             port=info.port,
-            workbench_port=int(props.get("workbench_port", 18800)),
+            workbench_port=int(props.get("workbench_port", DEFAULT_WORKBENCH_PORT)),
             platform=props.get("platform", "unknown"),
             version=props.get("version", "unknown"),
             hashi_version=props.get("hashi_version", "unknown"),

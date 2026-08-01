@@ -6,6 +6,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 
+from orchestrator.runtime_retry import RETRY_HANDOFF_SOURCE
+
 
 DEFAULT_CORE_BACKEND = "codex-cli"
 DEFAULT_CORE_MODEL = "gpt-5.5"
@@ -47,6 +49,7 @@ WRAPPER_BYPASS_SOURCES = frozenset(
         "loop_skill",
         "bridge:hchat",
         "retry",
+        RETRY_HANDOFF_SOURCE,
         SESSION_RESET_SOURCE,
     }
 )

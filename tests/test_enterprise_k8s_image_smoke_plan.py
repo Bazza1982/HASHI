@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
+from pathlib import Path
 
 from tools.enterprise_k8s_image_smoke_plan import build_image_smoke_plan, main
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_kubernetes_image_smoke_plan_contains_required_steps():
@@ -50,3 +56,26 @@ def test_kubernetes_image_smoke_plan_cli_writes_json(tmp_path):
     assert payload["image_tag"] == "hashi:test"
     assert payload["namespace"] == "smoke-ns"
     assert payload["lease_name"] == "lease-smoke"
+
+
+def test_kubernetes_image_smoke_plan_cli_needs_only_the_standard_library(tmp_path):
+    output = tmp_path / "plan.json"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-S",
+            str(ROOT / "tools" / "enterprise_k8s_image_smoke_plan.py"),
+            "--repo-root",
+            str(ROOT),
+            "--output",
+            str(output),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(output.read_text(encoding="utf-8"))["doctor"]["ok"] is True

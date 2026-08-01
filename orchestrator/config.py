@@ -11,6 +11,7 @@ from orchestrator.enterprise.profile import (
     validate_profile_context,
 )
 from orchestrator.pathing import resolve_command_value, resolve_path_value
+from orchestrator.runtime_defaults import DEFAULT_HASHI_REMOTE_PORT, DEFAULT_WORKBENCH_PORT
 
 # Valid access_scope values:
 #   "workspace" - only the agent's workspace_dir (most restrictive)
@@ -49,12 +50,12 @@ class GlobalConfig:
     instance_id: str = "HASHI"
     display_name: str = "HASHI Instance"
     api_host: str = "127.0.0.1"
-    remote_port: int = 8766
+    remote_port: int = DEFAULT_HASHI_REMOTE_PORT
     project_root: Path = None
     bridge_home: Path = None
     config_path: Path = None
     secrets_path: Path = None
-    workbench_port: int = 18800
+    workbench_port: int = DEFAULT_WORKBENCH_PORT
     api_gateway_port: int = 18801
     gemini_cmd: str = "gemini"
     claude_cmd: str = "claude"
@@ -142,7 +143,7 @@ class ConfigManager:
         # Value of 0 means Telegram not yet configured (workbench-only mode).
         _auth_id = int(secrets.get("authorized_telegram_id", 0)) or int(g_raw.get("authorized_id", 0))
 
-        workbench_port = int(g_raw.get("workbench_port", 18800))
+        workbench_port = int(g_raw.get("workbench_port", DEFAULT_WORKBENCH_PORT))
         api_gateway_port = int(g_raw.get("api_gateway_port", workbench_port + 1))
         enterprise_database_url = (
             os.environ.get("HASHI_ENTERPRISE_DATABASE_URL")
@@ -245,7 +246,7 @@ class ConfigManager:
             instance_id=g_raw.get("instance_id", "HASHI"),
             display_name=g_raw.get("display_name", "HASHI Instance"),
             api_host=g_raw.get("api_host", "127.0.0.1"),
-            remote_port=int(g_raw.get("remote_port", 8766)),
+            remote_port=int(g_raw.get("remote_port", DEFAULT_HASHI_REMOTE_PORT)),
             project_root=code_root,
             bridge_home=bridge_home,
             config_path=self.config_path,

@@ -11,10 +11,14 @@ from pathlib import Path
 
 
 PROTECTED_CORE_PATHS = (
+    "__main__.py",
     "main.py",
-    "orchestrator/kernel.py",
-    "orchestrator/reboot_manager.py",
+    "orchestrator/config.py",
     "orchestrator/instance_lock.py",
+    "orchestrator/pathing.py",
+    "orchestrator/manager_registry.py",
+    "orchestrator/hot_reload.py",
+    "orchestrator/reboot_manager.py",
     "orchestrator/startup_manager.py",
     "orchestrator/shutdown_manager.py",
     "remote/protocol_manager.py",
@@ -46,6 +50,10 @@ def _is_authorized(args: argparse.Namespace) -> bool:
     return args.authorized or os.environ.get("HASHI_CORE_EDIT_AUTHORIZED") == "1"
 
 
+def _missing_manifest_paths(root: Path) -> list[str]:
+    return sorted(path for path in PROTECTED_CORE_PATHS if not (root / path).is_file())
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cached", action="store_true", help="check staged changes")
@@ -55,10 +63,23 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="acknowledge explicit user authorization for protected core edits",
     )
+    parser.add_argument(
+        "--validate-manifest",
+        action="store_true",
+        help="fail if a protected path does not exist",
+    )
     args = parser.parse_args(argv)
 
     root = _repo_root()
     os.chdir(root)
+    if args.validate_manifest:
+        missing = _missing_manifest_paths(root)
+        if missing:
+            print("protected core manifest: invalid", file=sys.stderr)
+            for path in missing:
+                print(f"- missing: {path}", file=sys.stderr)
+            return 3
+        print("protected core manifest: ok")
     changed = _changed_files(args)
     protected = sorted(path for path in changed if path in PROTECTED_CORE_PATHS)
 

@@ -415,10 +415,19 @@ exit /b 0
 
 :preflight_check
 rem Check for an already-running bridge-u-f orchestrator.
-rem Uses .bridge_u_f.pid (always readable) - the .lock file is unreadable while held.
+rem Resolve the PID path from this configured instance_id. Other HASHI
+rem instances on the same computer are deliberately outside this scope.
+set "INSTANCE_PID_FILE="
+set "INSTANCE_ID=HASHI"
+for /f "delims=" %%P in ('"!PYTHON_EXE!" "!BRIDGE_CODE_ROOT!\scripts\resolve_instance_runtime.py" --code-root "!BRIDGE_CODE_ROOT!" --bridge-home "!BRIDGE_HOME!" --field pid-path') do set "INSTANCE_PID_FILE=%%P"
+for /f "delims=" %%P in ('"!PYTHON_EXE!" "!BRIDGE_CODE_ROOT!\scripts\resolve_instance_runtime.py" --code-root "!BRIDGE_CODE_ROOT!" --bridge-home "!BRIDGE_HOME!" --field instance-id') do set "INSTANCE_ID=%%P"
+if not defined INSTANCE_PID_FILE (
+    echo !C_WARN!Could not resolve the instance-scoped PID path.!C_RESET!
+    exit /b 1
+)
 set "EXISTING_PID="
-if exist "%BRIDGE_HOME%\.bridge_u_f.pid" (
-    for /f "usebackq delims=" %%P in ("%BRIDGE_HOME%\.bridge_u_f.pid") do set "EXISTING_PID=%%P"
+if exist "!INSTANCE_PID_FILE!" (
+    for /f "usebackq delims=" %%P in ("!INSTANCE_PID_FILE!") do set "EXISTING_PID=%%P"
 )
 if not defined EXISTING_PID exit /b 0
 rem Verify the PID is still alive and is actually bridge-u-f
@@ -427,21 +436,20 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "if(-not $p){ exit 1 }; " ^
   "$cmd = [string]$p.CommandLine; " ^
   "$bridgeHome = [System.IO.Path]::GetFullPath('%BRIDGE_HOME%').TrimEnd('\'); " ^
-  "$mainPath = Join-Path ([System.IO.Path]::GetFullPath('%BRIDGE_CODE_ROOT%')) 'main.py'; " ^
   "if(-not $cmd){ exit 1 }; " ^
   "if($cmd -match '(?i)--bridge-home\s+(""([^""]+)""|(\S+))'){ " ^
   "  $candidate = if($matches[2]){ $matches[2] } else { $matches[3] }; " ^
   "  try { $resolved = [System.IO.Path]::GetFullPath($candidate).TrimEnd('\') } catch { $resolved = $candidate.TrimEnd('\') }; " ^
   "  if($resolved -ieq $bridgeHome){ exit 0 } else { exit 1 } " ^
   "}; " ^
-  "if([regex]::IsMatch($cmd, '(?i)(^|[""\s])' + [regex]::Escape($mainPath) + '(""|\s|$)')){ exit 0 } else { exit 1 }"
+  "exit 1"
 if errorlevel 1 (
     rem PID file is stale - process is gone or not bridge-u-f
-    del /f /q "%BRIDGE_HOME%\.bridge_u_f.pid" >nul 2>&1
+    del /f /q "!INSTANCE_PID_FILE!" >nul 2>&1
     exit /b 0
 )
 echo.
-echo   !C_WARN!Bridge-u-f is already running ^(PID !EXISTING_PID!^).!C_RESET!
+echo   !C_WARN!!INSTANCE_ID! is already running ^(PID !EXISTING_PID!^).!C_RESET!
 if "!AUTO_RESUME_LAST!"=="1" (
     rem Called from restart script - don't prompt, just fail
     exit /b 1

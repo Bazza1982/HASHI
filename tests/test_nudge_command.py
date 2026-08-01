@@ -430,7 +430,7 @@ def test_build_nudge_with_buttons_uses_short_callbacks_for_long_ids():
     assert callbacks
     assert all(len(callback_data) <= CALLBACK_DATA_LIMIT for callback_data in callbacks)
     assert any(callback_data.startswith("nudgejob:key:") for callback_data in callbacks)
-    assert text.count("fired 1/100") == 1
+    assert text.count("<b>Progress</b> · <code>1/100</code>") == 1
     assert any(button.text == "Max +100" for row in markup.inline_keyboard for button in row)
 
 
@@ -449,7 +449,7 @@ def test_nudge_list_shows_unlimited_max_when_set_to_zero():
             ]
 
     text, _ = build_nudge_with_buttons(SkillManager(), "zelda")
-    assert "fired 1/∞" in text
+    assert "<b>Progress</b> · <code>1/∞</code>" in text
 
 
 @pytest.mark.asyncio

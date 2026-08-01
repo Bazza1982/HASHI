@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import json
 import logging
+from html import escape
 from pathlib import Path
 
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+from orchestrator.command_ui import BACK_LABEL, REFRESH_LABEL, card_title
 from orchestrator.superloop_compiler import SuperloopCompiler
 from orchestrator.superloop_issues import SuperloopIssuesService
 from orchestrator.superloop_recording import SuperloopRecordingService
@@ -14,6 +18,8 @@ from orchestrator.superloop_validator import format_validation_report, validate_
 from orchestrator.superloop_waits import SuperloopWaitsService
 
 logger = logging.getLogger("BridgeU.Superloop")
+
+TEMPLATES_PER_PAGE = 4
 
 
 def _local_instance_id() -> str:
@@ -26,9 +32,13 @@ def _local_instance_id() -> str:
         return "HASHI"
 
 
-def _build_services(runtime) -> tuple[SuperloopStore, SuperloopRecordingService, SuperloopCompiler]:
+def _build_store(runtime) -> SuperloopStore:
     root = Path(runtime.global_config.project_root) / "superloops"
-    store = SuperloopStore(root)
+    return SuperloopStore(root)
+
+
+def _build_services(runtime) -> tuple[SuperloopStore, SuperloopRecordingService, SuperloopCompiler]:
+    store = _build_store(runtime)
     return store, SuperloopRecordingService(store), SuperloopCompiler(store)
 
 
@@ -94,72 +104,261 @@ def _template_cards(store: SuperloopStore) -> list[dict[str, str]]:
     return cards
 
 
-def _template_list_text(store: SuperloopStore) -> str:
-    cards = _template_cards(store)
-    if not cards:
-        return (
-            "📚 Superloop 模板列表\n\n"
-            "当前未发现模板。\n"
-            "路径: `superloops/templates/`"
-        )
+def _compact_text(value: object, *, limit: int = 140) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def _directory_count(path: Path) -> int:
+    try:
+        return sum(1 for item in path.iterdir() if item.is_dir())
+    except OSError:
+        return 0
+
+
+def _loop_counts(store: SuperloopStore) -> tuple[int, int]:
+    total = 0
+    running = 0
+    try:
+        loop_dirs = [item for item in store.loops_dir.iterdir() if item.is_dir()]
+    except OSError:
+        loop_dirs = []
+    for loop_dir in loop_dirs:
+        total += 1
+        try:
+            state = json.loads((loop_dir / "state.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            continue
+        if isinstance(state, dict) and str(state.get("status") or "").lower() == "running":
+            running += 1
+    return total, running
+
+
+def _menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Browse templates", callback_data="superloop:list:0")],
+            [
+                InlineKeyboardButton("Recording guide", callback_data="superloop:recording"),
+                InlineKeyboardButton("Loop controls", callback_data="superloop:loops"),
+            ],
+            [InlineKeyboardButton("Tasks, issues & waits", callback_data="superloop:collaboration")],
+            [InlineKeyboardButton(REFRESH_LABEL, callback_data="superloop:menu")],
+        ]
+    )
+
+
+def _page_keyboard(refresh_data: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(BACK_LABEL, callback_data="superloop:menu"),
+                InlineKeyboardButton(REFRESH_LABEL, callback_data=refresh_data),
+            ]
+        ]
+    )
+
+
+def _menu_view(store: SuperloopStore) -> tuple[str, InlineKeyboardMarkup]:
+    loop_total, running = _loop_counts(store)
+    recording_total = _directory_count(store.recordings_dir)
+    template_total = len(_template_cards(store))
+    current = "ACTIVE" if running else "READY"
     lines = [
-        "📚 Superloop 模板列表",
-        f"共 `{len(cards)}` 套模板，路径 `superloops/templates/`",
+        card_title("🧭", "Superloop"),
         "",
+        f"<b>Current</b> · <code>{current}</code>",
+        "<b>Scope</b> · <code>local project</code>",
+        f"<b>Loops</b> · <code>{loop_total}</code> total · <code>{running}</code> running",
+        f"<b>Recordings</b> · <code>{recording_total}</code>",
+        f"<b>Templates</b> · <code>{template_total}</code>",
+        "<b>Changes</b> · immediate and persistent",
+        "",
+        "Superloop coordinates long-running work with persisted tasks, waits, issues, and evidence.",
+        "",
+        "<b>Quick start</b>",
+        "<code>/superloop quickstart &lt;goal&gt;</code>",
+        "<code>/superloop wizard &lt;goal&gt;</code>",
+        "",
+        "Choose a section below for detailed commands.",
     ]
-    for index, card in enumerate(cards, start=1):
+    return "\n".join(lines), _menu_keyboard()
+
+
+def _guide_view(
+    icon: str,
+    title: str,
+    *,
+    purpose: str,
+    commands: tuple[str, ...],
+    note: str,
+    refresh_data: str,
+) -> tuple[str, InlineKeyboardMarkup]:
+    lines = [
+        card_title(icon, title),
+        "",
+        "<b>Current</b> · <code>READY</code>",
+        "<b>Scope</b> · <code>local project</code>",
+        "",
+        purpose,
+        "",
+        "<b>Available commands</b>",
+        *(f"<code>{escape(command)}</code>" for command in commands),
+        "",
+        note,
+    ]
+    return "\n".join(lines), _page_keyboard(refresh_data)
+
+
+def _recording_guide_view() -> tuple[str, InlineKeyboardMarkup]:
+    return _guide_view(
+        "🎬",
+        "Superloop recording",
+        purpose="Capture a successful workflow before compiling it into a reusable loop.",
+        commands=(
+            "/superloop record start <goal>",
+            "/superloop record status [recording_id]",
+            "/superloop record try <recording_id> <step title>",
+            "/superloop record intent <recording_id> <summary>",
+            "/superloop record exit <recording_id> <kind> <details-json>",
+            "/superloop record finish [recording_id]",
+        ),
+        note="Finish compiles only when the recording has a clear intent, usable steps, and an exit condition.",
+        refresh_data="superloop:recording",
+    )
+
+
+def _loop_guide_view() -> tuple[str, InlineKeyboardMarkup]:
+    return _guide_view(
+        "🛠️",
+        "Superloop controls",
+        purpose="Inspect, validate, advance, pause, resume, or close a compiled loop.",
+        commands=(
+            "/superloop status <loop_id>",
+            "/superloop validate <loop_id>",
+            "/superloop next <loop_id>",
+            "/superloop pause <loop_id>",
+            "/superloop resume <loop_id>",
+            "/superloop closeout <loop_id>",
+        ),
+        note=(
+            "⚠️ Closeout remains blocked until worker and reviewer replies are drained, "
+            "classified, and backed by the required evidence."
+        ),
+        refresh_data="superloop:loops",
+    )
+
+
+def _collaboration_guide_view() -> tuple[str, InlineKeyboardMarkup]:
+    return _guide_view(
+        "📋",
+        "Superloop collaboration",
+        purpose="Add the tasks, issues, and wait conditions that keep a long-running loop explicit.",
+        commands=(
+            "/superloop task add <loop_id> <title>",
+            "/superloop issue add <loop_id> <title>",
+            "/superloop wait add <loop_id> <kind> [deadline-iso]",
+        ),
+        note="ℹ️ Waits default to <code>on_timeout=advance</code> and do not automatically open an issue.",
+        refresh_data="superloop:collaboration",
+    )
+
+
+def _template_list_view(
+    store: SuperloopStore,
+    *,
+    page: int = 0,
+) -> tuple[str, InlineKeyboardMarkup]:
+    cards = _template_cards(store)
+    page_count = max(1, (len(cards) + TEMPLATES_PER_PAGE - 1) // TEMPLATES_PER_PAGE)
+    page = min(max(int(page), 0), page_count - 1)
+    start = page * TEMPLATES_PER_PAGE
+    visible_cards = cards[start : start + TEMPLATES_PER_PAGE]
+    lines = [
+        card_title("📚", "Superloop templates"),
+        "",
+        f"<b>Current</b> · <code>{len(cards)}</code> templates",
+        f"<b>Page</b> · <code>{page + 1}/{page_count}</code>",
+        "<b>Source</b> · <code>superloops/templates/</code>",
+    ]
+    if not cards:
         lines.extend(
             [
-                f"{index}. **{card['title']}**",
-                f"slug: `{card['slug']}`",
-                f"用途: {card['purpose']}",
-                f"包含: `{card['includes']}`",
                 "",
+                "No templates are available yet.",
+                "Add a template directory under the source path, then refresh this view.",
             ]
         )
-    lines.append("提示: 细节可直接打开 `superloops/templates/<slug>/README.md`")
-    return "\n".join(lines)
-
-
-def _help_text() -> str:
-    return (
-        "🧭 SUPERLOOP 控制台\n"
-        "━━━━━━━━━━━━━━━━\n\n"
-        "当前 · 等待命令\n"
-        "变更 · 写入本地 Superloop 状态并立即生效\n\n"
-        "🚀 快速开始\n"
-        "/superloop quickstart <goal>\n"
-        "/superloop wizard <goal>\n\n"
-        "📚 模板\n"
-        "/superloop list\n\n"
-        "🎬 Recording\n"
-        "/superloop record start <goal>\n"
-        "/superloop record status [recording_id]\n"
-        "/superloop record try <recording_id> <step title>\n"
-        "/superloop record intent <recording_id> <summary>\n"
-        "/superloop record exit <recording_id> <kind> <details-json>\n"
-        "/superloop record finish [recording_id]\n\n"
-        "🛠 Loop 运行\n"
-        "/superloop status <loop_id>\n"
-        "/superloop validate <loop_id>\n"
-        "/superloop closeout <loop_id>\n"
-        "/superloop pause <loop_id>\n"
-        "/superloop resume <loop_id>\n"
-        "/superloop next <loop_id>\n\n"
-        "📋 协作条目\n"
-        "/superloop task add <loop_id> <title>\n"
-        "/superloop issue add <loop_id> <title>\n"
-        "/superloop wait add <loop_id> <kind> [deadline-iso]\n\n"
-        "ℹ️ wait 默认超时策略: on_timeout=advance（不自动开 issue）\n"
-        "🔒 Closeout 提醒: final 前必须 drain/classify 同 loop 的 worker/reviewer replies；"
-        "close 后的 stale replies 只记录为 late/superseded evidence，除非带来新 blocker。"
+    for index, card in enumerate(visible_cards, start=start + 1):
+        lines.extend(
+            [
+                "",
+                f"<b>{index} · {escape(card['title'])}</b>",
+                f"<b>ID</b> · <code>{escape(card['slug'])}</code>",
+                f"<b>Includes</b> · <code>{escape(card['includes'])}</code>",
+                escape(_compact_text(card["purpose"])),
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "Open <code>superloops/templates/&lt;slug&gt;/README.md</code> for full details.",
+        ]
     )
+
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("← Previous", callback_data=f"superloop:list:{page - 1}"))
+    nav.append(InlineKeyboardButton(REFRESH_LABEL, callback_data=f"superloop:list:{page}"))
+    if page + 1 < page_count:
+        nav.append(InlineKeyboardButton("Next →", callback_data=f"superloop:list:{page + 1}"))
+    keyboard = InlineKeyboardMarkup(
+        [
+            nav,
+            [InlineKeyboardButton(BACK_LABEL, callback_data="superloop:menu")],
+        ]
+    )
+    return "\n".join(lines), keyboard
+
+
+async def handle_superloop_callback(runtime, update, _context=None) -> None:
+    query = getattr(update, "callback_query", None)
+    if query is None:
+        return
+
+    parts = str(getattr(query, "data", "") or "").split(":")
+    action = parts[1] if len(parts) > 1 else "menu"
+    store = _build_store(runtime)
+
+    if action == "menu":
+        text, markup = _menu_view(store)
+    elif action == "list":
+        try:
+            page = int(parts[2]) if len(parts) > 2 else 0
+        except ValueError:
+            page = 0
+        text, markup = _template_list_view(store, page=page)
+    elif action == "recording":
+        text, markup = _recording_guide_view()
+    elif action == "loops":
+        text, markup = _loop_guide_view()
+    elif action == "collaboration":
+        text, markup = _collaboration_guide_view()
+    else:
+        await query.answer("Unknown Superloop view.", show_alert=True)
+        return
+
+    await query.answer()
+    await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
 
 
 async def handle_superloop_command(runtime, update, args_text: str) -> None:
     raw = (args_text or "").strip()
     if not raw:
-        await runtime._reply_text(update, _help_text())
+        text, markup = _menu_view(_build_store(runtime))
+        await runtime._reply_text(update, text, parse_mode="HTML", reply_markup=markup)
         return
 
     store, recording_service, compiler = _build_services(runtime)
@@ -267,7 +466,8 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
         return
 
     if lowered[:1] == ["list"]:
-        await runtime._reply_text(update, _template_list_text(store), parse_mode="Markdown")
+        text, markup = _template_list_view(store)
+        await runtime._reply_text(update, text, parse_mode="HTML", reply_markup=markup)
         return
 
     if lowered[:2] == ["record", "start"]:
@@ -604,4 +804,5 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
         await runtime._reply_text(update, f"✅ wait added: `{wait['wait_id']}`", parse_mode="Markdown")
         return
 
-    await runtime._reply_text(update, _help_text())
+    text, markup = _menu_view(store)
+    await runtime._reply_text(update, text, parse_mode="HTML", reply_markup=markup)

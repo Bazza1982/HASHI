@@ -14,6 +14,7 @@ HOME_PREFIX = "@home/"
 class BridgePaths:
     code_root: Path
     bridge_home: Path
+    instance_id: str
     config_path: Path
     secrets_path: Path
     tasks_path: Path
@@ -93,18 +94,45 @@ def _json_validator(path: Path) -> bool:
     return data is not None
 
 
+def resolve_instance_id(config_path: Path) -> str:
+    """Read the configured instance identity without loading runtime secrets."""
+    try:
+        raw = json.loads(config_path.read_text(encoding="utf-8-sig"))
+    except (json.JSONDecodeError, OSError):
+        return "HASHI"
+    global_config = raw.get("global") if isinstance(raw, dict) else None
+    if not isinstance(global_config, dict):
+        return "HASHI"
+    instance_id = str(global_config.get("instance_id") or "").strip()
+    return instance_id or "HASHI"
+
+
+def instance_runtime_dir(bridge_home: Path) -> Path:
+    """Keep process coordination under the installation's stable instance home."""
+    return Path(bridge_home) / "state" / "instance"
+
+
 def build_bridge_paths(code_root: Path, bridge_home: str | Path | None = None) -> BridgePaths:
     resolved_code_root = code_root.resolve()
     resolved_home = resolve_bridge_home(resolved_code_root, bridge_home)
+    config_path = resolve_home_file(
+        resolved_home,
+        resolved_code_root,
+        "agents.json",
+        validator=_json_validator,
+    )
+    instance_id = resolve_instance_id(config_path)
+    runtime_dir = instance_runtime_dir(resolved_home)
     return BridgePaths(
         code_root=resolved_code_root,
         bridge_home=resolved_home,
-        config_path=resolve_home_file(resolved_home, resolved_code_root, "agents.json", validator=_json_validator),
+        instance_id=instance_id,
+        config_path=config_path,
         secrets_path=resolve_home_file(resolved_home, resolved_code_root, "secrets.json", validator=_secrets_validator),
         tasks_path=resolve_home_file(resolved_home, resolved_code_root, "tasks.json"),
         state_path=resolved_home / "scheduler_state.json",
-        lock_path=resolved_home / ".bridge_u_f.lock",
-        pid_path=resolved_home / ".bridge_u_f.pid",
+        lock_path=runtime_dir / "process.lock",
+        pid_path=runtime_dir / "process.pid",
         workspaces_root=resolved_home / "workspaces",
     )
 

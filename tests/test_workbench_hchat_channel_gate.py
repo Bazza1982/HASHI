@@ -34,7 +34,11 @@ def _server(tmp_path: Path, *, profile: str = "enterprise", runtimes: list | Non
     config_path.write_text(
         json.dumps(
             {
-                "global": {"deployment_profile": profile, "organization_id": "ORG-001"},
+                "global": {
+                    "deployment_profile": profile,
+                    "organization_id": "ORG-001",
+                    "instance_id": "HASHI1",
+                },
                 "agents": [],
             }
         ),
@@ -46,6 +50,7 @@ def _server(tmp_path: Path, *, profile: str = "enterprise", runtimes: list | Non
         bridge_home=tmp_path,
         workbench_port=18800,
         project_root=tmp_path,
+        instance_id="HASHI1",
     )
     return WorkbenchApiServer(config_path=config_path, global_config=global_config, runtimes=runtimes or [])
 
@@ -68,12 +73,10 @@ def _audit_events(tmp_path: Path) -> list[dict]:
 
 
 @pytest.mark.asyncio
-async def test_enterprise_hchat_exchange_denies_disabled_default_and_audits(tmp_path, monkeypatch):
+async def test_enterprise_hchat_exchange_denies_disabled_default_and_audits(tmp_path):
     runtime = _Runtime("nana")
     server = _server(tmp_path, runtimes=[runtime])
     server.identity_service.create_organization(org_id="ORG-001", name="Acme")
-    monkeypatch.setattr("orchestrator.ticket_manager.detect_instance", lambda _root: "HASHI1")
-
     response = await server.handle_hchat_exchange(_FakeRequest(_payload()))
 
     assert response.status == 403
@@ -88,7 +91,7 @@ async def test_enterprise_hchat_exchange_denies_disabled_default_and_audits(tmp_
 
 
 @pytest.mark.asyncio
-async def test_enterprise_hchat_exchange_allows_bound_target_agent(tmp_path, monkeypatch):
+async def test_enterprise_hchat_exchange_allows_bound_target_agent(tmp_path):
     runtime = _Runtime("nana")
     server = _server(tmp_path, runtimes=[runtime])
     server.identity_service.create_organization(org_id="ORG-001", name="Acme")
@@ -101,8 +104,6 @@ async def test_enterprise_hchat_exchange_allows_bound_target_agent(tmp_path, mon
         scope_id="nana",
         permission="ingress",
     )
-    monkeypatch.setattr("orchestrator.ticket_manager.detect_instance", lambda _root: "HASHI1")
-
     response = await server.handle_hchat_exchange(_FakeRequest(_payload()))
 
     assert response.status == 200
@@ -113,11 +114,9 @@ async def test_enterprise_hchat_exchange_allows_bound_target_agent(tmp_path, mon
 
 
 @pytest.mark.asyncio
-async def test_personal_hchat_exchange_still_allows_without_channel_registry(tmp_path, monkeypatch):
+async def test_personal_hchat_exchange_still_allows_without_channel_registry(tmp_path):
     runtime = _Runtime("nana")
     server = _server(tmp_path, profile="personal", runtimes=[runtime])
-    monkeypatch.setattr("orchestrator.ticket_manager.detect_instance", lambda _root: "HASHI1")
-
     response = await server.handle_hchat_exchange(_FakeRequest(_payload()))
 
     assert response.status == 200

@@ -68,6 +68,25 @@ Every settings menu shows:
 - unavailable choices and why they are unavailable;
 - a safe way back or to refresh when the menu has sub-pages.
 
+When a command expresses a clear intent but the current mode blocks the action,
+offer a concise confirmation that can satisfy the intent instead of ending with
+instructions to run another command. The confirmation must state the current
+mode, the effect of leaving it, and a safe keep-current action. After
+confirmation, continue directly to the requested menu.
+
+Backend and model selection are one continuous configuration flow. After a
+backend and model are saved, models with selectable effort levels show an
+optional effort step. If the user makes no effort selection, the current or
+model-default effort remains active. Models without selectable effort skip that
+step and show `n/a` in the final configuration summary.
+
+Memory+ is a continuity setting, not an execution mode. `/mode` shows its
+independent ON/OFF summary and `/memory plus on|off` controls it without
+changing mode, backend, or stored files. `/notepad` separates Today, Carryover,
+History, and Find views; default cards never mix archived prompts into the
+current work card. The status card describes open-item and carryover counts as
+background, never as automatically queued work.
+
 The main `/status` card always shows the active backend, model, and model effort
 in its summary. Use `n/a` when the active model does not support a selectable
 effort level.

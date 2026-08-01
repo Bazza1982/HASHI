@@ -25,6 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Telegram `/steer`** — global mid-task course correction for all backends: when **busy**, immediately stops the active generation (like `/stop`), keeps interim thinking/progress/artefacts and session state, then queues a continuity-preserving mid-task wrapper with the user's new direction; when **idle**, enqueues the direction text only (no steer wrapper, `source=text`). Registered in flex and fixed runtimes and the Telegram bot command menu. See [docs/STEER_COMMAND.md](docs/STEER_COMMAND.md).
 - **Telegram `/focus`** — one-off scope correction for flex and fixed runtimes. It preserves in-scope progress, returns execution to the original user task, and requires the continuation to keep working until the requested outcome is complete or genuinely blocked. Repeated `/focus` calls retain one clean copy of the original task instead of nesting wrappers.
 - **Telegram `/recall [count]`** — withdraw requests that are still waiting in the current agent queue without interrupting active work. `/recall` removes all waiting requests; `/recall n` accepts any positive whole number and removes up to the newest `n` while preserving FIFO order for retained requests. See [docs/FOCUS_RECALL_COMMANDS.md](docs/FOCUS_RECALL_COMMANDS.md).
+- **Telegram `/resend` and recovery `/retry`** — `/resend` now has the single
+  explicit job of replaying the previous model or Bridge output without model
+  work. `/retry` saves the last prompt, stops stale execution, clears queued
+  work, applies `/new` cleanup for CLI backends or `/fresh` cleanup for API
+  backends, restores bounded handoff continuity, and reruns the prompt. Separate
+  retry/resend state survives runtime restarts and preserves failed requests and
+  Bridge-only outputs. See
+  [docs/RETRY_RESEND_COMMANDS.md](docs/RETRY_RESEND_COMMANDS.md).
 - **Telegram `/privacy [0-5]` foundation** — added a persisted per-agent privacy setting, backend compatibility declarations, a details menu, quick setting, downgrade confirmation, and the six-level framework. Level 0 fully disables privacy controls; Level 1 remains the default provider-trust mode. Levels 2–5 are reserved until their enforcement is installed and verified.
 - **Direct Grok OAuth → Claw (coming soon)** — landed HASHI-native xAI device-code OAuth scaffolding that stores tokens under the bridge home and injects `XAI_API_KEY` into Claw without Hermes or `grok-cli`. Live login remains blocked until HASHI receives its own xAI OAuth `client_id`. See [docs/HASHI_XAI_CLAW_OAUTH.md](docs/HASHI_XAI_CLAW_OAUTH.md).
 - **Grok CLI reasoning effort control** — added `low`, `medium`, and `high` support to Telegram `/effort` for `grok-cli`, with HASHI defaulting Grok sessions to `medium`, passing the selection through `--reasoning-effort`, and persisting per-backend choices across agent reloads.
@@ -33,6 +41,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Command menu display parity** — presentation-only menu updates now apply the
+  shared HASHI card order, escaped HTML values, active-choice markers, and
+  consistent navigation across parked topics, tickets, system slots, loops,
+  skills, voice controls, workzones, status, browser/remote views, schedulers,
+  queues, background jobs, Wrapper, Audit, Dual Brain, Anatta, xAI auth, and
+  other status panels. Command syntax, stored data, and execution behavior are
+  unchanged.
+- **Superloop command menu** — `/superloop` now opens a compact HASHI-standard
+  HTML status card with live loop, recording, and template counts plus inline
+  navigation for recording, loop, and collaboration commands. `/superloop list`
+  now uses escaped, paginated template cards with Back and Refresh controls.
+- **Memory+ v2 compact continuity** — Memory+ is now independent from execution
+  mode and works across Flex, Fixed, Wrapper, Audit, Dual Brain, CLI sessions,
+  and stateless API backends. It stores a bounded structured today card,
+  carries a short unresolved-work handover across midnight, indexes full daily
+  archives for on-demand lookup, removes legacy prompts from injected context,
+  and gives every assembled turn one authoritative current-request boundary.
+- **Intent-preserving backend/model menus** — `/backend` in a non-Flex mode now
+  offers an inline confirmation to switch to Flex and continues directly to the
+  backend picker. Backend and model selection now continue to an optional
+  model-effort step when supported, with the current/default effort preserved
+  when no new selection is made.
 - **Public/private command boundary** — moved HASHI2's OLL Browser Gateway
   control out of the public runtime and into its local private-command module.
   Private commands now receive their handler and picker metadata only from the
@@ -53,6 +83,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stopped and recreated after module reload, so Gateway code changes take
   effect through the standard `/reboot` path without `/api off`, `/api on`, or
   a cold process restart.
+- **API Gateway state ownership** — startup, Telegram `/api` controls, hot
+  reboot, and Gateway health now use the canonical
+  `<bridge_home>/state/api_gateway_config.json`. HASHI imports the legacy
+  root-level state once, retains it for rollback, and reports live
+  `enabled`/`running` separately from persisted `configured_enabled`.
 - **`/steer` and `/stop` false Backend error** — intentional backend kills (e.g. Grok CLI exit code `-9` / SIGKILL) no longer surface as `❌ Backend error` in Telegram. The pipeline marks `user_steer` / `user_stop` before shutdown and suppresses error delivery for that turn while still recording a soft interrupt.
 - **Telegram long-task flood control** — removed idle one-second answer-preview edits, added configurable edit intervals, heartbeat pacing, per-request edit budgets, and stream-display `RetryAfter` shutdown so long-running tasks cannot continuously edit a placeholder by default.
 - **Background job hot-reload and delivery path** — fixed Workbench API background-job start routing, `/reboot` hot reload of Workbench API handlers, command-array handling for Workbench job starts, notification context preservation, and Telegram delivery of agent reports produced from completion/failure events.
@@ -77,6 +112,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added focused regression coverage for tokenized nudge delete callbacks, `/say` bot menu metadata, limited-agent allowlist behavior, forced `/say` voice generation with voice replies disabled, and flexible-runtime transcript lookup.
 - Added regression coverage for a transient Telegram media `get_file()` timeout that succeeds on retry.
 - Added focused coverage for `/notify` persistence and Telegram `disable_notification` defaults.
+- Added production-path `/retry` and `/resend` coverage for CLI/API reset
+  semantics, active-process interruption, queue cleanup, bounded handoff order,
+  restart persistence, Bridge output replay, and control-turn exclusion.
+- Added API Gateway coverage for one-time legacy-state migration, canonical
+  ServiceManager persistence, and live-versus-configured health fields.
 - Added focused `/focus` and `/recall` coverage for continued execution, repeated-focus wrapper cleanup, newest-first queue withdrawal, FIFO preservation, invalid counts, empty queues, authorization, and arbitrarily large positive counts.
 
 ## [0.1.0a1] - 2026-06-18

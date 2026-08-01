@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# HASHI9 - Start Bridge with Workbench (macOS)
+# HASHI - Start Bridge with Workbench (macOS)
 # Starts the bridge with Workbench API enabled on the port from agents.json.
 # Double-click this file in Finder to launch.
 # Logs written to: mac/logs/workbench_<timestamp>.log
@@ -19,9 +19,11 @@ elif [ -f "$ROOT/.venv/bin/python3" ]; then
 elif command -v python3 &>/dev/null; then
     PYTHON_EXE="$(command -v python3)"
 else
-    osascript -e 'display alert "HASHI9 Error" message "Python 3 not found.\nPlease run mac/prepare_usb.sh first." as critical'
+    osascript -e 'display alert "HASHI Error" message "Python 3 not found.\nPlease run mac/prepare_usb.sh first." as critical'
     exit 1
 fi
+INSTANCE_ID="$("$PYTHON_EXE" "$ROOT/scripts/resolve_instance_runtime.py" \
+    --code-root "$ROOT" --bridge-home "$ROOT" --field instance-id)"
 
 WB_PORT="$("$PYTHON_EXE" -c 'import json, pathlib; p = pathlib.Path(r"'"$ROOT"'") / "agents.json"; data = json.loads(p.read_text(encoding="utf-8-sig")); print(data.get("global", {}).get("workbench_port", 18800))')"
 if [ -z "$WB_PORT" ]; then
@@ -30,7 +32,7 @@ fi
 
 {
     echo "===================================================="
-    echo "HASHI9 Bridge + Workbench"
+    echo "$INSTANCE_ID Bridge + Workbench"
     echo "Port:    $WB_PORT"
     echo "Started: $(date)"
     echo "Python:  $PYTHON_EXE"

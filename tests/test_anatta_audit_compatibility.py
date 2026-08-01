@@ -172,7 +172,16 @@ async def test_anatta_and_audit_skip_the_same_internal_sources():
     observer = AnattaPostTurnObserver(_Layer("on"))
     runtime = _runtime_with_anatta(observer)
 
-    for source in ["startup", "system", "scheduler", "scheduler-skill", "loop_skill", "retry", "bridge:hchat"]:
+    for source in [
+        "startup",
+        "system",
+        "scheduler",
+        "scheduler-skill",
+        "loop_skill",
+        "retry",
+        "retry-handoff",
+        "bridge:hchat",
+    ]:
         item = _item(source)
         sections = await runtime._build_pre_turn_context_sections(
             item,

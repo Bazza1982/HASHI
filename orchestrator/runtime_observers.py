@@ -43,6 +43,7 @@ async def build_pre_turn_context_sections(
     user_text: str,
     *,
     is_bridge_request: bool,
+    metadata: dict[str, Any] | None = None,
 ) -> list[tuple[str, str]]:
     if not runtime._pre_turn_context_providers:
         return []
@@ -53,7 +54,7 @@ async def build_pre_turn_context_sections(
         model_name=runtime.get_current_model(),
         chat_id=item.chat_id,
         summary=item.summary,
-        metadata={},
+        metadata=dict(metadata or {}),
     )
     sections: list[tuple[str, str]] = []
     for provider in runtime._pre_turn_context_providers:

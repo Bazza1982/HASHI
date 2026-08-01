@@ -6,6 +6,7 @@ from typing import Any
 from uuid import uuid4
 
 from orchestrator.runtime_common import QueuedRequest
+from orchestrator.runtime_delivery import format_backend_error_for_user
 
 
 def persist_transfer_state(runtime: Any) -> None:
@@ -82,7 +83,10 @@ async def flush_suppressed_transfer_results(runtime: Any) -> None:
         text = (
             entry.get("text")
             if entry.get("success")
-            else f"Flex Backend Error ({runtime.config.active_backend}): {entry.get('error')}"
+            else (
+                f"Flex Backend Error ({runtime.config.active_backend}): "
+                f"{format_backend_error_for_user(runtime.config.active_backend, entry.get('error') or '')}"
+            )
         )
         if not text:
             continue

@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import http.client
 import importlib
-import json
 import logging
 import os
 import socket
@@ -13,7 +12,8 @@ from contextlib import suppress
 from pathlib import Path
 
 from orchestrator.agent_directory import AgentDirectory
-from orchestrator.api_gateway import available_gateway_models, default_gateway_model
+from orchestrator.api_gateway import available_gateway_models
+from orchestrator.api_gateway_config import config_path_for, load_api_gateway_config, save_api_gateway_config
 from orchestrator.background_jobs import BackgroundJobManager
 from orchestrator.scheduler import TaskScheduler
 from orchestrator.telegram_delivery_failover import delivery_health_watcher
@@ -38,42 +38,25 @@ class ServiceManager:
         return self.kernel.agent_directory
 
     def _api_gateway_state_path(self) -> Path:
-        return self.kernel.paths.bridge_home / "api_gateway_state.json"
+        """Compatibility accessor for the canonical API Gateway config path."""
+        return config_path_for(self.kernel.paths)
 
     def _load_api_gateway_state(self) -> dict:
-        path = self._api_gateway_state_path()
-        default_state = {
-            "enabled": bool(getattr(self.kernel, "enable_api_gateway", False)),
-            "default_model": default_gateway_model(),
-        }
-        if not path.exists():
-            return default_state
-        try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return default_state
-        if not isinstance(loaded, dict):
-            return default_state
-        state = dict(default_state)
-        state.update(loaded)
-        if state.get("default_model") not in available_gateway_models():
-            state["default_model"] = default_gateway_model()
-        state["enabled"] = bool(state.get("enabled"))
-        return state
+        return load_api_gateway_config(self.kernel.paths)
 
-    def _save_api_gateway_state(self, *, enabled: bool | None = None, default_model: str | None = None) -> dict:
-        state = self._load_api_gateway_state()
-        if enabled is not None:
-            state["enabled"] = bool(enabled)
-        if default_model is not None:
-            normalized = str(default_model or "").strip()
-            if normalized not in available_gateway_models():
-                raise ValueError(f"unknown API gateway model: {default_model}")
-            state["default_model"] = normalized
-        path = self._api_gateway_state_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        return state
+    def _save_api_gateway_state(
+        self,
+        *,
+        enabled: bool | None = None,
+        default_model: str | None = None,
+        updated_by: str = "service-manager",
+    ) -> dict:
+        return save_api_gateway_config(
+            self.kernel.paths,
+            enabled=enabled,
+            default_model=default_model,
+            updated_by=updated_by,
+        )
 
     def _workbench_api_server_cls(self):
         module = sys.modules.get("orchestrator.workbench_api")
@@ -190,6 +173,12 @@ class ServiceManager:
         if self.kernel.api_gateway is None:
             return False, "API Gateway failed to start."
         return True, f"API Gateway started on {self.api_gateway_base_url()}."
+
+    async def set_api_gateway_enabled(self, enabled: bool) -> tuple[bool, str]:
+        """Compatibility control used by the modular /api callbacks."""
+        if enabled:
+            return await self.start_api_gateway_runtime()
+        return await self.stop_api_gateway_runtime()
 
     async def stop_api_gateway_runtime(self, timeout: float = 5.0) -> tuple[bool, str]:
         self.kernel.enable_api_gateway = False
@@ -411,7 +400,8 @@ class ServiceManager:
             self.kernel.scheduler_task = None
             self.kernel.scheduler = None
 
-    async def restart_scheduler(self):
+    async def refresh_hot_services(self):
+        """Recreate every warm service after a successful code reload."""
         await self.restart_workbench_api()
         await self.restart_api_gateway()
         await self.stop_scheduler()
@@ -435,6 +425,10 @@ class ServiceManager:
         bridge_logger.info("Hot restart: scheduler recreated with reloaded code")
         await self.restart_delivery_health_watcher()
         await self.restart_background_jobs()
+
+    async def restart_scheduler(self):
+        """Compatibility alias for callers predating the full service refresh."""
+        await self.refresh_hot_services()
 
     async def restart_workbench_api(self):
         if self.kernel.global_cfg is None:

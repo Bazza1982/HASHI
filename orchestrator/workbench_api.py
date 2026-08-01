@@ -6,6 +6,7 @@ import mimetypes
 import socket
 import time
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from aiohttp import web
@@ -2739,8 +2740,9 @@ class WorkbenchApiServer:
         if not to_agent or not to_instance or not from_agent or not from_instance or not text:
             return web.json_response({"ok": False, "error": "missing required fields"}, status=400)
 
-        from orchestrator.ticket_manager import detect_instance
-        local_instance = str(detect_instance(self.global_config.project_root)).upper()
+        local_instance = str(
+            getattr(self.global_config, "instance_id", None) or "HASHI"
+        ).upper()
 
         if to_instance == local_instance:
             gate_result = self._enterprise_channel_gate().check_ingress(
@@ -3046,9 +3048,9 @@ class WorkbenchApiServer:
         except ValueError as e:
             return web.json_response({"ok": False, "error": str(e)}, status=400)
 
-        from orchestrator.ticket_manager import detect_instance
-
-        current_instance = detect_instance(self.global_config.project_root)
+        current_instance = str(
+            getattr(self.global_config, "instance_id", None) or "HASHI"
+        ).upper()
         if str(package["target_instance"]).upper() != str(current_instance).upper():
             return web.json_response(
                 {"ok": False, "error": f"target instance mismatch: this endpoint is {current_instance}"},
@@ -3548,7 +3550,7 @@ class WorkbenchApiServer:
     async def handle_jobs_import(self, request):
         """Import a job from a remote instance (cross-instance job transfer).
 
-        Payload: {"kind": "cron"|"heartbeat", "job": {...}, "from_instance": "HASHI1", "from_agent": "akane"}
+        Payload: {"kind": "cron"|"heartbeat", "job": {...}, "from_instance": "<INSTANCE>", "from_agent": "akane"}
         The job is imported as disabled so the recipient can review before enabling.
         """
         try:

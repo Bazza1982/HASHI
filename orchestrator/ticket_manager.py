@@ -14,7 +14,9 @@ import shutil
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
+
+from orchestrator.workspace_state import WorkspaceStateStore
 
 logger = logging.getLogger("TicketManager")
 
@@ -140,16 +142,9 @@ def collect_diagnostics(
     diag["python"] = platform.python_version()
 
     # Backend state
-    state_path = workspace_dir / "state.json"
-    if state_path.exists():
-        try:
-            state = json.loads(state_path.read_text(encoding="utf-8"))
-            diag["backend_status"] = state.get("backend", "unknown")
-            diag["active_task"] = state.get("current_task", None)
-        except Exception:
-            diag["backend_status"] = "unknown"
-    else:
-        diag["backend_status"] = "unknown"
+    state = WorkspaceStateStore(workspace_dir).read()
+    diag["backend_status"] = state.get("backend", "unknown")
+    diag["active_task"] = state.get("current_task", None)
 
     return diag
 
@@ -250,14 +245,27 @@ def list_tickets(tickets_dir: Path, status: str = "open") -> list[dict]:
 # Instance detection
 # ---------------------------------------------------------------------------
 
-def detect_instance(project_root: Path) -> str:
-    """Detect which HASHI instance we're running on."""
-    root_str = str(project_root).replace("\\", "/").lower()
-    if "hashi2" in root_str:
-        return "HASHI2"
-    if "/mnt/c/" in root_str or "c:" in root_str.lower():
-        return "HASHI9"
-    return "HASHI1"
+def detect_instance(
+    project_root: Path,
+    configured_instance_id: str | None = None,
+) -> str:
+    """Resolve instance identity from configuration, never from path naming."""
+    explicit = str(configured_instance_id or "").strip()
+    if explicit:
+        return explicit.upper()
+    candidates = [Path(project_root) / "agents.json"]
+    bridge_home = str(os.environ.get("BRIDGE_HOME") or "").strip()
+    if bridge_home:
+        candidates.append(Path(bridge_home) / "agents.json")
+    for config_path in candidates:
+        try:
+            payload = json.loads(config_path.read_text(encoding="utf-8-sig"))
+            instance_id = str((payload.get("global") or {}).get("instance_id") or "").strip()
+        except Exception:
+            continue
+        if instance_id:
+            return instance_id.upper()
+    return "HASHI"
 
 
 # ---------------------------------------------------------------------------

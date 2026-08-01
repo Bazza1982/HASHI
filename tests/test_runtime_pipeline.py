@@ -335,6 +335,82 @@ async def test_build_turn_prompt_collects_context_sections_and_updates_audit_sta
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "supports_sessions", "session_id", "expected_profile", "expected_incremental"),
+    [
+        ("fixed", True, "cli-session", "memory_plus_session", True),
+        ("flex", False, None, "memory_plus_stateless", False),
+    ],
+)
+async def test_build_turn_prompt_routes_memory_plus_by_backend_capability(
+    mode,
+    supports_sessions,
+    session_id,
+    expected_profile,
+    expected_incremental,
+):
+    runtime = _runtime()
+    item = _item()
+    runtime.current_request_meta = {}
+    (runtime.workspace_dir / "state.json").write_text(
+        json.dumps(
+            {
+                "agent_mode": mode,
+                "memory_plus": {"enabled": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime.backend_manager.agent_mode = mode
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        _session_id=session_id,
+        capabilities=SimpleNamespace(
+            supports_sessions=supports_sessions,
+            supports_thinking_stream=True,
+        ),
+    )
+    observed: dict[str, object] = {}
+
+    async def build_sections(
+        item,
+        prompt,
+        *,
+        is_bridge_request,
+        metadata,
+    ):
+        observed["metadata"] = metadata
+        return [("Memory+ Continuity", "compact card")]
+
+    class Assembler:
+        def build_prompt_payload(
+            self,
+            prompt,
+            backend,
+            *,
+            extra_sections,
+            inject_memory,
+            incremental,
+            context_profile,
+        ):
+            observed["profile"] = context_profile
+            observed["incremental"] = incremental
+            return {
+                "final_prompt": prompt,
+                "audit": {"sections": []},
+            }
+
+    runtime._build_pre_turn_context_sections = build_sections
+    runtime.context_assembler = Assembler()
+
+    await runtime_pipeline.build_turn_prompt(runtime, item, is_bridge_request=False)
+
+    assert observed["profile"] == expected_profile
+    assert observed["incremental"] is expected_incremental
+    assert observed["metadata"]["supports_sessions"] is supports_sessions
+    assert observed["metadata"]["incremental"] is expected_incremental
+
+
+@pytest.mark.asyncio
 async def test_run_backend_generation_returns_foreground_response():
     runtime = _runtime()
     item = _item()
@@ -1227,7 +1303,7 @@ def test_persist_success_memory_records_human_exchange_and_handoff():
     assert runtime.post_turn_calls == [("user text", "memory:visible text", False)]
     assert runtime.handoff_builder.transcript == [
         ("user", "user text", "text"),
-        ("assistant", "visible text", None),
+        ("assistant", "visible text", "text"),
     ]
     assert runtime.handoff_builder.refreshed is True
     assert runtime.project_chat_logger.exchanges == [("user text", "visible text", "text")]
@@ -1272,8 +1348,34 @@ async def test_handle_backend_error_notifies_and_delivers_error():
     assert runtime.listener_payloads[0]["success"] is False
     assert runtime.listener_payloads[0]["error"] == "backend failed"
     assert runtime.sent_message["purpose"] == "error"
-    assert "Flex Backend Error" in runtime.sent_message["text"]
+    assert runtime.sent_message["text"] == "backend failed"
     assert runtime.maintenance_events[0][0] == "send_error"
+
+
+@pytest.mark.asyncio
+async def test_handle_backend_error_passes_raw_failure_to_delivery_boundary():
+    runtime = _runtime()
+    item = _item()
+    response = SimpleNamespace(
+        error=(
+            '{"type":"error","status":400,"error":{"type":"invalid_request_error",'
+            '"message":"The \'gpt-5.6-sol\' model requires a newer version of Codex. '
+            'Please upgrade to the latest app or CLI and try again."}}'
+        )
+    )
+
+    await runtime_pipeline.handle_backend_error(
+        runtime,
+        item,
+        response,
+        queued_at=datetime.now() - timedelta(seconds=1),
+        queue_wait_s=0.5,
+        backend_elapsed_s=0.25,
+    )
+
+    assert runtime.sent_message["text"] == response.error
+    assert runtime.sent_message["purpose"] == "error"
+    assert runtime.listener_payloads[0]["error"] == response.error
 
 
 @pytest.mark.asyncio

@@ -15,6 +15,7 @@ import subprocess
 from pathlib import Path
 from typing import Callable, Optional
 
+from orchestrator.runtime_defaults import DEFAULT_HASHI_REMOTE_PORT, DEFAULT_WORKBENCH_PORT
 from remote.live_endpoints import read_live_endpoints
 
 from .base import PeerDiscovery, PeerInfo, is_valid_instance_id
@@ -132,7 +133,12 @@ class TailscaleDiscovery(PeerDiscovery):
             host = self._pick_host(node)
             if not host:
                 continue
-            port = int(live_info.get("port") or instance_info.get("announced_port") or instance_info.get("remote_port") or 8766)
+            port = int(
+                live_info.get("port")
+                or instance_info.get("announced_port")
+                or instance_info.get("remote_port")
+                or DEFAULT_HASHI_REMOTE_PORT
+            )
 
             peers.append(
                 PeerInfo(
@@ -140,7 +146,11 @@ class TailscaleDiscovery(PeerDiscovery):
                     display_name=live_info.get("display_name") or node.get("HostName") or instance_info.get("display_name") or instance_id,
                     host=host,
                     port=port,
-                    workbench_port=int(live_info.get("workbench_port") or instance_info.get("workbench_port") or 18800),
+                    workbench_port=int(
+                        live_info.get("workbench_port")
+                        or instance_info.get("workbench_port")
+                        or DEFAULT_WORKBENCH_PORT
+                    ),
                     platform=live_info.get("platform") or instance_info.get("platform", "unknown"),
                     hashi_version=node.get("OS", "unknown"),
                     display_handle=f"@{instance_id.lower()}",

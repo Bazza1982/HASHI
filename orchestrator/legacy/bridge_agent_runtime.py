@@ -11,6 +11,7 @@ import html
 from contextlib import suppress
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update, constants
 from telegram.error import NetworkError as TelegramNetworkError, TimedOut as TelegramTimedOut
@@ -20,6 +21,7 @@ from adapters.base import BaseBackend
 from orchestrator.agent_fyi import build_agent_fyi_primer
 from orchestrator.bridge_memory import BridgeMemoryStore, BridgeContextAssembler, SysPromptManager
 from orchestrator.command_ui import (
+    BACK_LABEL,
     REFRESH_LABEL,
     card_title,
     help_menu_text,
@@ -59,11 +61,13 @@ from orchestrator.runtime_common import (
     _print_thinking,
     _print_user_message,
     _safe_excerpt,
-    resolve_authorized_telegram_ids,
 )
 from orchestrator import runtime_nudge
+from orchestrator import runtime_menu_views
+from orchestrator import runtime_retry
+from orchestrator import runtime_workzone
 from orchestrator.runtime_display import _show_logo_animation
-from orchestrator.runtime_jobs import _build_jobs_text, _build_jobs_with_buttons
+from orchestrator.runtime_jobs import _build_jobs_with_buttons
 
 HABIT_BROWSER_PAGE_SIZE = 5
 MAX_JOB_TRANSFER_SELECTIONS = 256
@@ -160,6 +164,7 @@ class BridgeAgentRuntime:
             self.global_config.project_root,
             self.name,
             self._get_agent_class(),
+            self.global_config.instance_id,
         )
 
     def get_typing_placeholder(self) -> tuple[str, str | None]:
@@ -548,7 +553,7 @@ class BridgeAgentRuntime:
         )
         if not primer:
             return request
-        return f"{primer}\n\n--- NEW REQUEST ---\n{request}"
+        return f"{primer}\n\n--- CURRENT USER REQUEST — AUTHORITATIVE ---\n{request}"
 
     def _consume_session_primer(self, item: QueuedRequest) -> str:
         if item.source.startswith("scheduler") or item.source.startswith("bridge:"):
@@ -713,36 +718,7 @@ class BridgeAgentRuntime:
         }
 
     def _format_parked_topics_text(self) -> str:
-        topics = self.parked_topics.list_topics()
-        if not topics:
-            return (
-                "Parked topics: none.\n\n"
-                "Usage:\n"
-                "/park - list parked topics\n"
-                "/park chat [optional title] - park the current topic\n"
-                "/park delete <slot> - delete a parked topic\n"
-                "/load <slot> - restore a parked topic"
-            )
-        lines = ["Parked topics", ""]
-        for topic in topics:
-            slot_id = int(topic.get("slot_id", 0))
-            title = topic.get("title") or f"Topic {slot_id}"
-            short = topic.get("summary_short") or "(no short summary)"
-            followup = topic.get("followup") or {}
-            status = followup.get("status") or "scheduled"
-            attempts = int(followup.get("attempts", 0))
-            next_at = followup.get("next_at")
-            suffix = f" | next {next_at}" if next_at else ""
-            lines.append(f"[{slot_id}] {title}")
-            lines.append(f"  {short}")
-            lines.append(f"  reminders: {status} ({attempts}/3){suffix}")
-        lines.extend(
-            [
-                "",
-                "Use /load <slot> to restore or /park delete <slot> to remove one.",
-            ]
-        )
-        return "\n".join(lines)
+        return runtime_menu_views.parked_topics_text(self.parked_topics.list_topics())
 
     def is_idle_for_proactive_message(self, min_idle_seconds: int = 900) -> bool:
         if self.is_generating or not self.queue.empty():
@@ -897,45 +873,46 @@ class BridgeAgentRuntime:
         available_efforts = self._get_available_efforts()
         current_effort = self._get_current_effort() if available_efforts else "n/a"
         lines = [
-            "📊 HASHI STATUS",
-            "━━━━━━━━━━━━━━━━",
+            card_title("📊", "Hashi status"),
             "",
-            f"🤖 Agent: {self.name}",
-            f"⚙️ Backend: {self.config.engine} • {self.config.model}",
-            f"🎛️ Model effort: {current_effort}",
+            f"<b>Current</b> · <b>{'ONLINE' if self.telegram_connected else 'LOCAL'}</b>",
+            f"<b>Agent</b> · <code>{html.escape(str(self.name))}</code>",
+            f"<b>Backend</b> · <code>{html.escape(str(self.config.engine))}</code>",
+            f"<b>Model</b> · <code>{html.escape(str(self.config.model))}</code>",
+            f"<b>Effort</b> · <code>{html.escape(str(current_effort))}</code>",
             "",
-            "CONNECTIONS",
-            f"📶 Channels: {channel_line}",
+            "<b>CONNECTIONS</b>",
+            f"<b>Channels</b> · {html.escape(channel_line)}",
             "",
-            "ACTIVITY",
-            f"📡 Runtime: {'busy' if self.is_generating else 'idle'} • queue {self.queue.qsize()} • process {self._process_info()}",
-            f"🧾 Current: {current_line}",
-            f"🧠 Memory: skills {', '.join(active_skills) if active_skills else 'none'} • recall {'ON' if recall_on else 'OFF'} • FYI {'armed' if self._pending_session_primer else 'clear'}",
-            f"🔔 Proactive: {active_mode} • every {active_interval} • hb {heartbeat_count} • cron {cron_count}",
-            f"🩺 Health: {health_line}",
-            f"🕒 Activity: last success {self._format_age(self.last_success_at)} • last activity {self._format_age(self.last_activity_at)}",
+            "<b>ACTIVITY</b>",
+            f"<b>Runtime</b> · <code>{'BUSY' if self.is_generating else 'IDLE'}</code> · queue <code>{self.queue.qsize()}</code> · process <code>{html.escape(str(self._process_info()))}</code>",
+            f"<b>Request</b> · {html.escape(str(current_line))}",
+            f"<b>Memory</b> · skills {html.escape(', '.join(active_skills) if active_skills else 'none')} · recall <code>{'ON' if recall_on else 'OFF'}</code> · FYI <code>{'ARMED' if self._pending_session_primer else 'CLEAR'}</code>",
+            f"<b>Proactive</b> · <code>{active_mode}</code> · every {html.escape(active_interval)} · hb <code>{heartbeat_count}</code> · cron <code>{cron_count}</code>",
+            f"<b>Health</b> · {html.escape(health_line)}",
+            f"<b>Last activity</b> · success {html.escape(self._format_age(self.last_success_at))} · activity {html.escape(self._format_age(self.last_activity_at))}",
         ]
         if detailed:
             lines.extend([
                 "",
-                "DETAILS",
-                f"📁 Workspace: {self.config.workspace_dir}",
-                f"📝 Transcript: {self.transcript_log_path.name}",
-                f"🚀 Started: {self.session_started_at.isoformat(timespec='seconds')}",
-                f"🔁 Retry Cache: prompt {'yes' if self.last_prompt else 'no'} • response {'yes' if self.last_response else 'no'}",
-                f"🧷 Primers: FYI {'armed' if self._pending_session_primer else 'clear'} • auto-recall {'armed' if self._pending_auto_recall_context else 'clear'}",
-                f"📚 Bridge Memory: {self.memory_store.get_stats()['turns']} turns • {self.memory_store.get_stats()['memories']} memories",
-                f"🔍 Verbose: {'ON' if self._verbose else 'OFF'}",
-                f"💭 Think: {'ON' if self._think else 'OFF'}",
+                "<b>DETAILS</b>",
+                f"<b>Workspace</b> · <code>{html.escape(str(self.config.workspace_dir))}</code>",
+                f"<b>Transcript</b> · <code>{html.escape(self.transcript_log_path.name)}</code>",
+                f"<b>Started</b> · <code>{html.escape(self.session_started_at.isoformat(timespec='seconds'))}</code>",
+                f"<b>Retry cache</b> · prompt <code>{'YES' if self.last_prompt else 'NO'}</code> · response <code>{'YES' if self.last_response else 'NO'}</code>",
+                f"<b>Primers</b> · FYI <code>{'ARMED' if self._pending_session_primer else 'CLEAR'}</code> · auto-recall <code>{'ARMED' if self._pending_auto_recall_context else 'CLEAR'}</code>",
+                f"<b>Bridge memory</b> · <code>{self.memory_store.get_stats()['turns']}</code> turns · <code>{self.memory_store.get_stats()['memories']}</code> memories",
+                f"<b>Verbose</b> · <code>{'ON' if self._verbose else 'OFF'}</code>",
+                f"<b>Think</b> · <code>{'ON' if self._think else 'OFF'}</code>",
             ])
-            lines.append(f"🏠 HASHI Instance: {self.global_config.project_root}")
+            lines.append(f"<b>HASHI instance</b> · <code>{html.escape(str(self.global_config.project_root))}</code>")
             if self.config.engine == "openrouter-api":
-                lines.append("☁️ Session Mode: stateless bridge-managed API")
+                lines.append("<b>Session mode</b> · stateless bridge-managed API")
             else:
-                lines.append("🧩 Session Mode: stateless bridge-managed CLI")
+                lines.append("<b>Session mode</b> · stateless bridge-managed CLI")
         else:
             lines.append("")
-            lines.append("Use /status full for more detail.")
+            lines.append("Use <code>/status full</code> for more detail.")
         return "\n".join(lines)
 
     def _skill_keyboard(self) -> InlineKeyboardMarkup:
@@ -953,10 +930,11 @@ class BridgeAgentRuntime:
     def _skill_action_keyboard(self, skill: SkillDefinition) -> InlineKeyboardMarkup:
         buttons = []
         if skill.type == "toggle":
+            enabled = skill.id in self.skill_manager.get_active_toggle_ids(self.config.workspace_dir)
             buttons.append(
                 [
-                    InlineKeyboardButton("On", callback_data=f"skill:toggle:{skill.id}:on"),
-                    InlineKeyboardButton("Off", callback_data=f"skill:toggle:{skill.id}:off"),
+                    InlineKeyboardButton(selected_label("On", enabled), callback_data=f"skill:toggle:{skill.id}:on"),
+                    InlineKeyboardButton(selected_label("Off", not enabled), callback_data=f"skill:toggle:{skill.id}:off"),
                 ]
             )
         elif skill.type == "action" and skill.id not in {"cron", "heartbeat"}:
@@ -965,6 +943,7 @@ class BridgeAgentRuntime:
             buttons.append([InlineKeyboardButton("Show usage", callback_data=f"skill:show:{skill.id}")])
         if skill.id in {"cron", "heartbeat"}:
             buttons.append([InlineKeyboardButton("↻ Refresh jobs", callback_data=f"skill:jobs:{skill.id}")])
+        buttons.append([InlineKeyboardButton(BACK_LABEL, callback_data="skill:back:menu")])
         return InlineKeyboardMarkup(buttons) if buttons else None
 
     async def _render_skill_jobs(self, update_or_query, kind: str):
@@ -1045,15 +1024,13 @@ class BridgeAgentRuntime:
         total, rows = self._load_local_habit_rows(offset=offset)
         lines = [
             card_title("🧠", "Local habits"),
-            f"Agent: <code>{_html.escape(self.name)}</code>",
             "",
-            (
-                f"📊 Total <b>{counts['total']}</b> • "
-                f"🟢 Active <b>{counts['active']}</b> • "
-                f"🟡 Candidate <b>{counts['candidate']}</b> • "
-                f"⏸ Paused <b>{counts['paused']}</b> • "
-                f"🔴 Disabled <b>{counts['disabled']}</b>"
-            ),
+            f"<b>Current</b> · <code>{counts['total']}</code> habits",
+            f"<b>Agent</b> · <code>{_html.escape(self.name)}</code>",
+            f"<b>Active</b> · <code>{counts['active']}</code>",
+            f"<b>Candidate</b> · <code>{counts['candidate']}</code>",
+            f"<b>Paused</b> · <code>{counts['paused']}</code>",
+            f"<b>Disabled</b> · <code>{counts['disabled']}</code>",
         ]
         if notice:
             lines.extend(["", f"✨ {_html.escape(notice)}"])
@@ -1140,15 +1117,13 @@ class BridgeAgentRuntime:
         for row in rows:
             counts[row.status] = counts.get(row.status, 0) + 1
         lines = [
-            "<b>📋 Habit Governance Queue</b>",
-            f"Agent: <code>{_html.escape(self.name)}</code>",
+            card_title("📋", "Habit governance"),
             "",
-            (
-                f"Pending <b>{counts['pending']}</b> • Approved <b>{counts['approved']}</b> • "
-                f"Applied <b>{counts['applied']}</b> • Rejected <b>{counts['rejected']}</b> • "
-                f"Obsolete <b>{counts['obsolete']}</b>"
-            ),
-            f"Shared active: <b>{len([item for item in shared_rows if item.status == HabitStore.SHARED_PATTERN_STATUS_ACTIVE])}</b>",
+            f"<b>Current</b> · <code>{counts['pending']}</code> pending",
+            f"<b>Agent</b> · <code>{_html.escape(self.name)}</code>",
+            f"<b>Approved</b> · <code>{counts['approved']}</code> · <b>Applied</b> · <code>{counts['applied']}</code>",
+            f"<b>Rejected</b> · <code>{counts['rejected']}</code> · <b>Obsolete</b> · <code>{counts['obsolete']}</code>",
+            f"<b>Shared patterns</b> · <code>{len([item for item in shared_rows if item.status == HabitStore.SHARED_PATTERN_STATUS_ACTIVE])}</code> active",
             "",
             "This queue is separate from local habit counts.",
         ]
@@ -1849,12 +1824,7 @@ class BridgeAgentRuntime:
                     )
                 self._mark_success()
                 self._record_habit_outcome(item, success=True, response_text=response.text)
-                self.last_response = {
-                    "chat_id": item.chat_id,
-                    "text": response.text,
-                    "request_id": item.request_id,
-                    "responded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-                }
+                runtime_retry.remember_output(self, item, response.text)
                 memory_user_text = item.prompt
                 if item.source.lower() in {"document", "photo", "voice", "audio", "video", "sticker"}:
                     memory_user_text = f"[{item.source}] {item.summary}"
@@ -1862,7 +1832,8 @@ class BridgeAgentRuntime:
                     self.memory_store.record_turn("user", item.source, memory_user_text)
                     self.memory_store.record_turn("assistant", self.config.engine, response.text)
                     self.memory_store.record_exchange(memory_user_text, response.text, item.source)
-                self.append_conversation_entry("assistant", response.text, self.config.engine)
+                if item.source != runtime_retry.RETRY_HANDOFF_SOURCE:
+                    self.append_conversation_entry("assistant", response.text, self.config.engine)
                 _print_final_response(self.name, response.text)
                 total_s = (datetime.now() - datetime.fromisoformat(item.created_at)).total_seconds()
                 send_elapsed_s, chunk_count = await self.send_long_message(
@@ -2173,6 +2144,7 @@ class BridgeAgentRuntime:
             try:
                 if not item.silent:
                     self.last_prompt = item
+                    runtime_retry.remember_retryable_prompt(self, item)
                 is_bridge_request = item.source.startswith("bridge:")
                 queued_at = datetime.fromisoformat(item.created_at)
                 queue_wait_s = (datetime.now() - queued_at).total_seconds()
@@ -2445,12 +2417,7 @@ class BridgeAgentRuntime:
                     )
                     if item.silent:
                         continue
-                    self.last_response = {
-                        "chat_id": item.chat_id,
-                        "text": response.text,
-                        "request_id": item.request_id,
-                        "responded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-                    }
+                    runtime_retry.remember_output(self, item, response.text)
                     memory_user_text = item.prompt
                     if item.source.lower() in {"document", "photo", "voice", "audio", "video", "sticker"}:
                         memory_user_text = f"[{item.source}] {item.summary}"
@@ -2458,7 +2425,10 @@ class BridgeAgentRuntime:
                         self.memory_store.record_turn("user", item.source, memory_user_text)
                         self.memory_store.record_turn("assistant", self.config.engine, response.text)
                         self.memory_store.record_exchange(memory_user_text, response.text, item.source)
-                    if not is_bridge_request:
+                    if (
+                        not is_bridge_request
+                        and item.source != runtime_retry.RETRY_HANDOFF_SOURCE
+                    ):
                         self.append_conversation_entry("assistant", response.text, self.config.engine)
                     if not item.deliver_to_telegram:
                         continue
@@ -2838,10 +2808,11 @@ class BridgeAgentRuntime:
         )
 
     def _voice_keyboard(self) -> InlineKeyboardMarkup:
+        enabled = bool(self.voice_manager.get_state().get("enabled"))
         rows = [
             [
-                InlineKeyboardButton("Turn on", callback_data="voice:toggle:on"),
-                InlineKeyboardButton("Turn off", callback_data="voice:toggle:off"),
+                InlineKeyboardButton(selected_label("On", enabled), callback_data="voice:toggle:on"),
+                InlineKeyboardButton(selected_label("Off", not enabled), callback_data="voice:toggle:off"),
             ]
         ]
         active_alias = self.voice_manager.get_active_preset_alias()
@@ -2850,7 +2821,7 @@ class BridgeAgentRuntime:
             base = preset.get("label") or alias
             label = selected_label(base, alias == active_alias)
             if available != "ready":
-                label = f"{base} ({available})"
+                label = f"🔒 {base} ({available})"
             preset_buttons.append(InlineKeyboardButton(label, callback_data=f"voice:use:{alias}"))
         for i in range(0, len(preset_buttons), 2):
             rows.append(preset_buttons[i:i + 2])
@@ -2913,7 +2884,7 @@ class BridgeAgentRuntime:
         text = self.voice_manager.voice_menu_text()
         if message:
             text = f"{text}\n\n{message}"
-        await query.edit_message_text(text, reply_markup=self._voice_keyboard())
+        await query.edit_message_text(text, reply_markup=self._voice_keyboard(), parse_mode="HTML")
         await query.answer()
 
     async def cmd_terminate(self, update, context):
@@ -2936,10 +2907,12 @@ class BridgeAgentRuntime:
         arg = " ".join(context.args).strip().lower() if context.args else ""
         if arg == "help":
             all_names = orchestrator.configured_agent_names()
+            running_names = {rt.name for rt in orchestrator.runtimes}
             lines = [
                 card_title("🔄", "Reboot agents"),
                 "",
-                f"<b>Current agent</b> · <code>{html.escape(self.name)}</code>",
+                f"<b>Current</b> · <code>{len(running_names)}</code> running",
+                f"<b>Agent</b> · <code>{html.escape(self.name)}</code>",
                 "<b>Effect</b> · reloads code and runtime state for the selected target",
                 "",
                 "Active requests on restarted agents are interrupted.",
@@ -2947,9 +2920,9 @@ class BridgeAgentRuntime:
                 "<b>AGENTS</b>",
             ]
             for i, name in enumerate(all_names, 1):
-                running = name in {rt.name for rt in orchestrator.runtimes}
+                running = name in running_names
                 marker = "●" if running else "○"
-                lines.append(f"  {i}. {marker} {name}")
+                lines.append(f"{i}. {marker} <code>{html.escape(name)}</code>")
             await update.message.reply_text("\n".join(lines), parse_mode="HTML")
             return
         if arg == "min":
@@ -3019,18 +2992,10 @@ class BridgeAgentRuntime:
             tickets_dir = _resolve_tickets_dir(self.global_config.project_root)
             open_tickets = list_tickets(tickets_dir, "open")
             ip_tickets = list_tickets(tickets_dir, "in_progress")
-            lines = []
-            if open_tickets:
-                lines.append("Open tickets:")
-                for t in open_tickets:
-                    lines.append(f"  [{t['ticket_id']}] {t['source_agent']} — {t['summary'][:60]}")
-            if ip_tickets:
-                lines.append("In progress:")
-                for t in ip_tickets:
-                    lines.append(f"  [{t['ticket_id']}] {t['source_agent']} — {t['summary'][:60]}")
-            if not lines:
-                lines.append("No open tickets.")
-            await update.message.reply_text("\n".join(lines))
+            await update.message.reply_text(
+                runtime_menu_views.ticket_list_text(open_tickets, ip_tickets),
+                parse_mode="HTML",
+            )
             return
 
         # Create the ticket
@@ -3095,7 +3060,10 @@ class BridgeAgentRuntime:
             return
         args = [a.strip() for a in (context.args or []) if a.strip()]
         if not args:
-            await update.message.reply_text(self._format_parked_topics_text())
+            await update.message.reply_text(
+                self._format_parked_topics_text(),
+                parse_mode="HTML",
+            )
             return
 
         action = args[0].lower()
@@ -3262,7 +3230,10 @@ class BridgeAgentRuntime:
         mgr = self.sys_prompt_manager
 
         if not args:
-            await update.message.reply_text(mgr.display_all(), parse_mode="Markdown")
+            await update.message.reply_text(
+                runtime_menu_views.sys_slots_text(mgr),
+                parse_mode="HTML",
+            )
             return
 
         slot = args[0]
@@ -3271,7 +3242,10 @@ class BridgeAgentRuntime:
             return
 
         if len(args) == 1:
-            await update.message.reply_text(mgr.display_slot(slot))
+            await update.message.reply_text(
+                runtime_menu_views.sys_slot_text(mgr, slot),
+                parse_mode="HTML",
+            )
             return
 
         sub = args[1].lower()
@@ -3306,12 +3280,8 @@ class BridgeAgentRuntime:
         args = [a.strip() for a in (context.args or []) if a.strip()]
         if not args:
             await update.message.reply_text(
-                "Usage:\n"
-                "/usecomputer on - enable managed GUI-aware mode\n"
-                "/usecomputer off - disable it and clear the managed /sys slot\n"
-                "/usecomputer status - show current state\n"
-                "/usecomputer examples - show example prompts\n"
-                "/usecomputer <task> - run a task with computer-use guidance loaded"
+                get_usecomputer_status(self.sys_prompt_manager),
+                parse_mode="HTML",
             )
             return
 
@@ -3323,10 +3293,16 @@ class BridgeAgentRuntime:
             await update.message.reply_text(set_usecomputer_mode(self.sys_prompt_manager, False))
             return
         if sub == "status":
-            await update.message.reply_text(get_usecomputer_status(self.sys_prompt_manager))
+            await update.message.reply_text(
+                get_usecomputer_status(self.sys_prompt_manager),
+                parse_mode="HTML",
+            )
             return
         if sub == "examples":
-            await update.message.reply_text(get_usecomputer_examples_text())
+            await update.message.reply_text(
+                get_usecomputer_examples_text(),
+                parse_mode="HTML",
+            )
             return
 
         task = " ".join(args).strip()
@@ -3374,10 +3350,8 @@ class BridgeAgentRuntime:
         if not args_text:
             await self._reply_text(
                 update,
-                "🔄 Loop — Recurring Task Manager\n\n"
-                "/loop <task> — create a loop\n"
-                "/loop list — list active loops\n"
-                "/loop stop [id] — stop loop(s)",
+                runtime_menu_views.loop_manager_text(),
+                parse_mode="HTML",
             )
             return
 
@@ -3392,25 +3366,11 @@ class BridgeAgentRuntime:
                 [("cron", j) for j in self.skill_manager.list_jobs("cron", agent_name=self.name)]
             )
             loops = [(job_kind, j) for job_kind, j in jobs if j.get("loop_meta")]
-            if not loops:
-                await self._reply_text(update, "No loops for this agent.")
-                return
-            lines = ["🔄 Loops\n"]
-            for job_kind, j in loops:
-                meta = j.get("loop_meta", {})
-                status = "ON" if j.get("enabled") else "OFF"
-                count = meta.get("count", 0)
-                mx = meta.get("max", 100)
-                sched = (
-                    f"every {j.get('interval_seconds')}s"
-                    if job_kind == "heartbeat"
-                    else j.get("schedule", "?")
-                )
-                summary = meta.get("task_summary", "")[:60]
-                lines.append(f"[{status}] {j['id']} [{job_kind}] {sched} ({count}/{mx})")
-                if summary:
-                    lines.append(f"  {summary}")
-            await self._reply_text(update, "\n".join(lines))
+            await self._reply_text(
+                update,
+                runtime_menu_views.loop_list_text(loops),
+                parse_mode="HTML",
+            )
             return
 
         if sub_lower.startswith("stop"):
@@ -3559,18 +3519,29 @@ class BridgeAgentRuntime:
             return
         args = [a.strip().lower() for a in (context.args or []) if a.strip()]
         if not args:
-            status = "ON 🛡️" if self._safevoice_enabled else "OFF"
-            await update.message.reply_text(f"Safe Voice: {status}\nUsage: /safevoice on | off")
+            await update.message.reply_text(
+                runtime_menu_views.safevoice_menu_text(enabled=self._safevoice_enabled),
+                parse_mode="HTML",
+                reply_markup=runtime_menu_views.safevoice_keyboard(enabled=self._safevoice_enabled),
+            )
             return
         if args[0] == "on":
             self._safevoice_enabled = True
             self._save_safevoice_state(True)
-            await update.message.reply_text("🛡️ Safe Voice ON — voice messages will require confirmation before sending to agent.")
+            await update.message.reply_text(
+                runtime_menu_views.safevoice_menu_text(enabled=True),
+                parse_mode="HTML",
+                reply_markup=runtime_menu_views.safevoice_keyboard(enabled=True),
+            )
         elif args[0] == "off":
             self._safevoice_enabled = False
             self._save_safevoice_state(False)
             self._pending_voice.clear()
-            await update.message.reply_text("Safe Voice OFF — voice messages go directly to agent.")
+            await update.message.reply_text(
+                runtime_menu_views.safevoice_menu_text(enabled=False),
+                parse_mode="HTML",
+                reply_markup=runtime_menu_views.safevoice_keyboard(enabled=False),
+            )
         else:
             await update.message.reply_text("Usage: /safevoice on | off")
 
@@ -3581,6 +3552,18 @@ class BridgeAgentRuntime:
         parts = (query.data or "").split(":", 2)
         action = parts[1] if len(parts) > 1 else ""
         chat_key = parts[2] if len(parts) > 2 else ""
+        if action == "set" and chat_key in {"on", "off"}:
+            self._safevoice_enabled = chat_key == "on"
+            self._save_safevoice_state(self._safevoice_enabled)
+            if not self._safevoice_enabled:
+                self._pending_voice.clear()
+            await query.edit_message_text(
+                runtime_menu_views.safevoice_menu_text(enabled=self._safevoice_enabled),
+                parse_mode="HTML",
+                reply_markup=runtime_menu_views.safevoice_keyboard(enabled=self._safevoice_enabled),
+            )
+            await query.answer("Safe Voice updated")
+            return
         pending = self._pending_voice.pop(chat_key, None)
         if action == "yes" and pending:
             await query.edit_message_text(f"✅ Confirmed. Sending to agent:\n\n_{pending['transcript']}_", parse_mode="Markdown")
@@ -3602,6 +3585,7 @@ class BridgeAgentRuntime:
             await update.message.reply_text(
                 self.voice_manager.voice_menu_text(),
                 reply_markup=self._voice_keyboard(),
+                parse_mode="HTML",
             )
             return
         mode = args[0].lower()
@@ -3612,6 +3596,7 @@ class BridgeAgentRuntime:
             await update.message.reply_text(
                 self.voice_manager.voice_menu_text(),
                 reply_markup=self._voice_keyboard(),
+                parse_mode="HTML",
             )
             return
         if mode == "use":
@@ -3707,7 +3692,11 @@ class BridgeAgentRuntime:
             return
         prompt_text = " ".join(raw_args).strip()
         if not prompt_text:
-            await update.message.reply_text("Usage: /debug <prompt> or /debug on|off")
+            enabled = "debug" in self.skill_manager.get_active_toggle_ids(self.config.workspace_dir)
+            await update.message.reply_text(
+                runtime_menu_views.debug_menu_text(enabled=enabled),
+                parse_mode="HTML",
+            )
             return
         prompt = self.skill_manager.build_prompt_for_skill(skill, prompt_text)
         await update.message.reply_text(f"Running skill {skill.id}...")
@@ -3730,14 +3719,7 @@ class BridgeAgentRuntime:
             grouped = self._skills_by_type()
             count = sum(len(items) for items in grouped.values())
             await update.message.reply_text(
-                setting_card(
-                    "🧰",
-                    "Skills",
-                    current=f"<code>{count}</code> available",
-                    facts=[f"<b>Agent</b> · <code>{html.escape(self.name)}</code>"],
-                    consequence="Toggle changes persist in this workspace; actions run immediately.",
-                    action="Choose a skill for its status and available actions.",
-                ),
+                runtime_menu_views.skills_menu_text(count=count, agent_name=self.name),
                 parse_mode="HTML",
                 reply_markup=self._skill_keyboard(),
             )
@@ -3746,12 +3728,19 @@ class BridgeAgentRuntime:
         sub = args[0].strip().lower()
         if sub == "help":
             grouped = self._skills_by_type()
-            lines = [card_title("🧰", "Skills reference"), ""]
+            count = sum(len(items) for items in grouped.values())
+            lines = [
+                card_title("🧰", "Skills reference"),
+                "",
+                f"<b>Current</b> · <code>{count}</code> available",
+                f"<b>Agent</b> · <code>{html.escape(self.name)}</code>",
+                "",
+            ]
             for skill_type in ("action", "toggle", "prompt"):
                 entries = grouped.get(skill_type, [])
                 if not entries:
                     continue
-                lines.append(skill_type.upper())
+                lines.append(f"<b>{skill_type.upper()}</b>")
                 for skill in entries:
                     lines.append(
                         f"<code>{html.escape(skill.id)}</code> · {html.escape(skill.description)}"
@@ -3781,10 +3770,24 @@ class BridgeAgentRuntime:
                     skill.id,
                     enabled=(rest.lower() == "on"),
                 )
-                await update.message.reply_text(message, reply_markup=self._skill_action_keyboard(skill))
+                await update.message.reply_text(
+                    f"✅ {html.escape(message)}\n\n"
+                    + runtime_menu_views.skill_detail_text(
+                        skill,
+                        self.config.workspace_dir,
+                        manager=self.skill_manager,
+                    ),
+                    parse_mode="HTML",
+                    reply_markup=self._skill_action_keyboard(skill),
+                )
                 return
             await update.message.reply_text(
-                self.skill_manager.describe_skill(skill, self.config.workspace_dir),
+                runtime_menu_views.skill_detail_text(
+                    skill,
+                    self.config.workspace_dir,
+                    manager=self.skill_manager,
+                ),
+                parse_mode="HTML",
                 reply_markup=self._skill_action_keyboard(skill),
             )
             return
@@ -3809,7 +3812,12 @@ class BridgeAgentRuntime:
 
         if not rest:
             await update.message.reply_text(
-                self.skill_manager.describe_skill(skill, self.config.workspace_dir),
+                runtime_menu_views.skill_detail_text(
+                    skill,
+                    self.config.workspace_dir,
+                    manager=self.skill_manager,
+                ),
+                parse_mode="HTML",
                 reply_markup=self._skill_action_keyboard(skill),
             )
             return
@@ -3834,7 +3842,7 @@ class BridgeAgentRuntime:
             return
         task = " ".join(context.args or []).strip()
         if not task:
-            await update.message.reply_text(get_exp_usage_text())
+            await update.message.reply_text(get_exp_usage_text(), parse_mode="HTML")
             return
         prompt = build_exp_task_prompt(task)
         await update.message.reply_text("Running with EXP guidebook...")
@@ -3986,6 +3994,16 @@ class BridgeAgentRuntime:
                     )
                 return
         if data.startswith("skill:"):
+            if data == "skill:back:menu":
+                grouped = self._skills_by_type()
+                count = sum(len(items) for items in grouped.values())
+                await query.edit_message_text(
+                    runtime_menu_views.skills_menu_text(count=count, agent_name=self.name),
+                    parse_mode="HTML",
+                    reply_markup=self._skill_keyboard(),
+                )
+                await query.answer()
+                return
             _, action, skill_id, *rest = data.split(":")
             skill = self.skill_manager.get_skill(skill_id)
             if skill is None:
@@ -3999,7 +4017,12 @@ class BridgeAgentRuntime:
                     await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
                 else:
                     await query.edit_message_text(
-                        self.skill_manager.describe_skill(skill, self.config.workspace_dir),
+                        runtime_menu_views.skill_detail_text(
+                            skill,
+                            self.config.workspace_dir,
+                            manager=self.skill_manager,
+                        ),
+                        parse_mode="HTML",
                         reply_markup=self._skill_action_keyboard(skill),
                     )
                 await query.answer()
@@ -4008,7 +4031,13 @@ class BridgeAgentRuntime:
                 enabled = rest[0] == "on"
                 ok, message = self.skill_manager.set_toggle_state(self.config.workspace_dir, skill.id, enabled=enabled)
                 await query.edit_message_text(
-                    message,
+                    f"✅ {html.escape(message)}\n\n"
+                    + runtime_menu_views.skill_detail_text(
+                        skill,
+                        self.config.workspace_dir,
+                        manager=self.skill_manager,
+                    ),
+                    parse_mode="HTML",
                     reply_markup=self._skill_action_keyboard(skill),
                 )
                 await query.answer()
@@ -4378,15 +4407,13 @@ class BridgeAgentRuntime:
         args = context.args or []
         current = load_workzone(self.config.workspace_dir)
         if not args:
-            if current:
-                await update.message.reply_text(
-                    f"Workzone is ON:\n{current}\n\n"
-                    "Use /workzone off to return to the agent home workspace."
-                )
-            else:
-                await update.message.reply_text(
-                    f"Workzone is OFF. Agent home workspace:\n{self.config.workspace_dir}"
-                )
+            await update.message.reply_text(
+                runtime_workzone.workzone_status_text(
+                    home_workspace=self.config.workspace_dir,
+                    current=current,
+                ),
+                parse_mode="HTML",
+            )
             return
         if self.is_generating or not self.queue.empty():
             await update.message.reply_text("Workzone change is blocked while a request is running or queued.")
@@ -4399,7 +4426,12 @@ class BridgeAgentRuntime:
             if self.backend.capabilities.supports_sessions:
                 await self.backend.handle_new_session()
             await update.message.reply_text(
-                f"Workzone OFF. Working directory reset to agent home workspace:\n{self.config.workspace_dir}"
+                runtime_workzone.workzone_status_text(
+                    home_workspace=self.config.workspace_dir,
+                    current=None,
+                    notice="Workzone returned to the agent home workspace.",
+                ),
+                parse_mode="HTML",
             )
             return
         try:
@@ -4413,41 +4445,22 @@ class BridgeAgentRuntime:
         if self.backend.capabilities.supports_sessions:
             await self.backend.handle_new_session()
         await update.message.reply_text(
-            f"Workzone ON:\n{zone}\n\n"
-            "Next request will run from this directory and include a workzone prompt."
+            runtime_workzone.workzone_status_text(
+                home_workspace=self.config.workspace_dir,
+                current=zone,
+                notice="Workzone updated.",
+            ),
+            parse_mode="HTML",
         )
 
     async def cmd_status(self, update, context):
         if update.effective_user.id != self.global_config.authorized_id:
             return
         detailed = bool(context.args and context.args[0].strip().lower() in {"full", "all", "more"})
-        await update.message.reply_text(self._build_status_text(detailed=detailed))
-        return
-        lines = [
-            f"Agent: {self.name}",
-            f"Engine: {self.config.engine}",
-            f"Model: {self.config.model}",
-            f"Workspace: {self.config.workspace_dir.name}",
-            f"Verbose: {'ON 🔍' if self._verbose else 'OFF'}",
-        ]
-        if self.skill_manager:
-            active_skills = sorted(self.skill_manager.get_active_toggle_ids(self.config.workspace_dir))
-            lines.append(f"Active skills: {', '.join(active_skills) if active_skills else 'none'}")
-            lines.append(self.skill_manager.describe_active_heartbeat(self.name).replace("\n", " | "))
-        if self.config.engine == "openrouter-api":
-            lines.append("Session mode: stateless (bridge-managed memory)")
-            lines.append(f"Thinking display: {'ON — traces sent as permanent messages every ~60s' if self._think else 'OFF'}")
-        elif self.config.engine == "claude-cli":
-            lines.append(f"Effort: {getattr(self.backend, 'effort', 'low')}")
-            lines.append("Session mode: stateless (bridge-managed memory)")
-        elif self.config.engine == "codex-cli":
-            lines.append(f"Effort: {self._get_current_effort()}")
-            lines.append("Session mode: stateless (bridge-managed memory)")
-        elif self.backend.capabilities.supports_sessions:
-            lines.append("Session mode: bridge-managed")
-        else:
-            lines.append("Session mode: stateless (bridge-managed memory)")
-        await update.message.reply_text("\n".join(lines))
+        await update.message.reply_text(
+            self._build_status_text(detailed=detailed),
+            parse_mode="HTML",
+        )
 
     def _get_available_models(self) -> list[str]:
         if self.config.engine == "gemini-cli":
@@ -4491,18 +4504,22 @@ class BridgeAgentRuntime:
         available = self._get_available_models()
         if not available:
             await update.message.reply_text(
-                f"Current model: {self.config.model}\nUse /model <name> to switch."
+                runtime_menu_views.model_menu_text(
+                    model=self.config.model,
+                    backend=self.config.engine,
+                    has_choices=False,
+                    persists=False,
+                ),
+                parse_mode="HTML",
             )
             return
 
         await update.message.reply_text(
-            setting_card(
-                "🧠",
-                "Hashi model",
-                current=f"<code>{html.escape(self.config.model)}</code>",
-                facts=[f"<b>Backend</b> · <code>{html.escape(self.config.engine)}</code>"],
-                consequence="The selection applies immediately to the next request.",
-                action="Choose a model.",
+            runtime_menu_views.model_menu_text(
+                model=self.config.model,
+                backend=self.config.engine,
+                has_choices=True,
+                persists=False,
             ),
             parse_mode="HTML",
             reply_markup=self._model_keyboard(),
@@ -4673,62 +4690,20 @@ class BridgeAgentRuntime:
             return None
 
     async def cmd_retry(self, update, context):
+        """Reset stale context, restore recent continuity, and rerun the last prompt."""
+        from orchestrator import runtime_control
+
         if update.effective_user.id != self.global_config.authorized_id:
             return
-        args = [a.strip().lower() for a in (context.args or []) if a.strip()]
-        mode = args[0] if args else "response"
-        chat_id = update.effective_chat.id
-        if mode in {"response", "resp"}:
-            if not self.last_response:
-                # Try to restore last response from transcript (survives reboot)
-                transcript_text = self._load_last_text_from_transcript("assistant")
-                if transcript_text:
-                    await update.message.reply_text("Restoring last response from transcript...")
-                    await self.send_long_message(
-                        chat_id=chat_id,
-                        text=transcript_text,
-                        purpose="retry-response",
-                    )
-                    return
-                # Fallback: re-run last prompt
-                if self.last_prompt:
-                    await update.message.reply_text("No cached response — retrying last prompt...")
-                    await self.enqueue_request(
-                        self.last_prompt.chat_id,
-                        self.last_prompt.prompt,
-                        "retry",
-                        "Retry request",
-                    )
-                else:
-                    await update.message.reply_text("Nothing to retry — no previous response or prompt.")
-                return
-            await update.message.reply_text("Resending last response...")
-            await self.send_long_message(
-                chat_id=self.last_response["chat_id"],
-                text=self.last_response["text"],
-                request_id=self.last_response.get("request_id"),
-                purpose="retry-response",
-            )
+        await runtime_control.cmd_retry(self, update, context)
+
+    async def cmd_resend(self, update, context):
+        """Replay the previous model or Bridge output without model work."""
+        from orchestrator import runtime_control
+
+        if update.effective_user.id != self.global_config.authorized_id:
             return
-        if mode in {"prompt", "req", "request"}:
-            if not self.last_prompt:
-                # Try to restore last user prompt from transcript
-                transcript_text = self._load_last_text_from_transcript("user")
-                if transcript_text:
-                    await update.message.reply_text("Restoring last prompt from transcript...")
-                    await self.enqueue_request(chat_id, transcript_text, "retry", "Retry request")
-                else:
-                    await update.message.reply_text("No previous prompt to rerun.")
-                return
-            await update.message.reply_text("Retrying last prompt...")
-            await self.enqueue_request(
-                self.last_prompt.chat_id,
-                self.last_prompt.prompt,
-                "retry",
-                "Retry request",
-            )
-            return
-        await update.message.reply_text("Usage: /retry [response|prompt]")
+        await runtime_control.cmd_resend(self, update, context)
 
     async def cmd_clear(self, update, context):
         if update.effective_user.id != self.global_config.authorized_id:
@@ -4843,14 +4818,12 @@ class BridgeAgentRuntime:
             hard_min = int(hard_s) // 60
             def_idle_min = default_idle // 60
             def_hard_min = default_hard // 60
-            text = (
-                f"<b>⏱ Timeout — {self.name}</b>\n\n"
-                f"  Idle:  <b>{idle_min} min</b>  (default: {def_idle_min} min)\n"
-                f"  Hard:  <b>{hard_min} min</b>  (default: {def_hard_min} min)\n\n"
-                f"Usage:\n"
-                f"  <code>/timeout 30</code>        — set idle to 30 min\n"
-                f"  <code>/timeout 30 120</code>    — idle=30 min, hard=120 min\n"
-                f"  <code>/timeout reset</code>     — restore defaults"
+            text = runtime_menu_views.timeout_menu_text(
+                agent_name=self.name,
+                idle_minutes=idle_min,
+                hard_minutes=hard_min,
+                default_idle_minutes=def_idle_min,
+                default_hard_minutes=def_hard_min,
             )
             await update.message.reply_text(text, parse_mode="HTML")
             return
@@ -4902,16 +4875,8 @@ class BridgeAgentRuntime:
         args = [a.strip() for a in (context.args or []) if a.strip()]
         if len(args) < 2:
             await update.message.reply_text(
-                "💬 Hchat — Ask this agent to compose & send a message to another agent\n\n"
-                "Usage: /hchat <agent> <intent>  — local instance only\n"
-                "       /hchat <agent>@<INSTANCE> <intent>  — cross-instance via HASHI1 exchange\n"
-                "       /hchat all <intent>  — broadcast to all local active agents (excludes temp)\n\n"
-                "Example: /hchat lily give her an update on what we've been doing\n"
-                "Example: /hchat rika@HASHI2 ask her for the latest test result\n"
-                "Example: /hchat hashiko@MSI tell her the route is fixed\n"
-                "Example: /hchat arale 告诉她新的 debug toggle 功能已完成\n"
-                "Example: /hchat all 告诉大家新功能上线了\n\n"
-                "Note: no @ means local only. Cross-instance targets must be written as agent@INSTANCE."
+                runtime_menu_views.hchat_help_text(),
+                parse_mode="HTML",
             )
             return
         target_name = args[0].lower()
@@ -5002,17 +4967,9 @@ class BridgeAgentRuntime:
             return
 
         data = key_info.get("data", {})
-        label = data.get("label", "unknown")
-        usage = data.get("usage", "unknown")
-        limit = data.get("limit", "unknown")
-        limit_remaining = data.get("limit_remaining", "unknown")
-        is_free_tier = data.get("is_free_tier", False)
         await update.message.reply_text(
-            f"OpenRouter key: {label}\n"
-            f"Usage: {usage}\n"
-            f"Limit: {limit}\n"
-            f"Remaining: {limit_remaining}\n"
-            f"Free tier: {is_free_tier}"
+            runtime_menu_views.credit_status_text(data),
+            parse_mode="HTML",
         )
 
     async def cmd_wa_on(self, update, context):
@@ -5059,25 +5016,33 @@ class BridgeAgentRuntime:
             return
 
         project_root = self.config.project_root
-        if not private_wol_available(project_root):
+        instance_id = getattr(self.global_config, "instance_id", None)
+        if not private_wol_available(project_root, instance_id):
             await update.message.reply_text("⚪ /wol is not enabled on this instance.")
             return
 
         arg = (context.args[0].strip().lower() if context.args else "")
         if not arg or arg in {"list", "status", "help"}:
             targets = describe_wol_targets(project_root)
-            lines = ["🪄 Private WoL targets on this instance:"]
-            for row in targets:
-                desc = f" — {row['description']}" if row["description"] else ""
-                lines.append(f"- {row['name']} ({row['label']}){desc}")
-            lines.append("")
-            lines.append("Usage: /wol <pc_name>")
-            await update.message.reply_text("\n".join(lines))
+            await update.message.reply_text(
+                runtime_menu_views.wol_targets_text(targets, instance_id=instance_id),
+                parse_mode="HTML",
+            )
             return
 
-        await update.message.reply_text(f"🪄 Sending Wake-on-LAN packet for `{arg}`…")
+        await update.message.reply_text(
+            f"🪄 Sending Wake-on-LAN packet for <code>{html.escape(arg)}</code>…",
+            parse_mode="HTML",
+        )
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(None, lambda: run_private_wol(project_root, arg))
+        result = await loop.run_in_executor(
+            None,
+            lambda: run_private_wol(
+                project_root,
+                arg,
+                configured_instance_id=instance_id,
+            ),
+        )
         if result.get("ok"):
             output = (result.get("stdout") or "").strip()
             if len(output) > 2500:
@@ -5121,7 +5086,8 @@ class BridgeAgentRuntime:
             BotCommand("recall", "Clear queued requests [newest count]"),
             BotCommand("reboot", "Hot restart agents"),
             BotCommand("terminate", "Shut down this agent"),
-            BotCommand("retry", "Resend response or rerun prompt"),
+            BotCommand("resend", "Replay previous model or Bridge output"),
+            BotCommand("retry", "Reset context and rerun last prompt"),
             BotCommand("debug", "Run in strict debug mode"),
             BotCommand("skill", "Browse and run skills"),
             BotCommand("exp", "Run a task with the EXP guidebook"),
@@ -5138,7 +5104,10 @@ class BridgeAgentRuntime:
             BotCommand("wa_send", "Send a WhatsApp message"),
             BotCommand("usecomputer", "Enable or run GUI-aware computer-use mode"),
         ]
-        if private_wol_available(self.config.project_root):
+        if private_wol_available(
+            self.config.project_root,
+            getattr(self.global_config, "instance_id", None),
+        ):
             commands.append(BotCommand("wol", "Send Wake-on-LAN magic packet [pc_name]"))
         if self.config.engine == "openrouter-api":
             commands.append(BotCommand("credit", "Show OpenRouter balance"))
@@ -5183,6 +5152,7 @@ class BridgeAgentRuntime:
         self.app.add_handler(CommandHandler("recall", self.cmd_recall))
         self.app.add_handler(CommandHandler("terminate", self.cmd_terminate))
         self.app.add_handler(CommandHandler("reboot", self.cmd_reboot))
+        self.app.add_handler(CommandHandler("resend", self.cmd_resend))
         self.app.add_handler(CommandHandler("retry", self.cmd_retry))
         self.app.add_handler(CommandHandler("think", self.cmd_think))
         self.app.add_handler(CommandHandler("verbose", self.cmd_verbose))

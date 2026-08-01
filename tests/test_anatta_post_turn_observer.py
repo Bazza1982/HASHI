@@ -94,7 +94,16 @@ async def test_anatta_pre_turn_provider_injects_and_reuses_cached_state():
 def test_anatta_source_policy_skips_internal_sources():
     observer = AnattaPostTurnObserver(_Layer("on"))
 
-    for source in ["startup", "system", "scheduler", "scheduler-skill", "loop_skill", "retry", "hchat-reply:akane"]:
+    for source in [
+        "startup",
+        "system",
+        "scheduler",
+        "scheduler-skill",
+        "loop_skill",
+        "retry",
+        "retry-handoff",
+        "hchat-reply:akane",
+    ]:
         assert not observer.should_observe(source, is_bridge_request=False)
         assert not observer.should_provide(source, is_bridge_request=False)
 

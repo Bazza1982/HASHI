@@ -15,6 +15,7 @@ try:
 except Exception:  # pragma: no cover - optional dependency fallback
     yaml = None
 
+from orchestrator.runtime_defaults import DEFAULT_HASHI_REMOTE_PORT
 from remote.local_http import local_http_hosts
 from remote.runtime_identity import (
     configured_instance_id,
@@ -109,9 +110,9 @@ def _resolve_remote_port(root: Path, data: dict[str, Any]) -> int:
             pass
     server = data.get("server") or {}
     try:
-        return int(server.get("port") or 8766)
+        return int(server.get("port") or DEFAULT_HASHI_REMOTE_PORT)
     except Exception:
-        return 8766
+        return DEFAULT_HASHI_REMOTE_PORT
 
 
 def load_settings(root: Path | str | None = None) -> RemoteLifecycleSettings:

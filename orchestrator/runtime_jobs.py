@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import html
 import logging
 import time
 import uuid
@@ -108,12 +109,6 @@ def _build_jobs_with_buttons(runtime, agent_name: str, skill_manager, filter_age
         return "Could not read tasks.json.", None
 
     scope = filter_agent or "all agents"
-    lines = [
-        card_title("📋", "Scheduled jobs"),
-        "",
-        f"<b>Current scope</b> · <code>{scope}</code>",
-        "<b>Changes</b> · immediate and persistent",
-    ]
     buttons: list = []
 
     all_jobs: list[tuple[str, dict]] = []
@@ -121,62 +116,52 @@ def _build_jobs_with_buttons(runtime, agent_name: str, skill_manager, filter_age
     for h in data.get("heartbeats", []):
         if filter_agent and h.get("agent") != filter_agent:
             continue
-        interval = h.get("interval_seconds", 0)
-        if interval >= 3600:
-            interval_s = f"every {interval // 3600}h"
-        elif interval >= 60:
-            interval_s = f"every {interval // 60}m"
-        else:
-            interval_s = f"every {interval}s"
-        status = "✅" if h.get("enabled", False) else "❌"
-        owner = h.get("agent", "?")
-        lines.append(f"\n{status} ⏱ <code>{h['id']}</code> — {interval_s} [{owner}]")
-        note = h.get("note", "")
-        if note and note != h["id"]:
-            lines.append(f"   {note}")
-        mismatch = ownership_mismatch_label(h)
-        if mismatch:
-            lines.append(f"   ⚠️ {mismatch}")
         all_jobs.append(("heartbeat", h))
 
     for c in data.get("crons", []):
         if filter_agent and c.get("agent") != filter_agent:
             continue
-        enabled = c.get("enabled", False)
-        schedule = c.get("schedule", "")
-        parts = schedule.split() if schedule else []
-        if len(parts) == 5:
-            minute, hour, dom, month, dow = parts
-            if dom == "*" and month == "*":
-                if dow == "*":
-                    if hour.startswith("*/"):
-                        interval_h = hour[2:]
-                        time_s = f"every {interval_h}h"
-                    elif minute.startswith("*/"):
-                        interval_m = minute[2:]
-                        time_s = f"every {interval_m}m"
-                    else:
-                        try:
-                            time_s = f"{int(hour):02d}:{int(minute):02d}"
-                        except ValueError:
-                            time_s = schedule
-                else:
-                    time_s = schedule
-            else:
-                time_s = schedule
-        else:
-            time_s = schedule or "??:??"
-        freq_label = "every " if "every" in time_s else "daily "
-        status = "✅" if enabled else "❌"
-        owner = c.get("agent", "?")
-        lines.append(f"\n{status} 📅 <code>{c['id']}</code> — {freq_label}{time_s} [{owner}]")
-        note = c.get("note", "")
-        if note and note != c["id"]:
-            lines.append(f"   {note}")
-        mismatch = ownership_mismatch_label(c)
-        if mismatch:
-            lines.append(f"   ⚠️ {mismatch}")
         all_jobs.append(("cron", c))
+
+    active_count = sum(bool(job.get("enabled")) for _kind, job in all_jobs)
+    lines = [
+        card_title("📋", "Scheduled jobs"),
+        "",
+        f"<b>Current</b> · <code>{active_count}</code> active · <code>{len(all_jobs)}</code> configured",
+        f"<b>Scope</b> · <code>{html.escape(scope)}</code>",
+        "<b>Changes</b> · immediate and persistent",
+    ]
+
+    for kind, job in all_jobs:
+        enabled = bool(job.get("enabled"))
+        icon = "⏱" if kind == "heartbeat" else "📅"
+        status = "ON" if enabled else "OFF"
+        jid = str(job.get("id") or "unknown")
+        owner = str(job.get("agent") or "?")
+        if kind == "heartbeat":
+            interval = int(job.get("interval_seconds", 0) or 0)
+            if interval >= 3600:
+                schedule = f"every {interval // 3600}h"
+            elif interval >= 60:
+                schedule = f"every {interval // 60}m"
+            else:
+                schedule = f"every {interval}s"
+        else:
+            schedule = str(job.get("schedule") or job.get("time") or "unknown")
+        lines.extend(
+            [
+                "",
+                f"{icon} <b>{status}</b> · <code>{html.escape(jid)}</code>",
+                f"<b>Schedule</b> · <code>{html.escape(schedule)}</code>",
+                f"<b>Owner</b> · <code>{html.escape(owner)}</code>",
+            ]
+        )
+        note = str(job.get("note") or "")
+        if note and note != jid:
+            lines.append(html.escape(note))
+        mismatch = ownership_mismatch_label(job)
+        if mismatch:
+            lines.append(f"⚠️ {html.escape(str(mismatch))}")
 
     for kind, job in all_jobs:
         jid = job["id"]
@@ -184,7 +169,7 @@ def _build_jobs_with_buttons(runtime, agent_name: str, skill_manager, filter_age
         toggle_mode = "off" if enabled else "on"
         toggle_label = "Turn off" if enabled else "Turn on"
         icon = "⏱" if kind == "heartbeat" else "📅"
-        short_id = jid[:22]
+        short_id = str(jid)[:22]
         run_token = mint_callback_token(runtime, "skilljob_action", {"kind": kind, "task_id": jid, "action": "run"}, prefix="j")
         toggle_token = mint_callback_token(
             runtime,
@@ -231,10 +216,20 @@ def _build_jobs_text(agent_name: str, skill_manager) -> str:
     except Exception:
         return "Could not read tasks.json."
 
-    lines = [card_title("📋", "Scheduled jobs"), "", f"<b>Current scope</b> · <code>{agent_name}</code>", ""]
+    hbs = [h for h in data.get("heartbeats", []) if h.get("agent") == agent_name]
+    crons = [c for c in data.get("crons", []) if c.get("agent") == agent_name]
+    all_jobs = [*hbs, *crons]
+    active_count = sum(bool(job.get("enabled")) for job in all_jobs)
+    lines = [
+        card_title("📋", "Scheduled jobs"),
+        "",
+        f"<b>Current</b> · <code>{active_count}</code> active · <code>{len(all_jobs)}</code> configured",
+        f"<b>Scope</b> · <code>{html.escape(str(agent_name))}</code>",
+        "<b>Changes</b> · immediate and persistent",
+        "",
+    ]
     found = False
 
-    hbs = [h for h in data.get("heartbeats", []) if h.get("agent") == agent_name]
     if hbs:
         lines.append("<b>Heartbeats</b>")
         for h in hbs:
@@ -248,18 +243,18 @@ def _build_jobs_text(agent_name: str, skill_manager) -> str:
                 interval_s = f"{interval}s"
             note = h.get("note", h.get("id", ""))
             action = h.get("action", "enqueue_prompt")
-            lines.append(f"  {enabled} <code>{h['id']}</code>  every {interval_s}")
+            job_id = str(h.get("id") or "unknown")
+            lines.append(f"  {enabled} <code>{html.escape(job_id)}</code> · every {html.escape(interval_s)}")
             if action != "enqueue_prompt":
-                lines.append(f"      action: {action}")
-            if note and note != h["id"]:
-                lines.append(f"      {note}")
+                lines.append(f"      action · <code>{html.escape(str(action))}</code>")
+            if note and note != job_id:
+                lines.append(f"      {html.escape(str(note))}")
             mismatch = ownership_mismatch_label(h)
             if mismatch:
-                lines.append(f"      ⚠️ {mismatch}")
+                lines.append(f"      ⚠️ {html.escape(str(mismatch))}")
         lines.append("")
         found = True
 
-    crons = [c for c in data.get("crons", []) if c.get("agent") == agent_name]
     if crons:
         lines.append("<b>Crons</b>")
         for c in crons:
@@ -267,14 +262,15 @@ def _build_jobs_text(agent_name: str, skill_manager) -> str:
             time_s = c.get("time", "??:??")
             action = c.get("action", "enqueue_prompt")
             note = c.get("note", c.get("id", ""))
-            lines.append(f"  {enabled} <code>{c['id']}</code>  at {time_s}")
+            job_id = str(c.get("id") or "unknown")
+            lines.append(f"  {enabled} <code>{html.escape(job_id)}</code> · at {html.escape(str(time_s))}")
             if action != "enqueue_prompt":
-                lines.append(f"      action: {action}")
-            if note and note != c["id"]:
-                lines.append(f"      {note}")
+                lines.append(f"      action · <code>{html.escape(str(action))}</code>")
+            if note and note != job_id:
+                lines.append(f"      {html.escape(str(note))}")
             mismatch = ownership_mismatch_label(c)
             if mismatch:
-                lines.append(f"      ⚠️ {mismatch}")
+                lines.append(f"      ⚠️ {html.escape(str(mismatch))}")
         lines.append("")
         found = True
 

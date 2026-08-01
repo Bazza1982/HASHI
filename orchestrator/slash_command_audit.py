@@ -8,19 +8,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from orchestrator.command_specs import SENSITIVE_COMMAND_NAMES
+
 _WRITE_LOCK = threading.Lock()
 
-_SENSITIVE_COMMANDS = frozenset(
-    {
-        "notepad",
-        "token",
-        "pswd",
-        "hchat",
-        "memory",
-        "sys",
-        "credit",
-    }
-)
+# `pswd` is provided by an optional private command package rather than the
+# built-in registry, so it remains an explicit external sensitivity rule.
+_SENSITIVE_COMMANDS = SENSITIVE_COMMAND_NAMES | {"pswd"}
 _SECRET_PATTERN = re.compile(
     r"(?i)(api[_-]?key|token|password|passwd|secret|bearer)\s*[:=]\s*\S+"
 )

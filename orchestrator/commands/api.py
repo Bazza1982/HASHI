@@ -109,7 +109,7 @@ def _status_text(runtime: Any, *, prefix: str = "") -> str:
         [
             card_title("🔌", "Hashi API gateway"),
             "",
-            f"<b>STATUS</b> · {'🟢' if running else '⚪'} <b>{'ON' if running else 'OFF'}</b>",
+            f"<b>Current</b> · <b>{'ON' if running else 'OFF'}</b>",
             f"<b>Starts after reboot</b> · <code>{'yes' if configured else 'no'}</code>",
             f"<b>Default model</b> · <code>{html.escape(cfg['default_model'])}</code>",
             "",

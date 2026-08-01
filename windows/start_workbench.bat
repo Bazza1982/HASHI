@@ -3,13 +3,15 @@ chcp 65001 >nul
 setlocal
 
 :: ============================================================
-:: HASHI9 - Start Workbench
+:: HASHI - Start Workbench
 :: Delegates to bin\bridge-u.bat with --workbench flag.
 :: Reads Workbench port from agents.json.
 :: Logs written to: windows\logs\workbench_<timestamp>.log
 :: ============================================================
 
 set ROOT=%~dp0..
+set "INSTANCE_ID=HASHI"
+for /f "delims=" %%i in ('powershell -NoProfile -Command "$cfg = Get-Content '%ROOT%\agents.json' -Raw | ConvertFrom-Json; if ($cfg.global.instance_id) { $cfg.global.instance_id } else { 'HASHI' }"') do set "INSTANCE_ID=%%i"
 set LOG_DIR=%~dp0logs
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
 for /f %%p in ('powershell -NoProfile -Command "$cfg = Get-Content '%ROOT%\agents.json' -Raw | ConvertFrom-Json; if ($cfg.global.workbench_port) { $cfg.global.workbench_port } else { 18800 }"') do set WB_PORT=%%p
@@ -20,12 +22,12 @@ for /f "tokens=1-3 delims=:." %%a in ("%TIME: =0%") do set T=%%a%%b%%c
 set LOG_FILE=%LOG_DIR%\workbench_%D%_%T%.log
 
 echo ==================================================== >> "%LOG_FILE%"
-echo HASHI9 Workbench >> "%LOG_FILE%"
+echo %INSTANCE_ID% Workbench >> "%LOG_FILE%"
 echo Port: %WB_PORT% >> "%LOG_FILE%"
 echo Started: %DATE% %TIME% >> "%LOG_FILE%"
 echo ==================================================== >> "%LOG_FILE%"
 
-echo Starting HASHI9 with Workbench enabled (port %WB_PORT%)...
+echo Starting %INSTANCE_ID% with Workbench enabled (port %WB_PORT%)...
 echo Log file: %LOG_FILE%
 echo.
 

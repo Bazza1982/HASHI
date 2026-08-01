@@ -6,7 +6,8 @@ import json
 
 import pytest
 
-from orchestrator.runtime_superloop import handle_superloop_command
+from orchestrator.commands.superloop import CALLBACKS, superloop_callback
+from orchestrator.runtime_superloop import handle_superloop_callback, handle_superloop_command
 from orchestrator.superloop_scheduler import advance_superloops_once
 from orchestrator.superloop_store import SuperloopStore
 
@@ -16,14 +17,48 @@ class _FakeRuntime:
         self.name = "zelda"
         self.global_config = SimpleNamespace(project_root=root)
         self.messages: list[str] = []
+        self.reply_kwargs: list[dict] = []
 
-    async def _reply_text(self, _update, text: str, **_kwargs):
+    async def _reply_text(self, _update, text: str, **kwargs):
         self.messages.append(text)
+        self.reply_kwargs.append(kwargs)
 
 
 class _FakeUpdate:
     def __init__(self, text: str):
         self.message = SimpleNamespace(text=text)
+
+
+class _FakeQuery:
+    def __init__(self, data: str):
+        self.data = data
+        self.from_user = SimpleNamespace(id=1)
+        self.answers: list[tuple[str | None, dict]] = []
+        self.edits: list[tuple[str, dict]] = []
+
+    async def answer(self, text: str | None = None, **kwargs):
+        self.answers.append((text, kwargs))
+
+    async def edit_message_text(self, text: str, **kwargs):
+        self.edits.append((text, kwargs))
+
+
+def test_superloop_menu_callback_is_registered_modularly() -> None:
+    assert len(CALLBACKS) == 1
+    assert CALLBACKS[0].pattern == r"^superloop:"
+    assert CALLBACKS[0].callback is superloop_callback
+
+
+@pytest.mark.asyncio
+async def test_superloop_menu_callback_rejects_unauthorized_users(tmp_path: Path) -> None:
+    runtime = _FakeRuntime(tmp_path)
+    runtime._is_authorized_user = lambda user_id: False
+    query = _FakeQuery("superloop:menu")
+
+    await superloop_callback(runtime, SimpleNamespace(callback_query=query), None)
+
+    assert query.answers == [(None, {})]
+    assert query.edits == []
 
 
 @pytest.mark.asyncio
@@ -134,15 +169,21 @@ async def test_superloop_quickstart_and_wizard(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_superloop_help_is_visual(tmp_path: Path) -> None:
+async def test_superloop_help_uses_standard_hashi_card_and_navigation(tmp_path: Path) -> None:
     runtime = _FakeRuntime(tmp_path)
     await handle_superloop_command(runtime, _FakeUpdate("/superloop"), "")
     help_text = runtime.messages[-1]
-    assert "快速开始" in help_text
-    assert "/superloop quickstart <goal>" in help_text
-    assert "/superloop list" in help_text
-    assert "/superloop validate <loop_id>" in help_text
-    assert "/superloop closeout <loop_id>" in help_text
+    kwargs = runtime.reply_kwargs[-1]
+
+    assert help_text.startswith("🧭 <b>SUPERLOOP</b>\n━━━━━━━━━━━━━━━━")
+    assert "<b>Current</b> · <code>READY</code>" in help_text
+    assert "<b>Changes</b> · immediate and persistent" in help_text
+    assert "/superloop quickstart &lt;goal&gt;" in help_text
+    assert kwargs["parse_mode"] == "HTML"
+    buttons = kwargs["reply_markup"].inline_keyboard
+    assert buttons[0][0].callback_data == "superloop:list:0"
+    assert buttons[-1][0].text == "↻ Refresh"
+    assert buttons[-1][0].callback_data == "superloop:menu"
 
 
 @pytest.mark.asyncio
@@ -152,7 +193,7 @@ async def test_superloop_list_shows_templates(tmp_path: Path) -> None:
     auto_debug = templates_root / "auto_debug"
     auto_debug.mkdir(parents=True)
     (auto_debug / "README.md").write_text(
-        "# Auto Debug Superloop Template\n\n## Purpose\n\nRun a bug investigation and repair loop.\n",
+        "# Auto <Debug> & Repair\n\n## Purpose\n\nRun a bug investigation and repair loop.\n",
         encoding="utf-8",
     )
     (auto_debug / "taskboard.template.json").write_text("[]", encoding="utf-8")
@@ -168,11 +209,46 @@ async def test_superloop_list_shows_templates(tmp_path: Path) -> None:
 
     await handle_superloop_command(runtime, _FakeUpdate("/superloop list"), "list")
     list_text = runtime.messages[-1]
-    assert "模板列表" in list_text
-    assert "Auto Debug Superloop Template" in list_text
+    kwargs = runtime.reply_kwargs[-1]
+
+    assert list_text.startswith("📚 <b>SUPERLOOP TEMPLATES</b>\n━━━━━━━━━━━━━━━━")
+    assert "<b>Current</b> · <code>2</code> templates" in list_text
+    assert "<b>Page</b> · <code>1/1</code>" in list_text
+    assert "Auto &lt;Debug&gt; &amp; Repair" in list_text
     assert "Remote Install Superloop Template" in list_text
-    assert "slug: `auto_debug`" in list_text
-    assert "包含: `README · taskboard`" in list_text
+    assert "<b>ID</b> · <code>auto_debug</code>" in list_text
+    assert "<b>Includes</b> · <code>README · taskboard</code>" in list_text
+    assert kwargs["parse_mode"] == "HTML"
+    buttons = kwargs["reply_markup"].inline_keyboard
+    assert buttons[0][0].text == "↻ Refresh"
+    assert buttons[-1][0].text == "← Back"
+
+
+@pytest.mark.asyncio
+async def test_superloop_template_list_callback_pages_and_returns(tmp_path: Path) -> None:
+    runtime = _FakeRuntime(tmp_path)
+    templates_root = tmp_path / "superloops" / "templates"
+    for index in range(5):
+        template = templates_root / f"template_{index}"
+        template.mkdir(parents=True)
+        (template / "README.md").write_text(
+            f"# Template {index}\n\n## Purpose\n\nPurpose {index}.\n",
+            encoding="utf-8",
+        )
+
+    query = _FakeQuery("superloop:list:1")
+    await handle_superloop_callback(runtime, SimpleNamespace(callback_query=query))
+
+    assert query.answers == [(None, {})]
+    text, kwargs = query.edits[-1]
+    assert "<b>Page</b> · <code>2/2</code>" in text
+    assert "<b>5 · Template 4</b>" in text
+    assert "Template 0" not in text
+    assert kwargs["parse_mode"] == "HTML"
+    buttons = kwargs["reply_markup"].inline_keyboard
+    assert buttons[0][0].text == "← Previous"
+    assert buttons[0][0].callback_data == "superloop:list:0"
+    assert buttons[-1][0].text == "← Back"
 
 
 @pytest.mark.asyncio

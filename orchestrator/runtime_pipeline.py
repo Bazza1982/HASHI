@@ -10,8 +10,13 @@ import hashlib as _hashlib
 from telegram.error import RetryAfter
 
 from orchestrator.runtime_common import _print_final_response, _safe_excerpt
+from orchestrator import runtime_retry
 from orchestrator import telegram_delivery_failover
 from orchestrator import telegram_stream_policy
+from orchestrator.memory_plus_mode import (
+    extract_memory_plus_update_details,
+    is_memory_plus_enabled,
+)
 from orchestrator.telegram_notifications import disable_notification
 
 EMPTY_SUCCESS_TOOL_FAILURE_MESSAGE = (
@@ -97,6 +102,7 @@ class InteractiveFeedback:
 def begin_queue_item(runtime, item) -> QueueItemStart:
     if not item.silent:
         runtime.last_prompt = item
+        runtime_retry.remember_retryable_prompt(runtime, item)
     is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
     queued_at = datetime.fromisoformat(item.created_at)
     queue_wait_s = (datetime.now() - queued_at).total_seconds()
@@ -135,25 +141,46 @@ def begin_queue_item(runtime, item) -> QueueItemStart:
 
 async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPrompt:
     effective_prompt = runtime._consume_session_primer(item)
-    habit_sections, habit_ids = runtime._build_habit_sections(item, effective_prompt)
-    extra_sections = runtime._workzone_prompt_section() + habit_sections
-    extra_sections += await runtime._build_pre_turn_context_sections(
-        item,
-        effective_prompt,
-        is_bridge_request=is_bridge_request,
+    backend = runtime.backend_manager.current_backend
+    supports_sessions = bool(
+        getattr(getattr(backend, "capabilities", None), "supports_sessions", False)
     )
-    runtime.current_request_meta["habit_ids"] = habit_ids
+    session_id = getattr(backend, "_session_id", None)
     incremental = (
         runtime.backend_manager.agent_mode == "fixed"
-        and hasattr(runtime.backend_manager.current_backend, "_session_id")
-        and runtime.backend_manager.current_backend._session_id is not None
+        and supports_sessions
+        and session_id is not None
     )
-    prompt_payload = runtime.context_assembler.build_prompt_payload(
+    continuity_enabled = is_memory_plus_enabled(runtime.workspace_dir)
+    habit_sections, habit_ids = runtime._build_habit_sections(item, effective_prompt)
+    extra_sections = runtime._workzone_prompt_section() + habit_sections
+    pre_turn_builder = runtime._build_pre_turn_context_sections
+    pre_turn_kwargs = {"is_bridge_request": is_bridge_request}
+    if "metadata" in inspect.signature(pre_turn_builder).parameters:
+        pre_turn_kwargs["metadata"] = {
+            "incremental": incremental,
+            "continuity_enabled": continuity_enabled,
+            "supports_sessions": supports_sessions,
+            "session_id": session_id or "",
+            "engine": runtime.config.active_backend,
+        }
+    extra_sections += await pre_turn_builder(item, effective_prompt, **pre_turn_kwargs)
+    runtime.current_request_meta["habit_ids"] = habit_ids
+    context_profile = None
+    if continuity_enabled:
+        context_profile = "memory_plus_session" if supports_sessions and runtime.backend_manager.agent_mode == "fixed" else "memory_plus_stateless"
+    prompt_builder = runtime.context_assembler.build_prompt_payload
+    prompt_kwargs = {
+        "extra_sections": extra_sections,
+        "inject_memory": not item.skip_memory_injection,
+        "incremental": incremental,
+    }
+    if "context_profile" in inspect.signature(prompt_builder).parameters:
+        prompt_kwargs["context_profile"] = context_profile
+    prompt_payload = prompt_builder(
         effective_prompt,
         runtime.config.active_backend,
-        extra_sections=extra_sections,
-        inject_memory=not item.skip_memory_injection,
-        incremental=incremental,
+        **prompt_kwargs,
     )
     final_prompt = prompt_payload["final_prompt"]
     prompt_audit = prompt_payload.get("audit", {})
@@ -828,9 +855,10 @@ async def prepare_successful_response(runtime, item, response, *, completion_pat
         item,
         display_text or response.text,
     )
+    safe_core_raw = extract_memory_plus_update_details(response.text).visible_text
     runtime._append_core_transcript(
         item,
-        core_raw=response.text,
+        core_raw=safe_core_raw,
         visible_text=visible_text,
         completion_path=completion_path,
         wrapper_result=wrapper_result,
@@ -844,7 +872,7 @@ async def prepare_successful_response(runtime, item, response, *, completion_pat
             "error": None,
             "source": item.source,
             "summary": item.summary,
-            **runtime._wrapper_listener_fields(response.text, visible_text, wrapper_result),
+            **runtime._wrapper_listener_fields(safe_core_raw, visible_text, wrapper_result),
         },
     )
     return SuccessfulResponse(
@@ -988,7 +1016,7 @@ def persist_success_memory(
         )
     if not is_bridge_request:
         runtime.handoff_builder.append_transcript("user", item.prompt, item.source)
-        runtime.handoff_builder.append_transcript("assistant", visible_text)
+        runtime.handoff_builder.append_transcript("assistant", visible_text, item.source)
         runtime.handoff_builder.refresh_recent_context()
         runtime.project_chat_logger.log_exchange(item.prompt, visible_text, item.source)
 
@@ -1004,7 +1032,8 @@ async def handle_backend_error(
     user_interrupt_reason: str | None = None,
 ) -> None:
     err_msg = response.error or "Unknown error"
-    # /stop and /steer intentionally kill the backend process (e.g. exit -9 / SIGKILL).
+    # /stop, /steer, and /retry intentionally kill the backend process
+    # (e.g. exit -9 / SIGKILL).
     # That is expected course-correction, not a backend failure — never show ❌ Backend error.
     if not user_interrupt_reason:
         from orchestrator.runtime_control import consume_user_interrupt
@@ -1073,7 +1102,7 @@ async def handle_backend_error(
         return
     send_elapsed_s, chunk_count = await runtime.send_long_message(
         chat_id=item.chat_id,
-        text=f"Flex Backend Error ({runtime.config.active_backend}): {err_msg}",
+        text=err_msg,
         request_id=item.request_id,
         purpose="error",
     )
@@ -1113,12 +1142,7 @@ async def handle_success_delivery(
                 pass
         runtime._record_suppressed_transfer_result(item, success=True, text=visible_text)
         return
-    runtime.last_response = {
-        "chat_id": item.chat_id,
-        "text": visible_text,
-        "request_id": item.request_id,
-        "responded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-    }
+    runtime_retry.remember_output(runtime, item, visible_text)
     persist_success_memory(
         runtime,
         item,
@@ -1133,7 +1157,8 @@ async def handle_success_delivery(
 
     response_text = visible_text
     cos_handled = False
-    await runtime._send_wrapper_verbose_trace(item, response.text, visible_text, wrapper_result)
+    safe_core_raw = extract_memory_plus_update_details(response.text).visible_text
+    await runtime._send_wrapper_verbose_trace(item, safe_core_raw, visible_text, wrapper_result)
     if (
         runtime._cos_enabled
         and runtime.name != "lily"
@@ -1168,7 +1193,7 @@ async def handle_success_delivery(
     await runtime._send_voice_reply(item.chat_id, response_text, item.request_id)
     runtime._schedule_audit_followup(
         item,
-        core_raw=response.text,
+        core_raw=safe_core_raw,
         visible_text=visible_text,
         response=response,
         audit_collector=audit_collector,

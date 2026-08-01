@@ -7,19 +7,40 @@ from typing import Any
 
 from orchestrator import runtime_pipeline
 from orchestrator.audit_mode import AuditTelemetryCollector, should_audit_source
+from orchestrator.memory_plus_mode import (
+    ensure_memory_plus_observer,
+    is_memory_plus_enabled,
+    migrate_legacy_memory_plus_runtime,
+    prepare_memory_plus_store,
+)
 from orchestrator.wrapper_mode import SESSION_RESET_SOURCE
 
 
 async def initialize(runtime: Any) -> bool:
     runtime.logger.info(f"Initializing flex agent '{runtime.name}'...")
     result = await runtime.backend_manager.initialize_active_backend()
-    runtime.reload_post_turn_observers()
-    if result and runtime.backend_manager.agent_mode in {"fixed", "memory+"}:
-        backend = runtime.backend_manager.current_backend
-        if hasattr(backend, "set_session_mode"):
-            backend.set_session_mode(True)
+    if result:
+        migrated = migrate_legacy_memory_plus_runtime(runtime)
+        if is_memory_plus_enabled(runtime.workspace_dir):
+            ensure_memory_plus_observer(runtime.workspace_dir)
+            prepare_memory_plus_store(runtime.workspace_dir)
+        if migrated:
             runtime.logger.info(
-                f"{runtime.backend_manager.agent_mode} mode active — session persistence enabled on {runtime.config.active_backend}"
+                "Migrated legacy memory+ mode to mode=%s with continuity enabled",
+                runtime.backend_manager.agent_mode,
+            )
+    runtime.reload_post_turn_observers()
+    if result:
+        backend = runtime.backend_manager.current_backend
+        supports_sessions = bool(
+            getattr(getattr(backend, "capabilities", None), "supports_sessions", False)
+        )
+        session_enabled = runtime.backend_manager.agent_mode == "fixed" and supports_sessions
+        if hasattr(backend, "set_session_mode"):
+            backend.set_session_mode(session_enabled)
+        if session_enabled:
+            runtime.logger.info(
+                f"fixed mode active — session persistence enabled on {runtime.config.active_backend}"
             )
     return result
 
@@ -208,7 +229,7 @@ async def process_queue(runtime: Any) -> None:
             else:
                 from orchestrator.runtime_control import consume_user_interrupt
 
-                # /stop and /steer already notified with user_* reason; do not
+                # /stop, /steer, and /retry already notified with user_* reason; do not
                 # re-label the intentional kill as backend_error or show ❌.
                 interrupt_reason = consume_user_interrupt(
                     runtime, getattr(item, "request_id", None)

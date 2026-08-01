@@ -178,6 +178,7 @@ def test_grok_build_cmd_uses_runtime_effort_change(tmp_path):
 async def test_grok_streaming_json_reconstructs_final_answer_and_emits_deltas(tmp_path):
     fake_grok = _write_fake_grok(tmp_path)
     adapter = GrokCLIAdapter(_agent_config(tmp_path), SimpleNamespace(grok_cmd=str(fake_grok)))
+    adapter.set_session_mode(True)
     events = []
 
     async def collect(event):
@@ -200,6 +201,22 @@ async def test_grok_streaming_json_reconstructs_final_answer_and_emits_deltas(tm
     assert [event.summary for event in text_events] == ["Hel", "lo"]
     thinking_events = [event for event in events if event.kind == KIND_THINKING]
     assert [event.summary for event in thinking_events] == ["thinking"]
+
+
+def test_grok_resume_is_used_only_in_explicit_session_mode(tmp_path):
+    adapter = GrokCLIAdapter(_agent_config(tmp_path), SimpleNamespace(grok_cmd="grok"))
+    adapter._session_id = "sess-existing"
+
+    flex_cmd = adapter._build_cmd("hello")
+    assert "--resume" not in flex_cmd
+
+    adapter.set_session_mode(True)
+    adapter._session_id = "sess-existing"
+    fixed_cmd = adapter._build_cmd("hello")
+    assert fixed_cmd[fixed_cmd.index("--resume") + 1] == "sess-existing"
+
+    adapter.set_session_mode(False)
+    assert adapter._session_id is None
 
 
 @pytest.mark.asyncio
