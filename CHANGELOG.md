@@ -77,6 +77,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Hot restart module consistency** — instance detection consumers now resolve
+  the reloaded provider instead of retaining a stale function reference. Hot
+  restart also fails when any requested agent does not return online or local,
+  and runtime-construction failures now include tracebacks in `bridge.log`.
 - **Duplicate password command alias** — removed the misspelled private
   `/paswd` alias; `/pswd` remains the single password lookup command.
 - **API Gateway `/reboot` adoption** — an enabled in-process Gateway is now

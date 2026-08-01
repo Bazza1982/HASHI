@@ -12,10 +12,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.modules.setdefault("edge_tts", SimpleNamespace())
 
-from orchestrator.runtime_common import QueuedRequest
 from orchestrator import flexible_agent_runtime as flex_module
+from orchestrator import ticket_manager
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.habits import HabitStore
+from orchestrator.runtime_common import QueuedRequest
 
 
 def _seed_local_habits_db(workspace_dir: Path, agent_name: str) -> Path:
@@ -192,6 +193,27 @@ def test_habit_store_must_be_reinitialized_after_habits_db_is_deleted(tmp_path):
     retrieved = reinitialized.retrieve("please verify this", source="text", summary="please verify this")
 
     assert retrieved == []
+
+
+def test_habit_store_uses_reloaded_instance_provider(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        ticket_manager,
+        "detect_instance",
+        lambda _project_root, configured_instance_id=None: (
+            f"RELOADED-{configured_instance_id}"
+        ),
+    )
+    monkeypatch.setattr(HabitStore, "_init_db", lambda _store: None)
+
+    store = HabitStore(
+        workspace_dir=tmp_path / "workspaces" / "lily",
+        project_root=tmp_path,
+        agent_id="lily",
+        agent_class="general",
+        instance_id="HASHI1",
+    )
+
+    assert store.instance == "RELOADED-HASHI1"
 
 
 @pytest.mark.anyio

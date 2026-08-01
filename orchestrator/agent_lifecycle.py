@@ -233,8 +233,13 @@ class AgentLifecycleManager:
                 try:
                     runtime = self.build_runtime(agent_cfg, global_cfg, secrets)
                 except Exception as e:
-                    main_logger.error("Failed to initialize '%s': %s", agent_name, e)
-                    return False, str(e)
+                    message = (
+                        f"Failed to initialize '{agent_name}': "
+                        f"{type(e).__name__}: {e}"
+                    )
+                    main_logger.exception(message)
+                    bridge_logger.exception(message)
+                    return False, message
 
                 ok, message = await self.start_runtime(runtime)
                 if not ok:
