@@ -103,9 +103,37 @@ def _runtime(tmp_path: Path):
         lambda update, media_kind, filename, file_id, prompt, summary:
         runtime_media.handle_media_message(runtime, update, media_kind, filename, file_id, prompt, summary)
     )
+    runtime._handle_voice_or_audio = (
+        lambda update, media_kind, filename, file_id, caption="":
+        runtime_media.handle_voice_or_audio(
+            runtime,
+            update,
+            media_kind,
+            filename,
+            file_id,
+            caption=caption,
+        )
+    )
     runtime.enqueued = enqueued
     runtime.replies = replies
     return runtime
+
+
+def _enable_long_buffer(runtime, target_session_id="long-1"):
+    collected = []
+    runtime._active_long_session_id = (
+        lambda chat_id: target_session_id if chat_id == 123 else None
+    )
+
+    def _buffer_long_chunk(chat_id, text, *, session_id=None):
+        if chat_id != 123 or session_id != target_session_id:
+            return False
+        collected.append(text)
+        return True
+
+    runtime._buffer_long_chunk = _buffer_long_chunk
+    runtime.collected = collected
+    return collected
 
 
 def test_build_media_prompt_for_image_document():
@@ -131,6 +159,87 @@ async def test_handle_document_downloads_and_enqueues(tmp_path):
     assert runtime.enqueued[0]["source"] == "document"
     assert "notes.txt" in runtime.enqueued[0]["prompt"]
     assert "please read" in runtime.enqueued[0]["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_handle_document_downloads_into_long_buffer_without_enqueuing(tmp_path):
+    runtime = _runtime(tmp_path)
+    collected = _enable_long_buffer(runtime)
+    update = _update(
+        document=SimpleNamespace(file_name="notes.txt", file_id="file-1"),
+        caption="please read",
+    )
+
+    await runtime_media.handle_document(runtime, update, SimpleNamespace())
+
+    assert runtime.enqueued == []
+    assert len(collected) == 1
+    assert collected[0].startswith("[Document]\n")
+    assert str(tmp_path / "media" / "notes.txt") in collected[0]
+    assert "please read" in collected[0]
+    assert runtime.replies[-1]["text"].startswith("📝 Added document to /long")
+
+
+@pytest.mark.asyncio
+async def test_handle_photo_downloads_into_long_buffer_without_enqueuing(tmp_path):
+    runtime = _runtime(tmp_path)
+    collected = _enable_long_buffer(runtime)
+    update = _update(
+        photo=[SimpleNamespace(file_id="photo-1")],
+        caption="compare this",
+    )
+
+    await runtime_media.handle_photo(runtime, update, SimpleNamespace())
+
+    assert runtime.enqueued == []
+    assert len(collected) == 1
+    assert collected[0].startswith("[Photo]\n")
+    assert "compare this" in collected[0]
+    assert "View the image" in collected[0]
+
+
+@pytest.mark.asyncio
+async def test_handle_voice_transcript_goes_into_long_buffer(tmp_path, monkeypatch):
+    from orchestrator import voice_transcriber
+
+    class _Transcriber:
+        async def transcribe(self, _local_path):
+            return "Please compare the attached items."
+
+    monkeypatch.setattr(voice_transcriber, "get_transcriber", lambda: _Transcriber())
+    runtime = _runtime(tmp_path)
+    runtime._safevoice_enabled = False
+    collected = _enable_long_buffer(runtime)
+    update = _update(voice=SimpleNamespace(file_id="voice-1"))
+
+    await runtime_media.handle_voice(runtime, update, SimpleNamespace())
+
+    assert runtime.enqueued == []
+    assert collected == [
+        "[Voice]\n[Voice message transcription] Please compare the attached items."
+    ]
+    assert runtime.replies[-1]["text"].startswith("📝 Added voice to /long")
+
+
+@pytest.mark.asyncio
+async def test_safe_voice_remembers_target_long_session(tmp_path, monkeypatch):
+    from orchestrator import voice_transcriber
+
+    class _Transcriber:
+        async def transcribe(self, _local_path):
+            return "Please inspect the photo."
+
+    monkeypatch.setattr(voice_transcriber, "get_transcriber", lambda: _Transcriber())
+    runtime = _runtime(tmp_path)
+    _enable_long_buffer(runtime)
+    update = _update(voice=SimpleNamespace(file_id="voice-1"))
+
+    await runtime_media.handle_voice(runtime, update, SimpleNamespace())
+
+    assert runtime.enqueued == []
+    assert runtime.collected == []
+    assert runtime._pending_voice["123"]["long_session_id"] == "long-1"
+    assert "Confirm to add to /long before /end" in runtime.replies[-1]["text"]
 
 
 @pytest.mark.asyncio

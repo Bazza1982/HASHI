@@ -84,6 +84,36 @@ def _log_warning(runtime: Any, message: str) -> None:
             info(message)
 
 
+def _active_long_session_id(runtime: Any, chat_id: int) -> str | None:
+    resolver = getattr(runtime, "_active_long_session_id", None)
+    if not callable(resolver):
+        return None
+    return resolver(chat_id)
+
+
+def _buffer_long_media(
+    runtime: Any,
+    chat_id: int,
+    session_id: str | None,
+    media_kind: str,
+    prompt: str,
+) -> bool:
+    if session_id is None:
+        return False
+    collector = getattr(runtime, "_buffer_long_chunk", None)
+    if not callable(collector):
+        return False
+    chunk = f"[{media_kind}]\n{prompt}"
+    return bool(collector(chat_id, chunk, session_id=session_id))
+
+
+async def _acknowledge_long_media(runtime: Any, update: Any, media_kind: str) -> None:
+    await runtime._reply_text(
+        update,
+        f"📝 Added {media_kind.lower()} to /long buffer. Send more input or /end to submit.",
+    )
+
+
 async def download_media(runtime: Any, file_id: str, filename: str) -> Path:
     local_path = runtime.media_dir / filename
     retryable_errors = (TimedOut, NetworkError, TimeoutError, OSError)
@@ -125,6 +155,8 @@ async def handle_media_message(
     if runtime._should_redirect_after_transfer():
         await runtime._reply_text(update, runtime._transfer_redirect_text())
         return
+    chat_id = update.effective_chat.id
+    long_session_id = _active_long_session_id(runtime, chat_id)
     backend = getattr(runtime.backend_manager, "current_backend", None)
     if backend and not backend.capabilities.supports_files:
         await runtime._reply_text(update, f"Current backend does not support {media_kind.lower()} attachments yet.")
@@ -133,7 +165,16 @@ async def handle_media_message(
     try:
         local_path = await runtime.download_media(file_id, filename)
         rendered_prompt = prompt.replace("{local_path}", str(local_path))
-        await runtime.enqueue_request(update.effective_chat.id, rendered_prompt, media_kind.lower(), summary)
+        if _buffer_long_media(
+            runtime,
+            chat_id,
+            long_session_id,
+            media_kind,
+            rendered_prompt,
+        ):
+            await _acknowledge_long_media(runtime, update, media_kind)
+            return
+        await runtime.enqueue_request(chat_id, rendered_prompt, media_kind.lower(), summary)
     except Exception as e:
         runtime.error_logger.exception(f"{media_kind} handler failed for '{filename}': {e}")
         try:
@@ -194,6 +235,8 @@ async def handle_voice_or_audio(
     if runtime._should_redirect_after_transfer():
         await runtime._reply_text(update, runtime._transfer_redirect_text())
         return
+    chat_id = update.effective_chat.id
+    long_session_id = _active_long_session_id(runtime, chat_id)
     from orchestrator.voice_transcriber import get_transcriber
 
     _print_user_message(runtime.name, f"Transcribing {filename}...", media_tag=media_kind)
@@ -207,7 +250,16 @@ async def handle_voice_or_audio(
             backend = getattr(runtime.backend_manager, "current_backend", None)
             if backend and backend.capabilities.supports_files:
                 prompt = f"User sent a voice message (saved at {local_path}). Listen to the audio, transcribe it, and respond."
-                await runtime.enqueue_request(update.effective_chat.id, prompt, media_kind.lower(), filename)
+                if _buffer_long_media(
+                    runtime,
+                    chat_id,
+                    long_session_id,
+                    media_kind,
+                    prompt,
+                ):
+                    await _acknowledge_long_media(runtime, update, media_kind)
+                    return
+                await runtime.enqueue_request(chat_id, prompt, media_kind.lower(), filename)
             else:
                 await runtime._reply_text(update, f"Failed to transcribe {media_kind.lower()} message.")
             return
@@ -222,13 +274,13 @@ async def handle_voice_or_audio(
         )
 
         if runtime._safevoice_enabled:
-            chat_id = update.effective_chat.id
             chat_key = str(chat_id)
             runtime._pending_voice[chat_key] = {
                 "prompt": prompt,
                 "transcript": transcript,
                 "summary": f"{media_kind}: {filename}",
                 "timestamp": datetime.now().isoformat(),
+                "long_session_id": long_session_id,
             }
             max_preview = 3500
             if len(transcript) > max_preview:
@@ -241,14 +293,28 @@ async def handle_voice_or_audio(
                     InlineKeyboardButton("Discard transcript", callback_data=f"safevoice:no:{chat_key}"),
                 ]
             ])
+            confirmation_title = (
+                "🛡️ *Safe Voice — Confirm to add to /long before /end:*"
+                if long_session_id
+                else "🛡️ *Safe Voice — Confirm transcription:*"
+            )
             await runtime._reply_text(
                 update,
-                f"🛡️ *Safe Voice — Confirm transcription:*\n\n_{preview}_",
+                f"{confirmation_title}\n\n_{preview}_",
                 reply_markup=keyboard,
                 parse_mode="Markdown",
             )
         else:
-            await runtime.enqueue_request(update.effective_chat.id, prompt, "voice_transcript", f"{media_kind}: {filename}")
+            if _buffer_long_media(
+                runtime,
+                chat_id,
+                long_session_id,
+                media_kind,
+                prompt,
+            ):
+                await _acknowledge_long_media(runtime, update, media_kind)
+                return
+            await runtime.enqueue_request(chat_id, prompt, "voice_transcript", f"{media_kind}: {filename}")
     except Exception as e:
         runtime.error_logger.exception(f"{media_kind} voice handler failed for '{filename}': {e}")
         try:
@@ -278,4 +344,9 @@ async def handle_sticker(runtime: Any, update: Any, context: Any):
     emoji = sticker.emoji or ""
     prompt, summary = build_media_prompt("sticker", "sticker", emoji=emoji)
     _print_user_message(runtime.name, emoji or "sticker", media_tag="Sticker")
-    await runtime.enqueue_request(update.effective_chat.id, prompt, "sticker", summary)
+    chat_id = update.effective_chat.id
+    long_session_id = _active_long_session_id(runtime, chat_id)
+    if _buffer_long_media(runtime, chat_id, long_session_id, "Sticker", prompt):
+        await _acknowledge_long_media(runtime, update, "Sticker")
+        return
+    await runtime.enqueue_request(chat_id, prompt, "sticker", summary)

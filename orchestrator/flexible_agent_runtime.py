@@ -42,6 +42,7 @@ from orchestrator import runtime_control
 from orchestrator import runtime_delivery
 from orchestrator import runtime_habits
 from orchestrator import runtime_lifecycle
+from orchestrator import runtime_long_input
 from orchestrator import runtime_media
 from orchestrator import runtime_menu_views
 from orchestrator import runtime_command_binding
@@ -211,6 +212,7 @@ class FlexibleAgentRuntime:
         self._long_buffer: list[str] = []
         self._long_buffer_active: bool = False
         self._long_buffer_chat_id: int | None = None
+        self._long_buffer_session_id: str | None = None
         self._long_buffer_timeout_task: asyncio.Task | None = None
         # Hashi Remote subprocess
         self._remote_process: asyncio.subprocess.Process | None = None
@@ -2854,7 +2856,28 @@ class FlexibleAgentRuntime:
             return
         pending = self._pending_voice.pop(chat_key, None)
         if action == "yes" and pending:
-            await query.edit_message_text(f"✅ Confirmed. Sending to agent:\n\n_{pending['transcript']}_", parse_mode="Markdown")
+            long_session_id = pending.get("long_session_id")
+            if long_session_id and self._buffer_long_chunk(
+                int(chat_key),
+                pending["prompt"],
+                session_id=long_session_id,
+            ):
+                await query.edit_message_text(
+                    f"✅ Confirmed. Added to /long buffer:\n\n_{pending['transcript']}_",
+                    parse_mode="Markdown",
+                )
+                await query.answer("Added to /long")
+                return
+            if long_session_id:
+                await query.edit_message_text(
+                    f"⚠️ The original /long session has ended. Sending separately:\n\n_{pending['transcript']}_",
+                    parse_mode="Markdown",
+                )
+            else:
+                await query.edit_message_text(
+                    f"✅ Confirmed. Sending to agent:\n\n_{pending['transcript']}_",
+                    parse_mode="Markdown",
+                )
             await query.answer("Sending...")
             await self.enqueue_request(int(chat_key), pending["prompt"], "voice_transcript", pending["summary"])
         elif action == "no":
@@ -7057,82 +7080,31 @@ class FlexibleAgentRuntime:
     # /long ... /end buffering (collect split Telegram messages)
     # ------------------------------------------------------------------
 
+    def _active_long_session_id(self, chat_id: int) -> str | None:
+        return runtime_long_input.active_session_id(self, chat_id)
+
+    def _buffer_long_chunk(
+        self,
+        chat_id: int,
+        text: str,
+        *,
+        session_id: str | None = None,
+    ) -> bool:
+        return runtime_long_input.buffer_chunk(
+            self,
+            chat_id,
+            text,
+            session_id=session_id,
+        )
+
     async def cmd_long(self, update: Update, context: Any):
-        """Start collecting multi-message input. Usage: /long [optional first line]"""
-        if not self._is_authorized_user(update.effective_user.id):
-            return
-        # If already buffering, treat as nested /long — just acknowledge
-        if self._long_buffer_active:
-            await self._reply_text(update, "⏳ Already in /long mode. Send /end to finish.")
-            return
-        self._long_buffer = []
-        self._long_buffer_active = True
-        self._long_buffer_chat_id = update.effective_chat.id
-        # If text was provided after /long, include it as the first chunk
-        args_text = " ".join(context.args).strip() if context.args else ""
-        if args_text:
-            self._long_buffer.append(args_text)
-        # Start safety timeout (5 minutes)
-        if self._long_buffer_timeout_task and not self._long_buffer_timeout_task.done():
-            self._long_buffer_timeout_task.cancel()
-        self._long_buffer_timeout_task = asyncio.create_task(self._long_buffer_timeout())
-        await self._reply_text(update, "📝 /long mode started. Paste your text, then send /end to submit.")
+        await runtime_long_input.cmd_long(self, update, context)
 
     async def cmd_end(self, update: Update, context: Any):
-        """End /long buffering and submit collected text."""
-        if not self._is_authorized_user(update.effective_user.id):
-            return
-        if not self._long_buffer_active:
-            await self._reply_text(update, "No /long session active.")
-            return
-        # Cancel timeout
-        if self._long_buffer_timeout_task and not self._long_buffer_timeout_task.done():
-            self._long_buffer_timeout_task.cancel()
-            self._long_buffer_timeout_task = None
-        # Assemble and submit
-        combined = "\n".join(self._long_buffer).strip()
-        self._long_buffer = []
-        self._long_buffer_active = False
-        chat_id = self._long_buffer_chat_id or update.effective_chat.id
-        self._long_buffer_chat_id = None
-        if not combined:
-            await self._reply_text(update, "⚠️ /long buffer was empty, nothing to submit.")
-            return
-        chunk_count = len(combined.splitlines())
-        await self._reply_text(update, f"✅ Collected {chunk_count} lines. Submitting...")
-        _print_user_message(self.name, combined)
-        await self.enqueue_request(chat_id, combined, "text", _safe_excerpt(combined))
+        await runtime_long_input.cmd_end(self, update, context)
 
     async def _long_buffer_timeout(self):
-        """Safety timeout: auto-submit after 5 minutes."""
-        try:
-            await asyncio.sleep(300)
-        except asyncio.CancelledError:
-            return
-        if not self._long_buffer_active:
-            return
-        combined = "\n".join(self._long_buffer).strip()
-        self._long_buffer = []
-        self._long_buffer_active = False
-        chat_id = self._long_buffer_chat_id
-        self._long_buffer_chat_id = None
-        self._long_buffer_timeout_task = None
-        if chat_id and combined:
-            await self.send_long_message(
-                chat_id,
-                f"⏰ /long auto-submitted after 5min timeout ({len(combined.splitlines())} lines).",
-                request_id=f"long-timeout-{uuid4().hex[:8]}",
-                purpose="long-timeout",
-            )
-            _print_user_message(self.name, combined)
-            await self.enqueue_request(chat_id, combined, "text", _safe_excerpt(combined))
-        elif chat_id:
-            await self.send_long_message(
-                chat_id,
-                "⏰ /long timed out with empty buffer. Cancelled.",
-                request_id=f"long-timeout-{uuid4().hex[:8]}",
-                purpose="long-timeout",
-            )
+        await runtime_long_input.buffer_timeout(self)
 
     async def handle_message(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -7145,9 +7117,8 @@ class FlexibleAgentRuntime:
             await self._reply_text(update, self._transfer_redirect_text())
             return
         text = update.message.text
-        # If in /long buffering mode, collect instead of processing
-        if self._long_buffer_active:
-            self._long_buffer.append(text)
+        # If this chat is in /long mode, collect instead of processing.
+        if self._buffer_long_chunk(update.effective_chat.id, text):
             return
         _print_user_message(self.name, text)
         self._capture_followup_habit_feedback(text)

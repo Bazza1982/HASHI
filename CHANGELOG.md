@@ -77,6 +77,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Multimodal Telegram `/long` input** — photos, voice/audio transcripts,
+  documents, videos, and stickers now join the active `/long` buffer instead of
+  being submitted as separate requests. Safe Voice confirmations target the
+  original long-input session, and `/end` submits the collected parts once.
 - **Telegram stream Markdown rendering** — think messages, verbose rolling status,
   and live answer previews now share the final-delivery Markdown-to-HTML renderer.
   Bold and inline-code markers render correctly instead of appearing literally,
