@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from adapters.base import BaseBackend, BackendCapabilities, BackendResponse, TokenUsage
+from adapters.stream_io import iter_stream_lines
 from adapters.stream_events import (
     StreamCallback,
     StreamEvent,
@@ -1266,7 +1267,6 @@ class ClawCLIAdapter(BaseBackend):
             stderr=asyncio.subprocess.PIPE,
             cwd=str(self.effective_workdir),
             env=self._task_env(),
-            limit=1024 * 1024,
             **extra_kwargs,
         )
         self.current_proc = proc
@@ -1339,10 +1339,7 @@ class ClawCLIAdapter(BaseBackend):
 
         async def read_stdout() -> None:
             assert proc.stdout is not None
-            while True:
-                line = await proc.stdout.readline()
-                if not line:
-                    break
+            async for line in iter_stream_lines(proc.stdout):
                 stdout_chunks.append(line)
                 self._touch_activity()
                 try:
@@ -1356,10 +1353,7 @@ class ClawCLIAdapter(BaseBackend):
 
         async def read_stderr() -> None:
             assert proc.stderr is not None
-            while True:
-                line = await proc.stderr.readline()
-                if not line:
-                    break
+            async for line in iter_stream_lines(proc.stderr):
                 stderr_chunks.append(line)
                 self._touch_activity()
 

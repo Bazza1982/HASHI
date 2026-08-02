@@ -2,13 +2,13 @@ from __future__ import annotations
 import re
 import json
 import os
-import signal
 import time
 import asyncio
 import logging
 from pathlib import Path
 
 from adapters.base import BaseBackend, BackendCapabilities, BackendResponse
+from adapters.stream_io import iter_stream_lines
 from adapters.stream_events import (
     StreamCallback, StreamEvent,
     KIND_THINKING, KIND_TOOL_START, KIND_TOOL_END,
@@ -209,7 +209,6 @@ class GeminiCLIAdapter(BaseBackend):
         # --- Tool result ---
         if etype == "tool_result":
             output = event.get("output", event.get("content", ""))
-            status = event.get("status", "")
             if event.get("error"):
                 preview = str(event["error"].get("message", event["error"]))[:80]
                 self._emit_stream_event(
@@ -299,7 +298,6 @@ class GeminiCLIAdapter(BaseBackend):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(effective_workdir),
-                limit=1024 * 1024,  # 1 MB readline buffer (default 64 KB too small for large output lines)
                 **_extra_kwargs,
             )
             self.logger.info(
@@ -355,10 +353,7 @@ class GeminiCLIAdapter(BaseBackend):
         timeout_kind: str | None = None
 
         async def _read_stderr():
-            while True:
-                line = await proc.stderr.readline()
-                if not line:
-                    break
+            async for line in iter_stream_lines(proc.stderr):
                 self._touch_activity()
                 decoded = line.decode(errors="replace")
                 stderr_lines.append(decoded)
@@ -373,10 +368,7 @@ class GeminiCLIAdapter(BaseBackend):
 
         async def _read_stdout():
             nonlocal stdout_line_count
-            while True:
-                line = await proc.stdout.readline()
-                if not line:
-                    break
+            async for line in iter_stream_lines(proc.stdout):
                 self._touch_activity()
                 stdout_line_count += 1
                 decoded = line.decode(errors="replace")

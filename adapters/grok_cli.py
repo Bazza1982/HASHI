@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from adapters.base import BaseBackend, BackendCapabilities, BackendResponse
+from adapters.stream_io import iter_stream_lines
 from adapters.stream_events import (
     KIND_ERROR,
     KIND_FILE_READ,
@@ -378,10 +379,7 @@ class GrokCLIAdapter(BaseBackend):
 
             async def _read_stdout():
                 nonlocal final_text
-                while True:
-                    line = await proc.stdout.readline()
-                    if not line:
-                        break
+                async for line in iter_stream_lines(proc.stdout):
                     self._touch_activity()
                     decoded = line.decode(errors="replace")
                     stdout_lines.append(decoded)
