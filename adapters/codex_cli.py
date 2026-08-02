@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 
 from adapters.base import BaseBackend, BackendCapabilities, BackendResponse, TokenUsage
+from adapters.stream_io import iter_stream_lines
 from adapters.stream_events import (
     StreamCallback, StreamEvent,
     KIND_THINKING, KIND_TOOL_END,
@@ -383,7 +384,6 @@ class CodexCLIAdapter(BaseBackend):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(effective_workdir),
-                limit=16 * 1024 * 1024,  # 16 MB readline buffer — Codex embeds full command output in single JSON lines
                 **_extra_kwargs,
             )
             # Capture local ref to avoid race with shutdown() nulling self.current_proc
@@ -406,23 +406,7 @@ class CodexCLIAdapter(BaseBackend):
                 nonlocal timeout_kind
                 nonlocal captured_thread_id
                 nonlocal turn_completed_at
-                while True:
-                    try:
-                        line = await proc.stdout.readline()
-                    except asyncio.LimitOverrunError:
-                        # Single JSON event exceeded buffer — drain the oversized line and continue
-                        self.logger.warning(
-                            f"Codex stdout line exceeded buffer limit for {request_id}; skipping event"
-                        )
-                        try:
-                            await proc.stdout.readuntil(b"\n")
-                        except (asyncio.LimitOverrunError, asyncio.IncompleteReadError):
-                            # Still too big or stream ended — read remaining buffer
-                            await proc.stdout.read(16 * 1024 * 1024)
-                        self._touch_activity()
-                        continue
-                    if not line:
-                        break
+                async for line in iter_stream_lines(proc.stdout):
                     self._touch_activity()
                     decoded = line.decode(errors="replace")
                     stdout_lines.append(decoded)
