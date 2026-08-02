@@ -15,7 +15,7 @@ class _FakeStdout:
         self._proc = proc
         self._lines = [line.encode("utf-8") + b"\n" for line in lines]
 
-    async def readline(self) -> bytes:
+    async def read(self, _size: int) -> bytes:
         if self._lines:
             return self._lines.pop(0)
         await self._proc.wait()

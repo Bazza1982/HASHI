@@ -7,11 +7,12 @@ import logging
 from pathlib import Path
 
 from adapters.base import BaseBackend, BackendCapabilities, BackendResponse, TokenUsage
+from adapters.stream_io import iter_stream_lines
 from adapters.stream_events import (
     StreamCallback, StreamEvent,
     KIND_THINKING, KIND_TOOL_START, KIND_TOOL_END,
     KIND_FILE_READ, KIND_FILE_EDIT, KIND_SHELL_EXEC,
-    KIND_TEXT_DELTA, KIND_ERROR,
+    KIND_TEXT_DELTA,
 )
 
 
@@ -182,7 +183,7 @@ class ClaudeCLIAdapter(BaseBackend):
                 file_path = ""
                 if tool_name in ("Read", "read"):
                     kind = KIND_FILE_READ
-                    summary = f"Read: ..."
+                    summary = "Read: ..."
                 elif tool_name in ("Edit", "edit", "Write", "write"):
                     kind = KIND_FILE_EDIT
                     summary = f"{tool_name}: ..."
@@ -313,7 +314,6 @@ class ClaudeCLIAdapter(BaseBackend):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(effective_workdir),
-                limit=1024 * 1024,  # 1 MB readline buffer (default 64 KB too small for large JSON events)
                 **_extra_kwargs,
             )
             self.current_proc = proc  # keep ref for shutdown/kill
@@ -366,10 +366,7 @@ class ClaudeCLIAdapter(BaseBackend):
         timeout_kind: str | None = None
 
         async def _read_stderr():
-            while True:
-                line = await proc.stderr.readline()
-                if not line:
-                    break
+            async for line in iter_stream_lines(proc.stderr):
                 self._touch_activity()
                 stderr_lines.append(line)
 
@@ -378,11 +375,7 @@ class ClaudeCLIAdapter(BaseBackend):
         async def _read_stdout():
             nonlocal result_text
             line_count = 0
-            while True:
-                line = await proc.stdout.readline()
-                if not line:
-                    break
-
+            async for line in iter_stream_lines(proc.stdout):
                 self._touch_activity()
                 line_count += 1
                 decoded = line.decode(errors="replace")
@@ -586,7 +579,6 @@ class ClaudeCLIAdapter(BaseBackend):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(self.effective_workdir),
-            limit=1024 * 1024,
         )
         self.current_proc = proc
         self._touch_activity()

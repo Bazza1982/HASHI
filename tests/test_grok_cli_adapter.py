@@ -72,6 +72,10 @@ if 'tool-events' in prompt:
     print(json.dumps({{"type": "text", "data": "done"}}), flush=True)
     print(json.dumps({{"type": "end", "sessionId": "sess-tool", "stopReason": "EndTurn"}}), flush=True)
     raise SystemExit(0)
+if 'large-event' in prompt:
+    print(json.dumps({{"type": "text", "data": "x" * (2 * 1024 * 1024)}}), flush=True)
+    print(json.dumps({{"type": "end", "sessionId": "sess-large", "stopReason": "EndTurn"}}), flush=True)
+    raise SystemExit(0)
 
 print(json.dumps({{"type": "session", "session_id": "sess-123", "summary": "started"}}), flush=True)
 print(json.dumps({{"type": "thought", "data": "thinking"}}), flush=True)
@@ -201,6 +205,22 @@ async def test_grok_streaming_json_reconstructs_final_answer_and_emits_deltas(tm
     assert [event.summary for event in text_events] == ["Hel", "lo"]
     thinking_events = [event for event in events if event.kind == KIND_THINKING]
     assert [event.summary for event in thinking_events] == ["thinking"]
+
+
+@pytest.mark.asyncio
+async def test_grok_streaming_json_accepts_event_larger_than_asyncio_reader_limit(tmp_path):
+    fake_grok = _write_fake_grok(tmp_path)
+    adapter = GrokCLIAdapter(_agent_config(tmp_path), SimpleNamespace(grok_cmd=str(fake_grok)))
+
+    response = await adapter.generate_response(
+        "emit a large-event",
+        "req-grok-large-event",
+        on_stream_event=None,
+    )
+
+    assert response.is_success is True
+    assert len(response.text) == 2 * 1024 * 1024
+    assert response.text == "x" * (2 * 1024 * 1024)
 
 
 def test_grok_resume_is_used_only_in_explicit_session_mode(tmp_path):
