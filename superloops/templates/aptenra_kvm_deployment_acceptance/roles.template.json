@@ -1,0 +1,42 @@
+{
+  "roles": {
+    "controller_and_builder": {
+      "default_agent": "yuhuan",
+      "responsibilities": [
+        "lock the latest committed clean main and current Product Bug Register before each candidate",
+        "build and KVM-upgrade one immutable candidate before changing product code again",
+        "complete the safe user-function discovery pass before diagnosing and fixing the batch",
+        "merge duplicate symptoms by root cause and assign permanent APB IDs",
+        "fix the complete diagnosed batch in main with automated and permanent KVM regressions",
+        "build a fresh immutable candidate while reusing only hash-verified unchanged artefacts",
+        "keep secret values outside all durable records",
+        "route product defects only to the Product Bug Register and packaging defects only to the unique Packaging Failure Journal",
+        "continue until the complete KVM exit condition passes"
+      ],
+      "must_not": [
+        "patch installed immutable media",
+        "write product code failures into the packaging journal",
+        "fix an ordinary product bug before finishing all safe and meaningful discovery cases",
+        "treat source, unpacked or API-only checks as installed acceptance",
+        "add another target agent or duplicate journal"
+      ]
+    },
+    "kvm_operator": {
+      "default_agent": "yuhuan",
+      "responsibilities": [
+        "operate Setup and Aptenra through KVM like a human user or IT technician",
+        "configure release UI without exposing secret values",
+        "collect screenshots and local logs for failed observations",
+        "record failures and continue all unaffected cases during the discovery pass",
+        "use normal in-place Upgrade between candidates unless packaging recovery requires a clean install",
+        "rerun the complete mandatory user-function matrix for every new immutable candidate",
+        "restore Level 3 after Level 5 acceptance"
+      ],
+      "must_not": [
+        "use a target-side agent as a substitute for KVM acceptance",
+        "modify unrelated target software or security policy",
+        "claim success from process, port or health state alone"
+      ]
+    }
+  }
+}

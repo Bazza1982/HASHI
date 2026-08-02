@@ -1,0 +1,42 @@
+[
+  {
+    "task_id": "R{{ROUND}}-01",
+    "phase": "lock_build_and_upgrade",
+    "title": "Lock latest committed main and journal identities, build one immutable candidate, then KVM-upgrade Lenovo and pass identity/startup smoke",
+    "owner_agent": "yuhuan",
+    "status": "pending",
+    "artifact_refs": []
+  },
+  {
+    "task_id": "R{{ROUND}}-02",
+    "phase": "complete_function_discovery",
+    "title": "Run the full user-function and connected-conversation matrix, recording every safe-to-continue failure before changing product code",
+    "owner_agent": "yuhuan",
+    "status": "pending",
+    "artifact_refs": []
+  },
+  {
+    "task_id": "R{{ROUND}}-03",
+    "phase": "batch_triage_and_diagnosis",
+    "title": "Separate environment and harness incidents, merge duplicate symptoms, assign APB IDs, and diagnose the complete product bug batch",
+    "owner_agent": "yuhuan",
+    "status": "pending",
+    "artifact_refs": []
+  },
+  {
+    "task_id": "R{{ROUND}}-04",
+    "phase": "batch_fix_and_regression",
+    "title": "Fix the diagnosed batch in main, add automated and permanent KVM regressions, and update the Product Bug Register",
+    "owner_agent": "yuhuan",
+    "status": "pending",
+    "artifact_refs": []
+  },
+  {
+    "task_id": "R{{ROUND}}-05",
+    "phase": "repeat_or_accept",
+    "title": "Build the next candidate and repeat the full matrix, or close device-verified APBs, clean scratch media and leave the accepted candidate installed",
+    "owner_agent": "yuhuan",
+    "status": "pending",
+    "artifact_refs": []
+  }
+]
