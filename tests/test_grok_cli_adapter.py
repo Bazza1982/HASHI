@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -36,10 +37,14 @@ def _write_fake_grok(tmp_path: Path, *, fail_version: bool = False) -> Path:
         f"""#!{sys.executable}
 import json
 import sys
+import time
 
 {version_block}
 
 prompt = sys.argv[-1] if sys.argv else ''
+if 'stall' in prompt:
+    time.sleep(20)
+    raise SystemExit(0)
 if 'fail' in prompt:
     print('grok failed', file=sys.stderr)
     raise SystemExit(7)
@@ -99,6 +104,25 @@ async def test_grok_initialize_fails_when_cli_version_fails(tmp_path):
     adapter = GrokCLIAdapter(_agent_config(tmp_path), SimpleNamespace(grok_cmd=str(fake_grok)))
 
     assert await adapter.initialize() is False
+
+
+@pytest.mark.asyncio
+async def test_grok_enforces_idle_timeout_and_logs_effective_policy(tmp_path, caplog):
+    fake_grok = _write_fake_grok(tmp_path)
+    cfg = _agent_config(tmp_path)
+    cfg.extra = {"idle_timeout_sec": 1, "hard_timeout_sec": 30}
+    adapter = GrokCLIAdapter(cfg, SimpleNamespace(grok_cmd=str(fake_grok)))
+
+    with caplog.at_level(logging.ERROR):
+        response = await adapter.generate_response("stall", "req-grok-idle")
+
+    assert response.is_success is False
+    assert "idle for 1s" in response.error
+    assert "kind=idle" in caplog.text
+    assert "idle_timeout_s=1" in caplog.text
+    assert "hard_timeout_s=30" in caplog.text
+    assert "last_output_age_s=" in caplog.text
+    assert "total_runtime_s=" in caplog.text
 
 
 def test_grok_build_cmd_defaults_to_execution_ready_flags(tmp_path):

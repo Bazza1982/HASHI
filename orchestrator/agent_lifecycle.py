@@ -35,12 +35,34 @@ class AgentLifecycleManager:
             runtime = _FlexRT(agent_cfg, global_cfg, token, secrets, self.kernel.skill_manager)
         else:
             from orchestrator.legacy.bridge_agent_runtime import BridgeAgentRuntime as _BridgeRT
+            from adapters.timeout_policy import apply_timeout_layers
+            from orchestrator.backend_timeout import read_timeout_override
+            from orchestrator.workspace_state import WorkspaceStateStore
 
             token = secrets.get(agent_cfg.name)
             api_key = secrets.get(f"{agent_cfg.engine}_key", None)
             if not token:
                 main_logger.warning("No Telegram token found for agent '%s'.", agent_cfg.name)
                 token = "WORKBENCH_ONLY_NO_TOKEN"
+            configured_extra = dict(agent_cfg.extra or {})
+            try:
+                persisted_timeout = read_timeout_override(
+                    WorkspaceStateStore(agent_cfg.workspace_dir),
+                    agent_cfg.engine,
+                )
+            except ValueError as exc:
+                main_logger.error(
+                    "Ignoring invalid persisted timeout override for fixed agent '%s': %s",
+                    agent_cfg.name,
+                    exc,
+                )
+                persisted_timeout = {}
+            agent_cfg.extra = apply_timeout_layers(
+                configured_extra,
+                engine=agent_cfg.engine,
+                agent_extra=configured_extra,
+                persisted_override=persisted_timeout,
+            )
             backend = _get_backend(agent_cfg.engine)(agent_cfg, global_cfg, api_key)
             runtime = _BridgeRT(agent_cfg.name, backend, token, self.kernel.skill_manager, secrets=secrets)
         runtime.orchestrator = self.kernel

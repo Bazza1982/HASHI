@@ -905,8 +905,8 @@ def run_claw_state(
 
 
 class ClawCLIAdapter(BaseBackend):
-    DEFAULT_IDLE_TIMEOUT_SEC = 300
-    DEFAULT_HARD_TIMEOUT_SEC = 1800
+    DEFAULT_IDLE_TIMEOUT_SEC = 60 * 60
+    DEFAULT_HARD_TIMEOUT_SEC = 24 * 60 * 60
 
     def _define_capabilities(self) -> BackendCapabilities:
         capabilities = BackendCapabilities(
@@ -1181,6 +1181,7 @@ class ClawCLIAdapter(BaseBackend):
         try:
             result = await self._run_task_async(
                 prompt,
+                request_id=request_id,
                 resume=None,
                 on_stream_event=on_stream_event,
             )
@@ -1240,6 +1241,7 @@ class ClawCLIAdapter(BaseBackend):
         self,
         prompt: str,
         *,
+        request_id: str,
         resume: str | None,
         on_stream_event: StreamCallback = None,
     ) -> ClawTaskResult:
@@ -1271,24 +1273,55 @@ class ClawCLIAdapter(BaseBackend):
         )
         self.current_proc = proc
         self._touch_activity()
+        communication_task = asyncio.create_task(
+            self._communicate_stream_json(proc, command, on_stream_event)
+            if on_stream_event is not None and self._supports_stream_json
+            else self._communicate_with_activity(proc)
+        )
         try:
-            if on_stream_event is not None and self._supports_stream_json:
-                stdout_data, stderr_data = await asyncio.wait_for(
-                    self._communicate_stream_json(proc, command, on_stream_event),
-                    timeout=self.HARD_TIMEOUT_SEC,
+            timeout_kind = await self._wait_for_task_with_timeouts(
+                communication_task,
+                started_monotonic=started,
+            )
+            if timeout_kind is not None:
+                diagnostic = self._timeout_diagnostic(
+                    timeout_kind,
+                    started_monotonic=started,
                 )
-            else:
-                stdout_data, stderr_data = await asyncio.wait_for(proc.communicate(), timeout=self.HARD_TIMEOUT_SEC)
-        except asyncio.TimeoutError as exc:
+                self.logger.error(
+                    f"Claw request {request_id} {timeout_kind}-timed out "
+                    f"(pid={proc.pid}, {diagnostic})"
+                )
+                await self.force_kill_process_tree(
+                    proc,
+                    logger=self.logger,
+                    reason=f"{timeout_kind}-timeout:{request_id}",
+                )
+                await asyncio.gather(communication_task, return_exceptions=True)
+                timeout_s = (
+                    self.IDLE_TIMEOUT_SEC
+                    if timeout_kind == "idle"
+                    else self.HARD_TIMEOUT_SEC
+                )
+                detail = (
+                    f"was idle for {timeout_s}s with no output"
+                    if timeout_kind == "idle"
+                    else f"exceeded hard timeout of {timeout_s}s"
+                )
+                raise ClawTimeoutError(
+                    f"Claw command {detail}.",
+                    timeout_s=timeout_s,
+                )
+            stdout_data, stderr_data = await communication_task
+        except asyncio.CancelledError:
             await self.force_kill_process_tree(
                 proc,
                 logger=self.logger,
-                reason=f"hard-timeout:{self.HARD_TIMEOUT_SEC}s",
+                reason=f"cancelled:{request_id}",
             )
-            raise ClawTimeoutError(
-                f"Claw command timed out after {self.HARD_TIMEOUT_SEC}s: {' '.join(command)}",
-                timeout_s=self.HARD_TIMEOUT_SEC,
-            ) from exc
+            communication_task.cancel()
+            await asyncio.gather(communication_task, return_exceptions=True)
+            raise
         finally:
             self.current_proc = None
 
@@ -1327,6 +1360,29 @@ class ClawCLIAdapter(BaseBackend):
             iterations=parsed.get("iterations") if isinstance(parsed.get("iterations"), int) else None,
             estimated_cost=parsed.get("estimated_cost") if isinstance(parsed.get("estimated_cost"), str) else None,
         )
+
+    async def _communicate_with_activity(
+        self,
+        proc: asyncio.subprocess.Process,
+    ) -> tuple[bytes, bytes]:
+        stdout_chunks: list[bytes] = []
+        stderr_chunks: list[bytes] = []
+
+        async def read_stream(reader, chunks: list[bytes]) -> None:
+            assert reader is not None
+            while True:
+                chunk = await reader.read(64 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                self._touch_activity()
+
+        await asyncio.gather(
+            read_stream(proc.stdout, stdout_chunks),
+            read_stream(proc.stderr, stderr_chunks),
+        )
+        await proc.wait()
+        return b"".join(stdout_chunks), b"".join(stderr_chunks)
 
     async def _communicate_stream_json(
         self,

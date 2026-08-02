@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import os
 import stat
 import textwrap
 import asyncio
 import hashlib
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -719,7 +719,12 @@ async def test_claw_adapter_shutdown_kills_running_process(tmp_path):
         name="test",
         workspace_dir=tmp_path,
         model="deepseek/test",
-        extra={"claw_binary_path": str(fake), "permission_mode": "read-only", "hard_timeout_sec": 30},
+        extra={
+            "claw_binary_path": str(fake),
+            "permission_mode": "read-only",
+            "idle_timeout_sec": 1,
+            "hard_timeout_sec": 30,
+        },
         resolve_access_root=lambda: tmp_path,
     )
     global_cfg = SimpleNamespace()
@@ -737,3 +742,43 @@ async def test_claw_adapter_shutdown_kills_running_process(tmp_path):
     response = await task
 
     assert response.is_success is False
+
+
+@pytest.mark.asyncio
+async def test_claw_adapter_enforces_idle_timeout_and_logs_effective_policy(tmp_path, caplog):
+    fake = _write_exe(
+        tmp_path / "claw",
+        """
+        #!/usr/bin/env python3
+        import json, sys, time
+        if sys.argv[1] == "version":
+            print(json.dumps({"kind": "version", "version": "0.1.0"}))
+        else:
+            time.sleep(20)
+        """,
+    )
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={
+            "claw_binary_path": str(fake),
+            "permission_mode": "read-only",
+            "idle_timeout_sec": 1,
+            "hard_timeout_sec": 30,
+        },
+        resolve_access_root=lambda: tmp_path,
+    )
+    adapter = ClawCLIAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    assert await adapter.initialize() is True
+
+    with caplog.at_level(logging.ERROR):
+        response = await adapter.generate_response("hello", "req-claw-idle")
+
+    assert response.is_success is False
+    assert "idle for 1s" in response.error
+    assert "kind=idle" in caplog.text
+    assert "idle_timeout_s=1" in caplog.text
+    assert "hard_timeout_s=30" in caplog.text
+    assert "last_output_age_s=" in caplog.text
+    assert "total_runtime_s=" in caplog.text

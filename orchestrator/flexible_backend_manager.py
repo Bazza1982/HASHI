@@ -2,6 +2,22 @@ import json
 import logging
 from pathlib import Path
 from typing import Optional, Any
+
+from adapters.timeout_policy import (
+    HARD_TIMEOUT_KEY,
+    IDLE_TIMEOUT_KEY,
+    LEGACY_TIMEOUT_KEY,
+    TIMEOUT_POLICY_META_KEY,
+    TimeoutPolicySnapshot,
+    apply_timeout_layers,
+    timeout_policy_snapshot,
+    validate_timeout_pair,
+)
+from orchestrator.backend_timeout import (
+    clear_timeout_override,
+    read_timeout_override,
+    set_timeout_override,
+)
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig, AgentConfig
 from orchestrator.flexible_backend_registry import get_secret_lookup_order
 from orchestrator.privacy_levels import (
@@ -162,12 +178,24 @@ class FlexibleBackendManager:
         state["dual_brain"] = dict(dual_brain)
         self._write_state_dict(state)
 
+    def _timeout_override_for(self, engine: str) -> dict[str, int]:
+        try:
+            return read_timeout_override(self.state_store, engine)
+        except ValueError as exc:
+            self.logger.error(
+                "Ignoring invalid persisted timeout override for %s: %s",
+                engine,
+                exc,
+            )
+            return {}
+
     def _build_adapter_config(
         self,
         engine: str,
         backend_cfg_raw: dict[str, Any],
         *,
         target_model: str | None = None,
+        apply_persisted_timeout: bool = True,
     ) -> AgentConfig:
         agent_extra = dict(getattr(self.config, "extra", None) or {})
         backend_extra = dict(backend_cfg_raw)
@@ -176,6 +204,17 @@ class FlexibleBackendManager:
         backend_scope = backend_cfg_raw.get("access_scope", self.config.access_scope)
         backend_extra.pop("access_scope", None)
         extra = {**agent_extra, **backend_extra}
+        extra = apply_timeout_layers(
+            extra,
+            engine=engine,
+            agent_extra=agent_extra,
+            backend_extra=backend_extra,
+            persisted_override=(
+                self._timeout_override_for(engine)
+                if apply_persisted_timeout
+                else {}
+            ),
+        )
         return AgentConfig(
             name=self.config.name,
             engine=engine,
@@ -187,6 +226,63 @@ class FlexibleBackendManager:
             access_scope=backend_scope,
             project_root=self.config.project_root,
         )
+
+    def _refresh_current_backend_timeout_config(self, engine: str) -> None:
+        backend = self.current_backend
+        if backend is None or getattr(getattr(backend, "config", None), "engine", None) != engine:
+            return
+        backend_cfg_raw = self._select_backend_cfg(
+            engine,
+            target_model=getattr(backend.config, "model", None),
+        )
+        if backend_cfg_raw is None:
+            raise ValueError(f"Backend {engine} is not allowed for {self.config.name}.")
+        rebuilt = self._build_adapter_config(
+            engine,
+            backend_cfg_raw,
+            target_model=getattr(backend.config, "model", None),
+        )
+        if backend.config.extra is None:
+            backend.config.extra = {}
+        for key in (IDLE_TIMEOUT_KEY, HARD_TIMEOUT_KEY, LEGACY_TIMEOUT_KEY, TIMEOUT_POLICY_META_KEY):
+            if key in rebuilt.extra:
+                backend.config.extra[key] = rebuilt.extra[key]
+            else:
+                backend.config.extra.pop(key, None)
+        backend._validate_timeout_configuration()
+
+    def get_active_timeout_policy(self) -> TimeoutPolicySnapshot:
+        if self.current_backend is None:
+            raise RuntimeError("No active backend is initialized.")
+        return timeout_policy_snapshot(self.current_backend)
+
+    def set_active_timeout_override(
+        self,
+        *,
+        idle_seconds: int,
+        hard_seconds: int | None = None,
+    ) -> TimeoutPolicySnapshot:
+        policy = self.get_active_timeout_policy()
+        validate_timeout_pair(
+            idle_seconds,
+            hard_seconds if hard_seconds is not None else policy.hard_seconds,
+        )
+        set_timeout_override(
+            self.state_store,
+            policy.engine,
+            idle_seconds=idle_seconds,
+            hard_seconds=hard_seconds,
+        )
+        self._save_state()
+        self._refresh_current_backend_timeout_config(policy.engine)
+        return self.get_active_timeout_policy()
+
+    def clear_active_timeout_override(self) -> TimeoutPolicySnapshot:
+        policy = self.get_active_timeout_policy()
+        clear_timeout_override(self.state_store, policy.engine)
+        self._save_state()
+        self._refresh_current_backend_timeout_config(policy.engine)
+        return self.get_active_timeout_policy()
 
     def _attach_runtime_context(self, adapter_cfg: AgentConfig) -> None:
         setattr(adapter_cfg, "_hashi_secrets", self.secrets)
@@ -233,7 +329,12 @@ class FlexibleBackendManager:
         if not backend_cfg_raw:
             raise ValueError(f"Backend {engine} not allowed for {self.config.name}.")
 
-        adapter_cfg = self._build_adapter_config(engine, backend_cfg_raw, target_model=target_model)
+        adapter_cfg = self._build_adapter_config(
+            engine,
+            backend_cfg_raw,
+            target_model=target_model,
+            apply_persisted_timeout=False,
+        )
         self._attach_runtime_context(adapter_cfg)
         from adapters.registry import get_backend_class
 

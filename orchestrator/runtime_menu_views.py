@@ -414,10 +414,13 @@ def safevoice_keyboard(*, enabled: bool) -> InlineKeyboardMarkup:
 def timeout_menu_text(
     *,
     agent_name: str,
+    backend_name: str,
     idle_minutes: int,
     hard_minutes: int,
     default_idle_minutes: int,
     default_hard_minutes: int,
+    idle_source: str,
+    hard_source: str,
 ) -> str:
     return setting_card(
         "⏱️",
@@ -426,15 +429,20 @@ def timeout_menu_text(
         facts=[
             f"<b>Defaults</b> · idle <code>{default_idle_minutes} min</code> · hard <code>{default_hard_minutes} min</code>",
             f"<b>Agent</b> · <code>{html.escape(agent_name)}</code>",
-            "<b>Scope</b> · active execution backend",
+            f"<b>Backend</b> · <code>{html.escape(backend_name)}</code>",
+            f"<b>Sources</b> · idle <code>{html.escape(idle_source)}</code> · hard <code>{html.escape(hard_source)}</code>",
+            "<b>Scope</b> · this agent and backend",
         ],
-        consequence="Changes apply immediately and persist with the backend configuration. Dual-brain memory passes are unaffected.",
+        consequence=(
+            "User overrides survive steering, backend recreation, hot reload and restart until /timeout reset. "
+            "Dual-brain memory passes are unaffected."
+        ),
         action=(
-            _command("/timeout 30", "set idle to 30 minutes")
+            _command("/timeout 60", "set idle to 60 minutes")
             + "\n"
-            + _command("/timeout 30 120", "set idle and hard limits")
+            + _command("/timeout 60 1440", "set idle and hard limits")
             + "\n"
-            + _command("/timeout reset", "restore backend defaults")
+            + _command("/timeout reset", "clear the user override")
         ),
     )
 
