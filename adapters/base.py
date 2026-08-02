@@ -11,6 +11,15 @@ from pathlib import Path
 from typing import Any, Optional
 
 from adapters.stream_events import StreamCallback
+from adapters.timeout_policy import (
+    AGENT_CONFIG_SOURCE,
+    DEFAULT_SOURCE,
+    HARD_TIMEOUT_KEY,
+    IDLE_TIMEOUT_KEY,
+    LEGACY_TIMEOUT_KEY,
+    TIMEOUT_POLICY_META_KEY,
+    parse_positive_timeout,
+)
 
 
 @dataclass
@@ -53,6 +62,7 @@ class BaseBackend(ABC):
         self.config = agent_config
         self.global_config = global_config
         self.api_key = api_key
+        self._validate_timeout_configuration()
         self.capabilities = self._define_capabilities()
         self._console_write_warned = False
         # epoch-seconds; updated by adapter whenever backend produces output.
@@ -68,15 +78,12 @@ class BaseBackend(ABC):
         Legacy timeout alias.
         Preserved for compatibility; prefer IDLE_TIMEOUT_SEC / HARD_TIMEOUT_SEC.
         """
-        extra = getattr(self.config, "extra", {}) or {}
-        return int(extra.get("process_timeout", self.DEFAULT_IDLE_TIMEOUT_SEC))
+        return self.IDLE_TIMEOUT_SEC
 
-    def _coerce_timeout(self, value, fallback: int) -> int:
-        try:
-            parsed = int(value)
-        except (TypeError, ValueError):
-            return fallback
-        return parsed if parsed > 0 else fallback
+    def _coerce_timeout(self, value, fallback: int, *, label: str) -> int:
+        if value is None:
+            return int(fallback)
+        return parse_positive_timeout(value, label=label)
 
     @property
     def IDLE_TIMEOUT_SEC(self) -> int:
@@ -87,8 +94,16 @@ class BaseBackend(ABC):
         """
         extra = getattr(self.config, "extra", {}) or {}
         if "idle_timeout_sec" in extra:
-            return self._coerce_timeout(extra.get("idle_timeout_sec"), self.DEFAULT_IDLE_TIMEOUT_SEC)
-        return self._coerce_timeout(extra.get("process_timeout"), self.DEFAULT_IDLE_TIMEOUT_SEC)
+            return self._coerce_timeout(
+                extra.get("idle_timeout_sec"),
+                self.DEFAULT_IDLE_TIMEOUT_SEC,
+                label="idle timeout",
+            )
+        return self._coerce_timeout(
+            extra.get("process_timeout"),
+            self.DEFAULT_IDLE_TIMEOUT_SEC,
+            label="idle timeout",
+        )
 
     @property
     def HARD_TIMEOUT_SEC(self) -> int:
@@ -97,8 +112,70 @@ class BaseBackend(ABC):
         Configurable via `hard_timeout_sec`.
         """
         extra = getattr(self.config, "extra", {}) or {}
-        floor = max(self.IDLE_TIMEOUT_SEC, self.DEFAULT_HARD_TIMEOUT_SEC)
-        return self._coerce_timeout(extra.get("hard_timeout_sec"), floor)
+        hard = self._coerce_timeout(
+            extra.get("hard_timeout_sec"),
+            self.DEFAULT_HARD_TIMEOUT_SEC,
+            label="hard timeout",
+        )
+        if hard < self.IDLE_TIMEOUT_SEC:
+            raise ValueError("hard timeout must be greater than or equal to idle timeout")
+        return hard
+
+    def _validate_timeout_configuration(self) -> None:
+        _ = self.IDLE_TIMEOUT_SEC
+        _ = self.HARD_TIMEOUT_SEC
+
+    def _timeout_source(self, key: str) -> str:
+        extra = getattr(self.config, "extra", {}) or {}
+        meta = extra.get(TIMEOUT_POLICY_META_KEY)
+        if isinstance(meta, dict):
+            sources = meta.get("sources")
+            if isinstance(sources, dict) and sources.get(key):
+                return str(sources[key])
+        if key == IDLE_TIMEOUT_KEY and (
+            IDLE_TIMEOUT_KEY in extra or LEGACY_TIMEOUT_KEY in extra
+        ):
+            return AGENT_CONFIG_SOURCE
+        if key == HARD_TIMEOUT_KEY and HARD_TIMEOUT_KEY in extra:
+            return AGENT_CONFIG_SOURCE
+        return DEFAULT_SOURCE
+
+    def _timeout_diagnostic(self, timeout_kind: str, *, started_monotonic: float) -> str:
+        total_runtime = max(0.0, time.perf_counter() - started_monotonic)
+        last_output_age = max(0.0, time.time() - (self.last_activity_at or time.time()))
+        idle_source = self._timeout_source(IDLE_TIMEOUT_KEY).replace(" ", "_")
+        hard_source = self._timeout_source(HARD_TIMEOUT_KEY).replace(" ", "_")
+        return (
+            f"kind={timeout_kind}, idle_timeout_s={self.IDLE_TIMEOUT_SEC}, "
+            f"idle_source={idle_source}, hard_timeout_s={self.HARD_TIMEOUT_SEC}, "
+            f"hard_source={hard_source}, last_output_age_s={last_output_age:.2f}, "
+            f"total_runtime_s={total_runtime:.2f}"
+        )
+
+    async def _wait_for_task_with_timeouts(
+        self,
+        task: asyncio.Future,
+        *,
+        started_monotonic: float,
+    ) -> str | None:
+        """Wait for a task while enforcing both output-idle and wall-clock caps."""
+        while not task.done():
+            total_runtime = max(0.0, time.perf_counter() - started_monotonic)
+            if total_runtime >= self.HARD_TIMEOUT_SEC:
+                return "hard"
+            idle_for = max(0.0, time.time() - (self.last_activity_at or time.time()))
+            if idle_for >= self.IDLE_TIMEOUT_SEC:
+                return "idle"
+            wait_slice = min(
+                5.0,
+                max(0.1, self.HARD_TIMEOUT_SEC - total_runtime),
+                max(0.1, self.IDLE_TIMEOUT_SEC - idle_for),
+            )
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=wait_slice)
+            except asyncio.TimeoutError:
+                continue
+        return None
 
     def _touch_activity(self) -> None:
         """Record that the backend just produced output. Call on every stdout/stderr chunk."""
