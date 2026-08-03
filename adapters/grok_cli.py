@@ -157,7 +157,11 @@ class GrokCLIAdapter(BaseBackend):
                 cmd.extend([flag, option_value])
         if self._session_mode and self._session_id:
             cmd.extend(["--resume", self._session_id])
-        cmd.extend(["-p", prompt])
+        # Bind the prompt to the option in one argv entry. Grok CLI 0.2.117
+        # rejects a separate `-p` value when the prompt starts with `-` (for
+        # example HASHI's `--- CURRENT USER REQUEST` bridge marker), treating
+        # the prompt as another command-line option before inference starts.
+        cmd.append(f"--single={prompt}")
         return cmd
 
     def _extract_content_text(self, value: Any) -> str:

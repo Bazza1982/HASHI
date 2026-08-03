@@ -39,7 +39,8 @@ import sys
 
 {version_block}
 
-prompt = sys.argv[-1] if sys.argv else ''
+prompt_arg = next((arg for arg in sys.argv if arg.startswith('--single=')), '')
+prompt = prompt_arg.split('=', 1)[1] if prompt_arg else ''
 if 'fail' in prompt:
     print('grok failed', file=sys.stderr)
     raise SystemExit(7)
@@ -116,6 +117,18 @@ def test_grok_build_cmd_defaults_to_execution_ready_flags(tmp_path):
     assert cmd[cmd.index("--permission-mode") + 1] == "bypassPermissions"
     assert "--always-approve" in cmd
     assert "--check" not in cmd
+    assert "-p" not in cmd
+    assert "--single=do work" in cmd
+
+
+def test_grok_build_cmd_binds_leading_hyphen_prompt_as_option_value(tmp_path):
+    adapter = GrokCLIAdapter(_agent_config(tmp_path), SimpleNamespace(grok_cmd="grok"))
+    prompt = "--- CURRENT USER REQUEST — AUTHORITATIVE ---\nRun the scheduled task."
+
+    cmd = adapter._build_cmd(prompt)
+
+    assert "-p" not in cmd
+    assert cmd[-1] == f"--single={prompt}"
 
 
 def test_grok_build_cmd_can_enable_check_explicitly(tmp_path):
