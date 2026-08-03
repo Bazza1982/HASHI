@@ -116,6 +116,10 @@ explicitly brought into scope.
 2. Run tests owned by affected zones plus the full Python suite and the compact
    Electron smoke before spending time on a freeze. Then build one fresh
    immutable candidate.
+   Reuse the last known-complete test interpreter and record `sys.executable`;
+   before the full suite, import its required test/runtime dependencies and run
+   one focused case. Do not discover an incomplete venv by repeatedly starting
+   the whole collection.
    Run a mini-media rehearsal only when packaging code changed or the last
    failure points to packaging.
 3. Transfer by manifest/SHA and perform a visible KVM in-place Upgrade. Verify
