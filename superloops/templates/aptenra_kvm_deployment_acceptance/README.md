@@ -270,6 +270,10 @@ acceptance.
 - Replace candidate-number-specific scripts with one Windows PowerShell 5.1
   compatible parameterized controller that emits JSON and a separate screenshot
   per action.
+- Use `scripts/prepare_candidate_from_bundle.ps1` and
+  `scripts/build_registered_candidate.ps1` for subsequent immutable builds;
+  pass candidate identity as parameters instead of cloning another dated build
+  wrapper.
 - Before sending a diagnostic command, prove the intended target window has
   focus. For encoded or long PiKVM keyboard input, open the shell explicitly
   and send a second `Enter` after printing completes; an empty second command at
