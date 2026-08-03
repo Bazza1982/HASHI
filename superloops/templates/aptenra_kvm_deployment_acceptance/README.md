@@ -4,8 +4,10 @@
 
 Rapidly find and repair Aptenra product defects by repeatedly building from
 the latest committed `main`, upgrading the Windows 11 x64 Lenovo through KVM,
-and exercising the complete user-visible function matrix. Packaging remains a
-supported failure route, but it is no longer the centre of every round.
+and testing only the zones affected by the current bug batch. Stable zones
+retain qualification through a compact boundary smoke unless their code,
+shared dependency or observed behaviour changes. Packaging remains a supported
+failure route, but it is no longer the centre of every round.
 
 The loop stays small:
 
@@ -13,11 +15,13 @@ The loop stays small:
 latest committed main + open APB regressions
 -> fresh immutable candidate
 -> KVM in-place upgrade + identity/startup smoke
--> complete user-function discovery pass
+-> deep-test OPEN/REOPENED or diff-affected zones
+-> compact boundary smoke for QUALIFIED zones
 -> record all safe-to-continue failures; do not change code mid-pass
 -> deduplicate and diagnose the complete bug batch
 -> fix the batch in main + add automated regressions + update APB records
--> next immutable candidate + full matrix again
+-> next immutable candidate + active-zone retest
+-> milestone candidate only: complete cross-zone acceptance
 -> success: close device-verified APBs, clean scratch media, leave candidate installed
 ```
 
@@ -55,71 +59,91 @@ The test checks that configuration can be entered safely, activates the
 expected route and survives an Aptenra restart. It does not benchmark model
 quality or force a complex escalation.
 
-## Mandatory user-function matrix
+## Debug zones and qualification
 
-Acceptance is user-visible. Every immutable candidate reruns the entire matrix;
-results from an older candidate are context, not inherited PASS evidence.
+Keep one small zone table. Do not create a second gate system or duplicate bug
+database. Each zone is `ACTIVE`, `QUALIFIED` or `REOPENED` for a round.
 
-1. Aptenra and Workbench launch from installed shortcuts.
-2. Host, HASHI Core and Primary status agree across product surfaces.
-3. Typed conversation completes five connected turns and preserves correction,
-   reference and action-result context.
-4. Voice `Agent`, `Chat` and `Mixed` each complete five connected turns through
-   both Push and Wake activation (`3 x 2` matrix).
-5. One mixed-input journey completes
-   `typed -> voice -> typed -> voice -> typed` without losing context or
-   misrouting a turn.
-6. DeepSeek Lite serves Primary; DeepSeek Pro serves Action and Escalation;
-   OpenRouter serves the current audio route. Each configured route completes
-   one real, low-risk call; complex escalation quality is out of scope.
-7. STT, TTS, Stop voice, cancellation, delayed continuation, mode switching and
-   new-chat/reset boundaries do not duplicate, leak or cross-associate turns.
-8. Desktop Companion displays, responds, moves and does not confuse drag with
-   Hold-to-talk.
-9. Widgets, Workbench, Activity, Settings and locale persistence complete their
-   normal user journeys.
-10. The Aptenra browser opens and completes one approved basic page action.
-11. File create, read, update and delete succeeds only inside a dedicated test
-    directory.
-12. Administrator launch permits Level `3 -> 5`; a controlled Level 5 action
-    completes; the product then safely returns to Level 3.
-13. Controlled restart, one Windows reboot and short network/audio recovery do
-    not duplicate processes, requests or side effects.
-14. Program Files remains free of runtime writes.
+| Zone | Boundary | Deep qualification | Normal candidate treatment |
+| --- | --- | --- | --- |
+| `Z1` | Setup, MSI, Upgrade, cache and installed identity | Upgrade fidelity plus conditional lifecycle | Identity, payload and launch smoke only |
+| `Z2` | Host, Core, frozen Runtime and lock identity | Health, single instance, restart and architecture contracts | Health and exact runtime-lock smoke |
+| `Z3` | Typed Chat, request delivery and session isolation | Five-turn continuity, correction, New Chat/reset, cancel and hidden continuation | One connected typed/read turn |
+| `Z4` | Microphone, Push/Wake, KWS, Whisper and TTS | Real-device acoustic and activation cases | One Push turn; Wake only while qualified |
+| `Z5` | Voice Agent/Chat/Mixed routing and memory | `3 x 2` routes, five-turn continuity, handoff and mode boundaries | One representative voice route |
+| `Z6` | Action, approval, Risk and final review | Safe file/action job, approval, review correction and restart recovery | One safe read/action boundary |
+| `Z7` | Shell UI, Activity, Settings, locale, Companion and Browser | Only the affected UI subzone; do not reopen unrelated surfaces | Launch plus visible shell smoke |
+| `Z8` | Workbench, Remote and Offline boundaries | Representative journey and recovery for the affected subzone | Health plus one representative request |
 
-Telegram configuration and real remote connections are excluded. HASHI Remote
-may remain enabled for read-only diagnosis but is not a product acceptance
-gate for this profile.
+A `QUALIFIED` zone is isolated from repeated deep testing. Reopen it only when:
+
+- a file owned by the zone changed;
+- a shared dependency or cross-zone contract used by the zone changed;
+- its compact smoke fails or a new field symptom appears; or
+- the candidate is selected for milestone/promotion acceptance.
+
+Before each repair batch, compare the last installed product source with the
+new source using `git diff --name-only`, map changed files to zones, and record
+the affected-zone list in the round note. If ownership is ambiguous, reopen the
+smallest plausible pair of zones rather than the whole product.
+
+Every ordinary candidate runs one compact cross-zone smoke:
+
+```text
+installed launch
+-> one typed reply
+-> one Push voice turn
+-> one safe read/action boundary
+-> Workbench and Remote health
+-> clean exit
+```
+
+Only a milestone or promotion candidate reruns the complete user-function
+matrix: typed and mixed-input continuity, Voice `Agent/Chat/Mixed x Push/Wake`,
+model routes, cancellation, recovery, major product surfaces, safe file
+roundtrip, Risk boundaries, restart/reboot and Program Files integrity.
+Telegram configuration and real remote actions remain excluded unless
+explicitly brought into scope.
 
 ## Batch discovery and repair round
 
 1. Lock the latest committed Aptenra `main`, the packaging commit and the open
-   Product Bug Register regressions in an isolated clean checkout. Inventory
-   customer-visible changes since Lenovo's installed baseline and add their
-   safe journeys to the round matrix. If the operator checkout is changing,
+   Product Bug Register regressions in an isolated clean checkout. Diff against
+   Lenovo's installed source, map files to zones, and declare only the
+   `ACTIVE/REOPENED` zones for the round. If the operator checkout is changing,
    wait for its intended work to be committed; never package staged or
    uncommitted content.
-2. Run change-focused automated tests, then build one fresh immutable candidate.
+2. Run tests owned by affected zones plus the full Python suite and the compact
+   Electron smoke before spending time on a freeze. Then build one fresh
+   immutable candidate.
    Run a mini-media rehearsal only when packaging code changed or the last
    failure points to packaging.
 3. Transfer by manifest/SHA and perform a visible KVM in-place Upgrade. Verify
    exact identity, preserved user state, launch and disk baseline before the
    functional pass.
-4. Run the complete mandatory user-function matrix. Record each failure with a
-   provisional case reference and continue every test that is still safe and
-   meaningful. Dependent cases become `BLOCKED-BY-APB-NNN`, not silent skips.
-5. End the discovery pass only after the matrix is exhausted, or immediately
+4. Deep-test every `ACTIVE/REOPENED` zone and run only the compact boundary
+   smoke for `QUALIFIED` zones. Record each failure with a provisional case
+   reference and continue every test that is still safe and meaningful.
+   Dependent cases become `BLOCKED-BY-APB-NNN`, not silent skips.
+5. Isolate test state by zone: use a dedicated Chat, test directory, marker,
+   settings snapshot and log time window. Restore only the settings changed by
+   that zone before moving to the next one.
+6. End the discovery pass only after all active-zone cases are exhausted, or immediately
    for security/privacy failure, data-loss risk, unsafe permission bypass,
    untrustworthy installed identity or a crash that makes further testing
    impossible.
-6. Triage all observations together: discard harness/environment incidents,
+7. Triage all observations together: discard harness/environment incidents,
    merge duplicate symptoms by root cause, assign permanent APB IDs, and
    diagnose the whole code batch before editing.
-7. Fix the batch in current `main`. Add an automated regression and permanent
+8. Fix the batch in current `main`. Add an automated regression and permanent
    KVM case for every APB, update the register to `FIXED-IN-MAIN`, then build the
    next immutable candidate.
-8. Rerun the full matrix on the new candidate. Close an APB only after its
-   original Lenovo path passes. Repeat until no mandatory product case fails.
+9. Rerun the affected zones plus compact cross-zone smoke on the next candidate.
+   Close an APB only after its original Lenovo path passes. Promote a zone to
+   `QUALIFIED` when its active cases pass and the boundary smoke remains healthy.
+10. When all zones are qualified, build or nominate one milestone candidate and
+    perform the complete cross-zone acceptance once. Repeat only zones exposed
+    by that acceptance, not the entire unaffected product.
 
 ## Observation contracts
 
@@ -218,11 +242,11 @@ views. No second Journal is created.
 
 ## Exit condition
 
-The loop exits only when one immutable candidate passes Upgrade identity,
-visible KVM launch, secure release-UI configuration, restart persistence and
-the complete mandatory user-function matrix; every observed APB at every
-severity is closed or explicitly ruled out as non-product, and there is no
-packaging blocker. The accepted candidate remains installed.
+The debug loop exits when every zone is `QUALIFIED`, every observed APB is
+closed or explicitly ruled out as non-product, compact cross-zone smoke passes,
+and there is no packaging blocker. Internal promotion additionally requires one
+milestone candidate to pass the complete cross-zone acceptance. The accepted
+candidate remains installed.
 
 Repair, downgrade, Uninstall/Reinstall and rollback are conditional in this
 function-focused loop. Run them only when packaging code changed, a result
@@ -258,8 +282,12 @@ acceptance.
   transitions or a failure signature; do not sample unchanged progress screens.
 - Do not stop the discovery pass for an ordinary product bug. Record it and
   continue unaffected cases so one package yields one complete repair batch.
-- Reuse evidence within a paused immutable candidate, but every newly built
-  candidate reruns the full mandatory user-function matrix.
+- Reuse evidence for unchanged `QUALIFIED` zones. Every newly built candidate
+  reruns only affected-zone qualification plus the compact cross-zone smoke.
+- Do not reopen a qualified zone merely because another zone is being tested;
+  map the source diff and shared contracts first.
+- Run the complete user-function matrix once for a milestone/promotion
+  candidate, not for every repair candidate.
 - Keep evidence compact: one case row, one useful visible capture and the
   narrow request/log proof. Do not generate large duplicate evidence bundles.
 - Do not add an independent target agent, historical gate matrix or duplicate
