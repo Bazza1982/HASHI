@@ -278,6 +278,10 @@ acceptance.
   `scripts/build_registered_candidate.ps1` for subsequent immutable builds;
   pass candidate identity as parameters instead of cloning another dated build
   wrapper.
+- Use `scripts/serve_registered_candidate.ps1` and
+  `scripts/stop_registered_candidate_server.ps1` for temporary transfer;
+  candidate identity and display version are parameters, and the paired stop
+  script removes both listener and firewall rule.
 - Before sending a diagnostic command, prove the intended target window has
   focus. For encoded or long PiKVM keyboard input, open the shell explicitly
   and send a second `Enter` after printing completes; an empty second command at
