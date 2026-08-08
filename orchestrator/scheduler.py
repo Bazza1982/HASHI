@@ -151,6 +151,11 @@ class TaskScheduler:
         self.state.setdefault("crons", {})
         self.state.setdefault("nudges", {})
         self.state.setdefault("missed_crons", {})
+        self.state.setdefault("missed_heartbeats", {})
+        # Only the first successful scheduler pass is downtime recovery. Later
+        # ticks must keep normal due jobs independent, even when several share
+        # the same interval or cron boundary.
+        self._startup_recovery_pending = True
 
     def _runtime_map(self):
         if self.orchestrator is not None:
@@ -164,7 +169,13 @@ class TaskScheduler:
                     return json.load(f)
             except Exception as e:
                 scheduler_logger.error(f"Failed to load state: {e}")
-        return {"heartbeats": {}, "crons": {}, "nudges": {}, "missed_crons": {}}
+        return {
+            "heartbeats": {},
+            "crons": {},
+            "nudges": {},
+            "missed_crons": {},
+            "missed_heartbeats": {},
+        }
 
     def _save_state(self):
         try:
@@ -358,6 +369,170 @@ class TaskScheduler:
         )
         return label
 
+    @staticmethod
+    def _format_missed_job_lines(items: list[dict]) -> str:
+        lines = []
+        for item in items:
+            task_id = item.get("task_id", "?")
+            missed_min = int(item.get("missed_by_seconds", 0) // 60)
+            kind = item.get("kind", "job")
+            schedule = item.get("schedule") or item.get("interval_seconds")
+            detail = f"schedule `{schedule}`" if item.get("schedule") else f"interval {schedule}s"
+            lines.append(f"- `{task_id}` ({kind}; {detail}; 错过约 {missed_min} 分钟)")
+        return "\n".join(lines)
+
+    def _build_missed_jobs_notify_prompt(self, *, items: list[dict]) -> str:
+        """Build one user decision prompt for an agent's missed scheduler jobs."""
+        count = len(items)
+        cron_count = sum(item.get("kind") == "cron" for item in items)
+        heartbeat_count = sum(item.get("kind") == "heartbeat" for item in items)
+        body = self._format_missed_job_lines(items)
+        return (
+            f"[系统通知] HASHI 离线或暂停期间，以下 {count} 个定时任务已错过"
+            f"（cron {cron_count}，heartbeat {heartbeat_count}）。"
+            "它们已合并为这一批，并已跳过自动补发，等待用户决定。\n\n"
+            f"{body}\n\n"
+            "请只向用户提出一次选择，不要逐项询问：\n"
+            "1. **全部执行**；\n"
+            "2. **只执行部分**（请用户回复需要补跑的任务 ID）；\n"
+            "3. **全部跳过**。\n\n"
+            "在用户明确选择前不要执行这一批任务。用户也可以通过 `/jobs` 手动 Run。"
+            "无论如何选择，下次仍按原计划正常触发。"
+        )
+
+    async def _notify_missed_jobs_grouped(
+        self,
+        *,
+        runtime_map: dict,
+        agent_name: str,
+        items: list[dict],
+    ) -> None:
+        if not items:
+            return
+        rt = runtime_map.get(agent_name)
+        if rt is None:
+            return
+        notify_prompt = self._build_missed_jobs_notify_prompt(items=items)
+        task_ids = ",".join(str(item.get("task_id", "?")) for item in items[:5])
+        if len(items) > 5:
+            task_ids = f"{task_ids},…(+{len(items) - 5})"
+        if len(items) == 1:
+            item = items[0]
+            summary = f"Missed {str(item.get('kind', 'job')).title()} [{item.get('task_id', '?')}]"
+        else:
+            summary = f"Missed Scheduler Jobs x{len(items)} [{task_ids}]"
+        await self._run_scheduler_action(
+            rt.enqueue_request(
+                chat_id=self.authorized_id,
+                prompt=notify_prompt,
+                source="scheduler",
+                summary=summary,
+            ),
+            task_kind="Scheduler recovery",
+            task_id=str(items[0].get("task_id", "missed-batch")),
+            agent_name=agent_name,
+        )
+
+    async def _fire_heartbeat_job(self, hb: dict, *, runtime_map: dict) -> bool:
+        """Run one due heartbeat. Returns True when last_run should advance."""
+        task_id = hb["id"]
+        agent_name = hb["agent"]
+        prompt = hb.get("prompt", "")
+        action = hb.get("action", "enqueue_prompt")
+        rt = runtime_map[agent_name]
+        scheduler_logger.info(f"Triggering heartbeat {task_id} for {agent_name}")
+        if action.startswith("skill:"):
+            skill_id = action.split(":", 1)[1]
+            args = hb.get("args", "") or prompt
+            return await self._run_scheduler_action(
+                rt.invoke_scheduler_skill(
+                    skill_id=skill_id,
+                    args=args,
+                    task_id=task_id,
+                ),
+                task_kind="Heartbeat",
+                task_id=task_id,
+                agent_name=agent_name,
+                timeout_s=SCHEDULER_SKILL_TIMEOUT_S,
+            )
+        return await self._run_scheduler_action(
+            rt.enqueue_request(
+                chat_id=self.authorized_id,
+                prompt=prompt,
+                source="scheduler",
+                summary=f"Heartbeat Task [{task_id}]",
+            ),
+            task_kind="Heartbeat",
+            task_id=task_id,
+            agent_name=agent_name,
+        )
+
+    async def _fire_cron_job(
+        self,
+        cron: dict,
+        *,
+        runtime_map: dict,
+        tasks: dict,
+        now_dt: datetime,
+    ) -> None:
+        """Run one due cron while preserving loop and action semantics."""
+        task_id = cron["id"]
+        agent_name = cron["agent"]
+        action = cron.get("action", "enqueue_prompt")
+
+        loop_meta = cron.get("loop_meta")
+        if loop_meta is not None:
+            count = loop_meta.get("count", 0) + 1
+            max_count = loop_meta.get("max", 100)
+            if count > max_count:
+                scheduler_logger.info(f"Loop {task_id} reached max ({max_count}). Auto-disabling.")
+                cron["enabled"] = False
+                loop_meta["count"] = count - 1
+                loop_meta["stopped_reason"] = "max_reached"
+                self._save_tasks(tasks)
+                return
+            loop_meta["count"] = count
+            self._save_tasks(tasks)
+
+        scheduler_logger.info(f"Triggering cron {task_id} for {agent_name} (schedule: {_resolve_schedule(cron)})")
+        rt = runtime_map[agent_name]
+        if action == "export_transcript":
+            exported = rt.export_daily_transcript(now_dt)
+            if not exported:
+                scheduler_logger.info(f"No transcript entries to export for {agent_name}")
+            return
+        if action.startswith("skill:"):
+            skill_id = action.split(":", 1)[1]
+            args = cron.get("args", "") or cron.get("prompt", "")
+            await self._run_scheduler_action(
+                rt.invoke_scheduler_skill(
+                    skill_id=skill_id,
+                    args=args,
+                    task_id=task_id,
+                ),
+                task_kind="Cron",
+                task_id=task_id,
+                agent_name=agent_name,
+                timeout_s=SCHEDULER_SKILL_TIMEOUT_S,
+            )
+            return
+
+        prompt = cron.get("prompt", "")
+        if not prompt or not prompt.strip():
+            scheduler_logger.error(f"Cron {task_id} for {agent_name} has an empty prompt. Skipping.")
+            return
+        await self._run_scheduler_action(
+            rt.enqueue_request(
+                chat_id=self.authorized_id,
+                prompt=prompt,
+                source="scheduler",
+                summary=f"Cron Task [{task_id}]",
+            ),
+            task_kind="Cron",
+            task_id=task_id,
+            agent_name=agent_name,
+        )
+
     async def run(self):
         scheduler_logger.info("Task Scheduler started%s.", " (croniter available)" if HAS_CRONITER else " (croniter NOT available, fallback mode)")
         while True:
@@ -375,8 +550,12 @@ class TaskScheduler:
 
                 state_changed = False
 
-                # Process heartbeats (unchanged — interval-based)
+                # During the first successful pass, collect all previously-run
+                # jobs that became due while HASHI was unavailable. Cron and
+                # heartbeat candidates share this collection so each agent gets
+                # one recovery decision instead of one prompt per job.
                 runtime_map = self._runtime_map()
+                recovery_jobs_by_agent: dict[str, list[dict]] = {}
                 for hb in tasks.get("heartbeats", []):
                     if not hb.get("enabled", False):
                         continue
@@ -395,42 +574,29 @@ class TaskScheduler:
                         continue
 
                     last_run = self.state["heartbeats"].get(task_id, 0)
-                    if now - last_run >= interval:
-                        if self._job_owner_mismatch(hb, task_kind="Heartbeat", task_id=task_id, agent_name=agent_name):
-                            self.state["heartbeats"][task_id] = now
-                            state_changed = True
-                            continue
-                        scheduler_logger.info(f"Triggering heartbeat {task_id} for {agent_name}")
-                        rt = runtime_map[agent_name]
-                        if action.startswith("skill:"):
-                            skill_id = action.split(":", 1)[1]
-                            args = hb.get("args", "") or prompt
-                            ok = await self._run_scheduler_action(
-                                rt.invoke_scheduler_skill(
-                                    skill_id=skill_id,
-                                    args=args,
-                                    task_id=task_id,
-                                ),
-                                task_kind="Heartbeat",
-                                task_id=task_id,
-                                agent_name=agent_name,
-                                timeout_s=SCHEDULER_SKILL_TIMEOUT_S,
-                            )
-                        else:
-                            ok = await self._run_scheduler_action(
-                                rt.enqueue_request(
-                                    chat_id=self.authorized_id,
-                                    prompt=prompt,
-                                    source="scheduler",
-                                    summary=f"Heartbeat Task [{task_id}]"
-                                ),
-                                task_kind="Heartbeat",
-                                task_id=task_id,
-                                agent_name=agent_name,
-                            )
-                        if ok:
-                            self.state["heartbeats"][task_id] = now
-                            state_changed = True
+                    if now - last_run < interval:
+                        continue
+                    if self._job_owner_mismatch(hb, task_kind="Heartbeat", task_id=task_id, agent_name=agent_name):
+                        self.state["heartbeats"][task_id] = now
+                        state_changed = True
+                        continue
+                    overdue_s = now - last_run if last_run else float(interval)
+                    if self._startup_recovery_pending and last_run:
+                        recovery_jobs_by_agent.setdefault(agent_name, []).append(
+                            {
+                                "job": hb,
+                                "task_id": task_id,
+                                "kind": "heartbeat",
+                                "interval_seconds": interval,
+                                "missed_by_seconds": max(0.0, overdue_s - float(interval)),
+                                "requires_prompt": False,
+                            }
+                        )
+                        continue
+                    ok = await self._fire_heartbeat_job(hb, runtime_map=runtime_map)
+                    if ok:
+                        self.state["heartbeats"][task_id] = now
+                        state_changed = True
 
                 # Process nudges (idle-bound continuation prompts)
                 for nudge in tasks.get("nudges", []):
@@ -491,14 +657,15 @@ class TaskScheduler:
                     self.state["nudges"][task_id] = now
                     state_changed = True
 
-                # Process crons (upgraded — cron expression support)
+                # Process crons (upgraded — cron expression support). Startup
+                # catch-up candidates join heartbeat candidates in the same
+                # per-agent recovery batch. Outside startup, the historical
+                # stale-miss threshold still produces a single-job notice.
                 for cron in tasks.get("crons", []):
                     if not cron.get("enabled", False):
                         continue
                     task_id = cron["id"]
                     agent_name = cron["agent"]
-                    prompt = cron.get("prompt", "")
-                    action = cron.get("action", "enqueue_prompt")
 
                     if agent_name not in runtime_map:
                         continue
@@ -521,111 +688,96 @@ class TaskScheduler:
                         continue
 
                     missed_by = _should_fire(schedule, last_run_ts, now_dt)
-                    if missed_by is not None and missed_by > CRON_CATCHUP_THRESHOLD_S:
-                        missed_min = int(missed_by // 60)
-                        scheduler_logger.info(
-                            "Cron %s for %s missed by %sm; skipping stale catch-up.",
-                            task_id,
-                            agent_name,
-                            missed_min,
-                        )
-                        rt = runtime_map[agent_name]
-                        notify_prompt = (
-                            "[系统通知] 以下定时任务因 HASHI 离线或暂停而错过，超过 1 小时未执行，"
-                            "已跳过自动补发，避免过期任务误运行。\n"
-                            f"- `{task_id}`（错过约 {missed_min} 分钟）\n\n"
-                            "如仍需执行，请在控制面板或 `/jobs` 中手动运行对应任务。"
-                        )
-                        await self._run_scheduler_action(
-                            rt.enqueue_request(
-                                chat_id=self.authorized_id,
-                                prompt=notify_prompt,
-                                source="scheduler",
-                                summary=f"Missed Cron [{task_id}]",
-                            ),
-                            task_kind="Cron",
-                            task_id=task_id,
-                            agent_name=agent_name,
-                        )
-                        self.state.setdefault("missed_crons", {})[task_id] = {
-                            "agent": agent_name,
-                            "schedule": schedule,
-                            "missed_by_seconds": missed_by,
-                            "noticed_at": now,
-                        }
+                    if missed_by is None:
+                        continue
+                    if self._job_owner_mismatch(cron, task_kind="Cron", task_id=task_id, agent_name=agent_name):
                         self.state["crons"][task_id] = now
                         state_changed = True
                         continue
 
-                    if missed_by is not None:
-                        if self._job_owner_mismatch(cron, task_kind="Cron", task_id=task_id, agent_name=agent_name):
-                            self.state["crons"][task_id] = now
-                            state_changed = True
-                            continue
-                        # --- Loop safety net: count iterations, auto-disable at max ---
-                        loop_meta = cron.get("loop_meta")
-                        if loop_meta is not None:
-                            count = loop_meta.get("count", 0) + 1
-                            max_count = loop_meta.get("max", 100)
-                            if count > max_count:
-                                scheduler_logger.info(
-                                    f"Loop {task_id} reached max ({max_count}). Auto-disabling."
-                                )
-                                cron["enabled"] = False
-                                loop_meta["count"] = count - 1
-                                loop_meta["stopped_reason"] = "max_reached"
-                                self._save_tasks(tasks)
-                                self.state["crons"][task_id] = now
-                                state_changed = True
-                                continue
-                            loop_meta["count"] = count
-                            self._save_tasks(tasks)
+                    requires_prompt = missed_by > CRON_CATCHUP_THRESHOLD_S
+                    if self._startup_recovery_pending or requires_prompt:
+                        scheduler_logger.info(
+                            "Cron %s for %s is a recovery candidate (missed by %sm).",
+                            task_id,
+                            agent_name,
+                            int(missed_by // 60),
+                        )
+                        recovery_jobs_by_agent.setdefault(agent_name, []).append(
+                            {
+                                "job": cron,
+                                "task_id": task_id,
+                                "kind": "cron",
+                                "schedule": schedule,
+                                "missed_by_seconds": missed_by,
+                                "requires_prompt": requires_prompt,
+                            }
+                        )
+                        continue
 
-                        scheduler_logger.info(f"Triggering cron {task_id} for {agent_name} (schedule: {schedule})")
-                        rt = runtime_map[agent_name]
-                        if action == "export_transcript":
-                            exported = rt.export_daily_transcript(now_dt)
-                            if not exported:
-                                scheduler_logger.info(f"No transcript entries to export for {agent_name}")
-                            ok = True
-                        elif action.startswith("skill:"):
-                            skill_id = action.split(":", 1)[1]
-                            args = cron.get("args", "") or cron.get("prompt", "")
-                            ok = await self._run_scheduler_action(
-                                rt.invoke_scheduler_skill(
-                                    skill_id=skill_id,
-                                    args=args,
-                                    task_id=task_id,
-                                ),
-                                task_kind="Cron",
-                                task_id=task_id,
-                                agent_name=agent_name,
-                                timeout_s=SCHEDULER_SKILL_TIMEOUT_S,
-                            )
-                        else:
-                            if not prompt or not prompt.strip():
-                                scheduler_logger.error(
-                                    f"Cron {task_id} for {agent_name} has an empty prompt. Skipping."
-                                )
-                                self.state["crons"][task_id] = now
+                    await self._fire_cron_job(
+                        cron,
+                        runtime_map=runtime_map,
+                        tasks=tasks,
+                        now_dt=now_dt,
+                    )
+                    # Cron state advances even when execution fails so the next
+                    # tick does not repeatedly fire the same scheduled boundary.
+                    self.state["crons"][task_id] = now
+                    state_changed = True
+
+                for agent_name, missed_items in recovery_jobs_by_agent.items():
+                    # Preserve historical behaviour when only one recent job was
+                    # due: heartbeat and recent cron catch-up still auto-run.
+                    if len(missed_items) == 1 and not missed_items[0]["requires_prompt"]:
+                        item = missed_items[0]
+                        if item["kind"] == "heartbeat":
+                            ok = await self._fire_heartbeat_job(item["job"], runtime_map=runtime_map)
+                            if ok:
+                                self.state["heartbeats"][item["task_id"]] = now
                                 state_changed = True
-                                continue
-                            ok = await self._run_scheduler_action(
-                                rt.enqueue_request(
-                                    chat_id=self.authorized_id,
-                                    prompt=prompt,
-                                    source="scheduler",
-                                    summary=f"Cron Task [{task_id}]"
-                                ),
-                                task_kind="Cron",
-                                task_id=task_id,
-                                agent_name=agent_name,
+                        else:
+                            await self._fire_cron_job(
+                                item["job"],
+                                runtime_map=runtime_map,
+                                tasks=tasks,
+                                now_dt=now_dt,
                             )
-                        # Always update last_run to prevent re-triggering on
-                        # timeout/failure.  The cron will fire again at its NEXT
-                        # scheduled time, not in the same minute.
-                        self.state["crons"][task_id] = now
+                            self.state["crons"][item["task_id"]] = now
+                            state_changed = True
+                        continue
+
+                    scheduler_logger.info(
+                        "Scheduler recovery batch for %s: %s missed job(s); notifying once.",
+                        agent_name,
+                        len(missed_items),
+                    )
+                    await self._notify_missed_jobs_grouped(
+                        runtime_map=runtime_map,
+                        agent_name=agent_name,
+                        items=missed_items,
+                    )
+                    for item in missed_items:
+                        task_id = item["task_id"]
+                        if item["kind"] == "heartbeat":
+                            self.state["missed_heartbeats"][task_id] = {
+                                "agent": agent_name,
+                                "interval_seconds": item.get("interval_seconds"),
+                                "missed_by_seconds": item.get("missed_by_seconds"),
+                                "noticed_at": now,
+                            }
+                            self.state["heartbeats"][task_id] = now
+                        else:
+                            self.state["missed_crons"][task_id] = {
+                                "agent": agent_name,
+                                "schedule": item.get("schedule"),
+                                "missed_by_seconds": item.get("missed_by_seconds"),
+                                "noticed_at": now,
+                            }
+                            self.state["crons"][task_id] = now
                         state_changed = True
+
+                self._startup_recovery_pending = False
 
                 # Process parked-topic follow-ups without creating ad hoc task rows.
                 for rt in runtime_map.values():

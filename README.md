@@ -709,6 +709,12 @@ Scheduled tasks at specific times:
 }
 ```
 
+#### Offline Recovery
+
+On the first scheduler pass after HASHI restarts, due cron and heartbeat jobs are collected per target agent. If more than one job was missed, HASHI sends one combined recovery prompt listing the whole batch and asks whether to run all jobs, selected job IDs, or none. The scheduler advances the saved baselines so the same missed batch is not announced again.
+
+A single recent job keeps the existing automatic catch-up behavior, while a stale cron still requires confirmation. Normal simultaneous heartbeat runs after startup continue independently and are not grouped.
+
 #### Skill-Based Jobs
 Jobs can invoke skills instead of prompts:
 ```json
