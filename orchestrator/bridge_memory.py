@@ -659,6 +659,17 @@ class SysPromptManager:
             if self._data.get(slot, {}).get("active") and self._data[slot].get("text")
         ]
 
+    def list_slots(self) -> list[dict[str, object]]:
+        """Return every stable SYS slot without exposing mutable state."""
+        return [
+            {
+                "slot": slot,
+                "active": bool(self._slot(slot).get("active")),
+                "text": str(self._slot(slot).get("text") or ""),
+            }
+            for slot in self.SLOTS
+        ]
+
 
 class BridgeContextAssembler:
     PROMPT_BUDGETS = {

@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from aiohttp import web
 
+from orchestrator.agent_overview import build_agent_overview
 from orchestrator.admin_local_testing import (
     execute_local_command,
     supported_commands,
@@ -287,6 +288,7 @@ class WorkbenchApiServer:
             self.handle_enterprise_connector_credential_revoke,
         )
         self.app.router.add_get("/api/agents", self.handle_agents)
+        self.app.router.add_get("/api/agents/{name}/overview", self.handle_agent_overview)
         self.app.router.add_get("/api/transcript/{name}", self.handle_transcript_recent)
         self.app.router.add_get("/api/transcript/{name}/poll", self.handle_transcript_poll)
         self.app.router.add_get(
@@ -2554,6 +2556,30 @@ class WorkbenchApiServer:
             for agent_row in agent_rows
         ]
         return web.json_response({"ok": True, "agents": agents})
+
+    async def handle_agent_overview(self, request):
+        name = str(request.match_info.get("name") or "").strip()
+        runtime_map = self._runtime_map()
+        agent_rows = self._load_agent_rows()
+        if self._is_governed_profile():
+            user = self._enterprise_user_from_request(request)
+            if user is None:
+                return web.json_response({"ok": False, "error": "not authenticated"}, status=401)
+            agent_rows = self._filter_enterprise_agent_rows_for_user(user, agent_rows)
+        agent_row = next((row for row in agent_rows if row["name"] == name), None)
+        if agent_row is None:
+            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+
+        runtime = runtime_map.get(name)
+        metadata = self._metadata_for_agent(agent_row, runtime)
+        overview = build_agent_overview(
+            metadata=metadata,
+            workspace_dir=Path(metadata["workspace_dir"]),
+            runtime=runtime,
+        )
+        response = web.json_response({"ok": True, "overview": overview})
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     async def handle_transcript_recent(self, request):
         name = request.match_info["name"]
