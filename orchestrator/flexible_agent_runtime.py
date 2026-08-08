@@ -42,6 +42,7 @@ from orchestrator import runtime_control
 from orchestrator import runtime_delivery
 from orchestrator import runtime_habits
 from orchestrator import runtime_lifecycle
+from orchestrator import runtime_long
 from orchestrator import runtime_media
 from orchestrator import runtime_menu_views
 from orchestrator import runtime_command_binding
@@ -207,11 +208,15 @@ class FlexibleAgentRuntime:
         self._pending_request_results: dict[str, dict] = {}
         self._transfer_state: dict | None = None
         self._suppressed_transfer_results: list[dict[str, Any]] = []
-        # /long ... /end buffering
+        # /long ... /end multimodal batching
         self._long_buffer: list[str] = []
+        self._long_buffer_kinds: list[str] = []
+        self._long_buffer_summaries: list[str] = []
+        self._long_buffer_ids: list[str | None] = []
         self._long_buffer_active: bool = False
         self._long_buffer_chat_id: int | None = None
         self._long_buffer_timeout_task: asyncio.Task | None = None
+        self._long_pending_voice_keys: set[str] = set()
         # Hashi Remote subprocess
         self._remote_process: asyncio.subprocess.Process | None = None
         self.skill_manager = skill_manager
@@ -2823,6 +2828,7 @@ class FlexibleAgentRuntime:
         elif args[0] == "off":
             self._safevoice_enabled = False
             self._set_skill_state("safevoice", False)
+            runtime_long.discard_pending_voice_confirmations(self)
             self._pending_voice.clear()
             await self._reply_text(
                 update,
@@ -2844,6 +2850,7 @@ class FlexibleAgentRuntime:
             self._safevoice_enabled = chat_key == "on"
             self._set_skill_state("safevoice", self._safevoice_enabled)
             if not self._safevoice_enabled:
+                runtime_long.discard_pending_voice_confirmations(self)
                 self._pending_voice.clear()
             await query.edit_message_text(
                 runtime_menu_views.safevoice_menu_text(enabled=self._safevoice_enabled),
@@ -2852,15 +2859,39 @@ class FlexibleAgentRuntime:
             )
             await query.answer("Safe Voice updated")
             return
+        was_long_batch_voice = chat_key in self._long_pending_voice_keys
         pending = self._pending_voice.pop(chat_key, None)
+        is_long_batch_voice = was_long_batch_voice or bool(pending and pending.get("long_batch"))
         if action == "yes" and pending:
-            await query.edit_message_text(f"✅ Confirmed. Sending to agent:\n\n_{pending['transcript']}_", parse_mode="Markdown")
-            await query.answer("Sending...")
-            await self.enqueue_request(int(chat_key), pending["prompt"], "voice_transcript", pending["summary"])
+            if is_long_batch_voice:
+                added = runtime_long.resolve_voice_confirmation(self, chat_key, pending)
+                if added:
+                    await query.edit_message_text(
+                        f"✅ Confirmed and added to the active /long batch:\n\n_{pending['transcript']}_",
+                        parse_mode="Markdown",
+                    )
+                    await query.answer("Added to /long batch")
+                else:
+                    await query.edit_message_text("⏰ The /long batch is no longer active. Voice message discarded.")
+                    await query.answer("Expired")
+            else:
+                await query.edit_message_text(f"✅ Confirmed. Sending to agent:\n\n_{pending['transcript']}_", parse_mode="Markdown")
+                await query.answer("Sending...")
+                pending_chat_id = int(pending.get("chat_id") or chat_key)
+                await self.enqueue_request(
+                    pending_chat_id,
+                    pending["prompt"],
+                    "voice_transcript",
+                    pending["summary"],
+                )
         elif action == "no":
+            if is_long_batch_voice:
+                runtime_long.discard_voice_confirmation(self, chat_key)
             await query.edit_message_text("❌ Voice message discarded.")
             await query.answer("Discarded")
         else:
+            if is_long_batch_voice:
+                runtime_long.discard_voice_confirmation(self, chat_key)
             await query.edit_message_text("⏰ Voice confirmation expired.")
             await query.answer("Expired")
 
@@ -7054,85 +7085,20 @@ class FlexibleAgentRuntime:
         await runtime_wol.cmd_wol(self, update, context)
 
     # ------------------------------------------------------------------
-    # /long ... /end buffering (collect split Telegram messages)
+    # /long ... /end multimodal batching
     # ------------------------------------------------------------------
 
     async def cmd_long(self, update: Update, context: Any):
-        """Start collecting multi-message input. Usage: /long [optional first line]"""
-        if not self._is_authorized_user(update.effective_user.id):
-            return
-        # If already buffering, treat as nested /long — just acknowledge
-        if self._long_buffer_active:
-            await self._reply_text(update, "⏳ Already in /long mode. Send /end to finish.")
-            return
-        self._long_buffer = []
-        self._long_buffer_active = True
-        self._long_buffer_chat_id = update.effective_chat.id
-        # If text was provided after /long, include it as the first chunk
-        args_text = " ".join(context.args).strip() if context.args else ""
-        if args_text:
-            self._long_buffer.append(args_text)
-        # Start safety timeout (5 minutes)
-        if self._long_buffer_timeout_task and not self._long_buffer_timeout_task.done():
-            self._long_buffer_timeout_task.cancel()
-        self._long_buffer_timeout_task = asyncio.create_task(self._long_buffer_timeout())
-        await self._reply_text(update, "📝 /long mode started. Paste your text, then send /end to submit.")
+        """Start collecting text and media for one request."""
+        await runtime_long.cmd_long(self, update, context)
 
     async def cmd_end(self, update: Update, context: Any):
-        """End /long buffering and submit collected text."""
-        if not self._is_authorized_user(update.effective_user.id):
-            return
-        if not self._long_buffer_active:
-            await self._reply_text(update, "No /long session active.")
-            return
-        # Cancel timeout
-        if self._long_buffer_timeout_task and not self._long_buffer_timeout_task.done():
-            self._long_buffer_timeout_task.cancel()
-            self._long_buffer_timeout_task = None
-        # Assemble and submit
-        combined = "\n".join(self._long_buffer).strip()
-        self._long_buffer = []
-        self._long_buffer_active = False
-        chat_id = self._long_buffer_chat_id or update.effective_chat.id
-        self._long_buffer_chat_id = None
-        if not combined:
-            await self._reply_text(update, "⚠️ /long buffer was empty, nothing to submit.")
-            return
-        chunk_count = len(combined.splitlines())
-        await self._reply_text(update, f"✅ Collected {chunk_count} lines. Submitting...")
-        _print_user_message(self.name, combined)
-        await self.enqueue_request(chat_id, combined, "text", _safe_excerpt(combined))
+        """Submit the collected /long batch as one request."""
+        await runtime_long.cmd_end(self, update, context)
 
     async def _long_buffer_timeout(self):
-        """Safety timeout: auto-submit after 5 minutes."""
-        try:
-            await asyncio.sleep(300)
-        except asyncio.CancelledError:
-            return
-        if not self._long_buffer_active:
-            return
-        combined = "\n".join(self._long_buffer).strip()
-        self._long_buffer = []
-        self._long_buffer_active = False
-        chat_id = self._long_buffer_chat_id
-        self._long_buffer_chat_id = None
-        self._long_buffer_timeout_task = None
-        if chat_id and combined:
-            await self.send_long_message(
-                chat_id,
-                f"⏰ /long auto-submitted after 5min timeout ({len(combined.splitlines())} lines).",
-                request_id=f"long-timeout-{uuid4().hex[:8]}",
-                purpose="long-timeout",
-            )
-            _print_user_message(self.name, combined)
-            await self.enqueue_request(chat_id, combined, "text", _safe_excerpt(combined))
-        elif chat_id:
-            await self.send_long_message(
-                chat_id,
-                "⏰ /long timed out with empty buffer. Cancelled.",
-                request_id=f"long-timeout-{uuid4().hex[:8]}",
-                purpose="long-timeout",
-            )
+        """Safety timeout: auto-submit the collected batch after 5 minutes."""
+        await runtime_long.long_buffer_timeout(self)
 
     async def handle_message(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -7145,9 +7111,8 @@ class FlexibleAgentRuntime:
             await self._reply_text(update, self._transfer_redirect_text())
             return
         text = update.message.text
-        # If in /long buffering mode, collect instead of processing
-        if self._long_buffer_active:
-            self._long_buffer.append(text)
+        # /long is scoped to the chat that started it.
+        if runtime_long.collect_text(self, update.effective_chat.id, text):
             return
         _print_user_message(self.name, text)
         self._capture_followup_habit_feedback(text)
@@ -7962,7 +7927,7 @@ class FlexibleAgentRuntime:
                 except Exception:
                     pass
                 memory_user_text = item.prompt
-                if item.source.lower() in {"document", "photo", "voice", "audio", "video", "sticker"}:
+                if item.source.lower() in {"document", "photo", "voice", "audio", "video", "sticker", "multimodal"}:
                     memory_user_text = f"[{item.source}] {item.summary}"
                 is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
                 if item.source not in {"startup", "system", SESSION_RESET_SOURCE}:
