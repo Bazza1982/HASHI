@@ -8,6 +8,7 @@ from typing import Any
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import NetworkError, TimedOut
 
+from orchestrator import runtime_long
 from orchestrator.media_utils import is_image_file
 from orchestrator.runtime_common import _print_user_message
 
@@ -84,8 +85,25 @@ def _log_warning(runtime: Any, message: str) -> None:
             info(message)
 
 
+def _available_media_path(media_dir: Path, filename: str) -> Path:
+    # Telegram filenames are user-controlled. Keep every download inside the
+    # agent media directory and avoid overwriting same-named batch items.
+    normalized = str(filename or "").replace("\\", "/")
+    safe_name = Path(normalized).name.strip() or f"media_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+    candidate = media_dir / safe_name
+    if not candidate.exists():
+        return candidate
+    suffix = candidate.suffix
+    stem = candidate.name[: -len(suffix)] if suffix else candidate.name
+    for index in range(2, 10_000):
+        alternative = media_dir / f"{stem}_{index}{suffix}"
+        if not alternative.exists():
+            return alternative
+    raise RuntimeError(f"could not allocate a unique media filename for {safe_name!r}")
+
+
 async def download_media(runtime: Any, file_id: str, filename: str) -> Path:
-    local_path = runtime.media_dir / filename
+    local_path = _available_media_path(runtime.media_dir, filename)
     retryable_errors = (TimedOut, NetworkError, TimeoutError, OSError)
     max_attempts = 3
     last_error: Exception | None = None
@@ -133,6 +151,14 @@ async def handle_media_message(
     try:
         local_path = await runtime.download_media(file_id, filename)
         rendered_prompt = prompt.replace("{local_path}", str(local_path))
+        if runtime_long.collect_media(
+            runtime,
+            update.effective_chat.id,
+            rendered_prompt,
+            media_kind.lower(),
+            summary,
+        ):
+            return
         await runtime.enqueue_request(update.effective_chat.id, rendered_prompt, media_kind.lower(), summary)
     except Exception as e:
         runtime.error_logger.exception(f"{media_kind} handler failed for '{filename}': {e}")
@@ -191,6 +217,7 @@ async def handle_voice_or_audio(
     caption: str = "",
 ):
     """Download voice/audio, transcribe locally, and dispatch as text."""
+    runtime._record_active_chat(update)
     if runtime._should_redirect_after_transfer():
         await runtime._reply_text(update, runtime._transfer_redirect_text())
         return
@@ -207,6 +234,14 @@ async def handle_voice_or_audio(
             backend = getattr(runtime.backend_manager, "current_backend", None)
             if backend and backend.capabilities.supports_files:
                 prompt = f"User sent a voice message (saved at {local_path}). Listen to the audio, transcribe it, and respond."
+                if runtime_long.collect_media(
+                    runtime,
+                    update.effective_chat.id,
+                    prompt,
+                    media_kind.lower(),
+                    filename,
+                ):
+                    return
                 await runtime.enqueue_request(update.effective_chat.id, prompt, media_kind.lower(), filename)
             else:
                 await runtime._reply_text(update, f"Failed to transcribe {media_kind.lower()} message.")
@@ -221,14 +256,26 @@ async def handle_voice_or_audio(
             f"Transcribed {media_kind.lower()} ({filename}): {len(transcript)} chars"
         )
 
+        chat_id = update.effective_chat.id
+        batch_pending_key = None
+        if runtime._safevoice_enabled and runtime_long.is_collecting(runtime, chat_id):
+            batch_pending_key = runtime_long.register_voice_confirmation(
+                runtime,
+                chat_id=chat_id,
+                prompt=prompt,
+                transcript=transcript,
+                summary=f"{media_kind}: {filename}",
+            )
+
         if runtime._safevoice_enabled:
-            chat_id = update.effective_chat.id
-            chat_key = str(chat_id)
+            chat_key = batch_pending_key or str(chat_id)
             runtime._pending_voice[chat_key] = {
                 "prompt": prompt,
                 "transcript": transcript,
                 "summary": f"{media_kind}: {filename}",
+                "chat_id": chat_id,
                 "timestamp": datetime.now().isoformat(),
+                "long_batch": bool(batch_pending_key),
             }
             max_preview = 3500
             if len(transcript) > max_preview:
@@ -241,13 +288,26 @@ async def handle_voice_or_audio(
                     InlineKeyboardButton("Discard transcript", callback_data=f"safevoice:no:{chat_key}"),
                 ]
             ])
+            safevoice_title = (
+                "🛡️ *Safe Voice — Confirm transcription for /long batch:*"
+                if batch_pending_key
+                else "🛡️ *Safe Voice — Confirm transcription:*"
+            )
             await runtime._reply_text(
                 update,
-                f"🛡️ *Safe Voice — Confirm transcription:*\n\n_{preview}_",
+                f"{safevoice_title}\n\n_{preview}_",
                 reply_markup=keyboard,
                 parse_mode="Markdown",
             )
         else:
+            if runtime_long.collect_media(
+                runtime,
+                chat_id,
+                prompt,
+                "voice_transcript",
+                f"{media_kind}: {filename}",
+            ):
+                return
             await runtime.enqueue_request(update.effective_chat.id, prompt, "voice_transcript", f"{media_kind}: {filename}")
     except Exception as e:
         runtime.error_logger.exception(f"{media_kind} voice handler failed for '{filename}': {e}")
@@ -278,4 +338,6 @@ async def handle_sticker(runtime: Any, update: Any, context: Any):
     emoji = sticker.emoji or ""
     prompt, summary = build_media_prompt("sticker", "sticker", emoji=emoji)
     _print_user_message(runtime.name, emoji or "sticker", media_tag="Sticker")
+    if runtime_long.collect_media(runtime, update.effective_chat.id, prompt, "sticker", summary):
+        return
     await runtime.enqueue_request(update.effective_chat.id, prompt, "sticker", summary)

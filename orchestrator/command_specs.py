@@ -112,7 +112,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         alias_of="usecomputer",
     ),
     CommandSpec("browser", "cmd_browser", "Run an internet task with a selected browser/search route", "tools"),
-    CommandSpec("long", "cmd_long", "Start multi-message input (end with /end)", "tools"),
+    CommandSpec("long", "cmd_long", "Start multimodal batch (end with /end)", "tools"),
     CommandSpec("end", "cmd_end", "Submit collected /long input", "tools"),
     CommandSpec("remote", "cmd_remote", "Control Hashi Remote", "tools"),
     CommandSpec("wol", "cmd_wol", "Send Wake-on-LAN magic packet [pc_name]", "tools", menu_visible=False),
