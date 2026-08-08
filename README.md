@@ -594,7 +594,7 @@ between `/stop`, `/steer`, `/focus`, and `/recall`, see
 | `/browser [status\|examples\|1-4 task]` | Direct an internet task through a selected browser/search route |
 | `/resend` | Replay the previous model or Bridge output exactly, without model work |
 | `/retry` | Stop stale execution, create a clean context, restore recent handoff continuity, and rerun the last prompt |
-| `/long` ... `/end` | Buffer long text across multiple messages, submit as one |
+| `/long` ... `/end` | Buffer text and Telegram media, submit everything as one request |
 | `/loop <interval> <task>` | Create recurring automated tasks via skill injection |
 
 `/retry` uses `/new`-equivalent cleanup for CLI backends and `/fresh`-equivalent
@@ -1056,18 +1056,20 @@ python -m nagare.cli --help
 
 ---
 
-### /long ... /end — Long Text Handling
+### /long ... /end — Multimodal Batch Handling
 
-Telegram splits long messages automatically, which can cause incomplete understanding. The `/long` command buffers all fragments:
+Telegram splits long messages and delivers each attachment as its own update. The `/long` command groups text, documents, photos, audio, video, and stickers into one model request:
 
 ```
 /long          ← start collecting (optional: /long first line)
-(paste long text — Telegram splits into multiple messages)
-(all messages silently buffered, no LLM triggered)
-/end           ← assemble and submit as one message
+(send text and/or Telegram media in any order)
+(items are downloaded or transcribed, but no LLM is triggered)
+/end           ← assemble and submit as one request with one consolidated response
 ```
 
-**Safety:** 5-minute auto-submit timeout, empty buffer warning, duplicate `/long` detection.
+Pure-text batches keep the original long-text behavior. Media batches preserve item order and identify every local file path so the agent can inspect all items and compare them before replying. SafeVoice confirmations still apply to voice transcripts.
+
+**Safety:** 5-minute auto-submit timeout, empty buffer warning, duplicate `/long` detection, chat-scoped collection, and blocking `/end` while voice confirmations are pending.
 
 ---
 
@@ -1440,7 +1442,7 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
 - **Agent behavior audit** — local-only daily audit report generation
 - **Remote backend policy** — API backends blocked for automated requests, preventing runaway costs
 - **`/loop` command** — recurring tasks via natural language skill injection
-- **`/long` ... `/end`** — buffer long Telegram messages for single submission
+- **`/long` ... `/end`** — buffer text and Telegram media for one consolidated request
 - **`/say` TTS** — text-to-speech with multiple voice providers
 - **Minato MCP** — 8-tier workflow choreography with KASUMI tool delegation
 - **Obsidian wiki integration** — knowledge vault with daily sync and weekly LLM curation

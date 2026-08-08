@@ -998,7 +998,7 @@ def persist_success_memory(
     session_reset_source: str,
 ) -> None:
     memory_user_text = item.prompt
-    if item.source.lower() in {"document", "photo", "voice", "audio", "video", "sticker"}:
+    if item.source.lower() in {"document", "photo", "voice", "audio", "video", "sticker", "multimodal"}:
         memory_user_text = f"[{item.source}] {item.summary}"
     if item.source not in {"startup", "system", session_reset_source} and not is_bridge_request:
         memory_assistant_text = runtime._core_memory_assistant_text(
