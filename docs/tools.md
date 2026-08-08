@@ -236,7 +236,8 @@ Tools listed in `agents.json` → `global.default_tools.allowed` are automatical
 - Scheduler checks every 15 seconds; injects prompt into target agent's async queue when due.
 - Hot reload: `tasks.json` is re-read on each loop — no restart needed for task changes.
 - Cron actions: enqueue a prompt or perform a built-in action (e.g. transcript export to markdown journal).
-- If a cron was missed by more than one hour while HASHI was offline or paused, the scheduler skips stale catch-up and notifies the target agent instead of running an old task late. Run the job manually from `/jobs` or Workbench if it is still needed.
+- On the first pass after a restart, multiple due cron and heartbeat jobs for the same agent are combined into one recovery prompt. The user can run all, choose job IDs, or skip the batch; the same missed batch is not announced again.
+- A single recent job keeps automatic catch-up behavior. A cron missed by more than one hour still waits for user confirmation, and normal heartbeat ticks after startup are not grouped.
 
 ## Dynamic Agent Lifecycle
 Agents can be started and stopped without restarting the bridge process.
