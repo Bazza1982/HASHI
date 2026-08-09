@@ -21,6 +21,13 @@ Five execution modes:
   - `background_mode` — detach to background with escalating placeholders (`true`/`false`)
   - `background_detach_after` — seconds before detaching
   - `escalation_thresholds` — array of seconds for placeholder messages (e.g. `[30, 60, 90, 150]`)
+- **Claw tools and permissions:** `claw-cli` exposes all Claw-native tools by
+  default. Set `allowed_tools` only to create an explicit tool allowlist.
+  Tool visibility does not grant authority: `permission_mode` still controls
+  read-only, workspace-write, or danger-full-access execution. Scheduled
+  prompts run through their owning Agent's current backend and inherit that
+  Agent runtime's access scope; a Cron does not create a separate low-privilege
+  Agent.
 - **Tokens and secrets:** Telegram bot tokens and API keys are stored in `<project_root>\secrets.json`, keyed by agent name. Never put them in `agents.json`.
 - **Memory isolation:** Each agent runs inside its own `workspace_dir`. Fixed mode enables persistent sessions only for session-capable Codex, Claude, and Grok CLI backends. Other modes use one-shot backend turns with bridge-managed context.
 - **Per-agent logs and files:** Logs under `<project_root>\logs\<agent>\<session>`. Media under `<project_root>\media\<agent>`.

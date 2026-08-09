@@ -610,6 +610,14 @@ class TaskScheduler:
                                 self.state["crons"][task_id] = now
                                 state_changed = True
                                 continue
+                            scheduler_logger.info(
+                                "Cron %s dispatching through owning agent runtime %s "
+                                "(backend=%s, access_scope=%s).",
+                                task_id,
+                                agent_name,
+                                getattr(getattr(rt, "config", None), "active_backend", "unknown"),
+                                getattr(getattr(rt, "config", None), "access_scope", "unknown"),
+                            )
                             ok = await self._run_scheduler_action(
                                 rt.enqueue_request(
                                     chat_id=self.authorized_id,

@@ -1167,12 +1167,12 @@ class BridgeAgentRuntime:
             return ok, text
         prompt = self.skill_manager.build_prompt_for_skill(skill, args or "")
         if skill.backend and skill.backend != self.config.engine:
-            message = (
-                f"Scheduled prompt skill {skill.id} targets {skill.backend} "
-                f"but agent {self.name} runs {self.config.engine}."
+            self.logger.info(
+                "Scheduled prompt skill %s declares backend=%s; retaining agent current backend=%s.",
+                skill.id,
+                skill.backend,
+                self.config.engine,
             )
-            self.error_logger.error(message)
-            return False, message
         await self.enqueue_request(
             chat_id=self.global_config.authorized_id,
             prompt=prompt,

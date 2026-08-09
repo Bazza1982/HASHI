@@ -934,13 +934,22 @@ class ClawCLIAdapter(BaseBackend):
         return dict(extra) if isinstance(extra, Mapping) else {}
 
     def _allowed_tools(self) -> list[str] | None:
+        """Return an explicit Claw-native tool restriction, if configured.
+
+        HASHI's default is unfiltered: omitting ``allowed_tools`` (or using
+        ``*``) omits ``--allowedTools`` so Claw exposes every native tool
+        supported by the selected runtime. Filesystem and mutation authority
+        remain controlled independently by ``permission_mode``.
+        """
         raw = self._extra.get("allowed_tools")
         if raw is None:
             return None
         if isinstance(raw, str):
-            return [item.strip() for item in raw.split(",") if item.strip()]
+            parsed = [item.strip() for item in raw.split(",") if item.strip()]
+            return None if "*" in parsed else parsed
         if isinstance(raw, list):
-            return [str(item).strip() for item in raw if str(item).strip()]
+            parsed = [str(item).strip() for item in raw if str(item).strip()]
+            return None if "*" in parsed else parsed
         return None
 
     def _global_claw_config(self) -> dict[str, Any]:
