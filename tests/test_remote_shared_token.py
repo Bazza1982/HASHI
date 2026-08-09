@@ -97,6 +97,84 @@ def test_protocol_handshake_requires_auth_when_token_configured(tmp_path):
     assert protocol.handshakes == []
 
 
+def test_terminal_exec_accepts_valid_shared_token_when_lan_mode_off(tmp_path):
+    token = _write_shared_token(tmp_path)
+    client, _protocol = _client_lan_mode(tmp_path, lan_mode=False)
+    body = json.dumps({"command": "hostname"}).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    headers.update(
+        build_auth_headers(
+            shared_token=token,
+            method="POST",
+            path="/terminal/exec",
+            from_instance="HASHI2",
+            body_bytes=body,
+        )
+    )
+
+    response = client.post("/terminal/exec", content=body, headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+    assert response.json()["command"] == "hostname"
+
+
+def test_terminal_exec_requires_auth_when_lan_mode_off(tmp_path):
+    _write_shared_token(tmp_path)
+    client, _protocol = _client_lan_mode(tmp_path, lan_mode=False)
+
+    response = client.post("/terminal/exec", json={"command": "hostname"})
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Not authenticated"
+
+
+def test_terminal_exec_rejects_tampered_shared_token_body(tmp_path):
+    token = _write_shared_token(tmp_path)
+    client, _protocol = _client_lan_mode(tmp_path, lan_mode=False)
+    signed_body = json.dumps({"command": "hostname"}).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    headers.update(
+        build_auth_headers(
+            shared_token=token,
+            method="POST",
+            path="/terminal/exec",
+            from_instance="HASHI2",
+            body_bytes=signed_body,
+        )
+    )
+    tampered_body = json.dumps({"command": "whoami"}).encode("utf-8")
+
+    response = client.post("/terminal/exec", content=tampered_body, headers=headers)
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid or expired token"
+
+
+def test_terminal_exec_still_accepts_pairing_bearer_when_lan_mode_off(tmp_path):
+    manager = PairingManager(storage_dir=tmp_path / "pairing", lan_mode=False)
+    token = manager.approve_request_direct("paired-client", "Paired client")
+    app = create_app(
+        {"instance_id": "HASHI_LOCAL", "display_name": "Local", "remote_port": 8766},
+        manager,
+        TerminalExecutor(),
+        peer_registry=_PeerRegistryStub(),
+        protocol_manager=_ProtocolStub(),
+        hashi_root=str(tmp_path),
+        workbench_port=18800,
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/terminal/exec",
+        json={"command": "hostname"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+
+
 def test_protocol_handshake_accepts_valid_shared_token(tmp_path):
     token = _write_shared_token(tmp_path)
     client, protocol = _client(tmp_path)

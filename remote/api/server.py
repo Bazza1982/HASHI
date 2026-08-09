@@ -1155,8 +1155,18 @@ def create_app(
     # ── Terminal exec ────────────────────────────────────────
 
     @app.post("/terminal/exec")
-    async def terminal_exec(payload: TerminalExecPayload, client_id: str = Depends(verify_token)):
+    async def terminal_exec(request: Request, payload: TerminalExecPayload):
         """Execute a shell command on this machine."""
+        body_bytes = await request.body()
+        client_id, auth_reason = authenticate_request_detailed(
+            request,
+            body_bytes=body_bytes,
+            allow_lan=True,
+        )
+        if not client_id:
+            detail = "Not authenticated" if auth_reason == "auth_required" else "Invalid or expired token"
+            raise HTTPException(status_code=401, detail=detail)
+
         if not _terminal_executor:
             raise HTTPException(status_code=503, detail="Terminal executor not available")
 
