@@ -51,6 +51,7 @@ from orchestrator import runtime_nudge
 from orchestrator import runtime_pipeline
 from orchestrator import runtime_remote
 from orchestrator import runtime_retry
+from orchestrator import runtime_scheduler_recovery
 from orchestrator import telegram_delivery_failover
 from orchestrator import telegram_stream_policy
 from orchestrator.source_policy import source_requires_manual_remote_api_permission
@@ -858,13 +859,14 @@ class FlexibleAgentRuntime:
         is_bridge_request: bool,
         metadata: dict[str, Any] | None = None,
     ) -> list[tuple[str, str]]:
-        return await runtime_observers.build_pre_turn_context_sections(
+        sections = await runtime_observers.build_pre_turn_context_sections(
             self,
             item,
             user_text,
             is_bridge_request=is_bridge_request,
             metadata=metadata,
         )
+        return sections + runtime_scheduler_recovery.context_section(self, item.source)
 
     def _schedule_post_turn_observers(
         self,
@@ -7148,6 +7150,8 @@ class FlexibleAgentRuntime:
         # If in /long buffering mode, collect instead of processing
         if self._long_buffer_active:
             self._long_buffer.append(text)
+            return
+        if await runtime_scheduler_recovery.handle_reply(self, text=text, chat_id=update.effective_chat.id):
             return
         _print_user_message(self.name, text)
         self._capture_followup_habit_feedback(text)

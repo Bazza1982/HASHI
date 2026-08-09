@@ -66,6 +66,7 @@ from orchestrator.runtime_common import (
 from orchestrator import runtime_nudge
 from orchestrator import runtime_menu_views
 from orchestrator import runtime_retry
+from orchestrator import runtime_scheduler_recovery
 from orchestrator import runtime_workzone
 from orchestrator.runtime_display import _show_logo_animation
 from orchestrator.runtime_jobs import _build_jobs_with_buttons
@@ -2254,7 +2255,11 @@ class BridgeAgentRuntime:
                 backend_started = datetime.now()
                 effective_prompt = self._consume_session_primer(item)
                 habit_sections, habit_ids = self._build_habit_sections(item, effective_prompt)
-                extra_sections = self._workzone_prompt_section() + habit_sections
+                extra_sections = (
+                    self._workzone_prompt_section()
+                    + habit_sections
+                    + runtime_scheduler_recovery.context_section(self, item.source)
+                )
                 self.current_request_meta["habit_ids"] = habit_ids
                 prompt_payload = self.context_assembler.build_prompt_payload(
                     effective_prompt,
@@ -2632,6 +2637,12 @@ class BridgeAgentRuntime:
             self.logger.warning(f"Ignored message from unauthorized user ID: {update.effective_user.id}")
             return
         text = update.message.text
+        if await runtime_scheduler_recovery.handle_reply(
+            self,
+            text=text,
+            chat_id=update.effective_chat.id,
+        ):
+            return
         _print_user_message(self.name, text)
         self._capture_followup_habit_feedback(text)
         self.append_conversation_entry("user", text, "text")
