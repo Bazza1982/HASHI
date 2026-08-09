@@ -365,6 +365,29 @@ def test_build_claw_task_args_accepts_stream_json():
     )
 
     assert args[args.index("--output-format") + 1] == "stream-json"
+    assert "--allowedTools" not in args
+
+
+def test_claw_adapter_defaults_to_all_native_tools_and_accepts_wildcard(tmp_path):
+    base = {
+        "name": "test",
+        "workspace_dir": tmp_path,
+        "model": "deepseek/test",
+        "resolve_access_root": lambda: tmp_path,
+    }
+    unrestricted = ClawCLIAdapter(
+        SimpleNamespace(**base, extra={}),
+        SimpleNamespace(),
+        api_key="test-key",
+    )
+    wildcard = ClawCLIAdapter(
+        SimpleNamespace(**base, extra={"allowed_tools": ["*"]}),
+        SimpleNamespace(),
+        api_key="test-key",
+    )
+
+    assert unrestricted._allowed_tools() is None
+    assert wildcard._allowed_tools() is None
 
 
 def test_registry_exposes_claw_backend():

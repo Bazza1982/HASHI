@@ -395,8 +395,7 @@ Agent backend entries should refer to a provider and model:
   "engine": "claw-cli",
   "provider": "openrouter",
   "model": "deepseek/deepseek-v4-flash",
-  "permission_mode": "read-only",
-  "allowed_tools": ["read", "glob", "grep"]
+  "permission_mode": "read-only"
 }
 ```
 
@@ -478,15 +477,19 @@ Provider status semantics:
 
 ### Permission Profiles
 
-All agents may list `claw-cli` as an allowed backend, but the default Claw
-profile must be conservative:
+All agents may list `claw-cli` as an allowed backend. HASHI leaves Claw's
+native tool catalogue unfiltered by default and uses the permission profile as
+the authority boundary:
 
 ```json
 {
-  "permission_mode": "read-only",
-  "allowed_tools": ["read", "glob", "grep"]
+  "permission_mode": "read-only"
 }
 ```
+
+An explicit `allowed_tools` list remains available for an Agent that needs a
+narrower catalogue. Omitting it means all Claw-native tools are visible; it
+does not override the selected permission mode.
 
 Coding agents can opt into:
 

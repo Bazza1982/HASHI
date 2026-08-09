@@ -1537,24 +1537,13 @@ class FlexibleAgentRuntime:
                 self.error_logger.error(text)
             return ok, text
         prompt = self.skill_manager.build_prompt_for_skill(skill, args or "")
-        if skill.backend:
-            allowed = [b["engine"] for b in self.config.allowed_backends]
-            if skill.backend not in allowed:
-                message = f"Scheduled prompt skill {skill.id} targets disallowed backend {skill.backend}."
-                self.error_logger.error(message)
-                return False, message
-            if self.config.active_backend != skill.backend:
-                self._workzone_dir = load_workzone(self.workspace_dir)
-                self._sync_workzone_to_backend_config()
-                switch_ok = await self.backend_manager.switch_backend(skill.backend)
-                if not switch_ok:
-                    message = f"Failed to switch backend for scheduled skill {skill.id}."
-                    self.error_logger.error(message)
-                    return False, message
-                self._sync_workzone_to_backend_config()
-                backend = self.backend_manager.current_backend
-                if backend and getattr(backend.capabilities, "supports_sessions", False):
-                    await backend.handle_new_session()
+        if skill.backend and self.config.active_backend != skill.backend:
+            self.logger.info(
+                "Scheduled prompt skill %s declares backend=%s; retaining agent current backend=%s.",
+                skill.id,
+                skill.backend,
+                self.config.active_backend,
+            )
         await self.enqueue_request(
             chat_id=self._primary_chat_id(),
             prompt=prompt,

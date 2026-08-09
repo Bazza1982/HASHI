@@ -121,6 +121,7 @@ class FakeRuntime:
         self.listeners = {}
         self.is_generating = False
         self.queue = SimpleNamespace(empty=lambda: not self.busy)
+        self.config = SimpleNamespace(active_backend="claw-cli", access_scope="drive")
 
     def _backend_busy(self) -> bool:
         return self.busy
@@ -271,6 +272,48 @@ async def test_scheduler_skips_stale_missed_cron_and_notifies(tmp_path):
     assert payload["summary"] == "Missed Cron [daily-old]"
     assert "已跳过自动补发" in payload["prompt"]
     assert scheduler.state["missed_crons"]["daily-old"]["agent"] == "zelda"
+
+
+@pytest.mark.asyncio
+async def test_scheduler_cron_uses_owning_runtime_current_backend_and_access(tmp_path, monkeypatch):
+    tasks_path = tmp_path / "tasks.json"
+    tasks_path.write_text(
+        json.dumps(
+            {
+                "heartbeats": [],
+                "nudges": [],
+                "crons": [
+                    {
+                        "id": "agent-current-backend",
+                        "agent": "zelda",
+                        "enabled": True,
+                        "schedule": "0 12 * * *",
+                        "prompt": "run with my current runtime",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime = FakeRuntime(busy=False)
+    scheduler = TaskScheduler(
+        tasks_path=tasks_path,
+        state_path=tmp_path / "scheduler_state.json",
+        runtimes=[runtime],
+        authorized_id=123,
+    )
+    scheduler.state["crons"]["agent-current-backend"] = time.time() - 60
+    monkeypatch.setattr(scheduler_module, "_should_fire", lambda *_args: 0.0)
+
+    await _run_one_scheduler_pass(scheduler)
+
+    assert runtime.config.active_backend == "claw-cli"
+    assert runtime.config.access_scope == "drive"
+    assert len(runtime.enqueued) == 1
+    _request_id, payload = runtime.enqueued[0]
+    assert payload["source"] == "scheduler"
+    assert "backend" not in payload
+    assert "access_scope" not in payload
 
 
 @pytest.mark.asyncio
