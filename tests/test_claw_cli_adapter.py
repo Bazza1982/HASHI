@@ -613,9 +613,49 @@ async def test_claw_adapter_new_session_clears_resume_identity(tmp_path):
     )
     adapter = ClawCLIAdapter(cfg, SimpleNamespace(), api_key="test-key")
     adapter._session_id = "session-old"
+    adapter._persist_session_identity()
 
     assert await adapter.handle_new_session() is True
     assert adapter._session_id is None
+    assert not adapter._session_state_path.exists()
+
+
+def test_claw_adapter_session_checkpoint_survives_adapter_recreation(tmp_path):
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={},
+        resolve_access_root=lambda: tmp_path,
+    )
+    first = ClawCLIAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    first._session_id = "session-persisted"
+    first._persist_session_identity()
+
+    second = ClawCLIAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    second._load_session_identity()
+
+    assert second._session_id == "session-persisted"
+    assert second._session_state_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_claw_adapter_ignores_checkpoint_for_other_model(tmp_path):
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/old",
+        extra={},
+        resolve_access_root=lambda: tmp_path,
+    )
+    first = ClawCLIAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    first._session_id = "session-old-model"
+    first._persist_session_identity()
+
+    cfg.model = "deepseek/new"
+    second = ClawCLIAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    second._load_session_identity()
+
+    assert second._session_id is None
 
 
 @pytest.mark.asyncio

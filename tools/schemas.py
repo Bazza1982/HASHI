@@ -376,11 +376,9 @@ TOOL_SCHEMAS = [
             "name": "browser_session",
             "description": (
                 "Execute a multi-step browser workflow on a single page without reloading between steps. "
-                "This is the most powerful browser tool — use it for complex tasks like: login flows, "
-                "form wizards, navigating SPAs, scraping paginated content, or any sequence of "
-                "interactions. Supports: goto, click, fill, submit, key, scroll, scroll_to, hover, "
-                "select, wait_for, screenshot, get_text, evaluate, wait, back, forward, reload. "
-                "Set cdp_url to reuse the user's logged-in browser."
+                "Every step returns its own success/error and output. Supports: goto, click, fill, "
+                "type_text, scroll, scroll_to, hover, screenshot, get_text, get_html, evaluate, wait. "
+                "The default stop_on_error=true prevents later side effects after a failed step."
             ),
             "parameters": {
                 "type": "object",
@@ -398,7 +396,23 @@ TOOL_SCHEMAS = [
                             '{"action":"get_text"}\n'
                             '{"action":"wait","ms":1000}'
                         ),
-                        "items": {"type": "object"},
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "action": {
+                                    "type": "string",
+                                    "enum": [
+                                        "goto", "click", "fill", "type_text", "scroll", "scroll_to",
+                                        "hover", "screenshot", "get_text", "get_html", "evaluate", "wait",
+                                    ],
+                                },
+                            },
+                            "required": ["action"],
+                        },
+                    },
+                    "stop_on_error": {
+                        "type": "boolean",
+                        "description": "Stop at the first failed step. Default true.",
                     },
                     "cdp_url": {"type": "string", "description": "CDP endpoint to reuse existing browser."},
                     "headed": {"type": "boolean", "description": "Visible browser (standalone only). Default false."},

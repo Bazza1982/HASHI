@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from tools import browser
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_normalize_extension_bridge_screenshot_data_url() -> None:
@@ -121,3 +127,78 @@ async def test_execute_browser_evaluate_prefers_extension_bridge(monkeypatch: py
         }
     )
     assert result == "\"Example Domain\""
+
+
+@pytest.mark.asyncio
+async def test_extension_contract_rejects_advanced_action_not_advertised(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tools import browser_extension_bridge
+
+    monkeypatch.setattr(browser_extension_bridge, "bridge_available", lambda: True)
+    monkeypatch.setattr(
+        browser_extension_bridge,
+        "ensure_bridge_session",
+        lambda **_kwargs: {
+            "session": {"session_id": "default::momo"},
+            "extension_meta": {"extension_version": "0.1.2"},
+        },
+    )
+
+    result = await browser._maybe_execute_extension_bridge(
+        "session",
+        {"url": "https://example.com", "steps": [{"action": "get_text"}]},
+    )
+
+    assert result is not None
+    assert "does not advertise the 'session' contract" in result
+
+
+@pytest.mark.asyncio
+async def test_extension_contract_allows_advertised_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tools import browser_extension_bridge
+
+    monkeypatch.setattr(browser_extension_bridge, "bridge_available", lambda: True)
+    monkeypatch.setattr(
+        browser_extension_bridge,
+        "ensure_bridge_session",
+        lambda **_kwargs: {
+            "session": {"session_id": "default::momo"},
+            "extension_meta": {
+                "extension_version": "0.1.4",
+                "actions": ["session_create", "session"],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        browser_extension_bridge,
+        "send_bridge_command",
+        lambda action, args: {"ok": True, "output": f"executed:{action}:{args['session_id']}"},
+    )
+
+    result = await browser._maybe_execute_extension_bridge(
+        "session",
+        {"url": "https://example.com", "steps": [{"action": "get_text"}]},
+    )
+
+    assert result == "executed:session:default::momo"
+
+
+def test_extension_source_routes_session_and_scroll_to_real_implementations() -> None:
+    source = (
+        ROOT / "tools" / "chrome_extension" / "hashi_browser_bridge" / "service_worker.js"
+    ).read_text(encoding="utf-8")
+    manifest = json.loads(
+        (ROOT / "tools" / "chrome_extension" / "hashi_browser_bridge" / "manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert 'const BRIDGE_VERSION = "0.1.4";' in source
+    assert manifest["version"] == "0.1.4"
+    assert 'if (action === "session") {\n    return actionSession(args);' in source
+    assert 'if (action === "scroll") {\n    return actionScroll(args);' in source
+    assert 'action === "active_tab" || action === "session_create" || action === "session"' not in source
+    assert "actions: SUPPORTED_ACTIONS" in source

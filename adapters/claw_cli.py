@@ -934,8 +934,45 @@ class ClawCLIAdapter(BaseBackend):
         self._binary_resolution: ClawBinaryResolution | None = None
         self._supports_stream_json = False
         self._session_id: str | None = None
+        self._session_state_path = self.config.workspace_dir / "backend_state" / "claw_session.json"
         self._gateway_context_path: Path | None = None
         self._gateway_config_home: Path | None = None
+
+    def _load_session_identity(self) -> None:
+        try:
+            payload = json.loads(self._session_state_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return
+        except Exception as exc:
+            self.logger.warning("Ignoring invalid Claw session checkpoint: %s", exc)
+            return
+        session_id = str(payload.get("session_id") or "").strip()
+        model = str(payload.get("model") or "").strip()
+        if session_id and (not model or model == self._claw_model()):
+            self._session_id = session_id
+            self.logger.info("Restored Claw session checkpoint: session=%s", session_id)
+        elif session_id:
+            self.logger.info(
+                "Ignoring Claw session checkpoint for different model: checkpoint=%s current=%s",
+                model or "unknown",
+                self._claw_model(),
+            )
+
+    def _persist_session_identity(self) -> None:
+        if not self._session_id:
+            self._session_state_path.unlink(missing_ok=True)
+            return
+        self._session_state_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "session_id": self._session_id,
+            "model": self._claw_model(),
+            "updated_at": time.time(),
+        }
+        temporary = self._session_state_path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.chmod(0o600)
+        os.replace(temporary, self._session_state_path)
+        self._session_state_path.chmod(0o600)
 
     @property
     def _extra(self) -> dict[str, Any]:
@@ -1239,6 +1276,7 @@ class ClawCLIAdapter(BaseBackend):
             )
             self.capabilities.supports_thinking_stream = self._supports_stream_json
             self.capabilities.supports_answer_stream = self._supports_stream_json
+            self._load_session_identity()
             if not self._supports_stream_json:
                 self.logger.warning("Claw binary does not advertise stream-json; verbose mode will use JSON fallback.")
             return True
@@ -1253,6 +1291,7 @@ class ClawCLIAdapter(BaseBackend):
 
     async def handle_new_session(self) -> bool:
         self._session_id = None
+        self._persist_session_identity()
         self.logger.info("Claw handle_new_session: cleared persisted Claw session identity.")
         return True
 
@@ -1321,6 +1360,7 @@ class ClawCLIAdapter(BaseBackend):
         if result.session_id:
             previous = self._session_id
             self._session_id = result.session_id
+            self._persist_session_identity()
             self.logger.info(
                 "Claw session checkpoint: request=%s session=%s resumed=%s",
                 request_id,
@@ -1486,6 +1526,7 @@ class ClawCLIAdapter(BaseBackend):
                     session_id = str(event.get("session_id") or "").strip()
                     if session_id:
                         self._session_id = session_id
+                        self._persist_session_identity()
                         self.logger.info(
                             "Claw session started: session=%s model=%s",
                             session_id,

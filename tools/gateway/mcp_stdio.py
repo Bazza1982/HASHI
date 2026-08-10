@@ -27,6 +27,24 @@ class ToolGateway:
         self.consecutive_errors = 0
         self.fingerprints: Counter[str] = Counter()
 
+    @staticmethod
+    def _reports_state_change(output: str) -> bool:
+        try:
+            payload = json.loads(output)
+        except (TypeError, json.JSONDecodeError):
+            return False
+
+        def walk(value: Any) -> bool:
+            if isinstance(value, dict):
+                if value.get("state_changed") is True:
+                    return True
+                return any(walk(item) for item in value.values())
+            if isinstance(value, list):
+                return any(walk(item) for item in value)
+            return False
+
+        return walk(payload)
+
     def tool_definitions(self) -> list[dict[str, Any]]:
         definitions = []
         for definition in self.registry.get_tool_definitions():
@@ -66,8 +84,7 @@ class ToolGateway:
         fingerprint = hashlib.sha256(
             json.dumps([name, arguments], ensure_ascii=False, sort_keys=True).encode("utf-8")
         ).hexdigest()
-        self.fingerprints[fingerprint] += 1
-        if self.fingerprints[fingerprint] > self.context.max_identical_calls:
+        if self.fingerprints[fingerprint] >= self.context.max_identical_calls:
             return self._result(
                 f"Error: repeated identical call to '{name}' stopped after "
                 f"{self.context.max_identical_calls} attempts; inspect state and report partial progress.",
@@ -81,6 +98,10 @@ class ToolGateway:
             )
 
         result = await self.registry.execute(name, arguments, tool_call_id=call_id)
+        if not result.is_error and self._reports_state_change(result.output):
+            self.fingerprints[fingerprint] = 0
+        else:
+            self.fingerprints[fingerprint] += 1
         self.consecutive_errors = self.consecutive_errors + 1 if result.is_error else 0
         return self._result(result.output, result.is_error)
 

@@ -1,8 +1,12 @@
 const HOST_NAME = "com.hashi.browser_bridge";
-const BRIDGE_VERSION = "0.1.2";
+const BRIDGE_VERSION = "0.1.4";
 const RECONNECT_DELAY_MS = 5000;
 const HEARTBEAT_INTERVAL_MS = 10000;
 const DEBUGGER_VERSION = "1.3";
+const SUPPORTED_ACTIONS = Object.freeze([
+  "active_tab", "session_create", "session", "get_text", "get_html",
+  "click", "hover", "fill", "type_text", "evaluate", "scroll", "screenshot"
+]);
 
 let nativePort = null;
 let reconnectTimer = null;
@@ -66,6 +70,7 @@ function ensureNativeConnection(reason = "unknown") {
     nativePort.postMessage({
       type: "hello",
       extension_version: BRIDGE_VERSION,
+      actions: SUPPORTED_ACTIONS,
       user_agent: navigator.userAgent,
       reason
     });
@@ -165,8 +170,11 @@ function tabMeta(tab) {
 }
 
 function stringifyOutput(value) {
-  if (value === undefined || value === null) {
-    return "";
+  if (value === undefined) {
+    return "undefined";
+  }
+  if (value === null) {
+    return "null";
   }
   if (typeof value === "string") {
     return value;
@@ -219,8 +227,10 @@ async function actionGetText(args) {
     target: { tabId: tab.id },
     func: () => document.body?.innerText || document.documentElement?.innerText || ""
   });
+  const maxLength = Number(args.max_length || 0);
+  const output = String(results?.[0]?.result || "");
   return {
-    output: String(results?.[0]?.result || ""),
+    output: maxLength > 0 ? output.slice(0, maxLength) : output,
     meta: tabMeta(tab)
   };
 }
@@ -232,8 +242,10 @@ async function actionGetHtml(args) {
     target: { tabId: tab.id },
     func: () => document.documentElement?.outerHTML || ""
   });
+  const maxLength = Number(args.max_length || 0);
+  const output = String(results?.[0]?.result || "");
   return {
-    output: String(results?.[0]?.result || ""),
+    output: maxLength > 0 ? output.slice(0, maxLength) : output,
     meta: tabMeta(tab)
   };
 }
@@ -246,10 +258,11 @@ async function actionClick(args) {
   if (!selector) {
     throw new Error("selector is required");
   }
+  const waitMs = Number(args.wait_ms ?? 350);
   const results = await chrome.scripting.executeScript({
     target: { tabId: tab.id },
-    args: [selector, timeoutMs],
-    func: async (selector, timeoutMs) => {
+    args: [selector, timeoutMs, waitMs],
+    func: async (selector, timeoutMs, waitMs) => {
       const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       const started = Date.now();
       let element = null;
@@ -271,21 +284,60 @@ async function actionClick(args) {
       if (rect.width === 0 && rect.height === 0) {
         throw new Error(`selector is not visible: ${selector}`);
       }
+      const matched = document.querySelectorAll(selector).length;
+      const before = {
+        ariaLabel: element.getAttribute("aria-label"),
+        ariaPressed: element.getAttribute("aria-pressed"),
+        className: String(element.className || ""),
+        text: String(element.innerText || element.textContent || "").trim().slice(0, 200),
+        componentKey: element.getAttribute("componentkey"),
+        href: element.getAttribute("href")
+      };
       element.click();
+      if (waitMs > 0) {
+        await sleep(waitMs);
+      }
+      const after = {
+        ariaLabel: element.getAttribute("aria-label"),
+        ariaPressed: element.getAttribute("aria-pressed"),
+        className: String(element.className || ""),
+        text: String(element.innerText || element.textContent || "").trim().slice(0, 200),
+        componentKey: element.getAttribute("componentkey"),
+        href: element.getAttribute("href"),
+        connected: element.isConnected
+      };
       return {
         selector,
+        matched,
         tagName: element.tagName,
-        text: String(element.innerText || element.textContent || "").slice(0, 200)
+        before,
+        after,
+        stateChanged: JSON.stringify(before) !== JSON.stringify({
+          ariaLabel: after.ariaLabel,
+          ariaPressed: after.ariaPressed,
+          className: after.className,
+          text: after.text,
+          componentKey: after.componentKey,
+          href: after.href
+        })
       };
     }
   });
-  if (Number(args.wait_ms || 0) > 0) {
-    await sleep(Number(args.wait_ms));
-  }
   const updatedTab = await chrome.tabs.get(tab.id);
-  const details = results?.[0]?.result || {};
+  const details = results?.[0]?.result;
+  if (!details) {
+    throw new Error(`click produced no execution result for selector: ${selector}`);
+  }
   return {
-    output: `OK: clicked '${selector}'`,
+    output: JSON.stringify({
+      ok: true,
+      action: "click",
+      selector,
+      matched: details.matched,
+      state_changed: Boolean(details.stateChanged),
+      before: details.before,
+      after: details.after
+    }),
     meta: {
       ...tabMeta(updatedTab),
       action: "click",
@@ -550,30 +602,134 @@ async function actionEvaluate(args) {
   if (!script) {
     throw new Error("script is required");
   }
-  const results = await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    world: "MAIN",
-    args: [script],
-    func: async (script) => {
-      try {
-        let result = globalThis.eval(script);
-        if (typeof result === "function") {
-          result = result();
-        }
-        return await Promise.resolve(result);
-      } catch (_evalError) {
-        const statement = new Function(script);
-        const result = statement();
-        return await Promise.resolve(result);
-      }
-    }
+  const expression = `(async () => {
+    const candidate = (${script});
+    return typeof candidate === "function" ? await candidate() : await candidate;
+  })()`;
+  const evaluated = await withDebugger(tab.id, async (target) => {
+    return await chrome.debugger.sendCommand(target, "Runtime.evaluate", {
+      expression,
+      awaitPromise: true,
+      returnByValue: true,
+      userGesture: true
+    });
   });
+  if (evaluated?.exceptionDetails) {
+    const message = evaluated.exceptionDetails.exception?.description
+      || evaluated.exceptionDetails.text
+      || "browser evaluate failed";
+    throw new Error(message);
+  }
+  if (!evaluated?.result || !("value" in evaluated.result)) {
+    throw new Error("browser evaluate produced no serializable result");
+  }
   return {
-    output: stringifyOutput(results?.[0]?.result),
+    output: stringifyOutput(evaluated.result.value),
     meta: {
       ...tabMeta(tab),
       action: "evaluate"
     }
+  };
+}
+
+async function actionScroll(args) {
+  const tab = await resolveTab({ ...args, wait_ms: 0 });
+  assertScriptableTab(tab);
+  const selector = String(args.selector || "").trim();
+  const x = Number(args.x ?? 0);
+  const y = Number(args.y ?? 500);
+  const results = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    args: [selector, x, y],
+    func: async (selector, x, y) => {
+      const before = { x: window.scrollX, y: window.scrollY };
+      let target = null;
+      if (selector) {
+        target = document.querySelector(selector);
+        if (!target) throw new Error(`selector not found: ${selector}`);
+        target.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+      } else {
+        window.scrollBy({ left: x, top: y, behavior: "instant" });
+      }
+      await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+      const after = { x: window.scrollX, y: window.scrollY };
+      return {
+        selector: selector || null,
+        before,
+        after,
+        stateChanged: before.x !== after.x || before.y !== after.y,
+        targetText: target ? String(target.innerText || target.textContent || "").trim().slice(0, 200) : null
+      };
+    }
+  });
+  const details = results?.[0]?.result;
+  if (!details) {
+    throw new Error("scroll produced no execution result");
+  }
+  return {
+    output: JSON.stringify({
+      ok: true,
+      action: "scroll",
+      selector: details.selector,
+      before: details.before,
+      after: details.after,
+      state_changed: Boolean(details.stateChanged),
+      target_text: details.targetText
+    }),
+    meta: { ...tabMeta(tab), action: "scroll", details }
+  };
+}
+
+async function actionSession(args) {
+  const steps = Array.isArray(args.steps) ? args.steps : [];
+  if (!steps.length) {
+    throw new Error("session steps must be a non-empty array");
+  }
+  const stopOnError = args.stop_on_error !== false;
+  if (args.url) {
+    await resolveTab({ url: args.url, timeout_ms: args.timeout_ms });
+  }
+  const results = [];
+  for (let index = 0; index < steps.length; index += 1) {
+    const step = steps[index] || {};
+    const action = String(step.action || "").trim();
+    try {
+      let result;
+      if (action === "wait") {
+        const ms = Number(step.ms ?? 1000);
+        await sleep(ms);
+        result = { output: `waited ${ms}ms`, meta: { action: "wait", ms } };
+      } else if (action === "goto") {
+        result = await actionActiveTab({ ...args, ...step, url: step.url });
+      } else if (action === "scroll_to") {
+        result = await actionScroll({ ...args, ...step, selector: step.selector });
+      } else if (["click", "hover", "fill", "type_text", "evaluate", "scroll", "get_text", "get_html", "screenshot"].includes(action)) {
+        result = await executeAction(action, { ...args, ...step, steps: undefined });
+      } else {
+        throw new Error(`unsupported session step: ${action || "<empty>"}`);
+      }
+      let output = result.output;
+      if (typeof output === "string" && (output.startsWith("{") || output.startsWith("["))) {
+        try {
+          output = JSON.parse(output);
+        } catch (_error) {
+          // Keep non-JSON text exactly as returned by the primitive action.
+        }
+      }
+      results.push({ index, action, ok: true, output, meta: result.meta || null });
+    } catch (error) {
+      const message = String(error?.message || error);
+      results.push({ index, action, ok: false, error: message });
+      if (stopOnError) {
+        throw new Error(`session step ${index} (${action || "<empty>"}) failed: ${message}`);
+      }
+    }
+  }
+  const failed = results.filter((item) => !item.ok).length;
+  const tab = await queryActiveTab();
+  return {
+    output: JSON.stringify({ ok: failed === 0, completed: results.length, failed, steps: results }),
+    meta: { ...tabMeta(tab), action: "session", completed: results.length, failed }
   };
 }
 
@@ -617,8 +773,11 @@ async function actionScreenshot(args) {
 }
 
 async function executeAction(action, args) {
-  if (action === "active_tab" || action === "session_create" || action === "session") {
+  if (action === "active_tab" || action === "session_create") {
     return actionActiveTab(args);
+  }
+  if (action === "session") {
+    return actionSession(args);
   }
   if (action === "get_text") {
     return actionGetText(args);
@@ -640,6 +799,9 @@ async function executeAction(action, args) {
   }
   if (action === "evaluate") {
     return actionEvaluate(args);
+  }
+  if (action === "scroll") {
+    return actionScroll(args);
   }
   if (action === "screenshot") {
     return actionScreenshot(args);
