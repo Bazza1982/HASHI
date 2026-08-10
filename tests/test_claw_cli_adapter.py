@@ -268,6 +268,7 @@ def test_build_claw_env_uses_allowlist_only():
             "OPENAI_API_KEY": "secret",
             "CLAW_MAX_TOOL_ITERATIONS": "96",
             "CLAW_TASK_PLANNING": "1",
+            "CLAW_EXECUTION_EFFORT": "high",
             "ANTHROPIC_API_KEY": "must-not-pass",
             "HASHI_REMOTE_SHARED_TOKEN": "must-not-pass",
             "HOME": "/tmp/home",
@@ -280,6 +281,7 @@ def test_build_claw_env_uses_allowlist_only():
         "OPENAI_API_KEY": "secret",
         "CLAW_MAX_TOOL_ITERATIONS": "96",
         "CLAW_TASK_PLANNING": "1",
+        "CLAW_EXECUTION_EFFORT": "high",
         "HOME": "/tmp/home",
         "PATH": "/bin",
     }
@@ -308,6 +310,7 @@ def test_claw_execution_effort_maps_to_iteration_budget(tmp_path, effort, expect
     assert adapter.effort == effort
     assert adapter._task_env()["CLAW_MAX_TOOL_ITERATIONS"] == expected_iterations
     assert adapter._task_env()["CLAW_TASK_PLANNING"] == ("0" if effort == "low" else "1")
+    assert adapter._task_env()["CLAW_EXECUTION_EFFORT"] == effort
 
 
 def test_claw_explicit_max_iterations_overrides_execution_effort(tmp_path):
