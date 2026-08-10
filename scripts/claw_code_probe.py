@@ -69,6 +69,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--secrets", default=str(ROOT / "secrets.json"), help="HASHI secrets.json path for provider probes.")
     parser.add_argument("--provider", help="Run a provider-aware smoke test using global.claw_providers.")
     parser.add_argument("--model", help="Model to use with --provider.")
+    parser.add_argument(
+        "--effort",
+        choices=("low", "medium", "high", "xhigh", "max"),
+        default="medium",
+        help="Claw execution effort for provider probes.",
+    )
     parser.add_argument("--prompt", default="Reply exactly: HASHI_CLAW_SMOKE_OK", help="Prompt for --provider smoke.")
     parser.add_argument(
         "--check",
@@ -90,6 +96,16 @@ def main(argv: list[str] | None = None) -> int:
                 secrets_path=Path(args.secrets).expanduser().resolve(),
                 provider_name=args.provider,
             )
+            effort_iterations = {
+                "low": 12,
+                "medium": 32,
+                "high": 96,
+                "xhigh": 192,
+                "max": 384,
+            }
+            env["CLAW_EXECUTION_EFFORT"] = args.effort
+            env["CLAW_TASK_PLANNING"] = "0" if args.effort == "low" else "1"
+            env["CLAW_MAX_TOOL_ITERATIONS"] = str(effort_iterations[args.effort])
             result = run_claw_task(
                 cwd,
                 args.prompt,
@@ -109,6 +125,7 @@ def main(argv: list[str] | None = None) -> int:
                     "provider_status": provider.get("status", "stable"),
                     "base_url": provider.get("base_url"),
                     "model": result.model,
+                    "effort": args.effort,
                     "message": result.text,
                     "duration_ms": result.duration_ms,
                     "iterations": result.iterations,
