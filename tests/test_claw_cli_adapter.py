@@ -215,6 +215,7 @@ def test_build_claw_env_uses_allowlist_only():
         {
             "OPENAI_BASE_URL": "https://example.invalid/v1",
             "OPENAI_API_KEY": "secret",
+            "CLAW_MAX_TOOL_ITERATIONS": "96",
             "ANTHROPIC_API_KEY": "must-not-pass",
             "HASHI_REMOTE_SHARED_TOKEN": "must-not-pass",
             "HOME": "/tmp/home",
@@ -225,6 +226,7 @@ def test_build_claw_env_uses_allowlist_only():
     assert env == {
         "OPENAI_BASE_URL": "https://example.invalid/v1",
         "OPENAI_API_KEY": "secret",
+        "CLAW_MAX_TOOL_ITERATIONS": "96",
         "HOME": "/tmp/home",
         "PATH": "/bin",
     }

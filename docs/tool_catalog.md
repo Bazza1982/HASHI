@@ -161,6 +161,16 @@ Click an element by CSS selector.
 | `selector` | Yes | CSS selector |
 | `cdp_url` | No | CDP URL |
 
+### browser_react
+Apply and verify a Like reaction on one uniquely identified feed post. Prefer this over generic JavaScript clicks for LinkedIn.
+| Param | Required | Description |
+|-------|----------|-------------|
+| `url` | Yes | Feed URL |
+| `post_text` | Yes | Distinctive visible excerpt from the target post |
+| `author` | No | Visible author name used to disambiguate |
+| `reaction` | No | Currently `like` |
+| `wait_ms` | No | Wait for UI state verification |
+
 ### browser_fill
 Fill a form field, optionally submit.
 | Param | Required | Description |
@@ -181,7 +191,7 @@ Execute JavaScript on a page.
 | `cdp_url` | No | CDP URL |
 
 ### browser_scroll
-Scroll a page by pixels or to an element.
+Scroll a page by pixels or to an element. The extension path automatically falls back to the largest visible internal scroll container when the window itself does not move.
 | Param | Required | Description |
 |-------|----------|-------------|
 | `url` | Yes | Page URL |

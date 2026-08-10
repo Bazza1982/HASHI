@@ -385,6 +385,21 @@ async def execute_browser_click(args: dict) -> str:
                 pass
 
 
+async def execute_browser_react(args: dict) -> str:
+    """Apply and verify a reaction on one uniquely identified feed post."""
+    url = str(args.get("url", "")).strip()
+    post_text = str(args.get("post_text", "")).strip()
+    if not url:
+        return "Error: url is required"
+    if not post_text:
+        return "Error: post_text is required"
+
+    bridge_result = await _maybe_execute_extension_bridge("react", args)
+    if bridge_result is not None:
+        return bridge_result
+    return "Error: browser_react requires the HASHI browser bridge extension"
+
+
 async def execute_browser_fill(args: dict) -> str:
     """Fill a form field (by CSS selector) with text, then optionally submit."""
     url = str(args.get("url", "")).strip()

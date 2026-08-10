@@ -1,11 +1,11 @@
 const HOST_NAME = "com.hashi.browser_bridge";
-const BRIDGE_VERSION = "0.1.4";
+const BRIDGE_VERSION = "0.1.5";
 const RECONNECT_DELAY_MS = 5000;
 const HEARTBEAT_INTERVAL_MS = 10000;
 const DEBUGGER_VERSION = "1.3";
 const SUPPORTED_ACTIONS = Object.freeze([
   "active_tab", "session_create", "session", "get_text", "get_html",
-  "click", "hover", "fill", "type_text", "evaluate", "scroll", "screenshot"
+  "click", "react", "hover", "fill", "type_text", "evaluate", "scroll", "screenshot"
 ]);
 
 let nativePort = null;
@@ -259,10 +259,11 @@ async function actionClick(args) {
     throw new Error("selector is required");
   }
   const waitMs = Number(args.wait_ms ?? 350);
-  const results = await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    args: [selector, timeoutMs, waitMs],
-    func: async (selector, timeoutMs, waitMs) => {
+  const details = await withDebugger(tab.id, async (target) => {
+    const expression = `(async () => {
+      const selector = ${JSON.stringify(selector)};
+      const timeoutMs = ${JSON.stringify(timeoutMs)};
+      const waitMs = ${JSON.stringify(waitMs)};
       const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       const started = Date.now();
       let element = null;
@@ -274,7 +275,7 @@ async function actionClick(args) {
         await sleep(100);
       }
       if (!element) {
-        throw new Error(`selector not found: ${selector}`);
+        throw new Error("selector not found: " + selector);
       }
       element.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
       if (typeof element.focus === "function") {
@@ -282,7 +283,7 @@ async function actionClick(args) {
       }
       const rect = element.getBoundingClientRect();
       if (rect.width === 0 && rect.height === 0) {
-        throw new Error(`selector is not visible: ${selector}`);
+        throw new Error("selector is not visible: " + selector);
       }
       const matched = document.querySelectorAll(selector).length;
       const before = {
@@ -321,10 +322,22 @@ async function actionClick(args) {
           href: after.href
         })
       };
+    })()`;
+    const evaluated = await chrome.debugger.sendCommand(target, "Runtime.evaluate", {
+      expression,
+      awaitPromise: true,
+      returnByValue: true,
+      userGesture: true
+    });
+    if (evaluated?.exceptionDetails) {
+      const message = evaluated.exceptionDetails.exception?.description
+        || evaluated.exceptionDetails.text
+        || `click failed for selector: ${selector}`;
+      throw new Error(message);
     }
+    return evaluated?.result?.value || null;
   });
   const updatedTab = await chrome.tabs.get(tab.id);
-  const details = results?.[0]?.result;
   if (!details) {
     throw new Error(`click produced no execution result for selector: ${selector}`);
   }
@@ -344,6 +357,106 @@ async function actionClick(args) {
       selector,
       details
     }
+  };
+}
+
+async function actionReact(args) {
+  const tab = await resolveTab({ ...args, wait_ms: 0 });
+  assertScriptableTab(tab);
+  const postText = String(args.post_text || "").trim();
+  const author = String(args.author || "").trim();
+  const reaction = String(args.reaction || "like").trim().toLowerCase();
+  const waitMs = Number(args.wait_ms ?? 700);
+  if (!postText) {
+    throw new Error("post_text is required");
+  }
+  if (reaction !== "like") {
+    throw new Error("only the 'like' reaction is currently supported");
+  }
+  const details = await withDebugger(tab.id, async (target) => {
+    const expression = `(async () => {
+      const postText = ${JSON.stringify(postText)};
+      const author = ${JSON.stringify(author)};
+      const waitMs = ${JSON.stringify(waitMs)};
+      const normalize = (value) => String(value || "").replace(/\\s+/g, " ").trim().toLocaleLowerCase();
+      const wantedPost = normalize(postText);
+      const wantedAuthor = normalize(author);
+      const buttons = Array.from(document.querySelectorAll('button[aria-label^="Reaction button state:"]'));
+      const candidates = [];
+      for (const button of buttons) {
+        let node = button;
+        let matchedContainer = null;
+        for (let depth = 0; depth < 14 && node?.parentElement; depth += 1) {
+          node = node.parentElement;
+          const text = normalize(node.innerText || node.textContent);
+          if (text.includes(wantedPost) && (!wantedAuthor || text.includes(wantedAuthor))) {
+            matchedContainer = node;
+            break;
+          }
+        }
+        if (matchedContainer) {
+          const rect = button.getBoundingClientRect();
+          candidates.push({ button, rect, container: matchedContainer });
+        }
+      }
+      const visible = candidates.filter(({ rect }) => rect.width > 0 && rect.height > 0);
+      if (visible.length !== 1) {
+        throw new Error(
+          visible.length === 0
+            ? 'no visible post reaction matched post_text/author'
+            : 'post_text/author matched multiple visible reaction buttons; provide a more specific post_text'
+        );
+      }
+      const { button, container } = visible[0];
+      button.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+      const before = {
+        ariaLabel: button.getAttribute("aria-label"),
+        ariaPressed: button.getAttribute("aria-pressed")
+      };
+      const alreadyReacted = !normalize(before.ariaLabel).includes("no reaction");
+      if (!alreadyReacted) {
+        button.click();
+        if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+      }
+      const after = {
+        ariaLabel: button.getAttribute("aria-label"),
+        ariaPressed: button.getAttribute("aria-pressed")
+      };
+      const stateChanged = JSON.stringify(before) !== JSON.stringify(after);
+      const verified = alreadyReacted || (stateChanged && !normalize(after.ariaLabel).includes("no reaction"));
+      return {
+        reaction: "like",
+        postText,
+        author: author || null,
+        postPreview: String(container.innerText || container.textContent || "").replace(/\\s+/g, " ").trim().slice(0, 240),
+        alreadyReacted,
+        stateChanged,
+        verified,
+        before,
+        after
+      };
+    })()`;
+    const evaluated = await chrome.debugger.sendCommand(target, "Runtime.evaluate", {
+      expression,
+      awaitPromise: true,
+      returnByValue: true,
+      userGesture: true
+    });
+    if (evaluated?.exceptionDetails) {
+      const message = evaluated.exceptionDetails.exception?.description
+        || evaluated.exceptionDetails.text
+        || "reaction failed";
+      throw new Error(message);
+    }
+    return evaluated?.result?.value || null;
+  });
+  if (!details?.verified) {
+    throw new Error("reaction click did not produce a verified state change");
+  }
+  const updatedTab = await chrome.tabs.get(tab.id);
+  return {
+    output: JSON.stringify({ ok: true, action: "react", ...details }),
+    meta: { ...tabMeta(updatedTab), action: "react", details }
   };
 }
 
@@ -642,22 +755,72 @@ async function actionScroll(args) {
     target: { tabId: tab.id },
     args: [selector, x, y],
     func: async (selector, x, y) => {
-      const before = { x: window.scrollX, y: window.scrollY };
+      const position = (target) => target === window
+        ? { x: window.scrollX, y: window.scrollY }
+        : { x: target.scrollLeft, y: target.scrollTop };
+      const describe = (target) => {
+        if (target === window) return "window";
+        const id = target.id ? `#${target.id}` : "";
+        const classes = String(target.className || "").trim().split(/\s+/).filter(Boolean).slice(0, 3).join(".");
+        return `${target.tagName.toLowerCase()}${id}${classes ? `.${classes}` : ""}`;
+      };
+      let scrollTarget = window;
+      const before = position(scrollTarget);
+      let effectiveBefore = before;
       let target = null;
       if (selector) {
         target = document.querySelector(selector);
         if (!target) throw new Error(`selector not found: ${selector}`);
+        let ancestor = target.parentElement;
+        while (ancestor) {
+          const style = getComputedStyle(ancestor);
+          const canScrollY = ancestor.scrollHeight > ancestor.clientHeight + 1
+            && ["auto", "scroll", "overlay"].includes(style.overflowY);
+          const canScrollX = ancestor.scrollWidth > ancestor.clientWidth + 1
+            && ["auto", "scroll", "overlay"].includes(style.overflowX);
+          if (canScrollY || canScrollX) {
+            scrollTarget = ancestor;
+            effectiveBefore = position(scrollTarget);
+            break;
+          }
+          ancestor = ancestor.parentElement;
+        }
         target.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
       } else {
         window.scrollBy({ left: x, top: y, behavior: "instant" });
+        await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+        const windowAfter = position(window);
+        if (before.x === windowAfter.x && before.y === windowAfter.y && (x !== 0 || y !== 0)) {
+          const scrollable = Array.from(document.querySelectorAll("*"))
+            .filter((element) => {
+              const style = getComputedStyle(element);
+              const canScrollY = element.scrollHeight > element.clientHeight + 1
+                && ["auto", "scroll", "overlay"].includes(style.overflowY);
+              const canScrollX = element.scrollWidth > element.clientWidth + 1
+                && ["auto", "scroll", "overlay"].includes(style.overflowX);
+              const rect = element.getBoundingClientRect();
+              return (canScrollY || canScrollX) && rect.width > 0 && rect.height > 0;
+            })
+            .sort((left, right) => {
+              const leftScore = left.clientWidth * left.clientHeight + (left.scrollHeight - left.clientHeight);
+              const rightScore = right.clientWidth * right.clientHeight + (right.scrollHeight - right.clientHeight);
+              return rightScore - leftScore;
+            });
+          if (scrollable.length > 0) {
+            scrollTarget = scrollable[0];
+            effectiveBefore = position(scrollTarget);
+            scrollTarget.scrollBy({ left: x, top: y, behavior: "instant" });
+          }
+        }
       }
       await new Promise((resolve) => requestAnimationFrame(() => resolve()));
-      const after = { x: window.scrollX, y: window.scrollY };
+      const after = position(scrollTarget);
       return {
         selector: selector || null,
-        before,
+        scrollTarget: describe(scrollTarget),
+        before: effectiveBefore,
         after,
-        stateChanged: before.x !== after.x || before.y !== after.y,
+        stateChanged: effectiveBefore.x !== after.x || effectiveBefore.y !== after.y,
         targetText: target ? String(target.innerText || target.textContent || "").trim().slice(0, 200) : null
       };
     }
@@ -671,6 +834,7 @@ async function actionScroll(args) {
       ok: true,
       action: "scroll",
       selector: details.selector,
+      scroll_target: details.scrollTarget,
       before: details.before,
       after: details.after,
       state_changed: Boolean(details.stateChanged),
@@ -703,7 +867,7 @@ async function actionSession(args) {
         result = await actionActiveTab({ ...args, ...step, url: step.url });
       } else if (action === "scroll_to") {
         result = await actionScroll({ ...args, ...step, selector: step.selector });
-      } else if (["click", "hover", "fill", "type_text", "evaluate", "scroll", "get_text", "get_html", "screenshot"].includes(action)) {
+      } else if (["click", "react", "hover", "fill", "type_text", "evaluate", "scroll", "get_text", "get_html", "screenshot"].includes(action)) {
         result = await executeAction(action, { ...args, ...step, steps: undefined });
       } else {
         throw new Error(`unsupported session step: ${action || "<empty>"}`);
@@ -787,6 +951,9 @@ async function executeAction(action, args) {
   }
   if (action === "click") {
     return actionClick(args);
+  }
+  if (action === "react") {
+    return actionReact(args);
   }
   if (action === "hover") {
     return actionHover(args);
