@@ -598,6 +598,41 @@ async def test_medium_claw_sends_one_visible_task_acknowledgement():
 
 
 @pytest.mark.asyncio
+async def test_medium_claw_acknowledgement_composes_with_request_activity():
+    runtime = _runtime()
+    runtime.config.active_backend = "claw-cli"
+    runtime.backend_manager.current_backend.effort = "medium"
+    sent = []
+    published = []
+
+    async def _send_text(chat_id, text, **kwargs):
+        sent.append((chat_id, text, kwargs))
+
+    runtime._send_text = _send_text
+    runtime.request_activity = SimpleNamespace(
+        publish_stream=lambda request_id, event: published.append((request_id, event.kind))
+    )
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(),
+        audit_active=False,
+        audit_collector=None,
+    )
+
+    await feedback.on_stream_event(StreamEvent(kind=KIND_PROGRESS, summary="Task started"))
+    await feedback.on_stream_event(
+        StreamEvent(kind=KIND_ACKNOWLEDGEMENT, summary="I will inspect the requested logs.")
+    )
+
+    assert published == [
+        ("req-1", KIND_PROGRESS),
+        ("req-1", KIND_ACKNOWLEDGEMENT),
+    ]
+    assert len(sent) == 1
+    assert sent[0][2]["_purpose"] == "task_acknowledgement"
+
+
+@pytest.mark.asyncio
 async def test_setup_interactive_feedback_placeholder_retry_after_records_failover(tmp_path):
     runtime = _runtime()
     runtime.name = "kasumi"
