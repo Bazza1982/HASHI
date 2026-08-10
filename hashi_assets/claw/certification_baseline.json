@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "runtime_version": "0.1.3-hashi.26",
+  "runtime_version": "0.1.3-hashi.27",
   "upstream_commit": "4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d",
-  "source_commit": "d3e659534b33823818630db309ceb3f319c981cf",
+  "source_commit": "7e5602ce9f77dfc2f49f96aa4952f931bda7c879",
   "rust_workspace": {
     "command": [
       "cargo",
