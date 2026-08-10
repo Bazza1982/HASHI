@@ -1,6 +1,7 @@
 # Claw Tool Gateway And Telemetry Plan
 
-Status: proposed long-term architecture, updated for in-package Claw runtime
+Status: active implementation for packaged `0.1.3-hashi.2`; remaining telemetry and
+cross-platform release work is tracked below
 Owner: HASHI
 Created: 2026-05-23
 Updated: 2026-05-23
@@ -859,9 +860,10 @@ Decisions to freeze:
 4. The canonical packaged executable name is `hashi-claw`.
 5. Platform manifest distinguishes `hashi_platform_key` from
    `rust_target_triple`.
-6. First Tool Gateway parity tier is `web` only:
-   `web_search`, `web_fetch`, `http_request`.
-7. Browser tier is delayed until cross-process web tools and audit are stable.
+6. The original web-only rollout decision was superseded after the canonical
+   ToolRegistry, MCP argument validation, session identity, and Browser audit path were
+   verified together.
+7. Browser is exposed through the same gateway without moving Browser logic into Claw.
 8. API backend parity gate is mandatory before any API adapter migrates from
    direct `ToolRegistry` execution to gateway-wrapped execution.
 9. `hashi_assets/` packaging inclusion strategy is selected and documented.
@@ -875,6 +877,9 @@ Acceptance:
 - No code is required in Phase 0.5 except documentation/test-plan updates.
 
 ### Phase A: Tool Gateway Foundation
+
+Status: **implemented as the protocol-neutral context and dispatch layer under
+`tools/gateway/`, wrapping the existing ToolRegistry without changing API adapters.**
 
 Deliverables:
 
@@ -896,6 +901,10 @@ Acceptance:
 
 ### Phase B: MCP Server Adapter
 
+Status: **implemented for the canonical ToolRegistry, including Browser capability
+schemas, argument validation, owner-only context snapshots, audit dispatch, and loop
+guards.**
+
 Deliverables:
 
 - Add `tools/gateway/mcp_stdio.py`.
@@ -915,6 +924,11 @@ Acceptance:
 
 ### Phase B2: Browser Gateway Design
 
+Status: **implemented through the existing Browser capability boundary.** The gateway
+does not own browser discovery or actions; it forwards the same schemas and calls used
+by API backends into `tools.browser`, which retains Browser Bridge selection and audit
+behavior.
+
 Deliverables:
 
 - Specify browser bridge discovery and CDP endpoint handling for subprocess
@@ -927,12 +941,16 @@ Deliverables:
 
 Acceptance:
 
-- Browser tools are not enabled for Claw MCP until session and audit behavior is
-  specified.
+- Browser tools are enabled for Claw through the canonical ToolRegistry after session
+  identity capture and tool audit behavior are active.
 - Browser failures are categorized as `network_error`, `timeout`, `tool_error`,
   or `permission_denied` instead of generic unknown errors.
 
 ### Phase C: Claw MCP Config Integration
+
+Status: **implemented for packaged `0.1.3-hashi.2`.** HASHI creates an isolated
+`CLAW_CONFIG_HOME`, validates the required `hashi-tools` entry during initialization,
+and resumes the session ID emitted by Claw.
 
 Deliverables:
 
