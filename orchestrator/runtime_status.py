@@ -211,18 +211,26 @@ def build_status_text(runtime, detailed: bool = False) -> str:
         f"<b>Agent</b> · <code>{html.escape(str(runtime.name))}</code>",
         f"<b>Mode</b> · <code>{html.escape(str(mode_str))}</code>",
         f"<b>Backend</b> · <code>{html.escape(str(runtime.config.active_backend))}</code>",
-        f"<b>Model</b> · <code>{html.escape(str(runtime.get_current_model()))}</code>",
-        f"<b>Effort</b> · <code>{html.escape(str(current_effort))}</code>",
-        (
-            f"<b>Memory+</b> · <code>{'ON' if memory_plus['enabled'] else 'OFF'}</code>"
-            f" · <code>{memory_plus['open_items']}</code> open"
-            + (
-                f" · carried from <code>{html.escape(str(memory_plus['carryover_from']))}</code>"
-                if memory_plus["carryover_from"]
-                else ""
-            )
-        ),
     ]
+    provider_getter = getattr(runtime, "get_current_provider", None)
+    provider = provider_getter() if callable(provider_getter) else None
+    if provider:
+        lines.append(f"<b>Provider</b> · <code>{html.escape(str(provider))}</code>")
+    lines.extend(
+        [
+            f"<b>Model</b> · <code>{html.escape(str(runtime.get_current_model()))}</code>",
+            f"<b>Effort</b> · <code>{html.escape(str(current_effort))}</code>",
+            (
+                f"<b>Memory+</b> · <code>{'ON' if memory_plus['enabled'] else 'OFF'}</code>"
+                f" · <code>{memory_plus['open_items']}</code> open"
+                + (
+                    f" · carried from <code>{html.escape(str(memory_plus['carryover_from']))}</code>"
+                    if memory_plus["carryover_from"]
+                    else ""
+                )
+            ),
+        ]
+    )
     if mode_str == "fixed":
         lines.append(f"<b>Session</b> · <code>{html.escape(str(session_id_short))}</code>")
     lines.extend(runtime._format_status_mode_block(mode_str, state_snapshot, detailed))

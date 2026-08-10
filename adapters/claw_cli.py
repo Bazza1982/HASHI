@@ -955,7 +955,11 @@ class ClawCLIAdapter(BaseBackend):
         model = str(self.config.model or "").strip()
         provider = self._extra.get("provider")
         if provider:
-            return str(provider).strip(), model
+            provider_name = str(provider).strip()
+            prefix = f"{provider_name}:"
+            if model.startswith(prefix) and len(model) > len(prefix):
+                model = model[len(prefix):]
+            return provider_name, model
         if ":" in model:
             maybe_provider, maybe_model = model.split(":", 1)
             if maybe_provider in self._provider_configs() and maybe_model:

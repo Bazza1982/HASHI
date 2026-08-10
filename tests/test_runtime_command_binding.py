@@ -26,7 +26,7 @@ def test_command_binding_names_are_unique_except_declared_aliases():
 def test_bot_command_metadata_is_unique_and_covers_static_commands():
     metadata_names = [binding.name for binding in runtime_command_binding.BOT_COMMAND_BINDINGS]
     assert len(metadata_names) == len(set(metadata_names))
-    for command in ("help", "status", "reboot", "audit", "wrapper", "remote", "say", "stream"):
+    for command in ("help", "status", "reboot", "audit", "wrapper", "remote", "say", "stream", "provider"):
         assert command in metadata_names
     assert "paswd" not in metadata_names
     assert "oll" not in metadata_names
