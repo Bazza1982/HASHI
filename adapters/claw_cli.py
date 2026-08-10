@@ -76,6 +76,14 @@ CLAW_ENV_ALLOWLIST = (
     *OS_ENV_ALLOWLIST,
 )
 
+CLAW_EXECUTION_EFFORT_ITERATIONS = {
+    "low": 12,
+    "medium": 32,
+    "high": 96,
+    "xhigh": 192,
+    "max": 384,
+}
+
 
 class ClawError(RuntimeError):
     """Base class for Claw CLI diagnostic failures."""
@@ -158,6 +166,8 @@ class ClawTaskResult:
     tool_results: list[Any]
     session_id: str | None = None
     iterations: int | None = None
+    completion_status: str | None = None
+    stop_reason: str | None = None
     estimated_cost: str | None = None
 
 
@@ -805,6 +815,8 @@ def run_claw_task(
         tool_results=list(data.get("tool_results") or []),
         session_id=str(data.get("session_id") or "").strip() or None,
         iterations=data.get("iterations") if isinstance(data.get("iterations"), int) else None,
+        completion_status=str(data.get("completion_status") or "").strip() or None,
+        stop_reason=str(data.get("stop_reason") or "").strip() or None,
         estimated_cost=data.get("estimated_cost") if isinstance(data.get("estimated_cost"), str) else None,
     )
 
@@ -930,6 +942,12 @@ class ClawCLIAdapter(BaseBackend):
     def __init__(self, agent_config, global_config, api_key: str = None):
         super().__init__(agent_config, global_config, api_key)
         self.logger = logging.getLogger(f"Backend.Claw.{self.config.name}")
+        requested_effort = str(self._extra.get("effort") or "high").strip().lower()
+        self.effort = (
+            requested_effort
+            if requested_effort in CLAW_EXECUTION_EFFORT_ITERATIONS
+            else "high"
+        )
         self.current_proc = None
         self._binary: Path | None = None
         self._binary_resolution: ClawBinaryResolution | None = None
@@ -1147,9 +1165,11 @@ class ClawCLIAdapter(BaseBackend):
             return self._env_from_provider(provider_name)
         return self._env_from_agent_extra()
 
-    def _task_env(self) -> dict[str, str]:
-        env = self._resolve_task_env()
-        raw_max_iterations = self._extra.get("max_tool_iterations", 96)
+    def _max_tool_iterations(self) -> int:
+        raw_max_iterations = self._extra.get(
+            "max_tool_iterations",
+            CLAW_EXECUTION_EFFORT_ITERATIONS.get(self.effort, 96),
+        )
         try:
             max_iterations = int(raw_max_iterations)
         except (TypeError, ValueError):
@@ -1158,7 +1178,11 @@ class ClawCLIAdapter(BaseBackend):
                 raw_max_iterations,
             )
             max_iterations = 96
-        env["CLAW_MAX_TOOL_ITERATIONS"] = str(min(512, max(8, max_iterations)))
+        return min(512, max(8, max_iterations))
+
+    def _task_env(self) -> dict[str, str]:
+        env = self._resolve_task_env()
+        env["CLAW_MAX_TOOL_ITERATIONS"] = str(self._max_tool_iterations())
         if self._gateway_config_home is not None:
             env["CLAW_CONFIG_HOME"] = str(self._gateway_config_home)
             project_root = Path(__file__).resolve().parents[1]
@@ -1387,11 +1411,13 @@ class ClawCLIAdapter(BaseBackend):
         )
         self.logger.info(
             "Claw task completed: request=%s model=%s session=%s iterations=%s "
-            "tool_calls=%d tool_errors=%d gateway=%s",
+            "completion=%s stop_reason=%s tool_calls=%d tool_errors=%d gateway=%s",
             request_id,
             result.model,
             result.session_id or self._session_id or "unavailable",
             result.iterations if result.iterations is not None else "unavailable",
+            result.completion_status or "unavailable",
+            result.stop_reason or "unavailable",
             len(result.tool_uses),
             tool_errors,
             bool(self._gateway_context_path),
@@ -1407,6 +1433,7 @@ class ClawCLIAdapter(BaseBackend):
             text=result.text,
             duration_ms=result.duration_ms,
             is_success=True,
+            stop_reason=result.stop_reason,
             usage=TokenUsage(
                 input_tokens=int(usage_data.get("input_tokens") or 0),
                 output_tokens=int(usage_data.get("output_tokens") or 0),
@@ -1415,7 +1442,13 @@ class ClawCLIAdapter(BaseBackend):
             cost_usd=None,
             tool_call_count=len(result.tool_uses),
             tool_loop_count=result.iterations or 0,
-            stream_metadata={"claw_thinking": stream_usage} if stream_usage else None,
+            stream_metadata={
+                **({"claw_thinking": stream_usage} if stream_usage else {}),
+                "claw_completion_status": result.completion_status or "unknown",
+                "claw_stop_reason": result.stop_reason or "unknown",
+                "claw_execution_effort": self.effort,
+                "claw_max_iterations": self._max_tool_iterations(),
+            },
         )
 
     @staticmethod
@@ -1511,6 +1544,8 @@ class ClawCLIAdapter(BaseBackend):
             tool_results=list(parsed.get("tool_results") or []),
             session_id=str(parsed.get("session_id") or "").strip() or None,
             iterations=parsed.get("iterations") if isinstance(parsed.get("iterations"), int) else None,
+            completion_status=str(parsed.get("completion_status") or "").strip() or None,
+            stop_reason=str(parsed.get("stop_reason") or "").strip() or None,
             estimated_cost=parsed.get("estimated_cost") if isinstance(parsed.get("estimated_cost"), str) else None,
         )
 

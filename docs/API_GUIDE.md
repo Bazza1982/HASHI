@@ -143,6 +143,16 @@ than exposing one unsafe backend-wide list. If an agent switches from Sol with
 [GPT-5.6 preview announcement](https://openai.com/index/previewing-gpt-5-6-sol/)
 for the model-family positioning.
 
+### Claw execution effort
+
+Claw providers currently do not expose a model reasoning-effort control. HASHI
+therefore maps `/effort` to the maximum agentic model/tool-loop iterations:
+`low=12`, `medium=32`, `high=96` (default), `xhigh=192`, and `max=384`.
+Reaching the selected budget returns a successful but machine-readable
+`completion_status: incomplete` result with `stop_reason: max_iterations`;
+the final iteration is tool-free and reports verified progress and a recommended
+next step. A natural model stop returns `completed` with `end_turn`.
+
 ### xAI OAuth setup
 
 `xai-api` uses Hermes-managed SuperGrok OAuth with automatic token refresh.

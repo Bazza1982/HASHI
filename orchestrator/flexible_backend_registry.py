@@ -73,8 +73,11 @@ BACKEND_REGISTRY: dict[str, dict] = {
             "openai/gpt-4.1-mini",
         ],
         "default_model": "deepseek/deepseek-v4-flash",
-        "efforts": [],
-        "default_effort": None,
+        # Claw providers currently expose no reasoning-effort control. These
+        # levels therefore represent agentic execution budget (maximum model/
+        # tool-loop iterations), mapped by ClawCLIAdapter.
+        "efforts": ["low", "medium", "high", "xhigh", "max"],
+        "default_effort": "high",
         "secret_keys": [
             "{agent_name}_openrouter_key",
             "openrouter-api_key",

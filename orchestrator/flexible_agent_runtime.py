@@ -4752,6 +4752,12 @@ class FlexibleAgentRuntime:
     def _build_effort_followup_text(self) -> str:
         available = self._get_available_efforts()
         current = self._get_current_effort() or (available[0] if available else "n/a")
+        consequence = (
+            "For Claw, effort controls the maximum agentic execution iterations "
+            "rather than provider reasoning depth. Higher levels allow longer work."
+            if self.config.active_backend == "claw-cli"
+            else "This optional step controls reasoning depth. If no selection is made, the current value remains active."
+        )
         return setting_card(
             "🎛️",
             "Choose effort",
@@ -4760,7 +4766,7 @@ class FlexibleAgentRuntime:
                 f"<b>Backend</b> · <code>{html.escape(self.config.active_backend)}</code>",
                 f"<b>Model</b> · <code>{html.escape(self.get_current_model())}</code>",
             ],
-            consequence="This optional step controls reasoning depth. If no selection is made, the current value remains active.",
+            consequence=consequence,
             action="Choose an effort level, or keep the current value.",
         )
 
@@ -4984,6 +4990,11 @@ class FlexibleAgentRuntime:
             return
 
         current_effort = self._get_current_effort() or available[0]
+        consequence = (
+            "For Claw, higher effort permits more agentic execution iterations; it does not change provider reasoning depth."
+            if self.config.active_backend == "claw-cli"
+            else "Higher effort may improve difficult work but takes longer and can use more tokens."
+        )
         await self._reply_text(
             update,
             setting_card(
@@ -4991,7 +5002,7 @@ class FlexibleAgentRuntime:
                 "Model effort",
                 current=f"<code>{html.escape(current_effort)}</code>",
                 facts=[f"<b>Model</b> · <code>{html.escape(self.get_current_model())}</code>"],
-                consequence="Higher effort may improve difficult work but takes longer and can use more tokens.",
+                consequence=consequence,
                 action="The selection applies immediately and persists.",
             ),
             parse_mode="HTML",
