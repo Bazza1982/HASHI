@@ -232,6 +232,43 @@ def test_build_claw_env_uses_allowlist_only():
     }
 
 
+@pytest.mark.parametrize(
+    ("effort", "expected_iterations"),
+    [
+        ("low", "12"),
+        ("medium", "32"),
+        ("high", "96"),
+        ("xhigh", "192"),
+        ("max", "384"),
+    ],
+)
+def test_claw_execution_effort_maps_to_iteration_budget(tmp_path, effort, expected_iterations):
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={"effort": effort},
+        resolve_access_root=lambda: tmp_path,
+    )
+    adapter = ClawCLIAdapter(cfg, SimpleNamespace(), api_key="test-key")
+
+    assert adapter.effort == effort
+    assert adapter._task_env()["CLAW_MAX_TOOL_ITERATIONS"] == expected_iterations
+
+
+def test_claw_explicit_max_iterations_overrides_execution_effort(tmp_path):
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={"effort": "low", "max_tool_iterations": 77},
+        resolve_access_root=lambda: tmp_path,
+    )
+    adapter = ClawCLIAdapter(cfg, SimpleNamespace(), api_key="test-key")
+
+    assert adapter._task_env()["CLAW_MAX_TOOL_ITERATIONS"] == "77"
+
+
 def test_run_claw_doctor_parses_json(tmp_path):
     fake = _write_exe(
         tmp_path / "claw",
@@ -571,6 +608,8 @@ async def test_claw_adapter_generate_response_with_fake_binary(tmp_path):
               "model": "deepseek/test",
               "session_id": resume or "session-1",
               "iterations": 1,
+              "completion_status": "incomplete",
+              "stop_reason": "max_iterations",
               "tool_uses": [],
               "tool_results": [],
               "usage": {"input_tokens": 3, "output_tokens": 2}
@@ -602,6 +641,10 @@ async def test_claw_adapter_generate_response_with_fake_binary(tmp_path):
     assert adapter._session_id == "session-1"
     assert response.usage.input_tokens == 3
     assert response.usage.output_tokens == 2
+    assert response.stop_reason == "max_iterations"
+    assert response.stream_metadata["claw_completion_status"] == "incomplete"
+    assert response.stream_metadata["claw_execution_effort"] == "high"
+    assert response.stream_metadata["claw_max_iterations"] == 96
 
 
 @pytest.mark.asyncio
@@ -681,6 +724,7 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path):
                 {"kind": "tool_end", "name": "read_file", "summary": "read_file completed", "output_preview": "ok"},
                 {"kind": "usage", "input_tokens": 5, "output_tokens": 7, "thinking_token_source": "estimated"},
                 {"kind": "run_finished", "message": "final answer", "model": "deepseek/test", "iterations": 1,
+                 "completion_status": "completed", "stop_reason": "end_turn",
                  "tool_uses": [{"name": "read_file"}], "tool_results": [],
                  "usage": {"input_tokens": 5, "output_tokens": 7}},
             ]:
@@ -709,6 +753,8 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path):
     assert response.usage.input_tokens == 5
     assert response.usage.output_tokens == 7
     assert response.usage.thinking_tokens == 12
+    assert response.stop_reason == "end_turn"
+    assert response.stream_metadata["claw_completion_status"] == "completed"
     assert adapter._session_id == "stream-session"
     assert adapter.capabilities.supports_thinking_stream is True
     assert adapter.capabilities.supports_answer_stream is True

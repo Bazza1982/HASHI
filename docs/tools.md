@@ -67,7 +67,7 @@ Five execution modes:
 **Backend configuration:**
 - `/backend` — switch active backend in Flex (inline keyboard; `+` variant carries continuity handoff). In another mode it first asks whether to switch to Flex, preserves saved mode configuration and Memory+, then continues directly to the backend picker.
 - Backend and model selection continue to an optional effort step when supported. Keeping the current effort does not change it; unsupported models finish with effort shown as `n/a`.
-- `/effort [level]` — reasoning effort for Claude, Codex, and Grok CLI. The keyboard and accepted values are model-aware: Grok offers `low`, `medium`, and `high` (default `medium`); `max` is currently offered for `gpt-5.6-sol`; `gpt-5.6-terra` and `gpt-5.6-luna` offer up to `xhigh`.
+- `/effort [level]` — effort for Claude, Codex, Grok CLI, and Claw. For Claw this is an agentic execution budget rather than provider reasoning depth: `low=12`, `medium=32`, `high=96` (default), `xhigh=192`, and `max=384` iterations. Other backends retain their model-aware reasoning-effort behavior.
 
 **Wrapper-mode:**
 - `/mode wrapper` — switch a flex-capable agent into wrapper mode.
@@ -82,7 +82,7 @@ Five execution modes:
 Wrapper model picker buttons currently group recommended choices by provider: Claude Haiku/Sonnet, Gemini Flash/Lite, DeepSeek Flash/Chat, and OpenRouter DeepSeek/Gemini. Claude Opus is intentionally omitted from the picker because it is too expensive for routine wrapping.
 
 **Backend-specific (fixed):**
-- `/effort` — Claude, Codex, Grok CLI
+- `/effort` — Claude, Codex, Grok CLI, Claw
 - `/credit` — OpenRouter
 
 Memory+ stores a bounded today card, a short cross-day carryover, and archive
