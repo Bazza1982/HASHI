@@ -1303,6 +1303,32 @@ async def test_prepare_successful_response_applies_wrapper_and_notifies_listener
     assert runtime.listener_payloads[0]["wrapped"] is True
 
 
+@pytest.mark.asyncio
+async def test_prepare_successful_response_does_not_mark_hidden_only_text_successful():
+    runtime = _runtime()
+
+    async def _strip_hidden_control_content(_item, _text):
+        return "", {"mode": "memory_plus"}
+
+    runtime._apply_wrapper_to_visible_text = _strip_hidden_control_content
+    response = SimpleNamespace(
+        text='<memory_plus_update>{"write":false}</memory_plus_update>'
+    )
+
+    result = await runtime_pipeline.prepare_successful_response(
+        runtime,
+        _item(),
+        response,
+        completion_path="foreground",
+    )
+
+    assert result.visible_text == ""
+    assert runtime.success_marked is False
+    assert runtime.habit_outcomes == []
+    assert runtime.transcripts == []
+    assert runtime.listener_payloads == []
+
+
 def test_record_foreground_usage_audit_records_estimated_usage(monkeypatch):
     runtime = _runtime()
     item = _item()
