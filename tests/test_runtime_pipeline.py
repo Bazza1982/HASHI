@@ -593,6 +593,8 @@ async def test_medium_claw_sends_one_visible_task_acknowledgement():
     assert len(sent) == 1
     assert sent[0][0] == 123
     assert sent[0][2]["_purpose"] == "task_acknowledgement"
+    assert any("acknowledgement policy" in message for message in runtime.logger.messages)
+    assert any("acknowledgement delivered" in message for message in runtime.logger.messages)
 
 
 @pytest.mark.asyncio

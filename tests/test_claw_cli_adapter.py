@@ -35,6 +35,7 @@ from adapters.claw_cli import (
 from adapters.registry import get_backend_class
 from adapters.stream_events import (
     KIND_ACKNOWLEDGEMENT,
+    KIND_PROGRESS,
     KIND_TEXT_DELTA,
     KIND_THINKING,
     KIND_TOOL_END,
@@ -788,13 +789,16 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path):
                 {"kind": "run_started", "model": "deepseek/test", "session_id": "stream-session"},
                 {"kind": "task_acknowledgement", "text": "I will inspect the requested file only."},
                 {"kind": "task_plan", "phase": "initial", "frame": {"active_goal": "inspect file"}},
+                {"kind": "semantic_compaction", "status": "started", "removed_message_count": 0, "timeout_seconds": 60},
+                {"kind": "semantic_compaction", "status": "completed", "removed_message_count": 12, "timeout_seconds": 60},
                 {"kind": "thinking_summary", "summary": "thinking block received (48 chars hidden)", "thinking_chars": 48},
                 {"kind": "assistant_delta", "text": "partial answer"},
                 {"kind": "tool_start", "name": "read_file", "summary": "reading README.md"},
                 {"kind": "tool_end", "name": "read_file", "summary": "read_file completed", "output_preview": "ok"},
                 {"kind": "usage", "input_tokens": 5, "output_tokens": 7, "thinking_token_source": "estimated"},
+                {"kind": "provider_stop_reason", "reason": "end_turn"},
                 {"kind": "run_finished", "message": "final answer", "model": "deepseek/test", "iterations": 1,
-                 "completion_status": "completed", "stop_reason": "end_turn",
+                 "completion_status": "completed", "stop_reason": "end_turn", "provider_stop_reason": "end_turn",
                  "tool_uses": [{"name": "read_file"}], "tool_results": [],
                  "usage": {"input_tokens": 5, "output_tokens": 7}},
             ]:
@@ -825,6 +829,7 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path):
     assert response.usage.thinking_tokens == 12
     assert response.stop_reason == "end_turn"
     assert response.stream_metadata["claw_completion_status"] == "completed"
+    assert response.stream_metadata["claw_provider_stop_reason"] == "end_turn"
     assert "fallback_report_generated" not in response.stream_metadata
     assert adapter._session_id == "stream-session"
     assert adapter.capabilities.supports_thinking_stream is True
@@ -838,6 +843,10 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path):
     assert KIND_TEXT_DELTA in [event.kind for event in events]
     assert KIND_TOOL_START in [event.kind for event in events]
     assert KIND_TOOL_END in [event.kind for event in events]
+    assert sum(
+        event.kind == KIND_PROGRESS and "semantic compaction" in event.summary
+        for event in events
+    ) == 2
     assert any(event.detail == "thinking_chars=48" for event in events)
     assert not any("may be summarized or hidden" in event.summary for event in events)
 

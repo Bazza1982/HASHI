@@ -534,6 +534,12 @@ async def setup_interactive_feedback(
         and str(getattr(runtime.config, "active_backend", "")) == "claw-cli"
         and str(getattr(backend, "effort", "low")).lower() != "low"
     )
+    if str(getattr(runtime.config, "active_backend", "")) == "claw-cli":
+        runtime.logger.info(
+            f"Claw acknowledgement policy: request={item.request_id} "
+            f"enabled={claw_ack_enabled} effort={getattr(backend, 'effort', 'low')} "
+            f"delivery_requested={delivery_requested} blocked={delivery_blocked}"
+        )
 
     if delivery_requested:
         runtime.logger.info(
@@ -702,16 +708,26 @@ async def setup_interactive_feedback(
                 and str(getattr(event, "summary", "") or "").strip()
             ):
                 acknowledgement_sent = True
+                acknowledgement_text = str(event.summary).strip()
+                runtime.logger.info(
+                    f"Claw acknowledgement delivery started: request={item.request_id} "
+                    f"text_len={len(acknowledgement_text)}"
+                )
                 try:
                     await runtime._send_text(
                         item.chat_id,
-                        str(event.summary).strip(),
+                        acknowledgement_text,
                         _request_id=item.request_id,
                         _purpose="task_acknowledgement",
                     )
+                    runtime.logger.info(
+                        f"Claw acknowledgement delivered: request={item.request_id} "
+                        f"text_len={len(acknowledgement_text)}"
+                    )
                 except Exception as exc:
-                    runtime.telegram_logger.warning(
-                        f"Failed to send Claw task acknowledgement for {item.request_id}: {exc}"
+                    runtime.logger.warning(
+                        f"Claw acknowledgement delivery failed: request={item.request_id} "
+                        f"error_type={type(exc).__name__}"
                     )
             if presentation_callback is not None:
                 result = presentation_callback(event)
