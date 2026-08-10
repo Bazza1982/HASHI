@@ -904,12 +904,18 @@ async def prepare_successful_response(runtime, item, response, *, completion_pat
             completion_path=completion_path,
         )
     display_text = runtime._strip_transfer_accept_prefix(item, response.text)
-    runtime._mark_success()
-    runtime._record_habit_outcome(item, success=True, response_text=response.text)
     visible_text, wrapper_result = await runtime._apply_wrapper_to_visible_text(
         item,
         display_text or response.text,
     )
+    if not visible_text.strip():
+        return SuccessfulResponse(
+            display_text=display_text,
+            visible_text=visible_text,
+            wrapper_result=wrapper_result,
+        )
+    runtime._mark_success()
+    runtime._record_habit_outcome(item, success=True, response_text=response.text)
     safe_core_raw = extract_memory_plus_update_details(response.text).visible_text
     runtime._append_core_transcript(
         item,

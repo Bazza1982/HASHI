@@ -194,6 +194,16 @@ async def process_queue(runtime: Any) -> None:
                 )
                 visible_text = success_result.visible_text
                 wrapper_result = success_result.wrapper_result
+                if not visible_text.strip():
+                    runtime._notify_right_brain_interrupted(
+                        item,
+                        effective_prompt,
+                        is_bridge_request=is_bridge_request,
+                        reason="empty_visible_success",
+                        error="backend returned only hidden control content",
+                    )
+                    await runtime_pipeline.handle_empty_success_response(runtime, item)
+                    continue
                 runtime._notify_right_brain_completed(
                     item,
                     effective_prompt,
