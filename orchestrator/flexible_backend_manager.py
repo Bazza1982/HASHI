@@ -328,9 +328,13 @@ class FlexibleBackendManager:
             self.current_backend = BackendClass(adapter_cfg, self.global_config, api_key)
             self.current_backend.privacy_level = self.privacy_level
 
-            # V2.2+: inject ToolRegistry for API backends that support tool calls
-            if engine in ("openrouter-api", "deepseek-api", "ollama-api", "xai-api"):
+            # V2.2+: inject the canonical ToolRegistry into tool-capable backends.
+            # API adapters consume it directly; Claw exposes it through the
+            # protocol-neutral HASHI Tool Gateway over MCP stdio.
+            if engine in ("openrouter-api", "deepseek-api", "ollama-api", "xai-api", "claw-cli"):
                 tools_cfg = self._resolve_tools_config(backend_cfg_raw)
+                if engine == "claw-cli" and not tools_cfg:
+                    tools_cfg = {"allowed": ["*"], "max_loops": 25}
                 if tools_cfg:
                     self._attach_tool_registry(tools_cfg, adapter_cfg)
 
@@ -372,7 +376,7 @@ class FlexibleBackendManager:
         return merged
 
     def _attach_tool_registry(self, tools_cfg: dict, adapter_cfg) -> None:
-        """Create and attach a ToolRegistry to the current OpenRouter backend."""
+        """Create and attach the canonical ToolRegistry to a tool-capable backend."""
         try:
             from tools.registry import ToolRegistry
 

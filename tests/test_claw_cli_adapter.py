@@ -563,10 +563,11 @@ async def test_claw_adapter_generate_response_with_fake_binary(tmp_path):
         if sys.argv[1] == "version":
             print(json.dumps({"kind": "version", "version": "0.1.0", "git_sha": "fake"}))
         else:
-            assert "--resume" not in sys.argv
+            resume = sys.argv[sys.argv.index("--resume") + 1] if "--resume" in sys.argv else None
             print(json.dumps({
               "message": "adapter done",
               "model": "deepseek/test",
+              "session_id": resume or "session-1",
               "iterations": 1,
               "tool_uses": [],
               "tool_results": [],
@@ -589,13 +590,32 @@ async def test_claw_adapter_generate_response_with_fake_binary(tmp_path):
     adapter = ClawCLIAdapter(cfg, global_cfg, api_key="test-key")
 
     assert await adapter.initialize() is True
-    assert adapter.capabilities.supports_sessions is False
+    assert adapter.capabilities.supports_sessions is True
     response = await adapter.generate_response("hello", "req-1")
+    resumed = await adapter.generate_response("continue", "req-2")
 
     assert response.is_success is True
     assert response.text == "adapter done"
+    assert resumed.is_success is True
+    assert adapter._session_id == "session-1"
     assert response.usage.input_tokens == 3
     assert response.usage.output_tokens == 2
+
+
+@pytest.mark.asyncio
+async def test_claw_adapter_new_session_clears_resume_identity(tmp_path):
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={},
+        resolve_access_root=lambda: tmp_path,
+    )
+    adapter = ClawCLIAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    adapter._session_id = "session-old"
+
+    assert await adapter.handle_new_session() is True
+    assert adapter._session_id is None
 
 
 @pytest.mark.asyncio
@@ -612,7 +632,7 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path):
         else:
             assert "stream-json" in sys.argv
             for event in [
-                {"kind": "run_started", "model": "deepseek/test"},
+                {"kind": "run_started", "model": "deepseek/test", "session_id": "stream-session"},
                 {"kind": "thinking_summary", "summary": "thinking block received (48 chars hidden)", "thinking_chars": 48},
                 {"kind": "assistant_delta", "text": "partial answer"},
                 {"kind": "tool_start", "name": "read_file", "summary": "reading README.md"},
@@ -647,6 +667,7 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path):
     assert response.usage.input_tokens == 5
     assert response.usage.output_tokens == 7
     assert response.usage.thinking_tokens == 12
+    assert adapter._session_id == "stream-session"
     assert adapter.capabilities.supports_thinking_stream is True
     assert adapter.capabilities.supports_answer_stream is True
     assert KIND_THINKING in [event.kind for event in events]

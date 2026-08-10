@@ -1,6 +1,6 @@
 # HASHI Claw Backend Contract
 
-Status: active for `0.1.3-hashi.1`
+Status: active for `0.1.3-hashi.2`
 
 ## Deployment scope
 
@@ -15,23 +15,41 @@ to Aptenra automatically.
 
 ## Ownership boundary
 
-HASHI owns conversation continuity, memory injection, handoff context, authorization,
-request identity, cancellation, and delivery. Claw is a stateless per-turn execution
-backend. Every request receives the complete context selected by HASHI and starts a new
-Claw process.
+HASHI owns agent identity, memory injection, handoff context, authorization, request
+identity, cancellation, and delivery. Claw owns the model/tool-loop session inside one
+active backend lifecycle. HASHI records the Claw `session_id` and resumes it for the next
+turn instead of rebuilding the browser plan from scratch.
 
 The production `ClawCLIAdapter` therefore:
 
-- reports `supports_sessions = false`;
-- never passes `--resume` for a normal HASHI turn;
-- treats `/new` as a HASHI continuity reset, not a request to retain or mutate hidden
-  Claw session state;
-- may expose low-level resume arguments only in diagnostic helpers that are outside the
-  production adapter contract.
+- reports `supports_sessions = true`;
+- captures `session_id` from `run_started` before tool execution and checkpoints it again
+  from `run_finished`;
+- passes `--resume <session_id>` on the next turn in the same backend lifecycle;
+- clears the Claw identity on `/new` and when a new adapter instance is created;
+- keeps Claw configuration and Tool Gateway state isolated per agent workspace.
 
-This is intentional. It prevents duplicate context ownership, stale permission state,
-implicit cross-agent state, and failures caused by passing a normal prompt after
-`--resume latest`, which Claw `0.1.0` and `0.1.3` both reject.
+The runtime lifecycle must send incremental turns when `supports_sessions` is true; it
+must not also replay the full HASHI conversation. Capturing the ID at `run_started`
+allows a cancelled turn to retain its intended session identity. Resume after a hard
+process kill remains best-effort if Claw did not persist the session file before exit;
+that case is logged and must not silently switch to a different agent's session.
+
+## Tool Gateway contract
+
+`ToolRegistry` remains the single capability catalog and execution core. API backends
+consume it directly. Claw consumes the same registry through the `hashi-tools` MCP stdio
+adapter generated under the agent's `backend_state` directory.
+
+- Browser behavior remains in `tools.browser`; the Claw adapter does not duplicate it.
+- The generated Gateway context is mode `0600`, contains only secrets required by the
+  allowed tools, and excludes live runtime/config objects.
+- Claw-native `--allowedTools` and HASHI capability permissions remain separate layers.
+- A required `hashi-tools` MCP entry is validated during backend initialization.
+- MCP calls use existing JSON schemas, ToolRegistry permission checks, and tool audit
+  records.
+- The gateway stops excessive total calls, repeated identical calls, and consecutive
+  error loops with explicit errors instructing the model to report partial progress.
 
 ## Streaming contract
 
@@ -71,10 +89,9 @@ python scripts/verify_claw_certification.py \
   --source-root /path/to/claw-code-hashi-4ea31c1
 ```
 
-## Future persistent-session mode
+## Remaining session limitation
 
-Persistent Claw sessions require a separate design and cannot be enabled by changing a
-single adapter flag. A future opt-in mode must define agent/workspace binding, context
-deduplication, permission invalidation, `/new` and `/handoff` semantics, backend-switch
-lifecycle, corruption recovery, and audit visibility. Stateless execution remains the
-safe default until that contract is implemented and certified.
+Session identity and normal multi-turn resume are active. Persisting an in-flight model
+plan across an operating-system kill still depends on whether Claw has flushed its
+session file. HASHI therefore treats interrupted-turn resume as best-effort and relies
+on structured tool audit records to diagnose completed side effects.

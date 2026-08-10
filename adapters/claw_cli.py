@@ -7,6 +7,8 @@ import os
 import platform as py_platform
 import shutil
 import subprocess
+import sys
+import tempfile
 import time
 import asyncio
 from dataclasses import dataclass, field
@@ -68,6 +70,8 @@ CLAW_ENV_ALLOWLIST = (
     "OPENAI_API_KEY",
     "XAI_API_KEY",
     "XAI_BASE_URL",
+    "CLAW_CONFIG_HOME",
+    "PYTHONPATH",
     *OS_ENV_ALLOWLIST,
 )
 
@@ -151,6 +155,7 @@ class ClawTaskResult:
     json_data: dict[str, Any]
     tool_uses: list[Any]
     tool_results: list[Any]
+    session_id: str | None = None
     iterations: int | None = None
     estimated_cost: str | None = None
 
@@ -797,6 +802,7 @@ def run_claw_task(
         json_data=data,
         tool_uses=list(data.get("tool_uses") or []),
         tool_results=list(data.get("tool_results") or []),
+        session_id=str(data.get("session_id") or "").strip() or None,
         iterations=data.get("iterations") if isinstance(data.get("iterations"), int) else None,
         estimated_cost=data.get("estimated_cost") if isinstance(data.get("estimated_cost"), str) else None,
     )
@@ -911,7 +917,7 @@ class ClawCLIAdapter(BaseBackend):
 
     def _define_capabilities(self) -> BackendCapabilities:
         capabilities = BackendCapabilities(
-            supports_sessions=False,
+            supports_sessions=True,
             supports_files=True,
             supports_tool_use=True,
             supports_thinking_stream=False,
@@ -927,6 +933,9 @@ class ClawCLIAdapter(BaseBackend):
         self._binary: Path | None = None
         self._binary_resolution: ClawBinaryResolution | None = None
         self._supports_stream_json = False
+        self._session_id: str | None = None
+        self._gateway_context_path: Path | None = None
+        self._gateway_config_home: Path | None = None
 
     @property
     def _extra(self) -> dict[str, Any]:
@@ -1101,7 +1110,99 @@ class ClawCLIAdapter(BaseBackend):
         return self._env_from_agent_extra()
 
     def _task_env(self) -> dict[str, str]:
-        return self._resolve_task_env()
+        env = self._resolve_task_env()
+        if self._gateway_config_home is not None:
+            env["CLAW_CONFIG_HOME"] = str(self._gateway_config_home)
+            project_root = Path(__file__).resolve().parents[1]
+            existing = env.get("PYTHONPATH")
+            env["PYTHONPATH"] = os.pathsep.join(
+                [str(project_root), existing] if existing else [str(project_root)]
+            )
+        return env
+
+    def _prepare_tool_gateway(self) -> None:
+        registry = getattr(self, "tool_registry", None)
+        if registry is None:
+            self.logger.warning("Claw initialized without HASHI ToolRegistry; only Claw-native tools will be available.")
+            return
+        from tools.gateway.context import write_gateway_context
+
+        state_dir = self.config.workspace_dir / "backend_state"
+        context_path = state_dir / "claw_gateway_context.json"
+        config_home = state_dir / "claw_config"
+        config_home.mkdir(parents=True, exist_ok=True)
+        context = write_gateway_context(registry, context_path)
+        settings = {
+            "mcpServers": {
+                "hashi-tools": {
+                    "command": sys.executable,
+                    "args": [
+                        "-m",
+                        "tools.gateway.mcp_stdio",
+                        "--context",
+                        str(context_path),
+                    ],
+                    "env": {"PYTHONPATH": str(Path(__file__).resolve().parents[1])},
+                    "toolCallTimeoutMs": 120_000,
+                    "required": True,
+                }
+            }
+        }
+        settings_path = config_home / "settings.json"
+        fd, temporary = tempfile.mkstemp(prefix=".settings.", suffix=".json", dir=config_home)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(settings, handle, ensure_ascii=False, indent=2, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, settings_path)
+            settings_path.chmod(0o600)
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            Path(temporary).unlink(missing_ok=True)
+            raise
+        self._gateway_context_path = context_path
+        self._gateway_config_home = config_home
+        self.logger.info(
+            "Claw HASHI Tool Gateway prepared: agent=%s tools=%d context=%s",
+            context.agent,
+            len(context.allowed_tools),
+            context_path,
+        )
+
+    def _validate_tool_gateway(self) -> None:
+        if self._gateway_context_path is None or self._gateway_config_home is None:
+            return
+        from tools.gateway.context import load_gateway_context
+
+        context = load_gateway_context(self._gateway_context_path)
+        definitions = context.build_registry().get_tool_definitions()
+        if not definitions:
+            raise ClawProviderConfigError("Claw HASHI Tool Gateway has no permitted tools")
+        status = run_claw_json_command(
+            ["mcp", "list", "--output-format", "json"],
+            cwd=self.effective_workdir,
+            binary_path=self._binary,
+            env=self._task_env(),
+            timeout_s=30,
+        ).json_data
+        server = next(
+            (item for item in status.get("servers", []) if item.get("name") == "hashi-tools"),
+            None,
+        )
+        if not server or not server.get("valid"):
+            raise ClawProviderConfigError(
+                f"Claw required HASHI Tool Gateway is invalid: {status.get('invalid_servers') or status}"
+            )
+        self.logger.info(
+            "Claw HASHI Tool Gateway validated: tools=%d mcp_server=hashi-tools",
+            len(definitions),
+        )
 
     async def initialize(self) -> bool:
         self.logger.info("Initializing Claw CLI backend...")
@@ -1112,6 +1213,7 @@ class ClawCLIAdapter(BaseBackend):
                 agent_config=self.config,
             )
             self._binary = self._binary_resolution.path
+            self._prepare_tool_gateway()
             for warning in self._binary_resolution.warnings:
                 self.logger.warning("Claw binary discovery warning: %s", warning)
             version = await asyncio.to_thread(
@@ -1128,6 +1230,7 @@ class ClawCLIAdapter(BaseBackend):
                 f"manifest={self._binary_resolution.manifest_path}, "
                 f"version={version.get('version')}, git_sha={version.get('git_sha')})"
             )
+            self._validate_tool_gateway()
             self._supports_stream_json = await asyncio.to_thread(
                 claw_supports_stream_json,
                 self._binary,
@@ -1136,12 +1239,6 @@ class ClawCLIAdapter(BaseBackend):
             )
             self.capabilities.supports_thinking_stream = self._supports_stream_json
             self.capabilities.supports_answer_stream = self._supports_stream_json
-            configured_resume = self._extra.get("resume")
-            if configured_resume not in (None, False, "none"):
-                self.logger.warning(
-                    "Ignoring Claw resume=%r: HASHI owns conversation continuity and runs Claw stateless per turn.",
-                    configured_resume,
-                )
             if not self._supports_stream_json:
                 self.logger.warning("Claw binary does not advertise stream-json; verbose mode will use JSON fallback.")
             return True
@@ -1155,7 +1252,8 @@ class ClawCLIAdapter(BaseBackend):
             return False
 
     async def handle_new_session(self) -> bool:
-        self.logger.info("Claw handle_new_session: backend is already stateless per turn.")
+        self._session_id = None
+        self.logger.info("Claw handle_new_session: cleared persisted Claw session identity.")
         return True
 
     async def shutdown(self):
@@ -1191,7 +1289,7 @@ class ClawCLIAdapter(BaseBackend):
         try:
             result = await self._run_task_async(
                 prompt,
-                resume=None,
+                resume=self._session_id,
                 on_stream_event=on_stream_event,
             )
         except asyncio.CancelledError:
@@ -1220,7 +1318,34 @@ class ClawCLIAdapter(BaseBackend):
                         )
                     )
         usage_data = result.json_data.get("usage") or {}
-        stream_usage = _stream_json_usage(result.stdout) if on_stream_event is not None else {}
+        if result.session_id:
+            previous = self._session_id
+            self._session_id = result.session_id
+            self.logger.info(
+                "Claw session checkpoint: request=%s session=%s resumed=%s",
+                request_id,
+                result.session_id,
+                bool(previous),
+            )
+        else:
+            self.logger.warning("Claw response omitted session_id for request=%s; next turn cannot resume safely.", request_id)
+        tool_errors = sum(
+            1
+            for item in result.tool_results
+            if isinstance(item, Mapping) and bool(item.get("is_error") or item.get("isError"))
+        )
+        self.logger.info(
+            "Claw task completed: request=%s model=%s session=%s iterations=%s "
+            "tool_calls=%d tool_errors=%d gateway=%s",
+            request_id,
+            result.model,
+            result.session_id or self._session_id or "unavailable",
+            result.iterations if result.iterations is not None else "unavailable",
+            len(result.tool_uses),
+            tool_errors,
+            bool(self._gateway_context_path),
+        )
+        stream_usage = _stream_json_usage(result.stdout) if self._supports_stream_json else {}
         thinking_tokens = int(
             usage_data.get("thinking_tokens")
             or (usage_data.get("completion_tokens_details") or {}).get("reasoning_tokens")
@@ -1262,7 +1387,7 @@ class ClawCLIAdapter(BaseBackend):
             resume=resume,
             allowed_tools=self._allowed_tools(),
             skip_permissions=self._skip_permissions(),
-            output_format="stream-json" if on_stream_event is not None and self._supports_stream_json else "json",
+            output_format="stream-json" if self._supports_stream_json else "json",
         )
         command = [str(self._binary), *args]
         started = time.perf_counter()
@@ -1281,7 +1406,7 @@ class ClawCLIAdapter(BaseBackend):
         self.current_proc = proc
         self._touch_activity()
         try:
-            if on_stream_event is not None and self._supports_stream_json:
+            if self._supports_stream_json:
                 stdout_data, stderr_data = await asyncio.wait_for(
                     self._communicate_stream_json(proc, command, on_stream_event),
                     timeout=self.HARD_TIMEOUT_SEC,
@@ -1309,7 +1434,7 @@ class ClawCLIAdapter(BaseBackend):
         output = stdout.strip() or stderr.strip()
         parsed = (
             _parse_stream_json_output(output, command=command)
-            if on_stream_event is not None and self._supports_stream_json
+            if self._supports_stream_json
             else (_parse_json_output(output, command=command) if output else {})
         )
         if proc.returncode != 0:
@@ -1333,6 +1458,7 @@ class ClawCLIAdapter(BaseBackend):
             json_data=parsed,
             tool_uses=list(parsed.get("tool_uses") or []),
             tool_results=list(parsed.get("tool_results") or []),
+            session_id=str(parsed.get("session_id") or "").strip() or None,
             iterations=parsed.get("iterations") if isinstance(parsed.get("iterations"), int) else None,
             estimated_cost=parsed.get("estimated_cost") if isinstance(parsed.get("estimated_cost"), str) else None,
         )
@@ -1341,7 +1467,7 @@ class ClawCLIAdapter(BaseBackend):
         self,
         proc: asyncio.subprocess.Process,
         command: list[str],
-        on_stream_event: StreamCallback,
+        on_stream_event: StreamCallback = None,
     ) -> tuple[bytes, bytes]:
         stdout_chunks: list[bytes] = []
         stderr_chunks: list[bytes] = []
@@ -1356,8 +1482,17 @@ class ClawCLIAdapter(BaseBackend):
                 except json.JSONDecodeError:
                     self.logger.warning("Ignoring non-JSON Claw stream line: %r", line[:200])
                     continue
+                if event.get("kind") == "run_started":
+                    session_id = str(event.get("session_id") or "").strip()
+                    if session_id:
+                        self._session_id = session_id
+                        self.logger.info(
+                            "Claw session started: session=%s model=%s",
+                            session_id,
+                            event.get("model") or self._claw_model(),
+                        )
                 stream_event = _claw_jsonl_to_stream_event(event)
-                if stream_event is not None:
+                if stream_event is not None and on_stream_event is not None:
                     await on_stream_event(stream_event)
 
         async def read_stderr() -> None:
