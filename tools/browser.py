@@ -181,6 +181,21 @@ async def _maybe_execute_extension_bridge(action: str, args: dict) -> Optional[s
         )
         if session.get("session", {}).get("session_id"):
             bridge_args["session_id"] = session["session"]["session_id"]
+        extension_meta = session.get("extension_meta") or {}
+        advertised_actions = {
+            str(item).strip()
+            for item in (extension_meta.get("actions") or [])
+            if str(item).strip()
+        }
+        contract_required_actions = {"session", "scroll", "evaluate"}
+        if action in contract_required_actions and action not in advertised_actions:
+            version = str(extension_meta.get("extension_version") or "unknown")
+            return (
+                f"Error: browser extension {version} does not advertise the '{action}' contract. "
+                "Reload the HASHI Browser Bridge extension before using this tool."
+            )
+        if advertised_actions and action not in advertised_actions:
+            return f"Error: browser extension does not support action '{action}'"
         bridge_args["_audit"] = {
             **audit,
             "agent_name": owner,
@@ -767,20 +782,13 @@ async def execute_browser_session(args: dict) -> str:
       { "action": "goto",         "url": "..." }
       { "action": "click",        "selector": "..." }
       { "action": "fill",         "selector": "...", "text": "..." }
-      { "action": "submit" }                        # press Enter
-      { "action": "key",          "key": "Tab" }
       { "action": "scroll",       "x": 0, "y": 500 }
       { "action": "scroll_to",    "selector": "..." }
       { "action": "hover",        "selector": "..." }
-      { "action": "select",       "selector": "...", "value"|"label"|"index": ... }
-      { "action": "wait_for",     "selector": "...", "timeout_ms": 5000 }
       { "action": "screenshot",   "full_page": false }   -> appends base64 to results
       { "action": "get_text" }                           -> appends visible text
       { "action": "evaluate",     "script": "() => ..." }
       { "action": "wait",         "ms": 1000 }
-      { "action": "back" }
-      { "action": "forward" }
-      { "action": "reload" }
 
     Returns a summary of each step result.
     """

@@ -248,7 +248,11 @@ class UnixBridgeRequestHandler(socketserver.StreamRequestHandler):
             with state.session_lock:
                 existing = state.sessions.get(session_id)
             if existing:
-                response = {"ok": True, "session": existing}
+                response = {
+                    "ok": True,
+                    "session": existing,
+                    "extension_meta": state.extension_meta,
+                }
             else:
                 ext_response = state.dispatch_request("session_create", args)
                 if not ext_response.get("ok"):
@@ -279,7 +283,11 @@ class UnixBridgeRequestHandler(socketserver.StreamRequestHandler):
                     }
                     with state.session_lock:
                         state.sessions[session_id] = session
-                    response = {"ok": True, "session": session}
+                    response = {
+                        "ok": True,
+                        "session": session,
+                        "extension_meta": state.extension_meta,
+                    }
                 else:
                     response = ext_response
         elif action == "session_close":

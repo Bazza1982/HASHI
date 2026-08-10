@@ -106,6 +106,27 @@ async def test_gateway_stops_identical_retry_loop(tmp_path, monkeypatch):
     assert "repeated identical call" in stopped["content"][0]["text"]
 
 
+@pytest.mark.asyncio
+async def test_gateway_allows_repeated_browser_side_effect_when_state_changes(tmp_path, monkeypatch):
+    context_path = _write_context(_registry(tmp_path), tmp_path)
+    gateway = ToolGateway(load_gateway_context(context_path))
+
+    async def changing_execute(name, arguments, tool_call_id=""):
+        from tools.registry import ToolResult
+
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            output=json.dumps({"ok": True, "state_changed": True}),
+            is_error=False,
+        )
+
+    monkeypatch.setattr(gateway.registry, "execute", changing_execute)
+    arguments = {"url": "https://example.com", "selector": "button.next"}
+    for number in range(gateway.context.max_identical_calls + 2):
+        result = await gateway.call("browser_click", arguments, str(number))
+        assert result["isError"] is False
+
+
 def test_packaged_claw_calls_hashi_tool_gateway_and_returns_answer(tmp_path):
     (tmp_path / "probe.txt").write_text("browser gateway works", encoding="utf-8")
     requests = []
