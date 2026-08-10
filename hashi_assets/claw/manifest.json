@@ -1,16 +1,16 @@
 {
   "manifest_version": 1,
   "runtime": "hashi-claw",
-  "version": "0.1.3-hashi.19",
+  "version": "0.1.3-hashi.20",
   "upstream_commit": "4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d",
-  "source_commit": "a3d234418cc252493dc6932180f490fef3295ab9",
+  "source_commit": "257bedb64d4992000706d3dd2f3812b98515e907",
   "source_branch": "integration/hashi-claw-4ea31c1",
   "build_date": "2026-08-11",
-  "notes": "Claw 0.1.3 pinned to upstream 4ea31c1 with max-effort fresh-context independent Critical Review gates for planning, executed verification and testing evidence, and final claims; up to three evidence-driven revision rounds per gate; fail-closed incomplete reporting; bounded raw-evidence review packets; high-and-above assurance planning and finalization reserves; persona-aware task acknowledgement; semantic compaction; provider termination diagnostics; and deterministic thinking-only recovery.",
+  "notes": "Claw 0.1.3 pinned to upstream 4ea31c1 with max-effort fresh-context independent Critical Review gates for planning, executed verification and testing evidence, and final claims; up to three evidence-driven revision rounds per gate; fail-closed incomplete reporting; bounded raw-evidence review packets; host-aware slash-command sandbox contract testing with zero Rust test exceptions; high-and-above assurance planning and finalization reserves; persona-aware task acknowledgement; semantic compaction; provider termination diagnostics; and deterministic thinking-only recovery.",
   "binaries": {
     "linux-x86_64": {
-      "path": "releases/0.1.3-hashi.19/linux-x86_64/hashi-claw",
-      "sha256": "4405b71d97813bd324f193e08452baaf8f6085631168fb11312b587b868ea6b1",
+      "path": "releases/0.1.3-hashi.20/linux-x86_64/hashi-claw",
+      "sha256": "3d8a3c841596734effb76db17cba8087c29ffa732add4dd0b7076b8cc03bee83",
       "rust_target_triple": "x86_64-unknown-linux-gnu",
       "binary_name": "hashi-claw"
     }

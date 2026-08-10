@@ -1,28 +1,13 @@
 {
   "schema_version": 1,
-  "runtime_version": "0.1.3-hashi.19",
+  "runtime_version": "0.1.3-hashi.20",
   "upstream_commit": "4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d",
-  "source_commit": "a3d234418cc252493dc6932180f490fef3295ab9",
+  "source_commit": "257bedb64d4992000706d3dd2f3812b98515e907",
   "rust_workspace": {
-    "all_other_tests_command": [
+    "command": [
       "cargo",
       "test",
-      "--workspace",
-      "--",
-      "--skip",
-      "direct_resume_safe_slash_commands_route_to_local_json_actions_831"
-    ],
-    "expected_upstream_failures": [
-      {
-        "package": "rusty-claude-cli",
-        "target": "output_format_contract",
-        "test": "direct_resume_safe_slash_commands_route_to_local_json_actions_831",
-        "evidence": [
-          "left: String(\"ok\")",
-          "right: \"warn\""
-        ],
-        "reason": "The host has a fully active filesystem and namespace sandbox, while this upstream test assumes the degraded warn status."
-      }
+      "--workspace"
     ]
   },
   "clippy": {

@@ -20,15 +20,13 @@ def test_claw_certification_baseline_matches_packaged_manifest():
     assert baseline["source_commit"] == manifest["source_commit"]
 
 
-def test_claw_certification_exceptions_are_exact_and_non_expanding():
+def test_claw_certification_requires_all_workspace_tests_to_pass():
     baseline = _load(PROJECT_ROOT / "hashi_assets" / "claw" / "certification_baseline.json")
-    rust_failures = baseline["rust_workspace"]["expected_upstream_failures"]
+    rust_workspace = baseline["rust_workspace"]
     clippy_command = baseline["clippy"]["command"]
     clippy_diagnostics = baseline["clippy"]["expected_upstream_diagnostics"]
 
-    assert [item["test"] for item in rust_failures] == [
-        "direct_resume_safe_slash_commands_route_to_local_json_actions_831"
-    ]
+    assert rust_workspace == {"command": ["cargo", "test", "--workspace"]}
     assert clippy_command == ["cargo", "clippy", "--workspace", "--lib", "--", "-D", "warnings"]
     assert len(clippy_diagnostics) == 6
     assert len(
