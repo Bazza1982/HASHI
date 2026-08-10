@@ -142,7 +142,44 @@ def test_packaged_claw_calls_hashi_tool_gateway_and_returns_answer(tmp_path):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
-            if len(requests) == 1:
+            if not body.get("tools"):
+                chunks = [
+                    {
+                        "id": "chatcmpl-plan",
+                        "choices": [
+                            {
+                                "delta": {
+                                    "content": json.dumps(
+                                        {
+                                            "acknowledgement": "I will read only probe.txt through the HASHI file tool and report the returned content.",
+                                            "active_goal": "Read probe.txt with the HASHI file tool and answer.",
+                                            "success_criteria": ["report the file content"],
+                                            "planned_actions": ["read probe.txt", "report the result"],
+                                            "planned_tools": ["mcp__hashi-tools__file_read"],
+                                            "do_not_do": ["do not modify the file"],
+                                            "assurance": {
+                                                "review_strategy": ["review tool evidence before answering"],
+                                                "review_interval_tool_results": 6,
+                                                "review_triggers": ["tool failure or scope change"],
+                                                "validation_strategy": ["validate the answer against the file-read result"],
+                                                "finalization_reserve": 6,
+                                                "critical_review_findings": [],
+                                                "validation_evidence": [],
+                                                "unverified_items": [],
+                                            },
+                                            "completed": [],
+                                            "remaining_work": ["read and report"],
+                                            "failures": [],
+                                            "next_action": "read probe.txt",
+                                        }
+                                    )
+                                },
+                                "finish_reason": "stop",
+                            }
+                        ],
+                    }
+                ]
+            elif len([request for request in requests if request.get("tools")]) == 1:
                 chunks = [
                     {
                         "id": "chatcmpl-1",
@@ -233,11 +270,11 @@ def test_packaged_claw_calls_hashi_tool_gateway_and_returns_answer(tmp_path):
 
     assert completed.returncode == 0, completed.stderr
     payload = json.loads(completed.stdout)
-    requested_tool_names = [tool["function"]["name"] for tool in requests[0].get("tools", [])]
+    requested_tool_names = [tool["function"]["name"] for tool in requests[1].get("tools", [])]
     assert "mcp__hashi-tools__file_read" in requested_tool_names, requested_tool_names
     assert payload["message"] == "gateway result received"
     assert payload["session_id"]
     assert any(tool.get("name") == "mcp__hashi-tools__file_read" for tool in payload["tool_uses"])
-    assert len(requests) == 2
-    second_messages = requests[1]["messages"]
-    assert any("browser gateway works" in str(message) for message in second_messages), second_messages
+    assert len(requests) == 3
+    final_messages = requests[2]["messages"]
+    assert any("browser gateway works" in str(message) for message in final_messages), final_messages
