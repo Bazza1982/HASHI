@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "runtime": "hashi-claw",
-  "version": "0.1.3-hashi.17",
+  "version": "0.1.3-hashi.18",
   "upstream_commit": "4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d",
   "source_commit": "8168b0cd8495c57b0b367baab8ac63f2d8dd388b",
   "source_branch": "integration/hashi-claw-4ea31c1",
@@ -9,8 +9,8 @@
   "notes": "Claw 0.1.3 pinned to upstream 4ea31c1 with high-and-above effort assurance planning, planning-selected Critical Review frequency, risk-triggered review gates, task-matched validation strategy, enforced pre-limit finalization reserves, accurate incomplete reporting, persona-aware task acknowledgement, non-fatal replanning recovery, conservative authorization anchoring, semantic compaction, provider termination diagnostics, and deterministic thinking-only recovery.",
   "binaries": {
     "linux-x86_64": {
-      "path": "releases/0.1.3-hashi.17/linux-x86_64/hashi-claw",
-      "sha256": "427fcccbc644e0b7284b8cee03afc7dfece14fbbf7bd9334735f676edbbfecaa",
+      "path": "releases/0.1.3-hashi.18/linux-x86_64/hashi-claw",
+      "sha256": "71d6bc6bb990631764db6cf512a77cccdb1af075cd45774d745df806945538fc",
       "rust_target_triple": "x86_64-unknown-linux-gnu",
       "binary_name": "hashi-claw"
     }
