@@ -1,16 +1,16 @@
 {
   "manifest_version": 1,
   "runtime": "hashi-claw",
-  "version": "0.1.3-hashi.6",
+  "version": "0.1.3-hashi.7",
   "upstream_commit": "4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d",
-  "source_commit": "3dbee5720e518c75a77a8aaacc2479024326c3b7",
+  "source_commit": "43dba00aa3e586a596997fa4f8d251da03cf5f1f",
   "source_branch": "integration/hashi-claw-4ea31c1",
   "build_date": "2026-08-10",
-  "notes": "Claw 0.1.3 pinned to upstream 4ea31c1 with HASHI stream telemetry, model identity, resumed sessions, configurable execution effort, and machine-readable incomplete results from a tool-free finalization turn.",
+  "notes": "Claw 0.1.3 pinned to upstream 4ea31c1 with HASHI stream telemetry, model identity, configurable execution effort, deterministic incomplete reports, dynamic context-aware compaction, and recurring active-goal re-anchoring.",
   "binaries": {
     "linux-x86_64": {
-      "path": "releases/0.1.3-hashi.6/linux-x86_64/hashi-claw",
-      "sha256": "f33d84dd71cc8a271a578d26f4ddfa76497cc24a5043f342036cc00805032067",
+      "path": "releases/0.1.3-hashi.7/linux-x86_64/hashi-claw",
+      "sha256": "3398bc9577313b90b322d7a81d5b1554e0797561d68cd737a9e7dc9a945c7621",
       "rust_target_triple": "x86_64-unknown-linux-gnu",
       "binary_name": "hashi-claw"
     }
