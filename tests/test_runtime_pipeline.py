@@ -14,7 +14,12 @@ from telegram.error import RetryAfter
 
 from orchestrator import runtime_pipeline, telegram_stream_policy
 from orchestrator import telegram_delivery_failover as failover
-from adapters.stream_events import KIND_PROGRESS, KIND_TEXT_DELTA, StreamEvent
+from adapters.stream_events import (
+    KIND_ACKNOWLEDGEMENT,
+    KIND_PROGRESS,
+    KIND_TEXT_DELTA,
+    StreamEvent,
+)
 
 
 class _Logger:
@@ -557,6 +562,37 @@ async def test_setup_interactive_feedback_creates_placeholder_and_cleanup_tasks(
     feedback.stop_typing.set()
     await feedback.typing_task
     await feedback.answer_preview_task
+
+
+@pytest.mark.asyncio
+async def test_medium_claw_sends_one_visible_task_acknowledgement():
+    runtime = _runtime()
+    runtime.config.active_backend = "claw-cli"
+    runtime.backend_manager.current_backend.effort = "medium"
+    sent = []
+
+    async def _send_text(chat_id, text, **kwargs):
+        sent.append((chat_id, text, kwargs))
+
+    runtime._send_text = _send_text
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(),
+        audit_active=False,
+        audit_collector=None,
+    )
+
+    assert feedback.on_stream_event is not None
+    event = StreamEvent(
+        kind=KIND_ACKNOWLEDGEMENT,
+        summary="I will inspect the requested logs and report only the findings.",
+    )
+    await feedback.on_stream_event(event)
+    await feedback.on_stream_event(event)
+
+    assert len(sent) == 1
+    assert sent[0][0] == 123
+    assert sent[0][2]["_purpose"] == "task_acknowledgement"
 
 
 @pytest.mark.asyncio

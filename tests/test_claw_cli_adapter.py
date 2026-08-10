@@ -34,6 +34,7 @@ from adapters.claw_cli import (
 )
 from adapters.registry import get_backend_class
 from adapters.stream_events import (
+    KIND_ACKNOWLEDGEMENT,
     KIND_TEXT_DELTA,
     KIND_THINKING,
     KIND_TOOL_END,
@@ -264,6 +265,7 @@ def test_build_claw_env_uses_allowlist_only():
             "OPENAI_BASE_URL": "https://example.invalid/v1",
             "OPENAI_API_KEY": "secret",
             "CLAW_MAX_TOOL_ITERATIONS": "96",
+            "CLAW_TASK_PLANNING": "1",
             "ANTHROPIC_API_KEY": "must-not-pass",
             "HASHI_REMOTE_SHARED_TOKEN": "must-not-pass",
             "HOME": "/tmp/home",
@@ -275,6 +277,7 @@ def test_build_claw_env_uses_allowlist_only():
         "OPENAI_BASE_URL": "https://example.invalid/v1",
         "OPENAI_API_KEY": "secret",
         "CLAW_MAX_TOOL_ITERATIONS": "96",
+        "CLAW_TASK_PLANNING": "1",
         "HOME": "/tmp/home",
         "PATH": "/bin",
     }
@@ -302,6 +305,7 @@ def test_claw_execution_effort_maps_to_iteration_budget(tmp_path, effort, expect
 
     assert adapter.effort == effort
     assert adapter._task_env()["CLAW_MAX_TOOL_ITERATIONS"] == expected_iterations
+    assert adapter._task_env()["CLAW_TASK_PLANNING"] == ("0" if effort == "low" else "1")
 
 
 def test_claw_explicit_max_iterations_overrides_execution_effort(tmp_path):
@@ -782,6 +786,8 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path):
             assert "stream-json" in sys.argv
             for event in [
                 {"kind": "run_started", "model": "deepseek/test", "session_id": "stream-session"},
+                {"kind": "task_acknowledgement", "text": "I will inspect the requested file only."},
+                {"kind": "task_plan", "phase": "initial", "frame": {"active_goal": "inspect file"}},
                 {"kind": "thinking_summary", "summary": "thinking block received (48 chars hidden)", "thinking_chars": 48},
                 {"kind": "assistant_delta", "text": "partial answer"},
                 {"kind": "tool_start", "name": "read_file", "summary": "reading README.md"},
@@ -824,6 +830,7 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path):
     assert adapter.capabilities.supports_thinking_stream is True
     assert adapter.capabilities.supports_answer_stream is True
     assert KIND_THINKING in [event.kind for event in events]
+    assert KIND_ACKNOWLEDGEMENT in [event.kind for event in events]
     assert any(
         event.kind == KIND_THINKING and "Claw stream started" in event.summary
         for event in events
