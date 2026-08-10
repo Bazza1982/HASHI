@@ -86,7 +86,7 @@ CLAW_EXECUTION_EFFORT_ITERATIONS = {
 }
 
 _CLAW_INCOMPLETE_STATUSES = {"incomplete"}
-_CLAW_INCOMPLETE_STOP_REASONS = {"max_iterations"}
+_CLAW_INCOMPLETE_STOP_REASONS = {"max_iterations", "no_final_text"}
 _CLAW_READ_ONLY_TOOL_MARKERS = (
     "get_",
     "read",
@@ -185,6 +185,7 @@ class ClawTaskResult:
     iterations: int | None = None
     completion_status: str | None = None
     stop_reason: str | None = None
+    provider_stop_reason: str | None = None
     estimated_cost: str | None = None
 
 
@@ -917,6 +918,13 @@ def _claw_jsonl_to_stream_event(event: Mapping[str, Any]) -> StreamEvent | None:
     if kind == "task_acknowledgement":
         text = str(event.get("text") or event.get("summary") or "").strip()
         return StreamEvent(kind=KIND_ACKNOWLEDGEMENT, summary=text[:500]) if text else None
+    if kind == "provider_stop_reason":
+        reason = str(event.get("reason") or "unknown").strip()
+        return StreamEvent(
+            kind=KIND_PROGRESS,
+            summary=f"Claw provider stop reason: {reason}"[:500],
+            detail=reason[:1000],
+        )
     if kind == "task_plan":
         phase = str(event.get("phase") or "update")
         frame = event.get("frame") if isinstance(event.get("frame"), Mapping) else {}
@@ -932,6 +940,27 @@ def _claw_jsonl_to_stream_event(event: Mapping[str, Any]) -> StreamEvent | None:
             summary=str(event.get("summary") or "Claw plan divergence")[:500],
             detail=str(event.get("reason") or "")[:1000],
             tool_name=str(event.get("tool_name") or ""),
+        )
+    if kind == "semantic_compaction":
+        status = str(event.get("status") or "unknown")
+        reason = str(event.get("reason") or "")
+        return StreamEvent(
+            kind=KIND_PROGRESS,
+            summary=f"Claw semantic compaction {status}"[:500],
+            detail=(
+                f"removed={int(event.get('removed_message_count') or 0)};"
+                f"timeout_seconds={int(event.get('timeout_seconds') or 0)};"
+                f"reason={reason}"
+            )[:2000],
+        )
+    if kind == "terminal_diagnostic":
+        classification = str(event.get("classification") or "unknown")
+        action = str(event.get("action") or "unknown")
+        provider_reason = str(event.get("provider_stop_reason") or "unknown")
+        return StreamEvent(
+            kind=KIND_PROGRESS,
+            summary=f"Claw terminal diagnostic: {classification}"[:500],
+            detail=f"action={action};provider_stop_reason={provider_reason}"[:2000],
         )
     if kind in {"tool_call", "tool_start"}:
         name = str(event.get("name") or event.get("tool_name") or "tool")
@@ -1103,6 +1132,7 @@ def run_claw_task(
         iterations=data.get("iterations") if isinstance(data.get("iterations"), int) else None,
         completion_status=str(data.get("completion_status") or "").strip() or None,
         stop_reason=str(data.get("stop_reason") or "").strip() or None,
+        provider_stop_reason=str(data.get("provider_stop_reason") or "").strip() or None,
         estimated_cost=data.get("estimated_cost") if isinstance(data.get("estimated_cost"), str) else None,
     )
 
@@ -1698,13 +1728,14 @@ class ClawCLIAdapter(BaseBackend):
         )
         self.logger.info(
             "Claw task completed: request=%s model=%s session=%s iterations=%s "
-            "completion=%s stop_reason=%s tool_calls=%d tool_errors=%d gateway=%s",
+            "completion=%s stop_reason=%s provider_stop_reason=%s tool_calls=%d tool_errors=%d gateway=%s",
             request_id,
             result.model,
             result.session_id or self._session_id or "unavailable",
             result.iterations if result.iterations is not None else "unavailable",
             result.completion_status or "unavailable",
             result.stop_reason or "unavailable",
+            result.provider_stop_reason or "unavailable",
             len(result.tool_uses),
             tool_errors,
             bool(self._gateway_context_path),
@@ -1745,6 +1776,7 @@ class ClawCLIAdapter(BaseBackend):
                 **({"claw_thinking": stream_usage} if stream_usage else {}),
                 "claw_completion_status": result.completion_status or "unknown",
                 "claw_stop_reason": result.stop_reason or "unknown",
+                "claw_provider_stop_reason": result.provider_stop_reason or "unknown",
                 "claw_execution_effort": self.effort,
                 "claw_max_iterations": self._max_tool_iterations(),
                 **fallback_metadata,
@@ -1846,6 +1878,7 @@ class ClawCLIAdapter(BaseBackend):
             iterations=parsed.get("iterations") if isinstance(parsed.get("iterations"), int) else None,
             completion_status=str(parsed.get("completion_status") or "").strip() or None,
             stop_reason=str(parsed.get("stop_reason") or "").strip() or None,
+            provider_stop_reason=str(parsed.get("provider_stop_reason") or "").strip() or None,
             estimated_cost=parsed.get("estimated_cost") if isinstance(parsed.get("estimated_cost"), str) else None,
         )
 
@@ -1878,6 +1911,38 @@ class ClawCLIAdapter(BaseBackend):
                             session_id,
                             event.get("model") or self._claw_model(),
                         )
+                kind = str(event.get("kind") or "")
+                if kind == "task_acknowledgement":
+                    self.logger.info(
+                        "Claw acknowledgement received: text=%s",
+                        str(event.get("text") or "")[:500],
+                    )
+                elif kind == "task_plan":
+                    self.logger.info(
+                        "Claw task plan received: phase=%s frame=%s",
+                        event.get("phase") or "unknown",
+                        json.dumps(event.get("frame") or {}, ensure_ascii=False)[:4000],
+                    )
+                elif kind == "provider_stop_reason":
+                    self.logger.info(
+                        "Claw provider termination received: reason=%s",
+                        event.get("reason") or "unknown",
+                    )
+                elif kind == "semantic_compaction":
+                    self.logger.info(
+                        "Claw semantic compaction: status=%s removed=%s timeout_seconds=%s reason=%s",
+                        event.get("status") or "unknown",
+                        event.get("removed_message_count") or 0,
+                        event.get("timeout_seconds") or 0,
+                        str(event.get("reason") or "")[:1000],
+                    )
+                elif kind == "terminal_diagnostic":
+                    self.logger.warning(
+                        "Claw terminal diagnostic: classification=%s action=%s provider_stop_reason=%s",
+                        event.get("classification") or "unknown",
+                        event.get("action") or "unknown",
+                        event.get("provider_stop_reason") or "unknown",
+                    )
                 stream_event = _claw_jsonl_to_stream_event(event)
                 if stream_event is not None and on_stream_event is not None:
                     await on_stream_event(stream_event)
