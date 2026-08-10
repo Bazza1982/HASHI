@@ -1,26 +1,28 @@
 from __future__ import annotations
 
-import os
-import stat
-import textwrap
 import asyncio
 import hashlib
 import json
+import stat
+import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from adapters.claw_cli import (
-    ClawCLIAdapter,
     ClawBinaryNotFound,
+    ClawCLIAdapter,
     ClawCommandError,
     ClawJsonError,
     ClawPackagedRuntimeError,
     ClawProviderSecretMissing,
+    ClawTaskResult,
     ClawTimeoutError,
-    build_claw_task_args,
+    _build_claw_incomplete_report,
+    _claw_run_is_incomplete,
     build_claw_env,
+    build_claw_task_args,
     detect_hashi_claw_platform,
     discover_claw_binary,
     find_claw_binary,
@@ -31,14 +33,60 @@ from adapters.claw_cli import (
     run_claw_task,
 )
 from adapters.registry import get_backend_class
-from adapters.stream_events import KIND_TEXT_DELTA, KIND_THINKING, KIND_TOOL_END, KIND_TOOL_START
-from orchestrator.flexible_backend_registry import allows_custom_models, get_secret_lookup_order, is_cli_backend
+from adapters.stream_events import (
+    KIND_TEXT_DELTA,
+    KIND_THINKING,
+    KIND_TOOL_END,
+    KIND_TOOL_START,
+)
+from orchestrator.flexible_backend_registry import (
+    allows_custom_models,
+    get_secret_lookup_order,
+    is_cli_backend,
+)
 
 
 def _write_exe(path: Path, body: str) -> Path:
     path.write_text(textwrap.dedent(body).lstrip(), encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
     return path
+
+
+def test_claw_max_iterations_builds_chinese_verified_fallback_report():
+    result = ClawTaskResult(
+        text="模型原始收尾",
+        model="deepseek/test",
+        permission_mode="workspace-write",
+        cwd="/workspace",
+        returncode=0,
+        duration_ms=10,
+        stdout="",
+        stderr="",
+        json_data={},
+        tool_uses=[{"id": "react-1", "name": "browser_react"}],
+        tool_results=[
+            {
+                "tool_use_id": "react-1",
+                "tool_name": "browser_react",
+                "output": {"success": True, "state_changed": True},
+                "is_error": False,
+            }
+        ],
+        iterations=12,
+        completion_status="completed",
+        stop_reason="max_iterations",
+    )
+
+    assert _claw_run_is_incomplete(result) is True
+    report, metadata = _build_claw_incomplete_report(result, prompt="继续完成任务")
+
+    assert "执行未完成" in report
+    assert "模型原始收尾" not in report
+    assert "`browser_react` ×1" in report
+    assert "**CONTINUE**" in report
+    assert metadata["verified_tool_results"] == 1
+    assert metadata["uncertain_tool_results"] == 0
+    assert metadata["recommended_action"] == "continue"
 
 
 def _write_packaged_claw(
@@ -610,8 +658,14 @@ async def test_claw_adapter_generate_response_with_fake_binary(tmp_path):
               "iterations": 1,
               "completion_status": "incomplete",
               "stop_reason": "max_iterations",
-              "tool_uses": [],
-              "tool_results": [],
+              "tool_uses": [
+                {"id": "read-1", "name": "browser_get_text"},
+                {"id": "click-1", "name": "browser_click"}
+              ],
+              "tool_results": [
+                {"tool_use_id": "read-1", "tool_name": "browser_get_text", "output": "feed text", "is_error": False},
+                {"tool_use_id": "click-1", "tool_name": "browser_click", "output": "{\\"matched\\":1,\\"state_changed\\":false}", "is_error": False}
+              ],
               "usage": {"input_tokens": 3, "output_tokens": 2}
             }))
         """,
@@ -636,7 +690,12 @@ async def test_claw_adapter_generate_response_with_fake_binary(tmp_path):
     resumed = await adapter.generate_response("continue", "req-2")
 
     assert response.is_success is True
-    assert response.text == "adapter done"
+    assert "Execution incomplete" in response.text
+    assert "`browser_get_text` ×1" in response.text
+    assert "`browser_click` ×1" in response.text
+    assert "**PIVOT**" in response.text
+    assert "无" not in response.text
+    assert "adapter done" not in response.text
     assert resumed.is_success is True
     assert adapter._session_id == "session-1"
     assert response.usage.input_tokens == 3
@@ -645,6 +704,11 @@ async def test_claw_adapter_generate_response_with_fake_binary(tmp_path):
     assert response.stream_metadata["claw_completion_status"] == "incomplete"
     assert response.stream_metadata["claw_execution_effort"] == "high"
     assert response.stream_metadata["claw_max_iterations"] == 96
+    assert response.stream_metadata["fallback_report_generated"] is True
+    assert response.stream_metadata["successful_tool_results"] == 2
+    assert response.stream_metadata["verified_tool_results"] == 1
+    assert response.stream_metadata["uncertain_tool_results"] == 1
+    assert response.stream_metadata["recommended_action"] == "pivot"
 
 
 @pytest.mark.asyncio
@@ -755,6 +819,7 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path):
     assert response.usage.thinking_tokens == 12
     assert response.stop_reason == "end_turn"
     assert response.stream_metadata["claw_completion_status"] == "completed"
+    assert "fallback_report_generated" not in response.stream_metadata
     assert adapter._session_id == "stream-session"
     assert adapter.capabilities.supports_thinking_stream is True
     assert adapter.capabilities.supports_answer_stream is True

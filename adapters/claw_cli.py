@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import json
+import asyncio
 import hashlib
+import json
 import logging
 import os
 import platform as py_platform
@@ -10,24 +11,22 @@ import subprocess
 import sys
 import tempfile
 import time
-import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
-from adapters.base import BaseBackend, BackendCapabilities, BackendResponse, TokenUsage
-from adapters.stream_io import iter_stream_lines
+from adapters.base import BackendCapabilities, BackendResponse, BaseBackend, TokenUsage
 from adapters.stream_events import (
-    StreamCallback,
-    StreamEvent,
     KIND_ERROR,
     KIND_PROGRESS,
     KIND_TEXT_DELTA,
     KIND_THINKING,
     KIND_TOOL_END,
     KIND_TOOL_START,
+    StreamCallback,
+    StreamEvent,
 )
-
+from adapters.stream_io import iter_stream_lines
 
 DEFAULT_CLAW_TIMEOUT_SEC = 30
 DEFAULT_CLAW_TASK_TIMEOUT_SEC = 1800
@@ -83,6 +82,22 @@ CLAW_EXECUTION_EFFORT_ITERATIONS = {
     "xhigh": 192,
     "max": 384,
 }
+
+_CLAW_INCOMPLETE_STATUSES = {"incomplete"}
+_CLAW_INCOMPLETE_STOP_REASONS = {"max_iterations"}
+_CLAW_READ_ONLY_TOOL_MARKERS = (
+    "get_",
+    "read",
+    "list",
+    "find",
+    "search",
+    "grep",
+    "glob",
+    "status",
+    "inspect",
+    "screenshot",
+    "query",
+)
 
 
 class ClawError(RuntimeError):
@@ -169,6 +184,256 @@ class ClawTaskResult:
     completion_status: str | None = None
     stop_reason: str | None = None
     estimated_cost: str | None = None
+
+
+def _claw_run_is_incomplete(result: ClawTaskResult) -> bool:
+    completion_status = str(result.completion_status or "").strip().lower()
+    stop_reason = str(result.stop_reason or "").strip().lower()
+    return (
+        completion_status in _CLAW_INCOMPLETE_STATUSES
+        or stop_reason in _CLAW_INCOMPLETE_STOP_REASONS
+    )
+
+
+def _claw_tool_name(item: Any) -> str:
+    if not isinstance(item, Mapping):
+        return "unknown_tool"
+    name = str(item.get("name") or item.get("tool_name") or "unknown_tool")
+    name = " ".join(name.replace("`", "'").split())[:80]
+    return name or "unknown_tool"
+
+
+def _claw_result_is_error(item: Any) -> bool:
+    return isinstance(item, Mapping) and bool(item.get("is_error") or item.get("isError"))
+
+
+def _claw_result_output(item: Any) -> Any:
+    if not isinstance(item, Mapping):
+        return None
+    return item.get("output")
+
+
+def _claw_parse_structured_output(output: Any) -> Any:
+    if isinstance(output, (dict, list)):
+        return output
+    if not isinstance(output, str):
+        return None
+    candidate = output.strip()
+    if not candidate or candidate[0] not in "[{":
+        return None
+    try:
+        return json.loads(candidate)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _claw_nested_truth(value: Any, keys: set[str]) -> bool:
+    if isinstance(value, Mapping):
+        for key, nested in value.items():
+            if str(key).strip().lower() in keys and nested is True:
+                return True
+            if _claw_nested_truth(nested, keys):
+                return True
+    elif isinstance(value, list):
+        return any(_claw_nested_truth(item, keys) for item in value)
+    return False
+
+
+def _claw_has_explicit_verification(result: Any) -> bool:
+    structured = _claw_parse_structured_output(_claw_result_output(result))
+    if structured is not None and _claw_nested_truth(
+        structured,
+        {"state_changed", "verified", "verification_succeeded"},
+    ):
+        return True
+    output = _claw_result_output(result)
+    if not isinstance(output, str):
+        return False
+    compact = "".join(output.lower().split())
+    return any(
+        marker in compact
+        for marker in (
+            '"state_changed":true',
+            "state_changed=true",
+            '"verified":true',
+            "verified=true",
+        )
+    )
+
+
+def _claw_tool_is_read_only(name: str) -> bool:
+    normalized = name.strip().lower()
+    leaf = normalized.rsplit(".", 1)[-1]
+    leaf = leaf.removeprefix("browser_")
+    return leaf.startswith(_CLAW_READ_ONLY_TOOL_MARKERS)
+
+
+def _claw_count_names(names: list[str], *, empty: str = "无") -> str:
+    counts: dict[str, int] = {}
+    for name in names:
+        counts[name] = counts.get(name, 0) + 1
+    return ", ".join(
+        f"`{name}` ×{count}"
+        for name, count in sorted(counts.items())
+    ) or empty
+
+
+def _claw_pair_tool_ledger(
+    tool_uses: list[Any],
+    tool_results: list[Any],
+) -> list[tuple[str, Any | None]]:
+    results_by_id: dict[str, Any] = {}
+    unkeyed_results: list[Any] = []
+    for result in tool_results:
+        result_id = ""
+        if isinstance(result, Mapping):
+            result_id = str(result.get("tool_use_id") or result.get("toolUseId") or "").strip()
+        if result_id:
+            results_by_id[result_id] = result
+        else:
+            unkeyed_results.append(result)
+
+    ledger: list[tuple[str, Any | None]] = []
+    unkeyed_index = 0
+    matched_result_ids: set[str] = set()
+    for tool_use in tool_uses:
+        tool_id = ""
+        if isinstance(tool_use, Mapping):
+            tool_id = str(tool_use.get("id") or tool_use.get("tool_use_id") or "").strip()
+        result = results_by_id.get(tool_id) if tool_id else None
+        if result is not None and tool_id:
+            matched_result_ids.add(tool_id)
+        if result is None and unkeyed_index < len(unkeyed_results):
+            result = unkeyed_results[unkeyed_index]
+            unkeyed_index += 1
+        ledger.append((_claw_tool_name(tool_use), result))
+
+    for result in unkeyed_results[unkeyed_index:]:
+        ledger.append((_claw_tool_name(result), result))
+    for result_id, result in results_by_id.items():
+        if result_id not in matched_result_ids:
+            ledger.append((_claw_tool_name(result), result))
+    return ledger
+
+
+def _build_claw_incomplete_report(result: ClawTaskResult, *, prompt: str) -> tuple[str, dict[str, Any]]:
+    ledger = _claw_pair_tool_ledger(result.tool_uses, result.tool_results)
+    successful: list[str] = []
+    failed: list[str] = []
+    verified: list[str] = []
+    uncertain: list[str] = []
+    missing: list[str] = []
+
+    for name, tool_result in ledger:
+        if tool_result is None:
+            missing.append(name)
+            uncertain.append(name)
+        elif _claw_result_is_error(tool_result):
+            failed.append(name)
+        else:
+            successful.append(name)
+            if _claw_tool_is_read_only(name) or _claw_has_explicit_verification(tool_result):
+                verified.append(name)
+            else:
+                uncertain.append(name)
+
+    failed_counts: dict[str, int] = {}
+    for name in failed:
+        failed_counts[name] = failed_counts.get(name, 0) + 1
+    repeated_failure = any(count >= 2 for count in failed_counts.values())
+
+    if uncertain or missing or repeated_failure:
+        recommendation = "PIVOT"
+        recommendation_zh = "改变策略后再继续；不要重复执行未经核验的副作用操作。"
+        recommendation_en = "Change strategy before continuing; do not repeat unverified side effects."
+    elif successful:
+        recommendation = "CONTINUE"
+        recommendation_zh = "从已保存的 session 继续，并先核验当前页面或外部状态。"
+        recommendation_en = "Resume the saved session and verify current external state first."
+    else:
+        recommendation = "STOP"
+        recommendation_zh = "当前账本没有可确认进展；停止并重新评估任务或请求人工决定。"
+        recommendation_en = "No confirmed progress is present; stop and reassess or request a human decision."
+
+    iterations = result.iterations if result.iterations is not None else "未知"
+    stop_reason = result.stop_reason or "incomplete"
+    checkpoint_zh = (
+        "- 已保存本次 session，可在后续回合继续。"
+        if result.session_id
+        else "- 本次结果没有 session checkpoint；后续继续前应先核验外部状态。"
+    )
+    checkpoint_en = (
+        "- The session checkpoint was preserved for a later turn."
+        if result.session_id
+        else "- No session checkpoint was returned; verify external state before continuing."
+    )
+    use_chinese = any("\u4e00" <= char <= "\u9fff" for char in f"{prompt}\n{result.text}")
+
+    if use_chinese:
+        report = "\n".join(
+            (
+                "## ⚠️ 执行未完成",
+                "",
+                f"任务在 **{iterations}** 轮后停止；原始模型收尾未作为最终答复发送。",
+                "",
+                "### 完成了什么",
+                f"- 成功返回的工具结果：{_claw_count_names(successful)}",
+                f"- 失败的工具结果：{_claw_count_names(failed)}",
+                "- 以上只代表工具执行记录，不代表整体业务目标已经完成。",
+                "",
+                "### 已验证",
+                f"- 有明确读取结果或状态变化证据：{_claw_count_names(verified)}",
+                "",
+                "### 状态不确定",
+                f"- 缺少明确状态变化证据或执行回执：{_claw_count_names(uncertain)}",
+                f"- 工具执行失败：{_claw_count_names(failed)}",
+                "",
+                "### 为什么停止",
+                f"- `completion_status=incomplete`；`stop_reason={stop_reason}`。",
+                checkpoint_zh,
+                "",
+                "### 建议下一步",
+                f"- **{recommendation}** — {recommendation_zh}",
+            )
+        )
+    else:
+        report = "\n".join(
+            (
+                "## ⚠️ Execution incomplete",
+                "",
+                f"The task stopped after **{iterations}** iterations. The model's raw closing text was not delivered as the final answer.",
+                "",
+                "### What completed",
+                f"- Successful tool results: {_claw_count_names(successful, empty='none')}",
+                f"- Failed tool results: {_claw_count_names(failed, empty='none')}",
+                "- Tool success does not by itself prove that the overall task completed.",
+                "",
+                "### Verified",
+                f"- Explicit read results or state-change evidence: {_claw_count_names(verified, empty='none')}",
+                "",
+                "### Uncertain",
+                f"- Missing explicit state-change evidence or execution receipt: {_claw_count_names(uncertain, empty='none')}",
+                f"- Failed tool executions: {_claw_count_names(failed, empty='none')}",
+                "",
+                "### Why it stopped",
+                f"- `completion_status=incomplete`; `stop_reason={stop_reason}`.",
+                checkpoint_en,
+                "",
+                "### Recommended next step",
+                f"- **{recommendation}** — {recommendation_en}",
+            )
+        )
+
+    metadata = {
+        "fallback_report_generated": True,
+        "successful_tool_results": len(successful),
+        "failed_tool_results": len(failed),
+        "verified_tool_results": len(verified),
+        "uncertain_tool_results": len(uncertain),
+        "missing_tool_results": len(missing),
+        "recommended_action": recommendation.lower(),
+    }
+    return report, metadata
 
 
 @dataclass(frozen=True)
@@ -1429,8 +1694,20 @@ class ClawCLIAdapter(BaseBackend):
             or stream_usage.get("thinking_tokens")
             or 0
         )
+        response_text = result.text
+        fallback_metadata: dict[str, Any] = {}
+        if _claw_run_is_incomplete(result):
+            response_text, fallback_metadata = _build_claw_incomplete_report(result, prompt=prompt)
+            self.logger.warning(
+                "Claw incomplete run replaced with deterministic report: request=%s "
+                "completion=%s stop_reason=%s recommendation=%s",
+                request_id,
+                result.completion_status or "unknown",
+                result.stop_reason or "unknown",
+                fallback_metadata.get("recommended_action") or "unknown",
+            )
         return BackendResponse(
-            text=result.text,
+            text=response_text,
             duration_ms=result.duration_ms,
             is_success=True,
             stop_reason=result.stop_reason,
@@ -1448,6 +1725,7 @@ class ClawCLIAdapter(BaseBackend):
                 "claw_stop_reason": result.stop_reason or "unknown",
                 "claw_execution_effort": self.effort,
                 "claw_max_iterations": self._max_tool_iterations(),
+                **fallback_metadata,
             },
         )
 
