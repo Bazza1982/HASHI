@@ -64,6 +64,27 @@ async def test_execute_browser_click_prefers_extension_bridge(monkeypatch: pytes
 
 
 @pytest.mark.asyncio
+async def test_execute_browser_react_prefers_extension_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_bridge(action: str, args: dict) -> str | None:
+        assert action == "react"
+        assert args["post_text"] == "City2Surf 2026"
+        assert args["author"] == "Jordan Xu"
+        return json.dumps({"ok": True, "action": "react", "verified": True})
+
+    monkeypatch.setattr(browser, "_maybe_execute_extension_bridge", fake_bridge)
+    result = await browser.execute_browser_react(
+        {
+            "url": "https://www.linkedin.com/feed/",
+            "post_text": "City2Surf 2026",
+            "author": "Jordan Xu",
+            "reaction": "like",
+        }
+    )
+
+    assert json.loads(result)["verified"] is True
+
+
+@pytest.mark.asyncio
 async def test_execute_browser_fill_prefers_extension_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_bridge(action: str, args: dict) -> str | None:
         assert action == "fill"
@@ -196,9 +217,13 @@ def test_extension_source_routes_session_and_scroll_to_real_implementations() ->
         )
     )
 
-    assert 'const BRIDGE_VERSION = "0.1.4";' in source
-    assert manifest["version"] == "0.1.4"
+    assert 'const BRIDGE_VERSION = "0.1.5";' in source
+    assert manifest["version"] == "0.1.5"
     assert 'if (action === "session") {\n    return actionSession(args);' in source
     assert 'if (action === "scroll") {\n    return actionScroll(args);' in source
+    assert 'if (action === "react") {\n    return actionReact(args);' in source
+    assert '"click", "react", "hover"' in source
+    assert "scrollable[0]" in source
+    assert "reaction click did not produce a verified state change" in source
     assert 'action === "active_tab" || action === "session_create" || action === "session"' not in source
     assert "actions: SUPPORTED_ACTIONS" in source

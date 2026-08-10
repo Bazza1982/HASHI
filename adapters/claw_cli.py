@@ -72,6 +72,7 @@ CLAW_ENV_ALLOWLIST = (
     "XAI_BASE_URL",
     "CLAW_CONFIG_HOME",
     "PYTHONPATH",
+    "CLAW_MAX_TOOL_ITERATIONS",
     *OS_ENV_ALLOWLIST,
 )
 
@@ -1148,6 +1149,16 @@ class ClawCLIAdapter(BaseBackend):
 
     def _task_env(self) -> dict[str, str]:
         env = self._resolve_task_env()
+        raw_max_iterations = self._extra.get("max_tool_iterations", 96)
+        try:
+            max_iterations = int(raw_max_iterations)
+        except (TypeError, ValueError):
+            self.logger.warning(
+                "Ignoring invalid Claw max_tool_iterations=%r; using 96.",
+                raw_max_iterations,
+            )
+            max_iterations = 96
+        env["CLAW_MAX_TOOL_ITERATIONS"] = str(min(512, max(8, max_iterations)))
         if self._gateway_config_home is not None:
             env["CLAW_CONFIG_HOME"] = str(self._gateway_config_home)
             project_root = Path(__file__).resolve().parents[1]

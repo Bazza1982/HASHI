@@ -680,6 +680,41 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "browser_react",
+            "description": (
+                "Apply and verify a Like reaction to exactly one feed post. "
+                "Identify the post with a distinctive text excerpt and optionally its author. "
+                "Use this instead of browser_evaluate or a generic browser_click for LinkedIn reactions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "Feed URL containing the post."},
+                    "post_text": {
+                        "type": "string",
+                        "description": "Distinctive visible excerpt from the target post.",
+                    },
+                    "author": {
+                        "type": "string",
+                        "description": "Optional visible author name used to disambiguate the post.",
+                    },
+                    "reaction": {
+                        "type": "string",
+                        "enum": ["like"],
+                        "description": "Reaction to apply. Currently only like is supported.",
+                    },
+                    "wait_ms": {
+                        "type": "integer",
+                        "description": "Wait for the UI state to update after clicking. Default 700.",
+                    },
+                },
+                "required": ["url", "post_text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "browser_fill",
             "description": (
                 "Navigate to a URL, fill a form field (CSS selector) with text, "
