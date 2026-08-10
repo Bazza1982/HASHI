@@ -581,7 +581,8 @@ between `/stop`, `/steer`, `/focus`, and `/recall`, see
 |---------|-------------|
 | `/mode [fixed\|flex\|wrapper\|audit\|dual-brain]` | Switch execution mode; `/mode memory+` is a compatibility alias that only enables continuity |
 | `/backend [engine]` | Switch backend in Flex; other modes first offer an explicit switch-to-Flex confirmation |
-| `/model` | View/change active model, followed by optional effort selection when supported |
+| `/provider [name]` | Choose a provider for the active Claw backend, then choose one of that provider's models |
+| `/model [name]` | View/change a model within the active provider, followed by optional effort selection when supported |
 | `/core` | View/change the functional core backend/model used by wrapper or audit mode |
 | `/wrap` | View/change wrapper-mode persona wrapper backend/model/context |
 | `/wrapper` | View/edit wrapper-mode persona/style slots |
@@ -614,10 +615,14 @@ For Grok CLI, `/effort` offers `low`, `medium`, and `high`. HASHI defaults
 Grok sessions to `medium`, passes the selection to the CLI explicitly, and
 persists the chosen level for that backend across agent reloads.
 
-The `/backend` and `/model` menus finish as one configuration flow. Models with
-selectable effort levels show an optional effort step; keeping the current value
-leaves it unchanged. Models without selectable effort skip that step and show
-`n/a` in the saved configuration summary.
+The `/backend` and `/model` menus finish as one configuration flow. For
+`claw-cli`, that flow is backend → provider → model: `/provider` refreshes the
+available model list, while `/model` remains inside the active provider and
+never changes it. Provider and model are committed together only after the new
+route initializes successfully. Models with selectable effort levels show an
+optional effort step; keeping the current value leaves it unchanged. Models
+without selectable effort skip that step and show `n/a` in the saved
+configuration summary.
 
 #### Toggles & Settings
 
@@ -1233,6 +1238,21 @@ duplicate alias `/paswd` has been removed.
     "authorized_id": 123456789,
     "default_tools": {
       "allowed": ["bash", "file_read", "file_write", "file_list"]
+    },
+    "claw_providers": {
+      "max_permission_mode": "workspace-write",
+      "providers": {
+        "openrouter": {
+          "base_url": "https://openrouter.ai/api/v1",
+          "secret": "openrouter_key",
+          "status": "stable"
+        },
+        "deepseek": {
+          "base_url": "https://api.deepseek.com/v1",
+          "secret": "deepseek_api_key",
+          "status": "stable"
+        }
+      }
     }
   },
   "agents": [
@@ -1244,7 +1264,21 @@ duplicate alias `/paswd` has been removed.
       "workspace_dir": "workspaces/hashiko",
       "is_active": true,
       "telegram_token_key": "hashiko",
-      "allowed_backends": ["gemini-cli", "claude-cli", "openrouter-api", "deepseek-api", "ollama-api"],
+      "allowed_backends": [
+        {"engine": "gemini-cli", "model": "gemini-3.1-pro-preview"},
+        {
+          "engine": "claw-cli",
+          "provider": "openrouter",
+          "models": ["deepseek/deepseek-v4-flash", "openai/gpt-4.1-mini"],
+          "default_model": "deepseek/deepseek-v4-flash"
+        },
+        {
+          "engine": "claw-cli",
+          "provider": "deepseek",
+          "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
+          "default_model": "deepseek-v4-flash"
+        }
+      ],
       "active_backend": "gemini-cli"
     }
   ]
@@ -1255,6 +1289,10 @@ Every agent must set `type` explicitly. New agents should normally use
 `"type": "flex"`. Omitted `type` is rejected so HASHI cannot accidentally fall
 back to the retired legacy fixed runtime. Explicit `"type": "fixed"` is reserved
 for emergency rollback only and requires `HASHI_ENABLE_LEGACY_FIXED_RUNTIME=1`.
+
+Claw provider profiles hold connection details, not secrets. Provider-specific
+`claw-cli` rows are the per-agent model allowlists shown by `/provider` and
+`/model`; the legacy singular `model` field remains a one-model allowlist.
 
 ### secrets.json
 ```json

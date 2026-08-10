@@ -1,7 +1,22 @@
 {
   "global": {
     "authorized_id": 0,
-    "workbench_port": 18802
+    "workbench_port": 18802,
+    "claw_providers": {
+      "max_permission_mode": "workspace-write",
+      "providers": {
+        "openrouter": {
+          "base_url": "https://openrouter.ai/api/v1",
+          "secret": "openrouter-api_key",
+          "status": "stable"
+        },
+        "deepseek": {
+          "base_url": "https://api.deepseek.com/v1",
+          "secret": "deepseek-api_key",
+          "status": "stable"
+        }
+      }
+    }
   },
   "agents": [
     {
@@ -30,6 +45,24 @@
         {
           "engine": "openrouter-api",
           "model": "anthropic/claude_sonnet-4.6"
+        },
+        {
+          "engine": "claw-cli",
+          "provider": "openrouter",
+          "models": [
+            "deepseek/deepseek-v4-flash",
+            "openai/gpt-4.1-mini"
+          ],
+          "default_model": "deepseek/deepseek-v4-flash"
+        },
+        {
+          "engine": "claw-cli",
+          "provider": "deepseek",
+          "models": [
+            "deepseek-v4-flash",
+            "deepseek-v4-pro"
+          ],
+          "default_model": "deepseek-v4-flash"
         }
       ],
       "active_backend": "claude-cli"

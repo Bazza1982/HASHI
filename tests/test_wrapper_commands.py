@@ -57,6 +57,66 @@ def _make_manager(workspace: Path) -> FlexibleBackendManager:
     return FlexibleBackendManager(cfg, global_cfg, secrets={})
 
 
+def _make_claw_manager(workspace: Path) -> FlexibleBackendManager:
+    workspace.mkdir(parents=True, exist_ok=True)
+    cfg = FlexibleAgentConfig(
+        name="test-claw",
+        workspace_dir=workspace,
+        system_md=workspace / "AGENT.md",
+        telegram_token_key="test-claw",
+        allowed_backends=[
+            {
+                "engine": "claw-cli",
+                "provider": "openrouter",
+                "models": ["deepseek/deepseek-v4-flash", "openai/gpt-4.1-mini"],
+                "default_model": "deepseek/deepseek-v4-flash",
+            },
+            {
+                "engine": "claw-cli",
+                "provider": "deepseek",
+                "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
+                "default_model": "deepseek-v4-flash",
+            },
+            {
+                "engine": "claw-cli",
+                "provider": "ollama",
+                "model": "qwen2.5-coder:32b",
+            },
+        ],
+        active_backend="claw-cli",
+        project_root=workspace,
+    )
+    global_cfg = GlobalConfig(
+        authorized_id=1,
+        base_logs_dir=workspace / "logs",
+        base_media_dir=workspace / "media",
+        project_root=workspace,
+        deployment_profile="personal",
+        organization_id=None,
+        claw_providers={
+            "providers": {
+                "openrouter": {"base_url": "https://openrouter.invalid/v1"},
+                "deepseek": {"base_url": "https://deepseek.invalid/v1"},
+                "ollama": {
+                    "base_url": "http://localhost:11434/v1",
+                    "status": "disabled",
+                },
+            }
+        },
+    )
+    manager = FlexibleBackendManager(cfg, global_cfg, secrets={})
+    manager._active_provider_override = "openrouter"
+    manager._active_model_override = "deepseek/deepseek-v4-flash"
+    manager.current_backend = SimpleNamespace(
+        config=SimpleNamespace(
+            model="deepseek/deepseek-v4-flash",
+            extra={"provider": "openrouter"},
+        ),
+        effort=None,
+    )
+    return manager
+
+
 def _make_runtime(manager: FlexibleBackendManager) -> tuple[FlexibleAgentRuntime, list[str]]:
     runtime = object.__new__(FlexibleAgentRuntime)
     runtime.backend_manager = manager
@@ -82,9 +142,27 @@ def _make_runtime(manager: FlexibleBackendManager) -> tuple[FlexibleAgentRuntime
         messages.append(text)
         runtime._reply_payloads.append({"text": text, **kwargs})
 
-    async def _switch_backend_mode(chat_id, target_engine, target_model=None, with_context=False):
+    async def _switch_backend_mode(
+        chat_id,
+        target_engine,
+        target_model=None,
+        target_provider=None,
+        with_context=False,
+    ):
         manager.config.active_backend = target_engine
-        manager._save_state(active_model=target_model)
+        manager._active_provider_override = target_provider if target_engine == "claw-cli" else None
+        manager._save_state(
+            active_model=target_model,
+            active_provider=target_provider,
+        )
+        if target_engine == "claw-cli":
+            manager.current_backend = SimpleNamespace(
+                config=SimpleNamespace(
+                    model=target_model,
+                    extra={"provider": target_provider},
+                ),
+                effort=None,
+            )
         return True, f"Backend switched to: {target_engine}\nModel: {target_model}"
 
     runtime._reply_text = _reply_text
@@ -1050,6 +1128,152 @@ async def test_backend_non_flex_modes_offer_confirmation_without_mutating(tmp_pa
     assert f"backend_mode_cancel:{mode}" in markup
     assert manager.agent_mode == mode
     assert not (manager.config.workspace_dir / "state.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_provider_command_is_available_only_for_active_claw_backend(tmp_path):
+    manager = _make_manager(tmp_path / "agent")
+    runtime, messages = _make_runtime(manager)
+    update, context = _update([])
+
+    await FlexibleAgentRuntime.cmd_provider(runtime, update, context)
+
+    assert "CLAW PROVIDER" in messages[-1]
+    assert "UNAVAILABLE" in messages[-1]
+    assert "<code>codex-cli</code>" in messages[-1]
+    assert not (manager.config.workspace_dir / "state.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_provider_menu_marks_current_and_reports_locked_choices(tmp_path):
+    manager = _make_claw_manager(tmp_path / "agent")
+    runtime, messages = _make_runtime(manager)
+    update, context = _update([])
+
+    await FlexibleAgentRuntime.cmd_provider(runtime, update, context)
+
+    text = messages[-1]
+    markup = runtime._reply_payloads[-1]["reply_markup"]
+    labels = [button.text for row in markup.inline_keyboard for button in row]
+    assert "CLAW PROVIDER" in text
+    assert text.index("<b>Current</b>") < text.index("<b>Backend</b>")
+    assert "ollama (provider is disabled)" in text
+    assert labels == ["✓ openrouter", "deepseek", "🔒 ollama"]
+    assert not (manager.config.workspace_dir / "state.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_provider_choice_opens_only_that_provider_models_without_committing(tmp_path):
+    manager = _make_claw_manager(tmp_path / "agent")
+    runtime, messages = _make_runtime(manager)
+    update, context = _update(["deepseek"])
+
+    await FlexibleAgentRuntime.cmd_provider(runtime, update, context)
+
+    text = messages[-1]
+    markup = str(runtime._reply_payloads[-1]["reply_markup"])
+    assert "CHOOSE CLAW MODEL" in text
+    assert "<code>deepseek</code>" in text
+    assert "deepseek-v4-flash" in markup
+    assert "deepseek-v4-pro" in markup
+    assert "openai/gpt-4.1-mini" not in markup
+    assert manager.get_active_provider() == "openrouter"
+    assert not (manager.config.workspace_dir / "state.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_provider_typed_name_is_case_insensitive(tmp_path):
+    manager = _make_claw_manager(tmp_path / "agent")
+    runtime, messages = _make_runtime(manager)
+    update, context = _update(["DeepSeek"])
+
+    await FlexibleAgentRuntime.cmd_provider(runtime, update, context)
+
+    assert "CHOOSE CLAW MODEL" in messages[-1]
+    assert "<code>deepseek</code>" in messages[-1]
+    assert "pmodel:a:deepseek:0" in str(runtime._reply_payloads[-1]["reply_markup"])
+
+
+@pytest.mark.asyncio
+async def test_provider_command_respects_managed_model_modes(tmp_path):
+    manager = _make_claw_manager(tmp_path / "agent")
+    manager.agent_mode = "wrapper"
+    runtime, messages = _make_runtime(manager)
+    update, context = _update([])
+
+    await FlexibleAgentRuntime.cmd_provider(runtime, update, context)
+
+    assert "CLAW PROVIDER" in messages[-1]
+    assert "MANAGED" in messages[-1]
+    assert "<code>/core</code>" in messages[-1]
+    assert not (manager.config.workspace_dir / "state.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_provider_button_then_model_button_commits_route_atomically(tmp_path):
+    manager = _make_claw_manager(tmp_path / "agent")
+    runtime, _messages = _make_runtime(manager)
+
+    update, edits, _answers = _callback_update("provider:a:deepseek")
+    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
+    assert "CHOOSE CLAW MODEL" in edits[-1]["text"]
+    assert manager.get_active_provider() == "openrouter"
+    assert not (manager.config.workspace_dir / "state.json").exists()
+
+    update, edits, _answers = _callback_update("pmodel:a:deepseek:1")
+    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
+
+    state = _read_state(manager.config.workspace_dir)
+    assert state["active_backend"] == "claw-cli"
+    assert state["active_provider"] == "deepseek"
+    assert state["active_model"] == "deepseek-v4-pro"
+    assert "MODEL CONFIGURATION" in edits[-1]["text"]
+    assert "<b>Provider</b> · <code>deepseek</code>" in edits[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_stale_active_provider_button_cannot_switch_from_non_claw_backend(tmp_path):
+    manager = _make_claw_manager(tmp_path / "agent")
+    runtime, _messages = _make_runtime(manager)
+    manager.config.active_backend = "codex-cli"
+    update, edits, answers = _callback_update("pmodel:a:deepseek:0")
+
+    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
+
+    assert edits == []
+    assert answers[-1]["show_alert"] is True
+    assert "only while Claw is active" in answers[-1]["text"]
+    assert manager.config.active_backend == "codex-cli"
+
+
+@pytest.mark.asyncio
+async def test_claw_model_menu_is_scoped_to_active_provider(tmp_path):
+    manager = _make_claw_manager(tmp_path / "agent")
+    runtime, messages = _make_runtime(manager)
+    update, context = _update([])
+
+    await FlexibleAgentRuntime.cmd_model(runtime, update, context)
+
+    text = messages[-1]
+    markup = str(runtime._reply_payloads[-1]["reply_markup"])
+    assert "<b>Provider</b> · <code>openrouter</code>" in text
+    assert "deepseek/deepseek-v4-flash" in markup
+    assert "openai/gpt-4.1-mini" in markup
+    assert "deepseek-v4-pro" not in markup
+
+
+@pytest.mark.asyncio
+async def test_backend_claw_button_opens_provider_before_model(tmp_path):
+    manager = _make_claw_manager(tmp_path / "agent")
+    runtime, _messages = _make_runtime(manager)
+    update, edits, _answers = _callback_update("backend:claw-cli:plain")
+
+    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
+
+    assert "CLAW PROVIDER" in edits[-1]["text"]
+    markup = str(edits[-1]["reply_markup"])
+    assert "provider:p:openrouter" in markup
+    assert "bmodel:claw-cli" not in markup
 
 
 @pytest.mark.asyncio

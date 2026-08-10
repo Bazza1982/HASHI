@@ -45,7 +45,14 @@ BOT_COMMAND_BINDINGS: tuple[BotCommandBinding, ...] = tuple(
 
 
 CALLBACK_BINDINGS: tuple[CallbackBinding, ...] = (
-    CallbackBinding(r"^(model|backend|bmodel|effort|backend_menu)", "callback_model"),
+    CallbackBinding(
+        r"^(model|backend|bmodel|effort|backend_menu)",
+        "callback_model",
+    ),
+    CallbackBinding(
+        r"^(provider|provider_menu|provider_locked|pmodel)",
+        "callback_claw_provider",
+    ),
     CallbackBinding(r"^wcfg:", "callback_wrapper_config"),
     CallbackBinding(r"^acfg:", "callback_audit_config"),
     CallbackBinding(r"^bcfg:", "callback_brain_config"),

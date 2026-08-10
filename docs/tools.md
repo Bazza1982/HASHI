@@ -59,8 +59,69 @@ Five execution modes:
 
 **Backend configuration:**
 - `/backend` — switch active backend in Flex (inline keyboard; `+` variant carries continuity handoff). In another mode it first asks whether to switch to Flex, preserves saved mode configuration and Memory+, then continues directly to the backend picker.
+- `/provider [name]` — Claw-only provider picker. Choosing a provider refreshes the menu to that provider's allowed models; provider and model are applied and saved together only after a model initializes successfully.
+- `/model [name]` — switch within the active backend. On `claw-cli`, the list is limited to the active provider and this command never changes provider.
 - Backend and model selection continue to an optional effort step when supported. Keeping the current effort does not change it; unsupported models finish with effort shown as `n/a`.
 - `/effort [level]` — reasoning effort for Claude, Codex, and Grok CLI. The keyboard and accepted values are model-aware: Grok offers `low`, `medium`, and `high` (default `medium`); `max` is currently offered for `gpt-5.6-sol`; `gpt-5.6-terra` and `gpt-5.6-luna` offer up to `xhigh`.
+
+### Claw provider and model configuration
+
+Claw is not tied to OpenRouter. Provider connection details live once under
+`global.claw_providers.providers`; each agent's `claw-cli` backend rows decide
+which providers and models that agent may select. API-key values stay in
+`secrets.json` and are referenced by name.
+
+```json
+{
+  "global": {
+    "claw_providers": {
+      "max_permission_mode": "workspace-write",
+      "providers": {
+        "openrouter": {
+          "base_url": "https://openrouter.ai/api/v1",
+          "secret": "openrouter-api_key",
+          "status": "stable"
+        },
+        "deepseek": {
+          "base_url": "https://api.deepseek.com/v1",
+          "secret": "deepseek-api_key",
+          "status": "stable"
+        }
+      }
+    }
+  },
+  "agents": [
+    {
+      "name": "hashiko",
+      "type": "flex",
+      "allowed_backends": [
+        {
+          "engine": "claw-cli",
+          "provider": "openrouter",
+          "models": [
+            "deepseek/deepseek-v4-flash",
+            "openai/gpt-4.1-mini"
+          ],
+          "default_model": "deepseek/deepseek-v4-flash"
+        },
+        {
+          "engine": "claw-cli",
+          "provider": "deepseek",
+          "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
+          "default_model": "deepseek-v4-flash"
+        }
+      ]
+    }
+  ]
+}
+```
+
+Use one provider-specific backend row per provider when an agent needs a
+different model list for each service. The legacy singular `model` field still
+works as a one-model allowlist. A provider with `"status": "disabled"` stays
+visible as a locked menu choice with its reason. `/provider` is unavailable
+unless the active backend is `claw-cli`; `/model` never crosses the provider
+boundary.
 
 **Wrapper-mode:**
 - `/mode wrapper` — switch a flex-capable agent into wrapper mode.

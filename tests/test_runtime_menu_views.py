@@ -148,6 +148,7 @@ def test_backend_and_model_cards_share_standard_order_and_escape_values() -> Non
         backend="api<one>",
         has_choices=False,
         persists=True,
+        provider="provider<one>",
     )
 
     _assert_standard_card(backend, "HASHI BACKEND")
@@ -155,7 +156,33 @@ def test_backend_and_model_cards_share_standard_order_and_escape_values() -> Non
     _assert_standard_card(model, "HASHI MODEL")
     assert "api&lt;one&gt;" in backend and "api&lt;one&gt;" in picker
     assert "model&amp;a" in picker and "model&amp;a" in model
+    assert "provider&lt;one&gt;" in model
     assert "<code>/model &lt;name&gt;</code>" in model
+
+
+def test_claw_provider_cards_follow_standard_order_and_escape_values() -> None:
+    provider = runtime_menu_views.claw_provider_menu_text(
+        current_provider="open<router>",
+        available_count=2,
+        unavailable=[("local&host", "provider is disabled")],
+        backend_flow=True,
+    )
+    model = runtime_menu_views.claw_provider_model_text(
+        provider="deep<seek>",
+        current_model="model&one",
+        model_count=3,
+        with_context=True,
+    )
+    unavailable = runtime_menu_views.claw_provider_unavailable_text(backend="codex<cli>")
+
+    _assert_standard_card(provider, "CLAW PROVIDER")
+    _assert_standard_card(model, "CHOOSE CLAW MODEL")
+    _assert_standard_card(unavailable, "CLAW PROVIDER")
+    assert "open&lt;router&gt;" in provider
+    assert "local&amp;host" in provider
+    assert "deep&lt;seek&gt;" in model
+    assert "model&amp;one" in model
+    assert "codex&lt;cli&gt;" in unavailable
 
 
 def test_skill_detail_escapes_reference_and_reports_active_toggle() -> None:

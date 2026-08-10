@@ -45,6 +45,7 @@ from orchestrator import runtime_lifecycle
 from orchestrator import runtime_long
 from orchestrator import runtime_media
 from orchestrator import runtime_menu_views
+from orchestrator import runtime_model_selection
 from orchestrator import runtime_command_binding
 from orchestrator import runtime_mode
 from orchestrator import runtime_privacy
@@ -852,6 +853,11 @@ class FlexibleAgentRuntime:
                 return backend.get("model", "unknown")
         return "unknown"
 
+    def get_current_provider(self) -> str | None:
+        if self.config.active_backend != "claw-cli":
+            return None
+        return self.backend_manager.get_active_provider()
+
     def reload_post_turn_observers(self) -> None:
         runtime_observers.reload_post_turn_observers(self)
 
@@ -969,6 +975,7 @@ class FlexibleAgentRuntime:
             "engine": self.config.active_backend,
             "active_backend": self.config.active_backend,
             "model": self.get_current_model(),
+            "provider": self.get_current_provider(),
             "allowed_backends": [dict(backend) for backend in self.config.allowed_backends],
             "workspace_dir": str(self.workspace_dir),
             "transcript_path": str(self.transcript_log_path),
@@ -4319,12 +4326,25 @@ class FlexibleAgentRuntime:
             await self._reply_text(update, text, parse_mode="HTML", reply_markup=reply_markup)
             return
 
+        if target_engine == "claw-cli":
+            mode_flag = self._claw_provider_mode(with_context=with_context)
+            await self._reply_text(
+                update,
+                self._build_claw_provider_menu_text(mode_flag),
+                parse_mode="HTML",
+                reply_markup=self._claw_provider_keyboard(mode_flag),
+            )
+            return
+
         await self._reply_text(
             update,
             self._build_backend_model_prompt(target_engine, with_context),
             parse_mode="HTML",
             reply_markup=self._backend_model_keyboard(target_engine, with_context),
         )
+
+    cmd_provider = runtime_model_selection.cmd_provider
+    callback_claw_provider = runtime_model_selection.callback_model
 
     async def cmd_handoff(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -4609,9 +4629,19 @@ class FlexibleAgentRuntime:
 
 
     def _get_available_models(self) -> list[str]:
+        if self.config.active_backend == "claw-cli":
+            return self.backend_manager.get_claw_models(self.get_current_provider())
         return get_available_models(self.config.active_backend)
 
-    def _get_available_models_for(self, engine: str) -> list[str]:
+    def _get_available_models_for(
+        self,
+        engine: str,
+        provider: str | None = None,
+    ) -> list[str]:
+        if engine == "claw-cli":
+            return self.backend_manager.get_claw_models(
+                provider or self.get_current_provider()
+            )
         return get_available_models(engine)
 
     def _get_available_efforts(self) -> list[str]:
@@ -4620,42 +4650,37 @@ class FlexibleAgentRuntime:
     def _get_available_efforts_for(self, engine: str, model: str | None = None) -> list[str]:
         return get_available_efforts(engine, model)
 
-    def _get_backend_cfg(self, engine: str) -> dict | None:
-        return next((b for b in self.config.allowed_backends if b["engine"] == engine), None)
+    def _get_backend_cfg(
+        self,
+        engine: str,
+        provider: str | None = None,
+    ) -> dict | None:
+        candidates = [b for b in self.config.allowed_backends if b["engine"] == engine]
+        if engine == "claw-cli" and provider:
+            return next(
+                (
+                    backend
+                    for backend in candidates
+                    if str(backend.get("provider") or "").strip() == provider
+                ),
+                next((backend for backend in candidates if not backend.get("provider")), None),
+            )
+        return next(iter(candidates), None)
 
     def _get_current_effort(self) -> Optional[str]:
         if self.backend_manager.current_backend:
             effort = getattr(self.backend_manager.current_backend, "effort", None)
             if effort:
                 return effort
-        backend_cfg = next(
-            (b for b in self.config.allowed_backends if b["engine"] == self.config.active_backend),
-            None,
+        backend_cfg = self._get_backend_cfg(
+            self.config.active_backend,
+            self.get_current_provider(),
         )
         if backend_cfg:
             return backend_cfg.get("effort")
         return None
 
-    def _set_backend_model(self, engine: str, requested: str):
-        normalized = normalize_model(engine, requested)
-        if not normalized:
-            return
-        backend_cfg = self._get_backend_cfg(engine)
-        if backend_cfg is not None:
-            backend_cfg["model"] = normalized
-        if engine == self.config.active_backend and self.backend_manager.current_backend:
-            self.backend_manager.current_backend.config.model = normalized
-            current_effort = getattr(self.backend_manager.current_backend, "effort", None)
-            normalized_effort = normalize_effort(engine, current_effort, normalized)
-            if normalized_effort:
-                self.backend_manager.current_backend.effort = normalized_effort
-                if backend_cfg is not None:
-                    backend_cfg["effort"] = normalized_effort
-            else:
-                self.backend_manager.current_backend.effort = None
-                if backend_cfg is not None:
-                    backend_cfg.pop("effort", None)
-        self.backend_manager.persist_state(active_model=normalized)
+    _set_backend_model = runtime_model_selection.set_backend_model
 
     def _set_active_effort(self, requested: str):
         normalized = normalize_effort(
@@ -4667,7 +4692,10 @@ class FlexibleAgentRuntime:
             return
         if self.backend_manager.current_backend and hasattr(self.backend_manager.current_backend, "effort"):
             self.backend_manager.current_backend.effort = normalized
-        backend_cfg = self._get_backend_cfg(self.config.active_backend)
+        backend_cfg = self._get_backend_cfg(
+            self.config.active_backend,
+            self.get_current_provider(),
+        )
         if backend_cfg is not None:
             backend_cfg["effort"] = normalized
         self.backend_manager.persist_state()
@@ -4710,21 +4738,15 @@ class FlexibleAgentRuntime:
             ]
         )
 
-    def _backend_keyboard(self) -> InlineKeyboardMarkup:
-        current = self.config.active_backend
-        buttons = []
-        for backend in self.config.allowed_backends:
-            engine = backend["engine"]
-            base = get_backend_label(engine)
-            plain_label = selected_label(base, engine == current)
-            context_label = f"{base} · with context"
-            buttons.append(
-                [
-                    InlineKeyboardButton(plain_label, callback_data=f"backend:{engine}:plain"),
-                    InlineKeyboardButton(context_label, callback_data=f"backend:{engine}:context"),
-                ]
-            )
-        return InlineKeyboardMarkup(buttons)
+    _backend_keyboard = runtime_model_selection.backend_keyboard
+    _claw_provider_mode = runtime_model_selection.claw_provider_mode
+    _claw_provider_options = runtime_model_selection.claw_provider_options
+    _claw_provider_option = runtime_model_selection.claw_provider_option
+    _claw_provider_callback_error = runtime_model_selection.claw_provider_callback_error
+    _claw_provider_keyboard = runtime_model_selection.claw_provider_keyboard
+    _claw_provider_model_keyboard = runtime_model_selection.claw_provider_model_keyboard
+    _build_claw_provider_menu_text = runtime_model_selection.claw_provider_menu_text
+    _build_claw_provider_model_text = runtime_model_selection.claw_provider_model_text
 
     def _model_keyboard(self, current_model: Optional[str] = None, engine: Optional[str] = None) -> InlineKeyboardMarkup:
         active_engine = engine or self.config.active_backend
@@ -4763,28 +4785,42 @@ class FlexibleAgentRuntime:
     def _build_effort_followup_text(self) -> str:
         available = self._get_available_efforts()
         current = self._get_current_effort() or (available[0] if available else "n/a")
+        facts = [
+            f"<b>Backend</b> · <code>{html.escape(self.config.active_backend)}</code>",
+        ]
+        provider = self.get_current_provider()
+        if provider:
+            facts.append(f"<b>Provider</b> · <code>{html.escape(provider)}</code>")
+        facts.append(f"<b>Model</b> · <code>{html.escape(self.get_current_model())}</code>")
         return setting_card(
             "🎛️",
             "Choose effort",
             current=f"<code>{html.escape(current)}</code>",
-            facts=[
-                f"<b>Backend</b> · <code>{html.escape(self.config.active_backend)}</code>",
-                f"<b>Model</b> · <code>{html.escape(self.get_current_model())}</code>",
-            ],
+            facts=facts,
             consequence="This optional step controls reasoning depth. If no selection is made, the current value remains active.",
             action="Choose an effort level, or keep the current value.",
         )
 
     def _build_model_configuration_summary(self) -> str:
         effort = self._get_current_effort() if self._get_available_efforts() else None
-        return (
-            f"{card_title('✅', 'Model configuration')}\n\n"
-            f"<b>Mode</b> · <code>{html.escape(self.backend_manager.agent_mode)}</code>\n"
-            f"<b>Backend</b> · <code>{html.escape(self.config.active_backend)}</code>\n"
-            f"<b>Model</b> · <code>{html.escape(self.get_current_model())}</code>\n"
-            f"<b>Effort</b> · <code>{html.escape(effort or 'n/a')}</code>\n\n"
-            "Configuration saved and active immediately."
+        lines = [
+            card_title("✅", "Model configuration"),
+            "",
+            f"<b>Mode</b> · <code>{html.escape(self.backend_manager.agent_mode)}</code>",
+            f"<b>Backend</b> · <code>{html.escape(self.config.active_backend)}</code>",
+        ]
+        provider = self.get_current_provider()
+        if provider:
+            lines.append(f"<b>Provider</b> · <code>{html.escape(provider)}</code>")
+        lines.extend(
+            [
+                f"<b>Model</b> · <code>{html.escape(self.get_current_model())}</code>",
+                f"<b>Effort</b> · <code>{html.escape(effort or 'n/a')}</code>",
+                "",
+                "Configuration saved and active immediately.",
+            ]
         )
+        return "\n".join(lines)
 
     def _configuration_followup(self, source: str) -> tuple[str, InlineKeyboardMarkup | None]:
         available = self._get_available_efforts()
@@ -4838,6 +4874,7 @@ class FlexibleAgentRuntime:
         chat_id: int,
         target_engine: str,
         target_model: str | None = None,
+        target_provider: str | None = None,
         with_context: bool = False,
     ) -> tuple[bool, str]:
         allowed_engines = [b["engine"] for b in self.config.allowed_backends]
@@ -4849,6 +4886,7 @@ class FlexibleAgentRuntime:
             resource=f"backend:{target_engine}",
             target_backend=target_engine,
             target_model=target_model,
+            target_provider=target_provider,
             with_context=with_context,
         )
         if not policy.allowed:
@@ -4864,6 +4902,7 @@ class FlexibleAgentRuntime:
         switch_ok = await self.backend_manager.switch_backend(
             target_engine,
             target_model=target_model,
+            target_provider=target_provider,
         )
         if not switch_ok:
             return False, f"Failed to switch backend to: {target_engine}"
@@ -4895,81 +4934,18 @@ class FlexibleAgentRuntime:
         self._arm_session_primer(primer_note)
 
         model = self.get_current_model()
+        provider = self.get_current_provider()
         effort = self._get_current_effort()
         mode_text = "with handoff context" if with_context else "without handoff context"
-        message = f"Backend switched to: {target_engine}\nModel: {model}\nMode: {mode_text}"
+        message = f"Backend switched to: {target_engine}\n"
+        if provider:
+            message += f"Provider: {provider}\n"
+        message += f"Model: {model}\nMode: {mode_text}"
         if effort:
             message += f"\nEffort: {effort}"
         return True, message
 
-    async def cmd_model(self, update: Update, context: Any):
-        if not self._is_authorized_user(update.effective_user.id):
-            return
-        if not self.backend_manager.current_backend:
-            return
-        if self.backend_manager.agent_mode == "wrapper":
-            await self._reply_text(
-                update,
-                "Model switching is managed by `/core` and `/wrap` in **wrapper** mode.\nUse `/mode flex` for normal `/model` switching.",
-                parse_mode="Markdown",
-            )
-            return
-        if self.backend_manager.agent_mode == "audit":
-            await self._reply_text(
-                update,
-                "Model switching is managed by `/core` and `/audit` in **audit** mode.\nUse `/mode flex` for normal `/model` switching.",
-                parse_mode="Markdown",
-            )
-            return
-        if self.backend_manager.agent_mode == "dual-brain":
-            await self._reply_text(
-                update,
-                "Model switching is managed by `/brain` in **dual-brain** mode.\nUse `/mode flex` for normal `/model` switching.",
-                parse_mode="Markdown",
-            )
-            return
-
-        current_model = self.backend_manager.current_backend.config.model
-        args = context.args
-        if args:
-            requested = args[0].strip()
-            if self.config.active_backend == "claude-cli":
-                requested = CLAUDE_MODEL_ALIASES.get(requested.lower(), requested)
-            available = self._get_available_models()
-            if available and requested not in available:
-                await self._reply_text(update, f"Unknown model: {requested}\nUse /model to see available options.")
-                return
-
-            self._set_backend_model(self.config.active_backend, requested)
-            text, reply_markup = self._configuration_followup("model")
-            await self._reply_text(update, text, parse_mode="HTML", reply_markup=reply_markup)
-            return
-
-        available = self._get_available_models()
-        if not available:
-            await self._reply_text(
-                update,
-                runtime_menu_views.model_menu_text(
-                    model=current_model,
-                    backend=self.config.active_backend,
-                    has_choices=False,
-                    persists=True,
-                ),
-                parse_mode="HTML",
-            )
-            return
-
-        await self._reply_text(
-            update,
-            runtime_menu_views.model_menu_text(
-                model=current_model,
-                backend=self.config.active_backend,
-                has_choices=True,
-                persists=True,
-            ),
-            parse_mode="HTML",
-            reply_markup=self._model_keyboard(current_model),
-        )
+    cmd_model = runtime_model_selection.cmd_model
 
     async def cmd_effort(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -6236,6 +6212,9 @@ class FlexibleAgentRuntime:
         if not self._is_authorized_user(query.from_user.id):
             return
         data = query.data
+        if data.startswith(("provider", "pmodel:")):
+            await runtime_model_selection.callback_model(self, update, context)
+            return
         try:
             if data == "backend_mode_confirm":
                 if self.backend_manager.agent_mode == "memory+":
@@ -6266,18 +6245,27 @@ class FlexibleAgentRuntime:
                 )
             elif data == "model_menu":
                 current_model = self.get_current_model()
-                await query.edit_message_text(
-                    setting_card(
-                        "🧠",
-                        "Hashi model",
-                        current=f"<code>{html.escape(current_model)}</code>",
-                        facts=[f"<b>Backend</b> · <code>{html.escape(self.config.active_backend)}</code>"],
-                        consequence="The selection applies immediately to the next request and persists.",
-                        action="Choose a model.",
-                    ),
-                    parse_mode="HTML",
-                    reply_markup=self._model_keyboard(current_model),
-                )
+                provider = self.get_current_provider()
+                available = self._get_available_models()
+                if self.config.active_backend == "claw-cli" and provider and not available:
+                    mode_flag = self._claw_provider_mode(active=True)
+                    await query.edit_message_text(
+                        self._build_claw_provider_model_text(provider, mode_flag),
+                        parse_mode="HTML",
+                        reply_markup=self._claw_provider_model_keyboard(provider, mode_flag),
+                    )
+                else:
+                    await query.edit_message_text(
+                        runtime_menu_views.model_menu_text(
+                            model=current_model,
+                            backend=self.config.active_backend,
+                            has_choices=bool(available),
+                            persists=True,
+                            provider=provider,
+                        ),
+                        parse_mode="HTML",
+                        reply_markup=self._model_keyboard(current_model),
+                    )
             elif data.startswith("model:"):
                 model = data.split(":", 1)[1]
                 available = self._get_available_models()
@@ -6289,6 +6277,9 @@ class FlexibleAgentRuntime:
                         parse_mode="HTML",
                         reply_markup=reply_markup,
                     )
+                else:
+                    await query.answer("Model is not available for the active provider.", show_alert=True)
+                    return
             elif data == "backend_menu":
                 await query.edit_message_text(
                     self._build_backend_menu_text(),
@@ -6302,11 +6293,19 @@ class FlexibleAgentRuntime:
                     return
                 _, target_engine, mode = parts
                 with_context = mode == "context"
-                await query.edit_message_text(
-                    self._build_backend_model_prompt(target_engine, with_context),
-                    parse_mode="HTML",
-                    reply_markup=self._backend_model_keyboard(target_engine, with_context),
-                )
+                if target_engine == "claw-cli":
+                    mode_flag = self._claw_provider_mode(with_context=with_context)
+                    await query.edit_message_text(
+                        self._build_claw_provider_menu_text(mode_flag),
+                        parse_mode="HTML",
+                        reply_markup=self._claw_provider_keyboard(mode_flag),
+                    )
+                else:
+                    await query.edit_message_text(
+                        self._build_backend_model_prompt(target_engine, with_context),
+                        parse_mode="HTML",
+                        reply_markup=self._backend_model_keyboard(target_engine, with_context),
+                    )
             elif data.startswith("bmodel:"):
                 parts = data.split(":", 3)
                 if len(parts) != 4:

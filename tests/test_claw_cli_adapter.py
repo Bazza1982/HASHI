@@ -402,6 +402,30 @@ def test_claw_provider_env_resolves_secret_and_base_url(tmp_path):
     assert adapter._task_env()["OPENAI_API_KEY"] == "provider-secret"
 
 
+def test_explicit_claw_provider_strips_matching_provider_model_prefix(tmp_path):
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek:deepseek-v4-flash",
+        extra={"provider": "deepseek"},
+        resolve_access_root=lambda: tmp_path,
+    )
+    global_cfg = SimpleNamespace(
+        claw_providers={
+            "providers": {
+                "deepseek": {
+                    "base_url": "https://deepseek.invalid/v1",
+                    "secret": "deepseek_api_key",
+                }
+            }
+        }
+    )
+    adapter = ClawCLIAdapter(cfg, global_cfg, api_key=None)
+
+    assert adapter._provider_and_model() == ("deepseek", "deepseek-v4-flash")
+    assert adapter._claw_model() == "deepseek-v4-flash"
+
+
 def test_claw_provider_missing_secret_raises(tmp_path):
     cfg = SimpleNamespace(
         name="test",
