@@ -37,6 +37,9 @@ KIND_ACKNOWLEDGEMENT = getattr(
     "KIND_ACKNOWLEDGEMENT",
     "acknowledgement",
 )
+KIND_REVIEW = getattr(_stream_events, "KIND_REVIEW", "review")
+KIND_VALIDATION = getattr(_stream_events, "KIND_VALIDATION", "validation")
+KIND_TESTING = getattr(_stream_events, "KIND_TESTING", "testing")
 
 DEFAULT_CLAW_TIMEOUT_SEC = 30
 DEFAULT_CLAW_TASK_TIMEOUT_SEC = 1800
@@ -944,6 +947,17 @@ def _claw_jsonl_to_stream_event(event: Mapping[str, Any]) -> StreamEvent | None:
             summary=f"Claw task plan {phase}: {goal}"[:500],
             detail=json.dumps(frame, ensure_ascii=False)[:2000],
         )
+    if kind == "independent_review":
+        gate = str(event.get("gate") or "unknown")
+        revision_round = int(event.get("revision_round") or 0)
+        review = event.get("review") if isinstance(event.get("review"), Mapping) else {}
+        decision = str(review.get("decision") or "unknown").upper()
+        summary = str(review.get("summary") or event.get("summary") or "no summary").strip()
+        return StreamEvent(
+            kind=KIND_REVIEW,
+            summary=f"Review {gate} r{revision_round}: {decision} — {summary}"[:500],
+            detail=json.dumps(review, ensure_ascii=False)[:4000],
+        )
     if kind == "plan_divergence":
         return StreamEvent(
             kind=KIND_PROGRESS,
@@ -1003,6 +1017,107 @@ def _claw_jsonl_to_stream_event(event: Mapping[str, Any]) -> StreamEvent | None:
     if kind in {"message_stop", "run_finished", "prompt_cache"}:
         return None
     return StreamEvent(kind=KIND_PROGRESS, summary=f"Claw event: {kind}"[:200])
+
+
+def _claw_jsonl_to_stream_events(event: Mapping[str, Any]) -> list[StreamEvent]:
+    """Expand one Claw JSONL record into user-visible verbose activities."""
+    events: list[StreamEvent] = []
+    primary = _claw_jsonl_to_stream_event(event)
+    if primary is not None:
+        events.append(primary)
+
+    event_kind = str(event.get("kind") or "")
+    if event_kind == "independent_review" and str(event.get("gate") or "") == "execution_evidence":
+        review = event.get("review") if isinstance(event.get("review"), Mapping) else {}
+        decision = str(review.get("decision") or "unknown").upper()
+        revision_round = int(event.get("revision_round") or 0)
+        summary = str(review.get("summary") or event.get("summary") or "no summary").strip()
+        findings = review.get("findings") if isinstance(review.get("findings"), list) else []
+        validation_findings = [
+            finding for finding in findings
+            if isinstance(finding, Mapping) and str(finding.get("category") or "") == "verification"
+        ]
+        testing_findings = [
+            finding for finding in findings
+            if isinstance(finding, Mapping) and str(finding.get("category") or "") == "testing"
+        ]
+        events.append(StreamEvent(
+            kind=KIND_VALIDATION,
+            summary=f"Validation evidence review r{revision_round}: {decision} — {summary}"[:500],
+            detail=json.dumps(validation_findings or review.get("missing_evidence") or [], ensure_ascii=False)[:4000],
+        ))
+        events.append(StreamEvent(
+            kind=KIND_TESTING,
+            summary=f"Testing evidence review r{revision_round}: {decision} — {summary}"[:500],
+            detail=json.dumps(testing_findings, ensure_ascii=False)[:4000],
+        ))
+
+    if event_kind != "task_plan":
+        return events
+    frame = event.get("frame") if isinstance(event.get("frame"), Mapping) else {}
+    assurance = frame.get("assurance") if isinstance(frame.get("assurance"), Mapping) else {}
+    phase = str(event.get("phase") or "update")
+
+    def _items(name: str) -> list[str]:
+        value = assurance.get(name)
+        if not isinstance(value, list):
+            return []
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    def _summary(label: str, status: str, items: list[str]) -> str:
+        first = items[0] if items else "none recorded"
+        suffix = f" (+{len(items) - 1} more)" if len(items) > 1 else ""
+        return f"{label} {status} [{phase}]: {first}{suffix}"[:500]
+
+    validation_plan = _items("validation_strategy")
+    validation_evidence = _items("validation_evidence")
+    testing_plan = _items("test_strategy")
+    testing_evidence = _items("testing_evidence")
+    review_findings = _items("critical_review_findings")
+    unverified = _items("unverified_items")
+
+    if validation_plan:
+        events.append(StreamEvent(
+            kind=KIND_VALIDATION,
+            summary=_summary("Validation", "plan", validation_plan),
+            detail=json.dumps(validation_plan, ensure_ascii=False)[:4000],
+        ))
+    if validation_evidence:
+        events.append(StreamEvent(
+            kind=KIND_VALIDATION,
+            summary=_summary("Validation", "evidence", validation_evidence),
+            detail=json.dumps(validation_evidence, ensure_ascii=False)[:4000],
+        ))
+    if testing_plan:
+        events.append(StreamEvent(
+            kind=KIND_TESTING,
+            summary=_summary("Testing", "plan", testing_plan),
+            detail=json.dumps(testing_plan, ensure_ascii=False)[:4000],
+        ))
+    if testing_evidence:
+        events.append(StreamEvent(
+            kind=KIND_TESTING,
+            summary=_summary("Testing", "evidence", testing_evidence),
+            detail=json.dumps(testing_evidence, ensure_ascii=False)[:4000],
+        ))
+    if review_findings:
+        events.append(StreamEvent(
+            kind=KIND_REVIEW,
+            summary=_summary("Critical review", "findings", review_findings),
+            detail=json.dumps(review_findings, ensure_ascii=False)[:4000],
+        ))
+    elif phase in {"critical_review", "finalization_review"}:
+        events.append(StreamEvent(
+            kind=KIND_REVIEW,
+            summary=f"Critical review checkpoint [{phase}]: no findings recorded"[:500],
+        ))
+    if unverified:
+        events.append(StreamEvent(
+            kind=KIND_VALIDATION,
+            summary=_summary("Validation", "unverified", unverified),
+            detail=json.dumps(unverified, ensure_ascii=False)[:4000],
+        ))
+    return events
 
 
 def claw_supports_stream_json(
@@ -1934,6 +2049,15 @@ class ClawCLIAdapter(BaseBackend):
                         event.get("phase") or "unknown",
                         json.dumps(event.get("frame") or {}, ensure_ascii=False)[:4000],
                     )
+                elif kind == "independent_review":
+                    review = event.get("review") if isinstance(event.get("review"), Mapping) else {}
+                    self.logger.info(
+                        "Claw independent review: gate=%s revision_round=%s decision=%s summary=%s",
+                        event.get("gate") or "unknown",
+                        event.get("revision_round") or 0,
+                        review.get("decision") or "unknown",
+                        redact_secret_text(str(review.get("summary") or event.get("summary") or ""))[:2000],
+                    )
                 elif kind == "provider_stop_reason":
                     self.logger.info(
                         "Claw provider termination received: reason=%s",
@@ -1974,9 +2098,9 @@ class ClawCLIAdapter(BaseBackend):
                         event.get("output_chars") or 0,
                         redact_secret_text(str(event.get("output_preview") or ""))[:1000],
                     )
-                stream_event = _claw_jsonl_to_stream_event(event)
-                if stream_event is not None and on_stream_event is not None:
-                    await on_stream_event(stream_event)
+                if on_stream_event is not None:
+                    for stream_event in _claw_jsonl_to_stream_events(event):
+                        await on_stream_event(stream_event)
 
         async def read_stderr() -> None:
             assert proc.stderr is not None

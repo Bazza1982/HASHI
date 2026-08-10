@@ -367,11 +367,14 @@ async def answer_preview_loop(
         KIND_ERROR,
         KIND_FILE_EDIT,
         KIND_PROGRESS,
+        KIND_REVIEW,
         KIND_SHELL_EXEC,
+        KIND_TESTING,
         KIND_TEXT_DELTA,
         KIND_THINKING,
         KIND_TOOL_END,
         KIND_TOOL_START,
+        KIND_VALIDATION,
     )
 
     policy = telegram_stream_policy.get_policy(runtime)
@@ -393,10 +396,13 @@ async def answer_preview_loop(
         KIND_ERROR,
         KIND_FILE_EDIT,
         KIND_PROGRESS,
+        KIND_REVIEW,
         KIND_SHELL_EXEC,
+        KIND_TESTING,
         KIND_THINKING,
         KIND_TOOL_END,
         KIND_TOOL_START,
+        KIND_VALIDATION,
     }
 
     def _preview_text() -> str:
@@ -406,7 +412,7 @@ async def answer_preview_loop(
         elapsed = int((datetime.now() - started).total_seconds())
         header = f"✍️ {runtime.name} is replying... ({elapsed}s)\n\n"
         if text:
-            return header + text
+            return header + f"📍 {latest_status}\n\n" + text
         return header + latest_status
 
     async def _edit() -> None:
@@ -491,7 +497,7 @@ async def answer_preview_loop(
                     stream_state.delta_count += 1
                     stream_state.char_count += len(raw_summary)
                 dirty = True
-            elif kind in status_kinds and summary and not chunks:
+            elif kind in status_kinds and summary:
                 latest_status = summary[:240]
                 dirty = True
         except asyncio.TimeoutError:
@@ -525,7 +531,12 @@ async def setup_interactive_feedback(
     delivery_requested = not item.silent and item.deliver_to_telegram
     policy = telegram_stream_policy.get_policy(runtime)
     delivery_blocked = telegram_delivery_failover.is_delivery_blocked(runtime)
-    stream_delivery_enabled = delivery_requested and policy.enabled and not delivery_blocked
+    verbose_delivery_enabled = delivery_requested and runtime._verbose and not delivery_blocked
+    stream_delivery_enabled = (
+        delivery_requested
+        and (policy.enabled or runtime._verbose)
+        and not delivery_blocked
+    )
     think_delivery_enabled = delivery_requested and runtime._think and not delivery_blocked
     backend = runtime.backend_manager.current_backend
     claw_ack_enabled = (
@@ -547,6 +558,7 @@ async def setup_interactive_feedback(
             f"source={policy.source}, placeholder={policy.placeholder_enabled}, "
             f"typing={policy.typing_enabled}, progress={policy.progress_enabled}, "
             f"preview={policy.preview_enabled}, promote={policy.promote_enabled}, "
+            f"verbose_override={verbose_delivery_enabled}, "
             f"blocked={delivery_blocked}"
         )
 
@@ -556,7 +568,8 @@ async def setup_interactive_feedback(
     if stream_delivery_enabled:
         placeholder_text, placeholder_parse_mode = runtime.get_typing_placeholder()
         try:
-            if policy.placeholder_enabled and await telegram_delivery_failover.handle_blocked_send(
+            placeholder_requested = policy.placeholder_enabled or verbose_delivery_enabled
+            if placeholder_requested and await telegram_delivery_failover.handle_blocked_send(
                 runtime,
                 chat_id=item.chat_id,
                 request_id=item.request_id,
@@ -565,7 +578,7 @@ async def setup_interactive_feedback(
                 runtime.telegram_logger.warning(
                     f"Skipping placeholder for {item.request_id} — delivery blocked"
                 )
-            elif policy.placeholder_enabled:
+            elif placeholder_requested:
                 placeholder_started = datetime.now()
                 placeholder = await runtime.app.bot.send_message(
                     chat_id=item.chat_id,
@@ -600,7 +613,11 @@ async def setup_interactive_feedback(
         stream_queue = None
         answer_preview_queue = None
         preview_enabled = policy.preview_enabled and placeholder is not None and not delivery_blocked
-        progress_enabled = policy.progress_enabled and placeholder is not None and not delivery_blocked
+        progress_enabled = (
+            (policy.progress_enabled or verbose_delivery_enabled)
+            and placeholder is not None
+            and not delivery_blocked
+        )
         final_stream_enabled = policy.promote_enabled and preview_enabled
         supports_answer_stream = bool(getattr(capabilities, "supports_answer_stream", False))
         if final_stream_enabled and supports_answer_stream and placeholder is not None:

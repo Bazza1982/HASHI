@@ -7296,7 +7296,14 @@ class FlexibleAgentRuntime:
         if placeholder is None or not self.telegram_connected:
             return
 
-        from adapters.stream_events import KIND_THINKING, KIND_TEXT_DELTA, KIND_TOOL_START
+        from adapters.stream_events import (
+            KIND_REVIEW,
+            KIND_TESTING,
+            KIND_THINKING,
+            KIND_TEXT_DELTA,
+            KIND_TOOL_START,
+            KIND_VALIDATION,
+        )
 
         buffer: list[str] = []
         MAX_LINES = 10
@@ -7320,6 +7327,9 @@ class FlexibleAgentRuntime:
             "shell_exec": "🔧",
             "text_delta": "✏️",
             "progress": "📊",
+            "review": "🧐",
+            "validation": "✅",
+            "testing": "🧪",
             "error": "❌",
         }
 
@@ -7406,6 +7416,8 @@ class FlexibleAgentRuntime:
                         buffer[-1] = f"{icon} {event.summary[:100]}"
                     else:
                         buffer.append(f"{icon} {event.summary[:100]}")
+                elif event.kind in {KIND_REVIEW, KIND_VALIDATION, KIND_TESTING}:
+                    buffer.append(f"{icon} {event.summary[:240]}")
                 else:
                     buffer.append(f"{icon} {event.summary[:100]}")
 

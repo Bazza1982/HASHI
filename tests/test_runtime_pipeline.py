@@ -17,6 +17,7 @@ from orchestrator import telegram_delivery_failover as failover
 from adapters.stream_events import (
     KIND_ACKNOWLEDGEMENT,
     KIND_PROGRESS,
+    KIND_REVIEW,
     KIND_TEXT_DELTA,
     StreamEvent,
 )
@@ -1134,6 +1135,42 @@ async def test_answer_preview_shows_progress_when_text_delta_absent():
 
 
 @pytest.mark.asyncio
+async def test_answer_preview_keeps_review_visible_after_answer_deltas_start():
+    runtime = _runtime()
+    runtime.config.extra = {
+        "telegram_stream_enabled": True,
+        "answer_stream_edit_interval_s": 0.01,
+        "answer_stream_min_chars": 1,
+    }
+    event_queue = asyncio.Queue()
+    stop_event = asyncio.Event()
+    task = asyncio.create_task(
+        runtime_pipeline.answer_preview_loop(
+            runtime,
+            _item(),
+            placeholder=SimpleNamespace(message_id=77),
+            stop_event=stop_event,
+            event_queue=event_queue,
+        )
+    )
+
+    await event_queue.put(StreamEvent(kind=KIND_TEXT_DELTA, summary="Draft answer"))
+    await event_queue.put(
+        StreamEvent(kind=KIND_REVIEW, summary="Review final_claim r1: PASS")
+    )
+    for _ in range(20):
+        if runtime.app.bot.edits and "Review final_claim" in runtime.app.bot.edits[-1]["text"]:
+            break
+        await asyncio.sleep(0.02)
+
+    stop_event.set()
+    await task
+
+    assert "Review final_claim r1: PASS" in runtime.app.bot.edits[-1]["text"]
+    assert "Draft answer" in runtime.app.bot.edits[-1]["text"]
+
+
+@pytest.mark.asyncio
 async def test_answer_preview_does_not_require_verbose_stream_capability():
     runtime = _runtime()
     runtime.backend_manager.current_backend.capabilities.supports_thinking_stream = False
@@ -1227,6 +1264,29 @@ async def test_verbose_streaming_backend_uses_streaming_display():
     await feedback.escalation_task
     assert runtime.streaming_loops == [("req-1", True)]
     assert runtime.escalating_loops == []
+
+
+@pytest.mark.asyncio
+async def test_verbose_alone_forces_placeholder_and_progress_stream():
+    runtime = _runtime()
+    runtime._verbose = True
+    runtime.config.extra = {"telegram_stream_enabled": True}
+
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(),
+        audit_active=False,
+        audit_collector=None,
+    )
+
+    assert feedback.placeholder is not None
+    assert runtime.app.bot.sent
+    assert feedback.on_stream_event[0] == "stream"
+    assert runtime.stream_callbacks[0]["event_queue"] is not None
+    feedback.stop_typing.set()
+    await feedback.typing_task
+    await feedback.escalation_task
+    assert runtime.streaming_loops == [("req-1", True)]
 
 
 @pytest.mark.asyncio
