@@ -792,7 +792,27 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path, caplog):
             for event in [
                 {"kind": "run_started", "model": "deepseek/test", "session_id": "stream-session"},
                 {"kind": "task_acknowledgement", "text": "I will inspect the requested file only."},
-                {"kind": "task_plan", "phase": "initial", "frame": {"active_goal": "inspect file"}},
+                {"kind": "task_plan", "phase": "initial", "frame": {
+                    "active_goal": "inspect file",
+                    "assurance": {
+                        "validation_strategy": ["verify the exact file contents"],
+                        "validation_evidence": ["read_file returned the requested contents"],
+                        "test_strategy": ["run the parser regression check"],
+                        "testing_evidence": ["parser regression passed"],
+                        "critical_review_findings": [],
+                        "unverified_items": [],
+                    },
+                }},
+                {"kind": "independent_review", "gate": "planning", "revision_round": 1,
+                 "summary": "The revised plan is adequate.",
+                 "review": {"decision": "pass", "summary": "The revised plan is adequate.",
+                            "findings": [], "missing_evidence": [], "required_changes": [],
+                            "evidence_refs": ["task frame"]}},
+                {"kind": "independent_review", "gate": "execution_evidence", "revision_round": 0,
+                 "summary": "Validation and tests are supported by raw evidence.",
+                 "review": {"decision": "pass", "summary": "Validation and tests are supported by raw evidence.",
+                            "findings": [], "missing_evidence": [], "required_changes": [],
+                            "evidence_refs": ["tool result 1", "test result 1"]}},
                 {"kind": "semantic_compaction", "status": "started", "removed_message_count": 0, "timeout_seconds": 60},
                 {"kind": "semantic_compaction", "status": "completed", "removed_message_count": 12, "timeout_seconds": 60},
                 {"kind": "thinking_summary", "summary": "thinking block received (48 chars hidden)", "thinking_chars": 48},
@@ -841,6 +861,29 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path, caplog):
     assert adapter.capabilities.supports_answer_stream is True
     assert KIND_THINKING in [event.kind for event in events]
     assert KIND_ACKNOWLEDGEMENT in [event.kind for event in events]
+    assert "review" in [event.kind for event in events]
+    assert "validation" in [event.kind for event in events]
+    assert "testing" in [event.kind for event in events]
+    assert any(
+        event.kind == "review" and "planning r1: PASS" in event.summary
+        for event in events
+    )
+    assert any(
+        event.kind == "validation" and "read_file returned" in event.summary
+        for event in events
+    )
+    assert any(
+        event.kind == "testing" and "parser regression passed" in event.summary
+        for event in events
+    )
+    assert any(
+        event.kind == "validation" and "evidence review r0: PASS" in event.summary
+        for event in events
+    )
+    assert any(
+        event.kind == "testing" and "evidence review r0: PASS" in event.summary
+        for event in events
+    )
     assert any(
         event.kind == KIND_THINKING and "Claw stream started" in event.summary
         for event in events

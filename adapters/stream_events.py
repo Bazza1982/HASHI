@@ -20,6 +20,9 @@ KIND_SHELL_EXEC = "shell_exec"
 KIND_TEXT_DELTA = "text_delta"
 KIND_PROGRESS = "progress"
 KIND_ACKNOWLEDGEMENT = "acknowledgement"
+KIND_REVIEW = "review"
+KIND_VALIDATION = "validation"
+KIND_TESTING = "testing"
 KIND_ERROR = "error"
 
 
