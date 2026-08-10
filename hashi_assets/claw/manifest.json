@@ -1,16 +1,16 @@
 {
   "manifest_version": 1,
   "runtime": "hashi-claw",
-  "version": "0.1.3-hashi.3",
+  "version": "0.1.3-hashi.4",
   "upstream_commit": "4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d",
-  "source_commit": "e268713a6a1a944727640c85b2ca92d36ec2a17f",
+  "source_commit": "f9af112fad4446fc27bd06c5d0a658144bdeb625",
   "source_branch": "integration/hashi-claw-4ea31c1",
   "build_date": "2026-08-10",
-  "notes": "Claw 0.1.3 pinned to upstream 4ea31c1 with HASHI stream telemetry, model identity, persistent session resume metadata, timeout-seconds contract, bounded tool loops, and final-answer budget warnings.",
+  "notes": "Claw 0.1.3 pinned to upstream 4ea31c1 with HASHI stream telemetry, model identity, ordinary prompt continuation across resumed sessions, timeout-seconds contract, bounded tool loops, and final-answer budget warnings.",
   "binaries": {
     "linux-x86_64": {
-      "path": "releases/0.1.3-hashi.3/linux-x86_64/hashi-claw",
-      "sha256": "51f21b8aceaae42d20def59482e4baaf461052c23b0e67f05370a6579eb010d7",
+      "path": "releases/0.1.3-hashi.4/linux-x86_64/hashi-claw",
+      "sha256": "0b73c80274a4afeb239f93bd61b23bdfef7b309c290c349da0acedf85df6269d",
       "rust_target_triple": "x86_64-unknown-linux-gnu",
       "binary_name": "hashi-claw"
     }
