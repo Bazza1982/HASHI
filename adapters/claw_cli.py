@@ -17,6 +17,7 @@ from typing import Any, Mapping
 
 from adapters.base import BackendCapabilities, BackendResponse, BaseBackend, TokenUsage
 from adapters.stream_events import (
+    KIND_ACKNOWLEDGEMENT,
     KIND_ERROR,
     KIND_PROGRESS,
     KIND_TEXT_DELTA,
@@ -72,6 +73,7 @@ CLAW_ENV_ALLOWLIST = (
     "CLAW_CONFIG_HOME",
     "PYTHONPATH",
     "CLAW_MAX_TOOL_ITERATIONS",
+    "CLAW_TASK_PLANNING",
     *OS_ENV_ALLOWLIST,
 )
 
@@ -912,6 +914,25 @@ def _claw_jsonl_to_stream_event(event: Mapping[str, Any]) -> StreamEvent | None:
     if kind == "assistant_delta":
         text = str(event.get("text") or "")
         return StreamEvent(kind=KIND_TEXT_DELTA, summary=text[:200]) if text else None
+    if kind == "task_acknowledgement":
+        text = str(event.get("text") or event.get("summary") or "").strip()
+        return StreamEvent(kind=KIND_ACKNOWLEDGEMENT, summary=text[:500]) if text else None
+    if kind == "task_plan":
+        phase = str(event.get("phase") or "update")
+        frame = event.get("frame") if isinstance(event.get("frame"), Mapping) else {}
+        goal = str(frame.get("active_goal") or "").strip()
+        return StreamEvent(
+            kind=KIND_PROGRESS,
+            summary=f"Claw task plan {phase}: {goal}"[:500],
+            detail=json.dumps(frame, ensure_ascii=False)[:2000],
+        )
+    if kind == "plan_divergence":
+        return StreamEvent(
+            kind=KIND_PROGRESS,
+            summary=str(event.get("summary") or "Claw plan divergence")[:500],
+            detail=str(event.get("reason") or "")[:1000],
+            tool_name=str(event.get("tool_name") or ""),
+        )
     if kind in {"tool_call", "tool_start"}:
         name = str(event.get("name") or event.get("tool_name") or "tool")
         summary = str(event.get("summary") or f"Claw tool started: {name}")
@@ -1448,6 +1469,7 @@ class ClawCLIAdapter(BaseBackend):
     def _task_env(self) -> dict[str, str]:
         env = self._resolve_task_env()
         env["CLAW_MAX_TOOL_ITERATIONS"] = str(self._max_tool_iterations())
+        env["CLAW_TASK_PLANNING"] = "0" if self.effort == "low" else "1"
         if self._gateway_config_home is not None:
             env["CLAW_CONFIG_HOME"] = str(self._gateway_config_home)
             project_root = Path(__file__).resolve().parents[1]

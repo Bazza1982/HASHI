@@ -527,6 +527,13 @@ async def setup_interactive_feedback(
     delivery_blocked = telegram_delivery_failover.is_delivery_blocked(runtime)
     stream_delivery_enabled = delivery_requested and policy.enabled and not delivery_blocked
     think_delivery_enabled = delivery_requested and runtime._think and not delivery_blocked
+    backend = runtime.backend_manager.current_backend
+    claw_ack_enabled = (
+        delivery_requested
+        and not delivery_blocked
+        and str(getattr(runtime.config, "active_backend", "")) == "claw-cli"
+        and str(getattr(backend, "effort", "low")).lower() != "low"
+    )
 
     if delivery_requested:
         runtime.logger.info(
@@ -582,7 +589,6 @@ async def setup_interactive_feedback(
         if not delivery_blocked and policy.typing_enabled and stop_typing is not None:
             typing_task = asyncio.create_task(runtime.typing_loop(item.chat_id, stop_typing))
 
-        backend = runtime.backend_manager.current_backend
         capabilities = getattr(backend, "capabilities", None)
         supports_stream_display = bool(getattr(capabilities, "supports_thinking_stream", False))
         stream_queue = None
@@ -681,6 +687,38 @@ async def setup_interactive_feedback(
 
     if stream_callback is None and audit_active:
         stream_callback = runtime._make_stream_callback(audit_collector=audit_collector)
+
+    if claw_ack_enabled:
+        from adapters.stream_events import KIND_ACKNOWLEDGEMENT
+
+        presentation_callback = stream_callback
+        acknowledgement_sent = False
+
+        async def _claw_ack_callback(event):
+            nonlocal acknowledgement_sent
+            if (
+                not acknowledgement_sent
+                and getattr(event, "kind", None) == KIND_ACKNOWLEDGEMENT
+                and str(getattr(event, "summary", "") or "").strip()
+            ):
+                acknowledgement_sent = True
+                try:
+                    await runtime._send_text(
+                        item.chat_id,
+                        str(event.summary).strip(),
+                        _request_id=item.request_id,
+                        _purpose="task_acknowledgement",
+                    )
+                except Exception as exc:
+                    runtime.telegram_logger.warning(
+                        f"Failed to send Claw task acknowledgement for {item.request_id}: {exc}"
+                    )
+            if presentation_callback is not None:
+                result = presentation_callback(event)
+                if inspect.isawaitable(result):
+                    await result
+
+        stream_callback = _claw_ack_callback
 
     # Local clients can observe the exact verbose/thinking events intentionally
     # emitted by the backend even when Telegram presentation is disabled.  The
