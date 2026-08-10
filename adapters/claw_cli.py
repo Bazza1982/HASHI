@@ -83,6 +83,7 @@ CLAW_ENV_ALLOWLIST = (
     "PYTHONPATH",
     "CLAW_MAX_TOOL_ITERATIONS",
     "CLAW_TASK_PLANNING",
+    "CLAW_EXECUTION_EFFORT",
     *OS_ENV_ALLOWLIST,
 )
 
@@ -1509,6 +1510,7 @@ class ClawCLIAdapter(BaseBackend):
         env = self._resolve_task_env()
         env["CLAW_MAX_TOOL_ITERATIONS"] = str(self._max_tool_iterations())
         env["CLAW_TASK_PLANNING"] = "0" if self.effort == "low" else "1"
+        env["CLAW_EXECUTION_EFFORT"] = self.effort
         if self._gateway_config_home is not None:
             env["CLAW_CONFIG_HOME"] = str(self._gateway_config_home)
             project_root = Path(__file__).resolve().parents[1]
