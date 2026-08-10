@@ -1,16 +1,16 @@
 {
   "manifest_version": 1,
   "runtime": "hashi-claw",
-  "version": "0.1.3-hashi.11",
+  "version": "0.1.3-hashi.12",
   "upstream_commit": "4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d",
-  "source_commit": "4f996bf46c65aed7fed4d37fbd0ec933517d77a2",
+  "source_commit": "cb6a4bee25a7496bf0e69a222271693019cb135a",
   "source_branch": "integration/hashi-claw-4ea31c1",
   "build_date": "2026-08-10",
-  "notes": "Claw 0.1.3 pinned to upstream 4ea31c1 with concrete model-generated medium-plus task acknowledgement isolated to the authoritative current request, fail-closed initial acknowledgement quality checks, non-fatal replanning recovery that preserves the confirmed task frame, conservative authorization anchoring, 60-second model-driven semantic compaction, provider termination diagnostics, and deterministic thinking-only recovery.",
+  "notes": "Claw 0.1.3 pinned to upstream 4ea31c1 with concrete model-generated medium-plus task acknowledgement isolated to the authoritative current request, fail-closed initial acknowledgement quality checks, non-fatal replanning recovery that preserves the confirmed task frame, visible-finalization recovery for hidden control-only output, conservative authorization anchoring, 60-second model-driven semantic compaction, provider termination diagnostics, and deterministic thinking-only recovery.",
   "binaries": {
     "linux-x86_64": {
-      "path": "releases/0.1.3-hashi.11/linux-x86_64/hashi-claw",
-      "sha256": "7ca16d46dcc7c682b9ab39dacca93dc1c5e6c67a3c628570dbe304bf8a6fc2ff",
+      "path": "releases/0.1.3-hashi.12/linux-x86_64/hashi-claw",
+      "sha256": "ee2584d5ecd99a427c4847788e09f45eee1db15ceb0dd8e2d3de9034af074e58",
       "rust_target_triple": "x86_64-unknown-linux-gnu",
       "binary_name": "hashi-claw"
     }
