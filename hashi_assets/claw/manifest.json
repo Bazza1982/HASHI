@@ -1,16 +1,16 @@
 {
   "manifest_version": 1,
   "runtime": "hashi-claw",
-  "version": "0.1.3-hashi.8",
+  "version": "0.1.3-hashi.9",
   "upstream_commit": "4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d",
-  "source_commit": "a1ad18fdd71b6d76631d280de97729c5b0043a43",
+  "source_commit": "56b7a18d0c2b27a653874fa42427296440d07e19",
   "source_branch": "integration/hashi-claw-4ea31c1",
   "build_date": "2026-08-10",
-  "notes": "Claw 0.1.3 pinned to upstream 4ea31c1 with HASHI stream telemetry, configurable execution effort, deterministic incomplete reports, dynamic context-aware compaction, and medium-plus task acknowledgement, planning, re-planning, and drift telemetry.",
+  "notes": "Claw 0.1.3 pinned to upstream 4ea31c1 with visible medium-plus task acknowledgement, conservative authorization anchoring, 60-second model-driven semantic compaction that preserves the active turn, provider termination diagnostics, and deterministic thinking-only recovery.",
   "binaries": {
     "linux-x86_64": {
-      "path": "releases/0.1.3-hashi.8/linux-x86_64/hashi-claw",
-      "sha256": "b5379a3a445439fbc15d53bbbdc370bf7f52019ae5b4234de5afa39fe1487971",
+      "path": "releases/0.1.3-hashi.9/linux-x86_64/hashi-claw",
+      "sha256": "084f62e058e3f26b36eeb04d9765747557785c014bf98f96a1fd2e57192e758f",
       "rust_target_triple": "x86_64-unknown-linux-gnu",
       "binary_name": "hashi-claw"
     }
