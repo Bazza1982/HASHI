@@ -81,37 +81,9 @@ def _verify_metadata(source_root: Path, manifest: dict, baseline: dict) -> Path:
 
 def _verify_workspace_tests(rust_root: Path, baseline: dict) -> None:
     rust_baseline = baseline["rust_workspace"]
-    allowed = rust_baseline["expected_upstream_failures"]
-    if len(allowed) != 1:
-        raise CertificationError(f"Expected exactly one Rust test exception, found {len(allowed)}")
-
-    all_other = _run(list(rust_baseline["all_other_tests_command"]), rust_root)
-    if all_other.returncode != 0:
-        raise CertificationError(f"Rust workspace has a non-baselined failure:\n{all_other.stdout}")
-
-    item = allowed[0]
-    command = [
-        "cargo",
-        "test",
-        "-p",
-        str(item["package"]),
-        "--test",
-        str(item["target"]),
-        str(item["test"]),
-        "--",
-        "--exact",
-        "--nocapture",
-    ]
-    expected = _run(command, rust_root)
-    if expected.returncode == 0:
-        raise CertificationError(
-            f"Baselined Rust test {item['test']} now passes; remove the stale exception"
-        )
-    missing = [value for value in item["evidence"] if value not in expected.stdout]
-    if missing:
-        raise CertificationError(
-            f"Baselined Rust test failed differently; missing evidence {missing}:\n{expected.stdout}"
-        )
+    result = _run(list(rust_baseline["command"]), rust_root)
+    if result.returncode != 0:
+        raise CertificationError(f"Rust workspace tests failed:\n{result.stdout}")
 
 
 def _parse_clippy_diagnostics(output: str) -> list[tuple[str, str, int, str]]:
