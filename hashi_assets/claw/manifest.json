@@ -1,16 +1,16 @@
 {
   "manifest_version": 1,
   "runtime": "hashi-claw",
-  "version": "0.1.3-hashi.25",
+  "version": "0.1.3-hashi.26",
   "upstream_commit": "4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d",
-  "source_commit": "70a3e969f756e5eae0cf1f8bbb23868818e8c9d6",
+  "source_commit": "d3e659534b33823818630db309ceb3f319c981cf",
   "source_branch": "integration/hashi-claw-4ea31c1",
   "build_date": "2026-08-11",
-  "notes": "Claw 0.1.3 pinned to upstream 4ea31c1 with up to three strict format attempts for each max planning revision; a max planning-gate contract that reviews evidence design without demanding tool-derived evidence before tools are allowed; robust task-frame extraction when bridge metadata contributes additional JSON objects; immediate visible max-effort acknowledgement before slow independent planning review, while tools remain blocked until that gate passes; fresh-context independent Critical Review gates for planning, executed verification and testing evidence, and final claims; up to three evidence-driven revision rounds per gate; fail-closed incomplete reporting; bounded raw-evidence review packets; host-aware slash-command sandbox contract testing with zero Rust test exceptions; high-and-above assurance planning and finalization reserves; persona-aware task acknowledgement; semantic compaction; provider termination diagnostics; and deterministic thinking-only recovery.",
+  "notes": "Claw 0.1.3 pinned to upstream 4ea31c1 with three strict format attempts for initial max task frames, planning revisions, and independent review verdicts; balanced extraction of task frames and review verdicts amid unrelated JSON objects; a max planning-gate contract that reviews evidence design without demanding tool-derived evidence before tools are allowed; immediate visible max-effort acknowledgement before slow independent planning review, while tools remain blocked until that gate passes; semantic INCOMPLETE finalization instead of backend errors when planning is blocked or structured-output recovery is exhausted; fresh-context independent Critical Review gates for planning, executed verification and testing evidence, and final claims; up to three evidence-driven revision rounds per gate; bounded raw-evidence review packets; host-aware slash-command sandbox contract testing with zero Rust test exceptions; high-and-above assurance planning and finalization reserves; persona-aware task acknowledgement; semantic compaction; provider termination diagnostics; and deterministic thinking-only recovery.",
   "binaries": {
     "linux-x86_64": {
-      "path": "releases/0.1.3-hashi.25/linux-x86_64/hashi-claw",
-      "sha256": "c6b5079300131a42fcfedce9f2d6b9dd89ca75e92ac8eaf7958e9bcf26f284e6",
+      "path": "releases/0.1.3-hashi.26/linux-x86_64/hashi-claw",
+      "sha256": "311920c1e9c47b7b6784875d769bda5c325e999abf1f86789f0af768a13adff5",
       "rust_target_triple": "x86_64-unknown-linux-gnu",
       "binary_name": "hashi-claw"
     }
