@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import stat
 import textwrap
 from pathlib import Path
@@ -773,7 +774,7 @@ def test_claw_adapter_ignores_checkpoint_for_other_model(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path):
+async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path, caplog):
     fake = _write_exe(
         tmp_path / "claw",
         """
@@ -820,7 +821,8 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path):
         events.append(event)
 
     assert await adapter.initialize() is True
-    response = await adapter.generate_response("hello", "req-stream", on_stream_event=collect)
+    with caplog.at_level(logging.INFO):
+        response = await adapter.generate_response("hello", "req-stream", on_stream_event=collect)
 
     assert response.is_success is True
     assert response.text == "final answer"
@@ -849,6 +851,10 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path):
     ) == 2
     assert any(event.detail == "thinking_chars=48" for event in events)
     assert not any("may be summarized or hidden" in event.summary for event in events)
+    assert "Claw tool started:" in caplog.text
+    assert "name=read_file" in caplog.text
+    assert "Claw tool finished:" in caplog.text
+    assert "output_preview=ok" in caplog.text
 
 
 @pytest.mark.asyncio

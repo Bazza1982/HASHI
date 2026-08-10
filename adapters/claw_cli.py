@@ -15,9 +15,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+from adapters import stream_events as _stream_events
 from adapters.base import BackendCapabilities, BackendResponse, BaseBackend, TokenUsage
 from adapters.stream_events import (
-    KIND_ACKNOWLEDGEMENT,
     KIND_ERROR,
     KIND_PROGRESS,
     KIND_TEXT_DELTA,
@@ -28,6 +28,15 @@ from adapters.stream_events import (
     StreamEvent,
 )
 from adapters.stream_io import iter_stream_lines
+
+# Bootstrap compatibility for the first hot reload from a runtime whose
+# stream_events module predates acknowledgement events.  Subsequent /reboot
+# calls load stream_events first, as enforced by orchestrator.hot_reload.
+KIND_ACKNOWLEDGEMENT = getattr(
+    _stream_events,
+    "KIND_ACKNOWLEDGEMENT",
+    "acknowledgement",
+)
 
 DEFAULT_CLAW_TIMEOUT_SEC = 30
 DEFAULT_CLAW_TASK_TIMEOUT_SEC = 1800
@@ -1942,6 +1951,26 @@ class ClawCLIAdapter(BaseBackend):
                         event.get("classification") or "unknown",
                         event.get("action") or "unknown",
                         event.get("provider_stop_reason") or "unknown",
+                    )
+                elif kind in {"tool_call", "tool_start"}:
+                    self.logger.info(
+                        "Claw tool started: iteration=%s id=%s name=%s summary=%s",
+                        event.get("iteration") or "unknown",
+                        event.get("id") or "unknown",
+                        event.get("name") or "unknown",
+                        redact_secret_text(str(event.get("summary") or ""))[:1000],
+                    )
+                elif kind == "tool_end":
+                    log_method = self.logger.warning if event.get("is_error") else self.logger.info
+                    log_method(
+                        "Claw tool finished: iteration=%s id=%s name=%s is_error=%s "
+                        "output_chars=%s output_preview=%s",
+                        event.get("iteration") or "unknown",
+                        event.get("id") or "unknown",
+                        event.get("name") or "unknown",
+                        bool(event.get("is_error")),
+                        event.get("output_chars") or 0,
+                        redact_secret_text(str(event.get("output_preview") or ""))[:1000],
                     )
                 stream_event = _claw_jsonl_to_stream_event(event)
                 if stream_event is not None and on_stream_event is not None:

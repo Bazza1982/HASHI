@@ -63,6 +63,38 @@ class RebootManager:
         if reloaded:
             main_logger.info("Hot reload: reloaded %s modules.", len(reloaded))
 
+    def validate_agent_runtime_contract(self):
+        """Verify cross-module adapter symbols before rebuilding an agent.
+
+        Compilation alone cannot detect an import-time dependency being
+        satisfied by an older in-memory module.  Keep this check small and
+        focused on the protocol used by every Claw acknowledgement/tool event.
+        """
+        stream_events = importlib.import_module("adapters.stream_events")
+        claw_cli = importlib.import_module("adapters.claw_cli")
+        runtime_pipeline = importlib.import_module("orchestrator.runtime_pipeline")
+
+        acknowledgement_kind = getattr(stream_events, "KIND_ACKNOWLEDGEMENT", None)
+        if acknowledgement_kind != "acknowledgement":
+            raise HotReloadError(
+                "Hot reload contract failed: adapters.stream_events does not expose "
+                "KIND_ACKNOWLEDGEMENT='acknowledgement'"
+            )
+        if getattr(claw_cli, "KIND_ACKNOWLEDGEMENT", None) != acknowledgement_kind:
+            raise HotReloadError(
+                "Hot reload contract failed: adapters.claw_cli retained a stale "
+                "acknowledgement event constant"
+            )
+        if not callable(getattr(runtime_pipeline, "setup_interactive_feedback", None)):
+            raise HotReloadError(
+                "Hot reload contract failed: runtime acknowledgement pipeline unavailable"
+            )
+        contract_message = (
+            "Hot reload contract verified: Claw acknowledgement and runtime pipeline are current."
+        )
+        main_logger.info(contract_message)
+        bridge_logger.info(contract_message)
+
     async def hot_restart(self, restart: dict):
         """Stop agents per restart mode, reload Python code and config, then start agents."""
         mode = restart.get("mode", "same")
@@ -117,6 +149,7 @@ class RebootManager:
         reload_error: HotReloadError | None = None
         try:
             self.reload_project_modules(module_names)
+            self.validate_agent_runtime_contract()
             self.rebuild_hot_managers()
         except HotReloadError as exc:
             reload_error = exc
