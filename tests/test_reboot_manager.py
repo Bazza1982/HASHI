@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
 import sys
 import types
+from contextlib import suppress
 from types import SimpleNamespace
 
 import pytest
 
-from orchestrator.reboot_manager import RebootManager
+from adapters import claw_cli
 from orchestrator.hot_reload import HotReloadError
+from orchestrator.reboot_manager import RebootManager
 from orchestrator.service_manager import ServiceManager
 
 
@@ -159,6 +160,21 @@ def test_reload_project_modules_loads_stream_policy_before_flexible_runtime(monk
     assert policy_idx < runtime_idx
     assert pipeline_idx < runtime_idx
     assert status_idx < runtime_idx
+
+
+def test_validate_agent_runtime_contract_accepts_current_modules():
+    manager = RebootManager(kernel=object(), console_handler=None)
+
+    manager.validate_agent_runtime_contract()
+
+
+def test_validate_agent_runtime_contract_rejects_stale_claw_constant(monkeypatch):
+    manager = RebootManager(kernel=object(), console_handler=None)
+
+    monkeypatch.setattr(claw_cli, "KIND_ACKNOWLEDGEMENT", "stale")
+
+    with pytest.raises(HotReloadError, match="retained a stale"):
+        manager.validate_agent_runtime_contract()
 
 
 def test_reload_project_modules_fails_fast_instead_of_continuing(monkeypatch):

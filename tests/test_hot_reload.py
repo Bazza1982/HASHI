@@ -7,6 +7,7 @@ import pytest
 from orchestrator.hot_reload import (
     HotReloadError,
     discover_loaded_project_modules,
+    module_reload_key,
     preflight_module_sources,
 )
 
@@ -76,3 +77,27 @@ def test_hot_reload_discovery_rejects_prefixed_modules_outside_project(tmp_path)
         {module.__name__: module},
         code_root=project,
     ) == []
+
+
+def test_hot_reload_orders_adapter_protocol_before_consumers():
+    names = [
+        "adapters.claw_cli",
+        "adapters.openrouter_api",
+        "adapters.base",
+        "adapters.stream_io",
+        "adapters.stream_events",
+        "adapters.deepseek_api",
+        "orchestrator.runtime_pipeline",
+        "orchestrator.flexible_agent_runtime",
+    ]
+
+    ordered = sorted(names, key=module_reload_key)
+
+    assert ordered.index("adapters.stream_events") < ordered.index("adapters.base")
+    assert ordered.index("adapters.stream_io") < ordered.index("adapters.claw_cli")
+    assert ordered.index("adapters.base") < ordered.index("adapters.claw_cli")
+    assert ordered.index("adapters.openrouter_api") < ordered.index("adapters.deepseek_api")
+    assert ordered.index("adapters.claw_cli") < ordered.index("orchestrator.runtime_pipeline")
+    assert ordered.index("orchestrator.runtime_pipeline") < ordered.index(
+        "orchestrator.flexible_agent_runtime"
+    )

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import py_compile
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from types import ModuleType
-from typing import Mapping
 
 
 HOT_RELOAD_PREFIXES = ("adapters.", "tools.", "orchestrator.")
@@ -20,15 +20,24 @@ COLD_RESTART_MODULES = frozenset(
 )
 
 # Only dependency roots that are imported by many consumers belong here.
-# The order is centralized so /reboot has one reload contract.
+# The order is centralized so /reboot has one reload contract.  In particular,
+# adapter protocol modules must be refreshed before adapters that import their
+# constants/classes at module import time.  Otherwise a hot reload can combine
+# new consumer source with the previous in-memory protocol module.
 FOUNDATION_PHASES = {
+    "adapters.stream_events": 0,
+    "adapters.stream_io": 0,
     "orchestrator.flexible_backend_registry": 0,
     "orchestrator.command_specs": 0,
     "orchestrator.runtime_defaults": 0,
     "orchestrator.workspace_state": 0,
+    "adapters.base": 1,
+    "adapters.xai_oauth_credentials": 1,
     "orchestrator.model_catalog": 1,
     "orchestrator.manager_registry": 1,
     "orchestrator.ticket_manager": 1,
+    "adapters.openrouter_api": 2,
+    "adapters.xai_imagine": 2,
 }
 
 
@@ -40,10 +49,10 @@ def module_reload_key(name: str) -> tuple[int, str]:
     if name in FOUNDATION_PHASES:
         return (FOUNDATION_PHASES[name], name)
     if name.startswith(("adapters.", "tools.")):
-        return (2, name)
+        return (3, name)
     if "_runtime" in name:
-        return (4, name)
-    return (3, name)
+        return (5, name)
+    return (4, name)
 
 
 def discover_loaded_project_modules(
