@@ -697,7 +697,7 @@ async def setup_interactive_feedback(
     if claw_ack_enabled:
         from adapters.stream_events import KIND_ACKNOWLEDGEMENT
 
-        presentation_callback = stream_callback
+        acknowledgement_presentation_callback = stream_callback
         acknowledgement_sent = False
 
         async def _claw_ack_callback(event):
@@ -729,8 +729,8 @@ async def setup_interactive_feedback(
                         f"Claw acknowledgement delivery failed: request={item.request_id} "
                         f"error_type={type(exc).__name__}"
                     )
-            if presentation_callback is not None:
-                result = presentation_callback(event)
+            if acknowledgement_presentation_callback is not None:
+                result = acknowledgement_presentation_callback(event)
                 if inspect.isawaitable(result):
                     await result
 
@@ -741,12 +741,12 @@ async def setup_interactive_feedback(
     # activity store is bounded and credential-redacted by construction.
     activity_store = getattr(runtime, "request_activity", None)
     if activity_store is not None:
-        presentation_callback = stream_callback
+        activity_presentation_callback = stream_callback
 
         async def _activity_callback(event):
             activity_store.publish_stream(item.request_id, event)
-            if presentation_callback is not None:
-                result = presentation_callback(event)
+            if activity_presentation_callback is not None:
+                result = activity_presentation_callback(event)
                 if inspect.isawaitable(result):
                     await result
 
