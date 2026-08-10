@@ -1,16 +1,16 @@
 {
   "manifest_version": 1,
   "runtime": "hashi-claw",
-  "version": "0.1.3-hashi.13",
+  "version": "0.1.3-hashi.14",
   "upstream_commit": "4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d",
-  "source_commit": "7abef95278e012ee8a157df5ac4ec3215f3f95eb",
+  "source_commit": "e0e913529fe13bd30e2e5ffbedca7e05ea3b5a03",
   "source_branch": "integration/hashi-claw-4ea31c1",
   "build_date": "2026-08-10",
-  "notes": "Claw 0.1.3 pinned to upstream 4ea31c1 with concrete model-generated medium-plus task acknowledgement isolated to the authoritative current request while inheriting the agent's visible persona, language, tone, form of address, and style, fail-closed initial acknowledgement quality checks, non-fatal replanning recovery that preserves the confirmed task frame, visible-finalization recovery for hidden control-only output, conservative authorization anchoring, 60-second model-driven semantic compaction, provider termination diagnostics, and deterministic thinking-only recovery.",
+  "notes": "Claw 0.1.3 pinned to upstream 4ea31c1 with concrete model-generated medium-plus task acknowledgement isolated to the authoritative current request while visibly demonstrating the agent's persona, language, tone, form of address, self-name, and style, fail-closed initial acknowledgement quality checks, non-fatal replanning recovery that preserves the confirmed task frame, visible-finalization recovery for hidden control-only output, conservative authorization anchoring, 60-second model-driven semantic compaction, provider termination diagnostics, and deterministic thinking-only recovery.",
   "binaries": {
     "linux-x86_64": {
-      "path": "releases/0.1.3-hashi.13/linux-x86_64/hashi-claw",
-      "sha256": "cf753e782f7a540468b775f391afba3bcb1e0cbff3b4aa7cf712cade3917f81c",
+      "path": "releases/0.1.3-hashi.14/linux-x86_64/hashi-claw",
+      "sha256": "858c20906a7f063281c9cbb4cbc34c7b7980036525d223df3b4352fd406b75dc",
       "rust_target_triple": "x86_64-unknown-linux-gnu",
       "binary_name": "hashi-claw"
     }
