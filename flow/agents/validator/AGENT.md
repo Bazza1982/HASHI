@@ -71,7 +71,7 @@
 ```
 claude-opus-4-6, claude-sonnet-4-6, claude-haiku-4-5-20251001,
 gemini-3.1-pro-preview, gemini-2.5-flash,
-gpt-5.4, deepseek/deepseek-v3.2-exp
+gpt-5.4, deepseek/deepseek-v4-pro, deepseek/deepseek-v4-flash
 ```
 
 ### 文件存在性检查

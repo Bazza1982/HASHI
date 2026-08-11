@@ -22,6 +22,9 @@ COLD_RESTART_MODULES = frozenset(
 # Only dependency roots that are imported by many consumers belong here.
 # The order is centralized so /reboot has one reload contract.
 FOUNDATION_PHASES = {
+    # Adapter event vocabulary must be refreshed before adapters import newly
+    # added event kinds during the same live reload.
+    "adapters.stream_events": 0,
     "orchestrator.flexible_backend_registry": 0,
     "orchestrator.command_specs": 0,
     "orchestrator.runtime_defaults": 0,
@@ -68,6 +71,11 @@ def discover_loaded_project_modules(
         path = Path(raw_file)
         if path.suffix in {".pyc", ".pyo"}:
             path = Path(str(path)[:-1])
+        # A long-running process may still retain a module from a branch that
+        # has since been switched away. importlib.reload() cannot reload that
+        # stale object once its source file is gone, so exclude it up front.
+        if not path.is_file():
+            return False
         try:
             path.resolve().relative_to(root)
         except (OSError, ValueError):

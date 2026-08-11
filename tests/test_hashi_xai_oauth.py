@@ -165,10 +165,8 @@ def test_claw_provider_hashi_oauth_injection(tmp_path: Path, monkeypatch):
 def test_select_backend_prefers_xai_for_grok_model():
     from orchestrator.flexible_backend_manager import FlexibleBackendManager
 
-    class Dummy:
-        pass
-
-    mgr = Dummy()
+    mgr = FlexibleBackendManager.__new__(FlexibleBackendManager)
+    mgr.global_config = SimpleNamespace(claw_providers={})
     mgr.config = SimpleNamespace(
         allowed_backends=[
             {"engine": "claw-cli", "provider": "openrouter", "model": "deepseek/deepseek-v4-flash"},
