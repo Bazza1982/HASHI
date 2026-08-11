@@ -713,6 +713,14 @@ Scheduled tasks at specific times:
 }
 ```
 
+#### Offline Recovery
+
+On the first scheduler pass after HASHI restarts, due cron and heartbeat jobs are collected per target agent. HASHI counts every missed cron occurrence, persists one actionable recovery batch, and sends one deterministic notice directly to the user; the notice is not generated or paraphrased by an agent. It distinguishes affected task IDs from missed occurrences, shows each task's note/purpose and due-time window, and asks whether to replay all allowed occurrences, selected counts (`task-id=N`), or none.
+
+Pending and recently resolved batches are injected into the target agent's next user-driven turns, so follow-up questions can be answered without log searches. Clear replies such as `run all`, `补跑 3 次`, `task-id=3`, or `skip all` are resolved by the bridge itself. The batch remains idempotently persisted across restarts, while the normal schedule advances independently.
+
+Replay is safety-bounded. Jobs default to one recovery execution; a task that genuinely needs repeated catch-up can opt in with `"recovery": {"max_replay": 10}`. A single recent job keeps automatic catch-up behavior, while a stale cron still requires confirmation. Normal simultaneous heartbeat runs after startup continue independently and are not grouped.
+
 #### Skill-Based Jobs
 Jobs can invoke skills instead of prompts:
 ```json
