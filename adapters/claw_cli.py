@@ -87,6 +87,8 @@ CLAW_ENV_ALLOWLIST = (
     "CLAW_MAX_TOOL_ITERATIONS",
     "CLAW_TASK_PLANNING",
     "CLAW_EXECUTION_EFFORT",
+    "CLAW_MAX_PLUS_TOKEN_BUDGET",
+    "CLAW_MAX_PLUS_TIME_BUDGET_SECONDS",
     *OS_ENV_ALLOWLIST,
 )
 
@@ -96,10 +98,11 @@ CLAW_EXECUTION_EFFORT_ITERATIONS = {
     "high": 96,
     "xhigh": 192,
     "max": 384,
+    "max+": 512,
 }
 
 _CLAW_INCOMPLETE_STATUSES = {"incomplete"}
-_CLAW_INCOMPLETE_STOP_REASONS = {"max_iterations", "no_final_text"}
+_CLAW_INCOMPLETE_STOP_REASONS = {"budget_exhausted", "max_iterations", "no_final_text"}
 _CLAW_READ_ONLY_TOOL_MARKERS = (
     "get_",
     "read",
@@ -958,6 +961,17 @@ def _claw_jsonl_to_stream_event(event: Mapping[str, Any]) -> StreamEvent | None:
             summary=f"Review {gate} r{revision_round}: {decision} — {summary}"[:500],
             detail=json.dumps(review, ensure_ascii=False)[:4000],
         )
+    if kind == "max_plus_checkpoint":
+        phase = str(event.get("phase") or "unknown")
+        budget = event.get("budget") if isinstance(event.get("budget"), Mapping) else {}
+        return StreamEvent(
+            kind=KIND_PROGRESS,
+            summary=f"MAX+ checkpoint: {phase}"[:500],
+            detail=json.dumps(
+                {"budget": budget, "stop_reason": event.get("stop_reason")},
+                ensure_ascii=False,
+            )[:4000],
+        )
     if kind == "control_invocation":
         stage = str(event.get("stage") or "unknown")
         gate = str(event.get("gate") or "unknown")
@@ -1646,6 +1660,13 @@ class ClawCLIAdapter(BaseBackend):
         env["CLAW_MAX_TOOL_ITERATIONS"] = str(self._max_tool_iterations())
         env["CLAW_TASK_PLANNING"] = "0" if self.effort == "low" else "1"
         env["CLAW_EXECUTION_EFFORT"] = self.effort
+        if self.effort == "max+":
+            env["CLAW_MAX_PLUS_TOKEN_BUDGET"] = str(
+                self._extra.get("max_plus_token_budget", 1_500_000)
+            )
+            env["CLAW_MAX_PLUS_TIME_BUDGET_SECONDS"] = str(
+                self._extra.get("max_plus_time_budget_seconds", 1_500)
+            )
         if self._gateway_config_home is not None:
             env["CLAW_CONFIG_HOME"] = str(self._gateway_config_home)
             project_root = Path(__file__).resolve().parents[1]
@@ -2096,6 +2117,13 @@ class ClawCLIAdapter(BaseBackend):
                         usage.get("input_tokens") or 0,
                         usage.get("output_tokens") or 0,
                     )
+                elif kind == "max_plus_checkpoint":
+                    self.logger.info(
+                        "Claw MAX+ checkpoint: phase=%s budget=%s stop_reason=%s",
+                        event.get("phase") or "unknown",
+                        json.dumps(event.get("budget") or {}, ensure_ascii=False),
+                        event.get("stop_reason") or "none",
+                    )
                 elif kind == "provider_stop_reason":
                     self.logger.info(
                         "Claw provider termination received: reason=%s",
@@ -2166,9 +2194,20 @@ class ClawCLIAdapter(BaseBackend):
             "task_plan",
             "independent_review",
             "control_invocation",
+            "max_plus_checkpoint",
         }:
             return
         path = self.config.workspace_dir / "claw_control_events.jsonl"
         record = {"request_id": request_id, "event": event}
         with path.open("a", encoding="utf-8") as control_log:
             control_log.write(json.dumps(record, ensure_ascii=False) + "\n")
+        if str(event.get("kind") or "") == "max_plus_checkpoint":
+            state_dir = self.config.workspace_dir / "backend_state"
+            state_dir.mkdir(parents=True, exist_ok=True)
+            checkpoint_path = state_dir / "claw_max_plus_checkpoint.json"
+            checkpoint_tmp = state_dir / "claw_max_plus_checkpoint.json.tmp"
+            checkpoint_tmp.write_text(
+                json.dumps(record, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            checkpoint_tmp.replace(checkpoint_path)
