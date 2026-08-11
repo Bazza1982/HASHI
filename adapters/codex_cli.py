@@ -18,8 +18,8 @@ from adapters.stream_events import (
 
 class CodexCLIAdapter(BaseBackend):
     MAX_PROMPT_CHARS = 24000
-    DEFAULT_IDLE_TIMEOUT_SEC = 1800
-    DEFAULT_HARD_TIMEOUT_SEC = 36000
+    DEFAULT_IDLE_TIMEOUT_SEC = 60 * 60
+    DEFAULT_HARD_TIMEOUT_SEC = 24 * 60 * 60
     POST_TURN_COMPLETION_GRACE_SEC = 15
 
     def _define_capabilities(self) -> BackendCapabilities:
@@ -479,14 +479,13 @@ class CodexCLIAdapter(BaseBackend):
 
             if timeout_kind is not None:
                 duration_ms = round((time.perf_counter() - started) * 1000, 2)
-                detail = (
-                    f"idle for {self.IDLE_TIMEOUT_SEC}s with no output"
-                    if timeout_kind == "idle"
-                    else f"exceeded hard timeout of {self.HARD_TIMEOUT_SEC}s"
+                diagnostic = self._timeout_diagnostic(
+                    timeout_kind,
+                    started_monotonic=started,
                 )
                 self.logger.error(
                     f"Codex request {request_id} {timeout_kind}-timed out "
-                    f"(pid={proc.pid}, duration_ms={duration_ms}, detail={detail})"
+                    f"(pid={proc.pid}, duration_ms={duration_ms}, {diagnostic})"
                 )
                 await self.force_kill_process_tree(
                     proc, logger=self.logger,

@@ -61,6 +61,7 @@ from remote.local_http import local_http_hosts
 from remote.runtime_identity import read_runtime_claim
 from orchestrator import runtime_session
 from orchestrator import runtime_status
+from orchestrator import runtime_timeout
 from orchestrator import runtime_transfer
 from orchestrator import runtime_workspace
 from orchestrator import runtime_wrapper
@@ -3834,77 +3835,7 @@ class FlexibleAgentRuntime:
     async def cmd_timeout(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
-        args = [a.strip() for a in (context.args or []) if a.strip()]
-        backend = getattr(self, "backend", None) or (
-            self.backend_manager.current_backend if hasattr(self, "backend_manager") else None
-        )
-        extra = {}
-        if backend and hasattr(backend, "config") and backend.config.extra:
-            extra = backend.config.extra
-
-        # Defaults (in seconds) from the backend class
-        default_idle = getattr(type(backend), "DEFAULT_IDLE_TIMEOUT_SEC", 300) if backend else 300
-        default_hard = getattr(type(backend), "DEFAULT_HARD_TIMEOUT_SEC", 1800) if backend else 1800
-
-        if not args:
-            # Show current values
-            idle_s = extra.get("idle_timeout_sec") or extra.get("process_timeout") or default_idle
-            hard_s = extra.get("hard_timeout_sec") or default_hard
-            idle_min = int(idle_s) // 60
-            hard_min = int(hard_s) // 60
-            def_idle_min = default_idle // 60
-            def_hard_min = default_hard // 60
-            text = runtime_menu_views.timeout_menu_text(
-                agent_name=self.name,
-                idle_minutes=idle_min,
-                hard_minutes=hard_min,
-                default_idle_minutes=def_idle_min,
-                default_hard_minutes=def_hard_min,
-            )
-            await self._reply_text(update, text, parse_mode="HTML")
-            return
-
-        if args[0].lower() == "reset":
-            if backend and hasattr(backend, "config") and backend.config.extra:
-                backend.config.extra.pop("idle_timeout_sec", None)
-                backend.config.extra.pop("hard_timeout_sec", None)
-                backend.config.extra.pop("process_timeout", None)
-            def_idle_min = default_idle // 60
-            def_hard_min = default_hard // 60
-            await self._reply_text(
-                update,
-                f"⏱ Right-brain/backend timeout reset to defaults: idle={def_idle_min} min, hard={def_hard_min} min",
-            )
-            return
-
-        try:
-            idle_min = int(args[0])
-            if idle_min <= 0:
-                raise ValueError
-        except ValueError:
-            await self._reply_text(update, "Usage: /timeout [minutes] [hard_minutes] | reset")
-            return
-
-        hard_min = None
-        if len(args) >= 2:
-            try:
-                hard_min = int(args[1])
-                if hard_min <= 0:
-                    raise ValueError
-            except ValueError:
-                await self._reply_text(update, "Usage: /timeout [minutes] [hard_minutes] | reset")
-                return
-
-        if backend and hasattr(backend, "config"):
-            if backend.config.extra is None:
-                backend.config.extra = {}
-            backend.config.extra["idle_timeout_sec"] = idle_min * 60
-            backend.config.extra.pop("process_timeout", None)  # avoid legacy conflict
-            if hard_min is not None:
-                backend.config.extra["hard_timeout_sec"] = hard_min * 60
-
-        hard_str = f", hard={hard_min} min" if hard_min is not None else ""
-        await self._reply_text(update, f"⏱ Right-brain/backend timeout updated: idle={idle_min} min{hard_str}")
+        await runtime_timeout.cmd_timeout(self, update, context)
 
     async def cmd_hchat(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
