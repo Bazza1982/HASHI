@@ -299,7 +299,10 @@ def test_build_claw_env_uses_allowlist_only():
         ("max+", "512"),
     ],
 )
-def test_claw_execution_effort_maps_to_iteration_budget(tmp_path, effort, expected_iterations):
+def test_claw_execution_effort_maps_to_iteration_budget(
+    tmp_path, monkeypatch, effort, expected_iterations
+):
+    monkeypatch.setenv("CLAW_MAX_PLUS_TOKEN_BUDGET", "1")
     cfg = SimpleNamespace(
         name="test",
         workspace_dir=tmp_path,
@@ -314,8 +317,8 @@ def test_claw_execution_effort_maps_to_iteration_budget(tmp_path, effort, expect
     assert adapter._task_env()["CLAW_TASK_PLANNING"] == ("0" if effort == "low" else "1")
     assert adapter._task_env()["CLAW_EXECUTION_EFFORT"] == effort
     if effort == "max+":
-        assert adapter._task_env()["CLAW_MAX_PLUS_TOKEN_BUDGET"] == "1500000"
         assert adapter._task_env()["CLAW_MAX_PLUS_TIME_BUDGET_SECONDS"] == "1500"
+        assert "CLAW_MAX_PLUS_TOKEN_BUDGET" not in adapter._task_env()
 
 
 def test_claw_explicit_max_iterations_overrides_execution_effort(tmp_path):
@@ -343,7 +346,7 @@ def test_max_plus_checkpoint_is_request_correlated_and_atomically_recoverable(tm
     event = {
         "kind": "max_plus_checkpoint",
         "phase": "evidence_update",
-        "budget": {"tokens_used": 123, "token_limit": 1_500_000},
+        "budget": {"tokens_used": 123},
         "stop_reason": None,
         "frame": {"active_goal": "verify max plus"},
     }
@@ -1047,7 +1050,7 @@ async def test_claw_adapter_stream_json_emits_actual_thinking_delta(tmp_path):
         else:
             for event in [
                 {"kind": "run_started", "model": "deepseek/test"},
-                {"kind": "thinking_delta", "text": "Need to inspect adapter mapping.", "thinking_chars": 32,
+                {"kind": "thinking_delta", "text": " Need to inspect adapter mapping.", "thinking_chars": 33,
                  "reasoning_source": "reasoning", "visibility": "provider_returned"},
                 {"kind": "thinking_redacted", "summary": "provider emitted encrypted reasoning block", "thinking_chars": 0,
                  "reasoning_source": "reasoning_details.encrypted", "visibility": "provider_redacted"},
@@ -1078,7 +1081,7 @@ async def test_claw_adapter_stream_json_emits_actual_thinking_delta(tmp_path):
     assert response.is_success is True
     assert response.usage.thinking_tokens == 8
     assert response.stream_metadata["claw_thinking"] == {
-        "thinking_chars": 32,
+        "thinking_chars": 33,
         "thinking_tokens": 8,
         "thinking_event_count": 2,
         "thinking_redacted_count": 1,
@@ -1086,8 +1089,9 @@ async def test_claw_adapter_stream_json_emits_actual_thinking_delta(tmp_path):
     }
     assert any(
         event.kind == KIND_THINKING
-        and event.summary == "Need to inspect adapter mapping."
-        and event.detail == "thinking_chars=32;source=reasoning"
+        and event.summary == " Need to inspect adapter mapping."
+        and event.raw_delta == " Need to inspect adapter mapping."
+        and event.detail == "thinking_chars=33;source=reasoning"
         for event in events
     )
     assert any(
