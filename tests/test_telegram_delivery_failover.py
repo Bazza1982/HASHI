@@ -222,7 +222,7 @@ def test_persisted_typing_only_defaults_override_legacy_preview_config(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_cmd_preview_updates_persisted_preference_and_reports_status(tmp_path):
+async def test_cmd_preview_reports_retirement_without_mutating_preference(tmp_path):
     replies: list[str] = []
 
     async def _reply_text(_update, text, **_kwargs):
@@ -243,15 +243,14 @@ async def test_cmd_preview_updates_persisted_preference_and_reports_status(tmp_p
     update = SimpleNamespace(effective_user=SimpleNamespace(id=1))
 
     await FlexibleAgentRuntime.cmd_preview(runtime, update, SimpleNamespace(args=["off"]))
-    assert "OFF" in replies[-1]
+    assert "Live answer preview retired" in replies[-1]
     assert failover.effective_preview_enabled(runtime) is False
 
     await FlexibleAgentRuntime.cmd_preview(runtime, update, SimpleNamespace(args=["status"]))
-    assert "persisted override" in replies[-1]
-    assert "OFF" in replies[-1]
+    assert "Live answer preview retired" in replies[-1]
 
 
-def test_status_summary_reports_delivery_block_and_preview(tmp_path):
+def test_status_summary_reports_delivery_block_and_typing(tmp_path):
     runtime = _runtime(tmp_path, "kasumi", preview_default=False)
     runtime.backend_ready = True
     runtime.telegram_connected = True
@@ -315,4 +314,5 @@ def test_status_summary_reports_delivery_block_and_preview(tmp_path):
     assert "remaining" in text
     assert "until <code>2030-01-01T00:00:00+10:00</code>" in text
     assert "via <code>lin_yueru</code>" in text
-    assert "<b>Preview</b> · <code>OFF</code> · persisted override" in text
+    assert "<b>Typing</b> · <code>ON</code>" in text
+    assert "<b>Preview</b>" not in text

@@ -178,12 +178,16 @@ def model_menu_text(
     backend: str,
     has_choices: bool,
     persists: bool,
+    provider: str | None = None,
 ) -> str:
+    facts = [f"<b>Backend</b> · <code>{html.escape(backend)}</code>"]
+    if provider:
+        facts.append(f"<b>Provider</b> · <code>{html.escape(provider)}</code>")
     return setting_card(
         "🧠",
         "Hashi model",
         current=f"<code>{html.escape(model)}</code>",
-        facts=[f"<b>Backend</b> · <code>{html.escape(backend)}</code>"],
+        facts=facts,
         consequence=(
             "The selection applies immediately to the next request"
             + (" and persists." if persists else ".")
@@ -195,6 +199,87 @@ def model_menu_text(
             if has_choices
             else "Use <code>/model &lt;name&gt;</code> to switch."
         ),
+    )
+
+
+def claw_provider_menu_text(
+    *,
+    current_provider: str | None,
+    available_count: int,
+    unavailable: Sequence[tuple[str, str]] = (),
+    backend_flow: bool = False,
+) -> str:
+    facts = [
+        "<b>Backend</b> · <code>claw-cli</code>",
+        f"<b>Available</b> · <code>{available_count}</code> providers",
+        "<b>Changes</b> · applied and saved only after a model is selected",
+    ]
+    if unavailable:
+        locked = ", ".join(
+            f"{html.escape(name)} ({html.escape(reason)})"
+            for name, reason in unavailable
+        )
+        facts.append(f"<b>Unavailable</b> · {locked}")
+    return setting_card(
+        "🔌",
+        "Claw provider",
+        current=(
+            f"<code>{html.escape(current_provider)}</code>"
+            if current_provider
+            else "<code>not selected</code>"
+        ),
+        facts=facts,
+        consequence=(
+            "Selecting a provider opens its model list. The current backend remains unchanged until the model choice succeeds."
+            if backend_flow
+            else "Selecting a provider opens its model list. The current provider remains active until the model choice succeeds."
+        ),
+        action=(
+            "Choose a provider below."
+            if available_count
+            else "No usable Claw provider is configured for this agent."
+        ),
+    )
+
+
+def claw_provider_model_text(
+    *,
+    provider: str,
+    current_model: str,
+    model_count: int,
+    with_context: bool,
+) -> str:
+    facts = [
+        "<b>Backend</b> · <code>claw-cli</code>",
+        f"<b>Provider</b> · <code>{html.escape(provider)}</code>",
+        f"<b>Models</b> · <code>{model_count}</code> available",
+        f"<b>Switch</b> · {'with handoff context' if with_context else 'without handoff context'}",
+    ]
+    return setting_card(
+        "🧠",
+        "Choose Claw model",
+        current=f"<code>{html.escape(current_model or 'not selected')}</code>",
+        facts=facts,
+        consequence="Provider and model are validated, applied, and saved together. A failed switch keeps the current configuration.",
+        action=(
+            "Choose a model to complete the switch."
+            if model_count
+            else "No model is available for this provider. Go back and choose another provider."
+        ),
+    )
+
+
+def claw_provider_unavailable_text(*, backend: str) -> str:
+    return setting_card(
+        "🔌",
+        "Claw provider",
+        current="<b>UNAVAILABLE</b>",
+        facts=[
+            f"<b>Backend</b> · <code>{html.escape(backend)}</code>",
+            "<b>Scope</b> · <code>/provider</code> is available only for <code>claw-cli</code>",
+        ],
+        consequence="No backend, provider, or model was changed.",
+        action="Use <code>/backend</code> to select Claw first.",
     )
 
 

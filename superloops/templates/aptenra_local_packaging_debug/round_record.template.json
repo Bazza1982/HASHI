@@ -1,0 +1,57 @@
+{
+  "schema_version": 2,
+  "round_id": "R{{ROUND}}",
+  "round_number": "{{ROUND_NUMBER}}",
+  "status": "planned",
+  "round_focus": {
+    "latest_relevant_failure": "",
+    "smallest_direct_avoidance": "",
+    "failure_journal_path": ""
+  },
+  "candidate": {
+    "candidate_id": null,
+    "product_code": null,
+    "product_commit": null,
+    "packaging_commit": null,
+    "media_directory": null,
+    "msi_sha256": null
+  },
+  "actual_validation": {
+    "actual_install_attempted": false,
+    "install_mode": null,
+    "validation_source": null,
+    "source_or_unpacked_substituted": false,
+    "aptenra_shortcut_launch_attempted": false,
+    "aptenra_user_visible_launch_result": null,
+    "workbench_shortcut_launch_attempted": false,
+    "workbench_user_visible_launch_result": null,
+    "basic_functions_result": null,
+    "baseline_agent_count": null,
+    "baseline_session_count": null,
+    "ordered_stop_before_repair": null,
+    "repair_attempted": false,
+    "repair_result": null,
+    "post_repair_dual_launch_result": null,
+    "ordered_stop_before_uninstall": null,
+    "uninstall_attempted": false,
+    "uninstall_result": null,
+    "final_product_state": null,
+    "final_cleanup_result": null
+  },
+  "failure_handling": {
+    "candidate_failed": null,
+    "journal_updated": false,
+    "journal_entry": null,
+    "uninstall_completed": false,
+    "cleanup_passed": false
+  },
+  "environment_boundary": {
+    "user_environment_unchanged": null,
+    "original_debug_runtime_unchanged": null
+  },
+  "outcome": {
+    "status": "pending",
+    "candidate_disposition": null,
+    "next_round": null
+  }
+}

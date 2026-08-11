@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from adapters.base import BaseBackend, BackendCapabilities, BackendResponse, TokenUsage
+from adapters.stream_io import iter_stream_lines
 from adapters.stream_events import (
     StreamCallback,
     StreamEvent,
@@ -599,7 +600,7 @@ def _claw_jsonl_to_stream_event(event: Mapping[str, Any]) -> StreamEvent | None:
     if kind == "run_started":
         model = event.get("model") or "model unknown"
         return StreamEvent(
-            kind=KIND_THINKING,
+            kind=KIND_PROGRESS,
             summary=f"Claw stream started ({model})",
         )
     if kind == "thinking_delta":
@@ -909,15 +910,16 @@ class ClawCLIAdapter(BaseBackend):
     DEFAULT_HARD_TIMEOUT_SEC = 24 * 60 * 60
 
     def _define_capabilities(self) -> BackendCapabilities:
-        capabilities = BackendCapabilities(
+        return BackendCapabilities(
             supports_sessions=False,
             supports_files=True,
             supports_tool_use=True,
             supports_thinking_stream=False,
             supports_headless_mode=True,
+            supports_progress_stream=True,
+            supports_tool_stream=True,
+            supports_answer_stream=False,
         )
-        capabilities.supports_answer_stream = False
-        return capabilities
 
     def __init__(self, agent_config, global_config, api_key: str = None):
         super().__init__(agent_config, global_config, api_key)
@@ -954,7 +956,11 @@ class ClawCLIAdapter(BaseBackend):
         model = str(self.config.model or "").strip()
         provider = self._extra.get("provider")
         if provider:
-            return str(provider).strip(), model
+            provider_name = str(provider).strip()
+            prefix = f"{provider_name}:"
+            if model.startswith(prefix) and len(model) > len(prefix):
+                model = model[len(prefix):]
+            return provider_name, model
         if ":" in model:
             maybe_provider, maybe_model = model.split(":", 1)
             if maybe_provider in self._provider_configs() and maybe_model:
@@ -962,7 +968,27 @@ class ClawCLIAdapter(BaseBackend):
         return None, model
 
     def _claw_model(self) -> str:
-        return self._provider_and_model()[1]
+        provider_name, model = self._provider_and_model()
+        if not provider_name or "/" in model or ":" in model:
+            return model
+
+        provider = self._provider_configs().get(provider_name)
+        provider = provider if isinstance(provider, Mapping) else {}
+        configured_prefix = provider.get("claw_model_prefix")
+        if configured_prefix is not None:
+            prefix = str(configured_prefix).strip().rstrip("/")
+            return f"{prefix}/{model}" if prefix else model
+
+        # Named provider profiles without a specialized auth mode use Claw's
+        # OpenAI-compatible transport. Claw requires provider/model syntax,
+        # while APIs such as DeepSeek expect a bare upstream model ID. Claw's
+        # `local/` routing prefix selects that transport and is always stripped
+        # before the model is sent to the upstream API. (`openai/` is preserved
+        # for custom gateways such as OpenRouter.)
+        auth_mode = self._provider_auth_mode(provider)
+        if auth_mode not in {"hashi_oauth", "hashi-xai-oauth", "xai_oauth"}:
+            return f"local/{model}"
+        return model
 
     def _permission_mode(self) -> str:
         requested = str(self._extra.get("permission_mode") or "workspace-write")
@@ -1268,7 +1294,6 @@ class ClawCLIAdapter(BaseBackend):
             stderr=asyncio.subprocess.PIPE,
             cwd=str(self.effective_workdir),
             env=self._task_env(),
-            limit=1024 * 1024,
             **extra_kwargs,
         )
         self.current_proc = proc
@@ -1395,10 +1420,7 @@ class ClawCLIAdapter(BaseBackend):
 
         async def read_stdout() -> None:
             assert proc.stdout is not None
-            while True:
-                line = await proc.stdout.readline()
-                if not line:
-                    break
+            async for line in iter_stream_lines(proc.stdout):
                 stdout_chunks.append(line)
                 self._touch_activity()
                 try:
@@ -1412,10 +1434,7 @@ class ClawCLIAdapter(BaseBackend):
 
         async def read_stderr() -> None:
             assert proc.stderr is not None
-            while True:
-                line = await proc.stderr.readline()
-                if not line:
-                    break
+            async for line in iter_stream_lines(proc.stderr):
                 stderr_chunks.append(line)
                 self._touch_activity()
 

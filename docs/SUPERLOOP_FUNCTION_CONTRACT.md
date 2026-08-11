@@ -264,6 +264,28 @@ For live or template validation, record at least:
 - wait satisfaction or timeout handling;
 - closeout barrier evidence.
 
+## Liveness Without Scheduler-Owned Task Starts
+
+A loop may require active supervision without granting the background scheduler
+authority to start work.
+
+Use these as separate controls:
+
+```text
+scheduler_auto_advance = false
+idle nudge or explicit wakeup = enabled
+```
+
+With scheduler auto-advance disabled, an idle scheduler must not change a
+pending task to `in_progress`. An idle nudge may enqueue a continuation prompt
+to the orchestrator, but the nudge itself must not mutate the taskboard, waive
+evidence, operate a GUI, or declare a gate passed.
+
+After waking, the orchestrator must inspect state, tasks, waits, issues and
+evidence. It may then explicitly continue an existing task or start the next
+eligible task. This gives a long-running loop liveness without allowing
+background idleness to become execution authority.
+
 ## Alpha Wording
 
 Acceptable release wording:

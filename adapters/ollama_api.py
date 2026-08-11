@@ -39,15 +39,16 @@ class OllamaAdapter(OpenRouterAdapter):
         self.ollama_url = extra.get("ollama_url", _DEFAULT_OLLAMA_URL)
 
     def _define_capabilities(self) -> BackendCapabilities:
-        capabilities = BackendCapabilities(
+        return BackendCapabilities(
             supports_sessions=False,
             supports_files=False,
             supports_tool_use=True,
             supports_thinking_stream=True,
             supports_headless_mode=True,
+            supports_progress_stream=True,
+            supports_tool_stream=True,
+            supports_answer_stream=True,
         )
-        capabilities.supports_answer_stream = True
-        return capabilities
 
     async def initialize(self) -> bool:
         self.config.workspace_dir.mkdir(parents=True, exist_ok=True)
