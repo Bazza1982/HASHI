@@ -581,7 +581,8 @@ between `/stop`, `/steer`, `/focus`, and `/recall`, see
 |---------|-------------|
 | `/mode [fixed\|flex\|wrapper\|audit\|dual-brain]` | Switch execution mode; `/mode memory+` is a compatibility alias that only enables continuity |
 | `/backend [engine]` | Switch backend in Flex; other modes first offer an explicit switch-to-Flex confirmation |
-| `/model` | View/change active model, followed by optional effort selection when supported |
+| `/provider [name]` | Choose a provider for the active Claw backend, then choose one of that provider's models |
+| `/model [name]` | View/change a model within the active provider, followed by optional effort selection when supported |
 | `/core` | View/change the functional core backend/model used by wrapper or audit mode |
 | `/wrap` | View/change wrapper-mode persona wrapper backend/model/context |
 | `/wrapper` | View/edit wrapper-mode persona/style slots |
@@ -594,7 +595,7 @@ between `/stop`, `/steer`, `/focus`, and `/recall`, see
 | `/browser [status\|examples\|1-4 task]` | Direct an internet task through a selected browser/search route |
 | `/resend` | Replay the previous model or Bridge output exactly, without model work |
 | `/retry` | Stop stale execution, create a clean context, restore recent handoff continuity, and rerun the last prompt |
-| `/long` ... `/end` | Buffer long text across multiple messages, submit as one |
+| `/long` ... `/end` | Buffer text and Telegram media, submit everything as one request |
 | `/loop <interval> <task>` | Create recurring automated tasks via skill injection |
 
 `/retry` uses `/new`-equivalent cleanup for CLI backends and `/fresh`-equivalent
@@ -614,19 +615,22 @@ For Grok CLI, `/effort` offers `low`, `medium`, and `high`. HASHI defaults
 Grok sessions to `medium`, passes the selection to the CLI explicitly, and
 persists the chosen level for that backend across agent reloads.
 
-The `/backend` and `/model` menus finish as one configuration flow. Models with
-selectable effort levels show an optional effort step; keeping the current value
-leaves it unchanged. Models without selectable effort skip that step and show
-`n/a` in the saved configuration summary.
+The `/backend` and `/model` menus finish as one configuration flow. For
+`claw-cli`, that flow is backend → provider → model: `/provider` refreshes the
+available model list, while `/model` remains inside the active provider and
+never changes it. Provider and model are committed together only after the new
+route initializes successfully. Models with selectable effort levels show an
+optional effort step; keeping the current value leaves it unchanged. Models
+without selectable effort skip that step and show `n/a` in the saved
+configuration summary.
 
 #### Toggles & Settings
 
 | Command | Description |
 |---------|-------------|
-| `/verbose [on\|off]` | Toggle detailed status; in wrapper mode, `on` also shows core raw output and wrapper final output |
-| `/think [on\|off]` | Toggle thinking trace display |
-| `/stream [on\|off\|status]` | Control Telegram intermediate streaming; default OFF for final-only delivery |
-| `/preview [on\|off\|status]` | Compatibility switch for the answer-preview subfeature; requires `/stream on` |
+| `/verbose [on\|off]` | Show a temporary progress card with timing and available tool-result summaries |
+| `/think [on\|off]` | Show model-authored interim commentary plus genuine provider-returned reasoning when available |
+| `/typing [on\|off\|status]` | Control both the temporary `Agent is typing...` bubble and Telegram's native typing indicator |
 | `/safevoice [on\|off]` | Toggle voice confirmation (default: ON) |
 | `/active [on\|off\|minutes]` | Toggle proactive heartbeat |
 | `/whisper [small\|medium\|large]` | Set local voice transcription model |
@@ -1064,18 +1068,20 @@ python -m nagare.cli --help
 
 ---
 
-### /long ... /end — Long Text Handling
+### /long ... /end — Multimodal Batch Handling
 
-Telegram splits long messages automatically, which can cause incomplete understanding. The `/long` command buffers all fragments:
+Telegram splits long messages and delivers each attachment as its own update. The `/long` command groups text, documents, photos, audio, video, and stickers into one model request:
 
 ```
 /long          ← start collecting (optional: /long first line)
-(paste long text — Telegram splits into multiple messages)
-(all messages silently buffered, no LLM triggered)
-/end           ← assemble and submit as one message
+(send text and/or Telegram media in any order)
+(items are downloaded or transcribed, but no LLM is triggered)
+/end           ← assemble and submit as one request with one consolidated response
 ```
 
-**Safety:** 5-minute auto-submit timeout, empty buffer warning, duplicate `/long` detection.
+Pure-text batches keep the original long-text behavior. Media batches preserve item order and identify every local file path so the agent can inspect all items and compare them before replying. SafeVoice confirmations still apply to voice transcripts.
+
+**Safety:** 5-minute auto-submit timeout, empty buffer warning, duplicate `/long` detection, chat-scoped collection, and blocking `/end` while voice confirmations are pending.
 
 ---
 
@@ -1239,6 +1245,21 @@ duplicate alias `/paswd` has been removed.
     "authorized_id": 123456789,
     "default_tools": {
       "allowed": ["bash", "file_read", "file_write", "file_list"]
+    },
+    "claw_providers": {
+      "max_permission_mode": "workspace-write",
+      "providers": {
+        "openrouter": {
+          "base_url": "https://openrouter.ai/api/v1",
+          "secret": "openrouter_key",
+          "status": "stable"
+        },
+        "deepseek": {
+          "base_url": "https://api.deepseek.com/v1",
+          "secret": "deepseek_api_key",
+          "status": "stable"
+        }
+      }
     }
   },
   "agents": [
@@ -1250,7 +1271,25 @@ duplicate alias `/paswd` has been removed.
       "workspace_dir": "workspaces/hashiko",
       "is_active": true,
       "telegram_token_key": "hashiko",
-      "allowed_backends": ["gemini-cli", "claude-cli", "openrouter-api", "deepseek-api", "ollama-api"],
+      "allowed_backends": [
+        {"engine": "gemini-cli", "model": "gemini-3.1-pro-preview"},
+        {
+          "engine": "claw-cli",
+          "provider": "openrouter",
+          "models": [
+            "deepseek/deepseek-v4-flash",
+            "deepseek/deepseek-v4-pro",
+            "openai/gpt-4.1-mini"
+          ],
+          "default_model": "deepseek/deepseek-v4-flash"
+        },
+        {
+          "engine": "claw-cli",
+          "provider": "deepseek",
+          "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
+          "default_model": "deepseek-v4-flash"
+        }
+      ],
       "active_backend": "gemini-cli"
     }
   ]
@@ -1261,6 +1300,10 @@ Every agent must set `type` explicitly. New agents should normally use
 `"type": "flex"`. Omitted `type` is rejected so HASHI cannot accidentally fall
 back to the retired legacy fixed runtime. Explicit `"type": "fixed"` is reserved
 for emergency rollback only and requires `HASHI_ENABLE_LEGACY_FIXED_RUNTIME=1`.
+
+Claw provider profiles hold connection details, not secrets. Provider-specific
+`claw-cli` rows are the per-agent model allowlists shown by `/provider` and
+`/model`; the legacy singular `model` field remains a one-model allowlist.
 
 ### secrets.json
 ```json
@@ -1409,7 +1452,7 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
 - **Slim core architecture accepted** — `main.py` reduced from a large feature host into a slim process bootstrap/kernel wrapper; hot-reloadable managers now own agent lifecycle, service management, reboot, startup, shutdown, config, backend preflight, skills, and WhatsApp control
 - **Wrapper Agent Mode implemented** — agents can run a functional core model and a separate stateless wrapper model for final visible persona/style rewriting
   - `/core`, `/wrap`, and `/wrapper` configure core model, wrapper model/context, and persona/style slots with Telegram inline controls
-  - `/verbose on` shows a labeled wrapper trace with the core raw output, wrapper final output, wrapper status, latency, and fallback reason
+  - `/verbose on` shows a compact wrapper status, latency, and fallback summary without echoing raw answer drafts
   - Foreground and background responses, listeners, transfer suppression, handoff, project chat, voice replies, and HChat reply summaries use wrapper-visible text where appropriate; active `bridge:hchat` sends remain wrapper-bypassed until the delivery-boundary HChat pipeline is implemented
   - Core prompt memory stores core raw assistant output, while visible transcript, project chat, core transcript, and audit metadata remain separated for debugging and user-facing continuity
   - `/reset CONFIRM` preserves wrapper mode configuration and prompt slots, matching `/sys` preservation behavior; `/wipe CONFIRM` remains a hard workspace clear
@@ -1448,7 +1491,7 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
 - **Agent behavior audit** — local-only daily audit report generation
 - **Remote backend policy** — API backends blocked for automated requests, preventing runaway costs
 - **`/loop` command** — recurring tasks via natural language skill injection
-- **`/long` ... `/end`** — buffer long Telegram messages for single submission
+- **`/long` ... `/end`** — buffer text and Telegram media for one consolidated request
 - **`/say` TTS** — text-to-speech with multiple voice providers
 - **Minato MCP** — 8-tier workflow choreography with KASUMI tool delegation
 - **Obsidian wiki integration** — knowledge vault with daily sync and weekly LLM curation

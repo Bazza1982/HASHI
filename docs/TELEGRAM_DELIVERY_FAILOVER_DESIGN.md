@@ -1,10 +1,10 @@
 # Telegram Delivery Failover And Preview Control Plan
 
-> Runtime update (2026-07-12): Telegram intermediate streaming is now governed
-> by the independent `/stream` policy and defaults to OFF for every agent.
-> `/preview` remains a compatibility sub-switch and cannot activate streaming
-> while the master switch is OFF. Historical preview-default examples below
-> describe the earlier implementation.
+> Runtime update (2026-08-11): the public `/stream` and `/preview` controls are
+> retired. `/typing` owns both Telegram typing indicators, `/verbose` owns the
+> temporary progress/tool-summary card, and `/think` owns genuine provider
+> reasoning. Answers are delivered only when complete. Preview material below
+> is retained as historical design context.
 
 ## Problem
 

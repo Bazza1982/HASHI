@@ -7,6 +7,7 @@ import pytest
 from orchestrator.hot_reload import (
     HotReloadError,
     discover_loaded_project_modules,
+    module_reload_key,
     preflight_module_sources,
 )
 
@@ -76,3 +77,31 @@ def test_hot_reload_discovery_rejects_prefixed_modules_outside_project(tmp_path)
         {module.__name__: module},
         code_root=project,
     ) == []
+
+
+def test_hot_reload_discovery_skips_stale_module_without_source(tmp_path):
+    stale = types.ModuleType("orchestrator.runtime_removed_feature")
+    stale.__file__ = str(
+        tmp_path / "orchestrator" / "__pycache__" / "runtime_removed_feature.cpython-312.pyc"
+    )
+
+    assert discover_loaded_project_modules(
+        {stale.__name__: stale},
+        code_root=tmp_path,
+    ) == []
+
+
+def test_hot_reload_refreshes_stream_event_vocabulary_before_adapters():
+    names = [
+        "adapters.codex_cli",
+        "adapters.stream_events",
+        "adapters.base",
+        "orchestrator.flexible_agent_runtime",
+    ]
+
+    assert sorted(names, key=module_reload_key) == [
+        "adapters.stream_events",
+        "adapters.base",
+        "adapters.codex_cli",
+        "orchestrator.flexible_agent_runtime",
+    ]

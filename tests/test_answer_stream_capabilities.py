@@ -13,6 +13,7 @@ from adapters.grok_cli import GrokCLIAdapter
 from adapters.ollama_api import OllamaAdapter
 from adapters.openrouter_api import OpenRouterAdapter
 from adapters.stream_events import KIND_TEXT_DELTA
+from adapters.xai_api import XaiApiAdapter
 
 
 def _agent_config(tmp_path, *, extra=None):
@@ -60,6 +61,34 @@ def test_cli_backends_do_not_advertise_answer_stream_by_default(tmp_path):
 
     assert getattr(codex_capabilities, "supports_answer_stream", False) is False
     assert getattr(claw.capabilities, "supports_answer_stream", False) is False
+
+
+def test_backend_presentation_capabilities_have_explicit_meaning(tmp_path):
+    cfg = _agent_config(tmp_path)
+    backends = {
+        "codex": CodexCLIAdapter(cfg, SimpleNamespace(codex_cmd="codex"), api_key="test-key"),
+        "claude": ClaudeCLIAdapter(cfg, SimpleNamespace(claude_cmd="claude"), api_key="test-key"),
+        "gemini": GeminiCLIAdapter(cfg, SimpleNamespace(gemini_cmd="gemini"), api_key="test-key"),
+        "grok": GrokCLIAdapter(cfg, SimpleNamespace(grok_cmd="grok"), api_key="test-key"),
+        "openrouter": OpenRouterAdapter(cfg, SimpleNamespace(), api_key="test-key"),
+        "deepseek": DeepSeekAdapter(cfg, SimpleNamespace(), api_key="test-key"),
+        "xai": XaiApiAdapter(cfg, SimpleNamespace(), api_key="test-key"),
+        "ollama": OllamaAdapter(cfg, SimpleNamespace(), api_key=None),
+        "claw": ClawCLIAdapter(cfg, SimpleNamespace(), api_key="test-key"),
+    }
+
+    for backend in backends.values():
+        assert backend.capabilities.supports_progress_stream is True
+        assert backend.capabilities.supports_tool_stream is True
+
+    assert backends["codex"].capabilities.supports_thinking_stream is False
+    assert backends["codex"].capabilities.supports_commentary_stream is True
+    assert backends["gemini"].capabilities.supports_thinking_stream is False
+    assert backends["claw"].capabilities.supports_thinking_stream is False
+    for name in ("claude", "grok", "openrouter", "deepseek", "xai", "ollama"):
+        assert backends[name].capabilities.supports_thinking_stream is True
+    for name in ("claude", "gemini", "grok", "openrouter", "deepseek", "xai", "ollama", "claw"):
+        assert backends[name].capabilities.supports_commentary_stream is False
 
 
 @pytest.mark.asyncio
