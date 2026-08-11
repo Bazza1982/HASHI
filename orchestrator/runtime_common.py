@@ -16,7 +16,6 @@ class QueuedRequest:
     silent: bool = False
     is_retry: bool = False
     deliver_to_telegram: bool = True
-    active_habits: list[dict] | None = None
     skip_memory_injection: bool = False
 
 

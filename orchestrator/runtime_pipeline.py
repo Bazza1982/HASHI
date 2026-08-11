@@ -37,7 +37,6 @@ class TurnPrompt:
     effective_prompt: str
     final_prompt: str
     extra_sections: list[tuple[str, str]]
-    habit_ids: list[str]
     incremental: bool
     prompt_audit: dict[str, Any]
 
@@ -152,8 +151,7 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         and session_id is not None
     )
     continuity_enabled = is_memory_plus_enabled(runtime.workspace_dir)
-    habit_sections, habit_ids = runtime._build_habit_sections(item, effective_prompt)
-    extra_sections = runtime._workzone_prompt_section() + habit_sections
+    extra_sections = runtime._workzone_prompt_section()
     pre_turn_builder = runtime._build_pre_turn_context_sections
     pre_turn_kwargs = {"is_bridge_request": is_bridge_request}
     if "metadata" in inspect.signature(pre_turn_builder).parameters:
@@ -165,7 +163,6 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
             "engine": runtime.config.active_backend,
         }
     extra_sections += await pre_turn_builder(item, effective_prompt, **pre_turn_kwargs)
-    runtime.current_request_meta["habit_ids"] = habit_ids
     context_profile = None
     if continuity_enabled:
         context_profile = "memory_plus_session" if supports_sessions and runtime.backend_manager.agent_mode == "fixed" else "memory_plus_stateless"
@@ -191,7 +188,6 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         effective_prompt=effective_prompt,
         final_prompt=final_prompt,
         extra_sections=extra_sections,
-        habit_ids=habit_ids,
         incremental=incremental,
         prompt_audit=prompt_audit,
     )
@@ -835,7 +831,6 @@ async def handle_empty_success_response(runtime, item) -> None:
         f"{item.request_id} — treating as recoverable tool failure"
     )
     runtime._mark_error(err_msg)
-    runtime._record_habit_outcome(item, success=False, error_text=err_msg)
     if runtime._should_buffer_during_transfer(item.request_id):
         runtime._record_suppressed_transfer_result(item, success=False, error=err_msg)
     if not item.silent and not runtime._should_buffer_during_transfer(item.request_id):
@@ -877,7 +872,6 @@ async def prepare_successful_response(runtime, item, response, *, completion_pat
             wrapper_result=wrapper_result,
         )
     runtime._mark_success()
-    runtime._record_habit_outcome(item, success=True, response_text=response.text)
     safe_core_raw = extract_memory_plus_update_details(response.text).visible_text
     runtime._append_core_transcript(
         item,
@@ -1070,7 +1064,6 @@ async def handle_backend_error(
             f"(reason={user_interrupt_reason}, backend={runtime.config.active_backend}, "
             f"source={item.source}): {err_msg}"
         )
-        runtime._record_habit_outcome(item, success=False, error_text=soft_msg)
         if runtime._should_buffer_during_transfer(item.request_id):
             runtime._record_suppressed_transfer_result(item, success=False, error=soft_msg)
         await runtime._notify_request_listeners(
@@ -1097,7 +1090,6 @@ async def handle_backend_error(
         return
 
     runtime._mark_error(err_msg)
-    runtime._record_habit_outcome(item, success=False, error_text=err_msg)
     if runtime._should_buffer_during_transfer(item.request_id):
         runtime._record_suppressed_transfer_result(item, success=False, error=err_msg)
     await runtime._notify_request_listeners(

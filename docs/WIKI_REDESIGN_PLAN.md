@@ -181,8 +181,8 @@ Topics and their precise semantic scope (NOT keyword matching):
   step design, checkpoint/approval flows. NOT generic task loops.
 - Minato_Platform: Minato universal agentic AI OS — plugin-socket architecture,
   Veritas, KASUMI, AIPM integration. NOT HASHI itself.
-- Dream_System: Nightly dream reflection — memory promotion, habit tracking,
-  dream log generation.
+- Dream_System: Nightly dream reflection — memory promotion and dream log
+  generation. HER Habit–Meditation is a separate backend-local mechanism.
 - Obsidian_Wiki: Obsidian vault system — wiki page design, backlinks,
   memory_to_obsidian pipeline, vault structure.
 - Carbon_Accounting: GHG protocol, emissions research, sustainability,

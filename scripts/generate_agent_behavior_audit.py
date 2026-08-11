@@ -19,7 +19,6 @@ except ImportError:  # pragma: no cover
 PROJECT_ROOT = Path("/home/lily/projects/hashi")
 WORKSPACE = PROJECT_ROOT / "workspaces" / "lily"
 CONSOLIDATED_DB = WORKSPACE / "consolidated_memory.sqlite"
-HABIT_DB = WORKSPACE / "habit_evaluation.sqlite"
 BRIDGE_DB = WORKSPACE / "bridge_memory.sqlite"
 REPORT_DIR = WORKSPACE / "agent_behavior_audit_reports"
 LATEST_REPORT = WORKSPACE / "agent_behavior_audit_report_latest.md"
@@ -777,56 +776,6 @@ def consolidated_behavior_findings() -> tuple[list[Finding], list[str]]:
     return findings, notes
 
 
-def harmful_behavior_findings(limit: int = 4) -> tuple[list[Finding], list[str]]:
-    if not HABIT_DB.exists():
-        return [], []
-    findings: list[Finding] = []
-    notes: list[str] = []
-    cutoff = (now_sydney() - timedelta(hours=72)).isoformat()
-    with sqlite3.connect(HABIT_DB) as conn:
-        rows = fetch_all(
-            conn,
-            "SELECT agent_id, ts, habit_id, context_summary, feedback_text "
-            "FROM habit_events WHERE harmful=1 AND ts >= ? ORDER BY ts DESC LIMIT ?",
-            (cutoff, limit),
-        )
-    seen_habits: set[str] = set()
-    for agent_id, ts, habit_id, context_summary, feedback_text in rows:
-        if str(habit_id) in seen_habits:
-            continue
-        seen_habits.add(str(habit_id))
-        snippet = " ".join(str(context_summary or feedback_text or "").split())
-        if snippet and "[hchat task]" not in snippet.lower() and re.search(r"(you|未授权|did not ask|不该|先做后报|without asking|triggered your last action)", snippet, re.I):
-            findings.append(
-                Finding(
-                    severity="Medium",
-                    title=f"`{agent_id}` 最近存在 harmful 行为反馈",
-                    details=[f"habit_id=`{habit_id}`，这条 harmful 事件文本本身包含对 agent 行为的负面反馈，不只是抽象计数。"],
-                    evidence=[f"{ts}: {snippet[:220]}"],
-                )
-            )
-        else:
-            notes.append(f"{agent_id}: recent harmful event at {ts} 未提炼为主 finding（证据方向不足或上下文为空）")
-    return findings, notes
-
-
-def habit_summary(limit: int = 5) -> list[str]:
-    if not HABIT_DB.exists():
-        return ["缺少 `habit_evaluation.sqlite`。"]
-    with sqlite3.connect(HABIT_DB) as conn:
-        rows = fetch_all(
-            conn,
-            "SELECT agent_id, COALESCE(SUM(harmful),0), COALESCE(SUM(triggered),0) "
-            "FROM habit_events GROUP BY agent_id "
-            "HAVING COALESCE(SUM(harmful),0) > 0 "
-            "ORDER BY COALESCE(SUM(harmful),0) DESC, COALESCE(SUM(triggered),0) DESC LIMIT ?",
-            (limit,),
-        )
-    if not rows:
-        return ["`habit_evaluation.sqlite` 中暂未看到 harmful>0 的 agent 汇总。"]
-    return [f"{agent}: harmful={harmful}, triggered={triggered}" for agent, harmful, triggered in rows]
-
-
 def sort_findings(findings: list[Finding]) -> list[Finding]:
     order = ["Critical", "High", "Medium", "Medium-Low", "Low"]
     return sorted(findings, key=lambda item: order.index(item.severity) if item.severity in order else 99)
@@ -837,13 +786,10 @@ def build_behavior_findings(collected_agents: list[str]) -> tuple[list[Finding],
     notes: list[str] = []
     transcript_findings, transcript_notes = transcript_behavior_findings(collected_agents)
     consolidated_findings, consolidated_notes = consolidated_behavior_findings()
-    harmful_findings, harmful_notes = harmful_behavior_findings()
     findings.extend(transcript_findings)
     findings.extend(consolidated_findings)
-    findings.extend(harmful_findings)
     notes.extend(transcript_notes)
     notes.extend(consolidated_notes)
-    notes.extend(harmful_notes)
     return sort_findings(findings), notes
 
 
@@ -880,7 +826,6 @@ def build_report() -> str:
     scheduler_lines = recent_scheduler_lines()
     lily_log_lines = recent_lily_log_summary()
     bridge_summary = bridge_memory_stats()
-    harmful_lines = habit_summary()
 
     checked_scope = [
         f"`tasks.json` enabled cron {len(crons)} 条",
@@ -895,7 +840,6 @@ def build_report() -> str:
         "共享 skill fanout 映射",
         "enabled `enqueue_prompt` 的 prompt/args credential 关键词扫描",
         "配置 backend 与最近 scheduler 实际 engine 的差异扫描",
-        "`habit_evaluation.sqlite` harmful 汇总与最近 harmful 事件抽样",
     ]
     unchecked_scope = []
     if transcript_missing:
@@ -922,8 +866,6 @@ def build_report() -> str:
     if behavior_notes:
         evidence_lines.append("行为层附加扫描：")
         evidence_lines.extend(behavior_notes[:8])
-    evidence_lines.append("harmful 汇总参考：")
-    evidence_lines.extend(harmful_lines)
     evidence_lines.extend(lily_log_lines)
     sections.append(bullet(evidence_lines) + "\n")
 
@@ -944,7 +886,7 @@ def build_report() -> str:
             sections.append(bullet(finding.evidence) + "\n")
     else:
         sections.append(
-            "今天没有从 transcript / consolidated / harmful 事件里抓到新的高置信度行为失准项，但这只代表本次已检查范围内未发现，并不等于 agent 行为已被证明安全。\n"
+            "今天没有从 transcript / consolidated 记录里抓到新的高置信度行为失准项，但这只代表本次已检查范围内未发现，并不等于 agent 行为已被证明安全。\n"
         )
     sections.append("## 行为收敛确认\n")
     if clean_notes:

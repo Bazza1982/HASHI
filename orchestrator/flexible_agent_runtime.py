@@ -6,7 +6,6 @@ import time
 import asyncio
 import inspect
 import logging
-import sqlite3
 from uuid import uuid4
 from contextlib import suppress
 from datetime import datetime
@@ -40,7 +39,6 @@ from orchestrator.browser_mode import (
 from orchestrator.exp_mode import build_exp_task_prompt, get_exp_usage_text
 from orchestrator import runtime_control
 from orchestrator import runtime_delivery
-from orchestrator import runtime_habits
 from orchestrator import runtime_lifecycle
 from orchestrator import runtime_long
 from orchestrator import runtime_media
@@ -103,7 +101,6 @@ from orchestrator.flexible_backend_registry import (
 )
 from orchestrator.memory_index import MemoryIndex
 from orchestrator.handoff_builder import HandoffBuilder
-from orchestrator.habits import HabitStore
 from orchestrator.media_utils import is_image_file, normalize_image_file
 from orchestrator.parked_topics import ParkedTopicStore
 from orchestrator.post_turn_observer import (
@@ -146,7 +143,6 @@ from orchestrator.dual_brain_mode import (
     load_dual_brain_config,
 )
 
-HABIT_BROWSER_PAGE_SIZE = 5
 MAX_JOB_TRANSFER_SELECTIONS = 256
 
 
@@ -297,14 +293,6 @@ class FlexibleAgentRuntime:
             active_skill_provider=self._get_active_skill_sections,
             sys_prompt_manager=self.sys_prompt_manager,
         )
-        self.habit_store = HabitStore(
-            self.workspace_dir,
-            self.global_config.project_root,
-            self.name,
-            self._get_agent_class(),
-            self.global_config.instance_id,
-        )
-
         # Initialize FlexibleBackendManager
         self.backend_manager = FlexibleBackendManager(config, global_config, secrets)
         self.backend_manager.runtime = self
@@ -338,33 +326,6 @@ class FlexibleAgentRuntime:
         if self._authorized_telegram_ids:
             return self._authorized_telegram_ids[0]
         return self.global_config.authorized_id
-
-    def _get_agent_class(self) -> str:
-        extra = self.config.extra or {}
-        direct = getattr(self.config, "agent_class", None)
-        return (direct or extra.get("agent_class") or "general").strip().lower()
-
-    def _build_habit_sections(self, item: QueuedRequest, prompt: str) -> tuple[list[tuple[str, str]], list[str]]:
-        return runtime_habits.build_habit_sections(self, item, prompt)
-
-    def _record_habit_outcome(
-        self,
-        item: QueuedRequest,
-        *,
-        success: bool,
-        response_text: str | None = None,
-        error_text: str | None = None,
-    ) -> None:
-        runtime_habits.record_habit_outcome(
-            self,
-            item,
-            success=success,
-            response_text=response_text,
-            error_text=error_text,
-        )
-
-    def _capture_followup_habit_feedback(self, text: str) -> None:
-        runtime_habits.capture_followup_habit_feedback(self, text)
 
     def _is_authorized_user(self, user_id: int | None) -> bool:
         if user_id is None:
@@ -1462,43 +1423,6 @@ class FlexibleAgentRuntime:
             buttons.append([InlineKeyboardButton("↻ Refresh jobs", callback_data=f"skill:jobs:{skill.id}")])
         buttons.append([InlineKeyboardButton(BACK_LABEL, callback_data="skill:back:menu")])
         return InlineKeyboardMarkup(buttons) if buttons else None
-
-    def _habit_db_path(self) -> Path:
-        return runtime_habits.habit_db_path(self)
-
-    def _load_local_habit_counts(self) -> dict[str, int]:
-        return runtime_habits.load_local_habit_counts(self)
-
-    def _load_local_habit_rows(
-        self,
-        *,
-        offset: int = 0,
-        limit: int = HABIT_BROWSER_PAGE_SIZE,
-    ) -> tuple[int, list[sqlite3.Row]]:
-        return runtime_habits.load_local_habit_rows(self, offset=offset, limit=limit)
-
-    def _habit_status_button_label(self, current: str, target: str) -> str:
-        return runtime_habits.habit_status_button_label(current, target)
-
-    def _build_habit_browser_view(
-        self,
-        *,
-        offset: int = 0,
-        selected_habit_id: str | None = None,
-        notice: str | None = None,
-    ) -> tuple[str, InlineKeyboardMarkup]:
-        return runtime_habits.build_habit_browser_view(
-            self,
-            offset=offset,
-            selected_habit_id=selected_habit_id,
-            notice=notice,
-        )
-
-    def _set_local_habit_status(self, habit_id: str, target_status: str) -> tuple[bool, str]:
-        return runtime_habits.set_local_habit_status(self, habit_id, target_status)
-
-    def _build_habit_governance_view(self) -> str:
-        return runtime_habits.build_habit_governance_view(self)
 
     async def _render_skill_jobs(self, update_or_query, kind: str):
         from orchestrator.runtime_jobs import _build_jobs_with_buttons
@@ -3356,10 +3280,6 @@ class FlexibleAgentRuntime:
             return
 
         rest = " ".join(args[1:]).strip()
-        if skill.id == "habits" and not rest:
-            text, markup = self._build_habit_browser_view()
-            await self._reply_text(update, text, parse_mode="HTML", reply_markup=markup)
-            return
         if skill.id in {"cron", "heartbeat"} and not rest:
             await self._render_skill_jobs(update, skill.id)
             return
@@ -3465,9 +3385,6 @@ class FlexibleAgentRuntime:
         if data == "skill:noop:none":
             await query.answer()
             return
-        if data.startswith("skill:habits:"):
-            if await runtime_habits.handle_habit_callback(self, query, data):
-                return
         if data.startswith("skilljob:"):
             from orchestrator import runtime_jobs
             if await runtime_jobs.handle_skill_job_callback(self, query, data):
@@ -3972,7 +3889,6 @@ class FlexibleAgentRuntime:
         except HChatDraftParseError as exc:
             visible_text = draft_parse_error_text(exc)
             self._mark_error(visible_text)
-            self._record_habit_outcome(item, success=False, error_text=visible_text)
             self._append_core_transcript(
                 item,
                 core_raw=core_raw,
@@ -4009,10 +3925,8 @@ class FlexibleAgentRuntime:
         )
         if result.success:
             self._mark_success()
-            self._record_habit_outcome(item, success=True, response_text=visible_text)
         else:
             self._mark_error(visible_text)
-            self._record_habit_outcome(item, success=False, error_text=visible_text)
         parsed_fields = hchat_draft_parsed_log_fields(draft)
         delivery_fields = hchat_delivery_log_fields(result)
         self._append_core_transcript(
@@ -6958,7 +6872,6 @@ class FlexibleAgentRuntime:
         if await runtime_scheduler_recovery.handle_reply(self, text=text, chat_id=update.effective_chat.id):
             return
         _print_user_message(self.name, text)
-        self._capture_followup_habit_feedback(text)
         await self.enqueue_request(update.effective_chat.id, text, "text", _safe_excerpt(text))
 
     # ------------------------------------------------------------------
@@ -7631,7 +7544,6 @@ class FlexibleAgentRuntime:
         try:
             if task.cancelled():
                 self._mark_error(f"Background task cancelled: {item.summary}")
-                self._record_habit_outcome(item, success=False, error_text="background_task_cancelled")
                 self.logger.warning(f"Background task {item.request_id} was cancelled.")
                 is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
                 self._notify_right_brain_interrupted(
@@ -7663,7 +7575,6 @@ class FlexibleAgentRuntime:
             exc = task.exception()
             if exc:
                 self._mark_error(str(exc))
-                self._record_habit_outcome(item, success=False, error_text=str(exc))
                 self.error_logger.error(f"Background task {item.request_id} raised: {exc}")
                 is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
                 self._notify_right_brain_interrupted(
@@ -7697,7 +7608,6 @@ class FlexibleAgentRuntime:
             if response.is_success and response.text:
                 display_text = self._strip_transfer_accept_prefix(item, response.text)
                 self._mark_success()
-                self._record_habit_outcome(item, success=True, response_text=response.text)
                 visible_text, wrapper_result = await self._apply_wrapper_to_visible_text(item, display_text or response.text)
                 safe_core_raw = extract_memory_plus_update_details(response.text).visible_text
                 self._append_core_transcript(
@@ -7853,7 +7763,6 @@ class FlexibleAgentRuntime:
             else:
                 err_msg = response.error or "Unknown error"
                 self._mark_error(err_msg)
-                self._record_habit_outcome(item, success=False, error_text=err_msg)
                 is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
                 self._notify_right_brain_interrupted(
                     item,
@@ -7887,7 +7796,6 @@ class FlexibleAgentRuntime:
 
         except Exception as e:
             self._mark_error(str(e))
-            self._record_habit_outcome(item, success=False, error_text=str(e))
             self.error_logger.exception(
                 f"Unhandled error in _on_background_complete for {item.request_id}: {e}"
             )

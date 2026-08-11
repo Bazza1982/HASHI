@@ -49,7 +49,6 @@ def _runtime():
         get_current_model=lambda: "gpt-test",
         _skill_action_keyboard=lambda skill: "keyboard",
         _render_skill_jobs=None,
-        _build_habit_browser_view=None,
         send_long_message=lambda **kwargs: _send(sent, kwargs),
         sent_messages=sent,
     )

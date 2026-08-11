@@ -661,7 +661,7 @@ Veritas/backend/tests/test_ete_adapter.py
 
 - **ROUND_TRIP_CONTRACT.md** -- ETE follows the same "reader be liberal, writer be strict" philosophy
 - **NAGARE_FLOW_SYSTEM.md** -- ETE workflow YAML is Nagare's canonical format
-- **HABIT_BASED_SELF_IMPROVEMENT_PLAN.md** -- No direct overlap; habits are agent-internal, not exchanged via ETE
+- **HER_HABIT_MEDITATION.md** -- No direct overlap; HER Habits are agent-local and are not exchanged via ETE
 
 ---
 

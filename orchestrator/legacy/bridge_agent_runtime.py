@@ -2,7 +2,6 @@ from __future__ import annotations
 import re
 import json
 import time
-import sqlite3
 import asyncio
 import inspect
 import logging
@@ -32,7 +31,6 @@ from orchestrator.command_ui import (
 from orchestrator.command_registry import bind_runtime_commands, runtime_bot_commands
 from orchestrator.exp_mode import build_exp_task_prompt, get_exp_usage_text
 from orchestrator.handoff_builder import HandoffBuilder
-from orchestrator.habits import HabitStore
 from orchestrator.media_utils import is_image_file, normalize_image_file
 from orchestrator.parked_topics import ParkedTopicStore
 from orchestrator.usecomputer_mode import (
@@ -73,7 +71,6 @@ from orchestrator import telegram_stream_policy
 from orchestrator.runtime_display import _show_logo_animation
 from orchestrator.runtime_jobs import _build_jobs_with_buttons
 
-HABIT_BROWSER_PAGE_SIZE = 5
 MAX_JOB_TRANSFER_SELECTIONS = 256
 
 
@@ -163,14 +160,6 @@ class BridgeAgentRuntime:
             active_skill_provider=self._get_active_skill_sections,
             sys_prompt_manager=self.sys_prompt_manager,
         )
-        self.habit_store = HabitStore(
-            self.config.workspace_dir,
-            self.global_config.project_root,
-            self.name,
-            self._get_agent_class(),
-            self.global_config.instance_id,
-        )
-
     def get_typing_placeholder(self) -> tuple[str, str | None]:
         extra = self.config.extra or {}
         text = extra.get("typing_message")
@@ -215,78 +204,6 @@ class BridgeAgentRuntime:
         )
         section = build_workzone_prompt(self._workzone_dir, self.config.workspace_dir, can_access_files=can_access_files)
         return [section] if section else []
-
-    def _get_agent_class(self) -> str:
-        extra = self.config.extra or {}
-        direct = getattr(self.config, "agent_class", None)
-        return (direct or extra.get("agent_class") or "general").strip().lower()
-
-    def _build_habit_sections(self, item: QueuedRequest, prompt: str) -> tuple[list[tuple[str, str]], list[str]]:
-        habits = self.habit_store.retrieve(prompt, source=item.source, summary=item.summary)
-        if not habits:
-            item.active_habits = []
-            return [], []
-        self.habit_store.mark_triggered(habits)
-        item.active_habits = self.habit_store.serialize_habits(habits)
-        habit_ids = [habit.habit_id for habit in habits]
-        section = self.habit_store.render_prompt_section(habits)
-        self.logger.info(
-            f"Habit retrieval for {item.request_id}: {len(habit_ids)} matched ({', '.join(habit_ids)})"
-        )
-        self._log_maintenance(item, "habit_retrieval", habit_ids=",".join(habit_ids), habit_count=len(habit_ids))
-        return ([section] if section else []), habit_ids
-
-    def _record_habit_outcome(
-        self,
-        item: QueuedRequest,
-        *,
-        success: bool,
-        response_text: str | None = None,
-        error_text: str | None = None,
-    ) -> None:
-        active_habits = item.active_habits or []
-        if not active_habits:
-            return
-        try:
-            self.habit_store.record_execution_outcome(
-                request_id=item.request_id,
-                prompt=item.prompt,
-                source=item.source,
-                summary=item.summary,
-                active_habits=active_habits,
-                response_text=response_text,
-                error_text=error_text,
-                success=success,
-            )
-        except Exception as exc:
-            self.error_logger.warning(
-                f"Failed to record habit outcome for {item.request_id}: {exc}"
-            )
-
-    def _capture_followup_habit_feedback(self, text: str) -> None:
-        last_response = self.last_response or {}
-        request_id = last_response.get("request_id")
-        responded_at = last_response.get("responded_at")
-        if not request_id:
-            return
-        try:
-            result = self.habit_store.apply_user_feedback(
-                request_id=request_id,
-                feedback_text=text,
-                responded_at=responded_at,
-            )
-        except Exception as exc:
-            self.error_logger.warning(
-                f"Failed to capture habit feedback for {request_id}: {exc}"
-            )
-            return
-        if not result:
-            return
-        self.maintenance_logger.info(
-            f"Habit follow-up feedback for {request_id}: "
-            f"sentiment={result.sentiment} updated_events={result.updated_events} "
-            f"habits={','.join(result.updated_habits)}"
-        )
 
     def _setup_logging(self):
         formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
@@ -961,182 +878,6 @@ class BridgeAgentRuntime:
             await update_or_query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
         else:
             await update_or_query.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
-
-    def _habit_db_path(self) -> Path:
-        return self.config.workspace_dir / "habits.sqlite"
-
-    def _load_local_habit_counts(self) -> dict[str, int]:
-        db_path = self._habit_db_path()
-        counts = {"total": 0, "active": 0, "candidate": 0, "paused": 0, "disabled": 0}
-        if not db_path.exists():
-            return counts
-        with sqlite3.connect(db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            row = conn.execute(
-                """
-                SELECT
-                    COUNT(*) AS total,
-                    COALESCE(SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END), 0) AS active,
-                    COALESCE(SUM(CASE WHEN status = 'candidate' THEN 1 ELSE 0 END), 0) AS candidate,
-                    COALESCE(SUM(CASE WHEN status = 'paused' THEN 1 ELSE 0 END), 0) AS paused,
-                    COALESCE(SUM(CASE WHEN status = 'disabled' THEN 1 ELSE 0 END), 0) AS disabled
-                FROM habits
-                WHERE agent_id = ?
-                """,
-                (self.name,),
-            ).fetchone()
-        if row:
-            counts = {key: int(row[key] or 0) for key in counts}
-        return counts
-
-    def _load_local_habit_rows(self, *, offset: int = 0, limit: int = HABIT_BROWSER_PAGE_SIZE) -> tuple[int, list[sqlite3.Row]]:
-        db_path = self._habit_db_path()
-        if not db_path.exists():
-            return 0, []
-        with sqlite3.connect(db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            total = int(
-                conn.execute("SELECT COUNT(*) FROM habits WHERE agent_id = ?", (self.name,)).fetchone()[0] or 0
-            )
-            rows = conn.execute(
-                """
-                SELECT habit_id, status, enabled, habit_type, title, instruction, task_type, confidence
-                FROM habits
-                WHERE agent_id = ?
-                ORDER BY
-                    CASE status WHEN 'active' THEN 0 WHEN 'candidate' THEN 1 WHEN 'paused' THEN 2 ELSE 3 END,
-                    confidence DESC,
-                    updated_at DESC
-                LIMIT ? OFFSET ?
-                """,
-                (self.name, limit, max(offset, 0)),
-            ).fetchall()
-        return total, rows
-
-    def _habit_status_button_label(self, current: str, target: str) -> str:
-        return {
-            "active": "✓ Active" if current == "active" else "Activate",
-            "paused": "✓ Paused" if current == "paused" else "Pause",
-            "disabled": "✓ Disabled" if current == "disabled" else "Disable",
-        }[target]
-
-    def _build_habit_browser_view(
-        self,
-        *,
-        offset: int = 0,
-        selected_habit_id: str | None = None,
-        notice: str | None = None,
-    ) -> tuple[str, InlineKeyboardMarkup]:
-        import html as _html
-
-        counts = self._load_local_habit_counts()
-        total, rows = self._load_local_habit_rows(offset=offset)
-        lines = [
-            card_title("🧠", "Local habits"),
-            "",
-            f"<b>Current</b> · <code>{counts['total']}</code> habits",
-            f"<b>Agent</b> · <code>{_html.escape(self.name)}</code>",
-            f"<b>Active</b> · <code>{counts['active']}</code>",
-            f"<b>Candidate</b> · <code>{counts['candidate']}</code>",
-            f"<b>Paused</b> · <code>{counts['paused']}</code>",
-            f"<b>Disabled</b> · <code>{counts['disabled']}</code>",
-        ]
-        if notice:
-            lines.extend(["", f"✨ {_html.escape(notice)}"])
-        lines.append("")
-        buttons: list[list[InlineKeyboardButton]] = []
-        if not rows:
-            lines.append("No local habits yet.")
-        for idx, row in enumerate(rows, start=offset + 1):
-            title = str(row["title"] or "").strip()
-            instruction = str(row["instruction"] or "").strip()
-            label = title or instruction or "(untitled)"
-            task_type = str(row["task_type"] or "general")
-            status = str(row["status"] or "active")
-            habit_type = str(row["habit_type"] or "do")
-            confidence = float(row["confidence"] or 0.0)
-            icon = {"active": "🟢", "candidate": "🟡", "paused": "⏸", "disabled": "🔴"}.get(status, "⚪")
-            type_icon = {"do": "✅", "avoid": "🚫"}.get(habit_type, "•")
-            lines.append(f"{idx}. {icon} <b>{_html.escape(label[:80])}</b>")
-            lines.append(
-                f"   {type_icon} <code>{_html.escape(habit_type)}</code> • "
-                f"<code>{_html.escape(task_type)}</code> • conf <b>{confidence:.2f}</b>"
-            )
-            if selected_habit_id == row["habit_id"]:
-                lines.append(f"   💡 {_html.escape(instruction[:280])}")
-                lines.append(f"   🆔 <code>{_html.escape(str(row['habit_id']))}</code>")
-            lines.append("")
-            habit_id = str(row["habit_id"])
-            buttons.append([
-                InlineKeyboardButton("🔍 Detail", callback_data=f"skill:habits:view:{habit_id}:{offset}"),
-                InlineKeyboardButton(self._habit_status_button_label(status, "active"), callback_data=f"skill:habits:set:{habit_id}:active:{offset}"),
-            ])
-            buttons.append([
-                InlineKeyboardButton(self._habit_status_button_label(status, "paused"), callback_data=f"skill:habits:set:{habit_id}:paused:{offset}"),
-                InlineKeyboardButton(self._habit_status_button_label(status, "disabled"), callback_data=f"skill:habits:set:{habit_id}:disabled:{offset}"),
-            ])
-        nav: list[InlineKeyboardButton] = []
-        prev_offset = max(offset - HABIT_BROWSER_PAGE_SIZE, 0)
-        next_offset = offset + HABIT_BROWSER_PAGE_SIZE
-        if offset > 0:
-            nav.append(InlineKeyboardButton("◀ Prev", callback_data=f"skill:habits:list:{prev_offset}"))
-        nav.append(InlineKeyboardButton(REFRESH_LABEL, callback_data=f"skill:habits:list:{offset}"))
-        if next_offset < total:
-            nav.append(InlineKeyboardButton("Next ▶", callback_data=f"skill:habits:list:{next_offset}"))
-        if nav:
-            buttons.append(nav)
-        buttons.append([InlineKeyboardButton("Governance queue", callback_data="skill:habits:queue:0")])
-        return "\n".join(lines).strip(), InlineKeyboardMarkup(buttons)
-
-    def _set_local_habit_status(self, habit_id: str, target_status: str) -> tuple[bool, str]:
-        db_path = self._habit_db_path()
-        if not db_path.exists():
-            return False, "Habit store not found."
-        enabled = 1 if target_status == "active" else 0
-        now = datetime.now().isoformat(timespec="seconds")
-        with sqlite3.connect(db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            row = conn.execute(
-                "SELECT habit_id, status FROM habits WHERE habit_id = ? AND agent_id = ?",
-                (habit_id, self.name),
-            ).fetchone()
-            if row is None:
-                return False, "Habit not found."
-            old_status = str(row["status"] or "")
-            conn.execute(
-                "UPDATE habits SET status = ?, enabled = ?, updated_at = ? WHERE habit_id = ? AND agent_id = ?",
-                (target_status, enabled, now, habit_id, self.name),
-            )
-            conn.execute(
-                """
-                INSERT INTO habit_state_changes (habit_id, change_type, old_value, new_value, reason, changed_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (habit_id, "telegram_status", old_status, target_status, f"telegram:{self.name}", now),
-            )
-        return True, f"Habit set to {target_status}."
-
-    def _build_habit_governance_view(self) -> str:
-        import html as _html
-
-        project_root = self.config.workspace_dir.parent.parent
-        rows = HabitStore.list_copy_recommendations(project_root=project_root, limit=100)
-        shared_rows = HabitStore.list_shared_patterns(project_root=project_root, limit=100)
-        counts: dict[str, int] = {status: 0 for status in ("pending", "approved", "applied", "rejected", "obsolete")}
-        for row in rows:
-            counts[row.status] = counts.get(row.status, 0) + 1
-        lines = [
-            card_title("📋", "Habit governance"),
-            "",
-            f"<b>Current</b> · <code>{counts['pending']}</code> pending",
-            f"<b>Agent</b> · <code>{_html.escape(self.name)}</code>",
-            f"<b>Approved</b> · <code>{counts['approved']}</code> · <b>Applied</b> · <code>{counts['applied']}</code>",
-            f"<b>Rejected</b> · <code>{counts['rejected']}</code> · <b>Obsolete</b> · <code>{counts['obsolete']}</code>",
-            f"<b>Shared patterns</b> · <code>{len([item for item in shared_rows if item.status == HabitStore.SHARED_PATTERN_STATUS_ACTIVE])}</code> active",
-            "",
-            "This queue is separate from local habit counts.",
-        ]
-        return "\n".join(lines)
 
     async def invoke_scheduler_skill(self, skill_id: str, args: str, task_id: str) -> tuple[bool, str | None]:
         if not self.skill_manager:
@@ -1818,7 +1559,6 @@ class BridgeAgentRuntime:
         try:
             if task.cancelled():
                 self._mark_error(f"Background task cancelled: {item.summary}")
-                self._record_habit_outcome(item, success=False, error_text="background_task_cancelled")
                 self.logger.warning(f"Background task {item.request_id} was cancelled.")
                 await self.send_long_message(
                     item.chat_id,
@@ -1831,7 +1571,6 @@ class BridgeAgentRuntime:
             exc = task.exception()
             if exc:
                 self._mark_error(str(exc))
-                self._record_habit_outcome(item, success=False, error_text=str(exc))
                 self.error_logger.error(f"Background task {item.request_id} raised: {exc}")
                 await self.send_long_message(
                     item.chat_id,
@@ -1859,7 +1598,6 @@ class BridgeAgentRuntime:
                         background_completion=True,
                     )
                 self._mark_success()
-                self._record_habit_outcome(item, success=True, response_text=response.text)
                 runtime_retry.remember_output(self, item, response.text)
                 memory_user_text = item.prompt
                 if item.source.lower() in {"document", "photo", "voice", "audio", "video", "sticker"}:
@@ -1899,7 +1637,6 @@ class BridgeAgentRuntime:
                     )
                 err_msg = response.error or "Unknown error"
                 self._mark_error(err_msg)
-                self._record_habit_outcome(item, success=False, error_text=err_msg)
                 self.error_logger.error(f"Background task {item.request_id} failed: {err_msg}")
                 clipped = err_msg if len(err_msg) <= 3000 else err_msg[:2800].rstrip() + "\n\n[truncated]"
                 await self.send_long_message(
@@ -2283,13 +2020,10 @@ class BridgeAgentRuntime:
 
                 backend_started = datetime.now()
                 effective_prompt = self._consume_session_primer(item)
-                habit_sections, habit_ids = self._build_habit_sections(item, effective_prompt)
                 extra_sections = (
                     self._workzone_prompt_section()
-                    + habit_sections
                     + runtime_scheduler_recovery.context_section(self, item.source)
                 )
-                self.current_request_meta["habit_ids"] = habit_ids
                 prompt_payload = self.context_assembler.build_prompt_payload(
                     effective_prompt,
                     self.config.engine,
@@ -2437,7 +2171,6 @@ class BridgeAgentRuntime:
                     )
                     self._request_audit_meta.pop(item.request_id, None)
                     self._mark_success()
-                    self._record_habit_outcome(item, success=True, response_text=response.text)
                     await self._notify_request_listeners(
                         item.request_id,
                         {
@@ -2508,7 +2241,6 @@ class BridgeAgentRuntime:
                             f"(reason={interrupt_reason}, engine={self.config.engine}, "
                             f"source={item.source}): {err_msg}"
                         )
-                        self._record_habit_outcome(item, success=False, error_text=soft_msg)
                         await self._notify_request_listeners(
                             item.request_id,
                             {
@@ -2531,7 +2263,6 @@ class BridgeAgentRuntime:
                         continue
 
                     self._mark_error(err_msg)
-                    self._record_habit_outcome(item, success=False, error_text=err_msg)
                     await self._notify_request_listeners(
                         item.request_id,
                         {
@@ -2572,8 +2303,6 @@ class BridgeAgentRuntime:
                 break
             except Exception as e:
                 self._mark_error(str(e))
-                if item is not None:
-                    self._record_habit_outcome(item, success=False, error_text=str(e))
                 self.error_logger.exception(f"Queue processing error for {getattr(item, 'request_id', '?')}: {e}")
             finally:
                 self.is_generating = False
@@ -2673,7 +2402,6 @@ class BridgeAgentRuntime:
         ):
             return
         _print_user_message(self.name, text)
-        self._capture_followup_habit_feedback(text)
         self.append_conversation_entry("user", text, "text")
         await self.enqueue_request(update.effective_chat.id, text, "text", _safe_excerpt(text))
 
@@ -3795,10 +3523,6 @@ class BridgeAgentRuntime:
             return
 
         rest = " ".join(args[1:]).strip()
-        if skill.id == "habits" and not rest:
-            text, markup = self._build_habit_browser_view()
-            await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
-            return
         if skill.id in {"cron", "heartbeat"} and not rest:
             await self._render_skill_jobs(update, skill.id)
             return
@@ -3901,39 +3625,6 @@ class BridgeAgentRuntime:
         if data == "skill:noop:none":
             await query.answer()
             return
-        if data.startswith("skill:habits:"):
-            parts = data.split(":", 5)
-            action = parts[2] if len(parts) > 2 else "list"
-            if action == "list":
-                offset = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
-                text, markup = self._build_habit_browser_view(offset=offset)
-                await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
-                await query.answer()
-                return
-            if action == "view":
-                habit_id = parts[3] if len(parts) > 3 else ""
-                offset = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
-                text, markup = self._build_habit_browser_view(offset=offset, selected_habit_id=habit_id)
-                await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
-                await query.answer()
-                return
-            if action == "set":
-                habit_id = parts[3] if len(parts) > 3 else ""
-                target = parts[4] if len(parts) > 4 else ""
-                offset = int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else 0
-                ok, message = self._set_local_habit_status(habit_id, target)
-                text, markup = self._build_habit_browser_view(
-                    offset=offset,
-                    selected_habit_id=habit_id if ok else None,
-                    notice=message,
-                )
-                await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
-                await query.answer(message, show_alert=not ok)
-                return
-            if action == "queue":
-                await query.edit_message_text(self._build_habit_governance_view(), parse_mode="HTML")
-                await query.answer()
-                return
         if data.startswith("skilljob:"):
             _, kind, action, task_id, value = data.split(":", 4)
             if action == "toggle":
@@ -4052,9 +3743,6 @@ class BridgeAgentRuntime:
             if action == "show":
                 if skill.id in {"cron", "heartbeat"}:
                     await self._render_skill_jobs(query, skill.id)
-                elif skill.id == "habits":
-                    text, markup = self._build_habit_browser_view()
-                    await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
                 else:
                     await query.edit_message_text(
                         runtime_menu_views.skill_detail_text(

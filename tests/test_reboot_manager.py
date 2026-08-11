@@ -110,7 +110,6 @@ def test_reload_project_modules_loads_runtime_defaults_before_consumers(monkeypa
 def test_reload_project_modules_loads_instance_provider_before_consumers(monkeypatch):
     manager = RebootManager(kernel=object(), console_handler=None)
     module_names = [
-        "orchestrator.habits",
         "orchestrator.private_wol",
         "orchestrator.ticket_manager",
     ]
@@ -128,7 +127,6 @@ def test_reload_project_modules_loads_instance_provider_before_consumers(monkeyp
     manager.reload_project_modules()
 
     provider_idx = reloaded.index("orchestrator.ticket_manager")
-    assert provider_idx < reloaded.index("orchestrator.habits")
     assert provider_idx < reloaded.index("orchestrator.private_wol")
 
 

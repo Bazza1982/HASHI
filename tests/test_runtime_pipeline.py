@@ -175,11 +175,9 @@ def _runtime():
     runtime._log_maintenance = lambda item, event, **fields: runtime.maintenance_events.append((event, fields))
     runtime._safe_excerpt = lambda text, limit: text[:limit]
     runtime.success_marked = False
-    runtime.habit_outcomes = []
     runtime.transcripts = []
     runtime.listener_payloads = []
     runtime._consume_session_primer = lambda item: f"primer\n{item.prompt}"
-    runtime._build_habit_sections = lambda item, prompt: ([("Habit", "Be precise.")], ["precision"])
     runtime._workzone_prompt_section = lambda: [("Workzone", "/tmp/work")]
 
     async def _build_pre_turn_context_sections(item, prompt, *, is_bridge_request):
@@ -250,7 +248,6 @@ def _runtime():
     )
     runtime._strip_transfer_accept_prefix = lambda item, text: text.removeprefix("ACCEPTED:")
     runtime._mark_success = lambda: setattr(runtime, "success_marked", True)
-    runtime._record_habit_outcome = lambda item, **fields: runtime.habit_outcomes.append(fields)
     runtime._should_buffer_during_transfer = lambda request_id: False
     runtime._record_suppressed_transfer_result = lambda item, **fields: setattr(runtime, "suppressed", fields)
     runtime._should_retry_codex_scheduler_failure = lambda item, error: False
@@ -334,14 +331,11 @@ async def test_build_turn_prompt_collects_context_sections_and_updates_audit_sta
     prompt = await runtime_pipeline.build_turn_prompt(runtime, item, is_bridge_request=False)
 
     assert prompt.effective_prompt == "primer\nHello"
-    assert prompt.habit_ids == ["precision"]
     assert prompt.extra_sections == [
         ("Workzone", "/tmp/work"),
-        ("Habit", "Be precise."),
         ("Anatta", "Guide"),
     ]
     assert "codex-cli" in prompt.final_prompt
-    assert runtime.current_request_meta["habit_ids"] == ["precision"]
     assert runtime._thinking_chars_this_req == 0
     assert runtime._last_full_prompt_tokens == len(prompt.final_prompt) // 4
 
@@ -1305,9 +1299,6 @@ async def test_handle_empty_success_response_uses_tool_failure_message():
     await runtime_pipeline.handle_empty_success_response(runtime, item)
 
     assert runtime.last_error == runtime_pipeline.EMPTY_SUCCESS_TOOL_FAILURE_MESSAGE
-    assert runtime.habit_outcomes == [
-        {"success": False, "error_text": runtime_pipeline.EMPTY_SUCCESS_TOOL_FAILURE_MESSAGE}
-    ]
     assert runtime.sent_message["purpose"] == "error"
     assert "tool I tried to use" in runtime.listener_payloads[0]["error"]
 
@@ -1342,7 +1333,6 @@ async def test_prepare_successful_response_applies_wrapper_and_notifies_listener
     assert result.display_text == "core text"
     assert result.visible_text == "wrapped:core text"
     assert runtime.success_marked is True
-    assert runtime.habit_outcomes == [{"success": True, "response_text": "ACCEPTED:core text"}]
     assert runtime.transcripts == [
         {
             "core_raw": "ACCEPTED:core text",
@@ -1376,7 +1366,6 @@ async def test_prepare_successful_response_does_not_mark_hidden_only_text_succes
 
     assert result.visible_text == ""
     assert runtime.success_marked is False
-    assert runtime.habit_outcomes == []
     assert runtime.transcripts == []
     assert runtime.listener_payloads == []
 
@@ -1496,7 +1485,6 @@ async def test_handle_backend_error_notifies_and_delivers_error():
     )
 
     assert runtime.last_error == "backend failed"
-    assert runtime.habit_outcomes == [{"success": False, "error_text": "backend failed"}]
     assert runtime.listener_payloads[0]["success"] is False
     assert runtime.listener_payloads[0]["error"] == "backend failed"
     assert runtime.sent_message["purpose"] == "error"

@@ -17,6 +17,15 @@ from typing import Any, Mapping
 
 from adapters import stream_events as _stream_events
 from adapters.base import BackendCapabilities, BackendResponse, BaseBackend, TokenUsage
+from adapters.her_habits import (
+    MEDITATION_ALLOWED_TOOLS,
+    HabitMeditationConfig,
+    HERHabitStore,
+    attach_habits_to_prompt,
+    build_meditation_prompt,
+    extract_current_request,
+    parse_meditation_actions,
+)
 from adapters.stream_events import (
     KIND_ERROR,
     KIND_PROGRESS,
@@ -1443,6 +1452,9 @@ class HERAdapter(BaseBackend):
         self._session_state_path = self.config.workspace_dir / "backend_state" / "claw_session.json"
         self._gateway_context_path: Path | None = None
         self._gateway_config_home: Path | None = None
+        self._habit_store_instance: HERHabitStore | None = None
+        self._habit_execution_lock = asyncio.Lock()
+        self._habit_meditation_tasks: set[asyncio.Task] = set()
 
     def _load_session_identity(self) -> None:
         try:
@@ -1484,6 +1496,97 @@ class HERAdapter(BaseBackend):
     def _extra(self) -> dict[str, Any]:
         extra = getattr(self.config, "extra", None) or {}
         return dict(extra) if isinstance(extra, Mapping) else {}
+
+    def _habit_meditation_config(self) -> HabitMeditationConfig:
+        return HabitMeditationConfig.resolve(self.global_config, self._extra)
+
+    def _her_habit_store(self) -> HERHabitStore:
+        if self._habit_store_instance is None:
+            self._habit_store_instance = HERHabitStore(
+                self.config.workspace_dir,
+                logger=self.logger,
+            )
+        return self._habit_store_instance
+
+    def _schedule_habit_meditation(
+        self,
+        *,
+        request_id: str,
+        task_prompt: str,
+        task_result: ClawTaskResult,
+        config: HabitMeditationConfig,
+    ) -> None:
+        task = asyncio.create_task(
+            self._run_habit_meditation(
+                request_id=request_id,
+                task_prompt=task_prompt,
+                task_result=task_result,
+                config=config,
+            ),
+            name=f"her-habit-meditation:{self.config.name}:{request_id}",
+        )
+        self._habit_meditation_tasks.add(task)
+        task.add_done_callback(self._habit_meditation_tasks.discard)
+
+    async def _run_habit_meditation(
+        self,
+        *,
+        request_id: str,
+        task_prompt: str,
+        task_result: ClawTaskResult,
+        config: HabitMeditationConfig,
+    ) -> None:
+        try:
+            async with self._habit_execution_lock:
+                # Re-resolve the switch immediately before work so an operational
+                # off override can drain already-queued Meditation tasks safely.
+                if not self._habit_meditation_config().enabled:
+                    self.logger.info(
+                        "HER Habit Meditation skipped after disable: request=%s",
+                        request_id,
+                    )
+                    return
+                store = self._her_habit_store()
+                meditation_prompt = build_meditation_prompt(
+                    agent_name=self.config.name,
+                    task_prompt=task_prompt,
+                    result=task_result,
+                    habits=store.load(),
+                    config=config,
+                )
+                meditation_result = await asyncio.wait_for(
+                    self._run_task_async(
+                        meditation_prompt,
+                        resume=None,
+                        request_id=f"{request_id}:habit-meditation",
+                        on_stream_event=None,
+                        track_session_identity=False,
+                        permission_mode_override="read-only",
+                        allowed_tools_override=list(MEDITATION_ALLOWED_TOOLS),
+                        task_env_overrides={
+                            "CLAW_TASK_PLANNING": "0",
+                            "CLAW_MAX_TOOL_ITERATIONS": "8",
+                        },
+                    ),
+                    timeout=config.meditation_timeout_seconds,
+                )
+                actions = parse_meditation_actions(meditation_result.text)
+                outcomes = store.apply_actions(actions, max_actions=config.max_actions)
+                self.logger.info(
+                    "HER Habit Meditation completed: request=%s actions=%d outcomes=%s",
+                    request_id,
+                    len(actions[: config.max_actions]),
+                    ",".join(outcomes) or "no-change",
+                )
+        except asyncio.CancelledError:
+            self.logger.info("HER Habit Meditation cancelled: request=%s", request_id)
+            raise
+        except Exception as exc:  # noqa: BLE001 - Meditation is best-effort and never breaks the turn
+            self.logger.warning(
+                "HER Habit Meditation failed safely: request=%s error=%s",
+                request_id,
+                exc,
+            )
 
     def _allowed_tools(self) -> list[str] | None:
         """Return an explicit Claw-native tool restriction, if configured.
@@ -1852,6 +1955,12 @@ class HERAdapter(BaseBackend):
         return True
 
     async def shutdown(self):
+        pending_meditations = list(self._habit_meditation_tasks)
+        for task in pending_meditations:
+            task.cancel()
+        if pending_meditations:
+            await asyncio.gather(*pending_meditations, return_exceptions=True)
+        self._habit_meditation_tasks.clear()
         if self.current_proc:
             await self.force_kill_process_tree(
                 self.current_proc,
@@ -1880,14 +1989,41 @@ class HERAdapter(BaseBackend):
         if on_stream_event is not None:
             await on_stream_event(StreamEvent(kind=KIND_PROGRESS, summary="HER task started"))
 
+        habit_config = self._habit_meditation_config()
+        task_prompt = prompt
+        selected_habit_ids: list[str] = []
+        if habit_config.enabled:
+            selected_habits = self._her_habit_store().retrieve(
+                extract_current_request(prompt),
+                limit=habit_config.retrieval_limit,
+            )
+            selected_habit_ids = [habit.habit_id for habit in selected_habits]
+            task_prompt = attach_habits_to_prompt(prompt, selected_habits)
+            self.logger.info(
+                "HER Habit planning: request=%s matched=%d ids=%s effort=%s",
+                request_id,
+                len(selected_habit_ids),
+                ",".join(selected_habit_ids) or "none",
+                self.effort,
+            )
+
         started = time.perf_counter()
         try:
-            result = await self._run_task_async(
-                prompt,
-                resume=self._session_id,
-                request_id=request_id,
-                on_stream_event=on_stream_event,
-            )
+            if habit_config.enabled or self._habit_meditation_tasks:
+                async with self._habit_execution_lock:
+                    result = await self._run_task_async(
+                        task_prompt,
+                        resume=self._session_id,
+                        request_id=request_id,
+                        on_stream_event=on_stream_event,
+                    )
+            else:
+                result = await self._run_task_async(
+                    prompt,
+                    resume=self._session_id,
+                    request_id=request_id,
+                    on_stream_event=on_stream_event,
+                )
         except asyncio.CancelledError:
             if self.current_proc:
                 await self.force_kill_process_tree(
@@ -1964,6 +2100,13 @@ class HERAdapter(BaseBackend):
                 result.stop_reason or "unknown",
                 fallback_metadata.get("recommended_action") or "unknown",
             )
+        if habit_config.enabled:
+            self._schedule_habit_meditation(
+                request_id=request_id,
+                task_prompt=prompt,
+                task_result=result,
+                config=habit_config,
+            )
         return BackendResponse(
             text=response_text,
             duration_ms=result.duration_ms,
@@ -1984,6 +2127,14 @@ class HERAdapter(BaseBackend):
                 "claw_provider_stop_reason": result.provider_stop_reason or "unknown",
                 "claw_execution_effort": self.effort,
                 "claw_max_iterations": self._max_tool_iterations(),
+                **(
+                    {
+                        "her_habit_meditation": True,
+                        "her_habit_ids": selected_habit_ids,
+                    }
+                    if habit_config.enabled
+                    else {}
+                ),
                 **fallback_metadata,
             },
         )
@@ -1999,16 +2150,26 @@ class HERAdapter(BaseBackend):
         resume: str | None,
         request_id: str,
         on_stream_event: StreamCallback = None,
+        track_session_identity: bool = True,
+        permission_mode_override: str | None = None,
+        allowed_tools_override: list[str] | None = None,
+        task_env_overrides: Mapping[str, str] | None = None,
     ) -> ClawTaskResult:
         if self._binary is None:
             raise ClawBinaryNotFound("HER binary not initialized")
+        permission_mode = permission_mode_override or self._permission_mode()
+        allowed_tools = (
+            self._allowed_tools()
+            if allowed_tools_override is None
+            else allowed_tools_override
+        )
         args = build_claw_task_args(
             prompt,
             self._claw_model(),
-            permission_mode=self._permission_mode(),
+            permission_mode=permission_mode,
             resume=resume,
-            allowed_tools=self._allowed_tools(),
-            skip_permissions=self._skip_permissions(),
+            allowed_tools=allowed_tools,
+            skip_permissions=self._skip_permissions() and permission_mode_override is None,
             output_format="stream-json" if self._supports_stream_json else "json",
         )
         command = [str(self._binary), *args]
@@ -2016,19 +2177,28 @@ class HERAdapter(BaseBackend):
         extra_kwargs = {}
         if os.name != "nt":
             extra_kwargs["start_new_session"] = True
+        task_env = self._task_env()
+        if task_env_overrides:
+            task_env.update({str(key): str(value) for key, value in task_env_overrides.items()})
         proc = await asyncio.create_subprocess_exec(
             *command,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(self.effective_workdir),
-            env=self._task_env(),
+            env=task_env,
             **extra_kwargs,
         )
         self.current_proc = proc
         self._touch_activity()
         communication_task = asyncio.create_task(
-            self._communicate_stream_json(proc, command, request_id, on_stream_event)
+            self._communicate_stream_json(
+                proc,
+                command,
+                request_id,
+                on_stream_event,
+                track_session_identity=track_session_identity,
+            )
             if self._supports_stream_json
             else self._communicate_with_activity(proc)
         )
@@ -2080,8 +2250,7 @@ class HERAdapter(BaseBackend):
             self.current_proc = None
 
         duration_ms = self._duration_ms(started)
-        env = self._task_env()
-        secret_values = [env.get(key, "") for key in SECRET_ENV_KEYS]
+        secret_values = [task_env.get(key, "") for key in SECRET_ENV_KEYS]
         stdout = redact_secret_text(stdout_data.decode(errors="replace"), secret_values)
         stderr = redact_secret_text(stderr_data.decode(errors="replace"), secret_values)
         output = stdout.strip() or stderr.strip()
@@ -2102,7 +2271,7 @@ class HERAdapter(BaseBackend):
         return ClawTaskResult(
             text=str(parsed.get("message") or ""),
             model=str(parsed.get("model") or self._claw_model()),
-            permission_mode=self._permission_mode(),
+            permission_mode=permission_mode,
             cwd=str(self.effective_workdir),
             returncode=proc.returncode or 0,
             duration_ms=duration_ms,
@@ -2148,6 +2317,8 @@ class HERAdapter(BaseBackend):
         command: list[str],
         request_id: str,
         on_stream_event: StreamCallback = None,
+        *,
+        track_session_identity: bool = True,
     ) -> tuple[bytes, bytes]:
         stdout_chunks: list[bytes] = []
         stderr_chunks: list[bytes] = []
@@ -2164,7 +2335,7 @@ class HERAdapter(BaseBackend):
                     self.logger.warning("Ignoring non-JSON HER stream line: %r", line[:200])
                     continue
                 self._persist_control_event(request_id, event)
-                if event.get("kind") == "run_started":
+                if event.get("kind") == "run_started" and track_session_identity:
                     session_id = str(event.get("session_id") or "").strip()
                     if session_id:
                         self._session_id = session_id
