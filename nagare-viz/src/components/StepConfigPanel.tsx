@@ -35,12 +35,12 @@ const BACKEND_MODELS: Record<string, string[]> = {
     "gpt-4o-mini",
     "gemini-2.5-pro",
     "gemini-2.5-flash",
-    "deepseek-chat",
-    "deepseek-reasoner",
+    "deepseek/deepseek-v4-pro",
+    "deepseek/deepseek-v4-flash",
   ],
   "deepseek-api": [
-    "deepseek-chat",
-    "deepseek-reasoner",
+    "deepseek-v4-pro",
+    "deepseek-v4-flash",
   ],
   "gemini-cli": [
     "gemini-2.5-pro",

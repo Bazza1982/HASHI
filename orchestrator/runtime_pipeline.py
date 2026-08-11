@@ -390,6 +390,7 @@ async def answer_preview_loop(
     edit_attempts = 0
     chunks: list[str] = []
     latest_status = "Still working..."
+    latest_status_visible_with_text = False
     dirty = False
     preview_disabled = False
     status_kinds = {
@@ -404,6 +405,7 @@ async def answer_preview_loop(
         KIND_TOOL_START,
         KIND_VALIDATION,
     }
+    assurance_status_kinds = {KIND_REVIEW, KIND_TESTING, KIND_VALIDATION}
 
     def _preview_text() -> str:
         text = "".join(chunks).strip()
@@ -412,7 +414,9 @@ async def answer_preview_loop(
         elapsed = int((datetime.now() - started).total_seconds())
         header = f"✍️ {runtime.name} is replying... ({elapsed}s)\n\n"
         if text:
-            return header + f"📍 {latest_status}\n\n" + text
+            if latest_status_visible_with_text:
+                return header + f"📍 {latest_status}\n\n" + text
+            return header + text
         return header + latest_status
 
     async def _edit() -> None:
@@ -497,8 +501,11 @@ async def answer_preview_loop(
                     stream_state.delta_count += 1
                     stream_state.char_count += len(raw_summary)
                 dirty = True
-            elif kind in status_kinds and summary:
+            elif kind in status_kinds and summary and (
+                not chunks or kind in assurance_status_kinds
+            ):
                 latest_status = summary[:240]
+                latest_status_visible_with_text = kind in assurance_status_kinds
                 dirty = True
         except asyncio.TimeoutError:
             now = asyncio.get_running_loop().time()
@@ -529,14 +536,12 @@ async def setup_interactive_feedback(
     answer_preview_task = None
     answer_stream_state = None
     delivery_requested = not item.silent and item.deliver_to_telegram
-    policy = telegram_stream_policy.get_policy(runtime)
+    display_policy = telegram_stream_policy.get_display_policy(runtime)
     delivery_blocked = telegram_delivery_failover.is_delivery_blocked(runtime)
-    verbose_delivery_enabled = delivery_requested and runtime._verbose and not delivery_blocked
-    stream_delivery_enabled = (
-        delivery_requested
-        and (policy.enabled or runtime._verbose)
-        and not delivery_blocked
+    typing_delivery_enabled = (
+        delivery_requested and display_policy.typing_enabled and not delivery_blocked
     )
+    verbose_delivery_enabled = delivery_requested and runtime._verbose and not delivery_blocked
     think_delivery_enabled = delivery_requested and runtime._think and not delivery_blocked
     backend = runtime.backend_manager.current_backend
     her_ack_enabled = (
@@ -554,22 +559,22 @@ async def setup_interactive_feedback(
 
     if delivery_requested:
         runtime.logger.info(
-            f"Telegram stream policy {item.request_id}: enabled={policy.enabled}, "
-            f"source={policy.source}, placeholder={policy.placeholder_enabled}, "
-            f"typing={policy.typing_enabled}, progress={policy.progress_enabled}, "
-            f"preview={policy.preview_enabled}, promote={policy.promote_enabled}, "
-            f"verbose_override={verbose_delivery_enabled}, "
+            f"Telegram display policy {item.request_id}: "
+            f"typing={typing_delivery_enabled}, verbose={verbose_delivery_enabled}, "
+            f"think={think_delivery_enabled}, source={display_policy.source}, "
             f"blocked={delivery_blocked}"
         )
 
-    if stream_delivery_enabled or think_delivery_enabled:
+    if typing_delivery_enabled or verbose_delivery_enabled or think_delivery_enabled:
         stop_typing = asyncio.Event()
 
-    if stream_delivery_enabled:
-        placeholder_text, placeholder_parse_mode = runtime.get_typing_placeholder()
+    if typing_delivery_enabled or verbose_delivery_enabled:
+        if typing_delivery_enabled:
+            placeholder_text, placeholder_parse_mode = runtime.get_typing_placeholder()
+        else:
+            placeholder_text, placeholder_parse_mode = runtime.get_progress_placeholder()
         try:
-            placeholder_requested = policy.placeholder_enabled or verbose_delivery_enabled
-            if placeholder_requested and await telegram_delivery_failover.handle_blocked_send(
+            if await telegram_delivery_failover.handle_blocked_send(
                 runtime,
                 chat_id=item.chat_id,
                 request_id=item.request_id,
@@ -578,7 +583,7 @@ async def setup_interactive_feedback(
                 runtime.telegram_logger.warning(
                     f"Skipping placeholder for {item.request_id} — delivery blocked"
                 )
-            elif placeholder_requested:
+            else:
                 placeholder_started = datetime.now()
                 placeholder = await runtime.app.bot.send_message(
                     chat_id=item.chat_id,
@@ -604,76 +609,26 @@ async def setup_interactive_feedback(
             runtime.telegram_logger.warning(f"Failed to send placeholder: {e}")
 
         delivery_blocked = telegram_delivery_failover.is_delivery_blocked(runtime)
+        typing_delivery_enabled = typing_delivery_enabled and not delivery_blocked
+        verbose_delivery_enabled = verbose_delivery_enabled and not delivery_blocked
         think_delivery_enabled = think_delivery_enabled and not delivery_blocked
-        if not delivery_blocked and policy.typing_enabled and stop_typing is not None:
+        if typing_delivery_enabled and stop_typing is not None:
             typing_task = asyncio.create_task(runtime.typing_loop(item.chat_id, stop_typing))
 
         capabilities = getattr(backend, "capabilities", None)
-        supports_stream_display = bool(getattr(capabilities, "supports_thinking_stream", False))
-        stream_queue = None
-        answer_preview_queue = None
-        preview_enabled = policy.preview_enabled and placeholder is not None and not delivery_blocked
-        progress_enabled = (
-            (policy.progress_enabled or verbose_delivery_enabled)
-            and placeholder is not None
-            and not delivery_blocked
-        )
-        final_stream_enabled = policy.promote_enabled and preview_enabled
-        supports_answer_stream = bool(getattr(capabilities, "supports_answer_stream", False))
-        if final_stream_enabled and supports_answer_stream and placeholder is not None:
-            answer_stream_state = StreamedAnswerState(
-                request_id=item.request_id,
-                chat_id=item.chat_id,
-                placeholder=placeholder,
-                buffer=[],
-                started_at=datetime.now(),
-            )
         runtime.logger.info(
-            f"Answer stream eligibility {item.request_id}: "
-            f"preview={preview_enabled}, final={answer_stream_state is not None}, "
+            f"Verbose event eligibility {item.request_id}: enabled={verbose_delivery_enabled}, "
             f"backend={getattr(runtime.config, 'active_backend', 'unknown')}, "
-            f"supports_answer_stream={supports_answer_stream}"
+            f"progress={bool(getattr(capabilities, 'supports_progress_stream', False))}, "
+            f"tools={bool(getattr(capabilities, 'supports_tool_stream', False))}"
         )
-        use_stream = (
-            think_delivery_enabled
-            or audit_active
-            or preview_enabled
-            or (progress_enabled and runtime._verbose and supports_stream_display)
-        )
-        if use_stream:
-            if progress_enabled and runtime._verbose and supports_stream_display and not preview_enabled:
-                stream_queue = asyncio.Queue(maxsize=200)
-            if preview_enabled:
-                answer_preview_queue = asyncio.Queue(maxsize=300)
-            base_stream_callback = runtime._make_stream_callback(
+        if verbose_delivery_enabled and placeholder is not None and stop_typing is not None:
+            stream_queue = asyncio.Queue(maxsize=200)
+            stream_callback = runtime._make_stream_callback(
                 event_queue=stream_queue,
                 think_buffer=runtime._think_buffer if think_delivery_enabled else None,
                 audit_collector=audit_collector,
             )
-
-            if preview_enabled:
-                async def stream_callback(event):
-                    if answer_preview_queue is not None:
-                        try:
-                            answer_preview_queue.put_nowait(event)
-                        except asyncio.QueueFull:
-                            pass
-                    await base_stream_callback(event)
-            else:
-                stream_callback = base_stream_callback
-
-        if preview_enabled and answer_preview_queue is not None:
-            answer_preview_task = asyncio.create_task(
-                answer_preview_loop(
-                    runtime,
-                    item,
-                    placeholder=placeholder,
-                    stop_event=stop_typing,
-                    event_queue=answer_preview_queue,
-                    stream_state=answer_stream_state,
-                )
-            )
-        elif progress_enabled and runtime._verbose and supports_stream_display:
             escalation_task = asyncio.create_task(
                 runtime._streaming_display_loop(
                     item.chat_id,
@@ -681,16 +636,6 @@ async def setup_interactive_feedback(
                     item.request_id,
                     stop_typing,
                     stream_queue,
-                    backend=backend,
-                )
-            )
-        elif progress_enabled:
-            escalation_task = asyncio.create_task(
-                runtime._escalating_placeholder_loop(
-                    item.chat_id,
-                    placeholder,
-                    item.request_id,
-                    stop_typing,
                     backend=backend,
                 )
             )
@@ -758,12 +703,12 @@ async def setup_interactive_feedback(
     # activity store is bounded and credential-redacted by construction.
     activity_store = getattr(runtime, "request_activity", None)
     if activity_store is not None:
-        activity_presentation_callback = stream_callback
+        presentation_callback = stream_callback
 
         async def _activity_callback(event):
             activity_store.publish_stream(item.request_id, event)
-            if activity_presentation_callback is not None:
-                result = activity_presentation_callback(event)
+            if presentation_callback is not None:
+                result = presentation_callback(event)
                 if inspect.isawaitable(result):
                     await result
 

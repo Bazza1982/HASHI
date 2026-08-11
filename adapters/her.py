@@ -910,7 +910,7 @@ def _claw_jsonl_to_stream_event(event: Mapping[str, Any]) -> StreamEvent | None:
     if kind == "run_started":
         model = event.get("model") or "model unknown"
         return StreamEvent(
-            kind=KIND_THINKING,
+            kind=KIND_PROGRESS,
             summary=f"HER stream started ({model})",
         )
     if kind == "thinking_delta":
@@ -1411,19 +1411,20 @@ def run_claw_state(
 
 class HERAdapter(BaseBackend):
     """HASHI Engine Runtime (HER), derived from the MIT-licensed Claw runtime."""
-    DEFAULT_IDLE_TIMEOUT_SEC = 300
-    DEFAULT_HARD_TIMEOUT_SEC = 1800
+    DEFAULT_IDLE_TIMEOUT_SEC = 60 * 60
+    DEFAULT_HARD_TIMEOUT_SEC = 24 * 60 * 60
 
     def _define_capabilities(self) -> BackendCapabilities:
-        capabilities = BackendCapabilities(
+        return BackendCapabilities(
             supports_sessions=True,
             supports_files=True,
             supports_tool_use=True,
             supports_thinking_stream=False,
             supports_headless_mode=True,
+            supports_progress_stream=True,
+            supports_tool_stream=True,
+            supports_answer_stream=False,
         )
-        capabilities.supports_answer_stream = False
-        return capabilities
 
     def __init__(self, agent_config, global_config, api_key: str = None):
         super().__init__(agent_config, global_config, api_key)
@@ -1519,7 +1520,11 @@ class HERAdapter(BaseBackend):
         model = str(self.config.model or "").strip()
         provider = self._extra.get("provider")
         if provider:
-            return str(provider).strip(), model
+            provider_name = str(provider).strip()
+            prefix = f"{provider_name}:"
+            if model.startswith(prefix) and len(model) > len(prefix):
+                model = model[len(prefix):]
+            return provider_name, model
         if ":" in model:
             maybe_provider, maybe_model = model.split(":", 1)
             if maybe_provider in self._provider_configs() and maybe_model:
@@ -1527,7 +1532,24 @@ class HERAdapter(BaseBackend):
         return None, model
 
     def _claw_model(self) -> str:
-        return self._provider_and_model()[1]
+        provider_name, model = self._provider_and_model()
+        if not provider_name or "/" in model or ":" in model:
+            return model
+
+        provider = self._provider_configs().get(provider_name)
+        provider = provider if isinstance(provider, Mapping) else {}
+        configured_prefix = provider.get("claw_model_prefix")
+        if configured_prefix is not None:
+            prefix = str(configured_prefix).strip().rstrip("/")
+            return f"{prefix}/{model}" if prefix else model
+
+        # HER uses the upstream Claw transport protocol. Bare models on named
+        # OpenAI-compatible profiles need Claw's local/ routing prefix; the
+        # upstream API still receives the original bare model identifier.
+        auth_mode = self._provider_auth_mode(provider)
+        if auth_mode not in {"hashi_oauth", "hashi-xai-oauth", "xai_oauth"}:
+            return f"local/{model}"
+        return model
 
     def _permission_mode(self) -> str:
         requested = str(self._extra.get("permission_mode") or "workspace-write")
@@ -2005,24 +2027,55 @@ class HERAdapter(BaseBackend):
         )
         self.current_proc = proc
         self._touch_activity()
+        communication_task = asyncio.create_task(
+            self._communicate_stream_json(proc, command, request_id, on_stream_event)
+            if self._supports_stream_json
+            else self._communicate_with_activity(proc)
+        )
         try:
-            if self._supports_stream_json:
-                stdout_data, stderr_data = await asyncio.wait_for(
-                    self._communicate_stream_json(proc, command, request_id, on_stream_event),
-                    timeout=self.HARD_TIMEOUT_SEC,
+            timeout_kind = await self._wait_for_task_with_timeouts(
+                communication_task,
+                started_monotonic=started,
+            )
+            if timeout_kind is not None:
+                diagnostic = self._timeout_diagnostic(
+                    timeout_kind,
+                    started_monotonic=started,
                 )
-            else:
-                stdout_data, stderr_data = await asyncio.wait_for(proc.communicate(), timeout=self.HARD_TIMEOUT_SEC)
-        except asyncio.TimeoutError as exc:
+                self.logger.error(
+                    f"HER request {request_id} {timeout_kind}-timed out "
+                    f"(pid={proc.pid}, {diagnostic})"
+                )
+                await self.force_kill_process_tree(
+                    proc,
+                    logger=self.logger,
+                    reason=f"{timeout_kind}-timeout:{request_id}",
+                )
+                await asyncio.gather(communication_task, return_exceptions=True)
+                timeout_s = (
+                    self.IDLE_TIMEOUT_SEC
+                    if timeout_kind == "idle"
+                    else self.HARD_TIMEOUT_SEC
+                )
+                detail = (
+                    f"was idle for {timeout_s}s with no output"
+                    if timeout_kind == "idle"
+                    else f"exceeded hard timeout of {timeout_s}s"
+                )
+                raise ClawTimeoutError(
+                    f"HER command {detail}.",
+                    timeout_s=timeout_s,
+                )
+            stdout_data, stderr_data = await communication_task
+        except asyncio.CancelledError:
             await self.force_kill_process_tree(
                 proc,
                 logger=self.logger,
-                reason=f"hard-timeout:{self.HARD_TIMEOUT_SEC}s",
+                reason=f"cancelled:{request_id}",
             )
-            raise ClawTimeoutError(
-                f"HER command timed out after {self.HARD_TIMEOUT_SEC}s: {' '.join(command)}",
-                timeout_s=self.HARD_TIMEOUT_SEC,
-            ) from exc
+            communication_task.cancel()
+            await asyncio.gather(communication_task, return_exceptions=True)
+            raise
         finally:
             self.current_proc = None
 
@@ -2065,6 +2118,29 @@ class HERAdapter(BaseBackend):
             provider_stop_reason=str(parsed.get("provider_stop_reason") or "").strip() or None,
             estimated_cost=parsed.get("estimated_cost") if isinstance(parsed.get("estimated_cost"), str) else None,
         )
+
+    async def _communicate_with_activity(
+        self,
+        proc: asyncio.subprocess.Process,
+    ) -> tuple[bytes, bytes]:
+        stdout_chunks: list[bytes] = []
+        stderr_chunks: list[bytes] = []
+
+        async def read_stream(reader, chunks: list[bytes]) -> None:
+            assert reader is not None
+            while True:
+                chunk = await reader.read(64 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                self._touch_activity()
+
+        await asyncio.gather(
+            read_stream(proc.stdout, stdout_chunks),
+            read_stream(proc.stderr, stderr_chunks),
+        )
+        await proc.wait()
+        return b"".join(stdout_chunks), b"".join(stderr_chunks)
 
     async def _communicate_stream_json(
         self,

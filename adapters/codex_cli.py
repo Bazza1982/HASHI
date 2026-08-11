@@ -6,19 +6,20 @@ import asyncio
 import logging
 from pathlib import Path
 
+import adapters.stream_events as stream_event_types
 from adapters.base import BaseBackend, BackendCapabilities, BackendResponse, TokenUsage
 from adapters.stream_io import iter_stream_lines
 from adapters.stream_events import (
     StreamCallback, StreamEvent,
-    KIND_THINKING, KIND_TOOL_END,
+    KIND_TOOL_END,
     KIND_FILE_EDIT, KIND_SHELL_EXEC, KIND_PROGRESS,
 )
 
 
 class CodexCLIAdapter(BaseBackend):
     MAX_PROMPT_CHARS = 24000
-    DEFAULT_IDLE_TIMEOUT_SEC = 1800
-    DEFAULT_HARD_TIMEOUT_SEC = 36000
+    DEFAULT_IDLE_TIMEOUT_SEC = 60 * 60
+    DEFAULT_HARD_TIMEOUT_SEC = 24 * 60 * 60
     POST_TURN_COMPLETION_GRACE_SEC = 15
 
     def _define_capabilities(self) -> BackendCapabilities:
@@ -26,8 +27,12 @@ class CodexCLIAdapter(BaseBackend):
             supports_sessions=True,
             supports_files=True,
             supports_tool_use=True,
-            supports_thinking_stream=True,
+            supports_thinking_stream=False,
             supports_headless_mode=True,
+            supports_commentary_stream=True,
+            supports_progress_stream=True,
+            supports_tool_stream=True,
+            supports_answer_stream=False,
         )
 
     def __init__(self, agent_config, global_config, api_key: str = None):
@@ -212,11 +217,13 @@ class CodexCLIAdapter(BaseBackend):
     ) -> None:
         if on_stream_event is None or not pending_agent_message:
             return
-        text = " ".join(str(pending_agent_message.get("text") or "").split())
+        text = str(pending_agent_message.get("text") or "").strip()
         if not text:
             return
         self._emit_stream_event(
-            StreamEvent(kind=KIND_THINKING, summary=text[:160]),
+            # Resolve through the module at emission time so a running bridge
+            # can load a newly introduced event kind in the same hot restart.
+            StreamEvent(kind=stream_event_types.KIND_COMMENTARY, summary=text),
             on_stream_event,
         )
 
@@ -240,17 +247,22 @@ class CodexCLIAdapter(BaseBackend):
             usage = event.get("usage")
             if isinstance(usage, dict):
                 self._last_usage = TokenUsage(
-                    input_tokens=usage.get("input_tokens", 0),
-                    output_tokens=usage.get("output_tokens", 0),
-                    thinking_tokens=0,
+                    input_tokens=usage.get("input_tokens", 0) or 0,
+                    output_tokens=usage.get("output_tokens", 0) or 0,
+                    thinking_tokens=(
+                        usage.get("reasoning_output_tokens")
+                        or usage.get("reasoning_tokens")
+                        or 0
+                    ),
                 )
             return None
 
-        if pending_agent_message and not (etype == "item.completed" and item_type == "agent_message"):
+        if pending_agent_message:
             # Codex uses `agent_message` for intermediate progress updates as well as
             # the final answer. Hold the latest one until another event arrives; if
-            # something follows, it was an interim status update and can be exposed
-            # as a thinking trace without duplicating the final response.
+            # anything except `turn.completed` follows, it was model-authored interim
+            # commentary. `turn.completed` is handled above so the held final answer
+            # is not duplicated in the thinking channel.
             self._flush_pending_agent_message(pending_agent_message, on_stream_event)
             pending_agent_message = None
 
@@ -467,14 +479,13 @@ class CodexCLIAdapter(BaseBackend):
 
             if timeout_kind is not None:
                 duration_ms = round((time.perf_counter() - started) * 1000, 2)
-                detail = (
-                    f"idle for {self.IDLE_TIMEOUT_SEC}s with no output"
-                    if timeout_kind == "idle"
-                    else f"exceeded hard timeout of {self.HARD_TIMEOUT_SEC}s"
+                diagnostic = self._timeout_diagnostic(
+                    timeout_kind,
+                    started_monotonic=started,
                 )
                 self.logger.error(
                     f"Codex request {request_id} {timeout_kind}-timed out "
-                    f"(pid={proc.pid}, duration_ms={duration_ms}, detail={detail})"
+                    f"(pid={proc.pid}, duration_ms={duration_ms}, {diagnostic})"
                 )
                 await self.force_kill_process_tree(
                     proc, logger=self.logger,

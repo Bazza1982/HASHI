@@ -11,7 +11,7 @@ from adapters.base import BaseBackend, BackendCapabilities, BackendResponse
 from adapters.stream_io import iter_stream_lines
 from adapters.stream_events import (
     StreamCallback, StreamEvent,
-    KIND_THINKING, KIND_TOOL_START, KIND_TOOL_END,
+    KIND_TOOL_START, KIND_TOOL_END,
     KIND_FILE_READ, KIND_FILE_EDIT, KIND_SHELL_EXEC,
     KIND_TEXT_DELTA, KIND_PROGRESS, KIND_ERROR,
 )
@@ -19,8 +19,8 @@ from adapters.stream_events import (
 
 class GeminiCLIAdapter(BaseBackend):
     MAX_PROMPT_ARG_CHARS = 24000
-    DEFAULT_IDLE_TIMEOUT_SEC = 1800
-    DEFAULT_HARD_TIMEOUT_SEC = 36000
+    DEFAULT_IDLE_TIMEOUT_SEC = 60 * 60
+    DEFAULT_HARD_TIMEOUT_SEC = 24 * 60 * 60
 
     # Heuristic patterns to detect tool/file activity from Gemini CLI stderr.
     # Gemini CLI doesn't emit structured events, but it does log to stderr.
@@ -29,19 +29,20 @@ class GeminiCLIAdapter(BaseBackend):
         (re.compile(r"(?:Writing|Editing|wrote|edited)\s+(.+)", re.IGNORECASE), KIND_FILE_EDIT, "Edit"),
         (re.compile(r"(?:Running|Executing|shell|bash|command)\s*:?\s*(.+)", re.IGNORECASE), KIND_SHELL_EXEC, "Bash"),
         (re.compile(r"(?:Searching|grep|rg|find)\s+(.+)", re.IGNORECASE), KIND_TOOL_START, "Search"),
-        (re.compile(r"(?:Thinking|thinking)", re.IGNORECASE), KIND_THINKING, ""),
+        (re.compile(r"(?:Thinking|thinking)", re.IGNORECASE), KIND_PROGRESS, ""),
     ]
 
     def _define_capabilities(self) -> BackendCapabilities:
-        capabilities = BackendCapabilities(
+        return BackendCapabilities(
             supports_sessions=False,
             supports_files=True,
             supports_tool_use=True,
-            supports_thinking_stream=True,
+            supports_thinking_stream=False,
             supports_headless_mode=True,
+            supports_progress_stream=True,
+            supports_tool_stream=True,
+            supports_answer_stream=True,
         )
-        capabilities.supports_answer_stream = True
-        return capabilities
 
     def __init__(self, agent_config, global_config, api_key: str = None):
         super().__init__(agent_config, global_config, api_key)
@@ -360,9 +361,9 @@ class GeminiCLIAdapter(BaseBackend):
 
         stderr_task = asyncio.create_task(_read_stderr())
 
-        # Emit a thinking event at start
+        # Startup is progress, not provider-returned reasoning.
         self._emit_stream_event(
-            StreamEvent(kind=KIND_THINKING, summary="Thinking..."),
+            StreamEvent(kind=KIND_PROGRESS, summary="Gemini task started"),
             on_stream_event,
         )
 
@@ -400,14 +401,13 @@ class GeminiCLIAdapter(BaseBackend):
         if timeout_kind is not None:
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
             pid = getattr(proc, "pid", "unknown")
-            detail = (
-                f"idle for {self.IDLE_TIMEOUT_SEC}s with no output"
-                if timeout_kind == "idle"
-                else f"exceeded hard timeout of {self.HARD_TIMEOUT_SEC}s"
+            diagnostic = self._timeout_diagnostic(
+                timeout_kind,
+                started_monotonic=started,
             )
             self.logger.error(
                 f"Gemini request {request_id} {timeout_kind}-timed out "
-                f"(pid={pid}, duration_ms={duration_ms}, detail={detail})"
+                f"(pid={pid}, duration_ms={duration_ms}, {diagnostic})"
             )
             await self.force_kill_process_tree(
                 proc, logger=self.logger,
@@ -488,11 +488,12 @@ class GeminiCLIAdapter(BaseBackend):
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
             pid = getattr(proc, "pid", "unknown")
             proc_snapshot = await self._describe_process(pid) if pid != "unknown" else "<unknown pid>"
+            diagnostic = self._timeout_diagnostic("hard", started_monotonic=started)
             self.logger.error(
                 f"Gemini request {request_id} timed out "
                 f"(pid={pid}, duration_ms={duration_ms}, stateless=True, "
                 f"retry={is_retry}, stdin={stdin_data is not None}, prompt_len=N/A, "
-                f"cmd={cmd}, process_snapshot={self._preview_text(proc_snapshot, 700)})"
+                f"cmd={cmd}, {diagnostic}, process_snapshot={self._preview_text(proc_snapshot, 700)})"
             )
             await self.force_kill_process_tree(
                 proc,

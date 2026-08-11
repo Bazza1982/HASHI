@@ -1,9 +1,16 @@
-"""
-Stream event types for real-time verbose display.
+"""Canonical backend activity events.
 
-When verbose mode is ON, backends emit StreamEvent objects via an
-on_stream_event callback.  The runtime's streaming display loop
-consumes them and edits the Telegram placeholder message in real time.
+Presentation switches consume disjoint subsets of this stream:
+
+* ``/think`` receives ``KIND_THINKING`` events containing genuine
+  provider-returned reasoning (or an explicit provider-redacted reasoning
+  notice), plus ``KIND_COMMENTARY`` events containing model-authored interim
+  commentary when a backend exposes it.
+* ``/verbose`` receives progress, tool/file/shell, result, and error events.
+* ``KIND_TEXT_DELTA`` is reserved for local observers and final-answer
+  assembly; Telegram does not present live answer drafts.
+
+Adapters must not label generic start/busy messages as thinking.
 """
 
 import time
@@ -12,6 +19,7 @@ from typing import Callable, Awaitable, Optional
 
 # Canonical event kinds.  Backends should use these constants.
 KIND_THINKING = "thinking"
+KIND_COMMENTARY = "commentary"
 KIND_TOOL_START = "tool_start"
 KIND_TOOL_END = "tool_end"
 KIND_FILE_READ = "file_read"
@@ -31,9 +39,9 @@ class StreamEvent:
     """A single streaming activity event emitted by a backend adapter."""
 
     kind: str                       # one of the KIND_* constants above
-    summary: str                    # human-readable one-liner, e.g. "Reading config.py"
+    summary: str                    # human-readable content; commentary may be multiline
     timestamp: float = field(default_factory=time.time)
-    detail: str = ""                # optional longer content (truncated before display)
+    detail: str = ""                # optional longer diagnostic content
     tool_name: str = ""             # e.g. "Read", "Grep", "Bash"
     file_path: str = ""             # relevant file path, if any
     current: float | None = None     # optional real progress numerator

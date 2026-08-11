@@ -20,13 +20,13 @@ def test_hashi_xai_oauth_module_has_no_hermes_imports():
 
 def test_resolve_client_id_prefers_env(monkeypatch):
     monkeypatch.setenv("HASHI_XAI_OAUTH_CLIENT_ID", "env-client")
-    cfg = SimpleNamespace(xai_oauth={"client_id": "cfg-client"}, claw_providers={})
+    cfg = SimpleNamespace(xai_oauth={"client_id": "cfg-client"}, her_providers={})
     assert oauth.resolve_client_id(global_config=cfg) == "env-client"
 
 
 def test_resolve_client_id_uses_agents_config(monkeypatch):
     monkeypatch.delenv("HASHI_XAI_OAUTH_CLIENT_ID", raising=False)
-    cfg = SimpleNamespace(xai_oauth={"client_id": "cfg-client"}, claw_providers={})
+    cfg = SimpleNamespace(xai_oauth={"client_id": "cfg-client"}, her_providers={})
     assert oauth.resolve_client_id(global_config=cfg) == "cfg-client"
 
 
@@ -61,7 +61,7 @@ def test_persist_and_resolve_refresh(tmp_path: Path, monkeypatch):
     cfg = SimpleNamespace(
         bridge_home=tmp_path,
         xai_oauth={"client_id": client_id, "auth_store": "auth/xai_oauth.json"},
-        claw_providers={},
+        her_providers={},
         xai_api_base_url="https://api.x.ai/v1",
     )
     creds = oauth.resolve_hashi_xai_credentials(global_config=cfg, force_refresh=True)
@@ -79,7 +79,7 @@ def test_oauth_status_not_logged_in(tmp_path: Path, monkeypatch):
     cfg = SimpleNamespace(
         bridge_home=tmp_path,
         xai_oauth={"client_id": "c1", "auth_store": "auth/xai_oauth.json"},
-        claw_providers={},
+        her_providers={},
     )
     status = oauth.oauth_status(global_config=cfg)
     assert status["logged_in"] is False
@@ -90,7 +90,7 @@ def test_clear_tokens(tmp_path: Path):
     store = tmp_path / "auth" / "xai_oauth.json"
     store.parent.mkdir(parents=True)
     store.write_text("{}", encoding="utf-8")
-    cfg = SimpleNamespace(bridge_home=tmp_path, xai_oauth={"auth_store": "auth/xai_oauth.json"}, claw_providers={})
+    cfg = SimpleNamespace(bridge_home=tmp_path, xai_oauth={"auth_store": "auth/xai_oauth.json"}, her_providers={})
     path = oauth.clear_tokens(global_config=cfg)
     assert path == store.resolve()
     assert not store.exists()
@@ -141,7 +141,7 @@ def test_claw_provider_hashi_oauth_injection(tmp_path: Path, monkeypatch):
         bridge_home=tmp_path,
         project_root=tmp_path,
         xai_oauth={"client_id": "hashi-client", "auth_store": "auth/xai_oauth.json"},
-        claw_providers={
+        her_providers={
             "providers": {
                 "xai": {
                     "auth_mode": "hashi_oauth",
@@ -165,10 +165,8 @@ def test_claw_provider_hashi_oauth_injection(tmp_path: Path, monkeypatch):
 def test_select_backend_prefers_xai_for_grok_model():
     from orchestrator.flexible_backend_manager import FlexibleBackendManager
 
-    class Dummy:
-        pass
-
-    mgr = Dummy()
+    mgr = FlexibleBackendManager.__new__(FlexibleBackendManager)
+    mgr.global_config = SimpleNamespace(her_providers={})
     mgr.config = SimpleNamespace(
         allowed_backends=[
             {"engine": "her", "provider": "openrouter", "model": "deepseek/deepseek-v4-flash"},
@@ -221,7 +219,7 @@ def test_device_login_poll_success(tmp_path: Path, monkeypatch):
     cfg = SimpleNamespace(
         bridge_home=tmp_path,
         xai_oauth={"client_id": "hashi-client", "auth_store": "auth/xai_oauth.json"},
-        claw_providers={},
+        her_providers={},
         xai_api_base_url="https://api.x.ai/v1",
     )
     creds = oauth.poll_device_login(session, global_config=cfg, sleep_fn=lambda _s: None)

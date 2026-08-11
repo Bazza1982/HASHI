@@ -89,3 +89,36 @@ async def test_think_delivery_renders_markdown_for_both_runtimes(flush_thinking)
         }
     ]
     assert "<i>" not in runtime.app.bot.sent[0]["text"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "flush_thinking",
+    [
+        pytest.param(FlexibleAgentRuntime._flush_thinking, id="flexible"),
+        pytest.param(BridgeAgentRuntime._flush_thinking, id="legacy"),
+    ],
+)
+async def test_think_delivery_chunks_long_commentary_without_truncating(flush_thinking) -> None:
+    runtime = _runtime()
+    commentary = "Codex commentary\n\n" + ("full-content " * 400)
+    runtime._think_buffer = [commentary]
+    long_sends: list[dict] = []
+
+    async def send_long_message(chat_id, text, **kwargs):
+        long_sends.append({"chat_id": chat_id, "text": text, **kwargs})
+        return 0.0, 2
+
+    runtime.send_long_message = send_long_message
+
+    await flush_thinking(runtime, 123)
+
+    assert runtime.app.bot.sent == []
+    assert long_sends == [
+        {"chat_id": 123, "text": f"💭 {commentary}", "purpose": "think"}
+    ]
+    assert runtime.handoff_builder.entries[-1] == (
+        "thinking",
+        f"💭 {commentary}",
+        "think",
+    )

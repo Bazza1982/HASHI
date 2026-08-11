@@ -118,6 +118,7 @@ class FakeRuntime:
     def __init__(self, *, busy: bool = False):
         self.busy = busy
         self.enqueued = []
+        self.notices = []
         self.listeners = {}
         self.is_generating = False
         self.queue = SimpleNamespace(empty=lambda: not self.busy)
@@ -130,6 +131,10 @@ class FakeRuntime:
         request_id = f"req-{len(self.enqueued) + 1}"
         self.enqueued.append((request_id, kwargs))
         return request_id
+
+    async def send_long_message(self, **kwargs):
+        self.notices.append(kwargs)
+        return 0.01, 1
 
     def register_request_listener(self, request_id, callback):
         self.listeners[request_id] = callback
@@ -267,10 +272,10 @@ async def test_scheduler_skips_stale_missed_cron_and_notifies(tmp_path):
     finally:
         monkeypatch.undo()
 
-    assert len(runtime.enqueued) == 1
-    _request_id, payload = runtime.enqueued[0]
-    assert payload["summary"] == "Missed Cron [daily-old]"
-    assert "已跳过自动补发" in payload["prompt"]
+    assert runtime.enqueued == []
+    assert len(runtime.notices) == 1
+    assert "1 个任务共错过" in runtime.notices[0]["text"]
+    assert "run stale task" in runtime.notices[0]["text"]
     assert scheduler.state["missed_crons"]["daily-old"]["agent"] == "zelda"
 
 
