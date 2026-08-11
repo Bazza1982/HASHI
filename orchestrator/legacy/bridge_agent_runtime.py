@@ -1705,6 +1705,12 @@ class BridgeAgentRuntime:
                     return
                 if event.kind != KIND_THINKING:
                     return
+                # Provider deltas already encode their own word boundaries.
+                # Never trim, deduplicate, or invent separators between them.
+                raw_delta = getattr(event, "raw_delta", "")
+                if raw_delta:
+                    self._openrouter_think_chunk += raw_delta
+                    return
                 if _engine == "openrouter-api":
                     snippet = (event.summary or "")[:200].strip()
                     if not snippet or snippet == self._last_openrouter_think_snippet:

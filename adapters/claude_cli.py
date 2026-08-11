@@ -221,10 +221,14 @@ class ClaudeCLIAdapter(BaseBackend):
                         on_stream_event,
                     )
             elif delta_type == "thinking_delta":
-                text = (delta.get("thinking") or "")[:200]
+                text = delta.get("thinking") or ""
                 if text:
                     self._emit_stream_event(
-                        StreamEvent(kind=KIND_THINKING, summary=f"Thinking: {text}"),
+                        StreamEvent(
+                            kind=KIND_THINKING,
+                            summary=f"Thinking: {text[:200]}",
+                            raw_delta=text,
+                        ),
                         on_stream_event,
                     )
             elif delta_type == "input_json_delta":

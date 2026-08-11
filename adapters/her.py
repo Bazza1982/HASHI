@@ -89,7 +89,6 @@ CLAW_ENV_ALLOWLIST = (
     "CLAW_MAX_TOOL_ITERATIONS",
     "CLAW_TASK_PLANNING",
     "CLAW_EXECUTION_EFFORT",
-    "CLAW_MAX_PLUS_TOKEN_BUDGET",
     "CLAW_MAX_PLUS_TIME_BUDGET_SECONDS",
     *OS_ENV_ALLOWLIST,
 )
@@ -921,7 +920,12 @@ def _claw_jsonl_to_stream_event(event: Mapping[str, Any]) -> StreamEvent | None:
         if source:
             detail_parts.append(f"source={source}")
         return (
-            StreamEvent(kind=KIND_THINKING, summary=text[:400], detail=";".join(detail_parts))
+            StreamEvent(
+                kind=KIND_THINKING,
+                summary=text[:400],
+                raw_delta=text,
+                detail=";".join(detail_parts),
+            )
             if text
             else None
         )
@@ -1698,9 +1702,6 @@ class HERAdapter(BaseBackend):
         env["CLAW_TASK_PLANNING"] = "0" if self.effort == "low" else "1"
         env["CLAW_EXECUTION_EFFORT"] = self.effort
         if self.effort == "max+":
-            env["CLAW_MAX_PLUS_TOKEN_BUDGET"] = str(
-                self._extra.get("max_plus_token_budget", 1_500_000)
-            )
             env["CLAW_MAX_PLUS_TIME_BUDGET_SECONDS"] = str(
                 self._extra.get("max_plus_time_budget_seconds", 1_500)
             )

@@ -300,7 +300,8 @@ Tools listed in `agents.json` → `global.default_tools.allowed` are automatical
 ## Bridge Memory System
 - `orchestrator/bridge_memory.py` — SQLite with WAL mode, local hashed embeddings (256-dim), FTS5 full-text search.
 - `BridgeContextAssembler` builds the final prompt sent to backends: system identity + skill sections + top-6 long-term memory + last-10 conversation turns.
-- Per-backend token budgets: Codex 24k, Gemini 24k, Claude 50k, OpenRouter 35k.
+- Per-request bridge-context capacities (not cumulative task limits): Codex 24k,
+  Gemini 24k, Claude 50k, OpenRouter 35k.
 
 ## Voice (Outbound Speech Replies)
 - Bridge-owned, not model-owned. Models return text; bridge synthesizes speech locally.
