@@ -803,6 +803,13 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path, caplog):
                         "unverified_items": [],
                     },
                 }},
+                {"kind": "control_invocation", "stage": "independent_review", "gate": "planning",
+                 "revision_round": 1, "format_attempt": 1,
+                 "request": {"system_prompt": ["PLANNING GATE"], "user_message": "raw task frame",
+                             "allow_tools": False},
+                 "raw_output": json.dumps({"decision": "pass"}), "outcome": "parsed", "error": None,
+                 "usage": {"input_tokens": 13, "output_tokens": 5,
+                           "cache_creation_input_tokens": 2, "cache_read_input_tokens": 3}},
                 {"kind": "independent_review", "gate": "planning", "revision_round": 1,
                  "summary": "The revised plan is adequate.",
                  "review": {"decision": "pass", "summary": "The revised plan is adequate.",
@@ -901,6 +908,42 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path, caplog):
     assert "name=read_file" in caplog.text
     assert "Claw tool finished:" in caplog.text
     assert "output_preview=ok" in caplog.text
+    assert "Claw control invocation:" in caplog.text
+    assert "input_tokens=13 output_tokens=5" in caplog.text
+    raw_events = [
+        json.loads(line)
+        for line in (tmp_path / "claw_exec_events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    persisted_review = next(
+        event
+        for event in raw_events
+        if event.get("kind") == "independent_review" and event.get("gate") == "planning"
+    )
+    assert persisted_review["revision_round"] == 1
+    assert persisted_review["review"] == {
+        "decision": "pass",
+        "summary": "The revised plan is adequate.",
+        "findings": [],
+        "missing_evidence": [],
+        "required_changes": [],
+        "evidence_refs": ["task frame"],
+    }
+    persisted_control = next(
+        event for event in raw_events if event.get("kind") == "control_invocation"
+    )
+    assert persisted_control["request"]["user_message"] == "raw task frame"
+    assert json.loads(persisted_control["raw_output"]) == {"decision": "pass"}
+    assert persisted_control["usage"]["input_tokens"] == 13
+    correlated_controls = [
+        json.loads(line)
+        for line in (tmp_path / "claw_control_events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert {record["request_id"] for record in correlated_controls} == {"req-stream"}
+    assert any(
+        record["event"].get("kind") == "control_invocation"
+        and record["event"].get("gate") == "planning"
+        for record in correlated_controls
+    )
 
 
 @pytest.mark.asyncio

@@ -958,6 +958,26 @@ def _claw_jsonl_to_stream_event(event: Mapping[str, Any]) -> StreamEvent | None:
             summary=f"Review {gate} r{revision_round}: {decision} — {summary}"[:500],
             detail=json.dumps(review, ensure_ascii=False)[:4000],
         )
+    if kind == "control_invocation":
+        stage = str(event.get("stage") or "unknown")
+        gate = str(event.get("gate") or "unknown")
+        revision_round = int(event.get("revision_round") or 0)
+        format_attempt = int(event.get("format_attempt") or 0)
+        outcome = str(event.get("outcome") or "unknown")
+        usage = event.get("usage") if isinstance(event.get("usage"), Mapping) else {}
+        return StreamEvent(
+            kind=KIND_PROGRESS,
+            summary=(
+                f"Claw control {stage}/{gate} r{revision_round} "
+                f"attempt={format_attempt} outcome={outcome}"
+            )[:500],
+            detail=(
+                f"input_tokens={int(usage.get('input_tokens') or 0)};"
+                f"output_tokens={int(usage.get('output_tokens') or 0)};"
+                f"cache_creation_input_tokens={int(usage.get('cache_creation_input_tokens') or 0)};"
+                f"cache_read_input_tokens={int(usage.get('cache_read_input_tokens') or 0)}"
+            ),
+        )
     if kind == "plan_divergence":
         return StreamEvent(
             kind=KIND_PROGRESS,
@@ -1807,6 +1827,7 @@ class ClawCLIAdapter(BaseBackend):
             result = await self._run_task_async(
                 prompt,
                 resume=self._session_id,
+                request_id=request_id,
                 on_stream_event=on_stream_event,
             )
         except asyncio.CancelledError:
@@ -1918,6 +1939,7 @@ class ClawCLIAdapter(BaseBackend):
         prompt: str,
         *,
         resume: str | None,
+        request_id: str,
         on_stream_event: StreamCallback = None,
     ) -> ClawTaskResult:
         if self._binary is None:
@@ -1950,7 +1972,7 @@ class ClawCLIAdapter(BaseBackend):
         try:
             if self._supports_stream_json:
                 stdout_data, stderr_data = await asyncio.wait_for(
-                    self._communicate_stream_json(proc, command, on_stream_event),
+                    self._communicate_stream_json(proc, command, request_id, on_stream_event),
                     timeout=self.HARD_TIMEOUT_SEC,
                 )
             else:
@@ -2012,6 +2034,7 @@ class ClawCLIAdapter(BaseBackend):
         self,
         proc: asyncio.subprocess.Process,
         command: list[str],
+        request_id: str,
         on_stream_event: StreamCallback = None,
     ) -> tuple[bytes, bytes]:
         stdout_chunks: list[bytes] = []
@@ -2021,12 +2044,14 @@ class ClawCLIAdapter(BaseBackend):
             assert proc.stdout is not None
             async for line in iter_stream_lines(proc.stdout):
                 stdout_chunks.append(line)
+                self._persist_stream_json_line(line)
                 self._touch_activity()
                 try:
                     event = json.loads(line.decode(errors="replace"))
                 except json.JSONDecodeError:
                     self.logger.warning("Ignoring non-JSON Claw stream line: %r", line[:200])
                     continue
+                self._persist_control_event(request_id, event)
                 if event.get("kind") == "run_started":
                     session_id = str(event.get("session_id") or "").strip()
                     if session_id:
@@ -2057,6 +2082,19 @@ class ClawCLIAdapter(BaseBackend):
                         event.get("revision_round") or 0,
                         review.get("decision") or "unknown",
                         redact_secret_text(str(review.get("summary") or event.get("summary") or ""))[:2000],
+                    )
+                elif kind == "control_invocation":
+                    usage = event.get("usage") if isinstance(event.get("usage"), Mapping) else {}
+                    self.logger.info(
+                        "Claw control invocation: stage=%s gate=%s revision_round=%s "
+                        "format_attempt=%s outcome=%s input_tokens=%s output_tokens=%s",
+                        event.get("stage") or "unknown",
+                        event.get("gate") or "unknown",
+                        event.get("revision_round") or 0,
+                        event.get("format_attempt") or 0,
+                        event.get("outcome") or "unknown",
+                        usage.get("input_tokens") or 0,
+                        usage.get("output_tokens") or 0,
                     )
                 elif kind == "provider_stop_reason":
                     self.logger.info(
@@ -2111,3 +2149,26 @@ class ClawCLIAdapter(BaseBackend):
         await asyncio.gather(read_stdout(), read_stderr())
         await proc.wait()
         return b"".join(stdout_chunks), b"".join(stderr_chunks)
+
+    def _persist_stream_json_line(self, line: bytes) -> None:
+        """Persist Claw's complete local stream before any event summarisation."""
+        if not line:
+            return
+        path = self.config.workspace_dir / "claw_exec_events.jsonl"
+        with path.open("ab") as stream_log:
+            stream_log.write(line)
+            if not line.endswith(b"\n"):
+                stream_log.write(b"\n")
+
+    def _persist_control_event(self, request_id: str, event: Mapping[str, Any]) -> None:
+        """Correlate raw max control records with their HASHI request."""
+        if str(event.get("kind") or "") not in {
+            "task_plan",
+            "independent_review",
+            "control_invocation",
+        }:
+            return
+        path = self.config.workspace_dir / "claw_control_events.jsonl"
+        record = {"request_id": request_id, "event": event}
+        with path.open("a", encoding="utf-8") as control_log:
+            control_log.write(json.dumps(record, ensure_ascii=False) + "\n")
