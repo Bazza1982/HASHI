@@ -188,3 +188,16 @@ exp/aptenra/aptenra_debug/scripts/
 
 # Barry's private Audit Office KVM EXP (machine-local; may contain workplace context)
 exp/barry/aonsw/
+
+# Barry's private Audit Office data-analysis EXP (machine-local; may contain workplace context)
+exp/barry/aonsw_data_analysis/
+
+# Wiki classifier scratch outputs (generated, reproducible, and may contain private topics)
+/.classification_out.json
+/.classifications_batch_out.json
+
+# Tool execution audit ledger (machine-local runtime output)
+/tool_action_audit.jsonl
+
+# Local Remote/HChat health-check action (machine-specific configuration and bytecode)
+/skills/remote_guard/
