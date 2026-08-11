@@ -1562,7 +1562,7 @@ async def test_wrapper_config_status_commands_include_clickable_buttons(tmp_path
     wrap_markup = str(runtime._reply_payloads[-1]["reply_markup"])
     assert "wcfg:wrapid:claude_haiku" in wrap_markup
     assert "wcfg:wrapid:gemini_flash" in wrap_markup
-    assert "wcfg:wrapid:deepseek_chat" in wrap_markup
+    assert "wcfg:wrapid:deepseek_pro" in wrap_markup
     assert "wcfg:wrapid:or_deepseek" in wrap_markup
     assert "wcfg:wrapctx:3" in wrap_markup
 
@@ -1851,8 +1851,8 @@ async def test_wrapper_config_buttons_update_wrapper_model_across_backends(tmp_p
     manager.config.allowed_backends.extend(
         [
             {"engine": "gemini-cli", "model": "gemini-2.5-flash"},
-            {"engine": "deepseek-api", "model": "deepseek-chat"},
-            {"engine": "openrouter-api", "model": "deepseek/deepseek-v3.2-exp"},
+            {"engine": "deepseek-api", "model": "deepseek-v4-pro"},
+            {"engine": "openrouter-api", "model": "deepseek/deepseek-v4-flash"},
         ]
     )
     manager.agent_mode = "wrapper"
@@ -1881,7 +1881,7 @@ async def test_wrapper_config_buttons_update_wrapper_model_across_backends(tmp_p
     state = _read_state(tmp_path / "agent")
     assert state["wrapper"] == {
         "backend": "openrouter-api",
-        "model": "deepseek/deepseek-v3.2-exp",
+        "model": "deepseek/deepseek-v4-flash",
         "context_window": 3,
         "fallback": "passthrough",
     }
@@ -2010,7 +2010,7 @@ async def test_foreground_completion_uses_wrapper_output_for_visible_surfaces(tm
 
 
 @pytest.mark.asyncio
-async def test_foreground_wrapper_verbose_shows_core_and_final_outputs(tmp_path):
+async def test_foreground_wrapper_verbose_shows_compact_wrapper_summary(tmp_path):
     runtime, sent, voices, hchat_replies = _make_foreground_runtime(tmp_path)
     runtime._verbose = True
     item = _queued_request()
@@ -2023,10 +2023,11 @@ async def test_foreground_wrapper_verbose_shows_core_and_final_outputs(tmp_path)
                 break
             await asyncio.sleep(0.01)
         assert sent[0]["purpose"] == "wrapper-verbose"
-        assert "Core output" in sent[0]["text"]
-        assert "core raw foreground" in sent[0]["text"]
-        assert "Wrapper final output" in sent[0]["text"]
-        assert "wrapped visible" in sent[0]["text"]
+        assert "Wrapper verbose trace" in sent[0]["text"]
+        assert "Status: `used`" in sent[0]["text"]
+        assert "Output: `15 chars`" in sent[0]["text"]
+        assert "core raw foreground" not in sent[0]["text"]
+        assert "wrapped visible" not in sent[0]["text"]
         assert sent[-1]["purpose"] == "response"
         assert sent[-1]["text"] == "wrapped visible"
     finally:
@@ -2072,6 +2073,7 @@ async def test_wrapper_polishing_placeholder_bridges_after_core_output(tmp_path)
 async def test_wrapper_final_only_skips_polishing_placeholder_and_typing(tmp_path):
     runtime, sent, voices, hchat_replies = _make_foreground_runtime(tmp_path)
     runtime.telegram_connected = True
+    telegram_stream_policy.set_typing_enabled(runtime, False)
     item = _queued_request()
     await runtime.queue.put(item)
 

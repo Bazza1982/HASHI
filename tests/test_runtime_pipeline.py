@@ -45,7 +45,12 @@ class _BackendManager:
         self.agent_mode = "flex"
         self.current_backend = SimpleNamespace(
             _session_id=None,
-            capabilities=SimpleNamespace(supports_thinking_stream=True),
+            capabilities=SimpleNamespace(
+                supports_thinking_stream=True,
+                supports_progress_stream=True,
+                supports_tool_stream=True,
+                supports_answer_stream=True,
+            ),
         )
         self.response = response or SimpleNamespace(is_success=True, text="ok")
         self.delay_s = delay_s
@@ -193,6 +198,7 @@ def _runtime():
     runtime.project_chat_logger = _ProjectChatLogger()
     runtime.app = SimpleNamespace(bot=_Bot())
     runtime.get_typing_placeholder = lambda: ("typing", None)
+    runtime.get_progress_placeholder = lambda: ("working", None)
     runtime._verbose = False
     runtime._think = False
     runtime._think_buffer = []
@@ -537,7 +543,7 @@ async def test_cleanup_interactive_feedback_can_leave_stream_owned_placeholder()
 @pytest.mark.asyncio
 async def test_setup_interactive_feedback_creates_placeholder_and_cleanup_tasks():
     runtime = _runtime()
-    _set_stream_policy(runtime, placeholder=True, preview=True)
+    telegram_stream_policy.set_typing_enabled(runtime, True)
 
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
@@ -552,11 +558,11 @@ async def test_setup_interactive_feedback_creates_placeholder_and_cleanup_tasks(
     assert feedback.placeholder.message_id == 77
     assert feedback.typing_task is not None
     assert feedback.escalation_task is None
-    assert feedback.answer_preview_task is not None
-    assert feedback.on_stream_event is not None
+    assert feedback.answer_preview_task is None
+    assert feedback.answer_stream_state is None
+    assert feedback.on_stream_event is None
     feedback.stop_typing.set()
     await feedback.typing_task
-    await feedback.answer_preview_task
 
 
 @pytest.mark.asyncio
@@ -670,12 +676,12 @@ async def test_setup_interactive_feedback_skips_placeholder_when_delivery_blocke
 
 
 @pytest.mark.asyncio
-async def test_stream_off_skips_intermediate_telegram_and_uses_final_delivery_once():
+async def test_typing_off_skips_typing_ui_and_uses_final_delivery_once():
     runtime = _runtime()
     runtime.config.extra = {}
     runtime._verbose = False
     runtime._think = False
-    _set_stream_policy(runtime, enabled=False)
+    telegram_stream_policy.set_typing_enabled(runtime, False)
     sends = []
 
     async def _send_long_message(**kwargs):
@@ -721,11 +727,11 @@ async def test_stream_off_skips_intermediate_telegram_and_uses_final_delivery_on
 
 
 @pytest.mark.asyncio
-async def test_stream_off_keeps_thinking_delivery_independent_without_placeholder():
+async def test_typing_off_keeps_thinking_delivery_independent_without_placeholder():
     runtime = _runtime()
     runtime.config.extra = {}
     runtime._think = True
-    _set_stream_policy(runtime, enabled=False)
+    telegram_stream_policy.set_typing_enabled(runtime, False)
 
     async def _flush_thinking(_chat_id):
         return None
@@ -758,7 +764,7 @@ async def test_stream_off_keeps_thinking_delivery_independent_without_placeholde
 
 
 @pytest.mark.asyncio
-async def test_setup_interactive_feedback_creates_stream_state_only_when_capability_and_flag_enabled():
+async def test_legacy_preview_flags_do_not_create_answer_stream_state():
     runtime = _runtime()
     runtime.config.extra = {
         "telegram_stream_enabled": True,
@@ -774,15 +780,14 @@ async def test_setup_interactive_feedback_creates_stream_state_only_when_capabil
         audit_collector=None,
     )
 
-    assert feedback.answer_stream_state is not None
-    assert feedback.answer_stream_state.placeholder is feedback.placeholder
+    assert feedback.answer_stream_state is None
+    assert feedback.answer_preview_task is None
     feedback.stop_typing.set()
     await feedback.typing_task
-    await feedback.answer_preview_task
 
 
 @pytest.mark.asyncio
-async def test_answer_preview_stream_edits_placeholder():
+async def test_typing_only_does_not_route_answer_deltas_or_edit_placeholder():
     runtime = _runtime()
     runtime.config.extra = {
         "telegram_stream_enabled": True,
@@ -791,11 +796,6 @@ async def test_answer_preview_stream_edits_placeholder():
     }
     _set_stream_policy(runtime, placeholder=True, preview=True)
 
-    async def _noop_stream_callback(_event):
-        return None
-
-    runtime._make_stream_callback = lambda **kwargs: _noop_stream_callback
-
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(),
@@ -803,21 +803,12 @@ async def test_answer_preview_stream_edits_placeholder():
         audit_collector=None,
     )
 
-    await feedback.on_stream_event(StreamEvent(kind=KIND_TEXT_DELTA, summary="**Hello** "))
-    await feedback.on_stream_event(StreamEvent(kind=KIND_TEXT_DELTA, summary="`world`"))
-
-    for _ in range(20):
-        if runtime.app.bot.edits:
-            break
-        await asyncio.sleep(0.02)
-
+    assert feedback.on_stream_event is None
+    assert feedback.answer_preview_task is None
+    assert feedback.answer_stream_state is None
     feedback.stop_typing.set()
     await feedback.typing_task
-    await feedback.answer_preview_task
-
-    assert runtime.app.bot.edits
-    assert "<b>Hello</b> <code>world</code>" in runtime.app.bot.edits[-1]["text"]
-    assert runtime.app.bot.edits[-1]["parse_mode"] == "HTML"
+    assert runtime.app.bot.edits == []
 
 
 @pytest.mark.asyncio
@@ -1061,7 +1052,7 @@ async def test_answer_preview_shows_progress_when_text_delta_absent():
 
 
 @pytest.mark.asyncio
-async def test_answer_preview_does_not_require_verbose_stream_capability():
+async def test_legacy_preview_flag_stays_inactive_without_verbose():
     runtime = _runtime()
     runtime.backend_manager.current_backend.capabilities.supports_thinking_stream = False
     _set_stream_policy(runtime, placeholder=True, preview=True)
@@ -1073,16 +1064,16 @@ async def test_answer_preview_does_not_require_verbose_stream_capability():
         audit_collector=None,
     )
 
-    assert feedback.answer_preview_task is not None
+    assert feedback.answer_preview_task is None
+    assert feedback.answer_stream_state is None
     assert feedback.escalation_task is None
-    assert feedback.on_stream_event is not None
+    assert feedback.on_stream_event is None
     feedback.stop_typing.set()
     await feedback.typing_task
-    await feedback.answer_preview_task
 
 
 @pytest.mark.asyncio
-async def test_answer_preview_takes_precedence_over_verbose_display():
+async def test_verbose_takes_precedence_over_retired_preview_flag():
     runtime = _runtime()
     runtime._verbose = True
     _set_stream_policy(runtime, placeholder=True, preview=True)
@@ -1094,17 +1085,18 @@ async def test_answer_preview_takes_precedence_over_verbose_display():
         audit_collector=None,
     )
 
-    assert feedback.answer_preview_task is not None
-    assert feedback.escalation_task is None
-    assert runtime.streaming_loops == []
-    assert runtime.stream_callbacks[0]["event_queue"] is None
+    assert feedback.answer_preview_task is None
+    assert feedback.answer_stream_state is None
+    assert feedback.escalation_task is not None
+    assert runtime.stream_callbacks[0]["event_queue"] is not None
     feedback.stop_typing.set()
     await feedback.typing_task
-    await feedback.answer_preview_task
+    await feedback.escalation_task
+    assert runtime.streaming_loops == [("req-1", True)]
 
 
 @pytest.mark.asyncio
-async def test_verbose_non_streaming_backend_uses_escalating_placeholder():
+async def test_verbose_backend_without_reasoning_still_uses_progress_events():
     runtime = _runtime()
     runtime._verbose = True
     runtime.config.extra = {
@@ -1121,13 +1113,13 @@ async def test_verbose_non_streaming_backend_uses_escalating_placeholder():
         audit_collector=None,
     )
 
-    assert feedback.on_stream_event is None
-    assert runtime.stream_callbacks == []
-    assert runtime.streaming_loops == []
+    assert feedback.on_stream_event[0] == "stream"
+    assert runtime.stream_callbacks[0]["event_queue"] is not None
     feedback.stop_typing.set()
     await feedback.typing_task
     await feedback.escalation_task
-    assert runtime.escalating_loops == ["req-1"]
+    assert runtime.streaming_loops == [("req-1", True)]
+    assert runtime.escalating_loops == []
 
 
 @pytest.mark.asyncio

@@ -628,10 +628,9 @@ configuration summary.
 
 | Command | Description |
 |---------|-------------|
-| `/verbose [on\|off]` | Toggle detailed status; in wrapper mode, `on` also shows core raw output and wrapper final output |
-| `/think [on\|off]` | Toggle thinking trace display |
-| `/stream [on\|off\|status]` | Control Telegram intermediate streaming; default OFF for final-only delivery |
-| `/preview [on\|off\|status]` | Compatibility switch for the answer-preview subfeature; requires `/stream on` |
+| `/verbose [on\|off]` | Show a temporary progress card with timing and available tool-result summaries |
+| `/think [on\|off]` | Show model-authored interim commentary plus genuine provider-returned reasoning when available |
+| `/typing [on\|off\|status]` | Control both the temporary `Agent is typing...` bubble and Telegram's native typing indicator |
 | `/safevoice [on\|off]` | Toggle voice confirmation (default: ON) |
 | `/active [on\|off\|minutes]` | Toggle proactive heartbeat |
 | `/whisper [small\|medium\|large]` | Set local voice transcription model |
@@ -1269,7 +1268,11 @@ duplicate alias `/paswd` has been removed.
         {
           "engine": "claw-cli",
           "provider": "openrouter",
-          "models": ["deepseek/deepseek-v4-flash", "openai/gpt-4.1-mini"],
+          "models": [
+            "deepseek/deepseek-v4-flash",
+            "deepseek/deepseek-v4-pro",
+            "openai/gpt-4.1-mini"
+          ],
           "default_model": "deepseek/deepseek-v4-flash"
         },
         {
@@ -1441,7 +1444,7 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
 - **Slim core architecture accepted** — `main.py` reduced from a large feature host into a slim process bootstrap/kernel wrapper; hot-reloadable managers now own agent lifecycle, service management, reboot, startup, shutdown, config, backend preflight, skills, and WhatsApp control
 - **Wrapper Agent Mode implemented** — agents can run a functional core model and a separate stateless wrapper model for final visible persona/style rewriting
   - `/core`, `/wrap`, and `/wrapper` configure core model, wrapper model/context, and persona/style slots with Telegram inline controls
-  - `/verbose on` shows a labeled wrapper trace with the core raw output, wrapper final output, wrapper status, latency, and fallback reason
+  - `/verbose on` shows a compact wrapper status, latency, and fallback summary without echoing raw answer drafts
   - Foreground and background responses, listeners, transfer suppression, handoff, project chat, voice replies, and HChat reply summaries use wrapper-visible text where appropriate; active `bridge:hchat` sends remain wrapper-bypassed until the delivery-boundary HChat pipeline is implemented
   - Core prompt memory stores core raw assistant output, while visible transcript, project chat, core transcript, and audit metadata remain separated for debugging and user-facing continuity
   - `/reset CONFIRM` preserves wrapper mode configuration and prompt slots, matching `/sys` preservation behavior; `/wipe CONFIRM` remains a hard workspace clear

@@ -8,7 +8,7 @@ import pytest
 
 from orchestrator import telegram_stream_policy
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
-from adapters.stream_events import KIND_PROGRESS, StreamEvent
+from adapters.stream_events import KIND_COMMENTARY, KIND_PROGRESS, KIND_TEXT_DELTA, KIND_THINKING, StreamEvent
 
 
 def _runtime(tmp_path, *, extra=None):
@@ -126,8 +126,24 @@ def test_stream_subswitches_require_master_and_placeholder_dependencies(tmp_path
     assert policy.promote_enabled is False
 
 
+def test_display_policy_migrates_effective_legacy_typing_and_persists_override(tmp_path):
+    runtime = _runtime(tmp_path)
+    telegram_stream_policy.set_policy_value(runtime, "enabled", True)
+    telegram_stream_policy.set_policy_value(runtime, "placeholder", True)
+    telegram_stream_policy.set_policy_value(runtime, "typing", False)
+
+    migrated = telegram_stream_policy.get_display_policy(runtime)
+    assert migrated.typing_enabled is True
+    assert migrated.source.startswith("legacy stream preference")
+
+    telegram_stream_policy.set_typing_enabled(runtime, False)
+    persisted = telegram_stream_policy.get_display_policy(runtime)
+    assert persisted.typing_enabled is False
+    assert persisted.source == "persisted override"
+
+
 @pytest.mark.asyncio
-async def test_stream_command_does_not_change_verbose_or_think_preferences(tmp_path):
+async def test_typing_command_does_not_change_verbose_or_think_preferences(tmp_path):
     runtime = object.__new__(FlexibleAgentRuntime)
     runtime.workspace_dir = tmp_path / "workspaces" / "zelda"
     runtime.workspace_dir.mkdir(parents=True, exist_ok=True)
@@ -145,42 +161,38 @@ async def test_stream_command_does_not_change_verbose_or_think_preferences(tmp_p
     runtime._reply_text = _reply_text
     update = SimpleNamespace(effective_user=SimpleNamespace(id=1))
 
-    await FlexibleAgentRuntime.cmd_stream(
-        runtime,
-        update,
-        SimpleNamespace(args=["on"]),
-    )
-
-    policy = telegram_stream_policy.get_policy(runtime)
-    assert policy.enabled is True
-    assert runtime._verbose is False
-    assert runtime._think is False
-    assert (runtime.workspace_dir / ".verbose_off").exists()
-    assert (runtime.workspace_dir / ".think_off").exists()
-    assert "<b>Current</b> · <b>ON</b> · LIVE STREAM" in replies[-1][0]
-    assert "Start message bubble" in replies[-1][0]
-    assert "Telegram header typing indicator" in replies[-1][0]
-    keyboard = replies[-1][1]["reply_markup"].inline_keyboard
-    button_labels = [button.text for row in keyboard for button in row]
-    assert any("Start bubble" in label for label in button_labels)
-    assert any("Typing" in label for label in button_labels)
-    assert any("Progress" in label for label in button_labels)
-    assert any("Live preview" in label for label in button_labels)
-    assert "Finalize on" in button_labels
-    assert "✓ Finalize off" in button_labels
-
-    await FlexibleAgentRuntime.cmd_stream(
+    await FlexibleAgentRuntime.cmd_typing(
         runtime,
         update,
         SimpleNamespace(args=["off"]),
     )
-    assert telegram_stream_policy.get_policy(runtime).enabled is False
+
+    policy = telegram_stream_policy.get_display_policy(runtime)
+    assert policy.typing_enabled is False
+    assert runtime._verbose is False
+    assert runtime._think is False
+    assert (runtime.workspace_dir / ".verbose_off").exists()
+    assert (runtime.workspace_dir / ".think_off").exists()
+    assert "<b>Current</b> · <b>OFF</b>" in replies[-1][0]
+    assert "Temporary bubble" in replies[-1][0]
+    assert "Telegram header" in replies[-1][0]
+    keyboard = replies[-1][1]["reply_markup"].inline_keyboard
+    button_labels = [button.text for row in keyboard for button in row]
+    assert "On" in button_labels
+    assert "✓ Off" in button_labels
+
+    await FlexibleAgentRuntime.cmd_typing(
+        runtime,
+        update,
+        SimpleNamespace(args=["on"]),
+    )
+    assert telegram_stream_policy.get_display_policy(runtime).typing_enabled is True
     assert runtime._verbose is False
     assert runtime._think is False
 
 
 @pytest.mark.asyncio
-async def test_preview_alias_does_not_change_stream_master(tmp_path):
+async def test_preview_alias_only_reports_retirement(tmp_path):
     runtime = object.__new__(FlexibleAgentRuntime)
     runtime.workspace_dir = tmp_path / "workspaces" / "zelda"
     runtime.workspace_dir.mkdir(parents=True, exist_ok=True)
@@ -201,15 +213,13 @@ async def test_preview_alias_does_not_change_stream_master(tmp_path):
     )
 
     policy = telegram_stream_policy.get_policy(runtime)
-    assert policy.preview is True
-    assert policy.preview_enabled is False
-    assert policy.enabled is True
-    assert "<b>ANSWER PREVIEW</b>" in replies[-1]
-    assert "<b>Current</b> · <b>ON</b>" in replies[-1]
+    assert policy.preview is False
+    assert "Live answer preview retired" in replies[-1]
+    assert "/verbose" in replies[-1]
 
 
 @pytest.mark.asyncio
-async def test_stream_inline_callback_updates_master_and_renders_menu(tmp_path):
+async def test_typing_inline_callback_updates_preference_and_renders_menu(tmp_path):
     runtime = object.__new__(FlexibleAgentRuntime)
     runtime.workspace_dir = tmp_path / "workspaces" / "zelda"
     runtime.workspace_dir.mkdir(parents=True, exist_ok=True)
@@ -227,7 +237,7 @@ async def test_stream_inline_callback_updates_master_and_renders_menu(tmp_path):
         answers.append((text, kwargs))
 
     query = SimpleNamespace(
-        data="tgl:stream:enabled:on",
+        data="tgl:typing:off",
         from_user=SimpleNamespace(id=1),
         edit_message_text=edit_message_text,
         answer=answer,
@@ -239,10 +249,10 @@ async def test_stream_inline_callback_updates_master_and_renders_menu(tmp_path):
         SimpleNamespace(),
     )
 
-    assert telegram_stream_policy.get_policy(runtime).enabled is True
-    assert "<b>Current</b> · <b>ON</b> · LIVE STREAM" in edits[-1][0]
+    assert telegram_stream_policy.get_display_policy(runtime).typing_enabled is False
+    assert "<b>Current</b> · <b>OFF</b>" in edits[-1][0]
     assert edits[-1][1]["reply_markup"] is not None
-    assert answers[-1][0] == "enabled ON"
+    assert answers[-1][0] == "Typing OFF"
 
 
 @pytest.mark.asyncio
@@ -303,3 +313,31 @@ async def test_verbose_stream_display_obeys_shared_edit_budget(tmp_path):
     assert any("<code>details</code>" in edit["text"] for edit in edits)
     assert all(edit["parse_mode"] == "HTML" for edit in edits)
     assert any("Streaming display budget exhausted" in message for message in log_messages)
+
+
+@pytest.mark.asyncio
+async def test_verbose_and_think_receive_disjoint_event_classes():
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.config = SimpleNamespace(active_backend="claw-cli")
+    runtime.logger = SimpleNamespace(debug=lambda _message: None)
+    runtime._thinking_chars_this_req = 0
+    runtime._openrouter_think_chunk = ""
+    runtime._last_openrouter_think_snippet = None
+    verbose_queue = asyncio.Queue()
+    think_buffer = []
+    callback = FlexibleAgentRuntime._make_stream_callback(
+        runtime,
+        event_queue=verbose_queue,
+        think_buffer=think_buffer,
+    )
+
+    await callback(StreamEvent(kind=KIND_TEXT_DELTA, summary="draft answer"))
+    await callback(StreamEvent(kind=KIND_PROGRESS, summary="checking files"))
+    await callback(StreamEvent(kind=KIND_THINKING, summary="r" * 160))
+    commentary = "model update\n\n" + " ".join(["complete"] * 80)
+    await callback(StreamEvent(kind=KIND_COMMENTARY, summary=commentary))
+
+    verbose_event = verbose_queue.get_nowait()
+    assert verbose_event.kind == KIND_PROGRESS
+    assert verbose_queue.empty()
+    assert think_buffer == ["r" * 160, commentary]

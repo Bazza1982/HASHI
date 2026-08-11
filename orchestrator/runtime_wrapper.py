@@ -144,7 +144,8 @@ def append_core_transcript(
 async def send_wrapper_polishing_placeholder(runtime: Any, item: Any):
     if item.silent or not item.deliver_to_telegram or not runtime.telegram_connected:
         return None
-    if not telegram_stream_policy.get_policy(runtime).placeholder_enabled:
+    display_policy = telegram_stream_policy.get_display_policy(runtime)
+    if not (display_policy.typing_enabled or runtime._verbose):
         return None
     if not should_wrap_source(item.source):
         return None
@@ -261,13 +262,13 @@ async def apply_wrapper_to_visible_text(runtime: Any, item: Any, visible_text: s
 
     stop_wrapper_typing = None
     wrapper_typing_task = None
-    stream_policy = telegram_stream_policy.get_policy(runtime)
+    display_policy = telegram_stream_policy.get_display_policy(runtime)
     wrapper_placeholder = await runtime._send_wrapper_polishing_placeholder(item)
     if (
         not item.silent
         and item.deliver_to_telegram
         and runtime.telegram_connected
-        and stream_policy.typing_enabled
+        and display_policy.typing_enabled
     ):
         stop_wrapper_typing = asyncio.Event()
         wrapper_typing_task = asyncio.create_task(runtime.typing_loop(item.chat_id, stop_wrapper_typing))
@@ -313,20 +314,7 @@ def format_wrapper_verbose_trace(runtime: Any, core_raw: str, visible_text: str,
     ]
     if fallback_reason:
         lines.append(f"- Fallback: `{fallback_reason}`")
-    lines.extend(
-        [
-            "",
-            "**Core output**",
-            "```text",
-            runtime._wrapper_verbose_excerpt(core_raw),
-            "```",
-            "",
-            "**Wrapper final output**",
-            "```text",
-            runtime._wrapper_verbose_excerpt(visible_text),
-            "```",
-        ]
-    )
+    lines.append(f"- Output: `{len(visible_text or '')} chars`")
     return "\n".join(lines)
 
 

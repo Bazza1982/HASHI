@@ -47,10 +47,10 @@ def audit_core_model_choices(runtime: Any) -> list[tuple[str, str, str, str]]:
             ("gemini_pro", "Gemini Pro", "gemini-cli", "gemini-2.5-pro"),
             ("gemini_flash", "Gemini Flash", "gemini-cli", "gemini-2.5-flash"),
             ("deepseek_pro", "DeepSeek Pro", "deepseek-api", "deepseek-v4-pro"),
-            ("deepseek_reasoner", "DeepSeek Reasoner", "deepseek-api", "deepseek-reasoner"),
+            ("deepseek_flash", "DeepSeek Flash", "deepseek-api", "deepseek-v4-flash"),
             ("or_sonnet", "OR Sonnet 4.6", "openrouter-api", "anthropic/claude-sonnet-4.6"),
             ("or_opus", "OR Opus 4.6", "openrouter-api", "anthropic/claude-opus-4.6"),
-            ("or_deepseek", "OR DeepSeek", "openrouter-api", "deepseek/deepseek-v3.2-exp"),
+            ("or_deepseek", "OR DeepSeek Pro", "openrouter-api", "deepseek/deepseek-v4-pro"),
             ("ollama_gemma", "Ollama Gemma", "ollama-api", "gemma4:26b"),
             ("ollama_qwen", "Ollama Qwen", "ollama-api", "qwen3:32b"),
         ]
@@ -69,7 +69,7 @@ def audit_auditor_model_choices(runtime: Any) -> list[tuple[str, str, str, str]]
             ("codex_gpt55", "Codex GPT-5.5", "codex-cli", "gpt-5.5"),
             ("codex_gpt54", "Codex GPT-5.4", "codex-cli", "gpt-5.4"),
             ("deepseek_pro", "DeepSeek Pro", "deepseek-api", "deepseek-v4-pro"),
-            ("deepseek_reasoner", "DeepSeek Reasoner", "deepseek-api", "deepseek-reasoner"),
+            ("deepseek_flash", "DeepSeek Flash", "deepseek-api", "deepseek-v4-flash"),
             ("gemini_pro", "Gemini Pro", "gemini-cli", "gemini-2.5-pro"),
             ("gemini_flash", "Gemini Flash", "gemini-cli", "gemini-2.5-flash"),
         ]
