@@ -29,19 +29,20 @@ class GeminiCLIAdapter(BaseBackend):
         (re.compile(r"(?:Writing|Editing|wrote|edited)\s+(.+)", re.IGNORECASE), KIND_FILE_EDIT, "Edit"),
         (re.compile(r"(?:Running|Executing|shell|bash|command)\s*:?\s*(.+)", re.IGNORECASE), KIND_SHELL_EXEC, "Bash"),
         (re.compile(r"(?:Searching|grep|rg|find)\s+(.+)", re.IGNORECASE), KIND_TOOL_START, "Search"),
-        (re.compile(r"(?:Thinking|thinking)", re.IGNORECASE), KIND_THINKING, ""),
+        (re.compile(r"(?:Thinking|thinking)", re.IGNORECASE), KIND_PROGRESS, ""),
     ]
 
     def _define_capabilities(self) -> BackendCapabilities:
-        capabilities = BackendCapabilities(
+        return BackendCapabilities(
             supports_sessions=False,
             supports_files=True,
             supports_tool_use=True,
-            supports_thinking_stream=True,
+            supports_thinking_stream=False,
             supports_headless_mode=True,
+            supports_progress_stream=True,
+            supports_tool_stream=True,
+            supports_answer_stream=True,
         )
-        capabilities.supports_answer_stream = True
-        return capabilities
 
     def __init__(self, agent_config, global_config, api_key: str = None):
         super().__init__(agent_config, global_config, api_key)
@@ -360,9 +361,9 @@ class GeminiCLIAdapter(BaseBackend):
 
         stderr_task = asyncio.create_task(_read_stderr())
 
-        # Emit a thinking event at start
+        # Startup is progress, not provider-returned reasoning.
         self._emit_stream_event(
-            StreamEvent(kind=KIND_THINKING, summary="Thinking..."),
+            StreamEvent(kind=KIND_PROGRESS, summary="Gemini task started"),
             on_stream_event,
         )
 

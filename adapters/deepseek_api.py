@@ -6,7 +6,7 @@ Differences from OpenRouter:
   - Endpoint: https://api.deepseek.com/v1/chat/completions
   - No OpenRouter-specific headers (HTTP-Referer, X-Title)
   - Reasoning content field: "reasoning_content" (not "reasoning")
-  - No payload reasoning toggle — model name (deepseek-reasoner) controls it
+  - Current model IDs are deepseek-v4-flash and deepseek-v4-pro
 """
 
 import asyncio

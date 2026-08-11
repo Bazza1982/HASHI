@@ -153,7 +153,7 @@ echo    Done.
 echo.
 echo [6/6] Configuring International build (OpenRouter / claude-sonnet-4-6)...
 
-powershell -NoProfile -Command "$f='%TARGET%\agents.json'; $j=Get-Content $f -Raw | ConvertFrom-Json; foreach($a in $j.agents){ if($a.name -eq 'hashiko'){ $a.engine='openrouter'; $a.model='claude-sonnet-4-6'; $a.active_backend='openrouter'; $a.allowed_backends=@(@{engine='openrouter';model='claude-sonnet-4-6'},@{engine='deepseek-api';model='deepseek-reasoner'}) } }; if($j.global.authorized_id -isnot [int]){ $j.global.authorized_id=0 }; $j | ConvertTo-Json -Depth 10 | Set-Content $f -Encoding UTF8"
+powershell -NoProfile -Command "$f='%TARGET%\agents.json'; $j=Get-Content $f -Raw | ConvertFrom-Json; foreach($a in $j.agents){ if($a.name -eq 'hashiko'){ $a.engine='openrouter'; $a.model='claude-sonnet-4-6'; $a.active_backend='openrouter'; $a.allowed_backends=@(@{engine='openrouter';model='claude-sonnet-4-6'},@{engine='deepseek-api';model='deepseek-v4-flash'}) } }; if($j.global.authorized_id -isnot [int]){ $j.global.authorized_id=0 }; $j | ConvertTo-Json -Depth 10 | Set-Content $f -Encoding UTF8"
 
 powershell -NoProfile -Command "$f='%TARGET%\secrets.json'; $j=Get-Content $f -Raw | ConvertFrom-Json; $j.PSObject.Properties.Remove('telegram_user_id'); $j | ConvertTo-Json -Depth 5 | Set-Content $f -Encoding UTF8"
 

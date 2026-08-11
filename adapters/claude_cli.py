@@ -12,7 +12,7 @@ from adapters.stream_events import (
     StreamCallback, StreamEvent,
     KIND_THINKING, KIND_TOOL_START, KIND_TOOL_END,
     KIND_FILE_READ, KIND_FILE_EDIT, KIND_SHELL_EXEC,
-    KIND_TEXT_DELTA,
+    KIND_TEXT_DELTA, KIND_PROGRESS,
 )
 
 
@@ -22,15 +22,16 @@ class ClaudeCLIAdapter(BaseBackend):
     DEFAULT_HARD_TIMEOUT_SEC = 36000
 
     def _define_capabilities(self) -> BackendCapabilities:
-        capabilities = BackendCapabilities(
+        return BackendCapabilities(
             supports_sessions=True,
             supports_files=True,
             supports_tool_use=True,
             supports_thinking_stream=True,
             supports_headless_mode=True,
+            supports_progress_stream=True,
+            supports_tool_stream=True,
+            supports_answer_stream=True,
         )
-        capabilities.supports_answer_stream = True
-        return capabilities
 
     def __init__(self, agent_config, global_config, api_key: str = None):
         super().__init__(agent_config, global_config, api_key)
@@ -202,7 +203,7 @@ class ClaudeCLIAdapter(BaseBackend):
                 )
             elif cb.get("type") == "thinking":
                 self._emit_stream_event(
-                    StreamEvent(kind=KIND_THINKING, summary="Thinking..."),
+                    StreamEvent(kind=KIND_PROGRESS, summary="Claude reasoning started"),
                     on_stream_event,
                 )
             return None

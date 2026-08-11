@@ -106,7 +106,7 @@ The adapter exposes Claw to HASHI as a backend-like function:
 ```json
 {
   "engine": "claw-cli",
-  "model": "openai/deepseek-v4-pro",
+  "model": "deepseek/deepseek-v4-pro",
   "permission_mode": "workspace-write",
   "enabled": false
 }

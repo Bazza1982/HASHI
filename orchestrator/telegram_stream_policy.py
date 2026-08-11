@@ -23,6 +23,27 @@ COMPONENT_NAMES = frozenset(DEFAULT_COMPONENTS)
 
 
 @dataclass(frozen=True)
+class TelegramDisplayPolicy:
+    """User-facing Telegram presentation settings.
+
+    ``typing`` intentionally controls both the temporary ``Agent is typing``
+    bubble and Telegram's native chat-action indicator.  The older stream
+    component map remains readable below only so existing workspace
+    preferences can migrate without surprising users.
+    """
+
+    typing: bool
+    edit_interval_s: float
+    heartbeat_interval_s: float
+    max_edits_per_request: int
+    source: str
+
+    @property
+    def typing_enabled(self) -> bool:
+        return self.typing
+
+
+@dataclass(frozen=True)
 class TelegramStreamPolicy:
     enabled: bool
     placeholder: bool
@@ -62,7 +83,10 @@ class TelegramStreamPolicy:
 
 
 def preferences_path(runtime: Any) -> Path:
-    return Path(runtime.workspace_dir) / "state" / "runtime_preferences.json"
+    workspace = getattr(runtime, "workspace_dir", None)
+    if workspace is None:
+        workspace = getattr(getattr(runtime, "config", None), "workspace_dir", ".")
+    return Path(workspace) / "state" / "runtime_preferences.json"
 
 
 def load_preferences(runtime: Any) -> dict[str, Any]:
@@ -236,6 +260,59 @@ def set_policy_value(runtime: Any, name: str, enabled: bool) -> Path:
         stream = {}
     stream[name] = bool(enabled)
     payload["telegram_stream"] = stream
+    _write_preferences(runtime, payload)
+    return preferences_path(runtime)
+
+
+def get_display_policy(runtime: Any) -> TelegramDisplayPolicy:
+    """Resolve the simplified Telegram display policy.
+
+    Resolution order is persisted ``telegram_display.typing``, the matching
+    agent configuration default, then the effective legacy stream preference.
+    The final fallback preserves whether a workspace previously enabled either
+    typing signal; the simplified switch then applies that choice to both.
+    """
+
+    payload = load_preferences(runtime)
+    persisted = payload.get("telegram_display")
+    if not isinstance(persisted, dict):
+        persisted = {}
+
+    extra = getattr(getattr(runtime, "config", None), "extra", {}) or {}
+    configured = extra.get("telegram_display")
+    if not isinstance(configured, dict):
+        configured = {}
+    configured_typing = configured.get("typing")
+    if not isinstance(configured_typing, bool):
+        configured_typing = extra.get("telegram_typing_enabled")
+
+    persisted_typing = persisted.get("typing")
+    if isinstance(persisted_typing, bool):
+        typing, source = persisted_typing, "persisted override"
+    elif isinstance(configured_typing, bool):
+        typing, source = configured_typing, "config default"
+    else:
+        legacy = get_policy(runtime)
+        typing = legacy.enabled and (legacy.typing or legacy.placeholder)
+        source = f"legacy stream preference ({legacy.source})"
+
+    legacy = get_policy(runtime)
+    return TelegramDisplayPolicy(
+        typing=bool(typing),
+        edit_interval_s=legacy.edit_interval_s,
+        heartbeat_interval_s=legacy.heartbeat_interval_s,
+        max_edits_per_request=legacy.max_edits_per_request,
+        source=source,
+    )
+
+
+def set_typing_enabled(runtime: Any, enabled: bool) -> Path:
+    payload = load_preferences(runtime)
+    display = payload.get("telegram_display")
+    if not isinstance(display, dict):
+        display = {}
+    display["typing"] = bool(enabled)
+    payload["telegram_display"] = display
     _write_preferences(runtime, payload)
     return preferences_path(runtime)
 
