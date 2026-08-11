@@ -28,7 +28,7 @@ async def test_scheduled_prompt_skill_retains_agent_current_backend(tmp_path):
     )
     runtime = SimpleNamespace(
         skill_manager=manager,
-        config=SimpleNamespace(active_backend="claw-cli", access_scope="drive"),
+        config=SimpleNamespace(active_backend="her", access_scope="drive"),
         logger=SimpleNamespace(info=Mock()),
         error_logger=SimpleNamespace(error=Mock()),
         enqueue_request=AsyncMock(return_value="req-1"),
@@ -45,7 +45,7 @@ async def test_scheduled_prompt_skill_retains_agent_current_backend(tmp_path):
 
     assert ok is True
     assert message == "Scheduled prompt skill queued: legacy-pinned-skill"
-    assert runtime.config.active_backend == "claw-cli"
+    assert runtime.config.active_backend == "her"
     runtime.enqueue_request.assert_awaited_once_with(
         chat_id=123,
         prompt="skill prompt: now",
@@ -73,7 +73,7 @@ async def test_legacy_scheduled_prompt_skill_retains_agent_current_backend(tmp_p
     runtime = SimpleNamespace(
         skill_manager=manager,
         config=SimpleNamespace(
-            engine="claw-cli",
+            engine="her",
             model="deepseek/deepseek-v4-flash",
             workspace_dir=tmp_path,
         ),
@@ -93,7 +93,7 @@ async def test_legacy_scheduled_prompt_skill_retains_agent_current_backend(tmp_p
 
     assert ok is True
     assert message == "Scheduled prompt skill queued: legacy-pinned-skill"
-    assert runtime.config.engine == "claw-cli"
+    assert runtime.config.engine == "her"
     runtime.enqueue_request.assert_awaited_once_with(
         chat_id=123,
         prompt="skill prompt: now",

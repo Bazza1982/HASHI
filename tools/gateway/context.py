@@ -61,7 +61,7 @@ class GatewayContext:
         cls,
         registry: ToolRegistry,
         *,
-        backend: str = "claw-cli",
+        backend: str = "her",
     ) -> "GatewayContext":
         audit = _json_safe(registry.audit_context or {}) or {}
         required_secret_keys = set()

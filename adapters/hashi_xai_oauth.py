@@ -106,8 +106,10 @@ def resolve_client_id(
                 pass
     candidates.append(str(xai_oauth.get("client_id") or "").strip())
 
-    claw = _as_mapping(getattr(global_config, "claw_providers", None) if global_config is not None else None)
-    providers = _as_mapping(claw.get("providers"))
+    her = _as_mapping(getattr(global_config, "her_providers", None) if global_config is not None else None)
+    if not her:
+        her = _as_mapping(getattr(global_config, "claw_providers", None) if global_config is not None else None)
+    providers = _as_mapping(her.get("providers"))
     xai_provider = _as_mapping(providers.get("xai"))
     candidates.append(str(xai_provider.get("client_id") or "").strip())
 

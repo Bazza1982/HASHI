@@ -11,7 +11,7 @@ Five execution modes:
 - **Dual Brain agents:** a left-brain continuity/planning pass plus right-brain execution.
 
 - **Memory+ continuity:** an independent optional layer that can stay enabled in any execution mode.
-- **Supported backends:** `gemini-cli`, `claude-cli`, `codex-cli`, `claw-cli`, `grok-cli`, `openrouter-api`, `deepseek-api`, `ollama-api`, and `xai-api`.
+- **Supported backends:** `gemini-cli`, `claude-cli`, `codex-cli`, `her`, `grok-cli`, `openrouter-api`, `deepseek-api`, `ollama-api`, and `xai-api`.
 - **Adding agents:** Add a new block to `<project_root>\agents.json`. Always set `type` explicitly. New agents should normally use `type: "flex"`; omitted `type` is rejected so HASHI cannot accidentally fall back to the retired legacy fixed runtime.
   - Flex required fields: `name`, `type: "flex"`, `workspace_dir`, `system_md`, `allowed_backends`, `active_backend`, `is_active`
   - Legacy fixed emergency fields: `name`, `type: "fixed"`, `engine`, `workspace_dir`, `system_md`, `model`, `is_active`; startup also requires `HASHI_ENABLE_LEGACY_FIXED_RUNTIME=1`
@@ -21,7 +21,7 @@ Five execution modes:
   - `background_mode` — detach to background with escalating placeholders (`true`/`false`)
   - `background_detach_after` — seconds before detaching
   - `escalation_thresholds` — array of seconds for placeholder messages (e.g. `[30, 60, 90, 150]`)
-- **Claw tools and permissions:** `claw-cli` exposes all Claw-native tools by
+- **HER tools and permissions:** `her` exposes all upstream Claw-native tools by
   default. Set `allowed_tools` only to create an explicit tool allowlist.
   Tool visibility does not grant authority: `permission_mode` still controls
   read-only, workspace-write, or danger-full-access execution. Scheduled

@@ -171,11 +171,11 @@ def test_select_backend_prefers_xai_for_grok_model():
     mgr = Dummy()
     mgr.config = SimpleNamespace(
         allowed_backends=[
-            {"engine": "claw-cli", "provider": "openrouter", "model": "deepseek/deepseek-v4-flash"},
-            {"engine": "claw-cli", "provider": "xai", "model": "grok-4.5"},
+            {"engine": "her", "provider": "openrouter", "model": "deepseek/deepseek-v4-flash"},
+            {"engine": "her", "provider": "xai", "model": "grok-4.5"},
         ]
     )
-    selected = FlexibleBackendManager._select_backend_cfg(mgr, "claw-cli", target_model="grok-4.5")
+    selected = FlexibleBackendManager._select_backend_cfg(mgr, "her", target_model="grok-4.5")
     assert selected["provider"] == "xai"
     assert selected["model"] == "grok-4.5"
 

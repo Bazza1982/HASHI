@@ -1,0 +1,8 @@
+{
+  "engine": "her",
+  "provider": "xai",
+  "model": "grok-4.5",
+  "permission_mode": "workspace-write",
+  "hard_timeout_sec": 36000,
+  "process_timeout": 300
+}

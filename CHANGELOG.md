@@ -34,7 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Bridge-only outputs. See
   [docs/RETRY_RESEND_COMMANDS.md](docs/RETRY_RESEND_COMMANDS.md).
 - **Telegram `/privacy [0-5]` foundation** — added a persisted per-agent privacy setting, backend compatibility declarations, a details menu, quick setting, downgrade confirmation, and the six-level framework. Level 0 fully disables privacy controls; Level 1 remains the default provider-trust mode. Levels 2–5 are reserved until their enforcement is installed and verified.
-- **Direct Grok OAuth → Claw (coming soon)** — landed HASHI-native xAI device-code OAuth scaffolding that stores tokens under the bridge home and injects `XAI_API_KEY` into Claw without Hermes or `grok-cli`. Live login remains blocked until HASHI receives its own xAI OAuth `client_id`. See [docs/HASHI_XAI_CLAW_OAUTH.md](docs/HASHI_XAI_CLAW_OAUTH.md).
+- **Direct Grok OAuth → HER (coming soon)** — landed HASHI-native xAI device-code OAuth scaffolding that stores tokens under the bridge home and injects `XAI_API_KEY` into HER's upstream Claw process without Hermes or `grok-cli`. Live login remains blocked until HASHI receives its own xAI OAuth `client_id`. See [docs/HASHI_XAI_HER_OAUTH.md](docs/HASHI_XAI_HER_OAUTH.md).
 - **Grok CLI reasoning effort control** — added `low`, `medium`, and `high` support to Telegram `/effort` for `grok-cli`, with HASHI defaulting Grok sessions to `medium`, passing the selection through `--reasoning-effort`, and persisting per-backend choices across agent reloads.
 - **Grok 4.5 API Gateway support** — added smoke-tested `grok-4.5` to the `xai-api` and `/v1/models` catalogs, routing it through xAI's Responses API. The existing tested Codex GPT-5.6 variants remain available through the API Gateway.
 - **Default-off Telegram streaming controls** — added independent `/stream` master and placeholder, typing, progress, preview, and final-promotion switches. All current and future agents default to final-only Telegram delivery until streaming is explicitly enabled.
@@ -165,10 +165,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### ✨ Added
 
-- **Claw provider smoke probe** — `scripts/claw_code_probe.py` can now run provider-aware smoke tests from `global.claw_providers`, loading provider base URLs and secrets from the normal HASHI config chain without printing secret values.
-- **Claw CLI backend foundation** — registered the `claw-cli` backend and provider resolver as a scoped adapter path for Claw/OpenClaw-style execution without leaking Claw-specific logic into protected core modules.
-- **Packaged Claw runtime discovery** — added manifest-based packaged binary lookup between explicit/global config and env/PATH fallback, with checksum verification, `prefer`/`require`/`system-only` runtime policies, and clear fail-closed diagnostics.
-- **Momo Claw integration enablement** — validated a live `claw-cli` agent workzone at the HASHI repo root with read/write/edit smoke coverage through HChat.
+- **HER provider smoke probe** — `scripts/her_runtime_probe.py` can run provider-aware smoke tests from `global.her_providers` (with legacy `claw_providers` fallback), loading provider base URLs and secrets from the normal HASHI config chain without printing secret values.
+- **HASHI Engine Runtime (HER) foundation** — registered the `her` backend and provider resolver as a scoped runtime path derived from MIT-licensed Claw without leaking upstream-specific logic into protected core modules.
+- **Packaged HER discovery** — added manifest-based packaged binary lookup between explicit/global config and env/PATH fallback, with checksum verification, `prefer`/`require`/`system-only` runtime policies, and clear fail-closed diagnostics.
+- **Momo HER integration enablement** — validated a live `her` agent workzone at the HASHI repo root with read/write/edit smoke coverage through HChat.
 - **Superloop operational foundation** — added a function contract for runnable superloops, documenting taskboard schema, wait/resume policy, HChat reply handling, closeout barriers, and release gates for controller-driven loops.
 
 ### 🧪 Tests
@@ -176,12 +176,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Live-validated Claw through OpenRouter and DeepSeek official API with `HASHI_CLAW_SMOKE_OK` no-tool prompts.
 - Verified the Ollama/OpenAI-compatible route against a local mock `/v1/chat/completions` server; real Ollama live validation still requires a local daemon and pulled model.
 - Added focused Claw adapter tests for packaged runtime discovery, manifest validation, checksum mismatch fallback, require-packaged failure, and WSL platform-key handling.
-- Validated momo live integration on `claw-cli / deepseek/deepseek-v4-flash`: repo-root read succeeded, repo-root write succeeded, repo-root edit succeeded, and runtime audit reported `success=true`.
+- Validated momo live integration on `her / deepseek/deepseek-v4-flash`: repo-root read succeeded, repo-root write succeeded, repo-root edit succeeded, and runtime audit reported `success=true`.
 - Release preparation must include the Superloop unit suite and at least one template dry-run or live controller loop before claiming autonomous superloop readiness.
 
 ### ⚠️ Known Limitations
 
-- Release binaries are not yet packaged under `hashi_assets/claw/bin/`; until then, `scripts/claw_code_probe.py` is expected to report `ClawBinaryNotFound` unless a system `claw` fallback is configured.
+- HER release binaries are packaged under `hashi_assets/her/releases/`; system `claw` remains a compatibility fallback when policy permits it.
 - Momo's current Claw enablement exposes file-level `read`/`glob`/`grep`/`write`/`edit`; shell execution and full test-running workflows remain separate release-gate tests.
 - Superloop is documented as an alpha operational foundation. It is not yet a stable unattended automation product; loops must keep explicit waits, evidence, issue state, and inbox-drain closeout records.
 

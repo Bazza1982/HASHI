@@ -62,7 +62,7 @@ deployment validation continues.
 - [WRAPPER_AGENT_MODE_PLAN.md](WRAPPER_AGENT_MODE_PLAN.md) — implemented v3.2 wrapper agent mode design, command model, state contract, and acceptance record
 - [API_GUIDE.md](API_GUIDE.md) — OpenAI-compatible API Gateway guide, including per-instance gateway port rules
 - [HASHI_XAI_API_BACKEND_PLAN.md](HASHI_XAI_API_BACKEND_PLAN.md) — xAI/Grok API backend design using Hermes-managed OAuth refresh and OpenAI-compatible gateway routes
-- [HASHI_XAI_CLAW_OAUTH.md](HASHI_XAI_CLAW_OAUTH.md) — **Coming soon:** direct Grok OAuth (HASHI device login → Claw; no Hermes, no grok-cli). Code landed; live use needs HASHI's own xAI `client_id`
+- [HASHI_XAI_HER_OAUTH.md](HASHI_XAI_HER_OAUTH.md) — **Coming soon:** direct Grok OAuth (HASHI device login → HER; no Hermes, no grok-cli). Code landed; live use needs HASHI's own xAI `client_id`
 - [OPTION_D_BROWSER_BRIDGE.md](OPTION_D_BROWSER_BRIDGE.md) — Option D Chrome extension browser bridge (actions, native host, logging)
 - [BROWSER_BRIDGE_HOVER_NOTE.md](BROWSER_BRIDGE_HOVER_NOTE.md) — Extension `hover` (CDP mouseMoved) for flyouts such as LinkedIn reactions
 - [ANATTA_MIGRATION_PLAN.md](ANATTA_MIGRATION_PLAN.md) — Anatta live self-assembly architecture and validation plan
@@ -77,8 +77,8 @@ deployment validation continues.
 - [HASHI2_WSL_STABLE_PORT_ROLLOUT_PLAN.md](HASHI2_WSL_STABLE_PORT_ROLLOUT_PLAN.md) — staged HASHI2 WSL rollout and full-function validation plan for stable Remote port allocation
 - [AUDIT_VIBE_CODING_SUPERLOOP.md](AUDIT_VIBE_CODING_SUPERLOOP.md) — end-to-end vibe-coded product superloop with mandatory independent reviews and live runtime exit gates
 - [HASHI_VOICE_BRIDGE_PLAN.md](HASHI_VOICE_BRIDGE_PLAN.md) — local-first voice runtime plan for the WhatsApp Desktop call bridge and future provider transports
-- [CLAW_TOOL_GATEWAY_TELEMETRY_PLAN.md](CLAW_TOOL_GATEWAY_TELEMETRY_PLAN.md) — long-term plan for packaging Claw into HASHI, exposing internet tools through Tool Gateway/MCP, and structured thinking/token telemetry
-- [CLAW_CODE_MODULE_PLAN.md](CLAW_CODE_MODULE_PLAN.md) — Claw module packaging notes, runtime binary expectations, and local release-binary evidence
+- [HER_TOOL_GATEWAY_TELEMETRY_PLAN.md](HER_TOOL_GATEWAY_TELEMETRY_PLAN.md) — long-term HER packaging, Tool Gateway/MCP, and structured thinking/token telemetry plan
+- [HER_CODE_MODULE_PLAN.md](HER_CODE_MODULE_PLAN.md) — HER module packaging notes, upstream Claw runtime expectations, and local release-binary evidence
 
 ### Nagare Flow System (v2.1)
 - [NAGARE_FLOW_SYSTEM.md](NAGARE_FLOW_SYSTEM.md) — Complete technical reference for the multi-agent workflow orchestration engine
@@ -105,7 +105,7 @@ deployment validation continues.
 
 ### Release Notes
 - [RELEASE_NOTES_HASHI_AAI_ENTERPRISE_v0.1.0-alpha.1.md](RELEASE_NOTES_HASHI_AAI_ENTERPRISE_v0.1.0-alpha.1.md) — Enterprise AAI v0.1 alpha release notes and known limits
-- [RELEASE_NOTES_v4.0.0-alpha.1.md](RELEASE_NOTES_v4.0.0-alpha.1.md) — v4 alpha release notes for Claw mode and Superloop foundation
+- [RELEASE_NOTES_v4.0.0-alpha.1.md](RELEASE_NOTES_v4.0.0-alpha.1.md) — v4 alpha release notes for HER mode and Superloop foundation
 - [RELEASE_NOTES_v1.1.md](RELEASE_NOTES_v1.1.md) — v1.1 release notes
 
 ---

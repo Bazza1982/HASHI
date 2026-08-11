@@ -34,14 +34,14 @@ def test_build_steer_prompt_keeps_original_and_forbids_reset():
     prompt = runtime_control.build_steer_prompt(
         direction="also include xxx in your tasks",
         original_prompt="Build the OAuth login flow",
-        backend="claw-cli",
+        backend="her",
     )
     assert "[HASHI /steer" in prompt
     assert "also include xxx in your tasks" in prompt
     assert "Build the OAuth login flow" in prompt
     assert "KEEP all interim progress" in prompt
     assert "Do NOT call session-reset" in prompt
-    assert "claw-cli" in prompt
+    assert "her" in prompt
 
 
 @pytest.mark.asyncio

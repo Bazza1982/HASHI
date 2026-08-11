@@ -28,11 +28,11 @@
   - `docs/HASHI_SLIM_CORE_ARCHITECTURE.md` reflects current manager boundaries
   - `docs/HASHI_CORE_SLIMMING_PLAN.md` reflects latest implementation and validation status
   - `CHANGELOG.md` records structural changes and residual notes
-- Claw mode gates:
-  - `python -m pytest tests/test_claw_cli_adapter.py -q`
-  - `python -m py_compile adapters/claw_cli.py tests/test_claw_cli_adapter.py`
-  - `python scripts/claw_code_probe.py --check version` returns a clear success or expected `ClawBinaryNotFound` diagnostic while packaged binaries are absent
-  - At least one live `claw-cli` agent workzone smoke validates repo-root read/write/edit before release notes claim agentic file work support
+- HER mode gates:
+  - `python -m pytest tests/test_her_adapter.py -q`
+  - `python -m py_compile adapters/her.py tests/test_her_adapter.py`
+  - `python scripts/her_runtime_probe.py --check version` resolves the packaged HER binary and returns a successful version diagnostic
+  - At least one live `her` agent workzone smoke validates repo-root read/write/edit before release notes claim agentic file work support
 - Superloop alpha gates:
   - `python -m pytest tests/test_superloop_store.py tests/test_superloop_taskboard.py tests/test_superloop_waits.py tests/test_superloop_runner.py tests/test_superloop_scheduler.py tests/test_superloop_compiler.py tests/test_superloop_issues.py tests/test_superloop_commands.py tests/test_superloop_recording.py tests/test_superloop_nagare_adapter.py -q`
   - Taskboards use `task_id`, not `id`, and every in-progress or next-action task resolves to a real task

@@ -38,6 +38,10 @@ FOUNDATION_PHASES = {
     "orchestrator.ticket_manager": 1,
     "adapters.openrouter_api": 2,
     "adapters.xai_imagine": 2,
+    # HER owns the implementation; the legacy claw_cli facade must reload
+    # afterwards so all of its compatibility exports point at current objects.
+    "adapters.her": 2,
+    "adapters.claw_cli": 3,
 }
 
 

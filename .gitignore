@@ -100,7 +100,7 @@ node_modules/
 # Local scratch, backups, and model assets
 *.bak_*
 voice_models/
-hashi_assets/claw/bin/
+hashi_assets/her/bin/
 
 # Additional workspace runtime state
 workspaces/*/.env

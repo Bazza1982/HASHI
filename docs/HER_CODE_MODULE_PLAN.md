@@ -1,0 +1,641 @@
+# HASHI Engine Runtime (HER) Historical Module Plan
+
+HER is derived from the MIT-licensed Claw runtime. This historical document
+retains upstream Claw names where they identify source code, commands, or state.
+
+Status: superseded for packaging direction by
+[HER_TOOL_GATEWAY_TELEMETRY_PLAN.md](HER_TOOL_GATEWAY_TELEMETRY_PLAN.md);
+kept as historical research and local smoke evidence.
+Owner: HASHI
+Last researched: 2026-05-20
+Local research copy: `/home/lily/projects/external/claw-code`
+Claw commit reviewed: `f8e1bb7262b261da1ee6bfcd461bfc5b676f6a6d`
+Local release binary tested:
+`/home/lily/projects/external/claw-code/rust/target/release/claw`
+
+## Decision
+
+Use `claw-code` as a long-running coding-agent function/backend, not as HASHI
+core. The original research direction treated Claw as an optional external
+subprocess. The current long-term direction is stronger: vendor/refactor Claw
+into the HASHI repository and ship a HASHI-managed packaged `hashi-her`
+runtime so users do not need to download a separate Claw checkout.
+
+The integration should still keep a subprocess boundary:
+
+```text
+HASHI runtime -> claw adapter -> packaged hashi-her binary -> .claw session state
+```
+
+This keeps HASHI minimal and hot-rebootable while allowing Claw to own its own
+agent loop, file tools, permission model, session persistence, compaction, and
+provider routing.
+
+## Why It Is Useful
+
+Claw already contains several pieces HASHI would otherwise have to build for
+API models:
+
+- `ConversationRuntime` with model/tool iteration.
+- Session persistence and resume via `.claw/sessions/...`.
+- Workspace-bound session namespacing.
+- Auto-compaction threshold support.
+- Permission modes: `read-only`, `workspace-write`, `danger-full-access`.
+- Tool specs and dispatch for bash, read/write/edit, grep/glob, web, tasks,
+  MCP/LSP registry surfaces, plugin tools, and agent/subagent surfaces.
+- OpenAI-compatible provider routing through `OPENAI_BASE_URL` and
+  `OPENAI_API_KEY`, which can point to OpenRouter or local OpenAI-compatible
+  servers.
+- Machine-readable JSON output for diagnostic commands.
+
+This maps well to the goal of releasing more capability from DeepSeek and other
+API models without making HASHI's native API backend loop overly complex.
+
+## Important Limitations
+
+- There is no real ACP/Zed daemon or JSON-RPC service today. `claw acp serve`
+  is explicitly a status alias and does not start a socket.
+- Integration should not depend on hidden daemon behavior.
+- The stable external surface today is CLI + files:
+  - `claw doctor --output-format json`
+  - `claw status --output-format json`
+  - `claw state --output-format json`
+  - `claw prompt ...`
+  - `claw --resume latest ...`
+  - `.claw/worker-state.json`
+  - `.claw/sessions/...`
+- Local Linux/WSL build/test now passes, but build and failure-path tests must
+  remain Phase 0 gates before any HASHI runtime integration is accepted.
+
+## Local Smoke Evidence
+
+On 2026-05-20, the external research copy was tested locally:
+
+- `cargo build --workspace` succeeded.
+- `cargo build --release -p rusty-claude-cli` succeeded.
+- Release binary:
+  `/home/lily/projects/external/claw-code/rust/target/release/claw`
+- Release binary size: about 17 MB.
+- Release binary SHA256:
+  `910be0eaef337a2ad3fb22a761bbf72cff572ca3f5e52891b53ad5574a8f697e`
+- `claw version --output-format json` returned `version=0.1.0`,
+  `git_sha=f8e1bb7`, and `target=x86_64-unknown-linux-gnu`.
+- `claw status --output-format json`, `claw config --output-format json`, and
+  `claw doctor --output-format json` returned parseable JSON.
+- OpenRouter route with model `deepseek/deepseek-v4-flash` returned
+  `message=ready`.
+- A read-only tool smoke with `--allowedTools read` successfully used
+  `read_file` on a disposable workspace and returned the expected answer.
+
+This proves the Linux/WSL local path is viable. It does not prove native
+Windows/HASHI9 packaging or runtime integration.
+
+## Proposed HASHI Shape
+
+Do not add a new generic `modules/` layer for Claw. HASHI does not currently
+have a module directory convention, and a one-off `modules/claw_code/` would
+create a new architecture category without enough design justification.
+
+Use the existing adapter shape first:
+
+```text
+adapters/her.py
+scripts/her_runtime_probe.py
+tests/test_her_adapter.py
+```
+
+The adapter exposes Claw to HASHI as a backend-like function:
+
+```json
+{
+  "engine": "her",
+  "model": "openai/deepseek-v4-pro",
+  "permission_mode": "workspace-write",
+  "enabled": false
+}
+```
+
+Runtime must accept a configured binary path, for example:
+
+```json
+{
+  "claw_binary_path": "/home/lily/projects/external/claw-code/rust/target/release/claw"
+}
+```
+
+This should be opt-in per agent. It should not change normal
+`claude-cli`, `codex-cli`, `openrouter-api`, or `deepseek-api` behavior.
+
+## Phase 0: External Spike
+
+Goal: prove Claw works locally before touching HASHI runtime behavior.
+
+Tasks:
+
+1. Prefer a prebuilt upstream release binary when one exists. Download its
+   matching checksum and verify it before use.
+2. If no release binary exists, build from source as a research-only fallback.
+   Cargo is allowed for this spike, but must not become a HASHI runtime
+   dependency.
+3. Build Claw from the external copy if using the fallback path:
+
+   ```bash
+   cd /home/lily/projects/external/claw-code/rust
+   cargo build --release -p rusty-claude-cli
+   ```
+
+4. Run no-credential commands:
+
+   ```bash
+   ./target/release/claw --help
+   ./target/release/claw status --output-format json
+   ./target/release/claw doctor --output-format json
+   ```
+
+5. Run provider smoke with OpenRouter:
+
+   ```bash
+   OPENAI_BASE_URL=https://openrouter.ai/api/v1 \
+   OPENAI_API_KEY=... \
+   ./target/release/claw --model deepseek/deepseek-v4-flash \
+     --output-format json \
+     prompt "reply with ready"
+   ```
+
+6. Run a workspace smoke in a disposable repo:
+
+   ```bash
+   claw init --output-format json
+   claw --permission-mode read-only --output-format json prompt "summarize files"
+   claw state --output-format json
+   claw --resume latest /status
+   ```
+
+7. Run failure-path smoke tests:
+
+   - Missing or invalid binary path.
+   - Invalid API key.
+   - Invalid model name.
+   - Read-only `.claw/` directory.
+   - Non-JSON or truncated command output.
+   - Timeout and cancellation.
+
+Acceptance:
+
+- Build succeeds.
+- JSON diagnostics parse.
+- OpenRouter/DeepSeek route works.
+- `.claw/worker-state.json` appears after a prompt.
+- `.claw/sessions/...` appears and can resume.
+- Failure modes produce clear non-zero exits or typed errors, not silent
+  success.
+
+## Phase 1: Read-Only HASHI Function
+
+Goal: add a callable HASHI diagnostic path that runs Claw diagnostics only.
+
+Add `scripts/her_runtime_probe.py` and internal helpers in `adapters/her.py`
+with:
+
+- `find_claw_binary()`
+- `run_claw_doctor(cwd, env) -> dict`
+- `run_claw_status(cwd, env) -> dict`
+- `run_claw_state(cwd, env) -> dict`
+- `ClawBinaryNotFound`
+- `ClawCommandError`
+- `ClawJsonError`
+- `ClawTimeoutError`
+
+Rules:
+
+- Never use shell string interpolation; pass args as arrays.
+- Redact API keys from env/logs.
+- Capture stdout/stderr separately.
+- Apply a timeout.
+- Store audit logs under HASHI logs.
+- Do not require Cargo at runtime.
+- If `claw_binary_path` is missing or invalid, report a typed error.
+
+Acceptance:
+
+- HASHI can call `claw doctor --output-format json`.
+- HASHI can call `claw status --output-format json`.
+- Missing binary, missing configured build artifact, and missing credentials
+  produce typed errors.
+- A missing binary does not prevent unrelated agents from starting.
+
+## Phase 2: One-Shot Claw Task Function
+
+Goal: run one Claw prompt as a HASHI function.
+
+Proposed interface:
+
+```python
+run_claw_task(
+    workspace_dir: Path,
+    prompt: str,
+    model: str,
+    permission_mode: str = "workspace-write",
+    resume: str | None = None,
+    timeout_s: int = 1800,
+) -> ClawTaskResult
+```
+
+Command shape:
+
+```bash
+claw \
+  --model <model> \
+  --permission-mode <mode> \
+  --output-format json \
+  prompt <prompt>
+```
+
+For continuation:
+
+```bash
+claw --resume latest --output-format json prompt <prompt>
+```
+
+Acceptance:
+
+- Can run a read-only analysis task.
+- Can run a workspace-write patch task in a disposable repo.
+- HASHI captures result text, return code, stdout/stderr, elapsed time, and
+  worker/session paths.
+- Invalid API key, invalid model, read-only `.claw/`, timeout, and cancellation
+  have explicit result states.
+
+## Phase 3: Backend Adapter
+
+Goal: expose Claw as `her` alongside existing CLI backends.
+
+Add `adapters/her.py` with the same high-level contract as existing CLI
+backends:
+
+- initialize
+- generate_response
+- stream or pseudo-stream status events
+- timeout/cancel
+- structured error mapping
+
+Use Claw's own session as the long-running state. HASHI owns queueing,
+delivery, logging, and restart boundaries.
+
+Lifecycle rules:
+
+- `initialize()` returns `False` if the configured Claw binary is missing,
+  not executable, or fails `version --output-format json`.
+- A failed `initialize()` puts only that agent/backend into degraded state and
+  must not block other agents.
+- Do not silently fall back to `openrouter-api` or `deepseek-api`; the user
+  must be able to see that Claw is unavailable.
+- `handle_new_session()` creates or switches to a new Claw session reference.
+  It must not delete old `.claw/sessions` files by default.
+- Adding `her` to `adapters/registry.py` requires one cold restart, just
+  like any new adapter class. Later config changes can follow normal HASHI
+  reboot behavior.
+- If another live Claw process owns the same workzone, the adapter must refuse
+  to start the task and report a clear conflict. Use a lock file or the
+  `.claw/worker-state.json` pid when available.
+
+Acceptance:
+
+- Agent can switch to `her`.
+- A task can resume after HASHI restart using `--resume latest`.
+- HASHI logs include Claw command, cwd, model, permission mode, return code,
+  duration, output lengths, and session state path.
+
+## Phase 4: Long-Running Task Supervision
+
+Goal: make it useful for real long coding work.
+
+Add:
+
+- periodic state polling via `claw state --output-format json`;
+- terminal/progress events derived from Claw JSON and `.claw/worker-state.json`;
+- cancellation by process group;
+- timeout tiers for short/medium/long tasks;
+- artifact collection from `.claw/sessions` and `.claw/worker-state.json`;
+- final diff/test summary collection.
+
+Acceptance:
+
+- HASHI can show a long task as running, blocked, failed, or complete.
+- Cancelling from HASHI stops the Claw subprocess.
+- Crash/reboot can report previous Claw session state.
+
+## Phase 5: Stable All-Agent Backend
+
+Goal: make `her` a stable optional backend that any HASHI agent can choose,
+while keeping provider credentials, model routing, and filesystem permissions
+explicit and auditable.
+
+This phase promotes Claw from a tested experimental backend to a normal HASHI
+backend option. It must not make Claw the default backend, and it must not make
+Cargo, OpenRouter, DeepSeek, Ollama, or any single provider a HASHI runtime
+dependency.
+
+### Provider Model
+
+Claw currently routes through OpenAI-compatible environment variables:
+
+```text
+OPENAI_BASE_URL
+OPENAI_API_KEY
+```
+
+HASHI should expose that through named provider profiles instead of repeating
+raw URLs and secret names in every agent config. The provider config must live
+in a HASHI global config section named `her_providers`, outside `secrets.json`
+and outside individual agent backend entries. URLs and provider status are not
+secrets; only the referenced secret values live in `secrets.json`.
+
+Proposed global shape:
+
+```json
+{
+  "her_providers": {
+    "binary_path": "/opt/hashi/bin/claw",
+    "max_permission_mode": "workspace-write",
+    "providers": {
+      "openrouter": {
+        "base_url": "https://openrouter.ai/api/v1",
+        "secret": "openrouter_key",
+        "status": "stable"
+      },
+      "deepseek": {
+        "base_url": "https://api.deepseek.com/v1",
+        "secret": "deepseek_api_key",
+        "status": "provisional"
+      },
+      "ollama": {
+        "base_url": "http://localhost:11434/v1",
+        "secret": null,
+        "dummy_api_key": "__ollama_dummy__",
+        "status": "provisional"
+      }
+    }
+  }
+}
+```
+
+Resolution priority:
+
+1. `provider` on the agent backend entry, if present.
+2. Legacy `agent.extra.openai_base_url` / adapter API key fallback, for
+   backwards compatibility only.
+3. Global default provider, if one is explicitly configured.
+
+If both `provider` and legacy `openai_base_url` are set, `provider` wins and the
+adapter logs a WARNING. Legacy `openai_base_url` and per-agent API key config
+are deprecated after Phase 5 but must not be removed during this rollout.
+
+Agent backend entries should refer to a provider and model:
+
+```json
+{
+  "engine": "her",
+  "provider": "openrouter",
+  "model": "deepseek/deepseek-v4-flash",
+  "permission_mode": "read-only"
+}
+```
+
+For local Ollama models:
+
+```json
+{
+  "engine": "her",
+  "provider": "ollama",
+  "model": "qwen2.5-coder:32b",
+  "permission_mode": "workspace-write"
+}
+```
+
+Secret resolution chain:
+
+```text
+agent backend entry
+-> provider name
+-> claw_providers.providers[provider]
+-> provider.secret
+-> secrets.json[provider.secret]
+-> OPENAI_API_KEY
+```
+
+If the provider references a secret that is missing from `secrets.json`, the
+adapter raises `ClawProviderSecretMissing`, `initialize()` returns `False`, and
+only that backend/agent enters degraded state. Other agents must continue to
+start normally.
+
+Implementation should replace direct `_task_env()` branching with one resolver:
+
+```python
+def _resolve_task_env(self) -> dict[str, str]:
+    provider_name = self._extra.get("provider")
+    if provider_name:
+        return self._env_from_provider(provider_name)
+    return self._env_from_agent_extra()
+```
+
+This avoids a double configuration track and gives one place to apply secret
+lookup, provider status warnings, redaction, and Ollama dummy-key handling.
+
+### Provider Verification Gates
+
+Do not mark a provider profile stable until these probes pass:
+
+1. `claw version --output-format json`
+2. `claw doctor --output-format json`
+3. One short no-tool prompt.
+4. One read-only file tool prompt in a disposable workzone.
+5. One workspace-write patch prompt in a disposable workzone.
+6. Invalid API key or invalid model returns a clear non-zero error.
+7. Timeout/cancellation kills the Claw subprocess.
+
+Current evidence:
+
+- OpenRouter with `deepseek/deepseek-v4-flash`: passed live Claw smoke.
+- DeepSeek official API with `deepseek-v4-flash`: passed live Claw smoke
+  after the Claw binary was rebuilt with bare OpenAI-compatible model support
+  when `OPENAI_BASE_URL` is set.
+- Ollama OpenAI-compatible `/v1`: Claw route and bare local model syntax passed
+  against a local `/v1/chat/completions` mock. Real daemon validation is still
+  blocked on this host because `ollama` is not installed/running and
+  `localhost:11434` refuses connections.
+
+Ollama must be treated as provisional until Claw is tested against
+`http://localhost:11434/v1`. If Claw requires `OPENAI_API_KEY`, HASHI may pass
+the non-secret dummy value `__ollama_dummy__`, but only for the Ollama provider
+profile. Redaction should skip this dummy value to avoid noisy replacement of
+ordinary text.
+
+Provider status semantics:
+
+- `stable`: no warning after probes pass.
+- `provisional`: allowed to run, but `initialize()` logs a WARNING and records
+  the provider as provisional in backend diagnostics.
+- `disabled`: rejected during `initialize()` with `ClawProviderConfigError`.
+
+### Permission Profiles
+
+All agents may list `her` as an allowed backend. HASHI leaves Claw's
+native tool catalogue unfiltered by default and uses the permission profile as
+the authority boundary:
+
+```json
+{
+  "permission_mode": "read-only"
+}
+```
+
+An explicit `allowed_tools` list remains available for an Agent that needs a
+narrower catalogue. Omitting it means all Claw-native tools are visible; it
+does not override the selected permission mode.
+
+Coding agents can opt into:
+
+```json
+{
+  "permission_mode": "workspace-write"
+}
+```
+
+`danger-full-access` is only allowed for disposable live tests or explicit
+maintainer work. It must not be committed as a normal agent default.
+
+The adapter must enforce the global `max_permission_mode`. If an agent requests
+`danger-full-access` while the global maximum is `workspace-write`, the adapter
+must downgrade the effective permission mode to `workspace-write` and log a
+WARNING. This keeps the all-agent default safe even if one agent config is too
+permissive.
+
+### Runtime Selection UX
+
+Backend switching should make the provider visible:
+
+```text
+/backend her openrouter:deepseek/deepseek-v4-flash
+/backend her ollama:qwen2.5-coder:32b
+```
+
+The command layer should not understand provider semantics. It should store the
+`provider:model` string or parsed `provider`/`model` fields in agent backend
+state and let the `her` adapter resolve provider details inside
+`_resolve_task_env()`. This keeps Claw provider rules inside the HER adapter
+boundary instead of spreading them through generic command handling.
+
+The runtime should resolve that into:
+
+```text
+engine=her
+provider=<provider>
+model=<model>
+OPENAI_BASE_URL=<provider base_url>
+OPENAI_API_KEY=<provider secret or dummy key>
+```
+
+If the provider is missing, the secret is missing, or the model probe fails,
+HASHI should report a typed backend error. Use `ClawProviderConfigError` for
+missing/disabled provider and `ClawProviderSecretMissing` for missing provider
+secret. These errors follow the same lifecycle as `ClawBinaryNotFound`:
+`initialize()` returns `False`, that backend becomes degraded, and HASHI must not
+silently fall back to a different backend or provider.
+
+### All-Agent Rollout
+
+Rollout order:
+
+1. Phase 5a: add provider resolver, error types, global `claw_providers`
+   loading, and legacy extra fallback.
+2. Phase 5b: add a provider-aware Claw probe command or script. Done via
+   `scripts/her_runtime_probe.py --provider <name> --model <model>`.
+3. Phase 5c: migrate existing Claw agent entries from legacy
+   `openai_base_url`/API-key fields to provider profiles.
+4. Phase 5d: add `her` as an allowed backend for all agents using the
+   read-only default profile.
+5. Phase 5e: enable `workspace-write` only for agents that are expected to
+   perform coding work.
+6. Run live smoke on at least one academic/research agent and one coding agent.
+7. Document provider/model examples for OpenRouter, DeepSeek official API, and
+   Ollama.
+8. Mark legacy extra fallback as deprecated in logs and docs, but do not remove
+   it in Phase 5.
+
+Acceptance:
+
+- Any agent can switch to `her` when a valid provider/model is configured.
+- A missing Claw binary degrades only that backend, not the whole HASHI runtime.
+- Missing provider config or provider secret degrades only that backend, not the
+  whole HASHI runtime.
+- Provider secrets are resolved by secret name and redacted in logs.
+- `provider` and legacy `openai_base_url` coexist predictably, with `provider`
+  taking precedence and a WARNING emitted.
+- Provisional providers run with explicit WARNING diagnostics.
+- `max_permission_mode` prevents accidental committed `danger-full-access`
+  defaults.
+- OpenRouter and at least one DeepSeek model pass read-only and workspace-write
+  live tests.
+- Ollama is either verified and documented as stable, or explicitly marked
+  unsupported/provisional with the observed failure reason.
+- Default all-agent configuration is read-only.
+- No committed config contains private local paths, real API keys, or
+  `danger-full-access` defaults.
+
+## Security Rules
+
+- Do not pass HASHI secrets wholesale. Build a minimal environment per task.
+- The Claw subprocess environment should be an allowlist, not a copy of
+  `os.environ`.
+- Initial allowlist:
+  - `OPENAI_BASE_URL`
+  - `OPENAI_API_KEY`
+  - OS-required process variables such as `HOME`, `USER`, `TMPDIR`, `TEMP`, and
+    a minimal `PATH` only when needed to execute the configured binary.
+- Do not pass Anthropic keys, HASHI instance secrets, WhatsApp/Bridge tokens,
+  or unrelated agent secrets to Claw.
+- Redact `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and any
+  key-like values from logs.
+- Default to `workspace-write`, not `danger-full-access`.
+- Use `read-only` for review/research tasks.
+- Keep Claw's `.claw/` state inside the target workzone, not HASHI core.
+- Never let Claw operate in `/home/lily/projects/hashi` unless the user
+  explicitly asks for HASHI code work.
+
+## Fit Assessment
+
+Good fit:
+
+- long coding tasks;
+- patch/test/review loops;
+- DeepSeek or OpenRouter models needing a stronger agent harness;
+- disposable repo tasks where Claw can own `.claw` state.
+
+Poor fit:
+
+- replacing HASHI core;
+- real-time chat responses;
+- lightweight file lookup;
+- Watchtower/remote status;
+- browser/desktop orchestration.
+
+## Recommended Next Step
+
+Phase 0 Linux/WSL smoke has passed for local build, OpenRouter/DeepSeek, and
+read-only file tool use. Before runtime integration, update this plan into an
+execution checklist and run the remaining failure-path tests.
+
+Then implement Phase 1 as a small optional adapter/probe path, not a new
+generic module layer.
+
+Do not add `her` to active agents until:
+
+- build passes;
+- no-credential diagnostics pass;
+- OpenRouter/DeepSeek smoke passes;
+- read-only workspace smoke passes;
+- workspace-write disposable patch smoke passes.
+- failure-path smokes pass;
+- binary missing/degraded lifecycle behavior is implemented;
+- subprocess environment allowlist is implemented.

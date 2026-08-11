@@ -568,7 +568,7 @@ async def test_setup_interactive_feedback_creates_placeholder_and_cleanup_tasks(
 @pytest.mark.asyncio
 async def test_medium_claw_sends_one_visible_task_acknowledgement():
     runtime = _runtime()
-    runtime.config.active_backend = "claw-cli"
+    runtime.config.active_backend = "her"
     runtime.backend_manager.current_backend.effort = "medium"
     sent = []
 
@@ -601,7 +601,7 @@ async def test_medium_claw_sends_one_visible_task_acknowledgement():
 @pytest.mark.asyncio
 async def test_medium_claw_acknowledgement_composes_with_request_activity():
     runtime = _runtime()
-    runtime.config.active_backend = "claw-cli"
+    runtime.config.active_backend = "her"
     runtime.backend_manager.current_backend.effort = "medium"
     sent = []
     published = []

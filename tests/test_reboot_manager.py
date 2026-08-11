@@ -177,6 +177,15 @@ def test_validate_agent_runtime_contract_rejects_stale_claw_constant(monkeypatch
         manager.validate_agent_runtime_contract()
 
 
+def test_validate_agent_runtime_contract_rejects_stale_her_facade(monkeypatch):
+    manager = RebootManager(kernel=object(), console_handler=None)
+
+    monkeypatch.setattr(claw_cli, "HERAdapter", object())
+
+    with pytest.raises(HotReloadError, match="stale HER adapter class"):
+        manager.validate_agent_runtime_contract()
+
+
 def test_reload_project_modules_fails_fast_instead_of_continuing(monkeypatch):
     manager = RebootManager(kernel=object(), console_handler=None)
     first = types.ModuleType("orchestrator.first")

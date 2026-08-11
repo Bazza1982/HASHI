@@ -63,7 +63,7 @@ async def xaiauth_command(runtime: Any, update: Any, context: Any) -> None:
             "",
             "<b>Use</b>",
             "<code>python hashi.py auth xai login</code> · sign in from the host shell",
-            "<code>/backend claw-cli grok-4.5</code> · select xAI after login",
+            "<code>/backend her grok-4.5</code> · select xAI through HER after login",
         ]
         await _send(runtime, update, "\n".join(lines))
         return
