@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from adapters.codex_cli import CodexCLIAdapter
+from adapters.stream_events import KIND_COMMENTARY, KIND_THINKING
 from tests.mocks.mock_adapters import SimpleGlobalConfig, SimpleTestConfig
 
 
@@ -15,7 +16,7 @@ class _FakeStdout:
         self._proc = proc
         self._lines = [line.encode("utf-8") + b"\n" for line in lines]
 
-    async def readline(self) -> bytes:
+    async def read(self, _size: int) -> bytes:
         if self._lines:
             return self._lines.pop(0)
         await self._proc.wait()
@@ -56,6 +57,55 @@ def _build_adapter(tmp_path: Path) -> CodexCLIAdapter:
     return CodexCLIAdapter(cfg, global_cfg)
 
 
+@pytest.mark.asyncio
+async def test_codex_intermediate_agent_message_is_full_commentary_not_reasoning(tmp_path):
+    adapter = _build_adapter(tmp_path)
+    events = []
+
+    async def collect(event):
+        events.append(event)
+
+    commentary = "Inspecting the failing test\n\n" + ("full detail " * 60)
+    adapter._flush_pending_agent_message({"text": commentary}, collect)
+    await asyncio.sleep(0)
+
+    assert adapter.capabilities.supports_thinking_stream is False
+    assert adapter.capabilities.supports_commentary_stream is True
+    assert [event.kind for event in events] == [KIND_COMMENTARY]
+    assert events[0].summary == commentary.strip()
+    assert all(event.kind != KIND_THINKING for event in events)
+
+
+@pytest.mark.asyncio
+async def test_codex_only_emits_agent_messages_that_are_proven_intermediate(tmp_path):
+    adapter = _build_adapter(tmp_path)
+    events = []
+
+    async def collect(event):
+        events.append(event)
+
+    pending = adapter._parse_codex_event(
+        json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "first update"}}),
+        collect,
+    )
+    pending = adapter._parse_codex_event(
+        json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "final answer"}}),
+        collect,
+        pending_agent_message=pending,
+    )
+    pending = adapter._parse_codex_event(
+        json.dumps({"type": "turn.completed", "usage": {"input_tokens": 4, "output_tokens": 2}}),
+        collect,
+        pending_agent_message=pending,
+    )
+    await asyncio.sleep(0)
+
+    assert pending is None
+    assert [(event.kind, event.summary) for event in events] == [
+        (KIND_COMMENTARY, "first update")
+    ]
+
+
 def test_codex_accepts_completed_turn_even_if_process_needs_forced_exit(tmp_path, monkeypatch: pytest.MonkeyPatch):
     adapter = _build_adapter(tmp_path)
     adapter.set_session_mode(True)
@@ -64,7 +114,7 @@ def test_codex_accepts_completed_turn_even_if_process_needs_forced_exit(tmp_path
     lines = [
         json.dumps({"type": "thread.started", "thread_id": "thread_123"}),
         json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "final answer"}}),
-        json.dumps({"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}}),
+        json.dumps({"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5, "reasoning_output_tokens": 3}}),
     ]
     proc = _HangingProc(lines)
     killed_reasons: list[str] = []
@@ -86,6 +136,7 @@ def test_codex_accepts_completed_turn_even_if_process_needs_forced_exit(tmp_path
     assert response.text == "final answer"
     assert response.usage is not None
     assert response.usage.input_tokens == 10
+    assert response.usage.thinking_tokens == 3
     assert adapter._session_id == "thread_123"
     assert killed_reasons == ["turn-completed-grace-expired:req-0001"]
 

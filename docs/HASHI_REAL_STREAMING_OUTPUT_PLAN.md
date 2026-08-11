@@ -1,5 +1,10 @@
 # HASHI Real Streaming Output Plan
 
+> Superseded for Telegram presentation on 2026-08-11. Live answer preview was
+> retired in favor of final-only answer delivery plus the independent
+> `/typing`, `/verbose`, and `/think` controls. Backend answer deltas remain
+> available to local observers.
+
 **Goal:** make HASHI deliver assistant answers progressively, like Hermes, instead of showing a placeholder and then sending the full final answer at the end.
 
 **Status:** implementation plan with Phase 0, Phase 1, Phase 2 OpenRouter streaming, Phase 2b full-delta preservation, and CLI stream-json full-delta preservation implemented behind explicit capability/config gates. OpenRouter live streaming was verified on 2026-06-13 with the `temp` agent. Direct Codex Responses streaming remains future work.

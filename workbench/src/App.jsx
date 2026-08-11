@@ -127,11 +127,11 @@ const BACKEND_CATALOG = {
     efforts: ['low', 'medium', 'high', 'extra_high'],
   },
   'deepseek-api': {
-    models: ['deepseek-reasoner', 'deepseek-chat'],
+    models: ['deepseek-v4-pro', 'deepseek-v4-flash'],
     efforts: [],
   },
   'openrouter-api': {
-    models: ['deepseek/deepseek-v3.2-exp', 'moonshotai/kimi-k2.5', 'google/gemini-3.1-flash-lite-preview', 'anthropic/claude-sonnet-4.6', 'anthropic/claude-opus-4.6', 'anthropic/claude-opus-4.5'],
+    models: ['deepseek/deepseek-v4-pro', 'deepseek/deepseek-v4-flash', 'moonshotai/kimi-k2.5', 'google/gemini-3.1-flash-lite-preview', 'anthropic/claude-sonnet-4.6', 'anthropic/claude-opus-4.6', 'anthropic/claude-opus-4.5'],
     efforts: [],
   },
 };

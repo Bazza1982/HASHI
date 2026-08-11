@@ -48,8 +48,10 @@ Five execution modes:
 - `/retry` — stop stale execution, reset context, restore recent handoff continuity, and rerun the last request; see [RETRY_RESEND_COMMANDS.md](RETRY_RESEND_COMMANDS.md)
 - `/model` — switch model (inline keyboard), then optionally choose or keep effort when the model supports it
 - `/mode [fixed|flex|wrapper|audit|dual-brain]` — switch execution mode; `/mode memory+` only enables Memory+ and keeps the current mode
-- `/think [on|off]` — toggle thinking trace display (periodic italic messages, ~60s intervals, independent of `/verbose`)
-- `/verbose [on|off]` — toggle real-time streaming display; in wrapper mode, `on` also shows core raw output, wrapper final output, wrapper status, latency, and fallback reason
+- `/think [on|off]` — show model-authored interim commentary plus genuine provider-returned reasoning chunks or explicit provider-redaction notices; independent of `/verbose` and `/typing`
+- `/verbose [on|off]` — show a temporary progress card with timing, progress, and available tool-result summaries; reasoning and answer drafts are excluded
+- `/typing [on|off|status]` — control both the temporary `Agent is typing...` bubble and Telegram's native typing indicator
+- `/stream` and `/preview` — retired compatibility commands that point to the three controls above; Telegram answers are delivered only when complete
 - `/skill` — browse, toggle, and run skills (inline keyboard)
 - `/active [on|off] [minutes]` — toggle bridge-managed proactive heartbeat (default 10 min)
 - `/nudge [list]` — show idle continuation jobs. `/nudge <minutes> <exit condition>` creates an idle-only continuation job; `/nudge max <id-fragment> <+100|-100|number|unlimited>` adjusts the optional fire limit. Telegram nudge panels also include `Max -100`, `Max +100`, and `Max ∞` buttons.
@@ -59,8 +61,77 @@ Five execution modes:
 
 **Backend configuration:**
 - `/backend` — switch active backend in Flex (inline keyboard; `+` variant carries continuity handoff). In another mode it first asks whether to switch to Flex, preserves saved mode configuration and Memory+, then continues directly to the backend picker.
+- `/provider [name]` — Claw-only provider picker. Choosing a provider refreshes the menu to that provider's allowed models; provider and model are applied and saved together only after a model initializes successfully.
+- `/model [name]` — switch within the active backend. On `claw-cli`, the list is limited to the active provider and this command never changes provider.
 - Backend and model selection continue to an optional effort step when supported. Keeping the current effort does not change it; unsupported models finish with effort shown as `n/a`.
 - `/effort [level]` — reasoning effort for Claude, Codex, and Grok CLI. The keyboard and accepted values are model-aware: Grok offers `low`, `medium`, and `high` (default `medium`); `max` is currently offered for `gpt-5.6-sol`; `gpt-5.6-terra` and `gpt-5.6-luna` offer up to `xhigh`.
+
+### Claw provider and model configuration
+
+Claw is not tied to OpenRouter. Provider connection details live once under
+`global.claw_providers.providers`; each agent's `claw-cli` backend rows decide
+which providers and models that agent may select. API-key values stay in
+`secrets.json` and are referenced by name.
+
+```json
+{
+  "global": {
+    "claw_providers": {
+      "max_permission_mode": "workspace-write",
+      "providers": {
+        "openrouter": {
+          "base_url": "https://openrouter.ai/api/v1",
+          "secret": "openrouter-api_key",
+          "status": "stable"
+        },
+        "deepseek": {
+          "base_url": "https://api.deepseek.com/v1",
+          "secret": "deepseek-api_key",
+          "status": "stable"
+        }
+      }
+    }
+  },
+  "agents": [
+    {
+      "name": "hashiko",
+      "type": "flex",
+      "allowed_backends": [
+        {
+          "engine": "claw-cli",
+          "provider": "openrouter",
+          "models": [
+            "deepseek/deepseek-v4-flash",
+            "deepseek/deepseek-v4-pro",
+            "openai/gpt-4.1-mini"
+          ],
+          "default_model": "deepseek/deepseek-v4-flash"
+        },
+        {
+          "engine": "claw-cli",
+          "provider": "deepseek",
+          "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
+          "default_model": "deepseek-v4-flash"
+        }
+      ]
+    }
+  ]
+}
+```
+
+Use one provider-specific backend row per provider when an agent needs a
+different model list for each service. The legacy singular `model` field still
+works as a one-model allowlist. A provider with `"status": "disabled"` stays
+visible as a locked menu choice with its reason. `/provider` is unavailable
+unless the active backend is `claw-cli`; `/model` never crosses the provider
+boundary.
+
+HASHI stores the upstream model IDs shown by each service. For direct DeepSeek,
+those remain `deepseek-v4-flash` and `deepseek-v4-pro`. When launching Claw,
+the adapter temporarily encodes a bare OpenAI-compatible model as
+`local/<model>` because Claw requires `provider/model` syntax; Claw strips that
+routing prefix before sending the official bare ID to DeepSeek. OpenRouter model
+slugs already contain `/` and pass through unchanged.
 
 **Wrapper-mode:**
 - `/mode wrapper` — switch a flex-capable agent into wrapper mode.
@@ -72,7 +143,7 @@ Five execution modes:
 - `/model` guides wrapper agents to `/core` or `/wrap`; `/backend` offers the explicit switch-to-Flex confirmation instead of silently changing modes.
 - `/reset CONFIRM` preserves wrapper mode config and wrapper slots; `/wipe CONFIRM` remains a hard workspace clear.
 
-Wrapper model picker buttons currently group recommended choices by provider: Claude Haiku/Sonnet, Gemini Flash/Lite, DeepSeek Flash/Chat, and OpenRouter DeepSeek/Gemini. Claude Opus is intentionally omitted from the picker because it is too expensive for routine wrapping.
+Wrapper model picker buttons currently group recommended choices by provider: Claude Haiku/Sonnet, Gemini Flash/Lite, DeepSeek Flash/Pro, and OpenRouter DeepSeek Flash/Gemini. Claude Opus is intentionally omitted from the picker because it is too expensive for routine wrapping.
 
 **Backend-specific (fixed):**
 - `/effort` — Claude, Codex, Grok CLI
@@ -236,7 +307,10 @@ Tools listed in `agents.json` → `global.default_tools.allowed` are automatical
 - Scheduler checks every 15 seconds; injects prompt into target agent's async queue when due.
 - Hot reload: `tasks.json` is re-read on each loop — no restart needed for task changes.
 - Cron actions: enqueue a prompt or perform a built-in action (e.g. transcript export to markdown journal).
-- If a cron was missed by more than one hour while HASHI was offline or paused, the scheduler skips stale catch-up and notifies the target agent instead of running an old task late. Run the job manually from `/jobs` or Workbench if it is still needed.
+- On the first pass after a restart, due cron and heartbeat jobs for the same agent are persisted as one recovery batch. HASHI directly sends a fixed notice showing affected task IDs, total missed occurrences, purpose, due-time range, and replay limit; it does not ask an agent to generate the notice.
+- Pending and recently resolved recovery batches are injected into later user turns for that agent. The bridge directly handles `run all` / `全部补跑`, `task-id=N` / `补跑 N 次`, and `skip all` / `全部跳过`, and persists the result across restarts.
+- Recovery defaults to one execution per task. Set `"recovery": {"max_replay": N}` on a job to permit bounded repeated catch-up; partial counts select the most recent N occurrences and execute them in chronological order.
+- A single recent job keeps automatic catch-up behavior. A cron missed by more than one hour still waits for user confirmation, and normal heartbeat ticks after startup are not grouped.
 
 ## Dynamic Agent Lifecycle
 Agents can be started and stopped without restarting the bridge process.
@@ -395,7 +469,23 @@ Recommended protocol for Windows UI work:
 ## Important Behavior Notes
 - Bridge owns continuity; backends are treated as stateless.
 - Backend capabilities are not identical — session model, file handling, tool use, and streaming vary per backend.
-- `/think` is a working bridge feature — thinking trace displayed as periodic italic messages. It is NOT limited to any single backend.
+- `/think` accepts only model-authored interim commentary and genuine provider reasoning. It never treats generic start, busy, progress, tool, or answer-delta events as either. If the current backend exposes neither commentary nor reasoning, `/think on` remains quiet.
 - `/handoff` restores continuity from bridge-owned transcript history, not CLI resume state.
 - Model and effort changes at runtime are not automatically persisted back to `agents.json`.
 - Backend-specific behaviors must be labeled as such, not described as universal.
+
+### Telegram display event contract
+
+| Backend | `/think` input | `/verbose` progress and tool summaries |
+|---|---|---|
+| Codex CLI | Full intermediate `agent_message` commentary. Raw provider reasoning text is not exposed by current `codex exec --json`; reported reasoning-token usage is still recorded | Task start, command start/exit code, edited paths, and todo updates |
+| Grok CLI | `thought`, `thinking`, or reasoning events when emitted by Grok | Generic progress plus mapped shell, file, search, tool-start, and tool-result events; result detail depends on the CLI payload |
+| Claw CLI | Actual reasoning text, explicit redaction notices, or legacy reasoning summaries when `stream-json` is supported | Task start, tool start/end, usage summary; JSON fallback can still report completed tool use but not live reasoning |
+| Claude CLI | Actual `thinking_delta` content when the model emits it | Tool/file/shell start, streamed tool input, and completion markers; result output is not always exposed |
+| Gemini CLI | Not currently exposed by Gemini's parsed stream schema | Task start, tool use, short tool-result previews, and errors |
+| OpenRouter API | `reasoning` or `reasoning_details`, model/provider dependent | HASHI tool-gateway start/action/end events, short output previews, policy blocks, and tool-loop warnings |
+| DeepSeek API | `reasoning_content` and reported reasoning-token usage on reasoning models | Same HASHI tool-gateway summaries as OpenRouter |
+| xAI API | Provider reasoning fields when the selected model/endpoint returns them | HASHI tool-gateway summaries where local tool execution is used |
+| Ollama API | The model's `reasoning` field when available | HASHI tool-gateway summaries for locally enabled tools |
+
+Assistant answer deltas remain available to local activity observers, but they are never displayed as Telegram previews. Codex commentary is kept distinct from both generic progress and private/provider reasoning, then routed to `/think` as Codex's user-visible substitute. Long commentary is split across Telegram messages rather than truncated. `/typing` is backend-independent.

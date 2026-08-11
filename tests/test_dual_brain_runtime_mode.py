@@ -425,7 +425,7 @@ def test_dual_brain_interrupted_turn_writes_continuity_once(tmp_path: Path) -> N
     assert "recover" in row["continuity_update"]["open_items"][0]
 
 
-def test_dual_brain_preflight_is_visible_when_think_or_verbose_enabled(tmp_path: Path) -> None:
+def test_dual_brain_preflight_is_visible_only_when_verbose_enabled(tmp_path: Path) -> None:
     workspace = tmp_path / "sakura"
     workspace.mkdir()
     (workspace / "state.json").write_text(
@@ -465,8 +465,8 @@ def test_dual_brain_preflight_is_visible_when_think_or_verbose_enabled(tmp_path:
             transcripts.append((role, text, source))
 
     class Runtime:
-        _verbose = False
-        _think = True
+        _verbose = True
+        _think = False
         handoff_builder = Handoff()
 
         async def send_long_message(self, **kwargs):
@@ -478,7 +478,8 @@ def test_dual_brain_preflight_is_visible_when_think_or_verbose_enabled(tmp_path:
         backend_invoker=invoker,
         backend_context_getter=lambda: {"engine": "codex-cli", "model": "gpt-5.4"},
     )
-    observer.attach_runtime(Runtime())
+    runtime = Runtime()
+    observer.attach_runtime(runtime)
 
     asyncio.run(
         observer.build_context_sections(
@@ -496,9 +497,25 @@ def test_dual_brain_preflight_is_visible_when_think_or_verbose_enabled(tmp_path:
     assert sent[-1]["chat_id"] == 123
     assert sent[-1]["purpose"] == "left-brain-visible"
     assert "Left brain preflight" in str(sent[-1]["text"])
-    assert "recent context" in str(sent[-1]["text"])
-    assert transcripts[-1][0] == "thinking"
-    assert transcripts[-1][2] == "think"
+    assert "Wiki:" in str(sent[-1]["text"])
+    assert "recent context" not in str(sent[-1]["text"])
+    assert transcripts == []
+
+    sent.clear()
+    runtime._verbose = False
+    runtime._think = True
+    asyncio.run(
+        observer.build_context_sections(
+            TurnContextRequest(
+                request_id="r-think-only",
+                source="text",
+                user_text="what happened?",
+                model_name="gpt-5.4",
+                chat_id=123,
+            )
+        )
+    )
+    assert sent == []
 
 
 def test_dual_brain_after_action_is_not_visible_when_think_and_verbose_disabled(tmp_path: Path) -> None:

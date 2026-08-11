@@ -121,6 +121,33 @@ async def test_pre_turn_context_sections_skip_bridge_requests():
 
 
 @pytest.mark.asyncio
+async def test_pending_scheduler_recovery_is_injected_into_next_user_turn():
+    runtime = _runtime()
+    runtime.name = "zelda"
+    scheduler = SimpleNamespace(
+        build_recovery_context=lambda agent: (
+            "PENDING RECOVERY BATCHES\n- task_id=hourly-hello missed_count=7"
+            if agent == "zelda"
+            else ""
+        )
+    )
+    runtime.orchestrator = SimpleNamespace(scheduler=scheduler)
+
+    sections = await runtime._build_pre_turn_context_sections(
+        _item("text"),
+        "What did I miss?",
+        is_bridge_request=False,
+    )
+
+    assert sections == [
+        (
+            "SCHEDULER RECOVERY",
+            "PENDING RECOVERY BATCHES\n- task_id=hourly-hello missed_count=7",
+        )
+    ]
+
+
+@pytest.mark.asyncio
 async def test_pre_turn_context_provider_failure_logs_and_continues(caplog):
     runtime = _runtime()
     runtime._pre_turn_context_providers = [_FailingProvider(), _Provider()]

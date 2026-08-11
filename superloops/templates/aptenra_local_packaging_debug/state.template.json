@@ -1,0 +1,42 @@
+{
+  "loop_id": "{{LOOP_ID}}",
+  "title": "Aptenra local packaging debug",
+  "template": "aptenra_local_packaging_debug",
+  "status": "paused",
+  "owner_agent": "zelda",
+  "owner_instance": "HASHI1",
+  "current_round": 1,
+  "max_rounds": 30,
+  "scheduler_auto_advance": false,
+  "current_step": null,
+  "next_action": {
+    "kind": "await_operator_start"
+  },
+  "execution_policy": {
+    "validation_source": "installed_candidate_only",
+    "failure_journal_update": "after_every_failure",
+    "failed_candidate_cleanup": "uninstall_before_next_round",
+    "environment_boundary": "candidate_only_preserve_user_environment_and_debug_runtime",
+    "prebuild_checks": "advisory_non_blocking",
+    "provider_credentials_required": false,
+    "success_condition": "stable_setup_native_launchers_clean_user_complete_lifecycle"
+  },
+  "liveness": {
+    "mode": "idle_nudge",
+    "interval_minutes": 1,
+    "may_mutate_task_status": false,
+    "must_continue_until_terminal": true,
+    "waiting_is_terminal": false,
+    "on_wake": "take_next_concrete_action_without_rechecking_global_history",
+    "terminal_conditions": [
+      "stable_setup_native_launchers_clean_user_complete_lifecycle",
+      "round_30_formal_block"
+    ]
+  },
+  "taskboard_path": "superloops/loops/{{LOOP_ID}}/taskboard.json",
+  "issues_path": "superloops/loops/{{LOOP_ID}}/issues.json",
+  "waits_path": "superloops/loops/{{LOOP_ID}}/waits.json",
+  "events_path": "superloops/loops/{{LOOP_ID}}/events.jsonl",
+  "active_round_path": "superloops/loops/{{LOOP_ID}}/rounds/round-01/round.json",
+  "operator_summary_path": "superloops/loops/{{LOOP_ID}}/README.md"
+}

@@ -38,6 +38,10 @@
     {
       "id": "verify_supervised_environment_parity",
       "guidance": "For service, watchdog, scheduler, or cold-restart work, compare the supervised runtime environment against the known-good interactive runtime, including home paths, config paths, auth/cache paths, active backend, model, and instance identity."
+    },
+    {
+      "id": "separate_liveness_from_task_start_authority",
+      "guidance": "An idle nudge may wake the orchestrator to inspect and continue a loop, but it must not mutate a pending task to in_progress. The orchestrator explicitly advances only after checking dependencies and evidence."
     }
   ],
   "tick_checklist": [
@@ -48,7 +52,8 @@
     "Did I record enough evidence for safe resume?",
     "Before closeout, did I drain/classify same-loop worker/reviewer replies?",
     "Before closeout, did I prove the exact user-visible capability, not only health?",
-    "For supervised launches, did I verify environment, auth/cache, backend/model, and identity parity?"
+    "For supervised launches, did I verify environment, auth/cache, backend/model, and identity parity?",
+    "If a liveness nudge woke me, did I inspect dependencies and evidence before explicitly starting any pending task?"
   ],
   "hard_stops": [
     {
@@ -74,6 +79,10 @@
     {
       "id": "no_unscoped_destructive_remote_action",
       "rule": "Do not perform destructive remote actions without a scoped command, target, rollback or recovery path, and safety boundary."
+    },
+    {
+      "id": "no_scheduler_owned_task_start_from_idleness",
+      "rule": "Do not let an idle scheduler or liveness nudge mark a pending task in progress. Only the orchestrator may explicitly start it after dependency and evidence review."
     }
   ],
   "non_goals": [

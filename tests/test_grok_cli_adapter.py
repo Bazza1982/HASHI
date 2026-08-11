@@ -41,7 +41,8 @@ import time
 
 {version_block}
 
-prompt = sys.argv[-1] if sys.argv else ''
+prompt_arg = next((arg for arg in sys.argv if arg.startswith('--single=')), '')
+prompt = prompt_arg.split('=', 1)[1] if prompt_arg else ''
 if 'stall' in prompt:
     time.sleep(20)
     raise SystemExit(0)
@@ -76,6 +77,10 @@ if 'tool-events' in prompt:
     print(json.dumps({{"type": "tool_call", "name": "Write", "path": "demo/file.txt"}}), flush=True)
     print(json.dumps({{"type": "text", "data": "done"}}), flush=True)
     print(json.dumps({{"type": "end", "sessionId": "sess-tool", "stopReason": "EndTurn"}}), flush=True)
+    raise SystemExit(0)
+if 'large-event' in prompt:
+    print(json.dumps({{"type": "text", "data": "x" * (2 * 1024 * 1024)}}), flush=True)
+    print(json.dumps({{"type": "end", "sessionId": "sess-large", "stopReason": "EndTurn"}}), flush=True)
     raise SystemExit(0)
 
 print(json.dumps({{"type": "session", "session_id": "sess-123", "summary": "started"}}), flush=True)
@@ -136,6 +141,18 @@ def test_grok_build_cmd_defaults_to_execution_ready_flags(tmp_path):
     assert cmd[cmd.index("--permission-mode") + 1] == "bypassPermissions"
     assert "--always-approve" in cmd
     assert "--check" not in cmd
+    assert "-p" not in cmd
+    assert "--single=do work" in cmd
+
+
+def test_grok_build_cmd_binds_leading_hyphen_prompt_as_option_value(tmp_path):
+    adapter = GrokCLIAdapter(_agent_config(tmp_path), SimpleNamespace(grok_cmd="grok"))
+    prompt = "--- CURRENT USER REQUEST — AUTHORITATIVE ---\nRun the scheduled task."
+
+    cmd = adapter._build_cmd(prompt)
+
+    assert "-p" not in cmd
+    assert cmd[-1] == f"--single={prompt}"
 
 
 def test_grok_build_cmd_can_enable_check_explicitly(tmp_path):
@@ -225,6 +242,22 @@ async def test_grok_streaming_json_reconstructs_final_answer_and_emits_deltas(tm
     assert [event.summary for event in text_events] == ["Hel", "lo"]
     thinking_events = [event for event in events if event.kind == KIND_THINKING]
     assert [event.summary for event in thinking_events] == ["thinking"]
+
+
+@pytest.mark.asyncio
+async def test_grok_streaming_json_accepts_event_larger_than_asyncio_reader_limit(tmp_path):
+    fake_grok = _write_fake_grok(tmp_path)
+    adapter = GrokCLIAdapter(_agent_config(tmp_path), SimpleNamespace(grok_cmd=str(fake_grok)))
+
+    response = await adapter.generate_response(
+        "emit a large-event",
+        "req-grok-large-event",
+        on_stream_event=None,
+    )
+
+    assert response.is_success is True
+    assert len(response.text) == 2 * 1024 * 1024
+    assert response.text == "x" * (2 * 1024 * 1024)
 
 
 def test_grok_resume_is_used_only_in_explicit_session_mode(tmp_path):

@@ -6,10 +6,12 @@ import asyncio
 import logging
 from pathlib import Path
 
+import adapters.stream_events as stream_event_types
 from adapters.base import BaseBackend, BackendCapabilities, BackendResponse, TokenUsage
+from adapters.stream_io import iter_stream_lines
 from adapters.stream_events import (
     StreamCallback, StreamEvent,
-    KIND_THINKING, KIND_TOOL_END,
+    KIND_TOOL_END,
     KIND_FILE_EDIT, KIND_SHELL_EXEC, KIND_PROGRESS,
 )
 
@@ -25,8 +27,12 @@ class CodexCLIAdapter(BaseBackend):
             supports_sessions=True,
             supports_files=True,
             supports_tool_use=True,
-            supports_thinking_stream=True,
+            supports_thinking_stream=False,
             supports_headless_mode=True,
+            supports_commentary_stream=True,
+            supports_progress_stream=True,
+            supports_tool_stream=True,
+            supports_answer_stream=False,
         )
 
     def __init__(self, agent_config, global_config, api_key: str = None):
@@ -211,11 +217,13 @@ class CodexCLIAdapter(BaseBackend):
     ) -> None:
         if on_stream_event is None or not pending_agent_message:
             return
-        text = " ".join(str(pending_agent_message.get("text") or "").split())
+        text = str(pending_agent_message.get("text") or "").strip()
         if not text:
             return
         self._emit_stream_event(
-            StreamEvent(kind=KIND_THINKING, summary=text[:160]),
+            # Resolve through the module at emission time so a running bridge
+            # can load a newly introduced event kind in the same hot restart.
+            StreamEvent(kind=stream_event_types.KIND_COMMENTARY, summary=text),
             on_stream_event,
         )
 
@@ -239,17 +247,22 @@ class CodexCLIAdapter(BaseBackend):
             usage = event.get("usage")
             if isinstance(usage, dict):
                 self._last_usage = TokenUsage(
-                    input_tokens=usage.get("input_tokens", 0),
-                    output_tokens=usage.get("output_tokens", 0),
-                    thinking_tokens=0,
+                    input_tokens=usage.get("input_tokens", 0) or 0,
+                    output_tokens=usage.get("output_tokens", 0) or 0,
+                    thinking_tokens=(
+                        usage.get("reasoning_output_tokens")
+                        or usage.get("reasoning_tokens")
+                        or 0
+                    ),
                 )
             return None
 
-        if pending_agent_message and not (etype == "item.completed" and item_type == "agent_message"):
+        if pending_agent_message:
             # Codex uses `agent_message` for intermediate progress updates as well as
             # the final answer. Hold the latest one until another event arrives; if
-            # something follows, it was an interim status update and can be exposed
-            # as a thinking trace without duplicating the final response.
+            # anything except `turn.completed` follows, it was model-authored interim
+            # commentary. `turn.completed` is handled above so the held final answer
+            # is not duplicated in the thinking channel.
             self._flush_pending_agent_message(pending_agent_message, on_stream_event)
             pending_agent_message = None
 
@@ -383,7 +396,6 @@ class CodexCLIAdapter(BaseBackend):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(effective_workdir),
-                limit=16 * 1024 * 1024,  # 16 MB readline buffer — Codex embeds full command output in single JSON lines
                 **_extra_kwargs,
             )
             # Capture local ref to avoid race with shutdown() nulling self.current_proc
@@ -406,23 +418,7 @@ class CodexCLIAdapter(BaseBackend):
                 nonlocal timeout_kind
                 nonlocal captured_thread_id
                 nonlocal turn_completed_at
-                while True:
-                    try:
-                        line = await proc.stdout.readline()
-                    except asyncio.LimitOverrunError:
-                        # Single JSON event exceeded buffer — drain the oversized line and continue
-                        self.logger.warning(
-                            f"Codex stdout line exceeded buffer limit for {request_id}; skipping event"
-                        )
-                        try:
-                            await proc.stdout.readuntil(b"\n")
-                        except (asyncio.LimitOverrunError, asyncio.IncompleteReadError):
-                            # Still too big or stream ended — read remaining buffer
-                            await proc.stdout.read(16 * 1024 * 1024)
-                        self._touch_activity()
-                        continue
-                    if not line:
-                        break
+                async for line in iter_stream_lines(proc.stdout):
                     self._touch_activity()
                     decoded = line.decode(errors="replace")
                     stdout_lines.append(decoded)

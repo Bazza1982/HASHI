@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from adapters.base import BaseBackend, BackendCapabilities, BackendResponse
+from adapters.stream_io import iter_stream_lines
 from adapters.stream_events import (
     KIND_ERROR,
     KIND_FILE_READ,
@@ -32,15 +33,16 @@ class GrokCLIAdapter(BaseBackend):
     DEFAULT_REASONING_EFFORT = "medium"
 
     def _define_capabilities(self) -> BackendCapabilities:
-        capabilities = BackendCapabilities(
+        return BackendCapabilities(
             supports_sessions=True,
             supports_files=True,
             supports_tool_use=True,
             supports_thinking_stream=True,
             supports_headless_mode=True,
+            supports_progress_stream=True,
+            supports_tool_stream=True,
+            supports_answer_stream=True,
         )
-        capabilities.supports_answer_stream = True
-        return capabilities
 
     def __init__(self, agent_config, global_config, api_key: str = None):
         super().__init__(agent_config, global_config, api_key)
@@ -156,7 +158,11 @@ class GrokCLIAdapter(BaseBackend):
                 cmd.extend([flag, option_value])
         if self._session_mode and self._session_id:
             cmd.extend(["--resume", self._session_id])
-        cmd.extend(["-p", prompt])
+        # Bind the prompt to the option in one argv entry. Grok CLI 0.2.117
+        # rejects a separate `-p` value when the prompt starts with `-` (for
+        # example HASHI's `--- CURRENT USER REQUEST` bridge marker), treating
+        # the prompt as another command-line option before inference starts.
+        cmd.append(f"--single={prompt}")
         return cmd
 
     def _extract_content_text(self, value: Any) -> str:
@@ -378,10 +384,7 @@ class GrokCLIAdapter(BaseBackend):
 
             async def _read_stdout():
                 nonlocal final_text
-                while True:
-                    line = await proc.stdout.readline()
-                    if not line:
-                        break
+                async for line in iter_stream_lines(proc.stdout):
                     self._touch_activity()
                     decoded = line.decode(errors="replace")
                     stdout_lines.append(decoded)

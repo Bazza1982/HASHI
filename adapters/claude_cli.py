@@ -7,11 +7,12 @@ import logging
 from pathlib import Path
 
 from adapters.base import BaseBackend, BackendCapabilities, BackendResponse, TokenUsage
+from adapters.stream_io import iter_stream_lines
 from adapters.stream_events import (
     StreamCallback, StreamEvent,
     KIND_THINKING, KIND_TOOL_START, KIND_TOOL_END,
     KIND_FILE_READ, KIND_FILE_EDIT, KIND_SHELL_EXEC,
-    KIND_TEXT_DELTA,
+    KIND_TEXT_DELTA, KIND_PROGRESS,
 )
 
 
@@ -21,15 +22,16 @@ class ClaudeCLIAdapter(BaseBackend):
     DEFAULT_HARD_TIMEOUT_SEC = 24 * 60 * 60
 
     def _define_capabilities(self) -> BackendCapabilities:
-        capabilities = BackendCapabilities(
+        return BackendCapabilities(
             supports_sessions=True,
             supports_files=True,
             supports_tool_use=True,
             supports_thinking_stream=True,
             supports_headless_mode=True,
+            supports_progress_stream=True,
+            supports_tool_stream=True,
+            supports_answer_stream=True,
         )
-        capabilities.supports_answer_stream = True
-        return capabilities
 
     def __init__(self, agent_config, global_config, api_key: str = None):
         super().__init__(agent_config, global_config, api_key)
@@ -201,7 +203,7 @@ class ClaudeCLIAdapter(BaseBackend):
                 )
             elif cb.get("type") == "thinking":
                 self._emit_stream_event(
-                    StreamEvent(kind=KIND_THINKING, summary="Thinking..."),
+                    StreamEvent(kind=KIND_PROGRESS, summary="Claude reasoning started"),
                     on_stream_event,
                 )
             return None
@@ -313,7 +315,6 @@ class ClaudeCLIAdapter(BaseBackend):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(effective_workdir),
-                limit=1024 * 1024,  # 1 MB readline buffer (default 64 KB too small for large JSON events)
                 **_extra_kwargs,
             )
             self.current_proc = proc  # keep ref for shutdown/kill
@@ -366,10 +367,7 @@ class ClaudeCLIAdapter(BaseBackend):
         timeout_kind: str | None = None
 
         async def _read_stderr():
-            while True:
-                line = await proc.stderr.readline()
-                if not line:
-                    break
+            async for line in iter_stream_lines(proc.stderr):
                 self._touch_activity()
                 stderr_lines.append(line)
 
@@ -378,11 +376,7 @@ class ClaudeCLIAdapter(BaseBackend):
         async def _read_stdout():
             nonlocal result_text
             line_count = 0
-            while True:
-                line = await proc.stdout.readline()
-                if not line:
-                    break
-
+            async for line in iter_stream_lines(proc.stdout):
                 self._touch_activity()
                 line_count += 1
                 decoded = line.decode(errors="replace")
@@ -586,7 +580,6 @@ class ClaudeCLIAdapter(BaseBackend):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(self.effective_workdir),
-            limit=1024 * 1024,
         )
         self.current_proc = proc
         self._touch_activity()
