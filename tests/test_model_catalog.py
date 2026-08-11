@@ -61,10 +61,11 @@ def test_grok_cli_exposes_reasoning_effort_with_medium_default():
 
 
 def test_claw_cli_exposes_agentic_execution_effort_with_high_default():
-    expected = ["low", "medium", "high", "xhigh", "max"]
+    expected = ["low", "medium", "high", "xhigh", "max", "max+"]
     assert get_available_efforts("claw-cli", "deepseek/deepseek-v4-pro") == expected
     assert normalize_effort("claw-cli", None, "deepseek/deepseek-v4-pro") == "high"
     assert normalize_effort("claw-cli", "max", "deepseek/deepseek-v4-pro") == "max"
+    assert normalize_effort("claw-cli", "max+", "deepseek/deepseek-v4-pro") == "max+"
 
 
 def test_xai_api_models_are_available_to_gateway_catalog():

@@ -76,7 +76,7 @@ BACKEND_REGISTRY: dict[str, dict] = {
         # Claw providers currently expose no reasoning-effort control. These
         # levels therefore represent agentic execution budget (maximum model/
         # tool-loop iterations), mapped by ClawCLIAdapter.
-        "efforts": ["low", "medium", "high", "xhigh", "max"],
+        "efforts": ["low", "medium", "high", "xhigh", "max", "max+"],
         "default_effort": "high",
         "secret_keys": [
             "{agent_name}_openrouter_key",

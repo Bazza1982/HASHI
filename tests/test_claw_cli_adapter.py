@@ -295,6 +295,7 @@ def test_build_claw_env_uses_allowlist_only():
         ("high", "96"),
         ("xhigh", "192"),
         ("max", "384"),
+        ("max+", "512"),
     ],
 )
 def test_claw_execution_effort_maps_to_iteration_budget(tmp_path, effort, expected_iterations):
@@ -311,6 +312,9 @@ def test_claw_execution_effort_maps_to_iteration_budget(tmp_path, effort, expect
     assert adapter._task_env()["CLAW_MAX_TOOL_ITERATIONS"] == expected_iterations
     assert adapter._task_env()["CLAW_TASK_PLANNING"] == ("0" if effort == "low" else "1")
     assert adapter._task_env()["CLAW_EXECUTION_EFFORT"] == effort
+    if effort == "max+":
+        assert adapter._task_env()["CLAW_MAX_PLUS_TOKEN_BUDGET"] == "1500000"
+        assert adapter._task_env()["CLAW_MAX_PLUS_TIME_BUDGET_SECONDS"] == "1500"
 
 
 def test_claw_explicit_max_iterations_overrides_execution_effort(tmp_path):
@@ -324,6 +328,34 @@ def test_claw_explicit_max_iterations_overrides_execution_effort(tmp_path):
     adapter = ClawCLIAdapter(cfg, SimpleNamespace(), api_key="test-key")
 
     assert adapter._task_env()["CLAW_MAX_TOOL_ITERATIONS"] == "77"
+
+
+def test_max_plus_checkpoint_is_request_correlated_and_atomically_recoverable(tmp_path):
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={"effort": "max+"},
+        resolve_access_root=lambda: tmp_path,
+    )
+    adapter = ClawCLIAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    event = {
+        "kind": "max_plus_checkpoint",
+        "phase": "evidence_update",
+        "budget": {"tokens_used": 123, "token_limit": 1_500_000},
+        "stop_reason": None,
+        "frame": {"active_goal": "verify max plus"},
+    }
+
+    adapter._persist_control_event("req-max-plus", event)
+
+    checkpoint = json.loads(
+        (tmp_path / "backend_state" / "claw_max_plus_checkpoint.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert checkpoint == {"request_id": "req-max-plus", "event": event}
+    assert not (tmp_path / "backend_state" / "claw_max_plus_checkpoint.json.tmp").exists()
 
 
 def test_run_claw_doctor_parses_json(tmp_path):
