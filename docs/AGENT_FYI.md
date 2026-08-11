@@ -102,7 +102,7 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 ## Core Memory Model
 - Fixed mode uses real persistent sessions and incremental prompts with
   session-capable Codex, Claude, and Grok CLI backends. Other modes invoke those
-  backends as one-shot turns; API, Gemini CLI, and Claw CLI paths remain
+  backends as one-shot turns; API, Gemini CLI, and HASHI Engine Runtime (HER) paths remain
   stateless.
 - Bridge owns normal context assembly. Optional Memory+ adds a canonical bounded
   today card, short carryover, and archive pointers across every execution mode.

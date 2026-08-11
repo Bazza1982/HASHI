@@ -100,7 +100,7 @@ def test_explicit_flex_agent_type_does_not_warn(tmp_path, caplog):
     assert "has no explicit type" not in caplog.text
 
 
-def test_global_claw_providers_are_loaded(tmp_path):
+def test_legacy_claw_configuration_migrates_to_her(tmp_path):
     config_path = tmp_path / "agents.json"
     secrets_path = tmp_path / "secrets.json"
     config_path.write_text(
@@ -137,10 +137,44 @@ def test_global_claw_providers_are_loaded(tmp_path):
     )
     secrets_path.write_text(json.dumps({"authorized_telegram_id": 0}), encoding="utf-8")
 
-    global_cfg, _, _ = ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
+    global_cfg, agents, _ = ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
 
+    assert global_cfg.her_providers["binary_path"] == "/opt/hashi/bin/claw"
     assert global_cfg.claw_providers["binary_path"] == "/opt/hashi/bin/claw"
     assert global_cfg.claw_providers["providers"]["openrouter"]["secret"] == "openrouter_key"
+    assert agents[0].active_backend == "her"
+    assert agents[0].allowed_backends[0]["engine"] == "her"
+
+
+def test_every_flex_agent_gets_builtin_her_backend(tmp_path):
+    config_path = tmp_path / "agents.json"
+    secrets_path = tmp_path / "secrets.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "global": {"authorized_id": 0},
+                "agents": [
+                    {
+                        "name": "flexy",
+                        "type": "flex",
+                        "workspace_dir": "workspaces/flexy",
+                        "system_md": "workspaces/flexy/agent.md",
+                        "allowed_backends": [{"engine": "gemini-cli"}],
+                        "active_backend": "gemini-cli",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    secrets_path.write_text(json.dumps({"authorized_telegram_id": 0}), encoding="utf-8")
+
+    _, agents, _ = ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
+
+    her = next(backend for backend in agents[0].allowed_backends if backend["engine"] == "her")
+    assert her["model"] == "deepseek/deepseek-v4-flash"
+    assert her["effort"] == "high"
+    assert her["permission_mode"] == "read-only"
 
 
 def test_enterprise_scheduler_lease_config_is_loaded(tmp_path):

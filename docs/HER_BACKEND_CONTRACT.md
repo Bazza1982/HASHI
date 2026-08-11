@@ -1,6 +1,9 @@
-# HASHI Claw Backend Contract
+# HASHI Engine Runtime (HER) Backend Contract
 
-Status: active for `0.1.3-hashi.2`
+Status: active for HER `0.1.0-hashi.1`
+
+HER is derived from the MIT-licensed Claw runtime. The upstream copyright and
+license notice ships with every packaged HER release as `CLAW_LICENSE`.
 
 ## Deployment scope
 
@@ -41,7 +44,7 @@ that case is logged and must not silently switch to a different agent's session.
 consume it directly. Claw consumes the same registry through the `hashi-tools` MCP stdio
 adapter generated under the agent's `backend_state` directory.
 
-- Browser behavior remains in `tools.browser`; the Claw adapter does not duplicate it.
+- Browser behavior remains in `tools.browser`; the HER adapter does not duplicate it.
 - The generated Gateway context is mode `0600`, contains only secrets required by the
   allowed tools, and excludes live runtime/config objects.
 - Claw-native `--allowedTools` and HASHI capability permissions remain separate layers.
@@ -53,7 +56,7 @@ adapter generated under the agent's `backend_state` directory.
 
 ## Streaming contract
 
-The authenticated packaged Claw may emit `stream-json`. HASHI consumes assistant,
+The authenticated packaged HER may emit `stream-json`. HASHI consumes assistant,
 thinking, tool, and usage events, but HASHI remains responsible for deciding which
 events are visible and how final delivery is promoted. Encrypted or provider-redacted
 reasoning must never be reconstructed or exposed.
@@ -64,8 +67,8 @@ Production resolution uses `runtime_policy = require-packaged`. The adapter veri
 platform, executable permission, manifest identity, and SHA-256 before execution. The
 certified binary and its provenance are recorded in:
 
-- `hashi_assets/claw/manifest.json`
-- `hashi_assets/claw/certification_baseline.json`
+- `hashi_assets/her/manifest.json`
+- `hashi_assets/her/certification_baseline.json`
 
 A source checkout, PATH binary, or legacy external binary must not silently replace the
 packaged runtime.
@@ -85,7 +88,7 @@ The baseline is deliberately non-expanding:
 Run the full certification check with:
 
 ```bash
-python scripts/verify_claw_certification.py \
+python scripts/verify_her_certification.py \
   --source-root /path/to/claw-code-hashi-4ea31c1
 ```
 

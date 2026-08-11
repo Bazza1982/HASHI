@@ -141,9 +141,9 @@ def test_provider_prefixed_model_is_preserved_for_adapter_resolution(tmp_path):
         system_md=workspace / "AGENT.md",
         telegram_token_key="test-flex",
         allowed_backends=[
-            {"engine": "claw-cli", "model": "deepseek/default"},
+            {"engine": "her", "model": "deepseek/default"},
         ],
-        active_backend="claw-cli",
+        active_backend="her",
         project_root=workspace,
     )
     global_cfg = GlobalConfig(
@@ -156,7 +156,7 @@ def test_provider_prefixed_model_is_preserved_for_adapter_resolution(tmp_path):
     manager = FlexibleBackendManager(cfg, global_cfg, secrets={"openrouter_key": "secret"})
 
     adapter_cfg = manager._build_adapter_config(
-        "claw-cli",
+        "her",
         cfg.allowed_backends[0],
         target_model="openrouter:deepseek/deepseek-v4-flash",
     )

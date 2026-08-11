@@ -12,7 +12,7 @@ HASHI is moving through three connected stages:
    human-directed AI agent system for one owner running local agents, backends,
    voice, memory, scheduling, tools, and Workbench.
 2. **Open-source orchestration platform** — HASHI now provides a broader
-   multi-agent runtime with backend adapters, Nagare workflows, Claw mode,
+   multi-agent runtime with backend adapters, Nagare workflows, HER mode,
    Superloop operations, HChat, Remote, EXP guidebooks, and local-first
    automation.
 3. **Enterprise-grade HASHI AAI** — the enterprise line turns the same codebase
@@ -30,7 +30,7 @@ Current version-line interpretation:
 - **Enterprise AAI `v0.1.0-alpha.1` / package `0.1.0a1`** is the current
   enterprise alpha artifact-freeze line.
 - **HASHI `v4.0.0-alpha.1`** is the broader platform foundation alpha line for
-  Claw mode, Superloop, and local orchestration evolution.
+  HER mode, Superloop, and local orchestration evolution.
 
 ---
 
@@ -53,7 +53,7 @@ SIEM, and Kubernetes/cloud validation remain post-alpha.
 
 HASHI v4 alpha is the broader platform foundation line. It is focused on:
 
-- **Claw mode foundation** — `claw-cli` is integrated as a scoped backend with
+- **HER mode foundation** — `her` is integrated as a scoped backend with
   provider routing, packaged runtime discovery, checksum-checked manifest
   metadata, and live repo-root read/write/edit validation.
 - **Grok CLI backend support** — `grok-cli` is integrated into the flex backend
@@ -78,7 +78,7 @@ HASHI v4 alpha is the broader platform foundation line. It is focused on:
 
 Alpha limitations:
 
-- Packaged `hashi-claw` release binaries are not yet shipped.
+- Packaged `hashi-her` release binaries are not yet shipped.
 - Claw Tool Gateway/MCP parity is planned, not complete.
 - Claw shell/test execution and browser/web parity require later gates.
 - Superloop is not yet a stable unattended automation product; alpha loops must

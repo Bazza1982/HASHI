@@ -27,7 +27,7 @@ def test_api_backends_declare_level_two_support(engine: str) -> None:
 
 @pytest.mark.parametrize(
     "engine",
-    ("gemini-cli", "claude-cli", "codex-cli", "claw-cli", "grok-cli"),
+    ("gemini-cli", "claude-cli", "codex-cli", "her", "grok-cli"),
 )
 def test_cli_harnesses_are_level_one_only(engine: str) -> None:
     assert get_supported_privacy_levels(engine) == (0, 1)

@@ -3,7 +3,7 @@ import logging
 from pathlib import Path
 from typing import Optional, Any
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig, AgentConfig
-from orchestrator.flexible_backend_registry import get_secret_lookup_order
+from orchestrator.flexible_backend_registry import canonical_backend_engine, get_secret_lookup_order
 from orchestrator.privacy_levels import (
     PrivacyLevel,
     PrivacyPolicyError,
@@ -46,7 +46,7 @@ class FlexibleBackendManager:
             try:
                 state = self.state_store.read()
                 if "active_backend" in state:
-                    self.config.active_backend = state["active_backend"]
+                    self.config.active_backend = canonical_backend_engine(state["active_backend"])
                 if "active_model" in state:
                     self._active_model_override = state["active_model"]
                 if "agent_mode" in state:
@@ -64,6 +64,8 @@ class FlexibleBackendManager:
                     for backend_cfg in self.config.allowed_backends:
                         engine = backend_cfg.get("engine")
                         effort = backend_efforts.get(engine)
+                        if effort is None and engine == "her":
+                            effort = backend_efforts.get("claw-cli")
                         if isinstance(effort, str) and effort.strip():
                             backend_cfg["effort"] = effort.strip().lower()
             except Exception as e:
@@ -194,9 +196,10 @@ class FlexibleBackendManager:
     def _select_backend_cfg(self, engine: str, target_model: str | None = None) -> dict | None:
         """Pick allowed backend entry for engine, preferring model/provider match.
 
-        Multiple claw-cli rows (e.g. openrouter vs xai) share the same engine name;
+        Multiple HER rows (e.g. OpenRouter vs xAI) share the same engine name;
         first-match alone would always bind the wrong provider.
         """
+        engine = canonical_backend_engine(engine)
         candidates = [b for b in self.config.allowed_backends if b.get("engine") == engine]
         if not candidates:
             return None
@@ -219,7 +222,7 @@ class FlexibleBackendManager:
                     return backend
                 return backend
 
-        # Grok models on claw should prefer the HASHI xAI OAuth provider when present.
+        # Grok models on HER should prefer the HASHI xAI OAuth provider when present.
         lowered = model.lower()
         if lowered.startswith("grok") or lowered.startswith("xai/"):
             for backend in candidates:
@@ -229,6 +232,7 @@ class FlexibleBackendManager:
         return candidates[0]
 
     def create_ephemeral_backend(self, engine: str, target_model: str | None = None):
+        engine = canonical_backend_engine(engine)
         backend_cfg_raw = self._select_backend_cfg(engine, target_model=target_model)
         if not backend_cfg_raw:
             raise ValueError(f"Backend {engine} not allowed for {self.config.name}.")
@@ -329,11 +333,11 @@ class FlexibleBackendManager:
             self.current_backend.privacy_level = self.privacy_level
 
             # V2.2+: inject the canonical ToolRegistry into tool-capable backends.
-            # API adapters consume it directly; Claw exposes it through the
+            # API adapters consume it directly; HER exposes it through the
             # protocol-neutral HASHI Tool Gateway over MCP stdio.
-            if engine in ("openrouter-api", "deepseek-api", "ollama-api", "xai-api", "claw-cli"):
+            if engine in ("openrouter-api", "deepseek-api", "ollama-api", "xai-api", "her"):
                 tools_cfg = self._resolve_tools_config(backend_cfg_raw)
-                if engine == "claw-cli" and not tools_cfg:
+                if engine == "her" and not tools_cfg:
                     tools_cfg = {"allowed": ["*"], "max_loops": 25}
                 if tools_cfg:
                     self._attach_tool_registry(tools_cfg, adapter_cfg)
@@ -424,6 +428,7 @@ class FlexibleBackendManager:
             self.logger.error(f"Failed to attach ToolRegistry: {e}")
 
     async def switch_backend(self, target_engine: str, target_model: str | None = None) -> bool:
+        target_engine = canonical_backend_engine(target_engine)
         self.logger.info(f"Switching backend to {target_engine}" + (f" model={target_model}" if target_model else ""))
         backend_cfg_raw = self._select_backend_cfg(target_engine, target_model=target_model)
         if not backend_cfg_raw:

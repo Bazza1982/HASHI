@@ -12,6 +12,10 @@ from orchestrator.enterprise.profile import (
 )
 from orchestrator.pathing import resolve_command_value, resolve_path_value
 from orchestrator.runtime_defaults import DEFAULT_HASHI_REMOTE_PORT, DEFAULT_WORKBENCH_PORT
+from orchestrator.flexible_backend_registry import (
+    canonical_backend_engine,
+    normalize_allowed_backends,
+)
 
 # Valid access_scope values:
 #   "workspace" - only the agent's workspace_dir (most restrictive)
@@ -68,6 +72,7 @@ class GlobalConfig:
     xai_oauth: Dict[str, Any] = field(default_factory=dict)
     openrouter_url: str = "https://openrouter.ai/api/v1/chat/completions"
     claw_providers: Dict[str, Any] = field(default_factory=dict)
+    her_providers: Dict[str, Any] = field(default_factory=dict)
     enterprise_auth_providers: List[Dict[str, Any]] = field(default_factory=list)
     enterprise_database_url: str | None = None
     enterprise_scheduler_lease_enabled: bool = False
@@ -283,7 +288,9 @@ class ConfigManager:
             xai_use_responses_api=_truthy(g_raw.get("xai_use_responses_api", False)),
             xai_oauth=dict(g_raw.get("xai_oauth") or {}),
             openrouter_url=g_raw.get("openrouter_url", "https://openrouter.ai/api/v1/chat/completions"),
-            claw_providers=dict(g_raw.get("claw_providers") or {}),
+            her_providers=dict(g_raw.get("her_providers") or g_raw.get("claw_providers") or {}),
+            # Deprecated compatibility alias for pre-HER deployments.
+            claw_providers=dict(g_raw.get("her_providers") or g_raw.get("claw_providers") or {}),
             enterprise_auth_providers=list(g_raw.get("enterprise_auth_providers") or []),
             enterprise_database_url=enterprise_database_url,
             enterprise_scheduler_lease_enabled=enterprise_scheduler_lease_enabled,
@@ -343,8 +350,8 @@ class ConfigManager:
                     bridge_home=bridge_home,
                 )
                 telegram_token_key = a_raw.pop("telegram_token_key", name)
-                allowed_backends = a_raw.pop("allowed_backends")
-                active_backend = a_raw.pop("active_backend")
+                allowed_backends = normalize_allowed_backends(a_raw.pop("allowed_backends"))
+                active_backend = canonical_backend_engine(a_raw.pop("active_backend"))
                 is_active = a_raw.pop("is_active", True)
                 access_scope = a_raw.pop("access_scope", "project")
                 if access_scope not in VALID_ACCESS_SCOPES:

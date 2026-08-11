@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
-  "runtime_version": "0.1.3-hashi.33",
+  "runtime_version": "0.1.0-hashi.1",
+  "upstream_runtime": "Claw 0.1.3-hashi.33",
   "upstream_commit": "4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d",
   "source_commit": "8902f31bc5f887332335c0d152e76aabd539710d",
   "rust_workspace": {

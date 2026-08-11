@@ -38,7 +38,7 @@ At Level 2:
 
 1. `openrouter-api`, `deepseek-api`, `xai-api`, and other HASHI-controlled API
    adapters may run after integration with the outbound privacy gate.
-2. `codex-cli`, `grok-cli`, `claude-cli`, `gemini-cli`, `claw-cli`, and similar
+2. `codex-cli`, `grok-cli`, `claude-cli`, `gemini-cli`, `her`, and similar
    online agent harnesses are prohibited.
 3. The initial user message, system instructions, restored history, attachment
    text, image/OCR text, tool arguments, tool results, retry messages, and each
@@ -232,7 +232,7 @@ Selecting Level 2 should show:
 ```text
 ✓ Local basic PII filtering before every API request
 ✓ Filter failures block transmission
-✗ Codex, Grok, Claude, Gemini and Claw CLI harnesses unavailable
+✗ Codex, Grok, Claude, Gemini and HASHI Engine Runtime (HER) harnesses unavailable
 △ Some names, identifiers, code, and tool output may be altered
 △ Automated detection cannot guarantee complete removal
 ```

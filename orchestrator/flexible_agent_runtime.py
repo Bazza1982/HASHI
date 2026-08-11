@@ -90,6 +90,7 @@ from orchestrator.ephemeral_invoker import make_backend_sidecar_invoker
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
 from orchestrator.flexible_backend_registry import (
     CLAUDE_MODEL_ALIASES,
+    canonical_backend_engine,
     get_available_efforts,
     get_available_models,
     allows_custom_models,
@@ -4267,7 +4268,7 @@ class FlexibleAgentRuntime:
             )
             return
 
-        target_engine = args[0].lower()
+        target_engine = canonical_backend_engine(args[0].lower())
         with_context = False
         requested_model = None
         for raw_arg in args[1:]:
@@ -4753,9 +4754,9 @@ class FlexibleAgentRuntime:
         available = self._get_available_efforts()
         current = self._get_current_effort() or (available[0] if available else "n/a")
         consequence = (
-            "For Claw, effort controls the maximum agentic execution iterations "
+            "For HER, effort controls the maximum agentic execution iterations "
             "rather than provider reasoning depth. Higher levels allow longer work."
-            if self.config.active_backend == "claw-cli"
+            if self.config.active_backend == "her"
             else "This optional step controls reasoning depth. If no selection is made, the current value remains active."
         )
         return setting_card(
@@ -4991,8 +4992,8 @@ class FlexibleAgentRuntime:
 
         current_effort = self._get_current_effort() or available[0]
         consequence = (
-            "For Claw, higher effort permits more agentic execution iterations; it does not change provider reasoning depth."
-            if self.config.active_backend == "claw-cli"
+            "For HER, higher effort permits more agentic execution iterations; it does not change provider reasoning depth."
+            if self.config.active_backend == "her"
             else "Higher effort may improve difficult work but takes longer and can use more tokens."
         )
         await self._reply_text(

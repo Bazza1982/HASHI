@@ -1,7 +1,10 @@
-# Claw-Code Optional Module Plan
+# HASHI Engine Runtime (HER) Historical Module Plan
+
+HER is derived from the MIT-licensed Claw runtime. This historical document
+retains upstream Claw names where they identify source code, commands, or state.
 
 Status: superseded for packaging direction by
-[CLAW_TOOL_GATEWAY_TELEMETRY_PLAN.md](CLAW_TOOL_GATEWAY_TELEMETRY_PLAN.md);
+[HER_TOOL_GATEWAY_TELEMETRY_PLAN.md](HER_TOOL_GATEWAY_TELEMETRY_PLAN.md);
 kept as historical research and local smoke evidence.
 Owner: HASHI
 Last researched: 2026-05-20
@@ -15,13 +18,13 @@ Local release binary tested:
 Use `claw-code` as a long-running coding-agent function/backend, not as HASHI
 core. The original research direction treated Claw as an optional external
 subprocess. The current long-term direction is stronger: vendor/refactor Claw
-into the HASHI repository and ship a HASHI-managed packaged `hashi-claw`
+into the HASHI repository and ship a HASHI-managed packaged `hashi-her`
 runtime so users do not need to download a separate Claw checkout.
 
 The integration should still keep a subprocess boundary:
 
 ```text
-HASHI runtime -> claw adapter -> packaged hashi-claw binary -> .claw session state
+HASHI runtime -> claw adapter -> packaged hashi-her binary -> .claw session state
 ```
 
 This keeps HASHI minimal and hot-rebootable while allowing Claw to own its own
@@ -96,16 +99,16 @@ create a new architecture category without enough design justification.
 Use the existing adapter shape first:
 
 ```text
-adapters/claw_cli.py
-scripts/claw_code_probe.py
-tests/test_claw_cli_adapter.py
+adapters/her.py
+scripts/her_runtime_probe.py
+tests/test_her_adapter.py
 ```
 
 The adapter exposes Claw to HASHI as a backend-like function:
 
 ```json
 {
-  "engine": "claw-cli",
+  "engine": "her",
   "model": "openai/deepseek-v4-pro",
   "permission_mode": "workspace-write",
   "enabled": false
@@ -191,7 +194,7 @@ Acceptance:
 
 Goal: add a callable HASHI diagnostic path that runs Claw diagnostics only.
 
-Add `scripts/claw_code_probe.py` and internal helpers in `adapters/claw_cli.py`
+Add `scripts/her_runtime_probe.py` and internal helpers in `adapters/her.py`
 with:
 
 - `find_claw_binary()`
@@ -265,9 +268,9 @@ Acceptance:
 
 ## Phase 3: Backend Adapter
 
-Goal: expose Claw as `claw-cli` alongside existing CLI backends.
+Goal: expose Claw as `her` alongside existing CLI backends.
 
-Add `adapters/claw_cli.py` with the same high-level contract as existing CLI
+Add `adapters/her.py` with the same high-level contract as existing CLI
 backends:
 
 - initialize
@@ -289,7 +292,7 @@ Lifecycle rules:
   must be able to see that Claw is unavailable.
 - `handle_new_session()` creates or switches to a new Claw session reference.
   It must not delete old `.claw/sessions` files by default.
-- Adding `claw-cli` to `adapters/registry.py` requires one cold restart, just
+- Adding `her` to `adapters/registry.py` requires one cold restart, just
   like any new adapter class. Later config changes can follow normal HASHI
   reboot behavior.
 - If another live Claw process owns the same workzone, the adapter must refuse
@@ -298,7 +301,7 @@ Lifecycle rules:
 
 Acceptance:
 
-- Agent can switch to `claw-cli`.
+- Agent can switch to `her`.
 - A task can resume after HASHI restart using `--resume latest`.
 - HASHI logs include Claw command, cwd, model, permission mode, return code,
   duration, output lengths, and session state path.
@@ -324,7 +327,7 @@ Acceptance:
 
 ## Phase 5: Stable All-Agent Backend
 
-Goal: make `claw-cli` a stable optional backend that any HASHI agent can choose,
+Goal: make `her` a stable optional backend that any HASHI agent can choose,
 while keeping provider credentials, model routing, and filesystem permissions
 explicit and auditable.
 
@@ -344,7 +347,7 @@ OPENAI_API_KEY
 
 HASHI should expose that through named provider profiles instead of repeating
 raw URLs and secret names in every agent config. The provider config must live
-in a HASHI global config section named `claw_providers`, outside `secrets.json`
+in a HASHI global config section named `her_providers`, outside `secrets.json`
 and outside individual agent backend entries. URLs and provider status are not
 secrets; only the referenced secret values live in `secrets.json`.
 
@@ -352,7 +355,7 @@ Proposed global shape:
 
 ```json
 {
-  "claw_providers": {
+  "her_providers": {
     "binary_path": "/opt/hashi/bin/claw",
     "max_permission_mode": "workspace-write",
     "providers": {
@@ -392,7 +395,7 @@ Agent backend entries should refer to a provider and model:
 
 ```json
 {
-  "engine": "claw-cli",
+  "engine": "her",
   "provider": "openrouter",
   "model": "deepseek/deepseek-v4-flash",
   "permission_mode": "read-only"
@@ -403,7 +406,7 @@ For local Ollama models:
 
 ```json
 {
-  "engine": "claw-cli",
+  "engine": "her",
   "provider": "ollama",
   "model": "qwen2.5-coder:32b",
   "permission_mode": "workspace-write"
@@ -477,7 +480,7 @@ Provider status semantics:
 
 ### Permission Profiles
 
-All agents may list `claw-cli` as an allowed backend. HASHI leaves Claw's
+All agents may list `her` as an allowed backend. HASHI leaves Claw's
 native tool catalogue unfiltered by default and uses the permission profile as
 the authority boundary:
 
@@ -513,20 +516,20 @@ permissive.
 Backend switching should make the provider visible:
 
 ```text
-/backend claw-cli openrouter:deepseek/deepseek-v4-flash
-/backend claw-cli ollama:qwen2.5-coder:32b
+/backend her openrouter:deepseek/deepseek-v4-flash
+/backend her ollama:qwen2.5-coder:32b
 ```
 
 The command layer should not understand provider semantics. It should store the
 `provider:model` string or parsed `provider`/`model` fields in agent backend
-state and let the `claw-cli` adapter resolve provider details inside
-`_resolve_task_env()`. This keeps Claw provider rules inside the Claw adapter
+state and let the `her` adapter resolve provider details inside
+`_resolve_task_env()`. This keeps Claw provider rules inside the HER adapter
 boundary instead of spreading them through generic command handling.
 
 The runtime should resolve that into:
 
 ```text
-engine=claw-cli
+engine=her
 provider=<provider>
 model=<model>
 OPENAI_BASE_URL=<provider base_url>
@@ -547,10 +550,10 @@ Rollout order:
 1. Phase 5a: add provider resolver, error types, global `claw_providers`
    loading, and legacy extra fallback.
 2. Phase 5b: add a provider-aware Claw probe command or script. Done via
-   `scripts/claw_code_probe.py --provider <name> --model <model>`.
+   `scripts/her_runtime_probe.py --provider <name> --model <model>`.
 3. Phase 5c: migrate existing Claw agent entries from legacy
    `openai_base_url`/API-key fields to provider profiles.
-4. Phase 5d: add `claw-cli` as an allowed backend for all agents using the
+4. Phase 5d: add `her` as an allowed backend for all agents using the
    read-only default profile.
 5. Phase 5e: enable `workspace-write` only for agents that are expected to
    perform coding work.
@@ -562,7 +565,7 @@ Rollout order:
 
 Acceptance:
 
-- Any agent can switch to `claw-cli` when a valid provider/model is configured.
+- Any agent can switch to `her` when a valid provider/model is configured.
 - A missing Claw binary degrades only that backend, not the whole HASHI runtime.
 - Missing provider config or provider secret degrades only that backend, not the
   whole HASHI runtime.
@@ -626,7 +629,7 @@ execution checklist and run the remaining failure-path tests.
 Then implement Phase 1 as a small optional adapter/probe path, not a new
 generic module layer.
 
-Do not add `claw-cli` to active agents until:
+Do not add `her` to active agents until:
 
 - build passes;
 - no-credential diagnostics pass;

@@ -119,10 +119,10 @@ uses xAI's Responses API route and was smoke-tested through HASHI's xAI OAuth
 adapter. The three Codex API Gateway variants `gpt-5.6-sol`,
 `gpt-5.6-terra`, and `gpt-5.6-luna` remain the tested GPT-5.6 choices.
 
-**Coming soon:** direct Grok OAuth for agent runtimes via Claw (`claw-cli` +
+**Coming soon:** direct Grok OAuth for agent runtimes via Claw (`her` +
 HASHI-owned device login, no Hermes and no `grok-cli`). Code is in tree;
 production login waits on HASHI's own xAI OAuth `client_id`. See
-[HASHI_XAI_CLAW_OAUTH.md](HASHI_XAI_CLAW_OAUTH.md).
+[HASHI_XAI_HER_OAUTH.md](HASHI_XAI_HER_OAUTH.md).
 
 ### GPT-5.6 through Codex CLI
 
@@ -319,7 +319,7 @@ Claw requires a non-empty `XAI_API_KEY` value even when the Gateway is on a
 trusted local network and does not validate that placeholder. Claw removes the
 `xai/` provider prefix and sends `model: "grok-4.3"` to HASHI.
 
-This path was live-validated on HASHI2 with both Claw Code 0.1.0 and HASHI Claw
+This path was live-validated on HASHI2 with both Claw Code 0.1.0 and HASHI Engine Runtime (HER)
 0.1.3. The model returned one `tool_call`, Claw executed `glob_search` locally,
 Claw sent the matching tool result back through the Gateway, and the model
 produced the requested final answer on iteration two. No Claw tool was executed

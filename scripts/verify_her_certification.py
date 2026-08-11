@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the pinned HASHI Claw source against its exact certification baseline."""
+"""Verify HER's pinned upstream Claw source against its certification baseline."""
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-MANIFEST_PATH = PROJECT_ROOT / "hashi_assets" / "claw" / "manifest.json"
-BASELINE_PATH = PROJECT_ROOT / "hashi_assets" / "claw" / "certification_baseline.json"
+MANIFEST_PATH = PROJECT_ROOT / "hashi_assets" / "her" / "manifest.json"
+BASELINE_PATH = PROJECT_ROOT / "hashi_assets" / "her" / "certification_baseline.json"
 
 
 class CertificationError(RuntimeError):

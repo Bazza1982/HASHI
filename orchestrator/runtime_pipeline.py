@@ -539,16 +539,16 @@ async def setup_interactive_feedback(
     )
     think_delivery_enabled = delivery_requested and runtime._think and not delivery_blocked
     backend = runtime.backend_manager.current_backend
-    claw_ack_enabled = (
+    her_ack_enabled = (
         delivery_requested
         and not delivery_blocked
-        and str(getattr(runtime.config, "active_backend", "")) == "claw-cli"
+        and str(getattr(runtime.config, "active_backend", "")) == "her"
         and str(getattr(backend, "effort", "low")).lower() != "low"
     )
-    if str(getattr(runtime.config, "active_backend", "")) == "claw-cli":
+    if str(getattr(runtime.config, "active_backend", "")) == "her":
         runtime.logger.info(
-            f"Claw acknowledgement policy: request={item.request_id} "
-            f"enabled={claw_ack_enabled} effort={getattr(backend, 'effort', 'low')} "
+            f"HER acknowledgement policy: request={item.request_id} "
+            f"enabled={her_ack_enabled} effort={getattr(backend, 'effort', 'low')} "
             f"delivery_requested={delivery_requested} blocked={delivery_blocked}"
         )
 
@@ -711,13 +711,13 @@ async def setup_interactive_feedback(
     if stream_callback is None and audit_active:
         stream_callback = runtime._make_stream_callback(audit_collector=audit_collector)
 
-    if claw_ack_enabled:
+    if her_ack_enabled:
         from adapters.stream_events import KIND_ACKNOWLEDGEMENT
 
         acknowledgement_presentation_callback = stream_callback
         acknowledgement_sent = False
 
-        async def _claw_ack_callback(event):
+        async def _her_ack_callback(event):
             nonlocal acknowledgement_sent
             if (
                 not acknowledgement_sent
@@ -727,7 +727,7 @@ async def setup_interactive_feedback(
                 acknowledgement_sent = True
                 acknowledgement_text = str(event.summary).strip()
                 runtime.logger.info(
-                    f"Claw acknowledgement delivery started: request={item.request_id} "
+                    f"HER acknowledgement delivery started: request={item.request_id} "
                     f"text_len={len(acknowledgement_text)}"
                 )
                 try:
@@ -738,12 +738,12 @@ async def setup_interactive_feedback(
                         _purpose="task_acknowledgement",
                     )
                     runtime.logger.info(
-                        f"Claw acknowledgement delivered: request={item.request_id} "
+                        f"HER acknowledgement delivered: request={item.request_id} "
                         f"text_len={len(acknowledgement_text)}"
                     )
                 except Exception as exc:
                     runtime.logger.warning(
-                        f"Claw acknowledgement delivery failed: request={item.request_id} "
+                        f"HER acknowledgement delivery failed: request={item.request_id} "
                         f"error_type={type(exc).__name__}"
                     )
             if acknowledgement_presentation_callback is not None:
@@ -751,7 +751,7 @@ async def setup_interactive_feedback(
                 if inspect.isawaitable(result):
                     await result
 
-        stream_callback = _claw_ack_callback
+        stream_callback = _her_ack_callback
 
     # Local clients can observe the exact verbose/thinking events intentionally
     # emitted by the backend even when Telegram presentation is disabled.  The

@@ -11,17 +11,17 @@ def _load(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def test_claw_certification_baseline_matches_packaged_manifest():
-    manifest = _load(PROJECT_ROOT / "hashi_assets" / "claw" / "manifest.json")
-    baseline = _load(PROJECT_ROOT / "hashi_assets" / "claw" / "certification_baseline.json")
+def test_her_certification_baseline_matches_packaged_manifest():
+    manifest = _load(PROJECT_ROOT / "hashi_assets" / "her" / "manifest.json")
+    baseline = _load(PROJECT_ROOT / "hashi_assets" / "her" / "certification_baseline.json")
 
     assert baseline["runtime_version"] == manifest["version"]
     assert baseline["upstream_commit"] == manifest["upstream_commit"]
     assert baseline["source_commit"] == manifest["source_commit"]
 
 
-def test_claw_certification_requires_all_workspace_tests_to_pass():
-    baseline = _load(PROJECT_ROOT / "hashi_assets" / "claw" / "certification_baseline.json")
+def test_her_certification_requires_all_workspace_tests_to_pass():
+    baseline = _load(PROJECT_ROOT / "hashi_assets" / "her" / "certification_baseline.json")
     rust_workspace = baseline["rust_workspace"]
     clippy_command = baseline["clippy"]["command"]
     clippy_diagnostics = baseline["clippy"]["expected_upstream_diagnostics"]

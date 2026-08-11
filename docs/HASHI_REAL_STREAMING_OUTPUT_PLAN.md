@@ -8,7 +8,7 @@
 
 **Non-goal:** rewrite HASHI core identity, queue ownership, memory semantics, remote registry, or tool execution contracts.
 
-**Review update:** Lily reviewed this plan after the first draft. The main corrections are included below: placeholder ownership must be split before final promotion can work; Claw CLI must be included; DeepSeek and Ollama already have streaming paths but need full-delta preservation; capability rollout should start with optional `getattr` checks; and final promotion must use wrapper/COS-processed `response_text`, not raw backend text.
+**Review update:** Lily reviewed this plan after the first draft. The main corrections are included below: placeholder ownership must be split before final promotion can work; HASHI Engine Runtime (HER) must be included; DeepSeek and Ollama already have streaming paths but need full-delta preservation; capability rollout should start with optional `getattr` checks; and final promotion must use wrapper/COS-processed `response_text`, not raw backend text.
 
 ---
 
@@ -300,16 +300,16 @@ Risk:
 
 - Heuristic parsing can create false deltas or leak non-answer status text into the answer.
 
-### 7.5 Claw CLI
+### 7.5 HASHI Engine Runtime (HER)
 
 Current state:
 
-- `adapters/claw_cli.py` already maps `assistant_delta` to `KIND_TEXT_DELTA`.
+- `adapters/her.py` already maps `assistant_delta` to `KIND_TEXT_DELTA`.
 - Stream behavior depends on Claw stream-json support and runtime configuration.
 
 Required changes:
 
-- Add Claw CLI to the capability matrix.
+- Add HASHI Engine Runtime (HER) to the capability matrix.
 - Preserve full assistant deltas for answer streaming.
 - Add fixtures for `assistant_delta`, completion, and fallback events.
 - Mark as `supports_answer_stream=True` only when stream-json is available and verified.
@@ -585,7 +585,7 @@ Backend examples:
 | Claude CLI | Yes | Yes, implemented behind config gate | Yes if emitted | Stream-json `text_delta`; live version verification still required |
 | Codex CLI current | Yes | No | Partial/progress only | Needs direct Responses path for true parity |
 | Gemini CLI | Yes | Yes, implemented behind config gate | Unknown | Stream-json assistant `message` content; live version verification still required |
-| Claw CLI | Yes | Conditional, implemented capability flag | Unknown | `assistant_delta` via stream-json when supported |
+| HASHI Engine Runtime (HER) | Yes | Conditional, implemented capability flag | Unknown | `assistant_delta` via stream-json when supported |
 | DeepSeek API | Yes | Yes, implemented behind config gate | Model-dependent | Existing SSE path; full deltas preserved |
 | Ollama API | Yes | Yes, implemented behind config gate | No/limited | Existing line stream path; full deltas preserved |
 
@@ -645,7 +645,7 @@ Live verification:
 - Agent: `temp`.
 - Backend: `openrouter-api`.
 - Result: user-visible Telegram output streaming worked as intended for OpenRouter.
-- Scope: validates the OpenRouter path only. It does not prove Codex CLI, Claude CLI, Gemini CLI, DeepSeek, Ollama, or Claw CLI live behavior.
+- Scope: validates the OpenRouter path only. It does not prove Codex CLI, Claude CLI, Gemini CLI, DeepSeek, Ollama, or HASHI Engine Runtime (HER) live behavior.
 
 Tasks:
 
@@ -708,11 +708,11 @@ Acceptance for fallback path:
 
 ### Phase 5: Remaining Backends
 
-Status: partially implemented. Claw CLI now advertises answer streaming only after stream-json support is detected; DeepSeek and Ollama are represented as real streaming API backends with full-delta preservation. Gemini stream-json assistant messages now preserve full answer chunks and advertise answer streaming, pending live version verification.
+Status: partially implemented. HASHI Engine Runtime (HER) now advertises answer streaming only after stream-json support is detected; DeepSeek and Ollama are represented as real streaming API backends with full-delta preservation. Gemini stream-json assistant messages now preserve full answer chunks and advertise answer streaming, pending live version verification.
 
 Tasks:
 
-- Claw CLI: verify stream-json `assistant_delta` and mark conditional answer-stream support.
+- HASHI Engine Runtime (HER): verify stream-json `assistant_delta` and mark conditional answer-stream support.
 - DeepSeek API: verify existing SSE streaming and full-delta preservation.
 - Ollama API: verify existing line streaming and full-delta preservation.
 - Gemini CLI: verify or mark non-answer-streaming.
@@ -764,7 +764,7 @@ Add fixtures for:
 
 - OpenRouter SSE `delta.content`.
 - Claude CLI `content_block_delta` text events.
-- Claw CLI `assistant_delta` events.
+- HASHI Engine Runtime (HER) `assistant_delta` events.
 - Codex Responses `response.output_text.delta` if direct path is implemented.
 - DeepSeek SSE deltas with full content preservation.
 - Ollama streaming JSON lines.
@@ -778,7 +778,7 @@ Run:
 1. Telegram + OpenRouter + /verbose off + long answer
 2. Telegram + OpenRouter + /verbose on + long answer with tool use
 3. Telegram + Claude CLI + long answer
-4. Telegram + Claw CLI + long answer if stream-json is available
+4. Telegram + HASHI Engine Runtime (HER) + long answer if stream-json is available
 5. Telegram + Codex current CLI + long answer, verify explicit non-stream fallback
 6. API gateway stream=true + OpenRouter
 7. /stop during streamed answer
@@ -845,7 +845,7 @@ HASHI has real streaming output when:
 7. API gateway still supports OpenAI-compatible SSE.
 8. Live logs can prove whether a turn was truly streamed or fallback-delivered.
 9. Tests cover streaming, fallback, cleanup ownership, long messages, cancellation, silent mode, verbose mode, and at least two real streaming adapters.
-10. Claw CLI, DeepSeek, and Ollama are represented accurately in the capability matrix.
+10. HASHI Engine Runtime (HER), DeepSeek, and Ollama are represented accurately in the capability matrix.
 
 ---
 

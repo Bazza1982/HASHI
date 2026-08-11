@@ -59,7 +59,9 @@ def _global_config_for_xai_oauth():
         bridge_home=path.parent,
         project_root=ROOT_DIR,
         xai_oauth=dict(global_raw.get("xai_oauth") or {}),
-        claw_providers=dict(global_raw.get("claw_providers") or {}),
+        her_providers=dict(global_raw.get("her_providers") or global_raw.get("claw_providers") or {}),
+        # Deprecated compatibility alias consumed by older helper code.
+        claw_providers=dict(global_raw.get("her_providers") or global_raw.get("claw_providers") or {}),
         xai_api_base_url=str(global_raw.get("xai_api_base_url") or "https://api.x.ai/v1"),
     )
 

@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from adapters.claw_cli import (
+from adapters.her import (
     ClawError,
     OLLAMA_DUMMY_API_KEY,
     find_claw_binary,
@@ -33,15 +33,16 @@ def _load_json(path: Path) -> dict:
 
 def _provider_env(*, config_path: Path, secrets_path: Path, provider_name: str) -> tuple[dict[str, str], dict]:
     raw = _load_json(config_path)
-    claw_cfg = raw.get("global", {}).get("claw_providers", {})
-    providers = claw_cfg.get("providers") or {}
+    global_cfg = raw.get("global", {})
+    her_cfg = global_cfg.get("her_providers") or global_cfg.get("claw_providers") or {}
+    providers = her_cfg.get("providers") or {}
     provider = providers.get(provider_name)
     if not isinstance(provider, dict):
-        raise KeyError(f"Claw provider is not configured: {provider_name}")
+        raise KeyError(f"HER provider is not configured: {provider_name}")
 
     base_url = str(provider.get("base_url") or "").strip()
     if not base_url:
-        raise KeyError(f"Claw provider {provider_name} has no base_url")
+        raise KeyError(f"HER provider {provider_name} has no base_url")
 
     secret_name = provider.get("secret")
     api_key = None
@@ -49,7 +50,7 @@ def _provider_env(*, config_path: Path, secrets_path: Path, provider_name: str) 
         secrets = _load_json(secrets_path) if secrets_path.exists() else {}
         api_key = secrets.get(str(secret_name))
         if not api_key:
-            raise KeyError(f"Claw provider {provider_name} requires missing secret: {secret_name}")
+            raise KeyError(f"HER provider {provider_name} requires missing secret: {secret_name}")
     else:
         api_key = provider.get("dummy_api_key") or OLLAMA_DUMMY_API_KEY
 
@@ -61,8 +62,8 @@ def _provider_env(*, config_path: Path, secrets_path: Path, provider_name: str) 
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Probe a configured Claw Code binary.")
-    parser.add_argument("--binary", help="Path to the claw executable. Falls back to CLAW_BINARY/CLAW_BIN/PATH.")
+    parser = argparse.ArgumentParser(description="Probe HASHI Engine Runtime (HER).")
+    parser.add_argument("--binary", help="Path to the HER/upstream HER executable. Falls back to packaged HER, CLAW_BINARY/CLAW_BIN/PATH.")
     parser.add_argument("--cwd", default=".", help="Workspace directory to run diagnostics in.")
     parser.add_argument("--timeout", type=float, default=30.0, help="Timeout in seconds per command.")
     parser.add_argument("--config", default=str(ROOT / "agents.json"), help="HASHI agents.json path for provider probes.")
@@ -73,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
         "--effort",
         choices=("low", "medium", "high", "xhigh", "max"),
         default="medium",
-        help="Claw execution effort for provider probes.",
+        help="HER execution effort for provider probes.",
     )
     parser.add_argument("--prompt", default="Reply exactly: HASHI_CLAW_SMOKE_OK", help="Prompt for --provider smoke.")
     parser.add_argument(

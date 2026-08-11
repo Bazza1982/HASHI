@@ -1,12 +1,14 @@
-# HASHI-native xAI OAuth → Claw
+# HASHI-native xAI OAuth → HASHI Engine Runtime (HER)
 
 **Status:** Coming soon (code landed; live OAuth blocked on HASHI's own `client_id`)  
 **Date:** 2026-07-19  
-**Commit:** `bc77fe6` — Add HASHI-native xAI OAuth for Claw Grok
+**Commit:** `bc77fe6` — Add HASHI-native xAI OAuth for the upstream Claw integration now shipped as HER
 
 ## Coming soon
 
-**Direct Grok OAuth** (HASHI login → Claw → Grok, no `grok-cli`, no Hermes) is **coming soon**.
+**Direct Grok OAuth** (HASHI login → HER → Grok, no `grok-cli`, no Hermes) is **coming soon**.
+
+HER is derived from the MIT-licensed Claw runtime and retains its license and attribution.
 
 | Layer | State |
 | --- | --- |
@@ -41,7 +43,7 @@ python hashi.py auth xai login
   → device code at auth.x.ai
   → bridge_home/auth/xai_oauth.json  (0600)
 
-agent: engine=claw-cli provider=xai model=grok-4.5
+agent: engine=her provider=xai model=grok-4.5
   → resolve_hashi_xai_credentials()
   → Claw env: XAI_API_KEY + XAI_BASE_URL
   → claw binary → api.x.ai
@@ -52,8 +54,8 @@ agent: engine=claw-cli provider=xai model=grok-4.5
 | Path | Role |
 | --- | --- |
 | `adapters/hashi_xai_oauth.py` | Login, refresh, store (no Hermes imports) |
-| `adapters/claw_cli.py` | `XAI_*` env allowlist + `auth_mode=hashi_oauth` |
-| `orchestrator/flexible_backend_manager.py` | Prefer matching claw-cli row by model/provider |
+| `adapters/her.py` | `XAI_*` env allowlist + `auth_mode=hashi_oauth` |
+| `orchestrator/flexible_backend_manager.py` | Prefer matching HER row by model/provider |
 | `hashi.py` | `auth xai status\|login\|logout` |
 | `orchestrator/commands/xai_auth.py` | `/xaiauth` status |
 | `tests/test_hashi_xai_oauth.py` | Unit tests |
@@ -71,7 +73,7 @@ agent: engine=claw-cli provider=xai model=grok-4.5
     "auth_store": "auth/xai_oauth.json",
     "base_url": "https://api.x.ai/v1"
   },
-  "claw_providers": {
+  "her_providers": {
     "providers": {
       "xai": {
         "auth_mode": "hashi_oauth",
@@ -99,7 +101,7 @@ Client strategy: **HASHI's own OAuth client** (not Hermes' embedded client id).
 1. Apply to xAI (Console / API support / enterprise contact) for an OAuth **public** client for product **HASHI**.
 2. Request Device Code flow against `https://auth.x.ai`, scopes at least `openid offline_access api:access`.
 3. Place the issued id in `global.xai_oauth.client_id` or `HASHI_XAI_OAUTH_CLIENT_ID`.
-4. Run `python hashi.py auth xai login`, then trial on **Xishi**: `/backend claw-cli grok-4.5`.
+4. Run `python hashi.py auth xai login`, then trial on **Xishi**: `/backend her grok-4.5`.
 
 There is no public self-service “Create OAuth App” page for third parties as of 2026-07-19.
 
@@ -122,7 +124,7 @@ See [examples/xishi_claw_xai_backend.json](examples/xishi_claw_xai_backend.json)
 After a successful login:
 
 ```text
-/backend claw-cli grok-4.5
+/backend her grok-4.5
 ```
 
 ## Non-goals
@@ -136,6 +138,6 @@ After a successful login:
 
 1. Configure `HASHI_XAI_OAUTH_CLIENT_ID` or `global.xai_oauth.client_id`
 2. `python hashi.py auth xai login`
-3. On Xishi: `/backend claw-cli grok-4.5`
+3. On Xishi: `/backend her grok-4.5`
 4. One short prompt; confirm no `grok` CLI process
 5. Mark this doc status **Live** and record smoke evidence

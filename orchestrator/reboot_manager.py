@@ -68,9 +68,10 @@ class RebootManager:
 
         Compilation alone cannot detect an import-time dependency being
         satisfied by an older in-memory module.  Keep this check small and
-        focused on the protocol used by every Claw acknowledgement/tool event.
+        focused on the protocol used by every HER acknowledgement/tool event.
         """
         stream_events = importlib.import_module("adapters.stream_events")
+        her = importlib.import_module("adapters.her")
         claw_cli = importlib.import_module("adapters.claw_cli")
         runtime_pipeline = importlib.import_module("orchestrator.runtime_pipeline")
 
@@ -85,12 +86,17 @@ class RebootManager:
                 "Hot reload contract failed: adapters.claw_cli retained a stale "
                 "acknowledgement event constant"
             )
+        if getattr(claw_cli, "HERAdapter", None) is not getattr(her, "HERAdapter", None):
+            raise HotReloadError(
+                "Hot reload contract failed: adapters.claw_cli retained a stale "
+                "HER adapter class"
+            )
         if not callable(getattr(runtime_pipeline, "setup_interactive_feedback", None)):
             raise HotReloadError(
                 "Hot reload contract failed: runtime acknowledgement pipeline unavailable"
             )
         contract_message = (
-            "Hot reload contract verified: Claw acknowledgement and runtime pipeline are current."
+            "Hot reload contract verified: HER compatibility facade and runtime pipeline are current."
         )
         main_logger.info(contract_message)
         bridge_logger.info(contract_message)

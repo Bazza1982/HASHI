@@ -137,7 +137,7 @@ capture/resume session IDs when session mode is explicitly enabled.
 
 ### Stateless backends
 
-OpenRouter, DeepSeek API, Ollama API, xAI API, Gemini CLI, and Claw CLI currently
+OpenRouter, DeepSeek API, Ollama API, xAI API, Gemini CLI, and HASHI Engine Runtime (HER) currently
 use stateless Memory+ assembly:
 
 - compact Memory+ card on every formal request;

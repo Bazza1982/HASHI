@@ -1,5 +1,5 @@
 {
-  "engine": "claw-cli",
+  "engine": "her",
   "provider": "xai",
   "model": "grok-4.5",
   "permission_mode": "workspace-write",

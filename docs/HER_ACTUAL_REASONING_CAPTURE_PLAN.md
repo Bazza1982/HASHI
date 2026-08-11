@@ -1,11 +1,14 @@
-# Claw Actual Reasoning Capture Plan
+# HASHI Engine Runtime (HER) Actual Reasoning Capture Plan
+
+HER is derived from the MIT-licensed Claw runtime. References to Claw below
+describe the acknowledged upstream implementation and wire protocol.
 
 ## Status
 
 Drafted: 2026-05-25
 Reviewed: 2026-05-25 by Akane. No blockers. Six non-blocker implementation clarifications were accepted and resolved in this revision.
 
-Goal: make `claw-cli` reasoning capture useful for live debugging, quality control, transcript review, and audit evidence. The current hidden-count output proves that provider reasoning exists, but it is not sufficient:
+Goal: make `her` reasoning capture useful for live debugging, quality control, transcript review, and audit evidence. The current hidden-count output proves that provider reasoning exists, but it is not sufficient:
 
 ```text
 provider reasoning block received (8 chars hidden)
@@ -27,7 +30,7 @@ Akane's review found no architectural blockers. The feedback is valid because it
 
 ## Problem
 
-`claw-cli` currently receives OpenRouter / DeepSeek V4 reasoning chunks, but the Claw JSONL layer collapses them into count-only summaries before HASHI sees them.
+`her` currently receives OpenRouter / DeepSeek V4 reasoning chunks, but the Claw JSONL layer collapses them into count-only summaries before HASHI sees them.
 
 Current Claw behavior:
 
@@ -215,7 +218,7 @@ For backwards compatibility:
 - keep `thinking_chars` on all thinking events
 - do not remove `message_stop`, `usage`, or `run_finished`
 
-### 4. Update HASHI `adapters/claw_cli.py`
+### 4. Update HASHI `adapters/her.py`
 
 Current mapping:
 
@@ -282,7 +285,7 @@ Do not overload `response.text` with reasoning content. Reasoning should remain 
 
 Collection point:
 
-- collect Claw stream metadata inside `adapters/claw_cli.py` while parsing JSONL
+- collect Claw stream metadata inside `adapters/her.py` while parsing JSONL
 - attach the collected metadata to the adapter response in a backwards-compatible side channel
 - have `runtime_pipeline.py` read that metadata when writing `token_audit.jsonl`
 - keep `usage.thinking_tokens` as the existing scalar compatibility field
@@ -308,7 +311,7 @@ Claw Rust tests:
 
 HASHI Python tests:
 
-- `test_claw_cli_adapter.py`
+- `test_her_adapter.py`
   - `thinking_delta` maps to `KIND_THINKING` with actual text.
   - `thinking_redacted` maps to an audit-visible redaction event.
   - `_stream_json_usage()` counts `thinking_delta`.
@@ -323,7 +326,7 @@ HASHI Python tests:
 Live smoke:
 
 ```text
-/backend claw-cli deepseek/deepseek-v4-pro
+/backend her deepseek/deepseek-v4-pro
 /think on
 /verbose on
 ```
@@ -375,12 +378,12 @@ cargo test -p rusty-claude-cli --test output_format_contract
 cargo check -p runtime -p tools -p rusty-claude-cli
 ```
 
-### Phase 2: HASHI Claw adapter mapping
+### Phase 2: HASHI HER adapter mapping
 
 Files:
 
-- `adapters/claw_cli.py`
-- `tests/test_claw_cli_adapter.py`
+- `adapters/her.py`
+- `tests/test_her_adapter.py`
 
 Outcome:
 
@@ -392,8 +395,8 @@ Outcome:
 Validation:
 
 ```bash
-python -m pytest tests/test_claw_cli_adapter.py tests/test_runtime_pipeline.py -q
-python -m py_compile adapters/claw_cli.py orchestrator/flexible_agent_runtime.py
+python -m pytest tests/test_her_adapter.py tests/test_runtime_pipeline.py -q
+python -m py_compile adapters/her.py orchestrator/flexible_agent_runtime.py
 ```
 
 ### Phase 3: audit and token metadata

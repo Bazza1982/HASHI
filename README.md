@@ -2,7 +2,7 @@
 
 > **Status:** HASHI AAI Enterprise `v0.1.0-alpha.1` is the current enterprise
 > alpha artifact-freeze line. The broader HASHI 4 alpha line continues to cover
-> Claw mode and Superloop foundations on top of the v3.2.1 hotfix line.
+> HER mode and Superloop foundations on top of the v3.2.1 hotfix line.
 > Enterprise `0.1.0a1` resets the enterprise-grade package version line for
 > alpha testing; it is not a production-certified deployment claim.
 >
@@ -100,7 +100,7 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
 
 **What makes HASHI different:**
 1. **No Token Storage** — Uses CLI backends with local authentication, not stored tokens
-2. **8 Backend Adapters** — Claude CLI, Gemini CLI, Codex CLI, Grok CLI, xAI API, OpenRouter API, DeepSeek API, Ollama (local LLM), and Claw CLI
+2. **9 Backend Adapters** — Claude CLI, Gemini CLI, Codex CLI, Grok CLI, xAI API, OpenRouter API, DeepSeek API, Ollama (local LLM), and HASHI Engine Runtime (HER)
 3. **Multi-Agent, Single Interface** — Chat with multiple specialized agents through one account
 4. **Nagare Flow System** — Describe a task in natural language; Nagare designs, executes, and improves a multi-agent workflow automatically
 5. **Self-Improving Agents** — Habit system with `/good` and `/bad` feedback, nightly dream reflection, and cross-agent habit governance
@@ -121,8 +121,11 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
    can wake the responsible agent after completion to report or decide the next
    step
 19. **Vibe-Coded** — Every line written by AI, reviewed by AI, directed by human vision
-20. **Claw Mode Foundation** — `claw-cli` can run as a scoped backend with provider routing, packaged runtime discovery, checksum-checked manifest metadata, and repo workzone read/write/edit validation
+20. **HER Mode Foundation** — `her` provides HASHI Engine Runtime as a scoped backend with provider routing, packaged runtime discovery, checksum-checked manifest metadata, and repo workzone read/write/edit validation
 21. **Superloop Operational Foundation** — Long-running controller loops use explicit taskboards, waits, issue registers, HChat reply classification, and inbox-drain closeout barriers
+
+HASHI Engine Runtime (HER) is derived from the MIT-licensed Claw runtime. HASHI
+retains and distributes the original Claw copyright and MIT license notice.
 
 ---
 
@@ -133,8 +136,8 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
   connector MVPs, Workbench enterprise surfaces, and deployment artifacts for
   alpha operator review. Production enterprise-server validation remains
   pending.
-- **v4.0.0-alpha.1** *(current v4 foundation alpha)* — Claw mode foundation,
-  packaged Claw runtime discovery, provider smoke probe, live momo repo-root
+- **v4.0.0-alpha.1** *(current v4 foundation alpha)* — HER mode foundation,
+  packaged HER runtime discovery, provider smoke probe, live momo repo-root
   read/write/edit validation, and Superloop operational contract. This is the
   broader platform foundation line, not the enterprise package version line.
 - **v3.2.1** — Workbench API self-repair on `/reboot`, HChat tool hot reload, and cross-instance route fallback hardening for multi-instance deployments
@@ -748,7 +751,7 @@ HASHI's **adapter system** provides a unified interface to multiple AI backends:
 | Codex CLI | `codex-cli` | `codex` CLI installed | Local auth |
 | Grok CLI | `grok-cli` | `grok` CLI installed and logged in | Local auth, streaming JSON |
 | xAI API | `xai-api` | Hermes xAI OAuth profile or `xai_api_key` | Grok chat, responses, Imagine image/video |
-| Claw + direct Grok OAuth | `claw-cli` + `provider=xai` | **Coming soon** — HASHI OAuth `client_id` from xAI | No `grok-cli`/Hermes; see [docs/HASHI_XAI_CLAW_OAUTH.md](docs/HASHI_XAI_CLAW_OAUTH.md) |
+| HER + direct Grok OAuth | `her` + `provider=xai` | **Coming soon** — HASHI OAuth `client_id` from xAI | No `grok-cli`/Hermes; see [docs/HASHI_XAI_HER_OAUTH.md](docs/HASHI_XAI_HER_OAUTH.md) |
 | OpenRouter API | `openrouter-api` | API key in `secrets.json` | Multi-model access |
 | DeepSeek API | `deepseek-api` | API key in `secrets.json` | Direct API, cost-effective |
 | Ollama | `ollama-api` | Ollama installed locally | Free, no API key needed |
@@ -1336,7 +1339,7 @@ HASHI AAI Enterprise v0.1.0-alpha.1 is the current **enterprise alpha** line.
 It packages the governed control-plane work for alpha operator review while
 keeping production enterprise-server validation pending.
 
-HASHI v4.0.0-alpha.1 remains the historical **v4 line alpha** for Claw mode and
+HASHI v4.0.0-alpha.1 remains the historical **v4 line alpha** for HER mode and
 Superloop foundations.
 
 **Known Limitations:**
@@ -1379,10 +1382,10 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
   IdP-specific certification, SIEM import validation, OAuth/Bot/Graph
   integrations, and full DLP/data residency enforcement remain post-alpha
 
-### v4.0.0-alpha.1 — Claw Mode And Superloop Foundation (May 2026)
+### v4.0.0-alpha.1 — HER Mode And Superloop Foundation (May 2026)
 
-- **Claw mode foundation** — `claw-cli` is available as a scoped backend with provider routing, packaged runtime discovery, checksum-checked manifest metadata, and clear `ClawBinaryNotFound` diagnostics while release binaries are absent
-- **Live Claw agent validation** — momo validated repo-root read/write/edit through `claw-cli / deepseek/deepseek-v4-flash`, with runtime audit evidence and workzone routing
+- **HER mode foundation** — `her` is available as a scoped backend with provider routing, packaged runtime discovery, checksum-checked manifest metadata, and clear diagnostics while release binaries are absent
+- **Live HER agent validation** — momo validated repo-root read/write/edit through `her / deepseek/deepseek-v4-flash`, with runtime audit evidence and workzone routing
 - **Superloop operational foundation** — `docs/SUPERLOOP_FUNCTION_CONTRACT.md` defines runnable loop schema, wait/resume policy, HChat reply handling, issue tracking, evidence requirements, and closeout barriers
 - **Release gates expanded** — Claw and Superloop checks are now part of `docs/RELEASE_CHECKLIST.md`
 - **Alpha limits** — packaged `hashi-claw` binaries, Claw Tool Gateway/MCP parity, Claw shell/test execution, and stable unattended Superloop automation remain release-blocking work for later v4 milestones

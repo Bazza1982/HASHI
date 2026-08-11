@@ -1,13 +1,16 @@
-# Claw Tool Gateway And Telemetry Plan
+# HASHI Engine Runtime (HER) Tool Gateway And Telemetry Plan
 
-Status: active implementation for packaged `0.1.3-hashi.2`; remaining telemetry and
+Status: active implementation for packaged HER `0.1.0-hashi.1`; remaining telemetry and
 cross-platform release work is tracked below
 Owner: HASHI
 Created: 2026-05-23
 Updated: 2026-05-23
+
+HER is derived from the MIT-licensed Claw runtime. Upstream Claw names are
+retained below only for source, protocol, environment, and license references.
 Related docs:
 
-- [CLAW_CODE_MODULE_PLAN.md](CLAW_CODE_MODULE_PLAN.md)
+- [HER_CODE_MODULE_PLAN.md](HER_CODE_MODULE_PLAN.md)
 - [HASHI_SLIM_CORE_ARCHITECTURE.md](HASHI_SLIM_CORE_ARCHITECTURE.md)
 - [HASHI_LAYERED_RUNTIME_BOUNDARIES.md](HASHI_LAYERED_RUNTIME_BOUNDARIES.md)
 - [TOKEN_AUDIT_SPEC.md](TOKEN_AUDIT_SPEC.md)
@@ -29,7 +32,7 @@ The runtime boundary remains process-level:
 
 ```text
 HASHI package
-  -> packaged hashi-claw executable
+  -> packaged hashi-her executable
   -> HASHI Tool Gateway over MCP/tools protocol
   -> HASHI telemetry
 ```
@@ -64,27 +67,27 @@ openrouter-api / deepseek-api / ollama-api
   -> ToolRegistry executes web_search, web_fetch, browser_*, etc.
 ```
 
-Claw mode is different:
+HER mode is different:
 
 ```text
-claw-cli
+her
   -> HASHI starts a Claw subprocess, currently resolved from an external binary
   -> Claw owns its own model/tool loop
   -> HASHI receives final JSON only
 ```
 
-Therefore, a Claw backend agent can be configured in HASHI, but it does not
+Therefore, a HER backend agent can be configured in HASHI, but it does not
 automatically inherit the internet tools that are available to API backends.
 Passing `allowed_tools` to Claw only permits Claw-native tool names or tools that
 Claw discovers through its own extension surfaces.
 
 This caused agents such as `diaochan` to correctly report that the current
-Claw backend did not have browser or URL-fetch capability, even though the same
+HER backend did not have browser or URL-fetch capability, even though the same
 agent has `openrouter-api` and `deepseek-api` configurations with HASHI
 `tools.allowed = ["*"]`.
 
 There is also a deployment problem. If another HASHI instance pulls the latest
-adapter code but does not have a compatible Claw binary installed, Claw mode is
+adapter code but does not have a compatible Claw binary installed, HER mode is
 not actually portable. That violates the desired user experience for the HASHI
 deck: the package should carry what it needs.
 
@@ -98,10 +101,10 @@ orchestrator/flexible_backend_manager.py
     -> _attach_tool_registry(...)
 ```
 
-The Claw adapter currently passes Claw's own tool list into the subprocess:
+The HER adapter currently passes Claw's own tool list into the subprocess:
 
 ```text
-adapters/claw_cli.py
+adapters/her.py
   --allowedTools read,glob,grep
 ```
 
@@ -128,7 +131,7 @@ ConversationRuntime model/tool iteration
 AssistantEvent::Thinking
 ```
 
-But the current Claw CLI JSON surface is not enough for parity:
+But the current HASHI Engine Runtime (HER) JSON surface is not enough for parity:
 
 ```text
 --output-format supports text/json, not stream-json
@@ -140,15 +143,15 @@ thinking blocks are rendered as hidden summaries, not emitted as machine telemet
 ## Architecture Goals
 
 1. Keep HASHI core slim and hot-rebootable.
-2. Make Claw mode work from the HASHI package without a separate user download.
+2. Make HER mode work from the HASHI package without a separate user download.
 3. Make internet tools available to Claw through a standard tool protocol.
 4. Reuse one HASHI tool permission/audit implementation instead of duplicating
    web/browser tool behavior for every backend.
 5. Make telemetry explicit, structured, and audit-friendly.
 6. Preserve backward compatibility for current API backends and current
-   `claw-cli` agents.
+   `her` agents.
 7. Avoid pretending that estimated or unavailable thinking tokens are real.
-8. Keep the packaged Claw runtime replaceable at the adapter boundary.
+8. Keep the packaged HER runtime replaceable at the adapter boundary.
 
 ## Non-Goals
 
@@ -175,7 +178,7 @@ thinking blocks are rendered as hidden summaries, not emitted as machine telemet
 ┌───────────────────────────────┐
 │ Backend adapter                │
 │ - API adapter                  │
-│ - Claw adapter                 │
+│ - HER adapter                 │
 │ - future adapters              │
 └───────┬───────────────────────┘
         │
@@ -198,9 +201,9 @@ thinking blocks are rendered as hidden summaries, not emitted as machine telemet
 For Claw specifically:
 
 ```text
-hashi-claw packaged runtime
+hashi-her packaged runtime
   -> configured MCP stdio server: hashi-tool-gateway
-  -> Claw model calls MCP tools
+  -> HER model calls MCP tools
   -> Tool Gateway executes existing HASHI tools
   -> Claw emits structured telemetry
   -> HASHI records usage and displays verbose status
@@ -220,16 +223,16 @@ vendor/claw-code/
     Cargo.toml
     crates/...
 
-packaging/claw/
+packaging/her/
   build.py                 # build/release helper
   manifest.json            # expected binary names, versions, checksums
   README.md                # maintainer notes
 
-hashi_assets/claw/
+hashi_assets/her/
   bin/
-    linux-x86_64/hashi-claw
-    windows-x86_64/hashi-claw.exe
-    macos-arm64/hashi-claw
+    linux-x86_64/hashi-her
+    windows-x86_64/hashi-her.exe
+    macos-arm64/hashi-her
   manifest.json
 ```
 
@@ -240,11 +243,11 @@ should stay clear:
 vendored source -> release build artifact -> packaged runtime binary
 ```
 
-Runtime lookup order in `adapters/claw_cli.py` should become:
+Runtime lookup order in `adapters/her.py` should become:
 
 1. Explicit backend `claw_binary_path` or `claw_cmd`.
 2. Global HASHI `claw_binary_path`.
-3. Packaged HASHI Claw binary for the current platform.
+3. Packaged HASHI Engine Runtime (HER) binary for the current platform.
 4. `CLAW_BINARY` / `CLAW_BIN`.
 5. `PATH` fallback for developer overrides.
 
@@ -275,13 +278,13 @@ Cargo and Rust are allowed in release/build CI.
 Cargo and Rust are not allowed as normal runtime prerequisites for HASHI users.
 
 Release artifacts should ship prebuilt Claw binaries for supported platforms.
-If a platform has no packaged binary, Claw mode should report a clear
+If a platform has no packaged binary, HER mode should report a clear
 unsupported-platform diagnostic rather than asking the user to manually build
 Claw.
 
 ### Versioning
 
-The packaged Claw runtime should have explicit version metadata:
+The packaged HER runtime should have explicit version metadata:
 
 ```json
 {
@@ -292,7 +295,7 @@ The packaged Claw runtime should have explicit version metadata:
 }
 ```
 
-`claw-cli` backend status should include:
+`her` backend status should include:
 
 ```text
 binary_source = packaged | explicit | env | path
@@ -307,14 +310,14 @@ telemetry = stream-json | json-fallback
 
 ### Binary Naming
 
-The canonical packaged executable name is `hashi-claw`.
+The canonical packaged executable name is `hashi-her`.
 
 The vendored Rust crate may still build an upstream binary named `claw`. Release
 packaging must copy or rename that build output into the HASHI package as:
 
 ```text
-hashi-claw
-hashi-claw.exe
+hashi-her
+hashi-her.exe
 ```
 
 External overrides can still point at any executable name, including an
@@ -329,7 +332,7 @@ must distinguish HASHI's stable platform key from Rust's target triple:
 {
   "hashi_platform_key": "linux-x86_64",
   "rust_target_triple": "x86_64-unknown-linux-gnu",
-  "binary_name": "hashi-claw",
+  "binary_name": "hashi-her",
   "sha256": "..."
 }
 ```
@@ -354,14 +357,14 @@ binary override available.
 
 ### Checksum Policy
 
-Packaged binaries should be checked against `hashi_assets/claw/manifest.json`.
+Packaged binaries should be checked against `hashi_assets/her/manifest.json`.
 
 If the packaged binary checksum fails:
 
 1. Mark `binary_integrity = failed` in diagnostics.
 2. Do not execute that packaged binary.
 3. Continue the lookup chain only for explicit/env/PATH overrides.
-4. If no safe override exists, fail Claw backend initialization clearly.
+4. If no safe override exists, fail HER backend initialization clearly.
 
 This is stricter than a warning-only policy because executing a corrupted
 packaged runtime is riskier than requiring an explicit override.
@@ -380,8 +383,8 @@ release/deploy scripts
 Acceptance requires a built HASHI artifact to contain:
 
 ```text
-hashi_assets/claw/manifest.json
-hashi_assets/claw/bin/<hashi_platform_key>/hashi-claw
+hashi_assets/her/manifest.json
+hashi_assets/her/bin/<hashi_platform_key>/hashi-her
 vendor/claw-code/LICENSE
 ```
 
@@ -461,7 +464,7 @@ documented state handoff.
 The Phase B design is a per-agent GatewayContext snapshot.
 
 ```text
-HASHI runtime / Claw adapter
+HASHI runtime / HER adapter
   -> resolves backend, workspace, access root, tool policy, and minimal secrets
   -> writes GatewayContext JSON with 0600 permissions
   -> launches Claw with MCP server args pointing at that context
@@ -480,7 +483,7 @@ Suggested context shape:
 {
   "schema_version": 1,
   "agent": "diaochan",
-  "backend": "claw-cli",
+  "backend": "her",
   "workspace_dir": "workspaces/diaochan",
   "access_root": "/home/lily/projects/hashi",
   "workzone_dir": null,
@@ -492,7 +495,7 @@ Suggested context shape:
   },
   "audit": {
     "agent_name": "diaochan",
-    "backend": "claw-cli",
+    "backend": "her",
     "safety_mode": "read_only_web"
   }
 }
@@ -543,7 +546,7 @@ Target Claw config per agent:
         "--agent",
         "diaochan",
         "--backend",
-        "claw-cli"
+        "her"
       ],
       "required": true
     }
@@ -551,19 +554,19 @@ Target Claw config per agent:
 }
 ```
 
-The Claw adapter should generate or select this config under an isolated
+The HER adapter should generate or select this config under an isolated
 agent-specific Claw config home, for example:
 
 ```text
-workspaces/<agent>/.claw-hashi/config/
+workspaces/<agent>/backend_state/her_config/
 ```
 
 The adapter should not require modifying a user's global `~/.claw` config.
 
 Required startup behavior:
 
-- If the gateway MCP server starts and lists tools, Claw mode is healthy.
-- If a required gateway fails, Claw backend initialization should fail clearly.
+- If the gateway MCP server starts and lists tools, HER mode is healthy.
+- If a required gateway fails, HER backend initialization should fail clearly.
 - If optional future MCP servers fail, the status should be degraded rather
   than silently losing tools.
 - Diagnostics must identify which server failed and why.
@@ -682,7 +685,7 @@ Minimum fields:
   "type": "tool_start",
   "request_id": "req-0001",
   "agent": "diaochan",
-  "backend": "claw-cli",
+  "backend": "her",
   "model": "deepseek/deepseek-v4-pro",
   "tool_name": "web_fetch",
   "tool_call_id": "toolu_...",
@@ -724,11 +727,11 @@ Do not use `0` to mean unknown.
 
 ## Claw Telemetry Requirements
 
-The packaged HASHI Claw runtime should gain a machine-readable streaming output
+The packaged HASHI Engine Runtime (HER) runtime should gain a machine-readable streaming output
 format:
 
 ```text
-hashi-claw --output-format stream-json prompt "..."
+hashi-her --output-format stream-json prompt "..."
 ```
 
 Each line should be a JSON event matching a stable schema. Required event kinds:
@@ -744,10 +747,10 @@ run_finished
 error
 ```
 
-Implementation status: the Claw CLI now accepts `--output-format stream-json`
+Implementation status: the HASHI Engine Runtime (HER) now accepts `--output-format stream-json`
 and emits JSONL events for `run_started`, `assistant_delta`,
 `thinking_summary`, `tool_call`, `tool_start`, `tool_end`, `usage`,
-`message_stop`, and `run_finished`. HASHI's `claw-cli` adapter detects this
+`message_stop`, and `run_finished`. HASHI's `her` adapter detects this
 capability, prefers it when verbose callbacks are active, and converts the
 events into HASHI `StreamEvent` records.
 
@@ -771,9 +774,9 @@ rusty-claude-cli/src/main.rs
   include thinking_token_source in stream usage events
 ```
 
-## HASHI Claw Adapter Requirements
+## HASHI HER Adapter Requirements
 
-The HASHI `claw-cli` adapter should:
+The HASHI `her` adapter should:
 
 - Resolve Claw binary and provider as it does today.
 - Prepare an isolated Claw config home for the agent.
@@ -798,7 +801,7 @@ Every gateway tool call must write structured audit data:
   "ts": "2026-05-23T07:00:00+10:00",
   "request_id": "req-0001",
   "agent": "diaochan",
-  "backend": "claw-cli",
+  "backend": "her",
   "tool_name": "web_fetch",
   "tool_call_id": "toolu_...",
   "allowed": true,
@@ -827,12 +830,12 @@ Deliverables:
 - Preserve Claw `LICENSE` and attribution.
 - Add packaging metadata for supported binary targets.
 - Add release/build scripts that compile upstream `claw` and package it as
-  `hashi-claw` during CI or release
+  `hashi-her` during CI or release
   preparation, not during normal HASHI startup.
-- Add packaged-binary lookup to `adapters/claw_cli.py`.
+- Add packaged-binary lookup to `adapters/her.py`.
 - Add status diagnostics for binary source, version, build target, and checksum.
 - Add `MANIFEST.in`, `setup.py`, `pyproject.toml`, or release-script changes
-  so `hashi_assets/claw` is actually included in distributed artifacts.
+  so `hashi_assets/her` is actually included in distributed artifacts.
 
 Acceptance:
 
@@ -857,7 +860,7 @@ Decisions to freeze:
 1. Gateway state handoff uses per-agent `GatewayContext` snapshots for Phase B.
 2. Direct full-config reload is not the default MCP state-sharing strategy.
 3. Future IPC is allowed only after the stateless web tier is stable.
-4. The canonical packaged executable name is `hashi-claw`.
+4. The canonical packaged executable name is `hashi-her`.
 5. Platform manifest distinguishes `hashi_platform_key` from
    `rust_target_triple`.
 6. The original web-only rollout decision was superseded after the canonical
@@ -954,11 +957,11 @@ and resumes the session ID emitted by Claw.
 
 Deliverables:
 
-- Add Claw adapter support for isolated `CLAW_CONFIG_HOME`.
+- Add HER adapter support for isolated `CLAW_CONFIG_HOME`.
 - Generate/select per-agent Claw MCP config.
 - Validate required `hashi-tools` MCP server before accepting the backend.
 - Add `/status` or backend diagnostics showing Claw gateway readiness.
-- Ensure generated Claw config targets the packaged `hashi-claw` runtime by
+- Ensure generated Claw config targets the packaged `hashi-her` runtime by
   default.
 - Define mapping between HASHI `tools.allowed` and Claw `--allowedTools`:
   HASHI tools are exposed through MCP; Claw-native tools remain controlled by
@@ -966,10 +969,10 @@ Deliverables:
 
 Acceptance:
 
-- The packaged Claw runtime starts from a clean HASHI install.
-- A Claw backend agent can fetch a public URL through the gateway.
+- The packaged HER runtime starts from a clean HASHI install.
+- A HER backend agent can fetch a public URL through the gateway.
 - Removing the gateway command causes clear backend initialization failure.
-- Existing non-Claw backends are unchanged.
+- Existing non-HER backends are unchanged.
 - `/reboot min` adopts adapter/config changes.
 
 ### Phase D: Claw Telemetry Contract
@@ -1017,7 +1020,7 @@ Deliverables:
 
 Acceptance:
 
-- `diaochan` can fetch and summarize a public URL in `claw-cli` mode.
+- `diaochan` can fetch and summarize a public URL in `her` mode.
 - `openrouter-api`, `deepseek-api`, and `ollama-api` keep existing tool access.
 - Tool audit output has consistent shape across backend types.
 
@@ -1031,7 +1034,7 @@ Current Claw JSON mode remains supported:
 
 If `stream-json` is unavailable:
 
-- Claw adapter can still return final text.
+- HER adapter can still return final text.
 - Tool use counts may be available from final JSON.
 - Real-time verbose is limited.
 - Thinking tokens must be marked `unavailable` unless explicit usage exists.
@@ -1044,7 +1047,7 @@ packaged binary is the default user path, but developers can still override it:
 
 ```json
 {
-  "engine": "claw-cli",
+  "engine": "her",
   "claw_binary_path": "/path/to/custom/claw"
 }
 ```
@@ -1057,8 +1060,8 @@ hotfix validation.
 Focused Python checks:
 
 ```bash
-python3 -m py_compile adapters/claw_cli.py tools/registry.py
-pytest tests/test_claw_cli_adapter.py tests/test_workzone.py tests/test_deepseek_api.py
+python3 -m py_compile adapters/her.py tools/registry.py
+pytest tests/test_her_adapter.py tests/test_workzone.py tests/test_deepseek_api.py
 ```
 
 Packaged runtime checks:
@@ -1078,8 +1081,8 @@ pytest tests/test_tool_gateway_parity.py
 Live smoke checks:
 
 ```text
-Packaged Claw binary resolves without external checkout
-Packaged Claw version/sha appears in backend status
+Packaged HER binary resolves without external checkout
+Packaged HER version/sha appears in backend status
 Claw MCP list: sees web-tier tools
 Claw web_fetch: fetches a public URL
 Claw missing gateway: fails clearly
@@ -1109,7 +1112,7 @@ No HASHI core restart required for gateway/adapter updates
 ## Open Questions
 
 1. Should the first gateway tier for Claw be `web` only, `web,browser`, or `*`?
-2. Should Claw gateway MCP be required by default for every `claw-cli` backend,
+2. Should Claw gateway MCP be required by default for every `her` backend,
    or opt-in via backend config?
 3. Should browser tools run through the current browser bridge, Playwright
    fallback, or both?
@@ -1127,13 +1130,13 @@ No HASHI core restart required for gateway/adapter updates
 
 1. Start with `web` only. Add `browser` after cross-process session and audit
    behavior are proven.
-2. Make gateway required when `tools` is configured on `claw-cli`; otherwise
+2. Make gateway required when `tools` is configured on `her`; otherwise
    preserve current read-only Claw behavior.
 3. Prefer existing browser bridge discovery first, with Playwright fallback.
 4. Do not show raw hidden reasoning by default. Show status and token counts.
 5. Keep API direct path initially; migrate to gateway facade after parity tests.
 6. Ship Claw in the normal full HASHI deck. A separate slim package can exist
-   later, but it must not be the default user path for Claw mode.
+   later, but it must not be the default user path for HER mode.
 7. Treat Linux/WSL x86_64 and Windows x86_64 as first rollout gates; add macOS
    after the build pipeline is stable.
 8. Use per-agent GatewayContext snapshots first; reserve IPC for a later
@@ -1143,12 +1146,12 @@ No HASHI core restart required for gateway/adapter updates
 
 This plan is complete when:
 
-- Claw backend agents can use HASHI internet tools through a standard gateway.
+- HER backend agents can use HASHI internet tools through a standard gateway.
 - Tool execution is logged with structured, redacted audit records.
 - Thinking/token telemetry is explicit and source-labelled.
 - Existing API backend behavior is preserved.
 - No Claw-specific behavior is added to HASHI core.
-- A normal HASHI package contains the Claw runtime needed by `claw-cli` mode.
+- A normal HASHI package contains the Claw runtime needed by `her` mode.
 - MCP subprocess state is passed through minimal, permissioned GatewayContext
   snapshots rather than full broad config reconstruction.
 - The feature can be adopted by `/reboot` without restarting the HASHI process.

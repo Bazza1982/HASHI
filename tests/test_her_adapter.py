@@ -11,9 +11,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from adapters.claw_cli import (
+from adapters.her import (
     ClawBinaryNotFound,
-    ClawCLIAdapter,
     ClawCommandError,
     ClawJsonError,
     ClawPackagedRuntimeError,
@@ -32,7 +31,9 @@ from adapters.claw_cli import (
     run_claw_doctor,
     run_claw_json_command,
     run_claw_task,
+    HERAdapter,
 )
+from adapters.claw_cli import ClawCLIAdapter
 from adapters.registry import get_backend_class
 from adapters.stream_events import (
     KIND_ACKNOWLEDGEMENT,
@@ -100,18 +101,18 @@ def _write_packaged_claw(
     body: str = "#!/usr/bin/env python3\nprint('ok')\n",
 ) -> Path:
     (root / "bin" / platform_key).mkdir(parents=True, exist_ok=True)
-    binary = _write_exe(root / "bin" / platform_key / "hashi-claw", body)
+    binary = _write_exe(root / "bin" / platform_key / "hashi-her", body)
     digest = hashlib.sha256(binary.read_bytes()).hexdigest()
     (root / "manifest.json").write_text(
         json.dumps(
             {
                 "manifest_version": 1,
-                "runtime": "hashi-claw",
+                "runtime": "hashi-her",
                 "version": "0.0.0-test",
                 "binaries": {
                     platform_key: {
                         "path": str(binary.relative_to(root)),
-                        "binary_name": "hashi-claw",
+                        "binary_name": "hashi-her",
                         "rust_target_triple": rust_target_triple,
                         "sha256": digest,
                     }
@@ -155,12 +156,12 @@ def test_load_packaged_claw_manifest_rejects_non_hashi_runtime(tmp_path):
         encoding="utf-8",
     )
 
-    with pytest.raises(ClawPackagedRuntimeError, match="hashi-claw"):
+    with pytest.raises(ClawPackagedRuntimeError, match="hashi-her"):
         load_packaged_claw_manifest(manifest)
 
 
 def test_resolve_packaged_claw_binary_validates_checksum(tmp_path):
-    root = tmp_path / "hashi_assets" / "claw"
+    root = tmp_path / "hashi_assets" / "her"
     binary = _write_packaged_claw(root)
     platform = detect_hashi_claw_platform(system="Linux", machine="x86_64", release="6.8")
 
@@ -172,7 +173,7 @@ def test_resolve_packaged_claw_binary_validates_checksum(tmp_path):
 
 
 def test_find_claw_binary_uses_packaged_runtime_before_env(tmp_path):
-    root = tmp_path / "hashi_assets" / "claw"
+    root = tmp_path / "hashi_assets" / "her"
     packaged = _write_packaged_claw(root)
     env_claw = _write_exe(
         tmp_path / "env-claw",
@@ -187,7 +188,7 @@ def test_find_claw_binary_uses_packaged_runtime_before_env(tmp_path):
 
 
 def test_find_claw_binary_checksum_mismatch_falls_back_to_env(tmp_path):
-    root = tmp_path / "hashi_assets" / "claw"
+    root = tmp_path / "hashi_assets" / "her"
     packaged = _write_packaged_claw(root)
     packaged.write_text("#!/usr/bin/env python3\nprint('tampered')\n", encoding="utf-8")
     packaged.chmod(packaged.stat().st_mode | stat.S_IXUSR)
@@ -208,7 +209,7 @@ def test_find_claw_binary_checksum_mismatch_falls_back_to_env(tmp_path):
 
 
 def test_find_claw_binary_require_packaged_fails_closed(tmp_path):
-    root = tmp_path / "hashi_assets" / "claw"
+    root = tmp_path / "hashi_assets" / "her"
     packaged = _write_packaged_claw(root)
     packaged.write_text("#!/usr/bin/env python3\nprint('tampered')\n", encoding="utf-8")
     packaged.chmod(packaged.stat().st_mode | stat.S_IXUSR)
@@ -220,7 +221,7 @@ def test_find_claw_binary_require_packaged_fails_closed(tmp_path):
 
 
 def test_find_claw_binary_require_packaged_does_not_bypass_manifest(tmp_path):
-    root = tmp_path / "hashi_assets" / "claw"
+    root = tmp_path / "hashi_assets" / "her"
     packaged = _write_packaged_claw(root)
     configured = _write_exe(
         tmp_path / "configured-claw",
@@ -518,7 +519,10 @@ def test_claw_adapter_defaults_to_all_native_tools_and_accepts_wildcard(tmp_path
     assert wildcard._allowed_tools() is None
 
 
-def test_registry_exposes_claw_backend():
+def test_registry_exposes_her_backend_and_legacy_alias():
+    assert get_backend_class("her") is HERAdapter
+    assert is_cli_backend("her")
+    assert allows_custom_models("her")
     assert get_backend_class("claw-cli") is ClawCLIAdapter
     assert is_cli_backend("claw-cli")
     assert allows_custom_models("claw-cli")
@@ -924,7 +928,7 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path, caplog):
         for event in events
     )
     assert any(
-        event.kind == KIND_THINKING and "Claw stream started" in event.summary
+        event.kind == KIND_THINKING and "HER stream started" in event.summary
         for event in events
     )
     assert KIND_TEXT_DELTA in [event.kind for event in events]
@@ -936,11 +940,11 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path, caplog):
     ) == 2
     assert any(event.detail == "thinking_chars=48" for event in events)
     assert not any("may be summarized or hidden" in event.summary for event in events)
-    assert "Claw tool started:" in caplog.text
+    assert "HER tool started:" in caplog.text
     assert "name=read_file" in caplog.text
-    assert "Claw tool finished:" in caplog.text
+    assert "HER tool finished:" in caplog.text
     assert "output_preview=ok" in caplog.text
-    assert "Claw control invocation:" in caplog.text
+    assert "HER control invocation:" in caplog.text
     assert "input_tokens=13 output_tokens=5" in caplog.text
     raw_events = [
         json.loads(line)

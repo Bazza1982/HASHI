@@ -46,7 +46,8 @@ def _backend_runtime_name(engine: str) -> str:
         "claude-cli": "Claude CLI",
         "gemini-cli": "Gemini CLI",
         "grok-cli": "Grok CLI",
-        "claw-cli": "Claw CLI",
+        "her": "HASHI Engine Runtime (HER)",
+        "claw-cli": "HASHI Engine Runtime (HER)",
     }
     return names.get(str(engine or "").strip().lower(), str(engine or "").strip() or "backend")
 
