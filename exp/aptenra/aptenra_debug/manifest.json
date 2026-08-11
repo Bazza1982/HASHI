@@ -44,7 +44,9 @@
     "start_aptenra_smoke": "playbooks/04_start_aptenra_smoke.exp.md",
     "git_sync_adjacent": "playbooks/05_git_sync_adjacent.exp.md",
     "evidence_pack": "playbooks/06_evidence_pack.exp.md",
-    "handoff_and_escalation": "playbooks/07_handoff_and_escalation.exp.md"
+    "handoff_and_escalation": "playbooks/07_handoff_and_escalation.exp.md",
+    "comprehensive_hp_human_debug_test": "playbooks/08_comprehensive_hp_human_debug_test.exp.md",
+    "enhanced_hp_full_coverage_test": "playbooks/09_enhanced_hp_full_coverage_test.exp.md"
   },
   "validators": [
     "validators/dual_channel_validators.md"
