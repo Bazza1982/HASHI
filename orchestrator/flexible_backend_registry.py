@@ -104,8 +104,6 @@ BACKEND_REGISTRY: dict[str, dict] = {
         "models": [
             "deepseek-v4-pro",
             "deepseek-v4-flash",
-            "deepseek-reasoner",
-            "deepseek-chat",
         ],
         "default_model": "deepseek-v4-pro",
         "efforts": [],
@@ -167,7 +165,8 @@ BACKEND_REGISTRY: dict[str, dict] = {
         "label": "openrouter",
         "privacy_levels": [0, 1, 2],
         "models": [
-            "deepseek/deepseek-v3.2-exp",
+            "deepseek/deepseek-v4-pro",
+            "deepseek/deepseek-v4-flash",
             "moonshotai/kimi-k2.5",
             "google/gemini-3.1-flash-lite-preview",
             "anthropic/claude-sonnet-4.6",
@@ -230,8 +229,6 @@ def normalize_allowed_backends(backends: list) -> list[dict]:
             continue
         item["engine"] = engine
         if engine == HER_ENGINE:
-            if her_seen:
-                continue
             her_seen = True
         normalized.append(item)
     if not her_seen:

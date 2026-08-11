@@ -569,18 +569,20 @@ class DualBrainObserver(PostTurnObserver, PreTurnContextProvider):
         runtime = self.runtime
         if runtime is None or chat_id is None:
             return
-        if not (bool(getattr(runtime, "_verbose", False)) or bool(getattr(runtime, "_think", False))):
+        if not bool(getattr(runtime, "_verbose", False)):
             return
-        text = (
-            f"💭 **Left brain {stage}** `{request_id}`\n\n"
-            "```json\n"
-            f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n"
-            "```"
-        )
-        with suppress(Exception):
-            handoff_builder = getattr(runtime, "handoff_builder", None)
-            if handoff_builder is not None:
-                handoff_builder.append_transcript("thinking", text, "think")
+        if stage == "preflight":
+            meta = payload.get("meta") if isinstance(payload.get("meta"), Mapping) else {}
+            text = (
+                f"🔍 **Left brain preflight** `{request_id}`\n"
+                f"Wiki: `{'used' if meta.get('wiki_used') else 'not used'}` · "
+                f"candidates: `{int(meta.get('wiki_candidates_loaded') or 0)}`"
+            )
+        else:
+            text = (
+                f"🔍 **Left brain after-action** `{request_id}`\n"
+                f"Continuity: `{'updated' if payload.get('written_to_continuity') else 'unchanged'}`"
+            )
         try:
             send_long = getattr(runtime, "send_long_message", None)
             if callable(send_long):

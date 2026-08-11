@@ -27,21 +27,22 @@ from adapters.stream_events import (
 
 class GrokCLIAdapter(BaseBackend):
     MAX_PROMPT_ARG_CHARS = 24000
-    DEFAULT_IDLE_TIMEOUT_SEC = 1800
-    DEFAULT_HARD_TIMEOUT_SEC = 36000
+    DEFAULT_IDLE_TIMEOUT_SEC = 60 * 60
+    DEFAULT_HARD_TIMEOUT_SEC = 24 * 60 * 60
     SUPPORTED_REASONING_EFFORTS = frozenset({"low", "medium", "high"})
     DEFAULT_REASONING_EFFORT = "medium"
 
     def _define_capabilities(self) -> BackendCapabilities:
-        capabilities = BackendCapabilities(
+        return BackendCapabilities(
             supports_sessions=True,
             supports_files=True,
             supports_tool_use=True,
             supports_thinking_stream=True,
             supports_headless_mode=True,
+            supports_progress_stream=True,
+            supports_tool_stream=True,
+            supports_answer_stream=True,
         )
-        capabilities.supports_answer_stream = True
-        return capabilities
 
     def __init__(self, agent_config, global_config, api_key: str = None):
         super().__init__(agent_config, global_config, api_key)
@@ -356,7 +357,7 @@ class GrokCLIAdapter(BaseBackend):
         silent: bool = False,
         on_stream_event: StreamCallback = None,
     ) -> BackendResponse:
-        started = time.time()
+        started = time.perf_counter()
         cmd = self._build_cmd(prompt)
         stdout_lines: list[str] = []
         stderr_chunks: list[bytes] = []
@@ -403,8 +404,44 @@ class GrokCLIAdapter(BaseBackend):
 
             stdout_task = asyncio.create_task(_read_stdout())
             stderr_task = asyncio.create_task(_read_stderr())
+            wait_task = asyncio.create_task(proc.wait())
             self._active_read_tasks = [stdout_task, stderr_task]
-            await asyncio.wait_for(proc.wait(), timeout=self.HARD_TIMEOUT_SEC)
+            timeout_kind = await self._wait_for_task_with_timeouts(
+                wait_task,
+                started_monotonic=started,
+            )
+            if timeout_kind is not None:
+                diagnostic = self._timeout_diagnostic(
+                    timeout_kind,
+                    started_monotonic=started,
+                )
+                self.logger.error(
+                    f"Grok request {request_id} {timeout_kind}-timed out "
+                    f"(pid={proc.pid}, {diagnostic})"
+                )
+                await self.force_kill_process_tree(
+                    proc,
+                    self.logger,
+                    reason=f"grok {timeout_kind} timeout",
+                )
+                await asyncio.gather(
+                    wait_task,
+                    stdout_task,
+                    stderr_task,
+                    return_exceptions=True,
+                )
+                error = (
+                    f"Grok CLI was idle for {self.IDLE_TIMEOUT_SEC}s with no output."
+                    if timeout_kind == "idle"
+                    else f"Grok CLI exceeded hard timeout of {self.HARD_TIMEOUT_SEC}s."
+                )
+                return BackendResponse(
+                    text="",
+                    error=error,
+                    is_success=False,
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                )
+            await wait_task
             await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
 
             stderr = b"".join(stderr_chunks).decode(errors="replace").strip()
@@ -415,7 +452,7 @@ class GrokCLIAdapter(BaseBackend):
                     text=response_text,
                     error=error,
                     is_success=False,
-                    duration_ms=(time.time() - started) * 1000,
+                    duration_ms=(time.perf_counter() - started) * 1000,
                 )
             if not response_text:
                 response_text = self._extract_last_text_from_stdout(stdout_lines)
@@ -459,7 +496,7 @@ class GrokCLIAdapter(BaseBackend):
                             f"{diagnostic}; retry_error={retry_error}"
                         ),
                         is_success=False,
-                        duration_ms=(time.time() - started) * 1000,
+                        duration_ms=(time.perf_counter() - started) * 1000,
                         stream_metadata=retry_metadata,
                     )
                 diagnostic = self._summarize_empty_response(stdout_lines, stderr, empty_pattern)
@@ -468,7 +505,7 @@ class GrokCLIAdapter(BaseBackend):
                     text="",
                     error=f"Grok CLI returned no answer text. {diagnostic}",
                     is_success=False,
-                    duration_ms=(time.time() - started) * 1000,
+                    duration_ms=(time.perf_counter() - started) * 1000,
                     stream_metadata={
                         "grok_text_delta_count": len(deltas),
                         "grok_action_event_count": len(action_events),
@@ -478,20 +515,12 @@ class GrokCLIAdapter(BaseBackend):
                 )
             return BackendResponse(
                 text=response_text,
-                duration_ms=(time.time() - started) * 1000,
+                duration_ms=(time.perf_counter() - started) * 1000,
                 tool_call_count=len(action_events),
                 stream_metadata={
                     "grok_text_delta_count": len(deltas),
                     "grok_action_event_count": len(action_events),
                 },
-            )
-        except asyncio.TimeoutError:
-            await self.force_kill_process_tree(self.current_proc, self.logger, reason="grok hard timeout")
-            return BackendResponse(
-                text="",
-                error=f"Grok CLI exceeded hard timeout of {self.HARD_TIMEOUT_SEC}s.",
-                is_success=False,
-                duration_ms=(time.time() - started) * 1000,
             )
         except Exception as exc:
             self.logger.exception(f"Grok request {request_id} failed")
@@ -499,7 +528,7 @@ class GrokCLIAdapter(BaseBackend):
                 text="",
                 error=str(exc),
                 is_success=False,
-                duration_ms=(time.time() - started) * 1000,
+                duration_ms=(time.perf_counter() - started) * 1000,
             )
         finally:
             self.current_proc = None

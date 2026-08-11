@@ -50,7 +50,8 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
   keep reasoning effort.
 - `/superloop`: recording-first long-running workflow orchestration.
 - `/verbose [on|off]`: toggle richer long-task status display.
-- `/think [on|off]`: toggle thinking trace display — periodic italic messages showing model reasoning (~60s intervals). Independent from `/verbose`.
+- `/think [on|off]`: toggle model-authored interim commentary and available provider-reasoning messages. Independent from `/verbose`; generic progress and tools remain under `/verbose`.
+- `/typing [on|off|status]`: control both the temporary typing bubble and Telegram's native typing indicator, independently from `/verbose` and `/think`.
 - `/stop`: cancel current processing. The intentional process kill is not reported as a Backend error.
 - `/steer <direction>`: when busy, stop the current turn immediately (all backends), keep interim thinking/progress/artefacts, then continue with a mid-task wrapper. When idle, send the direction as a plain new request (no steer wrapper). Example: `/steer also include unit tests`. The intentional kill (e.g. exit `-9`) is suppressed — you should see the steer ack, not `❌ Backend error`. Full reference: [STEER_COMMAND.md](STEER_COMMAND.md).
 - `/focus`: one-off scope correction that does not cancel or finish the task. When busy, replace the active backend turn with an immediate continuation that preserves progress/artefacts, narrows execution to the original user-requested scope, and keeps working until the requested outcome is complete or genuinely blocked. When idle, apply the same continuation reminder to the most recent task; if no task is available, do nothing. Full reference: [FOCUS_RECALL_COMMANDS.md](FOCUS_RECALL_COMMANDS.md).

@@ -17,8 +17,8 @@ Implementation record:
 - Wrapper config: `/wrap`, default `claude-cli / claude-haiku-4-5 / context=3`
 - Persona/style slots: `/wrapper set <slot> <text>`, stored in `state.json` as `wrapper_slots`
 - Telegram controls: `/core`, `/wrap`, and `/wrapper` expose inline configuration buttons.
-- Wrapper picker: Claude Haiku/Sonnet, Gemini Flash/Lite, DeepSeek Flash/Chat, and OpenRouter DeepSeek/Gemini. Claude Opus is intentionally omitted from the picker because it is too expensive for routine wrapping.
-- Visibility: `/verbose on` shows a labeled wrapper trace with core raw output, wrapper final output, status, latency, and fallback reason. `/verbose off` shows only the final reply.
+- Wrapper picker: Claude Haiku/Sonnet, Gemini Flash/Lite, DeepSeek Flash/Pro, and OpenRouter DeepSeek Flash/Gemini. Claude Opus is intentionally omitted from the picker because it is too expensive for routine wrapping.
+- Visibility: `/verbose on` shows compact wrapper status, latency, and fallback details without exposing core or wrapper answer drafts. `/verbose off` shows only the final reply.
 - Reset semantics: `/reset CONFIRM` preserves `state.json` wrapper config and prompt slots, matching `/sys` preservation behavior. `/wipe CONFIRM` remains a hard workspace clear.
 
 ## 1. Purpose
@@ -182,10 +182,10 @@ User message
  -> user sees wrapper_final
 ```
 
-Default visibility should respect existing `/verbose`:
+Default visibility respects the current Telegram display contract:
 
-- `/verbose on`: show core raw output with a clear label before wrapper output.
-- `/verbose off`: hide core raw output and show only wrapper output, with a short polishing indicator.
+- `/verbose on`: show compact progress, status, latency, and fallback details without echoing answer drafts.
+- `/verbose off`: show only the final wrapper output, with a short polishing indicator when typing display is enabled.
 
 Existing `/think` controls thinking trace display. Wrapper mode should not invent a new thinking toggle.
 
@@ -458,9 +458,9 @@ Examples:
 ```text
 /wrap
 /wrap model=claude-haiku-4-5 backend=claude-cli
-/wrap model=deepseek-chat backend=deepseek-api
+/wrap model=deepseek-v4-flash backend=deepseek-api
 /wrap model=gemini-2.5-flash backend=gemini-cli
-/wrap model=deepseek/deepseek-v3.2-exp backend=openrouter-api
+/wrap model=deepseek/deepseek-v4-flash backend=openrouter-api
 /wrap context=3
 ```
 
@@ -485,7 +485,7 @@ For fixed/flex agents:
 Current Telegram controls:
 
 - `/core` shows core model buttons such as `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.3-codex-spark`, `gpt-5.4`, and `gpt-5.3-codex`.
-- `/wrap` groups wrapper choices by provider: Claude Haiku/Sonnet, Gemini Flash/Lite, DeepSeek Flash/Chat, and OpenRouter DeepSeek/Gemini.
+- `/wrap` groups wrapper choices by provider: Claude Haiku/Sonnet, Gemini Flash/Lite, DeepSeek Flash/Pro, and OpenRouter DeepSeek Flash/Gemini.
 - Context buttons adjust only the wrapper's recent visible context window.
 - `/wrapper` summarizes the active core/wrapper pair and persona/style slots, with navigation buttons to `/core` and `/wrap`.
 
@@ -616,8 +616,7 @@ Tasks:
 - Use core raw for:
   - core prompt memory,
   - core transcript,
-  - audit log,
-  - optional `/verbose on` display.
+  - audit log.
 
 Acceptance:
 
@@ -625,8 +624,8 @@ Acceptance:
 - Scheduler/hchat/system source is not wrapped.
 - Request listeners receive the same visible text that the user receives, or receive a documented payload where visible text is explicit and backward-compatible.
 - Transfer-suppressed responses store wrapper final text, not core raw text.
-- `/verbose on` exposes labeled core raw.
-- `/verbose off` hides core raw.
+- `/verbose on` exposes compact status without raw answer drafts.
+- `/verbose off` hides progress details.
 - Wrapper failure sends core raw.
 
 Ordering constraint:

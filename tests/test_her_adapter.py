@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import stat
+import textwrap
 import asyncio
 import hashlib
 import json
 import logging
-import stat
-import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -557,6 +557,57 @@ def test_claw_provider_env_resolves_secret_and_base_url(tmp_path):
     assert adapter._task_env()["OPENAI_API_KEY"] == "provider-secret"
 
 
+def test_explicit_deepseek_provider_translates_bare_model_for_claw_runtime(tmp_path):
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek:deepseek-v4-flash",
+        extra={"provider": "deepseek"},
+        resolve_access_root=lambda: tmp_path,
+    )
+    global_cfg = SimpleNamespace(
+        claw_providers={
+            "providers": {
+                "deepseek": {
+                    "base_url": "https://deepseek.invalid/v1",
+                    "secret": "deepseek_api_key",
+                }
+            }
+        }
+    )
+    adapter = ClawCLIAdapter(cfg, global_cfg, api_key=None)
+
+    assert adapter._provider_and_model() == ("deepseek", "deepseek-v4-flash")
+    assert adapter._claw_model() == "local/deepseek-v4-flash"
+
+
+def test_openrouter_model_slug_is_preserved_for_claw_runtime(tmp_path):
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/deepseek-v4-flash",
+        extra={"provider": "openrouter"},
+        resolve_access_root=lambda: tmp_path,
+    )
+    global_cfg = SimpleNamespace(
+        claw_providers={
+            "providers": {
+                "openrouter": {
+                    "base_url": "https://openrouter.invalid/v1",
+                    "secret": "openrouter_key",
+                }
+            }
+        }
+    )
+    adapter = ClawCLIAdapter(cfg, global_cfg, api_key=None)
+
+    assert adapter._provider_and_model() == (
+        "openrouter",
+        "deepseek/deepseek-v4-flash",
+    )
+    assert adapter._claw_model() == "deepseek/deepseek-v4-flash"
+
+
 def test_claw_provider_missing_secret_raises(tmp_path):
     cfg = SimpleNamespace(
         name="test",
@@ -928,7 +979,7 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path, caplog):
         for event in events
     )
     assert any(
-        event.kind == KIND_THINKING and "HER stream started" in event.summary
+        event.kind == KIND_PROGRESS and "HER stream started" in event.summary
         for event in events
     )
     assert KIND_TEXT_DELTA in [event.kind for event in events]
@@ -1063,7 +1114,12 @@ async def test_claw_adapter_shutdown_kills_running_process(tmp_path):
         name="test",
         workspace_dir=tmp_path,
         model="deepseek/test",
-        extra={"claw_binary_path": str(fake), "permission_mode": "read-only", "hard_timeout_sec": 30},
+        extra={
+            "claw_binary_path": str(fake),
+            "permission_mode": "read-only",
+            "idle_timeout_sec": 1,
+            "hard_timeout_sec": 30,
+        },
         resolve_access_root=lambda: tmp_path,
     )
     global_cfg = SimpleNamespace()
@@ -1081,3 +1137,43 @@ async def test_claw_adapter_shutdown_kills_running_process(tmp_path):
     response = await task
 
     assert response.is_success is False
+
+
+@pytest.mark.asyncio
+async def test_claw_adapter_enforces_idle_timeout_and_logs_effective_policy(tmp_path, caplog):
+    fake = _write_exe(
+        tmp_path / "claw",
+        """
+        #!/usr/bin/env python3
+        import json, sys, time
+        if sys.argv[1] == "version":
+            print(json.dumps({"kind": "version", "version": "0.1.0"}))
+        else:
+            time.sleep(20)
+        """,
+    )
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={
+            "claw_binary_path": str(fake),
+            "permission_mode": "read-only",
+            "idle_timeout_sec": 1,
+            "hard_timeout_sec": 30,
+        },
+        resolve_access_root=lambda: tmp_path,
+    )
+    adapter = ClawCLIAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    assert await adapter.initialize() is True
+
+    with caplog.at_level(logging.ERROR):
+        response = await adapter.generate_response("hello", "req-claw-idle")
+
+    assert response.is_success is False
+    assert "idle for 1s" in response.error
+    assert "kind=idle" in caplog.text
+    assert "idle_timeout_s=1" in caplog.text
+    assert "hard_timeout_s=30" in caplog.text
+    assert "last_output_age_s=" in caplog.text
+    assert "total_runtime_s=" in caplog.text

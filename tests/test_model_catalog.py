@@ -73,6 +73,18 @@ def test_xai_api_models_are_available_to_gateway_catalog():
     assert "grok-4.3" in get_available_models("xai-api")
 
 
+def test_current_deepseek_models_replace_retired_and_experimental_ids():
+    direct_models = get_available_models("deepseek-api")
+    openrouter_models = get_available_models("openrouter-api")
+
+    assert direct_models == ["deepseek-v4-pro", "deepseek-v4-flash"]
+    assert "deepseek-chat" not in direct_models
+    assert "deepseek-reasoner" not in direct_models
+    assert "deepseek/deepseek-v4-pro" in openrouter_models
+    assert "deepseek/deepseek-v4-flash" in openrouter_models
+    assert "deepseek/deepseek-v3.2-exp" not in openrouter_models
+
+
 def test_compatibility_catalog_is_derived_from_backend_registry():
     assert available_gateway_models() == get_all_gateway_models()
     assert default_gateway_model() == "gpt-5.4"

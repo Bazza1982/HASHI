@@ -6,6 +6,14 @@ from pathlib import Path
 
 import pytest
 
+from adapters.base import BaseBackend, BackendCapabilities, BackendResponse
+from adapters.timeout_policy import (
+    BACKEND_CONFIG_SOURCE,
+    HARD_TIMEOUT_KEY,
+    IDLE_TIMEOUT_KEY,
+    TIMEOUT_POLICY_META_KEY,
+    USER_OVERRIDE_SOURCE,
+)
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
 from orchestrator.privacy_levels import PrivacyLevel
@@ -132,7 +140,123 @@ def test_backend_effort_survives_manager_reload(tmp_path):
     assert reloaded.config.allowed_backends[0]["effort"] == "high"
 
 
-def test_provider_prefixed_model_is_preserved_for_adapter_resolution(tmp_path):
+def test_timeout_priority_is_user_then_backend_then_agent(tmp_path):
+    workspace = tmp_path / "agent"
+    manager = _make_manager(workspace)
+    manager.config.extra = {
+        "idle_timeout_sec": 600,
+        "hard_timeout_sec": 7200,
+    }
+    backend_cfg = manager.config.allowed_backends[0]
+    backend_cfg["process_timeout"] = 1200
+    backend_cfg["hard_timeout_sec"] = 8000
+    manager.state_store.replace(
+        {
+            "backend_timeouts": {
+                "codex-cli": {
+                    "idle_timeout_sec": 1500,
+                    "hard_timeout_sec": 9000,
+                }
+            }
+        }
+    )
+
+    adapter_cfg = manager._build_adapter_config("codex-cli", backend_cfg)
+
+    assert adapter_cfg.extra[IDLE_TIMEOUT_KEY] == 1500
+    assert adapter_cfg.extra[HARD_TIMEOUT_KEY] == 9000
+    assert adapter_cfg.extra[TIMEOUT_POLICY_META_KEY]["sources"] == {
+        IDLE_TIMEOUT_KEY: USER_OVERRIDE_SOURCE,
+        HARD_TIMEOUT_KEY: USER_OVERRIDE_SOURCE,
+    }
+
+    manager.state_store.replace({})
+    adapter_cfg = manager._build_adapter_config("codex-cli", backend_cfg)
+    assert adapter_cfg.extra[IDLE_TIMEOUT_KEY] == 1200
+    assert adapter_cfg.extra[HARD_TIMEOUT_KEY] == 8000
+    assert adapter_cfg.extra[TIMEOUT_POLICY_META_KEY]["sources"] == {
+        IDLE_TIMEOUT_KEY: BACKEND_CONFIG_SOURCE,
+        HARD_TIMEOUT_KEY: BACKEND_CONFIG_SOURCE,
+    }
+
+    backend_cfg.pop("process_timeout")
+    backend_cfg.pop("hard_timeout_sec")
+    adapter_cfg = manager._build_adapter_config("codex-cli", backend_cfg)
+    assert adapter_cfg.extra[IDLE_TIMEOUT_KEY] == 600
+    assert adapter_cfg.extra[HARD_TIMEOUT_KEY] == 7200
+
+
+@pytest.mark.asyncio
+async def test_timeout_override_survives_recreation_and_is_scoped_per_backend(tmp_path, monkeypatch):
+    import adapters.registry
+
+    class FakeBackend(BaseBackend):
+        DEFAULT_IDLE_TIMEOUT_SEC = 3600
+        DEFAULT_HARD_TIMEOUT_SEC = 86400
+
+        def _define_capabilities(self):
+            return BackendCapabilities(False, False, False, False, True)
+
+        async def initialize(self):
+            return True
+
+        async def generate_response(
+            self,
+            prompt,
+            request_id,
+            is_retry=False,
+            silent=False,
+            on_stream_event=None,
+        ):
+            return BackendResponse(text=prompt, duration_ms=0)
+
+        async def shutdown(self):
+            return None
+
+        async def handle_new_session(self):
+            return True
+
+    monkeypatch.setattr(adapters.registry, "get_backend_class", lambda _engine: FakeBackend)
+    workspace = tmp_path / "agent"
+    manager = _make_manager(workspace)
+    assert await manager.initialize_active_backend() is True
+
+    saved = manager.set_active_timeout_override(
+        idle_seconds=3600,
+        hard_seconds=360000,
+    )
+
+    assert saved.idle_seconds == 3600
+    assert saved.hard_seconds == 360000
+    assert saved.idle_source == USER_OVERRIDE_SOURCE
+    assert saved.hard_source == USER_OVERRIDE_SOURCE
+    state = _read_state(workspace)
+    assert state["backend_timeouts"]["codex-cli"] == {
+        IDLE_TIMEOUT_KEY: 3600,
+        HARD_TIMEOUT_KEY: 360000,
+    }
+
+    reloaded = _make_manager(workspace)
+    assert await reloaded.initialize_active_backend() is True
+    assert reloaded.get_active_timeout_policy() == saved
+
+    assert await reloaded.switch_backend("claude-cli") is True
+    claude_policy = reloaded.get_active_timeout_policy()
+    assert claude_policy.hard_seconds == 86400
+    reloaded.set_active_timeout_override(idle_seconds=7200, hard_seconds=172800)
+
+    assert await reloaded.switch_backend("codex-cli") is True
+    assert reloaded.get_active_timeout_policy().hard_seconds == 360000
+
+    reset = reloaded.clear_active_timeout_override()
+    assert reset.idle_seconds == 3600
+    assert reset.hard_seconds == 86400
+    state = _read_state(workspace)
+    assert "codex-cli" not in state["backend_timeouts"]
+    assert state["backend_timeouts"]["claude-cli"][HARD_TIMEOUT_KEY] == 172800
+
+
+def test_provider_prefixed_model_is_normalized_for_adapter_resolution(tmp_path):
     workspace = tmp_path / "agent"
     workspace.mkdir()
     cfg = FlexibleAgentConfig(
@@ -151,7 +275,7 @@ def test_provider_prefixed_model_is_preserved_for_adapter_resolution(tmp_path):
         base_logs_dir=workspace / "logs",
         base_media_dir=workspace / "media",
         project_root=workspace,
-        claw_providers={"providers": {"openrouter": {"base_url": "https://example.invalid/v1"}}},
+        her_providers={"providers": {"openrouter": {"base_url": "https://example.invalid/v1"}}},
     )
     manager = FlexibleBackendManager(cfg, global_cfg, secrets={"openrouter_key": "secret"})
 
@@ -161,8 +285,229 @@ def test_provider_prefixed_model_is_preserved_for_adapter_resolution(tmp_path):
         target_model="openrouter:deepseek/deepseek-v4-flash",
     )
 
-    assert adapter_cfg.model == "openrouter:deepseek/deepseek-v4-flash"
-    assert "provider" not in adapter_cfg.extra
+    assert adapter_cfg.model == "deepseek/deepseek-v4-flash"
+    assert adapter_cfg.extra["provider"] == "openrouter"
+
+
+def test_claw_provider_models_are_scoped_by_agent_backend_rows(tmp_path):
+    workspace = tmp_path / "agent"
+    workspace.mkdir()
+    cfg = FlexibleAgentConfig(
+        name="test-flex",
+        workspace_dir=workspace,
+        system_md=workspace / "AGENT.md",
+        telegram_token_key="test-flex",
+        allowed_backends=[
+            {
+                "engine": "her",
+                "provider": "openrouter",
+                "models": ["deepseek/deepseek-v4-flash", "openai/gpt-4.1-mini"],
+            },
+            {
+                "engine": "her",
+                "provider": "deepseek",
+                "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
+            },
+            {
+                "engine": "her",
+                "provider": "ollama",
+                "model": "qwen2.5-coder:32b",
+            },
+        ],
+        active_backend="her",
+        project_root=workspace,
+    )
+    global_cfg = GlobalConfig(
+        authorized_id=1,
+        base_logs_dir=workspace / "logs",
+        base_media_dir=workspace / "media",
+        project_root=workspace,
+        her_providers={
+            "providers": {
+                "openrouter": {"base_url": "https://openrouter.invalid/v1"},
+                "deepseek": {"base_url": "https://deepseek.invalid/v1"},
+                "ollama": {"base_url": "http://localhost:11434/v1", "status": "disabled"},
+            }
+        },
+    )
+    manager = FlexibleBackendManager(cfg, global_cfg, secrets={})
+
+    options = {option["name"]: option for option in manager.get_claw_provider_options()}
+
+    assert options["openrouter"]["models"] == [
+        "deepseek/deepseek-v4-flash",
+        "openai/gpt-4.1-mini",
+    ]
+    assert options["deepseek"]["models"] == ["deepseek-v4-flash", "deepseek-v4-pro"]
+    assert options["ollama"]["available"] is False
+    assert options["ollama"]["reason"] == "provider is disabled"
+
+
+def test_generic_claw_model_routes_do_not_leak_between_providers(tmp_path):
+    workspace = tmp_path / "agent"
+    workspace.mkdir()
+    cfg = FlexibleAgentConfig(
+        name="test-flex",
+        workspace_dir=workspace,
+        system_md=workspace / "AGENT.md",
+        telegram_token_key="test-flex",
+        allowed_backends=[
+            {
+                "engine": "her",
+                "models": [
+                    "openrouter:deepseek/deepseek-v4-flash",
+                    "deepseek:deepseek-v4-pro",
+                ],
+            }
+        ],
+        active_backend="her",
+        project_root=workspace,
+    )
+    global_cfg = GlobalConfig(
+        authorized_id=1,
+        base_logs_dir=workspace / "logs",
+        base_media_dir=workspace / "media",
+        project_root=workspace,
+        her_providers={
+            "providers": {
+                "openrouter": {"base_url": "https://openrouter.invalid/v1"},
+                "deepseek": {"base_url": "https://deepseek.invalid/v1"},
+            }
+        },
+    )
+    manager = FlexibleBackendManager(cfg, global_cfg, secrets={})
+
+    options = {option["name"]: option for option in manager.get_claw_provider_options()}
+
+    assert options["openrouter"]["models"] == ["deepseek/deepseek-v4-flash"]
+    assert options["deepseek"]["models"] == ["deepseek-v4-pro"]
+
+
+def test_claw_adapter_config_uses_provider_default_model_when_row_only_authorizes_provider(
+    tmp_path,
+):
+    workspace = tmp_path / "agent"
+    workspace.mkdir()
+    cfg = FlexibleAgentConfig(
+        name="test-flex",
+        workspace_dir=workspace,
+        system_md=workspace / "AGENT.md",
+        telegram_token_key="test-flex",
+        allowed_backends=[{"engine": "her", "provider": "deepseek"}],
+        active_backend="her",
+        project_root=workspace,
+    )
+    global_cfg = GlobalConfig(
+        authorized_id=1,
+        base_logs_dir=workspace / "logs",
+        base_media_dir=workspace / "media",
+        project_root=workspace,
+        her_providers={
+            "providers": {
+                "deepseek": {
+                    "base_url": "https://deepseek.invalid/v1",
+                    "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
+                    "default_model": "deepseek-v4-pro",
+                }
+            }
+        },
+    )
+    manager = FlexibleBackendManager(cfg, global_cfg, secrets={})
+
+    adapter_cfg = manager._build_adapter_config("her", cfg.allowed_backends[0])
+
+    assert adapter_cfg.extra["provider"] == "deepseek"
+    assert adapter_cfg.model == "deepseek-v4-pro"
+
+
+def test_claw_provider_and_model_persist_as_separate_state(tmp_path):
+    workspace = tmp_path / "agent"
+    manager = _make_manager(workspace)
+    manager.config.active_backend = "her"
+    manager.persist_state(
+        active_provider="deepseek",
+        active_model="deepseek-v4-flash",
+    )
+
+    state = _read_state(workspace)
+
+    assert state["active_backend"] == "her"
+    assert state["active_provider"] == "deepseek"
+    assert state["active_model"] == "deepseek-v4-flash"
+
+
+@pytest.mark.asyncio
+async def test_failed_claw_provider_switch_rolls_back_full_route(tmp_path):
+    workspace = tmp_path / "agent"
+    workspace.mkdir()
+    cfg = FlexibleAgentConfig(
+        name="test-flex",
+        workspace_dir=workspace,
+        system_md=workspace / "AGENT.md",
+        telegram_token_key="test-flex",
+        allowed_backends=[
+            {
+                "engine": "her",
+                "provider": "openrouter",
+                "model": "deepseek/deepseek-v4-flash",
+            },
+            {
+                "engine": "her",
+                "provider": "deepseek",
+                "model": "deepseek-v4-pro",
+            },
+        ],
+        active_backend="her",
+        project_root=workspace,
+    )
+    global_cfg = GlobalConfig(
+        authorized_id=1,
+        base_logs_dir=workspace / "logs",
+        base_media_dir=workspace / "media",
+        project_root=workspace,
+        her_providers={
+            "providers": {
+                "openrouter": {"base_url": "https://openrouter.invalid/v1"},
+                "deepseek": {"base_url": "https://deepseek.invalid/v1"},
+            }
+        },
+    )
+    manager = FlexibleBackendManager(cfg, global_cfg, secrets={})
+    manager.current_backend = SimpleNamespace(
+        config=SimpleNamespace(
+            model="deepseek/deepseek-v4-flash",
+            extra={"provider": "openrouter"},
+        )
+    )
+    initialize_calls: list[tuple[str | None, str | None]] = []
+
+    async def fake_shutdown():
+        manager.current_backend = None
+
+    async def fake_initialize(target_model=None, target_provider=None):
+        initialize_calls.append((target_model, target_provider))
+        return len(initialize_calls) > 1
+
+    manager.shutdown = fake_shutdown
+    manager.initialize_active_backend = fake_initialize
+
+    switched = await manager.switch_backend(
+        "her",
+        target_provider="deepseek",
+        target_model="deepseek-v4-pro",
+    )
+
+    assert switched is False
+    assert initialize_calls == [
+        ("deepseek-v4-pro", "deepseek"),
+        ("deepseek/deepseek-v4-flash", "openrouter"),
+    ]
+    assert manager.config.active_backend == "her"
+    assert manager._active_provider_override == "openrouter"
+    assert manager._active_model_override == "deepseek/deepseek-v4-flash"
+    state = _read_state(workspace)
+    assert state["active_provider"] == "openrouter"
+    assert state["active_model"] == "deepseek/deepseek-v4-flash"
 
 
 def test_save_state_recovers_from_invalid_existing_json(tmp_path):
@@ -288,6 +633,16 @@ def test_create_ephemeral_backend_does_not_replace_current_backend(tmp_path, mon
     monkeypatch.setattr(adapters.registry, "get_backend_class", lambda engine: FakeBackend)
     workspace = tmp_path / "agent"
     manager = _make_manager(workspace)
+    manager.state_store.replace(
+        {
+            "backend_timeouts": {
+                "claude-cli": {
+                    IDLE_TIMEOUT_KEY: 3600,
+                    HARD_TIMEOUT_KEY: 360000,
+                }
+            }
+        }
+    )
     manager.current_backend = object()
     original_backend = manager.current_backend
     original_active = manager.config.active_backend
@@ -297,6 +652,8 @@ def test_create_ephemeral_backend_does_not_replace_current_backend(tmp_path, mon
     assert backend is created[0]
     assert backend.config.engine == "claude-cli"
     assert backend.config.model == "claude-haiku-4-5"
+    assert IDLE_TIMEOUT_KEY not in backend.config.extra
+    assert HARD_TIMEOUT_KEY not in backend.config.extra
     assert manager.current_backend is original_backend
     assert manager.config.active_backend == original_active
 

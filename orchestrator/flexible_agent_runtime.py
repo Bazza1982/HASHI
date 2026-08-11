@@ -45,6 +45,7 @@ from orchestrator import runtime_lifecycle
 from orchestrator import runtime_long
 from orchestrator import runtime_media
 from orchestrator import runtime_menu_views
+from orchestrator import runtime_model_selection
 from orchestrator import runtime_command_binding
 from orchestrator import runtime_mode
 from orchestrator import runtime_privacy
@@ -52,6 +53,7 @@ from orchestrator import runtime_nudge
 from orchestrator import runtime_pipeline
 from orchestrator import runtime_remote
 from orchestrator import runtime_retry
+from orchestrator import runtime_scheduler_recovery
 from orchestrator import telegram_delivery_failover
 from orchestrator import telegram_stream_policy
 from orchestrator.source_policy import source_requires_manual_remote_api_permission
@@ -59,6 +61,7 @@ from remote.local_http import local_http_hosts
 from remote.runtime_identity import read_runtime_claim
 from orchestrator import runtime_session
 from orchestrator import runtime_status
+from orchestrator import runtime_timeout
 from orchestrator import runtime_transfer
 from orchestrator import runtime_workspace
 from orchestrator import runtime_wrapper
@@ -853,6 +856,11 @@ class FlexibleAgentRuntime:
                 return backend.get("model", "unknown")
         return "unknown"
 
+    def get_current_provider(self) -> str | None:
+        if self.config.active_backend != "her":
+            return None
+        return self.backend_manager.get_active_provider()
+
     def reload_post_turn_observers(self) -> None:
         runtime_observers.reload_post_turn_observers(self)
 
@@ -864,13 +872,14 @@ class FlexibleAgentRuntime:
         is_bridge_request: bool,
         metadata: dict[str, Any] | None = None,
     ) -> list[tuple[str, str]]:
-        return await runtime_observers.build_pre_turn_context_sections(
+        sections = await runtime_observers.build_pre_turn_context_sections(
             self,
             item,
             user_text,
             is_bridge_request=is_bridge_request,
             metadata=metadata,
         )
+        return sections + runtime_scheduler_recovery.context_section(self, item.source)
 
     def _schedule_post_turn_observers(
         self,
@@ -961,7 +970,7 @@ class FlexibleAgentRuntime:
 
     def get_runtime_metadata(self) -> dict:
         delivery = telegram_delivery_failover.delivery_status_summary(self)
-        stream_policy = telegram_stream_policy.get_policy(self)
+        display_policy = telegram_stream_policy.get_display_policy(self)
         return {
             "id": self.name,
             "name": self.name,
@@ -970,6 +979,7 @@ class FlexibleAgentRuntime:
             "engine": self.config.active_backend,
             "active_backend": self.config.active_backend,
             "model": self.get_current_model(),
+            "provider": self.get_current_provider(),
             "allowed_backends": [dict(backend) for backend in self.config.allowed_backends],
             "workspace_dir": str(self.workspace_dir),
             "transcript_path": str(self.transcript_log_path),
@@ -980,17 +990,13 @@ class FlexibleAgentRuntime:
             "telegram_delivery_blocked": bool(delivery),
             "telegram_delivery_blocked_until": delivery.get("blocked_until") if delivery else None,
             "telegram_delivery_failover_agent": delivery.get("active_failover_agent") if delivery else None,
-            "telegram_stream_enabled": stream_policy.enabled,
-            "telegram_stream_source": stream_policy.source,
-            "telegram_stream_components": {
-                "placeholder": stream_policy.placeholder_enabled,
-                "typing": stream_policy.typing_enabled,
-                "progress": stream_policy.progress_enabled,
-                "preview": stream_policy.preview_enabled,
-                "promote": stream_policy.promote_enabled,
+            "telegram_typing_enabled": display_policy.typing_enabled,
+            "telegram_typing_source": display_policy.source,
+            "telegram_display": {
+                "typing": display_policy.typing_enabled,
+                "verbose": self._verbose,
+                "think": self._think,
             },
-            "answer_stream_preview": stream_policy.preview_enabled,
-            "answer_stream_preview_source": stream_policy.component_sources["preview"],
             "channels": {
                 "telegram": self.telegram_connected,
                 "workbench": True,
@@ -1564,6 +1570,11 @@ class FlexibleAgentRuntime:
         emoji = self.get_agent_emoji()
         return f"_{emoji}{display_name} is typing..._", constants.ParseMode.MARKDOWN
 
+    def get_progress_placeholder(self) -> tuple[str, str | None]:
+        display_name = self.get_display_name()
+        emoji = self.get_agent_emoji()
+        return f"_{emoji}{display_name} is working..._", constants.ParseMode.MARKDOWN
+
     def _build_media_prompt(self, media_kind: str, filename: str, caption: str = "", emoji: str = "") -> tuple[str, str]:
         return runtime_media.build_media_prompt(media_kind, filename, caption=caption, emoji=emoji)
 
@@ -2063,7 +2074,7 @@ class FlexibleAgentRuntime:
         await query.answer()
 
     # ── toggle callback ──────────────────────────────────────────────────────────
-    # Handles: tgl:verbose:on/off, tgl:think:on/off, tgl:stream:<switch>:on/off,
+    # Handles: tgl:verbose:on/off, tgl:think:on/off, tgl:typing:on/off,
     #          tgl:mode:fixed/flex,
     #          tgl:retry:response/prompt, tgl:whisper:small/medium/large,
     #          tgl:active:on/off/<minutes>, tgl:reboot:min/max/same/<name>
@@ -2106,26 +2117,21 @@ class FlexibleAgentRuntime:
             )
             await query.answer(f"Think {status_label(self._think)}")
 
-        elif target == "stream":
-            try:
-                switch, action = value.split(":", 1)
-                if switch == "reset":
-                    telegram_stream_policy.reset_policy(self)
-                    notice = "Telegram stream reset to functional default OFF"
-                else:
-                    if action not in {"on", "off"}:
-                        raise ValueError("Stream action must be on or off")
-                    telegram_stream_policy.set_policy_value(self, switch, action == "on")
-                    notice = f"{switch} {action.upper()}"
-            except ValueError as exc:
-                await query.answer(str(exc), show_alert=True)
-                return
+        elif target == "typing":
+            enabled = value == "on"
+            telegram_stream_policy.set_typing_enabled(self, enabled)
             await query.edit_message_text(
-                self._stream_status_text(),
+                self._typing_menu_text(),
                 parse_mode="HTML",
-                reply_markup=self._stream_keyboard(),
+                reply_markup=self._typing_keyboard(),
             )
-            await query.answer(notice)
+            await query.answer(f"Typing {status_label(enabled)}")
+
+        elif target == "stream":
+            await query.answer(
+                "Stream controls moved to /typing, /verbose and /think.",
+                show_alert=True,
+            )
 
         elif target == "mode":
             await runtime_mode.callback_mode_toggle(self, query, value)
@@ -3630,18 +3636,24 @@ class FlexibleAgentRuntime:
         ]])
 
     def _verbose_menu_text(self) -> str:
+        backend = getattr(getattr(self, "backend_manager", None), "current_backend", None)
+        capabilities = getattr(backend, "capabilities", None)
+        progress_available = bool(getattr(capabilities, "supports_progress_stream", False))
+        tools_available = bool(getattr(capabilities, "supports_tool_stream", False))
         return setting_card(
             "🔍",
             "Verbose display",
             current=f"<b>{status_label(self._verbose)}</b>",
             facts=[
-                f"<b>Stream</b> · <code>{status_label(telegram_stream_policy.get_policy(self).enabled)}</code>",
+                f"<b>Progress events</b> · <code>{'AVAILABLE' if progress_available else 'BASIC TIMER ONLY'}</code>",
+                f"<b>Tool summaries</b> · <code>{'AVAILABLE' if tools_available else 'NOT EXPOSED'}</code>",
                 "<b>Saved</b> · workspace setting",
             ],
             consequence=(
-                "Shows engine, timing and output-event detail while streaming."
+                "Shows a temporary progress card with timing and available tool-result summaries. "
+                "Model reasoning and answer drafts stay out of this view."
                 if self._verbose
-                else "Detailed progress and completion traces are hidden."
+                else "Progress and tool summaries are hidden."
             ),
             action="Changes apply immediately and persist across reboot.",
         )
@@ -3676,15 +3688,23 @@ class FlexibleAgentRuntime:
         ]])
 
     def _think_menu_text(self) -> str:
+        backend = getattr(getattr(self, "backend_manager", None), "current_backend", None)
+        capabilities = getattr(backend, "capabilities", None)
+        reasoning_available = bool(getattr(capabilities, "supports_thinking_stream", False))
+        commentary_available = bool(getattr(capabilities, "supports_commentary_stream", False))
         return setting_card(
             "💭",
-            "Thinking display",
+            "Thinking output",
             current=f"<b>{status_label(self._think)}</b>",
-            facts=["<b>Saved</b> · workspace setting"],
+            facts=[
+                f"<b>Provider reasoning</b> · <code>{'AVAILABLE' if reasoning_available else 'NOT EXPOSED'}</code>",
+                f"<b>Model commentary</b> · <code>{'AVAILABLE' if commentary_available else 'NOT EXPOSED'}</code>",
+                "<b>Saved</b> · workspace setting",
+            ],
             consequence=(
-                "Periodic thinking summaries may appear during long generation."
+                "Shows model-authored interim commentary and genuine provider-returned reasoning when available."
                 if self._think
-                else "Thinking summaries are hidden."
+                else "Model commentary and provider reasoning are hidden. Progress and typing are unaffected."
             ),
             action="Changes apply immediately and persist across reboot.",
         )
@@ -3711,183 +3731,81 @@ class FlexibleAgentRuntime:
             reply_markup=self._think_keyboard(),
         )
 
-    def _stream_status_text(self) -> str:
-        policy = telegram_stream_policy.get_policy(self)
-        effective_mode = "LIVE STREAM" if policy.enabled else "FINAL ONLY"
-        lines = [
-            card_title("📡", "Telegram stream"),
-            "",
-            f"<b>Current</b> · <b>{status_label(policy.enabled)}</b> · {effective_mode}",
-            f"<b>Source</b> · <code>{html.escape(str(policy.source))}</code>",
-            "<b>Saved</b> · workspace setting; immediate",
-            "",
-            "<b>COMPONENTS</b>",
-        ]
-        labels = {
-            "placeholder": 'Start message bubble ("Agent is typing...")',
-            "typing": "Telegram header typing indicator",
-            "progress": "Elapsed-time updates in the message bubble",
-            "preview": "Live answer edits in the message bubble",
-            "promote": "Turn the message bubble into the final answer",
-        }
-        for name, label in labels.items():
-            configured = bool(getattr(policy, name))
-            effective = bool(getattr(policy, f"{name}_enabled"))
-            if effective:
-                state = "ON"
-            elif configured:
-                state = "ARMED (inactive)"
-            else:
-                state = "OFF"
-            lines.append(f"{html.escape(label)} · <code>{state}</code>")
-        lines.extend(
-            [
-                "",
-                "",
-                f"<b>Safety</b> · <code>{policy.edit_interval_s:g}s</code> min edit · "
-                f"<code>{policy.heartbeat_interval_s:g}s</code> heartbeat · "
-                f"<code>{policy.max_edits_per_request}</code> edits/request",
-                f"<b>Independent</b> · verbose <code>{status_label(self._verbose)}</code> · "
-                f"think <code>{status_label(self._think)}</code>",
-            ]
+    def _typing_keyboard(self) -> InlineKeyboardMarkup:
+        enabled = telegram_stream_policy.get_display_policy(self).typing_enabled
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton(selected_label("On", enabled), callback_data="tgl:typing:on"),
+            InlineKeyboardButton(selected_label("Off", not enabled), callback_data="tgl:typing:off"),
+        ]])
+
+    def _typing_menu_text(self) -> str:
+        policy = telegram_stream_policy.get_display_policy(self)
+        return setting_card(
+            "⌨️",
+            "Telegram typing",
+            current=f"<b>{status_label(policy.typing_enabled)}</b>",
+            facts=[
+                '<b>Temporary bubble</b> · <code>Agent is typing...</code>',
+                "<b>Telegram header</b> · native typing indicator",
+                f"<b>Source</b> · <code>{html.escape(str(policy.source))}</code>",
+                "<b>Saved</b> · workspace setting",
+            ],
+            consequence=(
+                "Both typing indicators appear while a Telegram request is running."
+                if policy.typing_enabled
+                else "Both typing indicators are hidden. Verbose progress and thinking remain independent."
+            ),
+            action="Changes apply immediately and persist across reboot.",
         )
-        if not policy.enabled:
-            lines.extend(
-                [
-                    "",
-                    "ℹ️ The master switch is OFF. Armed component choices are saved but inactive; "
-                    "normal replies send only the final answer.",
-                ]
-            )
-        lines.extend(["", "Choose a component state below."])
-        return "\n".join(lines)
 
-    def _stream_keyboard(self) -> InlineKeyboardMarkup:
-        policy = telegram_stream_policy.get_policy(self)
-
-        def row(name: str, label: str, enabled: bool):
-            return [
-                InlineKeyboardButton(
-                    selected_label(f"{label} on", enabled),
-                    callback_data=f"tgl:stream:{name}:on",
-                ),
-                InlineKeyboardButton(
-                    selected_label(f"{label} off", not enabled),
-                    callback_data=f"tgl:stream:{name}:off",
-                ),
-            ]
-
-        rows = [row("enabled", "Stream", policy.enabled)]
-        rows.extend(
-            [
-                row("placeholder", "Start bubble", policy.placeholder),
-                row("typing", "Typing", policy.typing),
-                row("progress", "Progress", policy.progress),
-                row("preview", "Live preview", policy.preview),
-                row("promote", "Finalize", policy.promote),
-                [InlineKeyboardButton("Reset all to off", callback_data="tgl:stream:reset:off")],
-            ]
+    async def cmd_typing(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        args = [a.strip().lower() for a in (context.args or []) if a.strip()]
+        current = telegram_stream_policy.get_display_policy(self).typing_enabled
+        if args and args[0] in {"on", "true", "1"}:
+            enabled = True
+        elif args and args[0] in {"off", "false", "0"}:
+            enabled = False
+        elif args and args[0] == "status":
+            enabled = current
+        else:
+            enabled = not current
+        if not args or args[0] != "status":
+            telegram_stream_policy.set_typing_enabled(self, enabled)
+        await self._reply_text(
+            update,
+            self._typing_menu_text(),
+            parse_mode="HTML",
+            reply_markup=self._typing_keyboard(),
         )
-        return InlineKeyboardMarkup(rows)
 
     async def cmd_stream(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
-        args = [a.strip().lower() for a in (context.args or []) if a.strip()]
-        if not args or args[0] == "status":
-            await self._reply_text(
-                update,
-                self._stream_status_text(),
-                parse_mode="HTML",
-                reply_markup=self._stream_keyboard(),
-            )
-            return
-
-        aliases = {"final": "promote", "answer": "preview", "master": "enabled"}
-        action = args[0]
-        try:
-            if action == "reset":
-                telegram_stream_policy.reset_policy(self)
-            elif action in {"on", "off"}:
-                telegram_stream_policy.set_policy_value(self, "enabled", action == "on")
-            else:
-                switch = aliases.get(action, action)
-                if switch not in telegram_stream_policy.COMPONENT_NAMES and switch != "enabled":
-                    raise ValueError(f"Unknown stream switch: {action}")
-                if len(args) < 2 or args[1] not in {"on", "off"}:
-                    raise ValueError(f"Usage: /stream {action} on|off")
-                telegram_stream_policy.set_policy_value(self, switch, args[1] == "on")
-        except ValueError as exc:
-            await self._reply_text(update, str(exc))
-            return
-
         await self._reply_text(
             update,
-            self._stream_status_text(),
+            (
+                "📡 <b>Telegram stream menu retired</b>\n\n"
+                "Use <code>/typing</code> for the temporary typing bubble and Telegram header, "
+                "<code>/verbose</code> for progress and tool summaries, and "
+                "<code>/think</code> for model commentary and provider reasoning.\n\n"
+                "Answers are delivered once, when complete."
+            ),
             parse_mode="HTML",
-            reply_markup=self._stream_keyboard(),
         )
 
     async def cmd_preview(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
-        args = [a.strip().lower() for a in (context.args or []) if a.strip()]
-        action = args[0] if args else "toggle"
-        policy = telegram_stream_policy.get_policy(self)
-        configured = policy.preview
-        if action == "status":
-            await self._reply_text(
-                update,
-                setting_card(
-                    "👁️",
-                    "Answer preview",
-                    current=f"<b>{status_label(configured)}</b>",
-                    facts=[
-                        f"<b>Effective</b> · <code>{status_label(policy.preview_enabled)}</code>",
-                        f"<b>Master stream</b> · <code>{status_label(policy.enabled)}</code>",
-                        f"<b>Source</b> · <code>{html.escape(str(policy.component_sources['preview']))}</code>",
-                    ],
-                    consequence="The preference is saved immediately; it is active only while the master stream is on.",
-                    action="Use <code>/stream</code> for all Telegram stream controls.",
-                ),
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton(selected_label("On", configured), callback_data="tgl:stream:preview:on"),
-                    InlineKeyboardButton(selected_label("Off", not configured), callback_data="tgl:stream:preview:off"),
-                ]]),
-            )
-            return
-
-        if action in {"on", "true", "1"}:
-            new_value = True
-        elif action in {"off", "false", "0"}:
-            new_value = False
-        else:
-            new_value = not configured
-        telegram_delivery_failover.set_preview_enabled(self, new_value)
-        policy = telegram_stream_policy.get_policy(self)
-        advice = (
-            "Preference saved but inactive until /stream on."
-            if new_value and not policy.enabled
-            else "Preview edits may add Telegram traffic during long tasks."
-            if new_value
-            else "Future long tasks will skip answer preview edits."
-        )
         await self._reply_text(
             update,
-            setting_card(
-                "👁️",
-                "Answer preview",
-                current=f"<b>{status_label(new_value)}</b>",
-                facts=[f"<b>Effective</b> · <code>{status_label(policy.preview_enabled)}</code>"],
-                consequence=advice,
-                action="Changes apply immediately and persist across reboot.",
+            (
+                "👁️ <b>Live answer preview retired</b>\n\n"
+                "Telegram now receives only the completed answer. Use <code>/verbose</code> "
+                "for temporary progress and tool-result summaries."
             ),
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton(selected_label("On", new_value), callback_data="tgl:stream:preview:on"),
-                InlineKeyboardButton(selected_label("Off", not new_value), callback_data="tgl:stream:preview:off"),
-            ]]),
         )
 
     async def cmd_jobs(self, update: Update, context: Any):
@@ -3907,77 +3825,7 @@ class FlexibleAgentRuntime:
     async def cmd_timeout(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
-        args = [a.strip() for a in (context.args or []) if a.strip()]
-        backend = getattr(self, "backend", None) or (
-            self.backend_manager.current_backend if hasattr(self, "backend_manager") else None
-        )
-        extra = {}
-        if backend and hasattr(backend, "config") and backend.config.extra:
-            extra = backend.config.extra
-
-        # Defaults (in seconds) from the backend class
-        default_idle = getattr(type(backend), "DEFAULT_IDLE_TIMEOUT_SEC", 300) if backend else 300
-        default_hard = getattr(type(backend), "DEFAULT_HARD_TIMEOUT_SEC", 1800) if backend else 1800
-
-        if not args:
-            # Show current values
-            idle_s = extra.get("idle_timeout_sec") or extra.get("process_timeout") or default_idle
-            hard_s = extra.get("hard_timeout_sec") or default_hard
-            idle_min = int(idle_s) // 60
-            hard_min = int(hard_s) // 60
-            def_idle_min = default_idle // 60
-            def_hard_min = default_hard // 60
-            text = runtime_menu_views.timeout_menu_text(
-                agent_name=self.name,
-                idle_minutes=idle_min,
-                hard_minutes=hard_min,
-                default_idle_minutes=def_idle_min,
-                default_hard_minutes=def_hard_min,
-            )
-            await self._reply_text(update, text, parse_mode="HTML")
-            return
-
-        if args[0].lower() == "reset":
-            if backend and hasattr(backend, "config") and backend.config.extra:
-                backend.config.extra.pop("idle_timeout_sec", None)
-                backend.config.extra.pop("hard_timeout_sec", None)
-                backend.config.extra.pop("process_timeout", None)
-            def_idle_min = default_idle // 60
-            def_hard_min = default_hard // 60
-            await self._reply_text(
-                update,
-                f"⏱ Right-brain/backend timeout reset to defaults: idle={def_idle_min} min, hard={def_hard_min} min",
-            )
-            return
-
-        try:
-            idle_min = int(args[0])
-            if idle_min <= 0:
-                raise ValueError
-        except ValueError:
-            await self._reply_text(update, "Usage: /timeout [minutes] [hard_minutes] | reset")
-            return
-
-        hard_min = None
-        if len(args) >= 2:
-            try:
-                hard_min = int(args[1])
-                if hard_min <= 0:
-                    raise ValueError
-            except ValueError:
-                await self._reply_text(update, "Usage: /timeout [minutes] [hard_minutes] | reset")
-                return
-
-        if backend and hasattr(backend, "config"):
-            if backend.config.extra is None:
-                backend.config.extra = {}
-            backend.config.extra["idle_timeout_sec"] = idle_min * 60
-            backend.config.extra.pop("process_timeout", None)  # avoid legacy conflict
-            if hard_min is not None:
-                backend.config.extra["hard_timeout_sec"] = hard_min * 60
-
-        hard_str = f", hard={hard_min} min" if hard_min is not None else ""
-        await self._reply_text(update, f"⏱ Right-brain/backend timeout updated: idle={idle_min} min{hard_str}")
+        await runtime_timeout.cmd_timeout(self, update, context)
 
     async def cmd_hchat(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -4309,12 +4157,25 @@ class FlexibleAgentRuntime:
             await self._reply_text(update, text, parse_mode="HTML", reply_markup=reply_markup)
             return
 
+        if target_engine == "her":
+            mode_flag = self._claw_provider_mode(with_context=with_context)
+            await self._reply_text(
+                update,
+                self._build_claw_provider_menu_text(mode_flag),
+                parse_mode="HTML",
+                reply_markup=self._claw_provider_keyboard(mode_flag),
+            )
+            return
+
         await self._reply_text(
             update,
             self._build_backend_model_prompt(target_engine, with_context),
             parse_mode="HTML",
             reply_markup=self._backend_model_keyboard(target_engine, with_context),
         )
+
+    cmd_provider = runtime_model_selection.cmd_provider
+    callback_claw_provider = runtime_model_selection.callback_model
 
     async def cmd_handoff(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -4599,9 +4460,19 @@ class FlexibleAgentRuntime:
 
 
     def _get_available_models(self) -> list[str]:
+        if self.config.active_backend == "her":
+            return self.backend_manager.get_claw_models(self.get_current_provider())
         return get_available_models(self.config.active_backend)
 
-    def _get_available_models_for(self, engine: str) -> list[str]:
+    def _get_available_models_for(
+        self,
+        engine: str,
+        provider: str | None = None,
+    ) -> list[str]:
+        if engine == "her":
+            return self.backend_manager.get_claw_models(
+                provider or self.get_current_provider()
+            )
         return get_available_models(engine)
 
     def _get_available_efforts(self) -> list[str]:
@@ -4610,42 +4481,37 @@ class FlexibleAgentRuntime:
     def _get_available_efforts_for(self, engine: str, model: str | None = None) -> list[str]:
         return get_available_efforts(engine, model)
 
-    def _get_backend_cfg(self, engine: str) -> dict | None:
-        return next((b for b in self.config.allowed_backends if b["engine"] == engine), None)
+    def _get_backend_cfg(
+        self,
+        engine: str,
+        provider: str | None = None,
+    ) -> dict | None:
+        candidates = [b for b in self.config.allowed_backends if b["engine"] == engine]
+        if engine == "her" and provider:
+            return next(
+                (
+                    backend
+                    for backend in candidates
+                    if str(backend.get("provider") or "").strip() == provider
+                ),
+                next((backend for backend in candidates if not backend.get("provider")), None),
+            )
+        return next(iter(candidates), None)
 
     def _get_current_effort(self) -> Optional[str]:
         if self.backend_manager.current_backend:
             effort = getattr(self.backend_manager.current_backend, "effort", None)
             if effort:
                 return effort
-        backend_cfg = next(
-            (b for b in self.config.allowed_backends if b["engine"] == self.config.active_backend),
-            None,
+        backend_cfg = self._get_backend_cfg(
+            self.config.active_backend,
+            self.get_current_provider(),
         )
         if backend_cfg:
             return backend_cfg.get("effort")
         return None
 
-    def _set_backend_model(self, engine: str, requested: str):
-        normalized = normalize_model(engine, requested)
-        if not normalized:
-            return
-        backend_cfg = self._get_backend_cfg(engine)
-        if backend_cfg is not None:
-            backend_cfg["model"] = normalized
-        if engine == self.config.active_backend and self.backend_manager.current_backend:
-            self.backend_manager.current_backend.config.model = normalized
-            current_effort = getattr(self.backend_manager.current_backend, "effort", None)
-            normalized_effort = normalize_effort(engine, current_effort, normalized)
-            if normalized_effort:
-                self.backend_manager.current_backend.effort = normalized_effort
-                if backend_cfg is not None:
-                    backend_cfg["effort"] = normalized_effort
-            else:
-                self.backend_manager.current_backend.effort = None
-                if backend_cfg is not None:
-                    backend_cfg.pop("effort", None)
-        self.backend_manager.persist_state(active_model=normalized)
+    _set_backend_model = runtime_model_selection.set_backend_model
 
     def _set_active_effort(self, requested: str):
         normalized = normalize_effort(
@@ -4657,7 +4523,10 @@ class FlexibleAgentRuntime:
             return
         if self.backend_manager.current_backend and hasattr(self.backend_manager.current_backend, "effort"):
             self.backend_manager.current_backend.effort = normalized
-        backend_cfg = self._get_backend_cfg(self.config.active_backend)
+        backend_cfg = self._get_backend_cfg(
+            self.config.active_backend,
+            self.get_current_provider(),
+        )
         if backend_cfg is not None:
             backend_cfg["effort"] = normalized
         self.backend_manager.persist_state()
@@ -4700,21 +4569,15 @@ class FlexibleAgentRuntime:
             ]
         )
 
-    def _backend_keyboard(self) -> InlineKeyboardMarkup:
-        current = self.config.active_backend
-        buttons = []
-        for backend in self.config.allowed_backends:
-            engine = backend["engine"]
-            base = get_backend_label(engine)
-            plain_label = selected_label(base, engine == current)
-            context_label = f"{base} · with context"
-            buttons.append(
-                [
-                    InlineKeyboardButton(plain_label, callback_data=f"backend:{engine}:plain"),
-                    InlineKeyboardButton(context_label, callback_data=f"backend:{engine}:context"),
-                ]
-            )
-        return InlineKeyboardMarkup(buttons)
+    _backend_keyboard = runtime_model_selection.backend_keyboard
+    _claw_provider_mode = runtime_model_selection.claw_provider_mode
+    _claw_provider_options = runtime_model_selection.claw_provider_options
+    _claw_provider_option = runtime_model_selection.claw_provider_option
+    _claw_provider_callback_error = runtime_model_selection.claw_provider_callback_error
+    _claw_provider_keyboard = runtime_model_selection.claw_provider_keyboard
+    _claw_provider_model_keyboard = runtime_model_selection.claw_provider_model_keyboard
+    _build_claw_provider_menu_text = runtime_model_selection.claw_provider_menu_text
+    _build_claw_provider_model_text = runtime_model_selection.claw_provider_model_text
 
     def _model_keyboard(self, current_model: Optional[str] = None, engine: Optional[str] = None) -> InlineKeyboardMarkup:
         active_engine = engine or self.config.active_backend
@@ -4759,28 +4622,42 @@ class FlexibleAgentRuntime:
             if self.config.active_backend == "her"
             else "This optional step controls reasoning depth. If no selection is made, the current value remains active."
         )
+        facts = [
+            f"<b>Backend</b> · <code>{html.escape(self.config.active_backend)}</code>",
+        ]
+        provider = self.get_current_provider()
+        if provider:
+            facts.append(f"<b>Provider</b> · <code>{html.escape(provider)}</code>")
+        facts.append(f"<b>Model</b> · <code>{html.escape(self.get_current_model())}</code>")
         return setting_card(
             "🎛️",
             "Choose effort",
             current=f"<code>{html.escape(current)}</code>",
-            facts=[
-                f"<b>Backend</b> · <code>{html.escape(self.config.active_backend)}</code>",
-                f"<b>Model</b> · <code>{html.escape(self.get_current_model())}</code>",
-            ],
+            facts=facts,
             consequence=consequence,
             action="Choose an effort level, or keep the current value.",
         )
 
     def _build_model_configuration_summary(self) -> str:
         effort = self._get_current_effort() if self._get_available_efforts() else None
-        return (
-            f"{card_title('✅', 'Model configuration')}\n\n"
-            f"<b>Mode</b> · <code>{html.escape(self.backend_manager.agent_mode)}</code>\n"
-            f"<b>Backend</b> · <code>{html.escape(self.config.active_backend)}</code>\n"
-            f"<b>Model</b> · <code>{html.escape(self.get_current_model())}</code>\n"
-            f"<b>Effort</b> · <code>{html.escape(effort or 'n/a')}</code>\n\n"
-            "Configuration saved and active immediately."
+        lines = [
+            card_title("✅", "Model configuration"),
+            "",
+            f"<b>Mode</b> · <code>{html.escape(self.backend_manager.agent_mode)}</code>",
+            f"<b>Backend</b> · <code>{html.escape(self.config.active_backend)}</code>",
+        ]
+        provider = self.get_current_provider()
+        if provider:
+            lines.append(f"<b>Provider</b> · <code>{html.escape(provider)}</code>")
+        lines.extend(
+            [
+                f"<b>Model</b> · <code>{html.escape(self.get_current_model())}</code>",
+                f"<b>Effort</b> · <code>{html.escape(effort or 'n/a')}</code>",
+                "",
+                "Configuration saved and active immediately.",
+            ]
         )
+        return "\n".join(lines)
 
     def _configuration_followup(self, source: str) -> tuple[str, InlineKeyboardMarkup | None]:
         available = self._get_available_efforts()
@@ -4834,6 +4711,7 @@ class FlexibleAgentRuntime:
         chat_id: int,
         target_engine: str,
         target_model: str | None = None,
+        target_provider: str | None = None,
         with_context: bool = False,
     ) -> tuple[bool, str]:
         allowed_engines = [b["engine"] for b in self.config.allowed_backends]
@@ -4845,6 +4723,7 @@ class FlexibleAgentRuntime:
             resource=f"backend:{target_engine}",
             target_backend=target_engine,
             target_model=target_model,
+            target_provider=target_provider,
             with_context=with_context,
         )
         if not policy.allowed:
@@ -4860,6 +4739,7 @@ class FlexibleAgentRuntime:
         switch_ok = await self.backend_manager.switch_backend(
             target_engine,
             target_model=target_model,
+            target_provider=target_provider,
         )
         if not switch_ok:
             return False, f"Failed to switch backend to: {target_engine}"
@@ -4891,81 +4771,18 @@ class FlexibleAgentRuntime:
         self._arm_session_primer(primer_note)
 
         model = self.get_current_model()
+        provider = self.get_current_provider()
         effort = self._get_current_effort()
         mode_text = "with handoff context" if with_context else "without handoff context"
-        message = f"Backend switched to: {target_engine}\nModel: {model}\nMode: {mode_text}"
+        message = f"Backend switched to: {target_engine}\n"
+        if provider:
+            message += f"Provider: {provider}\n"
+        message += f"Model: {model}\nMode: {mode_text}"
         if effort:
             message += f"\nEffort: {effort}"
         return True, message
 
-    async def cmd_model(self, update: Update, context: Any):
-        if not self._is_authorized_user(update.effective_user.id):
-            return
-        if not self.backend_manager.current_backend:
-            return
-        if self.backend_manager.agent_mode == "wrapper":
-            await self._reply_text(
-                update,
-                "Model switching is managed by `/core` and `/wrap` in **wrapper** mode.\nUse `/mode flex` for normal `/model` switching.",
-                parse_mode="Markdown",
-            )
-            return
-        if self.backend_manager.agent_mode == "audit":
-            await self._reply_text(
-                update,
-                "Model switching is managed by `/core` and `/audit` in **audit** mode.\nUse `/mode flex` for normal `/model` switching.",
-                parse_mode="Markdown",
-            )
-            return
-        if self.backend_manager.agent_mode == "dual-brain":
-            await self._reply_text(
-                update,
-                "Model switching is managed by `/brain` in **dual-brain** mode.\nUse `/mode flex` for normal `/model` switching.",
-                parse_mode="Markdown",
-            )
-            return
-
-        current_model = self.backend_manager.current_backend.config.model
-        args = context.args
-        if args:
-            requested = args[0].strip()
-            if self.config.active_backend == "claude-cli":
-                requested = CLAUDE_MODEL_ALIASES.get(requested.lower(), requested)
-            available = self._get_available_models()
-            if available and requested not in available:
-                await self._reply_text(update, f"Unknown model: {requested}\nUse /model to see available options.")
-                return
-
-            self._set_backend_model(self.config.active_backend, requested)
-            text, reply_markup = self._configuration_followup("model")
-            await self._reply_text(update, text, parse_mode="HTML", reply_markup=reply_markup)
-            return
-
-        available = self._get_available_models()
-        if not available:
-            await self._reply_text(
-                update,
-                runtime_menu_views.model_menu_text(
-                    model=current_model,
-                    backend=self.config.active_backend,
-                    has_choices=False,
-                    persists=True,
-                ),
-                parse_mode="HTML",
-            )
-            return
-
-        await self._reply_text(
-            update,
-            runtime_menu_views.model_menu_text(
-                model=current_model,
-                backend=self.config.active_backend,
-                has_choices=True,
-                persists=True,
-            ),
-            parse_mode="HTML",
-            reply_markup=self._model_keyboard(current_model),
-        )
+    cmd_model = runtime_model_selection.cmd_model
 
     async def cmd_effort(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -5103,8 +4920,8 @@ class FlexibleAgentRuntime:
             ("gemini_flash", "Gemini Flash", "gemini-cli", "gemini-2.5-flash"),
             ("gemini_lite", "Gemini Lite", "gemini-cli", "gemini-2.5-flash-lite"),
             ("deepseek_flash", "DeepSeek Flash", "deepseek-api", "deepseek-v4-flash"),
-            ("deepseek_chat", "DeepSeek Chat", "deepseek-api", "deepseek-chat"),
-            ("or_deepseek", "OR DeepSeek", "openrouter-api", "deepseek/deepseek-v3.2-exp"),
+            ("deepseek_pro", "DeepSeek Pro", "deepseek-api", "deepseek-v4-pro"),
+            ("or_deepseek", "OR DeepSeek Flash", "openrouter-api", "deepseek/deepseek-v4-flash"),
             ("or_gemini", "OR Gemini", "openrouter-api", "google/gemini-3.1-flash-lite-preview"),
         ]
 
@@ -5117,7 +4934,7 @@ class FlexibleAgentRuntime:
         grouped_rows = [
             ["claude_haiku", "claude_sonnet"],
             ["gemini_flash", "gemini_lite"],
-            ["deepseek_flash", "deepseek_chat"],
+            ["deepseek_flash", "deepseek_pro"],
             ["or_deepseek", "or_gemini"],
         ]
         for group in grouped_rows:
@@ -6237,6 +6054,9 @@ class FlexibleAgentRuntime:
         if not self._is_authorized_user(query.from_user.id):
             return
         data = query.data
+        if data.startswith(("provider", "pmodel:")):
+            await runtime_model_selection.callback_model(self, update, context)
+            return
         try:
             if data == "backend_mode_confirm":
                 if self.backend_manager.agent_mode == "memory+":
@@ -6267,18 +6087,27 @@ class FlexibleAgentRuntime:
                 )
             elif data == "model_menu":
                 current_model = self.get_current_model()
-                await query.edit_message_text(
-                    setting_card(
-                        "🧠",
-                        "Hashi model",
-                        current=f"<code>{html.escape(current_model)}</code>",
-                        facts=[f"<b>Backend</b> · <code>{html.escape(self.config.active_backend)}</code>"],
-                        consequence="The selection applies immediately to the next request and persists.",
-                        action="Choose a model.",
-                    ),
-                    parse_mode="HTML",
-                    reply_markup=self._model_keyboard(current_model),
-                )
+                provider = self.get_current_provider()
+                available = self._get_available_models()
+                if self.config.active_backend == "her" and provider and not available:
+                    mode_flag = self._claw_provider_mode(active=True)
+                    await query.edit_message_text(
+                        self._build_claw_provider_model_text(provider, mode_flag),
+                        parse_mode="HTML",
+                        reply_markup=self._claw_provider_model_keyboard(provider, mode_flag),
+                    )
+                else:
+                    await query.edit_message_text(
+                        runtime_menu_views.model_menu_text(
+                            model=current_model,
+                            backend=self.config.active_backend,
+                            has_choices=bool(available),
+                            persists=True,
+                            provider=provider,
+                        ),
+                        parse_mode="HTML",
+                        reply_markup=self._model_keyboard(current_model),
+                    )
             elif data.startswith("model:"):
                 model = data.split(":", 1)[1]
                 available = self._get_available_models()
@@ -6290,6 +6119,9 @@ class FlexibleAgentRuntime:
                         parse_mode="HTML",
                         reply_markup=reply_markup,
                     )
+                else:
+                    await query.answer("Model is not available for the active provider.", show_alert=True)
+                    return
             elif data == "backend_menu":
                 await query.edit_message_text(
                     self._build_backend_menu_text(),
@@ -6303,11 +6135,19 @@ class FlexibleAgentRuntime:
                     return
                 _, target_engine, mode = parts
                 with_context = mode == "context"
-                await query.edit_message_text(
-                    self._build_backend_model_prompt(target_engine, with_context),
-                    parse_mode="HTML",
-                    reply_markup=self._backend_model_keyboard(target_engine, with_context),
-                )
+                if target_engine == "her":
+                    mode_flag = self._claw_provider_mode(with_context=with_context)
+                    await query.edit_message_text(
+                        self._build_claw_provider_menu_text(mode_flag),
+                        parse_mode="HTML",
+                        reply_markup=self._claw_provider_keyboard(mode_flag),
+                    )
+                else:
+                    await query.edit_message_text(
+                        self._build_backend_model_prompt(target_engine, with_context),
+                        parse_mode="HTML",
+                        reply_markup=self._backend_model_keyboard(target_engine, with_context),
+                    )
             elif data.startswith("bmodel:"):
                 parts = data.split(":", 3)
                 if len(parts) != 4:
@@ -7115,6 +6955,8 @@ class FlexibleAgentRuntime:
         # /long is scoped to the chat that started it.
         if runtime_long.collect_text(self, update.effective_chat.id, text):
             return
+        if await runtime_scheduler_recovery.handle_reply(self, text=text, chat_id=update.effective_chat.id):
+            return
         _print_user_message(self.name, text)
         self._capture_followup_habit_feedback(text)
         await self.enqueue_request(update.effective_chat.id, text, "text", _safe_excerpt(text))
@@ -7289,10 +7131,8 @@ class FlexibleAgentRuntime:
         backend=None,
     ):
         """
-        Real-time streaming display for verbose mode.  Consumes StreamEvent
-        objects from event_queue and edits the placeholder message with a
-        rolling activity buffer. Telegram stream policy supplies the edit
-        interval and per-request edit budget.
+        Temporary verbose progress card.  It consumes progress and tool events
+        only; provider reasoning and answer text are deliberately excluded.
         """
         if placeholder is None or not self.telegram_connected:
             return
@@ -7309,24 +7149,24 @@ class FlexibleAgentRuntime:
         buffer: list[str] = []
         MAX_LINES = 10
         MAX_MSG_LEN = 3800
-        stream_policy = telegram_stream_policy.get_policy(self)
-        MIN_EDIT_INTERVAL = stream_policy.edit_interval_s
-        MAX_EDITS = stream_policy.max_edits_per_request
+        display_policy = telegram_stream_policy.get_display_policy(self)
+        MIN_EDIT_INTERVAL = display_policy.edit_interval_s
+        HEARTBEAT_INTERVAL = display_policy.heartbeat_interval_s
+        MAX_EDITS = display_policy.max_edits_per_request
         last_edit_at = 0.0
         started = time.time()
+        last_heartbeat_at = started
         dirty = False
         edit_attempts = 0
         display_disabled = False
         engine = getattr(self.config, "active_backend", "unknown")
 
         ICONS = {
-            "thinking": "💭",
             "tool_start": "🔧",
             "tool_end": "  →",
             "file_read": "📂",
             "file_edit": "📝",
             "shell_exec": "🔧",
-            "text_delta": "✏️",
             "progress": "📊",
             "review": "🧐",
             "validation": "✅",
@@ -7400,18 +7240,7 @@ class FlexibleAgentRuntime:
             try:
                 event = await asyncio.wait_for(event_queue.get(), timeout=MIN_EDIT_INTERVAL)
                 icon = ICONS.get(event.kind, "•")
-                if event.kind == KIND_TEXT_DELTA:
-                    summary = event.summary[:80]
-                    if buffer and buffer[-1].startswith("✏️"):
-                        buffer[-1] = f"{icon} {summary}"
-                    else:
-                        buffer.append(f"{icon} {summary}")
-                elif event.kind == KIND_THINKING:
-                    if buffer and buffer[-1].startswith("💭"):
-                        buffer[-1] = f"{icon} {event.summary[:80]}"
-                    else:
-                        buffer.append(f"{icon} {event.summary[:80]}")
-                elif event.kind == KIND_TOOL_START:
+                if event.kind == KIND_TOOL_START:
                     # Replace last tool_start line if consecutive (avoids fragmented JSON input spam)
                     if buffer and buffer[-1].startswith("🔧"):
                         buffer[-1] = f"{icon} {event.summary[:100]}"
@@ -7427,7 +7256,15 @@ class FlexibleAgentRuntime:
 
                 dirty = True
             except asyncio.TimeoutError:
-                pass
+                now = time.time()
+                if (now - last_heartbeat_at) >= HEARTBEAT_INTERVAL:
+                    heartbeat = f"📊 Still working... ({int(now - started)}s)"
+                    if buffer and buffer[-1].startswith("📊 Still working..."):
+                        buffer[-1] = heartbeat
+                    else:
+                        buffer.append(heartbeat)
+                    last_heartbeat_at = now
+                    dirty = True
 
             now = time.time()
             if dirty and (now - last_edit_at) >= MIN_EDIT_INTERVAL:
@@ -7441,9 +7278,27 @@ class FlexibleAgentRuntime:
     def _make_stream_callback(self, event_queue: asyncio.Queue | None = None,
                               think_buffer: list | None = None,
                               audit_collector: AuditTelemetryCollector | None = None):
-        """Create an async callback that puts StreamEvents into the queue
-        and/or appends all events to the think buffer."""
-        from adapters.stream_events import KIND_THINKING
+        """Route progress to verbose and reasoning/commentary to think."""
+        from adapters.stream_events import (
+            KIND_COMMENTARY,
+            KIND_ERROR,
+            KIND_FILE_EDIT,
+            KIND_FILE_READ,
+            KIND_PROGRESS,
+            KIND_SHELL_EXEC,
+            KIND_THINKING,
+            KIND_TOOL_END,
+            KIND_TOOL_START,
+        )
+        verbose_kinds = {
+            KIND_ERROR,
+            KIND_FILE_EDIT,
+            KIND_FILE_READ,
+            KIND_PROGRESS,
+            KIND_SHELL_EXEC,
+            KIND_TOOL_END,
+            KIND_TOOL_START,
+        }
         _engine = self.config.active_backend
         _chunk_target = 100
         _chunk_hard_limit = 150
@@ -7453,7 +7308,7 @@ class FlexibleAgentRuntime:
                 # Best-effort hot path: audit telemetry must not disrupt stream delivery.
                 with suppress(Exception):
                     await audit_collector.record(event)
-            if event_queue is not None:
+            if event_queue is not None and event.kind in verbose_kinds:
                 try:
                     event_queue.put_nowait(event)
                 except asyncio.QueueFull:
@@ -7470,6 +7325,17 @@ class FlexibleAgentRuntime:
                         value = detail.split("=", 1)[1].split(";", 1)[0]
                         self._thinking_chars_this_req += max(0, int(value))
             if think_buffer is not None:
+                if event.kind == KIND_COMMENTARY:
+                    # Commentary is already a complete model-authored update.
+                    # Preserve it verbatim instead of folding it into the short
+                    # provider-reasoning chunk accumulator.
+                    if self._openrouter_think_chunk:
+                        think_buffer.append(self._openrouter_think_chunk)
+                        self._openrouter_think_chunk = ""
+                    commentary = (event.summary or "").strip()
+                    if commentary:
+                        think_buffer.append(commentary)
+                    return
                 if event.kind != KIND_THINKING:
                     return
                 if _engine == "openrouter-api":
@@ -7521,8 +7387,6 @@ class FlexibleAgentRuntime:
         lines = self._think_buffer[:]
         self._think_buffer.clear()
         text = "\n".join(lines)
-        if len(text) > 3800:
-            text = text[:3800] + "\n..."
         # Console
         _print_thinking(self.name, text)
         # Transcript (for workbench polling) — always write, even if Telegram disconnected
@@ -7530,7 +7394,13 @@ class FlexibleAgentRuntime:
         # Telegram — skip if not connected
         if not self.telegram_connected:
             return
-        _think_msg = f"💭 {_md_to_html(text)}"
+        _think_raw = f"💭 {text}"
+        _think_msg = _md_to_html(_think_raw)
+        if len(_think_msg) > 3800:
+            # Long Codex commentary is intentionally not clipped. Reuse the
+            # normal Telegram chunker so every character reaches the user.
+            await self.send_long_message(chat_id, _think_raw, purpose="think")
+            return
         try:
             await self.app.bot.send_message(
                 chat_id=chat_id,

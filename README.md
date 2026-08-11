@@ -584,7 +584,8 @@ between `/stop`, `/steer`, `/focus`, and `/recall`, see
 |---------|-------------|
 | `/mode [fixed\|flex\|wrapper\|audit\|dual-brain]` | Switch execution mode; `/mode memory+` is a compatibility alias that only enables continuity |
 | `/backend [engine]` | Switch backend in Flex; other modes first offer an explicit switch-to-Flex confirmation |
-| `/model` | View/change active model, followed by optional effort selection when supported |
+| `/provider [name]` | Choose a provider for the active HER backend, then choose one of that provider's models |
+| `/model [name]` | View/change a model within the active provider, followed by optional effort selection when supported |
 | `/core` | View/change the functional core backend/model used by wrapper or audit mode |
 | `/wrap` | View/change wrapper-mode persona wrapper backend/model/context |
 | `/wrapper` | View/edit wrapper-mode persona/style slots |
@@ -617,19 +618,22 @@ For Grok CLI, `/effort` offers `low`, `medium`, and `high`. HASHI defaults
 Grok sessions to `medium`, passes the selection to the CLI explicitly, and
 persists the chosen level for that backend across agent reloads.
 
-The `/backend` and `/model` menus finish as one configuration flow. Models with
-selectable effort levels show an optional effort step; keeping the current value
-leaves it unchanged. Models without selectable effort skip that step and show
-`n/a` in the saved configuration summary.
+The `/backend` and `/model` menus finish as one configuration flow. For
+`her`, that flow is backend → provider → model: `/provider` refreshes the
+available model list, while `/model` remains inside the active provider and
+never changes it. Provider and model are committed together only after the new
+route initializes successfully. Models with selectable effort levels show an
+optional effort step; keeping the current value leaves it unchanged. Models
+without selectable effort skip that step and show `n/a` in the saved
+configuration summary.
 
 #### Toggles & Settings
 
 | Command | Description |
 |---------|-------------|
-| `/verbose [on\|off]` | Toggle detailed status; in wrapper mode, `on` also shows core raw output and wrapper final output |
-| `/think [on\|off]` | Toggle thinking trace display |
-| `/stream [on\|off\|status]` | Control Telegram intermediate streaming; default OFF for final-only delivery |
-| `/preview [on\|off\|status]` | Compatibility switch for the answer-preview subfeature; requires `/stream on` |
+| `/verbose [on\|off]` | Show a temporary progress card with timing and available tool-result summaries |
+| `/think [on\|off]` | Show model-authored interim commentary plus genuine provider-returned reasoning when available |
+| `/typing [on\|off\|status]` | Control both the temporary `Agent is typing...` bubble and Telegram's native typing indicator |
 | `/safevoice [on\|off]` | Toggle voice confirmation (default: ON) |
 | `/active [on\|off\|minutes]` | Toggle proactive heartbeat |
 | `/whisper [small\|medium\|large]` | Set local voice transcription model |
@@ -711,6 +715,14 @@ Scheduled tasks at specific times:
   "prompt": "Provide morning briefing"
 }
 ```
+
+#### Offline Recovery
+
+On the first scheduler pass after HASHI restarts, due cron and heartbeat jobs are collected per target agent. HASHI counts every missed cron occurrence, persists one actionable recovery batch, and sends one deterministic notice directly to the user; the notice is not generated or paraphrased by an agent. It distinguishes affected task IDs from missed occurrences, shows each task's note/purpose and due-time window, and asks whether to replay all allowed occurrences, selected counts (`task-id=N`), or none.
+
+Pending and recently resolved batches are injected into the target agent's next user-driven turns, so follow-up questions can be answered without log searches. Clear replies such as `run all`, `补跑 3 次`, `task-id=3`, or `skip all` are resolved by the bridge itself. The batch remains idempotently persisted across restarts, while the normal schedule advances independently.
+
+Replay is safety-bounded. Jobs default to one recovery execution; a task that genuinely needs repeated catch-up can opt in with `"recovery": {"max_replay": 10}`. A single recent job keeps automatic catch-up behavior, while a stale cron still requires confirmation. Normal simultaneous heartbeat runs after startup continue independently and are not grouped.
 
 #### Skill-Based Jobs
 Jobs can invoke skills instead of prompts:
@@ -1236,6 +1248,21 @@ duplicate alias `/paswd` has been removed.
     "authorized_id": 123456789,
     "default_tools": {
       "allowed": ["bash", "file_read", "file_write", "file_list"]
+    },
+    "her_providers": {
+      "max_permission_mode": "workspace-write",
+      "providers": {
+        "openrouter": {
+          "base_url": "https://openrouter.ai/api/v1",
+          "secret": "openrouter_key",
+          "status": "stable"
+        },
+        "deepseek": {
+          "base_url": "https://api.deepseek.com/v1",
+          "secret": "deepseek_api_key",
+          "status": "stable"
+        }
+      }
     }
   },
   "agents": [
@@ -1247,7 +1274,25 @@ duplicate alias `/paswd` has been removed.
       "workspace_dir": "workspaces/hashiko",
       "is_active": true,
       "telegram_token_key": "hashiko",
-      "allowed_backends": ["gemini-cli", "claude-cli", "openrouter-api", "deepseek-api", "ollama-api"],
+      "allowed_backends": [
+        {"engine": "gemini-cli", "model": "gemini-3.1-pro-preview"},
+        {
+          "engine": "her",
+          "provider": "openrouter",
+          "models": [
+            "deepseek/deepseek-v4-flash",
+            "deepseek/deepseek-v4-pro",
+            "openai/gpt-4.1-mini"
+          ],
+          "default_model": "deepseek/deepseek-v4-flash"
+        },
+        {
+          "engine": "her",
+          "provider": "deepseek",
+          "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
+          "default_model": "deepseek-v4-flash"
+        }
+      ],
       "active_backend": "gemini-cli"
     }
   ]
@@ -1258,6 +1303,10 @@ Every agent must set `type` explicitly. New agents should normally use
 `"type": "flex"`. Omitted `type` is rejected so HASHI cannot accidentally fall
 back to the retired legacy fixed runtime. Explicit `"type": "fixed"` is reserved
 for emergency rollback only and requires `HASHI_ENABLE_LEGACY_FIXED_RUNTIME=1`.
+
+HER provider profiles hold connection details, not secrets. Provider-specific
+`her` rows are the per-agent model allowlists shown by `/provider` and
+`/model`; the legacy singular `model` field remains a one-model allowlist.
 
 ### secrets.json
 ```json
@@ -1406,7 +1455,7 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
 - **Slim core architecture accepted** — `main.py` reduced from a large feature host into a slim process bootstrap/kernel wrapper; hot-reloadable managers now own agent lifecycle, service management, reboot, startup, shutdown, config, backend preflight, skills, and WhatsApp control
 - **Wrapper Agent Mode implemented** — agents can run a functional core model and a separate stateless wrapper model for final visible persona/style rewriting
   - `/core`, `/wrap`, and `/wrapper` configure core model, wrapper model/context, and persona/style slots with Telegram inline controls
-  - `/verbose on` shows a labeled wrapper trace with the core raw output, wrapper final output, wrapper status, latency, and fallback reason
+  - `/verbose on` shows a compact wrapper status, latency, and fallback summary without echoing raw answer drafts
   - Foreground and background responses, listeners, transfer suppression, handoff, project chat, voice replies, and HChat reply summaries use wrapper-visible text where appropriate; active `bridge:hchat` sends remain wrapper-bypassed until the delivery-boundary HChat pipeline is implemented
   - Core prompt memory stores core raw assistant output, while visible transcript, project chat, core transcript, and audit metadata remain separated for debugging and user-facing continuity
   - `/reset CONFIRM` preserves wrapper mode configuration and prompt slots, matching `/sys` preservation behavior; `/wipe CONFIRM` remains a hard workspace clear
