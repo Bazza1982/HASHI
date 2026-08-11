@@ -18,8 +18,8 @@ from adapters.stream_events import (
 
 class ClaudeCLIAdapter(BaseBackend):
     MAX_PROMPT_ARG_CHARS = 24000
-    DEFAULT_IDLE_TIMEOUT_SEC = 1800
-    DEFAULT_HARD_TIMEOUT_SEC = 36000
+    DEFAULT_IDLE_TIMEOUT_SEC = 60 * 60
+    DEFAULT_HARD_TIMEOUT_SEC = 24 * 60 * 60
 
     def _define_capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
@@ -406,14 +406,13 @@ class ClaudeCLIAdapter(BaseBackend):
         if timeout_kind is not None:
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
             pid = getattr(proc, "pid", "unknown")
-            detail = (
-                f"idle for {self.IDLE_TIMEOUT_SEC}s with no output"
-                if timeout_kind == "idle"
-                else f"exceeded hard timeout of {self.HARD_TIMEOUT_SEC}s"
+            diagnostic = self._timeout_diagnostic(
+                timeout_kind,
+                started_monotonic=started,
             )
             self.logger.error(
                 f"Claude request {request_id} {timeout_kind}-timed out "
-                f"(pid={pid}, duration_ms={duration_ms}, detail={detail})"
+                f"(pid={pid}, duration_ms={duration_ms}, {diagnostic})"
             )
             await self.force_kill_process_tree(
                 proc, logger=self.logger,
@@ -505,11 +504,12 @@ class ClaudeCLIAdapter(BaseBackend):
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
             pid = getattr(proc, "pid", "unknown")
             proc_snapshot = await self._describe_process(pid) if pid != "unknown" else "<unknown pid>"
+            diagnostic = self._timeout_diagnostic("hard", started_monotonic=started)
             self.logger.error(
                 f"Claude request {request_id} timed out "
                 f"(pid={pid}, duration_ms={duration_ms}, stateless=True, "
                 f"retry={is_retry}, stdin={stdin_data is not None}, "
-                f"cmd={cmd}, process_snapshot={self._preview_text(proc_snapshot, 700)})"
+                f"cmd={cmd}, {diagnostic}, process_snapshot={self._preview_text(proc_snapshot, 700)})"
             )
             await self.force_kill_process_tree(
                 proc,
@@ -590,6 +590,11 @@ class ClaudeCLIAdapter(BaseBackend):
             )
         except asyncio.TimeoutError:
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
+            diagnostic = self._timeout_diagnostic("hard", started_monotonic=started)
+            self.logger.error(
+                f"Claude fallback request {request_id} hard-timed out "
+                f"(duration_ms={duration_ms}, {diagnostic})"
+            )
             await self.force_kill_process_tree(
                 proc,
                 logger=self.logger,
