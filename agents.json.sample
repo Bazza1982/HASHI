@@ -51,6 +51,7 @@
           "provider": "openrouter",
           "models": [
             "deepseek/deepseek-v4-flash",
+            "deepseek/deepseek-v4-pro",
             "openai/gpt-4.1-mini"
           ],
           "default_model": "deepseek/deepseek-v4-flash"
@@ -316,10 +317,7 @@
           }
         }
       ],
-      "active_backend": "openrouter-api",
-      "extra": {
-        "answer_stream_preview": false
-      }
+      "active_backend": "openrouter-api"
     },
     {
       "name": "xiao_tian",

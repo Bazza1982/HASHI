@@ -67,6 +67,7 @@ from orchestrator import runtime_nudge
 from orchestrator import runtime_menu_views
 from orchestrator import runtime_retry
 from orchestrator import runtime_workzone
+from orchestrator import telegram_stream_policy
 from orchestrator.runtime_display import _show_logo_animation
 from orchestrator.runtime_jobs import _build_jobs_with_buttons
 
@@ -174,7 +175,10 @@ class BridgeAgentRuntime:
         parse_mode = extra.get("typing_parse_mode")
         if text:
             return text, parse_mode
-        return f"{self.name} is thinking...", None
+        return f"{self.name} is typing...", None
+
+    def get_progress_placeholder(self) -> tuple[str, str | None]:
+        return f"{self.name} is working...", None
 
     def _sync_workzone_to_backend_config(self) -> None:
         if self.config.extra is None:
@@ -873,6 +877,7 @@ class BridgeAgentRuntime:
         channel_line = f"Telegram {tg_status} • WhatsApp {wa_status} • Workbench ✓"
         available_efforts = self._get_available_efforts()
         current_effort = self._get_current_effort() if available_efforts else "n/a"
+        display_policy = telegram_stream_policy.get_display_policy(self)
         lines = [
             card_title("📊", "Hashi status"),
             "",
@@ -884,6 +889,7 @@ class BridgeAgentRuntime:
             "",
             "<b>CONNECTIONS</b>",
             f"<b>Channels</b> · {html.escape(channel_line)}",
+            f"<b>Typing</b> · <code>{'ON' if display_policy.typing_enabled else 'OFF'}</code>",
             "",
             "<b>ACTIVITY</b>",
             f"<b>Runtime</b> · <code>{'BUSY' if self.is_generating else 'IDLE'}</code> · queue <code>{self.queue.qsize()}</code> · process <code>{html.escape(str(self._process_info()))}</code>",
@@ -1654,21 +1660,47 @@ class BridgeAgentRuntime:
 
     def _make_stream_callback(self, event_queue: asyncio.Queue | None = None,
                               think_buffer: list | None = None):
-        """Create an async callback that puts StreamEvents into the queue
-        and/or appends all events to the think buffer."""
-        from adapters.stream_events import KIND_THINKING
+        """Route progress to verbose and reasoning/commentary to think."""
+        from adapters.stream_events import (
+            KIND_COMMENTARY,
+            KIND_ERROR,
+            KIND_FILE_EDIT,
+            KIND_FILE_READ,
+            KIND_PROGRESS,
+            KIND_SHELL_EXEC,
+            KIND_THINKING,
+            KIND_TOOL_END,
+            KIND_TOOL_START,
+        )
+        verbose_kinds = {
+            KIND_ERROR,
+            KIND_FILE_EDIT,
+            KIND_FILE_READ,
+            KIND_PROGRESS,
+            KIND_SHELL_EXEC,
+            KIND_TOOL_END,
+            KIND_TOOL_START,
+        }
         _logger = self.logger
         _engine = self.config.engine
         _chunk_target = 100
         _chunk_hard_limit = 150
         _chunk_endings = ("。", "！", "？", "\n")
         async def _callback(event):
-            if event_queue is not None:
+            if event_queue is not None and event.kind in verbose_kinds:
                 try:
                     event_queue.put_nowait(event)
                 except asyncio.QueueFull:
                     _logger.debug(f"Stream event queue full, dropping: {event.summary[:40]!r}")
             if think_buffer is not None:
+                if event.kind == KIND_COMMENTARY:
+                    if self._openrouter_think_chunk:
+                        think_buffer.append(self._openrouter_think_chunk)
+                        self._openrouter_think_chunk = ""
+                    commentary = (event.summary or "").strip()
+                    if commentary:
+                        think_buffer.append(commentary)
+                    return
                 if event.kind != KIND_THINKING:
                     return
                 if _engine == "openrouter-api":
@@ -1723,8 +1755,6 @@ class BridgeAgentRuntime:
         lines = self._think_buffer[:]
         self._think_buffer.clear()
         text = "\n".join(lines)
-        if len(text) > 3800:
-            text = text[:3800] + "\n..."
         # Console
         _print_thinking(self.name, text)
         # Transcript (for workbench polling) — always write, even if Telegram disconnected
@@ -1732,7 +1762,11 @@ class BridgeAgentRuntime:
         # Telegram — skip if not connected
         if not self.telegram_connected:
             return
-        _think_msg = f"💭 {_md_to_html(text)}"
+        _think_raw = f"💭 {text}"
+        _think_msg = _md_to_html(_think_raw)
+        if len(_think_msg) > 3800:
+            await self.send_long_message(chat_id, _think_raw, purpose="think")
+            return
         try:
             await self.app.bot.send_message(chat_id=chat_id, text=_think_msg, parse_mode="HTML")
         except Exception as e:
@@ -2188,29 +2222,33 @@ class BridgeAgentRuntime:
                 _stream_callback = None
                 _think_flush_task = None
                 if not item.silent and item.deliver_to_telegram:
-                    placeholder_text, placeholder_parse_mode = self.get_typing_placeholder()
+                    display_policy = telegram_stream_policy.get_display_policy(self)
+                    typing_enabled = display_policy.typing_enabled
+                    if typing_enabled or self._verbose or self._think:
+                        stop_typing = asyncio.Event()
 
-                    stop_typing = asyncio.Event()
-                    typing_task = asyncio.create_task(self.typing_loop(item.chat_id, stop_typing))
+                    if typing_enabled or self._verbose:
+                        if typing_enabled:
+                            placeholder_text, placeholder_parse_mode = self.get_typing_placeholder()
+                        else:
+                            placeholder_text, placeholder_parse_mode = self.get_progress_placeholder()
+                        if typing_enabled:
+                            typing_task = asyncio.create_task(self.typing_loop(item.chat_id, stop_typing))
+                        try:
+                            placeholder_started = datetime.now()
+                            placeholder = await self.app.bot.send_message(
+                                chat_id=item.chat_id,
+                                text=placeholder_text,
+                                parse_mode=placeholder_parse_mode,
+                            )
+                            placeholder_elapsed_s = (datetime.now() - placeholder_started).total_seconds()
+                            self.telegram_logger.info(
+                                f"Sent placeholder for {item.request_id} "
+                                f"(elapsed_s={placeholder_elapsed_s:.2f})"
+                            )
+                        except Exception as e:
+                            self.telegram_logger.warning(f"Failed to send placeholder: {e}")
 
-                    try:
-                        placeholder_started = datetime.now()
-                        placeholder = await self.app.bot.send_message(
-                            chat_id=item.chat_id,
-                            text=placeholder_text,
-                            parse_mode=placeholder_parse_mode,
-                        )
-                        placeholder_elapsed_s = (datetime.now() - placeholder_started).total_seconds()
-                        self.telegram_logger.info(
-                            f"Sent placeholder for {item.request_id} "
-                            f"(elapsed_s={placeholder_elapsed_s:.2f})"
-                        )
-                    except Exception as e:
-                        self.telegram_logger.warning(f"Failed to send placeholder: {e}")
-
-                    # Verbose ON + non-silent → use streaming display loop.
-                    # Verbose OFF → use escalating placeholder loop.
-                    # Think ON → start thinking flush loop (independent of verbose).
                     _stream_queue = None
                     _stream_callback = None
                     _think_flush_task = None
@@ -2222,7 +2260,7 @@ class BridgeAgentRuntime:
                             event_queue=_stream_queue,
                             think_buffer=self._think_buffer if self._think else None,
                         )
-                    if self._verbose:
+                    if self._verbose and placeholder is not None:
                         escalation_task = asyncio.create_task(
                             self._streaming_display_loop(
                                 item.chat_id,
@@ -2230,16 +2268,6 @@ class BridgeAgentRuntime:
                                 item.request_id,
                                 stop_typing,
                                 _stream_queue,
-                                backend=self.backend,
-                            )
-                        )
-                    else:
-                        escalation_task = asyncio.create_task(
-                            self._escalating_placeholder_loop(
-                                item.chat_id,
-                                placeholder,
-                                item.request_id,
-                                stop_typing,
                                 backend=self.backend,
                             )
                         )
@@ -4746,9 +4774,9 @@ class BridgeAgentRuntime:
                 current=f"<b>{status_label(self._verbose)}</b>",
                 facts=["<b>Saved</b> · workspace setting"],
                 consequence=(
-                    "Long-task placeholders show engine, timing and output events."
+                    "Shows temporary progress and available tool-result summaries; reasoning and answer drafts stay hidden."
                     if self._verbose
-                    else "Long-task placeholders show concise status only."
+                    else "Progress and tool summaries are hidden."
                 ),
                 action="Changes apply immediately and persist across reboot.",
             ),
@@ -4773,14 +4801,45 @@ class BridgeAgentRuntime:
         await update.message.reply_text(
             setting_card(
                 "💭",
-                "Thinking display",
+                "Thinking output",
                 current=f"<b>{status_label(self._think)}</b>",
                 facts=["<b>Saved</b> · workspace setting"],
                 consequence=(
-                    "Periodic thinking summaries may appear during long generation."
+                    "Shows model-authored interim commentary and genuine provider-returned reasoning when available."
                     if self._think
-                    else "Thinking summaries are hidden."
+                    else "Model commentary and provider reasoning are hidden."
                 ),
+                action="Changes apply immediately and persist across reboot.",
+            ),
+            parse_mode="HTML",
+        )
+
+    async def cmd_typing(self, update, context):
+        if update.effective_user.id != self.global_config.authorized_id:
+            return
+        args = [a.strip().lower() for a in (context.args or []) if a.strip()]
+        current = telegram_stream_policy.get_display_policy(self).typing_enabled
+        if args and args[0] in {"on", "true", "1"}:
+            enabled = True
+        elif args and args[0] in {"off", "false", "0"}:
+            enabled = False
+        elif args and args[0] == "status":
+            enabled = current
+        else:
+            enabled = not current
+        if not args or args[0] != "status":
+            telegram_stream_policy.set_typing_enabled(self, enabled)
+        await update.message.reply_text(
+            setting_card(
+                "⌨️",
+                "Telegram typing",
+                current=f"<b>{status_label(enabled)}</b>",
+                facts=[
+                    '<b>Temporary bubble</b> · <code>Agent is typing...</code>',
+                    "<b>Telegram header</b> · native typing indicator",
+                    "<b>Saved</b> · workspace setting",
+                ],
+                consequence="Controls both typing indicators; verbose and think remain independent.",
                 action="Changes apply immediately and persist across reboot.",
             ),
             parse_mode="HTML",
@@ -5091,8 +5150,9 @@ class BridgeAgentRuntime:
             BotCommand("debug", "Run in strict debug mode"),
             BotCommand("skill", "Browse and run skills"),
             BotCommand("exp", "Run a task with the EXP guidebook"),
-            BotCommand("think", "Toggle thinking trace display [on|off]"),
-            BotCommand("verbose", "Toggle verbose long-task status [on|off]"),
+            BotCommand("think", "Show commentary and reasoning [on|off]"),
+            BotCommand("verbose", "Show progress and tool summaries [on|off]"),
+            BotCommand("typing", "Control Telegram typing indicators [on|off]"),
             BotCommand("jobs", "Show cron and heartbeat jobs"),
             BotCommand("cron", "Run or list cron jobs"),
             BotCommand("heartbeat", "Run or list heartbeat jobs"),
@@ -5156,6 +5216,7 @@ class BridgeAgentRuntime:
         self.app.add_handler(CommandHandler("retry", self.cmd_retry))
         self.app.add_handler(CommandHandler("think", self.cmd_think))
         self.app.add_handler(CommandHandler("verbose", self.cmd_verbose))
+        self.app.add_handler(CommandHandler("typing", self.cmd_typing))
         self.app.add_handler(CommandHandler("credit", self.cmd_credit))
         self.app.add_handler(CommandHandler("effort", self.cmd_effort))
         self.app.add_handler(CommandHandler("jobs", self.cmd_jobs))

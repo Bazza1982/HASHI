@@ -18,8 +18,20 @@ class BackendCapabilities:
     supports_sessions: bool
     supports_files: bool
     supports_tool_use: bool
+    # True only when the backend exposes genuine provider reasoning content.
+    # Generic busy/start messages must be emitted as progress instead.
     supports_thinking_stream: bool
     supports_headless_mode: bool
+    # Model-authored interim commentary, distinct from private/provider
+    # reasoning and from generic runtime/tool progress.
+    supports_commentary_stream: bool = False
+    # User-facing activity events such as started, planning, or elapsed work.
+    supports_progress_stream: bool = False
+    # Structured tool/file/shell start or result summaries.
+    supports_tool_stream: bool = False
+    # Assistant answer deltas. Kept for local observers; Telegram no longer
+    # presents live answer previews.
+    supports_answer_stream: bool = False
 
 
 @dataclass

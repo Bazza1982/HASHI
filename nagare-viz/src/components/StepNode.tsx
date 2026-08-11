@@ -21,8 +21,10 @@ function shortModel(model: string): string {
     .replace("claude-haiku-4-5", "Haiku 4.5")
     .replace("gemini-2.5-pro", "Gemini Pro")
     .replace("gemini-2.5-flash", "Gemini Flash")
-    .replace("deepseek-reasoner", "DS-R1")
-    .replace("deepseek-chat", "DS-V3");
+    .replace("deepseek/deepseek-v4-pro", "DS V4 Pro")
+    .replace("deepseek/deepseek-v4-flash", "DS V4 Flash")
+    .replace("deepseek-v4-pro", "DS V4 Pro")
+    .replace("deepseek-v4-flash", "DS V4 Flash");
 }
 
 export function StepNode({ data }: NodeProps<StepFlowNode>) {
