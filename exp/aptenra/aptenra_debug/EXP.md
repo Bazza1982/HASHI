@@ -98,6 +98,8 @@ Documented defaults for the first sample device (override on other targets):
 | Adjacent Git sync | `playbooks/05_git_sync_adjacent.exp.md` |
 | Evidence pack | `playbooks/06_evidence_pack.exp.md` |
 | Handoff & escalation | `playbooks/07_handoff_and_escalation.exp.md` |
+| Comprehensive HP human debug test | `playbooks/08_comprehensive_hp_human_debug_test.exp.md` |
+| Enhanced HP full coverage test | `playbooks/09_enhanced_hp_full_coverage_test.exp.md` |
 
 ## Validators and failure memory
 
