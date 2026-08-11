@@ -184,7 +184,7 @@ def build_status_text(runtime, detailed: bool = False) -> str:
         else "✅ healthy"
     )
     delivery = telegram_delivery_failover.delivery_status_summary(runtime)
-    stream_policy = telegram_stream_policy.get_policy(runtime)
+    display_policy = telegram_stream_policy.get_display_policy(runtime)
     tg_status = "✓" if runtime.telegram_connected else "✗"
     wa_status = "✓" if runtime._get_whatsapp_connected() else "✗"
     channel_line = f"Telegram {tg_status} • WhatsApp {wa_status} • Workbench ✓"
@@ -211,18 +211,26 @@ def build_status_text(runtime, detailed: bool = False) -> str:
         f"<b>Agent</b> · <code>{html.escape(str(runtime.name))}</code>",
         f"<b>Mode</b> · <code>{html.escape(str(mode_str))}</code>",
         f"<b>Backend</b> · <code>{html.escape(str(runtime.config.active_backend))}</code>",
-        f"<b>Model</b> · <code>{html.escape(str(runtime.get_current_model()))}</code>",
-        f"<b>Effort</b> · <code>{html.escape(str(current_effort))}</code>",
-        (
-            f"<b>Memory+</b> · <code>{'ON' if memory_plus['enabled'] else 'OFF'}</code>"
-            f" · <code>{memory_plus['open_items']}</code> open"
-            + (
-                f" · carried from <code>{html.escape(str(memory_plus['carryover_from']))}</code>"
-                if memory_plus["carryover_from"]
-                else ""
-            )
-        ),
     ]
+    provider_getter = getattr(runtime, "get_current_provider", None)
+    provider = provider_getter() if callable(provider_getter) else None
+    if provider:
+        lines.append(f"<b>Provider</b> · <code>{html.escape(str(provider))}</code>")
+    lines.extend(
+        [
+            f"<b>Model</b> · <code>{html.escape(str(runtime.get_current_model()))}</code>",
+            f"<b>Effort</b> · <code>{html.escape(str(current_effort))}</code>",
+            (
+                f"<b>Memory+</b> · <code>{'ON' if memory_plus['enabled'] else 'OFF'}</code>"
+                f" · <code>{memory_plus['open_items']}</code> open"
+                + (
+                    f" · carried from <code>{html.escape(str(memory_plus['carryover_from']))}</code>"
+                    if memory_plus["carryover_from"]
+                    else ""
+                )
+            ),
+        ]
+    )
     if mode_str == "fixed":
         lines.append(f"<b>Session</b> · <code>{html.escape(str(session_id_short))}</code>")
     lines.extend(runtime._format_status_mode_block(mode_str, state_snapshot, detailed))
@@ -232,7 +240,7 @@ def build_status_text(runtime, detailed: bool = False) -> str:
             "<b>CONNECTIONS</b>",
             f"<b>Channels</b> · {html.escape(channel_line)}",
             _delivery_line(delivery),
-            f"<b>Telegram stream</b> · <code>{'ON' if stream_policy.enabled else 'OFF'}</code> · {html.escape(str(stream_policy.source))}",
+            f"<b>Typing</b> · <code>{'ON' if display_policy.typing_enabled else 'OFF'}</code> · {html.escape(str(display_policy.source))}",
             "",
             "<b>ACTIVITY</b>",
             f"<b>Runtime</b> · <code>{'BUSY' if runtime.is_generating else 'IDLE'}</code> · queue <code>{runtime.queue.qsize()}</code> · process <code>{html.escape(str(runtime._process_info()))}</code>",
@@ -267,7 +275,7 @@ def build_status_text(runtime, detailed: bool = False) -> str:
                 f"<b>Handoff files</b> · recent <code>{'YES' if runtime.recent_context_path.exists() else 'NO'}</code> · handoff <code>{'YES' if runtime.handoff_path.exists() else 'NO'}</code>",
                 f"<b>Verbose</b> · <code>{'ON' if runtime._verbose else 'OFF'}</code>",
                 f"<b>Think</b> · <code>{'ON' if runtime._think else 'OFF'}</code>",
-                f"<b>Preview</b> · <code>{'ON' if stream_policy.preview_enabled else 'OFF'}</code> · {html.escape(str(stream_policy.component_sources['preview']))}",
+                f"<b>Typing</b> · <code>{'ON' if display_policy.typing_enabled else 'OFF'}</code>",
                 f"<b>Last switch</b> · {html.escape(runtime._format_age(runtime.last_backend_switch_at))}",
             ]
         )
