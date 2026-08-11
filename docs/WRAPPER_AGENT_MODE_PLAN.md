@@ -305,7 +305,7 @@ Core receives the same functional inputs it receives today:
 - `AGENT.md`,
 - `/sys` slots,
 - relevant memory/context,
-- workzone/habit sections,
+- workzone sections,
 - user request.
 
 Wrapper prompt text must not leak into the core model.

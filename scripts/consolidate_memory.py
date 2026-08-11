@@ -31,7 +31,6 @@ from pathlib import Path
 # ── Paths ──────────────────────────────────────────────────────
 LILY_WORKSPACE = "/home/lily/projects/hashi/workspaces/lily"
 CONSOLIDATED_DB = os.path.join(LILY_WORKSPACE, "consolidated_memory.sqlite")
-HABIT_EVAL_DB = os.path.join(LILY_WORKSPACE, "habit_evaluation.sqlite")
 CONSOLIDATION_LOG = os.path.join(LILY_WORKSPACE, "consolidation_log.jsonl")
 DEFAULT_SOURCE_CONFIG = "/home/lily/projects/hashi/private/memory_consolidation_sources.json"
 
@@ -159,55 +158,6 @@ def init_consolidated_db(db_path: str) -> sqlite3.Connection:
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_source_ts_quality
         ON consolidated(source_ts, ts_source)
-    """)
-    conn.commit()
-    return conn
-
-
-def init_habit_evaluation_db(db_path: str) -> sqlite3.Connection:
-    """Create or open Lily's habit evaluation database."""
-    conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS habit_events (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            version         INTEGER NOT NULL DEFAULT 1,
-            instance        TEXT    NOT NULL,
-            agent_id        TEXT    NOT NULL,
-            habit_id        TEXT    NOT NULL,
-            request_id      TEXT,
-            task_type       TEXT,
-            triggered       INTEGER NOT NULL DEFAULT 0,
-            applied         INTEGER NOT NULL DEFAULT 0,
-            helpful         INTEGER,
-            harmful         INTEGER,
-            ignored         INTEGER NOT NULL DEFAULT 0,
-            context_summary TEXT,
-            feedback_text   TEXT,
-            feedback_ts     TEXT,
-            ts              TEXT    NOT NULL,
-            ts_source       TEXT    NOT NULL DEFAULT 'native',
-            UNIQUE(instance, agent_id, habit_id, ts)
-        )
-    """)
-    conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_habit_events_agent_ts
-        ON habit_events(instance, agent_id, ts)
-    """)
-    conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_habit_events_habit_ts
-        ON habit_events(habit_id, ts)
-    """)
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(habit_events)").fetchall()}
-    if "request_id" not in cols:
-        conn.execute("ALTER TABLE habit_events ADD COLUMN request_id TEXT")
-    if "feedback_text" not in cols:
-        conn.execute("ALTER TABLE habit_events ADD COLUMN feedback_text TEXT")
-    if "feedback_ts" not in cols:
-        conn.execute("ALTER TABLE habit_events ADD COLUMN feedback_ts TEXT")
-    conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_habit_events_request
-        ON habit_events(instance, agent_id, request_id, ts)
     """)
     conn.commit()
     return conn
@@ -501,9 +451,6 @@ def consolidate():
     print(f"=== Memory Consolidation — {now} ===\n")
     instances = load_instances()
 
-    habit_conn = init_habit_evaluation_db(HABIT_EVAL_DB)
-    habit_conn.close()
-
     conn = init_consolidated_db(CONSOLIDATED_DB)
     existing = get_existing_keys(conn)
     print(f"Existing consolidated records: {len(existing)}\n")
@@ -598,7 +545,6 @@ def consolidate():
     print(f"Errors:  {stats['errors']}")
     print(f"Domains: {stats['by_domain']}")
     print(f"DB:      {CONSOLIDATED_DB}")
-    print(f"Habits:  {HABIT_EVAL_DB}")
     print(f"Log:     {CONSOLIDATION_LOG}")
 
     return stats

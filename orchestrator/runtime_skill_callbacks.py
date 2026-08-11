@@ -28,9 +28,6 @@ async def handle_skill_callback(runtime, query, data: str) -> bool:
     if action == "show":
         if skill.id in {"cron", "heartbeat"}:
             await runtime._render_skill_jobs(query, skill.id)
-        elif skill.id == "habits":
-            text, markup = runtime._build_habit_browser_view()
-            await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
         else:
             await query.edit_message_text(
                 runtime_menu_views.skill_detail_text(

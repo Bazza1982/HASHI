@@ -126,7 +126,7 @@ Current coverage includes:
   dual-brain configuration;
 - stream, verbose, think, preview, voice, safe voice, Whisper, active
   continuation, memory, notepad, and computer-use controls;
-- agents, start, groups, skills, habits, jobs, cron, heartbeat, nudge, loop,
+- agents, start, groups, skills, jobs, cron, heartbeat, nudge, loop,
   superloop, timeout, browser routes, request queue, and background jobs;
 - reboot, hard restart, retry, move, workspace reset, workspace wipe, and other
   destructive confirmation cards.

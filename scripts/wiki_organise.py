@@ -61,8 +61,8 @@ TOPICS = {
     },
     "Dream_System": {
         "display": "Dream & Memory Reflection",
-        "desc": "Dream nightly reflection, memory promotion, habit tracking",
-        "keywords": ["dream", "reflect", "/dream", "habit", "promotion", "nightly"],
+        "desc": "Dream nightly reflection and memory promotion",
+        "keywords": ["dream", "reflect", "/dream", "promotion", "nightly"],
         "max_samples": 40,
     },
     "Obsidian_Wiki": {

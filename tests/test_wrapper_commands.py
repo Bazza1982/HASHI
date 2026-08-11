@@ -623,7 +623,6 @@ def _make_background_runtime(tmp_path: Path, wrapper_response: BackendResponse |
     )
     runtime._mark_success = lambda: None
     runtime._mark_error = lambda error: None
-    runtime._record_habit_outcome = lambda *a, **k: None
     runtime._should_buffer_during_transfer = lambda request_id: False
     runtime._record_suppressed_transfer_result = lambda item, **kwargs: runtime._suppressed_transfer_results.append(kwargs)
     runtime.get_current_model = lambda: "gpt-5.5"
@@ -711,7 +710,6 @@ def _make_foreground_runtime(tmp_path: Path, wrapper_response: BackendResponse |
     runtime._mark_activity = lambda: None
     runtime._log_maintenance = lambda *a, **k: None
     runtime._consume_session_primer = lambda item: item.prompt
-    runtime._build_habit_sections = lambda item, effective_prompt: ([], [])
     runtime._workzone_prompt_section = lambda: []
     runtime.get_typing_placeholder = lambda: ("typing", None)
     runtime.typing_loop = lambda chat_id, stop_event: stop_event.wait()
@@ -1950,7 +1948,6 @@ async def test_reset_preserves_wrapper_config_and_sys_prompts(tmp_path):
     runtime.sys_prompt_manager = None
     runtime.logger = SimpleNamespace(warning=lambda *a, **k: None)
     runtime._get_active_skill_sections = lambda: []
-    runtime._get_agent_class = lambda: "persona"
     runtime._pending_auto_recall_context = "old"
     runtime._pending_session_primer = "old"
     runtime._clear_transfer_state = lambda: None

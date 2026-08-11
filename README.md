@@ -36,7 +36,7 @@ In short:
 Key principles:
 - **No Token Storage** — CLI backends use local authentication; no OAuth tokens stored
 - **Multi-Agent, Single Interface** — Chat with multiple specialized agents through one Telegram, WhatsApp, or Workbench session
-- **Self-Improving Agents** — Habit system learns from `/good` and `/bad` feedback, with nightly dream reflection
+- **Self-Improving HER Agents** — optional agent-local Habit planning and post-run Meditation in HER
 - **Open Source And Self-Hostable** — The control plane is designed to be
   inspectable and extensible rather than a closed hosted black box
 - **Built to Evolve** — Modular skills, tools, connectors, policies, and
@@ -94,7 +94,7 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
   job ids, bounded logs, Workbench status/tail/cancel APIs, completion/failure
   notifications, and terminal events that can wake the responsible agent to
   summarize or continue the workflow
-- **Habit System** — Self-improving behavior through feedback and nightly reflection
+- **HER Habit–Meditation** — Optional agent-local learning, independent from orchestration skills and Dream
 - **HChat** — Cross-instance agent-to-agent messaging
 - **API Gateway** — Optional OpenAI-compatible localhost gateway with per-instance ports and Grok/xAI chat, image, and video routes
 
@@ -103,7 +103,7 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
 2. **9 Backend Adapters** — Claude CLI, Gemini CLI, Codex CLI, Grok CLI, xAI API, OpenRouter API, DeepSeek API, Ollama (local LLM), and HASHI Engine Runtime (HER)
 3. **Multi-Agent, Single Interface** — Chat with multiple specialized agents through one account
 4. **Nagare Flow System** — Describe a task in natural language; Nagare designs, executes, and improves a multi-agent workflow automatically
-5. **Self-Improving Agents** — Habit system with `/good` and `/bad` feedback, nightly dream reflection, and cross-agent habit governance
+5. **Self-Improving HER Agents** — Optional `Planning → Execution → Meditation → Write` learning with agent-local files
 6. **SafeVoice** — Voice messages are transcribed and shown for confirmation before execution, preventing accidental commands
 7. **Context Recovery** — `/handoff` command instantly restores project context after compression
 8. **Tool Execution Layer** — API-backed agents can take real local actions: run bash commands, read/write files, browse the web, call external APIs, and more
@@ -168,7 +168,7 @@ profiles and bootstrap state.
 
 HASHI 2.x proved that local agents could execute tools, browse, switch backends, run from a TUI, and orchestrate Nagare workflows. HASHI 3.2 turns that foundation into a much broader local agent platform:
 
-- **From tools to agentic operations:** the v2 tool layer is now surrounded by habit learning, nightly dream reflection, SafeVoice confirmation, token/cost audit, and behavior audit trails.
+- **From tools to agentic operations:** the v2 tool layer is now surrounded by optional HER Habit–Meditation, separate nightly Dream reflection, SafeVoice confirmation, token/cost audit, and behavior audit trails.
 - **From one machine to a HASHI network:** HChat and Hashi Remote let agents address peers across instances, with peer health, protocol handshakes, and direct file transfer for moving artifacts and EXP packs.
 - **From backend switching to runtime composition:** agents can run fixed, flex, wrapper, or audit modes, including a strong core model paired with a separate persona wrapper or auditor.
 - **From generic skills to learned expertise:** `/exp` adds context-specific guidebooks with playbooks, validators, failure memory, templates, evidence, and training runs for repeatable high-skill work.
@@ -178,48 +178,47 @@ HASHI 2.x proved that local agents could execute tools, browse, switch backends,
 
 ---
 
-## Habit-Based Self-Improvement
+## HER Habit–Meditation
 
-HASHI agents learn from real usage over time. The habit system has two layers: user feedback signals that seed new habits, and nightly dream reflection that consolidates and evolves them.
+Habit learning now belongs exclusively to the HER backend. It is agent-specific,
+disabled by default, and independent from HASHI orchestration skills and Dream.
 
-### User Feedback Signals
+The lifecycle is:
 
-The simplest way to shape agent behavior — give direct feedback while working:
-
-```
-/skill good                    — agent did something right
-/skill good always verify before asserting facts
-/skill bad                     — agent did something wrong
-/skill bad skipped verification, stated file existed without checking
+```text
+Planning → Execution → Meditation → Write
 ```
 
-Each signal captures the full conversation context. If an API key is available, the signal is processed into habits immediately; otherwise it is stored for the next dream run.
+- **Planning:** HER searches only each Habit's title and compact natural-language
+  metadata, then adds a small set of relevant Habit bodies to its planning input.
+- **Execution:** HER runs normally at any configured effort level while retaining
+  the thinking and tool evidence the backend already exposes.
+- **Meditation:** after a completed run, the same HER model performs a silent,
+  isolated post-run reflection. It may return no change.
+- **Write:** HER creates, updates, or recoverably archives the owning agent's JSON
+  Habit files immediately. There is no promotion, confidence, evaluation, shared
+  scope, or cross-agent copying layer.
 
-### Dream — Nightly Reflection
+When disabled, HER does not create a Habit directory, alter the task prompt, or
+start a Meditation call. Controls are available at three levels:
 
-Each night, agents run `/skill dream` to consolidate memory and process habit signals:
-- Pending `/skill good` and `/skill bad` signals are analyzed (up to 3 per dream, paced to avoid overload)
-- New habit candidates are extracted from the conversation context and user comment
-- Similar habits are reinforced rather than duplicated
-- Habits accumulate evidence over time before being promoted to active
-- Duplicate detection via mtime gate + content hash prevents redundant dream runs
+```json
+{
+  "global": {
+    "her_providers": {
+      "habit_meditation": {"enabled": true}
+    }
+  }
+}
+```
 
-### Habit Governance (Lily-mediated)
+- Instance default: `global.her_providers.habit_meditation.enabled`
+- Per-HER-backend override: `habit_meditation.enabled` in that backend entry
+- Operational override: `HASHI_HER_HABIT_MEDITATION=on|off`
 
-A designated governance agent reviews habits across all agents and governs cross-agent reuse:
-- `/skill habits report` — regenerate evaluation report with Wilson-style evidence scoring
-- `/skill habits dashboard` — advanced evaluation dashboard (task/class/backend breakdown)
-- `/skill habits list pending` — inspect pending copy recommendations
-- `/skill habits approve <ids>` / `/skill habits apply` — approve and apply cross-agent copies
-- `/skill habits shared list` — inspect active shared patterns and protocols
-- `/skill habits shared promote` / `/skill habits shared retire` — manage shared registry
-
-### Storage
-
-All habit data is local-only and gitignored:
-- Per-agent habits: `workspaces/<agent>/habits.sqlite`
-- Shared evaluation: `workspaces/<governance_agent>/habit_evaluation.sqlite`
-- Reports: `workspaces/<governance_agent>/habit_reports/`
+Each agent stores its own files under `workspaces/<agent>/habits/*.json`.
+`/skill dream` remains the separate nightly memory-reflection mechanism and does
+not read or write HER Habit files.
 
 ---
 
@@ -369,8 +368,8 @@ HASHI uses a **Universal Orchestrator** pattern where a single Python process ma
 │  └────────────┘  └────────────┘  └────────────────────┘        │
 │                                                                  │
 │  ┌────────────────────────────┐  ┌────────────────────────┐    │
-│  │    Habit System            │  │   Token Audit          │    │
-│  │ (Feedback → Dream → Grow) │  │  (Usage + Cost Track)  │    │
+│  │ HER Habit–Meditation       │  │   Token Audit          │    │
+│  │ (Backend-local, optional) │  │  (Usage + Cost Track)  │    │
 │  └────────────────────────────┘  └────────────────────────┘    │
 │                                                                  │
 │  ┌────────────────────────────────────────────────────────────┐  │
@@ -416,7 +415,6 @@ hashi/
 │   ├── scheduler.py           # Heartbeat + cron job runner
 │   ├── skill_manager.py       # Skills system
 │   ├── bridge_memory.py       # Context assembly + memory retrieval
-│   ├── habits.py              # Habit evaluation and governance
 │   ├── voice_manager.py       # TTS and voice reply management
 │   ├── workbench_api.py       # Workbench REST API server
 │   └── api_gateway.py         # External API gateway (optional)
@@ -428,11 +426,10 @@ hashi/
 │   ├── openrouter_api.py      # OpenRouter API
 │   ├── deepseek_api.py        # DeepSeek API (direct)
 │   ├── ollama_api.py          # Ollama local LLM
+│   ├── her_habits.py          # HER-local Habit search, Meditation, and file writes
 │   └── registry.py            # Backend auto-discovery
 ├── skills/                    # Skill library
 │   ├── dream/                 # Nightly memory consolidation
-│   ├── good/ & bad/           # Habit feedback signals
-│   ├── habits/                # Habit governance surface
 │   ├── agent_audit/           # Agent behavior audit
 │   └── [custom_skills]/       # User-defined skills
 ├── tools/                     # Tool execution layer
@@ -668,8 +665,6 @@ configuration summary.
 | Skill | Type | Description |
 |-------|------|-------------|
 | `dream` | Action | Nightly memory consolidation + behavioral reflection |
-| `good` / `bad` | Action | Habit feedback signals |
-| `habits` | Action | Habit governance dashboard and approval surface |
 | `agent_audit` | Action | Local-only agent behavior audit report |
 | `cron` | Action | Cron job management |
 | `heartbeat` | Action | Heartbeat job management |
@@ -998,9 +993,6 @@ Every agent request includes assembled context:
 
 --- ACTIVE SKILLS ---
 {active toggle skills}
-
---- ACTIVE HABITS ---
-{habits learned from feedback}
 
 --- RELEVANT LONG-TERM MEMORY ---
 {top retrieved memories}
@@ -1487,7 +1479,7 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
 ### v3.0-beta — Self-Improving Agents (April 2026)
 
 - **6 LLM backends** — added DeepSeek API (direct) and Ollama (local LLM) alongside existing Claude/Gemini/Codex/OpenRouter
-- **Habit-based self-improvement** — agents learn from `/good` and `/bad` feedback, with nightly dream reflection and cross-agent habit governance (Phase 4-5)
+- **Legacy habit self-improvement (retired)** — this release originally used `/good`, `/bad`, Dream coupling, and cross-agent governance; current HASHI uses HER-local Habit–Meditation instead
 - **SafeVoice** — voice confirmation before execution, default ON, 3500-char preview
 - **Cross-instance agent messaging (HChat)** — agents communicate across HASHI instances via API routing
 - **Token audit & cost tracking** — precise API usage tracking, CLI estimation, cost analysis

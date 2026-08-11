@@ -38,7 +38,6 @@ if str(PROJECT_ROOT) not in sys.path:
 from orchestrator.bridge_memory import BridgeMemoryStore
 from orchestrator.config import AgentConfig, ConfigManager, FlexibleAgentConfig
 from orchestrator.flexible_backend_registry import get_secret_lookup_order
-from orchestrator.habits import HabitStore
 from adapters.registry import get_backend_class
 
 TASKS_PATH = PROJECT_ROOT / "tasks.json"
@@ -62,7 +61,6 @@ MEMORY_FORGET_THRESHOLD = 200   # start forgetting when agent exceeds this many 
 MEMORY_FORGET_TARGET = 160      # trim down to this count when threshold exceeded
 MAX_FORGET_PER_DREAM = 20       # safety cap — never delete more than this in one run
 _MEMORY_STORE: BridgeMemoryStore | None = None
-_HABIT_STORE: HabitStore | None = None
 SUPPORTED_SAFE_BACKENDS = {"claude-cli", "codex-cli", "gemini-cli"}
 _CONFIG_CACHE: tuple | None = None
 
@@ -359,28 +357,6 @@ def _memory_store() -> BridgeMemoryStore:
     if _MEMORY_STORE is None:
         _MEMORY_STORE = BridgeMemoryStore(WORKSPACE_DIR)
     return _MEMORY_STORE
-
-
-def _resolve_agent_class() -> str:
-    agents = _read_agents().get("agents", [])
-    for entry in agents:
-        if str(entry.get("name") or entry.get("id") or "").strip().lower() != AGENT_NAME.lower():
-            continue
-        extra = entry.get("extra") or {}
-        return str(entry.get("agent_class") or extra.get("agent_class") or "general").strip().lower()
-    return "general"
-
-
-def _habit_store() -> HabitStore:
-    global _HABIT_STORE
-    if _HABIT_STORE is None:
-        _HABIT_STORE = HabitStore(
-            workspace_dir=WORKSPACE_DIR,
-            project_root=PROJECT_ROOT,
-            agent_id=AGENT_NAME,
-            agent_class=_resolve_agent_class(),
-        )
-    return _HABIT_STORE
 
 
 def _write_memory(content: str, memory_type: str, source: str, importance: float) -> int | None:
@@ -885,29 +861,6 @@ RULES (follow strictly):
 
     # Append to dream log
     _append_dream_log(dream_date, reflection_summary, len(valid_memories), agent_md_updated)
-    habit_review = _habit_store().nightly_review()
-    habit_review_text = _habit_store().format_nightly_review(habit_review)
-    _append_dream_log(dream_date, f"[habit-review] {habit_review.summary}", 0, False)
-
-    # Process user /good and /bad signals (max 3 per dream to avoid overwhelm)
-    signal_log_lines = _habit_store().process_user_signals(
-        api_key=backend,
-        call_llm_fn=_call_current_backend,
-        max_signals=3,
-        max_habits_per_signal=2,
-        max_context_words=6000,
-    )
-    if signal_log_lines:
-        for sline in signal_log_lines:
-            _append_dream_log(dream_date, sline, 0, False)
-
-    recommendation_report = HabitStore.generate_recommendation_report(
-        project_root=PROJECT_ROOT,
-        generated_by=AGENT_NAME,
-        lookback_days=7,
-    )
-    recommendation_report_summary = HabitStore.summarize_recommendation_report(recommendation_report)
-    _append_dream_log(dream_date, f"[habit-report] {recommendation_report_summary}", 0, False)
 
     # Build output message
     lines = [
@@ -943,16 +896,6 @@ RULES (follow strictly):
         lines.append(f"📝 Agent.md updated: {', '.join(updated_names)}")
         lines.append("")
 
-    lines.append(habit_review_text)
-    lines.append("")
-    if signal_log_lines:
-        lines.append(f"💬 User signals processed: {len(signal_log_lines)}")
-        for sline in signal_log_lines:
-            lines.append(f"  • {sline}")
-        lines.append("")
-    lines.append(f"🧾 {recommendation_report_summary}")
-    lines.append(f"📍 Report: {recommendation_report.markdown_path}")
-    lines.append("")
     lines.append("Use '/skill dream undo' to revert if needed.")
 
     return "\n".join(lines)

@@ -267,7 +267,6 @@ async def process_queue(runtime: Any) -> None:
         except Exception as exc:
             runtime._mark_error(str(exc))
             if item is not None:
-                runtime._record_habit_outcome(item, success=False, error_text=str(exc))
                 try:
                     is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
                     runtime._notify_right_brain_interrupted(

@@ -238,7 +238,6 @@ async def test_handle_backend_error_suppresses_telegram_on_user_steer():
         logger=SimpleNamespace(info=lambda msg, *a, **k: logs.append(str(msg))),
         error_logger=SimpleNamespace(error=lambda msg, *a, **k: logs.append(f"ERR:{msg}")),
         _mark_error=lambda err: setattr(runtime, "marked_error", err),
-        _record_habit_outcome=lambda item, **kw: setattr(runtime, "habit", kw),
         _should_buffer_during_transfer=lambda _rid: False,
         _record_suppressed_transfer_result=lambda *a, **k: None,
         _notify_request_listeners=AsyncMock(side_effect=lambda _rid, payload: listeners.append(payload)),

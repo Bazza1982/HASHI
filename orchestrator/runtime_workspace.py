@@ -8,7 +8,6 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from orchestrator.bridge_memory import BridgeContextAssembler, BridgeMemoryStore
 from orchestrator.command_ui import card_title, confirm_card
-from orchestrator.habits import HabitStore
 from orchestrator.handoff_builder import HandoffBuilder
 from orchestrator.memory_index import MemoryIndex
 from orchestrator.memory_plus_mode import (
@@ -310,12 +309,6 @@ def _reinitialize_workspace_runtime(runtime: Any) -> None:
         runtime.config.system_md,
         active_skill_provider=runtime._get_active_skill_sections,
         sys_prompt_manager=runtime.sys_prompt_manager,
-    )
-    runtime.habit_store = HabitStore(
-        runtime.workspace_dir,
-        runtime.global_config.project_root,
-        runtime.name,
-        runtime._get_agent_class(),
     )
     runtime.reload_post_turn_observers()
 

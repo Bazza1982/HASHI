@@ -1,6 +1,8 @@
 # HASHI Habit-Based Self-Improvement Plan
 
-> Status: design proposal
+> Status: superseded historical design. The implemented HER-only design is in
+> `docs/HER_HABIT_MEDITATION.md`. Its orchestration Skill, Dream coupling,
+> promotion, evaluation, and cross-agent governance proposals are retired.
 > Scope: long-term architecture and rollout plan
 > Audience: HASHI core maintainers, Lily, agent/runtime implementers
 

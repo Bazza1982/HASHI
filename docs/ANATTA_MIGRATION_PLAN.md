@@ -104,7 +104,6 @@ Recommended foreground order:
 1. Receive user turn.
 2. Build prompt extra sections:
    - workzone section
-   - active habit sections
    - Anatta pre-turn sections, only when Anatta mode is `on`
 3. Generate the core assistant response.
 4. Deliver the normal visible response. If wrapper mode is disabled,

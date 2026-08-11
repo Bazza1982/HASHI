@@ -1,6 +1,6 @@
 # HASHI Runtime Modularization Plan
 
-Status: active incremental migration. Updated 2026-07-27.
+Status: active incremental migration. Updated 2026-08-12.
 
 ## Goals
 
@@ -8,8 +8,8 @@ HASHI currently has one large active runtime and one quarantined legacy runtime:
 
 - `orchestrator/agent_runtime.py`: 57-line compatibility export shim.
 - `orchestrator/legacy/bridge_agent_runtime.py`: fixed-backend legacy runtime,
-  5,241 lines.
-- `orchestrator/flexible_agent_runtime.py`: current flexible runtime, 8,062
+  4,907 lines.
+- `orchestrator/flexible_agent_runtime.py`: current flexible runtime, 7,810
   lines after the latest extractions.
 
 The live fleet now uses flexible agents. The long-term goal is to retire the
@@ -55,7 +55,6 @@ Known imports include:
 
 - `orchestrator/flexible_agent_runtime.py`
 - `orchestrator/api_gateway.py`
-- `tests/test_flexible_habits.py`
 - `tests/test_wrapper_commands.py`
 - legacy-specific tests for `BridgeAgentRuntime`
 
@@ -76,7 +75,7 @@ default would cause older configs to keep selecting legacy behavior implicitly.
 - media handling
 - Workbench/API/Hchat routing
 - transfer and handoff flows
-- habit, skill, workzone, memory, and status UI
+- skill, workzone, memory, and status UI
 - wrapper mode
 - audit mode
 - Anatta/post-turn observer hooks
@@ -310,7 +309,7 @@ Recommended extraction order:
    - Keep audit separate from wrapper code because audit evidence is a higher
      sensitivity boundary and should remain easy to review independently.
 
-7. Workzone, habit, skill, and status helpers
+7. Workzone, skill, and status helpers
    - Move these into focused modules with narrow public functions.
 
 Implementation style:
@@ -355,7 +354,7 @@ Actions:
    - backend/core: `/mode`, `/backend`, `/model`, `/effort`, `/core`
    - wrapper/audit: `/wrap`, `/wrapper`, `/audit`
    - Anatta: `/anatta`
-   - memory/workzone/habit/skill
+   - memory/workzone/skill
    - remote/move/transfer/handoff
    - Hchat/COS/WA/WOL
    - status/help/token/usage
