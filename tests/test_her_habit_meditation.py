@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -23,6 +25,59 @@ from adapters.her_habits import (
 )
 
 EFFORTS = ("low", "medium", "high", "xhigh", "max", "max+")
+
+
+def test_her_reload_tolerates_stale_habit_module_until_dependency_reload(tmp_path):
+    project_root = Path(__file__).resolve().parents[1]
+    script = r'''
+import importlib
+import logging
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import adapters.her as her
+import adapters.her_habits as habits
+
+habit_exports = (
+    "MEDITATION_ALLOWED_TOOLS",
+    "HabitMeditationConfig",
+    "HERHabitStore",
+    "HERMeditationJournal",
+    "MeditationValidationError",
+    "attach_habits_to_prompt",
+    "build_meditation_prompt",
+    "extract_current_request",
+    "parse_meditation_actions",
+)
+for name in habit_exports:
+    habits.__dict__.pop(name, None)
+    her.__dict__.pop(name, None)
+
+# This is the critical old-process order: HER reloads while its already-loaded
+# Habit dependency still has the previous export surface.
+importlib.reload(her)
+assert her._her_habits is habits
+assert all(name not in her.__dict__ for name in habit_exports)
+
+# The normal /reboot pass reaches and refreshes the dependency afterwards.
+importlib.reload(habits)
+adapter = object.__new__(her.HERAdapter)
+adapter._habit_journal_instance = None
+adapter.config = SimpleNamespace(workspace_dir=Path(sys.argv[1]))
+adapter.logger = logging.getLogger("test.her.reload")
+journal = adapter._her_meditation_journal()
+assert type(journal) is habits.HERMeditationJournal
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path)],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def _adapter(tmp_path: Path, *, enabled: bool, effort: str = "high") -> HERAdapter:

@@ -16,19 +16,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+from adapters import her_habits as _her_habits
 from adapters import stream_events as _stream_events
 from adapters.base import BackendCapabilities, BackendResponse, BaseBackend, TokenUsage
-from adapters.her_habits import (
-    MEDITATION_ALLOWED_TOOLS,
-    HabitMeditationConfig,
-    HERHabitStore,
-    HERMeditationJournal,
-    MeditationValidationError,
-    attach_habits_to_prompt,
-    build_meditation_prompt,
-    extract_current_request,
-    parse_meditation_actions,
-)
 from adapters.stream_events import (
     KIND_ERROR,
     KIND_PROGRESS,
@@ -1488,8 +1478,8 @@ class HERAdapter(BaseBackend):
         self._session_state_path = self.config.workspace_dir / "backend_state" / "claw_session.json"
         self._gateway_context_path: Path | None = None
         self._gateway_config_home: Path | None = None
-        self._habit_store_instance: HERHabitStore | None = None
-        self._habit_journal_instance: HERMeditationJournal | None = None
+        self._habit_store_instance: _her_habits.HERHabitStore | None = None
+        self._habit_journal_instance: _her_habits.HERMeditationJournal | None = None
         self._habit_execution_lock = asyncio.Lock()
         self._habit_meditation_tasks: set[asyncio.Task] = set()
         self._habit_meditation_job_ids: set[str] = set()
@@ -1535,20 +1525,23 @@ class HERAdapter(BaseBackend):
         extra = getattr(self.config, "extra", None) or {}
         return dict(extra) if isinstance(extra, Mapping) else {}
 
-    def _habit_meditation_config(self) -> HabitMeditationConfig:
-        return HabitMeditationConfig.resolve(self.global_config, self._extra)
+    def _habit_meditation_config(self) -> _her_habits.HabitMeditationConfig:
+        return _her_habits.HabitMeditationConfig.resolve(
+            self.global_config,
+            self._extra,
+        )
 
-    def _her_habit_store(self) -> HERHabitStore:
+    def _her_habit_store(self) -> _her_habits.HERHabitStore:
         if self._habit_store_instance is None:
-            self._habit_store_instance = HERHabitStore(
+            self._habit_store_instance = _her_habits.HERHabitStore(
                 self.config.workspace_dir,
                 logger=self.logger,
             )
         return self._habit_store_instance
 
-    def _her_meditation_journal(self) -> HERMeditationJournal:
+    def _her_meditation_journal(self) -> _her_habits.HERMeditationJournal:
         if self._habit_journal_instance is None:
-            self._habit_journal_instance = HERMeditationJournal(
+            self._habit_journal_instance = _her_habits.HERMeditationJournal(
                 self.config.workspace_dir,
                 logger=self.logger,
             )
@@ -1558,7 +1551,7 @@ class HERAdapter(BaseBackend):
         self,
         job_id: str,
         *,
-        config: HabitMeditationConfig,
+        config: _her_habits.HabitMeditationConfig,
     ) -> bool:
         if job_id in self._habit_meditation_job_ids:
             return False
@@ -1620,11 +1613,11 @@ class HERAdapter(BaseBackend):
         request_id: str,
         task_prompt: str,
         task_result: ClawTaskResult,
-        config: HabitMeditationConfig,
+        config: _her_habits.HabitMeditationConfig,
     ) -> bool:
         try:
             store = self._her_habit_store()
-            meditation_prompt = build_meditation_prompt(
+            meditation_prompt = _her_habits.build_meditation_prompt(
                 agent_name=self.config.name,
                 task_prompt=task_prompt,
                 result=task_result,
@@ -1662,7 +1655,7 @@ class HERAdapter(BaseBackend):
         self,
         *,
         job_id: str,
-        config: HabitMeditationConfig,
+        config: _her_habits.HabitMeditationConfig,
     ) -> None:
         journal = self._her_meditation_journal()
         request_id = job_id
@@ -1691,7 +1684,9 @@ class HERAdapter(BaseBackend):
                             on_stream_event=None,
                             track_session_identity=False,
                             permission_mode_override="read-only",
-                            allowed_tools_override=list(MEDITATION_ALLOWED_TOOLS),
+                            allowed_tools_override=list(
+                                _her_habits.MEDITATION_ALLOWED_TOOLS
+                            ),
                             task_env_overrides={
                                 "CLAW_TASK_PLANNING": "0",
                                 "CLAW_MAX_TOOL_ITERATIONS": "8",
@@ -1699,14 +1694,14 @@ class HERAdapter(BaseBackend):
                         ),
                         timeout=config.meditation_timeout_seconds,
                     )
-                    actions = parse_meditation_actions(
+                    actions = _her_habits.parse_meditation_actions(
                         meditation_result.text,
                         max_actions=int(job.get("max_actions") or config.max_actions),
                     )
                     job = journal.store_actions(job_id, actions)
                 actions = job.get("actions")
                 if not isinstance(actions, list):
-                    raise MeditationValidationError(
+                    raise _her_habits.MeditationValidationError(
                         "durable Meditation actions are missing"
                     )
                 outcomes = self._her_habit_store().apply_actions(
@@ -1728,7 +1723,7 @@ class HERAdapter(BaseBackend):
                 pass
             self.logger.info("HER Habit Meditation cancelled: job=%s", job_id)
             raise
-        except MeditationValidationError as exc:
+        except _her_habits.MeditationValidationError as exc:
             try:
                 journal.mark_failed(
                     job_id,
@@ -2217,11 +2212,14 @@ class HERAdapter(BaseBackend):
         selected_habit_ids: list[str] = []
         if habit_config.enabled:
             selected_habits = self._her_habit_store().retrieve(
-                extract_current_request(prompt),
+                _her_habits.extract_current_request(prompt),
                 limit=habit_config.retrieval_limit,
             )
             selected_habit_ids = [habit.habit_id for habit in selected_habits]
-            task_prompt = attach_habits_to_prompt(prompt, selected_habits)
+            task_prompt = _her_habits.attach_habits_to_prompt(
+                prompt,
+                selected_habits,
+            )
             self.logger.info(
                 "HER Habit planning: request=%s matched=%d ids=%s effort=%s",
                 request_id,
