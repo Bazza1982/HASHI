@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -21,6 +22,8 @@ from adapters.her_habits import (
     MEDITATION_ALLOWED_TOOLS,
     HabitMeditationConfig,
     HERHabitStore,
+    HERMeditationJournal,
+    MeditationValidationError,
     attach_habits_to_prompt,
     build_meditation_prompt,
     extract_current_request,
@@ -57,7 +60,7 @@ PERMISSION_MODE_RANK = {"read-only": 0, "workspace-write": 1, "danger-full-acces
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OLLAMA_DUMMY_API_KEY = "__ollama_dummy__"
 HER_DISPLAY_NAME = "HASHI Engine Runtime (HER)"
-HER_VERSION = "0.1.0-hashi.1"
+HER_VERSION = "0.1.0-hashi.9"
 PACKAGED_CLAW_RUNTIME = "hashi-her"
 PACKAGED_CLAW_MANIFEST_VERSION = 1
 CLAW_RUNTIME_POLICIES = {"prefer-packaged", "require-packaged", "system-only"}
@@ -98,7 +101,6 @@ CLAW_ENV_ALLOWLIST = (
     "CLAW_MAX_TOOL_ITERATIONS",
     "CLAW_TASK_PLANNING",
     "CLAW_EXECUTION_EFFORT",
-    "CLAW_MAX_PLUS_TOKEN_BUDGET",
     "CLAW_MAX_PLUS_TIME_BUDGET_SECONDS",
     *OS_ENV_ALLOWLIST,
 )
@@ -828,17 +830,17 @@ def find_claw_binary(
 
 
 def _parse_json_output(text: str, *, command: list[str]) -> dict[str, Any]:
+    command_name = Path(command[0]).name if command else PACKAGED_CLAW_RUNTIME
     try:
         loaded = json.loads(text)
     except json.JSONDecodeError as exc:
-        preview = " ".join(text.split())[:400] or "<empty>"
         raise ClawJsonError(
-            f"HER command produced non-JSON output for {' '.join(command)}: {preview}",
+            f"HER command {command_name} produced non-JSON output ({len(text)} chars)",
             output=text,
         ) from exc
     if not isinstance(loaded, dict):
         raise ClawJsonError(
-            f"HER command JSON output was not an object for {' '.join(command)}",
+            f"HER command {command_name} JSON output was not an object",
             output=text,
         )
     return loaded
@@ -847,29 +849,39 @@ def _parse_json_output(text: str, *, command: list[str]) -> dict[str, Any]:
 def _parse_stream_json_output(text: str, *, command: list[str]) -> dict[str, Any]:
     final: dict[str, Any] | None = None
     last_error: dict[str, Any] | None = None
+    non_json_line_count = 0
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line:
             continue
         try:
             event = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise ClawJsonError(
-                f"HER stream-json produced non-JSON line for {' '.join(command)}: {line[:400]}",
-                output=text,
-            ) from exc
+        except json.JSONDecodeError:
+            # A complete run_finished event is authoritative. Preserve forward
+            # compatibility with older HER builds that leaked an interactive
+            # permission prompt into stdout, but retain a count for diagnostics.
+            non_json_line_count += 1
+            continue
         if isinstance(event, dict):
             if event.get("kind") == "run_finished":
                 final = event
             elif event.get("kind") == "error" or event.get("type") == "error" or event.get("error"):
                 last_error = event
     if final is None:
-        if last_error is not None:
-            return last_error
+        command_name = Path(command[0]).name if command else PACKAGED_CLAW_RUNTIME
+        last_kind = str((last_error or {}).get("kind") or (last_error or {}).get("type") or "none")
+        diagnostic = (
+            f"; last_error_kind={last_kind}" if last_error is not None else ""
+        )
+        if non_json_line_count:
+            diagnostic += f"; non_json_lines={non_json_line_count}"
         raise ClawJsonError(
-            f"HER stream-json did not include run_finished for {' '.join(command)}",
+            f"HER stream-json from {command_name} did not include run_finished{diagnostic}",
             output=text,
         )
+    if non_json_line_count:
+        final = dict(final)
+        final["_protocol_non_json_line_count"] = non_json_line_count
     return final
 
 
@@ -930,7 +942,12 @@ def _claw_jsonl_to_stream_event(event: Mapping[str, Any]) -> StreamEvent | None:
         if source:
             detail_parts.append(f"source={source}")
         return (
-            StreamEvent(kind=KIND_THINKING, summary=text[:400], detail=";".join(detail_parts))
+            StreamEvent(
+                kind=KIND_THINKING,
+                summary=text[:400],
+                raw_delta=text,
+                detail=";".join(detail_parts),
+            )
             if text
             else None
         )
@@ -953,6 +970,25 @@ def _claw_jsonl_to_stream_event(event: Mapping[str, Any]) -> StreamEvent | None:
     if kind == "task_acknowledgement":
         text = str(event.get("text") or event.get("summary") or "").strip()
         return StreamEvent(kind=KIND_ACKNOWLEDGEMENT, summary=text[:500]) if text else None
+    if kind == "permission_required":
+        tool_name = str(event.get("tool_name") or "tool")
+        current_mode = str(event.get("current_mode") or "unknown")
+        required_mode = str(event.get("required_mode") or "unknown")
+        return StreamEvent(
+            kind=KIND_PROGRESS,
+            summary=f"HER permission required for {tool_name}"[:500],
+            detail=f"current_mode={current_mode};required_mode={required_mode}"[:1000],
+            tool_name=tool_name,
+        )
+    if kind == "permission_decision":
+        tool_name = str(event.get("tool_name") or "tool")
+        decision = str(event.get("decision") or "unknown")
+        return StreamEvent(
+            kind=KIND_PROGRESS,
+            summary=f"HER permission {decision} for {tool_name}"[:500],
+            detail=str(event.get("reason") or "")[:1000],
+            tool_name=tool_name,
+        )
     if kind == "provider_stop_reason":
         reason = str(event.get("reason") or "unknown").strip()
         return StreamEvent(
@@ -1453,8 +1489,10 @@ class HERAdapter(BaseBackend):
         self._gateway_context_path: Path | None = None
         self._gateway_config_home: Path | None = None
         self._habit_store_instance: HERHabitStore | None = None
+        self._habit_journal_instance: HERMeditationJournal | None = None
         self._habit_execution_lock = asyncio.Lock()
         self._habit_meditation_tasks: set[asyncio.Task] = set()
+        self._habit_meditation_job_ids: set[str] = set()
 
     def _load_session_identity(self) -> None:
         try:
@@ -1508,34 +1546,126 @@ class HERAdapter(BaseBackend):
             )
         return self._habit_store_instance
 
+    def _her_meditation_journal(self) -> HERMeditationJournal:
+        if self._habit_journal_instance is None:
+            self._habit_journal_instance = HERMeditationJournal(
+                self.config.workspace_dir,
+                logger=self.logger,
+            )
+        return self._habit_journal_instance
+
+    def _spawn_habit_meditation_job(
+        self,
+        job_id: str,
+        *,
+        config: HabitMeditationConfig,
+    ) -> bool:
+        if job_id in self._habit_meditation_job_ids:
+            return False
+        task = asyncio.create_task(
+            self._run_habit_meditation(job_id=job_id, config=config),
+            name=f"her-habit-meditation:{self.config.name}:{job_id}",
+        )
+        self._habit_meditation_job_ids.add(job_id)
+        self._habit_meditation_tasks.add(task)
+
+        def _done(done_task: asyncio.Task) -> None:
+            self._habit_meditation_tasks.discard(done_task)
+            self._habit_meditation_job_ids.discard(job_id)
+            if done_task.cancelled():
+                return
+            try:
+                error = done_task.exception()
+            except Exception:  # noqa: BLE001 - callback must never escape
+                error = None
+            if error is not None:
+                self.logger.warning(
+                    "Unhandled HER Habit Meditation task error: job=%s error=%s",
+                    job_id,
+                    type(error).__name__,
+                )
+
+        task.add_done_callback(_done)
+        return True
+
+    def _resume_pending_habit_meditations(self) -> int:
+        config = self._habit_meditation_config()
+        if not config.enabled:
+            return 0
+        try:
+            journal = self._her_meditation_journal()
+            recovered = journal.recover_interrupted_jobs()
+            spawned = sum(
+                self._spawn_habit_meditation_job(job["job_id"], config=config)
+                for job in journal.pending_jobs(limit=16)
+            )
+            if recovered or spawned:
+                self.logger.info(
+                    "HER Habit Meditation recovery: recovered=%d spawned=%d",
+                    recovered,
+                    spawned,
+                )
+            return spawned
+        except Exception as exc:  # noqa: BLE001 - recovery must not disable HER
+            self.logger.warning(
+                "HER Habit Meditation recovery failed safely: error=%s",
+                type(exc).__name__,
+            )
+            return 0
+
     def _schedule_habit_meditation(
         self,
         *,
+        job_id: str,
         request_id: str,
         task_prompt: str,
         task_result: ClawTaskResult,
         config: HabitMeditationConfig,
-    ) -> None:
-        task = asyncio.create_task(
-            self._run_habit_meditation(
-                request_id=request_id,
+    ) -> bool:
+        try:
+            store = self._her_habit_store()
+            meditation_prompt = build_meditation_prompt(
+                agent_name=self.config.name,
                 task_prompt=task_prompt,
-                task_result=task_result,
+                result=task_result,
+                habits=store.load(),
                 config=config,
-            ),
-            name=f"her-habit-meditation:{self.config.name}:{request_id}",
-        )
-        self._habit_meditation_tasks.add(task)
-        task.add_done_callback(self._habit_meditation_tasks.discard)
+            )
+            job_id, queued = self._her_meditation_journal().enqueue(
+                job_id=job_id,
+                request_id=request_id,
+                prompt=meditation_prompt,
+                max_actions=config.max_actions,
+            )
+            journaled = self._her_meditation_journal().get(job_id)
+            spawned = bool(
+                journaled
+                and journaled.get("status") in {"pending", "applying"}
+                and self._spawn_habit_meditation_job(job_id, config=config)
+            )
+            self.logger.info(
+                "HER Habit Meditation %s: request=%s job=%s",
+                "queued" if queued else "already-journaled",
+                request_id,
+                job_id,
+            )
+            return queued or spawned
+        except Exception as exc:  # noqa: BLE001 - queue failure must not break the turn
+            self.logger.warning(
+                "HER Habit Meditation scheduling failed safely: request=%s error=%s",
+                request_id,
+                type(exc).__name__,
+            )
+            return False
 
     async def _run_habit_meditation(
         self,
         *,
-        request_id: str,
-        task_prompt: str,
-        task_result: ClawTaskResult,
+        job_id: str,
         config: HabitMeditationConfig,
     ) -> None:
+        journal = self._her_meditation_journal()
+        request_id = job_id
         try:
             async with self._habit_execution_lock:
                 # Re-resolve the switch immediately before work so an operational
@@ -1546,47 +1676,137 @@ class HERAdapter(BaseBackend):
                         request_id,
                     )
                     return
-                store = self._her_habit_store()
-                meditation_prompt = build_meditation_prompt(
-                    agent_name=self.config.name,
-                    task_prompt=task_prompt,
-                    result=task_result,
-                    habits=store.load(),
-                    config=config,
+                phase = journal.claim(job_id)
+                if phase is None:
+                    return
+                job = journal.get(job_id)
+                if job is None:
+                    return
+                if phase == "meditate":
+                    meditation_result = await asyncio.wait_for(
+                        self._run_task_async(
+                            str(job.get("prompt") or ""),
+                            resume=None,
+                            request_id=f"{job_id}:habit-meditation",
+                            on_stream_event=None,
+                            track_session_identity=False,
+                            permission_mode_override="read-only",
+                            allowed_tools_override=list(MEDITATION_ALLOWED_TOOLS),
+                            task_env_overrides={
+                                "CLAW_TASK_PLANNING": "0",
+                                "CLAW_MAX_TOOL_ITERATIONS": "8",
+                            },
+                        ),
+                        timeout=config.meditation_timeout_seconds,
+                    )
+                    actions = parse_meditation_actions(
+                        meditation_result.text,
+                        max_actions=int(job.get("max_actions") or config.max_actions),
+                    )
+                    job = journal.store_actions(job_id, actions)
+                actions = job.get("actions")
+                if not isinstance(actions, list):
+                    raise MeditationValidationError(
+                        "durable Meditation actions are missing"
+                    )
+                outcomes = self._her_habit_store().apply_actions(
+                    actions,
+                    max_actions=int(job.get("max_actions") or config.max_actions),
+                    idempotency_key=job_id,
                 )
-                meditation_result = await asyncio.wait_for(
-                    self._run_task_async(
-                        meditation_prompt,
-                        resume=None,
-                        request_id=f"{request_id}:habit-meditation",
-                        on_stream_event=None,
-                        track_session_identity=False,
-                        permission_mode_override="read-only",
-                        allowed_tools_override=list(MEDITATION_ALLOWED_TOOLS),
-                        task_env_overrides={
-                            "CLAW_TASK_PLANNING": "0",
-                            "CLAW_MAX_TOOL_ITERATIONS": "8",
-                        },
-                    ),
-                    timeout=config.meditation_timeout_seconds,
-                )
-                actions = parse_meditation_actions(meditation_result.text)
-                outcomes = store.apply_actions(actions, max_actions=config.max_actions)
+                journal.mark_complete(job_id, outcomes)
                 self.logger.info(
-                    "HER Habit Meditation completed: request=%s actions=%d outcomes=%s",
-                    request_id,
-                    len(actions[: config.max_actions]),
+                    "HER Habit Meditation completed: job=%s actions=%d outcomes=%s",
+                    job_id,
+                    len(actions),
                     ",".join(outcomes) or "no-change",
                 )
         except asyncio.CancelledError:
-            self.logger.info("HER Habit Meditation cancelled: request=%s", request_id)
+            try:
+                journal.mark_pending(job_id, reason="runtime_shutdown")
+            except Exception:  # noqa: BLE001,S110 - cancellation must continue
+                pass
+            self.logger.info("HER Habit Meditation cancelled: job=%s", job_id)
             raise
-        except Exception as exc:  # noqa: BLE001 - Meditation is best-effort and never breaks the turn
+        except MeditationValidationError as exc:
+            try:
+                journal.mark_failed(
+                    job_id,
+                    error_code="invalid_output",
+                    error_summary=str(exc),
+                )
+            except Exception:  # noqa: BLE001,S110 - fail-open journal handling
+                pass
             self.logger.warning(
-                "HER Habit Meditation failed safely: request=%s error=%s",
-                request_id,
+                "HER Habit Meditation rejected invalid output: job=%s error=%s",
+                job_id,
                 exc,
             )
+        except (ClawError, asyncio.TimeoutError) as exc:
+            try:
+                journal.mark_pending(job_id, reason=type(exc).__name__)
+            except Exception:  # noqa: BLE001,S110 - fail-open journal handling
+                pass
+            self.logger.warning(
+                "HER Habit Meditation deferred for retry: job=%s error=%s",
+                job_id,
+                type(exc).__name__,
+            )
+        except OSError as exc:
+            # If actions were already made durable, leave the job in applying
+            # so restart recovery replays those same actions without another
+            # model call. Otherwise return it to the bounded retry queue.
+            try:
+                journal.mark_pending(job_id, reason=type(exc).__name__)
+            except Exception:  # noqa: BLE001,S110 - fail-open journal handling
+                pass
+            self.logger.warning(
+                "HER Habit Meditation write deferred safely: job=%s error=%s",
+                job_id,
+                type(exc).__name__,
+            )
+        except Exception as exc:  # noqa: BLE001 - Meditation never breaks the turn
+            try:
+                journal.mark_failed(
+                    job_id,
+                    error_code="runtime_error",
+                    error_summary=type(exc).__name__,
+                )
+            except Exception:  # noqa: BLE001,S110 - fail-open journal handling
+                pass
+            self.logger.warning(
+                "HER Habit Meditation failed safely: job=%s error=%s",
+                job_id,
+                type(exc).__name__,
+            )
+
+    def _habit_failure_result(
+        self,
+        exc: BaseException,
+        *,
+        started: float,
+    ) -> ClawTaskResult:
+        try:
+            permission_mode = self._permission_mode()
+        except Exception:  # noqa: BLE001 - preserve the original failure
+            permission_mode = "unknown"
+        return ClawTaskResult(
+            text="",
+            model=self._claw_model(),
+            permission_mode=permission_mode,
+            cwd=str(self.effective_workdir),
+            returncode=int(getattr(exc, "returncode", 1) or 1),
+            duration_ms=self._duration_ms(started),
+            stdout=str(getattr(exc, "stdout", "") or ""),
+            stderr=str(getattr(exc, "stderr", "") or str(exc)),
+            json_data={},
+            tool_uses=[],
+            tool_results=[],
+            session_id=None,
+            iterations=None,
+            completion_status="failed",
+            stop_reason=type(exc).__name__,
+        )
 
     def _allowed_tools(self) -> list[str] | None:
         """Return an explicit Claw-native tool restriction, if configured.
@@ -1801,9 +2021,6 @@ class HERAdapter(BaseBackend):
         env["CLAW_TASK_PLANNING"] = "0" if self.effort == "low" else "1"
         env["CLAW_EXECUTION_EFFORT"] = self.effort
         if self.effort == "max+":
-            env["CLAW_MAX_PLUS_TOKEN_BUDGET"] = str(
-                self._extra.get("max_plus_token_budget", 1_500_000)
-            )
             env["CLAW_MAX_PLUS_TIME_BUDGET_SECONDS"] = str(
                 self._extra.get("max_plus_time_budget_seconds", 1_500)
             )
@@ -1936,6 +2153,7 @@ class HERAdapter(BaseBackend):
             self.capabilities.supports_thinking_stream = self._supports_stream_json
             self.capabilities.supports_answer_stream = self._supports_stream_json
             self._load_session_identity()
+            self._resume_pending_habit_meditations()
             if not self._supports_stream_json:
                 self.logger.warning("HER binary does not advertise stream-json; verbose mode will use JSON fallback.")
             return True
@@ -1961,6 +2179,7 @@ class HERAdapter(BaseBackend):
         if pending_meditations:
             await asyncio.gather(*pending_meditations, return_exceptions=True)
         self._habit_meditation_tasks.clear()
+        self._habit_meditation_job_ids.clear()
         if self.current_proc:
             await self.force_kill_process_tree(
                 self.current_proc,
@@ -1990,6 +2209,10 @@ class HERAdapter(BaseBackend):
             await on_stream_event(StreamEvent(kind=KIND_PROGRESS, summary="HER task started"))
 
         habit_config = self._habit_meditation_config()
+        # HASHI request IDs intentionally remain restart-local. Give each HER
+        # execution its own durable Meditation identity so a reused req-0001
+        # cannot collide with a journal left by an earlier runtime.
+        meditation_job_id = uuid.uuid4().hex if habit_config.enabled else None
         task_prompt = prompt
         selected_habit_ids: list[str] = []
         if habit_config.enabled:
@@ -2024,19 +2247,51 @@ class HERAdapter(BaseBackend):
                     request_id=request_id,
                     on_stream_event=on_stream_event,
                 )
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
             if self.current_proc:
                 await self.force_kill_process_tree(
                     self.current_proc,
                     logger=self.logger,
                     reason=f"cancelled:{request_id}",
                 )
+            if habit_config.enabled:
+                self._schedule_habit_meditation(
+                    job_id=meditation_job_id,
+                    request_id=request_id,
+                    task_prompt=prompt,
+                    task_result=self._habit_failure_result(exc, started=started),
+                    config=habit_config,
+                )
             raise
         except ClawTimeoutError as exc:
+            if habit_config.enabled:
+                self._schedule_habit_meditation(
+                    job_id=meditation_job_id,
+                    request_id=request_id,
+                    task_prompt=prompt,
+                    task_result=self._habit_failure_result(exc, started=started),
+                    config=habit_config,
+                )
             return BackendResponse(text="", duration_ms=self._duration_ms(started), error=str(exc), is_success=False)
         except ClawCommandError as exc:
+            if habit_config.enabled:
+                self._schedule_habit_meditation(
+                    job_id=meditation_job_id,
+                    request_id=request_id,
+                    task_prompt=prompt,
+                    task_result=self._habit_failure_result(exc, started=started),
+                    config=habit_config,
+                )
             return BackendResponse(text="", duration_ms=self._duration_ms(started), error=str(exc), is_success=False)
         except (ClawError, ValueError) as exc:
+            if habit_config.enabled:
+                self._schedule_habit_meditation(
+                    job_id=meditation_job_id,
+                    request_id=request_id,
+                    task_prompt=prompt,
+                    task_result=self._habit_failure_result(exc, started=started),
+                    config=habit_config,
+                )
             return BackendResponse(text="", duration_ms=self._duration_ms(started), error=str(exc), is_success=False)
 
         if on_stream_event is not None:
@@ -2102,6 +2357,7 @@ class HERAdapter(BaseBackend):
             )
         if habit_config.enabled:
             self._schedule_habit_meditation(
+                job_id=meditation_job_id,
                 request_id=request_id,
                 task_prompt=prompt,
                 task_result=result,
@@ -2259,6 +2515,13 @@ class HERAdapter(BaseBackend):
             if self._supports_stream_json
             else (_parse_json_output(output, command=command) if output else {})
         )
+        protocol_non_json_line_count = int(parsed.get("_protocol_non_json_line_count") or 0)
+        if protocol_non_json_line_count:
+            self.logger.warning(
+                "HER stream completed with ignored non-JSON diagnostics: request=%s count=%d",
+                request_id,
+                protocol_non_json_line_count,
+            )
         if proc.returncode != 0:
             message = parsed.get("error") if isinstance(parsed, dict) else None
             raise ClawCommandError(

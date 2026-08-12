@@ -9,6 +9,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from orchestrator.command_ui import BACK_LABEL, REFRESH_LABEL, card_title
 from orchestrator.superloop_compiler import SuperloopCompiler
+from orchestrator.superloop_control import SuperloopControlService
 from orchestrator.superloop_issues import SuperloopIssuesService
 from orchestrator.superloop_recording import SuperloopRecordingService
 from orchestrator.superloop_runner import SuperloopRunner
@@ -239,7 +240,7 @@ def _loop_guide_view() -> tuple[str, InlineKeyboardMarkup]:
             "/superloop status <loop_id>",
             "/superloop validate <loop_id>",
             "/superloop next <loop_id>",
-            "/superloop pause <loop_id>",
+            "/superloop pause <loop_id> [--drain|--immediate]",
             "/superloop resume <loop_id>",
             "/superloop closeout <loop_id>",
         ),
@@ -690,18 +691,26 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
 
     if lowered[:1] == ["pause"]:
         if len(parts) < 2:
-            await runtime._reply_text(update, "Usage: /superloop pause <loop_id>")
+            await runtime._reply_text(update, "Usage: /superloop pause <loop_id> [--drain|--immediate]")
             return
         loop_id = parts[1]
+        mode = "immediate" if "--immediate" in lowered[2:] else "drain"
         try:
-            state = store.load_loop_state(loop_id)
+            result = SuperloopControlService(store).pause(
+                loop_id,
+                mode=mode,
+                actor=command_actor,
+                source="command",
+            )
         except FileNotFoundError:
             await runtime._reply_text(update, f"Loop not found: {loop_id}")
             return
-        state["status"] = "paused"
-        store.save_loop_state(loop_id, state)
-        store.append_loop_event(loop_id, event_type="loop.paused", data={"source": "command"}, actor=command_actor)
-        await runtime._reply_text(update, f"⏸ Paused `{loop_id}`", parse_mode="Markdown")
+        drain = "complete" if result["drain_complete"] else "pending"
+        await runtime._reply_text(
+            update,
+            f"⏸ Paused `{loop_id}`\nmode: `{mode}`\ndrain: `{drain}`",
+            parse_mode="Markdown",
+        )
         return
 
     if lowered[:1] == ["resume"]:
@@ -710,13 +719,25 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
             return
         loop_id = parts[1]
         try:
-            state = store.load_loop_state(loop_id)
+            result = SuperloopControlService(store).resume(
+                loop_id,
+                actor=command_actor,
+                source="command",
+            )
         except FileNotFoundError:
             await runtime._reply_text(update, f"Loop not found: {loop_id}")
             return
-        state["status"] = "running"
-        store.save_loop_state(loop_id, state)
-        store.append_loop_event(loop_id, event_type="loop.resumed", data={"source": "command"}, actor=command_actor)
+        if not result.get("ok"):
+            await runtime._reply_text(
+                update,
+                (
+                    f"⛔ Resume blocked for `{loop_id}`\n"
+                    f"reason: `{result.get('reason')}`\n"
+                    f"details: `{json.dumps(result.get('details') or {}, ensure_ascii=False)}`"
+                ),
+                parse_mode="Markdown",
+            )
+            return
         await runtime._reply_text(update, f"▶ Resumed `{loop_id}`", parse_mode="Markdown")
         return
 

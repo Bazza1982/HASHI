@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from orchestrator import runtime_control
+from orchestrator import runtime_control, runtime_retry
 from orchestrator.runtime_command_binding import BOT_COMMAND_BINDINGS, COMMAND_BINDINGS
 
 
@@ -215,6 +215,53 @@ def test_mark_and_consume_user_interrupt_matches_request():
     assert runtime_control.peek_user_interrupt(runtime, "req-other") is None
     assert runtime_control.consume_user_interrupt(runtime, "req-1") == "user_stop"
     assert runtime_control.consume_user_interrupt(runtime, "req-1") is None
+
+
+@pytest.mark.asyncio
+async def test_cmd_stop_persists_active_task_before_killing_backend(tmp_path):
+    replies: list[str] = []
+    shutdown = AsyncMock()
+
+    async def _reply(_update, text, **_kwargs):
+        replies.append(text)
+
+    runtime = SimpleNamespace(
+        name="ajiao",
+        workspace_dir=tmp_path,
+        logger=SimpleNamespace(warning=lambda *a, **k: None),
+        config=SimpleNamespace(active_backend="her", engine="her"),
+        queue=asyncio.Queue(),
+        backend_manager=SimpleNamespace(current_backend=SimpleNamespace(shutdown=shutdown)),
+        current_request_meta={
+            "request_id": "req-health",
+            "chat_id": 42,
+            "prompt": "Research common illnesses and write a detailed report",
+            "source": "text",
+            "summary": "Health report",
+        },
+        last_prompt=None,
+        is_generating=True,
+        _is_authorized_user=lambda _uid: True,
+        _reply_text=_reply,
+        _notify_right_brain_interrupted=lambda *a, **k: None,
+    )
+    message = SimpleNamespace(text="/stop", chat=SimpleNamespace(id=42))
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=1),
+        effective_chat=SimpleNamespace(id=42),
+        effective_message=message,
+        message=message,
+    )
+
+    await runtime_control.cmd_stop(runtime, update, SimpleNamespace(args=[]))
+
+    shutdown.assert_awaited_once()
+    saved = runtime_retry.capture_interrupted_task(runtime)
+    assert saved is not None
+    assert saved.request_id == "req-health"
+    assert saved.prompt == "Research common illnesses and write a detailed report"
+    assert "send “continue”" in replies[0]
+    assert runtime._user_interrupt["reason"] == "user_stop"
 
 
 @pytest.mark.asyncio

@@ -331,7 +331,11 @@ class XaiApiAdapter(OpenRouterAdapter):
                     reasoning_chunks.append(reasoning_delta)
                     if on_stream_event:
                         await on_stream_event(
-                            StreamEvent(kind=KIND_THINKING, summary=reasoning_delta[:400])
+                            StreamEvent(
+                                kind=KIND_THINKING,
+                                summary=reasoning_delta[:400],
+                                raw_delta=reasoning_delta,
+                            )
                         )
 
                 content = delta.get("content", "")

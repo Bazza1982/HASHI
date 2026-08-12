@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "loop_id": "{{LOOP_ID}}",
+  "campaign_id": "{{CAMPAIGN_ID}}",
+  "work_item_id": "{{WORK_ITEM_ID}}",
+  "attempt_id": "{{ATTEMPT_ID}}",
+  "status": "planned",
+  "packet": {
+    "stage": null,
+    "provider": null,
+    "model": null,
+    "mode": null,
+    "effort": null,
+    "wave": null,
+    "scenario": null,
+    "presentation": null,
+    "candidate_sha256": null
+  },
+  "dispatch": {
+    "controller_agent": "lin_yueru",
+    "worker_agent": "ajiao",
+    "dispatch_ref": null,
+    "expected_receipt": null,
+    "dispatched_at": null,
+    "worker_status": "not_dispatched",
+    "last_progress_at": null,
+    "last_monitor_observation_at": null,
+    "follow_up_after": null,
+    "follow_up_count": 0,
+    "follow_up_refs": [],
+    "terminal_receipt_ref": null
+  },
+  "nudge_observations": [],
+  "evidence": {
+    "run_manifest": null,
+    "verdict": null,
+    "provider_trace": null,
+    "her_events": null,
+    "hashi_events": null,
+    "tool_audit": null,
+    "delivery_transcript": null,
+    "workspace_manifest": null,
+    "acceptance_log": null
+  },
+  "classification": {
+    "result_class": null,
+    "first_failing_event": null,
+    "verified_by_controller": false,
+    "classified_at": null
+  },
+  "failure_cycle": {
+    "journal_entry_id": null,
+    "journal_opened_before_product_repair": null,
+    "regression_test_refs": [],
+    "repair_refs": [],
+    "rebuilt_candidate_sha256": null,
+    "exact_retest_attempt_ids": [],
+    "blast_radius_retest_attempt_ids": [],
+    "journal_fix_documentation_complete": null
+  },
+  "controller_decision": {
+    "next_action": null,
+    "next_check_at": null,
+    "campaign_terminal": false,
+    "terminal_reason": null
+  }
+}

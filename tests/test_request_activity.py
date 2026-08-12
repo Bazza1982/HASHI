@@ -57,6 +57,33 @@ def test_request_activity_poll_uses_sequence_cursor() -> None:
     assert result["latest_sequence"] == 2
 
 
+def test_request_activity_clamps_regressing_timestamps_to_sequence_order() -> None:
+    store = RequestActivityStore(max_requests=8, max_events_per_request=32)
+    store.start("req-clock-step", source="api", created_at=10.0)
+    store.mark_running("req-clock-step", timestamp=11.0)
+    store.publish_stream(
+        "req-clock-step",
+        SimpleNamespace(kind="progress", summary="first", timestamp=12.0),
+    )
+    store.publish_stream(
+        "req-clock-step",
+        SimpleNamespace(kind="progress", summary="second", timestamp=11.0),
+    )
+    store.complete("req-clock-step", success=True, timestamp=9.0)
+
+    result = store.poll("req-clock-step")
+
+    assert [event["timestamp"] for event in result["events"]] == [
+        10.0,
+        11.0,
+        12.0,
+        12.0,
+        12.0,
+    ]
+    assert result["started_at"] == 11.0
+    assert result["completed_at"] == 12.0
+
+
 def test_request_activity_redacts_credentials_but_preserves_verbose_detail() -> None:
     store = RequestActivityStore(max_requests=8, max_events_per_request=32)
     store.start("req-0003")

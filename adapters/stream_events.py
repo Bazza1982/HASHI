@@ -47,6 +47,7 @@ class StreamEvent:
     current: float | None = None     # optional real progress numerator
     total: float | None = None       # optional real progress denominator
     unit: str = ""                   # e.g. pages, files, images
+    raw_delta: str = ""             # exact provider delta; concatenate verbatim when present
 
 
 # Callback signature accepted by generate_response().

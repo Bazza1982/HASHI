@@ -1,7 +1,7 @@
 import json
 import logging
 from pathlib import Path
-from typing import Optional, Any
+from typing import Any, Optional
 
 from adapters.timeout_policy import (
     HARD_TIMEOUT_KEY,
@@ -18,7 +18,7 @@ from orchestrator.backend_timeout import (
     read_timeout_override,
     set_timeout_override,
 )
-from orchestrator.config import FlexibleAgentConfig, GlobalConfig, AgentConfig
+from orchestrator.config import AgentConfig, FlexibleAgentConfig, GlobalConfig
 from orchestrator.flexible_backend_registry import (
     canonical_backend_engine,
     get_available_models,
@@ -31,8 +31,9 @@ from orchestrator.privacy_levels import (
     require_backend_compatibility,
     require_level_available,
 )
-from orchestrator.workzone import access_root_for_workzone
 from orchestrator.workspace_state import WorkspaceStateStore
+from orchestrator.workzone import access_root_for_workzone
+
 
 class FlexibleBackendManager:
     def __init__(self, config: FlexibleAgentConfig, global_config: GlobalConfig, secrets: dict):
@@ -596,6 +597,19 @@ class FlexibleBackendManager:
             target_model=target_model,
             apply_persisted_timeout=False,
         )
+        if engine == "her":
+            # One-shot internal sidecars are not agent runs. Keep globally
+            # enabled Habit planning/Meditation out of health probes, wrapper
+            # helpers, and other ephemeral HER invocations.
+            extra = dict(adapter_cfg.extra or {})
+            habit_config = extra.get("habit_meditation")
+            habit_config = (
+                dict(habit_config) if isinstance(habit_config, dict) else {}
+            )
+            habit_config["enabled"] = False
+            extra["habit_meditation"] = habit_config
+            extra["habit_learning_eligible"] = False
+            adapter_cfg.extra = extra
         self._attach_runtime_context(adapter_cfg)
         from adapters.registry import get_backend_class
 

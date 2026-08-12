@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
+import logging
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from adapters.base import BaseBackend, BackendCapabilities, BackendResponse
+from adapters.base import BackendCapabilities, BackendResponse, BaseBackend
 from adapters.timeout_policy import (
     BACKEND_CONFIG_SOURCE,
     HARD_TIMEOUT_KEY,
@@ -14,10 +15,11 @@ from adapters.timeout_policy import (
     TIMEOUT_POLICY_META_KEY,
     USER_OVERRIDE_SOURCE,
 )
+from orchestrator.audit_mode import load_audit_config
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
+from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.privacy_levels import PrivacyLevel
-from orchestrator.audit_mode import load_audit_config
 from orchestrator.wrapper_mode import load_wrapper_config
 
 
@@ -658,6 +660,30 @@ def test_create_ephemeral_backend_does_not_replace_current_backend(tmp_path, mon
     assert manager.config.active_backend == original_active
 
 
+def test_ephemeral_her_backend_cannot_enable_habit_learning(tmp_path, monkeypatch):
+    import adapters.registry
+
+    class FakeBackend:
+        def __init__(self, config, global_config, api_key):
+            self.config = config
+
+    monkeypatch.setattr(adapters.registry, "get_backend_class", lambda engine: FakeBackend)
+    workspace = tmp_path / "agent"
+    manager = _make_manager(workspace)
+    manager.config.allowed_backends.append(
+        {
+            "engine": "her",
+            "model": "deepseek/test",
+            "habit_meditation": {"enabled": True},
+        }
+    )
+
+    backend = manager.create_ephemeral_backend("her", target_model="deepseek/test")
+
+    assert backend.config.extra["habit_meditation"]["enabled"] is False
+    assert backend.config.extra["habit_learning_eligible"] is False
+
+
 @pytest.mark.asyncio
 async def test_generate_ephemeral_response_shuts_down_and_preserves_active_backend(tmp_path, monkeypatch):
     import adapters.registry
@@ -729,3 +755,56 @@ def test_wrapper_config_survives_manager_reload_and_unrelated_state_saves(tmp_pa
     assert cfg.wrapper_model == "claude-haiku-4-5"
     assert cfg.context_window == 5
     assert state["wrapper_slots"] == {"1": "Be gentle."}
+
+
+def test_flexible_runtime_persists_her_backend_events(tmp_path):
+    agent_name = "habit-log-regression"
+    runtime_loggers = [
+        logging.getLogger(f"FlexRuntime.{agent_name}"),
+        logging.getLogger(f"FlexRuntime.{agent_name}.telegram"),
+        logging.getLogger(f"FlexRuntime.{agent_name}.messages"),
+        logging.getLogger(f"FlexRuntime.{agent_name}.errors"),
+        logging.getLogger(f"FlexRuntime.{agent_name}.maintenance"),
+    ]
+    backend_logger = logging.getLogger(f"Backend.HER.{agent_name}")
+    all_loggers = [*runtime_loggers, backend_logger]
+    for logger in all_loggers:
+        logger.handlers.clear()
+        logger.setLevel(logging.NOTSET)
+        logger.propagate = True
+
+    runtime = SimpleNamespace(
+        name=agent_name,
+        session_dir=tmp_path,
+        logger=runtime_loggers[0],
+        telegram_logger=runtime_loggers[1],
+        message_logger=runtime_loggers[2],
+        error_logger=runtime_loggers[3],
+        maintenance_logger=runtime_loggers[4],
+    )
+    messages = [
+        "HER Habit planning: request=req-0001 matched=1 ids=seeded effort=low",
+        "HER Habit Meditation queued: request=req-0001 job=job-0001",
+        "HER Habit Meditation completed: job=job-0001 actions=0 outcomes=no-change",
+    ]
+    try:
+        FlexibleAgentRuntime._setup_logging(runtime)
+        for message in messages:
+            backend_logger.info(message)
+        for handler in runtime.logger.handlers:
+            handler.flush()
+
+        events = (tmp_path / "events.log").read_text(encoding="utf-8")
+        assert all(events.count(message) == 1 for message in messages)
+    finally:
+        handlers = {
+            id(handler): handler
+            for logger in all_loggers
+            for handler in logger.handlers
+        }
+        for logger in all_loggers:
+            logger.handlers.clear()
+            logger.setLevel(logging.NOTSET)
+            logger.propagate = True
+        for handler in handlers.values():
+            handler.close()

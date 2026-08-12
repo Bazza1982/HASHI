@@ -341,3 +341,43 @@ async def test_verbose_and_think_receive_disjoint_event_classes():
     assert verbose_event.kind == KIND_PROGRESS
     assert verbose_queue.empty()
     assert think_buffer == ["r" * 160, commentary]
+
+
+@pytest.mark.asyncio
+async def test_thinking_deltas_preserve_exact_provider_spacing():
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.config = SimpleNamespace(active_backend="her")
+    runtime.logger = SimpleNamespace(debug=lambda _message: None)
+    runtime._thinking_chars_this_req = 0
+    runtime._openrouter_think_chunk = ""
+    runtime._last_openrouter_think_snippet = None
+    think_buffer = []
+    callback = FlexibleAgentRuntime._make_stream_callback(
+        runtime,
+        think_buffer=think_buffer,
+    )
+    fragments = [
+        "A",
+        " EST",
+        " and was flag",
+        "ged as miss",
+        "ed by ~",
+        " 2",
+        ".",
+        "5 hours, so sun",
+        "ny.",
+    ]
+
+    for fragment in fragments:
+        await callback(
+            StreamEvent(
+                kind=KIND_THINKING,
+                summary=fragment[:400],
+                raw_delta=fragment,
+            )
+        )
+
+    assert think_buffer == []
+    assert runtime._openrouter_think_chunk == (
+        "A EST and was flagged as missed by ~ 2.5 hours, so sunny."
+    )

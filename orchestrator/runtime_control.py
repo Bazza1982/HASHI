@@ -283,7 +283,15 @@ async def cmd_stop(runtime: Any, update: Any, context: Any) -> None:
     )
     # Mark before kill so the pipeline can suppress the expected non-zero exit
     # (e.g. Grok CLI code -9 / SIGKILL) instead of showing ❌ Backend error.
-    if _agent_is_busy(runtime):
+    busy = _agent_is_busy(runtime)
+    interrupted_task = None
+    if busy:
+        interrupted_task = runtime_retry.remember_interrupted_task(
+            runtime,
+            getattr(runtime, "current_request_meta", None),
+            backend=str(active or ""),
+            reason="user_stop",
+        )
         mark_user_interrupt(runtime, "user_stop")
     await _shutdown_active_backend(runtime)
     await _notify_interrupted(
@@ -295,9 +303,15 @@ async def cmd_stop(runtime: Any, update: Any, context: Any) -> None:
 
     dropped = await _clear_request_queue(runtime)
 
+    continuation_note = (
+        " The unfinished task was saved; send “continue” or “继续” to resume it."
+        if interrupted_task is not None
+        else ""
+    )
     await runtime._reply_text(
         update,
-        f"Stopped execution. Cleared {dropped} queued messages and killed active backend process tree.",
+        f"Stopped execution. Cleared {dropped} queued messages and killed active backend process tree."
+        f"{continuation_note}",
     )
 
 

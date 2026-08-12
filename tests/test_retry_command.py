@@ -220,6 +220,126 @@ def test_internal_retry_handoff_never_replaces_user_retry_or_resend_state(tmp_pa
     assert runtime_retry.capture_resend_output(runtime).text == "Previous visible output"
 
 
+def test_interrupted_task_survives_restart_and_last_prompt_overwrite(tmp_path):
+    runtime = SimpleNamespace(workspace_dir=tmp_path, logger=_Logger())
+    original = {
+        "request_id": "req-research",
+        "chat_id": 42,
+        "prompt": "Research common illnesses in middle-aged men and write a detailed report",
+        "source": "text",
+        "summary": "Health research",
+    }
+
+    saved = runtime_retry.remember_interrupted_task(
+        runtime,
+        original,
+        backend="her",
+    )
+    runtime_retry.remember_retryable_prompt(
+        runtime,
+        SimpleNamespace(
+            request_id="req-continue",
+            chat_id=42,
+            prompt="You can continue now",
+            source="text",
+            summary="Continue",
+            silent=False,
+        ),
+    )
+
+    restarted = SimpleNamespace(workspace_dir=tmp_path, logger=_Logger())
+    recovered = runtime_retry.capture_interrupted_task(restarted)
+
+    assert saved is not None
+    assert recovered is not None
+    assert recovered.prompt == original["prompt"]
+    assert recovered.request_id == "req-research"
+    assert recovered.backend == "her"
+    state = json.loads(runtime_retry.retry_state_path(runtime).read_text(encoding="utf-8"))
+    assert state["last_prompt"]["prompt"] == "You can continue now"
+    assert state["unfinished_task"]["prompt"] == original["prompt"]
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "You can continue now",
+        "please resume",
+        "pick up where you left off",
+        "继续",
+        "可以继续了",
+        "从刚才停下的地方继续",
+    ],
+)
+def test_explicit_continuation_phrases_are_recognized(prompt):
+    assert runtime_retry.is_explicit_continuation(prompt) is True
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "Continue using PostgreSQL for the new service",
+        "Write a new report",
+        "/retry",
+        "The work can continue after approval",
+    ],
+)
+def test_unrelated_prompts_do_not_resume_interrupted_task(prompt):
+    assert runtime_retry.is_explicit_continuation(prompt) is False
+
+
+def test_repeated_stop_of_continuation_keeps_original_task_and_success_clears_it(tmp_path):
+    runtime = SimpleNamespace(workspace_dir=tmp_path, logger=_Logger(), current_request_meta={})
+    original = runtime_retry.remember_interrupted_task(
+        runtime,
+        {
+            "request_id": "req-original",
+            "chat_id": 42,
+            "prompt": "Complete the original implementation",
+            "source": "text",
+            "summary": "Implementation",
+        },
+        backend="her",
+    )
+    item = SimpleNamespace(
+        request_id="req-continue",
+        chat_id=42,
+        prompt="You can continue now",
+        source="text",
+        summary="Continue",
+        silent=False,
+    )
+    prepared = runtime_retry.prepare_interrupted_task_continuation(
+        runtime,
+        item,
+        item.prompt,
+        backend="her",
+    )
+    runtime.current_request_meta = {
+        "request_id": item.request_id,
+        "prompt": item.prompt,
+        "source": item.source,
+        "summary": item.summary,
+        "resumed_interrupted_task": item._resumed_interrupted_task,
+    }
+
+    saved_again = runtime_retry.remember_interrupted_task(
+        runtime,
+        runtime.current_request_meta,
+        backend="her",
+    )
+
+    assert original is not None
+    assert "Complete the original implementation" in prepared
+    assert saved_again is not None
+    assert saved_again.request_id == "req-original"
+    assert saved_again.prompt == "Complete the original implementation"
+    assert runtime_retry.clear_completed_interrupted_task(runtime, item) is True
+    assert runtime_retry.capture_interrupted_task(runtime) is None
+    state = json.loads(runtime_retry.retry_state_path(runtime).read_text(encoding="utf-8"))
+    assert "unfinished_task" not in state
+
+
 @pytest.mark.asyncio
 async def test_resend_replays_exact_output_in_current_chat_without_model_work(tmp_path):
     runtime, replies, enqueued, _store, _backend = _runtime(

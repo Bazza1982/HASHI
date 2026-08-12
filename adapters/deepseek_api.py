@@ -128,10 +128,15 @@ class DeepSeekAdapter(OpenRouterAdapter):
                 reasoning_delta = str(delta.get("reasoning_content") or "")
                 if reasoning_delta:
                     reasoning_chunks.append(reasoning_delta)
-                reasoning_text = reasoning_delta.strip()
-                if reasoning_text and on_stream_event:
+                if reasoning_delta and on_stream_event:
                     asyncio.create_task(
-                        on_stream_event(StreamEvent(kind=KIND_THINKING, summary=reasoning_text[:400]))
+                        on_stream_event(
+                            StreamEvent(
+                                kind=KIND_THINKING,
+                                summary=reasoning_delta[:400],
+                                raw_delta=reasoning_delta,
+                            )
+                        )
                     )
 
                 content = delta.get("content", "")

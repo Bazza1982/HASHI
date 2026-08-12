@@ -79,6 +79,9 @@ deployment validation continues.
 - [HASHI_VOICE_BRIDGE_PLAN.md](HASHI_VOICE_BRIDGE_PLAN.md) — local-first voice runtime plan for the WhatsApp Desktop call bridge and future provider transports
 - [HER_TOOL_GATEWAY_TELEMETRY_PLAN.md](HER_TOOL_GATEWAY_TELEMETRY_PLAN.md) — long-term HER packaging, Tool Gateway/MCP, and structured thinking/token telemetry plan
 - [HER_CODE_MODULE_PLAN.md](HER_CODE_MODULE_PLAN.md) — HER module packaging notes, upstream Claw runtime expectations, and local release-binary evidence
+- [HER_COMPREHENSIVE_TEST_PLAN.md](HER_COMPREHENSIVE_TEST_PLAN.md) — full HER × DeepSeek certification matrix across providers, models, modes, efforts, streaming, continuity, and exit paths
+- [HER_bug_journal.md](HER_bug_journal.md) — permanent HER defect and regression record, seeded with the known 2026-08-11 failures
+- [HER Debug Superloop template](../superloops/templates/her_debug/README.md) — two-stage Flash-before-Pro test/fix/retest controller with Lin Yueru-owned `/nudge` liveness and strict no-fallback gates
 
 ### Nagare Flow System (v2.1)
 - [NAGARE_FLOW_SYSTEM.md](NAGARE_FLOW_SYSTEM.md) — Complete technical reference for the multi-agent workflow orchestration engine

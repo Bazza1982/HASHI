@@ -6,6 +6,7 @@ This module deliberately has no dependency on HASHI's orchestration skills.
 Habit scope is implicit in the owning agent workspace.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -20,7 +21,9 @@ from pathlib import Path
 from typing import Any
 
 HABIT_FORMAT = "her-habit-v1"
+MEDITATION_JOB_FORMAT = "her-habit-meditation-job-v1"
 HABIT_MEDITATION_ENV = "HASHI_HER_HABIT_MEDITATION"
+MAX_MEDITATION_ATTEMPTS = 3
 # HER requires at least one valid name when --allowedTools is present. Keep the
 # Meditation subprocess read-only and expose only the least-capable standard
 # filesystem tool; the prompt still instructs the model not to call it.
@@ -30,6 +33,28 @@ _HABIT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,79}$")
 _LATIN_TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9_.:/\\-]*", re.IGNORECASE)
 _CJK_RUN_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]+")
 _CURRENT_REQUEST_MARKER = "--- CURRENT USER REQUEST — AUTHORITATIVE ---"
+_VALID_JOB_STATUSES = frozenset(
+    {"pending", "running", "applying", "completed", "no_change", "failed"}
+)
+_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}"),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b"),
+    re.compile(r"\b\d{6,12}:[A-Za-z0-9_-]{24,}\b"),
+    re.compile(
+        r"(?i)(?:password|passwd|api[_ -]?key|token|secret|authorization|cookie|"
+        r"private[_ -]?key)\s*[:=]\s*[^\s,;]+"
+    ),
+    re.compile(
+        r"(?i)[?&](?:access_token|refresh_token|token|key|secret|signature)=[^&#\s]+"
+    ),
+)
+_REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (_SECRET_PATTERNS[0], "Bearer [REDACTED]"),
+    (_SECRET_PATTERNS[1], "[REDACTED_API_KEY]"),
+    (_SECRET_PATTERNS[2], "[REDACTED_BOT_TOKEN]"),
+    (_SECRET_PATTERNS[3], "[REDACTED_SECRET]"),
+    (_SECRET_PATTERNS[4], "[REDACTED_SECRET_QUERY]"),
+)
 _STOPWORDS = {
     "a",
     "an",
@@ -55,6 +80,10 @@ _STOPWORDS = {
     "you",
     "your",
 }
+
+
+class MeditationValidationError(ValueError):
+    """Raised when Meditation output violates the closed write contract."""
 
 
 def _utc_now() -> str:
@@ -143,6 +172,8 @@ class HabitMeditationConfig:
         enabled = _parse_bool(merged.get("enabled"), default=False)
         if HABIT_MEDITATION_ENV in env:
             enabled = _parse_bool(env.get(HABIT_MEDITATION_ENV), default=enabled)
+        if extra.get("habit_learning_eligible") is False:
+            enabled = False
 
         return cls(
             enabled=enabled,
@@ -222,6 +253,70 @@ def _clean_text(value: Any, *, limit: int) -> str:
     return text[:limit].rstrip()
 
 
+def contains_secret_like_text(value: Any) -> bool:
+    """Return whether text resembles one of a few common credential forms.
+
+    This is deliberately a narrow leakage guard, not a claim that arbitrary
+    natural-language Habit content can be made safe with deterministic rules.
+    """
+
+    text = str(value or "")
+    return any(pattern.search(text) for pattern in _SECRET_PATTERNS)
+
+
+def redact_bounded_text(value: Any, *, limit: int) -> str:
+    text = str(value or "").replace("\x00", "")
+    for pattern, replacement in _REDACTIONS:
+        text = pattern.sub(replacement, text)
+    if len(text) > limit:
+        text = text[: max(0, limit - 1)].rstrip() + "…"
+    return text
+
+
+def _validated_action_text(
+    value: Any,
+    *,
+    field: str,
+    limit: int,
+    required: bool = True,
+) -> str:
+    if not isinstance(value, str):
+        raise MeditationValidationError(f"{field} must be a string")
+    text = _clean_text(value, limit=limit + 1)
+    if required and not text:
+        raise MeditationValidationError(f"{field} must not be empty")
+    if len(text) > limit:
+        raise MeditationValidationError(f"{field} exceeds {limit} characters")
+    if contains_secret_like_text(text):
+        raise MeditationValidationError(f"{field} contains secret-like content")
+    return text
+
+
+def _atomic_write_json(destination: Path, payload: Mapping[str, Any]) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(
+        prefix=f".{destination.stem}-",
+        suffix=".tmp",
+        dir=destination.parent,
+    )
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(dict(payload), handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+        destination.chmod(0o600)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        Path(temporary).unlink(missing_ok=True)
+        raise
+
+
 def _slug(text: str) -> str:
     normalized = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
     slug = re.sub(r"[^a-z0-9]+", "-", normalized.casefold()).strip("-")
@@ -293,39 +388,61 @@ class HERHabitStore:
         actions: list[Mapping[str, Any]],
         *,
         max_actions: int,
+        idempotency_key: str | None = None,
     ) -> list[str]:
         """Apply Meditation's bounded create/update/delete decisions directly."""
         outcomes: list[str] = []
-        for raw_action in actions[:max_actions]:
+        for index, raw_action in enumerate(actions[:max_actions]):
             operation = str(
                 raw_action.get("operation") or raw_action.get("op") or ""
             ).strip().casefold()
             try:
                 if operation == "create":
-                    habit = self._create(raw_action)
+                    stable_id = None
+                    if idempotency_key:
+                        title = _clean_text(raw_action.get("title"), limit=160)
+                        digest = hashlib.sha256(
+                            f"{idempotency_key}\0{index}\0{title}".encode()
+                        ).hexdigest()[:12]
+                        stable_id = f"{_slug(title)}-{digest}"
+                    habit = self._create(raw_action, habit_id=stable_id)
                     outcomes.append(f"created:{habit.habit_id}")
                 elif operation == "update":
                     habit = self._update(raw_action)
                     outcomes.append(f"updated:{habit.habit_id}")
                 elif operation in {"delete", "remove"}:
-                    habit_id = self._archive(raw_action)
+                    habit_id = self._archive(
+                        raw_action,
+                        allow_already_archived=bool(idempotency_key),
+                    )
                     outcomes.append(f"deleted:{habit_id}")
                 else:
                     raise ValueError(f"unsupported operation: {operation or '<empty>'}")
-            except Exception as exc:  # noqa: BLE001 - invalid model action is ignored safely
+            except (ValueError, FileNotFoundError, FileExistsError) as exc:
                 outcomes.append(f"ignored:{operation or 'unknown'}:{type(exc).__name__}")
                 if self.logger is not None:
-                    self.logger.warning("Ignored invalid HER habit action %r: %s", raw_action, exc)
+                    self.logger.warning(
+                        "Ignored invalid HER habit action: operation=%s error=%s",
+                        operation or "unknown",
+                        type(exc).__name__,
+                    )
         return outcomes
 
-    def _create(self, action: Mapping[str, Any]) -> HERHabit:
+    def _create(
+        self,
+        action: Mapping[str, Any],
+        *,
+        habit_id: str | None = None,
+    ) -> HERHabit:
         now = _utc_now()
-        title = _clean_text(action.get("title"), limit=160)
-        metadata = _clean_text(action.get("metadata"), limit=2_000)
-        body = _clean_text(action.get("body"), limit=8_000)
-        if not title or not metadata or not body:
-            raise ValueError("create requires title, metadata, and body")
-        habit_id = f"{_slug(title)}-{uuid.uuid4().hex[:8]}"
+        title = _validated_action_text(action.get("title"), field="title", limit=160)
+        metadata = _validated_action_text(
+            action.get("metadata"),
+            field="metadata",
+            limit=2_000,
+        )
+        body = _validated_action_text(action.get("body"), field="body", limit=8_000)
+        habit_id = habit_id or f"{_slug(title)}-{uuid.uuid4().hex[:8]}"
         habit = HERHabit(
             habit_id=habit_id,
             title=title,
@@ -334,6 +451,17 @@ class HERHabitStore:
             created_at=now,
             updated_at=now,
         )
+        destination = self.root / f"{habit.habit_id}.json"
+        if destination.is_file():
+            payload = json.loads(destination.read_text(encoding="utf-8"))
+            existing = HERHabit.from_payload(payload)
+            if (
+                existing.title,
+                existing.metadata,
+                existing.body,
+            ) == (habit.title, habit.metadata, habit.body):
+                return existing
+            raise FileExistsError(habit.habit_id)
         self._write(habit)
         return habit
 
@@ -344,23 +472,45 @@ class HERHabitStore:
         existing = next((habit for habit in self.load() if habit.habit_id == habit_id), None)
         if existing is None:
             raise FileNotFoundError(habit_id)
+        title = existing.title
+        metadata = existing.metadata
+        body = existing.body
+        if "title" in action:
+            title = _validated_action_text(action.get("title"), field="title", limit=160)
+        if "metadata" in action:
+            metadata = _validated_action_text(
+                action.get("metadata"),
+                field="metadata",
+                limit=2_000,
+            )
+        if "body" in action:
+            body = _validated_action_text(action.get("body"), field="body", limit=8_000)
         habit = HERHabit(
             habit_id=existing.habit_id,
-            title=_clean_text(action.get("title"), limit=160) or existing.title,
-            metadata=_clean_text(action.get("metadata"), limit=2_000) or existing.metadata,
-            body=_clean_text(action.get("body"), limit=8_000) or existing.body,
+            title=title,
+            metadata=metadata,
+            body=body,
             created_at=existing.created_at,
             updated_at=_utc_now(),
         )
         self._write(habit)
         return habit
 
-    def _archive(self, action: Mapping[str, Any]) -> str:
+    def _archive(
+        self,
+        action: Mapping[str, Any],
+        *,
+        allow_already_archived: bool = False,
+    ) -> str:
         habit_id = str(action.get("habit_id") or action.get("id") or "").strip().casefold()
         if not _HABIT_ID_RE.fullmatch(habit_id):
             raise ValueError("delete requires a valid habit_id")
         source = self.root / f"{habit_id}.json"
         if not source.is_file():
+            if allow_already_archived and any(
+                self.archive_root.glob(f"{habit_id}.*.json")
+            ):
+                return habit_id
             raise FileNotFoundError(habit_id)
         self.archive_root.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -368,25 +518,231 @@ class HERHabitStore:
         return habit_id
 
     def _write(self, habit: HERHabit) -> None:
-        self.root.mkdir(parents=True, exist_ok=True)
         destination = self.root / f"{habit.habit_id}.json"
-        fd, temporary = tempfile.mkstemp(prefix=".habit-", suffix=".json", dir=self.root)
+        _atomic_write_json(destination, habit.to_payload())
+
+
+class HERMeditationJournal:
+    """Durable, agent-local journal for asynchronous Meditation work."""
+
+    def __init__(self, workspace_dir: Path, logger: Any | None = None):
+        self.root = Path(workspace_dir) / "backend_state" / "her_habit_meditation"
+        self.logger = logger
+
+    @staticmethod
+    def legacy_job_id_for(request_id: str) -> str:
+        """Return the pre-execution-ID job identity used by existing journals.
+
+        Legacy files remain readable and recoverable. New HER executions must
+        supply a fresh execution-scoped job ID to :meth:`enqueue` instead of
+        deriving durable identity from HASHI's restart-local request counter.
+        """
+        request = str(request_id or "").strip()
+        if not request:
+            raise ValueError("request_id is required for HER Meditation")
+        return hashlib.sha256(request.encode("utf-8")).hexdigest()[:32]
+
+    # Retain the old helper for callers that need to locate a legacy journal;
+    # enqueue() deliberately no longer calls it.
+    job_id_for = legacy_job_id_for
+
+    def _path(self, job_id: str) -> Path:
+        if not re.fullmatch(r"[a-f0-9]{32}", str(job_id or "")):
+            raise ValueError("invalid HER Meditation job id")
+        return self.root / f"{job_id}.json"
+
+    def _read(self, job_id: str) -> dict[str, Any]:
+        path = self._path(job_id)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise TypeError("HER Meditation job must be an object")
+        if payload.get("format") != MEDITATION_JOB_FORMAT:
+            raise ValueError("unsupported HER Meditation job format")
+        if payload.get("job_id") != job_id:
+            raise ValueError("HER Meditation job identity mismatch")
+        if payload.get("status") not in _VALID_JOB_STATUSES:
+            raise ValueError("invalid HER Meditation job status")
+        attempts = payload.get("attempts")
+        if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 0:
+            raise ValueError("invalid HER Meditation attempt count")
+        return payload
+
+    def _write(self, payload: Mapping[str, Any]) -> None:
+        _atomic_write_json(self._path(str(payload.get("job_id") or "")), payload)
+
+    def enqueue(
+        self,
+        *,
+        job_id: str,
+        request_id: str,
+        prompt: str,
+        max_actions: int,
+    ) -> tuple[str, bool]:
+        job_id = str(job_id or "").strip().casefold()
+        # Validate the execution-scoped identity before any filesystem access.
+        self._path(job_id)
+        normalized_request_id = _clean_text(request_id, limit=240)
+        if not normalized_request_id:
+            raise ValueError("request_id is required for HER Meditation")
+        path = self._path(job_id)
+        if path.is_file():
+            existing = self._read(job_id)
+            if existing.get("request_id") != normalized_request_id:
+                raise ValueError("HER Meditation request identity collision")
+            return job_id, False
+        now = _utc_now()
+        payload = {
+            "format": MEDITATION_JOB_FORMAT,
+            "job_id": job_id,
+            "request_id": normalized_request_id,
+            "status": "pending",
+            "attempts": 0,
+            "max_attempts": MAX_MEDITATION_ATTEMPTS,
+            "max_actions": max_actions,
+            "prompt": redact_bounded_text(prompt, limit=180_000),
+            "actions": None,
+            "outcomes": [],
+            "error_code": None,
+            "error_summary": None,
+            "created_at": now,
+            "updated_at": now,
+        }
+        self._write(payload)
+        return job_id, True
+
+    def get(self, job_id: str) -> dict[str, Any] | None:
         try:
-            os.fchmod(fd, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(habit.to_payload(), handle, ensure_ascii=False, indent=2)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, destination)
-            destination.chmod(0o600)
-        except Exception:
+            return self._read(job_id)
+        except FileNotFoundError:
+            return None
+
+    def pending_jobs(self, *, limit: int = 16) -> list[dict[str, Any]]:
+        if not self.root.is_dir():
+            return []
+        jobs: list[dict[str, Any]] = []
+        for path in sorted(self.root.glob("*.json")):
             try:
-                os.close(fd)
-            except OSError:
-                pass
-            Path(temporary).unlink(missing_ok=True)
-            raise
+                payload = self._read(path.stem)
+            except Exception as exc:  # noqa: BLE001 - one corrupt job must not block HER
+                if self.logger is not None:
+                    self.logger.warning(
+                        "Ignoring invalid HER Meditation job %s: %s",
+                        path,
+                        exc,
+                    )
+                continue
+            if payload["status"] in {"pending", "applying"}:
+                jobs.append(payload)
+        jobs.sort(key=lambda item: (str(item.get("created_at") or ""), item["job_id"]))
+        return jobs[: max(1, limit)]
+
+    def recover_interrupted_jobs(self) -> int:
+        if not self.root.is_dir():
+            return 0
+        recovered = 0
+        for path in sorted(self.root.glob("*.json")):
+            try:
+                payload = self._read(path.stem)
+            except Exception as exc:  # noqa: BLE001 - one corrupt job must not block recovery
+                if self.logger is not None:
+                    self.logger.warning(
+                        "Ignoring invalid HER Meditation recovery job %s: %s",
+                        path,
+                        exc,
+                    )
+                continue
+            if payload["status"] != "running":
+                continue
+            attempts = int(payload["attempts"])
+            if attempts >= MAX_MEDITATION_ATTEMPTS:
+                payload["status"] = "failed"
+                payload["error_code"] = "retry_exhausted"
+                payload["error_summary"] = "Meditation retry limit reached"
+            else:
+                payload["status"] = "pending"
+                payload["error_code"] = "runtime_interrupted"
+                payload["error_summary"] = "Meditation interrupted before completion"
+                recovered += 1
+            payload["updated_at"] = _utc_now()
+            self._write(payload)
+        return recovered
+
+    def claim(self, job_id: str) -> str | None:
+        payload = self._read(job_id)
+        if payload["status"] == "applying":
+            return "apply"
+        if payload["status"] != "pending":
+            return None
+        if int(payload["attempts"]) >= MAX_MEDITATION_ATTEMPTS:
+            payload["status"] = "failed"
+            payload["error_code"] = "retry_exhausted"
+            payload["error_summary"] = "Meditation retry limit reached"
+            payload["updated_at"] = _utc_now()
+            self._write(payload)
+            return None
+        payload["status"] = "running"
+        payload["attempts"] = int(payload["attempts"]) + 1
+        payload["error_code"] = None
+        payload["error_summary"] = None
+        payload["updated_at"] = _utc_now()
+        self._write(payload)
+        return "meditate"
+
+    def store_actions(
+        self,
+        job_id: str,
+        actions: list[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        payload = self._read(job_id)
+        if payload["status"] != "running":
+            raise ValueError("HER Meditation job is not running")
+        payload["actions"] = [dict(action) for action in actions]
+        payload["status"] = "applying"
+        payload["updated_at"] = _utc_now()
+        self._write(payload)
+        return payload
+
+    def mark_pending(self, job_id: str, *, reason: str) -> None:
+        payload = self._read(job_id)
+        if payload["status"] != "running":
+            return
+        if int(payload["attempts"]) >= MAX_MEDITATION_ATTEMPTS:
+            payload["status"] = "failed"
+            payload["error_code"] = "retry_exhausted"
+            payload["error_summary"] = "Meditation retry limit reached"
+        else:
+            payload["status"] = "pending"
+            payload["error_code"] = _clean_text(reason, limit=80) or "interrupted"
+            payload["error_summary"] = _clean_text(reason, limit=500) or "interrupted"
+        payload["updated_at"] = _utc_now()
+        self._write(payload)
+
+    def mark_failed(
+        self,
+        job_id: str,
+        *,
+        error_code: str,
+        error_summary: str,
+    ) -> None:
+        payload = self._read(job_id)
+        if payload["status"] in {"completed", "no_change", "failed"}:
+            return
+        payload["status"] = "failed"
+        payload["error_code"] = _clean_text(error_code, limit=80)
+        payload["error_summary"] = redact_bounded_text(error_summary, limit=500)
+        payload["updated_at"] = _utc_now()
+        self._write(payload)
+
+    def mark_complete(self, job_id: str, outcomes: list[str]) -> None:
+        payload = self._read(job_id)
+        if payload["status"] != "applying":
+            raise ValueError("HER Meditation job has no durable actions to complete")
+        payload["status"] = "completed" if payload.get("actions") else "no_change"
+        payload["outcomes"] = [_clean_text(item, limit=240) for item in outcomes]
+        payload["error_code"] = None
+        payload["error_summary"] = None
+        payload["updated_at"] = _utc_now()
+        self._write(payload)
 
 
 def attach_habits_to_prompt(prompt: str, habits: list[HERHabit]) -> str:
@@ -483,12 +839,16 @@ def build_observable_trace(result: Any, *, max_chars: int) -> str:
     final_text = _clean_text(getattr(result, "text", ""), limit=8_000)
     if final_text:
         entries.append(f"FINAL RESPONSE: {final_text}")
+    stderr = _clean_text(getattr(result, "stderr", ""), limit=4_000)
+    if stderr:
+        entries.append(f"EXECUTION ERROR: {stderr}")
     completion = _clean_text(getattr(result, "completion_status", ""), limit=80)
     stop_reason = _clean_text(getattr(result, "stop_reason", ""), limit=120)
     if completion or stop_reason:
         entries.append(f"TERMINATION: completion={completion or 'unknown'} stop_reason={stop_reason or 'unknown'}")
 
     trace = "\n".join(entries)
+    trace = redact_bounded_text(trace, limit=max(1, len(trace)))
     if len(trace) <= max_chars:
         return trace
     head = max_chars // 3
@@ -504,9 +864,9 @@ def _habit_catalog(habits: list[HERHabit], *, limit: int) -> str:
     for habit in habits:
         block = (
             f"ID: {habit.habit_id}\n"
-            f"Title: {habit.title}\n"
-            f"Metadata: {habit.metadata}\n"
-            f"Body: {habit.body}"
+            f"Title: {redact_bounded_text(habit.title, limit=160)}\n"
+            f"Metadata: {redact_bounded_text(habit.metadata, limit=2_000)}\n"
+            f"Body: {redact_bounded_text(habit.body, limit=8_000)}"
         )
         if used + len(block) > limit:
             blocks.append("...[catalog bounded]...")
@@ -529,7 +889,10 @@ def build_meditation_prompt(
         habits[: config.max_catalog_habits],
         limit=min(60_000, config.max_trace_chars * 2),
     )
-    request = extract_current_request(task_prompt)
+    request = redact_bounded_text(
+        extract_current_request(task_prompt),
+        limit=12_000,
+    )
     return f"""HER HABIT MEDITATION — INTERNAL, NOT USER-VISIBLE
 
 You are the same HER backend model performing a short post-run Meditation for agent {agent_name!r}.
@@ -565,19 +928,90 @@ CURRENT AGENT HABITS
 """
 
 
-def parse_meditation_actions(text: str) -> list[Mapping[str, Any]]:
+def parse_meditation_actions(
+    text: str,
+    *,
+    max_actions: int = 3,
+) -> list[Mapping[str, Any]]:
     candidate = str(text or "").strip()
     if candidate.startswith("```"):
-        candidate = re.sub(r"^```(?:json)?\s*", "", candidate, flags=re.IGNORECASE)
-        candidate = re.sub(r"\s*```$", "", candidate)
-    start = candidate.find("{")
-    end = candidate.rfind("}")
-    if start < 0 or end < start:
-        raise ValueError("Meditation did not return a JSON object")
-    payload = json.loads(candidate[start : end + 1])
-    if not isinstance(payload, Mapping):
-        raise TypeError("Meditation JSON must be an object")
-    actions = payload.get("actions")
+        match = re.fullmatch(
+            r"```(?:json)?\s*(\{.*\})\s*```",
+            candidate,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if match is None:
+            raise MeditationValidationError(
+                "Meditation response must be one JSON object"
+            )
+        candidate = match.group(1).strip()
+    if not candidate or candidate[0] != "{" or candidate[-1] != "}":
+        raise MeditationValidationError("Meditation response must be one JSON object")
+    try:
+        payload = json.loads(candidate)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise MeditationValidationError("Meditation response is not valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise MeditationValidationError("Meditation JSON must be an object")
+    if set(payload) != {"actions"}:
+        raise MeditationValidationError("Meditation JSON supports only the actions field")
+    actions = payload["actions"]
     if not isinstance(actions, list):
-        raise TypeError("Meditation JSON requires an actions list")
-    return [action for action in actions if isinstance(action, Mapping)]
+        raise MeditationValidationError("Meditation JSON requires an actions list")
+    if len(actions) > max_actions:
+        raise MeditationValidationError(
+            f"Meditation actions exceeds the limit of {max_actions}"
+        )
+
+    normalized: list[Mapping[str, Any]] = []
+    for index, raw_action in enumerate(actions):
+        if not isinstance(raw_action, dict):
+            raise MeditationValidationError(f"actions[{index}] must be an object")
+        operation = raw_action.get("operation")
+        if operation not in {"create", "update", "delete"}:
+            raise MeditationValidationError(f"actions[{index}].operation is unsupported")
+        if operation == "create":
+            allowed = {"operation", "title", "metadata", "body"}
+            required = allowed
+        elif operation == "update":
+            allowed = {"operation", "habit_id", "title", "metadata", "body"}
+            required = {"operation", "habit_id"}
+        else:
+            allowed = {"operation", "habit_id"}
+            required = allowed
+        unknown = set(raw_action) - allowed
+        missing = required - set(raw_action)
+        if unknown:
+            raise MeditationValidationError(
+                f"actions[{index}] contains unsupported fields: {', '.join(sorted(unknown))}"
+            )
+        if missing:
+            raise MeditationValidationError(
+                f"actions[{index}] is missing required fields: {', '.join(sorted(missing))}"
+            )
+
+        action: dict[str, Any] = {"operation": operation}
+        if operation in {"update", "delete"}:
+            habit_id = raw_action.get("habit_id")
+            if not isinstance(habit_id, str) or not _HABIT_ID_RE.fullmatch(
+                habit_id.strip().casefold()
+            ):
+                raise MeditationValidationError(
+                    f"actions[{index}].habit_id is invalid"
+                )
+            action["habit_id"] = habit_id.strip().casefold()
+        for field, limit in (("title", 160), ("metadata", 2_000), ("body", 8_000)):
+            if field in raw_action:
+                action[field] = _validated_action_text(
+                    raw_action[field],
+                    field=f"actions[{index}].{field}",
+                    limit=limit,
+                )
+        if operation == "update" and not any(
+            field in action for field in ("title", "metadata", "body")
+        ):
+            raise MeditationValidationError(
+                f"actions[{index}] update contains no content change"
+            )
+        normalized.append(action)
+    return normalized

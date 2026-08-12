@@ -108,11 +108,16 @@ Each agent stores recovery state at:
 <workspace>/state/retry_state.json
 ```
 
-The file has two independent snapshots:
+The file has three independent snapshots:
 
 - `last_prompt`: the most recent retryable request, recorded before model
   execution so a failed or interrupted turn remains recoverable;
 - `last_output`: the most recent successful visible model or Bridge output.
+- `unfinished_task`: the original user task most recently interrupted by `/stop`.
+  A short explicit continuation request such as `continue`, `resume`, or `继续`
+  is wrapped with this task before the next backend call. The snapshot survives
+  process restarts, is not overwritten by the continuation message itself, and
+  is cleared only after that bound continuation succeeds.
 
 Writes use an atomic temporary-file replacement. If the state file is missing
 or unreadable, HASHI falls back to in-memory state and compatible transcript

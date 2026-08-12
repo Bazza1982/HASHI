@@ -130,6 +130,14 @@ class RequestActivityStore:
         sequence = int(record.get("latest_sequence") or 0) + 1
         safe_current = self._safe_progress_value(current)
         safe_total = self._safe_progress_value(total)
+        event_timestamp = float(timestamp if timestamp is not None else time.time())
+        events = list(record.get("events") or [])
+        timestamp_floor = (
+            float(events[-1]["timestamp"])
+            if events
+            else float(record.get("created_at", event_timestamp))
+        )
+        event_timestamp = max(timestamp_floor, event_timestamp)
         event = {
             "sequence": sequence,
             "kind": _safe_text(kind, limit=64) or "progress",
@@ -141,11 +149,11 @@ class RequestActivityStore:
             "current": safe_current,
             "total": safe_total,
             "unit": _safe_text(unit, limit=40),
-            "timestamp": float(timestamp if timestamp is not None else time.time()),
+            "timestamp": event_timestamp,
         }
         record["latest_sequence"] = sequence
         record["events"] = [
-            *list(record.get("events") or []),
+            *events,
             event,
         ][-self.max_events_per_request :]
         return dict(event)
@@ -182,14 +190,14 @@ class RequestActivityStore:
                 return
             now = float(timestamp if timestamp is not None else time.time())
             record["state"] = "running"
-            record["started_at"] = record.get("started_at") or now
-            self._append_unlocked(
+            event = self._append_unlocked(
                 record,
                 kind="started",
                 summary="Working",
                 status="running",
                 timestamp=now,
             )
+            record["started_at"] = record.get("started_at") or event["timestamp"]
 
     def publish_stream(self, request_id: str, event: object) -> None:
         try:
@@ -238,8 +246,7 @@ class RequestActivityStore:
             record["state"] = "completed" if success else "failed"
             record["terminal"] = True
             record["success"] = bool(success)
-            record["completed_at"] = now
-            self._append_unlocked(
+            event = self._append_unlocked(
                 record,
                 kind="completed" if success else "error",
                 summary="Completed" if success else (_safe_text(error, limit=2_000) or "Failed"),
@@ -247,6 +254,7 @@ class RequestActivityStore:
                 status="completed" if success else "failed",
                 timestamp=now,
             )
+            record["completed_at"] = event["timestamp"]
 
     def poll(self, request_id: str, *, after_sequence: int = 0, limit: int = 100) -> dict[str, Any]:
         after = max(0, int(after_sequence))

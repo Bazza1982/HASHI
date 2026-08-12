@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from orchestrator.superloop_runner import SuperloopRunner
@@ -265,3 +266,55 @@ def test_closed_issue_and_wait_statuses_are_contract_terminal_states(tmp_path: P
     assert report["blocking"] is False
     assert report["summary"]["errors"] == 0
     assert not any(item["code"] in {"issue_status_noncontract", "wait_status_noncontract"} for item in report["findings"])
+
+
+def test_validator_reports_state_stats_drift(tmp_path: Path) -> None:
+    store = SuperloopStore(tmp_path / "superloops")
+    _create_loop(store, taskboard=[{"task_id": "task-001", "status": "pending"}])
+    state = store.load_loop_state("sl-test-001")
+    state["stats"] = {"task_total": 99, "task_completed": 99, "issue_open": 0, "wait_open": 0}
+    store.save_loop_state("sl-test-001", state)
+
+    report = validate_loop(store, "sl-test-001")
+
+    assert any(item["code"] == "state_stats_drift" for item in report["findings"])
+
+
+def test_validator_blocks_unclassified_live_attempt_at_closeout(tmp_path: Path) -> None:
+    store = SuperloopStore(tmp_path / "superloops")
+    _create_loop(store, taskboard=[])
+    store.append_loop_event(
+        "sl-test-001",
+        event_type="live_attempt.started",
+        data={"task_id": "task-1", "cell_id": "cell-1", "scenario": "C01", "attempt": 1},
+    )
+
+    report = validate_loop(store, "sl-test-001", closeout=True)
+
+    assert report["blocking"] is True
+    assert any(item["code"] == "live_attempt_unclassified" for item in report["findings"])
+
+
+def test_validator_reports_paused_loop_with_active_schema_v2_dispatch(tmp_path: Path) -> None:
+    store = SuperloopStore(tmp_path / "superloops")
+    _create_loop(store, taskboard=[])
+    state = store.load_loop_state("sl-test-001")
+    state["status"] = "paused"
+    state["active_dispatch_id"] = "dispatch-1"
+    store.save_loop_state("sl-test-001", state)
+    row = {
+        "schema_version": 2,
+        "dispatch_instance_id": "dispatch-1",
+        "dispatch_id": "dispatch-1",
+        "request_id": "req-1",
+        "status": "accepted",
+        "terminal": False,
+    }
+    (store.loop_dir("sl-test-001") / "dispatches.jsonl").write_text(
+        json.dumps(row) + "\n",
+        encoding="utf-8",
+    )
+
+    report = validate_loop(store, "sl-test-001")
+
+    assert any(item["code"] == "terminal_loop_with_active_dispatch" for item in report["findings"])

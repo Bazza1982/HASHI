@@ -75,12 +75,15 @@ def validate_loop(store: SuperloopStore, loop_id: str, *, closeout: bool = False
     issues = _load_json_list(_resolve_json_path(store, loop_id, state, "issues_path", "issues.json"), findings, "issues.json")
     waits = _load_json_list(_resolve_json_path(store, loop_id, state, "waits_path", "waits.json"), findings, "waits.json")
     events = _load_jsonl_list(loop_dir / "events.jsonl", findings, "events.jsonl")
+    dispatches = _load_jsonl_list(loop_dir / "dispatches.jsonl", findings, "dispatches.jsonl")
 
     _validate_state(state, findings, closeout=closeout)
+    _validate_stats(state, tasks, issues, waits, findings, closeout=closeout)
     _validate_tasks(store, loop_id, tasks, findings, closeout=closeout)
     _validate_issues(issues, findings, closeout=closeout)
     _validate_waits(waits, findings, closeout=closeout)
-    _validate_events(events, findings)
+    _validate_events(events, findings, closeout=closeout)
+    _validate_dispatches(state, dispatches, findings, closeout=closeout)
     _validate_closeout_shape(state, tasks, issues, waits, findings, closeout=closeout)
 
     counts = {
@@ -189,6 +192,41 @@ def _validate_state(state: dict[str, Any], findings: list[SuperloopFinding], *, 
         findings.append(SuperloopFinding(severity, "loop_status_noncontract", f"Non-contract loop status: {status}", "state.json"))
     if not state.get("loop_id"):
         findings.append(SuperloopFinding("warn", "loop_id_missing", "state.json has no loop_id.", "state.json"))
+
+
+def _validate_stats(
+    state: dict[str, Any],
+    tasks: list[dict[str, Any]],
+    issues: list[dict[str, Any]],
+    waits: list[dict[str, Any]],
+    findings: list[SuperloopFinding],
+    *,
+    closeout: bool,
+) -> None:
+    stats = state.get("stats")
+    if not isinstance(stats, dict):
+        return
+    actual = {
+        "task_total": len(tasks),
+        "task_completed": sum(task.get("status") == "completed" for task in tasks),
+        "issue_open": sum(issue.get("status") == "open" for issue in issues),
+        "wait_open": sum(wait.get("status") == "pending" for wait in waits),
+    }
+    drift = {
+        key: {"recorded": stats.get(key), "actual": value}
+        for key, value in actual.items()
+        if stats.get(key) != value
+    }
+    if drift:
+        severity = "error" if closeout else "warn"
+        findings.append(
+            SuperloopFinding(
+                severity,
+                "state_stats_drift",
+                f"Persisted loop stats do not match source files: {json.dumps(drift, sort_keys=True)}",
+                "state.json",
+            )
+        )
 
 
 def _validate_tasks(
@@ -453,7 +491,12 @@ def _validate_waits(waits: list[dict[str, Any]], findings: list[SuperloopFinding
             findings.append(SuperloopFinding(severity, "open_wait", "Open wait prevents closeout.", ref))
 
 
-def _validate_events(events: list[dict[str, Any]], findings: list[SuperloopFinding]) -> None:
+def _validate_events(
+    events: list[dict[str, Any]],
+    findings: list[SuperloopFinding],
+    *,
+    closeout: bool,
+) -> None:
     missing_refs: list[str] = []
     for index, event in enumerate(events, start=1):
         actor = event.get("actor")
@@ -472,6 +515,138 @@ def _validate_events(events: list[dict[str, Any]], findings: list[SuperloopFindi
                 "event_actor_missing",
                 f"Event ledger has missing actor attribution: {shown}{suffix}",
                 "events.jsonl",
+            )
+        )
+    _validate_live_attempt_balance(events, findings, closeout=closeout)
+
+
+def _validate_live_attempt_balance(
+    events: list[dict[str, Any]],
+    findings: list[SuperloopFinding],
+    *,
+    closeout: bool,
+) -> None:
+    balances: dict[tuple[Any, ...], int] = {}
+    terminal_kinds = {"live_attempt.completed", "live_attempt.aborted", "live_attempt.failed"}
+    for event in events:
+        kind = str(event.get("kind") or "")
+        if kind != "live_attempt.started" and kind not in terminal_kinds:
+            continue
+        data = event.get("data") if isinstance(event.get("data"), dict) else {}
+        key = (
+            data.get("task_id"),
+            data.get("cell_id"),
+            data.get("scenario"),
+            data.get("repeat"),
+            data.get("attempt"),
+        )
+        balances[key] = balances.get(key, 0) + (1 if kind == "live_attempt.started" else -1)
+    dangling = [(key, count) for key, count in balances.items() if count > 0]
+    orphaned = [(key, -count) for key, count in balances.items() if count < 0]
+    if dangling:
+        severity = "error" if closeout else "warn"
+        findings.append(
+            SuperloopFinding(
+                severity,
+                "live_attempt_unclassified",
+                f"Live attempts started without collected/aborted/failed terminal classification: {sum(value for _, value in dangling)}.",
+                "events.jsonl",
+            )
+        )
+    if orphaned:
+        findings.append(
+            SuperloopFinding(
+                "warn",
+                "live_attempt_terminal_without_start",
+                f"Live attempt terminal classifications have no matching start: {sum(value for _, value in orphaned)}.",
+                "events.jsonl",
+            )
+        )
+
+
+def _validate_dispatches(
+    state: dict[str, Any],
+    dispatches: list[dict[str, Any]],
+    findings: list[SuperloopFinding],
+    *,
+    closeout: bool,
+) -> None:
+    versioned = [row for row in dispatches if row.get("schema_version") == 2]
+    latest: dict[str, dict[str, Any]] = {}
+    started_ids: set[str] = set()
+    for index, row in enumerate(versioned):
+        dispatch_id = str(row.get("dispatch_instance_id") or row.get("dispatch_id") or "").strip()
+        if not dispatch_id:
+            findings.append(
+                SuperloopFinding("warn", "dispatch_id_missing", "Schema-v2 dispatch row has no instance id.", f"dispatches.jsonl:{index + 1}")
+            )
+            continue
+        latest[dispatch_id] = row
+        if row.get("terminal") is False:
+            started_ids.add(dispatch_id)
+        if row.get("terminal") is True:
+            outcome = str(row.get("outcome") or "").lower()
+            if outcome not in {"collected", "aborted", "failed"}:
+                severity = "error" if closeout else "warn"
+                findings.append(
+                    SuperloopFinding(
+                        severity,
+                        "dispatch_terminal_unclassified",
+                        f"Terminal dispatch {dispatch_id} has no valid collected/aborted/failed outcome.",
+                        "dispatches.jsonl",
+                    )
+                )
+            if outcome in {"aborted", "failed"} and not str(row.get("reason") or "").strip():
+                findings.append(
+                    SuperloopFinding(
+                        "error" if closeout else "warn",
+                        "dispatch_terminal_reason_missing",
+                        f"Terminal dispatch {dispatch_id} outcome {outcome} has no reason.",
+                        "dispatches.jsonl",
+                    )
+                )
+
+    active = {
+        dispatch_id: row
+        for dispatch_id, row in latest.items()
+        if row.get("terminal") is not True and str(row.get("status") or "").lower() in {"accepted", "queued", "running", "in_progress"}
+    }
+    if len(active) > 1:
+        findings.append(
+            SuperloopFinding(
+                "error" if closeout else "warn",
+                "multiple_active_dispatches",
+                f"More than one schema-v2 dispatch remains active: {', '.join(sorted(active)[:8])}.",
+                "dispatches.jsonl",
+            )
+        )
+    if active and str(state.get("status") or "").lower() in {"paused", "completed", "aborted", "failed"}:
+        findings.append(
+            SuperloopFinding(
+                "error" if closeout else "warn",
+                "terminal_loop_with_active_dispatch",
+                f"Loop status {state.get('status')} retains active dispatches.",
+                "dispatches.jsonl",
+            )
+        )
+    state_active = str(state.get("active_dispatch_id") or "").strip()
+    if state_active and state_active not in active:
+        findings.append(
+            SuperloopFinding(
+                "error" if closeout else "warn",
+                "active_dispatch_unledgered",
+                f"state.active_dispatch_id {state_active} is not active in the schema-v2 ledger.",
+                "state.json",
+            )
+        )
+    terminal_without_start = [dispatch_id for dispatch_id, row in latest.items() if row.get("terminal") is True and dispatch_id not in started_ids]
+    if terminal_without_start:
+        findings.append(
+            SuperloopFinding(
+                "info",
+                "dispatch_legacy_reconciled",
+                f"Terminal schema-v2 records reconcile legacy starts: {len(terminal_without_start)}.",
+                "dispatches.jsonl",
             )
         )
 

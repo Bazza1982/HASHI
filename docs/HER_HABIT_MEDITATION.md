@@ -56,6 +56,9 @@ Example backend override:
 When disabled, HER preserves the original execution path: it does not create a
 Habit directory, alter the task prompt, acquire the Habit execution lock, or
 start a Meditation model call. This invariant applies to every HER effort level.
+Internal one-shot/ephemeral HER backends are always ineligible, including when
+the process-wide environment override is on, so health probes and sidecars
+cannot recursively learn Habits.
 
 ## Planning
 
@@ -67,11 +70,19 @@ Matched records are appended to the HER task input as advisory internal planning
 context. They are explicitly subordinate to the current user request, policies,
 permissions, and exact-output requirements.
 
+Retrieval and use are deliberately different observations. Recording a selected
+Habit ID proves retrieval only when the same ID is present in the executed
+planning context. It does not prove that the model followed the Habit. Behavioral
+use needs its own predeclared, observable next-request output or tool-side-effect
+assertion. A conflicting Habit must lose to the current request.
+
 ## Execution and observable evidence
 
 The main HER run is unchanged except for the optional planning context. After a
-successful run, Meditation receives a bounded trace made from evidence HER can
-actually expose:
+completed run, Meditation receives a bounded trace made from evidence HER can
+actually expose. A HER timeout, non-zero exit, or cancellation after execution
+started can also be reflected on; a pre-execution backend discovery failure
+cannot. Evidence includes:
 
 - provider-visible thinking deltas or summaries;
 - redacted-thinking notices;
@@ -80,6 +91,9 @@ actually expose:
 - the final response and completion reason.
 
 No design assumption requires unavailable private chain-of-thought.
+Common credential-shaped values are redacted before a queued Meditation prompt
+is stored. This is a narrow leakage guard, not a general-purpose deterministic
+judgement of arbitrary natural-language safety.
 
 ## Meditation
 
@@ -99,10 +113,45 @@ Meditation failures are logged and never turn a successful user task into a
 failure. Pending Meditation and foreground HER executions share a lock so their
 subprocess and session state cannot race.
 
+A `no_change` journal terminal proves that the background Meditation wire,
+isolation, validation, journal, and silence path completed. It does not prove a
+Habit was formed, retrieved, or behaviorally used. Certification records those
+three observations and their evidence references separately.
+
+The Meditation model call has a bounded timeout. Timeout and other recoverable
+runtime failures release the shared lock, return the durable job to the bounded
+retry queue, and remain invisible to the user. Certification measures the
+foreground lock wait against an explicit upper bound rather than merely checking
+that the foreground eventually finishes.
+
+Before the background model call starts, HASHI atomically journals the bounded,
+redacted Meditation prompt under the owning agent workspace:
+
+```text
+workspaces/<agent>/backend_state/her_habit_meditation/*.json
+```
+
+HASHI's `request_id` remains a trace field and may repeat after a process
+restart. At the start of each eligible HER foreground execution, HER creates a
+separate 32-hex execution-scoped Meditation `job_id`. Every success, failure,
+timeout, and cancellation exit for that execution reuses the same `job_id`;
+the journal filename, recovery, and write idempotency use it instead of
+`request_id`. Consequently, two runtimes may both process `req-0001` without
+aliasing jobs, while repeated scheduling inside one execution still deduplicates.
+Existing v1 journal files whose IDs were derived from request IDs remain
+readable and recoverable without migration.
+
+Interrupted jobs return to a bounded three-attempt queue and resume when an
+eligible HER adapter initializes again. Once model actions are validated they
+are journalled before Write, so a restart replays the same actions without
+paying for or accepting a second model decision. Invalid model output fails that
+job; queue, recovery, or write errors remain fail-open for the user-facing run.
+
 ## Write and storage
 
-HASHI validates the structured response and performs the file write; the model
-does not edit Habit files directly. Active records live at:
+HASHI accepts only the closed `actions` JSON shape, bounds every field, rejects
+credential-shaped Habit content, and performs the file write; the model does
+not edit Habit files directly. Active records live at:
 
 ```text
 workspaces/<agent>/habits/*.json
@@ -122,8 +171,11 @@ Minimal record shape:
 }
 ```
 
-Writes are atomic. Deletion is recoverable: the record is moved into the owning
-agent's `habits/archive/` directory and excluded from retrieval.
+Writes are atomic. Creates use a stable per-job action identity, making replay
+idempotent without semantic deduplication or an evaluation system. A valid
+`create` or `update` becomes usable immediately. Deletion is recoverable: the
+record is moved into the owning agent's `habits/archive/` directory and excluded
+from retrieval.
 
 ## Dream remains separate
 
