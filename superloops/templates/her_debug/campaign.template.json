@@ -1,0 +1,156 @@
+{
+  "schema_version": 1,
+  "campaign_id": "{{CAMPAIGN_ID}}",
+  "loop_id": "{{LOOP_ID}}",
+  "status": "planned",
+  "authoritative_plan": "docs/HER_COMPREHENSIVE_TEST_PLAN.md",
+  "dimensions": {
+    "providers": {
+      "official_deepseek": {
+        "route_code": "DS",
+        "flash_model": "deepseek-v4-flash",
+        "pro_model": "deepseek-v4-pro"
+      },
+      "openrouter": {
+        "route_code": "OR",
+        "flash_model": "deepseek/deepseek-v4-flash",
+        "pro_model": "deepseek/deepseek-v4-pro"
+      }
+    },
+    "modes": [
+      "fixed",
+      "flex"
+    ],
+    "efforts": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "max+"
+    ]
+  },
+  "stages": [
+    {
+      "stage_id": "stage_1_flash",
+      "ordinal": 1,
+      "status": "pending",
+      "allowed_live_models": {
+        "official_deepseek": "deepseek-v4-flash",
+        "openrouter": "deepseek/deepseek-v4-flash"
+      },
+      "expected_core_cells": 24,
+      "locked_until": [
+        "layer_a_offline=passed"
+      ],
+      "completion_gate": "all_flash_cells_and_ancillary_suites_passed_and_all_affecting_defects_verified"
+    },
+    {
+      "stage_id": "stage_2_pro",
+      "ordinal": 2,
+      "status": "locked",
+      "allowed_live_models": {
+        "official_deepseek": "deepseek-v4-pro",
+        "openrouter": "deepseek/deepseek-v4-pro"
+      },
+      "expected_core_cells": 24,
+      "locked_until": [
+        "layer_a_offline=passed",
+        "stage_1_flash=passed"
+      ],
+      "completion_gate": "all_pro_cells_and_ancillary_suites_passed_and_all_affecting_defects_verified"
+    }
+  ],
+  "expected_counts": {
+    "stage_1_core_cells": 24,
+    "stage_2_core_cells": 24,
+    "total_core_cells": 48,
+    "scenario_groups_per_cell": 10,
+    "total_core_scenario_groups": 480,
+    "presentation_variants_per_cell": 8,
+    "total_presentation_runs": 384
+  },
+  "wave_order": [
+    "cheap",
+    "presentation_and_continuity",
+    "expensive_boundary_endurance_and_fault"
+  ],
+  "work_item_key_fields": [
+    "stage",
+    "provider",
+    "model",
+    "mode",
+    "effort",
+    "wave",
+    "scenario",
+    "presentation"
+  ],
+  "attempt_cycle": [
+    "dispatch_test",
+    "monitor_without_interrupting_running_worker",
+    "verify_and_classify",
+    "open_or_update_bug_record_before_product_repair",
+    "add_regression_and_repair",
+    "rebuild_immutable_candidate",
+    "retest_exact_failure_until_fixed",
+    "run_blast_radius_retests",
+    "complete_bug_and_fix_documentation",
+    "advance_to_next_eligible_work_item"
+  ],
+  "allowed_result_classes": [
+    "PASS",
+    "FAIL_HER",
+    "FAIL_HASHI",
+    "FAIL_PROVIDER_CONTRACT",
+    "INCONCLUSIVE_MODEL",
+    "INVALID_HARNESS",
+    "TRANSIENT_ROUTE",
+    "WORKER_FAILED_REPLY",
+    "BLOCKED_FUNDS"
+  ],
+  "retry_policy": {
+    "model_deviation_cold_retries": 3,
+    "transient_route_same_route_only": true,
+    "worker_failure_requires_correlated_follow_up": true,
+    "worker_running_forbids_interrupt_or_duplicate_dispatch": true,
+    "product_defect_repair_retries": "until_verified_fixed",
+    "campaign_round_limit": null
+  },
+  "fallback_policy": {
+    "allow_other_api": false,
+    "allow_other_provider_for_required_route_cell": false,
+    "allow_other_model": false,
+    "allow_local_model_for_live_cell": false,
+    "allow_mock_to_satisfy_live_cell": false
+  },
+  "funds_policy": {
+    "required_live_routes": [
+      "official_deepseek",
+      "openrouter"
+    ],
+    "terminal_on_confirmed_insufficient_funds_from_any_required_route": true,
+    "confirmation": "explicit_provider_response_plus_read_only_balance_check_or_one_bounded_same_route_probe",
+    "not_funds_exhaustion": [
+      "rate_limit",
+      "timeout",
+      "dns_failure",
+      "authentication_error",
+      "generic_5xx"
+    ],
+    "terminal_status": "BLOCKED_FUNDS"
+  },
+  "candidate_invalidation": {
+    "shared_runtime_fix_invalidates_prior_candidate_evidence": true,
+    "stage_2_shared_fix_sets_stage_1_to": "revalidation_required",
+    "pro_advancement_pauses_until_flash_revalidation": true,
+    "final_all_48_cells_require_same_candidate": true
+  },
+  "progress": {
+    "active_work_item_id": null,
+    "active_attempt_id": null,
+    "completed_work_item_ids": [],
+    "stale_work_item_ids": [],
+    "outstanding_work_item_ids": [],
+    "unclassified_reply_refs": []
+  }
+}

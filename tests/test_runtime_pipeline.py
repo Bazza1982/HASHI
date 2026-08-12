@@ -12,7 +12,7 @@ import types
 import pytest
 from telegram.error import RetryAfter
 
-from orchestrator import runtime_pipeline, telegram_stream_policy
+from orchestrator import runtime_pipeline, runtime_retry, telegram_stream_policy
 from orchestrator import telegram_delivery_failover as failover
 from adapters.stream_events import (
     KIND_ACKNOWLEDGEMENT,
@@ -338,6 +338,63 @@ async def test_build_turn_prompt_collects_context_sections_and_updates_audit_sta
     assert "codex-cli" in prompt.final_prompt
     assert runtime._thinking_chars_this_req == 0
     assert runtime._last_full_prompt_tokens == len(prompt.final_prompt) // 4
+
+
+@pytest.mark.asyncio
+async def test_build_turn_prompt_binds_bare_continue_to_persisted_stopped_task():
+    runtime = _runtime()
+    original_item = _item(
+        request_id="req-original",
+        prompt="Research the topic deeply and write the requested report",
+        summary="Deep research",
+    )
+    runtime_pipeline.begin_queue_item(runtime, original_item)
+    runtime_retry.remember_interrupted_task(
+        runtime,
+        runtime.current_request_meta,
+        backend="her",
+    )
+
+    continuation = _item(
+        request_id="req-continue",
+        prompt="You can continue now",
+        summary="Continue",
+    )
+    runtime_pipeline.begin_queue_item(runtime, continuation)
+    prompt = await runtime_pipeline.build_turn_prompt(
+        runtime,
+        continuation,
+        is_bridge_request=False,
+    )
+
+    assert "[HASHI /stop continuation" in prompt.effective_prompt
+    assert original_item.prompt in prompt.effective_prompt
+    assert "You can continue now" in prompt.effective_prompt
+    assert runtime.current_request_meta["resumed_interrupted_task"]["request_id"] == "req-original"
+    assert continuation._resumed_interrupted_task["prompt"] == original_item.prompt
+
+
+@pytest.mark.asyncio
+async def test_build_turn_prompt_leaves_unrelated_request_unchanged_with_stopped_task_saved():
+    runtime = _runtime()
+    runtime_retry.remember_interrupted_task(
+        runtime,
+        {
+            "request_id": "req-original",
+            "chat_id": 123,
+            "prompt": "Finish the original task",
+            "source": "text",
+            "summary": "Original",
+        },
+        backend="her",
+    )
+    item = _item(prompt="Write a new report")
+    runtime_pipeline.begin_queue_item(runtime, item)
+
+    prompt = await runtime_pipeline.build_turn_prompt(runtime, item, is_bridge_request=False)
+
+    assert prompt.effective_prompt == "primer\nWrite a new report"
+    assert "resumed_interrupted_task" not in runtime.current_request_meta
 
 
 @pytest.mark.asyncio

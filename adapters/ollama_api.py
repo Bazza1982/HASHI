@@ -152,10 +152,16 @@ class OllamaAdapter(OpenRouterAdapter):
                 finish_reason = choice.get("finish_reason") or finish_reason
 
                 # Emit reasoning/thinking chunks
-                reasoning_text = str(delta.get("reasoning") or "").strip()
-                if reasoning_text and on_stream_event:
+                reasoning_delta = str(delta.get("reasoning") or "")
+                if reasoning_delta and on_stream_event:
                     asyncio.create_task(
-                        on_stream_event(StreamEvent(kind=KIND_THINKING, summary=reasoning_text[:400]))
+                        on_stream_event(
+                            StreamEvent(
+                                kind=KIND_THINKING,
+                                summary=reasoning_delta[:400],
+                                raw_delta=reasoning_delta,
+                            )
+                        )
                     )
 
                 content = delta.get("content", "")

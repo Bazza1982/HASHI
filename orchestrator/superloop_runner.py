@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from orchestrator.superloop_interlock import evaluate_dispatch_interlock
 from orchestrator.superloop_store import SuperloopStore, system_actor
 from orchestrator.superloop_taskboard import SuperloopTaskboardService
 from orchestrator.superloop_validator import validate_loop
@@ -24,10 +25,17 @@ class SuperloopRunner:
     def next_action(self, loop_id: str) -> dict[str, Any]:
         with self.store._lock:
             state = self.store.load_loop_state(loop_id)
-            status = str(state.get("status") or "")
-
-            if status == "paused":
-                return {"ok": True, "loop_id": loop_id, "advanced": False, "reason": "paused"}
+            interlock = evaluate_dispatch_interlock(self.store, loop_id, state=state)
+            if not interlock.allowed:
+                self._record_interlock(loop_id, state, interlock.as_dict())
+                return {
+                    "ok": True,
+                    "loop_id": loop_id,
+                    "advanced": False,
+                    "reason": interlock.reason,
+                    **interlock.details,
+                }
+            self._clear_interlock(loop_id, state)
 
             if self.waits.has_open_waits(loop_id):
                 return {
@@ -108,3 +116,28 @@ class SuperloopRunner:
 
     def _save_loop_state(self, loop_id: str, state: dict[str, Any]) -> None:
         self.store.save_loop_state(loop_id, state)
+
+    def _record_interlock(self, loop_id: str, state: dict[str, Any], decision: dict[str, Any]) -> None:
+        previous = state.get("dispatch_interlock")
+        if previous == decision:
+            return
+        state["dispatch_interlock"] = decision
+        self._save_loop_state(loop_id, state)
+        self.store.append_loop_event(
+            loop_id,
+            event_type="dispatch.interlocked",
+            data=decision,
+            actor=self.actor,
+        )
+
+    def _clear_interlock(self, loop_id: str, state: dict[str, Any]) -> None:
+        previous = state.pop("dispatch_interlock", None)
+        if previous is None:
+            return
+        self._save_loop_state(loop_id, state)
+        self.store.append_loop_event(
+            loop_id,
+            event_type="dispatch.interlock_cleared",
+            data={"previous": previous},
+            actor=self.actor,
+        )

@@ -141,6 +141,12 @@ def begin_queue_item(runtime, item) -> QueueItemStart:
 async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPrompt:
     effective_prompt = runtime._consume_session_primer(item)
     backend = runtime.backend_manager.current_backend
+    effective_prompt = runtime_retry.prepare_interrupted_task_continuation(
+        runtime,
+        item,
+        effective_prompt,
+        backend=str(getattr(runtime.config, "active_backend", "") or ""),
+    )
     supports_sessions = bool(
         getattr(getattr(backend, "capabilities", None), "supports_sessions", False)
     )
@@ -1146,6 +1152,7 @@ async def handle_success_delivery(
     audit_collector,
     answer_stream_state: StreamedAnswerState | None = None,
 ) -> None:
+    runtime_retry.clear_completed_interrupted_task(runtime, item)
     if runtime._should_buffer_during_transfer(item.request_id):
         if answer_stream_state is not None and answer_stream_state.placeholder is not None:
             try:

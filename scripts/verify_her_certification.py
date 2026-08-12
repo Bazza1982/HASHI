@@ -114,10 +114,14 @@ def _verify_clippy(rust_root: Path, baseline: dict) -> None:
         )
         for item in clippy_baseline["expected_upstream_diagnostics"]
     )
-    if len(expected) != 6 or len(set(expected)) != 6:
-        raise CertificationError("Clippy baseline must contain exactly six unique diagnostics")
+    if len(expected) != len(set(expected)):
+        raise CertificationError("Clippy baseline contains duplicate diagnostics")
 
     result = _run(list(clippy_baseline["command"]), rust_root)
+    if not expected:
+        if result.returncode != 0:
+            raise CertificationError(f"Clippy failed:\n{result.stdout}")
+        return
     if result.returncode == 0:
         raise CertificationError("Clippy now passes; remove the stale diagnostic baseline")
     actual = sorted(_parse_clippy_diagnostics(result.stdout))

@@ -205,6 +205,48 @@ stale
 
 Open blocker issues prevent closeout.
 
+## Dispatch Interlock And Pause Contract
+
+Every outbound worker, model, or protocol packet must pass the shared dispatch
+interlock immediately before transport acceptance. The transport must hold the
+loop dispatch lock until the packet is rejected or both accepted and durably
+recorded. A task changing to `in_progress` is not permission to skip this gate.
+
+Dispatch is blocked when any of these is true:
+
+- the loop is not `running`;
+- a persisted or file-backed pause/halt signal exists;
+- the current phase has an open issue marked as a dispatch blocker;
+- a frozen candidate is explicitly invalid, stale, superseded, or invalidated.
+
+Empty template candidate placeholders do not block preflight work. Once a
+candidate has an identity or the loop declares `candidate_required_for_dispatch`,
+an explicit invalid state fails closed.
+
+Pause is a persisted state transition performed while holding the same dispatch
+lock. It must set `state.status=paused` before returning and record:
+
+```json
+{
+  "control": {
+    "requested_action": "pause",
+    "pause": {
+      "mode": "drain",
+      "requested_at": "...",
+      "active_request_ids": [],
+      "drain_complete": true,
+      "resume_action": {"kind": "run_task", "task_id": "step-001"}
+    }
+  }
+}
+```
+
+`drain` and `immediate` both stop new dispatches at once. They differ only in
+how the executor handles a request that was already accepted. Resume is an
+explicit transition and must fail closed while draining is incomplete, a pause
+signal file remains, an open phase blocker exists, or the frozen candidate is
+invalid.
+
 ## Events Contract
 
 `events.jsonl` should record controller-significant transitions:
@@ -249,7 +291,7 @@ Closeout without inbox drain is invalid.
 Before claiming Superloop functionality in a release, run:
 
 ```text
-python -m pytest tests/test_superloop_store.py tests/test_superloop_taskboard.py tests/test_superloop_waits.py tests/test_superloop_runner.py tests/test_superloop_scheduler.py tests/test_superloop_compiler.py tests/test_superloop_issues.py tests/test_superloop_commands.py tests/test_superloop_recording.py tests/test_superloop_nagare_adapter.py -q
+python -m pytest tests/test_superloop_store.py tests/test_superloop_taskboard.py tests/test_superloop_waits.py tests/test_superloop_runner.py tests/test_superloop_control.py tests/test_superloop_dispatch.py tests/test_superloop_validator.py tests/test_superloop_scheduler.py tests/test_superloop_compiler.py tests/test_superloop_issues.py tests/test_superloop_commands.py tests/test_superloop_recording.py tests/test_superloop_nagare_adapter.py -q
 ```
 
 For live or template validation, record at least:

@@ -1,0 +1,1149 @@
+# HER Bug Journal
+
+Status: active permanent regression record
+Applies to: HASHI ↔ HER ↔ provider integration
+Test plan: [HER_COMPREHENSIVE_TEST_PLAN.md](HER_COMPREHENSIVE_TEST_PLAN.md)
+
+## Rules
+
+1. Record a defect before repairing it.
+2. Never delete or renumber an entry. Reopen the original entry when a symptom recurs.
+3. One entry describes one root-cause class. Split unrelated causes even when one user
+   run exposed them together.
+4. Redact credentials, private prompts, and unnecessary reasoning from evidence.
+5. `Fixed` means code changed; `Verified` means the regression failed on the known-bad
+   build, passed on the fixed build, and the required live retest passed.
+6. Every confirmed defect must add an automated regression test. A manual-only fix
+   remains `Fixed, verification pending`.
+7. Link the exact package SHA, HASHI commit, HER source commit, cell ID, run ID, and
+   evidence bundle. Branch names alone are not sufficient provenance.
+8. Model-quality failures are not logged as HER bugs unless HER misreports, corrupts,
+   duplicates, loses, or fails to terminate the run correctly.
+
+## Status and severity
+
+Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `Deferred`,
+`Not a HER bug`.
+
+| Severity | Meaning |
+| --- | --- |
+| `P0` | secret leak, unsafe write, cross-agent/session contamination, or destructive duplicate side effect |
+| `P1` | lost task/context, corrupt protocol, missing terminal event, false success/error, runaway loop, or unusable output |
+| `P2` | degraded display, wrong accounting, recoverable duplicate/missing progress, or route-specific reliability defect |
+| `P3` | minor diagnostic, documentation, or evidence-quality defect without behavioral loss |
+
+## Index
+
+| ID | Status | Severity | Summary | Regression anchor |
+| --- | --- | --- | --- | --- |
+| `HER-20260811-001` | Verified | P1 | reasoning fragments lost exact whitespace and joined/split words | `test_thinking_deltas_preserve_exact_provider_spacing` |
+| `HER-20260811-002` | Verified | P1 | bare continuation after `/stop` could lose the original flex-mode task | `test_build_turn_prompt_binds_bare_continue_to_persisted_stopped_task` |
+| `HER-20260811-003` | Fixed — live verification pending | P1 | interactive permission text could corrupt stream JSONL | `stream_json_permission_prompt_preserves_the_jsonl_contract` |
+| `HER-20260811-004` | Fixed — live verification pending | P1 | reasoning-only assistant history could make DeepSeek visible finalization fail without `run_finished` | `deepseek_v4_drops_reasoning_only_assistant_history` |
+| `HER-20260811-005` | Fixed — live verification pending | P1 | parser errors could expose the original prompt/command while diagnosing a missing final event | `test_stream_json_parser_missing_final_is_safe_and_fail_closed` |
+| `HER-20260811-006` | Fixed — live verification pending | P1 | HER Tool Gateway could not start because its JSON Schema dependency was undeclared and absent | `test_lab_self_test_proves_isolation_and_cleanup_guard` |
+| `HER-20260811-007` | Fixed — live verification pending | P1 | stream-json provider failures exited without the required `run_finished` event | `stream_json_provider_error_emits_terminal_run_finished` |
+| `HER-20260811-008` | Verified | P2 | the required Rust 1.95 all-target Clippy gate failed on accumulated lint drift | `cargo clippy --workspace --all-targets -- -D warnings` |
+| `HER-20260811-009` | Verified | P3 | the new sequential-step evidence check read a nonexistent receipt field and reported a false failure | `test_packaged_candidate_sequential_steps_are_exactly_once` |
+| `HER-20260811-010` | Fixed — live verification pending | P2 | malformed or truncated provider streams terminated safely but were classified as unknown without the last safe event | `stream_json_malformed_provider_stream_names_protocol_failure` |
+| `HER-20260811-011` | Fixed — live verification pending | P2 | provider HTTP 403 was classified as a generic HTTP error instead of an authentication failure | `classify_error_kind_returns_correct_discriminants` |
+| `HER-20260811-012` | Verified | P3 | the delayed-response fixture printed a BrokenPipe traceback after the expected client timeout | `test_scripted_provider_tolerates_timed_out_client_disconnect` |
+| `HER-20260811-013` | Verified | P3 | the native-ceiling checker confused provider iterations with executed tool iterations | `test_packaged_candidate_hits_native_iteration_ceiling_exactly` |
+| `HER-20260812-014` | Verified | P1 | configured stdio MCP child logs leaked into HER structured CLI stderr | `allowed_tools_json_errors_isolate_configured_mcp_stderr` |
+| `HER-20260812-015` | Verified | P1 | initial planning-format deviations could abort valid tasks before execution | `medium_planning_format_failure_uses_conservative_fallback`; `high_effort_retries_an_invalid_initial_assurance_frame_once` |
+| `HER-20260812-016` | Verified | P2 | request activity timestamps could move backwards when wall-clock time regressed | `test_request_activity_clamps_regressing_timestamps_to_sequence_order` |
+| `HER-20260812-017` | Fixed — blast-radius verification pending | P1 | AskUserQuestion terminal UI corrupted structured JSONL and hid its correlated tool_end | `stream_json_ask_user_question_preserves_correlated_tool_events` |
+| `HER-20260812-018` | Verified | P1 | controller nudge misclassified an in-progress task's next packet as a pending-task start and livelocked | `test_in_progress_packet_continuation_cannot_require_new_start_authority` |
+| `HER-20260812-019` | Verified | P1 | live harness accepted the pre-restart runtime as the `/reboot min` completion receipt and lost the first request | `test_restart_receipt_rejects_pre_restart_online_idle_runtime` |
+
+## Historical entries
+
+### HER-20260811-001 — exact reasoning whitespace was corrupted
+
+- **Status:** Verified
+- **Severity:** P1
+- **First observed:** live HER reasoning display showed both joined words and invented
+  spaces inside words.
+- **Affected area:** HER provider stream → HER JSONL → HASHI thinking display.
+- **Expected:** raw reasoning deltas concatenate byte-for-byte, including leading,
+  trailing, repeated, and whitespace-only fragments.
+- **Actual:** fragment trimming/reconstruction removed or invented spaces.
+- **Root cause:** delta handling treated streamed fragments as words/lines rather than
+  exact fragments at one or more boundaries.
+- **HASHI fix:** `9c4bbd5` and packaged follow-up in `ed9ce45`.
+- **Regression tests:**
+  - `tests/test_telegram_stream_policy.py::test_thinking_deltas_preserve_exact_provider_spacing`
+  - `tests/test_her_adapter.py::test_claw_adapter_stream_json_emits_actual_thinking_delta`
+- **Permanent retest:** stream exactness fixture in every provider/model/mode route;
+  presentation-policy matrix at all efforts.
+- **Recurrence count:** 0
+
+### HER-20260811-002 — `/stop` continuation lost the original task
+
+- **Status:** Verified
+- **Severity:** P1
+- **First observed:** after stopping a flex-mode job, a later bare “continue” request did
+  not include enough information for Ajiao to identify the unfinished job.
+- **Affected area:** HASHI interrupted-task state and HER continuation prompt assembly.
+- **Expected:** HASHI persists the authoritative original prompt and rebinds it to a bare
+  continuation while retaining verified workspace state.
+- **Actual:** only the short continuation text could reach the backend.
+- **Root cause:** interrupted task identity was not durably rebound at turn construction.
+- **HASHI fix:** `ed9ce45`.
+- **Regression test:**
+  `tests/test_runtime_pipeline.py::test_build_turn_prompt_binds_bare_continue_to_persisted_stopped_task`
+- **Permanent retest:** `C07` in all 48 cells, with cancellation after `run_started`, after
+  a successful tool, and during finalization.
+- **Recurrence count:** 0
+
+### HER-20260811-003 — permission prompt broke the JSONL stream
+
+- **Status:** Verified
+- **Severity:** P1
+- **First observed:** a stream-mode permission path emitted interactive text adjacent to
+  structured events and could leave HASHI without a valid terminal record.
+- **Affected area:** packaged HER CLI stream-json permission path.
+- **Expected:** permission-required/decision events remain complete JSONL records; no
+  terminal prompt is printed into stdout.
+- **Actual:** interactive prompt text could contaminate the machine-readable stream.
+- **HER source fix:** `a439c6eeef9f1d02a90e80a59d92940c519d2a84`.
+- **Packaged HASHI fix:** HER `0.1.0-hashi.3`, HASHI commit `46d4ad0`.
+- **Regression tests:**
+  - HER source `stream_json_permission_prompt_preserves_the_jsonl_contract`
+  - `tests/test_her_adapter.py::test_stream_json_parser_accepts_legacy_diagnostics_when_run_finished_exists`
+- **Permanent retest:** structured-permission offline test, malformed-stream fault test,
+  and full-permission live runs that assert no prompt path is reached.
+- **Verification still required:** fixed/flex live finalization on both provider routes
+  with the packaged `0.1.0-hashi.3` binary.
+- **Recurrence count:** 0
+
+### HER-20260811-004 — DeepSeek visible finalization ended in an error
+
+- **Status:** Fixed — live verification pending
+- **Severity:** P1
+- **First observed:** Ajiao completed useful work and displayed normal thinking, but the
+  run ended as an error instead of producing a valid final terminal outcome.
+- **Affected area:** OpenAI-compatible DeepSeek history translation during tool-free
+  visible-finalization recovery.
+- **Expected:** a thinking-only response gets one visible-finalization retry and always
+  reaches `run_finished`; repeated thinking-only responses become
+  `incomplete/no_final_text`.
+- **Actual:** a reasoning-only assistant history item could be sent back to DeepSeek as
+  an invalid assistant message, causing an HTTP error and no terminal event.
+- **Root cause:** reasoning-only assistant history was retained even though DeepSeek
+  requires user-visible assistant content for that history shape.
+- **HER source fix:** `a439c6eeef9f1d02a90e80a59d92940c519d2a84`.
+- **Packaged HASHI fix:** HER `0.1.0-hashi.3`, HASHI commit `46d4ad0`.
+- **Regression tests:**
+  - HER source `deepseek_v4_drops_reasoning_only_assistant_history`
+  - HER source `thinking_only_response_gets_one_tool_free_visible_finalization_retry`
+  - HER source `repeated_thinking_only_response_is_incomplete_with_deterministic_report`
+- **Permanent retest:** thinking-only and no-final-text fault fixtures on both providers,
+  both models, both modes, and all efforts.
+- **Verification still required:** reproduce the original finalization shape through the
+  live Official DeepSeek and OpenRouter routes with the packaged binary.
+- **Recurrence count:** 0
+
+### HER-20260811-005 — finalization diagnostics could leak prompt content
+
+- **Status:** Fixed — live verification pending
+- **Severity:** P1
+- **First observed:** investigation of a missing `run_finished` showed that raw command or
+  output text could be included in parser error diagnostics.
+- **Affected area:** HASHI HER adapter error construction and log delivery.
+- **Expected:** errors identify the binary, last structured error kind, and protocol
+  state without echoing the private prompt, secret, raw command, or full stream.
+- **Actual:** unsafe diagnostic construction could expose sensitive request content.
+- **HASHI fix:** `46d4ad0`.
+- **Regression tests:**
+  - `tests/test_her_adapter.py::test_stream_json_parser_missing_final_is_safe_and_fail_closed`
+  - `tests/test_her_adapter.py::test_json_parser_error_does_not_echo_command_or_output`
+- **Permanent retest:** secret-canary scan for all error and fault-injection runs.
+- **Verification still required:** live fault-proxy run proving Telegram/user diagnostics
+  and retained logs contain no prompt canary.
+- **Recurrence count:** 0
+
+### HER-20260811-006 — HER Tool Gateway dependency was undeclared
+
+- **Status:** Fixed — live verification pending
+- **Severity:** P1
+- **Discovered:** 2026-08-11 22:38 AEST
+- **Reporter:** `lin_yueru@HASHI2`, `her_debug` controller
+- **Batch / cell / scenario / run IDs:**
+  `sl-20260811-123616159717-57f4` / Layer A lab preflight /
+  `her-20260811T123832Z-e3aa45`
+- **Provider / model / mode / effort:** local scripted provider fixture; no live route or
+  paid model request
+- **HASHI commit and dirty state:** `46d4ad0188fd9ec8ef8ec9c808e55bd6880a1003`;
+  pre-existing HER campaign documentation/template changes plus the isolated harness
+- **HER package version / SHA-256:** `0.1.0-hashi.3` /
+  `a201d8952c441c856af4b8304a87840e7c9916e6473f6cf5ed383e137f1d48ee`
+- **HER source commit:** `a439c6eeef9f1d02a90e80a59d92940c519d2a84`
+- **Expected:** the owner-only Tool Gateway context starts through Ajiao's configured
+  Python environment, completes MCP initialization, and lists the isolated file and
+  shell tools.
+- **Actual:** `tools.gateway.mcp_stdio` exited before MCP initialization with
+  `ModuleNotFoundError: No module named 'jsonschema'`; the scripted sequential-step MCP
+  fixture started normally in the same lab.
+- **User-visible impact:** a HER turn can continue without the required HASHI tools or
+  repeatedly attempt to start the failed MCP server, making tool-bearing cells invalid
+  and potentially leaving requested work incomplete.
+- **First divergent event:** the `hashi-tools` MCP child process exited with status 1
+  before returning its `initialize` response.
+- **Evidence bundle:**
+  `workspaces/ajiao/her_test_lab/runs/her-20260811T123832Z-e3aa45/evidence/`
+- **Secrets/redaction checked:** yes; the evidence scan reported zero findings
+- **Owning layer:** HASHI packaging/dependency declaration for the HER Tool Gateway
+- **Root cause:** `tools/gateway/mcp_stdio.py` imports `jsonschema.Draft7Validator`, but
+  neither `requirements.txt` nor `pyproject.toml` declares `jsonschema`, and the active
+  HASHI2 virtual environment does not contain it.
+- **Known-bad commit/package:** HASHI `46d4ad0188fd9ec8ef8ec9c808e55bd6880a1003` /
+  HER `0.1.0-hashi.3`
+- **Repair:** declared `jsonschema>=4.20.0,<5.0.0` in both install surfaces, installed it
+  into the current HASHI2 environment, and repeated the exact two-server MCP handshake.
+- **Fixed-build result:** isolated run `her-20260811T123936Z-b60dae` initialized both
+  MCP servers, listed the HASHI tools and `her_step`, exited both servers cleanly, and
+  reported zero evidence-scan findings; 18 targeted HASHI tests passed.
+- **Final offline candidate:** HASHI `56c5069781ae2f9e6da155eb00c78d04b6dc18ae`,
+  HER source `228442af944868e4c2ce8992e5343dc75a60e2ab`, package
+  `0.1.0-hashi.6` / SHA-256
+  `7cd1be43aa9c1786295ebe531ab49ddd3d03ba01b3c7841c2b6349b883493794`.
+- **Regression test:**
+  `tests/test_her_debug_lab.py::test_lab_self_test_proves_isolation_and_cleanup_guard`
+- **Required retest:** exact lab preflight, packaged HER sequential-step tool roundtrip,
+  then full deterministic Layer A before any live Flash cell.
+- **Recurrence count:** 0
+
+### HER-20260811-007 — provider failure exited stream JSON without a terminal event
+
+- **Status:** Fixed — live verification pending
+- **Severity:** P1
+- **Discovered:** 2026-08-11 22:40 AEST
+- **Reporter:** `lin_yueru@HASHI2`, `her_debug` controller
+- **Batch / cell / scenario / run IDs:**
+  `sl-20260811-123616159717-57f4` / Layer A provider-fault preflight /
+  `her-20260811T124319Z-406060`
+- **Provider / model / mode / effort:** local scripted OpenAI-compatible provider /
+  synthetic `openai/deepseek-v4-flash` routing fixture / one-shot / low
+- **HASHI commit and dirty state:** `46d4ad0188fd9ec8ef8ec9c808e55bd6880a1003`;
+  active isolated campaign changes retained
+- **HER package version / SHA-256:** `0.1.0-hashi.3` /
+  `a201d8952c441c856af4b8304a87840e7c9916e6473f6cf5ed383e137f1d48ee`
+- **HER source commit:** `a439c6eeef9f1d02a90e80a59d92940c519d2a84`
+- **Expected:** every stream-json run emits exactly one `run_started` and exactly one
+  terminal `run_finished`, including sanitized provider failures.
+- **Actual:** a scripted HTTP 400 produced valid JSONL containing `run_started` then
+  `api_http_error`, exited with status 1, and never emitted `run_finished`.
+- **User-visible impact:** HASHI cannot distinguish a cleanly terminated provider failure
+  from a truncated or crashed HER stream, weakening recovery and risking a generic error
+  that loses the authoritative terminal state.
+- **First divergent event:** process exit immediately after `api_http_error`, with
+  `run_finished_count=0`.
+- **Completion status / stop reason:** absent because the terminal event was missing
+- **Evidence bundle:**
+  `workspaces/ajiao/her_test_lab/runs/her-20260811T124319Z-406060/evidence/`
+- **Secrets/redaction checked:** yes; evidence verdict includes a zero-finding scan
+- **Owning layer:** HER stream-json CLI terminalization
+- **Root cause:** `run_prompt_stream_json` emits `run_started`, then applies `?` directly
+  to `run_turn_observed`; any runtime/provider error returns before the function's sole
+  `run_finished` emission.
+- **Known-bad commit/package:** HER source
+  `a439c6eeef9f1d02a90e80a59d92940c519d2a84` / package `0.1.0-hashi.3`
+- **Repair:** emit one sanitized error-shaped `run_finished`, preserve the recoverable
+  session when possible, retain a nonzero process exit, and suppress the duplicate
+  top-level error envelope after the terminal event.
+- **HER source fix:** `b4253e4f28e5ec56ee963800b0bc3b820b95a77a`
+- **Candidate package:** HER `0.1.0-hashi.4` / SHA-256
+  `bc1f5cc19cdf2fec2e1dbda97e9d27b73603f959374322ef099de83a725a4fae`
+- **Fixed-build automated result:** the source regression passed, all 1460 Rust workspace
+  tests passed, and the full all-target Clippy gate passed with warnings denied.
+- **Final offline candidate:** HASHI `56c5069781ae2f9e6da155eb00c78d04b6dc18ae`,
+  HER source `228442af944868e4c2ce8992e5343dc75a60e2ab`, package
+  `0.1.0-hashi.6` / SHA-256
+  `7cd1be43aa9c1786295ebe531ab49ddd3d03ba01b3c7841c2b6349b883493794`;
+  HTTP 400 run `her-20260811T131331Z-8ea23a` emitted exactly one safe
+  `run_finished` and exited nonzero as required.
+- **Regression test:** HER source
+  `stream_json_provider_error_emits_terminal_run_finished`
+- **Required retest:** scripted HTTP status, malformed/truncated stream, and connection
+  failure cases; then full Layer A before any live Flash cell.
+- **Recurrence count:** 0
+
+### HER-20260811-008 — the all-target Clippy certification gate had drifted red
+
+- **Status:** Verified
+- **Severity:** P2
+- **Discovered:** 2026-08-11 22:45 AEST
+- **Reporter:** `lin_yueru@HASHI2`, `her_debug` controller
+- **Batch / cell / scenario / run IDs:**
+  `sl-20260811-123616159717-57f4` / `HD-001` / Layer A build preflight
+- **Provider / model / mode / effort:** no provider request; local Rust build gate
+- **HER source commit:** `a439c6eeef9f1d02a90e80a59d92940c519d2a84` plus the
+  uncommitted `HER-20260811-007` repair
+- **Toolchain:** `rustc 1.95.0`, `clippy 0.1.95`
+- **Expected:** `cargo clippy --workspace --all-targets -- -D warnings` exits zero before
+  any candidate binary is packaged.
+- **Actual:** the gate failed deterministically across runtime, API, tools, CLI, and
+  test targets on accumulated lint drift, including unused imports/variables and newer
+  style lints. The failures were independent of the provider-terminal repair.
+- **User-visible impact:** the candidate cannot cross Layer A or be used for live Flash
+  certification while the source quality gate is red.
+- **First divergent event:** `runtime::trident` failed the first workspace Clippy pass;
+  later passes exposed the remaining crates after earlier failures were removed.
+- **Owning layer:** HER source build and release hygiene
+- **Root cause:** source accepted by an earlier toolchain had not been reconciled with
+  the current Rust 1.95 all-target warning set, while the release rule promotes every
+  warning to an error.
+- **Repair:** apply behavior-preserving lint fixes, retain the intentionally rich
+  `ApiError` representation with an explicit documented lint allowance, then rerun
+  format, full Clippy, and the entire workspace test suite.
+- **HER source fix:** `b4253e4f28e5ec56ee963800b0bc3b820b95a77a`
+- **Fixed-build result:** format check passed; full all-target Clippy passed with warnings
+  denied; all 1460 workspace tests passed; reproducible release build completed.
+- **Final candidate:** HASHI `56c5069781ae2f9e6da155eb00c78d04b6dc18ae`,
+  HER source `228442af944868e4c2ce8992e5343dc75a60e2ab`, package
+  `0.1.0-hashi.6` / SHA-256
+  `7cd1be43aa9c1786295ebe531ab49ddd3d03ba01b3c7841c2b6349b883493794`.
+- **Closure — 2026-08-11:** Rust format, full workspace tests, Rust 1.95
+  all-target Clippy with warnings denied, release build, full HER certification, and
+  the complete HASHI suite (`1889 passed, 3 skipped`) all passed. No live-provider
+  retest applies to this source-quality gate; route behavior remains covered by the
+  later live-cell stages.
+- **Regression anchor:**
+  `cargo clippy --workspace --all-targets -- -D warnings`
+- **Required retest:** clean format, clean full Clippy, complete workspace tests, and a
+  reproducible release build before packaging.
+- **Recurrence count:** 0
+
+### HER-20260811-009 — sequential-step evidence used the wrong state field
+
+- **Status:** Verified
+- **Severity:** P3
+- **Discovered:** 2026-08-11 22:59 AEST
+- **Reporter:** `lin_yueru@HASHI2`, `her_debug` controller
+- **Batch / cell / scenario / run IDs:**
+  `sl-20260811-123616159717-57f4` / `HD-001` / `sequential_steps` /
+  `her-20260811T125900Z-034a29`
+- **Provider / model / mode / effort:** local scripted provider /
+  `openai/deepseek-v4-flash` / one-shot / fixture
+- **HER package version / SHA-256:** `0.1.0-hashi.4` /
+  `bc1f5cc19cdf2fec2e1dbda97e9d27b73603f959374322ef099de83a725a4fae`
+- **Expected:** three ordered tool calls are accepted once, three durable step events are
+  recorded, and the evidence checker reports PASS.
+- **Actual:** HER completed three balanced calls and `accepted_steps=3`, but the checker
+  counted a nonexistent `receipts` field and reported `receipt_count=0`, producing a
+  false FAIL.
+- **User-visible impact:** no runtime behavior loss; the certification controller would
+  incorrectly block Stage 1 on valid evidence.
+- **First divergent event:** post-run evidence normalization after the valid terminal
+  `run_finished` event.
+- **Owning layer:** isolated HER certification harness
+- **Root cause:** `SequentialStepState` persists receipts under `events`, while the new
+  packaged-candidate runner queried `receipts`.
+- **Repair:** use the canonical `events` field, assert ordered step numbers and unique
+  token hashes, add an integration regression, and rerun the exact candidate.
+- **HASHI fix:** `56c5069781ae2f9e6da155eb00c78d04b6dc18ae`.
+- **Fixed candidate:** HER `0.1.0-hashi.6` / SHA-256
+  `7cd1be43aa9c1786295ebe531ab49ddd3d03ba01b3c7841c2b6349b883493794` /
+  source `228442af944868e4c2ce8992e5343dc75a60e2ab`.
+- **Fixed-build result:** run `her-20260811T131328Z-e43795` passed with three
+  ordered, unique, balanced tool calls and three durable step events; the packaged
+  integration regression passed.
+- **Evidence bundle:**
+  `workspaces/ajiao/her_test_lab/runs/her-20260811T125900Z-034a29/evidence/`
+- **Secrets/redaction checked:** yes; the private canary was absent and the scan passed
+- **Closure — 2026-08-11:** the known-bad checker failed on valid package evidence; the
+  repaired checker and regression passed on the frozen candidate. The full HER
+  certification and HASHI suite (`1889 passed, 3 skipped`) passed. No live-provider
+  retest applies to this evidence-harness-only defect.
+- **Recurrence count:** 0
+
+### HER-20260811-010 — malformed streams lost their protocol-failure classification
+
+- **Status:** Fixed — live verification pending
+- **Severity:** P2
+- **Discovered:** 2026-08-11 23:00 AEST
+- **Reporter:** `lin_yueru@HASHI2`, `her_debug` controller
+- **Batch / cell / scenario / run IDs:**
+  `sl-20260811-123616159717-57f4` / `HD-001` / `malformed_sse`, `truncated_sse` /
+  `her-20260811T130034Z-4ac385`, `her-20260811T130036Z-c77706`
+- **Provider / model / mode / effort:** local scripted provider /
+  `openai/deepseek-v4-flash` / one-shot / fixture
+- **HER package version / SHA-256:** `0.1.0-hashi.4` /
+  `bc1f5cc19cdf2fec2e1dbda97e9d27b73603f959374322ef099de83a725a4fae`
+- **Expected:** malformed or truncated SSE fails closed as a named stream protocol
+  failure, records the last safe structured event, emits one terminal event, and never
+  includes the unsafe provider body or private prompt.
+- **Actual:** both runs emitted one safe error-shaped `run_finished`, but
+  `error_kind=unknown`; the terminal record contained no `last_safe_event`.
+- **User-visible impact:** recovery and monitoring cannot distinguish provider protocol
+  corruption from an unclassified runtime failure or locate the safe replay boundary.
+- **First divergent event:** terminal error classification after `run_started`; no
+  provider delta was accepted.
+- **Owning layer:** HER stream-json CLI diagnostics
+- **Root cause:** `classify_error_kind` has no arm for `ApiError::Json` response parse
+  failures or invalid SSE frames, and the stream observer did not retain its latest
+  emitted event kind for the terminal envelope.
+- **Repair:** classify sanitized stream parse errors as
+  `stream_protocol_error`, track `last_safe_event`, add a failing mock-provider
+  regression, rebuild the package, and rerun the full offline blast radius.
+- **HER source fix:** `b2b1e550cbd8aeb4704d11ed78de1a944eaaa6e4`.
+- **Fixed candidate:** HASHI `56c5069781ae2f9e6da155eb00c78d04b6dc18ae`,
+  HER `0.1.0-hashi.6` / SHA-256
+  `7cd1be43aa9c1786295ebe531ab49ddd3d03ba01b3c7841c2b6349b883493794` /
+  source `228442af944868e4c2ce8992e5343dc75a60e2ab`.
+- **Fixed-build result:** malformed run `her-20260811T131350Z-4f83f8` and truncated
+  run `her-20260811T131351Z-27d575` both emitted one terminal
+  `stream_protocol_error`, named `run_started` as the last safe event, and passed the
+  secret-canary scan; source and packaged regressions passed.
+- **Verification still required:** live fault-proxy coverage through both provider
+  routes before the entry can be closed as Verified.
+- **Evidence bundles:**
+  `workspaces/ajiao/her_test_lab/runs/her-20260811T130034Z-4ac385/evidence/`,
+  `workspaces/ajiao/her_test_lab/runs/her-20260811T130036Z-c77706/evidence/`
+- **Secrets/redaction checked:** yes; both canary scans passed
+- **Recurrence count:** 0
+
+### HER-20260811-011 — HTTP 403 was not classified as an authentication failure
+
+- **Status:** Fixed — live verification pending
+- **Severity:** P2
+- **Discovered:** 2026-08-11 23:07 AEST
+- **Reporter:** `lin_yueru@HASHI2`, `her_debug` controller
+- **Batch / cell / scenario / run IDs:**
+  `sl-20260811-123616159717-57f4` / `HD-001` / `http_403` /
+  `her-20260811T130719Z-d0f089`
+- **Provider / model / mode / effort:** local scripted provider /
+  `openai/deepseek-v4-flash` / one-shot / fixture
+- **HER package version / SHA-256:** `0.1.0-hashi.5` /
+  `baf6d9d64eaf8e1434320e9cf046dca12320118671e3285080909d598d037fe9`
+- **Expected:** 401 and 403 both fail closed as `api_auth_error`, without credentials
+  or private prompt text.
+- **Actual:** 401 was `api_auth_error`; 403 was the generic `api_http_error`.
+- **User-visible impact:** automated recovery may suggest a generic retry instead of
+  correcting route permissions or credentials.
+- **First divergent event:** error-kind classification of the sanitized
+  `403 Forbidden` provider error.
+- **Owning layer:** HER CLI error taxonomy
+- **Root cause:** the auth classifier matched `401`, `Unauthorized`, and
+  `authentication_error`, but omitted `403` and `Forbidden` despite the documented
+  401/403 contract.
+- **Repair:** extend the auth discriminant regression and classifier, rebuild
+  the package, and rerun both 401 and 403 fixtures.
+- **HER source fix:** `228442af944868e4c2ce8992e5343dc75a60e2ab`.
+- **Fixed candidate:** HASHI `56c5069781ae2f9e6da155eb00c78d04b6dc18ae`,
+  HER `0.1.0-hashi.6` / SHA-256
+  `7cd1be43aa9c1786295ebe531ab49ddd3d03ba01b3c7841c2b6349b883493794`.
+- **Fixed-build result:** 401 run `her-20260811T131331Z-1a5fc0` and 403 run
+  `her-20260811T131332Z-064b86` both failed closed as `api_auth_error`, emitted one
+  terminal event, and passed the secret-canary scan; the source regression passed.
+- **Verification still required:** controlled live authentication-failure coverage or
+  equivalent route-owned fault-proxy evidence for both provider routes.
+- **Evidence bundle:**
+  `workspaces/ajiao/her_test_lab/runs/her-20260811T130719Z-d0f089/evidence/`
+- **Secrets/redaction checked:** yes; the private canary was absent
+- **Recurrence count:** 0
+
+### HER-20260811-012 — delayed-response fixture logged an expected disconnect traceback
+
+- **Status:** Verified
+- **Severity:** P3
+- **Discovered:** 2026-08-11 23:07 AEST
+- **Reporter:** `lin_yueru@HASHI2`, `her_debug` controller
+- **Batch / cell / scenario / run IDs:**
+  `sl-20260811-123616159717-57f4` / `HD-001` / `delayed_response_once` /
+  `her-20260811T130723Z-c582e8`
+- **Provider / model / mode / effort:** local scripted provider /
+  `openai/deepseek-v4-flash` / one-shot / fixture
+- **Expected:** the first delayed response exceeds the one-second client timeout, the
+  client disconnect is treated as an expected fixture event, and the retry succeeds
+  without controller stderr noise.
+- **Actual:** the retry succeeded and the run passed, but the fixture server printed a
+  Python `BrokenPipeError` traceback while writing to the timed-out first connection.
+- **User-visible impact:** no HER behavior loss; uncontrolled fixture stderr can confuse
+  evidence review and hide a later meaningful harness failure.
+- **First divergent event:** fixture response write after the expected client disconnect.
+- **Owning layer:** isolated HER scripted-provider harness
+- **Root cause:** the HTTP handler did not treat `BrokenPipeError` and
+  `ConnectionResetError` as expected after a deliberately induced timeout.
+- **Repair:** absorb only those two disconnect exceptions at the handler
+  boundary, add a deterministic regression, and rerun the delayed-response scenario.
+- **HASHI fix:** `56c5069781ae2f9e6da155eb00c78d04b6dc18ae`.
+- **Fixed-build result:** packaged run `her-20260811T131346Z-c1039c` retried once,
+  completed successfully, counted the expected disconnect, and produced no traceback;
+  the deterministic harness regression passed.
+- **Evidence bundle:**
+  `workspaces/ajiao/her_test_lab/runs/her-20260811T130723Z-c582e8/evidence/`
+- **Secrets/redaction checked:** yes
+- **Closure — 2026-08-11:** fixed and verified against HER `0.1.0-hashi.6` /
+  `7cd1be43aa9c1786295ebe531ab49ddd3d03ba01b3c7841c2b6349b883493794`;
+  source `228442af944868e4c2ce8992e5343dc75a60e2ab`; full HER certification
+  and HASHI tests passed. No live-provider retest applies to this fixture-only defect.
+- **Recurrence count:** 0
+
+### HER-20260811-013 — native-ceiling evidence counted the finalization turn as a tool turn
+
+- **Status:** Verified
+- **Severity:** P3
+- **Discovered:** 2026-08-11 23:10 AEST
+- **Reporter:** `lin_yueru@HASHI2`, `her_debug` controller
+- **Batch / cell / scenario / run IDs:**
+  `sl-20260811-123616159717-57f4` / `HD-001` / `iteration_ceiling:12` /
+  `her-20260811T131053Z-7645ee`
+- **Provider / model / mode / effort:** local scripted provider /
+  `openai/deepseek-v4-flash` / one-shot / fixture
+- **HER package version / SHA-256:** `0.1.0-hashi.6` /
+  `7cd1be43aa9c1786295ebe531ab49ddd3d03ba01b3c7841c2b6349b883493794`
+- **Expected:** a configured ceiling of N produces exactly N provider iterations; the
+  final iteration is tool-free finalization, leaving N-1 balanced tool executions and
+  `incomplete/max_iterations`.
+- **Actual:** HER did exactly that for N=12, but the new checker expected 12 accepted
+  tools and falsely failed the otherwise valid run.
+- **User-visible impact:** no HER behavior loss; the controller would block valid native
+  boundary evidence.
+- **First divergent event:** post-run ceiling assertion after the valid terminal event.
+- **Owning layer:** isolated HER certification harness
+- **Root cause:** the checker equated the configured provider-iteration budget with tool
+  executions and did not reserve the runtime's mandatory tool-free finalization turn.
+- **Repair:** assert N provider requests, N terminal iterations, and N-1 ordered,
+  unique, balanced tool executions; add a packaged integration regression and run all
+  six native limits.
+- **HASHI fix:** `56c5069781ae2f9e6da155eb00c78d04b6dc18ae`.
+- **Fixed-build result:** limits 12, 32, 96, 192, 384, and 512 all passed on the
+  frozen package with N provider iterations and N-1 balanced tool executions. Run IDs:
+  `her-20260811T131205Z-83bf16`, `her-20260811T131206Z-9e93b3`,
+  `her-20260811T131208Z-57fc12`, `her-20260811T131219Z-118d45`,
+  `her-20260811T131222Z-df1ae7`, and `her-20260811T131229Z-6d91f4`.
+- **Evidence bundle:**
+  `workspaces/ajiao/her_test_lab/runs/her-20260811T131053Z-7645ee/evidence/`
+- **Secrets/redaction checked:** yes
+- **Closure — 2026-08-11:** fixed and verified against HER `0.1.0-hashi.6` /
+  `7cd1be43aa9c1786295ebe531ab49ddd3d03ba01b3c7841c2b6349b883493794`;
+  source `228442af944868e4c2ce8992e5343dc75a60e2ab`; the packaged integration
+  regression, full HER certification, and full HASHI suite passed. No live-provider
+  retest applies to this harness-only defect.
+- **Recurrence count:** 0
+
+### HER-20260812-014 — configured MCP child logs leaked into structured CLI stderr
+
+- **Status:** Verified
+- **Severity:** P1
+- **Recurrence of:** none; related output-isolation class `HER-20260811-003`
+- **Discovered:** 2026-08-12 00:12 AEST
+- **Reporter:** `lin_yueru@HASHI2` controller and `ajiao@HASHI2` worker
+- **Batch / cell / scenario / run IDs:**
+  `sl-20260811-123616159717-57f4` / `HD-002` /
+  `HD-002-A002-20260811T135928Z` /
+  `allowed_tools_errors_have_typed_json_and_alias_map_432`
+- **Provider / model / mode / effort:** no provider request / worker orchestration model
+  `local/deepseek-v4-flash` / bounded offline verification / high
+- **Presentation policy:** not applicable; CLI `--output-format json` error contract
+- **HASHI commit and dirty state:**
+  `eb0bb06c6903a757c6fb59e5dad1c6005bdd9daa`, clean when reproduced
+- **HER package version / SHA-256:** `0.1.0-hashi.6` /
+  `7cd1be43aa9c1786295ebe531ab49ddd3d03ba01b3c7841c2b6349b883493794`
+- **HER source commit:** `228442af944868e4c2ce8992e5343dc75a60e2ab`, clean when reproduced
+- **Expected:** an invalid `--allowedTools` value in JSON output mode emits one typed
+  JSON error on stdout and keeps stderr empty, even when the loaded configuration has
+  a stdio MCP server that writes startup diagnostics to its own stderr.
+- **Actual:** the configured `hashi-tools` MCP child wrote `ToolRegistry initialized`
+  at INFO level; HER inherited the child's stderr into its own stderr, violating the
+  structured error contract and failing the Rust workspace gate at 108 passed / 1 failed.
+- **User-visible impact:** machine consumers that require the documented empty-stderr
+  JSON error contract can reject an otherwise valid response; the same leak also made
+  the deterministic HER certification gate depend on the invoking agent's live config.
+- **First divergent event:** `McpStdioProcess::spawn` started the configured MCP child
+  with `stderr(Stdio::inherit())` before the invalid-tool JSON error was returned.
+- **Completion status / stop reason / provider stop reason:** offline dispatch FAIL /
+  `offline_contract_divergence` / not applicable
+- **Session and request IDs:** dispatch `HD-002-A002-20260811T135928Z`; Ajiao transcript
+  line 1006; no provider request ID
+- **Tool calls / results / iterations:** targeted HASHI tests `23 passed`; full HER
+  certification failed in Rust workspace tests; isolated single-test control passed.
+- **Reproduction rate:** 1/1 with Ajiao's configured `CLAW_CONFIG_HOME`; 0/1 with an
+  empty `CLAW_CONFIG_HOME` control.
+- **Minimal reproduction:** from the HER `rust/` directory, run
+  `CLAW_CONFIG_HOME=/home/lily/projects/hashi2/workspaces/ajiao/backend_state/her_config cargo test -p rusty-claude-cli --test output_format_contract allowed_tools_errors_have_typed_json_and_alias_map_432 -- --exact --nocapture`.
+- **Evidence bundle:**
+  `superloops/loops/sl-20260811-123616159717-57f4/evidence/HD-002-A002-receipt.json`;
+  preserved full-verifier log SHA-256
+  `7210213cc870e230ecd57ef1bbfd791c8217cd827d97933bed272fedf70983de`
+- **Secrets/redaction checked:** yes; the journal retains no configured values or raw
+  tool arguments.
+- **Suspected owner:** HER stdio MCP runtime; the CLI test helper's ambient
+  `CLAW_CONFIG_HOME` inheritance is a determinism hardening gap.
+- **Root cause:** HER directly inherited each stdio MCP child's stderr. MCP servers are
+  allowed to use stderr for diagnostics, so a configured server could write arbitrary
+  text into HER's parent stderr. The test helper also failed to clear ambient
+  `CLAW_CONFIG_HOME`, which made the latent product defect reproducible only in a
+  configured worker environment.
+- **Known-bad commit/package:** source
+  `228442af944868e4c2ce8992e5343dc75a60e2ab`; HER `0.1.0-hashi.6` /
+  `7cd1be43aa9c1786295ebe531ab49ddd3d03ba01b3c7841c2b6349b883493794`
+- **Fix commits:** HER source
+  `b78a5cc60db8b6d5944bc0f507f31e260dbca851`; HASHI package
+  `bcc17dd38398cb7a6a08b771e5d4e28a0e83865e`.
+- **Repair:** pipe and continuously drain stdio MCP child stderr without replaying or
+  retaining raw content; expose only an observed-byte count for lifecycle checks; make
+  the CLI test helper clear ambient `CLAW_CONFIG_HOME` unless a test explicitly supplies
+  one.
+- **Regression tests:**
+  `allowed_tools_json_errors_isolate_configured_mcp_stderr` and
+  `stdio_process_drains_child_stderr_without_inheriting_parent`.
+- **Bad-build test result:** known-bad configured-environment reproduction failed with
+  the exact `ToolRegistry initialized` stderr line; the empty-config control passed.
+- **Fixed-build test result:** both focused regressions passed; all 23 stdio MCP runtime
+  tests and all 110 output-format contract tests passed; full Rust workspace tests,
+  all-target Clippy with warnings denied, release build, and full HER certification
+  passed for source `b78a5cc60db8b6d5944bc0f507f31e260dbca851`. Packaged HER
+  `0.1.0-hashi.7` / `e7c4b6ecf9cacd2dab1657f03dcc818d07239f34c0a3e187ea8dd65c6f2c75c8`
+  returned typed `invalid_tool_name` with zero stderr bytes under Ajiao's configured MCP
+  environment; the full HASHI suite passed with `1890 passed, 3 skipped`.
+- **Required live retest cells:** no paid-provider cell applies to this offline process
+  boundary; require an activated-package configured-MCP JSON smoke before Stage 1.
+- **Live retest result:** direct packaged configured-MCP smoke passed without a provider
+  request; Ajiao then activated the same `0.1.0-hashi.7` binary and returned the exact
+  activation receipt `HERDBG_ACTIVATION_SMOKE_002_OK`. The correlated Layer A chain
+  completed with A004's full verifier exit `0` and A005's single-call read-only
+  provenance closeout. No paid-provider request or live certification cell applied.
+- **Closure — 2026-08-12:** verified against HER `0.1.0-hashi.7` /
+  `e7c4b6ecf9cacd2dab1657f03dcc818d07239f34c0a3e187ea8dd65c6f2c75c8`;
+  source `b78a5cc60db8b6d5944bc0f507f31e260dbca851`. The focused regressions,
+  full HER source certification, full HASHI suite (`1890 passed, 3 skipped`),
+  activated-package smoke, and independent correlated Layer A verification passed.
+  Evidence: `HD-002-A004-receipt.json` and `HD-002-A005-receipt.json` under Superloop
+  `sl-20260811-123616159717-57f4`.
+- **Remaining risk:** other child-process boundaries may independently inherit
+  diagnostics and require their own output-contract review.
+- **Recurrence count:** 0
+
+### HER-20260812-015 — medium planning format deviation aborted a valid task
+
+- **Status:** Verified
+- **Severity:** P1
+- **Recurrence of:** none; related terminal-output class `HER-20260811-004`
+- **Discovered:** 2026-08-12 02:04 AEST
+- **Reporter:** `lin_yueru@HASHI2`, `her_debug` controller
+- **Batch / cell / scenario / run IDs:**
+  `sl-20260811-123616159717-57f4` / `HD-003` /
+  `HER-LIVE-DS-FLASH-FIXED-MEDIUM` / `C01` /
+  `her-20260811T155917Z-eac66a`
+- **Provider / model / mode / effort:** official DeepSeek /
+  `deepseek-v4-flash` / fixed / medium
+- **Presentation policy:** thinking=true, verbose=true, typing=true
+- **HASHI commit and dirty state:**
+  `a13cdf71856b5474c76beb9d585b70c50f0478f7`, clean when reproduced
+- **HER package version / SHA-256:** `0.1.0-hashi.7` /
+  `e7c4b6ecf9cacd2dab1657f03dcc818d07239f34c0a3e187ea8dd65c6f2c75c8`
+- **HER source commit:** `b78a5cc60db8b6d5944bc0f507f31e260dbca851`, clean when reproduced
+- **Expected:** a valid exact-output request at medium effort either obtains a TaskFrame
+  and executes normally or continues from a conservative, authorization-preserving
+  planning fallback; the exact provider answer is delivered with a completed terminal.
+- **Actual:** the initial task-planning control call returned the exact user-requested
+  text instead of TaskFrame JSON. HER treated that single format deviation as fatal,
+  emitted only `run_started` and `run_finished`, and returned
+  `completion_status=error`, `stop_reason=runtime_error`, `error_kind=unknown`, and zero
+  iterations even though the provider returned HTTP 200 and the assistant hash exactly
+  matched the requested output.
+- **User-visible impact:** safe medium-effort prompts that demand exact output can fail
+  before execution with only “Execution failed before completion,” losing a valid
+  provider response and offering no actionable diagnosis.
+- **First divergent event:** initial `run_task_checkpoint` parsed the valid provider text
+  as an invalid TaskFrame and returned a `RuntimeError` before the execution loop.
+- **Completion status / stop reason / provider stop reason:** error / runtime_error /
+  none; provider stream itself ended with `stop`.
+- **Session and request IDs:** HASHI `req-0021`; HER
+  `session-1786463958501-0`; proxy trace sequence 63.
+- **Tool calls / results / iterations:** 0 / 0 / 0.
+- **Reproduction rate:** 1/1 isolated HASHI live run and 1/1 bounded direct packaged
+  run using the same route, model, medium planning configuration, and exact-output shape.
+- **Minimal reproduction:** run packaged HER with `CLAW_TASK_PLANNING=1`,
+  `CLAW_EXECUTION_EFFORT=medium`, stream-json output, and a safe exact-output prompt;
+  use a scripted API in the regression so the planning response is valid text but not a
+  TaskFrame, then require the execution response to complete.
+- **Evidence bundle:**
+  `superloops/loops/sl-20260811-123616159717-57f4/evidence/HD-003-HER-20260812-015-reproduction.json`;
+  `superloops/loops/sl-20260811-123616159717-57f4/evidence/HD-003-HER-20260812-015-red.json`;
+  `workspaces/ajiao/her_test_lab/runs/her-20260811T155917Z-eac66a/evidence/`.
+- **Secrets/redaction checked:** yes; no authorization header, raw provider text, or raw
+  prompt is retained in controller evidence.
+- **Suspected owner:** HER conversation runtime initial task-planning recovery.
+- **Root cause:** non-assurance task planning has one initial format attempt. Its
+  invalid-format branch records `turn_failed` and returns immediately. The runtime
+  already has a conservative MAX planning fallback and already preserves a prior frame
+  on replan failure, but medium initial planning does neither.
+- **Known-bad commit/package:** source
+  `b78a5cc60db8b6d5944bc0f507f31e260dbca851`; HER `0.1.0-hashi.7` /
+  `e7c4b6ecf9cacd2dab1657f03dcc818d07239f34c0a3e187ea8dd65c6f2c75c8`.
+- **Fix commits:** HER source
+  `69c88798237132da9874e5a300ab2c25e6fd9ae2`; HASHI package
+  `b570daf2a00dd7ddeb620d8138c7450fee0737fe`.
+- **Repair:** share the existing conservative frame builder between MAX and medium, but
+  allow the medium fallback only for the exact syntactic “invalid task frame” error.
+  The fallback keeps the authoritative request as `active_goal`, declares no tools,
+  forbids authorization expansion, emits explicit control fallback telemetry, and does
+  not manufacture an assurance plan. Provider failures, empty responses, generic
+  acknowledgements, invalid task identification, and every assurance-enabled effort
+  remain fail-closed.
+- **Regression tests:**
+  `medium_planning_format_failure_uses_conservative_fallback`; boundary coverage from
+  `generic_acknowledgement_stops_before_execution`,
+  `high_effort_rejects_a_plan_without_assurance_strategies`, and
+  `max_planning_revision_format_exhaustion_continues_with_last_valid_plan`.
+- **Bad-build test result:** deterministic RED selected one test and failed one test on
+  source `b78a5cc60db8b6d5944bc0f507f31e260dbca851` with the exact pre-execution
+  `invalid task frame` RuntimeError.
+- **Fixed-build test result:** the focused regression and three boundary tests passed;
+  the runtime crate passed 643 unit, 2 conformance, and 12 integration tests; all-target
+  runtime Clippy with warnings denied, the release build, and full HER workspace
+  certification passed. HASHI's 73 targeted HER/Superloop tests and full suite
+  (`1890 passed, 3 skipped`) also passed. Packaged HER
+  `0.1.0-hashi.8` / `4f5f5dad26a208cef67f8f3ed84fbecaa0ed3d8164df22010ceb918a7456269b`.
+  Activation and the exact live failure retest passed as recorded below.
+- **Required live retest cells:** rerun the exact fixed/medium C01 failure before
+  closure, then rerun its flex and provider-route twins plus all prior Flash evidence
+  after the documentation-only successor candidate is frozen; final certification
+  requires one candidate.
+- **Live retest result:** activated HER `0.1.0-hashi.8` under Ajiao after `/reboot min`.
+  Activation smoke `req-0001` reproduced the exact medium planning deviation, emitted
+  `invalid_format` then `fallback`, and completed with the exact requested line and zero
+  tools. The exact official-DeepSeek fixed/medium C01 cell then passed as run
+  `her-20260811T162738Z-80a98a`: both provider calls returned HTTP 200 from
+  `deepseek-v4-flash`, the same fallback telemetry appeared, stream and visible hashes
+  matched, one start and one terminal finish were present, and no funds signal appeared.
+  Evidence: `ACTIVATION-SMOKE-003.json` and
+  `HD-003-HER-20260812-015-verification.json` under Superloop
+  `sl-20260811-123616159717-57f4`, plus the run's retained `evidence/verdict.json`.
+- **Closure — 2026-08-12:** verified against source
+  `69c88798237132da9874e5a300ab2c25e6fd9ae2` and HER `0.1.0-hashi.8` /
+  `4f5f5dad26a208cef67f8f3ed84fbecaa0ed3d8164df22010ceb918a7456269b`.
+  The known-bad RED, focused and boundary regressions, full HER certification, full
+  HASHI suite, active-binary smoke, and exact live failure retest all passed. The next
+  HASHI commit is documentation-only; the complete 48-cell campaign will restart after
+  freezing that successor identity.
+- **Cross-instance confirmation — 2026-08-12 09:40 AEST:** `zhaojun@HASHI1`
+  request `req-0003` asked a safe, open-ended HER permission-design question at high
+  effort. It stopped before tools after 20.28 seconds with zero response characters and
+  the exact 92-character `INVALID_TASK_FRAME_ERROR`. HASHI1 was running packaged HER
+  `0.1.0-hashi.1` / SHA-256
+  `bb2d233bf4c2dc358bab20ed9e816bdce4cde3b80ec59e1f76ef59ab8924efb1`,
+  source `8902f31bc5f887332335c0d152e76aabd539710d`; that source predates the
+  bounded high-assurance initial-frame retry in `d3e659534b33823818630db309ceb3f319c981cf`.
+  This is additional evidence for the same initial planning-format root-cause class,
+  not a new defect ID and not a recurrence on a fixed build.
+- **High-effort repair coverage:** assurance-enabled high effort makes at most two
+  initial TaskFrame attempts. The second attempt carries an explicit format-recovery
+  instruction and still validates the full assurance frame before any task tool can
+  run. It does not retry a partially executed outer request, weaken authorization,
+  change provider/model, or escalate Flash to Pro. Current source
+  `8f0f7344fbf64951619e44dd4c834aae57c29f53` passed
+  `high_effort_retries_an_invalid_initial_assurance_frame_once` and the medium fallback
+  regression on 2026-08-12. Packaged live high-effort coverage remains part of the
+  same-candidate Stage 1 Flash matrix.
+- **Remaining risk:** assurance-enabled high/xhigh/max+ planning intentionally retains
+  stricter validation after bounded format recovery; those effort cells must prove their
+  own recovery and terminal contracts without weakening authorization boundaries.
+- **Recurrence count:** 0
+
+### HER-20260812-016 — request activity timestamps moved backwards
+
+- **Status:** Verified
+- **Severity:** P2
+- **Recurrence of:** none
+- **Discovered:** 2026-08-12 02:54 AEST
+- **Reporter:** `lin_yueru@HASHI2`, `her_debug` controller
+- **Batch / cell / scenario / run IDs:**
+  `sl-20260811-123616159717-57f4` / `HD-003` /
+  `HER-LIVE-DS-FLASH-FIXED-HIGH` / `C00` /
+  `her-20260811T165326Z-9d3f30`
+- **Provider / model / mode / effort:** official DeepSeek /
+  `deepseek-v4-flash` / fixed / high
+- **Presentation policy:** thinking=true, verbose=true, typing=true
+- **HASHI commit and dirty state:**
+  `5e2df67f32f8458d0a6ddaaaf41900d2882e33bd`, clean when reproduced
+- **HER package version / SHA-256:** `0.1.0-hashi.8` /
+  `4f5f5dad26a208cef67f8f3ed84fbecaa0ed3d8164df22010ceb918a7456269b`
+- **HER source commit:** `69c88798237132da9874e5a300ab2c25e6fd9ae2`, clean when reproduced
+- **Expected:** request activity sequence and timestamps are nondecreasing in delivery
+  order, including across ordinary wall-clock corrections.
+- **Actual:** sequence 3 (`HER task started`) carried timestamp
+  `1786467207.619370`, then sequence 4 (`HER stream started`) carried the earlier
+  timestamp `1786467206.7893784`. All response, route, model, stream, visible-output,
+  completion, and terminal assertions otherwise passed.
+- **User-visible impact:** activity consumers can observe a negative elapsed interval or
+  move a progress display backwards even though the request itself succeeds.
+- **First divergent event:** `RequestActivityStore._append_unlocked` accepted the
+  regressing event timestamp verbatim instead of preserving the store's sequence-order
+  invariant.
+- **Completion status / stop reason / provider stop reason:** completed / end_turn /
+  end_turn.
+- **Session and request IDs:** HASHI `req-0032`; HER
+  `session-1786467207631-0`.
+- **Tool calls / results / iterations:** 0 / 0 / 1.
+- **Reproduction rate:** 1/1 live observation; deterministic store-level reproduction
+  is 1/1 by appending timestamps `12.0` then `11.0` in sequence order.
+- **Minimal reproduction:** create a request activity record, publish one event at
+  timestamp `12.0`, then publish the next event at `11.0`; the known-bad store exposes
+  `[12.0, 11.0]` for increasing sequence numbers.
+- **Evidence bundle:**
+  `superloops/loops/sl-20260811-123616159717-57f4/evidence/HD-003-HASHI-20260812-016-reproduction.json`;
+  `superloops/loops/sl-20260811-123616159717-57f4/evidence/HD-003-HASHI-20260812-016-red.json`;
+  `superloops/loops/sl-20260811-123616159717-57f4/evidence/HD-003-HASHI-20260812-016-offline-verification.json`;
+  `superloops/loops/sl-20260811-123616159717-57f4/evidence/HD-003-HASHI-20260812-016-verification.json`;
+  `workspaces/ajiao/her_test_lab/runs/her-20260811T165326Z-9d3f30/evidence/verdict.json`.
+- **Secrets/redaction checked:** yes; no credential, raw prompt, or private reasoning is
+  included in the controller record.
+- **Suspected owner:** HASHI request activity projection.
+- **Root cause:** activity sequence is authoritative, but the display-only store copied
+  each adapter's wall-clock timestamp without clamping it to the preceding sequenced
+  event. A backwards wall-clock adjustment therefore broke the public monotonic-time
+  contract while sequence numbers remained correct.
+- **Known-bad commit/package:** HASHI
+  `5e2df67f32f8458d0a6ddaaaf41900d2882e33bd`; HER `0.1.0-hashi.8` /
+  `4f5f5dad26a208cef67f8f3ed84fbecaa0ed3d8164df22010ceb918a7456269b`.
+- **Fix commits:** HASHI
+  `89c8ebbefed0790f6370628680eb7c611e4631b0`.
+- **Repair:** normalize each appended projection timestamp to be no earlier than the
+  prior sequenced event, and derive `started_at` / `completed_at` from those normalized
+  lifecycle events. Backend source events remain untouched.
+- **Regression tests:**
+  `tests/test_request_activity.py::test_request_activity_clamps_regressing_timestamps_to_sequence_order`.
+- **Bad-build test result:** deterministic RED selected one test and failed one test on
+  HASHI `5e2df67f32f8458d0a6ddaaaf41900d2882e33bd`; the store exposed
+  `[10.0, 11.0, 12.0, 11.0, 9.0]` instead of the required nondecreasing timestamps.
+- **Fixed-build test result:** the focused regression passed; all 6 request-activity
+  tests passed; the 106 request-activity, HER-adapter, and runtime-pipeline tests passed;
+  the full HASHI suite passed with `1891 passed, 3 skipped`.
+- **Required live retest cells:** defect closeout requires the exact fixed/high C00
+  failure after activating the repaired HASHI runtime. The campaign separately requires
+  all 48 cells to restart because the repair is in a shared HASHI delivery layer.
+- **Live retest result:** after `/reboot min`, the first cold attempt was a preserved
+  planning-format model deviation and its activity timestamps were already monotonic.
+  The second cold attempt passed as run `her-20260811T171109Z-42fdeb`: request
+  `req-0002`, session `session-1786468271163-0`, two official-DeepSeek HTTP 200 calls,
+  exact configured model and route, exact stream and visible output, one start, one
+  terminal completion, and nondecreasing activity sequence and timestamps.
+- **Closure — 2026-08-12:** verified with HASHI runtime fix
+  `89c8ebbefed0790f6370628680eb7c611e4631b0` under activated documentation successor
+  `71e8761b722dbd791c4356e174f70a4440c4d5e6`; HER source and packaged binary remained
+  `69c88798237132da9874e5a300ab2c25e6fd9ae2` and `0.1.0-hashi.8` /
+  `4f5f5dad26a208cef67f8f3ed84fbecaa0ed3d8164df22010ceb918a7456269b`.
+  The known-bad RED, focused regression, 106-test blast radius, full HASHI suite
+  (`1891 passed, 3 skipped`), narrow activation, and exact live failure retest passed.
+  All pre-repair live evidence remains excluded from final certification.
+- **Remaining risk:** other timestamped presentation projections may require independent
+  monotonicity review; this repair is intentionally scoped to request activity.
+- **Recurrence count:** 0
+
+### HER-20260812-017 — AskUserQuestion terminal UI corrupted structured JSONL
+
+- **Status:** Fixed — blast-radius verification pending
+- **Severity:** P1
+- **Recurrence of:** none; related output-isolation class `HER-20260811-003`
+- **Discovered:** 2026-08-12 07:17 AEST
+- **Reporter:** `lin_yueru@HASHI2`, `her_debug` controller
+- **Batch / cell / scenario / run IDs:**
+  `sl-20260811-123616159717-57f4` / `HD-003` /
+  `HER-LIVE-DS-FLASH-FLEX-MAX` / `C02` attempt 2 /
+  `her-20260811T204652Z-767754`
+- **Provider / model / mode / effort:** official DeepSeek /
+  `deepseek-v4-flash` / flex / max
+- **Presentation policy:** thinking=true, verbose=true, typing=true
+- **HASHI commit and dirty state:**
+  `9b48935e324ad69eea9026ea4a505046f73c31bb`, clean when reproduced
+- **HER package version / SHA-256:** `0.1.0-hashi.8` /
+  `4f5f5dad26a208cef67f8f3ed84fbecaa0ed3d8164df22010ceb918a7456269b`
+- **HER source commit:** `69c88798237132da9874e5a300ab2c25e6fd9ae2`, clean when
+  reproduced
+- **Expected:** every emitted `tool_start` has one valid JSONL `tool_end` with the same
+  id and name. A terminal-owned question tool must not write human prompt text into a
+  machine-readable stream or block on unavailable input.
+- **Actual:** HASHI parsed three tool starts but only two tool ends. The missing parsed
+  event was `AskUserQuestion` id `call_00_vh7JabQ7qERSQ8xq7hf43097` at iteration 3,
+  while `run_finished` reported three tool uses and three tool results.
+- **User-visible impact:** the canonical event ledger contradicted its terminal
+  accounting, so HASHI could not trust the run as certification evidence even though
+  the request reached a completed terminal state. Other strict JSONL consumers could
+  fail the stream entirely.
+- **First divergent event:** after the valid `AskUserQuestion` `tool_start`, the tool
+  wrote `[Question]`, options, and `Enter choice` terminal text directly to stdout. HER
+  did emit the correlated `tool_end`, but it was appended to the same non-JSON prompt
+  line and was therefore invisible to a line-oriented JSON parser.
+- **Completion status / stop reason / provider stop reason:** completed / end_turn /
+  end_turn.
+- **Session and request IDs:** HASHI `req-0079`; HER
+  `session-1786481212692-0`.
+- **Tool calls / results / iterations:** terminal ledger 3 / 3 / 8; parseable event
+  ledger 3 starts / 2 ends.
+- **Reproduction rate:** 1/1 original live observation and 1/1 deterministic known-bad
+  regression.
+- **Minimal reproduction:** use scripted provider output that calls
+  `AskUserQuestion`, run packaged HER with stdin closed and
+  `--output-format=stream-json`, and require every stdout line to parse as JSON plus a
+  same-id `tool_start` / `tool_end` pair.
+- **Evidence bundle:**
+  `superloops/loops/sl-20260811-123616159717-57f4/evidence/HD-003-HER-20260812-017-reproduction.json`;
+  `superloops/loops/sl-20260811-123616159717-57f4/evidence/HD-003-HER-20260812-017-red.json`;
+  `superloops/loops/sl-20260811-123616159717-57f4/evidence/HD-003-HER-20260812-017-offline-verification.json`;
+  `workspaces/ajiao/her_test_lab/runs/her-20260811T204652Z-767754/evidence/`.
+- **Secrets/redaction checked:** yes; the permanent evidence contains no raw
+  credential, authorization header, private prompt, or provider reasoning.
+- **Suspected owner:** HER CLI tool executor output isolation for terminal-owned tools.
+- **Root cause:** structured and other non-interactive command modes disabled HER's
+  ordinary renderer but still invoked `AskUserQuestion` through the global terminal
+  tool registry. That tool owns stdin/stdout and bypassed the structured event writer.
+  Runtime accounting remained correct, but terminal UI bytes corrupted the JSONL
+  framing around the emitted `tool_end`.
+- **Known-bad commit/package:** source
+  `69c88798237132da9874e5a300ab2c25e6fd9ae2`; HER `0.1.0-hashi.8` /
+  `4f5f5dad26a208cef67f8f3ed84fbecaa0ed3d8164df22010ceb918a7456269b`.
+- **Fix commits:** HER source
+  `8f0f7344fbf64951619e44dd4c834aae57c29f53`; HASHI package
+  `e171909a872a23cf2aabcfa575f10df8a7295e4e`.
+- **Repair:** when output emission is disabled, intercept `AskUserQuestion` before its
+  terminal implementation runs and return a normal `ToolError`. ConversationRuntime
+  then emits the correlated error `tool_end`, records the result in the terminal
+  ledger, and continues without reading stdin or printing terminal prompts. Interactive
+  TTY behavior remains unchanged.
+- **Regression test:** HER source
+  `stream_json_ask_user_question_preserves_correlated_tool_events`.
+- **Bad-build test result:** the deterministic RED selected one test and failed one
+  test on source `69c88798237132da9874e5a300ab2c25e6fd9ae2`; an empty/non-JSON
+  stdout line failed parsing before the correlated tool end could be observed.
+- **Fixed-build test result:** all 5 mock-parity tests passed; full HER workspace
+  certification passed with 1464 tests passed and 1 ignored; format, all-target Clippy
+  with warnings denied, and release build passed. HASHI's 107 targeted HER/Superloop
+  tests passed. Packaged HER `0.1.0-hashi.9` /
+  `431876b9120be26e6ecaffa7f0f5b1dc4cebd2c8bf123c135996e71ffa0367f1`
+  passed the exact local scripted reproduction: all stdout lines were JSON, stderr was
+  empty, the single start/end ids matched, the end was an explicit tool error, and
+  `run_finished` reported one use and one result.
+- **Required live retest cells:** after explicit authorization, activate the frozen
+  successor candidate and rerun the original Ajiao
+  `HER-LIVE-DS-FLASH-FLEX-MAX/C02` failure first. Then restart Flash from the same
+  candidate; Pro remains locked until Flash passes.
+- **Live retest result:** the authorized successor-candidate retest ran in Superloop
+  `sl-20260811-231651520023-b272`, attempt `HD-003-A002`, on candidate
+  `b9da84597fc3409d6cf3b032a5becd6021258f374b1589cee0b886290bc5e7f9` via official
+  DeepSeek `deepseek-v4-flash`, flex/max. The C02 transaction itself passed: the exact
+  receipt returned, all three file/Git tools ran once in order, all three structured
+  `tool_start` / `tool_end` pairs correlated, and `run_finished` reported three uses
+  and three results. Because the C02 run emitted no `AskUserQuestion`, one bounded
+  defect-only continuation invoked it exactly once without repeating the completed C02
+  side effects. The raw ledger contains one `tool_call`, one same-id/name `tool_start`,
+  and one same-id/name error `tool_end`; no `Enter choice` text, interactive prompt
+  event, raw terminal write, retry, or other tool call occurred. Ajiao initially
+  misclassified the expected error result, so that failed reply was preserved; a
+  correction-only request then returned the exact reconciliation receipt with zero
+  task tool calls. The exact live retest is therefore **PASS**. Evidence:
+  `superloops/loops/sl-20260811-231651520023-b272/evidence/HD-003-A002-c02-pass-defect-inconclusive.json`;
+  `superloops/loops/sl-20260811-231651520023-b272/evidence/HD-003-A002-her017-worker-failure-raw-pass.json`;
+  `superloops/loops/sl-20260811-231651520023-b272/evidence/HD-003-A002-her017-reconciled-pass.json`.
+- **Outstanding blast radius:** restart the Stage 1 Flash matrix on the same candidate
+  from `HER-LIVE-DS-FLASH-FIXED-LOW/C00`; retain **Fixed — blast-radius verification
+  pending** until the required same-route neighbor, other-mode twin, and Flash/offline
+  gates pass. Pro remains locked.
+- **Remaining risk:** other terminal-owned tools must preserve the same non-interactive
+  isolation rule. Interactive TTY question behavior is intentionally outside this
+  repair and remains enabled.
+
+### HER-20260812-018 — controller nudge livelocked between packets of an in-progress task
+
+- **Status:** Verified
+- **Severity:** P1
+- **Recurrence of:** none
+- **Discovered:** 2026-08-12 14:17 AEST
+- **Affected area:** HER debug Superloop liveness policy, instantiated controller state,
+  and template validation.
+- **Expected:** once the operator starts the campaign and the current phase task is
+  `in_progress`, a verified terminal packet may select and dispatch exactly one next
+  eligible packet after the normal worker, stage, candidate, wait, and duplicate-dispatch
+  checks pass. Starting that next packet does not mark a new pending phase task in
+  progress.
+- **Actual:** after `HD-003-A002` reached a verified PASS, the controller selected
+  `HER-LIVE-DS-FLASH-FIXED-LOW/C00` but persisted
+  `pending_non_nudge_start_authority=true`. Forty-one later nudge observations found
+  Ajiao online and idle with no active dispatch, yet only moved the next-check timestamp.
+  The campaign remained `running` without executing any test packet.
+- **Reproduction:** loop `sl-20260811-231651520023-b272`, event
+  `loop-event-20260812041737000001`; current task `HD-003` is `in_progress`, the prior
+  receipt is terminal PASS, the selected packet is unstarted, Ajiao is idle, and Pro is
+  locked. The existing validator reported zero errors and warnings.
+- **Root cause:** pending **phase-task** authority and continuation of an already
+  authorized **in-progress task's packet queue** were treated as the same transition.
+  The nudge policy prohibited the former but did not explicitly require the latter, and
+  validation had no invariant rejecting the contradictory persisted authority flag.
+- **Repair plan:** make the distinction explicit in the liveness contract; persist
+  campaign-scoped operator continuation authority; reject an unstarted selected packet
+  that requests fresh start authority while its owning task is already `in_progress`;
+  and add a bounded no-progress rule that must dispatch, wait on a concrete blocker, or
+  surface a validation finding instead of scheduling another identical observation.
+- **Regression:**
+  `tests/test_her_debug_superloop_template.py::test_in_progress_packet_continuation_cannot_require_new_start_authority`.
+- **Fix:** the template now distinguishes pending phase-task activation from packet
+  continuation inside an `in_progress` task, persists campaign-scoped execution
+  authority at start, forbids fresh per-packet authority, and caps identical stagnant
+  observations at three. The instantiated-loop validator now reports
+  `in_progress_packet_authority_livelock` for the exact contradictory state that the
+  prior validator accepted.
+- **Offline verification:** the regression and six neighboring HER debug template tests
+  passed; the template validator returned zero findings. Running the fixed validator
+  against the preserved live state produced exactly the new livelock finding before the
+  state repair.
+- **Live verification:** after the controller selected and dispatched the formerly
+  stranded packet, exact `HER-LIVE-DS-FLASH-FIXED-LOW/C00` passed as run
+  `her-20260812T044436Z-32e47e`: HASHI request `req-0001`, one official-DeepSeek HTTP
+  200 call, exact `deepseek-v4-flash` route/model, exact stream and visible output,
+  terminal successful request activity, and monotonic activity sequence/timestamps.
+  This closes the liveness defect; the evidence is defect closeout only, and the final
+  same-candidate Flash matrix restarts after the journal commit. Pro remains locked.
+- **Recurrence count:** 0
+
+### HER-20260812-019 — live harness accepted a pre-restart runtime as the restart receipt
+
+- **Status:** Verified
+- **Severity:** P1
+- **Recurrence of:** none
+- **Discovered:** 2026-08-12 14:37 AEST
+- **Reporter:** `lin_yueru@HASHI2`, `her_debug` controller
+- **Batch / cell / scenario / run IDs:**
+  `sl-20260811-231651520023-b272` / `HD-003` /
+  `HER-LIVE-DS-FLASH-FIXED-LOW` / `C00` /
+  `her-20260812T043252Z-e75db5`
+- **Provider / model / mode / effort:** official DeepSeek /
+  `deepseek-v4-flash` / fixed / low
+- **Presentation policy:** thinking=true, verbose=true, typing=true
+- **HASHI commit and dirty state:**
+  `b308a46273e87c1cff35c33e7ad1bbdca814c27e`, clean when reproduced
+- **HER package version / SHA-256:** `0.1.0-hashi.9` /
+  `431876b9120be26e6ecaffa7f0f5b1dc4cebd2c8bf123c135996e71ffa0367f1`
+- **HER source commit:** `8f0f7344fbf64951619e44dd4c834aae57c29f53`, clean when reproduced
+- **Expected:** after requesting `/reboot min`, the live harness must observe a new
+  Ajiao runtime-start marker and only then accept online+idle as the restart receipt.
+  No provider request may be dispatched against the runtime being replaced.
+- **Actual:** the harness requested the asynchronous restart at
+  `2026-08-12T04:32:51.897749Z`, accepted the still-running old runtime as online+idle,
+  marked setup complete at `04:32:52.894474Z`, and dispatched HASHI `req-0004` at
+  `04:32:53.092214Z`. Ajiao's replacement runtime did not finish starting until
+  `04:32:59.241298Z`; the queued request and its in-memory activity projection were
+  discarded with the old runtime.
+- **User-visible impact:** the first real-world certification packet appeared accepted
+  but never reached HER or the provider. The controller then waited the full 300-second
+  cell timeout for an activity record that could no longer exist.
+- **First divergent event:** `wait_agent_online()` accepted online+idle without proving
+  that `.runtime_session.json:last_started_at` had advanced past the pre-reboot marker.
+- **Completion status / stop reason / provider stop reason:** no HER completion /
+  controller timeout / provider not reached.
+- **Session and request IDs:** HASHI `req-0004`; no HER session was created.
+- **Tool calls / results / iterations:** 0 / 0 / 0.
+- **Reproduction rate:** 1/1 cold restart-dispatch race.
+- **Minimal reproduction:** record Ajiao's current runtime-start marker, issue
+  `/reboot min`, immediately poll only online+idle, then enqueue a request before the
+  marker changes. The old runtime accepts the request and is subsequently replaced.
+- **Evidence bundle:**
+  `superloops/loops/sl-20260811-231651520023-b272/evidence/HD-003-HER-20260812-019-reproduction.json`;
+  `superloops/loops/sl-20260811-231651520023-b272/evidence/HD-003-HER-20260812-019-verification.json`;
+  `workspaces/ajiao/her_test_lab/runs/her-20260812T044436Z-32e47e/evidence/verdict.json`.
+- **Secrets/redaction checked:** yes; no credential, raw prompt, provider text, or
+  private reasoning is persisted.
+- **Suspected owner:** HER debug live harness restart handshake.
+- **Root cause:** `/reboot min` acknowledges a restart request asynchronously. The
+  harness treated generic readiness as completion and did not bind readiness to a new
+  runtime generation/start marker.
+- **Known-bad commit/package:** HASHI
+  `b308a46273e87c1cff35c33e7ad1bbdca814c27e`; HER `0.1.0-hashi.9` /
+  `431876b9120be26e6ecaffa7f0f5b1dc4cebd2c8bf123c135996e71ffa0367f1`.
+- **Fix commits:** HASHI
+  `e1677e1698b97ce16920cef756635820d98410de`.
+- **Regression tests:**
+  `tests/test_her_debug_restart_guard.py::test_restart_receipt_rejects_pre_restart_online_idle_runtime`.
+- **Bad-build test result:** the preserved live timeline proves the known-bad predicate:
+  old runtime online=true, idle=true, and unchanged start marker was accepted. The new
+  deterministic regression rejects that exact state.
+- **Fixed-build test result:** all three restart-guard tests passed; the 27-test HER
+  debug focused suite passed; the operational runner compiled and its guarded restart
+  advanced Ajiao's start marker before returning.
+- **Required live retest cells:** guarded Ajiao restart followed by the exact
+  `HER-LIVE-DS-FLASH-FIXED-LOW/C00` packet; the dropped pre-provider request does not
+  count toward the final matrix.
+- **Live retest result:** guarded restart requested at
+  `2026-08-12T04:44:22.189148Z` and returned only after the start marker advanced from
+  `2026-08-12T14:32:59.241298` to `2026-08-12T14:44:26.587044`, with Ajiao online and
+  idle. The immediately following exact fixed/low C00 completed PASS as run
+  `her-20260812T044436Z-32e47e`; provider trace count was one, status was HTTP 200,
+  route/model and stream hashes were exact, and no funds signal was present.
+- **Remaining risk:** every later harness-triggered restart must use the same generation
+  receipt; generic online+idle remains insufficient. The final certification matrix is
+  independently restarted after this journal closure.
+- **Recurrence count:** 0
+
+## New-entry template
+
+Copy this section, replace every placeholder, and add the new ID to the index.
+
+```markdown
+### HER-YYYYMMDD-NNN — short symptom
+
+- **Status:** New
+- **Severity:** P0/P1/P2/P3
+- **Recurrence of:** none / HER-...
+- **Discovered:** YYYY-MM-DD HH:MM TZ
+- **Reporter:**
+- **Batch / cell / scenario / run IDs:**
+- **Provider / model / mode / effort:**
+- **Presentation policy:** thinking=?, verbose=?, typing=?
+- **HASHI commit and dirty state:**
+- **HER package version / SHA-256:**
+- **HER source commit:**
+- **Expected:**
+- **Actual:**
+- **User-visible impact:**
+- **First divergent event:**
+- **Completion status / stop reason / provider stop reason:**
+- **Session and request IDs:**
+- **Tool calls / results / iterations:**
+- **Reproduction rate:** x/y cold, x/y warm
+- **Minimal reproduction:**
+- **Evidence bundle:**
+- **Secrets/redaction checked:** yes/no
+- **Suspected owner:** HASHI / HER / Tool Gateway / provider adapter / delivery / unknown
+- **Root cause:**
+- **Known-bad commit/package:**
+- **Fix commits:**
+- **Regression tests:**
+- **Bad-build test result:**
+- **Fixed-build test result:**
+- **Required live retest cells:**
+- **Live retest result:**
+- **Remaining risk:**
+- **Recurrence count:** 0
+```
+
+## Triage checklist
+
+For every new symptom:
+
+1. Freeze the run directory and hash the evidence files.
+2. Confirm route, model, mode, effort, request ID, session ID, and package SHA.
+3. Locate the first divergence among provider trace, HER JSONL, HASHI stream events,
+   Tool Gateway audit, and delivery transcript.
+4. Check whether workspace state proves the tool work happened once.
+5. Scan diagnostics for prompt/secret canaries before sharing logs.
+6. Reproduce cold once and warm once; stop early for P0 or unsafe duplication.
+7. Reduce to an offline scripted-provider or scripted-tool regression.
+8. Decide owner from evidence, not from where the symptom appeared.
+9. Make the regression fail on the known-bad build before applying the repair.
+10. After repair, run the affected cell, same-route other model, other-mode twin, other
+    provider twin, and the full deterministic HER suite.
+
+## Closure record
+
+When an entry becomes `Verified`, append a dated closure note containing:
+
+- immutable fix commits and package SHA;
+- automated regression results;
+- exact live retest cells and run IDs;
+- whether HASHI full tests and HER certification passed;
+- any deferred coverage or remaining risk.
+
+If any required item is missing, use `Fixed, verification pending`, not `Verified`.

@@ -539,6 +539,7 @@ class FlexibleAgentRuntime:
 
     def _setup_logging(self):
         formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+        events_handler = None
         configured = (
             (self.logger, "events.log"),
             (self.telegram_logger, "telegram.log"),
@@ -555,6 +556,19 @@ class FlexibleAgentRuntime:
             fh = logging.FileHandler(self.session_dir / filename, encoding="utf-8")
             fh.setFormatter(formatter)
             cur_logger.addHandler(fh)
+            if cur_logger is self.logger:
+                events_handler = fh
+
+        # HER runs in process but uses its own backend-scoped logger. Route it
+        # into the agent's durable event log so planning and background
+        # Meditation lifecycle records are not lost to the console-only root
+        # filter. Reusing the handler also keeps each record single-copy.
+        her_logger = logging.getLogger(f"Backend.HER.{self.name}")
+        her_logger.handlers.clear()
+        her_logger.setLevel(logging.INFO)
+        her_logger.propagate = False
+        if events_handler is not None:
+            her_logger.addHandler(events_handler)
 
     async def initialize(self) -> bool:
         return await runtime_lifecycle.initialize(self)
@@ -7053,8 +7067,6 @@ class FlexibleAgentRuntime:
         from adapters.stream_events import (
             KIND_REVIEW,
             KIND_TESTING,
-            KIND_THINKING,
-            KIND_TEXT_DELTA,
             KIND_TOOL_START,
             KIND_VALIDATION,
         )
@@ -7250,6 +7262,12 @@ class FlexibleAgentRuntime:
                         think_buffer.append(commentary)
                     return
                 if event.kind != KIND_THINKING:
+                    return
+                # Provider deltas already encode their own word boundaries.
+                # Never trim, deduplicate, or invent separators between them.
+                raw_delta = getattr(event, "raw_delta", "")
+                if raw_delta:
+                    self._openrouter_think_chunk += raw_delta
                     return
                 if _engine == "openrouter-api":
                     snippet = (event.summary or "")[:200].strip()
@@ -7609,6 +7627,7 @@ class FlexibleAgentRuntime:
                 display_text = self._strip_transfer_accept_prefix(item, response.text)
                 self._mark_success()
                 visible_text, wrapper_result = await self._apply_wrapper_to_visible_text(item, display_text or response.text)
+                runtime_retry.clear_completed_interrupted_task(self, item)
                 safe_core_raw = extract_memory_plus_update_details(response.text).visible_text
                 self._append_core_transcript(
                     item,

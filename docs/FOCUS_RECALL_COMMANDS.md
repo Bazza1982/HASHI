@@ -115,7 +115,7 @@ the same effect as recalling the whole current queue.
 
 | Command | Active task | Waiting queue | What happens next |
 | --- | --- | --- | --- |
-| `/stop` | Interrupted | Cleared | No automatic continuation |
+| `/stop` | Interrupted and saved durably | Cleared | A later plain `continue`, `resume`, or `继续` resumes the saved task |
 | `/steer <direction>` while busy | Interrupted | Cleared | Continue with the added direction and preserved progress |
 | `/focus` | Re-focused through an immediate continuation | Cleared when busy | Continue only within the original scope until done or genuinely blocked |
 | `/recall [count]` | Continues untouched | All or newest `count` removed | Current task keeps running |

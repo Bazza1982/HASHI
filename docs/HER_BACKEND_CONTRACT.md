@@ -1,15 +1,16 @@
 # HASHI Engine Runtime (HER) Backend Contract
 
-Status: active for HER `0.1.0-hashi.1`
+Status: active for HER `0.1.0-hashi.9`
 
 HER is derived from the MIT-licensed Claw runtime. The upstream copyright and
 license notice ships with every packaged HER release as `CLAW_LICENSE`.
 
 ## Deployment scope
 
-This contract and packaged Linux binary belong to the standalone HASHI runtime,
-currently certified on HASHI1. They do not update Aptenra's embedded HASHI runtime,
-Windows `aptenra_hashi.exe`, debug candidate, or installation package.
+This contract and packaged Linux binary belong to the standalone HASHI runtime.
+Certification and deployment are performed independently for each HASHI instance. They
+do not update Aptenra's embedded HASHI runtime, Windows `aptenra_hashi.exe`, debug
+candidate, or installation package.
 
 Aptenra adoption is a separate release task: explicitly integrate the selected HASHI
 changes, build the Windows artifact, record its provenance and SHA-256, and run the
@@ -49,6 +50,9 @@ adapter generated under the agent's `backend_state` directory.
   allowed tools, and excludes live runtime/config objects.
 - Claw-native `--allowedTools` and HASHI capability permissions remain separate layers.
 - A required `hashi-tools` MCP entry is validated during backend initialization.
+- HER pipes and continuously drains stdio MCP child stderr instead of inheriting it;
+  child diagnostics cannot contaminate structured CLI output, and their raw content is
+  not retained because it may contain server-owned secrets.
 - MCP calls use existing JSON schemas, ToolRegistry permission checks, and tool audit
   records.
 - The gateway stops excessive total calls, repeated identical calls, and consecutive
@@ -60,6 +64,12 @@ The authenticated packaged HER may emit `stream-json`. HASHI consumes assistant,
 thinking, tool, and usage events, but HASHI remains responsible for deciding which
 events are visible and how final delivery is promoted. Encrypted or provider-redacted
 reasoning must never be reconstructed or exposed.
+
+Provider reasoning deltas are an exact byte-fragment contract. HER must preserve
+leading, trailing, and whitespace-only fragments from the provider stream; HASHI
+concatenates those raw fragments without trimming or guessing token boundaries. This
+prevents both joined words (`Theusersays`) and invented spaces inside words
+(`prov id er`).
 
 ## Binary contract
 
@@ -75,15 +85,12 @@ packaged runtime.
 
 ## Certification exceptions
 
-The baseline is deliberately non-expanding:
+The baseline is deliberately fail-closed:
 
-- exactly one upstream Rust workspace test is allowed to fail because its expected
-  degraded sandbox status conflicts with this host's fully active sandbox;
-- exactly six upstream Clippy diagnostics are recognized in Trident/RAG;
-- every other Rust workspace test must pass;
-- any new Clippy diagnostic fails certification;
-- if an allowed item starts passing, certification also fails until the stale exception
-  is removed.
+- every Rust workspace test must pass;
+- the full Rust workspace, including all targets, must pass Clippy with warnings denied;
+- no diagnostic allowlist is active;
+- any new test failure or Clippy diagnostic fails certification.
 
 Run the full certification check with:
 
@@ -92,9 +99,11 @@ python scripts/verify_her_certification.py \
   --source-root /path/to/claw-code-hashi-4ea31c1
 ```
 
-## Remaining session limitation
+## Interrupted-turn continuation
 
-Session identity and normal multi-turn resume are active. Persisting an in-flight model
-plan across an operating-system kill still depends on whether Claw has flushed its
-session file. HASHI therefore treats interrupted-turn resume as best-effort and relies
-on structured tool audit records to diagnose completed side effects.
+Session identity and normal multi-turn resume are active. An operating-system kill may
+still interrupt HER before its internal plan is fully flushed, so HASHI separately
+persists the authoritative original user prompt when `/stop` is issued. A later bare
+continuation request is rebound to that prompt while retaining the HER session,
+workspace artefacts, and completed tool side effects. This makes task identity durable;
+the exact internal model-plan position remains dependent on HER's last session flush.

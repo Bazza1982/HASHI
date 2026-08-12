@@ -99,6 +99,16 @@ class OpenRouterAdapter(BaseBackend):
             or str(detail.get("summary") or "").strip()
         )
 
+    def _reasoning_detail_delta(self, detail) -> str:
+        if not isinstance(detail, dict):
+            return ""
+        detail_type = str(detail.get("type") or "").strip()
+        if detail_type == "reasoning.encrypted":
+            return ""
+        if detail_type == "reasoning.summary":
+            return str(detail.get("summary") or "")
+        return str(detail.get("text") or detail.get("summary") or "")
+
     async def initialize(self) -> bool:
         self.config.workspace_dir.mkdir(parents=True, exist_ok=True)
         if not self.api_key:
@@ -411,15 +421,33 @@ class OpenRouterAdapter(BaseBackend):
 
                 # Text content
                 content = delta.get("content", "")
-                reasoning_text = str(delta.get("reasoning") or "").strip()
+                reasoning_text = str(delta.get("reasoning") or "")
                 reasoning_details = delta.get("reasoning_details") or []
 
                 if reasoning_text and on_stream_event:
                     asyncio.create_task(
-                        on_stream_event(StreamEvent(kind=KIND_THINKING, summary=reasoning_text[:400]))
+                        on_stream_event(
+                            StreamEvent(
+                                kind=KIND_THINKING,
+                                summary=reasoning_text[:400],
+                                raw_delta=reasoning_text,
+                            )
+                        )
                     )
                 elif reasoning_details and on_stream_event:
                     for detail in reasoning_details:
+                        raw_delta = self._reasoning_detail_delta(detail)
+                        if raw_delta:
+                            asyncio.create_task(
+                                on_stream_event(
+                                    StreamEvent(
+                                        kind=KIND_THINKING,
+                                        summary=raw_delta[:400],
+                                        raw_delta=raw_delta,
+                                    )
+                                )
+                            )
+                            continue
                         snippet = self._summarize_reasoning_detail(detail)
                         if snippet:
                             asyncio.create_task(

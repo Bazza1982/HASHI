@@ -1,21 +1,21 @@
 {
   "manifest_version": 1,
   "runtime": "hashi-her",
-  "version": "0.1.0-hashi.1",
+  "version": "0.1.0-hashi.9",
   "display_name": "HASHI Engine Runtime (HER)",
   "upstream_runtime": "Claw",
   "upstream_version": "0.1.3-hashi.33",
   "license": "MIT",
   "license_file": "CLAW_LICENSE",
   "upstream_commit": "4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d",
-  "source_commit": "8902f31bc5f887332335c0d152e76aabd539710d",
-  "source_branch": "integration/hashi-claw-4ea31c1",
-  "build_date": "2026-08-11",
-  "notes": "HER 0.1.0-hashi.1 is HASHI's built-in runtime engine, derived from the MIT-licensed Claw 0.1.3-hashi.33 runtime. It preserves the certified max+ execution policy, checkpointing, independent verdicts, telemetry, semantic compaction, termination diagnostics, and deterministic recovery behavior.",
+  "source_commit": "8f0f7344fbf64951619e44dd4c834aae57c29f53",
+  "source_branch": "agent/remove-token-budget-fix-reasoning-stream",
+  "build_date": "2026-08-12",
+  "notes": "HER 0.1.0-hashi.9 keeps AskUserQuestion terminal prompts out of structured and other non-interactive output modes. Such calls now return a correlated tool error, preserving valid JSONL plus matching tool_start/tool_end and terminal tool ledgers. It retains the medium planning recovery and prior structured-output isolation fixes certified in 0.1.0-hashi.8.",
   "binaries": {
     "linux-x86_64": {
-      "path": "releases/0.1.0-hashi.1/linux-x86_64/hashi-her",
-      "sha256": "bb2d233bf4c2dc358bab20ed9e816bdce4cde3b80ec59e1f76ef59ab8924efb1",
+      "path": "releases/0.1.0-hashi.9/linux-x86_64/hashi-her",
+      "sha256": "431876b9120be26e6ecaffa7f0f5b1dc4cebd2c8bf123c135996e71ffa0367f1",
       "rust_target_triple": "x86_64-unknown-linux-gnu",
       "binary_name": "hashi-her"
     }

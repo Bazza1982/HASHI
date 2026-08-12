@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
+
+from adapters.her import HER_VERSION
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +21,19 @@ def test_her_certification_baseline_matches_packaged_manifest():
     assert baseline["runtime_version"] == manifest["version"]
     assert baseline["upstream_commit"] == manifest["upstream_commit"]
     assert baseline["source_commit"] == manifest["source_commit"]
+    assert HER_VERSION == manifest["version"]
+
+
+def test_packaged_her_binary_matches_manifest_digest():
+    root = PROJECT_ROOT / "hashi_assets" / "her"
+    manifest = _load(root / "manifest.json")
+    binary_metadata = manifest["binaries"]["linux-x86_64"]
+    binary = (root / binary_metadata["path"]).resolve()
+
+    assert binary.is_relative_to(root.resolve())
+    assert binary.is_file()
+    assert binary.name == binary_metadata["binary_name"]
+    assert hashlib.sha256(binary.read_bytes()).hexdigest() == binary_metadata["sha256"]
 
 
 def test_her_certification_requires_all_workspace_tests_to_pass():
@@ -27,11 +43,13 @@ def test_her_certification_requires_all_workspace_tests_to_pass():
     clippy_diagnostics = baseline["clippy"]["expected_upstream_diagnostics"]
 
     assert rust_workspace == {"command": ["cargo", "test", "--workspace"]}
-    assert clippy_command == ["cargo", "clippy", "--workspace", "--lib", "--", "-D", "warnings"]
-    assert len(clippy_diagnostics) == 6
-    assert len(
-        {
-            (item["package"], item["path"], item["line"], item["lint"])
-            for item in clippy_diagnostics
-        }
-    ) == 6
+    assert clippy_command == [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings",
+    ]
+    assert clippy_diagnostics == []

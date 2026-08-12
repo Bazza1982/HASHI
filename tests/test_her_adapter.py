@@ -21,6 +21,8 @@ from adapters.her import (
     ClawTimeoutError,
     _build_claw_incomplete_report,
     _claw_run_is_incomplete,
+    _parse_json_output,
+    _parse_stream_json_output,
     build_claw_env,
     build_claw_task_args,
     detect_hashi_claw_platform,
@@ -91,6 +93,65 @@ def test_claw_max_iterations_builds_chinese_verified_fallback_report():
     assert metadata["verified_tool_results"] == 1
     assert metadata["uncertain_tool_results"] == 0
     assert metadata["recommended_action"] == "continue"
+
+
+def test_stream_json_parser_accepts_legacy_diagnostics_when_run_finished_exists():
+    output = "\n".join(
+        [
+            json.dumps({"kind": "run_started", "session_id": "session-1"}),
+            "Permission approval required",
+            "Approve this tool call? [y/N]: not-json",
+            json.dumps({"kind": "run_finished", "message": "done", "session_id": "session-1"}),
+        ]
+    )
+
+    parsed = _parse_stream_json_output(
+        output,
+        command=["/runtime/hashi-her", "prompt", "PRIVATE USER PROMPT"],
+    )
+
+    assert parsed["message"] == "done"
+    assert parsed["_protocol_non_json_line_count"] == 2
+
+
+def test_stream_json_parser_missing_final_is_safe_and_fail_closed():
+    output = "\n".join(
+        [
+            json.dumps({"kind": "run_started", "session_id": "session-1"}),
+            "Permission approval required for PRIVATE USER PROMPT",
+            json.dumps(
+                {
+                    "kind": "api_http_error",
+                    "type": "error",
+                    "message": "Invalid assistant message",
+                }
+            ),
+        ]
+    )
+
+    with pytest.raises(ClawJsonError) as raised:
+        _parse_stream_json_output(
+            output,
+            command=["/runtime/hashi-her", "prompt", "PRIVATE USER PROMPT"],
+        )
+
+    message = str(raised.value)
+    assert "did not include run_finished" in message
+    assert "last_error_kind=api_http_error" in message
+    assert "non_json_lines=1" in message
+    assert "PRIVATE USER PROMPT" not in message
+
+
+def test_json_parser_error_does_not_echo_command_or_output():
+    with pytest.raises(ClawJsonError) as raised:
+        _parse_json_output(
+            "PRIVATE USER PROMPT",
+            command=["/runtime/hashi-her", "prompt", "PRIVATE USER PROMPT"],
+        )
+
+    message = str(raised.value)
+    assert "hashi-her" in message
+    assert "PRIVATE USER PROMPT" not in message
 
 
 def _write_packaged_claw(
@@ -299,7 +360,10 @@ def test_build_claw_env_uses_allowlist_only():
         ("max+", "512"),
     ],
 )
-def test_claw_execution_effort_maps_to_iteration_budget(tmp_path, effort, expected_iterations):
+def test_claw_execution_effort_maps_to_iteration_budget(
+    tmp_path, monkeypatch, effort, expected_iterations
+):
+    monkeypatch.setenv("CLAW_MAX_PLUS_TOKEN_BUDGET", "1")
     cfg = SimpleNamespace(
         name="test",
         workspace_dir=tmp_path,
@@ -314,8 +378,8 @@ def test_claw_execution_effort_maps_to_iteration_budget(tmp_path, effort, expect
     assert adapter._task_env()["CLAW_TASK_PLANNING"] == ("0" if effort == "low" else "1")
     assert adapter._task_env()["CLAW_EXECUTION_EFFORT"] == effort
     if effort == "max+":
-        assert adapter._task_env()["CLAW_MAX_PLUS_TOKEN_BUDGET"] == "1500000"
         assert adapter._task_env()["CLAW_MAX_PLUS_TIME_BUDGET_SECONDS"] == "1500"
+        assert "CLAW_MAX_PLUS_TOKEN_BUDGET" not in adapter._task_env()
 
 
 def test_claw_explicit_max_iterations_overrides_execution_effort(tmp_path):
@@ -343,7 +407,7 @@ def test_max_plus_checkpoint_is_request_correlated_and_atomically_recoverable(tm
     event = {
         "kind": "max_plus_checkpoint",
         "phase": "evidence_update",
-        "budget": {"tokens_used": 123, "token_limit": 1_500_000},
+        "budget": {"tokens_used": 123},
         "stop_reason": None,
         "frame": {"active_goal": "verify max plus"},
     }
@@ -879,6 +943,10 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path, caplog):
             for event in [
                 {"kind": "run_started", "model": "deepseek/test", "session_id": "stream-session"},
                 {"kind": "task_acknowledgement", "text": "I will inspect the requested file only."},
+                {"kind": "permission_required", "tool_name": "bash", "current_mode": "workspace-write",
+                 "required_mode": "danger-full-access", "reason": "shell execution", "input": "private command"},
+                {"kind": "permission_decision", "tool_name": "bash", "decision": "denied",
+                 "reason": "approval input unavailable"},
                 {"kind": "task_plan", "phase": "initial", "frame": {
                     "active_goal": "inspect file",
                     "assurance": {
@@ -955,6 +1023,17 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path, caplog):
     assert adapter.capabilities.supports_answer_stream is True
     assert KIND_THINKING in [event.kind for event in events]
     assert KIND_ACKNOWLEDGEMENT in [event.kind for event in events]
+    assert any(
+        event.kind == KIND_PROGRESS
+        and event.summary == "HER permission required for bash"
+        and "private command" not in event.detail
+        for event in events
+    )
+    assert any(
+        event.kind == KIND_PROGRESS
+        and event.summary == "HER permission denied for bash"
+        for event in events
+    )
     assert "review" in [event.kind for event in events]
     assert "validation" in [event.kind for event in events]
     assert "testing" in [event.kind for event in events]
@@ -1047,7 +1126,7 @@ async def test_claw_adapter_stream_json_emits_actual_thinking_delta(tmp_path):
         else:
             for event in [
                 {"kind": "run_started", "model": "deepseek/test"},
-                {"kind": "thinking_delta", "text": "Need to inspect adapter mapping.", "thinking_chars": 32,
+                {"kind": "thinking_delta", "text": " Need to inspect adapter mapping.", "thinking_chars": 33,
                  "reasoning_source": "reasoning", "visibility": "provider_returned"},
                 {"kind": "thinking_redacted", "summary": "provider emitted encrypted reasoning block", "thinking_chars": 0,
                  "reasoning_source": "reasoning_details.encrypted", "visibility": "provider_redacted"},
@@ -1078,7 +1157,7 @@ async def test_claw_adapter_stream_json_emits_actual_thinking_delta(tmp_path):
     assert response.is_success is True
     assert response.usage.thinking_tokens == 8
     assert response.stream_metadata["claw_thinking"] == {
-        "thinking_chars": 32,
+        "thinking_chars": 33,
         "thinking_tokens": 8,
         "thinking_event_count": 2,
         "thinking_redacted_count": 1,
@@ -1086,8 +1165,9 @@ async def test_claw_adapter_stream_json_emits_actual_thinking_delta(tmp_path):
     }
     assert any(
         event.kind == KIND_THINKING
-        and event.summary == "Need to inspect adapter mapping."
-        and event.detail == "thinking_chars=32;source=reasoning"
+        and event.summary == " Need to inspect adapter mapping."
+        and event.raw_delta == " Need to inspect adapter mapping."
+        and event.detail == "thinking_chars=33;source=reasoning"
         for event in events
     )
     assert any(
