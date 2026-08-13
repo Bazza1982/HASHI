@@ -2744,7 +2744,13 @@ class FlexibleAgentRuntime:
             return
 
         await self._reply_text(update, f"Running in /browser route {sub}...")
-        await self.enqueue_request(update.effective_chat.id, prompt, source, summary)
+        await self.enqueue_request(
+            update.effective_chat.id,
+            prompt,
+            source,
+            summary,
+            habit_learning_eligible=True,
+        )
 
     async def cmd_credit(self, update, context):
         if not self._is_authorized_user(update.effective_user.id):
