@@ -37,7 +37,7 @@
   - `python scripts/verify_her_certification.py --source-root <pinned-her-source>`
     passes full Rust workspace tests plus workspace/all-target Clippy with
     warnings denied
-  - `python -m pytest -q tests/test_her_adapter.py tests/test_her_certification_baseline.py tests/test_tool_gateway_mcp.py tests/test_media_read.py tests/test_runtime_media.py`
+  - `python -m pytest -q tests/test_her_adapter.py tests/test_her_certification_baseline.py tests/test_her_runtime_probe.py tests/test_tool_gateway_mcp.py tests/test_media_read.py tests/test_runtime_media.py`
   - `python -m pytest -q tests/test_her_habit_meditation.py tests/test_runtime_her_habits.py tests/test_flexible_backend_state.py tests/test_runtime_pipeline.py`
   - `python -m pytest -q tests/test_her_debug_lab.py tests/test_her_debug_restart_guard.py tests/test_her_debug_superloop_template.py`
   - `python -m py_compile adapters/her.py adapters/her_habits.py orchestrator/runtime_her_habits.py tools/media_read.py tools/gateway/mcp_stdio.py`
@@ -53,8 +53,8 @@
     behavior before release notes claim those capabilities
   - `/reboot max` and wider rollout happen only after the canary is green and
     logs contain no unexplained HER, Gateway, media, Habit, or reload errors
-  - Certification is platform-specific. A Linux `.11` result must not be used
-    to claim Windows `.11` parity
+  - Certification is platform-specific. A Linux `.12` result must not be used
+    to claim Windows `.12` parity
 - Superloop alpha gates:
   - `python -m pytest tests/test_superloop_store.py tests/test_superloop_taskboard.py tests/test_superloop_waits.py tests/test_superloop_runner.py tests/test_superloop_scheduler.py tests/test_superloop_compiler.py tests/test_superloop_issues.py tests/test_superloop_commands.py tests/test_superloop_recording.py tests/test_superloop_nagare_adapter.py -q`
   - Taskboards use `task_id`, not `id`, and every in-progress or next-action task resolves to a real task

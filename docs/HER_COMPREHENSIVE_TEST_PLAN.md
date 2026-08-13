@@ -109,14 +109,20 @@ A successful answer from the wrong route is a failure.
 | Effort | Native maximum iterations | Planning | Additional contract |
 | --- | ---: | --- | --- |
 | `low` | 12 | off | short direct execution |
-| `medium` | 32 | on | planned execution |
-| `high` | 96 | on | planned execution |
-| `xhigh` | 192 | on | extended execution |
-| `max` | 384 | on | assurance/review and finalization behavior retained |
-| `max+` | 512 | on | plan-directed advisory assurance; no private time or token cap |
+| `medium` | 32 | on | adaptive execution plan; no review capability |
+| `high` | 96 | on | optional plan-selected self-review |
+| `xhigh` | 192 | on | optional plan-selected independent read-only review |
+| `max` | 384 | on | optional plan-selected independent read-only review |
+| `max+` | 512 | on | same review plus optional isolated rerun of exact plan-declared tests; no private time or token cap |
 
 The test harness must assert the environment passed to HER. It must not infer the
 effort from how long the model appeared to think.
+
+Effort is a capability ceiling, not a required amount of work. Every planned effort
+must prove that a direct-response task such as a greeting stops after planning and one
+reply, without tools, testing, or review. Non-trivial fixtures must also prove that the
+selected task profile—not the effort label alone—controls verification, testing,
+review targets, and stop conditions.
 
 ### 3.3 Core cells
 
@@ -264,6 +270,24 @@ prove exact edge behavior before any paid API run:
     before `run_finished` leaves a recoverable, correctly owned checkpoint.
 16. Fixed/flex prompt assembly, `/stop` rebinding, `/new`, Memory+, compaction, and final
     delivery are verified without a network dependency.
+17. At MEDIUM through MAX+, a direct-response greeting produces one adaptive plan and one
+    reply with no task tools, test, self-review, or independent review; LOW replies without
+    a planning call.
+18. HIGH exposes only optional self-review. XHIGH, MAX, and MAX+ expose optional
+    independent review, and the plan may select `none` at every level.
+19. An independent reviewer receives a separate read-only registry, can inspect actual
+    source files, Git status/diff/log/show/blame, and file SHA-256, and cannot mutate the
+    workspace even when the primary agent can.
+20. Every task tool input/output remains immutable and page-addressable by stable evidence
+    ID. Compact-packet truncation preserves the proposed answer and lets the reviewer fetch
+    the omitted raw result instead of resending the ledger.
+21. `revise` and `block` verdicts reach the primary agent as advisory feedback. Exhausting
+    review revisions still produces an agent-owned, uncertainty-aware final answer; a final
+    reviewer `pass` is not required.
+22. Only a MAX+ profile that selects `isolated_recheck`, independent review, and exact test
+    commands receives `ReviewRun`. Unplanned commands are denied, the source workspace is
+    not writable, network is unavailable, and no unsafe fallback runs when isolation is
+    absent.
 
 ### Layer B — staged live cells
 
@@ -278,9 +302,9 @@ Every core cell receives a native-limit run. These runs are scheduled after Laye
 clean because high limits are expensive. A deterministic local step tool makes work
 depend on sequential turns rather than puzzle-solving ability.
 
-For MAX+, the first native boundary to win may be 512 iterations or 1,500 seconds. The
-winning boundary must be reported accurately. Separately, the offline clock-controlled
-test proves each boundary in isolation.
+For MAX+, the only private native execution boundary is 512 iterations. No special
+1,500-second runtime budget exists. `/timeout` remains HASHI's separate operator-owned
+outer control and is tested independently from HER's iteration ceiling.
 
 ### Layer D — failure injection and restart recovery
 
@@ -324,9 +348,8 @@ the desired result and safety boundary but never reveal the patch.
 - **Nominal repair:** diagnose seeded defects and satisfy fixture tests.
 - **Sequential edge:** use `her_step_lab`, which unlocks exactly one next step per model
   round, rejects skipped or repeated step tokens, and records every accepted step.
-- **Impossible/over-bound:** request more sequential steps than the current native limit,
-  or deliberately exceed MAX+ time. Completion is impossible; the correct outcome is a
-  precise incomplete report.
+- **Impossible/over-bound:** request more sequential steps than the current native limit.
+  Completion is impossible; the correct outcome is a precise incomplete report.
 
 ### 7.2 Per-effort workload
 
@@ -337,7 +360,7 @@ the desired result and safety boundary but never reveal the patch.
 | `high` | repair a six-module incremental-cache fixture and run unit/integration tests | 95 rounds | 97 rounds |
 | `xhigh` | refactor a ten-module event pipeline while preserving its public fixture API | 191 rounds | 193 rounds |
 | `max` | complete a staged schema migration, rollback check, and full local verification | 383 rounds | 385 rounds |
-| `max+` | complete a staged migration with checkpoints, evidence review, rollback rehearsal, and final verification | calibrated below the winning live boundary | 513 rounds or more than 1,500 seconds |
+| `max+` | complete a staged migration whose plan selects direct inspection, evidence review, rollback rehearsal, and exact isolated rechecks | calibrated below 512 rounds | 513 rounds |
 
 The sequential harness counts **model loop iterations**, not raw tool calls; batching
 several tool calls in one model response cannot falsely satisfy the target. Before the
@@ -490,7 +513,7 @@ For each provider/model/mode route (eight route-mode pairs), run:
 - 50 consecutive short turns at `low`;
 - 30 mixed tool turns at `high`;
 - one native-boundary task at every effort;
-- one MAX+ task until completion or its native winning boundary;
+- one MAX+ task until completion or its 512-iteration boundary;
 - one 12-hour warm-session soak with periodic safe probes;
 - one 24-hour hard-timeout simulation using a fake clock, plus a shorter live idle-timeout
   probe where operationally safe.
@@ -506,7 +529,6 @@ Every terminal path must have a deterministic expected status and user message.
 | --- | --- |
 | normal provider end | `completed`, provider stop recorded, one final answer |
 | native iteration ceiling | `incomplete/max_iterations`, verified partial work listed, continuation offered |
-| MAX+ time ceiling | `incomplete/budget_exhausted`, checkpoint and partial evidence preserved |
 | repeated thinking-only response | `incomplete/no_final_text`, deterministic visible report |
 | one thinking-only response | one tool-free visible-finalization retry, then normal terminal event |
 | provider 400 invalid history | sanitized error or recovered visible finalization; never raw prompt leakage |

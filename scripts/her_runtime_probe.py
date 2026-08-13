@@ -72,7 +72,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", help="Model to use with --provider.")
     parser.add_argument(
         "--effort",
-        choices=("low", "medium", "high", "xhigh", "max"),
+        choices=("low", "medium", "high", "xhigh", "max", "max+"),
         default="medium",
         help="HER execution effort for provider probes.",
     )
@@ -103,6 +103,7 @@ def main(argv: list[str] | None = None) -> int:
                 "high": 96,
                 "xhigh": 192,
                 "max": 384,
+                "max+": 512,
             }
             env["CLAW_EXECUTION_EFFORT"] = args.effort
             env["CLAW_TASK_PLANNING"] = "0" if args.effort == "low" else "1"

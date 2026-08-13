@@ -11,12 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Certified HER `0.1.0-hashi.11` integration** — pinned the Linux HASHI
-  Engine Runtime package to source `f524b47`, preserved fixed-mode session
+- **Certified HER `0.1.0-hashi.12` integration** — pinned the Linux HASHI
+  Engine Runtime package to source `7ce6cf4`, preserved fixed-mode session
   resume and structured streaming, exposed the shared HASHI Tool Registry over
   a private MCP stdio gateway, and added provider/model routing plus HER
-  execution budgets through `max+`. MAX+ assurance is advisory and plan-driven,
-  with no private token or wall-clock ceiling. The current Windows manifest entry remains
+  execution budgets through `max+`. Effort is now a capability ceiling: the adaptive
+  plan chooses task-matched work and review, so trivial requests do not over-process.
+  XHIGH, MAX, and MAX+ reviewers can directly inspect deliverables through a separate
+  read-only workspace/Git tool registry and page immutable raw evidence by stable ID;
+  MAX+ may additionally rerun only exact plan-declared tests inside a disposable,
+  network-isolated snapshot. Review remains advisory, and no private token or wall-clock
+  ceiling exists. The current Windows manifest entry remains
   an older runtime and is not yet parity-certified. See the
   [unreleased checkpoint](docs/HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md).
 - **Secure HER multimedia bridge** — Telegram media now reaches HER as actual

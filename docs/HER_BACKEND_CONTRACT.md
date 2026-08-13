@@ -1,6 +1,6 @@
 # HASHI Engine Runtime (HER) Backend Contract
 
-Status: active for HER `0.1.0-hashi.11`; unreleased integration checkpoint
+Status: active for HER `0.1.0-hashi.12`; unreleased integration checkpoint
 recorded in
 [HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md)
 
@@ -17,14 +17,14 @@ not certify a Windows build, another architecture, or a downstream integration.
 
 | Field | Certified Linux value |
 | --- | --- |
-| Package version | `0.1.0-hashi.11` |
-| HER source | `f524b47054e5964b9ddfc61ab28cbfd990dc09af` |
+| Package version | `0.1.0-hashi.12` |
+| HER source | `7ce6cf431502ca5a78a1874f09db9c2de7211562` |
 | Upstream base | Claw `4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d` |
 | Target | `linux-x86_64` |
-| SHA-256 | `93229c2b3aae40eabe5ed4582429a5247a4520ba45b6f1c99eecadecefaa1232` |
+| SHA-256 | `7e14a22bb51d9c99de3eb92c627434adf631fed898fc4dca420a8faf2b6a9a32` |
 
 The same manifest also contains a Windows `0.1.3-hashi.3` artifact built from
-`b27f4180`. It is older than the `.11` runtime and must not be used as evidence
+`b27f4180`. It is older than the `.12` runtime and must not be used as evidence
 of current cross-platform parity.
 
 ## Ownership and session boundary
@@ -71,24 +71,46 @@ normal credential chain. The canonical command flow is backend → provider →
 model. `/provider` changes the provider and refreshes its allowlisted models;
 `/model` stays within the current provider.
 
+Request-scoped reviewer tools use the same configured provider/model route as the
+primary run. Anthropic and the supported OpenAI-compatible families—including xAI,
+DashScope, OpenRouter, and direct compatible endpoints—intersect the reviewer request's
+allowlist with the process allowlist and preserve its additional virtual tool schemas.
+No provider route may silently fall back to the primary agent's broader tool set.
+
 HER effort controls agentic execution length, not provider reasoning depth:
 
-| Effort | Maximum iterations | Planning |
+| Effort | Maximum iterations | Planning and review capability ceiling |
 | --- | ---: | --- |
-| `low` | 12 | off |
-| `medium` | 32 | on |
-| `high` | 96 | on |
-| `xhigh` | 192 | on |
-| `max` | 384 | on |
-| `max+` | 512 | on, with plan-directed assurance |
+| `low` | 12 | no planning; direct execution |
+| `medium` | 32 | adaptive plan; no review loop |
+| `high` | 96 | adaptive plan; optional self-review |
+| `xhigh` | 192 | adaptive plan; optional independent read-only review |
+| `max` | 384 | adaptive plan; optional independent read-only review |
+| `max+` | 512 | same independent review plus optional isolated rerun of exact plan-declared tests |
 
 An explicit `max_tool_iterations` remains an operator override but is bounded to
-8–512. MAX+ has no private token or wall-clock budget; `/timeout` remains the
-operator-owned outer control. Its planning step determines task-matched success,
-testing, and review work. Reviews provide feedback to the primary agent but cannot
-replace or suppress its final answer. Trivial plans skip heavyweight review, and
-tool aliases are compared by canonical capability rather than exact spelling.
-Provider-returned encrypted or redacted reasoning is never reconstructed.
+8–512. Effort is a capability ceiling, not a quota: the initial plan selects the
+smallest task-matched execution, verification, testing, and review scope available
+under that ceiling. A greeting at MAX+ therefore receives one planning decision and
+one normal reply, with no independent review, tool use, or test. MAX+ has no private
+token or wall-clock budget; `/timeout` remains the operator-owned outer control.
+
+The adaptive task profile records task kind, risk, state-change scope, direct-response
+eligibility, deliverables, material claims, verification mode, testing mode, exact test
+commands where applicable, review mode/targets/triggers, and stop conditions. HIGH may
+select self-review. XHIGH, MAX, and MAX+ may select an independent review, but none is
+mandatory merely because the capability exists.
+
+An independent reviewer starts without the task-performing conversation and receives a
+separate read-only tool registry. It can inspect workspace files, glob/grep results, Git
+status/diff/log/show/blame, and file identity/SHA-256 directly. Full immutable task tool
+inputs and outputs remain addressable by stable evidence IDs; the compact review packet
+is only an index, and truncation never makes older raw evidence inaccessible. MAX+ may
+also expose a disposable, network-isolated `ReviewRun`, but only for an exact command
+declared in the initial task profile. Reviewer `pass`, `revise`, and `block` verdicts are
+advisory. They trigger primary-agent reconsideration within the planned scope but cannot
+replace its judgment, suppress its final answer, or redefine completion. Provider-returned
+encrypted or redacted reasoning is never reconstructed.
 
 ## Tool Gateway contract
 

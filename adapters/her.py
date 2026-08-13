@@ -50,7 +50,7 @@ PERMISSION_MODE_RANK = {"read-only": 0, "workspace-write": 1, "danger-full-acces
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OLLAMA_DUMMY_API_KEY = "__ollama_dummy__"
 HER_DISPLAY_NAME = "HASHI Engine Runtime (HER)"
-HER_VERSION = "0.1.0-hashi.11"
+HER_VERSION = "0.1.0-hashi.12"
 PACKAGED_CLAW_RUNTIME = "hashi-her"
 PACKAGED_CLAW_MANIFEST_VERSION = 1
 CLAW_RUNTIME_POLICIES = {"prefer-packaged", "require-packaged", "system-only"}
@@ -1070,6 +1070,7 @@ def _claw_jsonl_to_stream_event(event: Mapping[str, Any]) -> StreamEvent | None:
         revision_round = int(event.get("revision_round") or 0)
         format_attempt = int(event.get("format_attempt") or 0)
         outcome = str(event.get("outcome") or "unknown")
+        request = event.get("request") if isinstance(event.get("request"), Mapping) else {}
         usage = event.get("usage") if isinstance(event.get("usage"), Mapping) else {}
         return StreamEvent(
             kind=KIND_PROGRESS,
@@ -1078,6 +1079,7 @@ def _claw_jsonl_to_stream_event(event: Mapping[str, Any]) -> StreamEvent | None:
                 f"attempt={format_attempt} outcome={outcome}"
             )[:500],
             detail=(
+                f"allow_tools={bool(request.get('allow_tools'))};"
                 f"input_tokens={int(usage.get('input_tokens') or 0)};"
                 f"output_tokens={int(usage.get('output_tokens') or 0)};"
                 f"cache_creation_input_tokens={int(usage.get('cache_creation_input_tokens') or 0)};"
@@ -1153,7 +1155,10 @@ def _claw_jsonl_to_stream_events(event: Mapping[str, Any]) -> list[StreamEvent]:
         events.append(primary)
 
     event_kind = str(event.get("kind") or "")
-    if event_kind == "independent_review" and str(event.get("gate") or "") == "execution_evidence":
+    if event_kind == "independent_review" and str(event.get("gate") or "") in {
+        "completion",
+        "execution_evidence",
+    }:
         review = event.get("review") if isinstance(event.get("review"), Mapping) else {}
         decision = str(review.get("decision") or "unknown").upper()
         revision_round = int(event.get("revision_round") or 0)
@@ -2925,15 +2930,17 @@ class HERAdapter(BaseBackend):
                         redact_secret_text(str(review.get("summary") or event.get("summary") or ""))[:2000],
                     )
                 elif kind == "control_invocation":
+                    request = event.get("request") if isinstance(event.get("request"), Mapping) else {}
                     usage = event.get("usage") if isinstance(event.get("usage"), Mapping) else {}
                     self.logger.info(
                         "HER control invocation: stage=%s gate=%s revision_round=%s "
-                        "format_attempt=%s outcome=%s input_tokens=%s output_tokens=%s",
+                        "format_attempt=%s outcome=%s allow_tools=%s input_tokens=%s output_tokens=%s",
                         event.get("stage") or "unknown",
                         event.get("gate") or "unknown",
                         event.get("revision_round") or 0,
                         event.get("format_attempt") or 0,
                         event.get("outcome") or "unknown",
+                        bool(request.get("allow_tools")),
                         usage.get("input_tokens") or 0,
                         usage.get("output_tokens") or 0,
                     )
