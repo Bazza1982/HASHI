@@ -61,8 +61,67 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 | `HER-20260813-023` | Fixed — live verification pending | P2 | runtime and adapter HER Habit pipelines can both process one foreground run | `test_her_adapter_declares_habit_pipeline_ownership`; `test_runtime_intake_ineligibility_disables_adapter_habit_pipeline` |
 | `HER-20260813-024` | Fixed — live verification pending | P1 | post-multimedia adapter runner rejected Meditation isolation overrides before inference | `test_her_task_runner_applies_meditation_safety_overrides` |
 | `HER-20260813-025` | Verified | P2 | HER Debug Lab failed in a clean clone without machine-local Ajiao state | `test_optional_operator_baseline_is_clone_portable_and_content_free`; `tests/test_her_debug_lab.py` |
+| `HER-20260813-026` | Fixed — live verification pending | P1 | MAX+ critic gates could repeatedly delay and then suppress otherwise usable completed work | `max_effort_returns_agent_owned_final_after_execution_review_exhaustion`; `max_plus_trivial_plan_skips_independent_review_gates` |
+| `HER-20260813-027` | Fixed — live verification pending | P1 | Habit Meditation model work occupied the foreground execution queue and process slot | `test_habit_meditation_model_work_does_not_block_foreground_task`; `test_habit_meditation_uses_low_effort_tool_free_snapshot` |
+| `HER-20260813-028` | Fixed — live verification pending | P1 | max-iteration handling could replace a usable primary-agent final answer with a mechanical incomplete report | `test_claw_incomplete_max_iterations_preserves_normal_final`; `test_claw_incomplete_dangling_tool_markup_uses_deterministic_report` |
 
 ## Historical entries
+
+### HER-20260813-026 — MAX+ assurance became a hard completion gate
+
+- **Status:** Fixed — live verification pending
+- **Severity:** P1
+- **Expected:** planning chooses task-matched success, validation, and review work;
+  critic output helps the primary agent improve but cannot confiscate its result.
+- **Actual:** exact tool-name comparison produced false divergence triggers, fixed
+  review limits repeated work, and a private time budget competed with `/timeout`.
+- **Root cause:** advisory assurance was implemented as runtime-owned gating with
+  mechanical matching and fixed ceilings instead of plan-directed feedback.
+- **Fix:** HER `.11` canonicalizes tool capabilities, skips heavy review for trivial
+  plans, derives revision allowance from the plan, deduplicates replan failures,
+  removes the private MAX+ wall-clock budget, and returns final ownership to the
+  primary agent after feedback.
+- **Fixed HER:** `0.1.0-hashi.11` / source `f524b47054e5964b9ddfc61ab28cbfd990dc09af`
+  / SHA-256 `93229c2b3aae40eabe5ed4582429a5247a4520ba45b6f1c99eecadecefaa1232`.
+- **Live retest required:** one trivial handoff and one multi-tool MAX+ task on the
+  upgraded packaged runtime.
+- **Recurrence count:** 0
+
+### HER-20260813-027 — Meditation blocked the primary queue
+
+- **Status:** Fixed — live verification pending
+- **Severity:** P1
+- **Expected:** Meditation uses the same agent's immutable context snapshot in a
+  separate queue as one low-effort, tool-free reflection round.
+- **Actual:** the model reflection shared the foreground execution lock and process
+  identity, delaying the next user task and risking foreground cancellation state.
+- **Root cause:** a broad lock covered both long model work and short durable Habit
+  state transitions.
+- **Fix:** separate Meditation execution lock, snapshot-only prompt, low effort,
+  tools disabled, no resumed session, and narrow serialization only around store
+  mutations. Existing turn-based scheduling remains unchanged.
+- **HASHI fix:** `4f66ca86`.
+- **Live retest required:** enqueue a foreground request while Meditation is running
+  and verify independent progress plus correct `/stop` ownership.
+- **Recurrence count:** 0
+
+### HER-20260813-028 — incomplete handling discarded a usable final answer
+
+- **Status:** Fixed — live verification pending
+- **Severity:** P1
+- **Expected:** iteration exhaustion preserves a normal primary-agent final answer;
+  only dangling tool/protocol output uses a deterministic recovery report.
+- **Actual:** HASHI discarded HER's final text whenever HER classified the run as
+  incomplete, even when all requested operations had succeeded.
+- **Root cause:** completion classification was treated as higher authority than the
+  primary agent's usable final payload.
+- **Fix:** preserve normal final text and append resumable state; retain deterministic
+  fallback only for malformed/dangling tool markup. Continue is preferred after
+  successful uncertain side effects unless evidence proves failure or repetition.
+- **HASHI fix:** `6d69ded6`.
+- **Live retest required:** iteration-ceiling task with successful tools and a usable
+  final, plus a dangling-tool negative control.
+- **Recurrence count:** 0
 
 ### HER-20260811-001 — exact reasoning whitespace was corrupted
 

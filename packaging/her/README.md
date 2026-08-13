@@ -23,11 +23,11 @@ is accepted only as a migration alias.
 
 | Platform | Runtime | Source | Status |
 | --- | --- | --- | --- |
-| Linux x86-64 | `0.1.0-hashi.10` | `85a481d9e5c94804ed9c0bd300ca9a635732c22d` | Current certified standalone HASHI package |
+| Linux x86-64 | `0.1.0-hashi.11` | `f524b47054e5964b9ddfc61ab28cbfd990dc09af` | Current certified standalone HASHI package |
 | Windows x86-64 | `0.1.3-hashi.3` | `b27f4180802a7735f745ddd764e5b9b1b88f7e9f` | Older reviewed artifact; not `.10` parity |
 
-The certified Linux `.10` SHA-256 is
-`882c9a71013bdd6155558ff4dc8df4a8e002188e144b04f7fda2fb96f0f83ac2`.
+The certified Linux `.11` SHA-256 is
+`93229c2b3aae40eabe5ed4582429a5247a4520ba45b6f1c99eecadecefaa1232`.
 Do not infer Windows parity from the shared manifest. A current Windows build
 needs its own reproducible source lock, checksum, product integration, and test
 evidence.

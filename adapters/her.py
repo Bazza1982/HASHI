@@ -50,7 +50,7 @@ PERMISSION_MODE_RANK = {"read-only": 0, "workspace-write": 1, "danger-full-acces
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OLLAMA_DUMMY_API_KEY = "__ollama_dummy__"
 HER_DISPLAY_NAME = "HASHI Engine Runtime (HER)"
-HER_VERSION = "0.1.0-hashi.10"
+HER_VERSION = "0.1.0-hashi.11"
 PACKAGED_CLAW_RUNTIME = "hashi-her"
 PACKAGED_CLAW_MANIFEST_VERSION = 1
 CLAW_RUNTIME_POLICIES = {"prefer-packaged", "require-packaged", "system-only"}
@@ -91,7 +91,6 @@ CLAW_ENV_ALLOWLIST = (
     "CLAW_MAX_TOOL_ITERATIONS",
     "CLAW_TASK_PLANNING",
     "CLAW_EXECUTION_EFFORT",
-    "CLAW_MAX_PLUS_TIME_BUDGET_SECONDS",
     *OS_ENV_ALLOWLIST,
 )
 
@@ -2266,10 +2265,6 @@ class HERAdapter(BaseBackend):
         env["CLAW_MAX_TOOL_ITERATIONS"] = str(self._max_tool_iterations())
         env["CLAW_TASK_PLANNING"] = "0" if self.effort == "low" else "1"
         env["CLAW_EXECUTION_EFFORT"] = self.effort
-        if self.effort == "max+":
-            env["CLAW_MAX_PLUS_TIME_BUDGET_SECONDS"] = str(
-                self._extra.get("max_plus_time_budget_seconds", 1_500)
-            )
         if self._gateway_config_home is not None:
             env["CLAW_CONFIG_HOME"] = str(self._gateway_config_home)
             project_root = Path(__file__).resolve().parents[1]

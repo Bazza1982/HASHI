@@ -8,10 +8,10 @@
 
 | Item | Value |
 | --- | --- |
-| HASHI code checkpoint | `2270f5be` (`fix(her): enforce session and habit ownership`) |
-| Certified HER package | `0.1.0-hashi.10` |
-| HER source commit | `85a481d9e5c94804ed9c0bd300ca9a635732c22d` |
-| Certified Linux SHA-256 | `882c9a71013bdd6155558ff4dc8df4a8e002188e144b04f7fda2fb96f0f83ac2` |
+| HASHI code checkpoint | through `4f66ca86` (`fix(her): isolate meditation from primary execution`) |
+| Certified HER package | `0.1.0-hashi.11` |
+| HER source commit | `f524b47054e5964b9ddfc61ab28cbfd990dc09af` |
+| Certified Linux SHA-256 | `93229c2b3aae40eabe5ed4582429a5247a4520ba45b6f1c99eecadecefaa1232` |
 | Release state | Unreleased source checkpoint; public `main` publication candidate |
 | Runtime state | Standalone HASHI adoption still requires an explicit reboot and live smoke |
 
@@ -19,7 +19,7 @@ The HER package identity is pinned in
 `hashi_assets/her/manifest.json` and
 `hashi_assets/her/certification_baseline.json`. The manifest's Windows entry is
 still the older `0.1.3-hashi.3` binary built from `b27f4180`; it must not be
-described as parity with the certified Linux `.10` package.
+described as parity with the certified Linux `.11` package.
 
 ## Developments incorporated
 
@@ -36,9 +36,13 @@ described as parity with the certified Linux `.10` package.
 - The HASHI Tool Gateway exposes the allowed `ToolRegistry` capabilities to HER
   over a private MCP stdio bridge, preserving existing permission and audit
   enforcement.
-- The certified `.10` runtime treats MCP `isError` results as failures and
+- The certified `.11` runtime treats MCP `isError` results as failures and
   preserves bounded MCP image results as model-visible multimodal input for
   Anthropic and OpenAI-compatible providers.
+- MAX+ now has no internal time/token ceiling. Planning selects task-matched
+  assurance; trivial work skips heavyweight review, tool aliases are canonical,
+  repeated replan failures are deduplicated, and critic feedback cannot discard
+  the primary agent's final answer.
 - The HER debug lab and Superloop template provide scripted provider/MCP
   fixtures, restart guards, evidence records, and Flash-before-Pro iteration.
 
@@ -70,6 +74,12 @@ The adapter-direct path now includes `/habit` status, view, on/off/default,
 recoverable delete/delete-all/reset, full-detail audit, bounded retry/recovery,
 and one proactive notification when Verbose was enabled and Meditation made a
 real change.
+
+Meditation receives an immutable same-agent context snapshot but runs in its own
+execution queue as one low-effort, tool-free round. Only short durable state
+transitions are serialized; model reflection no longer occupies or overwrites
+the foreground process slot. The existing turn-based scheduling cadence is
+unchanged.
 
 `HERAdapter.habit_pipeline_owner` makes this ownership explicit for downstream
 compatibility consumers, while request-scoped eligibility keeps internal,

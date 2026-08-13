@@ -1,6 +1,6 @@
 # HASHI Engine Runtime (HER) Backend Contract
 
-Status: active for HER `0.1.0-hashi.10`; unreleased integration checkpoint
+Status: active for HER `0.1.0-hashi.11`; unreleased integration checkpoint
 recorded in
 [HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md)
 
@@ -17,14 +17,14 @@ not certify a Windows build, another architecture, or a downstream integration.
 
 | Field | Certified Linux value |
 | --- | --- |
-| Package version | `0.1.0-hashi.10` |
-| HER source | `85a481d9e5c94804ed9c0bd300ca9a635732c22d` |
+| Package version | `0.1.0-hashi.11` |
+| HER source | `f524b47054e5964b9ddfc61ab28cbfd990dc09af` |
 | Upstream base | Claw `4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d` |
 | Target | `linux-x86_64` |
-| SHA-256 | `882c9a71013bdd6155558ff4dc8df4a8e002188e144b04f7fda2fb96f0f83ac2` |
+| SHA-256 | `93229c2b3aae40eabe5ed4582429a5247a4520ba45b6f1c99eecadecefaa1232` |
 
 The same manifest also contains a Windows `0.1.3-hashi.3` artifact built from
-`b27f4180`. It is older than the `.10` runtime and must not be used as evidence
+`b27f4180`. It is older than the `.11` runtime and must not be used as evidence
 of current cross-platform parity.
 
 ## Ownership and session boundary
@@ -73,17 +73,22 @@ model. `/provider` changes the provider and refreshes its allowlisted models;
 
 HER effort controls agentic execution length, not provider reasoning depth:
 
-| Effort | Maximum iterations | Planning | Extra time rule |
-| --- | ---: | --- | --- |
-| `low` | 12 | off | normal timeout |
-| `medium` | 32 | on | normal timeout |
-| `high` | 96 | on | normal timeout |
-| `xhigh` | 192 | on | normal timeout |
-| `max` | 384 | on | normal timeout |
-| `max+` | 512 | on | 1,500-second max-plus budget |
+| Effort | Maximum iterations | Planning |
+| --- | ---: | --- |
+| `low` | 12 | off |
+| `medium` | 32 | on |
+| `high` | 96 | on |
+| `xhigh` | 192 | on |
+| `max` | 384 | on |
+| `max+` | 512 | on, with plan-directed assurance |
 
 An explicit `max_tool_iterations` remains an operator override but is bounded to
-8–512. Provider-returned encrypted or redacted reasoning is never reconstructed.
+8–512. MAX+ has no private token or wall-clock budget; `/timeout` remains the
+operator-owned outer control. Its planning step determines task-matched success,
+testing, and review work. Reviews provide feedback to the primary agent but cannot
+replace or suppress its final answer. Trivial plans skip heavyweight review, and
+tool aliases are compared by canonical capability rather than exact spelling.
+Provider-returned encrypted or redacted reasoning is never reconstructed.
 
 ## Tool Gateway contract
 

@@ -437,7 +437,7 @@ def test_claw_execution_effort_maps_to_iteration_budget(
     assert adapter._task_env()["CLAW_TASK_PLANNING"] == ("0" if effort == "low" else "1")
     assert adapter._task_env()["CLAW_EXECUTION_EFFORT"] == effort
     if effort == "max+":
-        assert adapter._task_env()["CLAW_MAX_PLUS_TIME_BUDGET_SECONDS"] == "1500"
+        assert "CLAW_MAX_PLUS_TIME_BUDGET_SECONDS" not in adapter._task_env()
         assert "CLAW_MAX_PLUS_TOKEN_BUDGET" not in adapter._task_env()
 
 
