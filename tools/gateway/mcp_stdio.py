@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import hashlib
+import io
 import json
 import logging
+import re
 import sys
+import warnings
 from collections import Counter
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -17,6 +21,100 @@ from tools.gateway.context import GatewayContext, load_gateway_context
 
 PROTOCOL_VERSION = "2025-03-26"
 SERVER_VERSION = "1.0"
+
+_LEGACY_SCREENSHOT_TOOLS = {
+    "browser_screenshot",
+    "browser_session",
+    "desktop_screenshot",
+    "windows_screenshot",
+}
+_LEGACY_SCREENSHOT_PATTERN = re.compile(
+    r"(?P<data_url>data:(?P<mime>image/[a-z0-9.+-]+);base64,"
+    r"(?P<data_payload>[A-Za-z0-9+/=]*))|"
+    r"(?P<label>(?:^screenshot:|\[screenshot\]\s+base64:))"
+    r"(?P<label_payload>[A-Za-z0-9+/=]*)",
+    flags=re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _normalize_legacy_screenshot(payload: str) -> tuple[dict[str, str], int]:
+    from PIL import Image
+
+    from tools.media_read import (
+        IMAGE_MAX_BYTES,
+        MediaReadError,
+        _jpeg_bytes,
+    )
+
+    if len(payload) > ((IMAGE_MAX_BYTES + 2) // 3) * 4:
+        raise MediaReadError("encoded screenshot exceeds the source safety limit")
+    try:
+        raw = base64.b64decode(payload, validate=True)
+    except ValueError as exc:
+        raise MediaReadError("screenshot returned malformed base64") from exc
+    if not raw or len(raw) > IMAGE_MAX_BYTES:
+        raise MediaReadError("screenshot is empty or exceeds the source safety limit")
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(raw)) as image:
+                image.seek(0)
+                encoded, _size = _jpeg_bytes(image.copy())
+    except MediaReadError:
+        raise
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise MediaReadError("screenshot dimensions exceed the decode safety limit") from exc
+    except Exception as exc:
+        raise MediaReadError(f"screenshot decode failed: {exc}") from exc
+    return (
+        {
+            "type": "image",
+            "mimeType": "image/jpeg",
+            "data": base64.b64encode(encoded).decode("ascii"),
+        },
+        len(encoded),
+    )
+
+
+def _bridge_legacy_screenshot_output(
+    tool_name: str,
+    output: str,
+) -> tuple[list[dict[str, Any]] | None, bool]:
+    """Convert legacy screenshot strings into bounded MCP image blocks."""
+    if tool_name not in _LEGACY_SCREENSHOT_TOOLS:
+        return None, False
+    matches = list(_LEGACY_SCREENSHOT_PATTERN.finditer(output))
+    if not matches:
+        return None, False
+    from tools.media_read import MAX_TOTAL_IMAGE_BYTES
+
+    content: list[dict[str, Any]] = []
+    cursor = 0
+    image_count = 0
+    total_image_bytes = 0
+    errors: list[str] = []
+    for match in matches:
+        text = output[cursor : match.start()].strip()
+        if text:
+            content.append({"type": "text", "text": text})
+        payload = match.group("data_payload") or match.group("label_payload") or ""
+        try:
+            if image_count >= 6:
+                raise ValueError("screenshot omitted after the 6-image safety limit")
+            image, image_bytes = _normalize_legacy_screenshot(payload)
+            if total_image_bytes + image_bytes > MAX_TOTAL_IMAGE_BYTES:
+                raise ValueError("screenshot omitted at the total image-byte safety limit")
+            content.append(image)
+            image_count += 1
+            total_image_bytes += image_bytes
+        except ValueError as exc:
+            errors.append(str(exc))
+            content.append({"type": "text", "text": f"Screenshot unavailable: {exc}"})
+        cursor = match.end()
+    trailing = output[cursor:].strip()
+    if trailing:
+        content.append({"type": "text", "text": trailing})
+    return content, image_count == 0 and bool(errors)
 
 
 class ToolGateway:
@@ -103,7 +201,15 @@ class ToolGateway:
         else:
             self.fingerprints[fingerprint] += 1
         self.consecutive_errors = self.consecutive_errors + 1 if result.is_error else 0
-        return self._result(result.output, result.is_error, result.content)
+        content = result.content
+        bridge_error = False
+        if content is None:
+            content, bridge_error = _bridge_legacy_screenshot_output(name, result.output)
+        return self._result(
+            result.output,
+            result.is_error or bridge_error,
+            content,
+        )
 
     @staticmethod
     def _result(

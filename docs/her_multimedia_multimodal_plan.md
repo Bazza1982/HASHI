@@ -17,6 +17,10 @@ HASHI Python 网关增加 MCP `image` 块。HER `0.1.0-hashi.9` 会把整个 MCP
 2. HER Rust 运行时保存并解析结构化 MCP 图片结果；
 3. provider translator 把图片转换为供应商实际接受的视觉消息形状。
 
+原有 browser/desktop/Windows 截图工具继续保留兼容字符串返回值；HER 网关会在
+MCP 边界识别这些旧格式，验证、归一化并转换为真正的 image 块，因此不再把
+base64 当作普通文字交给模型。
+
 原始方案还有以下需要修正的地方：
 
 - `her_gateway_context.json` 是启动时生成的状态文件，不能手工持久修改；
@@ -88,6 +92,7 @@ URL 或 file ID 进入消息内容。HER 采用 data URL，并保留原有 tool 
 - 单张模型图片最大 2.5 MB，总图片原始字节最大 4 MB，为 6 MiB 供应商请求上限
   预留 base64 与其他消息空间；
 - HASHI 工具审计只写安全元数据，不写 image content/base64；
+- 旧 browser/desktop/Windows 截图字符串在进入审计时也会遮罩 image base64；
 - HER 把当前回合图片写入进程私有临时目录，文件在关闭 MCP 时删除；
 - 进入下一个用户回合后，历史图片降级为文字占位，避免重复发送；恢复旧会话时若
   临时缓存已不存在，也会安全降级。

@@ -9,6 +9,13 @@ from typing import Any
 
 _WRITE_LOCK = threading.Lock()
 _SECRET_PATTERN = re.compile(r"(?i)(api[_-]?key|token|password|passwd|secret|bearer)\s*[:=]\s*\S+")
+_IMAGE_DATA_PATTERN = re.compile(
+    r"(?i)(data:image/[a-z0-9.+-]+;base64,)[A-Za-z0-9+/=]*"
+)
+_SCREENSHOT_DATA_PATTERN = re.compile(
+    r"((?:^screenshot:|\[screenshot\]\s+base64:))[A-Za-z0-9+/=]*",
+    flags=re.MULTILINE | re.IGNORECASE,
+)
 _MAX_VALUE_CHARS = 800
 
 
@@ -25,6 +32,8 @@ def sanitize_value(value: Any) -> Any:
         return [sanitize_value(item) for item in value]
     if isinstance(value, str):
         cleaned = _SECRET_PATTERN.sub(r"\1=[redacted]", value)
+        cleaned = _IMAGE_DATA_PATTERN.sub(r"\1[image-redacted]", cleaned)
+        cleaned = _SCREENSHOT_DATA_PATTERN.sub(r"\1[image-redacted]", cleaned)
         if len(cleaned) > _MAX_VALUE_CHARS:
             return cleaned[:_MAX_VALUE_CHARS] + "...[truncated]"
         return cleaned
