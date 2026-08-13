@@ -55,11 +55,11 @@ and incomplete-run handling, the Tool Gateway/MCP bridge, secure multimodal
 media and `media_read`, HER Habit/Meditation implementations, and a reproducible
 HER debug Superloop.
 
-This is not a new release line or a live-deployment claim. Session ownership
-and Habit-pipeline ownership are now code-complete with automated regression
-coverage. Remaining gates are:
+This is not a new release line. Session ownership and Habit-pipeline ownership
+are code-complete with automated regression coverage, and the initial Nana `.13`
+MAX+ canary is green. Remaining gates are:
 
-- perform canary then wider live reboot/media/Habit validation;
+- complete broader Nana media/Habit validation, then the intended wider reboot;
 - build and certify a current Windows HER package;
 - publish only reviewed HASHI files from a clean checkout.
 

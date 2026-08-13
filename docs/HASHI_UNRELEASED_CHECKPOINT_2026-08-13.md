@@ -13,7 +13,7 @@
 | HER source commit | `d63b1bf86600cd4f54015c0dd5656cbcd35a8f3b` |
 | Certified Linux SHA-256 | `be6321017747858fc8cbc11796c4c79a73403de1bd5508caf245b32288ec4bb5` |
 | Release state | Unreleased source checkpoint; public `main` publication candidate |
-| Runtime state | Standalone HASHI adoption still requires an explicit reboot and live smoke |
+| Runtime state | Nana loaded `.13`; the simple MAX+ canary passed; broader live gates remain open |
 
 The HER package identity is pinned in
 `hashi_assets/her/manifest.json` and
@@ -140,6 +140,16 @@ and passed the `97/97` adapter, certification, runtime-probe, Tool Gateway, and
 media regression selection. Live rollout evidence remains separate from these
 build-time gates and is recorded only after an explicit canary reboot.
 
+The HASHI1 Nana canary then loaded packaged `.13` after `/reboot min`, restored
+its existing fixed-mode HER session, validated all 65 Tool Gateway capabilities,
+and retained the persisted Verbose, Think, and Typing settings. A real
+`Hi Nana!` request at MAX+ produced one parsed plan and the plan's one final
+persona reply: `0` task tools, `0` tests, `0` self/independent reviews, `0`
+semantic compactions, and no second execution generation. HER completed in
+`15.04s`; end-to-end delivery was `28.95s`, including Telegram feedback cleanup
+and final send. The prior global Superloop `waits.json` format error continued
+independently and Nana's new runtime error log remained empty.
+
 The HER `.12` increment independently completed `1,145` focused Rust runtime/CLI/tool
 tests with no failures, then passed the fail-closed full-workspace certification command
 (workspace tests plus workspace/all-target Clippy with warnings denied). HASHI's package,
@@ -153,11 +163,10 @@ Session-mode ownership and Habit-pipeline ownership are fixed with automated
 regression coverage in `2270f5be`. The remaining gates are operational and
 platform-specific:
 
-1. Run `/reboot min` on a canary HER agent, then verify session continuity,
-   `/habit`, media intake, `media_read`, screenshot results, notification
-   behavior, and failure recovery.
-2. Only after the canary is green, run the intended wider `/reboot max` rollout
-   and capture live evidence.
+1. Continue the green Nana `/reboot min` canary with `/habit`, media intake,
+   `media_read`, screenshot results, notification behavior, and failure recovery.
+2. Only after the full canary matrix is green, run the intended wider
+   `/reboot max` rollout and capture live evidence.
 3. Build and certify a current Windows HER package before claiming Linux/Windows
    parity.
 
