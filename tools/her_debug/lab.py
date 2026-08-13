@@ -68,6 +68,14 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _optional_file_baseline(path: Path) -> dict[str, Any]:
+    """Record local operator state without requiring or copying its contents."""
+    try:
+        return {"present": True, "sha256": _sha256(path)}
+    except FileNotFoundError:
+        return {"present": False, "sha256": None}
+
+
 def _mcp_frame(payload: dict[str, Any]) -> bytes:
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     return f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body
@@ -205,12 +213,25 @@ class HerDebugLab:
         binary = ROOT / "hashi_assets" / "her" / manifest["binaries"]["linux-x86_64"]["path"]
         hashi_commit = _command(["git", "rev-parse", "HEAD"], ROOT)
         hashi_dirty = bool(_command(["git", "status", "--porcelain"], ROOT))
-        source_root = Path("/home/lily/projects/external/claw-code-hashi-4ea31c1")
-        source_commit = _command(["git", "rev-parse", "HEAD"], source_root) if source_root.exists() else manifest.get("source_commit")
-        source_dirty = bool(_command(["git", "status", "--porcelain"], source_root)) if source_root.exists() else None
-        ajiao_state = _json(ROOT / "workspaces" / "ajiao" / "state.json")
-        ajiao_preferences = _json(ROOT / "workspaces" / "ajiao" / "state" / "runtime_preferences.json")
-        config = _json(ROOT / "agents.json")
+        configured_source = str(os.environ.get("HASHI_HER_SOURCE_ROOT") or "").strip()
+        source_root = Path(configured_source).expanduser() if configured_source else None
+        source_checkout = bool(source_root and (source_root / ".git").exists())
+        source_commit = (
+            _command(["git", "rev-parse", "HEAD"], source_root)
+            if source_checkout and source_root is not None
+            else manifest.get("source_commit")
+        )
+        source_dirty = (
+            bool(_command(["git", "status", "--porcelain"], source_root))
+            if source_checkout and source_root is not None
+            else None
+        )
+        ajiao_state = _optional_file_baseline(ROOT / "workspaces" / "ajiao" / "state.json")
+        ajiao_preferences = _optional_file_baseline(
+            ROOT / "workspaces" / "ajiao" / "state" / "runtime_preferences.json"
+        )
+        config_path = ROOT / "agents.json"
+        config = _json(config_path) if config_path.is_file() else {}
         provider_rows = {}
         for name, row in (config.get("global", {}).get("claw_providers", {}).get("providers", {}) or {}).items():
             provider_rows[name] = {"base_url": row.get("base_url"), "status": row.get("status")}
@@ -232,6 +253,7 @@ class HerDebugLab:
             "manifest_package_sha256": manifest["binaries"]["linux-x86_64"]["sha256"],
             "candidate_hash": hashlib.sha256(candidate_material).hexdigest(),
             "providers": provider_rows,
+            "agents_config_present": config_path.is_file(),
             "ajiao_baseline": {"state": ajiao_state, "runtime_preferences": ajiao_preferences},
             "permission_overlay": {
                 "maximum": "danger-full-access",

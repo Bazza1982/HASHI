@@ -10,7 +10,7 @@ import pytest
 
 from tools.her_debug.cleanup import CleanupGuard, UnsafeCleanupTarget
 from tools.her_debug.evidence import EvidenceCollector
-from tools.her_debug.lab import HerDebugLab
+from tools.her_debug.lab import HerDebugLab, _optional_file_baseline
 from tools.her_debug.scripted_provider import EXACT_FINAL_FRAGMENTS, EXACT_REASONING_FRAGMENTS, ScriptedProvider
 from tools.her_debug.step_state import SequentialStepState, StepProtocolError
 
@@ -72,6 +72,19 @@ def test_cleanup_guard_only_deletes_declared_child(tmp_path: Path) -> None:
     assert guard.delete_disposable(layout.root, ["workspace/disposable"]) == ["workspace/disposable"]
     assert not disposable.exists()
     assert layout.evidence.is_dir()
+
+
+def test_optional_operator_baseline_is_clone_portable_and_content_free(tmp_path: Path) -> None:
+    state_path = tmp_path / "state.json"
+
+    assert _optional_file_baseline(state_path) == {"present": False, "sha256": None}
+
+    state_path.write_text('{"private": "do-not-copy"}', encoding="utf-8")
+    baseline = _optional_file_baseline(state_path)
+
+    assert baseline["present"] is True
+    assert len(str(baseline["sha256"])) == 64
+    assert "do-not-copy" not in json.dumps(baseline)
 
 
 def test_evidence_collector_redacts_keys_values_and_key_like_strings(tmp_path: Path) -> None:
