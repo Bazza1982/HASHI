@@ -1089,6 +1089,16 @@ class FlexibleAgentRuntime:
         previous = self._load_runtime_session_state()
         unexpected_restart = bool(previous) and not previous.get("clean_shutdown", True)
         self._mark_runtime_started()
+        # Telegram is connected by this point. Resume durable Habit notices
+        # that could not be delivered before a restart or temporary outage.
+        from orchestrator import runtime_her_habits
+
+        resumed_habit_notifications = runtime_her_habits.resume_pending_habit_notifications(self)
+        if resumed_habit_notifications:
+            self.logger.info(
+                "Resumed %d pending HER Habit notification(s).",
+                resumed_habit_notifications,
+            )
         if not self.skill_manager:
             return
         active = self.skill_manager.get_active_toggle_ids(self.workspace_dir)
@@ -2623,6 +2633,23 @@ class FlexibleAgentRuntime:
                 "/sys <n> on|off|delete\n/sys <n> save <msg>\n/sys <n> replace <msg>\n"
                 "/sys output <n> - return raw content of slot"
             )
+
+    async def cmd_habit(self, update, context):
+        # Resolve lazily so /reboot can replace HER command behaviour without
+        # leaving a stale module object attached to the runtime class.
+        from orchestrator import runtime_her_habits
+
+        await runtime_her_habits.cmd_habit(self, update, context)
+
+    async def callback_habit(self, update, context):
+        from orchestrator import runtime_her_habits
+
+        await runtime_her_habits.callback_habit(self, update, context)
+
+    async def _deliver_her_habit_notification(self, job):
+        from orchestrator import runtime_her_habits
+
+        return await runtime_her_habits.deliver_habit_notification(self, job)
 
     async def cmd_usecomputer(self, update, context):
         if not self._is_authorized_user(update.effective_user.id):

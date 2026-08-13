@@ -318,6 +318,9 @@ def test_begin_queue_item_records_processing_metadata():
     assert runtime.last_prompt is item
     assert runtime.current_request_meta["request_id"] == "req-1"
     assert runtime.current_request_meta["source"] == "bridge:api"
+    assert runtime.current_request_meta["verbose_at_start"] is False
+    assert runtime.current_request_meta["silent"] is False
+    assert runtime.current_request_meta["deliver_to_telegram"] is True
     assert runtime.is_generating is True
     assert runtime.maintenance_events[0][0] == "processing"
 

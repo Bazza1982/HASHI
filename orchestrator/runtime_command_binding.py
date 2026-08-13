@@ -56,6 +56,7 @@ CALLBACK_BINDINGS: tuple[CallbackBinding, ...] = (
     CallbackBinding(r"^wcfg:", "callback_wrapper_config"),
     CallbackBinding(r"^acfg:", "callback_audit_config"),
     CallbackBinding(r"^bcfg:", "callback_brain_config"),
+    CallbackBinding(r"^habit:", "callback_habit"),
     CallbackBinding(r"^npad:", "callback_notepad"),
     CallbackBinding(r"^privacy:", "callback_privacy"),
     CallbackBinding(r"^voice:", "callback_voice"),

@@ -30,6 +30,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec("start", "cmd_start", "Start another stopped agent", "everyday"),
     CommandSpec("status", "cmd_status", "View agent status", "everyday"),
     CommandSpec("sys", "cmd_sys", "Manage system prompt slots", "tools", sensitive=True),
+    CommandSpec("habit", "cmd_habit", "View and manage HER habits", "tools"),
     CommandSpec("credit", "cmd_credit", "Check API credit/usage", "tools", sensitive=True),
     CommandSpec("voice", "cmd_voice", "Toggle native voice replies", "session"),
     CommandSpec("safevoice", "cmd_safevoice", "Toggle voice confirmation safety layer", "session"),

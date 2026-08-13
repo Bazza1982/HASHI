@@ -1483,6 +1483,8 @@ class HERAdapter(BaseBackend):
         self._habit_execution_lock = asyncio.Lock()
         self._habit_meditation_tasks: set[asyncio.Task] = set()
         self._habit_meditation_job_ids: set[str] = set()
+        self._habit_notification_tasks: set[asyncio.Task] = set()
+        self._habit_notification_job_ids: set[str] = set()
 
     def _load_session_identity(self) -> None:
         try:
@@ -1547,6 +1549,25 @@ class HERAdapter(BaseBackend):
             )
         return self._habit_journal_instance
 
+    def _habit_notification_context(
+        self,
+        request_id: str,
+        *,
+        silent: bool,
+    ) -> dict[str, Any]:
+        runtime = getattr(self.config, "_hashi_runtime", None)
+        meta = dict(getattr(runtime, "current_request_meta", None) or {})
+        if str(meta.get("request_id") or "") != str(request_id or ""):
+            meta = {}
+        return {
+            "chat_id": meta.get("chat_id"),
+            "verbose_at_start": bool(meta.get("verbose_at_start")),
+            "silent": bool(meta.get("silent", silent)),
+            "deliver_to_telegram": bool(meta.get("deliver_to_telegram")),
+            "request_source": meta.get("source"),
+            "request_summary": meta.get("summary"),
+        }
+
     def _spawn_habit_meditation_job(
         self,
         job_id: str,
@@ -1606,6 +1627,130 @@ class HERAdapter(BaseBackend):
             )
             return 0
 
+    def _spawn_habit_notification_job(self, job_id: str) -> bool:
+        runtime = getattr(self.config, "_hashi_runtime", None)
+        if runtime is None or not bool(getattr(runtime, "telegram_connected", False)):
+            return False
+        if job_id in self._habit_notification_job_ids:
+            return False
+        task = asyncio.create_task(
+            self._run_habit_notification(job_id),
+            name=f"her-habit-notification:{self.config.name}:{job_id}",
+        )
+        self._habit_notification_job_ids.add(job_id)
+        self._habit_notification_tasks.add(task)
+
+        def _done(done_task: asyncio.Task) -> None:
+            self._habit_notification_tasks.discard(done_task)
+            self._habit_notification_job_ids.discard(job_id)
+            if done_task.cancelled():
+                return
+            try:
+                error = done_task.exception()
+            except Exception:  # noqa: BLE001 - callback must never escape
+                error = None
+            if error is not None:
+                self.logger.warning(
+                    "Unhandled HER Habit notification task error: job=%s error=%s",
+                    job_id,
+                    type(error).__name__,
+                )
+
+        task.add_done_callback(_done)
+        return True
+
+    def _resume_pending_habit_notifications(self) -> int:
+        try:
+            return sum(
+                self._spawn_habit_notification_job(job["job_id"])
+                for job in self._her_meditation_journal().pending_notifications(limit=32)
+            )
+        except Exception as exc:  # noqa: BLE001 - notification recovery is fail-open
+            self.logger.warning(
+                "HER Habit notification recovery failed safely: error=%s",
+                type(exc).__name__,
+            )
+            return 0
+
+    async def _run_habit_notification(self, job_id: str) -> None:
+        journal = self._her_meditation_journal()
+        while True:
+            job = journal.claim_notification(job_id)
+            if job is None:
+                return
+            runtime = getattr(self.config, "_hashi_runtime", None)
+            sender = getattr(runtime, "_deliver_her_habit_notification", None)
+            try:
+                if not callable(sender):
+                    raise RuntimeError("runtime notification sender is unavailable")
+                delivered = await sender(job)
+                if delivered is None:
+                    journal.mark_notification_deferred(
+                        job_id,
+                        reason="Telegram delivery is temporarily unavailable",
+                    )
+                    current = journal.get(job_id) or {}
+                    _her_habits.append_habit_audit(
+                        self.config.workspace_dir,
+                        "habit_notification_deferred",
+                        agent_id=self.config.name,
+                        job_id=job_id,
+                        request_id=job.get("request_id"),
+                        changes=job.get("changes") or [],
+                        notification=current.get("notification") or {},
+                    )
+                    self.logger.info("HER Habit notification deferred: job=%s", job_id)
+                    return
+                if delivered is not True:
+                    raise RuntimeError("Telegram did not accept the Habit notification")
+                journal.mark_notification_sent(job_id)
+                current = journal.get(job_id) or {}
+                _her_habits.append_habit_audit(
+                    self.config.workspace_dir,
+                    "habit_notification_sent",
+                    agent_id=self.config.name,
+                    job_id=job_id,
+                    request_id=job.get("request_id"),
+                    changes=job.get("changes") or [],
+                    notification=current.get("notification") or {},
+                )
+                self.logger.info("HER Habit notification delivered: job=%s", job_id)
+                return
+            except asyncio.CancelledError:
+                try:
+                    journal.mark_notification_retry(job_id, reason="runtime_shutdown")
+                except Exception:  # noqa: BLE001,S110 - cancellation must continue
+                    pass
+                raise
+            except Exception as exc:  # noqa: BLE001 - notification failure cannot break HER
+                try:
+                    journal.mark_notification_retry(
+                        job_id,
+                        reason=f"{type(exc).__name__}: {exc}",
+                    )
+                    current = journal.get(job_id) or {}
+                    notification = current.get("notification") or {}
+                    _her_habits.append_habit_audit(
+                        self.config.workspace_dir,
+                        "habit_notification_failed",
+                        agent_id=self.config.name,
+                        job_id=job_id,
+                        request_id=job.get("request_id"),
+                        changes=job.get("changes") or [],
+                        notification=notification,
+                    )
+                except Exception:  # noqa: BLE001,S110 - journal/audit stays fail-open
+                    return
+                self.logger.warning(
+                    "HER Habit notification failed safely: job=%s attempt=%s error=%s",
+                    job_id,
+                    notification.get("attempts"),
+                    type(exc).__name__,
+                )
+                if notification.get("status") != "pending":
+                    return
+                await asyncio.sleep(min(10.0, 2.0 ** int(notification.get("attempts") or 1)))
+
     def _schedule_habit_meditation(
         self,
         *,
@@ -1614,6 +1759,7 @@ class HERAdapter(BaseBackend):
         task_prompt: str,
         task_result: ClawTaskResult,
         config: _her_habits.HabitMeditationConfig,
+        notification_context: Mapping[str, Any] | None = None,
     ) -> bool:
         try:
             store = self._her_habit_store()
@@ -1629,6 +1775,7 @@ class HERAdapter(BaseBackend):
                 request_id=request_id,
                 prompt=meditation_prompt,
                 max_actions=config.max_actions,
+                notification_context=notification_context,
             )
             journaled = self._her_meditation_journal().get(job_id)
             spawned = bool(
@@ -1659,6 +1806,7 @@ class HERAdapter(BaseBackend):
     ) -> None:
         journal = self._her_meditation_journal()
         request_id = job_id
+        completed = False
         try:
             async with self._habit_execution_lock:
                 # Re-resolve the switch immediately before work so an operational
@@ -1698,24 +1846,48 @@ class HERAdapter(BaseBackend):
                         meditation_result.text,
                         max_actions=int(job.get("max_actions") or config.max_actions),
                     )
-                    job = journal.store_actions(job_id, actions)
+                    action_baseline = self._her_habit_store().capture_action_baseline(
+                        actions,
+                        max_actions=int(job.get("max_actions") or config.max_actions),
+                        idempotency_key=job_id,
+                    )
+                    job = journal.store_actions(
+                        job_id,
+                        actions,
+                        action_baseline=action_baseline,
+                    )
                 actions = job.get("actions")
                 if not isinstance(actions, list):
                     raise _her_habits.MeditationValidationError(
                         "durable Meditation actions are missing"
                     )
-                outcomes = self._her_habit_store().apply_actions(
+                outcomes, changes = self._her_habit_store().apply_actions_with_changes(
                     actions,
                     max_actions=int(job.get("max_actions") or config.max_actions),
                     idempotency_key=job_id,
+                    audit_context={
+                        "source": "meditation",
+                        "job_id": job_id,
+                        "request_id": job.get("request_id"),
+                        "notification": job.get("notification"),
+                    },
+                    action_baseline=job.get("action_baseline"),
                 )
-                journal.mark_complete(job_id, outcomes)
+                journal.mark_complete(
+                    job_id,
+                    outcomes,
+                    changes=[change.to_payload() for change in changes],
+                )
+                completed = True
                 self.logger.info(
-                    "HER Habit Meditation completed: job=%s actions=%d outcomes=%s",
+                    "HER Habit Meditation completed: job=%s actions=%d changes=%d outcomes=%s",
                     job_id,
                     len(actions),
+                    len(changes),
                     ",".join(outcomes) or "no-change",
                 )
+            if completed:
+                self._spawn_habit_notification_job(job_id)
         except asyncio.CancelledError:
             try:
                 journal.mark_pending(job_id, reason="runtime_shutdown")
@@ -2149,6 +2321,7 @@ class HERAdapter(BaseBackend):
             self.capabilities.supports_answer_stream = self._supports_stream_json
             self._load_session_identity()
             self._resume_pending_habit_meditations()
+            self._resume_pending_habit_notifications()
             if not self._supports_stream_json:
                 self.logger.warning("HER binary does not advertise stream-json; verbose mode will use JSON fallback.")
             return True
@@ -2169,12 +2342,19 @@ class HERAdapter(BaseBackend):
 
     async def shutdown(self):
         pending_meditations = list(self._habit_meditation_tasks)
+        pending_notifications = list(self._habit_notification_tasks)
         for task in pending_meditations:
+            task.cancel()
+        for task in pending_notifications:
             task.cancel()
         if pending_meditations:
             await asyncio.gather(*pending_meditations, return_exceptions=True)
+        if pending_notifications:
+            await asyncio.gather(*pending_notifications, return_exceptions=True)
         self._habit_meditation_tasks.clear()
         self._habit_meditation_job_ids.clear()
+        self._habit_notification_tasks.clear()
+        self._habit_notification_job_ids.clear()
         if self.current_proc:
             await self.force_kill_process_tree(
                 self.current_proc,
@@ -2204,6 +2384,10 @@ class HERAdapter(BaseBackend):
             await on_stream_event(StreamEvent(kind=KIND_PROGRESS, summary="HER task started"))
 
         habit_config = self._habit_meditation_config()
+        habit_notification_context = self._habit_notification_context(
+            request_id,
+            silent=silent,
+        )
         # HASHI request IDs intentionally remain restart-local. Give each HER
         # execution its own durable Meditation identity so a reused req-0001
         # cannot collide with a journal left by an earlier runtime.
@@ -2259,6 +2443,7 @@ class HERAdapter(BaseBackend):
                     task_prompt=prompt,
                     task_result=self._habit_failure_result(exc, started=started),
                     config=habit_config,
+                    notification_context=habit_notification_context,
                 )
             raise
         except ClawTimeoutError as exc:
@@ -2269,6 +2454,7 @@ class HERAdapter(BaseBackend):
                     task_prompt=prompt,
                     task_result=self._habit_failure_result(exc, started=started),
                     config=habit_config,
+                    notification_context=habit_notification_context,
                 )
             return BackendResponse(text="", duration_ms=self._duration_ms(started), error=str(exc), is_success=False)
         except ClawCommandError as exc:
@@ -2279,6 +2465,7 @@ class HERAdapter(BaseBackend):
                     task_prompt=prompt,
                     task_result=self._habit_failure_result(exc, started=started),
                     config=habit_config,
+                    notification_context=habit_notification_context,
                 )
             return BackendResponse(text="", duration_ms=self._duration_ms(started), error=str(exc), is_success=False)
         except (ClawError, ValueError) as exc:
@@ -2289,6 +2476,7 @@ class HERAdapter(BaseBackend):
                     task_prompt=prompt,
                     task_result=self._habit_failure_result(exc, started=started),
                     config=habit_config,
+                    notification_context=habit_notification_context,
                 )
             return BackendResponse(text="", duration_ms=self._duration_ms(started), error=str(exc), is_success=False)
 
@@ -2360,6 +2548,7 @@ class HERAdapter(BaseBackend):
                 task_prompt=prompt,
                 task_result=result,
                 config=habit_config,
+                notification_context=habit_notification_context,
             )
         return BackendResponse(
             text=response_text,
