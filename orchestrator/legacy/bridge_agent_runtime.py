@@ -124,15 +124,13 @@ class BridgeAgentRuntime:
         self.last_success_at: datetime | None = None
         self.last_error_at: datetime | None = None
         self.last_error_summary: str | None = None
-        _think_file = self.config.workspace_dir / ".think"
-        self._think: bool = _think_file.exists()
+        self._think = telegram_stream_policy.get_display_preference(self, "think")
         self._think_buffer: list[str] = []
         self._openrouter_think_chunk: str = ""
         self._last_openrouter_think_snippet: str | None = None
         self.is_shutting_down = False
-        # Load persisted verbose preference (.verbose file presence = ON, absence = OFF)
-        _verbose_file = self.config.workspace_dir / ".verbose"
-        self._verbose: bool = _verbose_file.exists()
+        # Load the shared durable preference used by both runtime implementations.
+        self._verbose = telegram_stream_policy.get_display_preference(self, "verbose")
         self._scheduled_retry_tasks: set[asyncio.Task] = set()
         # Background tasks spawned when bg_mode detaches a long-running generation.
         # Tracked so shutdown() can cancel them cleanly.
@@ -4473,6 +4471,7 @@ class BridgeAgentRuntime:
             _verbose_file.touch()
         else:
             _verbose_file.unlink(missing_ok=True)
+        telegram_stream_policy.set_display_preference(self, "verbose", self._verbose)
         await update.message.reply_text(
             setting_card(
                 "🔍",
@@ -4504,6 +4503,7 @@ class BridgeAgentRuntime:
             _think_file.touch()
         else:
             _think_file.unlink(missing_ok=True)
+        telegram_stream_policy.set_display_preference(self, "think", self._think)
         await update.message.reply_text(
             setting_card(
                 "💭",

@@ -20,6 +20,7 @@ DEFAULT_EDIT_INTERVAL_S = 10.0
 DEFAULT_HEARTBEAT_INTERVAL_S = 60.0
 DEFAULT_MAX_EDITS_PER_REQUEST = 20
 COMPONENT_NAMES = frozenset(DEFAULT_COMPONENTS)
+DISPLAY_PREFERENCE_NAMES = frozenset({"verbose", "think", "typing"})
 
 
 @dataclass(frozen=True)
@@ -307,11 +308,44 @@ def get_display_policy(runtime: Any) -> TelegramDisplayPolicy:
 
 
 def set_typing_enabled(runtime: Any, enabled: bool) -> Path:
+    return set_display_preference(runtime, "typing", enabled)
+
+
+def get_display_preference(runtime: Any, name: str, *, default: bool = True) -> bool:
+    """Return a durable per-workspace display preference.
+
+    JSON is authoritative.  The marker checks migrate both the historical
+    fixed-runtime positive markers and flexible-runtime negative markers
+    without changing an existing user's choice.
+    """
+    if name not in DISPLAY_PREFERENCE_NAMES:
+        raise ValueError(f"Unknown Telegram display preference: {name}")
+    payload = load_preferences(runtime)
+    display = payload.get("telegram_display")
+    if isinstance(display, dict) and isinstance(display.get(name), bool):
+        return display[name]
+
+    workspace = preferences_path(runtime).parent.parent
+    negative_marker = workspace / f".{name}_off"
+    positive_marker = workspace / f".{name}"
+    if negative_marker.exists():
+        enabled = False
+    elif positive_marker.exists():
+        enabled = True
+    else:
+        enabled = bool(default)
+    set_display_preference(runtime, name, enabled)
+    return enabled
+
+
+def set_display_preference(runtime: Any, name: str, enabled: bool) -> Path:
+    if name not in DISPLAY_PREFERENCE_NAMES:
+        raise ValueError(f"Unknown Telegram display preference: {name}")
     payload = load_preferences(runtime)
     display = payload.get("telegram_display")
     if not isinstance(display, dict):
         display = {}
-    display["typing"] = bool(enabled)
+    display[name] = bool(enabled)
     payload["telegram_display"] = display
     _write_preferences(runtime, payload)
     return preferences_path(runtime)
