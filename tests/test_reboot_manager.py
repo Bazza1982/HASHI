@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from adapters import claw_cli
-from orchestrator.hot_reload import HotReloadError
+from orchestrator.hot_reload import HotReloadError, module_reload_key
 from orchestrator.reboot_manager import RebootManager
 from orchestrator.service_manager import ServiceManager
 
@@ -160,10 +160,48 @@ def test_reload_project_modules_loads_stream_policy_before_flexible_runtime(monk
     assert status_idx < runtime_idx
 
 
+def test_reload_project_modules_loads_tool_registry_before_gateway_context(monkeypatch):
+    manager = RebootManager(kernel=object(), console_handler=None)
+    module_names = [
+        "tools.gateway.mcp_stdio",
+        "tools.gateway.context",
+        "tools.registry",
+        "tools.schemas",
+    ]
+    reloaded = []
+
+    for name in module_names:
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+
+    def fake_reload(module):
+        reloaded.append(module.__name__)
+        return module
+
+    monkeypatch.setattr("orchestrator.reboot_manager.importlib.reload", fake_reload)
+
+    manager.reload_project_modules(sorted(module_names, key=module_reload_key))
+
+    assert reloaded == [
+        "tools.schemas",
+        "tools.registry",
+        "tools.gateway.context",
+        "tools.gateway.mcp_stdio",
+    ]
+
+
 def test_validate_agent_runtime_contract_accepts_current_modules():
     manager = RebootManager(kernel=object(), console_handler=None)
 
     manager.validate_agent_runtime_contract()
+
+
+def test_validate_agent_runtime_contract_rejects_stale_tool_registry(monkeypatch):
+    manager = RebootManager(kernel=object(), console_handler=None)
+
+    monkeypatch.setattr("tools.gateway.context.ToolRegistry", object())
+
+    with pytest.raises(HotReloadError, match="stale ToolRegistry class"):
+        manager.validate_agent_runtime_contract()
 
 
 def test_validate_agent_runtime_contract_rejects_stale_claw_constant(monkeypatch):

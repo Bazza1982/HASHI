@@ -6,7 +6,6 @@ from collections.abc import Mapping
 from pathlib import Path
 from types import ModuleType
 
-
 HOT_RELOAD_PREFIXES = ("adapters.", "tools.", "orchestrator.")
 
 # These modules define the identity and lock of the already-running process.
@@ -25,6 +24,13 @@ COLD_RESTART_MODULES = frozenset(
 # constants/classes at module import time.  Otherwise a hot reload can combine
 # new consumer source with the previous in-memory protocol module.
 FOUNDATION_PHASES = {
+    # The HER gateway context imports ToolRegistry at module scope.  Reload
+    # schemas, then the registry, then the context so a hot restart cannot
+    # retain the pre-change ToolRegistry class after its constructor evolves.
+    "tools.schemas": 0,
+    "tools.registry": 1,
+    "tools.gateway.context": 2,
+    "tools.gateway.mcp_stdio": 3,
     "adapters.stream_events": 0,
     "adapters.stream_io": 0,
     "orchestrator.flexible_backend_registry": 0,
