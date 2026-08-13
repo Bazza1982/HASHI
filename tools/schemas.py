@@ -59,6 +59,51 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "media_read",
+            "description": (
+                "Read a local image, PDF, video, voice message, or audio file and return "
+                "model-visible media content. Use this for local media paths instead of "
+                "file_read. Images are normalized, PDF text is extracted with scanned pages "
+                "rendered, videos yield deterministic frames, and audio is normalized before "
+                "local transcription."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute or workspace-relative local media path.",
+                    },
+                    "pdf_pages": {
+                        "type": "string",
+                        "enum": ["auto", "all", "none"],
+                        "description": (
+                            "PDF page rendering mode: auto renders pages without useful text "
+                            "(default), all renders every page, none extracts text only."
+                        ),
+                    },
+                    "video_frames": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 6,
+                        "description": "Number of deterministic video frames (default 3, maximum 6).",
+                    },
+                    "transcribe_audio": {
+                        "type": "boolean",
+                        "description": (
+                            "Also transcribe a video's audio track. Audio-only files are always "
+                            "transcribed. Defaults to false for video."
+                        ),
+                    },
+                },
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "file_write",
             "description": (
                 "Write content to a file, creating it or overwriting if it exists. "

@@ -85,6 +85,17 @@ def _log_warning(runtime: Any, message: str) -> None:
             info(message)
 
 
+def _is_her_backend(runtime: Any, backend: Any) -> bool:
+    backend_engine = str(
+        getattr(getattr(backend, "config", None), "engine", "") or ""
+    ).strip().casefold()
+    if not backend_engine:
+        backend_engine = str(
+            getattr(getattr(runtime, "config", None), "active_backend", "") or ""
+        ).strip().casefold()
+    return backend_engine in {"her", "claw-cli"}
+
+
 def _available_media_path(media_dir: Path, filename: str) -> Path:
     # Telegram filenames are user-controlled. Keep every download inside the
     # agent media directory and avoid overwriting same-named batch items.
@@ -232,8 +243,16 @@ async def handle_voice_or_audio(
         if transcript.startswith("[Transcription error]"):
             runtime.error_logger.error(f"Voice transcription failed for {filename}: {transcript}")
             backend = getattr(runtime.backend_manager, "current_backend", None)
-            if backend and backend.capabilities.supports_files:
-                prompt = f"User sent a voice message (saved at {local_path}). Listen to the audio, transcribe it, and respond."
+            if (
+                backend
+                and backend.capabilities.supports_files
+                and _is_her_backend(runtime, backend)
+            ):
+                prompt = (
+                    f"User sent a voice message (saved at {local_path}). "
+                    "Local direct transcription failed. Use media_read on that exact path; "
+                    "it will normalize the audio before retrying transcription, then respond."
+                )
                 if runtime_long.collect_media(
                     runtime,
                     update.effective_chat.id,

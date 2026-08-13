@@ -1,6 +1,6 @@
 # HASHI Engine Runtime (HER) Backend Contract
 
-Status: active for HER `0.1.0-hashi.9`
+Status: active for HER `0.1.0-hashi.10`
 
 HER is derived from the MIT-licensed Claw runtime. The upstream copyright and
 license notice ships with every packaged HER release as `CLAW_LICENSE`.
