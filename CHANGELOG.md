@@ -112,6 +112,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **HER Debug Lab clean-clone portability** — removed the dependency on a
+  developer-specific HER source path and mandatory local `ajiao`/`agents.json`
+  state. Missing operator files are now valid baselines, while present files
+  are represented only by presence and SHA-256 instead of copied contents.
 - **Telegram stream Markdown rendering** — think messages, verbose rolling status,
   and live answer previews now share the final-delivery Markdown-to-HTML renderer.
   Bold and inline-code markers render correctly instead of appearing literally,

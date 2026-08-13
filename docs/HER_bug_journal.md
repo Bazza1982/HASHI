@@ -60,6 +60,7 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 | `HER-20260813-022` | Fixed — live verification pending | P1 | Flex/composed full-context HER turns can also resume the persisted HER session | `test_her_full_context_turn_never_resumes_or_checkpoints_session` |
 | `HER-20260813-023` | Fixed — live verification pending | P2 | runtime and adapter HER Habit pipelines can both process one foreground run | `test_her_adapter_declares_habit_pipeline_ownership`; `test_runtime_intake_ineligibility_disables_adapter_habit_pipeline` |
 | `HER-20260813-024` | Fixed — live verification pending | P1 | post-multimedia adapter runner rejected Meditation isolation overrides before inference | `test_her_task_runner_applies_meditation_safety_overrides` |
+| `HER-20260813-025` | Verified | P2 | HER Debug Lab failed in a clean clone without machine-local Ajiao state | `test_optional_operator_baseline_is_clone_portable_and_content_free`; `tests/test_her_debug_lab.py` |
 
 ## Historical entries
 
@@ -1253,6 +1254,30 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 - **Remaining risk:** live provider and restart replay verification pending.
 - **Secrets/redaction checked:** yes; the regression uses synthetic arguments
   and environment values only.
+- **Recurrence count:** 0
+
+### HER-20260813-025 — Debug Lab required machine-local operator state
+
+- **Status:** Verified
+- **Severity:** P2
+- **Discovered:** 2026-08-13 AEST during the clean public-history regression
+- **Expected:** offline HER Debug Lab scenarios run from a clean clone and do
+  not copy private operator state into retained evidence.
+- **Actual:** baseline capture unconditionally read local `ajiao` state,
+  runtime preferences, and `agents.json`, and embedded a developer-specific HER
+  source checkout path. A clean clone failed before every packaged scenario.
+- **Root cause:** the original lab was built inside one configured HASHI2
+  instance and treated optional operator inputs as required fixtures.
+- **Resolution:** `66ce0ffe` accepts missing local state, fingerprints present
+  state by presence plus SHA-256 without copying contents, treats `agents.json`
+  as optional, and discovers an optional source checkout only through
+  `HASHI_HER_SOURCE_ROOT`.
+- **Regression:** `test_optional_operator_baseline_is_clone_portable_and_content_free`
+  plus the complete `tests/test_her_debug_lab.py` selection (`15 passed`).
+- **Clean integration retest:** the 24-file publication selection completed
+  with `428 passed, 0 failed`.
+- **Secrets/redaction checked:** yes; the new regression proves a private
+  sentinel never appears in the retained baseline record.
 - **Recurrence count:** 0
 
 ## New-entry template

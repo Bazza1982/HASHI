@@ -110,6 +110,11 @@ Gateway/media, screenshot audit, and UI locale policy: `369 passed, 2 skipped,
 0 failed`. The two skips are existing environment-conditional cases, not
 failures hidden by the ownership changes.
 
+The clean public integration then ran a 24-file HER/Habit/session/media/Gateway/
+Superloop selection: `428 passed, 0 failed`. That run also found and fixed the
+Debug Lab's dependency on machine-local `ajiao` state; its focused clean-clone
+regression is `15 passed` (`66ce0ffe`).
+
 ## Release and rollout gates still open
 
 Session-mode ownership and Habit-pipeline ownership are fixed with automated
