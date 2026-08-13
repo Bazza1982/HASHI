@@ -364,11 +364,13 @@ def _build_claw_incomplete_report(result: ClawTaskResult, *, prompt: str) -> tup
         failed_counts[name] = failed_counts.get(name, 0) + 1
     repeated_failure = any(count >= 2 for count in failed_counts.values())
 
-    if uncertain or missing or repeated_failure:
+    stop_reason = str(result.stop_reason or "incomplete").strip().lower()
+    max_iterations = stop_reason == "max_iterations"
+    if failed or missing or repeated_failure:
         recommendation = "PIVOT"
         recommendation_zh = "改变策略后再继续；不要重复执行未经核验的副作用操作。"
         recommendation_en = "Change strategy before continuing; do not repeat unverified side effects."
-    elif successful:
+    elif successful or max_iterations:
         recommendation = "CONTINUE"
         recommendation_zh = "从已保存的 session 继续，并先核验当前页面或外部状态。"
         recommendation_en = "Resume the saved session and verify current external state first."
@@ -456,6 +458,52 @@ def _build_claw_incomplete_report(result: ClawTaskResult, *, prompt: str) -> tup
         "recommended_action": recommendation.lower(),
     }
     return report, metadata
+
+
+def _claw_incomplete_response(
+    result: ClawTaskResult,
+    *,
+    prompt: str,
+) -> tuple[str, dict[str, Any]]:
+    """Preserve the primary agent's safe closing response at an iteration ceiling."""
+    report, metadata = _build_claw_incomplete_report(result, prompt=prompt)
+    stop_reason = str(result.stop_reason or "").strip().lower()
+    model_text = str(result.text or "").strip()
+    dangling_tool_markup = any(
+        marker in model_text
+        for marker in (
+            "<｜｜DSML｜｜tool_calls>",
+            "<tool_call>",
+            '"tool_calls":',
+        )
+    )
+    if stop_reason == "max_iterations" and model_text and not dangling_tool_markup:
+        recommendation = str(metadata.get("recommended_action") or "stop").upper()
+        use_chinese = any("\u4e00" <= char <= "\u9fff" for char in f"{prompt}\n{model_text}")
+        actions = (
+            {
+                "CONTINUE": "从已保存的 session 继续；不要重复已经完成的工作。",
+                "PIVOT": "存在明确失败或缺失回执；改变策略后再继续。",
+                "STOP": "停止并重新评估任务或请求人工决定。",
+            }
+            if use_chinese
+            else {
+                "CONTINUE": "Resume the saved session without repeating completed work.",
+                "PIVOT": "A concrete failure or missing receipt exists; change strategy before continuing.",
+                "STOP": "Stop and reassess the task or request a human decision.",
+            }
+        )
+        return f"{model_text}\n\n**{recommendation}** — {actions.get(recommendation, actions['STOP'])}", {
+            **metadata,
+            "fallback_report_generated": False,
+            "persona_final_response_preserved": True,
+            "persona_interpretation_generated": False,
+        }
+    return report, {
+        **metadata,
+        "persona_final_response_preserved": False,
+        "persona_interpretation_generated": False,
+    }
 
 
 @dataclass(frozen=True)
@@ -2599,13 +2647,14 @@ class HERAdapter(BaseBackend):
         response_text = result.text
         fallback_metadata: dict[str, Any] = {}
         if _claw_run_is_incomplete(result):
-            response_text, fallback_metadata = _build_claw_incomplete_report(result, prompt=prompt)
+            response_text, fallback_metadata = _claw_incomplete_response(result, prompt=prompt)
             self.logger.warning(
-                "HER incomplete run replaced with deterministic report: request=%s "
-                "completion=%s stop_reason=%s recommendation=%s",
+                "HER incomplete run finalized: request=%s completion=%s "
+                "stop_reason=%s persona_preserved=%s recommendation=%s",
                 request_id,
                 result.completion_status or "unknown",
                 result.stop_reason or "unknown",
+                fallback_metadata.get("persona_final_response_preserved", False),
                 fallback_metadata.get("recommended_action") or "unknown",
             )
         if habit_config.enabled:
