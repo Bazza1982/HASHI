@@ -191,7 +191,7 @@ def test_tool_registry_wildcard_survives_global_default_merge():
     assert merged == {"allowed": ["*"], "max_loops": 25}
 
 
-def test_tool_registry_wildcard_allows_all_registered_tools(tmp_path: Path):
+def test_tool_registry_wildcard_excludes_her_only_media_tool(tmp_path: Path):
     manager = FlexibleBackendManager.__new__(FlexibleBackendManager)
     manager.current_backend = SimpleNamespace(tool_registry=None)
     manager.secrets = {}
@@ -209,4 +209,4 @@ def test_tool_registry_wildcard_allows_all_registered_tools(tmp_path: Path):
 
     registry = manager.current_backend.tool_registry
     assert registry.max_loops == 25
-    assert set(registry._allowed) == set(ALL_TOOL_NAMES)
+    assert set(registry._allowed) == set(ALL_TOOL_NAMES) - {"media_read"}

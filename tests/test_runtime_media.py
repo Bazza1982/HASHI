@@ -306,3 +306,51 @@ async def test_safevoice_confirmation_adds_transcript_to_long_batch(tmp_path, mo
     assert submission.media_count == 1
     assert "please compare the totals" in submission.prompt
     assert "Voice transcript" in submission.prompt
+
+
+@pytest.mark.asyncio
+async def test_failed_direct_voice_transcription_routes_her_to_media_read(tmp_path, monkeypatch):
+    runtime = _runtime(tmp_path)
+    runtime._safevoice_enabled = False
+    runtime.config = SimpleNamespace(active_backend="her")
+
+    class _Transcriber:
+        async def transcribe(self, _local_path):
+            return "[Transcription error] decoder rejected input"
+
+    monkeypatch.setattr(
+        "orchestrator.voice_transcriber.get_transcriber",
+        lambda: _Transcriber(),
+    )
+    update = _update(voice=SimpleNamespace(file_id="voice-1"))
+
+    await runtime_media.handle_voice(runtime, update, SimpleNamespace())
+
+    assert len(runtime.enqueued) == 1
+    assert "Use media_read" in runtime.enqueued[0]["prompt"]
+    assert "normalize the audio" in runtime.enqueued[0]["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_failed_direct_voice_transcription_does_not_offer_media_read_to_non_her(
+    tmp_path,
+    monkeypatch,
+):
+    runtime = _runtime(tmp_path)
+    runtime._safevoice_enabled = False
+    runtime.config = SimpleNamespace(active_backend="codex-cli")
+
+    class _Transcriber:
+        async def transcribe(self, _local_path):
+            return "[Transcription error] decoder rejected input"
+
+    monkeypatch.setattr(
+        "orchestrator.voice_transcriber.get_transcriber",
+        lambda: _Transcriber(),
+    )
+    update = _update(voice=SimpleNamespace(file_id="voice-1"))
+
+    await runtime_media.handle_voice(runtime, update, SimpleNamespace())
+
+    assert runtime.enqueued == []
+    assert runtime.replies == [{"text": "Failed to transcribe voice message."}]

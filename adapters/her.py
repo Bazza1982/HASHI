@@ -50,7 +50,7 @@ PERMISSION_MODE_RANK = {"read-only": 0, "workspace-write": 1, "danger-full-acces
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OLLAMA_DUMMY_API_KEY = "__ollama_dummy__"
 HER_DISPLAY_NAME = "HASHI Engine Runtime (HER)"
-HER_VERSION = "0.1.0-hashi.9"
+HER_VERSION = "0.1.0-hashi.10"
 PACKAGED_CLAW_RUNTIME = "hashi-her"
 PACKAGED_CLAW_MANIFEST_VERSION = 1
 CLAW_RUNTIME_POLICIES = {"prefer-packaged", "require-packaged", "system-only"}
@@ -2211,7 +2211,16 @@ class HERAdapter(BaseBackend):
         context_path = state_dir / "her_gateway_context.json"
         config_home = state_dir / "her_config"
         config_home.mkdir(parents=True, exist_ok=True)
-        context = write_gateway_context(registry, context_path)
+        media_roots = []
+        base_media_dir = getattr(self.global_config, "base_media_dir", None)
+        if base_media_dir is not None:
+            media_roots.append(Path(base_media_dir) / self.config.name)
+        context = write_gateway_context(
+            registry,
+            context_path,
+            additional_allowed_tools={"media_read"},
+            media_roots=media_roots,
+        )
         settings = {
             "mcpServers": {
                 "hashi-tools": {

@@ -52,13 +52,14 @@ class _BrowserRuntime:
     async def _reply_text(self, update, text: str, **kwargs):
         return await update.message.reply_text(text, **kwargs)
 
-    async def enqueue_request(self, chat_id, prompt, source, summary):
+    async def enqueue_request(self, chat_id, prompt, source, summary, **kwargs):
         self.enqueued.append(
             {
                 "chat_id": chat_id,
                 "prompt": prompt,
                 "source": source,
                 "summary": summary,
+                **kwargs,
             }
         )
 
@@ -133,6 +134,7 @@ class BrowserModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(runtime.enqueued), 1)
         self.assertEqual(runtime.enqueued[0]["source"], "browser:brave")
         self.assertIn("Find recent CSR sources", runtime.enqueued[0]["prompt"])
+        self.assertTrue(runtime.enqueued[0]["habit_learning_eligible"])
 
     async def test_command_without_args_shows_menu(self):
         runtime = _BrowserRuntime()

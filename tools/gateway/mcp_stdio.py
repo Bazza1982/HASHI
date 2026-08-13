@@ -103,12 +103,37 @@ class ToolGateway:
         else:
             self.fingerprints[fingerprint] += 1
         self.consecutive_errors = self.consecutive_errors + 1 if result.is_error else 0
-        return self._result(result.output, result.is_error)
+        return self._result(result.output, result.is_error, result.content)
 
     @staticmethod
-    def _result(output: str, is_error: bool) -> dict[str, Any]:
+    def _result(
+        output: str,
+        is_error: bool,
+        content: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        safe_content: list[dict[str, Any]] = []
+        for block in content or []:
+            if not isinstance(block, dict):
+                continue
+            kind = block.get("type")
+            if kind == "text" and isinstance(block.get("text"), str):
+                safe_content.append({"type": "text", "text": block["text"]})
+            elif (
+                kind == "image"
+                and block.get("mimeType") in {"image/jpeg", "image/png", "image/gif", "image/webp"}
+                and isinstance(block.get("data"), str)
+            ):
+                safe_content.append(
+                    {
+                        "type": "image",
+                        "mimeType": block["mimeType"],
+                        "data": block["data"],
+                    }
+                )
+        if not safe_content:
+            safe_content = [{"type": "text", "text": output}]
         return {
-            "content": [{"type": "text", "text": output}],
+            "content": safe_content,
             "isError": is_error,
         }
 

@@ -8,9 +8,10 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from tools.registry import ToolRegistry
+from tools.schemas import ALL_TOOL_NAMES
 
 
-CONTEXT_SCHEMA_VERSION = 1
+CONTEXT_SCHEMA_VERSION = 2
 
 _TOOL_SECRET_KEYS = {
     "web_search": {"brave_api_key"},
@@ -47,6 +48,7 @@ class GatewayContext:
     backend: str
     workspace_dir: str
     access_root: str
+    media_roots: list[str]
     allowed_tools: list[str]
     max_calls: int = 100
     max_identical_calls: int = 3
@@ -62,10 +64,15 @@ class GatewayContext:
         registry: ToolRegistry,
         *,
         backend: str = "her",
+        additional_allowed_tools: set[str] | None = None,
+        media_roots: list[Path] | None = None,
     ) -> "GatewayContext":
         audit = _json_safe(registry.audit_context or {}) or {}
         required_secret_keys = set()
-        for tool_name in registry._allowed:
+        allowed_tools = set(registry._allowed)
+        allowed_tools.update(additional_allowed_tools or set())
+        allowed_tools.intersection_update(ALL_TOOL_NAMES)
+        for tool_name in allowed_tools:
             required_secret_keys.update(_TOOL_SECRET_KEYS.get(tool_name, set()))
             if tool_name.startswith("obsidian_"):
                 required_secret_keys.update({"obsidian_base_url", "obsidian_api_key"})
@@ -80,7 +87,11 @@ class GatewayContext:
             backend=backend,
             workspace_dir=str(registry.workspace_dir.resolve()),
             access_root=str(registry.access_root.resolve()),
-            allowed_tools=sorted(registry._allowed),
+            media_roots=[
+                str(Path(root).expanduser().resolve())
+                for root in (media_roots if media_roots is not None else registry.media_roots)
+            ],
+            allowed_tools=sorted(allowed_tools),
             max_calls=max(1, int(registry.max_loops) * 4),
             max_identical_calls=max(
                 1,
@@ -106,11 +117,22 @@ class GatewayContext:
             max_loops=max(1, self.max_calls // 4),
             agents_config=self.agents_config,
             audit_context=self.audit,
+            media_roots=[Path(root) for root in self.media_roots],
         )
 
 
-def write_gateway_context(registry: ToolRegistry, path: Path) -> GatewayContext:
-    context = GatewayContext.from_registry(registry)
+def write_gateway_context(
+    registry: ToolRegistry,
+    path: Path,
+    *,
+    additional_allowed_tools: set[str] | None = None,
+    media_roots: list[Path] | None = None,
+) -> GatewayContext:
+    context = GatewayContext.from_registry(
+        registry,
+        additional_allowed_tools=additional_allowed_tools,
+        media_roots=media_roots,
+    )
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(asdict(context), ensure_ascii=False, indent=2, sort_keys=True)

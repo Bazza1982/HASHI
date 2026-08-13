@@ -10,7 +10,7 @@ import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import urlparse
 
 from tools.schemas import TOOL_SCHEMA_MAP, ALL_TOOL_NAMES
@@ -74,6 +74,15 @@ class ToolResult:
     tool_call_id: str
     output: str
     is_error: bool = False
+    content: list[dict[str, Any]] | None = None
+
+
+@dataclass
+class StructuredToolOutput:
+    """Tool output with MCP-native content kept separate from audit text."""
+
+    output: str
+    content: list[dict[str, Any]]
 
 
 class ToolRegistry:
@@ -107,6 +116,7 @@ class ToolRegistry:
         max_loops: int = 25,
         agents_config: Optional[list] = None,
         audit_context: Optional[dict] = None,
+        media_roots: Optional[list[Path]] = None,
     ):
         self.logger = logging.getLogger("Tools.Registry")
         self.access_root = Path(access_root)
@@ -116,9 +126,14 @@ class ToolRegistry:
         self.max_loops = max_loops
         self.agents_config = agents_config or []
         self.audit_context = audit_context or {}
+        self.media_roots = [Path(root) for root in (media_roots or [])]
 
         if "*" in allowed_tools:
             self._allowed = set(ALL_TOOL_NAMES)
+            # media_read is injected explicitly into the HER-only gateway
+            # context. A wildcard on other backends must not broaden their
+            # capabilities merely because the schema exists globally.
+            self._allowed.discard("media_read")
         else:
             self._allowed = set(allowed_tools) & set(ALL_TOOL_NAMES)
             unknown = set(allowed_tools) - set(ALL_TOOL_NAMES) - {"*"}
@@ -181,7 +196,7 @@ class ToolRegistry:
             return enterprise_denial
 
         try:
-            output = await self._dispatch(tool_name, arguments)
+            dispatched = await self._dispatch(tool_name, arguments)
         except Exception as e:
             self.logger.error(f"Tool '{tool_name}' raised unexpected error: {e}", exc_info=True)
             output = f"Error: unexpected failure in '{tool_name}': {e}"
@@ -189,8 +204,19 @@ class ToolRegistry:
             self._record_tool_audit(tool_name, arguments, result, started)
             return result
 
+        if isinstance(dispatched, StructuredToolOutput):
+            output = dispatched.output
+            content = dispatched.content
+        else:
+            output = dispatched
+            content = None
         is_error = output.startswith("Error:")
-        result = ToolResult(tool_call_id=tool_call_id, output=output, is_error=is_error)
+        result = ToolResult(
+            tool_call_id=tool_call_id,
+            output=output,
+            is_error=is_error,
+            content=content,
+        )
         self._record_tool_audit(tool_name, arguments, result, started)
         return result
 
@@ -397,7 +423,7 @@ class ToolRegistry:
         except Exception:
             return None
 
-    async def _dispatch(self, tool_name: str, arguments: dict) -> str:
+    async def _dispatch(self, tool_name: str, arguments: dict) -> str | StructuredToolOutput:
         from tools.builtins import (
             execute_bash,
             execute_file_read,
@@ -435,6 +461,16 @@ class ToolRegistry:
                 arguments,
                 access_root=self.access_root,
                 workspace_dir=self.workspace_dir,
+            )
+
+        if tool_name == "media_read":
+            from tools.media_read import execute_media_read
+
+            return await execute_media_read(
+                arguments,
+                access_root=self.access_root,
+                workspace_dir=self.workspace_dir,
+                media_roots=self.media_roots,
             )
 
         if tool_name == "file_write":

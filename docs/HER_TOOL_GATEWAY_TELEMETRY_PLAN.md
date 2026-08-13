@@ -1,6 +1,6 @@
 # HASHI Engine Runtime (HER) Tool Gateway And Telemetry Plan
 
-Status: active implementation for packaged HER `0.1.0-hashi.9`; remaining telemetry and
+Status: active implementation for packaged HER `0.1.0-hashi.10`; remaining telemetry and
 cross-platform release work is tracked below
 Owner: HASHI
 Created: 2026-05-23
@@ -288,7 +288,7 @@ The packaged HER runtime should have explicit version metadata:
 
 ```json
 {
-  "hashi_claw_version": "0.1.0-hashi.9",
+  "hashi_claw_version": "0.1.0-hashi.10",
   "upstream_claw_commit": "f8e1bb7262b261da1ee6bfcd461bfc5b676f6a6d",
   "build_target": "linux-x86_64",
   "sha256": "..."
