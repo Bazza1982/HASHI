@@ -81,7 +81,7 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - Backend and model changes continue to an optional effort picker when the
   selected model supports effort. Keeping the current value leaves it unchanged;
   models without selectable effort finish with `n/a`.
-- `/effort [level]`: available when the active backend supports effort levels. Grok CLI offers `low`, `medium`, and `high` with a HASHI default of `medium`. Codex choices follow the active model: `gpt-5.6-sol` includes `max`; `gpt-5.6-terra` and `gpt-5.6-luna` expose `low`, `medium`, `high`, and `xhigh`. HER uses `low`, `medium`, `high`, `xhigh`, `max`, and `max+` as execution budgets of 12, 32, 96, 192, 384, and 512 iterations; `max+` also sets a 1,500-second budget. HER effort controls agentic run length rather than provider reasoning depth.
+- `/effort [level]`: available when the active backend supports effort levels. Grok CLI offers `low`, `medium`, and `high` with a HASHI default of `medium`. Codex choices follow the active model: `gpt-5.6-sol` includes `max`; `gpt-5.6-terra` and `gpt-5.6-luna` expose `low`, `medium`, `high`, and `xhigh`. HER uses `low`, `medium`, `high`, `xhigh`, `max`, and `max+` as execution budgets of 12, 32, 96, 192, 384, and 512 iterations. MAX+ has plan-directed advisory assurance but no private time or token ceiling; `/timeout` remains the separate outer control. HER effort controls agentic run length rather than provider reasoning depth.
 - Grok CLI `0.2.93` offers `grok-4.5` as the default model and
   `grok-composer-2.5-fast` as an alternate. An agent explicitly configured for
   Composer keeps that choice until `/model grok-4.5` is selected. `/effort`

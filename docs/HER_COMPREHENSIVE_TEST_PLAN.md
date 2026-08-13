@@ -113,7 +113,7 @@ A successful answer from the wrong route is a failure.
 | `high` | 96 | on | planned execution |
 | `xhigh` | 192 | on | extended execution |
 | `max` | 384 | on | assurance/review and finalization behavior retained |
-| `max+` | 512 | on | MAX+ checkpoints and 1,500-second time budget; no cumulative task token cap |
+| `max+` | 512 | on | plan-directed advisory assurance; no private time or token cap |
 
 The test harness must assert the environment passed to HER. It must not infer the
 effort from how long the model appeared to think.
@@ -256,8 +256,8 @@ prove exact edge behavior before any paid API run:
 11. Provider 400, 401, 403, 408, 429, 500, truncated SSE, malformed JSON, connection reset,
     and delayed response produce the expected sanitized outcome.
 12. Native limits 12/32/96/192/384/512 are hit exactly using a scripted model.
-13. MAX+ 1,500-second handling is tested with a fake monotonic clock; cumulative token
-    usage never terminates the task.
+13. MAX+ iteration-ceiling handling is tested; neither an internal wall-clock nor
+    cumulative token usage terminates the task.
 14. Repeated identical tool calls, excessive total calls, and consecutive tool errors are
     stopped by the Gateway with explicit partial-progress guidance.
 15. Process cancellation after `run_started`, after a successful tool result, and just

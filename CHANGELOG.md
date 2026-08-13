@@ -11,11 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Certified HER `0.1.0-hashi.10` integration** — pinned the Linux HASHI
-  Engine Runtime package to source `85a481d`, preserved fixed-mode session
+- **Certified HER `0.1.0-hashi.11` integration** — pinned the Linux HASHI
+  Engine Runtime package to source `f524b47`, preserved fixed-mode session
   resume and structured streaming, exposed the shared HASHI Tool Registry over
   a private MCP stdio gateway, and added provider/model routing plus HER
-  execution budgets through `max+`. The current Windows manifest entry remains
+  execution budgets through `max+`. MAX+ assurance is advisory and plan-driven,
+  with no private token or wall-clock ceiling. The current Windows manifest entry remains
   an older runtime and is not yet parity-certified. See the
   [unreleased checkpoint](docs/HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md).
 - **Secure HER multimedia bridge** — Telegram media now reaches HER as actual
@@ -31,6 +32,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   HER adapter is the sole Planning/Meditation owner in standalone HASHI; its
   ownership marker also keeps legacy compatibility pipelines dormant in
   downstream integrations.
+- **Non-blocking HER Meditation and safe incomplete finalization** — Meditation
+  now reflects once at low effort from an immutable same-agent context snapshot
+  on a separate execution queue, while durable state mutations remain narrowly
+  serialized. When HER reaches its iteration ceiling, HASHI preserves a usable
+  primary-agent final answer instead of replacing completed work with a
+  mechanical incomplete report.
 - **HER debug lab and Superloop** — added scripted provider/MCP fixtures,
   restart guards, durable evidence capture, and a two-stage Flash-before-Pro
   debug controller for reproducible backend certification work.
