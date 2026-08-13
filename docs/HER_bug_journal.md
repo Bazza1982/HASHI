@@ -57,8 +57,9 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 | `HER-20260812-019` | Verified | P1 | live harness accepted the pre-restart runtime as the `/reboot min` completion receipt and lost the first request | `test_restart_receipt_rejects_pre_restart_online_idle_runtime` |
 | `HER-20260813-020` | Fixed — live verification pending | P1 | MCP image results were flattened into text before the provider could see them | `test_packaged_her_bridges_media_read_image_into_provider_vision_input` |
 | `HER-20260813-021` | Fixed — live verification pending | P1 | legacy screenshot results reached HER as strings instead of validated MCP image content | `test_gateway_bridges_legacy_browser_screenshot_string_to_image` |
-| `HER-20260813-022` | Root caused | P1 | Flex/composed full-context HER turns can also resume the persisted HER session | regression pending |
-| `HER-20260813-023` | Root caused | P2 | runtime and adapter HER Habit pipelines can both process one foreground run | mutual-exclusion regression pending |
+| `HER-20260813-022` | Fixed — live verification pending | P1 | Flex/composed full-context HER turns can also resume the persisted HER session | `test_her_full_context_turn_never_resumes_or_checkpoints_session` |
+| `HER-20260813-023` | Fixed — live verification pending | P2 | runtime and adapter HER Habit pipelines can both process one foreground run | `test_her_adapter_declares_habit_pipeline_ownership`; `test_runtime_intake_ineligibility_disables_adapter_habit_pipeline` |
+| `HER-20260813-024` | Fixed — live verification pending | P1 | post-multimedia adapter runner rejected Meditation isolation overrides before inference | `test_her_task_runner_applies_meditation_safety_overrides` |
 
 ## Historical entries
 
@@ -1151,7 +1152,7 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 
 ### HER-20260813-022 — full-context modes can also resume the stored HER session
 
-- **Status:** Root caused
+- **Status:** Fixed — live verification pending
 - **Severity:** P1
 - **Recurrence of:** none
 - **Discovered:** 2026-08-13 AEST during documentation/source consistency audit
@@ -1169,22 +1170,28 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
   and potentially incorrect continuation in Flex/composed HER turns.
 - **First divergent event:** mode selection disables sessions only on adapters
   implementing `set_session_mode()`; HER does not implement that method.
-- **Reproduction:** source-path proof is deterministic; a focused command-level
-  regression and live provider retest have not yet been added.
+- **Reproduction:** source-path proof is deterministic; the regression now
+  exercises a full-context adapter turn with a stale fixed checkpoint.
 - **Root cause:** HER session persistence was added without integrating the
   runtime's fixed-versus-full-context session-mode contract.
-- **Fix commits / regression:** pending.
+- **Fix commits / regression:** `2270f5be`; HER now implements
+  `set_session_mode()`, generic ephemeral construction forces
+  `ephemeral_session`, and
+  `test_her_full_context_session_mode_clears_stale_checkpoint` plus
+  `test_her_full_context_turn_never_resumes_or_checkpoints_session` cover the
+  checkpoint and turn boundaries.
 - **Required retest:** fixed first/second turn proves session capture and
   incremental resume; Flex and each composed mode prove no `--resume`; mode
   switches and `/new` prove checkpoint cleanup; every health/helper/Meditation
   sidecar proves it neither loads nor overwrites the user session.
-- **Remaining risk:** publication and live rollout remain blocked until fixed.
+- **Remaining risk:** live provider verification across fixed, Flex, Wrapper,
+  Audit, and Dual Brain remains pending before rollout certification.
 - **Secrets/redaction checked:** yes; source inspection used no runtime secrets.
 - **Recurrence count:** 0
 
 ### HER-20260813-023 — both HER Habit pipelines can process one run
 
-- **Status:** Root caused
+- **Status:** Fixed — live verification pending
 - **Severity:** P2
 - **Recurrence of:** none
 - **Discovered:** 2026-08-13 AEST during documentation/source consistency audit
@@ -1198,15 +1205,54 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
   writes, confusing `/skill habits` versus `/habit` state, and duplicate cost.
 - **Root cause:** the later adapter-direct feature introduced an independent
   eligibility gate and store without a shared owner or mutual-exclusion rule.
-- **Current mitigation:** adapter-direct Habit Meditation remains default-off;
-  command and contract docs now distinguish both paths.
-- **Fix commits / regression:** pending a product decision: consolidate, select
-  one owner, or implement explicit mutual exclusion.
+- **Resolution:** the adapter-owned `/habit` path is authoritative. Standalone
+  HASHI removed the legacy runtime writer; `HERAdapter.habit_pipeline_owner =
+  "adapter"` also gives downstream compatibility runtimes an explicit
+  suppression signal.
+- **Fix commits / regression:** `2270f5be`;
+  `test_her_adapter_declares_habit_pipeline_ownership` and
+  `test_runtime_intake_ineligibility_disables_adapter_habit_pipeline`.
 - **Required retest:** one foreground run proves exactly one Planning injection,
   one Meditation owner, one durable write policy, and correct no-change/failure
   behavior for every supported configuration.
-- **Remaining risk:** default enablement remains blocked.
+- **Remaining risk:** live create/no-change/failure/recovery and Verbose
+  notification evidence remains pending; storage migration is deliberately not
+  performed.
 - **Secrets/redaction checked:** yes; source inspection used no Habit contents.
+- **Recurrence count:** 0
+
+### HER-20260813-024 — Meditation isolation overrides were rejected before inference
+
+- **Status:** Fixed — live verification pending
+- **Severity:** P1
+- **Recurrence of:** none
+- **Discovered:** 2026-08-13 AEST by the session-mode regression run
+- **Known-bad HASHI checkpoint:** `ed5dcc9e`
+- **HER package:** `0.1.0-hashi.10`
+- **Expected:** adapter-owned Meditation invokes HER in a non-resumable,
+  read-only call with its bounded tool allowlist, disabled task planning, and an
+  eight-iteration ceiling.
+- **Actual:** `_run_habit_meditation()` passed `track_session_identity`,
+  `permission_mode_override`, `allowed_tools_override`, and
+  `task_env_overrides`, but the post-multimedia `_run_task_async()` signature no
+  longer accepted them. A real Meditation job therefore raised `TypeError`
+  before starting HER; mocked job tests did not exercise the concrete runner.
+- **User-visible impact:** the foreground task still succeeded, but Meditation
+  could not form or update a Habit, and only logs exposed the background
+  failure.
+- **Root cause:** the multimedia integration retained the hardened foreground
+  task runner but dropped the previously implemented request-scoped override
+  parameters and stream session-tracking flag.
+- **Fix commits / regression:** `2270f5be` restores all four overrides while
+  preserving `.10` broad-workzone and credential-redaction behavior;
+  `test_her_task_runner_applies_meditation_safety_overrides` executes a real
+  subprocess fixture and verifies the effective CLI arguments and environment.
+- **Required retest:** enable `/habit`, complete one eligible HER request, and
+  prove the journal reaches `no_change` or a validated Write with no foreground
+  checkpoint mutation.
+- **Remaining risk:** live provider and restart replay verification pending.
+- **Secrets/redaction checked:** yes; the regression uses synthetic arguments
+  and environment values only.
 - **Recurrence count:** 0
 
 ## New-entry template

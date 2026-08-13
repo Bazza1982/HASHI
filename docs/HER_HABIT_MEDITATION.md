@@ -6,19 +6,12 @@ Habit learning is an optional capability of the HER backend only. It is not a
 HASHI orchestration feature, a Skill, a Dream extension, a shared registry, or a
 cross-backend protocol.
 
-This document describes only the **adapter-direct JSON path** implemented by
-`adapters/her_habits.py` and controlled by `/habit`. A separate
-runtime-governed SQLite candidate/evidence path is implemented by
-`orchestrator/her_habits.py` and `orchestrator/runtime_habits.py`, and is
-surfaced through `/skill habits`; see
-[HER_AGENT_HABIT_MEDITATION_CONTRACT.md](HER_AGENT_HABIT_MEDITATION_CONTRACT.md).
-The stores, lifecycle policies, and command surfaces are not aliases.
-
-When this default-off adapter path is enabled, both implementations can
-currently be eligible for the same HER foreground run. That can cause duplicate
-Planning injection and two Meditation jobs with different write policies.
-Mutual exclusion or an explicit consolidation decision is an open release gate;
-operators should not enable this path by default until that gate is closed.
+This document describes the **adapter-owned JSON path** implemented by
+`adapters/her_habits.py` and controlled by `/habit`. It is the only active HER
+Planning/Meditation writer in standalone HASHI. The adapter exposes an explicit
+ownership marker so downstream compatibility builds can suppress older
+pipelines instead of running two learning lifecycles. Consequently `/habit off`
+means the HER Habit loop is fully off.
 
 The lifecycle is:
 
@@ -53,7 +46,7 @@ The HER-only command surface is:
 retains its arguments subject only to HASHI's generic credential masking, and a
 separate full-detail Habit audit records targets, before/after records, outcomes,
 Meditation changes, and notification attempts. On a non-HER backend the command
-does not inspect dormant Habit files; it explains the HER-only boundary and
+does not inspect Habit files; it explains the HER-only boundary and
 offers the normal backend-switch flow instead.
 
 Example instance configuration:
@@ -92,6 +85,11 @@ start a Meditation model call. This invariant applies to every HER effort level.
 Internal one-shot/ephemeral HER backends are always ineligible, including when
 the process-wide environment override is on, so health probes and sidecars
 cannot recursively learn Habits.
+
+The foreground adapter also honors HASHI's request-scoped
+`habit_learning_eligible` value. An explicitly ineligible maintenance request
+uses the exact original prompt and schedules no Meditation even when the
+agent-wide `/habit` state is on.
 
 ## Planning
 
@@ -237,15 +235,12 @@ does not read or write HER Habit files. Future Dream work may be designed later,
 but this implementation does not prescribe any relationship between Dream and
 Habit.
 
-## Coexistence checklist
+## Ownership checklist
 
 Before enabling `habit_meditation.enabled` for an agent:
 
-1. confirm whether runtime-governed Habit eligibility is active for that same
-   agent and request source;
-2. do not treat `/skill habits` records as `/habit` JSON records or attempt to
-   manage one store through the other command;
-3. verify the foreground prompt and job journals contain only the intended
-   Planning/Meditation path;
-4. capture a real create/update/delete, no-change, failure/retry, and Verbose
-   notification smoke after the chosen mutual-exclusion policy is implemented.
+1. verify the active HER adapter declares `habit_pipeline_owner=adapter`;
+2. verify one foreground prompt and one adapter job journal are produced for an
+   eligible request;
+3. capture a real create/update/delete, no-change, failure/retry, and Verbose
+   notification smoke after loading the checkpoint.

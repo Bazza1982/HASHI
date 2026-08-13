@@ -55,17 +55,13 @@ and incomplete-run handling, the Tool Gateway/MCP bridge, secure multimodal
 media and `media_read`, HER Habit/Meditation implementations, and a reproducible
 HER debug Superloop.
 
-The checkpoint also includes current Workbench/Kasumi template and workbook
-work plus recent voice/continuous-conversation hardening. It is not a new
-release line or a live-deployment claim. Remaining gates are:
+This is not a new release line or a live-deployment claim. Session ownership
+and Habit-pipeline ownership are now code-complete with automated regression
+coverage. Remaining gates are:
 
-- prevent HER session resume in Flex/composed full-context modes;
-- consolidate or make the runtime-governed and adapter-direct HER Habit paths
-  mutually exclusive;
 - perform canary then wider live reboot/media/Habit validation;
 - build and certify a current Windows HER package;
-- approve the GitHub destination, visibility, and mixed-license publication
-  boundary.
+- publish only reviewed HASHI files from a clean checkout.
 
 See
 [HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md)

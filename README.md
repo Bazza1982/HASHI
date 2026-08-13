@@ -36,7 +36,7 @@ In short:
 Key principles:
 - **No Token Storage** — CLI backends use local authentication; no OAuth tokens stored
 - **Multi-Agent, Single Interface** — Chat with multiple specialized agents through one Telegram, WhatsApp, or Workbench session
-- **Self-Improving HER Agents** — optional agent-local Habit planning and post-run Meditation in HER
+- **Self-Improving HER Agents** — optional, adapter-owned Habit planning and post-run Meditation in HER
 - **Open Source And Self-Hostable** — The control plane is designed to be
   inspectable and extensible rather than a closed hosted black box
 - **Built to Evolve** — Modular skills, tools, connectors, policies, and
@@ -219,6 +219,12 @@ start a Meditation call. Controls are available at three levels:
 Each agent stores its own files under `workspaces/<agent>/habits/*.json`.
 `/skill dream` remains the separate nightly memory-reflection mechanism and does
 not read or write HER Habit files.
+
+The HER-only `/habit` menu supports inspection, persistent on/off/default
+control, recoverable deletion, delete-all, and reset. When Verbose was enabled
+at task start, a real Meditation change produces one consolidated notification;
+`no-change` stays silent. Non-HER and ephemeral requests cannot read, inject, or
+write these records.
 
 ---
 

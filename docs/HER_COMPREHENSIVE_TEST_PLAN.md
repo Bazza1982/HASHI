@@ -9,10 +9,11 @@ Controller template: [HER Debug Two-Stage Superloop](../superloops/templates/her
 > **2026-08-13 integration note:** this document preserves the original
 > HASHI2/Ajiao certification campaign and its 48-cell oracle. HASHI1 now carries
 > the same certified `.10` package plus later Habit and multimedia changes, but
-> has not inherited a completed 48-cell live verdict. The source audit also
-> found that Flex/composed HER can still resume a stored session while receiving
-> full context (`HER-20260813-022`), which violates the mode oracle below and is
-> a stop-the-line gate. Supplemental Habit/media gates are in section 19.
+> has not inherited a completed 48-cell live verdict. The source audit found
+> that Flex/composed HER could resume a stored session while receiving full
+> context (`HER-20260813-022`); `2270f5be` fixes that code path and adds
+> deterministic regressions, while live matrix verification remains pending.
+> Supplemental Habit/media gates are in section 19.
 
 ## 1. Purpose
 
@@ -745,7 +746,7 @@ mandatory additions for any release candidate that includes them; passing the
 
 ### 19.1 Session-mode correction
 
-- add a deterministic regression proving fixed HER captures one session and
+- retain the deterministic regression proving fixed HER captures one session and
   sends only the next incremental prompt on turn two;
 - prove Flex, Wrapper, Audit, and Dual Brain full-context turns do not pass
   `--resume` or load an old HER internal conversation;
@@ -755,13 +756,13 @@ mandatory additions for any release candidate that includes them; passing the
 
 ### 19.2 Habit ownership
 
-- select the runtime-governed SQLite path, the adapter-direct JSON `/habit`
-  path, or an explicitly coordinated design;
+- retain the adapter-direct JSON `/habit` path as the authoritative owner and
+  verify `HERAdapter.habit_pipeline_owner` remains `adapter`;
 - prove one eligible foreground run gets exactly one intended Planning
   injection and one Meditation owner;
 - cover no-change, create, update, delete, invalid output, timeout, restart
   replay, recoverable reset, audit, and Verbose notification behavior;
-- prove non-HER and ephemeral calls neither read nor write either store.
+- prove non-HER and ephemeral calls neither read nor write the Habit store.
 
 ### 19.3 Media and multimodal
 

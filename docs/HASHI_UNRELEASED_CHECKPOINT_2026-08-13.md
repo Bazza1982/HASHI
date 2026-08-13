@@ -1,20 +1,19 @@
 # HASHI Unreleased Development Checkpoint — 2026-08-13
 
-> Status: integrated code checkpoint on `main`, documentation and publication
-> preparation in progress. This is not a tagged release and is not evidence that
-> a running HASHI or Aptenra process has loaded the checkpoint.
+> Status: reviewed publication candidate for `main`. This is not a tagged
+> release and is not evidence that a running HASHI process has loaded the
+> checkpoint.
 
 ## Checkpoint identity
 
 | Item | Value |
 | --- | --- |
-| HASHI code checkpoint | `ed5dcc9e` (`fix(her): bridge legacy screenshot results`) |
+| HASHI code checkpoint | `2270f5be` (`fix(her): enforce session and habit ownership`) |
 | Certified HER package | `0.1.0-hashi.10` |
 | HER source commit | `85a481d9e5c94804ed9c0bd300ca9a635732c22d` |
 | Certified Linux SHA-256 | `882c9a71013bdd6155558ff4dc8df4a8e002188e144b04f7fda2fb96f0f83ac2` |
-| Release state | Unreleased; no GitHub push performed |
+| Release state | Unreleased source checkpoint; public `main` publication candidate |
 | Runtime state | Standalone HASHI adoption still requires an explicit reboot and live smoke |
-| Aptenra state | Separate integration, Windows build, provenance, and product certification required |
 
 The HER package identity is pinned in
 `hashi_assets/her/manifest.json` and
@@ -28,11 +27,9 @@ described as parity with the certified Linux `.10` package.
 
 - HER is the canonical public backend ID. `claw-cli` remains a migration alias.
 - Fixed-mode HER uses the packaged runtime's persisted session ID and
-  incremental turns. Flex and composed modes are intended to use HASHI-owned
-  full-context turns, but the current HER adapter has no `set_session_mode()`
-  hook and still resumes a non-ephemeral stored HER session. That mismatch is a
-  publication gate because it can combine full-context injection with HER's
-  previous internal context.
+  incremental turns. Flex and composed modes use HASHI-owned full-context
+  turns; `set_session_mode()` clears stale checkpoints, prevents `--resume`,
+  and ignores replacement session IDs for those turns.
 - Provider selection, provider/model discovery, structured streaming,
   provider-visible reasoning fragments, incomplete-run recovery, and effort
   budgets through `max+` are integrated.
@@ -64,35 +61,20 @@ The implementation and remaining live rollout matrix are recorded in
 
 ### HER Habit and Meditation work
 
-Two distinct, agent-local implementations currently coexist and must not be
-presented as one store or one lifecycle:
-
-| Path | Owner and storage | Activation and behavior | User surface |
-| --- | --- | --- | --- |
-| Runtime governance path | `orchestrator/her_habits.py`; SQLite under `backend_state/her/` | Intake-gated Planning and post-run Meditation produce candidates/evidence before promotion | `/skill habits` |
-| Adapter-direct path | `adapters/her_habits.py`; JSON under `habits/` plus durable job/audit records | Default-off configuration; validated `create`/`update`/`delete` actions become active immediately | HER-only `/habit` |
+The HER adapter is the authoritative agent-local Planning/Meditation owner.
+Standalone HASHI has one JSON store under `habits/`, with durable job and audit
+records under `backend_state/`. Validated `create`, `update`, and `delete`
+actions become active immediately and are managed through HER-only `/habit`.
 
 The adapter-direct path now includes `/habit` status, view, on/off/default,
 recoverable delete/delete-all/reset, full-detail audit, bounded retry/recovery,
 and one proactive notification when Verbose was enabled and Meditation made a
 real change.
 
-Both paths are agent-local and HER-gated, but their policy and persistence
-semantics differ. If the adapter-direct path is enabled while runtime governance
-eligibility is also true, both paths can retrieve Habits and schedule Meditation
-for the same foreground run. Mutual exclusion or an explicit consolidation
-decision is therefore a release gate before enabling adapter-direct Habit
-Meditation by default.
-
-### Other recent HASHI developments represented by this checkpoint
-
-- Workbench and Kasumi added versioned template binding, safe XLSM import, and
-  preservation of Nexcel worksheet dimensions.
-- Aptenra voice work added continuous conversation wake behavior, ambient-noise
-  adaptation, model-native persona/delivery settings, stricter read-only
-  translator fallbacks, and progress/caption ownership fixes.
-- Embedded HASHI routing and debug runtime asset resolution were aligned with
-  the canonical HER backend and current runtime package names.
+`HERAdapter.habit_pipeline_owner` makes this ownership explicit for downstream
+compatibility consumers, while request-scoped eligibility keeps internal,
+maintenance, non-HER, and ephemeral requests out of the Habit path. `/habit
+off` therefore disables ordinary HER Habit learning completely.
 
 The complete unreleased feature ledger remains the top-level
 [`CHANGELOG.md`](../CHANGELOG.md); this checkpoint records the integration and
@@ -118,45 +100,44 @@ This documentation pass completed those lightweight gates with:
 - `165 passed` across release-readiness, IP-boundary, HER certification
   metadata, Tool Gateway, media, Habit, and runtime-pipeline tests;
 - `152` internal Markdown links checked with no missing targets;
-- Aptenra/HASHI IP-boundary validation passed after explicit MIT classification
-  of this checkpoint document;
+- the publication-boundary review classified this checkpoint as HASHI scope;
 - the changed-file high-signal secret scan found zero findings;
 - `git diff --check` passed.
 
+The subsequent session/Habit gate closure ran a unified regression selection
+covering HER, `/habit`, ownership guards, mode switching, reboot,
+Gateway/media, screenshot audit, and UI locale policy: `369 passed, 2 skipped,
+0 failed`. The two skips are existing environment-conditional cases, not
+failures hidden by the ownership changes.
+
 ## Release and rollout gates still open
 
-1. Decide whether the two HER Habit paths will be mutually exclusive,
-   consolidated, or intentionally run together with separately documented
-   semantics.
-2. Add and test an explicit HER session-mode policy so Flex/composed full-context
-   turns do not also resume a prior HER session, while fixed mode retains
-   incremental resume.
-3. Run `/reboot min` on a canary HER agent, then verify session continuity,
+Session-mode ownership and Habit-pipeline ownership are fixed with automated
+regression coverage in `2270f5be`. The remaining gates are operational and
+platform-specific:
+
+1. Run `/reboot min` on a canary HER agent, then verify session continuity,
    `/habit`, media intake, `media_read`, screenshot results, notification
    behavior, and failure recovery.
-4. Only after the canary is green, run the intended wider `/reboot max` rollout
+2. Only after the canary is green, run the intended wider `/reboot max` rollout
    and capture live evidence.
-5. Build and certify a current Windows HER package before claiming Linux/Windows
+3. Build and certify a current Windows HER package before claiming Linux/Windows
    parity.
-6. Keep Aptenra adoption separate until its embedded runtime, Windows artifact,
-   provenance, and full product suite are explicitly updated.
 
 ## GitHub publication readiness
 
-This repository is a mixed-license tree: HASHI's inherited open-source scope and
-the proprietary Aptenra product scope coexist. Before any GitHub push:
+Before publishing this checkpoint:
 
 1. confirm the destination repository URL, owner, branch, and visibility;
 2. confirm that the selected publication scope is compatible with `LICENSE`,
-   `LICENSE_SCOPE.md`, `REUSE.toml`, and all third-party notices;
+   packaged `CLAW_LICENSE`, and all third-party notices;
 3. inspect staged files and ensure workspace state, credentials, logs, private
    media caches, generated binaries outside the reviewed package, and local
    operator material are excluded;
 4. run the release gates in [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md);
-5. create an intentional commit, review the final diff and commit range, then
-   push only after the GitHub remote and publication boundary are approved.
+5. create intentional commits, review the final diff and commit range, then
+   push without overwriting remote history.
 
-At this checkpoint the local repository has no `origin` or upstream tracking
-branch. The existing remote is a LAN debug remote, not an approved GitHub
-publication target. Documentation can be committed locally, but a GitHub push
-must wait for an explicit destination and visibility decision.
+The approved destination is the public `Bazza1982/HASHI` repository on its
+`main` branch. Publication uses a clean HASHI checkout, with only reviewed
+HASHI commits transferred and tested before the direct `main` push.

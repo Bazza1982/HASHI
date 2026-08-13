@@ -27,6 +27,10 @@ from adapters.her_habits import (
 EFFORTS = ("low", "medium", "high", "xhigh", "max", "max+")
 
 
+def test_her_adapter_declares_habit_pipeline_ownership() -> None:
+    assert HERAdapter.habit_pipeline_owner == "adapter"
+
+
 def test_her_reload_tolerates_stale_habit_module_until_dependency_reload(tmp_path):
     project_root = Path(__file__).resolve().parents[1]
     script = r'''

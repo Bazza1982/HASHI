@@ -87,7 +87,6 @@ deployment validation continues.
 - [HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md) — current unreleased integration identity, verification evidence, open rollout gates, and GitHub publication boundary
 - [HER_BACKEND_CONTRACT.md](HER_BACKEND_CONTRACT.md) — active HER ownership, sessions, Tool Gateway, streaming, multimodal, packaging, and certification contract
 - [HER_HABIT_MEDITATION.md](HER_HABIT_MEDITATION.md) — default-off adapter-direct HER Habit controls, JSON persistence, recovery, audit, and change notifications
-- [HER_AGENT_HABIT_MEDITATION_CONTRACT.md](HER_AGENT_HABIT_MEDITATION_CONTRACT.md) — runtime-governed HER candidate/evidence lifecycle and SQLite persistence contract
 - [her_multimedia_multimodal_plan.md](her_multimedia_multimodal_plan.md) — implemented HER media bridge, security limits, compatibility paths, and remaining live rollout matrix
 - [HER_TOOL_GATEWAY_TELEMETRY_PLAN.md](HER_TOOL_GATEWAY_TELEMETRY_PLAN.md) — long-term HER packaging, Tool Gateway/MCP, and structured thinking/token telemetry plan
 - [HER_CODE_MODULE_PLAN.md](HER_CODE_MODULE_PLAN.md) — HER module packaging notes, upstream Claw runtime expectations, and local release-binary evidence

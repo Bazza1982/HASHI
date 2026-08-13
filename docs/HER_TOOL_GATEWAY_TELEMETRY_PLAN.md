@@ -36,9 +36,10 @@ record. They are no longer a description of the pre-Gateway runtime:
 - `media_read` supplies bounded image/PDF/audio/video content without storing
   raw base64 in normal session output.
 
-Remaining gates are explicit HER session-mode control for Flex/composed turns,
-Habit-pipeline ownership, live post-reboot multimedia/Habit evidence, complete
-reasoning-token source persistence, and a current Windows package.
+Session-mode control for Flex/composed turns and adapter-owned Habit-pipeline
+mutual exclusion are implemented with regression coverage. Remaining gates are
+live post-reboot multimedia/Habit/session evidence, complete reasoning-token
+source persistence, and a current Windows package.
 
 ## Decision
 
@@ -1164,16 +1165,16 @@ Closed decisions:
    justified migration.
 6. Production packaged resolution is checksum- and provenance-checked and
    fail-closed.
+7. `HERAdapter.set_session_mode()` preserves fixed incremental resume and
+   disables resume/checkpoint capture for full-context and ephemeral turns.
+8. The adapter-direct `/habit` JSON pipeline is authoritative; compatibility
+   SQLite paths honor `habit_pipeline_owner=adapter` and remain dormant.
 
 Remaining decisions:
 
-1. What explicit adapter policy disables HER resume for Flex/composed
-   full-context turns while preserving fixed-mode session continuity?
-2. Which HER Habit implementation is authoritative, or what mutual-exclusion
-   rule coordinates the runtime and adapter paths?
-3. Is a `.10`-equivalent Windows package required for the next standalone
+1. Is a `.10`-equivalent Windows package required for the next standalone
    HASHI release, or will that release be Linux/WSL-only?
-4. When will token-audit persistence carry the complete
+2. When will token-audit persistence carry the complete
    `thinking_token_source` contract on every provider route?
 
 ## Acceptance Definition
