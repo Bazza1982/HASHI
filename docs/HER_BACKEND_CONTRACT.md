@@ -1,6 +1,6 @@
 # HASHI Engine Runtime (HER) Backend Contract
 
-Status: active for HER `0.1.0-hashi.12`; unreleased integration checkpoint
+Status: active for HER `0.1.0-hashi.13`; unreleased integration checkpoint
 recorded in
 [HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md)
 
@@ -17,15 +17,14 @@ not certify a Windows build, another architecture, or a downstream integration.
 
 | Field | Certified Linux value |
 | --- | --- |
-| Package version | `0.1.0-hashi.12` |
-| HER source | `7ce6cf431502ca5a78a1874f09db9c2de7211562` |
+| Package version | `0.1.0-hashi.13` |
+| HER source | `d63b1bf86600cd4f54015c0dd5656cbcd35a8f3b` |
 | Upstream base | Claw `4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d` |
 | Target | `linux-x86_64` |
-| SHA-256 | `7e14a22bb51d9c99de3eb92c627434adf631fed898fc4dca420a8faf2b6a9a32` |
+| SHA-256 | `be6321017747858fc8cbc11796c4c79a73403de1bd5508caf245b32288ec4bb5` |
 
-The same manifest also contains a Windows `0.1.3-hashi.3` artifact built from
-`b27f4180`. It is older than the `.12` runtime and must not be used as evidence
-of current cross-platform parity.
+The manifest contains no Windows artifact. Historical Windows work is not packaged by
+this checkpoint and must not be used as evidence of current cross-platform parity.
 
 ## Ownership and session boundary
 
@@ -94,6 +93,11 @@ smallest task-matched execution, verification, testing, and review scope availab
 under that ceiling. A greeting at MAX+ therefore receives one planning decision and
 one normal reply, with no independent review, tool use, or test. MAX+ has no private
 token or wall-clock budget; `/timeout` remains the operator-owned outer control.
+
+For a validated `direct_response` profile, the acknowledgement field is the complete
+final answer and `remaining_work` must be empty. HER returns that answer once without a
+second execution generation. Semantic compaction runs only when another model call is
+required, so completed answers are never held behind a maintenance provider call.
 
 The adaptive task profile records task kind, risk, state-change scope, direct-response
 eligibility, deliverables, material claims, verification mode, testing mode, exact test

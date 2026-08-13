@@ -9,7 +9,7 @@ This directory contains developer documentation and operational notes for HASHI.
 > enterprise-server production validation pending.
 >
 > **Development checkpoint:** the unreleased HASHI `main` integration state,
-> including HER `0.1.0-hashi.12`, is recorded in
+> including HER `0.1.0-hashi.13`, is recorded in
 > [HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md).
 >
 > **Changelog:** see [`../CHANGELOG.md`](../CHANGELOG.md) · **Roadmap:** see [ROADMAP.md](ROADMAP.md).

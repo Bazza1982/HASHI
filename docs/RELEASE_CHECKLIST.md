@@ -53,8 +53,8 @@
     behavior before release notes claim those capabilities
   - `/reboot max` and wider rollout happen only after the canary is green and
     logs contain no unexplained HER, Gateway, media, Habit, or reload errors
-  - Certification is platform-specific. A Linux `.12` result must not be used
-    to claim Windows `.12` parity
+  - Certification is platform-specific. A Linux `.13` result must not be used
+    to claim Windows `.13` parity
 - Superloop alpha gates:
   - `python -m pytest tests/test_superloop_store.py tests/test_superloop_taskboard.py tests/test_superloop_waits.py tests/test_superloop_runner.py tests/test_superloop_scheduler.py tests/test_superloop_compiler.py tests/test_superloop_issues.py tests/test_superloop_commands.py tests/test_superloop_recording.py tests/test_superloop_nagare_adapter.py -q`
   - Taskboards use `task_id`, not `id`, and every in-progress or next-action task resolves to a real task

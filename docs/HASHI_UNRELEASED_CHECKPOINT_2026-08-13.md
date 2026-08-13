@@ -8,18 +8,18 @@
 
 | Item | Value |
 | --- | --- |
-| HASHI code checkpoint | this HER `.12` packaging checkpoint on `main` |
-| Certified HER package | `0.1.0-hashi.12` |
-| HER source commit | `7ce6cf431502ca5a78a1874f09db9c2de7211562` |
-| Certified Linux SHA-256 | `7e14a22bb51d9c99de3eb92c627434adf631fed898fc4dca420a8faf2b6a9a32` |
+| HASHI code checkpoint | this HER `.13` packaging checkpoint on `main` |
+| Certified HER package | `0.1.0-hashi.13` |
+| HER source commit | `d63b1bf86600cd4f54015c0dd5656cbcd35a8f3b` |
+| Certified Linux SHA-256 | `be6321017747858fc8cbc11796c4c79a73403de1bd5508caf245b32288ec4bb5` |
 | Release state | Unreleased source checkpoint; public `main` publication candidate |
 | Runtime state | Standalone HASHI adoption still requires an explicit reboot and live smoke |
 
 The HER package identity is pinned in
 `hashi_assets/her/manifest.json` and
-`hashi_assets/her/certification_baseline.json`. The manifest's Windows entry is
-still the older `0.1.3-hashi.3` binary built from `b27f4180`; it must not be
-described as parity with the certified Linux `.12` package.
+`hashi_assets/her/certification_baseline.json`. The manifest contains no Windows
+artifact. Historical Windows work is not packaged by this checkpoint and must not be
+described as parity with the certified Linux `.13` package.
 
 ## Developments incorporated
 
@@ -36,7 +36,7 @@ described as parity with the certified Linux `.12` package.
 - The HASHI Tool Gateway exposes the allowed `ToolRegistry` capabilities to HER
   over a private MCP stdio bridge, preserving existing permission and audit
   enforcement.
-- The certified `.12` runtime treats MCP `isError` results as failures and
+- The certified `.13` runtime treats MCP `isError` results as failures and
   preserves bounded MCP image results as model-visible multimodal input for
   Anthropic and OpenAI-compatible providers.
 - Planning now treats effort as a capability ceiling and records the intended
@@ -47,6 +47,10 @@ described as parity with the certified Linux `.12` package.
   stable ID. MAX+ may rerun only exact plan-declared tests in a disposable,
   network-isolated snapshot. Reviewer feedback remains advisory and cannot discard or
   suppress the primary agent's final answer. No internal time/token ceiling exists.
+- A direct-response plan contains the complete final answer. HER publishes it once and
+  stops without a second execution generation, independent review, tool/test work, or a
+  terminal semantic-compaction provider call. Non-direct plans continue through the
+  normal execution and plan-selected assurance path.
 - The HER debug lab and Superloop template provide scripted provider/MCP
   fixtures, restart guards, evidence records, and Flash-before-Pro iteration.
 
@@ -128,6 +132,13 @@ The clean public integration then ran a 24-file HER/Habit/session/media/Gateway/
 Superloop selection: `428 passed, 0 failed`. That run also found and fixed the
 Debug Lab's dependency on machine-local `ajiao` state; its focused clean-clone
 regression is `15 passed` (`66ce0ffe`).
+
+The `.13` direct-response follow-up passed `666/666` runtime tests, runtime
+all-target Clippy with warnings denied, and the full pinned-source certification
+command. HASHI then resolved the packaged `.13` binary through its normal probe
+and passed the `97/97` adapter, certification, runtime-probe, Tool Gateway, and
+media regression selection. Live rollout evidence remains separate from these
+build-time gates and is recorded only after an explicit canary reboot.
 
 The HER `.12` increment independently completed `1,145` focused Rust runtime/CLI/tool
 tests with no failures, then passed the fail-closed full-workspace certification command

@@ -1,21 +1,21 @@
 {
   "manifest_version": 1,
   "runtime": "hashi-her",
-  "version": "0.1.0-hashi.12",
+  "version": "0.1.0-hashi.13",
   "display_name": "HASHI Engine Runtime (HER)",
   "upstream_runtime": "Claw",
   "upstream_version": "0.1.3-hashi.33",
   "license": "MIT",
   "license_file": "CLAW_LICENSE",
   "upstream_commit": "4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d",
-  "source_commit": "7ce6cf431502ca5a78a1874f09db9c2de7211562",
+  "source_commit": "d63b1bf86600cd4f54015c0dd5656cbcd35a8f3b",
   "source_branch": "agent/remove-token-budget-fix-reasoning-stream",
   "build_date": "2026-08-13",
-  "notes": "HER 0.1.0-hashi.12 makes effort a capability ceiling selected by an adaptive task profile. Planning determines deliverables, material claims, verification, testing, review scope, and stop conditions; trivial work completes directly at every planned effort. XHIGH, MAX, and MAX+ can use an advisory independent reviewer with separate read-only workspace and Git tools plus an addressable raw-evidence store. MAX+ alone can rerun exact plan-declared test commands in a disposable network-isolated snapshot. Reviewer feedback cannot suppress the primary agent's final answer, and no private token or wall-clock budget exists.",
+  "notes": "HER 0.1.0-hashi.13 makes effort a capability ceiling selected by an adaptive task profile. Planning determines deliverables, material claims, verification, testing, review scope, and stop conditions; direct-response plans return their complete answer once without a redundant execution generation, review, test, tool call, or terminal semantic-compaction delay. XHIGH, MAX, and MAX+ can use an advisory independent reviewer with separate read-only workspace and Git tools plus an addressable raw-evidence store. MAX+ alone can rerun exact plan-declared test commands in a disposable network-isolated snapshot. Reviewer feedback cannot suppress the primary agent's final answer, and no private token or wall-clock budget exists.",
   "binaries": {
     "linux-x86_64": {
-      "path": "releases/0.1.0-hashi.12/linux-x86_64/hashi-her",
-      "sha256": "7e14a22bb51d9c99de3eb92c627434adf631fed898fc4dca420a8faf2b6a9a32",
+      "path": "releases/0.1.0-hashi.13/linux-x86_64/hashi-her",
+      "sha256": "be6321017747858fc8cbc11796c4c79a73403de1bd5508caf245b32288ec4bb5",
       "rust_target_triple": "x86_64-unknown-linux-gnu",
       "binary_name": "hashi-her"
     }
