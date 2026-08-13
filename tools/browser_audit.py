@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from pathlib import Path
 from typing import Any
 
 _WRITE_LOCK = threading.Lock()
+_IMAGE_DATA_PATTERN = re.compile(
+    r"(data:image/[a-z0-9.+-]+;base64,)[A-Za-z0-9+/=]*",
+    re.IGNORECASE,
+)
+_SCREENSHOT_DATA_PATTERN = re.compile(
+    r"((?:^screenshot:|\[screenshot\]\s+base64:))[A-Za-z0-9+/=]*",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
 def default_audit_path(base_dir: Path | None = None) -> Path:
@@ -20,9 +29,11 @@ def sanitize_value(value: Any) -> Any:
     if isinstance(value, list):
         return [sanitize_value(v) for v in value]
     if isinstance(value, str):
-        if len(value) > 800:
-            return value[:800] + "...[truncated]"
-        return value
+        safe = _IMAGE_DATA_PATTERN.sub(r"\1[image-redacted]", value)
+        safe = _SCREENSHOT_DATA_PATTERN.sub(r"\1[image-redacted]", safe)
+        if len(safe) > 800:
+            return safe[:800] + "...[truncated]"
+        return safe
     return value
 
 

@@ -14,7 +14,7 @@ from tools.browser_extension_bridge import (
     healthcheck,
     send_bridge_command,
 )
-from tools.browser_audit import append_audit_record
+from tools.browser_audit import append_audit_record, sanitize_value
 from tools.browser_native_host import decode_native_message, encode_native_message
 
 HAS_UNIX_STREAM_SERVER = hasattr(socketserver, "UnixStreamServer")
@@ -131,6 +131,21 @@ def test_append_audit_record_writes_jsonl(tmp_path: Path) -> None:
     record = json.loads(content)
     assert record["kind"] == "browser_action"
     assert record["action"] == "get_text"
+
+
+def test_browser_audit_redacts_screenshot_image_payloads() -> None:
+    payload = "c2Vuc2l0aXZlLWJyb3dzZXItaW1hZ2U="
+
+    sanitized = sanitize_value(
+        {
+            "direct": f"screenshot:{payload}",
+            "session": f"[screenshot] base64:{payload}",
+            "desktop": f"data:image/png;base64,{payload}",
+        }
+    )
+
+    assert payload not in json.dumps(sanitized)
+    assert all("[image-redacted]" in value for value in sanitized.values())
 
 
 @requires_unix_stream_server

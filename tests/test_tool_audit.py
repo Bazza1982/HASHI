@@ -33,6 +33,28 @@ def test_build_tool_audit_record_redacts_and_truncates_sensitive_values():
     assert record["status"] == "success"
 
 
+@pytest.mark.parametrize(
+    "output",
+    [
+        "screenshot:c2Vuc2l0aXZlLWltYWdlLWJ5dGVz",
+        "[screenshot] base64:c2Vuc2l0aXZlLWltYWdlLWJ5dGVz",
+        "Screenshot OK\ndata:image/png;base64,c2Vuc2l0aXZlLWltYWdlLWJ5dGVz",
+    ],
+)
+def test_build_tool_audit_record_redacts_legacy_screenshot_payloads(output):
+    record = build_tool_audit_record(
+        tool_name="browser_screenshot",
+        tool_call_id="call-image",
+        arguments={},
+        output=output,
+        is_error=False,
+        duration_ms=1,
+    )
+
+    assert "c2Vuc2l0aXZlLWltYWdlLWJ5dGVz" not in record["output_snippet"]
+    assert "[image-redacted]" in record["output_snippet"]
+
+
 @pytest.mark.asyncio
 async def test_tool_registry_allows_bash_without_enterprise_context(tmp_path):
     registry = ToolRegistry(

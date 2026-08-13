@@ -423,6 +423,7 @@ TOOL_SCHEMAS = [
                 "Execute a multi-step browser workflow on a single page without reloading between steps. "
                 "Every step returns its own success/error and output. Supports: goto, click, fill, "
                 "type_text, scroll, scroll_to, hover, screenshot, get_text, get_html, evaluate, wait. "
+                "Screenshot steps are model-visible images through multimodal gateways. "
                 "The default stop_on_error=true prevents later side effects after a failed step."
             ),
             "parameters": {
@@ -627,7 +628,8 @@ TOOL_SCHEMAS = [
             "name": "browser_screenshot",
             "description": (
                 "Launch a browser (or attach to the user's running Chrome via CDP), "
-                "navigate to a URL, and return a base64-encoded PNG screenshot. "
+                "navigate to a URL, and return a screenshot as model-visible image content "
+                "through multimodal gateways (legacy direct callers receive a base64 PNG). "
                 "Works with local pages (localhost) and any public URL. "
                 "Set cdp_url='http://localhost:9222' to reuse the user's existing "
                 "logged-in browser session with all cookies intact."
@@ -835,7 +837,8 @@ DESKTOP_TOOL_SCHEMAS = [
             "name": "desktop_screenshot",
             "description": (
                 "Take a screenshot of the Linux virtual desktop (Xvfb / XRDP session). "
-                "Returns a base64-encoded PNG plus display metadata. "
+                "Returns display metadata plus model-visible image content through multimodal "
+                "gateways (legacy direct callers receive a base64 PNG). "
                 "Works even when the Windows host screen is locked. "
                 "Optionally annotate with grid overlay or save to a file path."
             ),
@@ -1033,7 +1036,8 @@ WINDOWS_USE_TOOL_SCHEMAS = [
             "name": "windows_screenshot",
             "description": (
                 "Take a screenshot of the real Windows desktop via the Windows host. "
-                "Returns a base64-encoded PNG plus metadata from the Windows-side executor. "
+                "Returns Windows-side metadata plus model-visible image content through multimodal "
+                "gateways (legacy direct callers receive a base64 PNG). "
                 "Works when called from Windows or from WSL agents through powershell.exe interop. "
                 "The Windows desktop usually needs to be unlocked for reliable results. "
                 "On multi-display hosts, call windows_info first, inspect displays, and pass display=N explicitly."

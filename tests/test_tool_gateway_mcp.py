@@ -15,8 +15,14 @@ from PIL import Image
 
 from adapters.claw_cli import ClawCLIAdapter
 from tools.gateway.context import load_gateway_context, write_gateway_context
-from tools.gateway.mcp_stdio import ToolGateway, _dispatch, _read_frame, _write_frame
-from tools.registry import ToolRegistry
+from tools.gateway.mcp_stdio import (
+    ToolGateway,
+    _bridge_legacy_screenshot_output,
+    _dispatch,
+    _read_frame,
+    _write_frame,
+)
+from tools.registry import ToolRegistry, ToolResult
 
 
 def _registry(tmp_path: Path) -> ToolRegistry:
@@ -85,6 +91,95 @@ def _write_context(registry: ToolRegistry, tmp_path: Path) -> Path:
     path = tmp_path / "context.json"
     write_gateway_context(registry, path)
     return path
+
+
+def _png_base64() -> str:
+    buffer = io.BytesIO()
+    Image.new("RGB", (32, 20), "purple").save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+@pytest.mark.asyncio
+async def test_gateway_bridges_legacy_browser_screenshot_string_to_image(tmp_path, monkeypatch):
+    registry = ToolRegistry(
+        allowed_tools=["browser_screenshot"],
+        access_root=tmp_path,
+        workspace_dir=tmp_path,
+        secrets={},
+    )
+    gateway = ToolGateway(load_gateway_context(_write_context(registry, tmp_path)))
+    original_payload = _png_base64()
+
+    async def screenshot_execute(name, arguments, tool_call_id=""):
+        assert name == "browser_screenshot"
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            output=f"screenshot:{original_payload}",
+        )
+
+    monkeypatch.setattr(gateway.registry, "execute", screenshot_execute)
+    result = await gateway.call(
+        "browser_screenshot",
+        {"url": "https://example.com"},
+        "call-screenshot",
+    )
+
+    assert result["isError"] is False
+    assert len(result["content"]) == 1
+    assert result["content"][0]["type"] == "image"
+    assert result["content"][0]["mimeType"] == "image/jpeg"
+    assert base64.b64decode(result["content"][0]["data"]).startswith(b"\xff\xd8\xff")
+    assert original_payload not in json.dumps(result)
+
+
+def test_gateway_bridges_legacy_desktop_and_session_screenshots_in_order():
+    payload = _png_base64()
+    desktop_content, desktop_error = _bridge_legacy_screenshot_output(
+        "desktop_screenshot",
+        f"Screenshot OK — 1KB\ndata:image/png;base64,{payload}",
+    )
+    assert desktop_error is False
+    assert desktop_content and [block["type"] for block in desktop_content] == ["text", "image"]
+    assert payload not in json.dumps(desktop_content)
+
+    session_content, session_error = _bridge_legacy_screenshot_output(
+        "browser_session",
+        f"[goto] https://example.com\n[screenshot] base64:{payload}\n[click] button",
+    )
+    assert session_error is False
+    assert session_content and [block["type"] for block in session_content] == [
+        "text",
+        "image",
+        "text",
+    ]
+    assert "[goto]" in session_content[0]["text"]
+    assert "[click]" in session_content[2]["text"]
+
+
+def test_gateway_rejects_malformed_legacy_screenshot_payload():
+    content, is_error = _bridge_legacy_screenshot_output(
+        "windows_screenshot",
+        "Windows screenshot OK\ndata:image/png;base64,not-valid!",
+    )
+
+    assert is_error is True
+    assert content and any(
+        "Screenshot unavailable" in block.get("text", "") for block in content
+    )
+    assert "not-valid" not in json.dumps(content)
+
+
+def test_gateway_bounds_legacy_browser_session_screenshot_count():
+    payload = _png_base64()
+    output = "\n".join(
+        f"[screenshot] base64:{payload}" for _index in range(7)
+    )
+
+    content, is_error = _bridge_legacy_screenshot_output("browser_session", output)
+
+    assert is_error is False
+    assert content and sum(block.get("type") == "image" for block in content) == 6
+    assert any("6-image safety limit" in block.get("text", "") for block in content)
 
 
 @pytest.mark.asyncio
