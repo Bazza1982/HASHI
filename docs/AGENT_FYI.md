@@ -48,6 +48,9 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
   inspect or maintain the bounded Memory+ work card and archive index.
 - `/model`: inspect or switch model where supported, then optionally choose or
   keep reasoning effort.
+- `/habit [view|on|off|default|delete|reset]`: inspect or control the default-off,
+  adapter-owned HER Habit/Meditation path. Non-HER backends do not read or
+  modify its records.
 - `/superloop`: recording-first long-running workflow orchestration.
 - `/verbose [on|off]`: toggle richer long-task status display.
 - `/think [on|off]`: toggle model-authored interim commentary and available provider-reasoning messages. Independent from `/verbose`; generic progress and tools remain under `/verbose`.

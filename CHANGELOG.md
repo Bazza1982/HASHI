@@ -27,7 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **HER-only Habit controls and change notifications** — added the default-off
   adapter-owned `/habit` menu, view, on/off/default, recoverable delete,
   delete-all and reset operations, durable audit/retry state, and one proactive
-  notification when Verbose was enabled and Meditation made a real change.
+  notification when Verbose was enabled and Meditation made a real change. The
+  HER adapter is the sole Planning/Meditation owner in standalone HASHI; its
+  ownership marker also keeps legacy compatibility pipelines dormant in
+  downstream integrations.
 - **HER debug lab and Superloop** — added scripted provider/MCP fixtures,
   restart guards, durable evidence capture, and a two-stage Flash-before-Pro
   debug controller for reproducible backend certification work.
@@ -61,6 +64,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **HER lifecycle and incomplete-run semantics** — fixed-mode HER receives
+  incremental prompts, while Flex, Wrapper, Audit, and Dual Brain full-context
+  turns neither resume nor capture an internal HER session. Generic ephemeral
+  HER sidecars are also forced session-isolated.
+- **HER Meditation invocation safety** — preserved the request-scoped runner
+  parameters used by background Meditation, including no-resume tracking,
+  read-only permission, a bounded tool allowlist, and planning/iteration
+  environment overrides.
+- **HER packaging and deployment boundary** — runtime discovery treats the
+  manifest, source provenance, platform, executable permission, and SHA-256 as
+  fail-closed inputs. Each platform package remains a separate certification
+  scope.
 - **Command menu display parity** — presentation-only menu updates now apply the
   shared HASHI card order, escaped HTML values, active-choice markers, and
   consistent navigation across parked topics, tickets, system slots, loops,

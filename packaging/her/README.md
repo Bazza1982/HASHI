@@ -41,8 +41,7 @@ python scripts/verify_her_certification.py --source-root /path/to/her-source
 
 The certification command checks the pinned source identity, full Rust
 workspace tests, and workspace/all-target Clippy with warnings denied. Runtime
-adoption still requires a canary reboot and live provider/tool/media smoke; it
-does not update Aptenra's embedded Windows runtime automatically.
+adoption still requires a canary reboot and live provider/tool/media smoke.
 
 See [the active backend contract](../../docs/HER_BACKEND_CONTRACT.md) and the
 [2026-08-13 unreleased checkpoint](../../docs/HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md).
