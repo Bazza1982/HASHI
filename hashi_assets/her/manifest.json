@@ -1,21 +1,21 @@
 {
   "manifest_version": 1,
   "runtime": "hashi-her",
-  "version": "0.1.0-hashi.11",
+  "version": "0.1.0-hashi.12",
   "display_name": "HASHI Engine Runtime (HER)",
   "upstream_runtime": "Claw",
   "upstream_version": "0.1.3-hashi.33",
   "license": "MIT",
   "license_file": "CLAW_LICENSE",
   "upstream_commit": "4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d",
-  "source_commit": "f524b47054e5964b9ddfc61ab28cbfd990dc09af",
+  "source_commit": "7ce6cf431502ca5a78a1874f09db9c2de7211562",
   "source_branch": "agent/remove-token-budget-fix-reasoning-stream",
   "build_date": "2026-08-13",
-  "notes": "HER 0.1.0-hashi.11 makes MAX+ review advisory and plan-driven: simple plans skip heavyweight review, planned review strategy bounds revision rounds, tool aliases are compared canonically, repeated replan failures are deduplicated, and MAX+ has no private wall-clock limit. It retains the multimodal and tool-result fixes certified in 0.1.0-hashi.10.",
+  "notes": "HER 0.1.0-hashi.12 makes effort a capability ceiling selected by an adaptive task profile. Planning determines deliverables, material claims, verification, testing, review scope, and stop conditions; trivial work completes directly at every planned effort. XHIGH, MAX, and MAX+ can use an advisory independent reviewer with separate read-only workspace and Git tools plus an addressable raw-evidence store. MAX+ alone can rerun exact plan-declared test commands in a disposable network-isolated snapshot. Reviewer feedback cannot suppress the primary agent's final answer, and no private token or wall-clock budget exists.",
   "binaries": {
     "linux-x86_64": {
-      "path": "releases/0.1.0-hashi.11/linux-x86_64/hashi-her",
-      "sha256": "93229c2b3aae40eabe5ed4582429a5247a4520ba45b6f1c99eecadecefaa1232",
+      "path": "releases/0.1.0-hashi.12/linux-x86_64/hashi-her",
+      "sha256": "7e14a22bb51d9c99de3eb92c627434adf631fed898fc4dca420a8faf2b6a9a32",
       "rust_target_triple": "x86_64-unknown-linux-gnu",
       "binary_name": "hashi-her"
     }

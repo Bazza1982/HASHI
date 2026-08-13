@@ -1138,11 +1138,20 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path, caplog):
                  "review": {"decision": "pass", "summary": "The revised plan is adequate.",
                             "findings": [], "missing_evidence": [], "required_changes": [],
                             "evidence_refs": ["task frame"]}},
-                {"kind": "independent_review", "gate": "execution_evidence", "revision_round": 0,
+                {"kind": "control_invocation", "stage": "independent_review", "gate": "completion",
+                 "revision_round": 0, "format_attempt": 1,
+                 "request": {"system_prompt": ["COMPLETION REVIEW"], "user_message": "evidence index",
+                             "allow_tools": True},
+                 "raw_output": "", "outcome": "inspection_tools", "error": None,
+                 "usage": {"input_tokens": 17, "output_tokens": 3}},
+                {"kind": "independent_review", "gate": "completion", "revision_round": 0,
                  "summary": "Validation and tests are supported by raw evidence.",
                  "review": {"decision": "pass", "summary": "Validation and tests are supported by raw evidence.",
-                            "findings": [], "missing_evidence": [], "required_changes": [],
-                            "evidence_refs": ["tool result 1", "test result 1"]}},
+                            "findings": [
+                                {"category": "verification", "issue": "File identity checked"},
+                                {"category": "testing", "issue": "Planned test checked"},
+                            ], "missing_evidence": [], "required_changes": [],
+                            "evidence_refs": ["ReviewFile sha256", "ReviewRun isolated result"]}},
                 {"kind": "semantic_compaction", "status": "started", "removed_message_count": 0, "timeout_seconds": 60},
                 {"kind": "semantic_compaction", "status": "completed", "removed_message_count": 12, "timeout_seconds": 60},
                 {"kind": "thinking_summary", "summary": "thinking block received (48 chars hidden)", "thinking_chars": 48},
@@ -1244,6 +1253,7 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path, caplog):
     assert "output_preview=ok" in caplog.text
     assert "HER control invocation:" in caplog.text
     assert "input_tokens=13 output_tokens=5" in caplog.text
+    assert "outcome=inspection_tools allow_tools=True" in caplog.text
     raw_events = [
         json.loads(line)
         for line in (tmp_path / "claw_exec_events.jsonl").read_text(encoding="utf-8").splitlines()

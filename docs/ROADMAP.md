@@ -50,7 +50,7 @@ SIEM, and Kubernetes/cloud validation remain post-alpha.
 ## Unreleased HASHI Integration Checkpoint (2026-08-13)
 
 Development after the tagged v4 foundation alpha now includes certified HER
-`0.1.0-hashi.11` on Linux, persistent fixed-mode sessions, structured stream
+`0.1.0-hashi.12` on Linux, persistent fixed-mode sessions, structured stream
 and incomplete-run handling, the Tool Gateway/MCP bridge, secure multimodal
 media and `media_read`, HER Habit/Meditation implementations, and a reproducible
 HER debug Superloop.
