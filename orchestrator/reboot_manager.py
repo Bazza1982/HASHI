@@ -74,6 +74,8 @@ class RebootManager:
         her = importlib.import_module("adapters.her")
         claw_cli = importlib.import_module("adapters.claw_cli")
         runtime_pipeline = importlib.import_module("orchestrator.runtime_pipeline")
+        tool_registry = importlib.import_module("tools.registry")
+        gateway_context = importlib.import_module("tools.gateway.context")
 
         acknowledgement_kind = getattr(stream_events, "KIND_ACKNOWLEDGEMENT", None)
         if acknowledgement_kind != "acknowledgement":
@@ -94,6 +96,13 @@ class RebootManager:
         if not callable(getattr(runtime_pipeline, "setup_interactive_feedback", None)):
             raise HotReloadError(
                 "Hot reload contract failed: runtime acknowledgement pipeline unavailable"
+            )
+        if getattr(gateway_context, "ToolRegistry", None) is not getattr(
+            tool_registry, "ToolRegistry", None
+        ):
+            raise HotReloadError(
+                "Hot reload contract failed: tools.gateway.context retained a stale "
+                "ToolRegistry class"
             )
         contract_message = (
             "Hot reload contract verified: HER compatibility facade and runtime pipeline are current."
