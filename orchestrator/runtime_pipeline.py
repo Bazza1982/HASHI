@@ -117,6 +117,12 @@ def begin_queue_item(runtime, item) -> QueueItemStart:
         "source": item.source,
         "summary": item.summary,
         "started_at": datetime.now().isoformat(),
+        # Habit Meditation finishes asynchronously. Capture presentation
+        # eligibility now so a later /verbose toggle cannot rewrite the
+        # notification policy for this already-started task.
+        "verbose_at_start": bool(getattr(runtime, "_verbose", False)),
+        "silent": bool(item.silent),
+        "deliver_to_telegram": bool(item.deliver_to_telegram),
     }
     runtime._mark_activity()
     activity_store = getattr(runtime, "request_activity", None)

@@ -1,16 +1,17 @@
-from __future__ import annotations
-
 """HER-local Habit planning, Meditation, and file maintenance.
 
 This module deliberately has no dependency on HASHI's orchestration skills.
 Habit scope is implicit in the owning agent workspace.
 """
 
+from __future__ import annotations
+
 import hashlib
 import json
 import os
 import re
 import tempfile
+import threading
 import unicodedata
 import uuid
 from collections import Counter
@@ -22,8 +23,10 @@ from typing import Any
 
 HABIT_FORMAT = "her-habit-v1"
 MEDITATION_JOB_FORMAT = "her-habit-meditation-job-v1"
+HABIT_AUDIT_FORMAT = "her-habit-audit-v1"
 HABIT_MEDITATION_ENV = "HASHI_HER_HABIT_MEDITATION"
 MAX_MEDITATION_ATTEMPTS = 3
+MAX_HABIT_NOTIFICATION_ATTEMPTS = 3
 # HER requires at least one valid name when --allowedTools is present. Keep the
 # Meditation subprocess read-only and expose only the least-capable standard
 # filesystem tool; the prompt still instructs the model not to call it.
@@ -35,6 +38,9 @@ _CJK_RUN_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af
 _CURRENT_REQUEST_MARKER = "--- CURRENT USER REQUEST — AUTHORITATIVE ---"
 _VALID_JOB_STATUSES = frozenset(
     {"pending", "running", "applying", "completed", "no_change", "failed"}
+)
+_VALID_NOTIFICATION_STATUSES = frozenset(
+    {"waiting", "pending", "sending", "sent", "skipped", "failed"}
 )
 _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}"),
@@ -80,6 +86,7 @@ _STOPWORDS = {
     "you",
     "your",
 }
+_HABIT_AUDIT_LOCK = threading.Lock()
 
 
 class MeditationValidationError(ValueError):
@@ -248,6 +255,37 @@ class HERHabit:
         }
 
 
+@dataclass(frozen=True)
+class HERHabitChange:
+    """One durable change made to an agent-local HER Habit."""
+
+    operation: str
+    habit_id: str
+    before: dict[str, str] | None
+    after: dict[str, str] | None
+
+    @property
+    def title(self) -> str:
+        payload = self.after or self.before or {}
+        return str(payload.get("title") or self.habit_id)
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "operation": self.operation,
+            "habit_id": self.habit_id,
+            "before": dict(self.before) if self.before is not None else None,
+            "after": dict(self.after) if self.after is not None else None,
+        }
+
+
+@dataclass(frozen=True)
+class HERHabitResetResult:
+    snapshot_id: str
+    active_count: int
+    archived_count: int
+    journal_count: int
+
+
 def _clean_text(value: Any, *, limit: int) -> str:
     text = str(value or "").replace("\x00", "").strip()
     return text[:limit].rstrip()
@@ -271,6 +309,46 @@ def redact_bounded_text(value: Any, *, limit: int) -> str:
     if len(text) > limit:
         text = text[: max(0, limit - 1)].rstrip() + "…"
     return text
+
+
+def default_habit_audit_path(workspace_dir: Path) -> Path:
+    return Path(workspace_dir) / "backend_state" / "her_habit_audit.jsonl"
+
+
+def _audit_safe(value: Any) -> Any:
+    """Preserve diagnostic detail while masking credential-shaped strings."""
+
+    if isinstance(value, Mapping):
+        return {str(key): _audit_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_audit_safe(item) for item in value]
+    if isinstance(value, str):
+        return redact_bounded_text(value, limit=20_000)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return redact_bounded_text(value, limit=20_000)
+
+
+def append_habit_audit(
+    workspace_dir: Path,
+    event: str,
+    **fields: Any,
+) -> Path:
+    """Append a full-fidelity HER Habit audit row for debugging."""
+
+    path = default_habit_audit_path(workspace_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "format": HABIT_AUDIT_FORMAT,
+        "ts": _utc_now(),
+        "event": str(event or "unknown"),
+        **{str(key): _audit_safe(value) for key, value in fields.items()},
+    }
+    line = json.dumps(record, ensure_ascii=False, sort_keys=True)
+    with _HABIT_AUDIT_LOCK:
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    return path
 
 
 def _validated_action_text(
@@ -361,6 +439,20 @@ class HERHabitStore:
                     self.logger.warning("Ignoring invalid HER habit file %s: %s", path, exc)
         return habits
 
+    def get(self, habit_id: str) -> HERHabit | None:
+        normalized = str(habit_id or "").strip().casefold()
+        if not _HABIT_ID_RE.fullmatch(normalized):
+            return None
+        return next(
+            (habit for habit in self.load() if habit.habit_id == normalized),
+            None,
+        )
+
+    def archived_count(self) -> int:
+        if not self.archive_root.is_dir():
+            return 0
+        return sum(1 for path in self.archive_root.glob("*.json") if path.is_file())
+
     def retrieve(self, prompt: str, *, limit: int = 5) -> list[HERHabit]:
         """Rank using title and natural-language metadata only."""
         query = _tokenize(prompt)
@@ -383,6 +475,39 @@ class HERHabitStore:
         ranked.sort(key=lambda item: (item[0], item[1], item[2].habit_id), reverse=True)
         return [item[2] for item in ranked[: max(1, limit)]]
 
+    def capture_action_baseline(
+        self,
+        actions: list[Mapping[str, Any]],
+        *,
+        max_actions: int,
+        idempotency_key: str,
+    ) -> list[dict[str, Any]]:
+        """Capture pre-Write records so an interrupted replay keeps change facts."""
+
+        baseline: list[dict[str, Any]] = []
+        for index, raw_action in enumerate(actions[:max_actions]):
+            operation = str(
+                raw_action.get("operation") or raw_action.get("op") or ""
+            ).strip().casefold()
+            habit_id = str(
+                raw_action.get("habit_id") or raw_action.get("id") or ""
+            ).strip().casefold()
+            if operation == "create":
+                title = _clean_text(raw_action.get("title"), limit=160)
+                digest = hashlib.sha256(
+                    f"{idempotency_key}\0{index}\0{title}".encode()
+                ).hexdigest()[:12]
+                habit_id = f"{_slug(title)}-{digest}"
+            before = self.get(habit_id)
+            baseline.append(
+                {
+                    "operation": operation or "unknown",
+                    "habit_id": habit_id or None,
+                    "before": before.to_payload() if before is not None else None,
+                }
+            )
+        return baseline
+
     def apply_actions(
         self,
         actions: list[Mapping[str, Any]],
@@ -391,11 +516,49 @@ class HERHabitStore:
         idempotency_key: str | None = None,
     ) -> list[str]:
         """Apply Meditation's bounded create/update/delete decisions directly."""
+        outcomes, _changes = self.apply_actions_with_changes(
+            actions,
+            max_actions=max_actions,
+            idempotency_key=idempotency_key,
+        )
+        return outcomes
+
+    def apply_actions_with_changes(
+        self,
+        actions: list[Mapping[str, Any]],
+        *,
+        max_actions: int,
+        idempotency_key: str | None = None,
+        audit_context: Mapping[str, Any] | None = None,
+        action_baseline: list[Mapping[str, Any]] | None = None,
+    ) -> tuple[list[str], list[HERHabitChange]]:
+        """Apply actions and return both compatibility outcomes and rich changes."""
+
         outcomes: list[str] = []
+        changes: list[HERHabitChange] = []
         for index, raw_action in enumerate(actions[:max_actions]):
+            baseline_entry = (
+                action_baseline[index]
+                if isinstance(action_baseline, list)
+                and index < len(action_baseline)
+                and isinstance(action_baseline[index], Mapping)
+                else None
+            )
+            baseline_supplied = baseline_entry is not None and "before" in baseline_entry
+            baseline_before: dict[str, str] | None = None
+            if baseline_supplied and isinstance(baseline_entry.get("before"), Mapping):
+                try:
+                    baseline_before = HERHabit.from_payload(
+                        baseline_entry["before"]
+                    ).to_payload()
+                except (TypeError, ValueError):
+                    baseline_supplied = False
             operation = str(
                 raw_action.get("operation") or raw_action.get("op") or ""
             ).strip().casefold()
+            before: HERHabit | None = None
+            after: HERHabit | None = None
+            outcome = ""
             try:
                 if operation == "create":
                     stable_id = None
@@ -405,28 +568,125 @@ class HERHabitStore:
                             f"{idempotency_key}\0{index}\0{title}".encode()
                         ).hexdigest()[:12]
                         stable_id = f"{_slug(title)}-{digest}"
-                    habit = self._create(raw_action, habit_id=stable_id)
-                    outcomes.append(f"created:{habit.habit_id}")
+                        before = self.get(stable_id)
+                    after = self._create(raw_action, habit_id=stable_id)
+                    outcome = f"created:{after.habit_id}"
+                    logical_before = (
+                        baseline_before
+                        if baseline_supplied
+                        else before.to_payload() if before is not None else None
+                    )
+                    if logical_before is None:
+                        changes.append(
+                            HERHabitChange(
+                                operation="created",
+                                habit_id=after.habit_id,
+                                before=None,
+                                after=after.to_payload(),
+                            )
+                        )
                 elif operation == "update":
-                    habit = self._update(raw_action)
-                    outcomes.append(f"updated:{habit.habit_id}")
+                    habit_id = str(
+                        raw_action.get("habit_id") or raw_action.get("id") or ""
+                    ).strip().casefold()
+                    before = self.get(habit_id)
+                    after = self._update(raw_action)
+                    logical_before = (
+                        baseline_before
+                        if baseline_supplied
+                        else before.to_payload() if before is not None else None
+                    )
+                    if logical_before is not None and after.to_payload() == logical_before:
+                        outcome = f"unchanged:{after.habit_id}"
+                    else:
+                        outcome = f"updated:{after.habit_id}"
+                        changes.append(
+                            HERHabitChange(
+                                operation="updated",
+                                habit_id=after.habit_id,
+                                before=logical_before,
+                                after=after.to_payload(),
+                            )
+                        )
                 elif operation in {"delete", "remove"}:
+                    requested_id = str(
+                        raw_action.get("habit_id") or raw_action.get("id") or ""
+                    ).strip().casefold()
+                    before = self.get(requested_id)
                     habit_id = self._archive(
                         raw_action,
                         allow_already_archived=bool(idempotency_key),
                     )
-                    outcomes.append(f"deleted:{habit_id}")
+                    outcome = f"deleted:{habit_id}"
+                    logical_before = (
+                        baseline_before
+                        if baseline_supplied
+                        else before.to_payload() if before is not None else None
+                    )
+                    if logical_before is not None:
+                        changes.append(
+                            HERHabitChange(
+                                operation="deleted",
+                                habit_id=habit_id,
+                                before=logical_before,
+                                after=None,
+                            )
+                        )
                 else:
                     raise ValueError(f"unsupported operation: {operation or '<empty>'}")
             except (ValueError, FileNotFoundError, FileExistsError) as exc:
-                outcomes.append(f"ignored:{operation or 'unknown'}:{type(exc).__name__}")
+                outcome = f"ignored:{operation or 'unknown'}:{type(exc).__name__}"
                 if self.logger is not None:
                     self.logger.warning(
                         "Ignored invalid HER habit action: operation=%s error=%s",
                         operation or "unknown",
                         type(exc).__name__,
                     )
-        return outcomes
+            outcomes.append(outcome)
+            try:
+                append_habit_audit(
+                    self.workspace_dir,
+                    "habit_action",
+                    agent_id=self.workspace_dir.name,
+                    action_index=index,
+                    operation=operation or "unknown",
+                    raw_action=dict(raw_action),
+                    outcome=outcome,
+                    before=(
+                        baseline_before
+                        if baseline_supplied
+                        else before.to_payload() if before is not None else None
+                    ),
+                    observed_before=before.to_payload() if before is not None else None,
+                    after=after.to_payload() if after is not None else None,
+                    action_baseline=dict(baseline_entry or {}),
+                    context=dict(audit_context or {}),
+                )
+            except Exception as exc:  # noqa: BLE001 - audit cannot corrupt the write
+                if self.logger is not None:
+                    self.logger.warning(
+                        "HER Habit audit append failed: operation=%s error=%s",
+                        operation or "unknown",
+                        type(exc).__name__,
+                    )
+        return outcomes, changes
+
+    def archive_all(
+        self,
+        *,
+        audit_context: Mapping[str, Any] | None = None,
+    ) -> tuple[list[str], list[HERHabitChange]]:
+        habits = self.load()
+        if not habits:
+            return [], []
+        return self.apply_actions_with_changes(
+            [
+                {"operation": "delete", "habit_id": habit.habit_id}
+                for habit in habits
+            ],
+            max_actions=len(habits),
+            audit_context=audit_context,
+        )
 
     def _create(
         self,
@@ -485,6 +745,12 @@ class HERHabitStore:
             )
         if "body" in action:
             body = _validated_action_text(action.get("body"), field="body", limit=8_000)
+        if (title, metadata, body) == (
+            existing.title,
+            existing.metadata,
+            existing.body,
+        ):
+            return existing
         habit = HERHabit(
             habit_id=existing.habit_id,
             title=title,
@@ -513,13 +779,138 @@ class HERHabitStore:
                 return habit_id
             raise FileNotFoundError(habit_id)
         self.archive_root.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        os.replace(source, self.archive_root / f"{habit_id}.{stamp}.json")
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        archive_name = f"{habit_id}.{stamp}-{uuid.uuid4().hex[:8]}.json"
+        os.replace(source, self.archive_root / archive_name)
         return habit_id
 
     def _write(self, habit: HERHabit) -> None:
         destination = self.root / f"{habit.habit_id}.json"
         _atomic_write_json(destination, habit.to_payload())
+
+
+def habit_state_inventory(workspace_dir: Path) -> dict[str, list[dict[str, Any]]]:
+    workspace = Path(workspace_dir)
+    roots = {
+        "active": workspace / "habits",
+        "archive": workspace / "habits" / "archive",
+        "journal": workspace / "backend_state" / "her_habit_meditation",
+    }
+    inventory: dict[str, list[dict[str, Any]]] = {}
+    for label, root in roots.items():
+        rows: list[dict[str, Any]] = []
+        pattern = "*.json"
+        if root.is_dir():
+            for path in sorted(root.glob(pattern)):
+                if not path.is_file():
+                    continue
+                data = path.read_bytes()
+                rows.append(
+                    {
+                        "name": path.name,
+                        "size": len(data),
+                        "sha256": hashlib.sha256(data).hexdigest(),
+                    }
+                )
+        inventory[label] = rows
+    return inventory
+
+
+def habit_state_fingerprint(workspace_dir: Path) -> str:
+    payload = json.dumps(
+        habit_state_inventory(workspace_dir),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def reset_habit_state(
+    workspace_dir: Path,
+    *,
+    audit_context: Mapping[str, Any] | None = None,
+) -> HERHabitResetResult:
+    """Move all HER Habit state into a recoverable reset snapshot."""
+
+    workspace = Path(workspace_dir)
+    inventory = habit_state_inventory(workspace)
+    snapshot_id = (
+        datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        + "-"
+        + uuid.uuid4().hex[:8]
+    )
+    snapshot_root = (
+        workspace / "backend_state" / "her_habit_resets" / snapshot_id
+    )
+    snapshot_root.mkdir(parents=True, exist_ok=False)
+    manifest_path = snapshot_root / "manifest.json"
+    manifest: dict[str, Any] = {
+        "format": "her-habit-reset-v1",
+        "snapshot_id": snapshot_id,
+        "agent_id": workspace.name,
+        "status": "preparing",
+        "created_at": _utc_now(),
+        "inventory": inventory,
+        "context": dict(audit_context or {}),
+    }
+    _atomic_write_json(manifest_path, manifest)
+
+    sources = (
+        (workspace / "habits", snapshot_root / "habits"),
+        (
+            workspace / "backend_state" / "her_habit_meditation",
+            snapshot_root / "her_habit_meditation",
+        ),
+    )
+    moved: list[tuple[Path, Path]] = []
+    try:
+        for source, destination in sources:
+            if not source.exists():
+                continue
+            os.replace(source, destination)
+            moved.append((source, destination))
+        manifest["status"] = "completed"
+        manifest["completed_at"] = _utc_now()
+        _atomic_write_json(manifest_path, manifest)
+    except Exception:
+        for source, destination in reversed(moved):
+            try:
+                if destination.exists() and not source.exists():
+                    os.replace(destination, source)
+            except OSError:
+                pass
+        manifest["status"] = "rolled_back"
+        manifest["completed_at"] = _utc_now()
+        try:
+            _atomic_write_json(manifest_path, manifest)
+        except OSError:
+            pass
+        raise
+
+    result = HERHabitResetResult(
+        snapshot_id=snapshot_id,
+        active_count=len(inventory["active"]),
+        archived_count=len(inventory["archive"]),
+        journal_count=len(inventory["journal"]),
+    )
+    try:
+        append_habit_audit(
+            workspace,
+            "habit_reset",
+            agent_id=workspace.name,
+            snapshot_id=snapshot_id,
+            inventory=inventory,
+            result={
+                "active_count": result.active_count,
+                "archived_count": result.archived_count,
+                "journal_count": result.journal_count,
+            },
+            context=dict(audit_context or {}),
+        )
+    except Exception:
+        pass
+    return result
 
 
 class HERMeditationJournal:
@@ -565,6 +956,19 @@ class HERMeditationJournal:
         attempts = payload.get("attempts")
         if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 0:
             raise ValueError("invalid HER Meditation attempt count")
+        notification = payload.get("notification")
+        if notification is not None:
+            if not isinstance(notification, dict):
+                raise ValueError("invalid HER Habit notification state")
+            if notification.get("status") not in _VALID_NOTIFICATION_STATUSES:
+                raise ValueError("invalid HER Habit notification status")
+            notification_attempts = notification.get("attempts", 0)
+            if (
+                isinstance(notification_attempts, bool)
+                or not isinstance(notification_attempts, int)
+                or notification_attempts < 0
+            ):
+                raise ValueError("invalid HER Habit notification attempt count")
         return payload
 
     def _write(self, payload: Mapping[str, Any]) -> None:
@@ -577,6 +981,7 @@ class HERMeditationJournal:
         request_id: str,
         prompt: str,
         max_actions: int,
+        notification_context: Mapping[str, Any] | None = None,
     ) -> tuple[str, bool]:
         job_id = str(job_id or "").strip().casefold()
         # Validate the execution-scoped identity before any filesystem access.
@@ -591,6 +996,10 @@ class HERMeditationJournal:
                 raise ValueError("HER Meditation request identity collision")
             return job_id, False
         now = _utc_now()
+        notification = self._new_notification_state(
+            notification_context,
+            now=now,
+        )
         payload = {
             "format": MEDITATION_JOB_FORMAT,
             "job_id": job_id,
@@ -601,7 +1010,10 @@ class HERMeditationJournal:
             "max_actions": max_actions,
             "prompt": redact_bounded_text(prompt, limit=180_000),
             "actions": None,
+            "action_baseline": None,
             "outcomes": [],
+            "changes": [],
+            "notification": notification,
             "error_code": None,
             "error_summary": None,
             "created_at": now,
@@ -609,6 +1021,52 @@ class HERMeditationJournal:
         }
         self._write(payload)
         return job_id, True
+
+    @staticmethod
+    def _new_notification_state(
+        context: Mapping[str, Any] | None,
+        *,
+        now: str,
+    ) -> dict[str, Any]:
+        raw = dict(context or {})
+        try:
+            chat_id = int(raw.get("chat_id"))
+        except (TypeError, ValueError):
+            chat_id = None
+        verbose_at_start = raw.get("verbose_at_start") is True
+        silent = raw.get("silent") is True
+        deliver_to_telegram = raw.get("deliver_to_telegram") is True
+        reason = None
+        if not verbose_at_start:
+            reason = "verbose_off_at_task_start"
+        elif silent:
+            reason = "silent_request"
+        elif not deliver_to_telegram:
+            reason = "telegram_delivery_not_requested"
+        elif chat_id is None:
+            reason = "telegram_chat_unavailable"
+        return {
+            "status": "skipped" if reason else "waiting",
+            "reason": reason,
+            "attempts": 0,
+            "max_attempts": MAX_HABIT_NOTIFICATION_ATTEMPTS,
+            "chat_id": chat_id,
+            "verbose_at_start": verbose_at_start,
+            "silent": silent,
+            "deliver_to_telegram": deliver_to_telegram,
+            "request_source": redact_bounded_text(
+                raw.get("request_source"),
+                limit=240,
+            ),
+            "request_summary": redact_bounded_text(
+                raw.get("request_summary"),
+                limit=2_000,
+            ),
+            "created_at": now,
+            "updated_at": now,
+            "sent_at": None,
+            "error_summary": None,
+        }
 
     def get(self, job_id: str) -> dict[str, Any] | None:
         try:
@@ -692,11 +1150,18 @@ class HERMeditationJournal:
         self,
         job_id: str,
         actions: list[Mapping[str, Any]],
+        *,
+        action_baseline: list[Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
         payload = self._read(job_id)
         if payload["status"] != "running":
             raise ValueError("HER Meditation job is not running")
         payload["actions"] = [dict(action) for action in actions]
+        payload["action_baseline"] = (
+            [_audit_safe(dict(entry)) for entry in action_baseline]
+            if action_baseline is not None
+            else None
+        )
         payload["status"] = "applying"
         payload["updated_at"] = _utc_now()
         self._write(payload)
@@ -733,14 +1198,155 @@ class HERMeditationJournal:
         payload["updated_at"] = _utc_now()
         self._write(payload)
 
-    def mark_complete(self, job_id: str, outcomes: list[str]) -> None:
+    def mark_complete(
+        self,
+        job_id: str,
+        outcomes: list[str],
+        *,
+        changes: list[Mapping[str, Any]] | None = None,
+    ) -> None:
         payload = self._read(job_id)
         if payload["status"] != "applying":
             raise ValueError("HER Meditation job has no durable actions to complete")
         payload["status"] = "completed" if payload.get("actions") else "no_change"
         payload["outcomes"] = [_clean_text(item, limit=240) for item in outcomes]
+        payload["changes"] = [_audit_safe(dict(change)) for change in (changes or [])]
+        notification = payload.get("notification")
+        if not isinstance(notification, dict):
+            notification = self._new_notification_state(None, now=_utc_now())
+            notification["reason"] = "legacy_job_without_notification_context"
+        if payload["changes"]:
+            if notification.get("status") == "waiting":
+                notification["status"] = "pending"
+                notification["reason"] = None
+        else:
+            notification["status"] = "skipped"
+            notification["reason"] = "no_habit_change"
+        notification["updated_at"] = _utc_now()
+        payload["notification"] = notification
         payload["error_code"] = None
         payload["error_summary"] = None
+        payload["updated_at"] = _utc_now()
+        self._write(payload)
+        try:
+            append_habit_audit(
+                self.root.parent.parent,
+                "habit_meditation_completed",
+                agent_id=self.root.parent.parent.name,
+                job_id=job_id,
+                request_id=payload.get("request_id"),
+                outcomes=payload["outcomes"],
+                changes=payload["changes"],
+                notification=notification,
+            )
+        except Exception as exc:  # noqa: BLE001 - journal completion is authoritative
+            if self.logger is not None:
+                self.logger.warning(
+                    "HER Habit completion audit append failed: job=%s error=%s",
+                    job_id,
+                    type(exc).__name__,
+                )
+
+    def pending_notifications(self, *, limit: int = 32) -> list[dict[str, Any]]:
+        if not self.root.is_dir():
+            return []
+        jobs: list[dict[str, Any]] = []
+        for path in sorted(self.root.glob("*.json")):
+            try:
+                payload = self._read(path.stem)
+            except Exception as exc:  # noqa: BLE001 - one corrupt job must not block delivery
+                if self.logger is not None:
+                    self.logger.warning(
+                        "Ignoring invalid HER Habit notification job %s: %s",
+                        path,
+                        exc,
+                    )
+                continue
+            notification = payload.get("notification")
+            if (
+                payload.get("status") in {"completed", "no_change"}
+                and isinstance(notification, dict)
+                and notification.get("status") in {"pending", "sending"}
+            ):
+                jobs.append(payload)
+        jobs.sort(key=lambda item: (str(item.get("created_at") or ""), item["job_id"]))
+        return jobs[: max(1, limit)]
+
+    def claim_notification(self, job_id: str) -> dict[str, Any] | None:
+        payload = self._read(job_id)
+        notification = payload.get("notification")
+        if not isinstance(notification, dict) or notification.get("status") not in {
+            "pending",
+            "sending",
+        }:
+            return None
+        attempts = int(notification.get("attempts") or 0)
+        maximum = int(
+            notification.get("max_attempts") or MAX_HABIT_NOTIFICATION_ATTEMPTS
+        )
+        if attempts >= maximum:
+            notification["status"] = "failed"
+            notification["reason"] = "retry_exhausted"
+            notification["updated_at"] = _utc_now()
+            payload["notification"] = notification
+            payload["updated_at"] = _utc_now()
+            self._write(payload)
+            return None
+        notification["status"] = "sending"
+        notification["attempts"] = attempts + 1
+        notification["reason"] = None
+        notification["error_summary"] = None
+        notification["updated_at"] = _utc_now()
+        payload["notification"] = notification
+        payload["updated_at"] = _utc_now()
+        self._write(payload)
+        return payload
+
+    def mark_notification_sent(self, job_id: str) -> None:
+        payload = self._read(job_id)
+        notification = payload.get("notification")
+        if not isinstance(notification, dict) or notification.get("status") != "sending":
+            return
+        now = _utc_now()
+        notification["status"] = "sent"
+        notification["reason"] = None
+        notification["error_summary"] = None
+        notification["sent_at"] = now
+        notification["updated_at"] = now
+        payload["notification"] = notification
+        payload["updated_at"] = now
+        self._write(payload)
+
+    def mark_notification_retry(self, job_id: str, *, reason: str) -> None:
+        payload = self._read(job_id)
+        notification = payload.get("notification")
+        if not isinstance(notification, dict) or notification.get("status") != "sending":
+            return
+        attempts = int(notification.get("attempts") or 0)
+        maximum = int(
+            notification.get("max_attempts") or MAX_HABIT_NOTIFICATION_ATTEMPTS
+        )
+        notification["status"] = "failed" if attempts >= maximum else "pending"
+        notification["reason"] = "retry_exhausted" if attempts >= maximum else "delivery_failed"
+        notification["error_summary"] = redact_bounded_text(reason, limit=500)
+        notification["updated_at"] = _utc_now()
+        payload["notification"] = notification
+        payload["updated_at"] = _utc_now()
+        self._write(payload)
+
+    def mark_notification_deferred(self, job_id: str, *, reason: str) -> None:
+        """Return a notice to pending without consuming a delivery attempt."""
+
+        payload = self._read(job_id)
+        notification = payload.get("notification")
+        if not isinstance(notification, dict) or notification.get("status") != "sending":
+            return
+        notification["status"] = "pending"
+        notification["attempts"] = max(0, int(notification.get("attempts") or 0) - 1)
+        notification["reason"] = "delivery_deferred"
+        notification["error_summary"] = redact_bounded_text(reason, limit=500)
+        notification["updated_at"] = _utc_now()
+        payload["notification"] = notification
         payload["updated_at"] = _utc_now()
         self._write(payload)
 

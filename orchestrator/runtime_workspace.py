@@ -323,7 +323,17 @@ def _preserve_backend_state(runtime: Any) -> dict[str, Any]:
     preserved_state: dict[str, Any] = {}
     try:
         state_snapshot = runtime.backend_manager.get_state_snapshot()
-        for key in ("active_backend", "active_model", "agent_mode", "core", "wrapper", "wrapper_slots", "audit", "audit_criteria"):
+        for key in (
+            "active_backend",
+            "active_model",
+            "agent_mode",
+            "core",
+            "wrapper",
+            "wrapper_slots",
+            "audit",
+            "audit_criteria",
+            "her_habit_meditation",
+        ):
             if key in state_snapshot:
                 preserved_state[key] = state_snapshot[key]
     except Exception as exc:

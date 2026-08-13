@@ -34,6 +34,8 @@ from orchestrator.privacy_levels import (
 from orchestrator.workspace_state import WorkspaceStateStore
 from orchestrator.workzone import access_root_for_workzone
 
+HER_HABIT_MEDITATION_STATE_KEY = "her_habit_meditation"
+
 
 class FlexibleBackendManager:
     def __init__(self, config: FlexibleAgentConfig, global_config: GlobalConfig, secrets: dict):
@@ -164,6 +166,56 @@ class FlexibleBackendManager:
         state = self._read_state_dict()
         self._apply_managed_state_fields(state)
         return state
+
+    def get_habit_meditation_override(self) -> bool | None:
+        raw = self._read_state_dict().get(HER_HABIT_MEDITATION_STATE_KEY)
+        if not isinstance(raw, dict) or not isinstance(raw.get("enabled"), bool):
+            return None
+        return bool(raw["enabled"])
+
+    def set_habit_meditation_override(self, enabled: bool | None) -> None:
+        """Persist an agent-local HER Habit switch and refresh the live adapter."""
+
+        state = self._read_state_dict()
+        if enabled is None:
+            state.pop(HER_HABIT_MEDITATION_STATE_KEY, None)
+        else:
+            state[HER_HABIT_MEDITATION_STATE_KEY] = {
+                "enabled": bool(enabled),
+            }
+        self._write_state_dict(state)
+        self._refresh_current_habit_meditation_config()
+
+    def _refresh_current_habit_meditation_config(self) -> None:
+        backend = self.current_backend
+        if backend is None or getattr(getattr(backend, "config", None), "engine", None) != "her":
+            return
+        current_extra = getattr(backend.config, "extra", None) or {}
+        provider = str(current_extra.get("provider") or "").strip() or None
+        backend_cfg_raw = self._select_backend_cfg(
+            "her",
+            target_model=getattr(backend.config, "model", None),
+            target_provider=provider,
+        )
+        if backend_cfg_raw is None:
+            raise ValueError("HER backend configuration is unavailable.")
+        rebuilt = self._build_adapter_config(
+            "her",
+            backend_cfg_raw,
+            target_model=getattr(backend.config, "model", None),
+            target_provider=provider,
+        )
+        if backend.config.extra is None:
+            backend.config.extra = {}
+        for key in (
+            "habit_meditation",
+            "habit_meditation_enabled",
+            "habit_learning_eligible",
+        ):
+            if key in rebuilt.extra:
+                backend.config.extra[key] = rebuilt.extra[key]
+            else:
+                backend.config.extra.pop(key, None)
 
     def update_wrapper_blocks(
         self,
@@ -415,6 +467,9 @@ class FlexibleBackendManager:
         backend_scope = backend_cfg_raw.get("access_scope", self.config.access_scope)
         backend_extra.pop("access_scope", None)
         extra = {**agent_extra, **backend_extra}
+        habit_override = self.get_habit_meditation_override()
+        if engine == "her" and habit_override is not None:
+            extra["habit_meditation_enabled"] = habit_override
         extra = apply_timeout_layers(
             extra,
             engine=engine,
@@ -522,6 +577,7 @@ class FlexibleBackendManager:
 
     def _attach_runtime_context(self, adapter_cfg: AgentConfig) -> None:
         setattr(adapter_cfg, "_hashi_secrets", self.secrets)
+        setattr(adapter_cfg, "_hashi_runtime", self.runtime)
 
     def _select_backend_cfg(
         self,

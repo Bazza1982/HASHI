@@ -21,7 +21,26 @@ The default is disabled. Configuration is resolved in this order:
 
 1. `global.her_providers.habit_meditation` supplies the HASHI instance default.
 2. A `habit_meditation` object in an individual HER backend entry overrides it.
-3. `HASHI_HER_HABIT_MEDITATION=on|off` is the final operational override.
+3. The owning agent's persisted `/habit on|off` override supersedes configuration.
+4. `HASHI_HER_HABIT_MEDITATION=on|off` is the final operational override.
+
+The HER-only command surface is:
+
+- `/habit` — open the status, list, and action menu;
+- `/habit view <habit-id>` — inspect the complete active record;
+- `/habit on|off` — persist an agent-local operational override;
+- `/habit default` — remove that override and return to configured defaults;
+- `/habit delete <habit-id>` — confirm and move one record to the recoverable archive;
+- `/habit delete all` — confirm and archive all active records;
+- `/habit reset` — confirm, create a recoverable snapshot, then clear active,
+  archived, and Meditation job state while preserving the switch and audit log.
+
+`/habit` is deliberately not a sensitive command. Normal slash-command logging
+retains its arguments subject only to HASHI's generic credential masking, and a
+separate full-detail Habit audit records targets, before/after records, outcomes,
+Meditation changes, and notification attempts. On a non-HER backend the command
+does not inspect dormant Habit files; it explains the HER-only boundary and
+offers the normal backend-switch flow instead.
 
 Example instance configuration:
 
@@ -97,7 +116,7 @@ judgement of arbitrary natural-language safety.
 
 ## Meditation
 
-Meditation is scheduled silently after the user-facing run completes. It uses
+Meditation is scheduled without progress chatter after the user-facing run completes. It uses
 the same configured HER model but an isolated session, read-only permission,
 and a small execution budget. HER requires at least one valid tool when a tool
 filter is supplied, so the subprocess exposes only `read_file`; the Meditation
@@ -147,6 +166,14 @@ are journalled before Write, so a restart replays the same actions without
 paying for or accepting a second model decision. Invalid model output fails that
 job; queue, recovery, or write errors remain fail-open for the user-facing run.
 
+When Verbose was on at the start of the foreground task and Telegram delivery
+was requested, a real `create`, `update`, or `delete` change creates a durable
+notification outbox entry in the same job journal. The agent proactively sends
+one combined Habit-change card after Write, retries bounded delivery failures,
+and resumes pending notices after restart. An empty/no-op Meditation remains
+silent. Manual `/habit delete`, `delete all`, and `reset` operations report their
+own command result and do not create a duplicate proactive notice.
+
 ## Write and storage
 
 HASHI accepts only the closed `actions` JSON shape, bounds every field, rejects
@@ -176,6 +203,18 @@ idempotent without semantic deduplication or an evaluation system. A valid
 `create` or `update` becomes usable immediately. Deletion is recoverable: the
 record is moved into the owning agent's `habits/archive/` directory and excluded
 from retrieval.
+
+Detailed operational audit rows live at:
+
+```text
+workspaces/<agent>/backend_state/her_habit_audit.jsonl
+```
+
+Recoverable reset snapshots live at:
+
+```text
+workspaces/<agent>/backend_state/her_habit_resets/<snapshot-id>/
+```
 
 ## Dream remains separate
 
