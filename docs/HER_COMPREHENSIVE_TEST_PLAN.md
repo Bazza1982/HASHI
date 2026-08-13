@@ -1,4 +1,4 @@
-# HER × DeepSeek Comprehensive Certification Plan
+# HER × DeepSeek × Habit–Meditation Comprehensive Certification Plan
 
 Status: executable test design
 Target: HASHI2 / Ajiao isolated test workzone
@@ -17,15 +17,19 @@ Controller template: [HER Debug Two-Stage Superloop](../superloops/templates/her
 
 ## 1. Purpose
 
-This plan certifies that HASHI Engine Runtime (HER) behaves correctly with both
-DeepSeek routes, both supported DeepSeek V4 models, every HER effort level, and both
-HASHI working modes over short and long-running sessions.
+This plan jointly certifies that HASHI Engine Runtime (HER) behaves correctly
+with both DeepSeek routes, both supported DeepSeek V4 models, every HER effort
+level, and both HASHI working modes, with HER-local Habit–Meditation both
+forcibly disabled and explicitly enabled. Habit–Meditation remains an optional
+HER capability; it does not become a HASHI orchestration feature.
 
 Execution is deliberately split into two cost-ordered stages:
 
-1. **Stage 1 — Flash only.** Complete and repair all Flash coverage first.
-2. **Stage 2 — Pro only.** This stage stays mechanically locked until Stage 1 passes
-   with no unresolved blocking HER issue.
+1. **Stage 1 — Flash only.** Complete and repair both the `CORE-OFF` and Habit
+   Flash tracks first.
+2. **Stage 2 — Pro only.** This stage stays mechanically locked until
+   `core_flash=passed` and `habit_flash=passed`, with no unresolved blocking
+   HER issue.
 
 Within each stage, cheap deterministic and short tests run before long, native-boundary,
 MAX, or MAX+ work. Flash and Pro are never mixed in one active stage.
@@ -45,6 +49,9 @@ by observable protocol and state:
 - incomplete work is reported honestly and never converted into a terminal status that
   contradicts HER's own loop/tool evidence, or a generic error after valid work completed;
 - long sessions do not corrupt subsequent turns, Memory+, or session identity.
+- disabled Habit–Meditation is observably a no-op at every effort;
+- enabled Habit planning, background Meditation, durable recovery, and Habit
+  writes remain isolated, bounded, silent, restart-safe, and agent-local.
 
 Wrong code produced by a model on a genuinely difficult fixture is not automatically a
 HER bug. A missing terminal event, corrupted stream, lost prompt, duplicate side effect,
@@ -65,6 +72,12 @@ wrong route, false completion, runaway loop, or incorrect recovery **is** a HER 
 - Consecutive user messages, queue order, interrupted-task continuation, Memory+,
   context compaction, and session recreation.
 - Safe local use of all tools with full permission inside the dedicated lab.
+- HER Habit–Meditation configuration resolution, planning retrieval, observable
+  evidence, Meditation isolation, durable journal, bounded recovery, writes,
+  deletion archive, backlog draining, and agent separation.
+- Retirement impact of the former HASHI-wide Habit system, including Dream,
+  Memory+, startup, installation, imports, and commands that must remain
+  separate from HER Habit files.
 
 ### 2.2 Out of scope
 
@@ -74,6 +87,9 @@ wrong route, false completion, runaway loop, or incorrect recovery **is** a HER 
 - HASHI1 deployment or validation.
 - Testing unrelated wrapper, audit, or dual-brain behavior except where shared delivery
   code needs an offline regression check.
+- Treating Dream, Memory+, or a HASHI Skill as a substitute for HER
+  Habit–Meditation, or defining candidate/promotion/confidence/evaluation/project
+  scope fields for Habit records.
 
 ### 2.3 Mode oracle
 
@@ -168,20 +184,77 @@ The campaign checklist is therefore:
 The actual result report replaces each box with its immutable batch/cell verdict link;
 the planning document itself remains unchanged.
 
-### 3.4 Two-stage gate and rollback rule
+### 3.4 Joint feature profiles and Habit live matrix
+
+The original 48 cells remain the complete HER core oracle and now have the
+mandatory profile `CORE-OFF`. The harness forces Habit–Meditation off even if
+the instance default or environment says on. Every `CORE-OFF` request must
+prove:
+
+- the raw and executed prompts are byte-identical;
+- no Habit directory or Meditation journal is created;
+- no Habit execution lock or Meditation model call is entered;
+- all original C00–C09, presentation, continuity, boundary, endurance, and
+  fault assertions retain their original meaning.
+
+Habit-on coverage is a separate track; it never weakens or replaces a core
+cell:
+
+| Track | Required live combinations | Count | Purpose |
+| --- | --- | ---: | --- |
+| `HABIT-WIRE` | 2 providers × 2 models × 2 modes × 6 efforts | 48 | planning context, route/model binding, foreground completion, silent journaled Meditation, and valid `no_change`; `no_change` receives wiring credit only |
+| `HABIT-DEEP` | 2 providers × 2 models × 2 modes at `high` | 8 | separately evidenced formation, retrieval, and next-request behavioral use; session isolation, read-only Meditation, foreground/Meditation serialization, and background silence |
+| `HABIT-FAULT` | 2 providers × 2 models, fixed/high | 4 | real restart/fault recovery, durable actions reuse, no second model decision, no duplicate write, and no orphan process |
+
+The deterministic `HABIT-OFFLINE` track proves create/update/delete and other
+stateful outcomes. A live model is allowed to return `{"actions": []}`; that
+is a valid `no_change` result when the complete wire contract passes, not a
+model failure and not proof of Habit formation, retrieval, behavioral use, or
+create/update/delete behavior. Every attempt records those three observations
+separately; selected Habit IDs alone never prove behavioral use.
+
+Every atomic work-item key therefore includes:
+
+```text
+stage/provider/model/mode/effort/feature_profile/habit_scenario/wave/scenario/presentation
+```
+
+`feature_profile` is exactly `core_off` or `habit_on`.
+`habit_scenario` is exactly `none`, `habit_wire`, `habit_deep`, or
+`habit_fault`.
+
+### 3.5 Two-stage gate and rollback rule
 
 The allowed model set is frozen by stage:
 
 - Stage 1 allows only the two configured Flash slugs in section 3.1.
-- Stage 2 allows only the two configured Pro slugs in section 3.1.
+- Stage 2 allows only the two configured Pro slugs in section 3.1 and remains
+  locked until both Flash subgates pass.
 - No controller, test, repair, retry, reviewer, fallback, or nudge request may select a
   different model or API provider.
 
-If a Pro-stage repair changes HASHI, HER source, the packaged binary, prompt assembly,
-Tool Gateway, or delivery code shared with Flash, Stage 1 evidence for the old candidate
-becomes stale. The loop returns to a Flash revalidation gate before continuing Pro. A
-cheap affected-cell Flash check runs immediately; full Stage 1 must pass against the
-final immutable candidate before final certification.
+If a repair changes HASHI, HER source, the packaged binary, prompt assembly,
+Tool Gateway, delivery, Habit code, the authoritative plan, template,
+validator, or instantiated campaign ledger, affected evidence for the old
+candidate becomes stale. During Pro, the loop returns to joint Flash
+revalidation before continuing. A cheap affected-cell Flash check runs
+immediately; both complete Flash subgates must pass against the final immutable
+candidate before final certification.
+
+Candidate identity is composite and records the HASHI commit and build hash,
+HER source commit and package hash, and authoritative oracle hash. Branch names
+and source commits without built/runtime and oracle identities are not a frozen
+candidate. Preflight binds one proposed identity for Layer A, but
+`candidate.evidence_valid` remains null (proposed, not release-valid). Only a
+complete joint Layer A PASS
+for that exact hash changes it to `frozen_after_joint_layer_a`; no live packet
+may run on the proposal alone.
+
+A joint-campaign migration retains pending waits from the superseded candidate
+as historical records with status `stale`. Those records neither block the new
+offline preflight/Layer A nor prove that their underlying condition is fixed.
+The controller revalidates the condition when its provider phase is reached
+and creates a fresh same-route wait if it still fails.
 
 ## 4. Ajiao test lab and full-permission safety
 
@@ -289,13 +362,61 @@ prove exact edge behavior before any paid API run:
     commands receives `ReviewRun`. Unplanned commands are denied, the source workspace is
     not writable, network is unavailable, and no unsafe fallback runs when isolation is
     absent.
+23. Default-off behavior is a byte-for-byte prompt no-op for all six efforts;
+    global, backend, and environment precedence is exact; ephemeral HER is
+    always ineligible.
+24. Habit retrieval scores only title and natural-language metadata, excludes
+    unrelated/body-only matches, handles Chinese queries, and exposes a newly
+    written Habit on the next eligible request.
+25. The closed Meditation JSON contract accepts only bounded create, update,
+    delete, or empty actions; rejects prefixes, unknown fields, missing required
+    fields, excess actions, oversized text, traversal IDs, and credential-shaped
+    content; journal prompts are redacted.
+26. The full journal state machine
+    `pending → running → applying → completed|no_change|failed` is exercised,
+    including three bounded attempts and crashes before claim, during the model
+    call, after durable actions, during each write, and before terminal journal
+    commit.
+27. Two fresh HASHI runtimes may both issue `req-0001` and create distinct HER
+    Meditation jobs; repeated scheduling of one HER execution remains
+    idempotent; legacy pending jobs remain recoverable without migration.
+28. More than 16 pending jobs drain in bounded batches across adapter
+    initializations without starvation, a second model decision, duplicate
+    writes, or an orphaned subprocess.
+29. Normal completion, timeout, non-zero exit, and post-execution cancellation
+    may schedule bounded Meditation; pre-execution discovery failure may not.
+30. Foreground and Meditation subprocesses serialize, the main session is not
+    replaced, Meditation is read-only with its constrained tool set, and no
+    user-visible stream or delivery event is emitted by background work.
+31. One deterministic closed loop runs a foreground task, journals a non-empty
+    create action, observes the new Habit on the next eligible request, and
+    proves a predeclared output/tool-side-effect change caused by the advisory
+    Habit. Formation, retrieval, and behavioral use are asserted separately.
+32. Habit-on/off twins return byte-identical visible output and tool side effects
+    for a controlled result; an unrelated Habit leaves the executed prompt
+    byte-identical, while a conflicting Habit remains subordinate to the exact
+    current request and causes no forbidden tool side effect.
+33. A timed-out or failed background Meditation releases the shared foreground
+    lock within a predeclared upper bound, stays invisible to the user, and
+    retains the correct bounded-recovery journal state.
+34. Evidence validation rejects lifecycle credit when formation, retrieval, or
+    behavioral use lacks its own linked observation. A `no_change` receipt must
+    acknowledge its claim limit and cannot satisfy `HABIT-DEEP`.
+35. Agent workspaces, Habit paths, archive paths, symlinks, file permissions,
+    Dream, Memory+, and ephemeral probes remain isolated. No deprecated HASHI
+    Habit import, command, startup hook, or Skill remains reachable.
+36. Habit records and actions contain no candidate, promotion, confidence,
+    evaluation, expiry, or project-scope lifecycle.
 
 ### Layer B — staged live cells
 
-Stage 1 runs the mandatory cell pack on all 24 Flash cells. Only its complete gate may
-unlock Stage 2, which runs the same pack on all 24 Pro cells. This confirms the same
-contracts against the real OpenRouter and official DeepSeek routes without spending Pro
-funds before shared Flash defects are repaired.
+Stage 1 runs the mandatory core pack on all 24 Flash `CORE-OFF` cells, all 24
+Flash `HABIT-WIRE` cells, four Flash `HABIT-DEEP` cells, and two Flash
+`HABIT-FAULT` cells. Only the persisted combination of
+`core_flash=passed` and `habit_flash=passed` may unlock Stage 2, which runs the
+corresponding Pro work. This confirms both contracts against the real
+OpenRouter and official DeepSeek routes without spending Pro funds before
+shared Flash defects are repaired.
 
 ### Layer C — native-boundary and endurance runs
 
@@ -309,11 +430,15 @@ outer control and is tested independently from HER's iteration ceiling.
 
 ### Layer D — failure injection and restart recovery
 
-Run provider-proxy faults, Tool Gateway faults, process kills, HASHI restart, storage
-faults confined to the run directory, and delivery retries. This layer verifies that a
-valid partial result is not replaced by a misleading generic error.
+Run provider-proxy faults, Tool Gateway faults, process kills, HASHI restart,
+Meditation model interruption, journal/write interruption, storage faults
+confined to the run directory, and delivery retries. This layer verifies that a
+valid partial result is not replaced by a misleading generic error and durable
+Habit actions are never decided or applied twice.
 
-## 6. Mandatory live cell pack
+## 6. Mandatory live packs
+
+### 6.1 `CORE-OFF` live cell pack
 
 Each of the 48 cells executes these ten scenario groups, Stage 1 before Stage 2. A
 multi-turn group counts as one group but retains every turn as separate evidence.
@@ -331,9 +456,25 @@ multi-turn group counts as one group but retains every turn as separate evidence
 | `C08` | Consecutive messages and delivery | Busy-queue order, verbose updates, thinking display, and final promotion remain correct |
 | `C09` | Warm repeat and clean reset | Second task does not inherit stale task state; `/new` creates a clean identity |
 
-The ten groups produce 480 mandatory cell-scenarios before the display-policy expansion
-and fault suite. `C06`–`C08` deliberately contain several requests, so reporting only a
-run count is insufficient; the evidence must also record request and event counts.
+The ten groups produce 480 mandatory core cell-scenarios before the
+display-policy expansion and fault suite. `C06`–`C08` deliberately contain
+several requests, so reporting only a run count is insufficient; the evidence
+must also record request and event counts. Every group additionally proves the
+`CORE-OFF` no-op assertions in section 3.4.
+
+### 6.2 Habit live packs
+
+| ID | Track | Required result |
+| --- | --- | --- |
+| `HW00` | `HABIT-WIRE` | Explicit enable source; relevant seeded Habit selected when applicable; original/executed prompt hashes recorded; foreground completes; one isolated same-route/model Meditation job reaches a valid durable terminal state; zero user-visible background messages |
+| `HD00` | `HABIT-DEEP` | A durable non-empty action proves formation; the exact new/updated Habit ID is selected and injected on the next request; a predeclared visible output or tool-side-effect assertion proves behavioral use; all three booleans and evidence refs are present, while serialization, distinct sessions, read-only Meditation, silence, and main-session preservation reconcile |
+| `HF00` | `HABIT-FAULT` | Guarded real restart or injected failure resumes the exact journal job, reuses durable actions when present, does not make a second model decision or duplicate a write, drains the foreground lock, and leaves no orphan process |
+
+The scripted provider supplies deterministic non-empty actions for create,
+update, archive-delete, replay, and crash-point proof. Live `actions: []` is
+accepted as `no_change`; it cannot substitute for those offline proofs.
+It also cannot pass `HABIT-DEEP`: it records the formation/retrieval/use claims
+as false or not observed and explicitly acknowledges that limitation.
 
 ## 7. Difficulty ladder by effort
 
@@ -569,6 +710,9 @@ verdict.json
 
 `run_manifest.json` records cell ID, scenario ID, request IDs, seed, commits, package
 hashes, route, mode, effort, presentation policy, start/end times, and parent batch ID.
+For joint work it also records `feature_profile`, `habit_scenario`, resolved
+Habit configuration and source, HER Meditation job ID, HASHI request ID,
+foreground/Meditation session IDs, and the composite candidate identity.
 
 `verdict.json` records every assertion separately. Allowed verdicts are:
 
@@ -589,6 +733,14 @@ the cause is removed. The suite never converts it to pass.
 - Provider trace → HER JSONL → HASHI stream event → delivery transcript hashes reconcile.
 - Tool audit → filesystem/Git manifest reconcile.
 - Session ID and request ID ownership reconcile.
+- For Habit-on work, HASHI request ID and HER Meditation job ID remain distinct;
+  a reused HASHI request ID across runtimes never aliases a durable job.
+- Raw/executed prompt hashes, matched Habit IDs, foreground/Meditation route and
+  model, permission/tool restriction, journal transition timestamps and attempt
+  counts, durable actions hash, Habit/Dream inventories, and visible background
+  event count reconcile.
+- `CORE-OFF` has identical prompt hashes and zero Habit/journal/Meditation side
+  effects.
 - Usage totals are non-negative and do not double count summaries.
 - Terminal status and user-facing message agree.
 - No key-like or prompt-secret canary appears in errors or logs.
@@ -614,22 +766,46 @@ A cell passes only when:
 
 ### Stage 1 — Flash gate
 
-Stage 1 passes only when:
+`core_flash` passes only when:
 
-- all 24 Flash cells pass on the same candidate;
+- all 24 Flash `CORE-OFF` cells pass on the same composite candidate;
 - all Flash presentation, boundary, continuity, endurance, and applicable fault cases
   pass;
 - all Flash-discovered bugs are fixed, journaled, and verified;
 - no P0/P1/P2 issue affecting Flash remains open;
 - HASHI and HER deterministic certification is green.
 
-Only a persisted `stage_1_flash=passed` gate may select a Pro model.
+`habit_flash` passes only when:
+
+- all 24 Flash `HABIT-WIRE`, four Flash `HABIT-DEEP`, and two Flash
+  `HABIT-FAULT` work items pass on the same composite candidate;
+- `HABIT-OFFLINE` and migration impact suites pass;
+- every journal, isolation, restart, backlog, silence, permission, and
+  idempotency assertion passes;
+- every Flash `HABIT-DEEP` item has independent, linked
+  `formation_observed=true`, `retrieval_observed=true`, and
+  `behavioral_use_observed=true` evidence; selected IDs or `no_change` alone do
+  not satisfy this gate;
+- no P0/P1/P2 issue affecting Habit–Meditation remains open.
+
+Only persisted `core_flash=passed`, `habit_flash=passed`, and their combined
+`stage_1_flash=passed` gate may select a Pro model.
+
+An explicit operator pause is a hard control boundary. A controller-owned
+freeze, receipt, or candidate drain is instead transient: it blocks new
+dispatch only while the accepted request is being reconciled and automatically
+restores its saved action after the drain. Internal drains must never be stored
+as `await_operator_resume`; the validator rejects that state even when no next
+packet has yet been selected.
 
 ### Stage 2 — Pro gate
 
-Stage 2 passes only when all 24 Pro cells satisfy the same rules. A shared-runtime fix
-made during Stage 2 marks the Flash gate `revalidation_required`; Pro advancement pauses
-until the required Flash revalidation succeeds.
+`core_pro` passes when all 24 Pro `CORE-OFF` cells satisfy the core rules.
+`habit_pro` passes when all 24 Pro `HABIT-WIRE`, four Pro `HABIT-DEEP`, and two
+Pro `HABIT-FAULT` work items satisfy the Habit rules. A shared-runtime or oracle
+change during Stage 2 marks both affected Flash subgates
+`revalidation_required`; Pro advancement pauses until joint Flash
+revalidation succeeds.
 
 ### Release candidate
 
@@ -637,6 +813,9 @@ The HER candidate is certified only when:
 
 - deterministic offline suite is fully green;
 - all 48 cells pass against one immutable package SHA-256;
+- all 60 live Habit work items pass against the same composite candidate;
+- the candidate fingerprint binds HASHI commit/build, HER source/package, and
+  oracle hashes;
 - fault and restart suites pass;
 - full HASHI test suite and full HER source certification pass;
 - every fixed bug has an automated regression test and linked journal entry;
@@ -650,27 +829,37 @@ completion. Flakiness is a failure, not a reason to average results.
 
 ## 14. Execution order
 
-1. **Freeze the oracle and candidate.** Record commits, package hash, configuration, and
-   known ambiguities. Do not edit the candidate during a batch.
+1. **Invalidate and bind.** Preserve prior evidence as historical, mark its
+   candidate superseded, then bind a proposed HASHI commit/build, HER
+   source/package, oracle hash, configuration, and known ambiguities. Do not
+   edit any bound component during Layer A.
 2. **Build and self-test the lab.** Verify fixture hashes, local proxy, fake provider,
    sequential-step tool, evidence redaction, and cleanup guard.
-3. **Run Layer A.** Stop immediately on any deterministic contract failure.
-4. **Stage 1 Flash cheap wave.** Run low→medium→high→xhigh→max→max+ short smokes on both
-   providers and both modes, with easy and nominal fixtures before long work.
-5. **Stage 1 Flash display/continuity wave.** Run presentation, consecutive-message,
-   fixed/flex, `/stop`, Memory+, and restart cases.
-6. **Stage 1 Flash expensive wave.** Run native limits, MAX/MAX+, endurance, and fault
-   injection only after cheaper Flash waves are green.
-7. **Close Stage 1.** Fix/retest every defect, update the journal, run full Flash gate,
-   and persist `stage_1_flash=passed`.
-8. **Stage 2 Pro cheap wave.** Only now run the same short matrix with Pro.
-9. **Stage 2 Pro display/continuity and expensive waves.** Keep the same cheap-first
-   ordering; never fall back to another model.
+3. **Run joint Layer A and freeze.** Run `CORE-OFF`, `HABIT-OFFLINE`,
+   migration, and all deterministic HER/HASHI contracts. Stop on any failure;
+   only a complete PASS for the proposed hash makes the candidate valid and
+   frozen.
+4. **Stage 1 Flash cheap wave.** Run low→medium→high→xhigh→max→max+ short
+   `CORE-OFF` smokes plus all 24 `HABIT-WIRE` cells.
+5. **Stage 1 Flash presentation/continuity wave.** Run core presentation,
+   consecutive-message, continuity, `/stop`, `/new`, Memory+, and compaction,
+   plus four `HABIT-DEEP` cells.
+6. **Stage 1 Flash expensive/fault wave.** Run core native limits, MAX/MAX+,
+   endurance, and fault recovery plus two `HABIT-FAULT` cells only after
+   cheaper Flash tests pass.
+7. **Close Stage 1.** Fix/retest every defect, update the journal, pass and
+   persist both Flash subgates.
+8. **Stage 2 Pro cheap wave.** Only now run the Pro `CORE-OFF` cheap work and
+   all 24 Pro `HABIT-WIRE` cells.
+9. **Stage 2 Pro remaining waves.** Run core presentation/continuity/expensive,
+   four `HABIT-DEEP`, and two `HABIT-FAULT` cells. Any shared fix returns the
+   campaign to both affected Flash subgates.
 10. **Fix one defect class at a time.** Journal it before repair, add a failing
     deterministic regression, implement, then rerun the defined blast radius. Shared
-    repairs trigger the Flash revalidation rule in section 3.4.
-11. **Final certification.** Run complete HASHI tests, HER source certification, all 48
-    cells on the final candidate, and a clean Ajiao smoke.
+    repairs trigger the Flash revalidation rule in section 3.5.
+11. **Final certification.** Run complete HASHI tests, HER source certification,
+    all 48 core cells and all 60 live Habit work items on the final composite
+    candidate, then a clean Ajiao smoke.
 
 Provider order is rotated by batch and seeds are fixed in the manifest. API cost/quota
 approval is an execution prerequisite, not a HER task token budget. The tests must never
@@ -707,6 +896,13 @@ Pause the live matrix and open a journal entry immediately when any of these occ
 - thinking text changes after provider capture;
 - uncontrolled loop, orphan process, or cleanup guard failure;
 - candidate source/package hash changes mid-batch.
+- authoritative plan/template/validator/instantiated-ledger hash changes
+  without candidate invalidation and refreeze;
+- a `CORE-OFF` request receives Habit planning context or creates a Habit,
+  journal entry, or Meditation call;
+- a Habit job aliases a different HER execution after HASHI request-ID reuse,
+  changes the main session, writes outside the owning agent workspace, emits a
+  user-visible background message, or repeats a durable decision/write.
 
 Do not continue collecting hundreds of identical failures. Preserve the first complete
 evidence bundle, reproduce offline, fix, and restart the affected phase with a new batch
@@ -729,11 +925,12 @@ hidden issue into a permanent release gate.
 The completed campaign produces:
 
 - immutable batch manifests and redacted evidence bundles;
-- a 48-cell matrix report plus presentation, endurance, and fault reports;
+- a 48-cell `CORE-OFF` matrix report, a 60-item live Habit report, and joint
+  offline, presentation, endurance, migration, and fault reports;
 - provider/model/mode/effort comparison limited to runtime behavior;
 - an updated HER bug journal;
 - one regression test per confirmed defect;
-- exact HASHI and HER source commits and packaged binary SHA-256;
+- exact HASHI commit/build hash, HER source commit/package hash, and oracle hash;
 - a signed-off certification result: `PASS`, `FAIL`, or `BLOCKED`, never “mostly works”.
 
 ## 18. `her_debug` Superloop controller
@@ -753,8 +950,9 @@ silently.
 
 The template persists exactly two terminal results:
 
-- `PASSED` after every required Flash and Pro combination, effort, scenario,
-  ancillary suite, defect repair, regression, and same-candidate gate succeeds;
+- `PASSED` after both core/Habit Flash and Pro subgates, every required
+  combination, effort, scenario, offline/migration/ancillary suite, defect
+  repair, regression, and same-composite-candidate gate succeeds;
 - `BLOCKED_FUNDS` after insufficient funds are confirmed on either required
   live route and all completed/unrun work is reconciled.
 

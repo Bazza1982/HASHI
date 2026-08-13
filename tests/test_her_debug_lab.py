@@ -50,14 +50,30 @@ def _controller_module():
 
 def test_campaign_expands_every_cell_scenario_and_presentation_run() -> None:
     items = _controller_module()._build_work_items()
+    core = [item for item in items if item["feature_profile"] == "core_off"]
+    habit_wire = [
+        item for item in items if item["habit_scenario"] == "habit_wire"
+    ]
+    habit_deep = [
+        item for item in items if item["habit_scenario"] == "habit_deep"
+    ]
+    habit_fault = [
+        item for item in items if item["habit_scenario"] == "habit_fault"
+    ]
 
-    assert len(items) == 48
-    assert len({item["work_item_id"] for item in items}) == 48
-    assert sum(item["stage"] == "stage_1_flash" for item in items) == 24
-    assert sum(item["stage"] == "stage_2_pro" for item in items) == 24
-    assert sum(len(item["scenario_groups"]) for item in items) == 480
-    assert sum(len(item["presentation_runs"]) for item in items) == 384
+    assert len(items) == 108
+    assert len({item["work_item_id"] for item in items}) == 108
+    assert len(core) == 48
+    assert sum(item["stage"] == "stage_1_flash" for item in core) == 24
+    assert sum(item["stage"] == "stage_2_pro" for item in core) == 24
+    assert sum(len(item["scenario_groups"]) for item in core) == 480
+    assert sum(len(item["presentation_runs"]) for item in core) == 384
+    assert len(habit_wire) == 48
+    assert len(habit_deep) == 8
+    assert len(habit_fault) == 4
     assert all(item["status"] == "locked" for item in items if item["stage"] == "stage_2_pro")
+    assert all(item["habit_scenario"] == "none" for item in core)
+    assert all(item["feature_profile"] == "habit_on" for item in items if item not in core)
 
 
 def test_sequential_step_tool_rejects_skip_and_repeat(tmp_path: Path) -> None:

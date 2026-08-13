@@ -2,14 +2,15 @@
   {
     "task_id": "HD-001",
     "phase": "preflight_and_lab",
-    "title": "Freeze the oracle and candidate, capture Ajiao baseline, and prove the isolated lab and cleanup guard",
+    "title": "Invalidate legacy evidence, bind the proposed composite oracle/candidate, capture Ajiao baseline, and prove the isolated joint lab",
     "owner_agent": "lin_yueru",
     "owner_instance": "HASHI2",
     "status": "pending",
     "depends_on": [],
     "required_evidence": [
       "oracle_and_scope_lock",
-      "candidate_identity",
+      "composite_candidate_identity",
+      "legacy_candidate_supersession_ledger",
       "ajiao_baseline",
       "redacted_config",
       "lab_self_test",
@@ -20,7 +21,7 @@
   {
     "task_id": "HD-002",
     "phase": "layer_a_offline",
-    "title": "Run and repair deterministic Layer A until every offline HER and HASHI contract passes",
+    "title": "Run and repair joint Layer A until CORE-OFF, HABIT-OFFLINE, HER, and HASHI contracts all pass, then freeze the candidate",
     "owner_agent": "ajiao",
     "owner_instance": "HASHI2",
     "status": "pending",
@@ -30,6 +31,14 @@
     "required_evidence": [
       "layer_a_manifest",
       "layer_a_verdict",
+      "core_off_no_side_effect_verdict",
+      "habit_offline_lifecycle_verdict",
+      "habit_create_retrieve_behavioral_use_closed_loop",
+      "habit_on_off_output_and_tool_side_effect_comparison",
+      "habit_irrelevant_and_conflicting_context_verdict",
+      "habit_lock_wait_latency_and_background_failure_verdict",
+      "habit_restart_backlog_over_batch_limit_verdict",
+      "migration_impact_verdict",
       "regressions_for_discovered_defects",
       "candidate_identity"
     ],
@@ -38,7 +47,7 @@
   {
     "task_id": "HD-003",
     "phase": "stage_1_flash_cheap",
-    "title": "Run the complete Stage 1 Flash cheap wave with per-packet repair and exact-retest cycles",
+    "title": "Run Stage 1 Flash CORE-OFF cheap packets plus all 24 HABIT-WIRE packets with per-packet repair cycles",
     "owner_agent": "ajiao",
     "owner_instance": "HASHI2",
     "status": "pending",
@@ -47,6 +56,7 @@
     ],
     "required_evidence": [
       "flash_cheap_queue_complete",
+      "flash_habit_wire_24_cell_ledger",
       "no_disallowed_route_or_model",
       "attempt_receipts",
       "defect_cycle_records"
@@ -56,7 +66,7 @@
   {
     "task_id": "HD-004",
     "phase": "stage_1_flash_presentation_continuity",
-    "title": "Run the complete Stage 1 Flash presentation, continuity, stop, Memory+, and restart wave",
+    "title": "Run Stage 1 Flash CORE-OFF presentation/continuity plus four HABIT-DEEP lifecycle packets",
     "owner_agent": "ajiao",
     "owner_instance": "HASHI2",
     "status": "pending",
@@ -66,6 +76,12 @@
     "required_evidence": [
       "flash_presentation_queue_complete",
       "flash_continuity_queue_complete",
+      "flash_habit_deep_four_cell_ledger",
+      "background_silence_and_session_isolation_evidence",
+      "formation_observed_evidence",
+      "retrieval_observed_evidence",
+      "behavioral_use_observed_evidence",
+      "no_change_claim_limit_acknowledgement",
       "attempt_receipts",
       "defect_cycle_records"
     ],
@@ -74,7 +90,7 @@
   {
     "task_id": "HD-005",
     "phase": "stage_1_flash_expensive",
-    "title": "Run the complete Stage 1 Flash native-boundary, MAX/MAX+, endurance, and fault wave",
+    "title": "Run Stage 1 Flash CORE-OFF boundary/endurance plus two HABIT-FAULT restart and backlog packets",
     "owner_agent": "ajiao",
     "owner_instance": "HASHI2",
     "status": "pending",
@@ -86,6 +102,8 @@
       "native_boundary_evidence",
       "endurance_evidence",
       "fault_evidence",
+      "flash_habit_fault_two_cell_ledger",
+      "journal_restart_and_backlog_evidence",
       "defect_cycle_records"
     ],
     "artifact_refs": []
@@ -93,7 +111,7 @@
   {
     "task_id": "HD-006",
     "phase": "stage_1_flash_gate",
-    "title": "Verify all 24 Flash cells and ancillary suites on one candidate, finish bug records, and persist the Stage 1 gate",
+    "title": "Verify CORE-OFF and Habit Flash subgates together on one composite candidate, then persist Stage 1",
     "owner_agent": "lin_yueru",
     "owner_instance": "HASHI2",
     "status": "pending",
@@ -102,6 +120,9 @@
     ],
     "required_evidence": [
       "stage_1_24_cell_ledger",
+      "stage_1_habit_30_item_ledger",
+      "core_flash_passed_gate",
+      "habit_flash_passed_gate",
       "stage_1_ancillary_suite_ledger",
       "stage_1_no_affecting_open_defects",
       "stage_1_candidate_identity",
@@ -112,7 +133,7 @@
   {
     "task_id": "HD-007",
     "phase": "stage_2_pro_cheap",
-    "title": "After the persisted Flash gate only, run the complete Stage 2 Pro cheap wave with repair and exact-retest cycles",
+    "title": "Only after both Flash subgates, run Pro CORE-OFF cheap packets and all 24 Pro HABIT-WIRE packets",
     "owner_agent": "ajiao",
     "owner_instance": "HASHI2",
     "status": "pending",
@@ -121,6 +142,8 @@
     ],
     "required_evidence": [
       "persisted_stage_1_gate_checked_before_first_pro_request",
+      "persisted_core_and_habit_flash_subgates_checked",
+      "pro_habit_wire_24_cell_ledger",
       "pro_cheap_queue_complete",
       "no_disallowed_route_or_model",
       "attempt_receipts",
@@ -131,7 +154,7 @@
   {
     "task_id": "HD-008",
     "phase": "stage_2_pro_remaining_and_flash_revalidation",
-    "title": "Run Pro presentation, continuity, boundary, endurance, and fault waves; perform mandatory Flash revalidation after shared repairs",
+    "title": "Run remaining Pro CORE-OFF plus HABIT-DEEP and HABIT-FAULT packets; revalidate both Flash subgates after shared repairs",
     "owner_agent": "ajiao",
     "owner_instance": "HASHI2",
     "status": "pending",
@@ -142,6 +165,8 @@
       "pro_remaining_queue_complete",
       "shared_fix_invalidation_ledger",
       "required_flash_revalidation_complete",
+      "pro_habit_deep_four_cell_ledger",
+      "pro_habit_fault_two_cell_ledger",
       "attempt_receipts",
       "defect_cycle_records"
     ],
@@ -150,7 +175,7 @@
   {
     "task_id": "HD-009",
     "phase": "final_same_candidate_gate",
-    "title": "Verify Layer A, all 48 cells, all ancillary suites, all regressions, and all journal records on the final candidate",
+    "title": "Verify joint Layer A, 48 CORE-OFF cells, all Habit suites, regressions, migration, and journals on the final candidate",
     "owner_agent": "lin_yueru",
     "owner_instance": "HASHI2",
     "status": "pending",
@@ -160,6 +185,9 @@
     "required_evidence": [
       "final_candidate_identity",
       "final_48_cell_ledger",
+      "final_60_item_habit_live_ledger",
+      "final_habit_offline_and_migration_ledger",
+      "final_formation_retrieval_behavioral_use_ledger",
       "final_ancillary_suite_ledger",
       "full_hashi_tests",
       "full_her_certification",

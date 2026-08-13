@@ -1,10 +1,11 @@
-# HER Debug Two-Stage Superloop
+# HER Debug Joint Two-Stage Superloop
 
 ## Purpose
 
-Drive the complete HER x DeepSeek certification plan through a persisted
-test-repair-retest loop without starting Pro traffic early, silently losing a
-failed worker reply, or substituting another provider or model.
+Drive the complete HER x DeepSeek certification plan, including optional
+HER-local Habit–Meditation, through one persisted test-repair-retest loop
+without starting Pro traffic early, silently losing a failed worker reply, or
+substituting another provider or model.
 
 This directory is a design template only. Creating it does not start a loop,
 dispatch Ajiao, create a nudge, change Ajiao's settings, or spend API funds.
@@ -19,7 +20,8 @@ When the operator later authorizes this template to start, activation must:
 
 1. instantiate the template as a paused loop and expand the complete campaign
    queue before any live request;
-2. validate the two 24-cell stage definitions and frozen route/model allowlist;
+2. validate both 24-cell `CORE-OFF` gates, both 24-cell `HABIT-WIRE`
+   matrices, the deep/fault Habit suites, and the frozen route/model allowlist;
 3. create the unlimited one-minute `/nudge` from the `lin_yueru` runtime with
    an exit condition restricted to evidenced `PASSED` or `BLOCKED_FUNDS`;
 4. persist that nudge ID in loop state and verify its job owner is
@@ -73,10 +75,10 @@ Only these live routes and model slugs are legal:
 | 2 | Official DeepSeek | `deepseek-v4-pro` |
 | 2 | OpenRouter | `deepseek/deepseek-v4-pro` |
 
-Stage 1 contains 24 Flash cells: two providers by two HASHI modes by six
-efforts. Stage 2 contains the corresponding 24 Pro cells. No test, retry,
-repair check, reviewer check, fallback, or nudge-triggered action may send live
-test traffic to any other API or model.
+Stage 1 contains 24 Flash `CORE-OFF` cells and 30 Habit-on items: 24
+`HABIT-WIRE`, four `HABIT-DEEP`, and two `HABIT-FAULT`. Stage 2 contains the
+corresponding Pro work. No test, retry, repair check, reviewer check, fallback,
+or nudge-triggered action may send live traffic to any other API or model.
 
 The scripted provider used by deterministic Layer A is a local protocol
 fixture, not a live API or model, and can never satisfy a live cell.
@@ -86,18 +88,19 @@ fixture, not a live API or model, and can never satisfy a live cell.
 ```text
 planned
   -> preflight_and_lab
-  -> layer_a_offline
-  -> stage_1_flash: cheap -> presentation/continuity -> expensive
-  -> stage_1_flash_gate
-  -> stage_2_pro: cheap -> presentation/continuity -> expensive
+  -> joint_layer_a: core_off + habit_offline + migration
+  -> stage_1_flash: core_off + habit_wire -> habit_deep -> habit_fault
+  -> stage_1_flash_gate: core_flash + habit_flash
+  -> stage_2_pro: core_off + habit_wire -> habit_deep -> habit_fault
   -> final_same_candidate_gate
   -> PASSED
 ```
 
-`stage_2_pro` is mechanically locked until all Stage 1 Flash work, regressions,
-defect retests, and the Stage 1 gate pass. A shared-runtime repair during Stage
-2 invalidates the older Flash evidence, pauses Pro advancement, and returns the
-campaign to Flash revalidation before Pro may continue.
+`stage_2_pro` is mechanically locked until `core_flash=passed` and
+`habit_flash=passed`, all regressions and defect retests are complete, and the
+combined Stage 1 gate passes. A shared-runtime repair during Stage 2 invalidates
+both affected Flash subgates, pauses Pro advancement, and returns the campaign
+to joint Flash revalidation before Pro may continue.
 
 Cheap waves always precede paid native-boundary, MAX/MAX+, endurance, and fault
 waves. The controller expands work in this order:
@@ -111,10 +114,18 @@ waves. The controller expands work in this order:
 Every atomic packet has a stable key:
 
 ```text
-stage/provider/model/mode/effort/wave/scenario/presentation
+stage/provider/model/mode/effort/feature_profile/habit_scenario/wave/scenario/presentation
 ```
 
 No packet can pass by sampling or by a neighboring route's result.
+
+`CORE-OFF` forces Habit–Meditation disabled and requires byte-identical raw and
+executed prompts with no Habit/journal side effects. `HABIT-WIRE` covers every
+provider/model/mode/effort combination. `HABIT-DEEP` covers each
+provider/model/mode at high effort. `HABIT-FAULT` covers each provider/model
+with a real restart/fault transaction. Deterministic create/update/delete,
+strict validation, recovery, isolation, backlog, and migration proofs remain
+in Layer A and cannot be replaced by a live model returning actions.
 
 ## Per-packet cycle
 
@@ -134,6 +145,32 @@ For each effort/task combination, the controller repeats this cycle:
    candidate-hash, and verification fields.
 8. Invalidate any earlier verdict that no longer belongs to the current
    candidate, then resume the ordered queue.
+
+Candidate identity is composite: HASHI commit and build hash, HER source commit
+and packaged binary hash, plus the authoritative oracle hash. A product,
+plan/template, validator, or instantiated-ledger change invalidates the prior
+candidate and all release credit attached to it. Historical evidence remains
+immutable and linked as superseded.
+
+HD-001 binds this composite identity only as a Layer A proposal with
+`evidence_valid=null` (proposed, not release-valid). HD-002 must pass the full
+joint Layer A suite against
+that exact hash before the controller persists
+`freeze_status=frozen_after_joint_layer_a`. Live packets cannot run before that
+transition.
+
+Joint campaign v3 makes Habit claims explicit. Formation, retrieval, and
+behavioral use each require their own boolean and linked evidence. A selected
+Habit ID proves retrieval only, and `no_change` proves only the Meditation wire,
+isolation, journal, and silence path. Every `HABIT-DEEP` packet must prove all
+three lifecycle observations; every `HABIT-FAULT` packet must also record a
+foreground lock-wait measurement within its predeclared limit.
+
+When an existing campaign is migrated, every pending wait attached to the
+superseded candidate or live queue is retained in the ledger but marked
+`stale`. It cannot block the new offline preflight/Layer A, and it is not
+treated as satisfied: the controller must revalidate the underlying condition
+when the matching provider phase is reached and open a fresh wait if needed.
 
 A model deviation, harness fault, transient route failure, worker transport
 failure, or failed Ajiao response is not silently converted into a product bug
@@ -169,6 +206,13 @@ the stagnation limit. The next decision must dispatch that packet, persist a
 concrete wait or blocker, or fail validation; merely moving the next-check time
 again is a functional livelock.
 
+An explicit operator pause remains a hard boundary and requires an explicit
+operator resume. A controller-owned freeze, receipt, or candidate drain uses
+the separate transient-drain control path: it blocks duplicate dispatch while
+an accepted request is active, keeps campaign authority intact, and restores
+its saved action automatically after reconciliation. It must never be encoded
+as `await_operator_resume`.
+
 Every dispatch records:
 
 - packet and attempt IDs;
@@ -183,9 +227,10 @@ Every dispatch records:
 The nudge emits its completion marker only after one of the two permitted
 terminal results has been persisted with evidence:
 
-- `PASSED`: Layer A, all 24 Flash cells and gates, all 24 Pro cells and gates,
-  all required ancillary suites, final same-candidate certification, cleanup,
-  and reply drain succeeded.
+- `PASSED`: joint Layer A, all 48 `CORE-OFF` cells, all 48 `HABIT-WIRE`
+  cells, all eight `HABIT-DEEP` and four `HABIT-FAULT` items, both Flash
+  subgates, both Pro subgates, migration and ancillary suites, final
+  same-candidate certification, cleanup, and reply drain succeeded.
 - `BLOCKED_FUNDS`: a required route's funds exhaustion was confirmed by the
   rule above, completed evidence was preserved, and every unrun packet was
   listed.
@@ -207,9 +252,13 @@ close the loop and do not disable the nudge.
 Before `PASSED`, the controller must personally prove:
 
 - Layer A is green;
-- the Flash gate and Pro gate are green on the final candidate;
-- all 48 core cells and all mandatory scenario/presentation/boundary evidence
-  are present;
+- both core/Habit Flash subgates and both core/Habit Pro subgates are green on
+  the final candidate;
+- all 48 core cells, 60 live Habit items, and all mandatory
+  scenario/presentation/boundary/offline/migration evidence are present;
+- all eight `HABIT-DEEP` items independently prove formation, retrieval, and
+  behavioral use; no selected-ID or `no_change` receipt is counted as a
+  substitute;
 - no affected P0/P1/P2 defect remains open;
 - every fix has its regression and completed journal entry;
 - no disallowed route/model appears in a live manifest;

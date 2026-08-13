@@ -48,6 +48,8 @@ class SuperloopControlService:
             active = list(dict.fromkeys(active_request_ids if active_request_ids is not None else inferred_active))
             requested_at = str(prior_pause.get("requested_at") or _utc_now())
             pause = {
+                "kind": "operator_pause",
+                "resume_policy": "explicit_operator",
                 "mode": normalized_mode,
                 "requested_at": requested_at,
                 "source": source,
@@ -88,6 +90,167 @@ class SuperloopControlService:
             "active_request_ids": active,
             "drain_complete": not active,
             "already_paused": previous_status == "paused",
+        }
+
+    def begin_controller_drain(
+        self,
+        loop_id: str,
+        *,
+        active_request_ids: list[str] | None = None,
+        resume_action: dict[str, Any] | None = None,
+        actor: dict[str, Any] | None = None,
+        source: str = "controller",
+    ) -> dict[str, Any]:
+        """Hold new dispatches while controller-owned work drains.
+
+        Unlike :meth:`pause`, this is not an operator control boundary. The loop
+        remains running and the saved action is restored automatically once the
+        accepted request has been reconciled. Keeping this as a distinct state
+        prevents an internal freeze/receipt guard from becoming an
+        ``await_operator_resume`` livelock.
+        """
+
+        event_actor = normalize_event_actor(actor or system_actor("superloop_control"))
+        with loop_dispatch_lock(self.store, loop_id):
+            state = self.store.load_loop_state(loop_id)
+            if str(state.get("status") or "").strip().lower() != "running":
+                raise ValueError("controller drain requires a running loop")
+            control = state.get("control") if isinstance(state.get("control"), dict) else {}
+            control = dict(control)
+            if isinstance(control.get("pause"), dict):
+                raise ValueError("controller drain cannot replace an operator pause")
+            if isinstance(control.get("controller_drain"), dict):
+                raise ValueError("controller drain is already active")
+
+            inferred_active = [
+                str(value)
+                for value in (
+                    state.get("active_request_id"),
+                    state.get("active_dispatch_id"),
+                )
+                if value
+            ]
+            active = list(
+                dict.fromkeys(
+                    active_request_ids
+                    if active_request_ids is not None
+                    else inferred_active
+                )
+            )
+            saved_action = (
+                dict(resume_action)
+                if isinstance(resume_action, dict) and resume_action
+                else dict(state.get("next_action") or {})
+            )
+            requested_at = _utc_now()
+            drain = {
+                "kind": "controller_transient_drain",
+                "resume_policy": "automatic_after_drain",
+                "requested_at": requested_at,
+                "source": source,
+                "active_request_ids": active,
+                "drain_complete": not active,
+                "resume_action": saved_action,
+            }
+
+            if active:
+                control["controller_drain"] = drain
+                state["control"] = control
+                state["next_action"] = {
+                    "kind": "await_controller_drain",
+                    "reason": "controller_transient_drain",
+                    "active_request_ids": active,
+                }
+                self.store.save_loop_state(loop_id, state)
+                event_type = "loop.controller_drain_started"
+            else:
+                if saved_action:
+                    state["next_action"] = saved_action
+                self.store.save_loop_state(loop_id, state)
+                event_type = "loop.controller_drain_completed"
+
+            self.store.append_loop_event(
+                loop_id,
+                event_type=event_type,
+                data={
+                    "source": source,
+                    "active_request_ids": active,
+                    "drain_complete": not active,
+                    "auto_resumed": not active,
+                },
+                actor=event_actor,
+            )
+        return {
+            "ok": True,
+            "loop_id": loop_id,
+            "status": "running",
+            "active_request_ids": active,
+            "drain_complete": not active,
+            "auto_resumed": not active,
+        }
+
+    def mark_controller_drained(
+        self,
+        loop_id: str,
+        *,
+        actor: dict[str, Any] | None = None,
+        source: str = "controller_reconciliation",
+        resume_action: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Complete one transient controller drain and restore its action."""
+
+        event_actor = normalize_event_actor(actor or system_actor("superloop_control"))
+        with loop_dispatch_lock(self.store, loop_id):
+            state = self.store.load_loop_state(loop_id)
+            control = state.get("control") if isinstance(state.get("control"), dict) else {}
+            control = dict(control)
+            drain = (
+                dict(control.get("controller_drain"))
+                if isinstance(control.get("controller_drain"), dict)
+                else {}
+            )
+            if drain.get("kind") != "controller_transient_drain":
+                return {
+                    "ok": False,
+                    "loop_id": loop_id,
+                    "reason": "controller_drain_not_active",
+                }
+
+            saved_action = (
+                dict(resume_action)
+                if isinstance(resume_action, dict) and resume_action
+                else dict(drain.get("resume_action") or {})
+            )
+            control.pop("controller_drain", None)
+            if control:
+                state["control"] = control
+            else:
+                state.pop("control", None)
+            state["status"] = "running"
+            state["active_request_id"] = None
+            state["active_dispatch_id"] = None
+            state["next_action"] = saved_action or {"kind": "evaluate_next"}
+            state.pop("dispatch_interlock", None)
+            self.store.save_loop_state(loop_id, state)
+            self.store.append_loop_event(
+                loop_id,
+                event_type="loop.controller_drain_completed",
+                data={
+                    "source": source,
+                    "active_request_ids": [],
+                    "drain_complete": True,
+                    "auto_resumed": True,
+                    "resume_action": state["next_action"],
+                },
+                actor=event_actor,
+            )
+        return {
+            "ok": True,
+            "loop_id": loop_id,
+            "status": "running",
+            "drain_complete": True,
+            "auto_resumed": True,
+            "next_action": state["next_action"],
         }
 
     def mark_drained(

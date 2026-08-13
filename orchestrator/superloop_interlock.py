@@ -150,6 +150,13 @@ def evaluate_dispatch_interlock(
 def _state_control_signal(state: dict[str, Any]) -> str | None:
     control = state.get("control") if isinstance(state.get("control"), dict) else {}
     pause = control.get("pause") if isinstance(control.get("pause"), dict) else {}
+    controller_drain = (
+        control.get("controller_drain")
+        if isinstance(control.get("controller_drain"), dict)
+        else {}
+    )
+    if controller_drain:
+        return "controller_drain_active"
     requested_action = str(control.get("requested_action") or "").strip().lower()
     if requested_action in {"halt", "abort", "stop"}:
         return "halt_requested"

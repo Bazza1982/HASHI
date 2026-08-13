@@ -55,6 +55,12 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 | `HER-20260812-017` | Fixed — blast-radius verification pending | P1 | AskUserQuestion terminal UI corrupted structured JSONL and hid its correlated tool_end | `stream_json_ask_user_question_preserves_correlated_tool_events` |
 | `HER-20260812-018` | Verified | P1 | controller nudge misclassified an in-progress task's next packet as a pending-task start and livelocked | `test_in_progress_packet_continuation_cannot_require_new_start_authority` |
 | `HER-20260812-019` | Verified | P1 | live harness accepted the pre-restart runtime as the `/reboot min` completion receipt and lost the first request | `test_restart_receipt_rejects_pre_restart_online_idle_runtime` |
+| `HER-20260812-020` | Fixed — live verification pending | P1 | Meditation journal identity reused HASHI request IDs across restarts and silently dropped a new job | `test_reused_hashi_request_id_creates_distinct_meditation_jobs` |
+| `HER-20260812-021` | Verified | P1 | joint-campaign restart left the migration pause interlock active after reporting running | `test_joint_migration_start_clears_pause_interlock` |
+| `HER-20260812-022` | Fixed — live verification pending | P2 | Meditation timeout released the foreground lock but was terminally journaled as `runtime_error` | `test_meditation_timeout_bounds_foreground_lock_wait_and_stays_silent` |
+| `HER-20260812-023` | Verified | P1 | v3 oracle realignment retained stale active-attempt and running-worker projections | `test_joint_realign_clears_stale_runtime_ownership_without_overwriting_receipt` |
+| `HER-20260812-024` | Verified | P1 | controller transient drain was promoted to an operator pause and livelocked HD-003 | `test_controller_transient_drain_auto_resumes_without_weakening_operator_pause` |
+| `HER-20260812-025` | Verified | P1 | HER Habit lifecycle INFO records were emitted but never persisted in the agent runtime log | `test_flexible_runtime_persists_her_backend_events` |
 | `HER-20260813-020` | Fixed — live verification pending | P1 | MCP image results were flattened into text before the provider could see them | `test_packaged_her_bridges_media_read_image_into_provider_vision_input` |
 | `HER-20260813-021` | Fixed — live verification pending | P1 | legacy screenshot results reached HER as strings instead of validated MCP image content | `test_gateway_bridges_legacy_browser_screenshot_string_to_image` |
 | `HER-20260813-022` | Fixed — live verification pending | P1 | Flex/composed full-context HER turns can also resume the persisted HER session | `test_her_full_context_turn_never_resumes_or_checkpoints_session` |
@@ -849,7 +855,7 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 
 ### HER-20260811-004 — DeepSeek visible finalization ended in an error
 
-- **Status:** Fixed — live verification pending
+- **Status:** Verified
 - **Severity:** P1
 - **First observed:** Ajiao completed useful work and displayed normal thinking, but the
   run ended as an error instead of producing a valid final terminal outcome.
@@ -2032,6 +2038,397 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
   with `428 passed, 0 failed`.
 - **Secrets/redaction checked:** yes; the new regression proves a private
   sentinel never appears in the retained baseline record.
+### HER-20260812-020 — Meditation journal aliased request IDs reused after restart
+
+- **Status:** Fixed — live verification pending
+- **Severity:** P1
+- **Recurrence of:** none. A journal-wide duplicate audit found no existing entry
+  for this identity class. `HER-20260812-019` concerns live-harness restart
+  readiness and has a different root cause.
+- **Discovered:** 2026-08-12 16:20 AEST during Habit–Meditation integration
+  assessment, before this repair.
+- **Affected area:** HER Habit–Meditation durable job identity, restart recovery,
+  and create/write idempotency.
+- **Expected:** a new HER execution after HASHI restart creates a new Meditation
+  job even when HASHI reuses `req-0001`; repeated scheduling of one HER
+  execution still deduplicates; legacy pending jobs still recover.
+- **Actual:** `HERMeditationJournal.enqueue()` hashed only `request_id`. The
+  second runtime's `req-0001` resolved to the completed or pending job from the
+  first runtime, returned `queued=false`, retained the old prompt, and silently
+  skipped Meditation for the new execution.
+- **Reproduction rate:** 2/2 deterministic restarts in an isolated temporary
+  agent workspace.
+- **First divergent event:** the second foreground HER execution entered
+  Meditation scheduling with a new prompt, but `job_id_for("req-0001")`
+  selected the existing journal path before a new job could be written.
+- **Known-bad candidate:** HASHI
+  `47c1e9c83006c62fa4ad9bc326fdd6ddc1711a48`; HER package remains
+  `0.1.0-hashi.9` /
+  `431876b9120be26e6ecaffa7f0f5b1dc4cebd2c8bf123c135996e71ffa0367f1`.
+- **Root cause:** HASHI request IDs are runtime-local counters, but the
+  Meditation journal treated them as globally durable execution identities.
+  Trace identity and idempotency identity were accidentally coupled.
+- **Repair:** each eligible `HERAdapter.generate_response()` creates one
+  execution-scoped UUID before foreground execution. Every success, timeout,
+  error, and cancellation exit passes that same UUID into the journal. The
+  journal stores HASHI `request_id` only as trace metadata and uses the supplied
+  32-hex job ID for filenames, recovery, and Habit-write idempotency. The legacy
+  request-derived helper remains available so existing v1 jobs recover without
+  migration.
+- **Regression tests:**
+  `tests/test_her_habit_meditation.py::test_reused_hashi_request_id_creates_distinct_meditation_jobs`;
+  `test_durable_journal_recovers_and_stops_after_bounded_attempts`;
+  `test_restart_replays_durable_actions_without_another_model_call`.
+- **Fixed-build offline result:** Habit–Meditation focused suite `31 passed`;
+  HER adapter/backend/transfer/Habit impact set `108 passed`. Two simulated
+  runtimes using `req-0001` produced two distinct completed `no_change` jobs;
+  one execution's repeated job ID remained idempotent; a legacy applying job
+  resumed without a second model call.
+- **Joint Layer A result:** final focused impact set `149 passed`; full HASHI suite
+  `1948 passed, 3 skipped`; enhanced Habit evidence gate `11 passed`; composite
+  candidate `e89fc48079e45f40825604019675134d280c8717d161ff50288273d71f660123`
+  froze after the controller accepted `HD-002-A006-final-joint-layer-a.json`.
+- **Verification still required:** Flash `HABIT-FAULT` guarded restart and its
+  same-route/mode blast radius. No prior candidate or live result counts toward
+  this gate. Pro remains locked.
+- **Recurrence count:** 0
+
+### HER-20260812-021 — joint-campaign restart retained the migration pause interlock
+
+- **Status:** Verified
+- **Severity:** P1
+- **Recurrence of:** none
+- **Discovered:** 2026-08-12 17:35 AEST during the explicitly authorized joint
+  campaign restart.
+- **Reporter:** `lin_yueru@HASHI2`, `her_debug` controller
+- **Batch / cell / scenario / run IDs:**
+  `sl-20260811-231651520023-b272` / `HD-001` / joint migration resume.
+- **Provider / model / mode / effort:** offline controller transition; no live
+  provider request.
+- **Expected:** `start()` must consume the explicit resume boundary, persist
+  `status=running`, activate campaign-scoped authority, and clear every pause
+  signal before HD-002 can be admitted.
+- **Actual:** `start()` reported success and set `status=running`, while
+  `control.requested_action=pause`, `control.pause_requested=true`, and
+  `joint_migration.resume_requires_explicit_operator_action=true` remained.
+- **User-visible impact:** the campaign can appear restarted but the generic
+  dispatch interlock will reject the first Ajiao packet as `pause_requested`.
+- **First divergent event:** the successful `loop.started` state write omitted
+  consumption of migration control fields.
+- **Reproduction rate:** 1/1 migrated campaign restart.
+- **Minimal reproduction:** migrate a drained campaign, re-enable its controller
+  nudge, call `start()`, then evaluate the persisted pause control signal.
+- **Evidence bundle:**
+  `superloops/loops/sl-20260811-231651520023-b272/evidence/HD-001-HER-20260812-021-reproduction.json`.
+- **Secrets/redaction checked:** yes; only controller state and hashes are retained.
+- **Suspected owner:** HASHI HER-debug Superloop controller.
+- **Root cause:** the HER-debug-specific `start()` transition set loop status and
+  execution authority directly but did not consume the generic migration pause
+  controls or synchronize the campaign projection.
+- **Known-bad commit/package:** HASHI
+  `47c1e9c83006c62fa4ad9bc326fdd6ddc1711a48`; HER `0.1.0-hashi.9` /
+  `431876b9120be26e6ecaffa7f0f5b1dc4cebd2c8bf123c135996e71ffa0367f1`.
+- **Fix commits:** working-tree repair pending the joint candidate commit.
+- **Regression tests:**
+  `tests/test_her_debug_superloop_template.py::test_joint_migration_start_clears_pause_interlock`.
+- **Bad-build test result:** live migrated state reproduced the contradiction:
+  `status=running` together with both persisted pause signals.
+- **Fixed-build test result:** the exact regression passed, its packet-authority
+  neighbor passed, and the complete 10-test HER-debug template suite passed. The
+  live loop was reconciled idempotently, cleared both pause signals, marked the
+  migration resume boundary consumed, synchronized `campaign.status=running`,
+  and retained zero validation findings. Verification receipt:
+  `superloops/loops/sl-20260811-231651520023-b272/evidence/HD-001-HER-20260812-021-verification.json`.
+- **Required live retest cells:** exact HD-001 resume followed by HD-002 dispatch
+  admission; this controller-only defect sends no paid traffic itself.
+- **Live retest result:** the repaired HD-001 resume consumed the migration pause
+  boundary, kept the controller nudge enabled, and admitted the single replacement
+  HD-002/A004 offline dispatch as `req-0002`. The replacement Layer A later closed
+  PASS through A006 and froze the same composite candidate; no paid provider request
+  was used for this controller retest.
+- **Remaining risk:** none specific to this defect. The campaign remains paused
+  before its first new Flash live packet and Pro remains locked.
+- **Recurrence count:** 0
+
+### HER-20260812-022 — Meditation timeout was terminally misclassified
+
+- **Status:** Fixed — live verification pending
+- **Severity:** P2
+- **Recurrence of:** none
+- **Discovered:** 2026-08-12 19:14 AEST while running the approved deterministic
+  Habit–Meditation latency enhancement.
+- **Reporter:** `lin_yueru@HASHI2`, `her_debug` controller
+- **Batch / cell / scenario / run IDs:**
+  `sl-20260811-231651520023-b272` / replacement joint Layer A /
+  offline scripted Meditation timeout.
+- **Provider / model / mode / effort:** scripted local only; no provider request.
+- **Expected:** the bounded Meditation timeout releases the shared foreground lock,
+  leaves the durable job `pending` for bounded restart recovery, records the timeout
+  reason, and emits no background event to the user.
+- **Actual:** the foreground completed within the upper bound and stayed silent, but
+  the journal ended `failed` with `error_code=runtime_error`; the retry was lost.
+- **User-visible impact:** no immediate foreground delay beyond the timeout, but a
+  recoverable Habit decision can be discarded instead of retried after restart.
+- **First divergent event:** the `asyncio.wait_for()` timeout reached the generic
+  background exception branch instead of the recoverable timeout branch.
+- **Reproduction rate:** 1/1 deterministic offline runs.
+- **Minimal reproduction:** enqueue one Meditation job, make its isolated model call
+  wait forever, use a 50 ms test timeout, then start a foreground request waiting on
+  the same execution lock.
+- **Evidence bundle:** failing pytest output from
+  `tests/test_her_habit_meditation.py::test_meditation_timeout_bounds_foreground_lock_wait_and_stays_silent`.
+- **Secrets/redaction checked:** yes; only synthetic prompts and identifiers used.
+- **Suspected owner:** HASHI HER adapter exception classification.
+- **Root cause:** this runtime uses Python 3.10, where
+  `asyncio.exceptions.TimeoutError` is not the built-in `TimeoutError`. The
+  recoverable branch named only the built-in class, so `asyncio.wait_for()`
+  timeouts fell through to the generic terminal-failure branch.
+- **Known-bad commit/package:** HASHI
+  `47c1e9c83006c62fa4ad9bc326fdd6ddc1711a48`; HER package remains
+  `0.1.0-hashi.9` /
+  `431876b9120be26e6ecaffa7f0f5b1dc4cebd2c8bf123c135996e71ffa0367f1`.
+- **Repair:** classify `asyncio.TimeoutError` explicitly with `ClawError`, retain
+  the job in the bounded pending queue, and preserve the existing foreground
+  release and background-silence behavior.
+- **Fix commits:** working-tree repair pending the replacement candidate commit.
+- **Regression tests:**
+  `tests/test_her_habit_meditation.py::test_meditation_timeout_bounds_foreground_lock_wait_and_stays_silent`.
+- **Bad-build test result:** `1 failed, 37 passed`; the failing assertion expected
+  `pending` but observed `failed`, while the foreground latency and silence assertions
+  had already passed.
+- **Fixed-build test result:** exact regression `1 passed in 0.13s`; combined
+  Habit–Meditation and HER-debug template impact set `52 passed in 1.54s`.
+  Final replacement Layer A then passed the focused set (`149 passed`), the full
+  suite (`1948 passed, 3 skipped`), and the enhanced Habit gate (`11 passed`);
+  its conservative foreground wall measurement was `343 ms <= 750 ms`.
+- **Required live retest cells:** covered by the existing `HABIT-FAULT` timeout/restart
+  packet on the replacement candidate; no extra paid cell is added.
+- **Live retest result:** pending.
+- **Remaining risk:** the existing live `HABIT-FAULT` timeout/restart packet must
+  pass on the frozen replacement candidate before closure.
+- **Recurrence count:** 0
+
+### HER-20260812-023 — v3 realignment retained stale worker ownership
+
+- **Status:** Verified
+- **Severity:** P1
+- **Recurrence of:** related boundary class to `HER-20260812-021`, but a distinct
+  transition and root cause.
+- **Discovered:** 2026-08-12 19:35 AEST after the approved v2→v3 Habit evidence
+  realignment and before A004 dispatch.
+- **Reporter:** `lin_yueru@HASHI2`, `her_debug` controller
+- **Batch / cell / scenario / run IDs:**
+  `sl-20260811-231651520023-b272` / `HD-001` / v3 oracle realignment.
+- **Provider / model / mode / effort:** offline controller transition; no live
+  provider request.
+- **Expected:** a drained realignment clears every mutable ownership projection
+  belonging to the superseded attempt before HD-001 restarts.
+- **Actual:** `active_dispatch_id` and `active_request_id` were cleared, while
+  `active_attempt_id=HD-002-A003`, `worker_runtime.status=running`, its dead
+  `req-0001`/process observation, and a stale pause closeout ref survived.
+- **User-visible impact:** the nudge can treat an idle worker as busy and refuse the
+  single replacement Layer A dispatch, causing a functional livelock.
+- **First divergent event:** the v3 `new_state.update()` reset selected active
+  fields but inherited other runtime-only keys from `deepcopy(state)`.
+- **Reproduction rate:** 1/1 live controller realignments; deterministic fixture
+  coverage pending repair.
+- **Minimal reproduction:** seed a paused v2 fixture with an active attempt,
+  running worker projection, and pause closeout ref; drain dispatch/request IDs;
+  realign to v3 and inspect the resulting state.
+- **Evidence bundle:** live post-realignment `state.json` observation before A004;
+  no packet was dispatched.
+- **Secrets/redaction checked:** yes; only controller IDs and state fields retained.
+- **Suspected owner:** HASHI HER-debug Superloop controller.
+- **Root cause:** the migration built `new_state` from `deepcopy(state)` and reset
+  dispatch/request IDs explicitly, but omitted three runtime-only keys that are
+  not present in a fresh template.
+- **Known-bad commit/package:** HASHI
+  `47c1e9c83006c62fa4ad9bc326fdd6ddc1711a48`; HER package remains
+  `0.1.0-hashi.9` /
+  `431876b9120be26e6ecaffa7f0f5b1dc4cebd2c8bf123c135996e71ffa0367f1`.
+- **Repair:** explicitly remove `active_attempt_id`, `worker_runtime`, and
+  `pause_closeout_ref` from the new state after applying the rendered template;
+  preserve durable dispatch/event/evidence history in their append-only ledgers.
+- **Fix commits:** working-tree repair pending the replacement candidate commit.
+- **Regression tests:**
+  `tests/test_her_debug_superloop_template.py::test_joint_realign_clears_stale_runtime_ownership_without_overwriting_receipt`.
+- **Bad-build test result:** live state retained all three stale projections after
+  validation reported zero blocking findings.
+- **Fixed-build test result:** exact regression plus preservation and restart
+  neighbors `3 passed in 0.39s`; final joint focused Layer A impact set
+  `149 passed in 22.38s`.
+- **Required live retest cells:** exact forced offline re-realignment followed by
+  one admitted HD-002 replacement dispatch; no paid target request.
+- **Live retest result:** the forced v3 re-realignment cleared the stale attempt,
+  worker-runtime, and pause-closeout projections, recomputed candidate
+  `e89fc48079e45f40825604019675134d280c8717d161ff50288273d71f660123`,
+  and admitted exactly one replacement A004 dispatch. The final A006 receipt
+  reconciled the immutable A004 execution evidence and completed joint Layer A.
+- **Remaining risk:** none specific to this ownership transition. Normal Flash
+  certification remains pending and Pro remains locked.
+- **Recurrence count:** 0
+
+### HER-20260812-024 — controller transient drain became a permanent operator pause
+
+- **Status:** Verified
+- **Severity:** P1
+- **Recurrence of:** related control-boundary class to `HER-20260812-018`,
+  `HER-20260812-021`, and `HER-20260812-023`, with a distinct pause/drain root
+  cause.
+- **Discovered:** 2026-08-12 21:54 AEST after four consecutive controller
+  observations showed no HD-003 progress.
+- **Reporter:** `lin_yueru@HASHI2`, `her_debug` controller.
+- **Batch / cell / scenario / run IDs:**
+  `sl-20260811-231651520023-b272` / A006-to-HD-003 transition / first Stage 1
+  Flash packet not selected.
+- **Provider / model / mode / effort:** no live provider request was admitted;
+  Pro stayed locked.
+- **Expected:** a controller-owned drain may hold new dispatch while an accepted
+  request finishes, but it must restore its saved action automatically after the
+  drain. Only an explicit operator pause may require explicit operator resume.
+- **Actual:** the A006 freeze guard called the generic pause path. It persisted
+  `status=paused`, `next_action=await_operator_resume`, and a completed drain.
+  Four nudges then retained the same idle state while Ajiao remained online and
+  HD-003 remained `in_progress`.
+- **User-visible impact:** 54 Stage 1 Flash work items remained unstarted despite
+  active campaign authority, a frozen valid candidate, an idle worker, no live
+  wait, no active dispatch, and no blocking product issue.
+- **First divergent event:** `loop-event-20260812104831000348`, emitted by
+  controller source `habit_enhancement_layer_a_final_freeze_guard` rather than an
+  operator command.
+- **Reproduction rate:** 4/4 consecutive idle nudges after the A006 drain.
+- **Evidence bundle:**
+  `superloops/loops/sl-20260811-231651520023-b272/evidence/HD-003-HER-20260812-024-reproduction.json`.
+- **Secrets/redaction checked:** yes; only controller state, IDs, hashes, and
+  bounded status facts are retained.
+- **Root cause:** `SuperloopControlService.pause()` has only operator semantics;
+  `mark_drained()` deliberately never resumes; the controller reused those
+  operations for a transient freeze drain. HER validation also checked fresh
+  start-authority conflict only when `selected_next_packet` existed, so a null
+  selection plus `await_operator_resume` passed with zero findings.
+- **Required repair:** preserve operator pause as a hard boundary; add a distinct
+  controller-transient drain that automatically restores its saved action once
+  drained; reject ambiguous drained pauses and idle in-progress await states;
+  add exact transition and validator regressions; reconcile the live legacy
+  pause only after the repair passes.
+- **Repair:** explicit operator pauses now carry `kind=operator_pause` and
+  `resume_policy=explicit_operator`. Controller-owned drains use a separate
+  running-state control record, block duplicate dispatch while active, and
+  atomically restore the saved action after reconciliation. HER validation now
+  rejects both ambiguous completed drains and idle `in_progress` await states
+  even when `selected_next_packet` is null.
+- **Regression tests:**
+  `tests/test_superloop_control.py::test_controller_transient_drain_auto_resumes_without_weakening_operator_pause`
+  and
+  `tests/test_her_debug_superloop_template.py::test_null_selected_packet_cannot_hide_idle_in_progress_livelock`.
+- **Known-bad source hashes:** `orchestrator/superloop_control.py`
+  `130306441e02822d54c2def8b3df08ee7ab8121a1bf3a44dfa136bd6957e53c8`;
+  `scripts/her_debug_superloop.py`
+  `3ccb9d4f7c98a6caeb5f2c302de10e63f698dd308fed3be19b39768f6501a6b1`.
+- **Fixed-build result:** exact control/template set `21 passed`; Superloop and
+  HER-debug impact set `89 passed`; full HASHI suite `1950 passed, 3 skipped`.
+  Template validation passed with zero findings. The previously silent live
+  state now produces `in_progress_idle_control_livelock` before reconciliation.
+- **Live recovery:** controller and worker evidence proved no active request and
+  no late reply. The legacy drain was cleared without treating it as an operator
+  pause, loop/campaign status returned to `running`, and no live dispatch crossed
+  the repair boundary. Because the repair changed candidate-bound controller and
+  oracle files, candidate
+  `e89fc48079e45f40825604019675134d280c8717d161ff50288273d71f660123`
+  was explicitly superseded; the remaining validator finding is exactly
+  `live_before_joint_layer_a_freeze` until joint Layer A refreezes the replacement.
+  Verification receipt:
+  `superloops/loops/sl-20260811-231651520023-b272/evidence/HD-003-HER-20260812-024-verification.json`.
+- **Remaining risk:** none specific to the control defect. Normal candidate
+  refreeze and Stage 1 live certification remain pending; Pro stays locked.
+- **Recurrence count:** 0
+
+### HER-20260812-025 — HER Habit lifecycle records were not persisted
+
+- **Status:** Fixed — live verification pending
+- **Severity:** P1
+- **Recurrence of:** none; this is distinct from structured HER child-stream
+  leakage (`HER-20260812-014`) because the missing records originate in HASHI's
+  in-process HER adapter logger.
+- **Discovered:** 2026-08-13 00:46 AEST during the first live `HABIT-WIRE`
+  `HW00` cell.
+- **Reporter:** `lin_yueru@HASHI2`, `her_debug` controller.
+- **Batch / cell / scenario / run IDs:**
+  `sl-20260811-231651520023-b272` /
+  `HER-LIVE-DS-FLASH-FIXED-LOW-HABIT-WIRE` / `HW00` /
+  `her-20260812T144606Z-6dce55`.
+- **Provider / model / mode / effort:** Official DeepSeek /
+  `deepseek-v4-flash` / fixed / low; `habit_on` / `habit_wire`.
+- **Expected:** `Backend.HER.ajiao` lifecycle telemetry for selected Habit IDs,
+  Meditation enqueue, and Meditation completion is retained in Ajiao's current
+  `events.log`, so the required matched-ID and durable-job cross-check can be
+  independently audited.
+- **Actual:** foreground and Meditation both succeeded, the journal reached
+  `no_change`, two same-route/model calls returned HTTP 200, and user-visible
+  background delivery stayed zero, but all three lifecycle records were absent
+  from `events.log`. The mandatory live cell therefore failed closed.
+- **User-visible impact:** no duplicate or leaked response occurred, but every
+  live Habit cell lacks the required persisted selection/lifecycle evidence and
+  cannot be certified.
+- **First divergent event:** the adapter called `self.logger.info()` for
+  `HER Habit planning`, but `Backend.HER.ajiao` had no file handler and its INFO
+  record was discarded by the root console filter.
+- **Reproduction rate:** 1/1 exact live `HW00` attempts on the frozen candidate.
+- **Evidence bundle:**
+  `superloops/loops/sl-20260811-231651520023-b272/evidence/HD-003-HER-20260812-025-reproduction.json`
+  and the retained redacted run under
+  `workspaces/ajiao/her_test_lab/runs/her-20260812T144606Z-6dce55/evidence/`.
+- **Secrets/redaction checked:** yes; the defect receipt contains hashes and
+  bounded identifiers only.
+- **Suspected owner:** HASHI flexible runtime logging integration.
+- **Root cause:** `FlexibleAgentRuntime._setup_logging()` attaches file handlers
+  only to `FlexRuntime.<agent>` logger names. The in-process HER adapter uses
+  `Backend.HER.<agent>`; that logger falls through to the root console handler,
+  whose INFO filter suppresses backend chatter. The adapter emitted the records,
+  but no durable sink received them.
+- **Known-bad candidate:** composite
+  `f86de57869dc23e630a1c80eb9a65f818950e5adcbf9a9036f5a58954278bbb8`;
+  HASHI commit `47c1e9c83006c62fa4ad9bc326fdd6ddc1711a48` with
+  `orchestrator/flexible_agent_runtime.py` SHA-256
+  `ea8cc662e61f56497d94c40ea02a41f8f631e493b859a013638c14b6e23227bb`;
+  HER `0.1.0-hashi.9` /
+  `431876b9120be26e6ecaffa7f0f5b1dc4cebd2c8bf123c135996e71ffa0367f1`.
+- **Repair:** `FlexibleAgentRuntime._setup_logging()` now reuses the current
+  agent `events.log` handler for `Backend.HER.<agent>`, fixes its level at INFO,
+  clears stale handlers, and disables propagation so every backend record has
+  one durable copy without console duplication.
+- **Regression test:**
+  `tests/test_flexible_backend_state.py::test_flexible_runtime_persists_her_backend_events`
+  failed on the known-bad logging topology exactly as intended: `1 failed in
+  0.44s`, with zero of the three emitted HER Habit lifecycle records persisted.
+  RED evidence:
+  `superloops/loops/sl-20260811-231651520023-b272/evidence/HD-003-HER-20260812-025-regression-red.json`.
+- **Fixed-build result:** the exact regression passed (`1 passed in 0.37s`),
+  then the affected flexible-backend, Habit–Meditation, and runtime-pipeline set
+  passed (`110 passed`, 7 deprecation warnings), the joint focused set passed
+  (`151 passed in 23.23s`), and the full HASHI suite passed (`1951 passed`, 3
+  skipped, 23 warnings). Joint Layer A, template validation, HER package
+  metadata verification, and repaired-candidate refreeze also passed.
+- **Required live retest:** exact
+  `HER-LIVE-DS-FLASH-FIXED-LOW-HABIT-WIRE/HW00`, followed by the defined
+  same-route other-mode and provider twins as their normal queue items.
+- **Live retest result:** PASS on A013 / `her-20260812T151833Z-231190` against
+  composite candidate
+  `39f50ce8e9c6cf4c28e1a003e4be07bb1ea044454334b40c72bec68a151c5ee5`.
+  The foreground receipt was byte-exact; the isolated Meditation job
+  `3a23e74bfc454236ac99d53acd2429ef` reached durable `no_change` in one attempt;
+  both Official DeepSeek calls used `deepseek-v4-flash` and returned HTTP 200;
+  foreground and Meditation sessions were distinct; tools and user-visible
+  background deliveries were zero; and the bounded Habit sandbox was removed.
+  Ajiao's runtime log retained exactly one correlated planning, queue, and
+  completion record. Controller receipt:
+  `superloops/loops/sl-20260811-231651520023-b272/evidence/HD-003-A013-hw00-repair-retest-pass.json`.
+- **Closure note:** A012 remains immutable nonterminal failure evidence. This
+  journal closeout changes a bound HASHI build input, so the controller must
+  refreeze the resulting documentation-only composite candidate and rerun the
+  same HW00 binding check before granting final matrix credit. That mandatory
+  candidate-binding retest does not reopen this verified defect. Pro remains
+  locked and no fallback is permitted.
 - **Recurrence count:** 0
 
 ## New-entry template

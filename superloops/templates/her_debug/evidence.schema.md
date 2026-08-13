@@ -12,6 +12,8 @@ provider and exact base-route family
 model slug
 mode
 effort
+feature_profile (`core_off` or `habit_on`)
+habit_scenario (`none`, `habit_wire`, `habit_deep`, or `habit_fault`)
 wave
 scenario
 presentation policy
@@ -22,9 +24,10 @@ final verified attempt ID
 stale reason, when invalidated
 ```
 
-The ledger must reconcile to 24 Flash core cells, 24 Pro core cells, 480 core
-scenario groups, and 384 presentation runs, plus the plan's boundary,
-continuity, endurance, restart, and fault work.
+The ledger must reconcile to 24 Flash and 24 Pro `CORE-OFF` cells, 24 Flash and
+24 Pro `HABIT-WIRE` cells, eight `HABIT-DEEP` cells, four `HABIT-FAULT` cells,
+480 core scenario groups, and 384 core presentation runs, plus the plan's
+offline, boundary, continuity, endurance, restart, migration, and fault work.
 
 ## Dispatch and follow-up ledger
 
@@ -62,6 +65,46 @@ acceptance log, and assertion-level verdict.
 
 Live manifests must contain one of the exact stage-allowed route/model pairs.
 Any other live API/model is a stop-the-line violation, not fallback evidence.
+
+Every `CORE-OFF` attempt also proves the raw and executed prompts are identical
+and that no Habit directory, Meditation journal entry, or Meditation model call
+was created. Every `HABIT-*` attempt additionally records configuration source,
+raw and executed prompt hashes, selected Habit IDs, foreground and Meditation
+session IDs, exact route/model, permission mode, journal timeline and attempt
+count, durable actions hash, Habit/Dream before-and-after inventories, and the
+count of user-visible background events.
+
+Habit formation, retrieval, and behavioral use are three separate claims and
+must never be inferred from one another:
+
+```text
+formation_observed
+formation_evidence_refs
+retrieval_observed
+retrieval_evidence_refs
+behavioral_use_observed
+behavioral_use_evidence_refs
+no_change_claim_limit_acknowledged
+foreground_lock_wait_ms
+foreground_lock_wait_limit_ms
+```
+
+`formation_observed=true` requires a durable non-empty Meditation action and a
+reconciled Habit inventory change. `retrieval_observed=true` requires the exact
+Habit ID in both the selection ledger and executed planning context.
+`behavioral_use_observed=true` requires a predeclared observable next-request
+output or tool-side-effect assertion that matches the Habit while remaining
+subordinate to the current request. A selected ID, changed prompt hash, or model
+assertion alone is not behavioral-use evidence.
+
+A terminal `no_change` proves only that the Meditation wire, isolation, journal,
+and silence contract completed. It is not evidence of formation, retrieval, or
+behavioral use. Such attempts set the unsupported observations to `false` or
+`null` and set `no_change_claim_limit_acknowledged=true`; they may satisfy
+`HABIT-WIRE`, but cannot satisfy a designated `HABIT-DEEP` lifecycle packet.
+Every `HABIT-DEEP` lifecycle packet must link evidence for all three observations
+as `true`. `HABIT-FAULT` additionally records the measured foreground lock wait
+and its predeclared upper bound.
 
 ## Defect cycle
 
@@ -102,7 +145,8 @@ populate this terminal record.
 
 ## Final evidence
 
-`PASSED` requires the final candidate identity, complete Layer A verdict, both
-24-cell stage gates, every ancillary suite, full HASHI/HER regression results,
+`PASSED` requires the final composite candidate identity (HASHI commit/build,
+HER source/package, and oracle hashes), complete joint Layer A verdict, both
+24-cell core gates and both Habit gates, every ancillary suite, full HASHI/HER regression results,
 all affecting journal entries verified, Ajiao restoration evidence, and a
 drained/classified reply ledger with no active dispatch, wait, or blocker.

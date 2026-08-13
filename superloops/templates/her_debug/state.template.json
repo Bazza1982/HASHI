@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "loop_id": "{{LOOP_ID}}",
-  "title": "HER x DeepSeek two-stage debug certification",
+  "title": "HER x DeepSeek joint core and Habit two-stage debug certification",
   "template": "her_debug",
   "status": "paused",
   "terminal_result": null,
@@ -32,13 +32,20 @@
   "candidate": {
     "hash": null,
     "hashi_commit": null,
+    "hashi_build_sha256": null,
     "her_source_commit": null,
     "package_sha256": null,
-    "evidence_valid": false
+    "oracle_sha256": null,
+    "evidence_valid": false,
+    "freeze_status": null
   },
   "gates": {
     "layer_a_offline": "pending",
+    "core_flash": "pending",
+    "habit_flash": "pending",
     "stage_1_flash": "pending",
+    "core_pro": "locked",
+    "habit_pro": "locked",
     "stage_2_pro": "locked",
     "final_same_candidate": "locked"
   },
@@ -49,6 +56,10 @@
     "one_active_worker_packet": true,
     "cheap_before_expensive": true,
     "stage_2_requires_stage_1_pass": true,
+    "stage_2_requires_both_flash_subgates": true,
+    "core_profile_requires_habit_disabled": true,
+    "habit_profile_requires_habit_enabled": true,
+    "live_packets_require_frozen_joint_layer_a_candidate": true,
     "shared_fix_requires_flash_revalidation": true,
     "allow_unlisted_live_provider": false,
     "allow_unlisted_live_model": false,
@@ -73,6 +84,8 @@
     "must_follow_up_nonterminal_failure": true,
     "must_surface_stagnation": true,
     "stagnation_observation_limit": 3,
+    "operator_pause_requires_explicit_resume": true,
+    "controller_transient_drain_auto_resumes": true,
     "must_continue_until_terminal": true,
     "terminal_conditions": [
       "PASSED",

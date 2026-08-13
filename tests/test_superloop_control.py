@@ -80,6 +80,64 @@ def test_resume_requires_drain_and_restores_prior_action(tmp_path: Path) -> None
     assert "pause" not in state.get("control", {})
 
 
+def test_controller_transient_drain_auto_resumes_without_weakening_operator_pause(
+    tmp_path: Path,
+) -> None:
+    store = SuperloopStore(tmp_path / "superloops")
+    _create_loop(store, "sl-control-transient", active_dispatch_id="req-0082")
+    control = SuperloopControlService(store)
+
+    started = control.begin_controller_drain(
+        "sl-control-transient",
+        active_request_ids=["req-0082"],
+        resume_action={"kind": "dispatch_task", "task_id": "task-001"},
+    )
+
+    assert started == {
+        "ok": True,
+        "loop_id": "sl-control-transient",
+        "status": "running",
+        "active_request_ids": ["req-0082"],
+        "drain_complete": False,
+        "auto_resumed": False,
+    }
+    draining = store.load_loop_state("sl-control-transient")
+    assert draining["status"] == "running"
+    assert draining["next_action"]["kind"] == "await_controller_drain"
+    assert draining["control"]["controller_drain"]["resume_policy"] == (
+        "automatic_after_drain"
+    )
+    try:
+        with guarded_dispatch(store, "sl-control-transient"):
+            raise AssertionError("active controller drain admitted a dispatch")
+    except DispatchInterlockError as exc:
+        assert exc.decision.reason == "controller_drain_active"
+
+    completed = control.mark_controller_drained("sl-control-transient")
+
+    assert completed["ok"] is True
+    assert completed["auto_resumed"] is True
+    resumed = store.load_loop_state("sl-control-transient")
+    assert resumed["status"] == "running"
+    assert resumed["next_action"] == {
+        "kind": "dispatch_task",
+        "task_id": "task-001",
+    }
+    assert "controller_drain" not in resumed.get("control", {})
+    with guarded_dispatch(store, "sl-control-transient"):
+        pass
+
+    control.pause("sl-control-transient", active_request_ids=["req-0083"])
+    control.mark_drained("sl-control-transient")
+    operator_paused = store.load_loop_state("sl-control-transient")
+    assert operator_paused["status"] == "paused"
+    assert operator_paused["next_action"]["kind"] == "await_operator_resume"
+    assert operator_paused["control"]["pause"]["kind"] == "operator_pause"
+    assert operator_paused["control"]["pause"]["resume_policy"] == (
+        "explicit_operator"
+    )
+
+
 def test_resume_is_blocked_by_open_phase_issue(tmp_path: Path) -> None:
     store = SuperloopStore(tmp_path / "superloops")
     _create_loop(

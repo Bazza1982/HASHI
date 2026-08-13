@@ -13,11 +13,19 @@ change a verdict, waive evidence, switch providers/models, or interrupt Ajiao.
 Here, "pending task" means a phase task whose taskboard status is `pending`.
 It does not mean the next selected packet owned by the current `in_progress`
 task. Once the operator has started the campaign, that campaign-scoped
-authority persists until terminal completion, pause, halt, or explicit
+authority persists until terminal completion, an explicit operator pause,
+halt, or explicit
 revocation. Subject to all normal interlocks, the nudge must continue the
 packet queue of the current `in_progress` task without asking for fresh start
 authority for every packet. This continuation does not change a pending phase
 task to `in_progress`.
+
+A controller-owned transient drain is not an operator pause. It must use the
+controller-transient drain contract and automatically restore its saved action
+after the accepted request is drained. Never persist an internal freeze,
+receipt, or candidate guard as `await_operator_resume`. A drained pause without
+explicit `operator_pause` and `explicit_operator` metadata is a validation
+finding and repair case, not permission to idle indefinitely.
 
 On every wake:
 
@@ -52,8 +60,10 @@ On every wake:
    without progress. At that limit, either dispatch it under rule 8, persist a
    concrete wait/blocker, or emit a validation finding. Moving only the next
    check timestamp is forbidden.
-10. Enforce the stage lock on every action: Flash only in Stage 1; Pro only after
-   the persisted Flash gate passes. Never use another API or model as fallback.
+10. Enforce the stage and feature locks on every action: Flash only in Stage 1;
+   Pro only after persisted `core_flash=passed` and `habit_flash=passed`;
+   `CORE-OFF` only with Habit disabled; `HABIT-*` only with the declared Habit
+   scenario enabled. Never use another API or model as fallback.
 11. Treat only confirmed insufficient funds on Official DeepSeek or OpenRouter
    as `BLOCKED_FUNDS`. Rate limits and generic provider errors are explicit
    waits or repair work, never fallback permission.
@@ -63,8 +73,9 @@ On every wake:
 Keep this nudge enabled with unlimited wakes until the loop has persisted one
 of exactly two terminal results:
 
-- `PASSED`: all required levels, efforts, cells, suites, defect repairs,
-  regressions, same-candidate gates, cleanup, and reply drain succeeded.
+- `PASSED`: all required `CORE-OFF`, `HABIT-WIRE`, `HABIT-DEEP`,
+  `HABIT-FAULT`, offline/migration suites, defect repairs, regressions,
+  same-composite-candidate gates, cleanup, and reply drain succeeded.
 - `BLOCKED_FUNDS`: funds exhaustion was confirmed on a required route,
   completed evidence was preserved, and every unrun work item was listed.
 

@@ -9,6 +9,8 @@
         "actively monitor progress without interrupting Ajiao while she is running",
         "turn every nonterminal failed response into a persisted classification and follow-up",
         "verify test evidence and enforce Flash-before-Pro and cheap-before-expensive gates",
+        "keep CORE-OFF and Habit-on work on separate evidence tracks and require both Flash subgates before Pro",
+        "invalidate release credit after product, oracle, template, validator, or instantiated-ledger changes",
         "enforce the frozen provider/model allowlist and funds terminal rule",
         "complete closeout only after same-loop replies are drained and exact exit evidence exists"
       ],
@@ -18,6 +20,7 @@
         "dispatch a duplicate packet while Ajiao is running",
         "treat a failed Ajiao response as a terminal campaign result",
         "unlock Pro before the complete Flash gate passes",
+        "count historical pre-migration or stale-candidate evidence toward a current joint gate",
         "use an unlisted API or model or accept fallback evidence",
         "close from health process or port checks alone"
       ]
@@ -28,6 +31,7 @@
       "responsibilities": [
         "execute only the exact active test or repair packet",
         "preserve packet attempt route model mode effort candidate and evidence identities",
+        "preserve feature_profile and habit_scenario identities and never run a CORE-OFF packet with Habit enabled",
         "report verified successes failures partial progress and blockers honestly",
         "for a confirmed product defect add the regression apply the bounded repair and exact retest requested by the controller",
         "avoid replaying successful side effects after an interrupted or failed attempt"
@@ -45,6 +49,8 @@
       "responsibilities": [
         "personally reconcile provider HER HASHI tool delivery and workspace evidence",
         "verify journal and regression completeness after every fixed defect",
+        "reconcile Habit prompt/session/model/permission/journal/action/inventory evidence for every Habit packet",
+        "verify formation, retrieval, and behavioral-use evidence separately and reject selected-ID or no_change overclaims",
         "invalidate stale candidate evidence and enqueue the required revalidation",
         "confirm the final 48-cell same-candidate gate and restored Ajiao state"
       ],
