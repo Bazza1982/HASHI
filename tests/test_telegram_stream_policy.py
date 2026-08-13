@@ -142,6 +142,48 @@ def test_display_policy_migrates_effective_legacy_typing_and_persists_override(t
     assert persisted.source == "persisted override"
 
 
+def test_display_preferences_survive_new_runtime_objects(tmp_path):
+    first_runtime = _runtime(tmp_path)
+    telegram_stream_policy.set_display_preference(first_runtime, "verbose", False)
+    telegram_stream_policy.set_display_preference(first_runtime, "think", False)
+    telegram_stream_policy.set_typing_enabled(first_runtime, False)
+
+    restarted_runtime = _runtime(tmp_path)
+
+    assert telegram_stream_policy.get_display_preference(restarted_runtime, "verbose") is False
+    assert telegram_stream_policy.get_display_preference(restarted_runtime, "think") is False
+    assert telegram_stream_policy.get_display_policy(restarted_runtime).typing_enabled is False
+
+
+@pytest.mark.parametrize(
+    ("marker", "name", "expected"),
+    [
+        (".verbose", "verbose", True),
+        (".verbose_off", "verbose", False),
+        (".think", "think", True),
+        (".think_off", "think", False),
+    ],
+)
+def test_display_preferences_migrate_legacy_markers(tmp_path, marker, name, expected):
+    runtime = _runtime(tmp_path)
+    (runtime.workspace_dir / marker).touch()
+
+    assert telegram_stream_policy.get_display_preference(runtime, name) is expected
+
+    payload = json.loads(
+        telegram_stream_policy.preferences_path(runtime).read_text(encoding="utf-8")
+    )
+    assert payload["telegram_display"][name] is expected
+
+
+def test_persisted_display_preference_wins_over_stale_marker(tmp_path):
+    runtime = _runtime(tmp_path)
+    (runtime.workspace_dir / ".think_off").touch()
+    telegram_stream_policy.set_display_preference(runtime, "think", True)
+
+    assert telegram_stream_policy.get_display_preference(_runtime(tmp_path), "think") is True
+
+
 @pytest.mark.asyncio
 async def test_typing_command_does_not_change_verbose_or_think_preferences(tmp_path):
     runtime = object.__new__(FlexibleAgentRuntime)

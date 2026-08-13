@@ -228,10 +228,10 @@ class FlexibleAgentRuntime:
 
         # Workspace structure
         self.workspace_dir = config.workspace_dir
-        # Load persisted verbose preference (.verbose_off file presence = OFF, absence = ON)
-        self._verbose: bool = not (self.workspace_dir / ".verbose_off").exists()
-        # Load persisted think preference (.think_off file presence = OFF, absence = ON)
-        self._think: bool = not (self.workspace_dir / ".think_off").exists()
+        # Load the durable workspace preference, migrating legacy markers once.
+        self._verbose = telegram_stream_policy.get_display_preference(self, "verbose")
+        # The same JSON survives sessions, runtime recreation, and host reboot.
+        self._think = telegram_stream_policy.get_display_preference(self, "think")
         # Load persisted Telegram notification preference (.notify_on presence = audible, absence = silent)
         self._notify_enabled: bool = (self.workspace_dir / ".notify_on").exists()
         self._think_buffer: list[str] = []
@@ -2039,6 +2039,7 @@ class FlexibleAgentRuntime:
 
         if target == "verbose":
             self._verbose = value == "on"
+            telegram_stream_policy.set_display_preference(self, "verbose", self._verbose)
             _f = self.workspace_dir / ".verbose_off"
             if self._verbose:
                 _f.unlink(missing_ok=True)
@@ -2053,6 +2054,7 @@ class FlexibleAgentRuntime:
 
         elif target == "think":
             self._think = value == "on"
+            telegram_stream_policy.set_display_preference(self, "think", self._think)
             _f = self.workspace_dir / ".think_off"
             if self._think:
                 _f.unlink(missing_ok=True)
@@ -3638,6 +3640,7 @@ class FlexibleAgentRuntime:
             _verbose_file.unlink(missing_ok=True)
         else:
             _verbose_file.touch()
+        telegram_stream_policy.set_display_preference(self, "verbose", self._verbose)
         await self._reply_text(
             update,
             self._verbose_menu_text(),
@@ -3688,6 +3691,7 @@ class FlexibleAgentRuntime:
             _think_file.unlink(missing_ok=True)
         else:
             _think_file.touch()
+        telegram_stream_policy.set_display_preference(self, "think", self._think)
         await self._reply_text(
             update,
             self._think_menu_text(),
