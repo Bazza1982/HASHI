@@ -4,6 +4,44 @@ This document describes known issues and their workarounds in HASHI.
 
 ---
 
+## HER Full-Context Modes Can Also Resume a Stored Session
+
+**Status:** Release blocker
+
+**Severity:** High
+
+**Affected Users:** HER agents in Flex, Wrapper, Audit, or Dual Brain modes
+
+The Bridge assembles full context in these modes, but the current HER adapter
+does not implement the runtime's session-mode hook and can still pass
+`--resume` for its persisted session. The provider may therefore receive both
+the assembled conversation and HER's prior internal conversation.
+
+Until explicit no-resume behavior and regression coverage land, use a verified
+fixed-mode HER session for continuity or clear the HER session before a
+full-context turn. Do not claim Flex/composed HER continuity certification.
+
+---
+
+## Two HER Habit/Meditation Pipelines Can Run Together
+
+**Status:** Release blocker for default enablement
+
+**Severity:** Medium
+
+**Affected Users:** HER agents with adapter-direct `habit_meditation` enabled
+
+The runtime-governed SQLite candidate/evidence path and the adapter-direct JSON
+`/habit` path have independent eligibility gates. If both gates pass, one
+foreground run can receive two Planning injections and schedule two Meditation
+jobs with different write policies.
+
+Keep the adapter-direct path disabled by default until one owner is selected or
+tested mutual exclusion is implemented. Manage the SQLite path through
+`/skill habits` and the JSON path through `/habit`; the stores are not aliases.
+
+---
+
 ## Memory Contamination from CLI Integration
 
 **Status:** Known Issue (By Design)  
@@ -75,4 +113,4 @@ Found a new issue? Please report it at:
 
 ---
 
-*Last updated: 2026-03-15*
+*Last updated: 2026-08-13*

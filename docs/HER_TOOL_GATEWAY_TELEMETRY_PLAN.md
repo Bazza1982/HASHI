@@ -4,7 +4,7 @@ Status: active implementation for packaged HER `0.1.0-hashi.10`; remaining telem
 cross-platform release work is tracked below
 Owner: HASHI
 Created: 2026-05-23
-Updated: 2026-08-12
+Updated: 2026-08-13
 
 HER is derived from the MIT-licensed Claw runtime. Upstream Claw names are
 retained below only for source, protocol, environment, and license references.
@@ -15,6 +15,30 @@ Related docs:
 - [HASHI_LAYERED_RUNTIME_BOUNDARIES.md](HASHI_LAYERED_RUNTIME_BOUNDARIES.md)
 - [TOKEN_AUDIT_SPEC.md](TOKEN_AUDIT_SPEC.md)
 - [tools.md](tools.md)
+- [HER_BACKEND_CONTRACT.md](HER_BACKEND_CONTRACT.md)
+- [her_multimedia_multimodal_plan.md](her_multimedia_multimodal_plan.md)
+- [HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md)
+
+## Current implementation snapshot
+
+The original problem and architecture sections below are retained as the design
+record. They are no longer a description of the pre-Gateway runtime:
+
+- packaged Linux HER `0.1.0-hashi.10` is pinned by manifest, provenance, and
+  SHA-256; the manifest's Windows binary is older and not `.10` parity;
+- the per-agent owner-only GatewayContext and required MCP stdio server are
+  implemented around the canonical ToolRegistry, including permission checks,
+  audit, argument validation, loop guards, and Browser tools;
+- `stream-json`, session ID capture/resume, structured tool/progress/usage
+  events, exact reasoning fragments, and incomplete-run diagnostics are active;
+- `.10` preserves canonical MCP images, and the HASHI Gateway also normalizes
+  the reviewed legacy screenshot result shapes;
+- `media_read` supplies bounded image/PDF/audio/video content without storing
+  raw base64 in normal session output.
+
+Remaining gates are explicit HER session-mode control for Flex/composed turns,
+Habit-pipeline ownership, live post-reboot multimedia/Habit evidence, complete
+reasoning-token source persistence, and a current Windows package.
 
 ## Decision
 
@@ -56,7 +80,7 @@ Claw stream-json / structured events -> HASHI StreamEvent -> token audit
 Do not fake reasoning token counts. If a provider/runtime does not expose real
 thinking tokens, HASHI must record that explicitly.
 
-## Problem Statement
+## Historical Problem Statement
 
 API backends currently receive HASHI tools directly:
 
@@ -70,10 +94,10 @@ openrouter-api / deepseek-api / ollama-api
 HER mode is different:
 
 ```text
-her
-  -> HASHI starts a Claw subprocess, currently resolved from an external binary
-  -> Claw owns its own model/tool loop
-  -> HASHI receives final JSON only
+her (before the packaged/Gateway work)
+  -> HASHI started an externally resolved Claw subprocess
+  -> Claw owned its own model/tool loop
+  -> HASHI received final JSON only
 ```
 
 Therefore, a HER backend agent can be configured in HASHI, but it does not
@@ -81,19 +105,20 @@ automatically inherit the internet tools that are available to API backends.
 Passing `allowed_tools` to Claw only permits Claw-native tool names or tools that
 Claw discovers through its own extension surfaces.
 
-This caused agents such as `diaochan` to correctly report that the current
-HER backend did not have browser or URL-fetch capability, even though the same
+This caused agents such as `diaochan` to correctly report that the earlier HER
+backend did not have browser or URL-fetch capability, even though the same
 agent has `openrouter-api` and `deepseek-api` configurations with HASHI
 `tools.allowed = ["*"]`.
 
-There is also a deployment problem. If another HASHI instance pulls the latest
+There was also a deployment problem. If another HASHI instance pulled the
 adapter code but does not have a compatible Claw binary installed, HER mode is
 not actually portable. That violates the desired user experience for the HASHI
 deck: the package should carry what it needs.
 
-## Evidence From Current Code
+## Historical Evidence Before Implementation
 
-HASHI attaches `ToolRegistry` only to API backends today:
+Before the Gateway implementation, HASHI attached `ToolRegistry` only to API
+backends:
 
 ```text
 orchestrator/flexible_backend_manager.py
@@ -101,7 +126,7 @@ orchestrator/flexible_backend_manager.py
     -> _attach_tool_registry(...)
 ```
 
-The HER adapter currently passes Claw's own tool list into the subprocess:
+The earlier HER adapter passed only Claw's own tool list into the subprocess:
 
 ```text
 adapters/her.py
@@ -131,7 +156,7 @@ ConversationRuntime model/tool iteration
 AssistantEvent::Thinking
 ```
 
-But the current HASHI Engine Runtime (HER) JSON surface is not enough for parity:
+The earlier HER JSON surface was not enough for parity:
 
 ```text
 --output-format supports text/json, not stream-json
@@ -209,10 +234,11 @@ hashi-her packaged runtime
   -> HASHI records usage and displays verbose status
 ```
 
-## In-Package Claw Runtime
+## In-Package Claw Runtime Design
 
-Claw should be integrated into the HASHI source and release pipeline as a
-packaged sidecar runtime.
+HER is integrated into the HASHI release pipeline as a packaged sidecar runtime.
+The design layout below is historical; the active binary/provenance layout is
+defined by `hashi_assets/her/manifest.json` and `packaging/her/`.
 
 Recommended source layout:
 
@@ -243,7 +269,9 @@ should stay clear:
 vendored source -> release build artifact -> packaged runtime binary
 ```
 
-Runtime lookup order in `adapters/her.py` should become:
+Runtime lookup supports explicit/developer sources under permissive policies,
+but production uses `runtime_policy = require-packaged` and fails closed. The
+original proposed lookup order was:
 
 1. Explicit backend `claw_binary_path` or `claw_cmd`.
 2. Global HASHI `claw_binary_path`.
@@ -371,8 +399,9 @@ packaged runtime is riskier than requiring an explicit override.
 
 ### Packaging Inclusion
 
-`hashi_assets/` does not exist in the current repository and must be added with
-explicit packaging rules. Phase 0 must update the active packaging mechanism:
+`hashi_assets/her/` now exists and contains the manifest, license, certification
+baseline, and versioned artifacts. Distribution packaging must continue to
+include these assets explicitly through the active packaging mechanism:
 
 ```text
 MANIFEST.in
@@ -384,13 +413,13 @@ Acceptance requires a built HASHI artifact to contain:
 
 ```text
 hashi_assets/her/manifest.json
-hashi_assets/her/bin/<hashi_platform_key>/hashi-her
-vendor/claw-code/LICENSE
+hashi_assets/her/releases/<version>/<hashi_platform_key>/hashi-her
+hashi_assets/her/CLAW_LICENSE
 ```
 
-The current `setup.py` only packages selected Python packages and does not yet
-include arbitrary binary assets. This must be fixed before the packaged runtime
-can be considered shipped.
+Artifact-specific release tests must continue proving that the selected HASHI
+package includes the manifest, license, and intended platform binary; presence
+in the source tree alone is not distribution evidence.
 
 ## Review Feedback Evaluation
 
@@ -573,7 +602,7 @@ Required startup behavior:
 
 ## Internet Tool Surface
 
-The first required gateway tier for Claw parity is the stateless web tier:
+The first implemented gateway tier for HER parity was the stateless web tier:
 
 ```text
 web
@@ -587,8 +616,8 @@ web_fetch
 http_request
 ```
 
-The browser tier is intentionally deferred until the web tier proves the
-cross-process gateway path:
+The Browser tier was then enabled after the cross-process Gateway, session
+identity, schema validation, and audit path were established:
 
 ```text
 browser_session
@@ -615,8 +644,9 @@ Reason:
 - `browser_*` tools need browser bridge discovery, session coordination, CDP
   access, page state, and stronger audit controls.
 
-Later tiers can expose file, shell, communication, desktop, Windows, Obsidian,
-and remote tools, but internet parity should be proven first.
+Additional file, shell, communication, desktop, Windows, Obsidian, and remote
+tools remain governed by the canonical registry and agent allowlist; they are
+not implied by enabling HER or Browser support.
 
 ## Gateway Policy And Validation
 
@@ -824,6 +854,11 @@ When `is_error = true`, `error_kind` must use the enum defined in
 
 ### Phase 0: Vendor And Package Claw Runtime
 
+Status: **implemented for the certified Linux package; current Windows parity
+and additional platform artifacts remain open.** Source provenance is pinned
+rather than inferred from a branch name, and the upstream MIT notice ships as
+`CLAW_LICENSE`.
+
 Deliverables:
 
 - Import the reviewed MIT Claw source into a dedicated vendor directory.
@@ -951,7 +986,7 @@ Acceptance:
 
 ### Phase C: Claw MCP Config Integration
 
-Status: **implemented for packaged `0.1.3-hashi.2`.** HASHI creates an isolated
+Status: **implemented and retained through packaged `0.1.0-hashi.10`.** HASHI creates an isolated
 `CLAW_CONFIG_HOME`, validates the required `hashi-tools` entry during initialization,
 and resumes the session ID emitted by Claw.
 
@@ -1060,22 +1095,22 @@ hotfix validation.
 Focused Python checks:
 
 ```bash
-python3 -m py_compile adapters/her.py tools/registry.py
-pytest tests/test_her_adapter.py tests/test_workzone.py tests/test_deepseek_api.py
+python3 -m py_compile adapters/her.py tools/registry.py tools/gateway/mcp_stdio.py tools/media_read.py
+pytest -q tests/test_her_adapter.py tests/test_tool_gateway_mcp.py tests/test_media_read.py tests/test_runtime_media.py
 ```
 
 Packaged runtime checks:
 
 ```bash
-pytest tests/test_claw_packaging.py
-python3 scripts/claw_package_probe.py --json
+pytest -q tests/test_her_certification_baseline.py
+python scripts/her_runtime_probe.py --check version
+python scripts/verify_her_certification.py --source-root <pinned-her-source>
 ```
 
 Gateway checks:
 
 ```bash
-pytest tests/test_tool_gateway.py tests/test_tool_gateway_mcp.py
-pytest tests/test_tool_gateway_parity.py
+pytest -q tests/test_tool_gateway_mcp.py tests/test_tool_audit.py
 ```
 
 Live smoke checks:
@@ -1088,14 +1123,17 @@ Claw web_fetch: fetches a public URL
 Claw missing gateway: fails clearly
 Claw stream-json: emits tool_start/tool_end/usage
 Token audit: thinking_token_source is accurate
+MCP image: provider receives model-visible image content, not text/base64
+media_read: image, mixed PDF, normalized audio, and video limits behave safely
 ```
 
-Browser smoke checks are added only after Phase B2:
+Browser and compatibility smoke checks:
 
 ```text
 Claw browser_get_text: reads a public page
 Claw browser_session: preserves expected session behavior
 Browser audit: redacted and categorized
+Legacy browser/desktop/Windows screenshot: normalized to bounded MCP image
 ```
 
 Regression checks:
@@ -1107,44 +1145,41 @@ API backend tools still work
 No secrets in logs
 No Cargo/Rust needed at runtime
 No HASHI core restart required for gateway/adapter updates
+Fixed HER resumes incrementally; Flex/composed HER does not also resume
+Exactly one selected HER Habit/Meditation owner runs per foreground request
 ```
 
-## Open Questions
+## Decisions Closed And Questions Remaining
 
-1. Should the first gateway tier for Claw be `web` only, `web,browser`, or `*`?
-2. Should Claw gateway MCP be required by default for every `her` backend,
-   or opt-in via backend config?
-3. Should browser tools run through the current browser bridge, Playwright
-   fallback, or both?
-4. Should raw thinking text ever be surfaced to users, or only hidden summaries
-   and token counts?
-5. Should API backends move to Tool Gateway in the same release or after Claw
-   parity is proven?
-6. Should HASHI ship one full package with Claw included, or split a slim core
-   package and a full deck package?
-7. Which platform binaries are release-blocking for the first in-package Claw
-   rollout?
-8. Should MCP state sharing use full config reload, context snapshots, or IPC?
+Closed decisions:
 
-## Recommended Answers
+1. Gateway state uses an owner-only, per-agent context snapshot; broad config
+   reload is not the default.
+2. HER uses the canonical ToolRegistry and existing Browser boundary rather
+   than duplicating tool implementations.
+3. The required `hashi-tools` MCP entry fails backend initialization clearly.
+4. Hidden reasoning is never reconstructed; exact provider-visible fragments
+   and source-labelled usage are the observability boundary.
+5. API adapters keep their established direct registry path until a separately
+   justified migration.
+6. Production packaged resolution is checksum- and provenance-checked and
+   fail-closed.
 
-1. Start with `web` only. Add `browser` after cross-process session and audit
-   behavior are proven.
-2. Make gateway required when `tools` is configured on `her`; otherwise
-   preserve current read-only Claw behavior.
-3. Prefer existing browser bridge discovery first, with Playwright fallback.
-4. Do not show raw hidden reasoning by default. Show status and token counts.
-5. Keep API direct path initially; migrate to gateway facade after parity tests.
-6. Ship Claw in the normal full HASHI deck. A separate slim package can exist
-   later, but it must not be the default user path for HER mode.
-7. Treat Linux/WSL x86_64 and Windows x86_64 as first rollout gates; add macOS
-   after the build pipeline is stable.
-8. Use per-agent GatewayContext snapshots first; reserve IPC for a later
-   optimization.
+Remaining decisions:
+
+1. What explicit adapter policy disables HER resume for Flex/composed
+   full-context turns while preserving fixed-mode session continuity?
+2. Which HER Habit implementation is authoritative, or what mutual-exclusion
+   rule coordinates the runtime and adapter paths?
+3. Is a `.10`-equivalent Windows package required for the next standalone
+   HASHI release, or will that release be Linux/WSL-only?
+4. When will token-audit persistence carry the complete
+   `thinking_token_source` contract on every provider route?
 
 ## Acceptance Definition
 
-This plan is complete when:
+The core packaging, Gateway, Browser, structured-stream, and multimodal parts of
+this plan are implemented. The plan is fully complete when:
 
 - HER backend agents can use HASHI internet tools through a standard gateway.
 - Tool execution is logged with structured, redacted audit records.
@@ -1155,3 +1190,7 @@ This plan is complete when:
 - MCP subprocess state is passed through minimal, permissioned GatewayContext
   snapshots rather than full broad config reconstruction.
 - The feature can be adopted by `/reboot` without restarting the HASHI process.
+- Fixed and full-context modes enforce non-overlapping HER session semantics.
+- The selected HER Habit/Meditation ownership policy is deterministic.
+- Current release platforms and token-source telemetry pass their declared
+  certification matrix.
