@@ -683,8 +683,9 @@ async def test_meditation_is_isolated_read_only_and_written_by_the_adapter(tmp_p
     assert call.kwargs["resume"] is None
     assert call.kwargs["track_session_identity"] is False
     assert call.kwargs["permission_mode_override"] == "read-only"
-    assert call.kwargs["allowed_tools_override"] == list(MEDITATION_ALLOWED_TOOLS)
+    assert call.kwargs["allowed_tools_override"] == []
     assert call.kwargs["task_env_overrides"]["CLAW_TASK_PLANNING"] == "0"
+    assert call.kwargs["task_env_overrides"]["CLAW_EXECUTION_EFFORT"] == "low"
     assert adapter._session_id == "main-session"
     habits = adapter._her_habit_store().load()
     assert [habit.title for habit in habits] == ["Recover from permission errors"]
@@ -799,7 +800,7 @@ async def test_reused_hashi_request_id_creates_distinct_meditation_jobs(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_meditation_timeout_bounds_foreground_lock_wait_and_stays_silent(
+async def test_meditation_runs_independently_without_blocking_foreground(
     tmp_path,
 ):
     adapter = _adapter(tmp_path, enabled=True)
@@ -854,7 +855,7 @@ async def test_meditation_timeout_bounds_foreground_lock_wait_and_stays_silent(
     await background_task
 
     assert response.text == "FOREGROUND_UNBLOCKED"
-    assert elapsed < 0.75
+    assert elapsed < 0.05
     assert [event.kind for event in visible_events] == ["progress"]
     assert all("Meditation" not in event.summary for event in visible_events)
     job = journal.get(job_id)

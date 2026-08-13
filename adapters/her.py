@@ -1530,7 +1530,11 @@ class HERAdapter(BaseBackend):
         self._gateway_config_home: Path | None = None
         self._habit_store_instance: _her_habits.HERHabitStore | None = None
         self._habit_journal_instance: _her_habits.HERMeditationJournal | None = None
+        # Primary execution never waits for Meditation.  The Meditation lock
+        # serializes only the agent's independent snapshot-processing queue;
+        # the short store lock protects atomic Habit mutations.
         self._habit_execution_lock = asyncio.Lock()
+        self._habit_meditation_execution_lock = asyncio.Lock()
         self._habit_meditation_tasks: set[asyncio.Task] = set()
         self._habit_meditation_job_ids: set[str] = set()
         self._habit_notification_tasks: set[asyncio.Task] = set()
@@ -1878,7 +1882,7 @@ class HERAdapter(BaseBackend):
         request_id = job_id
         completed = False
         try:
-            async with self._habit_execution_lock:
+            async with self._habit_meditation_execution_lock:
                 # Re-resolve the switch immediately before work so an operational
                 # off override can drain already-queued Meditation tasks safely.
                 if not self._habit_meditation_config().enabled:
@@ -1902,12 +1906,11 @@ class HERAdapter(BaseBackend):
                             on_stream_event=None,
                             track_session_identity=False,
                             permission_mode_override="read-only",
-                            allowed_tools_override=list(
-                                _her_habits.MEDITATION_ALLOWED_TOOLS
-                            ),
+                            allowed_tools_override=[],
                             task_env_overrides={
                                 "CLAW_TASK_PLANNING": "0",
                                 "CLAW_MAX_TOOL_ITERATIONS": "8",
+                                "CLAW_EXECUTION_EFFORT": "low",
                             },
                         ),
                         timeout=config.meditation_timeout_seconds,
@@ -1916,38 +1919,40 @@ class HERAdapter(BaseBackend):
                         meditation_result.text,
                         max_actions=int(job.get("max_actions") or config.max_actions),
                     )
-                    action_baseline = self._her_habit_store().capture_action_baseline(
-                        actions,
-                        max_actions=int(job.get("max_actions") or config.max_actions),
-                        idempotency_key=job_id,
-                    )
-                    job = journal.store_actions(
-                        job_id,
-                        actions,
-                        action_baseline=action_baseline,
-                    )
+                    async with self._habit_execution_lock:
+                        action_baseline = self._her_habit_store().capture_action_baseline(
+                            actions,
+                            max_actions=int(job.get("max_actions") or config.max_actions),
+                            idempotency_key=job_id,
+                        )
+                        job = journal.store_actions(
+                            job_id,
+                            actions,
+                            action_baseline=action_baseline,
+                        )
                 actions = job.get("actions")
                 if not isinstance(actions, list):
                     raise _her_habits.MeditationValidationError(
                         "durable Meditation actions are missing"
                     )
-                outcomes, changes = self._her_habit_store().apply_actions_with_changes(
-                    actions,
-                    max_actions=int(job.get("max_actions") or config.max_actions),
-                    idempotency_key=job_id,
-                    audit_context={
-                        "source": "meditation",
-                        "job_id": job_id,
-                        "request_id": job.get("request_id"),
-                        "notification": job.get("notification"),
-                    },
-                    action_baseline=job.get("action_baseline"),
-                )
-                journal.mark_complete(
-                    job_id,
-                    outcomes,
-                    changes=[change.to_payload() for change in changes],
-                )
+                async with self._habit_execution_lock:
+                    outcomes, changes = self._her_habit_store().apply_actions_with_changes(
+                        actions,
+                        max_actions=int(job.get("max_actions") or config.max_actions),
+                        idempotency_key=job_id,
+                        audit_context={
+                            "source": "meditation",
+                            "job_id": job_id,
+                            "request_id": job.get("request_id"),
+                            "notification": job.get("notification"),
+                        },
+                        action_baseline=job.get("action_baseline"),
+                    )
+                    journal.mark_complete(
+                        job_id,
+                        outcomes,
+                        changes=[change.to_payload() for change in changes],
+                    )
                 completed = True
                 self.logger.info(
                     "HER Habit Meditation completed: job=%s actions=%d changes=%d outcomes=%s",
@@ -2522,23 +2527,13 @@ class HERAdapter(BaseBackend):
 
         started = time.perf_counter()
         try:
-            if habit_config.enabled or self._habit_meditation_tasks:
-                async with self._habit_execution_lock:
-                    result = await self._run_task_async(
-                        task_prompt,
-                        resume=self._session_id if session_mode_enabled else None,
-                        request_id=request_id,
-                        on_stream_event=on_stream_event,
-                        track_session_identity=session_mode_enabled,
-                    )
-            else:
-                result = await self._run_task_async(
-                    prompt,
-                    resume=self._session_id if session_mode_enabled else None,
-                    request_id=request_id,
-                    on_stream_event=on_stream_event,
-                    track_session_identity=session_mode_enabled,
-                )
+            result = await self._run_task_async(
+                task_prompt,
+                resume=self._session_id if session_mode_enabled else None,
+                request_id=request_id,
+                on_stream_event=on_stream_event,
+                track_session_identity=session_mode_enabled,
+            )
         except asyncio.CancelledError as exc:
             if self.current_proc:
                 await self.force_kill_process_tree(
@@ -2748,7 +2743,8 @@ class HERAdapter(BaseBackend):
             env=task_env,
             **extra_kwargs,
         )
-        self.current_proc = proc
+        if track_session_identity:
+            self.current_proc = proc
         self._touch_activity()
         communication_task = asyncio.create_task(
             self._communicate_stream_json(
@@ -2806,7 +2802,8 @@ class HERAdapter(BaseBackend):
             await asyncio.gather(communication_task, return_exceptions=True)
             raise
         finally:
-            self.current_proc = None
+            if self.current_proc is proc:
+                self.current_proc = None
 
         duration_ms = self._duration_ms(started)
         secret_values = [task_env.get(key, "") for key in SECRET_ENV_KEYS]
