@@ -6,6 +6,14 @@ Created: 2026-08-11
 Companion record: [HER_bug_journal.md](HER_bug_journal.md)
 Controller template: [HER Debug Two-Stage Superloop](../superloops/templates/her_debug/README.md)
 
+> **2026-08-13 integration note:** this document preserves the original
+> HASHI2/Ajiao certification campaign and its 48-cell oracle. HASHI1 now carries
+> the same certified `.10` package plus later Habit and multimedia changes, but
+> has not inherited a completed 48-cell live verdict. The source audit also
+> found that Flex/composed HER can still resume a stored session while receiving
+> full context (`HER-20260813-022`), which violates the mode oracle below and is
+> a stop-the-line gate. Supplemental Habit/media gates are in section 19.
+
 ## 1. Purpose
 
 This plan certifies that HASHI Engine Runtime (HER) behaves correctly with both
@@ -728,3 +736,46 @@ The template persists exactly two terminal results:
 
 All other failures remain explicit work, waits, or blockers. They never unlock
 another API/model and never disable controller follow-up.
+
+## 19. Post-plan Habit and multimedia gates
+
+The following features landed after the original matrix was designed. They are
+mandatory additions for any release candidate that includes them; passing the
+48 provider/model/mode/effort cells does not imply these gates passed.
+
+### 19.1 Session-mode correction
+
+- add a deterministic regression proving fixed HER captures one session and
+  sends only the next incremental prompt on turn two;
+- prove Flex, Wrapper, Audit, and Dual Brain full-context turns do not pass
+  `--resume` or load an old HER internal conversation;
+- verify mode switches, provider/model changes, `/new`, `/retry`, `/stop`, and
+  process restart never cross agent or model session identity;
+- rerun the fixed/flex twins across both providers after the correction.
+
+### 19.2 Habit ownership
+
+- select the runtime-governed SQLite path, the adapter-direct JSON `/habit`
+  path, or an explicitly coordinated design;
+- prove one eligible foreground run gets exactly one intended Planning
+  injection and one Meditation owner;
+- cover no-change, create, update, delete, invalid output, timeout, restart
+  replay, recoverable reset, audit, and Verbose notification behavior;
+- prove non-HER and ephemeral calls neither read nor write either store.
+
+### 19.3 Media and multimodal
+
+- receive a real Telegram image and prove the provider receives pixels, not a
+  path or base64 text;
+- read a mixed text/scanned PDF and prove bounded text plus rendered-page
+  ordering;
+- normalize and transcribe real audio, and record a truthful failure when the
+  safe transcription route is unavailable;
+- exercise canonical MCP image content and every enabled legacy screenshot
+  family, including parallel tool-result ordering and `isError` handling;
+- inspect Gateway, tool-audit, session, and Habit records for base64, private
+  prompt, path-escape, and credential leakage;
+- repeat after `/reboot min` before allowing any wider `/reboot max` rollout.
+
+The current artifact identity and unresolved release boundary are recorded in
+[HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md).

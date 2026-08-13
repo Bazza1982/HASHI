@@ -55,6 +55,10 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 | `HER-20260812-017` | Fixed — blast-radius verification pending | P1 | AskUserQuestion terminal UI corrupted structured JSONL and hid its correlated tool_end | `stream_json_ask_user_question_preserves_correlated_tool_events` |
 | `HER-20260812-018` | Verified | P1 | controller nudge misclassified an in-progress task's next packet as a pending-task start and livelocked | `test_in_progress_packet_continuation_cannot_require_new_start_authority` |
 | `HER-20260812-019` | Verified | P1 | live harness accepted the pre-restart runtime as the `/reboot min` completion receipt and lost the first request | `test_restart_receipt_rejects_pre_restart_online_idle_runtime` |
+| `HER-20260813-020` | Fixed — live verification pending | P1 | MCP image results were flattened into text before the provider could see them | `test_packaged_her_bridges_media_read_image_into_provider_vision_input` |
+| `HER-20260813-021` | Fixed — live verification pending | P1 | legacy screenshot results reached HER as strings instead of validated MCP image content | `test_gateway_bridges_legacy_browser_screenshot_string_to_image` |
+| `HER-20260813-022` | Root caused | P1 | Flex/composed full-context HER turns can also resume the persisted HER session | regression pending |
+| `HER-20260813-023` | Root caused | P2 | runtime and adapter HER Habit pipelines can both process one foreground run | mutual-exclusion regression pending |
 
 ## Historical entries
 
@@ -1075,6 +1079,134 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 - **Remaining risk:** every later harness-triggered restart must use the same generation
   receipt; generic online+idle remains insufficient. The final certification matrix is
   independently restarted after this journal closure.
+- **Recurrence count:** 0
+
+### HER-20260813-020 — MCP image results were flattened before provider translation
+
+- **Status:** Fixed — live verification pending
+- **Severity:** P1
+- **Recurrence of:** none
+- **Discovered:** 2026-08-13 AEST during HASHI1 multimedia integration review
+- **HASHI checkpoint:** `764258cf`; follow-up `ed5dcc9e`
+- **Known-bad HER:** `0.1.0-hashi.9` /
+  `431876b9120be26e6ecaffa7f0f5b1dc4cebd2c8bf123c135996e71ffa0367f1`
+- **Fixed HER:** `0.1.0-hashi.10` /
+  `882c9a71013bdd6155558ff4dc8df4a8e002188e144b04f7fda2fb96f0f83ac2`
+  / source `85a481d9e5c94804ed9c0bd300ca9a635732c22d`
+- **Expected:** validated MCP image content reaches the active provider's native
+  multimodal message shape while normal session output stores no raw base64.
+- **Actual:** `.9` serialized the MCP result and later collapsed tool output to
+  one text block, so the model saw text rather than pixels.
+- **User-visible impact:** HER could receive an image path or call a screenshot
+  tool but could not reason over the returned image.
+- **Root cause:** structured MCP image content was not preserved through HER's
+  internal tool-result and provider-translation boundaries.
+- **Fix:** `.10` preserves bounded private image content, emits Anthropic
+  `tool_result` image blocks or ordered OpenAI-compatible image messages, and
+  safely downgrades historical media.
+- **Regression tests:** `tests/test_tool_gateway_mcp.py::test_packaged_her_bridges_media_read_image_into_provider_vision_input`
+  plus the pinned HER workspace provider/media suite.
+- **Offline result:** focused Python multimedia follow-up passed `81 passed, 2
+  skipped`; HER workspace passed `1468 passed, 1 ignored`; strict Clippy and
+  package certification passed.
+- **Required live retest:** packaged HER through the real Gateway with one
+  image, mixed PDF, and parallel tool results on each release provider route.
+- **Remaining risk:** no live post-reboot rollout evidence is recorded yet.
+- **Secrets/redaction checked:** yes; base64 is excluded from normal audit and
+  session output.
+- **Recurrence count:** 0
+
+### HER-20260813-021 — legacy screenshot strings were not model-visible images
+
+- **Status:** Fixed — live verification pending
+- **Severity:** P1
+- **Recurrence of:** HER-20260813-020 at a compatibility boundary
+- **Discovered:** 2026-08-13 AEST during browser/desktop/Windows screenshot review
+- **HASHI fix:** `ed5dcc9e`
+- **HER package:** `0.1.0-hashi.10` /
+  `882c9a71013bdd6155558ff4dc8df4a8e002188e144b04f7fda2fb96f0f83ac2`
+- **Expected:** reviewed screenshot tool return shapes are decoded, bounded,
+  audited without base64, ordered after paired tool receipts, and exposed as MCP
+  image content.
+- **Actual:** legacy tools returned image/base64 inside strings, which bypassed
+  the canonical structured-content bridge.
+- **User-visible impact:** a screenshot tool could report success while HER saw
+  only serialized metadata or base64 text.
+- **Root cause:** compatibility normalization existed for canonical MCP content
+  but not the established browser, desktop, Windows, and session screenshot
+  string shapes.
+- **Fix:** Gateway normalization recognizes only the reviewed shapes, validates
+  media and limits, preserves order, and writes safe audit metadata.
+- **Regression tests:**
+  `test_gateway_bridges_legacy_browser_screenshot_string_to_image`,
+  `test_gateway_bridges_legacy_desktop_and_session_screenshots_in_order`,
+  `test_gateway_rejects_malformed_legacy_screenshot_payload`, and
+  `test_gateway_bounds_legacy_browser_session_screenshot_count`.
+- **Required live retest:** one real screenshot through each enabled legacy tool
+  family after canary reboot, with provider-visible image evidence.
+- **Remaining risk:** compatibility is shape-specific by design; unreviewed
+  string formats remain text.
+- **Secrets/redaction checked:** yes.
+- **Recurrence count:** 0
+
+### HER-20260813-022 — full-context modes can also resume the stored HER session
+
+- **Status:** Root caused
+- **Severity:** P1
+- **Recurrence of:** none
+- **Discovered:** 2026-08-13 AEST during documentation/source consistency audit
+- **Known-bad HASHI checkpoint:** `ed5dcc9e`
+- **HER package:** `0.1.0-hashi.10`
+- **Expected:** fixed mode uses incremental prompts plus `--resume`; Flex,
+  Wrapper, Audit, and Dual Brain use HASHI-assembled full context without also
+  resuming HER's previous internal conversation.
+- **Actual:** `runtime_pipeline.build_turn_prompt()` assembles full context
+  outside fixed mode, while `HERAdapter.generate_response()` passes its stored
+  `_session_id` and the adapter has no `set_session_mode()` hook. Generic
+  ephemeral HER construction also does not force `ephemeral_session`; only
+  callers such as runtime-owned Meditation that pass the override are isolated.
+- **User-visible impact:** repeated or conflicting context, unnecessary tokens,
+  and potentially incorrect continuation in Flex/composed HER turns.
+- **First divergent event:** mode selection disables sessions only on adapters
+  implementing `set_session_mode()`; HER does not implement that method.
+- **Reproduction:** source-path proof is deterministic; a focused command-level
+  regression and live provider retest have not yet been added.
+- **Root cause:** HER session persistence was added without integrating the
+  runtime's fixed-versus-full-context session-mode contract.
+- **Fix commits / regression:** pending.
+- **Required retest:** fixed first/second turn proves session capture and
+  incremental resume; Flex and each composed mode prove no `--resume`; mode
+  switches and `/new` prove checkpoint cleanup; every health/helper/Meditation
+  sidecar proves it neither loads nor overwrites the user session.
+- **Remaining risk:** publication and live rollout remain blocked until fixed.
+- **Secrets/redaction checked:** yes; source inspection used no runtime secrets.
+- **Recurrence count:** 0
+
+### HER-20260813-023 — both HER Habit pipelines can process one run
+
+- **Status:** Root caused
+- **Severity:** P2
+- **Recurrence of:** none
+- **Discovered:** 2026-08-13 AEST during documentation/source consistency audit
+- **Known-bad HASHI checkpoint:** `ed5dcc9e`
+- **Expected:** one authoritative Habit Planning/Meditation policy processes a
+  foreground HER run, or multiple policies have explicit, tested coordination.
+- **Actual:** `runtime_pipeline` can inject/schedule the runtime-governed SQLite
+  path while `HERAdapter.generate_response()` independently retrieves/schedules
+  the adapter-direct JSON path when `habit_meditation.enabled` is true.
+- **User-visible impact:** duplicate planning advice, two model calls, divergent
+  writes, confusing `/skill habits` versus `/habit` state, and duplicate cost.
+- **Root cause:** the later adapter-direct feature introduced an independent
+  eligibility gate and store without a shared owner or mutual-exclusion rule.
+- **Current mitigation:** adapter-direct Habit Meditation remains default-off;
+  command and contract docs now distinguish both paths.
+- **Fix commits / regression:** pending a product decision: consolidate, select
+  one owner, or implement explicit mutual exclusion.
+- **Required retest:** one foreground run proves exactly one Planning injection,
+  one Meditation owner, one durable write policy, and correct no-change/failure
+  behavior for every supported configuration.
+- **Remaining risk:** default enablement remains blocked.
+- **Secrets/redaction checked:** yes; source inspection used no Habit contents.
 - **Recurrence count:** 0
 
 ## New-entry template

@@ -29,10 +29,33 @@
   - `docs/HASHI_CORE_SLIMMING_PLAN.md` reflects latest implementation and validation status
   - `CHANGELOG.md` records structural changes and residual notes
 - HER mode gates:
-  - `python -m pytest tests/test_her_adapter.py -q`
-  - `python -m py_compile adapters/her.py tests/test_her_adapter.py`
-  - `python scripts/her_runtime_probe.py --check version` resolves the packaged HER binary and returns a successful version diagnostic
-  - At least one live `her` agent workzone smoke validates repo-root read/write/edit before release notes claim agentic file work support
+  - Manifest review confirms runtime version, source commit, platform target,
+    executable path, SHA-256, upstream license, and certification baseline all
+    describe the same artifact
+  - `python scripts/her_runtime_probe.py --check version` resolves the packaged
+    HER binary and returns a successful version diagnostic
+  - `python scripts/verify_her_certification.py --source-root <pinned-her-source>`
+    passes full Rust workspace tests plus workspace/all-target Clippy with
+    warnings denied
+  - `python -m pytest -q tests/test_her_adapter.py tests/test_her_certification_baseline.py tests/test_tool_gateway_mcp.py tests/test_media_read.py tests/test_runtime_media.py`
+  - `python -m pytest -q tests/test_her_habit_meditation.py tests/test_runtime_her_habits.py tests/test_runtime_pipeline.py`
+  - `python -m pytest -q tests/test_her_debug_lab.py tests/test_her_debug_restart_guard.py tests/test_her_debug_superloop_template.py`
+  - `python -m py_compile adapters/her.py adapters/her_habits.py orchestrator/runtime_her_habits.py tools/media_read.py tools/gateway/mcp_stdio.py`
+  - Fixed mode proves incremental resume only after a HER session ID exists;
+    Flex, Wrapper, Audit, and Dual Brain prove full-context turns do not also
+    pass `--resume`
+  - A release decision selects one authoritative HER Habit/Meditation path or
+    supplies tested mutual exclusion; `/skill habits` SQLite records and
+    `/habit` JSON records are never presented as one store
+  - At least one live `her` canary after `/reboot min` validates provider/model
+    selection, fixed-mode continuation, repo-root read/write/edit, `media_read`
+    for image/PDF/audio, canonical and legacy screenshot image results,
+    `/habit` no-change/change/failure recovery, and Verbose notification
+    behavior before release notes claim those capabilities
+  - `/reboot max` and wider rollout happen only after the canary is green and
+    logs contain no unexplained HER, Gateway, media, Habit, or reload errors
+  - Certification is platform-specific. A Linux `.10` result must not be used
+    to claim Windows `.10` parity or Aptenra embedded-runtime adoption
 - Superloop alpha gates:
   - `python -m pytest tests/test_superloop_store.py tests/test_superloop_taskboard.py tests/test_superloop_waits.py tests/test_superloop_runner.py tests/test_superloop_scheduler.py tests/test_superloop_compiler.py tests/test_superloop_issues.py tests/test_superloop_commands.py tests/test_superloop_recording.py tests/test_superloop_nagare_adapter.py -q`
   - Taskboards use `task_id`, not `id`, and every in-progress or next-action task resolves to a real task
@@ -40,6 +63,34 @@
   - HChat/protocol replies are classified into loop evidence before task advancement or closeout
   - Closeout includes an inbox-drain barrier and records stale/contradictory/late replies
   - At least one template dry-run or live controller loop records taskboard, waits, issues, evidence, and final closeout state before claiming superloop functionality
+
+## GitHub Publication
+
+- Destination:
+  - approved GitHub owner/repository URL is recorded
+  - branch, visibility, and upstream tracking are intentional
+  - a LAN/debug remote is not treated as a GitHub publication target
+- License and IP boundary:
+  - `LICENSE`, `LICENSE_SCOPE.md`, `REUSE.toml`, and third-party notices agree
+    with the files being published
+  - HASHI open-source scope is not assumed to include proprietary Aptenra paths
+  - packaged HER retains `CLAW_LICENSE` and its reviewed provenance
+- Repository hygiene:
+  - `git status --short` contains only intended changes
+  - staged diff and commit range contain no credentials, workspace state, logs,
+    private media/cache content, local operator notes, or unrelated user edits
+  - generated binaries are included only when their provenance, platform,
+    checksum, license, and release purpose are reviewed
+- Documentation:
+  - `README.md`, `CHANGELOG.md`, `docs/README.md`, active contracts, known
+    issues, and release notes agree on released versus unreleased status
+  - internal Markdown links resolve and `git diff --check` passes
+  - current validation evidence is distinguished from live rollout evidence
+- Git operation:
+  - create one coherent reviewed commit for the checkpoint
+  - review `git show --stat --oneline HEAD` and the exact outbound commit range
+  - push only after the destination and publication scope are approved; do not
+    create or overwrite a remote implicitly
 
 ## HASHI AAI Enterprise 0.1 Alpha
 

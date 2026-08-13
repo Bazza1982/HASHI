@@ -47,6 +47,30 @@ Compose/Kubernetes/Helm/systemd/SIEM deployment artifacts for alpha operator
 review. It is not production-certified; customer-like enterprise server, IdP,
 SIEM, and Kubernetes/cloud validation remain post-alpha.
 
+## Unreleased HASHI Integration Checkpoint (2026-08-13)
+
+Development after the tagged v4 foundation alpha now includes certified HER
+`0.1.0-hashi.10` on Linux, persistent fixed-mode sessions, structured stream
+and incomplete-run handling, the Tool Gateway/MCP bridge, secure multimodal
+media and `media_read`, HER Habit/Meditation implementations, and a reproducible
+HER debug Superloop.
+
+The checkpoint also includes current Workbench/Kasumi template and workbook
+work plus recent voice/continuous-conversation hardening. It is not a new
+release line or a live-deployment claim. Remaining gates are:
+
+- prevent HER session resume in Flex/composed full-context modes;
+- consolidate or make the runtime-governed and adapter-direct HER Habit paths
+  mutually exclusive;
+- perform canary then wider live reboot/media/Habit validation;
+- build and certify a current Windows HER package;
+- approve the GitHub destination, visibility, and mixed-license publication
+  boundary.
+
+See
+[HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md)
+for exact artifact identity, evidence, and rollout status.
+
 ---
 
 ## v4.0.0-alpha.1
@@ -76,7 +100,8 @@ HASHI v4 alpha is the broader platform foundation line. It is focused on:
   ready-to-implement phase plan is tracked in
   [HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md](HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md).
 
-Alpha limitations:
+Limitations recorded at the v4 alpha tag (later work is tracked in the
+unreleased checkpoint above):
 
 - Packaged `hashi-her` release binaries are not yet shipped.
 - Claw Tool Gateway/MCP parity is planned, not complete.

@@ -6,6 +6,20 @@ Habit learning is an optional capability of the HER backend only. It is not a
 HASHI orchestration feature, a Skill, a Dream extension, a shared registry, or a
 cross-backend protocol.
 
+This document describes only the **adapter-direct JSON path** implemented by
+`adapters/her_habits.py` and controlled by `/habit`. A separate
+runtime-governed SQLite candidate/evidence path is implemented by
+`orchestrator/her_habits.py` and `orchestrator/runtime_habits.py`, and is
+surfaced through `/skill habits`; see
+[HER_AGENT_HABIT_MEDITATION_CONTRACT.md](HER_AGENT_HABIT_MEDITATION_CONTRACT.md).
+The stores, lifecycle policies, and command surfaces are not aliases.
+
+When this default-off adapter path is enabled, both implementations can
+currently be eligible for the same HER foreground run. That can cause duplicate
+Planning injection and two Meditation jobs with different write policies.
+Mutual exclusion or an explicit consolidation decision is an open release gate;
+operators should not enable this path by default until that gate is closed.
+
 The lifecycle is:
 
 ```text
@@ -222,3 +236,16 @@ workspaces/<agent>/backend_state/her_habit_resets/<snapshot-id>/
 does not read or write HER Habit files. Future Dream work may be designed later,
 but this implementation does not prescribe any relationship between Dream and
 Habit.
+
+## Coexistence checklist
+
+Before enabling `habit_meditation.enabled` for an agent:
+
+1. confirm whether runtime-governed Habit eligibility is active for that same
+   agent and request source;
+2. do not treat `/skill habits` records as `/habit` JSON records or attempt to
+   manage one store through the other command;
+3. verify the foreground prompt and job journals contain only the intended
+   Planning/Meditation path;
+4. capture a real create/update/delete, no-change, failure/retry, and Verbose
+   notification smoke after the chosen mutual-exclusion policy is implemented.

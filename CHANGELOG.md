@@ -11,6 +11,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Certified HER `0.1.0-hashi.10` integration** — pinned the Linux HASHI
+  Engine Runtime package to source `85a481d`, preserved fixed-mode session
+  resume and structured streaming, exposed the shared HASHI Tool Registry over
+  a private MCP stdio gateway, and added provider/model routing plus HER
+  execution budgets through `max+`. The current Windows manifest entry remains
+  an older runtime and is not yet parity-certified. See the
+  [unreleased checkpoint](docs/HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md).
+- **Secure HER multimedia bridge** — Telegram media now reaches HER as actual
+  media; the bounded `media_read` tool supports local image, PDF, audio, and
+  video inspection; and MCP image results from canonical or legacy screenshot
+  tools become model-visible multimodal input without persisting raw base64 in
+  normal session output. See
+  [HER multimedia and multimodal plan](docs/her_multimedia_multimodal_plan.md).
+- **HER-only Habit controls and change notifications** — added the default-off
+  adapter-owned `/habit` menu, view, on/off/default, recoverable delete,
+  delete-all and reset operations, durable audit/retry state, and one proactive
+  notification when Verbose was enabled and Meditation made a real change.
+- **HER debug lab and Superloop** — added scripted provider/MCP fixtures,
+  restart guards, durable evidence capture, and a two-stage Flash-before-Pro
+  debug controller for reproducible backend certification work.
 - **HASHI command UI standard** — added a shared local/Telegram command display
   guide and reusable UI helpers for card headings, selected choices, navigation,
   and grouped help. `/help` is now generated from registered command metadata,

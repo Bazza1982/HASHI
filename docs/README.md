@@ -8,6 +8,10 @@ This directory contains developer documentation and operational notes for HASHI.
 > alpha target. It is deployment-artifact-ready for alpha testing, with full
 > enterprise-server production validation pending.
 >
+> **Development checkpoint:** the unreleased HASHI `main` integration state,
+> including HER `0.1.0-hashi.10`, is recorded in
+> [HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md).
+>
 > **Changelog:** see [`../CHANGELOG.md`](../CHANGELOG.md) · **Roadmap:** see [ROADMAP.md](ROADMAP.md).
 
 ---
@@ -29,6 +33,9 @@ Use these docs by intent:
   [RELEASE_NOTES_HASHI_AAI_ENTERPRISE_v0.1.0-alpha.1.md](RELEASE_NOTES_HASHI_AAI_ENTERPRISE_v0.1.0-alpha.1.md).
 - **Understand the long-term route:** read [ROADMAP.md](ROADMAP.md) and
   [HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md](HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md).
+- **Understand the latest integrated code:** read the
+  [2026-08-13 unreleased checkpoint](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md),
+  then the HER backend, multimedia, and Habit contracts linked below.
 - **Operate the current alpha artifacts:** read
   [HASHI_ENTERPRISE_DEPLOYMENT.md](HASHI_ENTERPRISE_DEPLOYMENT.md) and the
   enterprise runbooks linked from the readiness review.
@@ -77,6 +84,11 @@ deployment validation continues.
 - [HASHI2_WSL_STABLE_PORT_ROLLOUT_PLAN.md](HASHI2_WSL_STABLE_PORT_ROLLOUT_PLAN.md) — staged HASHI2 WSL rollout and full-function validation plan for stable Remote port allocation
 - [AUDIT_VIBE_CODING_SUPERLOOP.md](AUDIT_VIBE_CODING_SUPERLOOP.md) — end-to-end vibe-coded product superloop with mandatory independent reviews and live runtime exit gates
 - [HASHI_VOICE_BRIDGE_PLAN.md](HASHI_VOICE_BRIDGE_PLAN.md) — local-first voice runtime plan for the WhatsApp Desktop call bridge and future provider transports
+- [HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md) — current unreleased integration identity, verification evidence, open rollout gates, and GitHub publication boundary
+- [HER_BACKEND_CONTRACT.md](HER_BACKEND_CONTRACT.md) — active HER ownership, sessions, Tool Gateway, streaming, multimodal, packaging, and certification contract
+- [HER_HABIT_MEDITATION.md](HER_HABIT_MEDITATION.md) — default-off adapter-direct HER Habit controls, JSON persistence, recovery, audit, and change notifications
+- [HER_AGENT_HABIT_MEDITATION_CONTRACT.md](HER_AGENT_HABIT_MEDITATION_CONTRACT.md) — runtime-governed HER candidate/evidence lifecycle and SQLite persistence contract
+- [her_multimedia_multimodal_plan.md](her_multimedia_multimodal_plan.md) — implemented HER media bridge, security limits, compatibility paths, and remaining live rollout matrix
 - [HER_TOOL_GATEWAY_TELEMETRY_PLAN.md](HER_TOOL_GATEWAY_TELEMETRY_PLAN.md) — long-term HER packaging, Tool Gateway/MCP, and structured thinking/token telemetry plan
 - [HER_CODE_MODULE_PLAN.md](HER_CODE_MODULE_PLAN.md) — HER module packaging notes, upstream Claw runtime expectations, and local release-binary evidence
 - [HER_COMPREHENSIVE_TEST_PLAN.md](HER_COMPREHENSIVE_TEST_PLAN.md) — full HER × DeepSeek certification matrix across providers, models, modes, efforts, streaming, continuity, and exit paths
